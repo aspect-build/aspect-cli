@@ -227,7 +227,7 @@ def _config_items(data):
                 value = "%s — filtered to %s" % (scope, pluralize(count, "changed file"))
         items.append({"key": "Scope", "value": value})
     if data["format"].get("soft_fail"):
-        items.append({"key": "Soft-fail", "value": "true"})
+        items.append({"key": "Soft fail", "value": "true"})
     return items
 
 def _build_details_data(data, status):

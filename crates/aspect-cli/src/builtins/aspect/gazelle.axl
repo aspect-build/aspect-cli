@@ -88,6 +88,21 @@ Usage:
     # when BUILD files are out of date.
     aspect gazelle --check=true --soft-fail
 
+    # Pre-commit hook flavor — also tell gazelle to skip files the
+    # user hasn't checked in yet so in-flight work doesn't get BUILD
+    # rules written for it.
+    aspect gazelle --ignore-untracked-files
+
+    # `.gitignore`-matched paths (build dirs, language caches, etc.)
+    # are skipped by default — gazelle's native ignore mechanisms
+    # (`.bazelignore`, `REPO.bazel ignore_directories()`,
+    # `# gazelle:exclude`) don't honor `.gitignore`, so we close the
+    # gap by querying git and feeding gazelle a `-exclude` per result
+    # (deduped against `.bazelignore` + `REPO.bazel` so we don't
+    # restate what gazelle would already skip). Opt out in the rare
+    # case you need gazelle to index gitignored content:
+    aspect gazelle --ignore-gitignored-files=false
+
     # Pass arbitrary gazelle flags (e.g. aspect-gazelle's --progress).
     aspect gazelle --gazelle-flag=-progress --gazelle-flag=-r tools/go
 
@@ -188,6 +203,8 @@ load(
     "dedupe_subtrees",
     "dir_at_or_below",
     "extract_changed_dirs",
+    "parse_bazelignore",
+    "parse_repo_bazel_ignore_directories",
     gaz_init_data = "init_data",
 )
 load("./lib/github.axl", "detect_changed_files", "print_changed_files_listing")
@@ -325,7 +342,145 @@ def _forwarded_flags(ctx):
         flags.append(("--gazelle-command", ctx.args.gazelle_command))
     if ctx.args.gazelle_flags:
         flags.append(("--gazelle-flag", list(ctx.args.gazelle_flags)))
+
+    # Emit each Ignore-* flag only when it departs from the arg's
+    # default — keeps repros minimal while preserving user intent.
+    if ctx.args.ignore_untracked_files:  # default False
+        flags.append(("--ignore-untracked-files", "true"))
+    if not ctx.args.ignore_gitignored_files:  # default True
+        flags.append(("--ignore-gitignored-files", "false"))
     return flags
+
+def _native_gazelle_ignores(ctx):
+    """Collect the ignore paths gazelle already honors on its own, so
+    we can skip adding redundant `-exclude=<path>` tokens for them.
+
+    Returns `(literal_set, glob_list)`:
+      - literal_set: dict-as-set of repo-relative literal paths from
+        `.bazelignore` (parsed via `parse_bazelignore`).
+      - glob_list: doublestar patterns from a top-level
+        `ignore_directories([...])` call in `REPO.bazel`, if present
+        (parsed via `parse_repo_bazel_ignore_directories`).
+
+    `# gazelle:exclude` directives in BUILD files are intentionally
+    NOT consulted — they're per-package and parsing every BUILD in
+    the repo just to dedup the exclude list isn't worth it.
+
+    `REPO.bazel` is case-sensitive — matches gazelle, which uses the
+    literal uppercase filename ([walk/config.go:277])."""
+    root = ctx.std.env.root_dir()
+    literal = {}
+    globs = []
+
+    bazelignore = root + "/.bazelignore"
+    if ctx.std.fs.exists(bazelignore):
+        literal = parse_bazelignore(ctx.std.fs.read_to_string(bazelignore))
+
+    repo_bazel = root + "/REPO.bazel"
+    if ctx.std.fs.exists(repo_bazel):
+        globs = parse_repo_bazel_ignore_directories(ctx.std.fs.read_to_string(repo_bazel))
+
+    return (literal, globs)
+
+def _gazelle_already_ignores(path, literal_set, glob_list):
+    """True if `path` would already be skipped by gazelle via
+    `.bazelignore` (literal-path set) or REPO.bazel
+    `ignore_directories()` (glob list)."""
+    if path in literal_set:
+        return True
+    return match_any(glob_list, path)
+
+def _is_dir_symlink(ctx, path):
+    """True if `path` is a symlink whose target is a directory.
+
+    Gazelle's walker doesn't follow symlinks by default
+    ([walk/walk.go::maybeResolveSymlink]): a directory symlink ends up
+    in `RegularFiles` (not `Subdirs`), gazelle doesn't recurse, and no
+    language rule's extension filter matches a dir-shaped name, so
+    these are effectively skipped already. Passing `-exclude=<path>`
+    for them is redundant noise on the gazelle command line.
+
+    File symlinks deliberately don't match here — gazelle treats them
+    as regular files and language rules can still process them via
+    extension match, so their `-exclude=` is load-bearing.
+
+    Returns False for broken symlinks (target doesn't exist) — the
+    target type check needs `metadata()` which follows the symlink
+    and errors on a missing target. Better to keep the exclude in
+    that edge case than to drop it."""
+    if not ctx.std.fs.exists(path):
+        return False
+    sm = ctx.std.fs.symlink_metadata(path)
+    if not sm.is_symlink:
+        return False
+    return ctx.std.fs.metadata(path).is_dir
+
+def _git_ls_excludes(ctx, flag_name, extra_args, native_ignores):
+    """Run `git ls-files --others --exclude-standard --directory -z`
+    with `extra_args` injected, filter out paths gazelle already
+    ignores natively, and turn the rest into `-exclude=<path>` tokens
+    for gazelle. Shared body of `_untracked_excludes` and
+    `_gitignored_excludes`.
+
+    `--directory` makes git collapse a fully-untracked (or fully-
+    ignored) dir into a single trailing-slash entry (`new_pkg/`)
+    rather than listing every file inside, so the gazelle command
+    line stays bounded. Files inside tracked dirs appear individually.
+    `-z` is NUL-separated for filenames with newlines.
+
+    Trailing slashes are stripped before forming the exclude tokens:
+    gazelle's exclude match uses `doublestar.Match` against rel paths
+    that never carry a trailing slash, so `new_pkg/` would silently
+    match nothing. `new_pkg` matches the dir entry and causes
+    gazelle's walker to prune the subtree.
+
+    `native_ignores` is the `(literal_set, glob_list)` tuple from
+    `_native_gazelle_ignores`. Paths already covered by `.bazelignore`
+    or `REPO.bazel ignore_directories()` are filtered out — no point
+    passing `-exclude=path` for a path gazelle would already skip,
+    and the dedup keeps repro / fix command lines minimal.
+
+    Returns `[]` on git failure (with a WARNING) or when there's
+    nothing to exclude. `flag_name` only appears in the warning."""
+    args = ["ls-files", "--others", "--exclude-standard", "--directory", "-z"] + extra_args
+    result = (ctx.std.process.command("git")
+        .args(args)
+        .current_dir(ctx.std.env.root_dir())
+        .stdout("piped")
+        .stderr("piped")
+        .spawn()
+        .wait_with_output())
+    if not result.status.success:
+        warn(ctx.std, "%s: `git ls-files` failed (exit %d). stderr: %s" % (
+            flag_name,
+            result.status.code,
+            result.stderr.strip(),
+        ))
+        return []
+    literal_set, glob_list = native_ignores
+    paths = sorted([p.rstrip("/") for p in result.stdout.split("\0") if p])
+    paths = [
+        p
+        for p in paths
+        if not _gazelle_already_ignores(p, literal_set, glob_list) and
+           not _is_dir_symlink(ctx, p)
+    ]
+    return ["-exclude=%s" % p for p in paths]
+
+def _untracked_excludes(ctx, native_ignores):
+    """Excludes for files the user hasn't checked in yet. Pre-commit /
+    pre-push use case: skip in-flight work so gazelle doesn't generate
+    BUILD rules for files that may change or be discarded."""
+    return _git_ls_excludes(ctx, "--ignore-untracked-files", [], native_ignores)
+
+def _gitignored_excludes(ctx, native_ignores):
+    """Excludes for paths matching `.gitignore` (and `.git/info/exclude`,
+    plus the user's global excludes). Gazelle doesn't honor `.gitignore`
+    natively — only `.bazelignore`, `REPO.bazel ignore_directories()`,
+    and `# gazelle:exclude` — so this flag covers the common gap.
+    Typical wins: skipping `bazel-out/`, `node_modules/`, `.venv/`,
+    `__pycache__/`, build artifacts."""
+    return _git_ls_excludes(ctx, "--ignore-gitignored-files", ["--ignored"], native_ignores)
 
 def _detection_flags(ctx, check_value):
     """Flag set that recreates the original change-detection invocation.
@@ -343,8 +498,8 @@ def _detection_flags(ctx, check_value):
             flags.append(("--base-ref", ctx.args.base_ref))
         if ctx.args.merge_base:
             flags.append(("--merge-base", ctx.args.merge_base))
-        if ctx.args.scope_all_on_change:
-            flags.append(("--scope-all-on-change", list(ctx.args.scope_all_on_change)))
+        if ctx.args.scope_all_on_changes:
+            flags.append(("--scope-all-on-change", list(ctx.args.scope_all_on_changes)))
         if ctx.args.changed_file_patterns:
             flags.append(("--changed-file-pattern", list(ctx.args.changed_file_patterns)))
     return flags + _forwarded_flags(ctx)
@@ -489,7 +644,7 @@ def _resolve_effective_dirs(ctx, lifecycle, data):
     # set may have shifted, gazelle should re-resolve everywhere).
     # Checked against the unfiltered set so the escalation still
     # triggers even when --changed-file-pattern would have dropped it.
-    escalate = list(ctx.args.scope_all_on_change or [])
+    escalate = list(ctx.args.scope_all_on_changes or [])
     if escalate:
         for f in detect_result["files"]:
             if match_any(escalate, f):
@@ -564,9 +719,11 @@ def _impl(ctx: TaskContext) -> int:
     data["gazelle"]["gazelle_command"] = ctx.args.gazelle_command or ""
     data["gazelle"]["check_mode"] = ctx.args.check
     data["gazelle"]["scope"] = ctx.args.scope
-    data["gazelle"]["scope_all_on_change"] = list(ctx.args.scope_all_on_change or [])
+    data["gazelle"]["scope_all_on_changes"] = list(ctx.args.scope_all_on_changes or [])
     data["gazelle"]["changed_file_patterns"] = list(ctx.args.changed_file_patterns or [])
     data["gazelle"]["soft_fail"] = bool(ctx.args.soft_fail)
+    data["gazelle"]["ignore_untracked_files"] = bool(ctx.args.ignore_untracked_files)
+    data["gazelle"]["ignore_gitignored_files"] = bool(ctx.args.ignore_gitignored_files)
     enforce_check = _resolve_check_mode(ctx)
     data["gazelle"]["enforce_check"] = enforce_check
     setup_phase(ctx, lifecycle)
@@ -596,7 +753,7 @@ def _impl(ctx: TaskContext) -> int:
         "--build_runfile_links",
         "--experimental_build_event_upload_strategy=local",
     ]
-    flags.extend(ctx.args.bazel_flag)
+    flags.extend(ctx.args.bazel_flags)
     flags.extend(bazel_trait.extra_flags)
 
     # Task-time flag contributors — features register hooks that need
@@ -606,7 +763,7 @@ def _impl(ctx: TaskContext) -> int:
     if bazel_trait.flags:
         flags = bazel_trait.flags(flags)
 
-    startup_flags = list(ctx.args.bazel_startup_flag)
+    startup_flags = list(ctx.args.bazel_startup_flags)
     startup_flags.extend(bazel_trait.extra_startup_flags)
     if bazel_trait.startup_flags:
         startup_flags = bazel_trait.startup_flags(startup_flags)
@@ -778,6 +935,12 @@ def _impl(ctx: TaskContext) -> int:
             diff_args.append(f)
         else:
             info(ctx.std, "--gazelle-flag=%s ignored in diff phase (task controls -mode internally)." % f)
+    if ctx.args.ignore_untracked_files or ctx.args.ignore_gitignored_files:
+        native_ignores = _native_gazelle_ignores(ctx)
+        if ctx.args.ignore_untracked_files:
+            diff_args.extend(_untracked_excludes(ctx, native_ignores))
+        if ctx.args.ignore_gitignored_files:
+            diff_args.extend(_gitignored_excludes(ctx, native_ignores))
     diff_args.append("-mode=diff")
     diff_args.extend(effective_dirs)
     status = _pick_status(data, had_failure = False, terminal = False)
@@ -793,6 +956,7 @@ def _impl(ctx: TaskContext) -> int:
         data = data,
         phase = Phase(name = "diff", description = "Compute BUILD-file diff", emoji = "📋"),
     )
+    trace.log("gazelle invocation: %s %s" % (gazelle, " ".join(diff_args)))
     diff_proc = r.spawn(gazelle, diff_args, capture = True)
     diff_stdout = diff_proc.stdout().read_to_string()
     diff_stderr = diff_proc.stderr().read_to_string()
@@ -935,7 +1099,15 @@ gazelle = task(
             default = False,
             description = "When true, the task returns 0 even when gazelle wants to update BUILD files, printing a WARNING with the affected file list instead. Useful for teams adopting gazelle incrementally so the CI step doesn't block merges while the backlog of unmanaged BUILD files is cleared. Gazelle's own non-zero exits (configuration errors, missing language plugins) are still surfaced as task failures regardless of this flag.",
         ),
-        "scope_all_on_change": args.string_list(
+        "ignore_untracked_files": args.boolean(
+            default = False,
+            description = "When true, tell gazelle to skip files the user hasn't checked in yet. Gazelle's default behavior treats untracked files the same as tracked ones for rule generation. Implementation: runs `git ls-files --others --exclude-standard --directory -z` in the workspace root, dedups the result against paths gazelle already skips natively (`.bazelignore`, `REPO.bazel ignore_directories()`, and symlinks whose target is a directory — gazelle doesn't follow those by default so they're effectively pre-skipped), then passes each remaining entry as a `--gazelle-flag=-exclude=<path>`. `--directory` collapses each fully-untracked directory into a single entry (`new_pkg/`) instead of listing every file inside, so the gazelle command line stays bounded — a brand-new package of N files contributes one exclude, not N. Files in tracked dirs still appear individually (`src/new.py`). Trailing slashes from git's directory entries are stripped before being passed to gazelle: gazelle's exclude check matches against rel paths that never carry a trailing slash, so `-exclude=new_pkg` is what actually prunes the dir's subtree (a literal `new_pkg/` would silently match nothing). No-op on clean checkouts (typical CI), so safe to leave on in CI configs that also serve as local hook entry points. Falls back to a no-op with a WARNING if `git ls-files` fails (e.g., not in a git working tree).",
+        ),
+        "ignore_gitignored_files": args.boolean(
+            default = True,
+            description = "Tell gazelle to skip paths matching `.gitignore` (and `.git/info/exclude`, plus the user's global git excludes). Gazelle's native ignore mechanisms are `.bazelignore` (literal paths, no globs), `REPO.bazel ignore_directories([...])` (dir globs only, bzlmod-era), `# gazelle:exclude` directives in BUILD files (per-package), and not-following-symlinks-by-default — none of which honor `.gitignore`. Without this flag every gitignored dir users want gazelle to skip has to be mirrored into one of those lists, duplicating a list that's already canonical in `.gitignore`. Defaults to **true** to close that gap automatically: typical wins are skipping `bazel-out/`, `node_modules/`, `.venv/`, `__pycache__/`, and other build / cache directories. Pass `--ignore-gitignored-files=false` to opt out — relevant when a gitignored file needs to be visible to gazelle (e.g., a build-time-generated source file that lives in `.gitignore` but gazelle's indexing needs to see). Implementation: runs `git ls-files --others --ignored --exclude-standard --directory -z` in the workspace root, dedups against `.bazelignore` + `REPO.bazel ignore_directories()` and against directory symlinks gazelle would not follow (no point passing `-exclude=` for a path gazelle would already skip), and passes each remaining entry as a `--gazelle-flag=-exclude=<path>`. The dir-symlink filter especially cuts the typical Bazel workspace's `bazel-bin`, `bazel-out`, `bazel-testlogs` convenience symlinks from the list. Same trailing-slash stripping and `--directory` collapse as `--ignore-untracked-files`. Behavior depends on local working-tree state (different ignored sets per machine); on clean CI checkouts the ignored set is typically empty so this is a no-op there. `.bazelignore` / `REPO.bazel` remain the right places for ignore patterns that must apply machine-independently — this flag picks up your gitignore patterns without duplicating them.",
+        ),
+        "scope_all_on_changes": args.string_list(
             long = "scope-all-on-change",
             default = ["BUILD.bazel", "MODULE.bazel"],
             description = "When --scope=changed and any changed file matches one of these glob patterns, escalate to a whole-repo update (as if --scope=all). The defaults cover the workspace-level files that affect gazelle's behavior repo-wide: `BUILD.bazel` (top-level gazelle directives) and `MODULE.bazel` (bazel_dep set that gazelle deps-resolution reads). Repeat the flag to specify a custom list — custom values REPLACE the defaults, so include them if you want to keep them: `--scope-all-on-change=BUILD.bazel --scope-all-on-change=MODULE.bazel --scope-all-on-change=gazelle_python.yaml`. Patterns are repo-relative and use standard glob syntax (`*` matches one path segment, `**` matches zero or more, `?` matches one char). Has no effect under --scope=all. CAUTION: this is the escape hatch for repo-wide-effect config files. Anything that influences gazelle's output across the tree (`gazelle_python.yaml`, `tsconfig.json`, `package.json`, top-level `BUILD.bazel`, …) MUST be listed here, otherwise a change to one of those won't force a full pass and updates can be missed silently.",
@@ -965,10 +1137,12 @@ gazelle = task(
             maximum = 4096,
             description = "Directories gazelle should update BUILD files in. When empty (default), gazelle considers every directory in the workspace. Combine with --scope=changed to take the intersection with directories that contain changed files. Useful for scoping to a sub-workspace within a monorepo. CAUTION: under --scope=changed, supplying narrow dirs intersection-filters the derived set. Changed dirs that fall outside the listed roots are dropped, so the BUILD updates those changes would have triggered are silently missed. NOTE: positional dirs only narrow the BUILD-regeneration step. Under gazelle's default `-index=all`, gazelle still traverses every workspace directory, parses every BUILD, and re-determines target exports (often re-parsing source) repo-wide. Pair with `--gazelle-flag=-index=lazy` (plus `# gazelle:go_search` / `# gazelle:proto_search` directives) to also narrow that traversal + parse + indexing work. Optionally also pass `--gazelle-flag=-r=false` to skip recursion on top of that, but some gazelle language extensions are incompatible with non-recursive mode — test against your plugin set first. See https://github.com/bazel-contrib/bazel-gazelle#lazy-indexing-in-fix-and-update.",
         ),
-        "bazel_flag": args.string_list(
+        "bazel_flags": args.string_list(
+            long = "bazel-flag",
             description = "Additional Bazel flags forwarded to the gazelle build. Repeat the flag to pass multiple — e.g. `--bazel-flag=--config=ci --bazel-flag=--keep_going`.",
         ),
-        "bazel_startup_flag": args.string_list(
+        "bazel_startup_flags": args.string_list(
+            long = "bazel-startup-flag",
             description = "Additional Bazel startup flags. Repeat the flag to pass multiple. Note: changing startup flags restarts the Bazel server.",
         ),
     },

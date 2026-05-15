@@ -20,6 +20,8 @@ load(
     "dedupe_subtrees",
     "dir_at_or_below",
     "extract_changed_dirs",
+    "parse_bazelignore",
+    "parse_repo_bazel_ignore_directories",
 )
 load("@aspect//lib/github.axl", "detect_build_url", "detect_commit_sha", "github")
 load("@aspect//lib/path_glob.axl", "match_any", "match_path")
@@ -2040,6 +2042,136 @@ def test_gazelle_dir_helpers(tc: int) -> int:
 
     return tc
 
+def test_parse_bazelignore(tc: int) -> int:
+    """Coverage for lib/gazelle_results.axl::parse_bazelignore. Mirrors
+    gazelle's [walk/config.go::loadBazelIgnore] rules."""
+
+    tc = test_case(tc, parse_bazelignore("") == {}, "parse_bazelignore: empty → {}")
+
+    tc = test_case(
+        tc,
+        parse_bazelignore("bazel-out\nnode_modules\n") == {"bazel-out": True, "node_modules": True},
+        "parse_bazelignore: simple two-entry file",
+    )
+
+    # Blank lines and # comments are skipped.
+    tc = test_case(
+        tc,
+        parse_bazelignore("# header\n\nbazel-out\n\n# trailing\n") == {"bazel-out": True},
+        "parse_bazelignore: blanks + # comments skipped",
+    )
+
+    # Whitespace around entries is trimmed.
+    tc = test_case(
+        tc,
+        parse_bazelignore("  bazel-out  \n\tnode_modules\t\n") == {"bazel-out": True, "node_modules": True},
+        "parse_bazelignore: whitespace trimmed",
+    )
+
+    # Glob-bearing entries are dropped (gazelle's loader rejects them).
+    tc = test_case(
+        tc,
+        parse_bazelignore("bazel-out\nbazel-*\nnode_*\nfoo?bar\n[abc]\n") == {"bazel-out": True},
+        "parse_bazelignore: glob entries dropped",
+    )
+
+    # Trailing slashes normalized and leading ./ stripped.
+    tc = test_case(
+        tc,
+        parse_bazelignore("bazel-out/\n./node_modules\n./vendor/\n") == {
+            "bazel-out": True,
+            "node_modules": True,
+            "vendor": True,
+        },
+        "parse_bazelignore: ./ stripped + trailing / removed",
+    )
+
+    # An entry of just `./` or `.` collapses to empty after normalization → dropped.
+    tc = test_case(
+        tc,
+        parse_bazelignore("./\n.\nbazel-out\n") == {"bazel-out": True, ".": True},
+        "parse_bazelignore: `./` drops to empty; bare `.` kept literally (no path.Clean here)",
+    )
+
+    return tc
+
+def test_parse_repo_bazel_ignore_directories(tc: int) -> int:
+    """Coverage for lib/gazelle_results.axl::parse_repo_bazel_ignore_directories.
+    Naive substring lift of the quoted strings inside a top-level
+    `ignore_directories([...])` call."""
+
+    tc = test_case(
+        tc,
+        parse_repo_bazel_ignore_directories("") == [],
+        "parse_repo_bazel: empty file → []",
+    )
+
+    tc = test_case(
+        tc,
+        parse_repo_bazel_ignore_directories('module(name = "foo")\n') == [],
+        "parse_repo_bazel: no ignore_directories → []",
+    )
+
+    # Simple case — single-line list.
+    tc = test_case(
+        tc,
+        parse_repo_bazel_ignore_directories('ignore_directories(["bazel-*", "node_modules"])') == ["bazel-*", "node_modules"],
+        "parse_repo_bazel: single-line list",
+    )
+
+    # Multi-line list, common formatting.
+    multiline = """ignore_directories([
+    "bazel-*",
+    "node_modules",
+    "third_party/*",
+])"""
+    tc = test_case(
+        tc,
+        parse_repo_bazel_ignore_directories(multiline) == ["bazel-*", "node_modules", "third_party/*"],
+        "parse_repo_bazel: multi-line list",
+    )
+
+    # Single-quoted strings accepted.
+    tc = test_case(
+        tc,
+        parse_repo_bazel_ignore_directories("ignore_directories(['bazel-*', 'vendor'])") == ["bazel-*", "vendor"],
+        "parse_repo_bazel: single-quoted strings",
+    )
+
+    # Mixed quotes (one of each in the same list — uncommon but valid Starlark).
+    tc = test_case(
+        tc,
+        parse_repo_bazel_ignore_directories('ignore_directories(["bazel-*", \'vendor\'])') == ["bazel-*", "vendor"],
+        "parse_repo_bazel: mixed quote styles",
+    )
+
+    # Other top-level calls don't interfere; only the first ignore_directories matters.
+    surrounded = """module(name = "myrepo")
+ignore_directories(["bazel-*"])
+register_toolchains("//some:tc")
+"""
+    tc = test_case(
+        tc,
+        parse_repo_bazel_ignore_directories(surrounded) == ["bazel-*"],
+        "parse_repo_bazel: surrounding directives ignored",
+    )
+
+    # Empty list → no patterns.
+    tc = test_case(
+        tc,
+        parse_repo_bazel_ignore_directories("ignore_directories([])") == [],
+        "parse_repo_bazel: empty list → []",
+    )
+
+    # Empty strings inside the list are dropped (not useful as patterns).
+    tc = test_case(
+        tc,
+        parse_repo_bazel_ignore_directories('ignore_directories(["", "bazel-*"])') == ["bazel-*"],
+        "parse_repo_bazel: empty-string entries dropped",
+    )
+
+    return tc
+
 def test_severity_for_status(tc: int) -> int:
     """Coverage for lib/result_text.axl::severity_for_status.
 
@@ -3029,6 +3161,8 @@ def impl(ctx: TaskContext) -> int:
     tc = test_build_metadata_lib(tc)
     tc = test_severity_for_status(tc)
     tc = test_gazelle_dir_helpers(tc)
+    tc = test_parse_bazelignore(tc)
+    tc = test_parse_repo_bazel_ignore_directories(tc)
 
     print(tc, "tests passed")
     return 0
