@@ -14,6 +14,11 @@ Scenarios:
   8. dirs-scoped         — positional dirs in repro command
   9. large               — 300 files to exercise the trim cascade
  10. in-progress         — task still running (initial state)
+ 11. metadata-all        — GitHubStatusChecksTrait.metadata_keys = ["*"]
+ 12. early-fail          — early-bail before gazelle ran
+ 13. scope=changed       — Configuration row with Scope + default escalation list
+ 14. scope=changed full  — all four Config rows fire (Scope, Soft-fail, escalate, pattern)
+ 15. scope=changed empty — no-op short-circuit, dirs=[]
 """
 
 load("./gazelle_results.axl", "init_data", "render_check_output")
@@ -55,33 +60,31 @@ def _make_base():
     }
     r["gazelle"]["gazelle_target"] = "//tools/gazelle:gazelle"
     r["gazelle"]["gazelle_command"] = ""
-    r["gazelle"]["check_mode"] = True
+    r["gazelle"]["check_mode"] = "true"
+    r["gazelle"]["enforce_check"] = True
     r["gazelle"]["dirs"] = []
     return r
 
 def _make_clean():
     return _make_base()
 
+_OUT_OF_DATE_FILES = [
+    "services/api/BUILD.bazel",
+    "services/worker/BUILD.bazel",
+    "tools/go/BUILD.bazel",
+    "apps/web/proto/BUILD.bazel",
+]
+
 def _make_files_out_of_date():
     r = _make_base()
-    r["gazelle"]["check_mode"] = True
-    r["gazelle"]["affected_files"] = [
-        "services/api/BUILD.bazel",
-        "services/worker/BUILD.bazel",
-        "tools/go/BUILD.bazel",
-        "apps/web/proto/BUILD.bazel",
-    ]
+    r["gazelle"]["affected_files"] = _OUT_OF_DATE_FILES
     return r
 
 def _make_fix_mode():
     r = _make_base()
-    r["gazelle"]["check_mode"] = False
-    r["gazelle"]["affected_files"] = [
-        "services/api/BUILD.bazel",
-        "services/worker/BUILD.bazel",
-        "tools/go/BUILD.bazel",
-        "apps/web/proto/BUILD.bazel",
-    ]
+    r["gazelle"]["check_mode"] = "false"
+    r["gazelle"]["enforce_check"] = False
+    r["gazelle"]["affected_files"] = _OUT_OF_DATE_FILES
     return r
 
 def _make_gazelle_error():
@@ -101,7 +104,8 @@ def _make_early_fail():
 
 def _make_apply_error():
     r = _make_base()
-    r["gazelle"]["check_mode"] = False
+    r["gazelle"]["check_mode"] = "false"
+    r["gazelle"]["enforce_check"] = False
     r["gazelle"]["affected_files"] = ["services/api/BUILD.bazel", "tools/go/BUILD.bazel"]
     r["gazelle"]["apply_error"] = True
     r["gazelle"]["apply_error_msg"] = "error: patch failed: services/api/BUILD.bazel:3"
@@ -109,7 +113,6 @@ def _make_apply_error():
 
 def _make_with_patch_url():
     r = _make_base()
-    r["gazelle"]["check_mode"] = True
     r["gazelle"]["affected_files"] = [
         "services/api/BUILD.bazel",
         "tools/go/BUILD.bazel",
@@ -119,7 +122,6 @@ def _make_with_patch_url():
 
 def _make_non_default_target():
     r = _make_base()
-    r["gazelle"]["check_mode"] = True
     r["gazelle"]["gazelle_target"] = "//tools/gazelle:gazelle_from_source"
     r["gazelle"]["gazelle_command"] = "fix"
     r["gazelle"]["affected_files"] = ["services/api/BUILD.bazel"]
@@ -127,7 +129,6 @@ def _make_non_default_target():
 
 def _make_dirs_scoped():
     r = _make_base()
-    r["gazelle"]["check_mode"] = True
     r["gazelle"]["dirs"] = ["services/api", "tools/go"]
     r["gazelle"]["affected_files"] = [
         "services/api/BUILD.bazel",
@@ -135,14 +136,54 @@ def _make_dirs_scoped():
     ]
     return r
 
+def _make_scope_changed():
+    """--scope=changed with the default scope-all-on-change list. Surfaces
+    the Configuration row with Scope: changed — N changed dirs, and the
+    default escalation patterns (BUILD.bazel, MODULE.bazel)."""
+    r = _make_base()
+    r["gazelle"]["scope"] = "changed"
+    r["gazelle"]["scope_all_on_change"] = ["BUILD.bazel", "MODULE.bazel"]
+    r["gazelle"]["dirs"] = ["services/api", "services/worker"]
+    r["gazelle"]["affected_files"] = [
+        "services/api/BUILD.bazel",
+        "services/worker/BUILD.bazel",
+    ]
+    return r
+
+def _make_scope_changed_with_filter():
+    """--scope=changed with a custom --changed-file-pattern list (e.g.
+    'I only care about Python and TS changes'). All four Config rows
+    fire: Scope, Soft-fail, Scope-all-on-change, Changed-file-pattern."""
+    r = _make_base()
+    r["gazelle"]["scope"] = "changed"
+    r["gazelle"]["scope_all_on_change"] = ["BUILD.bazel", "MODULE.bazel", "gazelle_python.yaml"]
+    r["gazelle"]["changed_file_patterns"] = ["**/*.py", "**/*.ts", "**/*.tsx", "**/BUILD.bazel"]
+    r["gazelle"]["soft_fail"] = True
+    r["gazelle"]["dirs"] = ["apps/web", "services/api"]
+    r["gazelle"]["affected_files"] = [
+        "apps/web/BUILD.bazel",
+        "services/api/BUILD.bazel",
+    ]
+    return r
+
+def _make_scope_changed_empty():
+    """--scope=changed but no surviving dirs (the no-op short-circuit
+    path) — the task exited 0 cleanly. Configuration row still shows
+    `Scope: changed` (no count suffix since dirs is empty)."""
+    r = _make_base()
+    r["gazelle"]["scope"] = "changed"
+    r["gazelle"]["scope_all_on_change"] = ["BUILD.bazel", "MODULE.bazel"]
+    r["gazelle"]["no_changed_dirs"] = True
+    r["gazelle"]["dirs"] = []
+    return r
+
 def _make_large():
     """300 files to exercise the trim cascade."""
     r = _make_base()
-    r["gazelle"]["check_mode"] = True
-    files = []
-    for i in range(300):
-        files.append("services/svc_%d/BUILD.bazel" % i)
-    r["gazelle"]["affected_files"] = files
+    r["gazelle"]["affected_files"] = [
+        "services/svc_%d/BUILD.bazel" % i
+        for i in range(300)
+    ]
     return r
 
 # ─── Test harness ─────────────────────────────────────────────────────────────
@@ -193,6 +234,11 @@ def _test_impl(ctx):
         # entrypoint resolution failed). Title and body must say "Failed",
         # NOT "Passed" / "All BUILD files are up to date."
         ("12. early-fail · GH", _make_early_fail(), "failed", "github", None),
+        # Scope=changed configs: surface Scope row + Scope-all-on-change
+        # + (when set) Changed-file-pattern + Soft-fail.
+        ("13. scope=changed default · GH", _make_scope_changed(), "failed", "github", None),
+        ("14. scope=changed full config · GH", _make_scope_changed_with_filter(), "failed", "github", None),
+        ("15. scope=changed empty no-op · GH", _make_scope_changed_empty(), "passed", "github", None),
     ]
 
     sep = "=" * 70

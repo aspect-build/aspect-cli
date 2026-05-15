@@ -10,7 +10,7 @@ CI-specific upload primitives live in their respective lib files:
 
 load("./buildkite.axl", "buildkite")
 load("./circleci.axl", "circleci")
-load("./environment.axl", "warn")
+load("./environment.axl", "detect_ci", "warn")
 load("./github.axl", "github")
 load("./tar.axl", "tar_create", "zip_create")
 
@@ -40,25 +40,6 @@ ArtifactsTrait = trait(
     #        stable direct download URL.
     testlogs_label_urls = attr(dict, default = {}),
 )
-
-def detect_ci(env):
-    """Detect CI platform from environment.
-
-    Args:
-        env: Environment interface (ctx.std.env)
-
-    Returns:
-        "github" | "buildkite" | "gitlab" | "circleci" | None
-    """
-    if env.var("GITHUB_ACTIONS"):
-        return "github"
-    elif env.var("BUILDKITE_AGENT_ACCESS_TOKEN"):
-        return "buildkite"
-    elif env.var("CI_JOB_TOKEN"):
-        return "gitlab"
-    elif env.var("CIRCLE_PROJECT_REPONAME"):
-        return "circleci"
-    return None
 
 def artifact_name(ci, task_name, task_key, filename):
     """Format an artifact name based on CI platform conventions.

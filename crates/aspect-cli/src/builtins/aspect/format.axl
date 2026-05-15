@@ -19,10 +19,10 @@ Usage:
 
 load("@std//time.axl", "sleep_iter")
 load("./bazel.axl", "BazelTrait")
-load("./lib/artifacts.axl", "ArtifactsTrait", "artifact_name", "create_uploader", "detect_ci")
+load("./lib/artifacts.axl", "ArtifactsTrait", "artifact_name", "create_uploader")
 load("./lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "pluralize", "process_event")
 load("./lib/checkrun.axl", "GitHubCheckRunTrait")
-load("./lib/environment.axl", "color_enabled", "error", "info", "warn")
+load("./lib/environment.axl", "color_enabled", "detect_ci", "error", "info", "warn")
 load(
     "./lib/format_results.axl",
     fmt_init_data = "init_data",
@@ -741,7 +741,7 @@ format = task(
         "check": args.string(
             default = "auto",
             values = ["auto", "true", "false"],
-            description = "Whether to fail the task when the formatter rewrote files. 'auto' (default) checks when running on a recognized CI host (GitHub Actions / Buildkite / CircleCI / GitLab) and applies-without-failing locally — the formatter already did the work, so a local invocation that returned the failure exit code 'fix locally and commit' would be telling the user to run something they just ran. 'true' always fails on changes (preserves the legacy behavior — useful in scripts that depend on the failure exit). 'false' never fails on changes (exits 0 with a 'Formatted N file(s)' message). The formatter binary's own non-zero exits are still surfaced as task failures regardless of this flag; --soft-fail (which prints a WARNING and exits 0) takes precedence when set.",
+            description = "Whether to fail the task when the formatter rewrote files. 'auto' (default) checks when running on a recognized CI host and applies-without-failing locally — the formatter already did the work, so a local invocation that returned the failure exit code 'fix locally and commit' would be telling the user to run something they just ran. 'true' always fails on changes (preserves the legacy behavior — useful in scripts that depend on the failure exit). 'false' never fails on changes (exits 0 with a 'Formatted N file(s)' message). The formatter binary's own non-zero exits are still surfaced as task failures regardless of this flag; --soft-fail (which prints a WARNING and exits 0) takes precedence when set.",
         ),
         "ignore_patterns": args.string_list(
             long = "ignore-pattern",

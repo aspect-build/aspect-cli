@@ -569,6 +569,33 @@ def is_aspect_workflows_runner(env):
     """True when the current process is running on an Aspect Workflows runner."""
     return bool(env.var("ASPECT_WORKFLOWS_RUNNER"))
 
+def detect_ci(env):
+    """Detect the CI platform from environment variables.
+
+    Returns one of:
+      - "github" / "buildkite" / "gitlab" / "circleci" — recognized hosts,
+        gated on a host-specific marker each provider exclusively sets.
+      - "unknown" — generic `CI` env var is set but no specific marker was
+        found. Lets callers that only need "are we on CI?" (e.g. the
+        `--check=auto` resolution in format / gazelle) behave correctly
+        on hosts we haven't been taught yet.
+      - None — no CI env detected at all (typical local dev shell).
+
+    Args:
+      env: Environment interface (ctx.std.env).
+    """
+    if env.var("GITHUB_ACTIONS"):
+        return "github"
+    if env.var("BUILDKITE_AGENT_ACCESS_TOKEN"):
+        return "buildkite"
+    if env.var("CI_JOB_TOKEN"):
+        return "gitlab"
+    if env.var("CIRCLE_PROJECT_REPONAME"):
+        return "circleci"
+    if env.var("CI"):
+        return "unknown"
+    return None
+
 def build_aspect_runner_rows(std):
     """Build [{key, value}] rows for the Aspect Workflows Runner details section.
 

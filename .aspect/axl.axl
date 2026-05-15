@@ -3,7 +3,7 @@ Exercise axl
 """
 
 load("@aspect//delivery.axl", delivery_fmt_elapsed = "fmt_elapsed")
-load("@aspect//lib/artifacts.axl", "artifact_name", "detect_ci")
+load("@aspect//lib/artifacts.axl", "artifact_name")
 load("@aspect//lib/bazel_results.axl", "compute_reproducer_command", "init_data", "render_check_output", "resolve_aspect_url", "summary_title")
 load(
     "@aspect//lib/build_metadata.axl",
@@ -14,7 +14,13 @@ load(
     "version_tuple",
 )
 load("@aspect//lib/deliveryd.axl", deliveryd_parse_endpoint = "parse_endpoint")
-load("@aspect//lib/environment.axl", "color_enabled", "parse_git_url_name", "sanitize_filename")
+load("@aspect//lib/environment.axl", "color_enabled", "detect_ci", "parse_git_url_name", "sanitize_filename")
+load(
+    "@aspect//lib/gazelle_results.axl",
+    "dedupe_subtrees",
+    "dir_at_or_below",
+    "extract_changed_dirs",
+)
 load("@aspect//lib/github.axl", "detect_build_url", "detect_commit_sha", "github")
 load("@aspect//lib/path_glob.axl", "match_any", "match_path")
 load("@aspect//lib/repro_commands.axl", "build_aspect_command", "dedup_and_attribute", "patch_download_cmd", "task_cli_path")
@@ -1830,6 +1836,210 @@ def test_build_metadata_lib(tc: int) -> int:
 
     return tc
 
+def test_gazelle_dir_helpers(tc: int) -> int:
+    """Coverage for the pure changed-dir helpers in lib/gazelle_results.axl
+    that gazelle.axl's `_resolve_effective_dirs` composes:
+      - extract_changed_dirs : changed file paths → unique parent dirs
+      - dir_at_or_below      : descendancy test for scope intersection
+      - dedupe_subtrees      : drop dirs whose ancestor is in the list
+    """
+
+    # ----- extract_changed_dirs -----
+
+    tc = test_case(tc, extract_changed_dirs([]) == [], "extract_changed_dirs: empty → []")
+
+    # Top-level files have no parent dir → dropped.
+    tc = test_case(
+        tc,
+        extract_changed_dirs(["MODULE.bazel", ".bazelversion"]) == [],
+        "extract_changed_dirs: top-level files dropped",
+    )
+
+    # Single nested file → its parent.
+    tc = test_case(
+        tc,
+        extract_changed_dirs(["services/api/foo.py"]) == ["services/api"],
+        "extract_changed_dirs: single nested file → parent dir",
+    )
+
+    # Multiple files share a parent → deduped.
+    tc = test_case(
+        tc,
+        extract_changed_dirs(["services/api/foo.py", "services/api/bar.py"]) == ["services/api"],
+        "extract_changed_dirs: same-dir files deduped",
+    )
+
+    # Different subtrees → both included, sorted.
+    tc = test_case(
+        tc,
+        extract_changed_dirs(["services/api/x.py", "tools/go/y.go"]) == ["services/api", "tools/go"],
+        "extract_changed_dirs: different dirs both kept, sorted",
+    )
+
+    # Mixed: top-level + nested → only the nested parent.
+    tc = test_case(
+        tc,
+        extract_changed_dirs(["MODULE.bazel", "services/api/foo.py"]) == ["services/api"],
+        "extract_changed_dirs: top-level skipped, nested kept",
+    )
+
+    # Deeply nested file → only its direct parent (not all ancestors).
+    tc = test_case(
+        tc,
+        extract_changed_dirs(["a/b/c/d/foo.py"]) == ["a/b/c/d"],
+        "extract_changed_dirs: deeply nested → direct parent only",
+    )
+
+    # ----- dir_at_or_below -----
+
+    tc = test_case(
+        tc,
+        dir_at_or_below("services/api", ["services/api"]),
+        "dir_at_or_below: exact match",
+    )
+    tc = test_case(
+        tc,
+        dir_at_or_below("services/api/v2", ["services/api"]),
+        "dir_at_or_below: descendant matches ancestor scope",
+    )
+    tc = test_case(
+        tc,
+        dir_at_or_below("services/api", ["services"]),
+        "dir_at_or_below: direct child of scope",
+    )
+    tc = test_case(
+        tc,
+        not dir_at_or_below("tools/go", ["services/api"]),
+        "dir_at_or_below: unrelated subtree → false",
+    )
+
+    # Prefix-but-not-segment-boundary: "services/api2" must NOT match "services/api"
+    tc = test_case(
+        tc,
+        not dir_at_or_below("services/api2", ["services/api"]),
+        "dir_at_or_below: string-prefix-only (no segment boundary) → false",
+    )
+    tc = test_case(
+        tc,
+        dir_at_or_below("services/api", ["services/api/"]),
+        "dir_at_or_below: trailing slash on scope tolerated",
+    )
+    tc = test_case(
+        tc,
+        dir_at_or_below("services/api", ["tools/go", "services"]),
+        "dir_at_or_below: matches against any scope in the list",
+    )
+    tc = test_case(
+        tc,
+        not dir_at_or_below("services/api", []),
+        "dir_at_or_below: empty scope list → false",
+    )
+
+    # `./` prefix normalization: `./services` ≡ `services`.
+    tc = test_case(
+        tc,
+        dir_at_or_below("services/api", ["./services"]),
+        "dir_at_or_below: ./ prefix normalized",
+    )
+    tc = test_case(
+        tc,
+        dir_at_or_below("services", ["./services"]),
+        "dir_at_or_below: ./ prefix normalized, exact match",
+    )
+    tc = test_case(
+        tc,
+        not dir_at_or_below("tools/go", ["./services"]),
+        "dir_at_or_below: ./ prefix doesn't widen match",
+    )
+
+    # `.` (workspace root) matches every path.
+    tc = test_case(
+        tc,
+        dir_at_or_below("services/api", ["."]),
+        "dir_at_or_below: `.` matches any path",
+    )
+    tc = test_case(
+        tc,
+        dir_at_or_below("any/deep/path", ["."]),
+        "dir_at_or_below: `.` matches deep paths",
+    )
+    tc = test_case(
+        tc,
+        dir_at_or_below("services/api", ["./"]),
+        "dir_at_or_below: `./` (trailing slash) matches any path",
+    )
+
+    # ----- dedupe_subtrees -----
+
+    tc = test_case(tc, dedupe_subtrees([]) == [], "dedupe_subtrees: empty → []")
+
+    tc = test_case(tc, dedupe_subtrees(["services"]) == ["services"], "dedupe_subtrees: singleton")
+
+    # Ancestor + descendant → ancestor wins.
+    tc = test_case(
+        tc,
+        dedupe_subtrees(["services", "services/api"]) == ["services"],
+        "dedupe_subtrees: ancestor wins over descendant",
+    )
+
+    # Multi-level: three nested, only the shortest kept.
+    tc = test_case(
+        tc,
+        dedupe_subtrees(["a/b/c", "a", "a/b"]) == ["a"],
+        "dedupe_subtrees: multi-level → root kept",
+    )
+
+    # Independent subtrees stay.
+    tc = test_case(
+        tc,
+        dedupe_subtrees(["tools/go", "services/api"]) == ["services/api", "tools/go"],
+        "dedupe_subtrees: independent subtrees both kept, sorted",
+    )
+
+    # Prefix-but-not-segment: "services/api" must NOT swallow "services/api2".
+    tc = test_case(
+        tc,
+        dedupe_subtrees(["services/api", "services/api2"]) == ["services/api", "services/api2"],
+        "dedupe_subtrees: string-prefix-only entries both kept",
+    )
+
+    # Trailing slash normalization.
+    tc = test_case(
+        tc,
+        dedupe_subtrees(["services/", "services/api"]) == ["services"],
+        "dedupe_subtrees: trailing slash normalized; ancestor still wins",
+    )
+
+    # `./` prefix normalization.
+    tc = test_case(
+        tc,
+        dedupe_subtrees(["./services", "services/api"]) == ["services"],
+        "dedupe_subtrees: ./ prefix normalized; ancestor wins",
+    )
+
+    # `.` (workspace root) collapses to empty and is dropped from the
+    # result — passing `.` to gazelle is equivalent to passing no
+    # positionals, so we return [] not [""].
+    tc = test_case(
+        tc,
+        dedupe_subtrees(["."]) == [],
+        "dedupe_subtrees: `.` alone → [] (whole-repo mode)",
+    )
+    tc = test_case(
+        tc,
+        dedupe_subtrees(["./"]) == [],
+        "dedupe_subtrees: `./` alone → []",
+    )
+
+    # `.` mixed with other dirs swallows them (root contains everything).
+    tc = test_case(
+        tc,
+        dedupe_subtrees([".", "services/api"]) == [],
+        "dedupe_subtrees: `.` mixed with subtree → [] (root contains both)",
+    )
+
+    return tc
+
 def test_severity_for_status(tc: int) -> int:
     """Coverage for lib/result_text.axl::severity_for_status.
 
@@ -1854,13 +2064,22 @@ def test_severity_for_status(tc: int) -> int:
         tc = test_case(tc, got == expected, "severity_for_status: %s (got %r, want %r)" % (desc, got, expected))
     return tc
 
-def test_artifacts_lib(ctx: TaskContext, tc: int) -> int:
-    """Coverage for lib/artifacts.axl: detect_ci + artifact_name."""
-    env = ctx.std.env
+_CI_MARKERS = [
+    "GITHUB_ACTIONS",
+    "BUILDKITE_AGENT_ACCESS_TOKEN",
+    "CI_JOB_TOKEN",
+    "CIRCLE_PROJECT_REPONAME",
+    "CI",
+]
 
-    # Clear all CI markers up front.
-    for k in ["GITHUB_ACTIONS", "BUILDKITE_AGENT_ACCESS_TOKEN", "CI_JOB_TOKEN", "CIRCLE_PROJECT_REPONAME"]:
+def _clear_ci_env(env):
+    for k in _CI_MARKERS:
         env.remove_var(k)
+
+def test_detect_ci(ctx: TaskContext, tc: int) -> int:
+    """Coverage for lib/environment.axl::detect_ci."""
+    env = ctx.std.env
+    _clear_ci_env(env)
 
     tc = test_case(tc, detect_ci(env) == None, "detect_ci: no markers → None")
 
@@ -1883,11 +2102,23 @@ def test_artifacts_lib(ctx: TaskContext, tc: int) -> int:
     env.set_var("GITHUB_ACTIONS", "true")
     tc = test_case(tc, detect_ci(env) == "github", "detect_ci: GitHub precedence over CircleCI")
 
-    # Clean up.
-    for k in ["GITHUB_ACTIONS", "BUILDKITE_AGENT_ACCESS_TOKEN", "CI_JOB_TOKEN", "CIRCLE_PROJECT_REPONAME"]:
-        env.remove_var(k)
+    # Generic CI=true alone (no specific marker) → "unknown" so callers
+    # that only need "are we on CI?" (e.g. --check=auto) behave correctly
+    # on hosts we haven't been taught yet.
+    _clear_ci_env(env)
+    env.set_var("CI", "true")
+    tc = test_case(tc, detect_ci(env) == "unknown", "detect_ci: CI=true alone → unknown")
 
-    # artifact_name
+    # Specific marker beats the generic CI=true.
+    env.set_var("CI", "true")
+    env.set_var("BUILDKITE_AGENT_ACCESS_TOKEN", "x")
+    tc = test_case(tc, detect_ci(env) == "buildkite", "detect_ci: specific marker beats generic CI")
+
+    _clear_ci_env(env)
+    return tc
+
+def test_artifacts_lib(ctx: TaskContext, tc: int) -> int:
+    """Coverage for lib/artifacts.axl: artifact_name."""
     cases = [
         # (ci, task_name, task_key, filename, expected, desc)
         ("github", "test", "my-build", "profile.gz", "test.my-build.profile.gz", "github → flat dotted"),
@@ -1899,7 +2130,6 @@ def test_artifacts_lib(ctx: TaskContext, tc: int) -> int:
     for (ci, task_name, task_key, filename, expected, desc) in cases:
         got = artifact_name(ci, task_name, task_key, filename)
         tc = test_case(tc, got == expected, "artifact_name: %s → %r (got %r)" % (desc, expected, got))
-
     return tc
 
 def test_detect_build_url(ctx: TaskContext, tc: int) -> int:
@@ -2779,6 +3009,7 @@ def impl(ctx: TaskContext) -> int:
     tc = test_color_enabled(ctx, tc)
     tc = test_detect_github_repo(ctx, tc)
     tc = test_detect_build_url(ctx, tc)
+    tc = test_detect_ci(ctx, tc)
     tc = test_artifacts_lib(ctx, tc)
     tc = test_sarif_lib(tc)
     tc = test_file_uri_to_path(tc)
@@ -2797,6 +3028,7 @@ def impl(ctx: TaskContext) -> int:
     tc = test_deliveryd_parse_endpoint(tc)
     tc = test_build_metadata_lib(tc)
     tc = test_severity_for_status(tc)
+    tc = test_gazelle_dir_helpers(tc)
 
     print(tc, "tests passed")
     return 0

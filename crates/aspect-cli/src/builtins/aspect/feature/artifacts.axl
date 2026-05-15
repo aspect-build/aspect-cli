@@ -59,8 +59,8 @@ features like GithubStatusChecks can surface download links:
 """
 
 load("../bazel.axl", "BazelTrait")
-load("../lib/artifacts.axl", "ArtifactsTrait", "artifact_name", "create_uploader", "detect_ci")
-load("../lib/environment.axl", "info", "warn")
+load("../lib/artifacts.axl", "ArtifactsTrait", "artifact_name", "create_uploader")
+load("../lib/environment.axl", "detect_ci", "info", "warn")
 
 def _record_artifact_url(artifacts_trait, kind, url):
     """Record a direct download URL for a specific artifact kind.
