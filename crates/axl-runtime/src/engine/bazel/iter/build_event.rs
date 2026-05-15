@@ -21,17 +21,17 @@ use starlark::values::starlark_value;
 use axl_proto::build_event_stream::BuildEvent;
 use derive_more::Display;
 
-use super::super::stream::Subscriber;
+use super::super::stream::CappedSubscriber;
 
 #[derive(Debug, ProvidesStaticType, Display, Trace, NoSerialize, Allocative)]
 #[display("<build_event_iterator>")]
 pub struct BuildEventIterator {
     #[allocative(skip)]
-    recv: RefCell<Subscriber<BuildEvent>>,
+    recv: RefCell<CappedSubscriber<BuildEvent>>,
 }
 
 impl BuildEventIterator {
-    pub fn new(recv: Subscriber<BuildEvent>) -> Self {
+    pub fn new(recv: CappedSubscriber<BuildEvent>) -> Self {
         Self {
             recv: RefCell::new(recv),
         }

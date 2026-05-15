@@ -271,13 +271,17 @@ def run_bazel_task(ctx: TaskContext, command: str) -> TaskConclusion:
     if bazel_trait.build_event_sinks:
         build_events.extend(bazel_trait.build_event_sinks)
 
-    # Coerce to bool/list for ctx.bazel.build/test:
-    # - non-empty list → stream to those sinks + build_events() iterator.
-    # - True → stream without explicit sinks (build_event handler + result tracking)
-    # - False → no BEP stream at all
+    # Prepend a local sink when this task needs the iterator (status
+    # surfaces or per-event hooks). The local sink declares intent so
+    # the runtime pre-registers the AXL receiver before bazel opens the
+    # BEP FIFO. Without need_bes, no local sink — `False` skips the
+    # stream entirely; non-empty `build_events` opens it for the remote
+    # sinks only.
     need_bes = bool(bazel_trait.build_event) or bool(lifecycle.task_update)
-    if not build_events:
-        build_events = True if need_bes else False
+    if need_bes:
+        build_events = [bazel.build_events.local()] + build_events
+    elif not build_events:
+        build_events = False
 
     for handler in bazel_trait.build_start:
         handler(ctx)
@@ -371,13 +375,6 @@ def run_bazel_task(ctx: TaskContext, command: str) -> TaskConclusion:
                 *ctx.args.targets
             )
 
-        # Subscribe BEFORE emitting any task_updates (the broadcaster only
-        # delivers to subscribers that joined before the event was sent).
-        # On a warm bazel daemon BES events stream within milliseconds, so
-        # the gap between `ctx.bazel.{build,test}` returning and the
-        # subscribe is enough to drop the early burst (`build_started`,
-        # `target_completed`, …) — which makes the running annotation
-        # render with stale/empty state.
         events = invocation.build_events() if need_bes else None
 
         # Capture the sink invocation ID (the UUID used by the Aspect

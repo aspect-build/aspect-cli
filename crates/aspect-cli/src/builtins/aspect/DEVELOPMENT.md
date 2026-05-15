@@ -158,18 +158,20 @@ A subtle but load-bearing design detail. The runtime exposes BES events via a *b
 - Subscribers register and get a private channel. The broadcaster dispatches every event to every subscriber's channel.
 - **Subscribers that join after an event has been broadcast do *not* receive that event.** There is no replay buffer.
 
-`ctx.bazel.build(...)` registers two subscribers internally before returning (a tracing sink and the gRPC sinks from `bazel_trait.build_event_sinks`). User code that wants its own iterator calls `build.build_events()`, which calls `event_stream.subscribe()` lazily.
+`ctx.bazel.build(...)` registers subscribers eagerly before returning: a tracing sink, the gRPC sinks from `bazel_trait.build_event_sinks`, AND — when the caller explicitly opts in via a `bazel.build_events.local(...)` sink in the list (or the `build_events=True` sugar, which expands to a single default local sink) — the AXL-facing receiver returned by the first `build.build_events()` call. The eager registration happens before bazel opens the BEP FIFO, so the early burst (`build_started`, `target_completed`, `named_set_of_files`) is buffered for the AXL task regardless of when it eventually calls `build_events()`.
 
-On a **warm bazel daemon** with a fully cached build, BES events stream within milliseconds. If the task does any meaningful work between `ctx.bazel.build(...)` returning and `build.build_events()` being called — including emitting a running `task_update` (which spawns `buildkite-agent annotate`, dozens of ms) — the user-side subscriber registers too late and the early burst (`build_started`, `target_completed`, `named_set_of_files`) is gone. `runnable.determine_entrypoint()` then can't find the target's executable, format/gazelle silently can't run their binary, lint can't read SARIF reports.
+If the caller passes only remote sinks (e.g. `build_events=[bazel.build_events.grpc(...)]`) without a local sink, `build.build_events()` errors at call time — the runtime won't subscribe behind the caller's back, because every undrained subscription is buffered memory.
 
-**The rule: call `build.build_events()` immediately after `ctx.bazel.build(...)` returns, before any other work.** Stash the iterator and use it later:
+The local sink carries a `buffer_cap` (default `10000` events): if the consumer falls behind by more than that, the broadcaster drops the subscription on the next overflow send and the AXL iterator sees `Disconnected`. This bounds memory growth when a task declares intent but stops draining.
+
+Call `build.build_events()` early after `ctx.bazel.build(...)` returns. Stash the iterator and use it later:
 
 ```python
 build = ctx.bazel.build(...)
-events = build.build_events()        # ← subscribe FIRST, the channel is now buffering
+events = build.build_events()        # ← first call returns the pre-subscribed channel
 
-# Now safe to do potentially-slow work — the broadcaster is feeding `events`'
-# channel from t=0 regardless of how slow we are below.
+# Safe to do potentially-slow work — the broadcaster has been feeding
+# `events`' channel from t=0 regardless of what we do here.
 data["sink_invocation_id"] = build.sink_invocation_id
 for handler in lifecycle.task_update:
     handler(ctx, TaskUpdate(kind = "...", status = "running", data = data))
@@ -178,7 +180,7 @@ for event in events:                  # iterate the already-buffered channel
     ...
 ```
 
-If you violate this rule, the failure mode is *intermittent* — cold-daemon runs work, warm-daemon runs fail — which is exactly the kind of bug that escapes local testing.
+Subsequent calls to `build.build_events()` fall back to fresh `subscribe()` (late-subscriber semantics — they will miss any events broadcast before the call). Tasks that need multiple iterators should subscribe each via `build.build_events()` upfront, in order, then drain them.
 
 ---
 
@@ -617,7 +619,7 @@ When a task you change works in snapshots but fails live (artifact URL malformed
 
 When writing a new task or modifying an existing one, sanity-check:
 
-- [ ] Subscribe to BES events (`build.build_events()`) **immediately** after `ctx.bazel.build(...)` returns, before any other work.
+- [ ] When the task needs to iterate BES events, declare intent by including `bazel.build_events.local()` in the `build_events=[...]` list (or pass `build_events=True` for the no-remote-sinks shorthand). Then call `build.build_events()` once, stashing the iterator. The runtime pre-registers your receiver before bazel opens the BEP FIFO; the cap on the local sink bounds memory if you stop draining.
 - [ ] Capture `data["sink_invocation_id"] = build.sink_invocation_id` right after, then emit a running `task_update` so the Aspect Workflows link surfaces live.
 - [ ] Iterate `bazel_trait.build_start` / `build_event` / `build_end` so features fire (BK section markers, artifact upload).
 - [ ] Iterate `hc_trait.pre_health_check` / `post_health_check` so the runner-env sections render and post-failures surface.

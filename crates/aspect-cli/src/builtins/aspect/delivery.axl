@@ -296,8 +296,6 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
             *targets
         )
 
-        # Subscribe BEFORE emitting (broadcaster only delivers to pre-existing
-        # subscribers); a warm daemon can stream BES events within milliseconds.
         events = build.build_events()
 
         # Capture the sink-side invocation UUID from phase 1 (the
@@ -680,9 +678,9 @@ def _delivery_impl(ctx):
     if bazel_trait.startup_flags:
         startup_flags = bazel_trait.startup_flags(startup_flags)
 
-    # BES: delivery always needs the iterator for run_tracker, so pass trait sinks
-    # when available and fall back to True otherwise.
-    build_events = list(bazel_trait.build_event_sinks) if bazel_trait.build_event_sinks else True
+    # BES: delivery always needs the iterator for run_tracker — the
+    # local sink declares that intent. Trait sinks come after.
+    build_events = [bazel.build_events.local()] + list(bazel_trait.build_event_sinks)
 
     for handler in bazel_trait.build_start:
         handler(ctx)

@@ -341,7 +341,11 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # only — the runtime would still mint a sink_invocation_id, but the
     # Aspect backend would have no record under that UUID, leading to
     # the "invocation not found" 404 we observed live.
-    build_events = list(bazel_trait.build_event_sinks) if bazel_trait.build_event_sinks else True
+    # The local sink declares intent to iterate via build.build_events();
+    # the runtime pre-registers it before bazel opens the BEP FIFO so
+    # the early burst (target_completed for runnable.determine_entrypoint)
+    # is buffered regardless of remote-sink connect timing.
+    build_events = [bazel.build_events.local()] + list(bazel_trait.build_event_sinks)
 
     # Fire `bazel_trait.build_start` hooks before spawning bazel —
     # Workflows registers the BK `--- :bazel: Running bazel …`
@@ -370,11 +374,6 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         flags = flags,
     )
 
-    # Subscribe BEFORE emitting (broadcaster only delivers to pre-existing
-    # subscribers); a warm daemon can stream BES events within milliseconds,
-    # so any delay between `ctx.bazel.build` returning and the subscribe
-    # risks missing the early burst — including the target_completed for
-    # the formatter that `runnable.determine_entrypoint` needs.
     events = build.build_events()
 
     # `build.sink_invocation_id` is minted inside the runtime's `Build::spawn`

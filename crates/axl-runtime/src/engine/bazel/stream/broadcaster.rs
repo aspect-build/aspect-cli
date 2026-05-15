@@ -180,8 +180,32 @@
 //! - Dead subscribers are cleaned up lazily on the next `send()`
 //! - The `close()` method immediately frees all sender resources
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+
+/// A subscription on the broadcaster's fan-out list. Each kind tracks its
+/// own back-pressure policy:
+///
+/// - `Unbounded`: events queue forever on the receiver's channel. Used by
+///   sinks (tracing, gRPC) whose worker threads pull events as fast as
+///   they can — buffer growth is bounded by upload throughput.
+/// - `Capped`: subscribed via [`Broadcaster::subscribe_capped`]. The
+///   shared `queued` counter is incremented on each send and decremented
+///   on each receive (via [`CappedSubscriber::recv`] /
+///   [`CappedSubscriber::try_recv`]). When `queued >= cap` on a send,
+///   the broadcaster drops the subscription (removes its entry from
+///   `subscribers`), causing the receiver to see disconnect. Used to
+///   bound memory growth for slow / never-consumed AXL-side iterators.
+#[derive(Debug)]
+enum Subscription<T> {
+    Unbounded(mpsc::Sender<T>),
+    Capped {
+        tx: mpsc::Sender<T>,
+        queued: Arc<AtomicUsize>,
+        cap: usize,
+    },
+}
 
 /// Internal state shared between the broadcaster and its clones.
 ///
@@ -191,8 +215,9 @@ struct BroadcasterInner<T> {
     /// Active subscriber senders. Each sender corresponds to one subscriber's buffer.
     /// Senders are removed when:
     /// - The corresponding receiver is dropped (detected on next send)
+    /// - A capped subscription overflows its `cap`
     /// - The broadcaster is closed
-    subscribers: Vec<mpsc::Sender<T>>,
+    subscribers: Vec<Subscription<T>>,
 
     /// Whether the broadcaster has been explicitly closed.
     /// When true:
@@ -202,6 +227,54 @@ struct BroadcasterInner<T> {
 }
 
 pub type Subscriber<T> = mpsc::Receiver<T>;
+
+/// A subscription with an optional bounded queue depth. Wraps a
+/// [`mpsc::Receiver`] and, when subscribed via
+/// [`Broadcaster::subscribe_capped`], a shared counter; each
+/// [`recv`](Self::recv) / [`try_recv`](Self::try_recv) decrements the
+/// counter so the broadcaster sees back-pressure. When `queued >= cap`
+/// on a send, the broadcaster drops this subscription and the receiver
+/// sees `Disconnected`.
+///
+/// Use for AXL-side iterators where the runtime needs to bound memory
+/// growth if the consumer falls behind or never drains.
+///
+/// Late subscribers wrapped via [`from_unbounded`](Self::from_unbounded)
+/// hold `queued = None` — they're plain `Receiver` consumers on the
+/// broadcaster's `Subscription::Unbounded` path, so there's no shared
+/// counter to track, and `recv` / `try_recv` skip the decrement.
+#[derive(Debug)]
+pub struct CappedSubscriber<T> {
+    rx: mpsc::Receiver<T>,
+    queued: Option<Arc<AtomicUsize>>,
+}
+
+impl<T> CappedSubscriber<T> {
+    pub fn recv(&self) -> Result<T, mpsc::RecvError> {
+        let v = self.rx.recv()?;
+        if let Some(q) = &self.queued {
+            q.fetch_sub(1, Ordering::Relaxed);
+        }
+        Ok(v)
+    }
+
+    pub fn try_recv(&self) -> Result<T, mpsc::TryRecvError> {
+        let v = self.rx.try_recv()?;
+        if let Some(q) = &self.queued {
+            q.fetch_sub(1, Ordering::Relaxed);
+        }
+        Ok(v)
+    }
+
+    /// Wrap a plain [`mpsc::Receiver`] (obtained from
+    /// [`Broadcaster::subscribe`]) as a [`CappedSubscriber`] with no
+    /// back-pressure tracking. Use for late-subscribe paths where the
+    /// caller has already taken the broadcaster's pre-subscribed
+    /// (capped) receiver but needs another iterator handle.
+    pub fn from_unbounded(rx: mpsc::Receiver<T>) -> Self {
+        Self { rx, queued: None }
+    }
+}
 
 /// A thread-safe broadcaster that fans out events to multiple subscribers.
 ///
@@ -309,8 +382,36 @@ impl<T: Clone> Broadcaster<T> {
         }
 
         let (tx, rx) = mpsc::channel();
-        inner.subscribers.push(tx);
+        inner.subscribers.push(Subscription::Unbounded(tx));
         rx
+    }
+
+    /// Subscribe with a bounded queue depth. When `queued >= cap` on a
+    /// send, the broadcaster drops this subscription — the receiver sees
+    /// `Disconnected` rather than the channel growing without limit. The
+    /// counter decrements on each [`CappedSubscriber::recv`] /
+    /// [`CappedSubscriber::try_recv`], so a consumer that drains at
+    /// least as fast as the producer sends never trips the cap.
+    pub fn subscribe_capped(&self, cap: usize) -> CappedSubscriber<T> {
+        let mut inner = self.inner.lock().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let queued = Arc::new(AtomicUsize::new(0));
+        if inner.closed {
+            drop(tx);
+            return CappedSubscriber {
+                rx,
+                queued: Some(queued),
+            };
+        }
+        inner.subscribers.push(Subscription::Capped {
+            tx,
+            queued: queued.clone(),
+            cap,
+        });
+        CappedSubscriber {
+            rx,
+            queued: Some(queued),
+        }
     }
 
     /// Sends an event to all current subscribers.
@@ -352,13 +453,25 @@ impl<T: Clone> Broadcaster<T> {
     pub fn send(&self, event: T) {
         let mut inner = self.inner.lock().unwrap();
 
-        // Use retain to both send and clean up dead subscribers in one pass.
-        // - send() returns Ok if the receiver is still alive
-        // - send() returns Err if the receiver has been dropped
-        // We keep only the subscribers where send succeeded.
-        inner
-            .subscribers
-            .retain(|tx| tx.send(event.clone()).is_ok());
+        // Use retain to send, prune dead receivers, AND drop capped
+        // subscriptions whose queue depth exceeded `cap` (overflow).
+        inner.subscribers.retain(|sub| match sub {
+            Subscription::Unbounded(tx) => tx.send(event.clone()).is_ok(),
+            Subscription::Capped { tx, queued, cap } => {
+                if queued.load(Ordering::Relaxed) >= *cap {
+                    // Consumer fell behind / never started draining;
+                    // drop the subscription so we stop buffering and
+                    // the receiver sees Disconnected on its next recv.
+                    return false;
+                }
+                if tx.send(event.clone()).is_ok() {
+                    queued.fetch_add(1, Ordering::Relaxed);
+                    true
+                } else {
+                    false
+                }
+            }
+        });
     }
 
     /// Closes the broadcaster, disconnecting all subscribers.
@@ -1068,5 +1181,72 @@ mod tests {
             post_close_sub.recv().is_err(),
             "Subscriber after close should get no events"
         );
+    }
+
+    /// Capped subscribers receive every event while the consumer keeps
+    /// up — the cap only matters under sustained back-pressure.
+    #[test]
+    fn capped_subscriber_drains_normally() {
+        let broadcaster: Broadcaster<i32> = Broadcaster::new();
+        let sub = broadcaster.subscribe_capped(100);
+
+        for i in 0..50 {
+            broadcaster.send(i);
+            assert_eq!(sub.recv().unwrap(), i);
+        }
+    }
+
+    /// When the consumer never drains, the broadcaster drops the
+    /// subscription as soon as `queued >= cap` so memory doesn't grow
+    /// without limit. The receiver sees Disconnected on its next recv.
+    #[test]
+    fn capped_subscriber_dropped_on_overflow() {
+        let broadcaster: Broadcaster<i32> = Broadcaster::new();
+        let sub = broadcaster.subscribe_capped(3);
+
+        // Fill the buffer to the cap. Sends 0..3 succeed because
+        // queued goes 0→1→2→3 and the cap check is `>=` on the
+        // *next* send (i.e. after the third successful send the
+        // counter is at 3 and the fourth send trips the drop).
+        broadcaster.send(0);
+        broadcaster.send(1);
+        broadcaster.send(2);
+        // This one trips the drop.
+        broadcaster.send(3);
+
+        // Subsequent sends are no-ops for this subscriber; only the
+        // first three events are in the buffer.
+        broadcaster.send(4);
+        broadcaster.send(5);
+
+        assert_eq!(sub.recv().unwrap(), 0);
+        assert_eq!(sub.recv().unwrap(), 1);
+        assert_eq!(sub.recv().unwrap(), 2);
+        // Buffer drained — sender was dropped at overflow, so recv
+        // now sees Disconnected.
+        assert!(sub.recv().is_err());
+    }
+
+    /// Capped and unbounded subscribers can coexist; a capped overflow
+    /// must not affect other subscribers.
+    #[test]
+    fn capped_overflow_does_not_disturb_unbounded_peers() {
+        let broadcaster: Broadcaster<i32> = Broadcaster::new();
+        let capped = broadcaster.subscribe_capped(2);
+        let unbounded = broadcaster.subscribe();
+
+        for i in 0..10 {
+            broadcaster.send(i);
+        }
+
+        // Unbounded receives the full 10.
+        for i in 0..10 {
+            assert_eq!(unbounded.recv().unwrap(), i);
+        }
+
+        // Capped receives the first 2, then disconnects.
+        assert_eq!(capped.recv().unwrap(), 0);
+        assert_eq!(capped.recv().unwrap(), 1);
+        assert!(capped.recv().is_err());
     }
 }
