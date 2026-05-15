@@ -47,6 +47,10 @@ steps:
       ; do
         val=$$(printenv "$$var") && echo "  $$var=$$val" || true
       done
+      echo "ASPECT_LAUNCHER_CACHE / ASPECT_CLI_CACHE:"
+      for var in ASPECT_LAUNCHER_CACHE ASPECT_CLI_CACHE; do
+        val=$$(printenv "$$var") && echo "  $$var=$$val" || true
+      done
 
   - key: pre-build
     label: ":aspect: Pre-build CLI"
