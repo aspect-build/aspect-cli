@@ -143,8 +143,8 @@ def color_enabled(std):
 #
 # Litmus test for `info` vs `warn`: did something *fail*, or is this
 # a deliberate / expected outcome of the runtime conditions?
-#   - User opted in via flag → `info()`. ("--soft-fail is set; task
-#     exits 0", "--gazelle-flag=X ignored in diff phase".)
+#   - User opted in via flag → `info()`. ("--on-change=warn → exiting 0
+#     with a warning signal", "--gazelle-flag=X ignored in diff phase".)
 #   - Environment-detected limitation / feature unavailable here →
 #     `info()`. ("Missing GITHUB_RUN_ID; skipping", "ASPECT_VCS_URL
 #     non-github.com; skipping check-run creation".)
@@ -577,8 +577,8 @@ def detect_ci(env):
         gated on a host-specific marker each provider exclusively sets.
       - "unknown" — generic `CI` env var is set but no specific marker was
         found. Lets callers that only need "are we on CI?" (e.g. the
-        `--check=auto` resolution in format / gazelle) behave correctly
-        on hosts we haven't been taught yet.
+        `--on-change=auto` resolution in format / gazelle) behave
+        correctly on hosts we haven't been taught yet.
       - None — no CI env detected at all (typical local dev shell).
 
     Args:

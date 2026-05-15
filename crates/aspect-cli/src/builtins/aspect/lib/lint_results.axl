@@ -213,6 +213,25 @@ def lint_summary_title(data, status, target_pattern = "", task_name = ""):
         return base + " · Passed"
     return base + " · " + _findings_phrase(errs, warns, infos)
 
+def conclusion(status, data):
+    """Lint task's terminal bookend conclusion. See
+    `lifecycle.task_update` for the contract; returns a findings
+    summary (`"3 errors, 8 warnings"`) or `""`.
+    """
+    lt = data.get("lint", {}) or {}
+    if lt.get("build_failed"):
+        return "Build failed"
+    counts = lt.get("counts_by_severity", {}) or {}
+    errs = counts.get("error", 0)
+    warns = counts.get("warning", 0)
+    infos = counts.get("info", 0)
+    total = _sum_values(counts)
+    if total == 0:
+        if status == "passed":
+            return "No findings"
+        return ""
+    return _findings_phrase(errs, warns, infos)
+
 def _findings_phrase(errs, warns, infos):
     parts = []
     if errs > 0:

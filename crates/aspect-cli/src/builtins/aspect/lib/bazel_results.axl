@@ -1180,6 +1180,20 @@ def summary_title(data, status, target_pattern = "", task_name = ""):
         title = state
     return _truncate_for_title(title, _TITLE_MAX_LEN)
 
+def conclusion(status, data):
+    """Bazel build/test task's terminal bookend conclusion. Delegates
+    to `compute_invocation_state(data, status)` so the bookend reads
+    the same bucket-derived state label as `summary_title()`.
+    """
+    if status in ("running", "failing"):
+        return ""
+    state = compute_invocation_state(data, status)
+
+    # `compute_invocation_state` returns "Pending..." while running,
+    # which we've already excluded above. Defensive fall-through: empty
+    # if no bucket matched (shouldn't fire in practice).
+    return state or ""
+
 def now_ms(ctx):
     """Return current time as milliseconds since epoch.
 

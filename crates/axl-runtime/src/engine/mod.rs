@@ -57,6 +57,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     r#async::register_globals(globals);
     r#trait::register_globals(globals);
     task::register_globals(globals);
+    task_info::register_globals(globals);
     feature::register_globals(globals);
 
     globals.namespace("args", arg::register_globals);

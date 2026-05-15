@@ -442,3 +442,193 @@ fn task_info_methods(registry: &mut MethodsBuilder) {
         Ok(NoneType)
     }
 }
+
+/// Terminal state returned by a task's `_impl` function. The runtime
+/// reads it after `_impl` returns to render the closing bookend:
+///
+/// - `exit_code`  — the task's exit code (0 = pass, non-zero = fail).
+/// - `text`       — short, plain-text conclusion appended to the
+///                  bookend as `· <text>`. Omitted when empty.
+/// - `flagged`    — when `True` and `exit_code == 0`, the bookend
+///                  reads `⚠️ Flagged` instead of `✅ Passed`. Ignored
+///                  on non-zero exit (failure dominates).
+///
+/// Tasks may instead return a bare `int` (treated as `TaskConclusion(
+/// exit_code=int)`) when they have nothing more to say than the
+/// numeric exit. `int` and `TaskConclusion` are the only accepted
+/// return types.
+#[derive(Debug, Clone, ProvidesStaticType, Display, NoSerialize, Allocative)]
+#[display(
+    "<TaskConclusion exit_code={} text={:?} flagged={}>",
+    exit_code,
+    text,
+    flagged
+)]
+pub struct TaskConclusion {
+    pub exit_code: i32,
+    pub text: String,
+    pub flagged: bool,
+}
+
+starlark_simple_value!(TaskConclusion);
+
+#[starlark_value(type = "TaskConclusion")]
+impl<'v> StarlarkValue<'v> for TaskConclusion {
+    fn get_methods() -> Option<&'static Methods> {
+        static RES: MethodsStatic = MethodsStatic::new();
+        RES.methods(task_conclusion_methods)
+    }
+}
+
+#[starlark_module]
+fn task_conclusion_methods(registry: &mut MethodsBuilder) {
+    /// The task's exit code (0 = pass, non-zero = fail).
+    #[starlark(attribute)]
+    fn exit_code<'v>(this: Value<'v>) -> anyhow::Result<i32> {
+        Ok(this.downcast_ref::<TaskConclusion>().unwrap().exit_code)
+    }
+
+    /// Short, plain-text terminal summary appended to the bookend as
+    /// `· <text>`. `""` when no conclusion was supplied.
+    #[starlark(attribute)]
+    fn text<'v>(this: Value<'v>) -> anyhow::Result<String> {
+        Ok(this.downcast_ref::<TaskConclusion>().unwrap().text.clone())
+    }
+
+    /// `True` when this task should render as `⚠️ Flagged` instead of
+    /// `✅ Passed` (only when `exit_code == 0` — ignored otherwise).
+    #[starlark(attribute)]
+    fn flagged<'v>(this: Value<'v>) -> anyhow::Result<bool> {
+        Ok(this.downcast_ref::<TaskConclusion>().unwrap().flagged)
+    }
+}
+
+#[starlark_module]
+pub fn register_globals(globals: &mut starlark::environment::GlobalsBuilder) {
+    /// Construct a `TaskConclusion` to return from `_impl`. Carries the
+    /// task's terminal state to the runtime: exit code, optional
+    /// conclusion text (rendered as `· <text>` on the bookend), and
+    /// optional `flagged` flag (passing-with-warning).
+    ///
+    /// `_impl` may return either a bare `int` (treated as
+    /// `TaskConclusion(exit_code=int)`) or a `TaskConclusion`.
+    #[starlark(as_type = TaskConclusion)]
+    fn TaskConclusion(
+        #[starlark(require = named)] exit_code: i32,
+        #[starlark(require = named, default = String::new())] text: String,
+        #[starlark(require = named, default = false)] flagged: bool,
+    ) -> anyhow::Result<TaskConclusion> {
+        Ok(TaskConclusion {
+            exit_code,
+            text,
+            flagged,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn return_int_runs_to_completion() {
+        let exit = crate::test::eval(
+            r#"
+def _impl(ctx):
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+        )
+        .run_task(0)
+        .expect("run_task");
+        assert_eq!(exit, Some(0));
+    }
+
+    #[test]
+    fn return_task_conclusion_passed() {
+        let exit = crate::test::eval(
+            r#"
+def _impl(ctx):
+    return TaskConclusion(exit_code = 0, text = "12 files processed")
+
+Test = task(implementation = _impl)
+"#,
+        )
+        .run_task(0)
+        .expect("run_task");
+        assert_eq!(exit, Some(0));
+    }
+
+    #[test]
+    fn return_task_conclusion_flagged() {
+        let exit = crate::test::eval(
+            r#"
+def _impl(ctx):
+    return TaskConclusion(
+        exit_code = 0,
+        text = "reformatted 12 files",
+        flagged = True,
+    )
+
+Test = task(implementation = _impl)
+"#,
+        )
+        .run_task(0)
+        .expect("run_task");
+        assert_eq!(exit, Some(0));
+    }
+
+    #[test]
+    fn return_task_conclusion_failed() {
+        let exit = crate::test::eval(
+            r#"
+def _impl(ctx):
+    return TaskConclusion(exit_code = 1, text = "3 errors, 8 warnings")
+
+Test = task(implementation = _impl)
+"#,
+        )
+        .run_task(0)
+        .expect("run_task");
+        assert_eq!(exit, Some(1));
+    }
+
+    #[test]
+    fn return_task_conclusion_empty_text_with_flag() {
+        let exit = crate::test::eval(
+            r#"
+def _impl(ctx):
+    return TaskConclusion(exit_code = 0, flagged = True)
+
+Test = task(implementation = _impl)
+"#,
+        )
+        .run_task(0)
+        .expect("run_task");
+        assert_eq!(exit, Some(0));
+    }
+
+    // Sanity-check that the starlark `enum()` builtin (used by
+    // `lifecycle.Status` to validate task_update's `status` arg) is
+    // wired into the runtime and raises on invalid values with a
+    // useful error message.
+    #[test]
+    fn enum_builtin_validates_values() {
+        let err = crate::test::eval(
+            r#"
+Status = enum("running", "warning", "passed", "failed")
+def _impl(ctx):
+    Status("warned")  # typo — not a member; should raise
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+        )
+        .run_task(0)
+        .expect_err("expected invalid enum value to raise");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("warned"),
+            "error should mention the bad value, got: {msg}",
+        );
+    }
+}

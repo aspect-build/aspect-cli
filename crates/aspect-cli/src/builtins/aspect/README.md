@@ -113,11 +113,11 @@ aspect format                                                    # changed scope
 aspect format --scope=all                                        # whole tree
 aspect format --formatter-target=//tools/format:format-starlark  # buildifier-only
 aspect format --ignore-pattern='**/*.bzl'                        # exclude Starlark
-aspect format --soft-fail                                        # warn but don't fail CI
+aspect format --on-change=warn                                   # warn but don't fail CI
 aspect format --upload-format-diff                               # upload `format.patch`
 ```
 
-Verdict comes from a `git diff` between the pre-format and post-format working tree (after applying `--ignore-pattern`). Non-empty diff → "files need formatting". The formatter binary's own non-zero exit also fails the task (regardless of `--soft-fail`).
+Verdict comes from a `git diff` between the pre-format and post-format working tree (after applying `--ignore-pattern`). Non-empty diff + `--on-change=fail` → exit 1; `--on-change=warn` → exit 0 with status=warning; `--on-change=silent` → exit 0 with status=passed. The formatter binary's own non-zero exit fails the task regardless of `--on-change`.
 
 Renderer: `format_results`. The check-run / annotation summary shows the formatter-target label in the title (e.g. `Format //tools/format:format-starlark · 3 files need formatting`); the body lists affected files with a `aspect format` repro command and (when `--upload-format-diff`) a download link to the captured patch.
 

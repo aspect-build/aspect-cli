@@ -65,28 +65,35 @@ Install:
         )
 
 Usage:
-    # Default — apply locally (exit 0), gate on CI (exit 1 on diff).
-    # `--check=auto` resolves to "true" when running on a recognized
-    # CI host and "false" otherwise.
+    # Default — apply locally (exit 0, silent), gate on CI (exit 1 on diff).
+    # `--on-change=auto` resolves to "fail" on a recognized CI host and
+    # "silent" otherwise; `--check-only=auto` resolves to True on CI and
+    # False locally. Together: local applies the patch silently, CI
+    # detects drift and fails the build.
     aspect gazelle
 
-    # CI gate: don't modify the tree, just report and exit 1 on diff.
-    aspect gazelle --check=true
+    # CI gate: detect drift, exit 1 (`fail`), don't modify the tree.
+    aspect gazelle --on-change=fail --check-only=true
 
     # Limit BUILD-file updates to specific directories.
-    aspect gazelle --check=true tools/go services/api
+    aspect gazelle --on-change=fail --check-only=true tools/go services/api
 
     # Fast incremental mode: restrict updates to directories that
     # contain changed files (against `--base-ref`, default origin/main).
-    aspect gazelle --check=true --scope=changed
+    aspect gazelle --on-change=fail --check-only=true --scope=changed
 
     # Combine --scope=changed with positional dirs to intersect — only
     # update changed subtrees that fall under apps/web/.
-    aspect gazelle --check=true --scope=changed apps/web/
+    aspect gazelle --on-change=fail --check-only=true --scope=changed apps/web/
 
-    # Soft-fail mode for incremental adoption — WARN instead of fail
-    # when BUILD files are out of date.
-    aspect gazelle --check=true --soft-fail
+    # Soft-fail mode for incremental adoption — surface a yellow warning
+    # instead of failing the build when BUILD files are out of date.
+    aspect gazelle --on-change=warn --check-only=true
+
+    # Audit mode — apply locally AND surface a warning that something
+    # was out of date. Useful for maintainers wanting an explicit
+    # "BUILD files needed regen" signal even on a successful local run.
+    aspect gazelle --on-change=warn
 
     # Pass arbitrary gazelle flags (e.g. aspect-gazelle's --progress).
     aspect gazelle --gazelle-flag=-progress --gazelle-flag=-r tools/go
@@ -95,12 +102,12 @@ Usage:
     aspect gazelle --gazelle-command=fix
 
     # CI patch upload: archives the diff as a `gazelle.patch` artifact.
-    aspect gazelle --check=true --upload-gazelle-diff
+    aspect gazelle --on-change=fail --check-only=true --upload-gazelle-diff
 
     # Override the gazelle target (e.g. build-from-source variant).
     # Combine with `--bazel-flag=--config=pure_go` if linking against
     # toolchains_llvm_bootstrapped on Linux.
-    aspect gazelle --check=true \\
+    aspect gazelle --on-change=fail --check-only=true \\
         --gazelle-target=//tools/gazelle:gazelle_from_source \\
         --bazel-flag=--config=pure_go
 
@@ -145,7 +152,7 @@ Usage:
   is much smaller than it looks. For the full incremental win, pass
   gazelle's `-index=lazy`:
 
-      aspect gazelle --check=true --scope=changed \\
+      aspect gazelle --on-change=fail --check-only=true --scope=changed \\
           --gazelle-flag=-index=lazy
 
   With lazy indexing gazelle restricts the traverse + parse + export
@@ -183,16 +190,10 @@ load("./lib/artifacts.axl", "ArtifactsTrait", "artifact_name", "create_uploader"
 load("./lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "pluralize", "process_event")
 load("./lib/checkrun.axl", "GitHubCheckRunTrait")
 load("./lib/environment.axl", "color_enabled", "detect_ci", "error", "info", "warn")
-load(
-    "./lib/gazelle_results.axl",
-    "dedupe_subtrees",
-    "dir_at_or_below",
-    "extract_changed_dirs",
-    gaz_init_data = "init_data",
-)
+load("./lib/gazelle_results.axl", "dedupe_subtrees", "dir_at_or_below", "extract_changed_dirs", gaz_init_data = "init_data", gazelle_conclusion = "conclusion")
 load("./lib/github.axl", "detect_changed_files", "print_changed_files_listing")
 load("./lib/health_check.axl", "HealthCheckTrait")
-load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "preflight_phase", "setup_phase", "task_update")
+load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "pick_task_status", "preflight_phase", "resolve_on_change", "setup_phase", "task_update")
 load("./lib/path_glob.axl", "match_any")
 load("./lib/repro_commands.axl", "build_aspect_command", "task_cli_path")
 load("./lib/runnable.axl", "runnable")
@@ -268,20 +269,7 @@ def _try_upload_gazelle_diff(ctx, diff_text):
         info(ctx.std, "Uploaded gazelle diff patch (no stable URL on this CI host).")
 
 def _pick_status(data, had_failure, terminal):
-    """Decide a gazelle task's lifecycle status from accumulated data.
-
-    Aborted (bazel terminated mid-build) → "aborted".
-    Hard failure → "failing"/"failed".
-    `affected_files` non-empty (gazelle wants to update BUILD files) →
-    "warning" (soft-fail or fix-applied — same signal either way).
-    Else → "running"/"passed"."""
-    if data.get("bazel", {}).get("aborted"):
-        return "aborted"
-    if had_failure:
-        return "failed" if terminal else "failing"
-    if (data.get("gazelle", {}) or {}).get("affected_files"):
-        return "warning"
-    return "passed" if terminal else "running"
+    return pick_task_status(data, "gazelle", had_failure, terminal)
 
 def _compact_text(status, data):
     """Compact Result-cell text for the PR-comment surface."""
@@ -327,14 +315,19 @@ def _forwarded_flags(ctx):
         flags.append(("--gazelle-flag", list(ctx.args.gazelle_flags)))
     return flags
 
-def _detection_flags(ctx, check_value):
+def _detection_flags(ctx, mode):
     """Flag set that recreates the original change-detection invocation.
     Used by both the repro command and the fix-command's re-discovery
     fallback. Omits `--base-ref` when it's the default so the rendered
-    command stays short. `--soft-fail` is intentionally never captured
-    — a local re-run wants the real fail/pass signal."""
-    flags = [
-        ("--check", check_value),
+    command stays short. The repro/fix renderers pass `mode="check"` to
+    reproduce CI's check-only run, or `mode="apply"` to apply locally;
+    that maps to `--on-change=fail --check-only=true` and
+    `--on-change=silent --check-only=false` respectively."""
+    if mode == "check":
+        flags = [("--on-change", "fail"), ("--check-only", "true")]
+    else:
+        flags = [("--on-change", "silent"), ("--check-only", "false")]
+    flags = flags + [
         ("--scope", ctx.args.scope),
         ("--gazelle-target", ctx.args.gazelle_target),
     ]
@@ -349,24 +342,27 @@ def _detection_flags(ctx, check_value):
             flags.append(("--changed-file-pattern", list(ctx.args.changed_file_patterns)))
     return flags + _forwarded_flags(ctx)
 
-def _explicit_dirs_flags(ctx, check_value):
+def _explicit_dirs_flags(ctx, mode):
     """Flag set for invocations that scope via explicit positional dirs
     and bypass change detection. Smaller subset of `_detection_flags`."""
-    return [
-        ("--check", check_value),
+    if mode == "check":
+        flags = [("--on-change", "fail"), ("--check-only", "true")]
+    else:
+        flags = [("--on-change", "silent"), ("--check-only", "false")]
+    return flags + [
         ("--gazelle-target", ctx.args.gazelle_target),
     ] + _forwarded_flags(ctx)
 
 def _append_repro_command(ctx, data):
     """Append the always-rendered Reproduce command. Re-runs the same
-    `aspect gazelle --check=true ...` invocation CI ran, with the
-    post-resolution effective dirs as positionals so the user reproduces
-    CI's exact working set."""
+    `aspect gazelle --on-change=fail --check-only=true ...` invocation
+    CI ran, with the post-resolution effective dirs as positionals so
+    the user reproduces CI's exact working set."""
     effective_dirs = (data.get("gazelle", {}) or {}).get("dirs", []) or []
     data["repro_commands"].append({
         "command": build_aspect_command(
             task_cli_path(ctx.task),
-            _detection_flags(ctx, "true"),
+            _detection_flags(ctx, "check"),
             list(effective_dirs),
         ),
         "description": "",
@@ -376,7 +372,7 @@ def _append_fix_commands(ctx, data):
     """Append fix-command entries to `data["fix_commands"]`. Emitted
     only when gazelle actually found something to update.
 
-    The primary fix flips `--check=false` and carries the parent dirs
+    The primary fix flips to `--on-change=silent --check-only=false` and carries the parent dirs
     of the affected BUILD files as positionals — gazelle re-walks
     those subtrees and applies the captured diff via `git apply -p0`.
     Positionals supersede scope=changed (gazelle walks the listed dirs
@@ -390,7 +386,7 @@ def _append_fix_commands(ctx, data):
         return
     task_path = task_cli_path(ctx.task)
     fix_dirs = dedupe_subtrees(extract_changed_dirs(affected))
-    explicit_flags = _explicit_dirs_flags(ctx, "false")
+    explicit_flags = _explicit_dirs_flags(ctx, "apply")
 
     if len(fix_dirs) <= _FIX_DIRS_LIMIT:
         data["fix_commands"].append({
@@ -411,22 +407,22 @@ def _append_fix_commands(ctx, data):
         ),
     })
     data["fix_commands"].append({
-        "command": build_aspect_command(task_path, _detection_flags(ctx, "false"), []),
+        "command": build_aspect_command(task_path, _detection_flags(ctx, "apply"), []),
         "description": "Or re-discover and update all %d affected dirs" % len(fix_dirs),
     })
 
-def _resolve_check_mode(ctx):
-    """Resolve `--check=auto|true|false` to an `enforce_check` bool.
+def _resolve_check_only(ctx):
+    """Resolve `--check-only=auto|true|false` to a bool.
 
-    `auto` → enforce on CI hosts (`detect_ci(...)` truthy), apply
-    locally. `true` always enforces (CI gate, skip the apply step).
-    `false` never enforces (apply and exit 0 even on diff)."""
-    check_mode = ctx.args.check
-    if check_mode == "auto":
+    `auto` → True on CI (don't dirty the tree at the gate), False
+    locally (apply the patch as part of the task). `true` / `false`
+    pass through. Independent of `--on-change`: check-only controls
+    whether gazelle applies the patch, on-change controls the verdict.
+    """
+    val = ctx.args.check_only
+    if val == "auto":
         return bool(detect_ci(ctx.std.env))
-    if check_mode == "true":
-        return True
-    return False
+    return val == "true"
 
 def _resolve_effective_dirs(ctx, lifecycle, data):
     """Combine --scope, --dirs, --scope-all-on-change, and
@@ -524,9 +520,10 @@ def _resolve_effective_dirs(ctx, lifecycle, data):
     return effective, False
 
 def _emit_final(ctx, lifecycle, data, exit_code):
-    """Emit the terminal task_update and task_complete for status-check
-    consumers. Always appends the repro command; appends fix commands
-    when gazelle reported something to update."""
+    """Emit the terminal `task_update` + `task_complete` and return a
+    `TaskConclusion` for `_impl` to return. Always appends the repro
+    command; appends fix commands when gazelle reported something to
+    update."""
     status = _pick_status(data, had_failure = exit_code != 0, terminal = True)
     if not data.get("finish_time_ms"):
         data["finish_time_ms"] = now_ms(ctx)
@@ -536,11 +533,14 @@ def _emit_final(ctx, lifecycle, data, exit_code):
     _append_repro_command(ctx, data)
     _append_fix_commands(ctx, data)
 
+    bookend = gazelle_conclusion(status, data)
+
     for handler in lifecycle.task_update:
         handler(ctx, TaskUpdate(
             kind = "gazelle_results",
             status = status,
             final = True,
+            conclusion = bookend,
             data = data,
             progress = ProgressStyles(
                 body = _body_text(status, data),
@@ -549,8 +549,14 @@ def _emit_final(ctx, lifecycle, data, exit_code):
     for handler in lifecycle.task_complete:
         handler(ctx, exit_code)
 
+    return TaskConclusion(
+        exit_code = exit_code,
+        text = bookend,
+        flagged = status == "warning",
+    )
+
 # buildifier: disable=function-docstring
-def _impl(ctx: TaskContext) -> int:
+def _impl(ctx: TaskContext) -> int | TaskConclusion:
     bazel_trait = ctx.traits[BazelTrait]
     hc_trait = ctx.traits[HealthCheckTrait]
     lifecycle = ctx.traits[TaskLifecycleTrait]
@@ -562,13 +568,13 @@ def _impl(ctx: TaskContext) -> int:
     data["start_time_ms"] = now_ms(ctx)
     data["gazelle"]["gazelle_target"] = ctx.args.gazelle_target
     data["gazelle"]["gazelle_command"] = ctx.args.gazelle_command or ""
-    data["gazelle"]["check_mode"] = ctx.args.check
     data["gazelle"]["scope"] = ctx.args.scope
     data["gazelle"]["scope_all_on_change"] = list(ctx.args.scope_all_on_change or [])
     data["gazelle"]["changed_file_patterns"] = list(ctx.args.changed_file_patterns or [])
-    data["gazelle"]["soft_fail"] = bool(ctx.args.soft_fail)
-    enforce_check = _resolve_check_mode(ctx)
-    data["gazelle"]["enforce_check"] = enforce_check
+    on_change_resolved = resolve_on_change(ctx)
+    check_only = _resolve_check_only(ctx)
+    data["gazelle"]["on_change_resolved"] = on_change_resolved
+    data["gazelle"]["check_only"] = check_only
     setup_phase(ctx, lifecycle)
     for handler in lifecycle.task_started:
         handler(ctx, ctx.args.gazelle_target)
@@ -582,8 +588,7 @@ def _impl(ctx: TaskContext) -> int:
     data["gazelle"]["dirs"] = list(effective_dirs)
     if no_op:
         data["gazelle"]["no_changed_dirs"] = True
-        _emit_final(ctx, lifecycle, data, 0)
-        return 0
+        return _emit_final(ctx, lifecycle, data, 0)
 
     # Pre-flight: Workflows' `print_environment_info` +
     # `agent_health_check` hooks fire here, printing the
@@ -812,15 +817,13 @@ def _impl(ctx: TaskContext) -> int:
         error(ctx.std, "Gazelle (-mode=diff) exited %d with no diff output (likely a configuration error)." % diff_status.code)
         data["gazelle"]["gazelle_error"] = True
         data["gazelle"]["gazelle_error_code"] = diff_status.code
-        _emit_final(ctx, lifecycle, data, diff_status.code)
-        return diff_status.code
+        return _emit_final(ctx, lifecycle, data, diff_status.code)
 
     if not diff_stdout.strip():
         # Clean — gazelle reports no changes needed regardless of
-        # --check / fix mode.
+        # --on-change / --check-only mode.
         print("✅ All BUILD files are up to date.")
-        _emit_final(ctx, lifecycle, data, 0)
-        return 0
+        return _emit_final(ctx, lifecycle, data, 0)
 
     affected = _parse_diff_paths(diff_stdout)
 
@@ -836,11 +839,10 @@ def _impl(ctx: TaskContext) -> int:
     # the default `-p1` would strip the leading directory and look
     # for `gazelle/testdata/BUILD.bazel`, which doesn't exist.
     #
-    # CI-style enforcement (--check=true, or --check=auto on CI) skips
-    # this entirely — the gate doesn't want a dirtied tree. Local apply
-    # mode (--check=false, or --check=auto off-CI) runs `git apply` so
-    # the user's working tree gets updated.
-    if not enforce_check:
+    # `--check-only=true` (CI default) skips this entirely — the gate
+    # doesn't want a dirtied tree. `--check-only=false` (local default)
+    # runs `git apply` so the user's working tree gets updated.
+    if not check_only:
         files_label = pluralize(len(affected), "file")
         status = _pick_status(data, had_failure = False, terminal = False)
         task_update(
@@ -867,10 +869,9 @@ def _impl(ctx: TaskContext) -> int:
             data["gazelle"]["affected_files"] = affected
             data["gazelle"]["apply_error"] = True
             data["gazelle"]["apply_error_msg"] = apply_result.stderr.strip()
-            _emit_final(ctx, lifecycle, data, apply_result.status.code)
-            return apply_result.status.code
+            return _emit_final(ctx, lifecycle, data, apply_result.status.code)
 
-    verb = "would update" if enforce_check else "updated"
+    verb = "would update" if check_only else "updated"
     if affected:
         print("\nGazelle %s %d file(s):" % (verb, len(affected)))
         for f in affected:
@@ -893,31 +894,34 @@ def _impl(ctx: TaskContext) -> int:
         if artifacts_trait.artifact_urls:
             data["gazelle"]["patch_url"] = artifacts_trait.artifact_urls.get("gazelle_diff", "") or ""
 
-    if ctx.args.soft_fail:
-        info(ctx.std, "BUILD files are out of date, but --soft-fail is set; task exits 0. " +
-                      "Run `aspect gazelle` locally and commit the result, or amend with --soft-fail=false to enforce.")
-        _emit_final(ctx, lifecycle, data, 0)
-        return 0
-
-    if not enforce_check:
-        # Local apply mode — we just updated the user's tree; don't tell
-        # them to re-run what they already ran.
+    # Verdict from --on-change (resolved at entry).
+    if on_change_resolved == "fail":
+        error(ctx.std, "BUILD files are out of date. Run `aspect gazelle` locally and commit the result.")
+        return _emit_final(ctx, lifecycle, data, 1)
+    if on_change_resolved == "warn":
+        info(ctx.std, "BUILD files are out of date. --on-change=warn → exiting 0 with a warning signal. " +
+                      "Run `aspect gazelle` locally and commit the result, or set --on-change=fail to gate.")
+    elif not check_only:
+        # Local apply, silent: we just updated the tree; don't tell the
+        # user to run what they just ran.
         print("Gazelle updated %d file(s). Review and commit the changes." % len(affected))
-        _emit_final(ctx, lifecycle, data, 0)
-        return 0
-
-    error(ctx.std, "BUILD files are out of date. Run `aspect gazelle` locally and commit the result.")
-    _emit_final(ctx, lifecycle, data, 1)
-    return 1
+    return _emit_final(ctx, lifecycle, data, 0)
 
 gazelle = task(
     implementation = _impl,
     traits = [ArtifactsTrait, BazelTrait, HealthCheckTrait, TaskLifecycleTrait, GitHubCheckRunTrait],
     args = {
-        "check": args.string(
+        "on_change": args.string(
+            default = "auto",
+            values = ["auto", "silent", "warn", "fail"],
+            long = "on-change",
+            description = "Verdict when gazelle wants to update BUILD files. 'silent' exits 0 (status=passed). 'warn' exits 0 with status=warning — a non-fatal yellow signal in CI surfaces. 'fail' exits 1 with status=failed — the CI gate. 'auto' (default) resolves to 'fail' on a recognized CI host and 'silent' off CI. Gazelle's own non-zero exits (configuration errors, missing language plugins) surface as task failures regardless.",
+        ),
+        "check_only": args.string(
             default = "auto",
             values = ["auto", "true", "false"],
-            description = "Whether to fail the task when gazelle wants to update BUILD files. 'auto' (default) checks when running on a recognized CI host and applies-without-failing locally — the apply step already did the work, so a local invocation that returned the 'fix locally and commit' failure exit would be telling the user to run something they just ran. 'true' always fails on changes (CI gate; skips the apply step). 'false' never fails on changes (applies and exits 0 with a 'Gazelle updated N file(s)' message). Gazelle's own non-zero exits (configuration errors, missing language plugins) are still surfaced as task failures regardless of this flag; --soft-fail (which prints a WARNING and exits 0) takes precedence when set.",
+            long = "check-only",
+            description = "Whether to skip the `git apply` step (detect-only) or apply the patch as part of the task. 'true' detect-only (don't modify the working tree). 'false' apply via `git apply -p0`. 'auto' (default) resolves to 'true' on a recognized CI host and 'false' off CI. Independent of --on-change: this controls apply behavior; --on-change controls the verdict.",
         ),
         "scope": args.string(
             default = "all",
@@ -930,10 +934,6 @@ gazelle = task(
         ),
         "merge_base": args.string(
             description = "Explicit merge-base SHA for the local-git fallback's diff base. When set, skips the `git merge-base HEAD <base-ref>` resolution.",
-        ),
-        "soft_fail": args.boolean(
-            default = False,
-            description = "When true, the task returns 0 even when gazelle wants to update BUILD files, printing a WARNING with the affected file list instead. Useful for teams adopting gazelle incrementally so the CI step doesn't block merges while the backlog of unmanaged BUILD files is cleared. Gazelle's own non-zero exits (configuration errors, missing language plugins) are still surfaced as task failures regardless of this flag.",
         ),
         "scope_all_on_change": args.string_list(
             long = "scope-all-on-change",
@@ -950,7 +950,7 @@ gazelle = task(
         ),
         "gazelle_target": args.string(
             default = "//tools/gazelle:gazelle",
-            description = "Bazel label of the gazelle target. Generated by `aspect_gazelle()` from `@aspect_gazelle_prebuilt//:def.bzl`. The task runs the target once with `-mode=diff` to derive the verdict + patch without modifying the tree, then (in apply mode, when `--check=false` or `--check=auto` off-CI) applies the captured patch via `git apply -p0` rather than re-running gazelle.",
+            description = "Bazel label of the gazelle target. Generated by `aspect_gazelle()` from `@aspect_gazelle_prebuilt//:def.bzl`. The task runs the target once with `-mode=diff` to derive the verdict + patch without modifying the tree, then (when `--check-only=false`, or `--check-only=auto` off-CI) applies the captured patch via `git apply -p0` rather than re-running gazelle.",
         ),
         "gazelle_command": args.string(
             default = "",

@@ -127,11 +127,7 @@ User-facing migration guide: https://docs.aspect.build/cli/migration/delivery
 load("@aspect//bazel.axl", "BazelTrait")
 load("@aspect//lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "now_ms", "pluralize", "process_event", bazel_init_data = "init_data")
 load("@aspect//lib/checkrun.axl", "GitHubCheckRunTrait")
-load(
-    "@aspect//lib/delivery_results.axl",
-    delivery_add_result = "add_result",
-    delivery_init_data = "init_data",
-)
+load("@aspect//lib/delivery_results.axl", delivery_add_result = "add_result", delivery_conclusion = "conclusion", delivery_init_data = "init_data")
 load(
     "@aspect//lib/deliveryd.axl",
     deliveryd_delete_artifact = "delete_artifact",
@@ -554,11 +550,14 @@ def _emit_final(ctx, lifecycle, dr, exit_code):
             dr["repro_commands"].append({"command": repro, "description": desc})
 
     final_status = _pick_status(dr, had_failure = exit_code != 0, terminal = True)
+    bookend = delivery_conclusion(final_status, dr)
+
     for handler in lifecycle.task_update:
         handler(ctx, TaskUpdate(
             kind = "delivery_results",
             status = final_status,
             final = True,
+            conclusion = bookend,
             data = dr,
             progress = ProgressStyles(
                 body = _body_text(final_status, dr),
@@ -566,6 +565,12 @@ def _emit_final(ctx, lifecycle, dr, exit_code):
         ))
     for handler in lifecycle.task_complete:
         handler(ctx, exit_code)
+
+    return TaskConclusion(
+        exit_code = exit_code,
+        text = bookend,
+        flagged = final_status == "warning",
+    )
 
 def _delivery_impl(ctx):
     hc_trait = ctx.traits[HealthCheckTrait]
@@ -729,8 +734,7 @@ def _delivery_impl(ctx):
         else:
             error(ctx.std, "Delivery requires a remote cache but no --remote_cache or --remote_executor was found." +
                            " (Use --mode=always --track-state=false to deliver every target without change detection.)")
-            _emit_final(ctx, lifecycle, dr, exit_code = 1)
-            return 1
+            return _emit_final(ctx, lifecycle, dr, exit_code = 1)
 
     query_expr = ctx.args.query
     if query_expr:
@@ -778,8 +782,7 @@ def _delivery_impl(ctx):
 
     if not targets:
         info(ctx.std, "No targets to deliver")
-        _emit_final(ctx, lifecycle, dr, exit_code = 0)
-        return 0
+        return _emit_final(ctx, lifecycle, dr, exit_code = 0)
 
     # --force-target / ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS only flip
     # change detection for labels already in the resolved target set —
@@ -822,8 +825,7 @@ def _delivery_impl(ctx):
                     "warn",
                     message = "build failed (exit {})".format(build_code),
                 )
-            _emit_final(ctx, lifecycle, dr, exit_code = build_code)
-            return build_code
+            return _emit_final(ctx, lifecycle, dr, exit_code = build_code)
     else:
         output_shas = {}
 
@@ -935,15 +937,13 @@ def _delivery_impl(ctx):
                     message = "download failed (exit {})".format(status.code),
                     output_sha = output_shas.get(label, ""),
                 )
-            _emit_final(ctx, lifecycle, dr, exit_code = status.code)
-            return status.code
+            return _emit_final(ctx, lifecycle, dr, exit_code = status.code)
         print("  Download took {}.".format(fmt_elapsed(time.monotonic() - _t_download)))
 
     max_par = ctx.args.max_parallelization
     if max_par < 1:
         error(ctx.std, "--max-parallelization must be >= 1, got {}.".format(max_par))
-        _emit_final(ctx, lifecycle, dr, exit_code = 1)
-        return 1
+        return _emit_final(ctx, lifecycle, dr, exit_code = 1)
     capture = max_par > 1
 
     # Step 1: collect targets needing delivery; record WARN/SKIP immediately
@@ -1210,8 +1210,7 @@ def _delivery_impl(ctx):
             fail(result)
 
     exit_code = 1 if failed_count > 0 else 0
-    _emit_final(ctx, lifecycle, dr, exit_code = exit_code)
-    return exit_code
+    return _emit_final(ctx, lifecycle, dr, exit_code = exit_code)
 
 delivery = task(
     name = "delivery",

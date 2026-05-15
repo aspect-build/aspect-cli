@@ -27,7 +27,7 @@ load("./lib/environment.axl", "color_enabled", "warn")
 load("./lib/github.axl", "detect_changed_files", "print_changed_files_listing")
 load("./lib/health_check.axl", "HealthCheckTrait")
 load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "preflight_phase", "setup_phase", "task_update")
-load("./lib/lint_results.axl", lint_accumulate = "accumulate", lint_init_data = "init_data")
+load("./lib/lint_results.axl", lint_accumulate = "accumulate", lint_conclusion = "conclusion", lint_init_data = "init_data")
 load("./lib/repro_commands.axl", "build_aspect_command", "task_cli_path")
 load("./lib/sarif.axl", "get_sarif_summary", "parse_sarif", "parse_sarif_diagnostics")
 load("./lib/tar.axl", "tar_create")
@@ -724,7 +724,7 @@ def _body_text(status, data):
     return ""
 
 # buildifier: disable=function-docstring
-def _impl(ctx: TaskContext) -> int:
+def _impl(ctx: TaskContext) -> int | TaskConclusion:
     lint_trait = ctx.traits[LintTrait]
     bazel_trait = ctx.traits[BazelTrait]
     hc_trait = ctx.traits[HealthCheckTrait]
@@ -1165,11 +1165,14 @@ def _impl(ctx: TaskContext) -> int:
     # Final task_update — for GithubStatusChecks this drives the terminal
     # render. `_pick_status` picks one of: passed | warning | failed.
     final_status = _pick_status(data, had_failure = exit_code != 0, terminal = True)
+    bookend = lint_conclusion(final_status, data)
+
     for handler in lifecycle.task_update:
         handler(ctx, TaskUpdate(
             kind = "lint_results",
             status = final_status,
             final = True,
+            conclusion = bookend,
             data = data,
             progress = ProgressStyles(
                 body = _body_text(final_status, data),
@@ -1183,7 +1186,11 @@ def _impl(ctx: TaskContext) -> int:
         if result != None:
             fail(result)
 
-    return exit_code
+    return TaskConclusion(
+        exit_code = exit_code,
+        text = bookend,
+        flagged = final_status == "warning",
+    )
 
 lint = task(
     implementation = _impl,

@@ -882,14 +882,14 @@ def _test_impl(ctx):
                     ),
                     24000,
                 ),
-                # Warned lint task contributing both — appears in
+                # Warning lint task contributing both — appears in
                 # repro (non-passing) and fix sections.
                 _entry(
                     "lint",
                     "lint-task",
                     "lint-task",
                     "lint",
-                    "warned",
+                    "warning",
                     _with_commands(
                         make_lint_passed_with_warnings(),
                         repro = [("aspect lint --strategy=hold-the-line -- //...", "")],

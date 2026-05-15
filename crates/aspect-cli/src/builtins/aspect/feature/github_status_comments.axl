@@ -310,12 +310,11 @@ def _bucket_entries(entries):
             failed.append(e)
         elif status == "failing":
             failing.append(e)
-        elif status == "warning" or status == "warned":
-            # `warning` is the live non-fatal signal; `warned` is its
-            # terminal counterpart. Both surface in the flagged
-            # section so a passed-with-non-fatal task still gets a
-            # visible callout (rather than blending into the bottom
-            # ✅ successful list).
+        elif status == "warning":
+            # Non-fatal signal — live or terminal (lifecycle disambiguates
+            # via `update.final`). Surfaces in the flagged section so a
+            # passed-with-non-fatal task still gets a visible callout
+            # rather than blending into the bottom ✅ successful list.
             flagged.append(e)
         elif status == "passed":
             successful.append(e)

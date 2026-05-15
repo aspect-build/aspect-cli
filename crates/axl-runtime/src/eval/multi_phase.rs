@@ -27,6 +27,24 @@ use crate::eval::load::AxlLoader;
 use crate::eval::task::FrozenTaskModuleLike;
 use crate::module::Mod;
 
+// ANSI SGR parameters for the closing bookend.
+//
+// Terminal-state colors are fixed semaphores (green/yellow/red). The
+// opening "Running" line uses the configurable highlight color from
+// `ASPECT_CLI_HIGHLIGHT_COLOR` (default `_DEFAULT_HIGHLIGHT_COLOR`),
+// mirroring AXL's `highlight_style` for mid-task phase updates.
+const SGR_BOLD_GREEN: &str = "1;32";
+const SGR_BOLD_YELLOW: &str = "1;33";
+const SGR_BOLD_RED: &str = "1;31";
+const SGR_RESET: &str = "\x1b[0m";
+
+/// Default highlight color for the opening "→ 🎬 Running" line when
+/// `ASPECT_CLI_HIGHLIGHT_COLOR` is unset. `1;36` is bold cyan — reads
+/// cleanly on dark terminals. Common overrides: `94` (bright blue),
+/// `38;5;75` (256-color sky blue), or empty to disable.
+const DEFAULT_HIGHLIGHT_COLOR: &str = "1;36";
+const HIGHLIGHT_COLOR_ENV: &str = "ASPECT_CLI_HIGHLIGHT_COLOR";
+
 /// Wrapper around a live Starlark Module heap.
 ///
 /// All three evaluation phases share this heap so `Value<'v>` references
@@ -435,43 +453,40 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         } else {
             String::new()
         };
-        // ANSI styling — verb color for the leading verb on success
-        // ("Running" / "Completed"), bold+red on failure ("Failed").
-        // Color emitted when stderr is a TTY OR a known CI host is
-        // detected (CI log viewers render ANSI even when stderr is
-        // piped). Skipped on the BK section marker so it stays clean
-        // structural text.
-        //
-        // Success color reads from `ASPECT_CLI_HIGHLIGHT_COLOR` (matches
-        // the same env var the AXL `highlight_style` helper uses for
-        // mid-task phase task_updates) so the runtime-emitted bookend
-        // lines stay in sync with the in-task ones. Default `1;36`
-        // (bold cyan) reads cleanly on dark terminals; common
-        // overrides include `94` (bright blue), `38;5;75` (256-color
-        // sky blue), or empty to disable.
+        // Color when stderr is a TTY or we're on a known CI host (CI
+        // log viewers render ANSI even when stderr is piped).
+        // `HIGHLIGHT_COLOR_ENV` overrides the highlight color used for
+        // the opening "Running" verb; defaults to `DEFAULT_HIGHLIGHT_COLOR`.
         let color = std::io::stderr().is_terminal() || on_ci;
-        let highlight_color = std::env::var("ASPECT_CLI_HIGHLIGHT_COLOR")
+        let highlight_color = std::env::var(HIGHLIGHT_COLOR_ENV)
             .ok()
-            .unwrap_or_else(|| "1;36".to_string());
+            .unwrap_or_else(|| DEFAULT_HIGHLIGHT_COLOR.to_string());
         let verb_seq = if color && !highlight_color.is_empty() {
             format!("\x1b[{}m", highlight_color)
         } else {
             String::new()
         };
-        let bold_red = if color { "\x1b[1;31m" } else { "" };
-        let reset = if color { "\x1b[0m" } else { "" };
+        let sgr = |params: &str| {
+            if color {
+                format!("\x1b[{}m", params)
+            } else {
+                String::new()
+            }
+        };
+        let bold_green = sgr(SGR_BOLD_GREEN);
+        let bold_yellow = sgr(SGR_BOLD_YELLOW);
+        let bold_red = sgr(SGR_BOLD_RED);
+        let reset = if color { SGR_RESET } else { "" };
         if on_buildkite {
-            // The `--- :aspect: Running …` section header carries the
-            // same text the `→` line would, so emit only the section
-            // header on BK — printing both is duplicate output.
+            // The BK section header carries the same text the `→` line
+            // would; skip the duplicate `→` print on BK.
             eprintln!(
                 "--- :aspect: {}Running{} `{}` task{}",
                 verb_seq, reset, task_info.name, key_suffix
             );
         } else {
-            // 🎬 reads as "Action!" — the universal signal for a
-            // scene beginning. Pairs with the closing 🏁 (finish
-            // flag) as the bookend pair for the task.
+            // 🎬 (clapper board) pairs with the closing ✅ / ⚠️ / ❌
+            // as the task's bookend.
             eprintln!(
                 "→ 🎬 {}Running{} `{}` task{}",
                 verb_seq, reset, task_info.name, key_suffix
@@ -508,9 +523,9 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         eval.extra = Some(&self.loader.env);
 
         let ret = eval.eval_function(task.implementation(), &[context], &[])?;
-        let exit_code = ret.unpack_i32().map(|ex| ex as u8);
+        let (exit_code, flagged, conclusion) = unpack_task_return(ret);
 
-        // Read elapsed + phases off the heap-allocated TaskInfo. Closes
+        // Reads elapsed + phases off the heap-allocated TaskInfo. Closes
         // any phase still active when `_impl` returned so the breakdown
         // is whole.
         let (elapsed, phases) = {
@@ -528,68 +543,49 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             tracing::error!(exit_code = code as i64, "task exited with non-zero status");
         }
 
-        // Universal "task complete" announcement — symmetric with the
-        // opening "Running" announcement above. Every task gets a
-        // closing CLI marker for free without each AXL impl having to
-        // emit its own. Status surfaces (BK / GHSC) get terminal
-        // status via the per-task `lifecycle.task_update(..., status="passed"|"failed", ...)`
-        // emit, so this is CLI-only. Verb mirrors the opener: bold+blue
-        // "Completed" on success, bold+red "Failed" on non-zero exit.
-        //
-        // The phase breakdown trailing the line follows `--timing`:
-        //   total    → ""
-        //   summary  → " — Init 0.2s · Detect 1.2s · …"
-        //   detailed → "\n    Init    0.2s  —\n    Detect  1.2s  Detecting…\n…"
-        // Empty when no phases were marked.
         let duration = format_duration(elapsed);
         let failed = matches!(exit_code, Some(code) if code != 0);
         let breakdown = render_phase_breakdown(&phases, timing, failed);
-        // Emit a closing Buildkite section marker so the task's
-        // completion lands in its own collapsible group, symmetric
-        // with the per-phase `--- :emoji: <Phase> · …` headers AXL
-        // emits during the run. CI-only: gated on `BUILDKITE` env var
-        // so local terminals don't see literal `--- :checkered_flag:`
-        // text.
+        let conclusion_suffix = if conclusion.is_empty() {
+            String::new()
+        } else {
+            format!(" · {}", conclusion)
+        };
+        let exit_suffix = match exit_code {
+            Some(code) if code != 0 => format!(" (exit code {})", code),
+            _ => String::new(),
+        };
         let on_bk = std::env::var_os("BUILDKITE")
             .map(|v| !v.is_empty())
             .unwrap_or(false);
-        // On Buildkite, only emit the `---` section header — the
-        // breakdown trails it on the same line for Summary mode, or
-        // on the next lines for Detailed. Skip the duplicate
-        // `→ Completed/Failed` line entirely. Off BK, keep the
-        // leading blank + `→` line as before.
-        match exit_code {
-            Some(0) | None => {
-                if on_bk {
-                    eprintln!(
-                        "--- :checkered_flag: {}Completed{} · `{}` task in {}{}",
-                        verb_seq, reset, task_name, duration, breakdown
-                    );
-                } else {
-                    // 🏁 (checkered flag) matches the BK section
-                    // header's `:checkered_flag:` shortcode and pairs
-                    // with the opening 🏎️ on the Running line.
-                    eprintln!();
-                    eprintln!(
-                        "→ 🏁 {}Completed{} `{}` task in {}{}",
-                        verb_seq, reset, task_name, duration, breakdown
-                    );
-                }
-            }
-            Some(code) => {
-                if on_bk {
-                    eprintln!(
-                        "--- :x: {}Failed{} · `{}` task (exit code {}) in {}{}",
-                        bold_red, reset, task_name, code, duration, breakdown
-                    );
-                } else {
-                    eprintln!();
-                    eprintln!(
-                        "→ ❌ {}Failed{} `{}` task (exit code {}) in {}{}",
-                        bold_red, reset, task_name, code, duration, breakdown
-                    );
-                }
-            }
+        let verdict = Verdict::pick(exit_code, flagged, &bold_green, &bold_yellow, &bold_red);
+        if on_bk {
+            eprintln!(
+                "--- {} {}{}{} · `{}` task{} in {}{}{}",
+                verdict.bk_shortcode,
+                verdict.color,
+                verdict.verb,
+                reset,
+                task_name,
+                exit_suffix,
+                duration,
+                conclusion_suffix,
+                breakdown,
+            );
+        } else {
+            eprintln!();
+            eprintln!(
+                "→ {} {}{}{} `{}` task{} in {}{}{}",
+                verdict.glyph,
+                verdict.color,
+                verdict.verb,
+                reset,
+                task_name,
+                exit_suffix,
+                duration,
+                conclusion_suffix,
+                breakdown,
+            );
         }
 
         Ok(exit_code)
@@ -597,6 +593,79 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
 
     pub fn finish(self) -> FinishedEval {
         FinishedEval
+    }
+}
+
+/// Three-way verdict rendered on the closing bookend line. Selected
+/// from the task's exit code and `flagged` bit:
+///
+///   exit 0, !flagged → ✅ Passed   (bold green)
+///   exit 0,  flagged → ⚠️ Flagged  (bold yellow)
+///   exit non-0       → ❌ Failed   (bold red)
+///
+/// Off Buildkite the runtime emits `→ <glyph> <verb> …`; on BK it
+/// emits `--- <bk_shortcode> <verb> · …` so the closing line lands as
+/// its own collapsible section header.
+struct Verdict<'a> {
+    /// BK emoji shortcode (e.g. `:white_check_mark:`); used in the
+    /// `--- :<shortcode>: <verb> …` BK section header.
+    bk_shortcode: &'a str,
+    /// Unicode glyph (e.g. `✅`); used off Buildkite. `⚠️` carries a
+    /// trailing space — it pre-dates the emoji standard and renders
+    /// 1-cell-wide in some terminals where ✅/❌ are reliably 2-cell.
+    /// The space keeps the line aligned across verdicts.
+    glyph: &'a str,
+    verb: &'a str,
+    /// ANSI color prefix (e.g. `bold_green`). Empty when `color` is
+    /// off (`!is_terminal() && !on_ci`). Paired with `reset` at the
+    /// call site.
+    color: &'a str,
+}
+
+impl<'a> Verdict<'a> {
+    fn pick(
+        exit_code: Option<u8>,
+        flagged: bool,
+        bold_green: &'a str,
+        bold_yellow: &'a str,
+        bold_red: &'a str,
+    ) -> Self {
+        match (exit_code, flagged) {
+            (Some(0) | None, false) => Self {
+                bk_shortcode: ":white_check_mark:",
+                glyph: "✅",
+                verb: "Passed",
+                color: bold_green,
+            },
+            (Some(0) | None, true) => Self {
+                bk_shortcode: ":warning:",
+                glyph: "⚠️ ",
+                verb: "Flagged",
+                color: bold_yellow,
+            },
+            (Some(_), _) => Self {
+                bk_shortcode: ":x:",
+                glyph: "❌",
+                verb: "Failed",
+                color: bold_red,
+            },
+        }
+    }
+}
+
+/// Unpack the return value of `_impl` into `(exit_code, flagged, conclusion)`.
+///
+/// Tasks may return either a bare `int` (treated as `TaskConclusion(
+/// exit_code=int)`) or a `TaskConclusion` record carrying the full
+/// terminal state. Anything else yields `(None, false, "")` — the
+/// runtime renders that as `✅ Passed` with no conclusion suffix.
+fn unpack_task_return<'v>(ret: starlark::values::Value<'v>) -> (Option<u8>, bool, String) {
+    if let Some(tc) = ret.downcast_ref::<crate::engine::task_info::TaskConclusion>() {
+        (Some(tc.exit_code as u8), tc.flagged, tc.text.clone())
+    } else if let Some(code) = ret.unpack_i32() {
+        (Some(code as u8), false, String::new())
+    } else {
+        (None, false, String::new())
     }
 }
 
@@ -636,15 +705,15 @@ fn format_duration(d: std::time::Duration) -> String {
 const INIT_PHASE_HIDE_THRESHOLD_MS: u128 = 50;
 
 /// Verbosity for the phase breakdown trailing the runtime's
-/// "→ Completed" / "→ Failed" line. Driven by the top-level
-/// `--timing` CLI flag.
+/// "→ ✅ Passed" / "→ ⚠️ Flagged" / "→ ❌ Failed" line. Driven by the
+/// top-level `--timing` CLI flag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimingMode {
     /// Total only. Same as the pre-phase output.
-    /// `→ Completed `lint` task in 46.8s`
+    /// `→ ✅ Passed `lint` task in 46.8s`
     Total,
     /// Total + inline phase breakdown.
-    /// `→ Completed `lint` task in 46.8s — Init 0.2s · Detect 1.2s · ...`
+    /// `→ ✅ Passed `lint` task in 46.8s — Init 0.2s · Detect 1.2s · ...`
     Summary,
     /// Total + multi-line breakdown with descriptions. Default.
     Detailed,
