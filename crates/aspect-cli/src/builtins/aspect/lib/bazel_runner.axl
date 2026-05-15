@@ -13,7 +13,7 @@ applies uniformly to both tasks.
 """
 
 load("@std//time.axl", "sleep_iter")
-load("./bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "failed_labels", "init_data", "now_ms", "pluralize", "process_event")
+load("./bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "failed_labels", "init_data", "now_ms", "pluralize", "process_event", bazel_conclusion = "conclusion")
 load("./environment.axl", "color_enabled")
 load("./health_check.axl", "HealthCheckTrait")
 load("./lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "preflight_phase", "setup_phase", "task_update")
@@ -178,23 +178,33 @@ def _collect_bes_from_args(ctx):
 
 def _emit_terminal(ctx, lifecycle, command, data, exit_code):
     """Fire the terminal `task_update(final=True)` + `task_complete`
-    hooks. Used by both the happy path and the early-fail bailouts
-    (post_health_check rejecting, etc.) so status surfaces always
-    conclude rather than stick at "running".
+    hooks and return a `TaskConclusion` for `run_bazel_task` to return.
+    Called from both the happy path and the early-fail bailouts (e.g.
+    post_health_check rejecting) so status surfaces always conclude
+    rather than stick at "running".
     """
     final_status = _pick_status(command, data, had_failure = exit_code != 0, terminal = True)
+    bookend = bazel_conclusion(final_status, data)
+
     for handler in lifecycle.task_update:
         handler(ctx, TaskUpdate(
             kind = "bazel_results",
             status = final_status,
             final = True,
+            conclusion = bookend,
             data = data,
             progress = _live_progress(data, command, final_status),
         ))
     for handler in lifecycle.task_complete:
         handler(ctx, exit_code)
 
-def run_bazel_task(ctx: TaskContext, command: str) -> int:
+    return TaskConclusion(
+        exit_code = exit_code,
+        text = bookend,
+        flagged = final_status == "warning",
+    )
+
+def run_bazel_task(ctx: TaskContext, command: str) -> TaskConclusion:
     """Shared impl for build/test tasks.
 
     Args:
@@ -458,5 +468,4 @@ def run_bazel_task(ctx: TaskContext, command: str) -> int:
     if _repro_cmd:
         data["repro_commands"].append({"command": _repro_cmd, "description": ""})
 
-    _emit_terminal(ctx, lifecycle, command, data, invocation_status.code)
-    return invocation_status.code
+    return _emit_terminal(ctx, lifecycle, command, data, invocation_status.code)

@@ -47,12 +47,14 @@ def init_data():
         "affected_files": [],  # BUILD file paths extracted from gazelle's diff
         "gazelle_target": "",  # Bazel label of the gazelle target
         "gazelle_command": "",  # subcommand forwarded to gazelle ("fix", "update", "")
-        "check_mode": "auto",  # raw --check arg value ("auto" | "true" | "false")
-        "enforce_check": False,  # resolved enforcement (auto → CI? true : false)
+        # Resolved `--on-change` policy: "silent" | "warn" | "fail".
+        # Stamped by `_impl` after resolving `auto`.
+        "on_change_resolved": "silent",
+        # Resolved `--check-only` (detect-only vs apply).
+        "check_only": False,
         "scope": "all",  # raw --scope arg value ("all" | "changed")
         "scope_all_on_change": [],  # glob patterns that escalate scope=changed → all
         "changed_file_patterns": [],  # glob filter on changed files contributing dirs
-        "soft_fail": False,  # --soft-fail was set
         "no_changed_dirs": False,  # --scope=changed found no surviving dirs → no-op exit 0
         "dirs": [],  # effective dir list passed to gazelle (post-resolution)
         "gazelle_error": False,  # non-zero exit with empty diff → config error
@@ -200,6 +202,33 @@ def gazelle_summary_title(data, status, target_pattern = "", task_name = ""):
     noun = "BUILD file" if count == 1 else "BUILD files"
     return base + " · %s %s out of date" % (str(count), noun)
 
+def conclusion(status, data):
+    """Gazelle task's terminal bookend conclusion. See
+    `lifecycle.task_update` for the contract; returns text like
+    `"Updated 5 BUILD files"` / `"5 BUILD files out of date"`, or `""`.
+    """
+    gz = data.get("gazelle", {}) or {}
+    if gz.get("gazelle_error"):
+        return "Configuration error (exit %s)" % str(gz.get("gazelle_error_code", 0))
+    if gz.get("apply_error"):
+        return "Apply error"
+    affected = gz.get("affected_files", []) or []
+    n = len(affected)
+    if n == 0:
+        if status == "passed":
+            return "All BUILD files are up to date"
+        return ""
+    noun = "BUILD file" if n == 1 else "BUILD files"
+
+    # When `--check-only=false` the gazelle task just applied the patch
+    # to the tree; the user-facing framing is "Updated N BUILD files".
+    # When `--check-only=true` (CI gate) the tree wasn't modified — the
+    # frame is "out of date" (they still need to commit the regen).
+    if not gz.get("check_only"):
+        verb = "Updated %s %s" % (str(n), noun)
+        return verb
+    return "%s %s out of date" % (str(n), noun)
+
 # ─── Templates ────────────────────────────────────────────────────────────────
 
 _SUMMARY_TEMPLATE = """{% if detail_rows %}{% for row in detail_rows %}
@@ -235,8 +264,8 @@ _DETAILS_TEMPLATE = """{% if gazelle_error %}
 _… {{ overflow }} more file(s) not shown._
 {% endif %}
 
-""" + FIX_COMMANDS_BLOCK + """{% if check_mode %}
-> ℹ️ This check ran with `--check` (tree not modified). Re-run with `--check=false` (the fix command above) to apply the changes.
+""" + FIX_COMMANDS_BLOCK + """{% if check_only %}
+> ℹ️ This task ran with `--check-only=true` (tree not modified). Re-run with `--check-only=false` (the fix command above) to apply the changes.
 {% endif %}
 {% if patch_url %}
 ### 📥 Patch
@@ -285,8 +314,8 @@ def _config_items(data):
             if dirs_count > 0:
                 value = "%s — %s" % (scope, pluralize(dirs_count, "changed dir"))
         items.append({"key": "Scope", "value": value})
-    if g.get("soft_fail"):
-        items.append({"key": "Soft-fail", "value": "true"})
+    if g.get("on_change_resolved") == "warn":
+        items.append({"key": "On-change", "value": "warn"})
     if scope == "changed":
         triggers = g.get("scope_all_on_change", []) or []
         if triggers:
@@ -325,10 +354,9 @@ def _build_details_data(data, status):
                      not data["gazelle"].get("gazelle_error") and
                      not data["gazelle"].get("apply_error"),
         "has_overflow": overflow > 0,
-        # In the template, `check_mode` means "did we run in CI-style
-        # gate mode (skipped the apply step)?" — keyed off the resolved
-        # `enforce_check` bool, not the raw arg string which may be "auto".
-        "check_mode": bool(data["gazelle"].get("enforce_check")),
+        # `check_only` mirrors the resolved `--check-only` bool — the
+        # template uses it to surface "tree not modified" guidance.
+        "check_only": bool(data["gazelle"].get("check_only")),
         "gazelle_error": bool(data["gazelle"].get("gazelle_error")),
         "gazelle_error_code": str(data["gazelle"].get("gazelle_error_code", 0) or 0),
         "apply_error": bool(data["gazelle"].get("apply_error")),

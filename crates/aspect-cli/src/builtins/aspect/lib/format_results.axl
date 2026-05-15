@@ -49,7 +49,9 @@ def init_data():
         "ignored_count": 0,  # files filtered by --ignore-pattern
         "scope": "",  # "changed" | "all"
         "formatter_target": "",  # Bazel label of the formatter binary
-        "soft_fail": False,  # --soft-fail was set
+        # Resolved `--on-change` policy: "silent" | "warn" | "fail".
+        # Stamped by `_impl` after resolving `auto`.
+        "on_change_resolved": "silent",
         "formatter_error": False,  # formatter binary itself crashed
         "formatter_error_code": 0,  # exit code when formatter_error is True
         "no_git": False,  # no initial git commit / not in a git repo
@@ -118,16 +120,44 @@ def format_summary_title(data, status, target_pattern = "", task_name = ""):
     count = len(affected)
     noun = "file" if count == 1 else "files"
 
-    # `applied=True` means --check resolved to false (local default or
-    # explicit --check=false): the formatter rewrote files, the task
-    # exits 0, and the title reflects what happened ("Formatted N
-    # file(s)") rather than what would be needed ("N files need
-    # formatting"), which is misleading when the work has just been
-    # done.
+    # `applied=True` means the formatter rewrote files (format always
+    # applies — the formatter modifies the tree as part of its run).
+    # The title reflects what happened ("Formatted N file(s)") rather
+    # than what would be needed ("N files need formatting"), which is
+    # misleading when the work has just been done.
     if data.get("applied"):
         return base + " · Formatted %s %s" % (str(count), noun)
     verb = "needs" if count == 1 else "need"
     return base + " · %s %s %s formatting" % (str(count), noun, verb)
+
+def conclusion(status, data):
+    """Format task's terminal bookend conclusion. See
+    `lifecycle.task_update` for the contract; returns text like
+    `"Reformatted 12 files"` / `"3 files need formatting"`, or `""`.
+    """
+    fm = data.get("format", {}) or {}
+    if fm.get("formatter_error"):
+        return "Formatter error (exit %s)" % str(fm.get("formatter_error_code", 0))
+    if fm.get("no_files_to_format"):
+        return "No files to format"
+    if fm.get("no_git"):
+        return "No git context"
+    affected = fm.get("affected_files", []) or []
+    n = len(affected)
+    if n == 0:
+        if status == "passed":
+            return "All files are properly formatted"
+        return ""
+    noun = "file" if n == 1 else "files"
+
+    # Format always applies (the formatter rewrites the tree before the
+    # verdict is computed). On status=failed (the CI gate path with
+    # --on-change=fail), the user-facing framing is "N files need
+    # formatting" — they still need to commit. Otherwise: "Reformatted".
+    if status == "failed" or status == "failing":
+        verb = "needs" if n == 1 else "need"
+        return "%s %s %s formatting" % (str(n), noun, verb)
+    return "Reformatted %s %s" % (str(n), noun)
 
 # ─── Templates ────────────────────────────────────────────────────────────────
 
@@ -175,8 +205,8 @@ _… {{ overflow }} more file(s) not shown._
 {% if has_ignored %}
 _({{ ignored_count }} file(s) matching `--ignore-pattern` were excluded from this check.)_
 {% endif %}
-{% if soft_fail %}
-> ⚠️ `--soft-fail` is set — this task returned 0 despite formatting being required.
+{% if warn_signal %}
+> ⚠️ `--on-change=warn` is set — this task returned 0 with a warning signal despite formatting being required.
 {% endif %}
 
 """ + FIX_COMMANDS_BLOCK + """{% if not applied and patch_url %}
@@ -226,8 +256,8 @@ def _config_items(data):
             if count > 0:
                 value = "%s — filtered to %s" % (scope, pluralize(count, "changed file"))
         items.append({"key": "Scope", "value": value})
-    if data["format"].get("soft_fail"):
-        items.append({"key": "Soft-fail", "value": "true"})
+    if data["format"].get("on_change_resolved") == "warn":
+        items.append({"key": "On-change", "value": "warn"})
     return items
 
 def _build_details_data(data, status):
@@ -277,7 +307,7 @@ def _build_details_data(data, status):
         "checked_count": str(data.get("changed_files_count", 0) or "") if (data.get("changed_files_count", 0) or 0) > 0 else "",
         "has_overflow": overflow > 0,
         "has_ignored": ignored > 0,
-        "soft_fail": bool(data["format"].get("soft_fail")),
+        "warn_signal": data["format"].get("on_change_resolved") == "warn",
         "formatter_error": bool(data["format"].get("formatter_error")),
         "formatter_error_code": str(data["format"].get("formatter_error_code", 0) or 0),
         "no_git": bool(data["format"].get("no_git")),

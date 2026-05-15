@@ -54,7 +54,7 @@ the verdict.
 # user `config.axl` files.
 # ---------------------------------------------------------------------------
 
-load("./environment.axl", "color_enabled")
+load("./environment.axl", "color_enabled", "detect_ci")
 
 # Structured update passed to task_update hooks.
 #
@@ -95,18 +95,26 @@ ProgressStyles = record(
     stream = field(str, default = ""),
 )
 
+# Lifecycle severity bucket. One of:
+#   running  — clean, in-flight
+#   warning  — non-fatal signal accumulated (live or terminal)
+#   failing  — hard failure detected, still in-flight
+#   passed   — clean, terminal
+#   failed   — hard failure, terminal
+#   aborted  — bazel terminated the invocation (timeout, OOM, ctrl-c)
+#
+# Live/terminal disambiguation lives on `TaskUpdate.final` — `warning` is
+# the same name for both live and terminal non-fatal cases; surfaces that
+# need to know which it is read `final`.
+#
+# `task_update(...)` validates the incoming string against this enum and
+# raises with the enum's standard "X is not a valid Status value" error
+# on typos. `TaskUpdate.status` stays as `str` (the canonical value) so
+# downstream surfaces continue to compare with plain string literals.
+Status = enum("running", "failing", "warning", "passed", "failed", "aborted")
+
 TaskUpdate = record(
     progress = field(ProgressStyles, default = ProgressStyles()),
-    # The lifecycle severity bucket. One of:
-    #   running  — clean, in-flight
-    #   warning  — non-fatal signal accumulated (live or terminal)
-    #   failing  — hard failure detected, still in-flight
-    #   passed   — clean, terminal
-    #   failed   — hard failure, terminal
-    #   aborted  — bazel terminated the invocation (timeout, OOM, ctrl-c)
-    # Live/terminal disambiguation lives on `final` below — the `warning`
-    # status is the same name for both live and terminal non-fatal cases,
-    # and surfaces that need to know which it is read `final`.
     status = field(str, default = "running"),
     kind = field(str, default = ""),
     priority = field(bool, default = False),
@@ -116,6 +124,13 @@ TaskUpdate = record(
     # being both live and terminal). Producers pass `final = True` on
     # their final emit; everywhere else defaults to False.
     final = field(bool, default = False),
+    # Short, plain-text, one-line terminal summary (`"58/58 passed"`,
+    # `"Reformatted 12 files"`, `"3 errors in 2 files"`). Only meaningful
+    # on the `final = True` emit; the runtime reads it to render the
+    # bookend's trailing `· <conclusion>` suffix. Each task kind's
+    # `*_results.axl` module exposes a `conclusion(status, data) -> str`
+    # helper that produces the canonical string per status.
+    conclusion = field(str, default = ""),
     data = field(dict, default = {}),
 )
 
@@ -188,7 +203,7 @@ def _highlight_style(std):
     """ANSI prefix for the styled phase label, or "" when color is off.
 
     Reads `ASPECT_CLI_HIGHLIGHT_COLOR` (SGR parameters between `\\033[`
-    and `m`); defaults to `1;36` (bold cyan).
+    and `m`); defaults to _DEFAULT_HIGHLIGHT_COLOR.
     """
     if not color_enabled(std):
         return ""
@@ -309,16 +324,20 @@ def _resolve_progress_styles(progress):
     # of context to fix the call.
     return progress
 
-def task_update(ctx, lifecycle, status, progress, kind = "", data = None, priority = True, phase = None):
+def task_update(ctx, lifecycle, status, progress, kind = "", data = None, priority = True, phase = None, final = False, conclusion = "", exit_code = 0):
     """Emit a TaskUpdate to all `lifecycle.task_update` handlers and
-    print a `→ <progress>` line to stderr.
+    print a `→ <progress>` line to stderr. When `final = True`,
+    returns a `TaskConclusion` carrying `exit_code`, `conclusion`, and
+    `flagged = (status == "warning")` — `_impl` returns it directly
+    to drive the runtime's closing bookend.
 
     Args:
         ctx:       The TaskContext.
         lifecycle: The TaskLifecycleTrait with task_update handlers.
         status:    Lifecycle status — one of "running" | "failing" |
-                   "passed" | "failed". Required so callers state
-                   intent at every emit (terminal vs phase boundary).
+                   "warning" | "passed" | "failed" | "aborted". Required
+                   so callers state intent at every emit (terminal vs
+                   phase boundary).
         progress:  Either a single string (same text for every
                    surface — `stream` gets it verbatim, `body` gets
                    the ANSI-stripped form) or a `ProgressStyles`
@@ -348,7 +367,30 @@ def task_update(ctx, lifecycle, status, progress, kind = "", data = None, priori
                    on every surface (BK section header / CLI `→` line
                    / Task-timing strip). `phase.display_name` wins
                    over `titlecase(phase.name)` when non-empty.
+        final:     `True` on the producer's last `task_update` before
+                   `task_complete`. Causes `task_update` to return a
+                   `TaskConclusion(exit_code=exit_code, text=conclusion,
+                   flagged=(status == "warning"))` that the task should
+                   return from `_impl` — the runtime reads it to render
+                   `→ ✅ Passed / ⚠️ Flagged / ❌ Failed \\`<task>\\` task
+                   in <duration> · <conclusion>`. Returns `None` when
+                   `final=False`.
+        conclusion: Short, plain-text, one-line summary of the
+                   terminal outcome (e.g. `"58/58 passed"`,
+                   `"Reformatted 12 files"`, `"3 errors in 2 files"`).
+                   Appended to the bookend as ` · <conclusion>`. Only
+                   read when `final=True`. Use the per-kind
+                   `conclusion(status, data)` helper in each
+                   `*_results.axl` module for consistency with the
+                   check-run titles.
+        exit_code: The task's exit code. Threaded onto the returned
+                   `TaskConclusion` when `final=True`; ignored otherwise.
     """
+
+    # Validate the status against the `Status` enum — typos raise here
+    # with the enum's standard error. Normalize back to the canonical
+    # string so downstream surfaces and `TaskUpdate.status` see a `str`.
+    status = Status(status).value
 
     # Resolve once at entry — every downstream consumer (phase
     # description fallback, BK section header, CLI print, TaskUpdate
@@ -413,10 +455,20 @@ def task_update(ctx, lifecycle, status, progress, kind = "", data = None, priori
         status = status,
         progress = progress_styles,
         priority = priority,
+        final = final,
+        conclusion = conclusion,
         data = data if data != None else {},
     )
     for handler in lifecycle.task_update:
         handler(ctx, update)
+
+    if final:
+        return TaskConclusion(
+            exit_code = exit_code,
+            text = conclusion,
+            flagged = status == "warning",
+        )
+    return None
 
 def _on_ci(ctx):
     """True when running on a recognized CI host."""
@@ -427,6 +479,60 @@ def _on_ci(ctx):
         ctx.std.env.var("CIRCLECI") or
         ctx.std.env.var("GITLAB_CI"),
     )
+
+# ---------------------------------------------------------------------------
+# --on-change policy: shared resolver + lifecycle-status helper
+#
+# Tasks that detect drift and want to gate / signal / fix on it (format,
+# gazelle, and future task types with the same shape) expose an
+# `--on-change=auto|silent|warn|fail` flag. `resolve_on_change` resolves
+# `auto` per environment; `pick_task_status` derives the lifecycle status
+# from the resolved policy and per-task data.
+# ---------------------------------------------------------------------------
+
+def resolve_on_change(ctx):
+    """Resolve `--on-change=auto` to a concrete `silent|warn|fail` value.
+
+    `auto` picks `fail` on a recognized CI host (CI gates remain
+    effective) and `silent` off CI (local invocations don't surface
+    the task doing its job as a warning). Any explicit value passes
+    through unchanged. Tasks stamp the resolved value onto their
+    `data[kind]["on_change_resolved"]` field for `pick_task_status` to
+    read.
+    """
+    val = ctx.args.on_change
+    if val == "auto":
+        return "fail" if detect_ci(ctx.std.env) else "silent"
+    return val
+
+def pick_task_status(data, kind_key, had_failure, terminal):
+    """Lifecycle status for a task whose verdict gates on `--on-change`.
+
+    `kind_key` is the data namespace (e.g. `"format"`, `"gazelle"`).
+    Inputs the function reads off `data[kind_key]`:
+
+      - `affected_files` (list)        — non-empty iff drift was found
+      - `on_change_resolved` (str)     — `silent|warn|fail`
+
+    Aborted (bazel terminated mid-build) → `"aborted"`.
+    Hard failure (`had_failure=True`)    → `"failed"` / `"failing"`.
+    Drift + `on_change_resolved`:
+      - `silent` → `"passed"` (apply silently)
+      - `warn`   → `"warning"` (audit / soft-fail signal)
+      - `fail`   → `"failed"` / `"failing"` (CI gate)
+    No drift → `"passed"` / `"running"`.
+    """
+    if data.get("bazel", {}).get("aborted"):
+        return "aborted"
+    if had_failure:
+        return "failed" if terminal else "failing"
+    if (data.get(kind_key, {}) or {}).get("affected_files"):
+        on_change = (data.get(kind_key, {}) or {}).get("on_change_resolved", "silent")
+        if on_change == "warn":
+            return "warning"
+        if on_change == "fail":
+            return "failed" if terminal else "failing"
+    return "passed" if terminal else "running"
 
 def setup_phase(ctx, lifecycle):
     """Open the `setup` phase covering CI-platform task setup.

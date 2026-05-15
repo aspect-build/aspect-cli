@@ -184,6 +184,35 @@ def delivery_summary_title(data, status, target_pattern = "", task_name = ""):
         return base + " · " + ", ".join(parts) + " so far"
     return base + " · " + ", ".join(parts)
 
+def conclusion(status, data):
+    """Delivery task's terminal bookend conclusion. See
+    `lifecycle.task_update` for the contract; returns text like
+    `"12 delivered, 3 skipped"` / `"2 failed, 10 delivered"`.
+    """
+    counts = (data.get("delivery", {}) or {}).get("counts", {}) or {}
+    ok = counts.get("ok", 0)
+    skip = counts.get("skip", 0)
+    warn = counts.get("warn", 0)
+    fail = counts.get("fail", 0)
+    pending = counts.get("pending", 0)
+    total = ok + skip + warn + fail + pending
+    if total == 0:
+        if status == "passed":
+            return "No targets"
+        return ""
+    parts = []
+    if fail > 0:
+        parts.append(_plural(fail, "failed"))
+    if ok > 0:
+        parts.append(_plural(ok, "delivered"))
+    if skip > 0:
+        parts.append(_plural(skip, "skipped"))
+    if warn > 0:
+        parts.append(_plural(warn, "warning"))
+    if pending > 0:
+        parts.append(_plural(pending, "pending", plural = "pending"))
+    return ", ".join(parts)
+
 def _plural(count, singular, plural = None):
     if plural == None:
         plural = singular + "s" if not singular.endswith("ed") else singular

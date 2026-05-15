@@ -10,7 +10,7 @@ load("./lib/checkrun.axl", "GitHubCheckRunTrait")
 load("./lib/health_check.axl", "HealthCheckTrait")
 load("./lib/lifecycle.axl", "TaskLifecycleTrait")
 
-def _impl(ctx: TaskContext) -> int:
+def _impl(ctx: TaskContext) -> int | TaskConclusion:
     return run_bazel_task(ctx, command = "build")
 
 build = task(

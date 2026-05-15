@@ -5,8 +5,8 @@ Run with:
 
 Scenarios:
   1. clean-passed        — all BUILD files are up to date
-  2. files-out-of-date   — 4 BUILD files need updating (--check mode)
-  3. fix-mode            — same 4 files, fix mode (patch applied)
+  2. files-out-of-date   — 4 BUILD files need updating (--check-only=true)
+  3. fix-mode            — same 4 files, --check-only=false (patch applied)
   4. gazelle-error       — non-zero exit with no diff (config error)
   5. apply-error         — git apply -p0 failed
   6. with-patch-url      — patch artifact uploaded
@@ -17,7 +17,7 @@ Scenarios:
  11. metadata-all        — GitHubStatusChecksTrait.metadata_keys = ["*"]
  12. early-fail          — early-bail before gazelle ran
  13. scope=changed       — Configuration row with Scope + default escalation list
- 14. scope=changed full  — all four Config rows fire (Scope, Soft-fail, escalate, pattern)
+ 14. scope=changed full  — all four Config rows fire (Scope, On-change, escalate, pattern)
  15. scope=changed empty — no-op short-circuit, dirs=[]
 """
 
@@ -60,8 +60,7 @@ def _make_base():
     }
     r["gazelle"]["gazelle_target"] = "//tools/gazelle:gazelle"
     r["gazelle"]["gazelle_command"] = ""
-    r["gazelle"]["check_mode"] = "true"
-    r["gazelle"]["enforce_check"] = True
+    r["gazelle"]["check_only"] = True
     r["gazelle"]["dirs"] = []
     return r
 
@@ -82,8 +81,7 @@ def _make_files_out_of_date():
 
 def _make_fix_mode():
     r = _make_base()
-    r["gazelle"]["check_mode"] = "false"
-    r["gazelle"]["enforce_check"] = False
+    r["gazelle"]["check_only"] = False
     r["gazelle"]["affected_files"] = _OUT_OF_DATE_FILES
     return r
 
@@ -104,8 +102,7 @@ def _make_early_fail():
 
 def _make_apply_error():
     r = _make_base()
-    r["gazelle"]["check_mode"] = "false"
-    r["gazelle"]["enforce_check"] = False
+    r["gazelle"]["check_only"] = False
     r["gazelle"]["affected_files"] = ["services/api/BUILD.bazel", "tools/go/BUILD.bazel"]
     r["gazelle"]["apply_error"] = True
     r["gazelle"]["apply_error_msg"] = "error: patch failed: services/api/BUILD.bazel:3"
@@ -153,12 +150,12 @@ def _make_scope_changed():
 def _make_scope_changed_with_filter():
     """--scope=changed with a custom --changed-file-pattern list (e.g.
     'I only care about Python and TS changes'). All four Config rows
-    fire: Scope, Soft-fail, Scope-all-on-change, Changed-file-pattern."""
+    fire: Scope, On-change, Scope-all-on-change, Changed-file-pattern."""
     r = _make_base()
     r["gazelle"]["scope"] = "changed"
     r["gazelle"]["scope_all_on_change"] = ["BUILD.bazel", "MODULE.bazel", "gazelle_python.yaml"]
     r["gazelle"]["changed_file_patterns"] = ["**/*.py", "**/*.ts", "**/*.tsx", "**/BUILD.bazel"]
-    r["gazelle"]["soft_fail"] = True
+    r["gazelle"]["on_change_resolved"] = "warn"
     r["gazelle"]["dirs"] = ["apps/web", "services/api"]
     r["gazelle"]["affected_files"] = [
         "apps/web/BUILD.bazel",
