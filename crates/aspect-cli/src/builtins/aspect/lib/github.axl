@@ -286,6 +286,24 @@ def complete_check_run(ctx, token, owner, repo, check_run_id, conclusion, output
 
 # CI environment detection
 
+def _read_github_event(std):
+    """Read and parse the GitHub Actions event payload from
+    `GITHUB_EVENT_PATH`. Returns the parsed dict, or `{}` when the
+    env var isn't set, the file can't be read, or the JSON is
+    malformed.
+
+    GitHub Actions writes the full event payload (the same JSON
+    `github.event` exposes in workflow expressions) to the file at
+    `GITHUB_EVENT_PATH` for every job run. Reading it is free — no
+    API call — so we use it to extract context that isn't otherwise
+    surfaced as a plain env var (merge_group.base_sha, PR head SHA, …).
+    """
+    env = std.env
+    event_path = env.var("GITHUB_EVENT_PATH") or ""
+    if not event_path or not std.fs.exists(event_path):
+        return {}
+    return json.try_decode(std.fs.read_to_string(event_path), {})
+
 def detect_commit_sha(std):
     """Detect commit SHA from CI environment variables.
 
@@ -297,12 +315,9 @@ def detect_commit_sha(std):
     env = std.env
     event_name = env.var("GITHUB_EVENT_NAME") or ""
     if env.var("GITHUB_ACTIONS") and event_name in ("pull_request", "pull_request_target"):
-        event_path = env.var("GITHUB_EVENT_PATH") or ""
-        if event_path and std.fs.exists(event_path):
-            event = json.decode(std.fs.read_to_string(event_path))
-            head_sha = event.get("pull_request", {}).get("head", {}).get("sha", "")
-            if head_sha:
-                return head_sha
+        head_sha = (_read_github_event(std).get("pull_request", {}) or {}).get("head", {}).get("sha", "")
+        if head_sha:
+            return head_sha
     return (
         env.var("GITHUB_SHA") or
         env.var("BUILDKITE_COMMIT") or
@@ -310,6 +325,25 @@ def detect_commit_sha(std):
         env.var("CI_COMMIT_SHA") or
         ""
     )
+
+def _detect_merge_group_base_sha(std):
+    """Return the merge-queue base SHA from the `merge_group` event
+    payload, or `""` when not in a merge_group run.
+
+    GitHub's merge queue batches PRs into a queue branch and produces
+    a temporary merge commit; the `merge_group` event payload exposes
+    `base_sha` directly. We use it as the diff base when scoping
+    changed files, which sidesteps the usual `git merge-base HEAD
+    origin/<base-branch>` lookup — that lookup fails on the typical
+    shallow merge-queue checkout (`fetch-depth: 2`, `origin/main`
+    never fetched).
+    """
+    env = std.env
+    if not env.var("GITHUB_ACTIONS"):
+        return ""
+    if (env.var("GITHUB_EVENT_NAME") or "") != "merge_group":
+        return ""
+    return (_read_github_event(std).get("merge_group", {}) or {}).get("base_sha", "") or ""
 
 def detect_build_url(ctx):
     """Detect the CI build URL from common environment variables.
@@ -480,29 +514,81 @@ def _widen_lines(lines, radius):
     out = sorted(out)
     return out
 
-def _try_local_git_diff_from_base_sha(ctx, line_level, base_sha):
-    """Run a local `git diff <base_sha>` and return the structured
-    {files, skipped, source} dict, or None on any failure.
+def _head_parents(ctx):
+    """Return HEAD's parent SHAs as a list, or `[]` when HEAD is
+    unresolvable. `len(result) >= 2` ⇒ HEAD is a merge commit.
 
-    Used by the API-inconsistency fallback path: when GitHub's PR
-    Files API returns degenerate data (rebase-stale +0/-0 entries),
-    we'd rather get accurate counts from local git than render the
-    broken API view. Best-effort — falls through to None if:
-      - the base SHA isn't locally available and `git fetch` can't
-        retrieve it (rare; usually means the SHA was force-pushed
-        away)
-      - `git diff` itself fails for any reason
+    On a GitHub Actions `pull_request` / `pull_request_target` run,
+    `actions/checkout` checks out the synthesized merge commit at
+    `refs/pull/<n>/merge` — HEAD^1 is the base branch SHA and HEAD^2
+    is the PR head. On a `merge_group` run, HEAD is the queue-
+    synthesized merge commit with the same shape. Both are local
+    (the parents are reachable from HEAD), so a local `git diff
+    HEAD^1..HEAD` produces the same change set as the PR Files API
+    at zero API cost.
+    """
+    process = ctx.std.process
+    cwd = ctx.std.env.current_dir()
+    out = process.command("git").args(["log", "-1", "--pretty=%P"]).current_dir(cwd).stdout("piped").stderr("null").spawn().wait_with_output()
+    if not out.status.success:
+        return []
+    parents = out.stdout.strip().split()
+    return [p for p in parents if p]
 
-    Caller decides what to do when this returns None (typically
-    falls back to the original API response + a WARNING).
+def _resolve_merge_base(ctx, base_ref):
+    """Resolve a diff base SHA for local-git change detection, with
+    layered fallbacks. Returns `(sha, source_description)` on success,
+    or `("", reason)` when no candidate succeeds.
+
+    Strategy, in order:
+      1. `git merge-base HEAD <base_ref>` — the canonical path.
+      2. `git rev-parse HEAD^1` when HEAD is a merge commit — works on
+         any merge commit (including a merge-queue HEAD) without
+         needing any ref to exist locally.
+      3. `git fetch --depth=1 origin <base_ref>` then retry merge-base
+         — last-resort fetch in case the ref was just never fetched.
     """
     process = ctx.std.process
     cwd = ctx.std.env.current_dir()
 
-    # Ensure the base SHA is available locally. On CI with
-    # `fetch-depth: 1` (the GHA default), the base SHA isn't in the
-    # local repo and `git diff` would fail. Try a targeted fetch
-    # first. `--depth=1` keeps the cost low.
+    mb = process.command("git").args(["merge-base", "HEAD", base_ref]).current_dir(cwd).stdout("piped").stderr("piped").spawn().wait_with_output()
+    if mb.status.success:
+        return mb.stdout.strip(), "git merge-base HEAD %s" % base_ref
+
+    parents = _head_parents(ctx)
+    if len(parents) >= 2:
+        return parents[0], "git rev-parse HEAD^1 (merge commit first parent)"
+
+    # `git fetch origin <ref>` wants the *remote* ref name. `base_ref`
+    # is typically `origin/main` — a local remote-tracking ref. Strip
+    # the `origin/` prefix to get the corresponding remote ref name.
+    remote_ref = base_ref[len("origin/"):] if base_ref.startswith("origin/") else base_ref
+    fetch = process.command("git").args(["fetch", "--depth=1", "origin", remote_ref]).current_dir(cwd).stdout("null").stderr("piped").spawn().wait_with_output()
+    if fetch.status.success:
+        retry = process.command("git").args(["merge-base", "HEAD", base_ref]).current_dir(cwd).stdout("piped").stderr("piped").spawn().wait_with_output()
+        if retry.status.success:
+            return retry.stdout.strip(), "git merge-base HEAD %s (after `git fetch origin %s`)" % (base_ref, remote_ref)
+
+    return "", "tried `git merge-base HEAD %s`, `git rev-parse HEAD^1`, and `git fetch --depth=1 origin %s`; none succeeded" % (base_ref, remote_ref)
+
+def _try_local_git_diff_from_base_sha(ctx, line_level, base_sha):
+    """Run a local `git diff <base_sha>` and return the structured
+    `{files, skipped, source, unscoped}` dict, or `None` on any failure.
+
+    Best-effort: returns `None` if `git fetch` can't retrieve the SHA
+    (rare; usually means it was force-pushed away) or `git diff`
+    itself fails. Callers decide how to recover.
+
+    Used by the merge-queue path (`merge_group.base_sha`), the
+    merge-commit-first path (HEAD^1), and the PR-Files-API
+    inconsistency recovery path (PR base SHA from `get_pull_request`).
+    """
+    process = ctx.std.process
+    cwd = ctx.std.env.current_dir()
+
+    # Ensure the base SHA is available locally. On shallow checkouts
+    # (e.g. `fetch-depth: 1`) the SHA may not be in the local repo
+    # and `git diff` would fail. Try a targeted fetch first.
     have_sha = process.command("git").args(["cat-file", "-e", base_sha]).current_dir(cwd).stdout("null").stderr("null").spawn().wait_with_output()
     if not have_sha.status.success:
         fetched = process.command("git").args(["fetch", "origin", base_sha, "--depth=1"]).current_dir(cwd).stdout("null").stderr("piped").spawn().wait_with_output()
@@ -523,13 +609,13 @@ def _try_local_git_diff_from_base_sha(ctx, line_level, base_sha):
         parsed = _parse_local_diff_output(result.stdout)
         for entry in parsed:
             entry["hunk_lines"] = _widen_lines(entry["lines"], _HUNK_CONTEXT_LINES)
-        return {"files": parsed, "skipped": [], "source": source}
+        return {"files": parsed, "skipped": [], "source": source, "unscoped": False}
 
     out = process.command("git").args(["diff", "--diff-filter=d", "--name-only", base_sha]).current_dir(cwd).stdout("piped").stderr("piped").spawn().wait_with_output()
     if not out.status.success:
         return None
     names = [f for f in out.stdout.strip().split("\n") if f]
-    return {"files": names, "skipped": [], "source": source}
+    return {"files": names, "skipped": [], "source": source, "unscoped": False}
 
 def _parse_local_diff_output(output):
     """Parse `git diff --unified=0` output into per-file change records.
@@ -644,60 +730,79 @@ def _parse_github_pr_patch(patch):
     return (added, hunk)
 
 def detect_changed_files(ctx, line_level = True, base_ref = "origin/main", merge_base = None):
-    """Detect changed files for a build, preferring the GitHub PR Files API
-    when available and falling back to local `git diff` otherwise.
+    """Detect changed files for a build.
 
-    Returns a dict (not a bare list — callers want diagnostics too):
+    Resolution order (first hit wins):
+      1. Caller's explicit `merge_base` SHA → local `git diff`.
+      2. `merge_group` event → local diff against `merge_group.base_sha`
+         from the event payload (skips the PR Files API; the queue can
+         batch multiple PRs).
+      3. HEAD is a merge commit (≥2 parents) → local diff against
+         HEAD^1. Covers every typical PR checkout (`refs/pull/<n>/merge`
+         is a merge commit whose first parent is the base branch SHA)
+         and merge-queue HEADs. Zero API cost on the common case.
+      4. PR context detected via env (`refs/pull/<n>/merge` ref or
+         equivalent) → GitHub PR Files API.
+      5. Local-git fallback via `_resolve_merge_base` cascade against
+         `base_ref`.
 
+    When every path fails, returns `{"files": None, "unscoped": True,
+    "source": <reason>}` rather than raising. Callers WARN and
+    degrade to processing all files in scope (equivalent to
+    `--scope=all`).
+
+    Returns:
       {
-        "files":   [...],   # entries that actually carry line-level changes;
-                            # what the strategy filter should operate on.
-                            # Per-entry shape is dict {file, lines, hunk_lines,
-                            # additions, deletions} when line_level=True,
-                            # plain filename string when False.
-        "skipped": [...],   # API entries the source listed but with
-                            # additions+deletions == 0 (rename-only,
-                            # rebase-stale modified entries, etc.).
-                            # Excluded from `files` so they don't poison
-                            # the strategy filter, but exposed here so
-                            # callers can show them as `[+0 / -0]` in
-                            # diagnostic listings — useful for spotting
-                            # when GitHub's API reports a file as
-                            # changed but with no actual line diff.
-                            # Same per-entry shape as `files`.
-        "source":  "...",   # human-readable description of where this
-                            # data came from. Surfaces as the first line
-                            # under the Detect phase so users can tell at
-                            # a glance whether they're looking at PR Files
-                            # API data or a local-git fallback.
+        "files":    list | None,  # per-entry dict when line_level=True
+                                  # (file, lines, hunk_lines, additions,
+                                  # deletions, status, previous_filename);
+                                  # bare filename string when False.
+                                  # None when `unscoped` is True.
+        "skipped":  list,         # API entries with additions+deletions=0
+                                  # (rename-only, rebase-stale +0/-0)
+                                  # excluded from `files` to keep the
+                                  # strategy filter clean, but kept for
+                                  # diagnostic listings. Empty on the
+                                  # local-git paths.
+        "source":   str,          # human-readable description of where
+                                  # this data came from; surfaced under
+                                  # the Detect phase.
+        "unscoped": bool,         # True when every detection path failed.
       }
 
     Args:
       ctx:        TaskContext.
-      line_level: if True (default), per-entry dict (lint usage). If
-                  False, per-entry filename string (format usage).
-      base_ref:   merge-base argument for the local-git fallback
-                  (e.g. "origin/main"). Ignored on the PR API path.
-      merge_base: explicit merge-base SHA for the local-git fallback.
-                  Overrides `base_ref` if set.
-
-    PR-API path (when in a GitHub PR + auth succeeds):
-      - calls github.pulls.list_files via authenticate(roles=["prs.read"])
-      - parses each file's `patch` to extract added-line indices
-      - source: "GitHub PR Files API: GET /repos/<o>/<r>/pulls/<n>/files"
-
-    Local-git fallback (always available). The diff base is resolved as:
-      - explicit `merge_base` SHA if provided, else
-      - `git merge-base HEAD <base_ref>` (default base_ref `origin/main`).
-    Then:
-      - line_level=True:  `git diff <base> --unified=0`
-      - line_level=False: `git diff --diff-filter=d --name-only <base>`
-      - source: "local git diff <base_sha>..<head_sha>"
-
-    If a GitHub PR context is detected but the PR-API path is unavailable
-    (auth failure, transient API error), a yellow WARNING is printed
-    explaining the reason before falling through.
+      line_level: True (default) → per-entry dict (lint usage).
+                  False → per-entry filename string (format usage).
+      base_ref:   merge-base argument for the local-git fallback (e.g.
+                  "origin/main"). Ignored when an earlier step succeeds.
+      merge_base: explicit merge-base SHA. Overrides every detection
+                  path; routed through the local `git diff` helper.
     """
+
+    # (2) merge_group event
+    if merge_base == None:
+        mg_base = _detect_merge_group_base_sha(ctx.std)
+        if mg_base:
+            local = _try_local_git_diff_from_base_sha(ctx, line_level, mg_base)
+            if local:
+                local["source"] = "local git diff %s..HEAD (merge_group event base_sha; no API call)" % mg_base
+                return local
+
+            # Helper couldn't run the diff; hand the SHA off to the
+            # local-git fallback below as a starting point.
+            merge_base = mg_base
+
+    # (3) merge-commit-first
+    if merge_base == None:
+        parents = _head_parents(ctx)
+        if len(parents) >= 2:
+            local = _try_local_git_diff_from_base_sha(ctx, line_level, parents[0])
+            if local:
+                local["source"] = "local git diff %s..HEAD (HEAD is a merge commit; no API call)" % parents[0]
+                return local
+
+    # (4) PR Files API
     pr, _ = detect_github_pr(ctx.std)
     fallback_reason = ""
     if pr:
@@ -834,7 +939,7 @@ def detect_changed_files(ctx, line_level = True, base_ref = "origin/main", merge
                     pr["repo"],
                     pr["pr_number"],
                 )
-                return {"files": files, "skipped": skipped, "source": source}
+                return {"files": files, "skipped": skipped, "source": source, "unscoped": False}
             fallback_reason = "GitHub PR Files API call failed: %s" % result.get("error", "unknown")
 
     if fallback_reason:
@@ -845,21 +950,24 @@ def detect_changed_files(ctx, line_level = True, base_ref = "origin/main", merge
             fallback_reason,
         ))
 
-    # Local-git fallback. Resolve the diff base once for both shapes.
-    # Errors fail loudly: a silent empty result would be interpreted as
-    # "no changed files" by callers (lint hold-the-line surfaces nothing,
-    # format formats nothing) and pass CI even though the diff base was
-    # invalid (shallow clone, missing remote ref, …).
+    # (5) Local-git fallback. Failures degrade to `unscoped=True`
+    # rather than raising — change detection is a soft gate; a hard
+    # fail here would block a task that could still run with
+    # `--scope=all` semantics.
     process = ctx.std.process
     cwd = ctx.std.env.current_dir()
     if merge_base:
         diff_base = merge_base
+        diff_base_source = "explicit merge_base"
     else:
-        mb = process.command("git").args(["merge-base", "HEAD", base_ref]).current_dir(cwd).stdout("piped").stderr("piped").spawn().wait_with_output()
-        if not mb.status.success:
-            msg = "Could not resolve merge-base for changed-file detection: `git merge-base HEAD %s` failed (exit %d).\nstderr: %s\nThe ref may not exist locally (shallow clone? missing `git fetch`?). Override with --merge-base=<sha>, or set --base-ref to a ref that's available in the local repo." % (base_ref, mb.status.code, mb.stderr.strip())
-            fail(msg)
-        diff_base = mb.stdout.strip()
+        diff_base, diff_base_source = _resolve_merge_base(ctx, base_ref)
+        if not diff_base:
+            return {
+                "files": None,
+                "skipped": [],
+                "source": "scope detection failed: %s" % diff_base_source,
+                "unscoped": True,
+            }
 
     # Resolve HEAD for the source string. Don't fail if it's unresolvable
     # (a brand-new repo with no commits); just leave the SHA empty.
@@ -870,8 +978,12 @@ def detect_changed_files(ctx, line_level = True, base_ref = "origin/main", merge
     if line_level:
         result = process.command("git").args(["diff", diff_base, "--unified=0"]).current_dir(cwd).stdout("piped").stderr("piped").spawn().wait_with_output()
         if not result.status.success:
-            msg = "`git diff %s --unified=0` failed (exit %d).\nstderr: %s" % (diff_base, result.status.code, result.stderr.strip())
-            fail(msg)
+            return {
+                "files": None,
+                "skipped": [],
+                "source": "`git diff %s --unified=0` failed (exit %d): %s" % (diff_base, result.status.code, result.stderr.strip()),
+                "unscoped": True,
+            }
         parsed = _parse_local_diff_output(result.stdout)
 
         # `--unified=0` doesn't carry context lines, so the local-git
@@ -887,14 +999,18 @@ def detect_changed_files(ctx, line_level = True, base_ref = "origin/main", merge
         # (a no-content-diff file just doesn't appear in `git diff`
         # output), so `skipped` is always empty here. Keep the same
         # return shape for symmetry with the PR-API path.
-        return {"files": parsed, "skipped": [], "source": source}
+        return {"files": parsed, "skipped": [], "source": source, "unscoped": False}
 
     out = process.command("git").args(["diff", "--diff-filter=d", "--name-only", diff_base]).current_dir(cwd).stdout("piped").stderr("piped").spawn().wait_with_output()
     if not out.status.success:
-        msg = "`git diff --diff-filter=d --name-only %s` failed (exit %d).\nstderr: %s" % (diff_base, out.status.code, out.stderr.strip())
-        fail(msg)
+        return {
+            "files": None,
+            "skipped": [],
+            "source": "`git diff --diff-filter=d --name-only %s` failed (exit %d): %s" % (diff_base, out.status.code, out.stderr.strip()),
+            "unscoped": True,
+        }
     names = [f for f in out.stdout.strip().split("\n") if f]
-    return {"files": names, "skipped": [], "source": source}
+    return {"files": names, "skipped": [], "source": source, "unscoped": False}
 
 def print_changed_files_listing(ctx, detect_result):
     """Print the standard diagnostic listing for a `detect_changed_files`
@@ -924,7 +1040,14 @@ def print_changed_files_listing(ctx, detect_result):
                            render as plain `  filename` with no
                            brackets (the source didn't provide
                            per-file counts).
+
+    When `detect_result["unscoped"]` is True (every detection path
+    failed), prints just the source line — the caller is expected to
+    emit a yellow WARNING explaining the degraded mode.
     """
+    if detect_result.get("unscoped"):
+        print("Scope detection unavailable: %s" % detect_result["source"])
+        return
     print("Detecting changed files via %s" % detect_result["source"])
     ansi = color_enabled(ctx.std)
     green = "\033[32m" if ansi else ""
@@ -1233,7 +1356,9 @@ def _decode_backend_ids(ctx, token):
     if not payload_json:
         return (None, None)
 
-    payload = json.decode(payload_json)
+    payload = json.try_decode(payload_json, None)
+    if payload == None:
+        return (None, None)
     scp = payload.get("scp", "")
 
     for scope in scp.split(" "):

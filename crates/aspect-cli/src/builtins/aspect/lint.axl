@@ -774,7 +774,17 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         base_ref = ctx.args.base_ref,
         merge_base = ctx.args.merge_base or None,
     )
-    changed_files = detect_result["files"]
+    if detect_result.get("unscoped"):
+        # Change detection failed (e.g. shallow checkout with no
+        # remote-tracking ref). Surface all findings rather than
+        # silently hiding them: override to `StrategyHard` which uses
+        # `filter_all` and ignores `changed_files`. Any user
+        # `--strategy=...` choice is overridden with the warning.
+        warn(ctx.std, "Could not determine the changed-file set (%s). Linting with `strategy=hard` (all findings shown, no hold-the-line scoping). Override with --merge-base=<sha> or set --base-ref to a ref available locally." % detect_result["source"])
+        strategy = StrategyHard
+        changed_files = []
+    else:
+        changed_files = detect_result["files"]
     lint_trait.changed_files = changed_files
     data["lint"]["changed_files"] = changed_files
 
