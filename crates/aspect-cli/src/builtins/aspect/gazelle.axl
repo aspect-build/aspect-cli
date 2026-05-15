@@ -479,6 +479,10 @@ def _resolve_effective_dirs(ctx, lifecycle, data):
         merge_base = ctx.args.merge_base or None,
     )
     print_changed_files_listing(ctx, detect_result)
+    if detect_result.get("unscoped"):
+        # Degrade to whole-repo update (equivalent to --scope=all).
+        warn(ctx.std, "Could not determine the changed-file set (%s). Escalating to a whole-repo gazelle update (equivalent to --scope=all). Override with --merge-base=<sha> or set --base-ref to a ref available locally." % detect_result["source"])
+        return dedupe_subtrees(user_dirs), False
 
     # Escalate to whole-repo if any changed file matches a
     # --scope-all-on-change pattern (e.g. MODULE.bazel changed → deps

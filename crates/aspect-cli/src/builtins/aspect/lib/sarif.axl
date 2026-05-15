@@ -4,8 +4,11 @@ Provides parsing of raw SARIF JSON and conversion to GitHub PR review comments.
 """
 
 def parse_sarif(content):
-    """Parse a SARIF JSON string into a dict."""
-    return json.decode(content)
+    """Parse a SARIF JSON string into a dict. Returns `{}` on
+    malformed JSON — downstream consumers iterate `runs` / `results`
+    and naturally produce empty output from an empty SARIF.
+    """
+    return json.try_decode(content, {})
 
 # SARIF `level` values per spec: "none" | "note" | "warning" | "error".
 # Translate to aspect-cli's user-facing severity vocabulary at the SARIF
@@ -93,7 +96,7 @@ def parse_sarif_diagnostics(content):
     is True when the result carries an inline-fix relatedLocation (see
     `_result_has_fix`).
     """
-    sarif = json.decode(content)
+    sarif = json.try_decode(content, {})
     diagnostics = []
     for run in sarif.get("runs", []):
         tool_name = run.get("tool", {}).get("driver", {}).get("name", "unknown")
@@ -123,7 +126,7 @@ def parse_sarif_diagnostics(content):
 def get_sarif_summary(sarif):
     """Return a human-readable summary of SARIF findings."""
     if type(sarif) == "string":
-        sarif = json.decode(sarif)
+        sarif = json.try_decode(sarif, {})
     total = 0
     lines = []
     for run in sarif.get("runs", []):
@@ -227,7 +230,7 @@ def sarif_result_to_comment(result, tool_name):
 def sarif_to_review_comments(sarif):
     """Convert a parsed SARIF dict (or JSON string) to GitHub review comment dicts."""
     if type(sarif) == "string":
-        sarif = json.decode(sarif)
+        sarif = json.try_decode(sarif, {})
     comments = []
     for run in sarif.get("runs", []):
         tool_name = run.get("tool", {}).get("driver", {}).get("name", "Linter")

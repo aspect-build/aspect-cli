@@ -177,7 +177,10 @@ def _display_runner_health(environment):
         print("Health check has not yet been run on this runner")
         return
 
-    data = json.decode(environment.runner.last_health_check)
+    data = json.try_decode(environment.runner.last_health_check, None)
+    if data == None:
+        print("Health check data is unavailable (malformed JSON)")
+        return
 
     # data.timestamp is a unix epoch integer
     # data.output is a pre-formatted multi-line string

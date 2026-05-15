@@ -497,24 +497,30 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         # filename per row (no +/- counts — the source didn't give
         # us per-line data).
         print_changed_files_listing(ctx, detect_result)
-        changed_files = detect_result["files"]
-        if ignore_patterns:
-            kept = [f for f in changed_files if not match_any(ignore_patterns, f)]
-            ignored_count = len(changed_files) - len(kept)
-            if ignored_count > 0:
-                info(ctx.std, "Filtered %d file(s) via --ignore-pattern." % ignored_count)
-            changed_files = kept
-        if not changed_files:
-            info(ctx.std, "No files to format")
-            data["format"]["no_files_to_format"] = True
-            return _emit_final(ctx, lifecycle, data, 0)
+        if detect_result.get("unscoped"):
+            # Degrade to `--scope=all`: no positionals, formatter
+            # walks the working tree itself.
+            warn(ctx.std, "Could not determine the changed-file set (%s). Formatting all files in scope (equivalent to --scope=all). Override with --merge-base=<sha> or set --base-ref to a ref available locally." % detect_result["source"])
+            format_args = []
+        else:
+            changed_files = detect_result["files"]
+            if ignore_patterns:
+                kept = [f for f in changed_files if not match_any(ignore_patterns, f)]
+                ignored_count = len(changed_files) - len(kept)
+                if ignored_count > 0:
+                    info(ctx.std, "Filtered %d file(s) via --ignore-pattern." % ignored_count)
+                changed_files = kept
+            if not changed_files:
+                info(ctx.std, "No files to format")
+                data["format"]["no_files_to_format"] = True
+                return _emit_final(ctx, lifecycle, data, 0)
 
-        # Surface the input file count so the Configuration row can show
-        # `Scope: changed — N file(s)` (analogous to lint's
-        # "Strategy: hold-the-line — filtered to N changed files"). This
-        # is the post-ignore-pattern set the formatter actually saw.
-        data["changed_files_count"] = len(changed_files)
-        format_args = changed_files
+            # Surface the input file count so the Configuration row can show
+            # `Scope: changed — N file(s)` (analogous to lint's
+            # "Strategy: hold-the-line — filtered to N changed files"). This
+            # is the post-ignore-pattern set the formatter actually saw.
+            data["changed_files_count"] = len(changed_files)
+            format_args = changed_files
 
     # Snapshot pre-format tracked state so we can detect what the formatter
     # changed independently of any pre-existing dirty files. `git stash
