@@ -286,7 +286,7 @@ def complete_check_run(ctx, token, owner, repo, check_run_id, conclusion, output
 
 # CI environment detection
 
-def _read_github_event(std):
+def read_github_event(std):
     """Read and parse the GitHub Actions event payload from
     `GITHUB_EVENT_PATH`. Returns the parsed dict, or `{}` when the
     env var isn't set, the file can't be read, or the JSON is
@@ -315,7 +315,7 @@ def detect_commit_sha(std):
     env = std.env
     event_name = env.var("GITHUB_EVENT_NAME") or ""
     if env.var("GITHUB_ACTIONS") and event_name in ("pull_request", "pull_request_target"):
-        head_sha = (_read_github_event(std).get("pull_request", {}) or {}).get("head", {}).get("sha", "")
+        head_sha = (read_github_event(std).get("pull_request", {}) or {}).get("head", {}).get("sha", "")
         if head_sha:
             return head_sha
     return (
@@ -326,7 +326,7 @@ def detect_commit_sha(std):
         ""
     )
 
-def _detect_merge_group_base_sha(std):
+def detect_merge_group_base_sha(std):
     """Return the merge-queue base SHA from the `merge_group` event
     payload, or `""` when not in a merge_group run.
 
@@ -343,7 +343,7 @@ def _detect_merge_group_base_sha(std):
         return ""
     if (env.var("GITHUB_EVENT_NAME") or "") != "merge_group":
         return ""
-    return (_read_github_event(std).get("merge_group", {}) or {}).get("base_sha", "") or ""
+    return (read_github_event(std).get("merge_group", {}) or {}).get("base_sha", "") or ""
 
 def detect_build_url(ctx):
     """Detect the CI build URL from common environment variables.
@@ -518,22 +518,60 @@ def _head_parents(ctx):
     """Return HEAD's parent SHAs as a list, or `[]` when HEAD is
     unresolvable. `len(result) >= 2` ⇒ HEAD is a merge commit.
 
+    Reads parents from the raw commit object via `git cat-file -p HEAD`
+    rather than `git log -1 --pretty=%P` or `git rev-list --parents`.
+    The latter two respect the `.git/shallow` overlay and return empty
+    on a shallow checkout (e.g. `actions/checkout` with `fetch-depth:
+    1`), even though the parent SHAs are still encoded in the commit
+    object itself. Reading the raw object bypasses the overlay so
+    merge-commit-first works on shallow PR checkouts too — the parent
+    SHAs become known, and a targeted `git fetch <sha> --depth=1`
+    (handled by `_try_local_git_diff_from_base_sha` /
+    `_ensure_local_sha`) can pull the parent object on demand.
+
     On a GitHub Actions `pull_request` / `pull_request_target` run,
     `actions/checkout` checks out the synthesized merge commit at
-    `refs/pull/<n>/merge` — HEAD^1 is the base branch SHA and HEAD^2
-    is the PR head. On a `merge_group` run, HEAD is the queue-
-    synthesized merge commit with the same shape. Both are local
-    (the parents are reachable from HEAD), so a local `git diff
-    HEAD^1..HEAD` produces the same change set as the PR Files API
-    at zero API cost.
+    `refs/pull/<n>/merge` — parents[0] is the base branch SHA and
+    parents[1] is the PR head. On a `merge_group` run, HEAD is the
+    queue-synthesized merge commit with the same shape.
     """
     process = ctx.std.process
     cwd = ctx.std.env.current_dir()
-    out = process.command("git").args(["log", "-1", "--pretty=%P"]).current_dir(cwd).stdout("piped").stderr("null").spawn().wait_with_output()
+    out = process.command("git").args(["cat-file", "-p", "HEAD"]).current_dir(cwd).stdout("piped").stderr("null").spawn().wait_with_output()
     if not out.status.success:
         return []
-    parents = out.stdout.strip().split()
-    return [p for p in parents if p]
+    parents = []
+    for line in out.stdout.split("\n"):
+        if line.startswith("parent "):
+            sha = line[len("parent "):].strip()
+            if sha:
+                parents.append(sha)
+        elif line == "":
+            # End of commit-object header block; commit message follows.
+            break
+    return parents
+
+def _ensure_local_sha(ctx, sha):
+    """Ensure `sha` is present in the local object store, fetching it
+    shallowly from `origin` on-demand. Returns True iff the object is
+    available after this call.
+
+    Companion to `_head_parents`: on shallow checkouts the cat-file-based
+    parent SHA is known but the parent commit OBJECT may not be local,
+    so a subsequent `git diff <sha>` would fail. This helper closes that
+    gap with a targeted depth-1 fetch by SHA (GitHub's git server
+    accepts arbitrary reachable SHAs via `uploadpack.allowAnySHA1InWant`).
+    """
+    process = ctx.std.process
+    cwd = ctx.std.env.current_dir()
+    have = process.command("git").args(["cat-file", "-e", sha]).current_dir(cwd).stdout("null").stderr("null").spawn().wait_with_output()
+    if have.status.success:
+        return True
+    fetched = process.command("git").args(["fetch", "--depth=1", "origin", sha]).current_dir(cwd).stdout("null").stderr("null").spawn().wait_with_output()
+    if not fetched.status.success:
+        return False
+    recheck = process.command("git").args(["cat-file", "-e", sha]).current_dir(cwd).stdout("null").stderr("null").spawn().wait_with_output()
+    return recheck.status.success
 
 def _resolve_merge_base(ctx, base_ref):
     """Resolve a diff base SHA for local-git change detection, with
@@ -541,23 +579,64 @@ def _resolve_merge_base(ctx, base_ref):
     or `("", reason)` when no candidate succeeds.
 
     Strategy, in order:
-      1. `git merge-base HEAD <base_ref>` — the canonical path.
-      2. `git rev-parse HEAD^1` when HEAD is a merge commit — works on
-         any merge commit (including a merge-queue HEAD) without
-         needing any ref to exist locally.
+      1. `git merge-base HEAD <base_ref>` — the canonical path. The
+         result determines what step 2 is allowed to do:
+           - Returns a SHA different from HEAD's: use it directly.
+           - Returns HEAD's own SHA (`mb == HEAD`): HEAD is already on
+             `base_ref` (push-to-base / squash-merge landing). Set
+             `head_on_base = True` and fall through; the HEAD^1 path
+             below will return the previous commit on the branch.
+           - Fails (`base_ref` ref not present, e.g. shallow checkout
+             without origin/main): unknown topology — DON'T use HEAD^1
+             for single-parent commits (would silently under-scope a
+             multi-commit feature branch to just its tip). Fall through
+             but skip the single-parent branch.
+      2. HEAD^1 — usable only in topology-confirmed cases:
+           a. HEAD is a merge commit (≥2 parents): parents[0] is the
+              base branch SHA (PR / merge-queue checkout). Safe
+              regardless of `head_on_base` — the merge commit's first
+              parent IS the base by construction.
+           b. HEAD is a single-parent commit AND `head_on_base` is
+              true: HEAD^1 is the previous commit on the branch
+              (push-to-base / squash-merge landing). NOT used when
+              merge-base failed — we'd be guessing the topology.
+         The parent OBJECT may not be local on shallow checkouts;
+         `_ensure_local_sha` fetches it on-demand before returning.
       3. `git fetch --depth=1 origin <base_ref>` then retry merge-base
-         — last-resort fetch in case the ref was just never fetched.
+         — last-resort fetch when the ref was never fetched. After a
+         successful retry, apply the same three-way result handling
+         as step 1: distinct SHA → use it; HEAD-equal → HEAD^1 path
+         (single-parent now safe because we've confirmed `head_on_base`).
     """
     process = ctx.std.process
     cwd = ctx.std.env.current_dir()
 
+    head_out = process.command("git").args(["rev-parse", "HEAD"]).current_dir(cwd).stdout("piped").stderr("null").spawn().wait_with_output()
+    head_sha = head_out.stdout.strip() if head_out.status.success else ""
+
+    head_on_base = False
     mb = process.command("git").args(["merge-base", "HEAD", base_ref]).current_dir(cwd).stdout("piped").stderr("piped").spawn().wait_with_output()
     if mb.status.success:
-        return mb.stdout.strip(), "git merge-base HEAD %s" % base_ref
+        mb_sha = mb.stdout.strip()
+        if mb_sha and mb_sha != head_sha:
+            return mb_sha, "git merge-base HEAD %s" % base_ref
+        if mb_sha == head_sha:
+            head_on_base = True
 
     parents = _head_parents(ctx)
-    if len(parents) >= 2:
-        return parents[0], "git rev-parse HEAD^1 (merge commit first parent)"
+
+    # Merge commit: parents[0] is the base by construction — safe even
+    # when we couldn't confirm `head_on_base`.
+    # Single-parent: only safe when merge-base CONFIRMED HEAD is on the
+    # base branch. Returning HEAD^1 for an arbitrary single-parent HEAD
+    # (e.g. multi-commit feature branch with origin/<base> not yet
+    # fetched) would under-scope the diff to just the tip commit.
+    if len(parents) >= 2 or (len(parents) >= 1 and head_on_base):
+        parent_sha = parents[0]
+        if _ensure_local_sha(ctx, parent_sha):
+            if len(parents) >= 2:
+                return parent_sha, "git rev-parse HEAD^1 (merge commit first parent)"
+            return parent_sha, "git rev-parse HEAD^1 (HEAD on %s)" % base_ref
 
     # `git fetch origin <ref>` wants the *remote* ref name. `base_ref`
     # is typically `origin/main` — a local remote-tracking ref. Strip
@@ -567,7 +646,16 @@ def _resolve_merge_base(ctx, base_ref):
     if fetch.status.success:
         retry = process.command("git").args(["merge-base", "HEAD", base_ref]).current_dir(cwd).stdout("piped").stderr("piped").spawn().wait_with_output()
         if retry.status.success:
-            return retry.stdout.strip(), "git merge-base HEAD %s (after `git fetch origin %s`)" % (base_ref, remote_ref)
+            mb_sha = retry.stdout.strip()
+            if mb_sha and mb_sha != head_sha:
+                return mb_sha, "git merge-base HEAD %s (after `git fetch origin %s`)" % (base_ref, remote_ref)
+
+            # mb_sha == head_sha now CONFIRMS HEAD is on base; the
+            # single-parent HEAD^1 branch is safe.
+            if mb_sha == head_sha and len(parents) >= 1:
+                parent_sha = parents[0]
+                if _ensure_local_sha(ctx, parent_sha):
+                    return parent_sha, "git rev-parse HEAD^1 (HEAD on %s, confirmed after `git fetch origin %s`)" % (base_ref, remote_ref)
 
     return "", "tried `git merge-base HEAD %s`, `git rev-parse HEAD^1`, and `git fetch --depth=1 origin %s`; none succeeded" % (base_ref, remote_ref)
 
@@ -586,17 +674,11 @@ def _try_local_git_diff_from_base_sha(ctx, line_level, base_sha):
     process = ctx.std.process
     cwd = ctx.std.env.current_dir()
 
-    # Ensure the base SHA is available locally. On shallow checkouts
-    # (e.g. `fetch-depth: 1`) the SHA may not be in the local repo
-    # and `git diff` would fail. Try a targeted fetch first.
-    have_sha = process.command("git").args(["cat-file", "-e", base_sha]).current_dir(cwd).stdout("null").stderr("null").spawn().wait_with_output()
-    if not have_sha.status.success:
-        fetched = process.command("git").args(["fetch", "origin", base_sha, "--depth=1"]).current_dir(cwd).stdout("null").stderr("piped").spawn().wait_with_output()
-        if not fetched.status.success:
-            return None
-        recheck = process.command("git").args(["cat-file", "-e", base_sha]).current_dir(cwd).stdout("null").stderr("null").spawn().wait_with_output()
-        if not recheck.status.success:
-            return None
+    # On shallow checkouts (e.g. `fetch-depth: 1`) the SHA may not be
+    # in the local object store and `git diff` would fail; do a
+    # targeted depth-1 fetch on-demand.
+    if not _ensure_local_sha(ctx, base_sha):
+        return None
 
     head_out = process.command("git").args(["rev-parse", "HEAD"]).current_dir(cwd).stdout("piped").stderr("null").spawn().wait_with_output()
     head_sha = head_out.stdout.strip() if head_out.status.success else ""
@@ -782,7 +864,7 @@ def detect_changed_files(ctx, line_level = True, base_ref = "origin/main", merge
 
     # (2) merge_group event
     if merge_base == None:
-        mg_base = _detect_merge_group_base_sha(ctx.std)
+        mg_base = detect_merge_group_base_sha(ctx.std)
         if mg_base:
             local = _try_local_git_diff_from_base_sha(ctx, line_level, mg_base)
             if local:
@@ -811,6 +893,14 @@ def detect_changed_files(ctx, line_level = True, base_ref = "origin/main", merge
         if not token:
             fallback_reason = "authentication failed: %s" % auth_reason.get("reason", "unknown")
         else:
+            # We've fallen past the merge-commit-first path (HEAD isn't
+            # a merge commit, or its first parent couldn't be fetched)
+            # so we have to consult the API. Surface this once so users
+            # can fix their checkout config and stop burning rate-limit
+            # budget on every run — the API call costs against the
+            # GitHub App's shared 5,000 req/hr quota, while the
+            # local-diff alternative is free.
+            warn(ctx.std, "Using GitHub PR Files API for change detection (consumes GitHub App API quota). To avoid this on future runs, keep the default `pull_request` merge-commit ref in `actions/checkout` (no `ref:` override) — aspect-cli derives the change set from a local `git diff HEAD^1..HEAD` at zero API cost. If you're already using the default ref, ensure `fetch-depth >= 1` (the default).")
             result = list_pull_request_files(ctx, token, pr["owner"], pr["repo"], pr["pr_number"])
             if result["success"]:
                 # `git rev-parse --show-prefix` strips the workspace prefix so
