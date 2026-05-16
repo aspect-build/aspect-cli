@@ -359,7 +359,6 @@ def run_bazel_task(ctx: TaskContext, command: str) -> TaskConclusion:
                 build_events = build_events,
                 execution_log = bazel_trait.execution_log_sinks or False,
                 flags = flags,
-                inherit_stdout = True,
                 *ctx.args.targets
             )
         else:
@@ -367,7 +366,6 @@ def run_bazel_task(ctx: TaskContext, command: str) -> TaskConclusion:
                 build_events = build_events,
                 execution_log = bazel_trait.execution_log_sinks or False,
                 flags = flags,
-                inherit_stdout = True,
                 *ctx.args.targets
             )
 

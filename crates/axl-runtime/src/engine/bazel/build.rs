@@ -7,6 +7,7 @@ use std::process::Stdio;
 use std::thread::JoinHandle;
 
 use allocative::Allocative;
+use axl_types::stream::Writable;
 use derive_more::Display;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
@@ -38,6 +39,52 @@ use super::sink::tracing as tracing_sink;
 use super::stream::BuildEventStream;
 use super::stream::ExecLogStream;
 use super::stream::WorkspaceEventStream;
+
+/// Convert a Starlark `Writable` handle to a `std::process::Stdio` for use
+/// as a child's stdio slot.
+///
+/// Parent stdio handles (`Writable::Stdout`/`Stderr`/`ChildStdin`) get their
+/// underlying fd duplicated so cross-wiring (e.g. `stdout = ctx.std.io.stderr`)
+/// works and the original handle stays usable from Starlark. `Writable::File`
+/// is `try_clone`d for the same reason.
+pub fn writable_to_stdio(w: &Writable) -> io::Result<Stdio> {
+    let closed = || io::Error::other("writable stream is closed");
+    match w {
+        Writable::Stdout(arc) => {
+            let guard = arc.lock().unwrap();
+            let borrowed = guard.borrow();
+            let s = borrowed.as_ref().ok_or_else(closed)?;
+            dup_fd(s)
+        }
+        Writable::Stderr(arc) => {
+            let guard = arc.lock().unwrap();
+            let borrowed = guard.borrow();
+            let s = borrowed.as_ref().ok_or_else(closed)?;
+            dup_fd(s)
+        }
+        Writable::ChildStdin(arc) => {
+            let guard = arc.lock().unwrap();
+            let borrowed = guard.borrow();
+            let s = borrowed.as_ref().ok_or_else(closed)?;
+            dup_fd(s)
+        }
+        Writable::File(arc) => {
+            let guard = arc.lock().unwrap();
+            let file = guard.as_ref().ok_or_else(closed)?;
+            Ok(Stdio::from(file.try_clone()?))
+        }
+    }
+}
+
+#[cfg(unix)]
+fn dup_fd<H: std::os::fd::AsFd>(h: &H) -> io::Result<Stdio> {
+    Ok(Stdio::from(h.as_fd().try_clone_to_owned()?))
+}
+
+#[cfg(windows)]
+fn dup_fd<H: std::os::windows::io::AsHandle>(h: &H) -> io::Result<Stdio> {
+    Ok(Stdio::from(h.as_handle().try_clone_to_owned()?))
+}
 
 #[derive(Debug, ProvidesStaticType, Display, Trace, NoSerialize, Allocative)]
 #[display("<bazel.build.BuildStatus>")]
@@ -182,8 +229,8 @@ impl Build {
         workspace_events: bool,
         flags: Vec<String>,
         startup_flags: Vec<String>,
-        inherit_stdout: bool,
-        inherit_stderr: bool,
+        stdout: Stdio,
+        stderr: Stdio,
         current_dir: Option<String>,
         rt: AsyncRuntime,
     ) -> Result<Build, std::io::Error> {
@@ -280,17 +327,8 @@ impl Build {
 
         crate::trace!("exec: {:?}", cmd.get_args());
 
-        // TODO: if not inheriting, we should pipe and make the streams available to AXL
-        cmd.stdout(if inherit_stdout {
-            Stdio::inherit()
-        } else {
-            Stdio::null()
-        });
-        cmd.stderr(if inherit_stderr {
-            Stdio::inherit()
-        } else {
-            Stdio::null()
-        });
+        cmd.stdout(stdout);
+        cmd.stderr(stderr);
         cmd.stdin(Stdio::null());
 
         let child = cmd
@@ -586,7 +624,7 @@ def _impl(ctx):
     build = ctx.bazel.build(
         flags = ["--scenario=success"],
         build_events = True,
-        inherit_stderr = False,
+        stderr = None,
     )
     started = 0
     finished = 0
@@ -634,7 +672,7 @@ def _impl(ctx):
     build = ctx.bazel.build(
         flags = ["--scenario=cache_evicted_no_retry"],
         build_events = True,
-        inherit_stderr = False,
+        stderr = None,
     )
     for _ in build.build_events():
         pass
@@ -768,7 +806,7 @@ def _impl(ctx):
     build = ctx.bazel.build(
         flags = ["--scenario=success"],
         build_events = [sink],
-        inherit_stderr = False,
+        stderr = None,
     )
     status = build.wait()
     if not status.success: return 1
@@ -805,7 +843,7 @@ def _impl(ctx):
     build = ctx.bazel.build(
         flags = ["--scenario=success"],
         build_events = [sink],
-        inherit_stderr = False,
+        stderr = None,
     )
     status = build.wait()
     if status.success: return 1
@@ -845,7 +883,7 @@ def _impl(ctx):
     build = ctx.bazel.build(
         flags = ["--scenario=signal_killed_sigkill"],
         build_events = [sink],
-        inherit_stderr = False,
+        stderr = None,
     )
     status = build.wait()
     if status.success: return 1
@@ -882,7 +920,7 @@ def _impl(ctx):
     build = ctx.bazel.build(
         flags = ["--scenario=nonzero_exit"],
         build_events = [sink],
-        inherit_stderr = False,
+        stderr = None,
     )
     status = build.wait()
     if status.success: return 1

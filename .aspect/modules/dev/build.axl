@@ -8,7 +8,8 @@ def _build_impl(ctx: TaskContext) -> int:
     build = ctx.bazel.build(
         build_events = True,
         flags = ["--isatty=" + str(int(ctx.std.io.stdout.is_tty))],
-        inherit_stderr = False,
+        stdout = None,
+        stderr = None,
         *ctx.args.targets
     )
     return tui(ctx, build)

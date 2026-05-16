@@ -26,6 +26,7 @@ use starlark::starlark_simple_value;
 use starlark::values;
 use starlark::values::NoSerialize;
 use starlark::values::ProvidesStaticType;
+use starlark::values::UnpackValue;
 use starlark::values::ValueLike;
 use starlark::values::none::NoneType;
 use starlark::values::starlark_value;
@@ -46,6 +47,7 @@ pub enum Writable {
     ChildStdin(#[allocative(skip)] Arc<Mutex<RefCell<Option<ChildStdin>>>>),
     Stdout(#[allocative(skip)] Arc<Mutex<RefCell<Option<Stdout>>>>),
     Stderr(#[allocative(skip)] Arc<Mutex<RefCell<Option<Stderr>>>>),
+    File(#[allocative(skip)] Arc<Mutex<Option<std::fs::File>>>),
 }
 
 impl Display for Readable {
@@ -65,6 +67,7 @@ impl Display for Writable {
             Self::ChildStdin(_) => write!(f, "stream<child_stdin>"),
             Self::Stderr(_) => write!(f, "stream<stderr>"),
             Self::Stdout(_) => write!(f, "stream<stdout>"),
+            Self::File(_) => write!(f, "stream<file>"),
         }
     }
 }
@@ -102,6 +105,30 @@ impl From<Stdout> for Writable {
 impl From<Stderr> for Writable {
     fn from(stderr: Stderr) -> Self {
         Self::Stderr(Arc::new(Mutex::new(RefCell::new(Some(stderr)))))
+    }
+}
+
+impl From<std::fs::File> for Writable {
+    fn from(file: std::fs::File) -> Self {
+        Self::File(Arc::new(Mutex::new(Some(file))))
+    }
+}
+
+impl<'v> UnpackValue<'v> for Writable {
+    type Error = anyhow::Error;
+
+    fn unpack_value_impl(value: values::Value<'v>) -> Result<Option<Self>, Self::Error> {
+        let v = value.downcast_ref_err::<Writable>().into_anyhow_result()?;
+        Ok(Some(v.dupe()))
+    }
+}
+
+impl<'v> UnpackValue<'v> for Readable {
+    type Error = anyhow::Error;
+
+    fn unpack_value_impl(value: values::Value<'v>) -> Result<Option<Self>, Self::Error> {
+        let v = value.downcast_ref_err::<Readable>().into_anyhow_result()?;
+        Ok(Some(v.dupe()))
     }
 }
 
@@ -281,6 +308,7 @@ fn writable_methods(registry: &mut MethodsBuilder) {
                 let borrowed = guard.borrow();
                 borrowed.as_ref().map(|s| s.is_terminal()).unwrap_or(false)
             }
+            Writable::File(_) => false,
         })
     }
 
@@ -333,6 +361,14 @@ fn writable_methods(registry: &mut MethodsBuilder) {
                     .map(|f| f as u32)
                     .map_err(|err| anyhow!(err))
             }
+            Writable::File(file) => {
+                let mut guard = file.lock().unwrap();
+                let inner = guard.as_mut().ok_or_else(|| anyhow!("stream is closed"))?;
+                inner
+                    .write(data)
+                    .map(|f| f as u32)
+                    .map_err(|err| anyhow!(err))
+            }
         }
     }
 
@@ -360,6 +396,11 @@ fn writable_methods(registry: &mut MethodsBuilder) {
                 let mut borrowed = guard.borrow_mut();
                 if let Some(inner) = borrowed.as_mut() {
                     inner.lock().flush()?;
+                }
+            }
+            Writable::File(file) => {
+                if let Some(inner) = file.lock().unwrap().as_mut() {
+                    inner.flush()?;
                 }
             }
         };
@@ -392,6 +433,12 @@ fn writable_methods(registry: &mut MethodsBuilder) {
                     .lock()
                     .unwrap()
                     .borrow_mut()
+                    .take()
+                    .ok_or_else(|| anyhow!("stream is already closed"))?;
+            }
+            Writable::File(file) => {
+                file.lock()
+                    .unwrap()
                     .take()
                     .ok_or_else(|| anyhow!("stream is already closed"))?;
             }

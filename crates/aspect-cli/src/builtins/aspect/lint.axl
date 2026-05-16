@@ -892,8 +892,6 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     build = ctx.bazel.build(
         flags = flags,
         build_events = build_events,
-        inherit_stderr = True,
-        inherit_stdout = True,
         *ctx.args.targets
     )
 

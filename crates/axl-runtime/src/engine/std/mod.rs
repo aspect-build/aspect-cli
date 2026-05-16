@@ -18,7 +18,7 @@ use starlark::{
 
 mod env;
 mod fs;
-mod io;
+pub mod io;
 mod process;
 pub mod stream;
 

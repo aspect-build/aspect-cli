@@ -508,6 +508,18 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         let file = fs::File::open(path.as_str())?;
         Ok(stream::Readable::File(Arc::new(Mutex::new(file))))
     }
+
+    /// Creates (or truncates) a file for writing and returns it as a writable stream.
+    ///
+    /// Mirrors `std::fs::File::create` — the file is opened write-only and
+    /// truncated to zero length, or created if it does not exist.
+    fn create<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        #[starlark(require = pos)] path: values::StringValue,
+    ) -> anyhow::Result<stream::Writable> {
+        let file = fs::File::create(path.as_str())?;
+        Ok(stream::Writable::from(file))
+    }
 }
 
 fn marshal_metadata<'v>(m: &fs::Metadata, heap: Heap<'v>) -> Metadata<'v> {

@@ -27,8 +27,10 @@ use starlark::{
     values::starlark_value_as_type::StarlarkValueAsType,
 };
 
+use crate::engine::std::io::Stdio as StdStdio;
 use crate::engine::store::Env;
 use axl_proto;
+use axl_types::stream::Writable;
 
 mod build;
 mod cancel;
@@ -47,6 +49,36 @@ mod stream;
 /// it via `PATH`.
 pub(crate) fn bazel_binary() -> String {
     std::env::var("BAZEL_REAL").unwrap_or_else(|_| "bazel".to_string())
+}
+
+/// Resolve the `(stdout, stderr)` `Stdio` slots from the Starlark args.
+///
+/// Tri-state for each per-fd arg: not passed → inherit, Starlark `None` →
+/// `/dev/null`, `Writable` → fd-dup that handle into the child. The `stdio`
+/// shorthand sets both slots from a single `Stdio` bundle; combining it with
+/// per-fd `stdout`/`stderr` is an error so the resolution stays unambiguous.
+fn resolve_stdio(
+    stdio: NoneOr<StdStdio>,
+    stdout: Option<NoneOr<Writable>>,
+    stderr: Option<NoneOr<Writable>>,
+) -> anyhow::Result<(Stdio, Stdio)> {
+    if let NoneOr::Other(s) = stdio {
+        if stdout.is_some() || stderr.is_some() {
+            anyhow::bail!("stdio cannot be combined with stdout/stderr — pass one or the other");
+        }
+        return Ok((
+            build::writable_to_stdio(&s.stdout)?,
+            build::writable_to_stdio(&s.stderr)?,
+        ));
+    }
+    let to_stdio = |spec: Option<NoneOr<Writable>>| -> anyhow::Result<Stdio> {
+        match spec {
+            None => Ok(Stdio::inherit()),
+            Some(NoneOr::None) => Ok(Stdio::null()),
+            Some(NoneOr::Other(w)) => Ok(build::writable_to_stdio(&w)?),
+        }
+    };
+    Ok((to_stdio(stdout)?, to_stdio(stderr)?))
 }
 
 /// Resolve a mixed list of plain flags and conditional `(flag, constraint)` tuples into
@@ -178,8 +210,14 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///   or a list of `BuildEventSink` values to forward events to remote sinks.
     /// * `workspace_events` - Enable the workspace events stream.
     /// * `execution_logs` - Enable the execution logs stream.
-    /// * `inherit_stdout` - Inherit stdout from the parent process.
-    /// * `inherit_stderr` - Inherit stderr from the parent process. Defaults to `True`.
+    /// * `stdout` - Per-fd config for the child's stdout. Not passed →
+    ///   inherit the parent's stdout. `None` → discard (`/dev/null`). A
+    ///   `Writable` (e.g. `ctx.std.io.stderr`, `ctx.std.fs.create("out.log")`)
+    ///   → redirect the child's stdout into that handle (the fd is duplicated).
+    /// * `stderr` - Per-fd config for the child's stderr. Same shape as `stdout`.
+    /// * `stdio` - Shorthand: set both `stdout` and `stderr` from a single
+    ///   `Stdio` bundle (typically `ctx.std.io`). Cannot be combined with
+    ///   `stdout`/`stderr`.
     /// * `current_dir` - Working directory for the Bazel invocation.
     ///
     /// # Arguments
@@ -205,6 +243,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///         ("--notmp_sandbox", ">=8"),
     ///         ("--some_legacy_flag", "<7"),
     ///     ],
+    ///     stdout = None,                              # discard child stdout
+    ///     stderr = ctx.std.fs.create("bazel.err"),    # redirect stderr to a file
     /// )
     /// status = build.wait()
     /// ```
@@ -223,8 +263,9 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = UnpackList::default())] flags: UnpackList<
             Either<values::StringValue<'v>, (values::StringValue<'v>, values::StringValue<'v>)>,
         >,
-        #[starlark(require = named, default = false)] inherit_stdout: bool,
-        #[starlark(require = named, default = true)] inherit_stderr: bool,
+        #[starlark(require = named)] stdout: Option<NoneOr<Writable>>,
+        #[starlark(require = named)] stderr: Option<NoneOr<Writable>>,
+        #[starlark(require = named, default = NoneOr::None)] stdio: NoneOr<StdStdio>,
         #[starlark(require = named, default = NoneOr::None)] current_dir: NoneOr<String>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<build::Build> {
@@ -247,6 +288,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         let resolved_flags = resolve_flags(&flags.items, bazel_version.as_ref())?;
         let resolved_startup_flags = read_startup_flags(this)?;
         let env = Env::from_eval(eval)?;
+        let (stdout, stderr) = resolve_stdio(stdio, stdout, stderr)?;
         let build = build::Build::spawn(
             "build",
             targets.items.iter().map(|f| f.as_str().to_string()),
@@ -255,8 +297,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             workspace_events,
             resolved_flags,
             resolved_startup_flags,
-            inherit_stdout,
-            inherit_stderr,
+            stdout,
+            stderr,
             current_dir.into_option(),
             env.rt.clone(),
         )?;
@@ -281,8 +323,14 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///   or a list of `BuildEventSink` values to forward events to remote sinks.
     /// * `workspace_events` - Enable the workspace events stream.
     /// * `execution_logs` - Enable the execution logs stream.
-    /// * `inherit_stdout` - Inherit stdout from the parent process.
-    /// * `inherit_stderr` - Inherit stderr from the parent process. Defaults to `True`.
+    /// * `stdout` - Per-fd config for the child's stdout. Not passed →
+    ///   inherit the parent's stdout. `None` → discard (`/dev/null`). A
+    ///   `Writable` (e.g. `ctx.std.io.stderr`, `ctx.std.fs.create("out.log")`)
+    ///   → redirect the child's stdout into that handle (the fd is duplicated).
+    /// * `stderr` - Per-fd config for the child's stderr. Same shape as `stdout`.
+    /// * `stdio` - Shorthand: set both `stdout` and `stderr` from a single
+    ///   `Stdio` bundle (typically `ctx.std.io`). Cannot be combined with
+    ///   `stdout`/`stderr`.
     /// * `current_dir` - Working directory for the Bazel invocation.
     ///
     /// # Arguments
@@ -326,8 +374,9 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = UnpackList::default())] flags: UnpackList<
             Either<values::StringValue<'v>, (values::StringValue<'v>, values::StringValue<'v>)>,
         >,
-        #[starlark(require = named, default = false)] inherit_stdout: bool,
-        #[starlark(require = named, default = true)] inherit_stderr: bool,
+        #[starlark(require = named)] stdout: Option<NoneOr<Writable>>,
+        #[starlark(require = named)] stderr: Option<NoneOr<Writable>>,
+        #[starlark(require = named, default = NoneOr::None)] stdio: NoneOr<StdStdio>,
         #[starlark(require = named, default = NoneOr::None)] current_dir: NoneOr<String>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<build::Build> {
@@ -350,6 +399,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         let resolved_flags = resolve_flags(&flags.items, bazel_version.as_ref())?;
         let resolved_startup_flags = read_startup_flags(this)?;
         let env = Env::from_eval(eval)?;
+        let (stdout, stderr) = resolve_stdio(stdio, stdout, stderr)?;
         let test = build::Build::spawn(
             "test",
             targets.items.iter().map(|f| f.as_str().to_string()),
@@ -358,8 +408,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             workspace_events,
             resolved_flags,
             resolved_startup_flags,
-            inherit_stdout,
-            inherit_stderr,
+            stdout,
+            stderr,
             current_dir.into_option(),
             env.rt.clone(),
         )?;
