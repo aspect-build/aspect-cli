@@ -52,6 +52,7 @@ load(
     lint_chunk_annotations = "chunk_annotations",
     lint_compute_annotations = "compute_annotations",
 )
+load("../lib/tips.axl", "collect_tips_sorted")
 load("../lint.axl", "LintTrait")
 
 # Configures the GitHub status check output templates for a task.
@@ -239,10 +240,15 @@ def _github_status_checks(ctx: FeatureContext):
         _state["_github_token"] = token
 
         # Upgrade the CI link from the run page to the specific job
-        # page; falls back to the run URL if the App lacks actions:read.
+        # page; falls back to the run URL if neither token has
+        # actions:read. Job URL lookup doesn't need App attribution,
+        # so spare App quota when a job-scoped GITHUB_TOKEN is
+        # exported. The check-run token is reused as the App fallback
+        # so `_resolve_current_job_url` can retry on 4xx-auth.
         if ctx.std.env.var("GITHUB_ACTIONS"):
             run_id = ctx.std.env.var("GITHUB_RUN_ID") or ""
-            job_url = github.resolve_current_job_url(ctx, token, owner, repo, run_id)
+            read_token, app_fallback = github.preferred_token_pair(ctx, owner = owner, repo = repo, roles = ["actions.read"], existing_app_token = token)
+            job_url = github.resolve_current_job_url(ctx, read_token, owner, repo, run_id, app_fallback_token = app_fallback)
             if job_url:
                 _ci_links_base["ci_url"] = job_url
         _state["_ci_links"] = _ci_links_base
@@ -255,7 +261,7 @@ def _github_status_checks(ctx: FeatureContext):
             ctx,
             initial_renderer.init(),
             "running",
-            make_render_ctx(_state, default_targets = "//..."),
+            make_render_ctx(_state, default_targets = "//...", tips = collect_tips_sorted(ctx)),
             dict(_ci_links_base),
             gh_trait.templates,
             gh_trait.metadata_keys,
@@ -495,7 +501,7 @@ def _github_status_checks(ctx: FeatureContext):
             ctx,
             data,
             status,
-            make_render_ctx(_state, default_targets = "//..."),
+            make_render_ctx(_state, default_targets = "//...", tips = collect_tips_sorted(ctx)),
             _make_links(data),
             gh_trait.templates,
             gh_trait.metadata_keys,

@@ -9,20 +9,12 @@ load("./lib/bazel_runner.axl", "run_bazel_task")
 load("./lib/checkrun.axl", "GitHubCheckRunTrait")
 load("./lib/health_check.axl", "HealthCheckTrait")
 load("./lib/lifecycle.axl", "TaskLifecycleTrait")
+load("./lib/tips.axl", "TipsTrait")
 
 def _impl(ctx: TaskContext) -> int | TaskConclusion:
     return run_bazel_task(ctx, command = "test")
 
 test = task(
-    implementation = _impl,
-    traits = [
-        BazelTrait,
-        HealthCheckTrait,
-        TaskLifecycleTrait,
-        GitHubStatusChecksTrait,
-        GitHubCheckRunTrait,
-        ArtifactsTrait,
-    ],
     args = {
         # TODO: Support a long --pattern_file like bazel does (@./targets)
         # TODO: Support - (list from stdin)
@@ -61,4 +53,14 @@ test = task(
             description = "Bazel output base path. Use to target a specific Bazel server instance — distinct paths run independent JVMs and cache contents.",
         ),
     },
+    traits = [
+        ArtifactsTrait,
+        BazelTrait,
+        GitHubCheckRunTrait,
+        GitHubStatusChecksTrait,
+        HealthCheckTrait,
+        TaskLifecycleTrait,
+        TipsTrait,
+    ],
+    implementation = _impl,
 )

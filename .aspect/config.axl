@@ -11,8 +11,8 @@ load("@aspect//lib/github_detect_test.axl", "github_detect_tests")
 load("@aspect//lib/gitlab_detect_test.axl", "gitlab_detect_tests")
 load("@aspect//lib/gitlab_test.axl", "gitlab_client_tests")
 load("@aspect//lib/lint_results_test.axl", "lint_template_snapshot_tests")
-load("@aspect//lint.axl", "LintTrait")
-load("@aspect//traits.axl", "BazelTrait")
+load("@aspect//lib/tips_test.axl", "tips_tests")
+load("@aspect//traits.axl", "BazelTrait", "LintTrait", "TipsTrait")
 load("./lambda.axl", "lambda_with_global_bind")
 
 def _user_task_impl(ctx: TaskContext) -> int:
@@ -64,7 +64,10 @@ def config(ctx: ConfigContext):
     ctx.features[ArtifactUpload].args.upload_profile = True
     ctx.features[ArtifactUpload].args.upload_bep = True
 
-    # add a new task
+    # Silence tips
+    ctx.traits[TipsTrait].silenced_tips = []
+
+    # Add a new task
     ctx.tasks.add(_user_task)
 
     # Template snapshot tests — renders bazel_results templates across failure modes.
@@ -88,6 +91,12 @@ def config(ctx: ConfigContext):
     # Lint template snapshot tests — renders lint_results templates.
     # Run with: aspect dev test-lint-template-snapshots
     ctx.tasks.add(lint_template_snapshot_tests)
+
+    # Tips framework primitives — add_tip / emit_tip / collect_tips_sorted,
+    # severity helpers, blockquote_body, task_keys glob filtering,
+    # silenced_tips short-circuit, and built-in template shape.
+    # Run with: aspect dev test-tips
+    ctx.tasks.add(tips_tests)
 
     # Delivery template snapshot tests — renders delivery_results templates.
     # Run with: aspect dev test-delivery-template-snapshots
@@ -137,7 +146,7 @@ def config(ctx: ConfigContext):
         "--build_metadata=ASPECT_WORKFLOWS_LINKS=[Docs](https://docs.aspect.build),[Website](https://aspect.build/)",
     ])
 
-    # configure user_task's attrs by path (group/name).
+    # Configure user_task's attrs by path (group/name).
     t = ctx.tasks["user/nested/user-task"]
     t.args.message = "hello axl"
     t.args.run_count = 2

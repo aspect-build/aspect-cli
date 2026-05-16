@@ -33,6 +33,7 @@ load("./lib/repro_commands.axl", "build_aspect_command", "task_cli_path")
 load("./lib/sarif.axl", "get_sarif_summary", "parse_sarif", "parse_sarif_diagnostics")
 load("./lib/tar.axl", "tar_create")
 load("./lib/text.axl", "pluralize")
+load("./lib/tips.axl", "TipsTrait")
 
 # bb_clientd FUSE mount root for resolving bytestream:// URIs on Aspect Workflows runners.
 _BB_CLIENTD_ROOT = "/mnt/ephemeral/buildbarn/bb_clientd"
@@ -1204,8 +1205,6 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     )
 
 lint = task(
-    implementation = _impl,
-    traits = [LintTrait, BazelTrait, HealthCheckTrait, TaskLifecycleTrait, GitHubCheckRunTrait],
     args = {
         "aspects": args.string_list(
             long = "aspect",
@@ -1256,4 +1255,13 @@ lint = task(
             description = "Bazel target patterns to lint. Defaults to '...' which expands to all rule targets in the package at and beneath the current directory. Pass multiple patterns to combine includes and excludes; when any pattern is hyphen-led, separate them from flags with `--` (e.g. `aspect lint -- //... -//experimental/...`).",
         ),
     },
+    traits = [
+        BazelTrait,
+        GitHubCheckRunTrait,
+        HealthCheckTrait,
+        LintTrait,
+        TaskLifecycleTrait,
+        TipsTrait,
+    ],
+    implementation = _impl,
 )

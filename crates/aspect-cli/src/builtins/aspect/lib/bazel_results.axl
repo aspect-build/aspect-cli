@@ -55,6 +55,7 @@ load(
 load("./path_glob.axl", "match_path")
 load("./result_text.axl", "emoji_for_status")
 load("./text.axl", "format_int_comma", "pluralize")
+load("./tips.axl", "decorate_tip")
 
 # Max number of unique failed build target labels to track detail for. Entries
 # are small (label + deduped mnemonic list) so this can be generous.
@@ -2884,12 +2885,27 @@ def build_invocation_rows(ctx, data, render_ctx, status, links = None, run_date 
             rows.append(row)
     return rows
 
+# Shared `## 💡 Tips`-equivalent block for surface templates: one
+# Markdown blockquote per tip, header line is severity-emoji +
+# severity-label + title, body has `> ` line prefixes baked in by
+# `decorate_tip`, optional silence-hint footer (blank for critical
+# tips). Each surface template splices this in so lint / format /
+# gazelle / delivery / bazel-results stay consistent.
+TIPS_BLOCK = """{% if tips %}{% for tip in tips %}
+
+> {{ tip.severity_emoji }} **{{ tip.severity_label }}:** {{ tip.title }}
+>
+{{ tip.body_quoted }}{% if tip.silence_hint %}
+>
+> {{ tip.silence_hint }}{% endif %}
+{% endfor %}{% endif %}"""
+
 SUMMARY_TEMPLATE = """{% if detail_rows %}{% for row in detail_rows %}
 {% for item in row %}{{ item.icon }} {{ item.value }}{% if not loop.last %} · {% endif %}{% endfor %}{% if not loop.last %}  {% endif %}
 {%- endfor %}{% endif %}
 {% if config_items %}
 :gear: {% for item in config_items %}**{{ item.key }}:** `{{ item.value }}`{% if not loop.last %} · {% endif %}{% endfor %}{% if last_update %}  {% endif %}{% endif %}{% if last_update %}
-:speech_balloon: **Last update:** `{{ last_update }}`{% endif %}"""
+:speech_balloon: **Last update:** `{{ last_update }}`{% endif %}""" + TIPS_BLOCK
 
 # `REPRO_COMMANDS_BLOCK` and `FIX_COMMANDS_BLOCK` are reusable
 # Jinja snippets each task's details template can splice in where
@@ -3381,6 +3397,7 @@ def build_summary_data(ctx, data, status, render_ctx, links, metadata_keys, run_
         "short_sha": sha[:7] if sha else "",
         "commit_msg": html_escape(commit_msg),
         "detail_rows": build_invocation_rows(ctx, data, render_ctx, status, links = links, run_date = run_date, extra_meta = extra_meta),
+        "tips": [decorate_tip(t) for t in (render_ctx.get("tips") if render_ctx else None) or []],
     }
 
 def build_kv_rows(kv):

@@ -32,6 +32,7 @@ load("./lib/path_glob.axl", "match_any")
 load("./lib/repro_commands.axl", "build_aspect_command", "task_cli_path")
 load("./lib/runnable.axl", "runnable")
 load("./lib/text.axl", "pluralize")
+load("./lib/tips.axl", "TipsTrait")
 
 def _git_capture(ctx, *args):
     """Run `git <args>` and return (stdout, exit_code, stderr).
@@ -703,8 +704,6 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     return _emit_final(ctx, lifecycle, data, 0)
 
 format = task(
-    implementation = _impl,
-    traits = [BazelTrait, ArtifactsTrait, HealthCheckTrait, TaskLifecycleTrait, GitHubCheckRunTrait],
     args = {
         "scope": args.string(
             default = "changed",
@@ -764,4 +763,13 @@ format = task(
             minimum = 0,
         ),
     },
+    traits = [
+        ArtifactsTrait,
+        BazelTrait,
+        GitHubCheckRunTrait,
+        HealthCheckTrait,
+        TaskLifecycleTrait,
+        TipsTrait,
+    ],
+    implementation = _impl,
 )

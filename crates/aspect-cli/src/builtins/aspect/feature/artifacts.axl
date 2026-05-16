@@ -361,7 +361,7 @@ def _artifact_upload_impl(ctx: FeatureContext):
 
     def _on_build_end(ctx, exit_code):
         if not is_local:
-            reason = uploader.check(ctx.std.env)
+            reason = uploader.check(ctx)
             if reason:
                 info(ctx.std, "Artifact upload skipped: " + reason)
             else:

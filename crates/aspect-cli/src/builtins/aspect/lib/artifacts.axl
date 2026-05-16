@@ -347,10 +347,12 @@ def create_uploader(env):
     else:
         return None
 
-    def check(env):
-        """Return a warning message if the uploader is misconfigured, else None."""
+    def check(ctx):
+        """Return a warning message if the uploader is misconfigured,
+        else None. `check_token` may emit a tip on the missing-token
+        branch, so we forward `ctx` (not just `ctx.std.env`)."""
         if ci == "github":
-            return github.check_token(env)
+            return github.check_token(ctx)
         return None
 
     def upload_file(ctx, path, name):

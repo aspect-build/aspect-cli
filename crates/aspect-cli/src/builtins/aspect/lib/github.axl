@@ -22,6 +22,13 @@ load("./environment.axl", "color_enabled", "warn")
 load("./gitlab_detect.axl", "detect_gitlab_mr_base_sha")
 load("./tar.axl", "zip_create")
 load("./text.axl", "pluralize")
+load(
+    "./tips.axl",
+    "TIP_ADD_GITHUB_TOKEN",
+    "TIP_ADD_GITHUB_TOKEN_SCOPE",
+    "TIP_ADD_ID_TOKEN_PERMISSION",
+    "emit_tip",
+)
 
 DEFAULT_GITHUB_API = "https://api.github.com"
 
@@ -122,15 +129,20 @@ def _do_request_once(ctx, method, url, token, payload = None):
 # the resource (extra check-runs, duplicate PR comments, etc.).
 _IDEMPOTENT_METHODS = ["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
 
-def _do_request(ctx, method, url, token, payload = None):
+def _do_request(ctx, method, url, token, payload = None, quiet_4xx_auth = False):
     """Single HTTP call, retried on transient failures for idempotent
-    methods. POST runs exactly once. Returns `(success, status, body)`."""
+    methods. POST runs exactly once. Returns `(success, status, body)`.
+
+    `quiet_4xx_auth=True` suppresses the failure log on 4xx-auth
+    statuses (401 / 403 / 404). Use at call sites that have a token
+    fallback ready — the warn would describe a failure that's about
+    to be transparently retried with the App token."""
     if method in _IDEMPOTENT_METHODS:
         success, status, body, attempts = _retry_http(lambda: _do_request_once(ctx, method, url, token, payload))
     else:
         success, status, body = _do_request_once(ctx, method, url, token, payload)
         attempts = 1
-    if not success:
+    if not success and not (quiet_4xx_auth and _is_4xx_auth(status)):
         _warn_http_failure(ctx, "GitHub API %s %s" % (method, url), attempts, status, body)
     return (success, status, body)
 
@@ -162,6 +174,76 @@ def _missing_credentials_reason(ctx):
     else:
         msg = "not logged in — run `aspect auth login`"
     return msg + ". Setup guide: " + setup_url
+
+def _is_4xx_auth(status_code):
+    """True for HTTP statuses signaling "token lacks permission to call
+    this endpoint": 401 (unauthenticated), 403 (forbidden), 404
+    (some GitHub endpoints return 404 instead of 403 when the token
+    can't see the resource)."""
+    return status_code in (401, 403, 404)
+
+def _emit_gha_tip(ctx, template, **kwargs):
+    """Emit a tip that only makes sense on GitHub Actions (every
+    built-in tip in this module recommends GHA-specific workflow YAML).
+    Gated on `GITHUB_ACTIONS` env + `hasattr(ctx, "traits")` so test
+    stubs without the traits map don't crash. Dedup-by-id inside
+    `add_tip` keeps the tip to one fire per task across multiple call
+    sites."""
+    if not hasattr(ctx, "traits"):
+        return
+    if not ctx.std.env.var("GITHUB_ACTIONS"):
+        return
+    emit_tip(ctx, template, **kwargs)
+
+def _preferred_token_pair(ctx, owner, repo, profile = None, roles = None, existing_app_token = None, _reason = None):
+    """Resolve `(primary_token, app_fallback_token)` for supporting
+    GitHub API calls, preferring the job-scoped `GITHUB_TOKEN` /
+    `GH_TOKEN` from env over the Aspect GitHub App's installation
+    token.
+
+    Use for API calls that don't need to attribute to the Aspect App
+    (job URL lookup, PR file diff, PR comment listing, artifact
+    downloads). Calls authenticated via the job-scoped env token
+    count against the *job's* token budget rather than the Aspect
+    App's shared installation-token quota (5,000 req/hr). The App
+    token comes back in the fallback slot so the caller can retry
+    on a 4xx-auth (workflow forgot to grant the scope).
+
+    Result shape:
+      - env exported: `(env_token, app_token)` — the API helper
+        retries with the App token on 4xx-auth and emits the
+        `add-github-token-scope` tip (accumulating the missing
+        scope and endpoint).
+      - env unset:    `(app_token, None)` — no fallback (and none
+        needed).
+      - auth failed:  `(None, None)` with `_reason` populated as for
+        `_authenticate`.
+
+    Pass `existing_app_token` when the caller already minted an App
+    token earlier in the same handler to avoid a redundant mint.
+
+    For calls that MUST attribute to the App (check-runs, PR / issue
+    comment create / update), call `_authenticate` directly.
+    """
+    env = ctx.std.env
+    env_token = env.var("GITHUB_TOKEN") or env.var("GH_TOKEN") or ""
+    app_token = existing_app_token if existing_app_token else _authenticate(
+        ctx,
+        owner = owner,
+        repo = repo,
+        profile = profile,
+        roles = roles,
+        _reason = _reason,
+    )
+    if env_token:
+        return env_token, app_token
+
+    # env unset — suggest setting it, but only when we have a viable App
+    # token to fall back to. Firing alongside an Aspect auth-failure warn
+    # would be misleading (the suggestion isn't what'd fix the auth error).
+    if app_token:
+        _emit_gha_tip(ctx, TIP_ADD_GITHUB_TOKEN)
+    return app_token, None
 
 def _authenticate(ctx, owner, repo, profile = None, roles = None, _reason = None):
     """Resolve a GitHub token by exchanging Aspect credentials via the Aspect
@@ -440,9 +522,9 @@ def detect_build_url(ctx):
         run_url = server + "/" + repository + "/actions/runs/" + run_id
         owner, repo = detect_github_repo(ctx.std)
         if owner and repo:
-            token = _authenticate(ctx, owner = owner, repo = repo, roles = ["actions.read"])
+            token, app_fallback = _preferred_token_pair(ctx, owner, repo, roles = ["actions.read"])
             if token:
-                job_url = _resolve_current_job_url(ctx, token, owner, repo, run_id)
+                job_url = _resolve_current_job_url(ctx, token, owner, repo, run_id, app_fallback_token = app_fallback)
                 if job_url:
                     return job_url
         return run_url
@@ -747,6 +829,7 @@ def _try_local_git_diff_from_base_sha(ctx, line_level, base_sha):
     explicit `merge_base`, `merge_group` event, merge-commit-first, and
     the general `_resolve_merge_base` resolution against `base_ref`.
     """
+
     process = ctx.std.process
     cwd = ctx.std.env.current_dir()
 
@@ -1014,7 +1097,7 @@ def detect_changed_files(ctx, line_level = True, base_ref = "", merge_base = Non
     pr, _ = detect_github_pr(ctx.std)
     if pr:
         auth_reason = {}
-        token = _authenticate(ctx, owner = pr["owner"], repo = pr["repo"], roles = ["prs.read"], _reason = auth_reason)
+        token, app_fallback = _preferred_token_pair(ctx, pr["owner"], pr["repo"], roles = ["prs.read"], _reason = auth_reason)
         if not token:
             warn(ctx.std, "%s and the GitHub PR Files API fallback can't authenticate (%s). Degrading to --scope=all." % (
                 _local_diff_exhausted_prefix(diff_base_source),
@@ -1025,7 +1108,7 @@ def detect_changed_files(ctx, line_level = True, base_ref = "", merge_base = Non
                 _local_diff_exhausted_prefix(diff_base_source),
                 base_ref[len("origin/"):] if base_ref.startswith("origin/") else base_ref,
             ))
-            result = list_pull_request_files(ctx, token, pr["owner"], pr["repo"], pr["pr_number"])
+            result = list_pull_request_files(ctx, token, pr["owner"], pr["repo"], pr["pr_number"], app_fallback_token = app_fallback)
             if result["success"]:
                 # `git rev-parse --show-prefix` strips the workspace prefix so
                 # GitHub-API paths line up with local relative paths.
@@ -1498,34 +1581,14 @@ def _decode_backend_ids(ctx, token):
 
     return (None, None)
 
-_MISSING_TOKEN_MSG = """missing ACTIONS_RUNTIME_TOKEN
-
-GitHub Actions does not inject ACTIONS_RUNTIME_TOKEN into shell (run:) steps.
-To make it available, use one of the following options:
-
-  Option 1 — permissions: id-token: write  (zero config, recommended)
-    Add to your workflow job or at the top level:
-
-      permissions:
-        id-token: write
-
-    This makes ACTIONS_ID_TOKEN_REQUEST_TOKEN available in shell steps.
-    It is the same credential as ACTIONS_RUNTIME_TOKEN and is accepted
-    by the artifact API.
-
-  Option 2 — pass the token via env: on the step that calls aspect:
-
-      - run: aspect build //...
-        env:
-          ACTIONS_RUNTIME_TOKEN: ${{ secrets.ACTIONS_RUNTIME_TOKEN }}
-
-  Option 3 — set at the job level so all steps in the job receive it:
-
-      jobs:
-        build:
-          env:
-            ACTIONS_RUNTIME_TOKEN: ${{ secrets.ACTIONS_RUNTIME_TOKEN }}
-"""
+# Short error string returned from artifact-upload paths when neither
+# `ACTIONS_RUNTIME_TOKEN` nor `ACTIONS_ID_TOKEN_REQUEST_TOKEN` is
+# available. The full actionable guidance (workflow snippet, why this
+# happens, how to fix) lives in `TIP_ADD_ID_TOKEN_PERMISSION` so the
+# tip framework can surface it on the terminal + check-run summary +
+# PR comment — we don't need to repeat it inline on every failure
+# log line. The tip is auto-fired from the same use sites.
+_MISSING_TOKEN_MSG = "missing ACTIONS_RUNTIME_TOKEN (see the `add-id-token-permission` TIP)"
 
 def _github_twirp_once(ctx, url, headers, payload):
     """Single Twirp attempt. Returns `(success, status, body_or_None)`
@@ -1561,6 +1624,7 @@ def _github_twirp(ctx, method, payload):
     results_url = (ctx.std.env.var("ACTIONS_RESULTS_URL") or
                    "https://results-receiver.actions.githubusercontent.com/")
     if not token:
+        _emit_gha_tip(ctx, TIP_ADD_ID_TOKEN_PERMISSION)
         return (False, None, _MISSING_TOKEN_MSG)
 
     if results_url.endswith("/"):
@@ -1612,6 +1676,7 @@ def _upload_artifact(ctx, path, name, expires_at = ""):
     token = (ctx.std.env.var("ACTIONS_RUNTIME_TOKEN") or
              ctx.std.env.var("ACTIONS_ID_TOKEN_REQUEST_TOKEN"))
     if not token:
+        _emit_gha_tip(ctx, TIP_ADD_ID_TOKEN_PERMISSION)
         return {"success": False, "artifact_ref": None, "download_url": "", "errors": [_MISSING_TOKEN_MSG]}
 
     run_id, job_id = _decode_backend_ids(ctx, token)
@@ -1730,14 +1795,19 @@ def _delete_artifact(ctx, name):
     })
     return {"success": ok}
 
-def _check_token(env):
-    """Return an info message if the artifact token is unavailable, else None."""
+def _check_token(ctx):
+    """Return a short info message if the artifact token is unavailable,
+    else None. Fires `TIP_ADD_ID_TOKEN_PERMISSION` on the missing-token
+    branch — the tip carries the actionable workflow snippet, so the
+    return value just needs to identify the failure mode."""
+    env = ctx.std.env
     token = env.var("ACTIONS_RUNTIME_TOKEN") or env.var("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
     if not token:
+        _emit_gha_tip(ctx, TIP_ADD_ID_TOKEN_PERMISSION)
         return _MISSING_TOKEN_MSG
     return None
 
-def _resolve_current_job_url(ctx, token, owner, repo, run_id, api_base = DEFAULT_GITHUB_API):
+def _resolve_current_job_url(ctx, token, owner, repo, run_id, app_fallback_token = None, api_base = DEFAULT_GITHUB_API):
     """Resolve the html_url of the currently running GitHub Actions job.
 
     Returns a URL of the form
@@ -1748,6 +1818,22 @@ def _resolve_current_job_url(ctx, token, owner, repo, run_id, api_base = DEFAULT
     by RUNNER_NAME + status=in_progress (most reliable: one job per runner).
     The caller must supply a token with actions:read scope (e.g. an Aspect App
     token obtained via `github.authenticate(..., roles=["actions.read"])`).
+
+    When `app_fallback_token` is supplied AND the primary `token` returns
+    a 4xx-auth status (401 / 403 / 404), retries with the App token and
+    accumulates `actions: read` into the `add-github-token-scope` tip.
+    Lets callers prefer a job-scoped `GITHUB_TOKEN` for the call while
+    still falling back to the App token if the workflow forgot to grant
+    `actions: read` in its `permissions:` block.
+
+    GitHub's docs list `actions: read` as required for the underlying
+    `GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs` endpoint, but
+    in practice GitHub grants `GITHUB_TOKEN` implicit access to its own
+    workflow run's metadata regardless of the `permissions:` block. So
+    the fallback + scope-tip path is dormant on a normally-configured
+    workflow — the wiring stays in place to handle the case where
+    GitHub tightens this implicit access, or where a caller queries a
+    workflow run other than the current one (no current call site does).
     """
     if not token or not owner or not repo or not run_id:
         return ""
@@ -1759,7 +1845,14 @@ def _resolve_current_job_url(ctx, token, owner, repo, run_id, api_base = DEFAULT
     url = api_base + "/repos/" + owner + "/" + repo + "/actions/runs/" + run_id + "/jobs?per_page=100"
     if attempt:
         url = url + "&attempt_number=" + attempt
-    success, _, body = _do_request(ctx, "GET", url, token)
+    has_fallback = app_fallback_token and app_fallback_token != token
+    success, status_code, body = _do_request(ctx, "GET", url, token, quiet_4xx_auth = has_fallback)
+    if (not success) and has_fallback and _is_4xx_auth(status_code):
+        _emit_gha_tip(ctx, TIP_ADD_GITHUB_TOKEN_SCOPE, accumulators = {
+            "scopes": "actions: read",
+            "endpoints": "GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs",
+        })
+        success, status_code, body = _do_request(ctx, "GET", url, app_fallback_token)
     if not success or type(body) != "dict":
         return ""
     jobs = body.get("jobs", []) or []
@@ -1781,21 +1874,46 @@ def _resolve_current_job_url(ctx, token, owner, repo, run_id, api_base = DEFAULT
 
 # Pull Request Reviews
 
-def list_pull_request_files(ctx, token, owner, repo, pull_number, api_base = DEFAULT_GITHUB_API):
+def list_pull_request_files(ctx, token, owner, repo, pull_number, app_fallback_token = None, api_base = DEFAULT_GITHUB_API):
     """List all files changed in a pull request, paginated.
 
     GitHub returns up to 100 files per page; PRs can carry up to 3000
     (the API caps there). We page through with `?per_page=100&page=N`
     and stop when a page returns fewer than 100 entries — no Link-header
     parsing needed. The 30-page safety cap matches GitHub's hard limit.
+
+    When `app_fallback_token` is supplied AND the primary `token` returns
+    a 4xx-auth status on the first page, retries with the App token and
+    accumulates `pull-requests: read` into the `add-github-token-scope`
+    tip. The fallback only triggers on page 1 — if pagination starts
+    succeeding and then 4xx-auths mid-stream the token is fine and
+    something else broke (timeout, rate limit, …).
+
+    GitHub's docs list `pull-requests: read` as required for the
+    underlying `GET /repos/{owner}/{repo}/pulls/{pull_number}/files`
+    endpoint, but in practice GitHub grants `GITHUB_TOKEN` implicit
+    access to the PR that triggered the workflow regardless of the
+    `permissions:` block. The fallback + scope-tip path is dormant for
+    own-PR queries; the wiring stays in place to handle cases where
+    GitHub tightens the implicit access (or where a caller queries a
+    PR other than the trigger PR — no current call site does).
     """
     base_url = api_base + "/repos/" + owner + "/" + repo + "/pulls/" + str(pull_number) + "/files"
     per_page = 100
     max_pages = 30
     all_files = []
+    active_token = token
     for page in range(1, max_pages + 1):
         url = base_url + "?per_page=" + str(per_page) + "&page=" + str(page)
-        success, status_code, body = _do_request(ctx, "GET", url, token)
+        has_fallback = page == 1 and app_fallback_token and app_fallback_token != token
+        success, status_code, body = _do_request(ctx, "GET", url, active_token, quiet_4xx_auth = has_fallback)
+        if (not success) and has_fallback and _is_4xx_auth(status_code):
+            _emit_gha_tip(ctx, TIP_ADD_GITHUB_TOKEN_SCOPE, accumulators = {
+                "scopes": "pull-requests: read",
+                "endpoints": "GET /repos/{owner}/{repo}/pulls/{pull_number}/files",
+            })
+            active_token = app_fallback_token
+            success, status_code, body = _do_request(ctx, "GET", url, active_token)
         if not success:
             return {"success": False, "error": "request failed (page %d): %s" % (page, str(status_code))}
         if type(body) != "list":
@@ -1885,6 +2003,7 @@ def delete_review_comment(ctx, token, owner, repo, comment_id, api_base = DEFAUL
 github = struct(
     VALID_ROLES = VALID_ROLES,
     authenticate = _authenticate,
+    preferred_token_pair = _preferred_token_pair,
     missing_credentials_reason = _missing_credentials_reason,
     validate_role = validate_role,
     check_token = _check_token,

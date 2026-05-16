@@ -1,0 +1,614 @@
+"""Tests for `lib/tips.axl`.
+
+Covers the tip framework primitives directly:
+  - `add_tip` — fully-rendered emission + dedup-by-id + severity guard
+                + `silenced_tips` short-circuit.
+  - `emit_tip` — template render + vars interpolation + id_suffix +
+                 type validation + task_keys propagation + silence.
+  - `collect_tips_sorted` — severity ordering, insertion-order stability,
+                            task_keys glob filter, limit.
+  - `severity_emoji`, `severity_label`.
+  - `blockquote_body` — the line-prefix transform applied to tip bodies
+                        so they render as Markdown blockquotes.
+  - `strip_code_fences` — fence-line strip used by the terminal
+                            `TIP:` printer.
+  - `TipsTrait.auto_print` — `add_tip` reads this to gate its terminal
+                              print; tests pin it `False`.
+
+These tests need a real `ctx` (the trait map lives on it). The test
+task registers `TipsTrait` so `ctx.traits[TipsTrait]` resolves.
+
+Run with:
+  aspect dev test-tips
+"""
+
+load(
+    "./tips.axl",
+    "TIP_ADD_GITHUB_TOKEN",
+    "TIP_ADD_GITHUB_TOKEN_SCOPE",
+    "TIP_ADD_ID_TOKEN_PERMISSION",
+    "TIP_CRITICAL",
+    "TIP_INFO",
+    "TIP_SUGGESTION",
+    "TIP_TEMPLATE_FORMAT",
+    "TIP_TEMPLATE_JINJA2",
+    "TIP_TEMPLATE_RAW",
+    "TIP_WARNING",
+    "TipsTrait",
+    "add_tip",
+    "blockquote_body",
+    "collect_tips_sorted",
+    "decorate_tip",
+    "emit_tip",
+    "severity_emoji",
+    "severity_label",
+    "severity_rank",
+    "silence_hint_line",
+    "strip_code_fences",
+    "tip_to_payload",
+)
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _reset(ctx):
+    """Clear the TipsTrait between subtests so each section runs from
+    a known-empty state. The trait persists across the whole `_test_impl`
+    invocation otherwise. Also pin `auto_print = False` so the
+    `add_tip` terminal print doesn't drown out the test-runner output."""
+    ctx.traits[TipsTrait].tips = []
+    ctx.traits[TipsTrait].silenced_tips = []
+    ctx.traits[TipsTrait].auto_print = False
+
+def _ids(tips):
+    """Project to id strings — most assertions only care about which
+    tips made it through, in what order."""
+    return [t.get("id") for t in tips]
+
+def _test_add_tip_basic(ctx):
+    _reset(ctx)
+    add_tip(ctx, id = "a", severity = TIP_INFO, title = "T", body = "B")
+    add_tip(ctx, id = "b", severity = TIP_WARNING, title = "T", body = "B")
+    _eq("add_tip basic — count", len(ctx.traits[TipsTrait].tips), 2)
+    _eq("add_tip basic — ids in insertion order", _ids(ctx.traits[TipsTrait].tips), ["a", "b"])
+
+def _test_add_tip_dedup(ctx):
+    _reset(ctx)
+    add_tip(ctx, id = "a", severity = TIP_INFO, title = "first", body = "first body")
+    add_tip(ctx, id = "a", severity = TIP_WARNING, title = "second", body = "second body")
+    tips = ctx.traits[TipsTrait].tips
+    _eq("dedup — count is 1", len(tips), 1)
+    _eq("dedup — first add wins (title)", tips[0]["title"], "first")
+    _eq("dedup — first add wins (severity)", tips[0]["severity"], TIP_INFO)
+
+def _test_silenced_tips_short_circuits_add_tip(ctx):
+    _reset(ctx)
+    ctx.traits[TipsTrait].silenced_tips = ["noisy", "also-noisy"]
+    add_tip(ctx, id = "noisy", severity = TIP_INFO, title = "T", body = "B")
+    add_tip(ctx, id = "also-noisy", severity = TIP_WARNING, title = "T", body = "B")
+    add_tip(ctx, id = "keep-me", severity = TIP_INFO, title = "T", body = "B")
+    _eq(
+        "silenced — only non-silenced ids survive",
+        _ids(ctx.traits[TipsTrait].tips),
+        ["keep-me"],
+    )
+
+def _test_silenced_tips_blocks_emit_tip(ctx):
+    _reset(ctx)
+    ctx.traits[TipsTrait].silenced_tips = ["add-github-token"]
+    emit_tip(ctx, TIP_ADD_GITHUB_TOKEN)
+    _eq(
+        "silenced — emit_tip respects silence list",
+        ctx.traits[TipsTrait].tips,
+        [],
+    )
+
+def _test_critical_tips_cannot_be_silenced(ctx):
+    """Critical tips ignore `silenced_tips` — they signal a key-feature
+    breakage and must always reach the user. Verified both via direct
+    `add_tip` and via `emit_tip` against a built-in critical template."""
+    _reset(ctx)
+    ctx.traits[TipsTrait].silenced_tips = ["unsuppressable", "add-id-token-permission"]
+    add_tip(ctx, id = "unsuppressable", severity = TIP_CRITICAL, title = "T", body = "B")
+    emit_tip(ctx, TIP_ADD_ID_TOKEN_PERMISSION)
+    _eq(
+        "critical — silence list ignored",
+        _ids(ctx.traits[TipsTrait].tips),
+        ["unsuppressable", "add-id-token-permission"],
+    )
+
+def _test_add_tip_task_keys_stored(ctx):
+    _reset(ctx)
+    add_tip(ctx, id = "a", severity = TIP_INFO, title = "T", body = "B", task_keys = ["lint-*", "format-*"])
+    add_tip(ctx, id = "b", severity = TIP_INFO, title = "T", body = "B")
+    tips = ctx.traits[TipsTrait].tips
+    _eq("task_keys stored", tips[0]["task_keys"], ["lint-*", "format-*"])
+    _eq("task_keys default — empty list when None", tips[1]["task_keys"], [])
+
+def _test_emit_tip_format(ctx):
+    _reset(ctx)
+    template = {
+        "id": "scope-missing",
+        "severity": TIP_WARNING,
+        "title": "Token lacks `{scope}` scope",
+        "body": "Endpoint {endpoint} returned 403.",
+        "type": TIP_TEMPLATE_FORMAT,
+    }
+    emit_tip(ctx, template, vars = {"scope": "actions: read", "endpoint": "/runs/jobs"})
+    tip = ctx.traits[TipsTrait].tips[0]
+    _eq("format — title interpolated", tip["title"], "Token lacks `actions: read` scope")
+    _eq("format — body interpolated", tip["body"], "Endpoint /runs/jobs returned 403.")
+
+def _test_emit_tip_raw_skips_interpolation(ctx):
+    _reset(ctx)
+    template = {
+        "id": "raw-tip",
+        "severity": TIP_INFO,
+        "title": "Title with {literal} braces",
+        "body": "Body with {curly} braces",
+        "type": TIP_TEMPLATE_RAW,
+    }
+    emit_tip(ctx, template, vars = {"literal": "shouldn't be touched"})
+    tip = ctx.traits[TipsTrait].tips[0]
+    _eq("raw — title untouched", tip["title"], "Title with {literal} braces")
+    _eq("raw — body untouched", tip["body"], "Body with {curly} braces")
+
+def _test_emit_tip_default_type_is_format(ctx):
+    _reset(ctx)
+    template = {
+        "id": "default-type",
+        "severity": TIP_INFO,
+        "title": "Hello {name}",
+        "body": "B",
+        # no `type` field — should default to TIP_TEMPLATE_FORMAT.
+    }
+    emit_tip(ctx, template, vars = {"name": "world"})
+    _eq("default type — interpolated as FORMAT", ctx.traits[TipsTrait].tips[0]["title"], "Hello world")
+
+def _test_emit_tip_id_suffix(ctx):
+    _reset(ctx)
+    template = {
+        "id": "base",
+        "severity": TIP_INFO,
+        "title": "T",
+        "body": "B",
+        "type": TIP_TEMPLATE_RAW,
+    }
+    emit_tip(ctx, template)
+    emit_tip(ctx, template, id_suffix = "variant-a")
+    emit_tip(ctx, template, id_suffix = "variant-b")
+    _eq("id_suffix — distinct ids", _ids(ctx.traits[TipsTrait].tips), ["base", "base-variant-a", "base-variant-b"])
+
+def _test_emit_tip_task_keys_override(ctx):
+    _reset(ctx)
+    template = {
+        "id": "tmpl-1",
+        "severity": TIP_INFO,
+        "title": "T",
+        "body": "B",
+        "type": TIP_TEMPLATE_RAW,
+        "task_keys": ["lint-*"],
+    }
+    emit_tip(ctx, template)
+    emit_tip(ctx, template, id_suffix = "override", task_keys = ["format-*", "gazelle-*"])
+    tips = ctx.traits[TipsTrait].tips
+    _eq("emit_tip — template task_keys honored", tips[0]["task_keys"], ["lint-*"])
+    _eq("emit_tip — explicit task_keys override template", tips[1]["task_keys"], ["format-*", "gazelle-*"])
+
+_JINJA2_TEMPLATE = {
+    "id": "scope-fail",
+    "severity": TIP_WARNING,
+    "title": "Grant {% if scopes|length == 1 %}`{{ scopes[0] }}`{% else %}{{ scopes|length }} scopes{% endif %}",
+    "body": "{{ endpoints|length }} {{ \"call\" if endpoints|length == 1 else \"calls\" }} fell back:\n{% for e in endpoints %}- {{ e }}\n{% endfor %}",
+    "type": TIP_TEMPLATE_JINJA2,
+}
+
+def _test_jinja2_first_emit_seeds_accumulators(ctx):
+    """First emit of a JINJA2 tip seeds each accumulator with the
+    initial value as a single-entry list, renders title + body, and
+    stores both the templates and the dict<name, list> for later
+    re-render on merge."""
+    _reset(ctx)
+    emit_tip(
+        ctx,
+        _JINJA2_TEMPLATE,
+        accumulators = {"scopes": "actions: read", "endpoints": "/jobs"},
+    )
+    tips = ctx.traits[TipsTrait].tips
+    _eq("jinja2 first-emit — single tip", len(tips), 1)
+    _eq("jinja2 first-emit — type recorded", tips[0]["type"], TIP_TEMPLATE_JINJA2)
+    _eq(
+        "jinja2 first-emit — accumulators seeded as lists",
+        tips[0]["accumulators"],
+        {"scopes": ["actions: read"], "endpoints": ["/jobs"]},
+    )
+    if "actions: read" not in tips[0]["title"]:
+        fail("jinja2 first-emit — title missing scope: %r" % tips[0]["title"])
+    if "/jobs" not in tips[0]["body"]:
+        fail("jinja2 first-emit — body missing endpoint: %r" % tips[0]["body"])
+
+    # Templates retained for later re-render on accumulator merge.
+    if not tips[0].get("title_template"):
+        fail("jinja2 first-emit — title_template not retained")
+    if not tips[0].get("body_template"):
+        fail("jinja2 first-emit — body_template not retained")
+
+def _test_jinja2_dedup_merges_new_values(ctx):
+    """Second emit with new accumulator values: dedup on id, union
+    each accumulator (preserving insertion order), re-render title +
+    body so the merged state is what's stored."""
+    _reset(ctx)
+    emit_tip(
+        ctx,
+        _JINJA2_TEMPLATE,
+        accumulators = {"scopes": "actions: read", "endpoints": "/jobs"},
+    )
+    emit_tip(
+        ctx,
+        _JINJA2_TEMPLATE,
+        accumulators = {"scopes": "pull-requests: read", "endpoints": "/files"},
+    )
+    tips = ctx.traits[TipsTrait].tips
+    _eq("jinja2 dedup — still single tip", len(tips), 1)
+    _eq(
+        "jinja2 dedup — scopes unioned in order",
+        tips[0]["accumulators"]["scopes"],
+        ["actions: read", "pull-requests: read"],
+    )
+    _eq(
+        "jinja2 dedup — endpoints unioned in order",
+        tips[0]["accumulators"]["endpoints"],
+        ["/jobs", "/files"],
+    )
+
+    # Title plural form now applies (2 scopes).
+    if "2 scopes" not in tips[0]["title"]:
+        fail("jinja2 dedup — title not re-rendered with plural form: %r" % tips[0]["title"])
+
+    # Body lists both endpoints with plural noun.
+    if "/jobs" not in tips[0]["body"] or "/files" not in tips[0]["body"]:
+        fail("jinja2 dedup — body missing one endpoint: %r" % tips[0]["body"])
+    if "2 calls" not in tips[0]["body"]:
+        fail("jinja2 dedup — body not re-rendered with plural form: %r" % tips[0]["body"])
+
+def _test_jinja2_dedup_skips_duplicate_values(ctx):
+    """Re-emitting the same accumulator values is a no-op — no
+    duplicate list entries, no re-render."""
+    _reset(ctx)
+    emit_tip(
+        ctx,
+        _JINJA2_TEMPLATE,
+        accumulators = {"scopes": "actions: read", "endpoints": "/jobs"},
+    )
+    emit_tip(
+        ctx,
+        _JINJA2_TEMPLATE,
+        accumulators = {"scopes": "actions: read", "endpoints": "/jobs"},
+    )
+    tip = ctx.traits[TipsTrait].tips[0]
+    _eq(
+        "jinja2 dedup — duplicate scope skipped",
+        tip["accumulators"]["scopes"],
+        ["actions: read"],
+    )
+    _eq(
+        "jinja2 dedup — duplicate endpoint skipped",
+        tip["accumulators"]["endpoints"],
+        ["/jobs"],
+    )
+
+def _test_jinja2_partial_overlap_appends_only_new(ctx):
+    """Second emit sharing one accumulator value with the first only
+    appends the new value to the differing accumulator. Confirms the
+    per-name union is independent (scopes can dedup while endpoints
+    accumulate)."""
+    _reset(ctx)
+    emit_tip(
+        ctx,
+        _JINJA2_TEMPLATE,
+        accumulators = {"scopes": "actions: read", "endpoints": "/jobs"},
+    )
+    emit_tip(
+        ctx,
+        _JINJA2_TEMPLATE,
+        accumulators = {"scopes": "actions: read", "endpoints": "/runs"},
+    )
+    tip = ctx.traits[TipsTrait].tips[0]
+    _eq(
+        "jinja2 partial overlap — scopes deduped",
+        tip["accumulators"]["scopes"],
+        ["actions: read"],
+    )
+    _eq(
+        "jinja2 partial overlap — endpoints both retained",
+        tip["accumulators"]["endpoints"],
+        ["/jobs", "/runs"],
+    )
+
+def _test_collect_sorted_by_severity(ctx):
+    _reset(ctx)
+    add_tip(ctx, id = "info-1", severity = TIP_INFO, title = "T", body = "B")
+    add_tip(ctx, id = "critical-1", severity = TIP_CRITICAL, title = "T", body = "B")
+    add_tip(ctx, id = "warning-1", severity = TIP_WARNING, title = "T", body = "B")
+    add_tip(ctx, id = "suggestion-1", severity = TIP_SUGGESTION, title = "T", body = "B")
+    add_tip(ctx, id = "critical-2", severity = TIP_CRITICAL, title = "T", body = "B")
+    sorted_ids = _ids(collect_tips_sorted(ctx))
+    _eq(
+        "sorted — critical → warning → suggestion → info; stable within bucket",
+        sorted_ids,
+        ["critical-1", "critical-2", "warning-1", "suggestion-1", "info-1"],
+    )
+
+def _test_collect_task_keys_filter(ctx):
+    # Task keys are auto-generated at task instantiation
+    # (`ctx.task.key` looks like a `truthful-ice`-style word pair). The
+    # test can't hardcode the value, so we exercise the filter with
+    # patterns that are deterministic regardless: empty list (current
+    # task), `["*"]` (match all), `["never-match-*"]` (no match), and
+    # one synthesized from the actual `ctx.task.key`.
+    _reset(ctx)
+    add_tip(ctx, id = "empty-keys", severity = TIP_INFO, title = "T", body = "B")
+    add_tip(ctx, id = "match-all", severity = TIP_INFO, title = "T", body = "B", task_keys = ["*"])
+    add_tip(ctx, id = "match-exact", severity = TIP_INFO, title = "T", body = "B", task_keys = [ctx.task.key])
+    add_tip(ctx, id = "never-match", severity = TIP_INFO, title = "T", body = "B", task_keys = ["zzzz-never-match-*"])
+    _eq(
+        "filter — empty + `*` + exact-key pass; mismatched glob skipped",
+        _ids(collect_tips_sorted(ctx)),
+        ["empty-keys", "match-all", "match-exact"],
+    )
+
+def _test_collect_limit(ctx):
+    _reset(ctx)
+    for i in range(5):
+        add_tip(ctx, id = "tip-" + str(i), severity = TIP_WARNING, title = "T", body = "B")
+    _eq("limit — caps at requested count", len(collect_tips_sorted(ctx, limit = 3)), 3)
+    _eq("limit — None returns all", len(collect_tips_sorted(ctx, limit = None)), 5)
+    _eq("limit — 0 returns empty", len(collect_tips_sorted(ctx, limit = 0)), 0)
+
+def _test_severity_emoji(ctx):
+    _eq("emoji — critical", severity_emoji(TIP_CRITICAL), "🔥")
+    _eq("emoji — warning", severity_emoji(TIP_WARNING), "⚠️")
+    _eq("emoji — suggestion", severity_emoji(TIP_SUGGESTION), "💡")
+    _eq("emoji — info", severity_emoji(TIP_INFO), "ℹ️")
+    _eq("emoji — unknown defaults to info", severity_emoji("bogus"), "ℹ️")
+
+def _test_severity_label(ctx):
+    _eq("label — critical", severity_label(TIP_CRITICAL), "Critical")
+    _eq("label — warning", severity_label(TIP_WARNING), "Warning")
+    _eq("label — suggestion", severity_label(TIP_SUGGESTION), "Tip")
+    _eq("label — info", severity_label(TIP_INFO), "Info")
+    _eq("label — unknown defaults to info", severity_label("bogus"), "Info")
+
+def _test_blockquote_body(ctx):
+    _eq("blockquote — empty body", blockquote_body(""), "")
+    _eq("blockquote — single line", blockquote_body("hello"), "> hello")
+    _eq("blockquote — two lines", blockquote_body("a\nb"), "> a\n> b")
+    _eq(
+        "blockquote — blank line between paragraphs uses bare `>`",
+        blockquote_body("para1\n\npara2"),
+        "> para1\n>\n> para2",
+    )
+    _eq(
+        "blockquote — preserves code-fence lines",
+        blockquote_body("intro\n\n```yaml\nkey: value\n```"),
+        "> intro\n>\n> ```yaml\n> key: value\n> ```",
+    )
+
+def _test_builtin_templates_shape(ctx):
+    """Smoke-test the built-in templates have the required keys so a
+    rename or restructure trips the test before users see a broken tip."""
+    for name, tmpl in [
+        ("TIP_ADD_GITHUB_TOKEN", TIP_ADD_GITHUB_TOKEN),
+        ("TIP_ADD_GITHUB_TOKEN_SCOPE", TIP_ADD_GITHUB_TOKEN_SCOPE),
+        ("TIP_ADD_ID_TOKEN_PERMISSION", TIP_ADD_ID_TOKEN_PERMISSION),
+    ]:
+        for key in ("id", "severity", "title", "body", "type"):
+            if key not in tmpl:
+                fail("%s missing required key %r" % (name, key))
+
+def _test_builtin_insufficient_scope_renders(ctx):
+    """`TIP_ADD_GITHUB_TOKEN_SCOPE` is the canonical multi-accumulator
+    JINJA2 template — both `scopes` and `endpoints` accumulate, the
+    title pluralizes on `scopes`, and the body pluralizes on
+    `endpoints` and renders one bullet per endpoint. One tip per task;
+    distinct scopes union into the same tip's `scopes` accumulator."""
+    _reset(ctx)
+    emit_tip(
+        ctx,
+        TIP_ADD_GITHUB_TOKEN_SCOPE,
+        accumulators = {
+            "scopes": "pull-requests: read",
+            "endpoints": "GET /repos/{owner}/{repo}/pulls/{pull_number}/files",
+        },
+    )
+    tip = ctx.traits[TipsTrait].tips[0]
+    _eq("scope tip — id is the canonical id (no suffix)", tip["id"], "add-github-token-scope")
+    _eq("scope tip — severity is WARNING", tip["severity"], TIP_WARNING)
+    _eq("scope tip — type is JINJA2", tip["type"], TIP_TEMPLATE_JINJA2)
+    if "pull-requests: read" not in tip["title"]:
+        fail("scope tip — title missing scope: %r" % tip["title"])
+    if "GET /repos/{owner}/{repo}/pulls/{pull_number}/files" not in tip["body"]:
+        fail("scope tip — body missing endpoint: %r" % tip["body"])
+    _eq("scope tip — scopes accumulated", tip["accumulators"]["scopes"], ["pull-requests: read"])
+    _eq(
+        "scope tip — endpoints accumulated",
+        tip["accumulators"]["endpoints"],
+        ["GET /repos/{owner}/{repo}/pulls/{pull_number}/files"],
+    )
+
+    # Second emit with a different scope + endpoint: merge.
+    emit_tip(
+        ctx,
+        TIP_ADD_GITHUB_TOKEN_SCOPE,
+        accumulators = {
+            "scopes": "actions: read",
+            "endpoints": "GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs",
+        },
+    )
+    _eq("scope tip — still single tip after merge", len(ctx.traits[TipsTrait].tips), 1)
+    merged = ctx.traits[TipsTrait].tips[0]
+    _eq(
+        "scope tip — both scopes unioned",
+        merged["accumulators"]["scopes"],
+        ["pull-requests: read", "actions: read"],
+    )
+    _eq(
+        "scope tip — both endpoints unioned",
+        merged["accumulators"]["endpoints"],
+        [
+            "GET /repos/{owner}/{repo}/pulls/{pull_number}/files",
+            "GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs",
+        ],
+    )
+    if "2 scopes" not in merged["title"]:
+        fail("scope tip — merged title not pluralized: %r" % merged["title"])
+
+def _test_silence_hint_line(ctx):
+    _eq("silence_hint — empty id", silence_hint_line("", TIP_INFO), "")
+    _eq(
+        "silence_hint — critical returns empty",
+        silence_hint_line("anything", TIP_CRITICAL),
+        "",
+    )
+    for sev in (TIP_WARNING, TIP_SUGGESTION, TIP_INFO):
+        line = silence_hint_line("add-github-token", sev)
+        if "add-github-token" not in line:
+            fail("silence_hint %s: missing tip id: %r" % (sev, line))
+        if "silenced_tips" not in line:
+            fail("silence_hint %s: missing silenced_tips ref: %r" % (sev, line))
+        if not line.startswith("<sub>"):
+            fail("silence_hint %s: must wrap in <sub>: %r" % (sev, line))
+
+def _test_severity_rank(ctx):
+    _eq("rank — critical most urgent", severity_rank(TIP_CRITICAL), 0)
+    _eq("rank — warning", severity_rank(TIP_WARNING), 1)
+    _eq("rank — suggestion", severity_rank(TIP_SUGGESTION), 2)
+    _eq("rank — info least urgent", severity_rank(TIP_INFO), 3)
+    if severity_rank("bogus") <= severity_rank(TIP_INFO):
+        fail("rank — unknown severity must sort after info")
+
+def _test_tip_to_payload(ctx):
+    """`tip_to_payload` projects a stored tip into the artifact-boundary
+    shape consumed by the PR-comment aggregator. Test pins the field
+    set so a future drop (e.g. of `title_template`) trips here rather
+    than at the downstream JINJA2 re-render."""
+    stored = {
+        "id": "x",
+        "severity": TIP_WARNING,
+        "title": "Title",
+        "body": "Body",
+        "type": TIP_TEMPLATE_JINJA2,
+        "title_template": "T",
+        "body_template": "B",
+        "accumulators": {"scopes": ["actions: read"]},
+        "task_keys": ["lint-*"],  # producer-side filter; payload omits this
+    }
+    payload = tip_to_payload(stored)
+    _eq("tip_to_payload — id", payload["id"], "x")
+    _eq("tip_to_payload — severity", payload["severity"], TIP_WARNING)
+    _eq("tip_to_payload — title", payload["title"], "Title")
+    _eq("tip_to_payload — body", payload["body"], "Body")
+    _eq("tip_to_payload — type", payload["type"], TIP_TEMPLATE_JINJA2)
+    _eq("tip_to_payload — title_template", payload["title_template"], "T")
+    _eq("tip_to_payload — body_template", payload["body_template"], "B")
+    _eq("tip_to_payload — accumulators", payload["accumulators"], {"scopes": ["actions: read"]})
+    if "task_keys" in payload:
+        fail("tip_to_payload — task_keys (producer-side filter) must NOT cross the artifact boundary")
+
+    # Empty accumulators normalize to {} rather than None.
+    minimal = tip_to_payload({"id": "y", "severity": TIP_INFO, "title": "T", "body": "B"})
+    _eq("tip_to_payload — missing accumulators → empty dict", minimal["accumulators"], {})
+
+def _test_decorate_tip(ctx):
+    """`decorate_tip` projects a stored tip into the render shape both
+    surfaces consume (TIPS_BLOCK + PR-comment Tips section). Test
+    keeps the two surfaces aligned by construction."""
+    decorated = decorate_tip({
+        "id": "x",
+        "severity": TIP_WARNING,
+        "title": "T",
+        "body": "line1\nline2",
+    })
+    _eq("decorate_tip — id", decorated["id"], "x")
+    _eq("decorate_tip — severity_emoji", decorated["severity_emoji"], "⚠️")
+    _eq("decorate_tip — severity_label", decorated["severity_label"], "Warning")
+    _eq("decorate_tip — title", decorated["title"], "T")
+    _eq("decorate_tip — body_quoted prefixes each line", decorated["body_quoted"], "> line1\n> line2")
+    if "silenced_tips" not in decorated["silence_hint"]:
+        fail("decorate_tip — non-critical row missing silence_hint: %r" % decorated["silence_hint"])
+
+    # Critical: silence_hint should be blank.
+    crit = decorate_tip({"id": "c", "severity": TIP_CRITICAL, "title": "C", "body": ""})
+    _eq("decorate_tip — critical silence_hint blank", crit["silence_hint"], "")
+
+def _test_strip_code_fences(ctx):
+    _eq("fences — empty body", strip_code_fences(""), "")
+    _eq("fences — no fences passes through", strip_code_fences("hello\nworld"), "hello\nworld")
+    _eq(
+        "fences — bare ``` lines dropped, content kept",
+        strip_code_fences("intro\n```\nx: y\n```"),
+        "intro\nx: y",
+    )
+    _eq(
+        "fences — language tag dropped (```yaml)",
+        strip_code_fences("intro\n```yaml\nkey: value\n```"),
+        "intro\nkey: value",
+    )
+    _eq(
+        "fences — indented ``` still treated as fence (matches Markdown laxness)",
+        strip_code_fences("intro\n   ```\nbody\n   ```"),
+        "intro\nbody",
+    )
+
+def _test_auto_print_flag(ctx):
+    """`add_tip` reads `TipsTrait.auto_print` to gate the terminal
+    print. Tests run with `auto_print = False` (set by `_reset`) — so
+    we just verify the storage still works in that mode, which
+    indirectly proves the `auto_print = False` branch doesn't crash
+    or interfere with the dedup / silence paths."""
+    _reset(ctx)
+    _eq("auto_print — pinned False in test reset", ctx.traits[TipsTrait].auto_print, False)
+    add_tip(ctx, id = "x", severity = TIP_INFO, title = "T", body = "B")
+    _eq("auto_print False — tip still recorded", _ids(ctx.traits[TipsTrait].tips), ["x"])
+
+def _test_impl(ctx):
+    _test_add_tip_basic(ctx)
+    _test_add_tip_dedup(ctx)
+    _test_silenced_tips_short_circuits_add_tip(ctx)
+    _test_silenced_tips_blocks_emit_tip(ctx)
+    _test_critical_tips_cannot_be_silenced(ctx)
+    _test_add_tip_task_keys_stored(ctx)
+    _test_emit_tip_format(ctx)
+    _test_emit_tip_raw_skips_interpolation(ctx)
+    _test_emit_tip_default_type_is_format(ctx)
+    _test_emit_tip_id_suffix(ctx)
+    _test_emit_tip_task_keys_override(ctx)
+    _test_jinja2_first_emit_seeds_accumulators(ctx)
+    _test_jinja2_dedup_merges_new_values(ctx)
+    _test_jinja2_dedup_skips_duplicate_values(ctx)
+    _test_jinja2_partial_overlap_appends_only_new(ctx)
+    _test_collect_sorted_by_severity(ctx)
+    _test_collect_task_keys_filter(ctx)
+    _test_collect_limit(ctx)
+    _test_severity_emoji(ctx)
+    _test_severity_label(ctx)
+    _test_severity_rank(ctx)
+    _test_blockquote_body(ctx)
+    _test_builtin_templates_shape(ctx)
+    _test_builtin_insufficient_scope_renders(ctx)
+    _test_silence_hint_line(ctx)
+    _test_decorate_tip(ctx)
+    _test_tip_to_payload(ctx)
+    _test_strip_code_fences(ctx)
+    _test_auto_print_flag(ctx)
+    print("tips.axl: OK (28 sections)")
+    return 0
+
+tips_tests = task(
+    name = "test-tips",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+    traits = [TipsTrait],
+)

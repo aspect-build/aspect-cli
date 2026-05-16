@@ -19,6 +19,7 @@ load(
     "FIX_COMMANDS_BLOCK",
     "REPRO_COMMANDS_BLOCK",
     "SHARED_DETAILS_BODY_TEMPLATE",
+    "TIPS_BLOCK",
     "active_phase_data",
     "build_details_data",
     "build_summary_data",
@@ -166,7 +167,7 @@ _SUMMARY_TEMPLATE = """{% if detail_rows %}{% for row in detail_rows %}
 {%- endfor %}{% endif %}
 {% if config_items %}
 :gear: {% for item in config_items %}**{{ item.key }}:** `{{ item.value }}`{% if not loop.last %} · {% endif %}{% endfor %}{% if last_update %}  {% endif %}{% endif %}{% if last_update %}
-:speech_balloon: **Last update:** `{{ last_update }}`{% endif %}"""
+:speech_balloon: **Last update:** `{{ last_update }}`{% endif %}""" + TIPS_BLOCK
 
 _DETAILS_TEMPLATE = """{% if is_running %}
 > 🔄 Format task in progress...

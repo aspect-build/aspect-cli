@@ -9,6 +9,7 @@ load("./lib/bazel_runner.axl", "run_bazel_task")
 load("./lib/checkrun.axl", "GitHubCheckRunTrait")
 load("./lib/health_check.axl", "HealthCheckTrait")
 load("./lib/lifecycle.axl", "TaskLifecycleTrait")
+load("./lib/tips.axl", "TipsTrait")
 
 def _impl(ctx: TaskContext) -> int | TaskConclusion:
     return run_bazel_task(ctx, command = "build")
@@ -53,12 +54,13 @@ build = task(
         ),
     },
     traits = [
+        ArtifactsTrait,
         BazelTrait,
+        GitHubCheckRunTrait,
+        GitHubStatusChecksTrait,
         HealthCheckTrait,
         TaskLifecycleTrait,
-        GitHubStatusChecksTrait,
-        GitHubCheckRunTrait,
-        ArtifactsTrait,
+        TipsTrait,
     ],
     implementation = _impl,
 )
