@@ -21,7 +21,7 @@ Usage:
 load("@std//time.axl", "sleep_iter")
 load("./bazel.axl", "BazelTrait")
 load("./lib/artifacts.axl", "create_uploader")
-load("./lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "pluralize", "process_event")
+load("./lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event")
 load("./lib/checkrun.axl", "GitHubCheckRunTrait")
 load("./lib/environment.axl", "color_enabled", "warn")
 load("./lib/github.axl", "detect_changed_files", "print_changed_files_listing")
@@ -31,6 +31,7 @@ load("./lib/lint_results.axl", lint_accumulate = "accumulate", lint_conclusion =
 load("./lib/repro_commands.axl", "build_aspect_command", "task_cli_path")
 load("./lib/sarif.axl", "get_sarif_summary", "parse_sarif", "parse_sarif_diagnostics")
 load("./lib/tar.axl", "tar_create")
+load("./lib/text.axl", "pluralize")
 
 # bb_clientd FUSE mount root for resolving bytestream:// URIs on Aspect Workflows runners.
 _BB_CLIENTD_ROOT = "/mnt/ephemeral/buildbarn/bb_clientd"

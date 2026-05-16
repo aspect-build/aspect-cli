@@ -13,11 +13,12 @@ applies uniformly to both tasks.
 """
 
 load("@std//time.axl", "sleep_iter")
-load("./bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "failed_labels", "init_data", "now_ms", "pluralize", "process_event", bazel_conclusion = "conclusion")
+load("./bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "failed_labels", "init_data", "now_ms", "process_event", bazel_conclusion = "conclusion")
 load("./environment.axl", "color_enabled")
 load("./health_check.axl", "HealthCheckTrait")
 load("./lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "preflight_phase", "setup_phase", "task_update")
 load("./repro_commands.axl", "build_aspect_command", "task_cli_path")
+load("./text.axl", "pluralize")
 load("../bazel.axl", "BazelTrait")
 
 # ─── Lifecycle status + Result-cell text ──────────────────────────────────────

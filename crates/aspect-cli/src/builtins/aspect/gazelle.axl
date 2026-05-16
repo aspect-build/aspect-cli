@@ -187,7 +187,7 @@ Usage:
 load("@std//time.axl", "sleep_iter")
 load("./bazel.axl", "BazelTrait")
 load("./lib/artifacts.axl", "ArtifactsTrait", "artifact_name", "create_uploader")
-load("./lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "pluralize", "process_event")
+load("./lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event")
 load("./lib/checkrun.axl", "GitHubCheckRunTrait")
 load("./lib/environment.axl", "color_enabled", "detect_ci", "error", "info", "warn")
 load("./lib/gazelle_results.axl", "dedupe_subtrees", "dir_at_or_below", "extract_changed_dirs", gaz_init_data = "init_data", gazelle_conclusion = "conclusion")
@@ -197,6 +197,7 @@ load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "Ta
 load("./lib/path_glob.axl", "match_any")
 load("./lib/repro_commands.axl", "build_aspect_command", "task_cli_path")
 load("./lib/runnable.axl", "runnable")
+load("./lib/text.axl", "pluralize")
 
 def _parse_diff_paths(diff_text):
     """Extract the set of affected paths from a unified diff.
