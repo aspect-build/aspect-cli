@@ -23,11 +23,11 @@ load(
     "build_details_data",
     "build_summary_data",
     "format_run_date",
-    "pluralize",
     bazel_init_data = "init_data",
 )
 load("./repro_commands.axl", "patch_download_cmd")
 load("./result_text.axl", "emoji_for_status")
+load("./text.axl", "pluralize")
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 

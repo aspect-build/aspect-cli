@@ -125,7 +125,7 @@ User-facing migration guide: https://docs.aspect.build/cli/migration/delivery
 """
 
 load("@aspect//bazel.axl", "BazelTrait")
-load("@aspect//lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "now_ms", "pluralize", "process_event", bazel_init_data = "init_data")
+load("@aspect//lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "now_ms", "process_event", bazel_init_data = "init_data")
 load("@aspect//lib/checkrun.axl", "GitHubCheckRunTrait")
 load("@aspect//lib/delivery_results.axl", delivery_add_result = "add_result", delivery_conclusion = "conclusion", delivery_init_data = "init_data")
 load(
@@ -141,6 +141,7 @@ load("@aspect//lib/health_check.axl", "HealthCheckTrait")
 load("@aspect//lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "preflight_phase", "setup_phase", "task_update")
 load("@aspect//lib/repro_commands.axl", "build_aspect_command", "task_cli_path")
 load("@aspect//lib/runnable.axl", "runnable")
+load("@aspect//lib/text.axl", "pluralize")
 load("@std//time.axl", "sleep_iter", "time")
 
 DeliveryTrait = trait(

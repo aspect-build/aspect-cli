@@ -24,13 +24,13 @@ load(
     "active_phase_data",
     "build_details_data",
     "build_summary_data",
-    "format_int_comma",
     "format_run_date",
     "html_escape",
     "merged_meta",
     bazel_init_data = "init_data",
 )
 load("./result_text.axl", "emoji_for_status")
+load("./text.axl", "format_int_comma")
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
