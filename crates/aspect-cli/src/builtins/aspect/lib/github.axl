@@ -19,6 +19,7 @@ HTTP failure-handling contract (applies to every helper below):
 load("@std//base64.axl", "base64")
 load("@std//time.axl", "time")
 load("./environment.axl", "color_enabled", "warn")
+load("./gitlab_detect.axl", "detect_gitlab_mr_base_sha")
 load("./tar.axl", "zip_create")
 load("./text.axl", "pluralize")
 
@@ -345,6 +346,76 @@ def detect_merge_group_base_sha(std):
     if (env.var("GITHUB_EVENT_NAME") or "") != "merge_group":
         return ""
     return (read_github_event(std).get("merge_group", {}) or {}).get("base_sha", "") or ""
+
+_CI_BASE_BRANCH_PROBES = [
+    # (host_guard_env, target_branch_env). Probed in declaration order;
+    # first host whose guard env is truthy AND whose target-branch env
+    # is non-empty wins. CircleCI is absent — no standard env var
+    # surfaces the PR target branch there.
+    ("GITHUB_ACTIONS", "GITHUB_BASE_REF"),
+    ("BUILDKITE", "BUILDKITE_PULL_REQUEST_BASE_BRANCH"),
+    ("GITLAB_CI", "CI_MERGE_REQUEST_TARGET_BRANCH_NAME"),
+]
+
+def detect_ci_base_ref(std):
+    """Return `origin/<branch>` for the PR / MR target branch surfaced
+    by the running CI host, or `""` when none exposes one (CircleCI,
+    local dev, generic CI).
+
+    Used by `detect_changed_files` to pick a smarter default for the
+    `git merge-base HEAD <base_ref>` step when the caller didn't pass
+    an explicit `--base-ref`, and by lint / format / gazelle to surface
+    the detected ref in repro / fix commands so a developer copying the
+    command lands on the same scope as CI.
+    """
+    env = std.env
+    for host_var, branch_var in _CI_BASE_BRANCH_PROBES:
+        if not env.var(host_var):
+            continue
+        branch = env.var(branch_var) or ""
+        if branch:
+            return "origin/" + branch
+    return ""
+
+def detect_default_branch_ref(ctx):
+    """Best-effort detection of the remote's default branch, returning
+    `origin/<branch>` or `""` when undetectable.
+
+    Resolution order:
+      1. `git symbolic-ref refs/remotes/origin/HEAD` — set on clones
+         made via `git clone`; resolves offline. NOT set by
+         `actions/checkout`-style shallow checkouts on CI.
+      2. `git ls-remote --symref origin HEAD` — single network
+         round-trip to the remote; works whenever `origin` is
+         reachable, regardless of local state.
+
+    Used by `detect_changed_files` as the LAST fallback for the
+    merge-base ref, after caller-explicit `--base-ref` and
+    `detect_ci_base_ref` have both come up empty. Replaces the previous
+    hard-coded `origin/main` assumption so repos that still default to
+    `origin/master` (or `develop` / `trunk`) get the right base.
+    """
+    process = ctx.std.process
+    cwd = ctx.std.env.current_dir()
+
+    out = process.command("git").args(["symbolic-ref", "refs/remotes/origin/HEAD"]).current_dir(cwd).stdout("piped").stderr("null").spawn().wait_with_output()
+    if out.status.success:
+        ref = out.stdout.strip()
+        prefix = "refs/remotes/"
+        if ref.startswith(prefix) and len(ref) > len(prefix):
+            return ref[len(prefix):]  # "refs/remotes/origin/main" → "origin/main"
+
+    out = process.command("git").args(["ls-remote", "--symref", "origin", "HEAD"]).current_dir(cwd).stdout("piped").stderr("null").spawn().wait_with_output()
+    if out.status.success:
+        for line in out.stdout.split("\n"):
+            if line.startswith("ref: "):
+                ref = line[len("ref: "):].split("\t")[0].strip()
+                prefix = "refs/heads/"
+                if ref.startswith(prefix) and len(ref) > len(prefix):
+                    return "origin/" + ref[len(prefix):]
+                break  # malformed line; don't keep scanning
+
+    return ""
 
 def detect_build_url(ctx):
     """Detect the CI build URL from common environment variables.
@@ -822,27 +893,40 @@ def _local_diff_exhausted_prefix(diff_base_source):
     tried and why it didn't yield a diff."""
     return "Local `git diff` couldn't determine a base for change detection (%s)" % (diff_base_source or "no base candidate")
 
-def detect_changed_files(ctx, line_level = True, base_ref = "origin/main", merge_base = None):
+def detect_changed_files(ctx, line_level = True, base_ref = "", merge_base = None):
     """Detect changed files for a build.
 
     Resolution order (first hit wins):
       1. Caller's explicit `merge_base` SHA → local `git diff`.
-      2. `merge_group` event → local diff against `merge_group.base_sha`
-         from the event payload (skips the PR Files API; the queue can
-         batch multiple PRs).
-      3. HEAD is a merge commit (≥2 parents) → local diff against
-         HEAD^1. Covers `actions/checkout`'s default `refs/pull/<n>/merge`
-         ref and merge-queue HEADs at zero API cost.
+      2. HEAD is a merge commit (≥2 parents) → local diff against
+         HEAD^1. Covers every synthesized-merge-commit checkout: GHA
+         `refs/pull/<n>/merge`, GHA merge_group, GitLab merged_result /
+         merge_train.
+      3. GitLab `detached` MR pipeline → local diff against
+         `CI_MERGE_REQUEST_DIFF_BASE_SHA`. Only fires when step 2
+         missed (HEAD is the source-branch head, not a merge commit).
       4. `_resolve_merge_base(ctx, base_ref)` → local diff against the
-         resolved merge-base. Engages on every CI host where local-git
-         can determine a base — including Buildkite / CircleCI PR
-         builds (which check out the PR head SHA directly, so HEAD
-         isn't a merge commit and step 3 doesn't apply) and GitHub
-         Actions configs that override the default `ref:`.
+         resolved merge-base. The fallback for everything not covered
+         above — Buildkite / CircleCI PR builds (PR head SHA checked
+         out directly), GitHub Actions configs that override the
+         default `ref:`, push-to-default-branch builds, local dev.
       5. PR Files API (fallback) — only when local-git couldn't
          determine a base in steps 1-4. Costs against the GitHub App's
-         shared rate-limit quota; we'd rather pay it only when no
-         cheaper path works.
+         shared rate-limit quota.
+
+    Why step 2 runs before step 3: on GitLab merged_result / merge_train
+    HEAD includes target-branch updates beyond
+    `CI_MERGE_REQUEST_DIFF_BASE_SHA`, so `DIFF_BASE_SHA..HEAD` over-
+    scopes by those updates. `HEAD^1..HEAD` correctly anchors on the
+    merge's first parent.
+
+    `base_ref` resolution for step 4:
+      - Non-empty `base_ref` → honored verbatim.
+      - Empty `base_ref` (the default sentinel) → `detect_ci_base_ref`
+        first (`GITHUB_BASE_REF`, `BUILDKITE_PULL_REQUEST_BASE_BRANCH`,
+        `CI_MERGE_REQUEST_TARGET_BRANCH_NAME`), then
+        `detect_default_branch_ref` (probes the remote's HEAD), then
+        falling back to `origin/main` when even that's undetectable.
 
     When every path fails (or the API returns malformed data), returns
     `{"files": None, "unscoped": True, "source": <reason>}` rather
@@ -876,7 +960,8 @@ def detect_changed_files(ctx, line_level = True, base_ref = "origin/main", merge
       line_level: True (default) → per-entry dict (lint usage).
                   False → per-entry filename string (format usage).
       base_ref:   merge-base argument for `_resolve_merge_base` (e.g.
-                  "origin/main"). Ignored when an earlier step succeeds.
+                  "origin/main"). Empty string is the sentinel that
+                  triggers CI-env / remote-default-branch auto-detection.
       merge_base: explicit merge-base SHA. Overrides every detection
                   path; routed through the local `git diff` helper.
     """
@@ -894,17 +979,7 @@ def detect_changed_files(ctx, line_level = True, base_ref = "origin/main", merge
             "unscoped": True,
         }
 
-    # (2) merge_group event base_sha
-    mg_base = detect_merge_group_base_sha(ctx.std)
-    if mg_base:
-        local = _try_local_git_diff_from_base_sha(ctx, line_level, mg_base)
-        if local:
-            local["source"] += " (merge_group event base_sha)"
-            return local
-
-    # (3) merge-commit-first — HEAD's first parent is the base by
-    # construction on `refs/pull/<n>/merge` and queue-synthesized merge
-    # commits.
+    # (2) merge-commit-first
     parents = _head_parents(ctx)
     if len(parents) >= 2:
         local = _try_local_git_diff_from_base_sha(ctx, line_level, parents[0])
@@ -912,9 +987,18 @@ def detect_changed_files(ctx, line_level = True, base_ref = "origin/main", merge
             local["source"] += " (HEAD is a merge commit)"
             return local
 
-    # (4) `_resolve_merge_base(base_ref)` — local-git's cascade against
-    # the base branch, covering every CI host where the base ref is
-    # locally fetchable (or can be fetched on-demand).
+    # (3) GitLab `detached` MR pipeline — HEAD isn't a merge commit, so
+    # step 2 skipped; CI_MERGE_REQUEST_DIFF_BASE_SHA is the correct base.
+    gitlab_base = detect_gitlab_mr_base_sha(ctx.std)
+    if gitlab_base:
+        local = _try_local_git_diff_from_base_sha(ctx, line_level, gitlab_base)
+        if local:
+            local["source"] += " (CI_MERGE_REQUEST_DIFF_BASE_SHA)"
+            return local
+
+    # (4) Resolve a base ref and run `_resolve_merge_base`.
+    if not base_ref:
+        base_ref = detect_ci_base_ref(ctx.std) or detect_default_branch_ref(ctx) or "origin/main"
     diff_base, diff_base_source = _resolve_merge_base(ctx, base_ref)
     if diff_base:
         local = _try_local_git_diff_from_base_sha(ctx, line_level, diff_base)

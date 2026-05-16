@@ -188,10 +188,11 @@ load("@std//time.axl", "sleep_iter")
 load("./bazel.axl", "BazelTrait")
 load("./lib/artifacts.axl", "ArtifactsTrait", "artifact_name", "create_uploader")
 load("./lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event")
+load("./lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
 load("./lib/checkrun.axl", "GitHubCheckRunTrait")
 load("./lib/environment.axl", "color_enabled", "detect_ci", "error", "info", "warn")
 load("./lib/gazelle_results.axl", "dedupe_subtrees", "dir_at_or_below", "extract_changed_dirs", gaz_init_data = "init_data", gazelle_conclusion = "conclusion")
-load("./lib/github.axl", "detect_changed_files", "print_changed_files_listing")
+load("./lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_changed_files_listing")
 load("./lib/health_check.axl", "HealthCheckTrait")
 load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "pick_task_status", "preflight_phase", "resolve_on_change", "setup_phase", "task_update")
 load("./lib/path_glob.axl", "match_any")
@@ -333,8 +334,9 @@ def _detection_flags(ctx, mode):
         ("--gazelle-target", ctx.args.gazelle_target),
     ]
     if ctx.args.scope == "changed":
-        if ctx.args.base_ref and ctx.args.base_ref != "origin/main":
-            flags.append(("--base-ref", ctx.args.base_ref))
+        surfaced_base_ref = ctx.args.base_ref or detect_ci_base_ref(ctx.std)
+        if surfaced_base_ref:
+            flags.append(("--base-ref", surfaced_base_ref))
         if ctx.args.merge_base:
             flags.append(("--merge-base", ctx.args.merge_base))
         if ctx.args.scope_all_on_change:
@@ -934,8 +936,8 @@ gazelle = task(
             description = "Which directories gazelle should update BUILD files in. 'all' (default) considers every directory in the workspace. 'changed' restricts updates to directories that contain files changed against the base branch — the GitHub PR Files API in PR contexts when authenticated, otherwise local `git diff <merge-base>`. Useful for incremental gazelle in CI when you don't want to revisit BUILD files in unrelated subtrees. CAUTION: 'changed' (and the flags that shape its dir set — `--dirs`, `--scope-all-on-change`, `--changed-file-pattern`) narrows the work gazelle does; a misconfiguration can silently MISS BUILD-file updates a full `--scope=all` run would have produced. Use with caution; periodically run with `--scope=all` to catch drift. NOTE: 'changed' only saves the BUILD-regeneration step for non-listed dirs. By default gazelle still traverses the whole workspace, parses every BUILD, and re-determines target exports (often re-parsing source) before regeneration runs — on large repos those steps dominate wall time. Combine with `--gazelle-flag=-index=lazy` (plus `# gazelle:go_search` / `# gazelle:proto_search` directives in your BUILD files) to also narrow the traverse + parse + indexing work for the full incremental win. Optionally also pass `--gazelle-flag=-r=false` to skip recursion on top of that, but some gazelle language extensions are incompatible with non-recursive mode — test against your plugin set first. See https://github.com/bazel-contrib/bazel-gazelle#lazy-indexing-in-fix-and-update.",
         ),
         "base_ref": args.string(
-            default = "origin/main",
-            description = "Base ref for the changed-file set when --scope=changed and no PR context is detected (i.e., the local-git fallback runs). Resolved to a merge-base via `git merge-base HEAD <base-ref>`. Ignored on the GitHub PR Files API path. Override --merge-base to skip merge-base resolution.",
+            default = "",
+            description = "Base ref for the changed-file set under --scope=changed, " + BASE_REF_DESCRIPTION_TAIL,
         ),
         "merge_base": args.string(
             description = "Explicit merge-base SHA for the local-git fallback's diff base. When set, skips the `git merge-base HEAD <base-ref>` resolution.",

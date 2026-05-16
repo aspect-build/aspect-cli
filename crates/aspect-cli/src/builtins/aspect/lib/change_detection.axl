@@ -1,0 +1,15 @@
+"""Shared text constants for the change-detection surface.
+
+The implementation lives in `lib/github.axl::detect_changed_files`
+(named for the original GitHub-only path; now also covers Buildkite,
+CircleCI, and GitLab MR pipelines via the per-host detectors). The
+constants here are surfaced in user-facing `--help` text across every
+task that consumes `detect_changed_files` — lint, format, gazelle —
+so the auto-detect chain documentation stays consistent across CLIs.
+"""
+
+# Trailing clause for the `--base-ref` arg description on every task
+# that consumes `detect_changed_files`. Callers prepend their own
+# lead clause (e.g. "Base ref for the changed-file set, " or
+# "Base ref for the changed-file set under --scope=changed, ").
+BASE_REF_DESCRIPTION_TAIL = "resolved to a merge-base via `git merge-base HEAD <base-ref>`. When empty (default), auto-detected from the CI environment (`GITHUB_BASE_REF` on GitHub Actions PR builds, `BUILDKITE_PULL_REQUEST_BASE_BRANCH` on Buildkite, `CI_MERGE_REQUEST_TARGET_BRANCH_NAME` on GitLab MR pipelines) — falling back to the remote's default branch (probed via `git symbolic-ref refs/remotes/origin/HEAD` or `git ls-remote --symref origin HEAD`), and finally `origin/main`. Any non-empty value is honored verbatim. Override --merge-base to skip merge-base resolution and pin to a specific SHA."

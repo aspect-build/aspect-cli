@@ -22,9 +22,10 @@ load("@std//time.axl", "sleep_iter")
 load("./bazel.axl", "BazelTrait")
 load("./lib/artifacts.axl", "create_uploader")
 load("./lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event")
+load("./lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
 load("./lib/checkrun.axl", "GitHubCheckRunTrait")
 load("./lib/environment.axl", "color_enabled", "warn")
-load("./lib/github.axl", "detect_changed_files", "print_changed_files_listing")
+load("./lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_changed_files_listing")
 load("./lib/health_check.axl", "HealthCheckTrait")
 load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "preflight_phase", "setup_phase", "task_update")
 load("./lib/lint_results.axl", lint_accumulate = "accumulate", lint_conclusion = "conclusion", lint_init_data = "init_data")
@@ -1155,8 +1156,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     repro_flags = [("--strategy", ctx.args.strategy)]
     if ctx.args.aspects:
         repro_flags.append(("--aspect", list(ctx.args.aspects)))
-    if ctx.args.base_ref and ctx.args.base_ref != "origin/main":
-        repro_flags.append(("--base-ref", ctx.args.base_ref))
+    surfaced_base_ref = ctx.args.base_ref or detect_ci_base_ref(ctx.std)
+    if surfaced_base_ref:
+        repro_flags.append(("--base-ref", surfaced_base_ref))
     if ctx.args.merge_base:
         repro_flags.append(("--merge-base", ctx.args.merge_base))
     targets = list(ctx.args.targets)
@@ -1241,8 +1243,8 @@ lint = task(
             ),
         ),
         "base_ref": args.string(
-            default = "origin/main",
-            description = "Base ref for the changed-file set when the local-git fallback runs (no PR context detected, or PR-API auth unavailable). Resolved to a merge-base via `git merge-base HEAD <base-ref>`. Ignored on the GitHub PR Files API path. Override --merge-base to skip the merge-base resolution and use a specific SHA directly.",
+            default = "",
+            description = "Base ref for the changed-file set, " + BASE_REF_DESCRIPTION_TAIL,
         ),
         "merge_base": args.string(
             description = "Explicit merge-base SHA for the local-git fallback's diff base. When set, skips the `git merge-base HEAD <base-ref>` resolution and uses this SHA directly. Ignored on the GitHub PR Files API path.",
