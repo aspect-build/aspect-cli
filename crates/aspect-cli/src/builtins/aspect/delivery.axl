@@ -412,8 +412,6 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
     # TODO: Do not swallow errors here and surface them if we can not find the hashes for all the deliverable targets.
     ctx.bazel.build(
         flags = phase2_flags,
-        inherit_stdout = True,
-        inherit_stderr = True,
         *targets
     ).wait()
 
@@ -914,7 +912,7 @@ def _delivery_impl(ctx):
             "--build_runfile_links",
         ]
         _t_download = time.monotonic()
-        build = ctx.bazel.build(flags = phase3_flags, build_events = True, inherit_stderr = False, *delivery_targets)
+        build = ctx.bazel.build(flags = phase3_flags, build_events = True, stderr = None, *delivery_targets)
         for event in build.build_events():
             run_tracker.event(event)
         status = build.wait()

@@ -19,7 +19,7 @@ def _idea_impl(ctx):
             "--nokeep_state_after_build",
             "--remote_grpc_log=bazel-log.bin",
         ],
-        inherit_stderr = False,
+        stderr = None,
     )
     r = build.wait()
 

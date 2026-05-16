@@ -12,17 +12,27 @@ use starlark::starlark_simple_value;
 use starlark::values;
 use starlark::values::NoSerialize;
 use starlark::values::ProvidesStaticType;
+use starlark::values::UnpackValue;
 use starlark::values::ValueLike;
 use starlark::values::starlark_value;
 
 use super::stream;
 
-#[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
+#[derive(Debug, Display, Clone, ProvidesStaticType, NoSerialize, Allocative)]
 #[display("<std.io.Stdio>")]
 pub struct Stdio {
-    stdout: stream::Writable,
-    stderr: stream::Writable,
-    stdin: stream::Readable,
+    pub stdout: stream::Writable,
+    pub stderr: stream::Writable,
+    pub stdin: stream::Readable,
+}
+
+impl<'v> UnpackValue<'v> for Stdio {
+    type Error = anyhow::Error;
+
+    fn unpack_value_impl(value: values::Value<'v>) -> Result<Option<Self>, Self::Error> {
+        let v = value.downcast_ref_err::<Stdio>().into_anyhow_result()?;
+        Ok(Some(v.clone()))
+    }
 }
 
 impl Stdio {
