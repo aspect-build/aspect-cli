@@ -387,8 +387,9 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///     .kind("source file")
     ///     .eval()
     /// ```
-    fn query<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<query::Query> {
-        Ok(query::Query::new())
+    fn query<'v>(this: values::Value<'v>) -> anyhow::Result<query::Query> {
+        let startup_flags = read_startup_flags(this)?;
+        Ok(query::Query::new(startup_flags))
     }
 
     /// Run `bazel info` and return all key/value pairs as a dict.
