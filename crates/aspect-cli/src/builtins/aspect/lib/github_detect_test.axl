@@ -24,10 +24,15 @@ Run with:
 
 load(
     "./github.axl",
+    "detect_ci_base_ref",
     "detect_commit_sha",
     "detect_github_pr",
     "detect_merge_group_base_sha",
     "read_github_event",
+)
+load(
+    "./gitlab_detect.axl",
+    "detect_gitlab_mr_base_sha",
 )
 
 def _fake_std(vars, files = {}):
@@ -279,6 +284,78 @@ def _test_impl(ctx):
         },
         {},
         "must be numeric",
+    )
+
+    # ── CI-env base-ref detection ──────────────────────────────────────
+    # `detect_ci_base_ref` returns `origin/<branch>` from the first
+    # matching CI host (GHA → Buildkite → GitLab), or "" when none
+    # exposes the target branch. Callers compose this with their own
+    # `--base-ref` override and the default-branch probe to surface a
+    # base ref in repro commands and to seed merge-base resolution.
+
+    _eq(
+        "GHA PR: detect_ci_base_ref from GITHUB_BASE_REF",
+        detect_ci_base_ref(_fake_std({
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_BASE_REF": "release/v2",
+        })),
+        "origin/release/v2",
+    )
+    _eq(
+        "Buildkite PR: detect_ci_base_ref from BUILDKITE_PULL_REQUEST_BASE_BRANCH",
+        detect_ci_base_ref(_fake_std({
+            "BUILDKITE": "true",
+            "BUILDKITE_PULL_REQUEST_BASE_BRANCH": "master",
+        })),
+        "origin/master",
+    )
+    _eq(
+        "GitLab MR: detect_ci_base_ref from CI_MERGE_REQUEST_TARGET_BRANCH_NAME",
+        detect_ci_base_ref(_fake_std({
+            "GITLAB_CI": "true",
+            "CI_MERGE_REQUEST_TARGET_BRANCH_NAME": "develop",
+        })),
+        "origin/develop",
+    )
+    _eq(
+        "CircleCI: detect_ci_base_ref returns empty (no env var exposed)",
+        detect_ci_base_ref(_fake_std({"CIRCLECI": "true", "CIRCLE_PULL_REQUEST": "https://github.com/o/r/pull/5"})),
+        "",
+    )
+    _eq(
+        "no CI: detect_ci_base_ref empty",
+        detect_ci_base_ref(_fake_std({})),
+        "",
+    )
+    _eq(
+        "GHA precedence over GitLab in detect_ci_base_ref",
+        detect_ci_base_ref(_fake_std({
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_BASE_REF": "main",
+            "GITLAB_CI": "true",
+            "CI_MERGE_REQUEST_TARGET_BRANCH_NAME": "develop",
+        })),
+        "origin/main",
+    )
+    _eq(
+        "host guard: branch env var only honored when host var is truthy",
+        detect_ci_base_ref(_fake_std({"GITHUB_BASE_REF": "develop"})),
+        "",
+    )
+
+    # ── detect_gitlab_mr_base_sha ──────────────────────────────────────
+    _eq(
+        "GitLab MR: detect_gitlab_mr_base_sha",
+        detect_gitlab_mr_base_sha(_fake_std({
+            "GITLAB_CI": "true",
+            "CI_MERGE_REQUEST_DIFF_BASE_SHA": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        })),
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    )
+    _eq(
+        "GitLab MR: detect_gitlab_mr_base_sha guard (no GITLAB_CI → empty)",
+        detect_gitlab_mr_base_sha(_fake_std({"CI_MERGE_REQUEST_DIFF_BASE_SHA": "x"})),
+        "",
     )
 
     print("github_detect.axl smoke: OK")

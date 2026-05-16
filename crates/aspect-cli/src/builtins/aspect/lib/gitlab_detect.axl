@@ -131,3 +131,29 @@ def _parse_int_or_none(s):
     if not s.isdigit():
         return None
     return int(s)
+
+def detect_gitlab_mr_base_sha(std):
+    """Return `CI_MERGE_REQUEST_DIFF_BASE_SHA` on a GitLab MR pipeline,
+    or `""` otherwise.
+
+    GitLab sets this variable to the merge-base from which the source
+    branch diverged from the target — the authoritative diff base for
+    the MR. Lets `detect_changed_files` skip `git merge-base HEAD
+    origin/<base>` resolution entirely on MR builds (which is how the
+    default `GIT_DEPTH=20` GitLab clone, missing `origin/<base>`,
+    used to slide into `--scope=all`).
+
+    Pipeline event-type interaction: on `merged_result` / `merge_train`
+    pipelines HEAD is a synthesized merge commit containing
+    target-branch updates beyond this SHA, so `DIFF_BASE_SHA..HEAD`
+    over-scopes by those updates. `detect_changed_files` handles this
+    by running the merge-commit-first path (HEAD^1) BEFORE consulting
+    this helper — on those pipelines HEAD has ≥2 parents and step 2
+    catches it. On `detached` pipelines (HEAD is the source-branch
+    head, no merge commit) the merge-commit-first path skips and this
+    helper supplies the correct diff base.
+    """
+    env = std.env
+    if not env.var("GITLAB_CI"):
+        return ""
+    return env.var("CI_MERGE_REQUEST_DIFF_BASE_SHA") or ""
