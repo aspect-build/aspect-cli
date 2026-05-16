@@ -54,6 +54,7 @@ load(
 )
 load("./path_glob.axl", "match_path")
 load("./result_text.axl", "emoji_for_status")
+load("./text.axl", "format_int_comma", "pluralize")
 
 # Max number of unique failed build target labels to track detail for. Entries
 # are small (label + deduped mnemonic list) so this can be generous.
@@ -121,28 +122,6 @@ _FAILED_STATUSES = [
     _TEST_STATUS_REMOTE_FAILURE,
     _TEST_STATUS_BLAZE_HALTED_BEFORE_TESTING,
 ]
-
-def pluralize(count, singular, plural = None):
-    """Return `<count> <singular>` or `<count> <plural>` based on count.
-
-    Examples:
-        pluralize(1, "target")    → "1 target"
-        pluralize(2, "target")    → "2 targets"
-        pluralize(12500, "action") → "12,500 actions"
-        pluralize(0, "file")      → "0 files"
-        pluralize(1, "warning", plural = "warnings") → "1 warning"
-
-    Counts are formatted with thousands separators via
-    `format_int_comma` so large bazel numbers (10K+ actions, 1M+ tests
-    in big repos) read cleanly. Defaults `plural` to `singular + "s"`
-    for the common English case; pass an explicit `plural=` for
-    irregular forms or when the singular already ends in `s` /
-    past-participle (`"delivered"` should not pluralize to
-    `"delivereds"`).
-    """
-    if plural == None:
-        plural = singular + "s"
-    return format_int_comma(count) + " " + (singular if count == 1 else plural)
 
 def html_escape(s):
     """Escape HTML special characters so user-provided text renders safely.
@@ -233,21 +212,6 @@ def _format_cpu_seconds(ms):
     if tenths > 0:
         return format_int_comma(whole) + "." + str(tenths) + " cpu-hours"
     return pluralize(whole, "cpu-hour")
-
-def format_int_comma(n):
-    """Format an integer with thousands separators: 12345 → "12,345"."""
-    if n < 0:
-        return "-" + format_int_comma(-n)
-    s = str(n)
-
-    # Insert commas every 3 digits from the right.
-    out = []
-    n_len = len(s)
-    for i in range(n_len):
-        if i > 0 and (n_len - i) % 3 == 0:
-            out.append(",")
-        out.append(s[i])
-    return "".join(out)
 
 def _miss_reason_display(reason):
     """Pretty-print a Bazel MissReason enum string.

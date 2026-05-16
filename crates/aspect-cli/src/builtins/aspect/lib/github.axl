@@ -20,6 +20,7 @@ load("@std//base64.axl", "base64")
 load("@std//time.axl", "time")
 load("./environment.axl", "color_enabled", "warn")
 load("./tar.axl", "zip_create")
+load("./text.axl", "pluralize")
 
 DEFAULT_GITHUB_API = "https://api.github.com"
 
@@ -1010,16 +1011,15 @@ def detect_changed_files(ctx, line_level = True, base_ref = "origin/main", merge
                 # silently omitted), so degrade to --scope=all rather
                 # than ship downstream a partial file list.
                 if suspects:
+                    suspect_count = pluralize(len(suspects), "entry", plural = "entries")
                     suspect_lines = "\n  ".join(suspects)
-                    plural = "y" if len(suspects) == 1 else "ies"
-                    warn(ctx.std, ("GitHub PR Files API returned %d entr%s with inconsistent line counts on PR %s/%s#%d:\n  " +
+                    warn(ctx.std, ("GitHub PR Files API returned %s with inconsistent line counts on PR %s/%s#%d:\n  " +
                                    "%s\n" +
                                    "This usually means GitHub's PR diff cache is stale (common after a rebase). " +
                                    "Push an empty commit (`git commit --allow-empty -m 'refresh PR diff' && git push`) " +
                                    "or rebase onto the current base branch to force a refresh. " +
                                    "Degrading to --scope=all.") % (
-                        len(suspects),
-                        plural,
+                        suspect_count,
                         pr["owner"],
                         pr["repo"],
                         pr["pr_number"],
@@ -1028,9 +1028,8 @@ def detect_changed_files(ctx, line_level = True, base_ref = "origin/main", merge
                     return {
                         "files": None,
                         "skipped": skipped,
-                        "source": "GitHub PR Files API returned %d suspect entr%s on %s/%s#%d; degraded to --scope=all" % (
-                            len(suspects),
-                            plural,
+                        "source": "GitHub PR Files API returned %s on %s/%s#%d; degraded to --scope=all" % (
+                            suspect_count,
                             pr["owner"],
                             pr["repo"],
                             pr["pr_number"],

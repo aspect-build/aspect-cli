@@ -1,0 +1,48 @@
+"""Text-formatting utilities shared across the aspect-cli builtins.
+
+Currently:
+  - `format_int_comma(n)` — thousands separators on integers.
+  - `pluralize(count, singular, plural=None)` — `"N noun"` / `"N nouns"`
+    with thousands-separated count.
+
+Both are stateless, pure-string helpers. Add a new function here when
+it's wanted by more than one module and not specific to any one
+domain (bazel results, lint results, etc.).
+"""
+
+def format_int_comma(n):
+    """Format an integer with thousands separators: 12345 → "12,345"."""
+    if n < 0:
+        return "-" + format_int_comma(-n)
+    s = str(n)
+
+    # Insert commas every 3 digits from the right.
+    out = []
+    n_len = len(s)
+    for i in range(n_len):
+        if i > 0 and (n_len - i) % 3 == 0:
+            out.append(",")
+        out.append(s[i])
+    return "".join(out)
+
+def pluralize(count, singular, plural = None):
+    """Return `<count> <singular>` or `<count> <plural>` based on count.
+
+    Examples:
+        pluralize(1, "target")    → "1 target"
+        pluralize(2, "target")    → "2 targets"
+        pluralize(12500, "action") → "12,500 actions"
+        pluralize(0, "file")      → "0 files"
+        pluralize(1, "warning", plural = "warnings") → "1 warning"
+
+    Counts are formatted with thousands separators via
+    `format_int_comma` so large bazel numbers (10K+ actions, 1M+ tests
+    in big repos) read cleanly. Defaults `plural` to `singular + "s"`
+    for the common English case; pass an explicit `plural=` for
+    irregular forms or when the singular already ends in `s` /
+    past-participle (`"delivered"` should not pluralize to
+    `"delivereds"`).
+    """
+    if plural == None:
+        plural = singular + "s"
+    return format_int_comma(count) + " " + (singular if count == 1 else plural)
