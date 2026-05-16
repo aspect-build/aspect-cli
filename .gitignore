@@ -15,3 +15,5 @@ site
 .DS_Store
 
 .bazelrc.user
+
+.claude

@@ -1,0 +1,292 @@
+"""Smoke tests for `lib/github.axl` CI-event detection helpers.
+
+Covers the three change-detection event shapes aspect-cli sees in
+GitHub Actions:
+
+  1. GitHub PR (`pull_request` / `pull_request_target`)
+     — `detect_github_pr` returns the PR context;
+       `detect_merge_group_base_sha` returns "".
+  2. Merge queue (`merge_group`)
+     — `detect_merge_group_base_sha` returns `merge_group.base_sha`
+       from the event payload;
+       `detect_github_pr` returns None (no PR ref).
+  3. Landed commit (`push`)
+     — both helpers return empty / None; downstream falls back to
+       local `git diff` against the base branch.
+
+These are env- and event-file-driven, so the tests stub `std` with a
+fake env (dict-backed) and a fake fs (path → content dict). No real
+filesystem, no real subprocesses.
+
+Run with:
+  aspect dev test-github-detect
+"""
+
+load(
+    "./github.axl",
+    "detect_commit_sha",
+    "detect_github_pr",
+    "detect_merge_group_base_sha",
+    "read_github_event",
+)
+
+def _fake_std(vars, files = {}):
+    """Stub std with env + fs:
+      env.var(name)           → vars.get(name, "")
+      fs.exists(path)          → path in files
+      fs.read_to_string(path)  → files[path]  (KeyError if missing)
+    """
+    return struct(
+        env = struct(
+            var = lambda name: vars.get(name, ""),
+        ),
+        fs = struct(
+            exists = lambda path: path in files,
+            read_to_string = lambda path: files[path],
+        ),
+    )
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+# ── detect_github_pr ────────────────────────────────────────────────
+
+def _expect_pr_ok(label, vars, files, expected):
+    pr, reason = detect_github_pr(_fake_std(vars, files))
+    if pr == None:
+        fail("%s: expected PR but got None (%s)" % (label, reason))
+    for k, want in expected.items():
+        _eq(label + " / " + k, pr.get(k), want)
+    if reason != "":
+        fail("%s: unexpected reason on success: %r" % (label, reason))
+
+def _expect_pr_none(label, vars, files, reason_contains):
+    pr, reason = detect_github_pr(_fake_std(vars, files))
+    if pr != None:
+        fail("%s: expected None but got %r" % (label, pr))
+    if reason_contains not in reason:
+        fail("%s: reason %r missing substring %r" % (label, reason, reason_contains))
+
+# ── detect_merge_group_base_sha ─────────────────────────────────────
+
+def _expect_mg_sha(label, vars, files, expected):
+    got = detect_merge_group_base_sha(_fake_std(vars, files))
+    _eq(label, got, expected)
+
+# ── detect_commit_sha ───────────────────────────────────────────────
+
+def _expect_commit_sha(label, vars, files, expected):
+    got = detect_commit_sha(_fake_std(vars, files))
+    _eq(label, got, expected)
+
+# ── read_github_event ───────────────────────────────────────────────
+
+def _expect_event(label, vars, files, expected):
+    got = read_github_event(_fake_std(vars, files))
+    _eq(label, got, expected)
+
+def _test_impl(ctx):
+    # ── (1) GitHub PR — pull_request event ──────────────────────────
+    # actions/checkout v6 default: synthesized merge commit at
+    # refs/pull/N/merge; pull_request.head.sha in event payload is the
+    # PR's real head (used for status checks / annotations).
+    pr_event_path = "/tmp/event-pr.json"
+    pr_event_json = """{
+        "pull_request": {
+            "head": {"sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+            "base": {"sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+        }
+    }"""
+    pr_vars = {
+        "GITHUB_ACTIONS": "true",
+        "GITHUB_EVENT_NAME": "pull_request",
+        "GITHUB_REF": "refs/pull/42/merge",
+        "GITHUB_REPOSITORY": "aspect-build/aspect-cli",
+        "GITHUB_SHA": "ccccccccccccccccccccccccccccccccccccccccc",
+        "GITHUB_EVENT_PATH": pr_event_path,
+    }
+    pr_files = {pr_event_path: pr_event_json}
+
+    _expect_pr_ok(
+        "pull_request: detect_github_pr returns PR context",
+        pr_vars,
+        pr_files,
+        {
+            "owner": "aspect-build",
+            "repo": "aspect-cli",
+            "pr_number": 42,
+            # detect_commit_sha prefers pull_request.head.sha over the
+            # synthetic GITHUB_SHA (the latter points at the temp merge
+            # commit; check-runs anchored there are hidden in the UI).
+            "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        },
+    )
+    _expect_mg_sha(
+        "pull_request: detect_merge_group_base_sha is empty",
+        pr_vars,
+        pr_files,
+        "",
+    )
+    _expect_commit_sha(
+        "pull_request: detect_commit_sha is pull_request.head.sha",
+        pr_vars,
+        pr_files,
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    )
+
+    # ── (2) Merge queue — merge_group event ─────────────────────────
+    # GitHub merges PRs through a queue branch
+    # (`gh-readonly-queue/<target>/<sha>`); the event payload exposes
+    # `merge_group.base_sha` directly so we don't have to resolve it
+    # via `git merge-base HEAD origin/<base>` on a shallow checkout.
+    mg_event_path = "/tmp/event-mg.json"
+    mg_event_json = """{
+        "merge_group": {
+            "base_sha": "1111111111111111111111111111111111111111",
+            "head_sha": "2222222222222222222222222222222222222222",
+            "base_ref": "refs/heads/main"
+        }
+    }"""
+    mg_vars = {
+        "GITHUB_ACTIONS": "true",
+        "GITHUB_EVENT_NAME": "merge_group",
+        "GITHUB_REF": "refs/heads/gh-readonly-queue/main/pr-42-cafef00d",
+        "GITHUB_REPOSITORY": "aspect-build/aspect-cli",
+        "GITHUB_SHA": "2222222222222222222222222222222222222222",
+        "GITHUB_EVENT_PATH": mg_event_path,
+    }
+    mg_files = {mg_event_path: mg_event_json}
+
+    _expect_mg_sha(
+        "merge_group: detect_merge_group_base_sha returns base_sha",
+        mg_vars,
+        mg_files,
+        "1111111111111111111111111111111111111111",
+    )
+    _expect_pr_none(
+        "merge_group: detect_github_pr is None (no PR ref)",
+        mg_vars,
+        mg_files,
+        "GITHUB_REF is not a PR merge ref",
+    )
+
+    # ── (3) Landed commit — push to main ────────────────────────────
+    # No PR context, no merge_group payload. Downstream falls back to
+    # local `git diff` against `origin/main`.
+    push_event_path = "/tmp/event-push.json"
+    push_event_json = """{
+        "ref": "refs/heads/main",
+        "before": "1111111111111111111111111111111111111111",
+        "after": "3333333333333333333333333333333333333333"
+    }"""
+    push_vars = {
+        "GITHUB_ACTIONS": "true",
+        "GITHUB_EVENT_NAME": "push",
+        "GITHUB_REF": "refs/heads/main",
+        "GITHUB_REPOSITORY": "aspect-build/aspect-cli",
+        "GITHUB_SHA": "3333333333333333333333333333333333333333",
+        "GITHUB_EVENT_PATH": push_event_path,
+    }
+    push_files = {push_event_path: push_event_json}
+
+    _expect_pr_none(
+        "push: detect_github_pr is None",
+        push_vars,
+        push_files,
+        "GITHUB_REF is not a PR merge ref",
+    )
+    _expect_mg_sha(
+        "push: detect_merge_group_base_sha is empty",
+        push_vars,
+        push_files,
+        "",
+    )
+    _expect_commit_sha(
+        "push: detect_commit_sha is GITHUB_SHA",
+        push_vars,
+        push_files,
+        "3333333333333333333333333333333333333333",
+    )
+
+    # ── read_github_event edge cases ────────────────────────────────
+    _expect_event(
+        "missing GITHUB_EVENT_PATH returns empty dict",
+        {},
+        {},
+        {},
+    )
+    _expect_event(
+        "GITHUB_EVENT_PATH set but file doesn't exist returns empty",
+        {"GITHUB_EVENT_PATH": "/does/not/exist"},
+        {},
+        {},
+    )
+    _expect_event(
+        "malformed JSON returns empty dict (json.try_decode)",
+        {"GITHUB_EVENT_PATH": "/tmp/bad.json"},
+        {"/tmp/bad.json": "not-valid-json {"},
+        {},
+    )
+
+    # ── detect_merge_group_base_sha guards ──────────────────────────
+    _expect_mg_sha(
+        "not on GitHub Actions returns empty",
+        {"GITHUB_EVENT_NAME": "merge_group"},
+        {},
+        "",
+    )
+    _expect_mg_sha(
+        "GitHub Actions but wrong event returns empty",
+        {"GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "pull_request"},
+        {},
+        "",
+    )
+    _expect_mg_sha(
+        "merge_group event with empty/missing event file returns empty",
+        {
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_EVENT_NAME": "merge_group",
+            "GITHUB_EVENT_PATH": "/missing",
+        },
+        {},
+        "",
+    )
+
+    # ── ASPECT_GITHUB_PR_NUMBER explicit override (used on GitLab CI
+    # ── mirrors of GitHub repos) ─────────────────────────────────────
+    _expect_pr_ok(
+        "explicit override: ASPECT_GITHUB_PR_NUMBER",
+        {
+            "ASPECT_GITHUB_PR_NUMBER": "99",
+            "GITHUB_REPOSITORY": "aspect-build/aspect-cli",
+            "GITHUB_SHA": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        },
+        {},
+        {
+            "owner": "aspect-build",
+            "repo": "aspect-cli",
+            "pr_number": 99,
+            "sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        },
+    )
+    _expect_pr_none(
+        "explicit override but non-numeric IID",
+        {
+            "ASPECT_GITHUB_PR_NUMBER": "not-a-number",
+            "GITHUB_REPOSITORY": "aspect-build/aspect-cli",
+            "GITHUB_SHA": "abc",
+        },
+        {},
+        "must be numeric",
+    )
+
+    print("github_detect.axl smoke: OK")
+    return 0
+
+github_detect_tests = task(
+    name = "test-github-detect",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)
