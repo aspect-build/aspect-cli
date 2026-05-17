@@ -55,6 +55,7 @@ the verdict.
 # ---------------------------------------------------------------------------
 
 load("./environment.axl", "color_enabled", "detect_ci")
+load("./github.axl", "detect_github_repo", "github")
 
 # Structured update passed to task_update hooks.
 #
@@ -67,8 +68,8 @@ load("./environment.axl", "color_enabled", "detect_ci")
 #                    without delay (e.g. the first "Bazel build running" tick when
 #                    BES events start arriving — the throttle would otherwise hold
 #                    the rendered "Last update" line at "Spawning bazel build…"
-#                    for up to min_update_interval_ms after the build is already
-#                    well underway).
+#                    for up to `min_update_interval_seconds` after the build is
+#                    already well underway).
 #
 # "passed" and "failed" are terminal — the task is done. Features should complete
 # their output (e.g. close a check run) on these statuses.
@@ -563,6 +564,7 @@ def setup_phase(ctx, lifecycle):
         return
     if not _on_ci(ctx):
         return
+    _probe_rate_limit_quota(ctx)
     task_update(
         ctx,
         lifecycle,
@@ -577,6 +579,20 @@ def setup_phase(ctx, lifecycle):
             emoji = "⚙",
         ),
     )
+
+def _probe_rate_limit_quota(ctx):
+    """Seed `GitHubApiRateLimitTrait` with a fresh `GET /rate_limit` snapshot
+    before the task starts spending tokens. The probe is free
+    (doesn't count against the primary quota) and lets `throttle_factor`
+    fall back to threshold-based rather than no-data behavior for
+    early API calls.
+
+    Silent on any failure: missing owner/repo, no Aspect credential,
+    transport error — none of these should hold up `setup_phase`."""
+    owner, repo = detect_github_repo(ctx.std)
+    if not owner or not repo:
+        return
+    github.probe_rate_limit(ctx, owner = owner, repo = repo)
 
 def preflight_phase(ctx, lifecycle, hc_trait):
     """Mark the `preflight` phase and run the pre-health-check hooks.

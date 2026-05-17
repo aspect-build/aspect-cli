@@ -30,6 +30,7 @@ Templates can be customized per-task via GitHubStatusChecksTrait:
 load("../lib/artifacts.axl", "ArtifactsTrait")
 load(
     "../lib/bazel_results.axl",
+    "format_run_date",
     "now_ms",
     "render_bes_url",
     "resolve_aspect_url",
@@ -52,6 +53,7 @@ load(
     lint_chunk_annotations = "chunk_annotations",
     lint_compute_annotations = "compute_annotations",
 )
+load("../lib/rate_limit.axl", "BUCKET_APP", "effective_throttle_factor", "usage_footer")
 load("../lib/tips.axl", "collect_tips_sorted")
 load("../lint.axl", "LintTrait")
 
@@ -180,7 +182,16 @@ def _github_status_checks(ctx: FeatureContext):
 
     _ci_links_base = _collect_ci_links(ctx.std.env, workflows_results_url(ctx.std))
 
-    min_update_interval_ms = ctx.args.min_update_interval_ms
+    # Sub-1-second cadences would burn API quota and rarely surface as
+    # something a reviewer can react to in time — clamp to 1s floor.
+    # Branch builds (non-PR triggers) get at least a 60s interval —
+    # nobody's actively watching a push-to-main run, so a more
+    # responsive cadence just spends API quota for no review benefit.
+    min_update_interval_s = max(1, ctx.args.min_update_interval_seconds)
+    pr, _ = github.detect_pr(ctx.std)
+    if pr == None:
+        min_update_interval_s = max(min_update_interval_s, 60)
+    min_update_interval_ms = min_update_interval_s * 1000
 
     only_annotate_changed_regions = ctx.args.only_annotate_changed_regions
 
@@ -247,8 +258,8 @@ def _github_status_checks(ctx: FeatureContext):
         # so `_resolve_current_job_url` can retry on 4xx-auth.
         if ctx.std.env.var("GITHUB_ACTIONS"):
             run_id = ctx.std.env.var("GITHUB_RUN_ID") or ""
-            read_token, app_fallback = github.preferred_token_pair(ctx, owner = owner, repo = repo, roles = ["actions.read"], existing_app_token = token)
-            job_url = github.resolve_current_job_url(ctx, read_token, owner, repo, run_id, app_fallback_token = app_fallback)
+            read_token, read_fallback, read_class = github.preferred_token_pair(ctx, owner = owner, repo = repo, roles = ["actions.read"], existing_app_token = token)
+            job_url = github.resolve_current_job_url(ctx, read_token, owner, repo, run_id, fallback_token = read_fallback, token_class = read_class)
             if job_url:
                 _ci_links_base["ci_url"] = job_url
         _state["_ci_links"] = _ci_links_base
@@ -261,7 +272,7 @@ def _github_status_checks(ctx: FeatureContext):
             ctx,
             initial_renderer.init(),
             "running",
-            make_render_ctx(_state, default_targets = "//...", tips = collect_tips_sorted(ctx)),
+            make_render_ctx(_state, default_targets = "//...", tips = collect_tips_sorted(ctx), api_usage = usage_footer(ctx), last_updated_at = format_run_date(ctx, now_ms(ctx))),
             dict(_ci_links_base),
             gh_trait.templates,
             gh_trait.metadata_keys,
@@ -490,8 +501,21 @@ def _github_status_checks(ctx: FeatureContext):
             desired_conclusion != None and
             desired_conclusion != _state.get("_gh_conclusion")
         )
-        if not (is_conclusion_transition or update.priority):
-            if not should_emit_update(_state, now_ms(ctx), min_update_interval_ms, final):
+
+        # Honor the *first* `update.priority` event per task only —
+        # that's the spawn-label-flip after Bazel produces real data.
+        # Subsequent priority events (phase transitions) are throttled
+        # normally; on a task with many phases they'd otherwise PATCH
+        # the check-run on every boundary and burn through App quota.
+        # BK annotations honor every priority (no API cost).
+        is_initial = update.priority and not _state.get("_saw_priority", False)
+        if update.priority:
+            _state["_saw_priority"] = True
+        if not (is_conclusion_transition or is_initial):
+            now = now_ms(ctx)
+            elapsed_s = float(now - _state.get("_started_ms", now)) / 1000.0
+            factor = effective_throttle_factor(ctx, BUCKET_APP, elapsed_s, min_update_interval_s)
+            if not should_emit_update(_state, now, int(min_update_interval_ms * factor), final):
                 return
         elif final:
             # The terminal render needs _ended_ms for duration.
@@ -501,7 +525,7 @@ def _github_status_checks(ctx: FeatureContext):
             ctx,
             data,
             status,
-            make_render_ctx(_state, default_targets = "//...", tips = collect_tips_sorted(ctx)),
+            make_render_ctx(_state, default_targets = "//...", tips = collect_tips_sorted(ctx), api_usage = usage_footer(ctx), last_updated_at = format_run_date(ctx, now_ms(ctx))),
             _make_links(data),
             gh_trait.templates,
             gh_trait.metadata_keys,
@@ -561,9 +585,16 @@ GithubStatusChecks = feature(
             values = ["ci-only", "local-only", "always"],
             description = "When to create GitHub Status Checks: ci-only (default), local-only, or always",
         ),
-        "min_update_interval_ms": args.int(
-            default = 1000,
-            description = "Minimum milliseconds between live check-run PATCH calls during a task. Default 1000ms suits a GitHub App token (high rate limits); increase to ~2000ms if using a PAT with the standard 5000 req/hr cap. Status-transition updates (first failing tick, terminal verdict) bypass this throttle so the red ❌ lands immediately, and the terminal update always lands.",
+        "min_update_interval_seconds": args.int(
+            default = 20,
+            description = "Minimum seconds between live GitHub Status Check refreshes during a task. " +
+                          "Default 20s for PR builds, 60s for branch / push builds (nobody's actively " +
+                          "watching a push-to-main, so a tighter cadence just spends API quota). " +
+                          "Minimum 1s (smaller values are silently raised to 1). Each refresh counts " +
+                          "against the GitHub API rate limit; on busy repos this interval will " +
+                          "automatically stretch further as the remaining quota shrinks or the task " +
+                          "runs longer. The task's terminal result always lands immediately so the " +
+                          "final conclusion shows up without delay.",
         ),
         "only_annotate_changed_regions": args.boolean(
             default = True,

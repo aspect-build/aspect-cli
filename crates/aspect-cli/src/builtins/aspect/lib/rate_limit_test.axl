@@ -1,0 +1,800 @@
+"""Tests for `lib/rate_limit.axl`.
+
+Covers:
+  - `record_observation` — buffer truncation, reset-crossing detection,
+                            watermark monotonicity, two-bucket independence.
+  - `throttle_factor`     — empty / 1-obs / 2-obs paths, threshold ladder,
+                            `max(1, ...)` floor, terminal-only sentinel.
+  - `_check_thresholds`   — bumps `threshold_warned_tier[bucket]` once per
+                            tier when LOW (≤ 20%) and IMPORTANT (≤ 5%)
+                            crossings fire. The WARN line itself is a
+                            side effect on the CLI log; tests pin the
+                            tier-state machine.
+  - `seed_from_rate_limit_body`     — JSON body parses into a fresh
+                                      observation + INFO line.
+
+Run with:
+  aspect dev test-rate-limit
+"""
+
+load(
+    "./rate_limit.axl",
+    "BUCKET_APP",
+    "BUCKET_ENV",
+    "GitHubApiRateLimitTrait",
+    "effective_throttle_factor",
+    "export_observations",
+    "ingest_sibling_observations",
+    "record_from_headers",
+    "record_observation",
+    "seed_from_rate_limit_body",
+    "throttle_factor",
+    "time_throttle_factor",
+    "usage_footer",
+)
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _assert(label, cond):
+    if not cond:
+        fail("%s: condition false" % label)
+
+def _reset(ctx):
+    """Clear the trait between subtests so each section runs from a
+    known-empty state."""
+    ctx.traits[GitHubApiRateLimitTrait].observations = {BUCKET_APP: [], BUCKET_ENV: []}
+    ctx.traits[GitHubApiRateLimitTrait].sibling_observations = {}
+    ctx.traits[GitHubApiRateLimitTrait].watermark = {BUCKET_APP: None, BUCKET_ENV: None}
+    ctx.traits[GitHubApiRateLimitTrait].limits = {BUCKET_APP: 0, BUCKET_ENV: 0}
+    ctx.traits[GitHubApiRateLimitTrait].last_effective_factor = {BUCKET_APP: 1.0, BUCKET_ENV: 1.0}
+    ctx.traits[GitHubApiRateLimitTrait].last_logged_factor_step = {BUCKET_APP: 1, BUCKET_ENV: 1}
+    ctx.traits[GitHubApiRateLimitTrait].threshold_warned_tier = {BUCKET_APP: 0, BUCKET_ENV: 0}
+
+def _tier(ctx, bucket):
+    """Project the trait's `threshold_warned_tier[bucket]` for assertions."""
+    return ctx.traits[GitHubApiRateLimitTrait].threshold_warned_tier.get(bucket, 0)
+
+# Far-future reset epoch — `time_to_reset` clamps well above the
+# `_TIME_TO_RESET_FLOOR_S` floor, so the safe-burn calc has stable
+# inputs regardless of the test runner's wall clock.
+_FAR_FUTURE = 9999999999
+
+def _test_record_basic(ctx):
+    _reset(ctx)
+    record_observation(ctx, BUCKET_APP, remaining = 4800, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 100.0)
+    obs = ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_APP]
+    _eq("record_basic — single entry", len(obs), 1)
+    _eq("record_basic — values stored", obs[0], (100.0, 4800, 5000, _FAR_FUTURE))
+    _eq("record_basic — watermark seeded", ctx.traits[GitHubApiRateLimitTrait].watermark[BUCKET_APP], 4800)
+    _eq("record_basic — limit seeded", ctx.traits[GitHubApiRateLimitTrait].limits[BUCKET_APP], 5000)
+
+def _test_record_buffer_truncation(ctx):
+    _reset(ctx)
+    for i in range(25):
+        record_observation(ctx, BUCKET_APP, remaining = 5000 - i, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = float(i))
+    obs = ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_APP]
+    _eq("buffer truncation — capped at 16", len(obs), 16)
+
+    # The oldest entry kept is observation index 9 (remaining = 5000-9 = 4991).
+    _eq("buffer truncation — oldest is most-recent 16", obs[0][1], 4991)
+    _eq("buffer truncation — newest preserved", obs[-1][1], 4976)
+
+def _test_watermark_monotone_decreasing(ctx):
+    _reset(ctx)
+    record_observation(ctx, BUCKET_APP, remaining = 4800, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 1.0)
+    record_observation(ctx, BUCKET_APP, remaining = 3000, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 2.0)
+    record_observation(ctx, BUCKET_APP, remaining = 4500, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 3.0)
+    _eq("watermark — tracks the lowest seen", ctx.traits[GitHubApiRateLimitTrait].watermark[BUCKET_APP], 3000)
+
+def _test_reset_crossing_flushes_buffer(ctx):
+    _reset(ctx)
+    record_observation(ctx, BUCKET_APP, remaining = 2000, limit = 5000, reset_epoch = 1000, epoch_s = 1.0)
+    record_observation(ctx, BUCKET_APP, remaining = 1900, limit = 5000, reset_epoch = 1000, epoch_s = 2.0)
+
+    # `reset_epoch` jumps +1800s — well past `_RESET_JUMP_S` (600s).
+    # Buffer should flush, retaining only the new observation.
+    record_observation(ctx, BUCKET_APP, remaining = 4900, limit = 5000, reset_epoch = 2800, epoch_s = 3.0)
+    obs = ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_APP]
+    _eq("reset crossing — buffer flushed to length 1", len(obs), 1)
+    _eq("reset crossing — only newest retained", obs[0][1], 4900)
+
+def _test_reset_crossing_rebaselines_watermark(ctx):
+    """When the GitHub rate-limit window rolls mid-task, the bucket
+    replenishes (remaining jumps back up). The watermark must reset
+    too — otherwise `usage_footer` carries the pre-reset peak forward
+    and renders a non-zero `% used` against the fresh window. The
+    threshold-warn tier must also reset so a fresh burn-through in
+    the new window re-fires LOW/IMPORTANT. The burn-rate inference
+    must NOT throttle on the replenishment (the `remaining` going UP
+    is a window roll, not aspect-cli accelerating its spend)."""
+    _reset(ctx)
+
+    # Pre-reset: burn down to 100/5000 (98% used) — fires LOW + IMPORTANT.
+    record_observation(ctx, BUCKET_APP, remaining = 4500, limit = 5000, reset_epoch = 1000, epoch_s = 1.0)
+    record_observation(ctx, BUCKET_APP, remaining = 100, limit = 5000, reset_epoch = 1000, epoch_s = 50.0)
+    _eq("pre-reset — watermark at lowest", ctx.traits[GitHubApiRateLimitTrait].watermark[BUCKET_APP], 100)
+    _eq("pre-reset — WARN tier at IMPORTANT", _tier(ctx, BUCKET_APP), 2)
+
+    # Reset crossing: reset_epoch jumps from 1000 → 4600 (+3600s,
+    # past `_RESET_JUMP_S`). `remaining` jumps back to 5000.
+    record_observation(ctx, BUCKET_APP, remaining = 5000, limit = 5000, reset_epoch = 4600, epoch_s = 100.0)
+    _eq(
+        "post-reset — watermark re-baselined to fresh remaining",
+        ctx.traits[GitHubApiRateLimitTrait].watermark[BUCKET_APP],
+        5000,
+    )
+    _eq(
+        "post-reset — buffer holds only the fresh observation",
+        len(ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_APP]),
+        1,
+    )
+    _eq("post-reset — WARN tier cleared", _tier(ctx, BUCKET_APP), 0)
+
+    # Throttle factor with the single post-reset observation falls
+    # through to the threshold ladder. 100% remaining → 1× (no throttle).
+    _eq(
+        "post-reset — throttle factor relaxes to 1×",
+        throttle_factor(ctx, BUCKET_APP, now_epoch_s = 0),
+        1.0,
+    )
+
+    # Continue burning post-reset. burn-rate inference sees only
+    # post-reset observations now, so it computes a meaningful rate.
+    record_observation(ctx, BUCKET_APP, remaining = 4900, limit = 5000, reset_epoch = 4600, epoch_s = 110.0)
+
+    # 100 calls in 10s = 10/s. safe_remaining = 4900 - 0.20*5000 = 3900.
+    # time_to_reset = max(60, 4600-0) = 4600. safe_burn = 3900/4600 ≈ 0.85/s.
+    # factor ≈ 10/0.85 ≈ 11.8.
+    factor = throttle_factor(ctx, BUCKET_APP, now_epoch_s = 0)
+    _assert("post-reset — burn-rate sees only fresh-window data", factor > 5.0)
+
+def _test_effective_factor_records_to_trait(ctx):
+    """Each call to `effective_throttle_factor` writes the resulting
+    factor to `trait.last_effective_factor[bucket]` so `usage_footer`
+    can surface it without recomputing. Verifies the recording side
+    effect across multiple calls."""
+    _reset(ctx)
+    effective_throttle_factor(ctx, BUCKET_APP, elapsed_s = 0, min_interval_s = 10)
+    _eq(
+        "effective-factor recording — initial 1.0 stored",
+        ctx.traits[GitHubApiRateLimitTrait].last_effective_factor[BUCKET_APP],
+        1.0,
+    )
+
+    # Time-throttle ramp at 1 h elapsed with 10 s base → factor 6.
+    effective_throttle_factor(ctx, BUCKET_APP, elapsed_s = 3600, min_interval_s = 10)
+    _eq(
+        "effective-factor recording — 6× stored after time throttle kicks in",
+        ctx.traits[GitHubApiRateLimitTrait].last_effective_factor[BUCKET_APP],
+        6.0,
+    )
+
+def _test_usage_footer_renders_throttle_clause(ctx):
+    """`usage_footer` appends `, throttle N×` when the bucket's
+    recorded effective factor is > 1. Stays silent at factor == 1
+    (the no-pressure default) and flips to `terminal-only` at the
+    sentinel."""
+    _reset(ctx)
+    record_observation(ctx, BUCKET_APP, remaining = 4900, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 1.0)
+
+    # Factor 1 → no throttle clause.
+    effective_throttle_factor(ctx, BUCKET_APP, elapsed_s = 0, min_interval_s = 10)
+    if ", throttle" in usage_footer(ctx):
+        fail("usage_footer at factor 1 should not surface a throttle clause: %r" % usage_footer(ctx))
+
+    # Factor 6 (time-throttle clamp at 30 min) → `, throttle 6×`.
+    effective_throttle_factor(ctx, BUCKET_APP, elapsed_s = 3600, min_interval_s = 10)
+    if "throttle 6×" not in usage_footer(ctx):
+        fail("usage_footer at factor 6 should surface `throttle 6×`: %r" % usage_footer(ctx))
+
+    # Sentinel terminal-only → `, throttle terminal-only`.
+    _reset(ctx)
+    record_observation(ctx, BUCKET_APP, remaining = 100, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 1.0)
+    effective_throttle_factor(ctx, BUCKET_APP, elapsed_s = 0, min_interval_s = 10)
+    if "throttle terminal-only" not in usage_footer(ctx):
+        fail("usage_footer at terminal-only should surface that explicitly: %r" % usage_footer(ctx))
+
+    # Factor 1.4 rounds to 1× — clause must be suppressed (no visible
+    # stretch, no point in advertising it). Synthesize by setting the
+    # trait field directly after an obs is in place so `usage_footer`
+    # has both watermark + factor to render.
+    _reset(ctx)
+    record_observation(ctx, BUCKET_APP, remaining = 4900, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 1.0)
+    ctx.traits[GitHubApiRateLimitTrait].last_effective_factor = {BUCKET_APP: 1.4, BUCKET_ENV: 1.0}
+    if ", throttle" in usage_footer(ctx):
+        fail("usage_footer at factor=1.4 (rounds to 1×) should suppress throttle clause: %r" % usage_footer(ctx))
+
+def _test_burn_rate_replenishment_returns_floor(ctx):
+    """If the reset crossing escapes detection (small `reset_epoch`
+    delta) and the buffer ends up with mixed pre-/post-reset data,
+    `delta_remaining` goes negative (remaining went UP). The factor
+    floors at 1.0 — we never speed up cadence based on stale
+    pre-reset data."""
+    _reset(ctx)
+
+    # Pre-reset observations on a 1000-epoch window. Then a "post-reset"
+    # observation with the SAME reset_epoch (window didn't visibly roll)
+    # — synthesizes the escaped-reset case where data is mixed.
+    record_observation(ctx, BUCKET_APP, remaining = 100, limit = 5000, reset_epoch = 1000, epoch_s = 1.0)
+    record_observation(ctx, BUCKET_APP, remaining = 50, limit = 5000, reset_epoch = 1000, epoch_s = 10.0)
+    record_observation(ctx, BUCKET_APP, remaining = 5000, limit = 5000, reset_epoch = 1000, epoch_s = 20.0)
+
+    # oldest.remaining = 100, newest.remaining = 5000 → delta_remaining = -4900 → burn_rate < 0 → 1.0.
+    _eq(
+        "replenishment without detected reset → factor floors at 1.0",
+        throttle_factor(ctx, BUCKET_APP, now_epoch_s = 0),
+        1.0,
+    )
+
+def _test_two_bucket_independence(ctx):
+    """Recording into one bucket must not touch the other — they have
+    independent budgets and threshold-warn tiers."""
+    _reset(ctx)
+    record_observation(ctx, BUCKET_APP, remaining = 4900, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 1.0)
+    record_observation(ctx, BUCKET_ENV, remaining = 40, limit = 1000, reset_epoch = _FAR_FUTURE, epoch_s = 2.0)
+    _eq("two-bucket — app buffer len 1", len(ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_APP]), 1)
+    _eq("two-bucket — env buffer len 1", len(ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_ENV]), 1)
+
+    # env at 4% (below IMPORTANT) bumps env tier to 2; app at 98% stays at 0.
+    _eq("two-bucket — env tier at IMPORTANT", _tier(ctx, BUCKET_ENV), 2)
+    _eq("two-bucket — app tier untouched", _tier(ctx, BUCKET_APP), 0)
+
+def _test_threshold_factor_ladder(ctx):
+    """With a single observation, the factor falls through the
+    threshold ladder. Verifies the boundaries: 95% → 1×, 30% → 2×,
+    10% → 5×, 3% → terminal-only."""
+    _reset(ctx)
+    record_observation(ctx, BUCKET_APP, remaining = 4800, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 1.0)
+    _eq("threshold — 96% → 1×", throttle_factor(ctx, BUCKET_APP, now_epoch_s = 0), 1.0)
+
+    _reset(ctx)
+    record_observation(ctx, BUCKET_APP, remaining = 1500, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 1.0)
+    _eq("threshold — 30% → 2×", throttle_factor(ctx, BUCKET_APP, now_epoch_s = 0), 2.0)
+
+    _reset(ctx)
+    record_observation(ctx, BUCKET_APP, remaining = 500, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 1.0)
+    _eq("threshold — 10% → 5×", throttle_factor(ctx, BUCKET_APP, now_epoch_s = 0), 5.0)
+
+    _reset(ctx)
+    record_observation(ctx, BUCKET_APP, remaining = 150, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 1.0)
+    _assert("threshold — 3% → terminal-only", throttle_factor(ctx, BUCKET_APP, now_epoch_s = 0) >= 1000.0)
+
+def _test_throttle_factor_floor(ctx):
+    """A bucket whose `remaining` rose between observations (server
+    replenished mid-task) must still produce factor ≥ 1.0. We never
+    speed up — only slow down."""
+    _reset(ctx)
+    record_observation(ctx, BUCKET_APP, remaining = 1000, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 100.0)
+    record_observation(ctx, BUCKET_APP, remaining = 1100, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 110.0)
+    _eq("floor — rising remaining yields 1.0", throttle_factor(ctx, BUCKET_APP, now_epoch_s = 0), 1.0)
+
+def _test_throttle_factor_burn_rate_inference(ctx):
+    """With two observations and a positive burn rate, the factor
+    scales with how aggressively the bucket is being consumed
+    relative to the safe-burn rate (remaining / time_to_reset)."""
+    _reset(ctx)
+
+    # Reset 1 hour out (now_epoch_s = 0). Bucket has burned 100/sec
+    # over 10s = effectively 100 calls/sec. safe_burn = 4900/3600 ≈ 1.36/sec.
+    # factor ≈ 100/1.36 ≈ 73.5×.
+    reset_epoch = 3600
+    record_observation(ctx, BUCKET_APP, remaining = 5900, limit = 6000, reset_epoch = reset_epoch, epoch_s = 100.0)
+    record_observation(ctx, BUCKET_APP, remaining = 4900, limit = 6000, reset_epoch = reset_epoch, epoch_s = 110.0)
+    factor_high = throttle_factor(ctx, BUCKET_APP, now_epoch_s = 0)
+    _assert("burn rate — high burn → high factor", factor_high > 50.0)
+
+    _reset(ctx)
+
+    # Same window but burn only 1 call/sec — well under safe-burn,
+    # factor floors at 1.0.
+    record_observation(ctx, BUCKET_APP, remaining = 5900, limit = 6000, reset_epoch = reset_epoch, epoch_s = 100.0)
+    record_observation(ctx, BUCKET_APP, remaining = 5890, limit = 6000, reset_epoch = reset_epoch, epoch_s = 110.0)
+    factor_low = throttle_factor(ctx, BUCKET_APP, now_epoch_s = 0)
+    _eq("burn rate — low burn under safe-burn yields 1.0", factor_low, 1.0)
+
+def _test_threshold_warn_fires_once(ctx):
+    """Crossing the LOW threshold (≤ 20% of limit) bumps the bucket's
+    `threshold_warned_tier` to 1; further LOW-zone observations don't
+    re-fire. Crossing IMPORTANT (≤ 5%) bumps to 2. The WARN line
+    itself is a CLI-log side effect; the tier int is the dedup state."""
+    _reset(ctx)
+    _eq("warn — initial tier is 0", _tier(ctx, BUCKET_APP), 0)
+
+    # 15% → bump to LOW (tier 1).
+    record_observation(ctx, BUCKET_APP, remaining = 750, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 1.0)
+    _eq("warn — LOW recorded at 15%", _tier(ctx, BUCKET_APP), 1)
+
+    # 10% → still LOW, tier stays 1 (no re-fire).
+    record_observation(ctx, BUCKET_APP, remaining = 500, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 2.0)
+    _eq("warn — LOW does not re-fire at 10%", _tier(ctx, BUCKET_APP), 1)
+
+    # 4% → bump to IMPORTANT (tier 2).
+    record_observation(ctx, BUCKET_APP, remaining = 200, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 3.0)
+    _eq("warn — IMPORTANT recorded at 4%", _tier(ctx, BUCKET_APP), 2)
+
+    # 3% → still IMPORTANT, tier stays 2.
+    record_observation(ctx, BUCKET_APP, remaining = 150, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 4.0)
+    _eq("warn — IMPORTANT does not re-fire at 3%", _tier(ctx, BUCKET_APP), 2)
+
+def _test_threshold_warn_re_fires_after_reset(ctx):
+    """A reset crossing clears the bucket's tier so a fresh
+    burn-through in the new window re-fires LOW + IMPORTANT instead
+    of staying silent under the prior tier-2 dedup."""
+    _reset(ctx)
+
+    # First window: burn to 4% → tier 2 (IMPORTANT).
+    record_observation(ctx, BUCKET_APP, remaining = 200, limit = 5000, reset_epoch = 1000, epoch_s = 1.0)
+    _eq("first window — tier at IMPORTANT", _tier(ctx, BUCKET_APP), 2)
+
+    # Window rolls (+3600s, past `_RESET_JUMP_S`). Tier clears.
+    record_observation(ctx, BUCKET_APP, remaining = 5000, limit = 5000, reset_epoch = 4600, epoch_s = 100.0)
+    _eq("post-reset — tier cleared", _tier(ctx, BUCKET_APP), 0)
+
+    # Burn again in new window — LOW re-fires (tier → 1).
+    record_observation(ctx, BUCKET_APP, remaining = 500, limit = 5000, reset_epoch = 4600, epoch_s = 200.0)
+    _eq("new-window burn — tier re-fires to LOW", _tier(ctx, BUCKET_APP), 1)
+
+def _test_threshold_warn_direct_to_important(ctx):
+    """First observation already in the IMPORTANT zone (≤ 5%) fires
+    both tiers on the same call — the bucket lands at tier 2 directly,
+    matching the CLI's two-WARN-line emit order."""
+    _reset(ctx)
+    record_observation(ctx, BUCKET_APP, remaining = 150, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 1.0)
+    _eq("warn — direct-to-IMPORTANT lands at tier 2", _tier(ctx, BUCKET_APP), 2)
+
+def _test_reset_crossing_exact_boundary(ctx):
+    """Reset-epoch jump of exactly `_RESET_JUMP_S` (600s) is at the
+    threshold and does NOT flush (the check uses strict `>`); a jump
+    of +601s does flush."""
+    _reset(ctx)
+    record_observation(ctx, BUCKET_APP, remaining = 100, limit = 5000, reset_epoch = 1000, epoch_s = 1.0)
+
+    # +600s — at the boundary, not a flush.
+    record_observation(ctx, BUCKET_APP, remaining = 90, limit = 5000, reset_epoch = 1600, epoch_s = 2.0)
+    _eq(
+        "reset crossing — exactly +600s preserves prior obs",
+        len(ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_APP]),
+        2,
+    )
+
+    # +601s — past the boundary, flushes the prior buffer.
+    record_observation(ctx, BUCKET_APP, remaining = 80, limit = 5000, reset_epoch = 2202, epoch_s = 3.0)
+    _eq(
+        "reset crossing — +601s flushes prior obs",
+        len(ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_APP]),
+        1,
+    )
+
+def _test_effective_throttle_factor_picks_larger(ctx):
+    """`effective_throttle_factor` returns max(quota_factor, time_factor).
+    Test each side dominates the other under different inputs."""
+    _reset(ctx)
+
+    # Both factors 1.0 → 1.0.
+    _eq(
+        "effective — no pressure → 1.0",
+        effective_throttle_factor(ctx, BUCKET_APP, elapsed_s = 0, min_interval_s = 10),
+        1.0,
+    )
+
+    # Time factor 6.0 (1h elapsed, 10s base → 60s target) dominates
+    # a no-pressure quota factor of 1.0.
+    _eq(
+        "effective — time pressure dominates quota at rest",
+        effective_throttle_factor(ctx, BUCKET_APP, elapsed_s = 3600, min_interval_s = 10),
+        6.0,
+    )
+
+    # Drop the quota into the threshold ladder's 5% step (factor 5.0).
+    # Time at 0 elapsed → 1.0. Quota factor wins.
+    record_observation(ctx, BUCKET_APP, remaining = 500, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 1.0)
+    _eq(
+        "effective — quota pressure dominates time at task start",
+        effective_throttle_factor(ctx, BUCKET_APP, elapsed_s = 0, min_interval_s = 10),
+        5.0,
+    )
+
+def _test_seed_from_rate_limit_body(ctx):
+    """`/rate_limit` JSON parses into the App bucket and seeds the
+    ring buffer with the embedded `resources.core` values."""
+    _reset(ctx)
+    body = {
+        "resources": {
+            "core": {
+                "limit": 5000,
+                "used": 100,
+                "remaining": 4900,
+                "reset": _FAR_FUTURE,
+            },
+        },
+    }
+    seed_from_rate_limit_body(ctx, BUCKET_APP, body)
+    obs = ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_APP]
+    _eq("seed — single entry", len(obs), 1)
+    _eq("seed — remaining recorded", obs[0][1], 4900)
+    _eq("seed — limit recorded", obs[0][2], 5000)
+    _eq("seed — watermark seeded", ctx.traits[GitHubApiRateLimitTrait].watermark[BUCKET_APP], 4900)
+
+    # Malformed body — silent no-op.
+    _reset(ctx)
+    seed_from_rate_limit_body(ctx, BUCKET_APP, "not a dict")
+    _eq("seed — non-dict body no-ops", len(ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_APP]), 0)
+
+    # Missing resources.core — silent no-op.
+    _reset(ctx)
+    seed_from_rate_limit_body(ctx, BUCKET_APP, {"resources": {}})
+    _eq("seed — missing core no-ops", len(ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_APP]), 0)
+
+def _test_record_from_headers(ctx):
+    """Header-list parsing path: case-insensitive name lookup, lenient
+    integer parsing, silent no-op when `X-RateLimit-Remaining` isn't
+    present (non-GitHub endpoint or transport error)."""
+    _reset(ctx)
+    record_from_headers(
+        ctx,
+        BUCKET_APP,
+        [
+            ("Content-Type", "application/json"),
+            # GitHub's actual header capitalization is canonical, but
+            # we look up case-insensitively in case a proxy lowercased
+            # them (some HTTP/2 stacks do).
+            ("x-ratelimit-limit", "5000"),
+            ("X-RateLimit-Remaining", "4900"),
+            ("X-RATELIMIT-RESET", "1700000000"),
+        ],
+        epoch_s = 5.0,
+    )
+    obs = ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_APP]
+    _eq("headers — single observation recorded", len(obs), 1)
+    _eq("headers — remaining parsed", obs[0][1], 4900)
+    _eq("headers — limit parsed", obs[0][2], 5000)
+    _eq("headers — reset_epoch parsed", obs[0][3], 1700000000)
+
+    # No `X-RateLimit-Remaining` → silent no-op (non-GitHub response).
+    _reset(ctx)
+    record_from_headers(ctx, BUCKET_APP, [("Content-Type", "text/html")])
+    _eq("headers — no x-ratelimit-* no-ops", len(ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_APP]), 0)
+
+    # Empty header list → silent no-op.
+    _reset(ctx)
+    record_from_headers(ctx, BUCKET_APP, [])
+    _eq("headers — empty list no-ops", len(ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_APP]), 0)
+
+    # None headers → silent no-op (e.g. transport error returns no response object).
+    _reset(ctx)
+    record_from_headers(ctx, BUCKET_APP, None)
+    _eq("headers — None no-ops", len(ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_APP]), 0)
+
+    # Malformed limit string → silent no-op (limit ≤ 0 fails the validation
+    # in record_observation, so the observation never lands).
+    _reset(ctx)
+    record_from_headers(ctx, BUCKET_APP, [
+        ("X-RateLimit-Remaining", "4900"),
+        ("X-RateLimit-Limit", "not-a-number"),
+        ("X-RateLimit-Reset", "1700000000"),
+    ])
+    _eq("headers — malformed limit no-ops", len(ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_APP]), 0)
+
+def _test_record_validation(ctx):
+    """`record_observation` silently rejects bad inputs so callers
+    don't have to validate themselves."""
+    _reset(ctx)
+
+    # Unknown bucket → no-op.
+    record_observation(ctx, "unknown-bucket", remaining = 100, limit = 1000, reset_epoch = _FAR_FUTURE, epoch_s = 1.0)
+    _eq("validation — unknown bucket app empty", len(ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_APP]), 0)
+    _eq("validation — unknown bucket env empty", len(ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_ENV]), 0)
+
+    # Zero limit → no-op (can't meaningfully compute a fraction).
+    _reset(ctx)
+    record_observation(ctx, BUCKET_APP, remaining = 100, limit = 0, reset_epoch = _FAR_FUTURE, epoch_s = 1.0)
+    _eq("validation — zero limit no-ops", len(ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_APP]), 0)
+
+    # Negative limit → no-op (same reasoning).
+    _reset(ctx)
+    record_observation(ctx, BUCKET_APP, remaining = 100, limit = -5, reset_epoch = _FAR_FUTURE, epoch_s = 1.0)
+    _eq("validation — negative limit no-ops", len(ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_APP]), 0)
+
+def _test_throttle_factor_no_trait(ctx):
+    """`throttle_factor` on a ctx without `GitHubApiRateLimitTrait` (test stubs)
+    returns 1.0 so the caller's heartbeat cadence is unaffected."""
+    fake_ctx = struct(std = struct(env = struct(var = lambda _name: "")))
+    _eq("no-trait — factor is 1.0", throttle_factor(fake_ctx, BUCKET_APP), 1.0)
+
+def _test_throttle_factor_exhausted(ctx):
+    """With ≥ 2 observations and `remaining == 0`, the factor returns
+    the terminal-only sentinel so callers drop every non-final emit."""
+    _reset(ctx)
+    record_observation(ctx, BUCKET_APP, remaining = 1, limit = 5000, reset_epoch = 3600, epoch_s = 1.0)
+    record_observation(ctx, BUCKET_APP, remaining = 0, limit = 5000, reset_epoch = 3600, epoch_s = 2.0)
+    _assert("exhausted — terminal-only factor", throttle_factor(ctx, BUCKET_APP, now_epoch_s = 0) >= 1000.0)
+
+def _test_burn_rate_falls_back_on_degenerate_inputs(ctx):
+    """The ≥ 2 observation path returns None on degenerate inputs
+    (zero Δt, missing reset_epoch); `throttle_factor` then falls back
+    to the threshold ladder on the latest observation."""
+
+    # Zero Δt — both observations share the same monotonic timestamp.
+    _reset(ctx)
+    record_observation(ctx, BUCKET_APP, remaining = 4900, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 5.0)
+    record_observation(ctx, BUCKET_APP, remaining = 4800, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 5.0)
+
+    # 96% remaining on the threshold ladder → 1×.
+    _eq("zero Δt — falls back to threshold (96% → 1×)", throttle_factor(ctx, BUCKET_APP, now_epoch_s = 0), 1.0)
+
+    # Missing reset_epoch — burn-rate calc can't compute time_to_reset
+    # without it, so falls back to the threshold ladder.
+    _reset(ctx)
+    record_observation(ctx, BUCKET_APP, remaining = 600, limit = 5000, reset_epoch = 0, epoch_s = 1.0)
+    record_observation(ctx, BUCKET_APP, remaining = 500, limit = 5000, reset_epoch = 0, epoch_s = 2.0)
+
+    # 10% remaining on the threshold ladder → 5×.
+    _eq("no reset_epoch — falls back to threshold (10% → 5×)", throttle_factor(ctx, BUCKET_APP, now_epoch_s = 0), 5.0)
+
+def _test_seed_from_rate_limit_body_edge_cases(ctx):
+    """`seed_from_rate_limit_body` ignores partially-missing bodies
+    without polluting the buffer or watermark."""
+
+    # Missing `resources` key entirely.
+    _reset(ctx)
+    seed_from_rate_limit_body(ctx, BUCKET_APP, {})
+    _eq("seed edge — missing resources no-ops", len(ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_APP]), 0)
+
+    # `resources.core.remaining = -1` (sentinel for unset in our parser).
+    _reset(ctx)
+    seed_from_rate_limit_body(ctx, BUCKET_APP, {
+        "resources": {"core": {"limit": 5000, "remaining": -1, "reset": _FAR_FUTURE}},
+    })
+    _eq("seed edge — negative remaining no-ops", len(ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_APP]), 0)
+
+    # `resources.core.limit = 0` (invalid; can't compute fraction).
+    _reset(ctx)
+    seed_from_rate_limit_body(ctx, BUCKET_APP, {
+        "resources": {"core": {"limit": 0, "remaining": 100, "reset": _FAR_FUTURE}},
+    })
+    _eq("seed edge — zero limit no-ops", len(ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_APP]), 0)
+
+def _test_usage_footer(ctx):
+    """`usage_footer` is App-bucket-only — env-bucket pressure is
+    surfaced via CLI INFO logs (first-observation + threshold
+    transitions) but kept out of the GHSC / BK / PR-comment footer
+    so the surface stays focused on the one bucket aspect-cli
+    actively manages and swarm-coordinates on."""
+    _reset(ctx)
+    _eq("usage_footer — empty trait → empty string", usage_footer(ctx), "")
+
+    # App-bucket observation only → footer renders the App payload
+    # with thousands separators on the numbers, no bucket label.
+    _reset(ctx)
+    record_observation(ctx, BUCKET_APP, remaining = 4200, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 1.0)
+
+    # The `resets in <duration>` segment depends on wall-clock time, so
+    # assert the payload with `in` containment instead of an exact
+    # match. The format under test:
+    # `📊 GitHub API quota <used>/<limit> (<pct>% used, resets in <duration>)`.
+    footer = usage_footer(ctx)
+    if not footer.startswith("📊 GitHub API quota "):
+        fail("usage_footer — App-only: missing prefix: %r" % footer)
+    if "800/5,000 (16% used" not in footer:
+        fail("usage_footer — App-only: missing payload: %r" % footer)
+    if "resets in " not in footer:
+        fail("usage_footer — App-only: missing `resets in`: %r" % footer)
+
+    # Env-bucket observation alone → no footer. The surface skips
+    # env-only data; CLI INFO logs carry it for operator visibility.
+    _reset(ctx)
+    record_observation(ctx, BUCKET_ENV, remaining = 100, limit = 1000, reset_epoch = _FAR_FUTURE, epoch_s = 2.0)
+    _eq("usage_footer — env-only → empty string", usage_footer(ctx), "")
+
+    # App + env observed → footer renders App only; the env bucket
+    # stays in the INFO log layer.
+    _reset(ctx)
+    record_observation(ctx, BUCKET_APP, remaining = 4900, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 1.0)
+    record_observation(ctx, BUCKET_ENV, remaining = 100, limit = 1000, reset_epoch = _FAR_FUTURE, epoch_s = 2.0)
+    footer = usage_footer(ctx)
+    if "100/5,000 (2% used" not in footer:
+        fail("usage_footer — App + env: missing App payload: %r" % footer)
+    if "GITHUB_TOKEN" in footer or "900/1,000" in footer:
+        fail("usage_footer — App + env: env payload must NOT appear in surface footer: %r" % footer)
+
+    # No-traits ctx → "" (test stubs that don't carry GitHubApiRateLimitTrait).
+    fake_ctx = struct(std = struct())
+    _eq("usage_footer — no-traits ctx → empty string", usage_footer(fake_ctx), "")
+
+def _test_time_throttle_factor_sliding_scale(ctx):
+    """Verify the time-based sliding-scale throttle:
+      - 0 ≤ elapsed < FAST (5 min)         → 1.0
+      - FAST ≤ elapsed < SLOW (5..30 min) → linear ramp
+      - elapsed ≥ SLOW (30 min)           → clamp at target
+    Floored at 1.0 in every case."""
+    min_interval = 10  # seconds — typical GHSC min_poll_interval_seconds.
+
+    # Fast period: no throttle.
+    _eq("time-throttle — 0s elapsed → 1.0", time_throttle_factor(0, min_interval), 1.0)
+    _eq("time-throttle — 60s elapsed → 1.0", time_throttle_factor(60, min_interval), 1.0)
+    _eq("time-throttle — 4m 59s elapsed → 1.0", time_throttle_factor(299, min_interval), 1.0)
+
+    # At 5 min the ramp starts: factor is still 1.0 at the boundary.
+    _eq("time-throttle — exactly 5 min → 1.0", time_throttle_factor(300, min_interval), 1.0)
+
+    # Mid-ramp at ~17m 30s: halfway between FAST and SLOW. Target at
+    # SLOW is 60/10 = 6.0; halfway from 1.0 is 3.5.
+    halfway = (300 + 1800) // 2  # 1050s
+    _eq("time-throttle — halfway 17.5m → 3.5", time_throttle_factor(halfway, min_interval), 3.5)
+
+    # At 30 min the ramp clamps: target = 60s / 10s = 6.0.
+    _eq("time-throttle — exactly 30 min → 6.0", time_throttle_factor(1800, min_interval), 6.0)
+    _eq("time-throttle — 1h elapsed (past clamp) → 6.0", time_throttle_factor(3600, min_interval), 6.0)
+
+    # If `min_interval` already meets or exceeds the target, factor is 1.0.
+    _eq("time-throttle — min_interval == target → 1.0 at clamp", time_throttle_factor(3600, 60), 1.0)
+    _eq("time-throttle — min_interval > target → 1.0 at clamp", time_throttle_factor(3600, 120), 1.0)
+
+    # Degenerate inputs → 1.0 (no throttle).
+    _eq("time-throttle — zero min_interval → 1.0", time_throttle_factor(3600, 0), 1.0)
+    _eq("time-throttle — negative min_interval → 1.0", time_throttle_factor(3600, -5), 1.0)
+    _eq("time-throttle — negative elapsed → 1.0", time_throttle_factor(-1, min_interval), 1.0)
+
+def _test_export_observations_round_trip(ctx):
+    """`export_observations` produces a JSON-friendly dict shape that
+    `ingest_sibling_observations` consumes; the two are inverses."""
+    _reset(ctx)
+    record_observation(ctx, BUCKET_APP, remaining = 4800, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 100.0)
+    record_observation(ctx, BUCKET_APP, remaining = 4700, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 110.0)
+    record_observation(ctx, BUCKET_ENV, remaining = 900, limit = 1000, reset_epoch = _FAR_FUTURE, epoch_s = 105.0)
+
+    exported = export_observations(ctx)
+    _eq("export — app entries serialised", len(exported.get(BUCKET_APP, [])), 2)
+    _eq("export — env entries serialised", len(exported.get(BUCKET_ENV, [])), 1)
+    _eq("export — first app entry is a dict", type(exported[BUCKET_APP][0]), "dict")
+    _eq("export — first app epoch", exported[BUCKET_APP][0]["epoch_s"], 100.0)
+    _eq("export — first app remaining", exported[BUCKET_APP][0]["remaining"], 4800)
+
+    # Buckets with zero observations are omitted from the payload so
+    # the artifact stays compact. Reset and re-export.
+    _reset(ctx)
+    record_observation(ctx, BUCKET_APP, remaining = 4800, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 100.0)
+    exported = export_observations(ctx)
+    if BUCKET_ENV in exported:
+        fail("export — empty env bucket should be omitted: %r" % exported)
+
+def _test_ingest_sibling_observations(ctx):
+    """Sibling-exported observations land under their `sibling_id` and
+    feed into the merged view consumed by `throttle_factor`."""
+    _reset(ctx)
+
+    # Sibling A burned 100 calls in 10s; its export carries the two
+    # observations spanning that window.
+    sibling_a = {
+        BUCKET_APP: [
+            {"epoch_s": 100.0, "remaining": 5900, "limit": 6000, "reset_epoch": 3600},
+            {"epoch_s": 110.0, "remaining": 5800, "limit": 6000, "reset_epoch": 3600},
+        ],
+    }
+    ingest_sibling_observations(ctx, "sibling-a", sibling_a)
+
+    sib = ctx.traits[GitHubApiRateLimitTrait].sibling_observations
+    _eq("ingest — sibling slice keyed by id", list(sib.keys()), ["sibling-a"])
+    _eq("ingest — app bucket observations stored", len(sib["sibling-a"][BUCKET_APP]), 2)
+
+    # Re-ingest under the same id overwrites — sibling sends a fresh
+    # slice each cycle, the trait holds at most one per sibling.
+    sibling_a_v2 = {
+        BUCKET_APP: [
+            {"epoch_s": 120.0, "remaining": 5700, "limit": 6000, "reset_epoch": 3600},
+        ],
+    }
+    ingest_sibling_observations(ctx, "sibling-a", sibling_a_v2)
+    sib = ctx.traits[GitHubApiRateLimitTrait].sibling_observations
+    _eq("ingest — overwrite by sibling_id", len(sib["sibling-a"][BUCKET_APP]), 1)
+
+    # Malformed inputs silently no-op.
+    _reset(ctx)
+    ingest_sibling_observations(ctx, "", {BUCKET_APP: [{"epoch_s": 1, "remaining": 1, "limit": 1, "reset_epoch": 1}]})
+    _eq("ingest — empty sibling_id no-ops", ctx.traits[GitHubApiRateLimitTrait].sibling_observations, {})
+    ingest_sibling_observations(ctx, "sibling-b", "not a dict")
+    _eq("ingest — non-dict payload no-ops", ctx.traits[GitHubApiRateLimitTrait].sibling_observations, {})
+    ingest_sibling_observations(ctx, "sibling-b", {BUCKET_APP: [{"remaining": -1, "limit": 100}]})
+    _eq("ingest — negative remaining filtered", ctx.traits[GitHubApiRateLimitTrait].sibling_observations, {})
+
+def _test_merged_view_drives_throttle_factor(ctx):
+    """A task with a single local observation falls back to the
+    threshold ladder when consulting `throttle_factor` alone — but
+    after ingesting sibling observations covering a real burn window,
+    the merged view supplies ≥ 2 samples and the burn-rate path takes
+    over. This is the convergence guarantee: every swarm member
+    computing throttle_factor against the same merged sample set
+    produces the same factor."""
+    _reset(ctx)
+
+    # Reset 1 hour out (now_epoch_s = 0). Sibling A burned 100 calls
+    # in 10s = ~10/s. safe_burn ≈ (4700 - 0.20*5000) / 3600 = 1.0/s.
+    # factor ≈ 10× — well above threshold-ladder (96% remaining → 1×).
+    reset_epoch = 3600
+
+    # Only our own first observation: 4700/5000 → threshold ladder hits the 96% row → 1×.
+    record_observation(ctx, BUCKET_APP, remaining = 4700, limit = 5000, reset_epoch = reset_epoch, epoch_s = 110.0)
+    local_only = throttle_factor(ctx, BUCKET_APP, now_epoch_s = 0)
+    _eq("merged — local-only falls through to threshold", local_only, 1.0)
+
+    # Sibling shares the missing prior observation — now merged buffer
+    # has 2 samples spanning a real burn window.
+    ingest_sibling_observations(ctx, "sibling-a", {
+        BUCKET_APP: [
+            {"epoch_s": 100.0, "remaining": 4800, "limit": 5000, "reset_epoch": reset_epoch},
+        ],
+    })
+    with_sibling = throttle_factor(ctx, BUCKET_APP, now_epoch_s = 0)
+    _assert("merged — sibling sample unlocks burn-rate inference", with_sibling > 5.0)
+
+def _test_merged_view_handles_flat_burn(ctx):
+    """A merged buffer of observations where `remaining` doesn't change
+    (steady-state, no actual burn) must produce factor 1.0 via the
+    `burn_rate <= 0 → 1.0` floor in `_burn_rate_factor`. Exercises
+    the merged path end-to-end with both local and sibling samples."""
+    _reset(ctx)
+
+    # Local + sibling both observed remaining = 4500 at different
+    # times — represents a swarm that's quiet (no calls between
+    # observations). Reset 1h out so `safe_remaining > 0`.
+    reset_epoch = 3600
+    for i in range(8):
+        record_observation(ctx, BUCKET_APP, remaining = 4500, limit = 5000, reset_epoch = reset_epoch, epoch_s = float(i))
+
+    sibling = {
+        BUCKET_APP: [
+            {"epoch_s": 100.0 + float(i), "remaining": 4500, "limit": 5000, "reset_epoch": reset_epoch}
+            for i in range(8)
+        ],
+    }
+    ingest_sibling_observations(ctx, "sibling-a", sibling)
+
+    _eq(
+        "merged — flat-burn merged buffer → factor 1.0",
+        throttle_factor(ctx, BUCKET_APP, now_epoch_s = 0),
+        1.0,
+    )
+
+def _test_impl(ctx):
+    _test_record_basic(ctx)
+    _test_record_buffer_truncation(ctx)
+    _test_record_from_headers(ctx)
+    _test_record_validation(ctx)
+    _test_watermark_monotone_decreasing(ctx)
+    _test_reset_crossing_flushes_buffer(ctx)
+    _test_two_bucket_independence(ctx)
+    _test_threshold_factor_ladder(ctx)
+    _test_throttle_factor_floor(ctx)
+    _test_throttle_factor_no_trait(ctx)
+    _test_throttle_factor_exhausted(ctx)
+    _test_throttle_factor_burn_rate_inference(ctx)
+    _test_burn_rate_falls_back_on_degenerate_inputs(ctx)
+    _test_threshold_warn_fires_once(ctx)
+    _test_threshold_warn_direct_to_important(ctx)
+    _test_threshold_warn_re_fires_after_reset(ctx)
+    _test_reset_crossing_exact_boundary(ctx)
+    _test_reset_crossing_rebaselines_watermark(ctx)
+    _test_burn_rate_replenishment_returns_floor(ctx)
+    _test_seed_from_rate_limit_body(ctx)
+    _test_seed_from_rate_limit_body_edge_cases(ctx)
+    _test_usage_footer(ctx)
+    _test_time_throttle_factor_sliding_scale(ctx)
+    _test_effective_throttle_factor_picks_larger(ctx)
+    _test_effective_factor_records_to_trait(ctx)
+    _test_usage_footer_renders_throttle_clause(ctx)
+    _test_export_observations_round_trip(ctx)
+    _test_ingest_sibling_observations(ctx)
+    _test_merged_view_drives_throttle_factor(ctx)
+    _test_merged_view_handles_flat_burn(ctx)
+    print("rate_limit.axl: OK (30 sections)")
+    return 0
+
+rate_limit_tests = task(
+    name = "test-rate-limit",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+    traits = [GitHubApiRateLimitTrait],
+)

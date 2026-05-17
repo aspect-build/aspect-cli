@@ -35,6 +35,7 @@ load(
     "./gitlab_detect.axl",
     "detect_gitlab_mr_base_sha",
 )
+load("./rate_limit.axl", "BUCKET_APP", "BUCKET_ENV", "GitHubApiRateLimitTrait")
 load("./tips.axl", "TipsTrait")
 
 def _fake_std(vars, files = {}):
@@ -360,11 +361,13 @@ def _test_impl(ctx):
         "",
     )
 
-    # ── github.preferred_token_pair: GITHUB_TOKEN / GH_TOKEN preference ─
-    # Resolves a `(primary, app_fallback)` pair for supporting
-    # GitHub API calls so the spend counts against the job's quota
-    # rather than the App's shared installation-token quota. The
-    # fallback is the App token, used to retry a 4xx-auth response.
+    # ── github.preferred_token_pair: (primary, fallback, primary_class) ─
+    # Resolves a `(primary, fallback, primary_class)` tuple for
+    # supporting GitHub API calls. The Aspect Workflows GitHub App's installation token
+    # is preferred as primary; `GITHUB_TOKEN` / `GH_TOKEN` from env
+    # sits in the fallback slot for the 4xx-auth retry path. The
+    # `primary_class` is the `GitHubApiRateLimitTrait` bucket the
+    # primary's response headers belong to (`"app"` or `"env"`).
     # Fresh App-token mints via `_authenticate(...)` aren't covered
     # here — they require `ctx.aspect.auth` stubbing; the
     # `existing_app_token` parameter bypasses the mint for tests.
@@ -372,47 +375,46 @@ def _test_impl(ctx):
     def _ctx_with_env(env_vars):
         return struct(std = struct(env = struct(var = lambda name: env_vars.get(name, ""))))
 
-    # App token is primary; env token (when exported) is the fallback
-    # for the 4xx-auth retry path.
     _eq(
         "preferred_token_pair: App token primary; GITHUB_TOKEN is fallback",
         github.preferred_token_pair(_ctx_with_env({"GITHUB_TOKEN": "gh-actions-tok"}), "o", "r", existing_app_token = "app-tok"),
-        ("app-tok", "gh-actions-tok"),
+        ("app-tok", "gh-actions-tok", "app"),
     )
     _eq(
         "preferred_token_pair: App primary; GH_TOKEN fallback when GITHUB_TOKEN unset",
         github.preferred_token_pair(_ctx_with_env({"GH_TOKEN": "gh-cli-tok"}), "o", "r", existing_app_token = "app-tok"),
-        ("app-tok", "gh-cli-tok"),
+        ("app-tok", "gh-cli-tok", "app"),
     )
     _eq(
         "preferred_token_pair: GITHUB_TOKEN preferred over GH_TOKEN in fallback slot when both set",
         github.preferred_token_pair(_ctx_with_env({"GITHUB_TOKEN": "gha", "GH_TOKEN": "gh"}), "o", "r", existing_app_token = "app-tok"),
-        ("app-tok", "gha"),
+        ("app-tok", "gha", "app"),
     )
     _eq(
         "preferred_token_pair: env unset — App token is primary, no fallback",
         github.preferred_token_pair(_ctx_with_env({}), "o", "r", existing_app_token = "app-tok"),
-        ("app-tok", None),
+        ("app-tok", None, "app"),
     )
 
     # Auth-failed branch — `_authenticate` short-circuits to `None`
     # when owner / repo are missing, populating `_reason` with both a
     # structured `kind` and a human-readable `reason`. Without an env
-    # token callers get `(None, None)`; with env exported, env becomes
-    # the last-resort primary so the call can still proceed.
+    # token callers get `(None, None, "app")` (primary_class doesn't
+    # matter since there's no token to attribute); with env exported,
+    # env becomes the last-resort primary and the class flips to env.
     auth_reason = {}
     _eq(
-        "preferred_token_pair: App auth failed + env unset → (None, None)",
+        "preferred_token_pair: App auth failed + env unset → (None, None, app)",
         github.preferred_token_pair(_ctx_with_env({}), "", "", _reason = auth_reason),
-        (None, None),
+        (None, None, "app"),
     )
     _eq("preferred_token_pair: _reason.kind populated", auth_reason.get("kind"), "no-owner-repo")
     if not auth_reason.get("reason"):
         fail("preferred_token_pair: expected _reason['reason'] to be set, got %r" % auth_reason)
     _eq(
-        "preferred_token_pair: App auth failed + env set → env as last-resort primary",
+        "preferred_token_pair: App auth failed + env set → env as last-resort primary (env bucket)",
         github.preferred_token_pair(_ctx_with_env({"GITHUB_TOKEN": "gha-fallback"}), "", "", _reason = {}),
-        ("gha-fallback", None),
+        ("gha-fallback", None, "env"),
     )
 
     # ── Failure-kind gate for TIP_ADD_ASPECT_API_TOKEN ────────────────
@@ -438,8 +440,11 @@ def _test_impl(ctx):
 
 def _http_stub(responses):
     """Stub `ctx.http()` returning canned responses in order. `responses`
-    is a list of `(status, body_str)` tuples; each `.get(...)` call
-    consumes one entry. Records every call's url + Authorization
+    is a list of `(status, body_str)` or `(status, body_str, headers_list)`
+    tuples; each `.get(...)` call consumes one entry. Headers default to
+    `[]` (no `X-RateLimit-*` → rate-limit observation hook silently
+    no-ops); tests that exercise the rate-limit bucket attribution
+    supply the 3-tuple form. Records every call's url + Authorization
     header so tests can assert which token went out on which attempt."""
     state = {"i": 0, "calls": []}
 
@@ -449,14 +454,17 @@ def _http_stub(responses):
             fail("http stub exhausted at call %d (urls so far: %r)" % (i, [c["url"] for c in state["calls"]]))
         state["i"] = i + 1
         state["calls"].append({"url": url, "auth": headers.get("Authorization", "")})
-        status, body = responses[i]
+        entry = responses[i]
+        status = entry[0]
+        body = entry[1]
+        resp_headers = entry[2] if len(entry) > 2 else []
 
         # _do_request_once consumes `.map_err(...).block()` for transport-error
         # normalization. The HTTP layer never errors here (we always return
         # a status/body tuple) so `.map_err` is a passthrough.
         return struct(
             map_err = lambda _f: struct(
-                block = lambda: struct(status = status, body = body),
+                block = lambda: struct(status = status, body = body, headers = resp_headers),
             ),
         )
 
@@ -516,7 +524,7 @@ def _test_aspect_api_token_tip_gate(ctx):
         _reason = reason,
     )
     _eq("kind-gate GHA: kind populated", reason.get("kind"), "no-credentials")
-    _eq("kind-gate GHA: env-token returned as primary", result, ("env-tok", None))
+    _eq("kind-gate GHA: env-token returned as primary", result, ("env-tok", None, "env"))
     _eq("kind-gate GHA: one tip fired", len(trait.tips), 1)
     _eq("kind-gate GHA: tip id (GHA-specific)", trait.tips[0]["id"], "add-aspect-api-token-github-actions")
     _eq("kind-gate GHA: tip is important", trait.tips[0]["severity"], "important")
@@ -628,7 +636,7 @@ def _test_pr_files_4xx_auth_fallback(ctx):
     ])
     stub = _stub_ctx(ctx, {"GITHUB_ACTIONS": "true"}, http_client)
 
-    result = github.pulls.list_files(stub, "app-tok", "o", "r", 42, app_fallback_token = "env-tok")
+    result = github.pulls.list_files(stub, "app-tok", "o", "r", 42, fallback_token = "env-tok")
 
     if not result["success"]:
         fail("pr-files fallback: expected success=True after retry, got %r" % result)
@@ -667,10 +675,51 @@ def _test_pr_files_4xx_auth_fallback(ctx):
     _eq("pr-files no-fallback: only the primary call ran", len(state2["calls"]), 1)
     _eq("pr-files no-fallback: no tip emitted (fallback drives the tip)", len(trait.tips), 0)
 
+    _test_pr_files_bucket_class_routes_observations(ctx)
+
+def _test_pr_files_bucket_class_routes_observations(ctx):
+    """Rate-limit observations from the primary + fallback calls in
+    `list_pull_request_files` must land in the buckets implied by
+    `token_class` (default `BUCKET_APP` for the primary) — the fallback
+    retry uses the opposite bucket. Pins the bucket-class derivation
+    against accidental inversion (e.g. assuming env is primary when a
+    fallback exists)."""
+    rl = ctx.traits[GitHubApiRateLimitTrait]
+    rl.observations = {BUCKET_APP: [], BUCKET_ENV: []}
+    rl.watermark = {BUCKET_APP: None, BUCKET_ENV: None}
+    rl.limits = {BUCKET_APP: 0, BUCKET_ENV: 0}
+    trait = ctx.traits[TipsTrait]
+    trait.tips = []
+
+    # Primary call (App-bucket headers) → 403, then retry (env-bucket
+    # headers) → 200. Distinct `Remaining` so the bucket attribution
+    # is unambiguous.
+    state, http_client = _http_stub([
+        (403, '{"message":"Resource not accessible by integration"}', [
+            ("X-RateLimit-Limit", "5000"),
+            ("X-RateLimit-Remaining", "4800"),
+            ("X-RateLimit-Reset", "9999999999"),
+        ]),
+        (200, "[]", [
+            ("X-RateLimit-Limit", "1000"),
+            ("X-RateLimit-Remaining", "900"),
+            ("X-RateLimit-Reset", "9999999999"),
+        ]),
+    ])
+    stub = _stub_ctx(ctx, {"GITHUB_ACTIONS": "true"}, http_client)
+    github.pulls.list_files(stub, "app-tok", "o", "r", 42, fallback_token = "env-tok")
+
+    app_obs = ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_APP]
+    env_obs = ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_ENV]
+    _eq("bucket-class — App bucket has the primary call's observation", len(app_obs), 1)
+    _eq("bucket-class — App `Remaining` matches primary response", app_obs[0][1], 4800)
+    _eq("bucket-class — env bucket has the fallback retry's observation", len(env_obs), 1)
+    _eq("bucket-class — env `Remaining` matches fallback response", env_obs[0][1], 900)
+
 github_detect_tests = task(
     name = "test-github-detect",
     group = ["dev"],
     implementation = _test_impl,
     args = {},
-    traits = [TipsTrait],
+    traits = [GitHubApiRateLimitTrait, TipsTrait],
 )

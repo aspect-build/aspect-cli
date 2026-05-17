@@ -20,7 +20,7 @@ Usage in `.aspect/config.axl`:
 """
 
 load("../lib/artifacts.axl", "ArtifactsTrait")
-load("../lib/bazel_results.axl", "html_escape", "now_ms", "render_bes_url", "resolve_aspect_url")
+load("../lib/bazel_results.axl", "format_run_date", "html_escape", "now_ms", "render_bes_url", "resolve_aspect_url")
 load(
     "../lib/check_dispatch.axl",
     "apply_artifact_links",
@@ -31,6 +31,7 @@ load(
 )
 load("../lib/environment.axl", "feature_logger", "workflows_results_url")
 load("../lib/lifecycle.axl", "TaskLifecycleTrait", "TaskUpdate")
+load("../lib/rate_limit.axl", "usage_footer")
 load("../lib/result_text.axl", "severity_for_status")
 load("../lib/tips.axl", "collect_tips_sorted")
 
@@ -231,7 +232,9 @@ def _buildkite_annotations(ctx: FeatureContext):
         return
     _LOG.trace("buildkite-agent probe ok")
 
-    min_update_interval_ms = ctx.args.min_update_interval_ms
+    # Sub-1-second cadences would spawn `buildkite-agent annotate` faster
+    # than it can finish — clamp to 1s floor.
+    min_update_interval_ms = max(1, ctx.args.min_update_interval_seconds) * 1000
     _state = {}
 
     def _make_links(data):
@@ -278,7 +281,7 @@ def _buildkite_annotations(ctx: FeatureContext):
             ctx,
             initial_results,
             "running",
-            make_render_ctx(_state, tips = collect_tips_sorted(ctx)),
+            make_render_ctx(_state, tips = collect_tips_sorted(ctx), api_usage = usage_footer(ctx), last_updated_at = format_run_date(ctx, now_ms(ctx))),
             _make_links(initial_results),
             None,
             None,
@@ -325,7 +328,7 @@ def _buildkite_annotations(ctx: FeatureContext):
             ctx,
             data,
             status,
-            make_render_ctx(_state, tips = collect_tips_sorted(ctx)),
+            make_render_ctx(_state, tips = collect_tips_sorted(ctx), api_usage = usage_footer(ctx), last_updated_at = format_run_date(ctx, now_ms(ctx))),
             _make_links(data),
             None,
             None,
@@ -353,9 +356,13 @@ BuildkiteAnnotations = feature(
             values = ["ci-only", "local-only", "always"],
             description = "When to create Buildkite annotations: ci-only (default), local-only, or always.",
         ),
-        "min_update_interval_ms": args.int(
-            default = 500,
-            description = "Minimum milliseconds between live `buildkite-agent annotate` invocations during a task. Lower values give a more-responsive live annotation at the cost of more agent spawns on chatty tasks; the final task_update (terminal status) always bypasses this throttle. Status-transition updates (first failing tick, terminal verdict) also bypass it so the red stripe lands immediately.",
+        "min_update_interval_seconds": args.int(
+            default = 1,
+            description = "Minimum seconds between live Buildkite annotation refreshes during a task. " +
+                          "Default 1s, minimum 1s (smaller values are silently raised to 1). Higher values " +
+                          "reduce `buildkite-agent annotate` invocations on chatty tasks at the cost of " +
+                          "less-responsive live annotations. The task's terminal result and phase " +
+                          "boundaries always land immediately regardless of this setting.",
         ),
     },
 )

@@ -139,6 +139,7 @@ load("@aspect//lib/environment.axl", "color_enabled", "error", "info", "warn")
 load("@aspect//lib/github.axl", "detect_build_url", "detect_commit_sha")
 load("@aspect//lib/health_check.axl", "HealthCheckTrait")
 load("@aspect//lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "preflight_phase", "setup_phase", "task_update")
+load("@aspect//lib/rate_limit.axl", "GitHubApiRateLimitTrait")
 load("@aspect//lib/repro_commands.axl", "build_aspect_command", "task_cli_path")
 load("@aspect//lib/runnable.axl", "runnable")
 load("@aspect//lib/text.axl", "pluralize")
@@ -1289,6 +1290,7 @@ Currently \x1b[3monly\x1b[23m supported on Aspect Workflows CI runners. Support 
         DeliveryTrait,
         GitHubCheckRunTrait,
         HealthCheckTrait,
+        GitHubApiRateLimitTrait,
         TaskLifecycleTrait,
         TipsTrait,
     ],

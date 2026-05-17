@@ -29,6 +29,7 @@ load("./lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_ch
 load("./lib/health_check.axl", "HealthCheckTrait")
 load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "pick_task_status", "preflight_phase", "resolve_on_change", "setup_phase", "task_update")
 load("./lib/path_glob.axl", "match_any")
+load("./lib/rate_limit.axl", "GitHubApiRateLimitTrait")
 load("./lib/repro_commands.axl", "build_aspect_command", "task_cli_path")
 load("./lib/runnable.axl", "runnable")
 load("./lib/text.axl", "pluralize")
@@ -768,6 +769,7 @@ format = task(
         BazelTrait,
         GitHubCheckRunTrait,
         HealthCheckTrait,
+        GitHubApiRateLimitTrait,
         TaskLifecycleTrait,
         TipsTrait,
     ],
