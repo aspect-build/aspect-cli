@@ -18,7 +18,7 @@ HTTP failure-handling contract (applies to every helper below):
 
 load("@std//base64.axl", "base64")
 load("@std//time.axl", "time")
-load("./environment.axl", "color_enabled", "warn")
+load("./environment.axl", "color_enabled", "info", "warn")
 load("./gitlab_detect.axl", "detect_gitlab_mr_base_sha")
 load("./tar.axl", "zip_create")
 load("./text.axl", "pluralize")
@@ -63,25 +63,38 @@ def _retry_http(fn):
         backoff_ms = backoff_ms * 2
     return (result[0], result[1], result[2], attempts)
 
+def _format_http_failure_detail(status, error):
+    """Format the trailing `<status>: <body-snippet>` portion of an HTTP
+    failure message. Shared by `_warn_http_failure` and the
+    quiet-failure-log path so the two surfaces show the same detail."""
+    if status == 0:
+        return error if error else "transport error"
+    detail = "HTTP %d" % status
+    if error:
+        extra = error if type(error) == "string" else str(error)
+
+        # Keep one-line: collapse newlines, cap to 200 chars.
+        extra = extra.replace("\n", " ")
+        if len(extra) > 200:
+            extra = extra[:200] + "..."
+        detail = detail + ": " + extra
+    return detail
+
 def _warn_http_failure(ctx, label, attempts, status, error):
     """Emit a single WARNING line summarizing a terminal HTTP failure.
 
     `label` is a short identifier (e.g. `"GitHub API POST /repos/.../check-runs"`).
     `error` is the body or transport-error string from the response triple."""
-    if status == 0:
-        detail = error if error else "transport error"
-    else:
-        detail = "HTTP %d" % status
-        if error:
-            extra = error if type(error) == "string" else str(error)
-
-            # Keep one-line: collapse newlines, cap to 200 chars.
-            extra = extra.replace("\n", " ")
-            if len(extra) > 200:
-                extra = extra[:200] + "..."
-            detail = detail + ": " + extra
     suffix = " after %d attempts" % attempts if attempts > 1 else ""
-    warn(ctx.std, "%s failed%s: %s" % (label, suffix, detail))
+    warn(ctx.std, "%s failed%s: %s" % (label, suffix, _format_http_failure_detail(status, error)))
+
+def _info_http_failure(ctx, label, attempts, status, error):
+    """INFO-level sibling of `_warn_http_failure` for benign failures —
+    e.g. a `DeleteArtifact` that 404s on the eventual-consistency
+    window after a known prior upload. Same one-line shape so log
+    grep matches both."""
+    suffix = " after %d attempts" % attempts if attempts > 1 else ""
+    info(ctx.std, "%s failed%s (benign): %s" % (label, suffix, _format_http_failure_detail(status, error)))
 
 def _do_request_once(ctx, method, url, token, payload = None):
     """Single HTTP attempt. See file docstring for failure contract."""
@@ -1613,10 +1626,15 @@ def _github_twirp_once(ctx, url, headers, payload):
 # and a retry after partial success would duplicate / half-finalize.
 _TWIRP_IDEMPOTENT_METHODS = ["DeleteArtifact"]
 
-def _github_twirp(ctx, method, payload):
+def _github_twirp(ctx, method, payload, quiet_failure_log = False):
     """Twirp RPC to the GitHub Actions ArtifactService. Retries
     transient failures only for `_TWIRP_IDEMPOTENT_METHODS`. Returns
-    `(ok, body_or_None, error_message_or_None)`."""
+    `(ok, body_or_None, error_message_or_None)`.
+
+    `quiet_failure_log=True` downgrades the failure log from WARN to
+    INFO. Use at call sites where a failure is an expected/benign
+    outcome — e.g. `DeleteArtifact` 404'ing because the artifact
+    isn't there yet (eventual-consistency window) or never was."""
     token = (ctx.std.env.var("ACTIONS_RUNTIME_TOKEN") or
              ctx.std.env.var("ACTIONS_ID_TOKEN_REQUEST_TOKEN"))
 
@@ -1644,7 +1662,10 @@ def _github_twirp(ctx, method, payload):
         attempts = 1
 
     if not success:
-        _warn_http_failure(ctx, "GitHub Actions Twirp %s" % method, attempts, status, body_or_err)
+        if quiet_failure_log:
+            _info_http_failure(ctx, "GitHub Actions Twirp %s" % method, attempts, status, body_or_err)
+        else:
+            _warn_http_failure(ctx, "GitHub Actions Twirp %s" % method, attempts, status, body_or_err)
         if status == 0:
             err = body_or_err if type(body_or_err) == "string" else "transport error"
         else:
@@ -1777,8 +1798,14 @@ def _upload_artifact(ctx, path, name, expires_at = ""):
 
     return {"success": True, "artifact_ref": name, "download_url": download_url, "errors": []}
 
-def _delete_artifact(ctx, name):
-    """Delete an artifact from GitHub Actions using the Twirp API."""
+def _delete_artifact(ctx, name, quiet_failure_log = False):
+    """Delete an artifact from GitHub Actions using the Twirp API.
+
+    `quiet_failure_log=True` forwards to `_github_twirp` so the failure
+    log lands at INFO instead of WARN. Use when a delete failure is
+    expected to be benign — e.g. pre-upload cleanup where 404 is the
+    common "nothing to delete" outcome, or eventual-consistency miss
+    on a known prior upload."""
     token = (ctx.std.env.var("ACTIONS_RUNTIME_TOKEN") or
              ctx.std.env.var("ACTIONS_ID_TOKEN_REQUEST_TOKEN"))
     if not token:
@@ -1792,7 +1819,7 @@ def _delete_artifact(ctx, name):
         "workflowRunBackendId": run_id,
         "workflowJobRunBackendId": job_id,
         "name": name,
-    })
+    }, quiet_failure_log = quiet_failure_log)
     return {"success": ok}
 
 def _check_token(ctx):
@@ -2045,4 +2072,5 @@ github = struct(
     parse_pr_patch = _parse_github_pr_patch,
     parse_local_diff = _parse_local_diff_output,
     extract_owner_repo = _extract_github_owner_repo_from_url,
+    format_http_failure_detail = _format_http_failure_detail,
 )
