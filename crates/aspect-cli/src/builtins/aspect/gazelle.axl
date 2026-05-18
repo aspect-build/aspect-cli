@@ -199,6 +199,7 @@ load("./lib/path_glob.axl", "match_any")
 load("./lib/repro_commands.axl", "build_aspect_command", "task_cli_path")
 load("./lib/runnable.axl", "runnable")
 load("./lib/text.axl", "pluralize")
+load("./lib/tips.axl", "TipsTrait")
 
 def _parse_diff_paths(diff_text):
     """Extract the set of affected paths from a unified diff.
@@ -915,8 +916,6 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     return _emit_final(ctx, lifecycle, data, 0)
 
 gazelle = task(
-    implementation = _impl,
-    traits = [ArtifactsTrait, BazelTrait, HealthCheckTrait, TaskLifecycleTrait, GitHubCheckRunTrait],
     args = {
         "on_change": args.string(
             default = "auto",
@@ -979,4 +978,13 @@ gazelle = task(
             description = "Additional Bazel startup flags. Repeat the flag to pass multiple. Note: changing startup flags restarts the Bazel server.",
         ),
     },
+    traits = [
+        ArtifactsTrait,
+        BazelTrait,
+        GitHubCheckRunTrait,
+        HealthCheckTrait,
+        TaskLifecycleTrait,
+        TipsTrait,
+    ],
+    implementation = _impl,
 )

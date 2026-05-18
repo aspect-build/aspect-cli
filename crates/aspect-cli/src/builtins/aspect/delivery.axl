@@ -142,6 +142,7 @@ load("@aspect//lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrai
 load("@aspect//lib/repro_commands.axl", "build_aspect_command", "task_cli_path")
 load("@aspect//lib/runnable.axl", "runnable")
 load("@aspect//lib/text.axl", "pluralize")
+load("@aspect//lib/tips.axl", "TipsTrait")
 load("@std//time.axl", "sleep_iter", "time")
 
 DeliveryTrait = trait(
@@ -1217,8 +1218,6 @@ delivery = task(
     description = """Build and deliver binary targets. Targets are built with stamping and delivered exactly once per commit unless forced; change detection skips targets whose outputs haven't changed since the last delivery.
 
 Currently \x1b[3monly\x1b[23m supported on Aspect Workflows CI runners. Support for generic CI runners is planned. Contact Aspect support <support@aspect.build> for more info.""",
-    implementation = _delivery_impl,
-    traits = [BazelTrait, DeliveryTrait, HealthCheckTrait, TaskLifecycleTrait, GitHubCheckRunTrait],
     args = {
         "ci_host": args.string(
             default = "bk",
@@ -1285,4 +1284,13 @@ Currently \x1b[3monly\x1b[23m supported on Aspect Workflows CI runners. Support 
             description = "Bazel target labels to deliver.",
         ),
     },
+    traits = [
+        BazelTrait,
+        DeliveryTrait,
+        GitHubCheckRunTrait,
+        HealthCheckTrait,
+        TaskLifecycleTrait,
+        TipsTrait,
+    ],
+    implementation = _delivery_impl,
 )

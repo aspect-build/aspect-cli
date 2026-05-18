@@ -16,6 +16,11 @@ Coverage:
   - Link availability variants (CI Run only, no Aspect, no Check, all)
   - Live phase + ProgressStyles round-trip via the artifact-shape dict
   - Failed-in-phase prefix
+  - Tips aggregation: single-task, multi-task dedup + attribution,
+    severity-sort with the `_MAX_SUBORDINATE_TIPS` cap on
+    suggestion / info; plus inline `_check_collect_tip_rows`
+    assertions on the aggregator's invariants (dedup,
+    attribution-key sort, severity order, cap, silence_hint).
 """
 
 load(
@@ -24,6 +29,7 @@ load(
     "DEFAULT_STATUS_BADGES",
     "MARKER_FMT",
     "bucket_entries",
+    "collect_tip_rows",
     "prepare_for_render",
     "render_body",
     "results_subset",
@@ -274,7 +280,8 @@ def _entry(
         current_phase_elapsed_ms = 0,
         progress = None,
         failed_in_phase = "",
-        start_time_ms = _DEFAULT_START_MS):
+        start_time_ms = _DEFAULT_START_MS,
+        tips = None):
     """Build an artifact-payload-shaped entry. Mirrors what
     `_publish_self` writes to task.json so the test exercises the same
     on-wire shape sibling jobs would read.
@@ -321,10 +328,119 @@ def _entry(
     payload["run_attempt"] = "1"
     payload["status"] = status
     payload["ci_run_url"] = ci_run_url
+    if tips != None:
+        payload["tips"] = tips
     return payload
+
+def _check_collect_tip_rows(ctx):
+    """Functional assertions for `_collect_tip_rows` — exercise the
+    dedup, attribution, severity-sort, `_MAX_SUBORDINATE_TIPS` cap,
+    and the multi-accumulator JINJA2 re-render logic without going
+    through the full snapshot pipeline."""
+
+    # Dedup + attribution: same id surfaced by two tasks merges into
+    # one row with both task keys in alphabetical order.
+    rows = collect_tip_rows(ctx, [
+        {"key": "lint-task", "tips": [
+            {"id": "x", "severity": "suggestion", "title": "T", "body": "B"},
+        ]},
+        {"key": "build-task", "tips": [
+            {"id": "x", "severity": "suggestion", "title": "T", "body": "B"},
+        ]},
+    ])
+    if len(rows) != 1:
+        fail("collect_tip_rows dedup: expected 1 row, got %d" % len(rows))
+    if rows[0]["task_keys"] != ["build-task", "lint-task"]:
+        fail("collect_tip_rows attribution: expected [build-task, lint-task], got %r" % rows[0]["task_keys"])
+
+    # Severity sort: critical first, then warning, then suggestion, then info.
+    rows = collect_tip_rows(ctx, [{"key": "t1", "tips": [
+        {"id": "i", "severity": "info", "title": "I", "body": ""},
+        {"id": "c", "severity": "critical", "title": "C", "body": ""},
+        {"id": "s", "severity": "suggestion", "title": "S", "body": ""},
+        {"id": "w", "severity": "warning", "title": "W", "body": ""},
+    ]}])
+    ids = [r["id"] for r in rows]
+    if ids != ["c", "w", "s", "i"]:
+        fail("collect_tip_rows severity sort: expected [c, w, s, i], got %r" % ids)
+
+    # Cap: suggestion + info combined capped at 5; critical + warning unbounded.
+    big = (
+        [{"id": "c%d" % i, "severity": "critical", "title": "C", "body": ""} for i in range(3)] +
+        [{"id": "w%d" % i, "severity": "warning", "title": "W", "body": ""} for i in range(4)] +
+        [{"id": "s%d" % i, "severity": "suggestion", "title": "S", "body": ""} for i in range(4)] +
+        [{"id": "i%d" % i, "severity": "info", "title": "I", "body": ""} for i in range(4)]
+    )
+    rows = collect_tip_rows(ctx, [{"key": "t1", "tips": big}])
+    critical_count = len([r for r in rows if r["severity_label"] == "Critical"])
+    warning_count = len([r for r in rows if r["severity_label"] == "Warning"])
+    subordinate_count = len([r for r in rows if r["severity_label"] in ("Tip", "Info")])
+    if critical_count != 3:
+        fail("collect_tip_rows cap: expected 3 critical, got %d" % critical_count)
+    if warning_count != 4:
+        fail("collect_tip_rows cap: expected 4 warning, got %d" % warning_count)
+    if subordinate_count != 5:
+        fail("collect_tip_rows cap: expected 5 subordinate (suggestion+info), got %d" % subordinate_count)
+
+    # silence_hint: empty for critical, non-empty for non-critical.
+    # The rendered tip carries this `<sub>...</sub>` line as its
+    # silence-hint footer; an empty value suppresses the footer.
+    rows = collect_tip_rows(ctx, [{"key": "t1", "tips": [
+        {"id": "c", "severity": "critical", "title": "C", "body": ""},
+        {"id": "s", "severity": "suggestion", "title": "S", "body": ""},
+    ]}])
+    by_id = {r["id"]: r for r in rows}
+    if by_id["c"]["silence_hint"] != "":
+        fail("collect_tip_rows: critical row must have empty silence_hint")
+    if "silenced_tips" not in by_id["s"]["silence_hint"]:
+        fail("collect_tip_rows: suggestion row must reference silenced_tips in silence_hint")
+
+    # Multi-accumulator cross-task merge: two tasks each emit the
+    # `add-github-token-scope` JINJA2 tip with distinct scopes and
+    # endpoints. The merged row carries the union of each
+    # accumulator (preserving first-seen order across tasks), and
+    # the title + body are re-rendered via Jinja2 so the surfaced
+    # text reflects the merged accumulator state (pluralized title,
+    # full endpoint list in the body).
+    title_tmpl = "Grant {% if scopes|length == 1 %}`{{ scopes[0] }}`{% else %}{{ scopes|length }} scopes{% endif %}"
+    body_tmpl = "{{ endpoints|length }} calls fell back:\n{% for e in endpoints %}- {{ e }}\n{% endfor %}"
+    rows = collect_tip_rows(ctx, [
+        {"key": "build-task", "tips": [{
+            "id": "add-github-token-scope",
+            "severity": "warning",
+            "title": "Grant `actions: read`",
+            "body": "...",
+            "type": "jinja2",
+            "title_template": title_tmpl,
+            "body_template": body_tmpl,
+            "accumulators": {"scopes": ["actions: read"], "endpoints": ["/a/jobs"]},
+        }]},
+        {"key": "test-task", "tips": [{
+            "id": "add-github-token-scope",
+            "severity": "warning",
+            "title": "Grant `pull-requests: read`",
+            "body": "...",
+            "type": "jinja2",
+            "title_template": title_tmpl,
+            "body_template": body_tmpl,
+            "accumulators": {"scopes": ["pull-requests: read"], "endpoints": ["/b/files", "/c/files"]},
+        }]},
+    ])
+    if len(rows) != 1:
+        fail("multi-accumulator merge: expected 1 row, got %d" % len(rows))
+    if "2 scopes" not in rows[0]["title"]:
+        fail("multi-accumulator merge: title not re-rendered with plural form: %r" % rows[0]["title"])
+    if "/a/jobs" not in rows[0]["body_quoted"] or "/b/files" not in rows[0]["body_quoted"] or "/c/files" not in rows[0]["body_quoted"]:
+        fail("multi-accumulator merge: body missing an endpoint: %r" % rows[0]["body_quoted"])
+    if "3 calls" not in rows[0]["body_quoted"]:
+        fail("multi-accumulator merge: body not re-rendered with merged count: %r" % rows[0]["body_quoted"])
+    if rows[0]["task_keys"] != ["build-task", "test-task"]:
+        fail("multi-accumulator merge: task_keys merge wrong: %r" % rows[0]["task_keys"])
 
 def _test_impl(ctx):
     sep = "=" * 70
+
+    _check_collect_tip_rows(ctx)
 
     scenarios = [
         (
@@ -896,6 +1012,126 @@ def _test_impl(ctx):
                         fix = [("aspect lint --fix --strategy=hold-the-line -- //...", "")],
                     ),
                     16000,
+                ),
+            ],
+        ),
+        # ── Tips aggregation ─────────────────────────────────────────
+        # Each scenario below populates the new `tips` field on the
+        # per-task payload. The aggregator dedups by id, attributes
+        # by task key, severity-sorts, and applies the
+        # `_MAX_SUBORDINATE_TIPS` cap on suggestion / info tips.
+        (
+            "18. tips — single tip on one task",
+            [
+                _entry(
+                    "lint",
+                    "lint-task",
+                    "lint-task",
+                    "lint",
+                    "passed",
+                    make_lint_passed_clean(),
+                    16000,
+                    tips = [{
+                        "id": "add-github-token",
+                        "severity": "suggestion",
+                        "title": "Export `GITHUB_TOKEN` to free App quota",
+                        "body": "Setting `GITHUB_TOKEN` routes supporting calls through the job-scoped token.",
+                    }],
+                ),
+            ],
+        ),
+        (
+            "19. tips — same id surfaced by multiple tasks (dedup + attribution)",
+            [
+                _entry(
+                    "build",
+                    "build-task",
+                    "build-task",
+                    "build",
+                    "passed",
+                    make_build_passed(),
+                    8000,
+                    tips = [{
+                        "id": "add-github-token",
+                        "severity": "suggestion",
+                        "title": "Export `GITHUB_TOKEN` to free App quota",
+                        "body": "Setting `GITHUB_TOKEN` routes supporting calls through the job-scoped token.",
+                    }],
+                ),
+                _entry(
+                    "test",
+                    "test-task",
+                    "test-task",
+                    "test",
+                    "passed",
+                    make_test_passed_flaky_only(),
+                    12000,
+                    tips = [{
+                        "id": "add-github-token",
+                        "severity": "suggestion",
+                        "title": "Export `GITHUB_TOKEN` to free App quota",
+                        "body": "Setting `GITHUB_TOKEN` routes supporting calls through the job-scoped token.",
+                    }],
+                ),
+                _entry(
+                    "lint",
+                    "lint-task",
+                    "lint-task",
+                    "lint",
+                    "passed",
+                    make_lint_passed_clean(),
+                    4000,
+                    tips = [{
+                        "id": "add-github-token",
+                        "severity": "suggestion",
+                        "title": "Export `GITHUB_TOKEN` to free App quota",
+                        "body": "Setting `GITHUB_TOKEN` routes supporting calls through the job-scoped token.",
+                    }],
+                ),
+            ],
+        ),
+        (
+            "20. tips — critical + warning render in full; suggestion / info capped at 5",
+            [
+                _entry(
+                    "build",
+                    "build-task",
+                    "build-task",
+                    "build",
+                    "passed",
+                    make_build_passed(),
+                    8000,
+                    tips = [
+                        # 1 critical — always shown, no silence footer.
+                        {
+                            "id": "add-id-token-permission",
+                            "severity": "critical",
+                            "title": "Grant `id-token: write`",
+                            "body": "Required for artifact uploads.",
+                        },
+                        # 2 warnings — always shown.
+                        {
+                            "id": "warn-a",
+                            "severity": "warning",
+                            "title": "Warning A",
+                            "body": "Degraded behavior A.",
+                        },
+                        {
+                            "id": "warn-b",
+                            "severity": "warning",
+                            "title": "Warning B",
+                            "body": "Degraded behavior B.",
+                        },
+                        # 7 suggestion/info — but the section caps the
+                        # subordinate tier at 5, so two should be dropped.
+                        {"id": "sugg-1", "severity": "suggestion", "title": "Sugg 1", "body": "B1"},
+                        {"id": "sugg-2", "severity": "suggestion", "title": "Sugg 2", "body": "B2"},
+                        {"id": "sugg-3", "severity": "suggestion", "title": "Sugg 3", "body": "B3"},
+                        {"id": "info-1", "severity": "info", "title": "Info 1", "body": "I1"},
+                        {"id": "info-2", "severity": "info", "title": "Info 2", "body": "I2"},
+                        {"id": "info-3", "severity": "info", "title": "Info 3", "body": "I3"},
+                        {"id": "info-4", "severity": "info", "title": "Info 4", "body": "I4"},
+                    ],
                 ),
             ],
         ),

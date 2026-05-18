@@ -13,20 +13,21 @@ on:
 
 permissions:
   id-token: write
+  pull-requests: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
-# Workflow-level env. Per-job env: blocks add their own (e.g. ASPECT_API_TOKEN);
-# values defined here are inherited by every step in every job. The Dash0 OTLP
-# endpoint and bearer token feed `.aspect/config.axl`'s `ctx.telemetry.exporters.add(...)`
+# The Dash0 OTLP endpoint and bearer token feed `.aspect/config.axl`'s `ctx.telemetry.exporters.add(...)`
 # call, which dogfoods the trace.event/trace.log pipeline against a real backend.
 # Both are no-ops if a secret isn't configured (unset env var = empty string,
 # config.axl skips registration).
 env:
+  ASPECT_API_TOKEN: ${{ secrets.ASPECT_API_TOKEN }}
   DASH0_ENDPOINT: ${{ secrets.DASH0_ENDPOINT }}
   DASH0_TOKEN: ${{ secrets.DASH0_TOKEN }}
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
   pre-build:
@@ -43,8 +44,6 @@ jobs:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     needs: [pre-build]
     timeout-minutes: 10
-    env:
-      ASPECT_API_TOKEN: ${{ secrets.ASPECT_API_TOKEN }}
     steps:
       - uses: actions/checkout@v6
       - name: Bootstrap
@@ -58,8 +57,6 @@ jobs:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     needs: [pre-build]
     timeout-minutes: 10
-    env:
-      ASPECT_API_TOKEN: ${{ secrets.ASPECT_API_TOKEN }}
     steps:
       - uses: actions/checkout@v6
       - name: Bootstrap
@@ -73,8 +70,6 @@ jobs:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     needs: [pre-build]
     timeout-minutes: 10
-    env:
-      ASPECT_API_TOKEN: ${{ secrets.ASPECT_API_TOKEN }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -99,8 +94,6 @@ jobs:
   buildifier-task:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     needs: [pre-build]
-    env:
-      ASPECT_API_TOKEN: ${{ secrets.ASPECT_API_TOKEN }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -116,8 +109,6 @@ jobs:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     needs: [pre-build]
     timeout-minutes: 10
-    env:
-      ASPECT_API_TOKEN: ${{ secrets.ASPECT_API_TOKEN }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -151,8 +142,6 @@ jobs:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     needs: [pre-build]
     timeout-minutes: 10
-    env:
-      ASPECT_API_TOKEN: ${{ secrets.ASPECT_API_TOKEN }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -168,8 +157,6 @@ jobs:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     needs: [pre-build]
     timeout-minutes: 10
-    env:
-      ASPECT_API_TOKEN: ${{ secrets.ASPECT_API_TOKEN }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -191,7 +178,6 @@ jobs:
     needs: [pre-build]
     timeout-minutes: 10
     env:
-      ASPECT_API_TOKEN: ${{ secrets.ASPECT_API_TOKEN }}
       ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS: ${{ inputs.force_targets }}
     steps:
       - uses: actions/checkout@v6

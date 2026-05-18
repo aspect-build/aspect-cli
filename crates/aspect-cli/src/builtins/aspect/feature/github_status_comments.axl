@@ -46,6 +46,16 @@ load("../lib/lifecycle.axl", "TaskLifecycleTrait")
 load("../lib/repro_commands.axl", "dedup_and_attribute")
 load("../lib/result_text.axl", "severity_for_status")
 load("../lib/tar.axl", "bsdtar")
+load(
+    "../lib/tips.axl",
+    "TIP_CRITICAL",
+    "TIP_TEMPLATE_JINJA2",
+    "TIP_WARNING",
+    "collect_tips_sorted",
+    "decorate_tip",
+    "severity_rank",
+    "tip_to_payload",
+)
 
 _ARTIFACT_PREFIX = "aspect-ci-status-"
 _MARKER_FMT = "<!-- aspect-ci-status:pr-%d -->"
@@ -105,6 +115,18 @@ _No tasks have reported yet._
 {{ section("failing",     "❌", sections.failing) -}}
 {{ section("flagged",     "⚠️", sections.flagged) -}}
 {{ section("successful",  "✅", sections.successful) -}}
+{% if tip_rows %}
+## 💡 Tips
+{% for tip in tip_rows %}
+> {{ tip.severity_emoji }} **{{ tip.severity_label }}:** {{ tip.title }}
+>
+{{ tip.body_quoted }}
+>
+> <sub>_Surfaced by: {{ tip.task_keys|join(", ") }}_</sub>{% if tip.silence_hint %}
+>
+> {{ tip.silence_hint }}{% endif %}
+
+{% endfor %}{% endif -%}
 {% if repro_rows %}
 ## 🔁 Reproduce
 {% for r in repro_rows %}
@@ -493,6 +515,86 @@ def _collect_repro_fix_rows(sections):
     fix_rows = _gather(("running", "failed", "failing", "flagged", "successful"), "fix_commands")
     return (repro_rows, fix_rows)
 
+# Cap for non-critical / non-warning tips in the aggregated section.
+# Critical and warning always render in full; this cap applies to
+# suggestion + info combined so the comment can't get drowned by a
+# flood of low-urgency tips. See `_collect_tip_rows` for the contract.
+_MAX_SUBORDINATE_TIPS = 5
+
+def _is_must_show(severity):
+    """Tips at this severity always surface in the PR-comment Tips
+    section regardless of cap — critical signals key-feature breakage
+    and warning signals degraded behavior."""
+    return severity == TIP_CRITICAL or severity == TIP_WARNING
+
+def _collect_tip_rows(ctx, entries):
+    """Walk every entry's `tips` list, dedup by id, attribute by task
+    key, sort by severity, then apply the rendering caps.
+
+    Dedup is by `id`. Pre-rendered tips (RAW/FORMAT) take the first
+    seen `title` / `body`. JINJA2 tips union each accumulator's values
+    across tasks (preserving first-seen order) and re-render so the
+    comment surfaces the full cross-task picture (e.g. every scope +
+    endpoint contributed by every task that hit the path).
+
+    Render caps:
+      - `TIP_CRITICAL` and `TIP_WARNING` always surface.
+      - `TIP_SUGGESTION` + `TIP_INFO` are combined and capped at
+        `_MAX_SUBORDINATE_TIPS` total so a noisy task can't drown the
+        section.
+
+    Returns rows in `decorate_tip` shape plus `task_keys` (sorted) for
+    the attribution footer."""
+    by_id = {}
+    insertion_order = []
+    for e in entries:
+        task_key = e.get("key", "") or e.get("name", "")
+        for tip in e.get("tips", []) or []:
+            id_ = tip.get("id", "")
+            if not id_:
+                continue
+            if id_ not in by_id:
+                row = dict(tip)
+                row["accumulators"] = {
+                    name: list(values or [])
+                    for name, values in (tip.get("accumulators") or {}).items()
+                }
+                row["_task_keys"] = []
+                by_id[id_] = row
+                insertion_order.append(id_)
+            else:
+                row = by_id[id_]
+                for name, values in (tip.get("accumulators") or {}).items():
+                    current = row["accumulators"].get(name, [])
+                    for v in values or []:
+                        if v not in current:
+                            current = current + [v]
+                    row["accumulators"][name] = current
+            if task_key and task_key not in by_id[id_]["_task_keys"]:
+                by_id[id_]["_task_keys"].append(task_key)
+
+    for row in by_id.values():
+        if row.get("type") == TIP_TEMPLATE_JINJA2 and row["accumulators"]:
+            if row.get("title_template"):
+                row["title"] = ctx.template.jinja2(row["title_template"], data = row["accumulators"])
+            if row.get("body_template"):
+                row["body"] = ctx.template.jinja2(row["body_template"], data = row["accumulators"])
+
+    rows = sorted(
+        [by_id[id_] for id_ in insertion_order],
+        key = lambda r: severity_rank(r.get("severity")),
+    )
+    must_show, subordinate = [], []
+    for r in rows:
+        (must_show if _is_must_show(r.get("severity")) else subordinate).append(r)
+    selected = must_show + subordinate[:_MAX_SUBORDINATE_TIPS]
+    out = []
+    for r in selected:
+        decorated = decorate_tip(r)
+        decorated["task_keys"] = sorted(r["_task_keys"])
+        out.append(decorated)
+    return out
+
 def _render_body(ctx, marker, entries, started_at, body_template, status_badges, sections):
     """Render the comment body via the (possibly user-overridden) Jinja2 template.
 
@@ -518,8 +620,13 @@ def _render_body(ctx, marker, entries, started_at, body_template, status_badges,
     `_collect_repro_fix_rows`, with dedup-and-attribute applied so a
     command contributed by two tasks renders as one row with both
     task keys.
-    """
+
+    `tip_rows` is the deduped + attributed + severity-sorted output of
+    `_collect_tip_rows`, with the cap applied so suggestion / info
+    tips can't drown the section (critical + warning always pass
+    through in full)."""
     repro_rows, fix_rows = _collect_repro_fix_rows(sections)
+    tip_rows = _collect_tip_rows(ctx, entries)
     body = ctx.template.jinja2(body_template, data = {
         "marker": marker,
         "entries": entries,
@@ -528,6 +635,7 @@ def _render_body(ctx, marker, entries, started_at, body_template, status_badges,
         "sections": sections,
         "repro_rows": repro_rows,
         "fix_rows": fix_rows,
+        "tip_rows": tip_rows,
     })
     if not body.endswith("\n"):
         body = body + "\n"
@@ -596,10 +704,15 @@ def _github_status_comments(ctx: FeatureContext):
             "",  # failed_in_phase
         )
 
-    def _own_payload():
+    def _own_payload(ctx):
         """Build our own task entry dict — what _publish_self writes to disk and
         also what gets folded into the rendered comment without going through a
-        download round-trip."""
+        download round-trip.
+
+        `tips` carries this task's tips at upload time (filtered + sorted by
+        `collect_tips_sorted`); the comment aggregator dedups by id across
+        siblings and attributes by task key. Trimmed to render fields so the
+        upload payload doesn't carry filter glob lists or other internals."""
 
         # Prefer the per-job URL when we have it — drops the reviewer
         # straight on the failing job's logs.
@@ -611,6 +724,7 @@ def _github_status_comments(ctx: FeatureContext):
             "run_attempt": run_attempt,
             "status": _state.get("_status", "running"),
             "ci_run_url": link_url,
+            "tips": [tip_to_payload(t) for t in collect_tips_sorted(ctx)],
         }
         payload.update(_state.get("_results_subset") or _empty_results_subset())
 
@@ -627,7 +741,7 @@ def _github_status_comments(ctx: FeatureContext):
             _state["_workdir"] = ctx.std.fs.mkdtemp(prefix = "aspect-ci-status-")
         _state["_my_artifact_name"] = _ARTIFACT_PREFIX + job_name + "-" + _state["_task_key"] + "-" + run_attempt
 
-        payload = _own_payload()
+        payload = _own_payload(ctx)
         payload_str = json.encode(payload)
         if _state.get("_last_payload_str") == payload_str:
             return True
@@ -642,7 +756,7 @@ def _github_status_comments(ctx: FeatureContext):
         expires_at = _iso_in(ctx, artifact_expires_minutes)
         up = github.upload_artifact(ctx, payload_path, _state["_my_artifact_name"], expires_at = expires_at)
         if not up.get("success"):
-            _LOG.warn(ctx.std, "Upload failed: %s" % up.get("errors", []))
+            _LOG.warn(ctx.std, "Upload failed: %s" % "; ".join(up.get("errors", []) or []))
             return False
         _state["_last_payload_str"] = payload_str
         return True
@@ -674,7 +788,7 @@ def _github_status_comments(ctx: FeatureContext):
             # We have authoritative data for our own task in _state — skip the
             # download and use it directly. Avoids reading our own zip back.
             if aname == own_name:
-                seen[aname] = _own_payload()
+                seen[aname] = _own_payload(ctx)
                 continue
 
             cached = cache.get(aid)
@@ -804,14 +918,17 @@ def _github_status_comments(ctx: FeatureContext):
         _state["_github_token"] = token
 
         # Upgrade the GHA workflow-run URL to the per-job URL via the
-        # GitHub Actions API (`/repos/.../actions/runs/{id}/jobs`). The
-        # job URL drops a reviewer directly on the failing job's logs
-        # instead of the workflow-run summary. Same path
-        # `feature/github_status_checks.axl::_create_check_run` uses.
-        # Falls back silently to `_ci_run_url` if the resolution fails
-        # (e.g. the App lacks `actions:read`).
+        # GitHub Actions API. Same path as
+        # `feature/github_status_checks.axl::_create_check_run`. Routed
+        # through the GH_TOKEN-preferring resolver — the job URL
+        # lookup doesn't need App attribution, so spare the App
+        # quota when the workflow exposes a job-scoped token. The
+        # check-run feature's App token (already in scope) is passed
+        # as the 4xx-auth fallback. Falls back silently to
+        # `_ci_run_url` if neither token has `actions:read`.
         if run_id:
-            job_url = github.resolve_current_job_url(ctx, token, owner, repo, run_id)
+            read_token, app_fallback = github.preferred_token_pair(ctx, owner = owner, repo = repo, roles = ["actions.read"], existing_app_token = token)
+            job_url = github.resolve_current_job_url(ctx, read_token, owner, repo, run_id, app_fallback_token = app_fallback)
             if job_url:
                 _state["_ci_link_url"] = job_url
 
@@ -909,6 +1026,10 @@ def _github_status_comments(ctx: FeatureContext):
 def prepare_for_render(entries):
     """Public test hook; see `_prepare_for_render`."""
     return _prepare_for_render(entries)
+
+def collect_tip_rows(ctx, entries):
+    """Public test hook; see `_collect_tip_rows`."""
+    return _collect_tip_rows(ctx, entries)
 
 def bucket_entries(entries):
     """Public test hook; see `_bucket_entries`."""

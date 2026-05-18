@@ -1,0 +1,558 @@
+"""Surface-rendered tips: actionable suggestions for users.
+
+Tips are non-fatal recommendations that should be visible on the same
+surface the user is already looking at (check-run summary, PR comment)
+so the product is self-documenting — users shouldn't have to grep
+logs for WARNs or read docs to discover improvements.
+
+# Producer API
+
+`add_tip(ctx, id, severity, ...)` — adds a tip to the trait. Accepts
+either pre-rendered `title` + `body` (for `TIP_TEMPLATE_RAW` /
+`TIP_TEMPLATE_FORMAT` tips) or `title_template` + `body_template` +
+`accumulators` (for `TIP_TEMPLATE_JINJA2` tips, see below). Dedup
+by `id`: first add wins for pre-rendered tips; JINJA2 tips merge new
+accumulator values into the stored tip and re-render.
+
+`emit_tip(ctx, template, vars=None, accumulators=None, id_suffix="", task_keys=None)`
+— renders a tip template, then calls `add_tip`. Used by built-in
+producers (so their templates are overridable; see "Customization"
+below) and by user task code wanting parameterised tips.
+
+Tip templates are dicts of the shape:
+
+    {
+        "id":        str,         # stable dedup key; vars are NOT interpolated here
+        "severity":  str,         # TIP_CRITICAL / TIP_WARNING / TIP_SUGGESTION / TIP_INFO
+        "title":     str,         # short headline; interpolated per `type`
+        "body":      str,         # markdown body; interpolated per `type`
+        "type":      str,         # TIP_TEMPLATE_RAW / TIP_TEMPLATE_FORMAT (default) / TIP_TEMPLATE_JINJA2
+        "task_keys": list[str]?,  # optional glob list — see "Task-key scoping" below
+    }
+
+# Template types
+
+The `type` field selects the interpolation engine for `title` / `body`:
+
+  - `TIP_TEMPLATE_RAW`    — no interpolation; `vars` ignored.
+  - `TIP_TEMPLATE_FORMAT` — Starlark `str.format(**vars)` — `{name}`
+                            placeholders replaced from `vars`. Default.
+  - `TIP_TEMPLATE_JINJA2` — Jinja2 source rendered against the tip's
+                            `accumulators` dict (each name maps to a
+                            list). Re-rendered every time `accumulators`
+                            change so the surfaced strings always
+                            reflect the merged state.
+
+# Customization
+
+Built-in tip templates are exported as module-level constants
+(e.g. `TIP_ADD_GITHUB_TOKEN`). User task / config code can:
+
+  a) Add custom tips via `add_tip` or `emit_tip` with arbitrary
+     templates of their own.
+  b) Preempt a built-in tip by calling `add_tip` with that built-in
+     tip's id BEFORE the framework emits — dedup-by-id makes the
+     user's version win.
+  c) Silence any non-critical tip (built-in or custom) by adding its
+     id to `TipsTrait.silenced_tips`. `add_tip` short-circuits on a
+     match so the tip never enters the trait. Each rendered tip's
+     footer names its id and points users at this knob. Critical
+     tips (severity `TIP_CRITICAL`) ignore the silence list — they
+     signal a problem that breaks key features, so a `silenced_tips`
+     entry for a critical id is a no-op.
+
+`TipsTrait` is accessible from `.aspect/config.axl`, which doubles as
+the registry for tips that should seed every task's `TipsTrait` at
+setup. Combined with the `task_keys` glob filter (see below) this is
+how user-defined tips get scoped to specific tasks; the same trait
+is also where users silence noisy tips:
+
+    # In .aspect/config.axl
+    def config(ctx):
+        ctx.traits[TipsTrait].silenced_tips = [
+            "add-github-token",  # tip id from its footer
+        ]
+        ctx.traits[TipsTrait].tips = [
+            {
+                "id": "internal-docs-reminder",
+                "severity": TIP_INFO,
+                "title": "Internal docs link for lint failures",
+                "body": "See https://wiki.example/lint for triage notes.",
+                "task_keys": ["lint-*"],
+            },
+        ]
+
+# Surface rendering
+
+`collect_tips_sorted(ctx)` returns tips sorted by severity (most
+urgent first), stable within a bucket by insertion order. Renderers
+(check-run summary template, PR comment aggregator) call it and
+display the result.
+
+# Severity ordering (highest → lowest urgency)
+
+    TIP_CRITICAL    — action required; key features broken without it.
+                      Cannot be silenced (`silenced_tips` is ignored).
+                      Surface and terminal rendering omit the silence
+                      hint footer for critical tips.
+    TIP_WARNING     — degraded behavior; user should fix to restore full function.
+    TIP_SUGGESTION  — improvement opportunity; product works fine without it.
+    TIP_INFO        — FYI.
+
+# Task-key scoping
+
+Each tip optionally carries `task_keys` — a list of glob patterns matched
+against `ctx.task.key` at render time. When empty (the default), the tip
+shows on the task it was emitted into and no others. When non-empty,
+the tip shows only on tasks whose key matches one of the patterns.
+`["*"]` shows on every task, `["lint-*"]` on lint variants, etc.
+"""
+
+load("./environment.axl", "color_enabled")
+load("./path_glob.axl", "match_any")
+
+# ── Severity constants ───────────────────────────────────────────────
+
+TIP_CRITICAL = "critical"
+TIP_WARNING = "warning"
+TIP_SUGGESTION = "suggestion"
+TIP_INFO = "info"
+
+_SEVERITY_ORDER = {
+    TIP_CRITICAL: 0,
+    TIP_WARNING: 1,
+    TIP_SUGGESTION: 2,
+    TIP_INFO: 3,
+}
+
+_SEVERITY_EMOJI = {
+    TIP_CRITICAL: "🔥",
+    TIP_WARNING: "⚠️",
+    TIP_SUGGESTION: "💡",
+    TIP_INFO: "ℹ️",
+}
+
+# Human-readable label paired with the emoji on each tip's header line
+# (e.g. `💡 **Tip:** ...`, `🔥 **Critical:** ...`). The label is part of
+# the rendered tip — it makes the severity legible even where the emoji
+# may not render.
+_SEVERITY_LABEL = {
+    TIP_CRITICAL: "Critical",
+    TIP_WARNING: "Warning",
+    TIP_SUGGESTION: "Tip",
+    TIP_INFO: "Info",
+}
+
+# ── Template type enum ──────────────────────────────────────────────
+
+TIP_TEMPLATE_RAW = "raw"
+TIP_TEMPLATE_FORMAT = "format"
+TIP_TEMPLATE_JINJA2 = "jinja2"
+
+_VALID_TEMPLATE_TYPES = [TIP_TEMPLATE_RAW, TIP_TEMPLATE_FORMAT, TIP_TEMPLATE_JINJA2]
+
+# ── Trait ────────────────────────────────────────────────────────────
+
+TipsTrait = trait(
+    # Insertion-ordered list of stored tip dicts. Pre-rendered tips
+    # carry `{id, severity, title, body, type, task_keys}`; JINJA2
+    # tips additionally carry `title_template`, `body_template`, and
+    # `accumulators` (dict<name, list<value>>) so `add_tip` can
+    # re-render on each accumulation event. Dedup by `id`; tips in
+    # `silenced_tips` are dropped on `add_tip`.
+    tips = attr(list, default = []),
+    silenced_tips = attr(list, default = []),
+    # Gate on the `add_tip` terminal print. Tests flip to False so
+    # unit-test output stays clean while exercising storage / filter
+    # logic.
+    auto_print = attr(bool, default = True),
+)
+
+# ── Built-in tip templates ───────────────────────────────────────────
+#
+# Each constant is a tip-template dict consumed by `emit_tip`. The
+# YAML constants below are shared snippets the bodies splice in;
+# both are rendered at workflow-top-level indentation so users can
+# paste them verbatim above `jobs:` or re-indent under a specific
+# `jobs.<name>:` for per-job scoping.
+
+GITHUB_TOKEN_ENV_YAML = """env:
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+"""
+
+ID_TOKEN_PERMISSIONS_YAML = """permissions:
+  id-token: write    # artifact uploads + PR summary comment aggregation
+"""
+
+TIP_ADD_GITHUB_TOKEN = {
+    "id": "add-github-token",
+    "severity": TIP_SUGGESTION,
+    "title": "Export `GITHUB_TOKEN` to route supporting API calls through the job-scoped quota",
+    "body": "When `GITHUB_TOKEN` is set, aspect-cli sends supporting API calls (job URL lookup, PR file diff, etc.) using the job-scoped token rather than the Aspect Workflows GitHub App. The job-scoped token has [a higher rate limit](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api?apiVersion=2026-03-10#primary-rate-limit-for-github_token-in-github-actions) — up to 60,000 req/hr per repository — than [the App's quota](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api?apiVersion=2026-03-10#primary-rate-limit-for-github-app-installations) (5,000 req/hr, or 15,000 req/hr on GitHub Enterprise Cloud), and they're separate buckets. Routing supporting calls through the job-scoped token reduces App quota usage and prevents live job updates to GitHub Status Checks and Status Comments from being throttled on busy repos.\n\nGitHub Actions grants `GITHUB_TOKEN` implicit read access to the workflow's own run metadata and the PR that triggered it, so no extra `permissions:` block scopes are required for the supporting calls aspect-cli makes today. Add at the top level of the workflow (so every job inherits) or scope it to the specific job(s) that need it:\n\n```yaml\n" + GITHUB_TOKEN_ENV_YAML + "```",
+    "type": TIP_TEMPLATE_RAW,
+}
+
+# One tip per task accumulating both the missing scopes and the API
+# endpoints that fell back. Pluralization + per-scope snippet lines
+# are driven by Jinja2 on the merged accumulator state.
+TIP_ADD_GITHUB_TOKEN_SCOPE = {
+    "id": "add-github-token-scope",
+    "severity": TIP_WARNING,
+    "title": "Grant {% if scopes|length == 1 %}`{{ scopes[0] }}`{% else %}{{ scopes|length }} scopes{% endif %} to the job-scoped `GITHUB_TOKEN`",
+    "body": """aspect-cli made {{ endpoints|length }} supporting API {{ "call" if endpoints|length == 1 else "calls" }} that needed {{ "a scope" if scopes|length == 1 else "scopes" }} the job-scoped `GITHUB_TOKEN` lacks; {{ "the call" if endpoints|length == 1 else "the calls" }} fell back to the Aspect Workflows GitHub App token. Granting {{ "this scope" if scopes|length == 1 else "these scopes" }} keeps the {{ "call" if endpoints|length == 1 else "calls" }} on the job-scoped token and reduces App quota usage.
+
+Add at the top level of the workflow (so every job inherits) or scope to the specific job(s) that need it:
+
+```yaml
+permissions:
+{% for s in scopes %}  {{ s }}
+{% endfor %}```
+
+API {{ "endpoint" if endpoints|length == 1 else "endpoints" }} that fell back ({{ endpoints|length }}):
+{% for e in endpoints %}- `{{ e }}`
+{% endfor %}""",
+    "type": TIP_TEMPLATE_JINJA2,
+}
+
+# Severity is CRITICAL because key features depend on this permission:
+# artifact uploads (status payloads, BEP files, test logs, profiles)
+# fail outright, and PR summary comment aggregation breaks because
+# per-task payloads ride on the same artifact upload path. Critical
+# tips can't be silenced.
+TIP_ADD_ID_TOKEN_PERMISSION = {
+    "id": "add-id-token-permission",
+    "severity": TIP_CRITICAL,
+    "title": "Grant `id-token: write` to enable GitHub Actions artifact uploads",
+    "body": "aspect-cli is trying to upload an artifact via GitHub Actions' ArtifactService but the API needs an OIDC token (`ACTIONS_ID_TOKEN_REQUEST_TOKEN`) that GitHub only exposes to the job when `id-token: write` is granted. Without it, the artifact upload fails.\n\nWhich features depend on this varies by configuration. When enabled, the PR summary comment aggregator and test-log / BEP / profile artifact uploads all ride on the ArtifactService — any of those features will be affected until the permission is granted. The task itself completes regardless.\n\nAdd at the top level of the workflow (so every job inherits) or scope it to the specific job(s) that upload artifacts:\n\n```yaml\n" + ID_TOKEN_PERMISSIONS_YAML + "```",
+    "type": TIP_TEMPLATE_RAW,
+}
+
+# ── API ──────────────────────────────────────────────────────────────
+
+def _merge_accumulators(existing, incoming):
+    """Merge `incoming` (dict<name, value>) into `existing`
+    (dict<name, list<value>>). Returns `(merged, changed)`. `changed`
+    is True when at least one new value landed — callers re-render
+    and re-print only on `changed`."""
+    merged = {name: list(values) for name, values in (existing or {}).items()}
+    changed = False
+    for name, value in (incoming or {}).items():
+        if value == None or value == "":
+            continue
+        current = merged.get(name, [])
+        if value in current:
+            continue
+        merged[name] = current + [value]
+        changed = True
+    return merged, changed
+
+def add_tip(
+        ctx,
+        id,
+        severity,
+        task_keys = None,
+        title = "",
+        body = "",
+        type_ = TIP_TEMPLATE_RAW,
+        title_template = "",
+        body_template = "",
+        accumulators = None):
+    """Add a tip to the task's `TipsTrait` and print a `TIP:` block
+    to the terminal.
+
+    No-op if `id` is listed in `TipsTrait.silenced_tips` AND
+    `severity != TIP_CRITICAL` (critical tips can't be silenced —
+    see "Severity ordering" in the module docstring).
+
+    Two storage shapes:
+
+      - Pre-rendered tips (`type_ == TIP_TEMPLATE_RAW` / `_FORMAT`):
+        `title` and `body` are the final strings to surface. No
+        accumulators. Dedup-by-id is silent (first add wins).
+
+      - Jinja2 tips (`type_ == TIP_TEMPLATE_JINJA2`):
+        `title_template` and `body_template` are stored as Jinja2
+        source. `accumulators` is a dict<name, value> for the
+        initial emit. The framework converts each value to a
+        single-entry list and re-renders title + body with the
+        accumulators as `dict<name, list<value>>`. On every
+        subsequent emit with the same id, the new accumulator
+        values get unioned into the stored lists (skipping
+        duplicates), the title and body are re-rendered, and the
+        terminal re-prints so each accumulation event surfaces in
+        the log. Plain dedups (no accumulator change) stay silent.
+
+    `task_keys` is an optional list of glob patterns; when set, the
+    renderer only shows the tip on tasks whose key matches one of the
+    patterns. When unset / empty, the tip shows on the task it was
+    emitted into (natural for framework tips emitted during a
+    specific task's run). The terminal print fires regardless of
+    `task_keys`.
+    """
+    if severity not in _SEVERITY_ORDER:
+        fail("unknown tip severity %r; valid: %s" % (severity, ", ".join(_SEVERITY_ORDER.keys())))
+    trait = ctx.traits[TipsTrait]
+    if severity != TIP_CRITICAL and id in trait.silenced_tips:
+        return
+
+    is_jinja2 = type_ == TIP_TEMPLATE_JINJA2
+    if is_jinja2 and not [v for v in (accumulators or {}).values() if v]:
+        fail("TIP_TEMPLATE_JINJA2 tip %r requires at least one non-empty accumulator value" % id)
+
+    for i, existing in enumerate(trait.tips):
+        if existing.get("id") != id:
+            continue
+        if not is_jinja2:
+            return
+        merged, changed = _merge_accumulators(existing.get("accumulators", {}), accumulators)
+        if not changed:
+            return
+        stored_severity = existing.get("severity", severity)
+        rendered_title = ctx.template.jinja2(existing["title_template"], data = merged)
+        rendered_body = ctx.template.jinja2(existing["body_template"], data = merged)
+        updated = dict(existing)
+        updated["title"] = rendered_title
+        updated["body"] = rendered_body
+        updated["accumulators"] = merged
+        trait.tips = trait.tips[:i] + [updated] + trait.tips[i + 1:]
+        if trait.auto_print:
+            _print_tip(ctx.std, id, stored_severity, rendered_title, rendered_body)
+        return
+
+    if is_jinja2:
+        seeded = {name: [value] for name, value in accumulators.items() if value}
+        new_tip = {
+            "id": id,
+            "severity": severity,
+            "title": ctx.template.jinja2(title_template, data = seeded),
+            "body": ctx.template.jinja2(body_template, data = seeded),
+            "task_keys": list(task_keys) if task_keys else [],
+            "type": TIP_TEMPLATE_JINJA2,
+            "title_template": title_template,
+            "body_template": body_template,
+            "accumulators": seeded,
+        }
+    else:
+        new_tip = {
+            "id": id,
+            "severity": severity,
+            "title": title,
+            "body": body,
+            "task_keys": list(task_keys) if task_keys else [],
+            "type": type_,
+        }
+    trait.tips = list(trait.tips) + [new_tip]
+    if trait.auto_print:
+        _print_tip(ctx.std, id, severity, new_tip["title"], new_tip["body"])
+
+def emit_tip(ctx, template, vars = None, accumulators = None, id_suffix = "", task_keys = None):
+    """Render a tip template and add it via `add_tip`.
+
+    Args:
+      template:      dict — see module docstring for shape.
+      vars:          dict — `{name: value}` interpolated into title /
+                     body when `template.type == TIP_TEMPLATE_FORMAT`.
+                     Ignored for `TIP_TEMPLATE_RAW` and
+                     `TIP_TEMPLATE_JINJA2` (the latter takes its
+                     data from `accumulators` instead).
+      accumulators:  dict — `{name: value}` for
+                     `TIP_TEMPLATE_JINJA2` tips. Each value becomes
+                     the first entry of a per-name accumulator list
+                     on first emit; subsequent emits union new
+                     values into the existing lists. The body /
+                     title templates see each accumulator as a list
+                     and can iterate / pluralize on it.
+      id_suffix:     optional kebab-case suffix appended to
+                     `template.id`.
+      task_keys:     optional list of glob patterns overriding the
+                     template's `task_keys` (or supplying it if
+                     absent).
+    """
+    type_ = template.get("type", TIP_TEMPLATE_FORMAT)
+    if type_ not in _VALID_TEMPLATE_TYPES:
+        fail("unknown tip template type %r; valid: %s" % (type_, ", ".join(_VALID_TEMPLATE_TYPES)))
+    id = template["id"]
+    if id_suffix:
+        id = id + "-" + id_suffix
+    resolved_task_keys = task_keys if task_keys != None else template.get("task_keys")
+    if type_ == TIP_TEMPLATE_JINJA2:
+        add_tip(
+            ctx,
+            id = id,
+            severity = template["severity"],
+            task_keys = resolved_task_keys,
+            type_ = TIP_TEMPLATE_JINJA2,
+            title_template = template["title"],
+            body_template = template["body"],
+            accumulators = accumulators or {},
+        )
+        return
+    title = template["title"]
+    body = template["body"]
+    if type_ == TIP_TEMPLATE_FORMAT and vars:
+        title = title.format(**vars)
+        body = body.format(**vars)
+    add_tip(
+        ctx,
+        id = id,
+        severity = template["severity"],
+        task_keys = resolved_task_keys,
+        title = title,
+        body = body,
+        type_ = type_,
+    )
+
+def collect_tips_sorted(ctx, limit = None):
+    """Return the current tips list filtered by `task_keys` (when set)
+    against `ctx.task.key`, then sorted by severity (highest urgency
+    first); the sort is stable, so insertion order is preserved
+    within a severity bucket.
+
+    Tips without `task_keys` pass through unconditionally — they're
+    scoped to the task they were emitted into. Tips with `task_keys`
+    apply only on tasks whose key matches one of the glob patterns
+    (e.g. `["lint-*"]`, `["*"]`).
+
+    Pass `limit` to cap the result for space-constrained surfaces
+    (e.g. PR comment summary).
+    """
+    trait = ctx.traits[TipsTrait]
+    task_key = ctx.task.key
+    filtered = []
+    for t in trait.tips:
+        patterns = t.get("task_keys") or []
+        if patterns and not match_any(patterns, task_key):
+            continue
+        filtered.append(t)
+    out = sorted(filtered, key = lambda t: severity_rank(t.get("severity")))
+    if limit != None and limit >= 0:
+        out = out[:limit]
+    return out
+
+def severity_emoji(severity):
+    """Emoji prefix for a tip's severity. Used by renderers."""
+    return _SEVERITY_EMOJI.get(severity, "ℹ️")
+
+def severity_label(severity):
+    """Human-readable label for a tip's severity (e.g. "Tip",
+    "Warning", "Critical"). Paired with `severity_emoji` to introduce
+    each rendered tip — readable even where the emoji may not."""
+    return _SEVERITY_LABEL.get(severity, "Info")
+
+def severity_rank(severity):
+    """Sort rank for a tip's severity — lower = more urgent. Use for
+    cross-task aggregators (e.g. PR-comment tip dedup) that need to
+    order tips without taking a dependency on the underlying constant
+    dict. Unknown severities sort after `TIP_INFO`."""
+    return _SEVERITY_ORDER.get(severity, 999)
+
+def silence_hint_line(id, severity):
+    """Standard Markdown `<sub>` silence-hint line for a tip — the
+    fine-print footer naming the tip's id and the knob to silence
+    it via `.aspect/config.axl`.
+
+    Returns `""` for critical tips (which can't be silenced) and for
+    blank ids. Used by the check-run summary's `TIPS_BLOCK` and by
+    the PR-comment tip section so the two surfaces stay aligned on
+    the silence affordance."""
+    if not id or severity == TIP_CRITICAL:
+        return ""
+    return '<sub>_Silence by adding `"%s"` to `ctx.traits[TipsTrait].silenced_tips` in `.aspect/config.axl`._</sub>' % id
+
+def tip_to_payload(t):
+    """Project a stored tip dict into the render-only field subset
+    that crosses the per-task artifact boundary (PR-comment
+    aggregation pipeline). JINJA2 fields are preserved so the
+    cross-task merge in `_collect_tip_rows` can re-render against
+    the unioned accumulator state."""
+    return {
+        "id": t.get("id", ""),
+        "severity": t.get("severity", ""),
+        "title": t.get("title", ""),
+        "body": t.get("body", ""),
+        "type": t.get("type", ""),
+        "title_template": t.get("title_template", ""),
+        "body_template": t.get("body_template", ""),
+        "accumulators": t.get("accumulators", {}) or {},
+    }
+
+def decorate_tip(t):
+    """Project a stored tip dict into the render-shape consumed by the
+    surface templates (`TIPS_BLOCK` in `bazel_results.axl`, the
+    `## 💡 Tips` section in `feature/github_status_comments.axl`).
+    Single source of truth so both surfaces stay aligned by
+    construction. The PR-comment aggregator additionally injects a
+    `task_keys` list on top of this shape for its "Surfaced by:"
+    attribution footer."""
+    severity = t.get("severity")
+    return {
+        "id": t.get("id", ""),
+        "severity": severity,
+        "severity_emoji": severity_emoji(severity),
+        "severity_label": severity_label(severity),
+        "title": t.get("title", ""),
+        "body_quoted": blockquote_body(t.get("body", "")),
+        "silence_hint": silence_hint_line(t.get("id", ""), severity),
+    }
+
+def strip_code_fences(body):
+    """Drop Markdown code-fence delimiter lines (``` or ```lang) so a
+    tip body renders cleanly on the terminal. Inner content of the
+    fenced block is preserved — only the delimiter lines disappear.
+    Surface (Markdown) rendering uses the unmodified body."""
+    if not body:
+        return body
+    kept = []
+    for line in body.split("\n"):
+        if not line.strip().startswith("```"):
+            kept.append(line)
+    return "\n".join(kept)
+
+_TERMINAL_TIP_COLOR = {
+    TIP_CRITICAL: "1;31",  # bold red — required action, key features broken without it
+    TIP_WARNING: "0;33",  # yellow — degraded behavior
+    TIP_SUGGESTION: "1;35",  # bold magenta — improvement opportunity
+    TIP_INFO: "1;36",  # bold cyan — informational
+}
+
+def _print_tip(std, id, severity, title, body):
+    """Print a `TIP:` block to the terminal — called from `add_tip` on
+    each first add and (for `TIP_TEMPLATE_JINJA2` tips) on each
+    accumulator change. The format mirrors `warn` / `info` from
+    `environment.axl` so users recognize it as the same family of
+    framework messages. Prefix color scales with severity (red for
+    critical, yellow for warning, magenta for suggestion, cyan for
+    info). Code-fence delimiter lines are stripped from the body so
+    the inline YAML reads naturally on the terminal. The silence
+    footer is omitted for critical tips (they can't be silenced)."""
+    if color_enabled(std):
+        code = _TERMINAL_TIP_COLOR.get(severity, "1;35")
+        prefix = "\x1b[" + code + "mTIP\x1b[0m: "
+    else:
+        prefix = "TIP: "
+    print(prefix + title)
+    cleaned = strip_code_fences(body)
+    if cleaned:
+        print("")
+        print(cleaned)
+    if severity != TIP_CRITICAL:
+        print("")
+        print('(Silence this tip by adding "%s" to `ctx.traits[TipsTrait].silenced_tips` in `.aspect/config.axl`.)' % id)
+
+def blockquote_body(body):
+    """Prefix every line of a tip body with `> ` (or `>` for empty
+    lines) so the body renders inside a Markdown blockquote — the
+    closest "box" affordance available on both GitHub check-run
+    summaries and Buildkite annotations. Code fences inside the body
+    are preserved because GFM and Buildkite both nest code blocks
+    inside blockquotes correctly."""
+    if not body:
+        return ""
+    lines = body.split("\n")
+    out = []
+    for line in lines:
+        if line == "":
+            out.append(">")
+        else:
+            out.append("> " + line)
+    return "\n".join(out)

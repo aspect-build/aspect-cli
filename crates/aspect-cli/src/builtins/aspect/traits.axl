@@ -28,12 +28,16 @@ load(
     _TaskLifecycleTrait = "TaskLifecycleTrait",
     _TaskUpdate = "TaskUpdate",
 )
+load("./lib/tips.axl", _TipsTrait = "TipsTrait")
+load("./lint.axl", _LintTrait = "LintTrait")
 
-TaskUpdate = _TaskUpdate
-TaskLifecycleTrait = _TaskLifecycleTrait
-BazelTrait = _BazelTrait
-HealthCheckTrait = _HealthCheckTrait
 ArtifactsTrait = _ArtifactsTrait
-GitHubCheckRunTrait = _GitHubCheckRunTrait
+BazelTrait = _BazelTrait
 DeliveryTrait = _DeliveryTrait
+GitHubCheckRunTrait = _GitHubCheckRunTrait
 GitHubStatusChecksTrait = _GitHubStatusChecksTrait
+HealthCheckTrait = _HealthCheckTrait
+LintTrait = _LintTrait
+TaskLifecycleTrait = _TaskLifecycleTrait
+TaskUpdate = _TaskUpdate
+TipsTrait = _TipsTrait

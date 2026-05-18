@@ -105,6 +105,28 @@ steps:
       $$LAUNCHER build --task-id not-a-uuid //... && echo "ERROR: --task-id should reject non-UUID" && exit 1 || true
       echo "--- :aspect: invalid task-key"
       $$LAUNCHER build --task-key "bad key!" //... && echo "ERROR: --task-key should reject invalid chars" && exit 1 || true
+      echo "--- :aspect: aspect dev test-template-snapshots"
+      $$LAUNCHER dev test-template-snapshots
+      echo "--- :aspect: aspect dev test-lint-template-snapshots"
+      $$LAUNCHER dev test-lint-template-snapshots
+      echo "--- :aspect: aspect dev test-format-template-snapshots"
+      $$LAUNCHER dev test-format-template-snapshots
+      echo "--- :aspect: aspect dev test-gazelle-template-snapshots"
+      $$LAUNCHER dev test-gazelle-template-snapshots
+      echo "--- :aspect: aspect dev test-delivery-template-snapshots"
+      $$LAUNCHER dev test-delivery-template-snapshots
+      echo "--- :aspect: aspect dev test-bk-annotation-snapshots"
+      $$LAUNCHER dev test-bk-annotation-snapshots
+      echo "--- :aspect: aspect dev test-pr-comment-snapshots"
+      $$LAUNCHER dev test-pr-comment-snapshots
+      echo "--- :aspect: aspect dev test-github-detect"
+      $$LAUNCHER dev test-github-detect
+      echo "--- :aspect: aspect dev test-gitlab-detect"
+      $$LAUNCHER dev test-gitlab-detect
+      echo "--- :aspect: aspect dev test-gitlab-client"
+      $$LAUNCHER dev test-gitlab-client
+      echo "--- :aspect: aspect dev test-tips"
+      $$LAUNCHER dev test-tips
       echo "--- :aspect: aspect tests axl"
       # Run AXL tests last — cancel tests may kill the Bazel server,
       # which invalidates bazel-out paths used by $$LAUNCHER above.

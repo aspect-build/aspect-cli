@@ -117,7 +117,7 @@ def to_display_name(name):
     """
     return "".join([w[0].upper() + w[1:] for w in name.split("_") if w])
 
-def make_render_ctx(state, default_targets = ""):
+def make_render_ctx(state, default_targets = "", tips = None):
     """Build the render_ctx dict the per-kind renderers consume.
 
     Reads from `state` — the feature-private dict the caller maintains
@@ -129,6 +129,12 @@ def make_render_ctx(state, default_targets = ""):
     task_started). GitHubStatusChecks uses `"//..."` so the initial
     "running" check-run has *something* readable in the title;
     BuildkiteAnnotations leaves it empty.
+
+    `tips` is the caller-supplied list of tips (typically
+    `collect_tips_sorted(ctx)`); each entry is rendered as a
+    blockquote at the bottom of the check-run summary by the shared
+    `TIPS_BLOCK` template. Features pass it; direct-render call sites
+    that don't care leave it `None` and no tips render.
     """
     return {
         "triggered_by": state.get("_triggered_by", ""),
@@ -137,6 +143,7 @@ def make_render_ctx(state, default_targets = ""):
         "ended_ms": state.get("_ended_ms", 0),
         "progress": state.get("_progress", ""),
         "task_name": state.get("_task_name", ""),
+        "tips": tips or [],
     }
 
 def apply_artifact_links(links, artifacts_trait):
