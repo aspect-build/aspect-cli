@@ -360,10 +360,10 @@ def _check_collect_tip_rows(ctx):
     if rows[0]["task_keys"] != ["build-task", "lint-task"]:
         fail("collect_tip_rows attribution: expected [build-task, lint-task], got %r" % rows[0]["task_keys"])
 
-    # Severity sort: critical first, then warning, then suggestion, then info.
+    # Severity sort: important first, then warning, then suggestion, then info.
     rows = collect_tip_rows(ctx, [{"key": "t1", "tips": [
         {"id": "i", "severity": "info", "title": "I", "body": ""},
-        {"id": "c", "severity": "critical", "title": "C", "body": ""},
+        {"id": "c", "severity": "important", "title": "C", "body": ""},
         {"id": "s", "severity": "suggestion", "title": "S", "body": ""},
         {"id": "w", "severity": "warning", "title": "W", "body": ""},
     ]}])
@@ -371,34 +371,34 @@ def _check_collect_tip_rows(ctx):
     if ids != ["c", "w", "s", "i"]:
         fail("collect_tip_rows severity sort: expected [c, w, s, i], got %r" % ids)
 
-    # Cap: suggestion + info combined capped at 5; critical + warning unbounded.
+    # Cap: suggestion + info combined capped at 5; important + warning unbounded.
     big = (
-        [{"id": "c%d" % i, "severity": "critical", "title": "C", "body": ""} for i in range(3)] +
+        [{"id": "c%d" % i, "severity": "important", "title": "C", "body": ""} for i in range(3)] +
         [{"id": "w%d" % i, "severity": "warning", "title": "W", "body": ""} for i in range(4)] +
         [{"id": "s%d" % i, "severity": "suggestion", "title": "S", "body": ""} for i in range(4)] +
         [{"id": "i%d" % i, "severity": "info", "title": "I", "body": ""} for i in range(4)]
     )
     rows = collect_tip_rows(ctx, [{"key": "t1", "tips": big}])
-    critical_count = len([r for r in rows if r["severity_label"] == "Critical"])
+    important_count = len([r for r in rows if r["severity_label"] == "Important"])
     warning_count = len([r for r in rows if r["severity_label"] == "Warning"])
     subordinate_count = len([r for r in rows if r["severity_label"] in ("Tip", "Info")])
-    if critical_count != 3:
-        fail("collect_tip_rows cap: expected 3 critical, got %d" % critical_count)
+    if important_count != 3:
+        fail("collect_tip_rows cap: expected 3 important, got %d" % important_count)
     if warning_count != 4:
         fail("collect_tip_rows cap: expected 4 warning, got %d" % warning_count)
     if subordinate_count != 5:
         fail("collect_tip_rows cap: expected 5 subordinate (suggestion+info), got %d" % subordinate_count)
 
-    # silence_hint: empty for critical, non-empty for non-critical.
+    # silence_hint: empty for important, non-empty for non-important.
     # The rendered tip carries this `<sub>...</sub>` line as its
     # silence-hint footer; an empty value suppresses the footer.
     rows = collect_tip_rows(ctx, [{"key": "t1", "tips": [
-        {"id": "c", "severity": "critical", "title": "C", "body": ""},
+        {"id": "c", "severity": "important", "title": "C", "body": ""},
         {"id": "s", "severity": "suggestion", "title": "S", "body": ""},
     ]}])
     by_id = {r["id"]: r for r in rows}
     if by_id["c"]["silence_hint"] != "":
-        fail("collect_tip_rows: critical row must have empty silence_hint")
+        fail("collect_tip_rows: important row must have empty silence_hint")
     if "silenced_tips" not in by_id["s"]["silence_hint"]:
         fail("collect_tip_rows: suggestion row must reference silenced_tips in silence_hint")
 
@@ -1214,7 +1214,7 @@ def _test_impl(ctx):
             ],
         ),
         (
-            "20. tips — critical + warning render in full; suggestion / info capped at 5",
+            "20. tips — important + warning render in full; suggestion / info capped at 5",
             [
                 _entry(
                     "build",
@@ -1225,10 +1225,10 @@ def _test_impl(ctx):
                     make_build_passed(),
                     8000,
                     tips = [
-                        # 1 critical — always shown, no silence footer.
+                        # 1 important — always shown, no silence footer.
                         {
                             "id": "add-id-token-permission",
-                            "severity": "critical",
+                            "severity": "important",
                             "title": "Grant `id-token: write`",
                             "body": "Required for artifact uploads.",
                         },

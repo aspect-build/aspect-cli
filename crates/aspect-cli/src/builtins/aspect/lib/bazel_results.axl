@@ -2888,12 +2888,20 @@ def build_invocation_rows(ctx, data, render_ctx, status, links = None, run_date 
 # Shared `## 💡 Tips`-equivalent block for surface templates: one
 # Markdown blockquote per tip, header line is severity-emoji +
 # severity-label + title, body has `> ` line prefixes baked in by
-# `decorate_tip`, optional silence-hint footer (blank for critical
+# `decorate_tip`, optional silence-hint footer (blank for important
 # tips). Each surface template splices this in so lint / format /
 # gazelle / delivery / bazel-results stay consistent.
+#
+# Each tip is preceded by `<div class="border-top my3"></div>` (the
+# same delimiter used between the BK annotation's summary and details
+# sections) so the boundary is visibly drawn on both GitHub and
+# Buildkite — including BK's dark mode where a Markdown horizontal
+# rule reads as a faint line that's easy to miss.
 TIPS_BLOCK = """{% if tips %}{% for tip in tips %}
 
-> {{ tip.severity_emoji }} **{{ tip.severity_label }}:** {{ tip.title }}
+<div class="border-top my3"></div>
+
+> {{ tip.severity_emoji }} **{{ tip.severity_label|upper }}: {{ tip.title }}**
 >
 {{ tip.body_quoted }}{% if tip.silence_hint %}
 >

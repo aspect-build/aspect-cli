@@ -45,6 +45,37 @@ const SGR_RESET: &str = "\x1b[0m";
 const DEFAULT_HIGHLIGHT_COLOR: &str = "1;36";
 const HIGHLIGHT_COLOR_ENV: &str = "ASPECT_CLI_HIGHLIGHT_COLOR";
 
+/// True on any recognized CI host (Buildkite / GitHub Actions / CircleCI /
+/// GitLab CI / generic `CI=...`). Used to gate task-key suffix on the
+/// running-task header and to force-enable color when stderr is piped to
+/// a CI log viewer that renders ANSI.
+fn on_recognized_ci() -> bool {
+    std::env::var_os("BUILDKITE").is_some()
+        || std::env::var_os("CI").is_some()
+        || std::env::var_os("GITHUB_ACTIONS").is_some()
+        || std::env::var_os("CIRCLECI").is_some()
+        || std::env::var_os("GITLAB_CI").is_some()
+}
+
+/// Return `(verb_color_prefix, reset)` for the "Running" verb on the
+/// task-starting line. `verb_color_prefix` is empty when color is
+/// disabled or `ASPECT_CLI_HIGHLIGHT_COLOR=""`; `reset` is empty when
+/// color is disabled. Color is enabled when stderr is a TTY or we're on
+/// a recognized CI host.
+fn running_verb_color() -> (String, &'static str) {
+    let color = std::io::stderr().is_terminal() || on_recognized_ci();
+    let highlight = std::env::var(HIGHLIGHT_COLOR_ENV)
+        .ok()
+        .unwrap_or_else(|| DEFAULT_HIGHLIGHT_COLOR.to_string());
+    let verb_seq = if color && !highlight.is_empty() {
+        format!("\x1b[{}m", highlight)
+    } else {
+        String::new()
+    };
+    let reset = if color { SGR_RESET } else { "" };
+    (verb_seq, reset)
+}
+
 /// Wrapper around a live Starlark Module heap.
 ///
 /// All three evaluation phases share this heap so `Value<'v>` references
@@ -325,6 +356,53 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         Ok(())
     }
 
+    /// Print the universal "task starting" announcement — the `→ 🎬 Running …`
+    /// line, or `--- :aspect: Running …` BK section header — for the task at
+    /// `task_index` in `self.tasks()`.
+    ///
+    /// Called from the CLI before `execute_features_with_args` so that any
+    /// diagnostic output emitted during feature initialization (auth WARNINGs,
+    /// tip blocks, etc.) is framed by the task header. Without this, the header
+    /// would only appear after features finish — and feature-init output would
+    /// look like it preceded any task running.
+    pub fn print_running_task_header(
+        &self,
+        task_index: usize,
+        task_key: &str,
+    ) -> Result<(), EvalError> {
+        let task = *self.tasks().get(task_index).ok_or_else(|| {
+            EvalError::UnknownError(anyhow!("task index {} out of range", task_index))
+        })?;
+        let (verb_seq, reset) = running_verb_color();
+        let key_suffix = if on_recognized_ci() {
+            format!(" [{}]", task_key)
+        } else {
+            String::new()
+        };
+        if std::env::var_os("BUILDKITE").is_some() {
+            // The BK section header replaces the `→` line on BK (avoids
+            // duplicating the same text in the BK log viewer).
+            eprintln!(
+                "--- :aspect: {}Running{} `{}` task{}",
+                verb_seq,
+                reset,
+                task.name(),
+                key_suffix
+            );
+        } else {
+            // 🎬 (clapper board) pairs with the closing ✅ / ⚠️ / ❌ as
+            // the task's bookend.
+            eprintln!(
+                "→ 🎬 {}Running{} `{}` task{}",
+                verb_seq,
+                reset,
+                task.name(),
+                key_suffix
+            );
+        }
+        Ok(())
+    }
+
     /// Phase 3: run enabled feature implementations.
     ///
     /// Must be called after `eval_config` so that config files have had the opportunity
@@ -415,57 +493,15 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         let task_name = task.name();
         let task_info = TaskInfo::new(task.name(), task.group().clone(), task_key, task_id);
 
-        // Universal "task starting" announcement. Fires for every task —
-        // built-in or custom — so users can see in CI logs which task is
-        // running and what key/id it was invoked under, without each
-        // task's AXL impl having to remember to print this itself. Phase
-        // boundaries inside the task body are still announced from AXL
-        // via `lib/lifecycle.axl::announce`; this line just frames each
-        // task invocation.
-        //
-        // Diagnostic output → stderr. stdout is reserved for the primary
-        // task output (anything a downstream consumer might want to
-        // capture or pipe).
-        //
-        // On Buildkite, a `--- :aspect: Running …` section header
-        // opens a collapsible section that groups the task's output
-        // under one header — this REPLACES the `→ Running …` line on
-        // BK (avoids printing the same text twice on the BK log
-        // viewer). Off BK, the `→ Running …` line is the only marker.
-        // Bracket form `[key]` matches BazelDefaults' "Running bazel
-        // <cmd> [<key>] <targets>" so the two adjacent log lines read
-        // as a pair.
-        //
-        // The `[<key>]` bracket is only included on CI. Locally most
-        // invocations don't pass `--task-key`, so the auto-generated
-        // name (e.g. `taboo-rub`) just clutters every task line. CI
-        // shows it because that's where users correlate task-key with
-        // the GHSC check-run / BK annotation context. Detected via
-        // any of the major CI env markers.
-        let on_buildkite = std::env::var_os("BUILDKITE").is_some();
-        let on_ci = on_buildkite
-            || std::env::var_os("CI").is_some()
-            || std::env::var_os("GITHUB_ACTIONS").is_some()
-            || std::env::var_os("CIRCLECI").is_some()
-            || std::env::var_os("GITLAB_CI").is_some();
-        let key_suffix = if on_ci {
-            format!(" [{}]", task_info.task_key)
-        } else {
-            String::new()
-        };
-        // Color when stderr is a TTY or we're on a known CI host (CI
-        // log viewers render ANSI even when stderr is piped).
-        // `HIGHLIGHT_COLOR_ENV` overrides the highlight color used for
-        // the opening "Running" verb; defaults to `DEFAULT_HIGHLIGHT_COLOR`.
-        let color = std::io::stderr().is_terminal() || on_ci;
-        let highlight_color = std::env::var(HIGHLIGHT_COLOR_ENV)
-            .ok()
-            .unwrap_or_else(|| DEFAULT_HIGHLIGHT_COLOR.to_string());
-        let verb_seq = if color && !highlight_color.is_empty() {
-            format!("\x1b[{}m", highlight_color)
-        } else {
-            String::new()
-        };
+        // The opening `→ 🎬 Running …` (or BK `--- :aspect: Running …`)
+        // header is printed by `print_running_task_header` BEFORE phase
+        // 3 (feature impls) so that any diagnostic output emitted during
+        // feature initialization is framed by the header. Only the
+        // closing announcement is built here; phase boundaries inside
+        // the task body are still announced from AXL via
+        // `lib/lifecycle.axl::announce`. Color setup mirrors the helper
+        // so the verdict glyph and labels match.
+        let color = std::io::stderr().is_terminal() || on_recognized_ci();
         let sgr = |params: &str| {
             if color {
                 format!("\x1b[{}m", params)
@@ -477,21 +513,6 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         let bold_yellow = sgr(SGR_BOLD_YELLOW);
         let bold_red = sgr(SGR_BOLD_RED);
         let reset = if color { SGR_RESET } else { "" };
-        if on_buildkite {
-            // The BK section header carries the same text the `→` line
-            // would; skip the duplicate `→` print on BK.
-            eprintln!(
-                "--- :aspect: {}Running{} `{}` task{}",
-                verb_seq, reset, task_info.name, key_suffix
-            );
-        } else {
-            // 🎬 (clapper board) pairs with the closing ✅ / ⚠️ / ❌
-            // as the task's bookend.
-            eprintln!(
-                "→ 🎬 {}Running{} `{}` task{}",
-                verb_seq, reset, task_info.name, key_suffix
-            );
-        }
 
         let task_trait_map = match self.trait_map_value {
             Some(tmap_val) => {

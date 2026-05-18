@@ -24,6 +24,9 @@ load("./tar.axl", "zip_create")
 load("./text.axl", "pluralize")
 load(
     "./tips.axl",
+    "TIP_ADD_ASPECT_API_TOKEN_BUILDKITE",
+    "TIP_ADD_ASPECT_API_TOKEN_CIRCLECI",
+    "TIP_ADD_ASPECT_API_TOKEN_GHA",
     "TIP_ADD_GITHUB_TOKEN",
     "TIP_ADD_GITHUB_TOKEN_SCOPE",
     "TIP_ADD_ID_TOKEN_PERMISSION",
@@ -176,17 +179,49 @@ def validate_role(role):
     """Validate that a role is in the known set."""
     return role in VALID_ROLES
 
-def _missing_credentials_reason(ctx):
-    """Human-readable explanation for `ctx.aspect.auth.credentials()` returning
-    None, tailored to the environment the CLI is running in."""
+# Stable identifiers populated into `_reason["kind"]` by `_authenticate`.
+# Downstream code (tip gates, error handlers) discriminates on these
+# rather than the human-readable `_reason["reason"]` string, which is
+# subject to change.
+_AUTH_KIND_NO_OWNER_REPO = "no-owner-repo"
+_AUTH_KIND_NO_CREDENTIALS = "no-credentials"  # CI without ASPECT_API_TOKEN
+_AUTH_KIND_NOT_LOGGED_IN = "not-logged-in"  # local without `aspect auth login`
+_AUTH_KIND_TRANSPORT_ERROR = "aspect-api-transport-error"
+_AUTH_KIND_BAD_RESPONSE = "aspect-api-bad-response"
+_AUTH_KIND_EXPIRED = "credentials-expired"
+_AUTH_KIND_DENIED = "access-denied"
+_AUTH_KIND_APP_NOT_INSTALLED = "app-not-installed"
+_AUTH_KIND_API_ERROR = "aspect-api-error"
+
+def _set_auth_reason(_reason, kind, msg):
+    """Populate `_reason` with both the structured `kind` and the
+    human-readable `reason`. No-op when the caller didn't pass a dict."""
+    if _reason != None:
+        _reason["kind"] = kind
+        _reason["reason"] = msg
+
+def _classify_missing_credentials(ctx):
+    """Return `(kind, msg)` for `ctx.aspect.auth.credentials()` returning
+    None. The kind discriminates the CI case (where setting
+    `ASPECT_API_TOKEN` is the fix) from the local case (`aspect auth login`).
+    """
     setup_url = "https://docs.aspect.build/cli/authentication"
     if ctx.std.env.var("BUILDKITE_AGENT_ACCESS_TOKEN"):
         msg = "no Aspect credentials — set ASPECT_API_TOKEN in the job env or provision it as a Buildkite secret (https://buildkite.com/docs/pipelines/security/secrets/buildkite-secrets)"
+        kind = _AUTH_KIND_NO_CREDENTIALS
     elif ctx.std.env.var("CI"):
         msg = "no Aspect credentials — set ASPECT_API_TOKEN (client_id:secret) in the job env"
+        kind = _AUTH_KIND_NO_CREDENTIALS
     else:
         msg = "not logged in — run `aspect auth login`"
-    return msg + ". Setup guide: " + setup_url
+        kind = _AUTH_KIND_NOT_LOGGED_IN
+    return kind, msg + ". Setup guide: " + setup_url
+
+def _missing_credentials_reason(ctx):
+    """Human-readable explanation for `ctx.aspect.auth.credentials()` returning
+    None, tailored to the environment the CLI is running in."""
+    _, msg = _classify_missing_credentials(ctx)
+    return msg
 
 def _is_4xx_auth(status_code):
     """True for HTTP statuses signaling "token lacks permission to call
@@ -195,42 +230,78 @@ def _is_4xx_auth(status_code):
     can't see the resource)."""
     return status_code in (401, 403, 404)
 
-def _emit_gha_tip(ctx, template, **kwargs):
-    """Emit a tip that only makes sense on GitHub Actions (every
-    built-in tip in this module recommends GHA-specific workflow YAML).
-    Gated on `GITHUB_ACTIONS` env + `hasattr(ctx, "traits")` so test
-    stubs without the traits map don't crash. Dedup-by-id inside
-    `add_tip` keeps the tip to one fire per task across multiple call
-    sites."""
+def _emit_tip_if_ready(ctx, template, **kwargs):
+    """Emit a tip when `ctx.traits` is available. Defensive against
+    test stubs that don't carry a traits map. Use for tips whose
+    recommendation applies on every CI host."""
     if not hasattr(ctx, "traits"):
-        return
-    if not ctx.std.env.var("GITHUB_ACTIONS"):
         return
     emit_tip(ctx, template, **kwargs)
 
+def _emit_gha_tip(ctx, template, **kwargs):
+    """Emit a tip whose recommendation is GitHub-Actions-specific
+    (workflow YAML, `permissions:` block, `${{ secrets.* }}`). Wraps
+    `_emit_tip_if_ready` with an additional `GITHUB_ACTIONS` env gate
+    so the tip never surfaces on Buildkite / CircleCI / GitLab where
+    its example syntax would be wrong."""
+    if not ctx.std.env.var("GITHUB_ACTIONS"):
+        return
+    _emit_tip_if_ready(ctx, template, **kwargs)
+
+def _emit_aspect_api_token_tip(ctx):
+    """Emit the host-specific `add-aspect-api-token-<host>` tip on CI
+    hosts where `ASPECT_API_TOKEN` is a documented Aspect integration
+    (GitHub Actions, Buildkite, CircleCI). Skip on GitLab and other
+    CIs where there's no documented use case yet."""
+    env = ctx.std.env
+    if env.var("GITHUB_ACTIONS"):
+        template = TIP_ADD_ASPECT_API_TOKEN_GHA
+    elif env.var("BUILDKITE"):
+        template = TIP_ADD_ASPECT_API_TOKEN_BUILDKITE
+    elif env.var("CIRCLECI"):
+        template = TIP_ADD_ASPECT_API_TOKEN_CIRCLECI
+    else:
+        return
+    _emit_tip_if_ready(ctx, template)
+
 def _preferred_token_pair(ctx, owner, repo, profile = None, roles = None, existing_app_token = None, _reason = None):
-    """Resolve `(primary_token, app_fallback_token)` for supporting
-    GitHub API calls, preferring the job-scoped `GITHUB_TOKEN` /
-    `GH_TOKEN` from env over the Aspect GitHub App's installation
-    token.
+    """Resolve `(primary_token, fallback_token)` for supporting GitHub
+    API calls, preferring the Aspect GitHub App's installation token
+    over the job-scoped `GITHUB_TOKEN` / `GH_TOKEN` from env.
 
     Use for API calls that don't need to attribute to the Aspect App
     (job URL lookup, PR file diff, PR comment listing, artifact
-    downloads). Calls authenticated via the job-scoped env token
-    count against the *job's* token budget rather than the Aspect
-    App's shared installation-token quota (5,000 req/hr). The App
-    token comes back in the fallback slot so the caller can retry
-    on a 4xx-auth (workflow forgot to grant the scope).
+    downloads). The App token is preferred because:
+
+      - The job-scoped `GITHUB_TOKEN` shares a single per-repository
+        bucket with every other workflow step in the repo. Routing
+        aspect-cli's supporting calls through it competes with the
+        user's own workflow logic for that budget.
+      - The Aspect App's installation token has its own bucket,
+        consumed only by aspect-cli, so calls made through it don't
+        contend with anything else the user is running.
+
+    See GitHub's rate-limit docs for the per-bucket numbers and how
+    they vary by plan: https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api
 
     Result shape:
-      - env exported: `(env_token, app_token)` — the API helper
-        retries with the App token on 4xx-auth and emits the
-        `add-github-token-scope` tip (accumulating the missing
-        scope and endpoint).
-      - env unset:    `(app_token, None)` — no fallback (and none
-        needed).
-      - auth failed:  `(None, None)` with `_reason` populated as for
-        `_authenticate`.
+      - App auth succeeded:           `(app_token, env_token_or_None)`.
+                                      App is primary; env token (when
+                                      exported) sits in the fallback
+                                      slot for the 4xx-auth retry path.
+      - App auth failed, env present: `(env_token, None)` — env token
+                                      becomes the last-resort primary.
+      - App auth failed, env unset:   `(None, None)`.
+
+    On any auth failure, `_reason` (when supplied) is populated with
+    both a structured `kind` and a human-readable `reason` from
+    `_authenticate`.
+
+    `_authenticate` emits `TIP_ADD_ASPECT_API_TOKEN` (kind + host gated)
+    on the missing-credentials path. `_preferred_token_pair` additionally
+    emits `TIP_ADD_GITHUB_TOKEN` on GitHub Actions when neither App nor
+    env produces a token, since exporting `GITHUB_TOKEN` is the
+    GHA-specific path to an immediate fallback.
 
     Pass `existing_app_token` when the caller already minted an App
     token earlier in the same handler to avoid a redundant mint.
@@ -240,40 +311,56 @@ def _preferred_token_pair(ctx, owner, repo, profile = None, roles = None, existi
     """
     env = ctx.std.env
     env_token = env.var("GITHUB_TOKEN") or env.var("GH_TOKEN") or ""
+    local_reason = {}
     app_token = existing_app_token if existing_app_token else _authenticate(
         ctx,
         owner = owner,
         repo = repo,
         profile = profile,
         roles = roles,
-        _reason = _reason,
+        _reason = local_reason,
     )
-    if env_token:
-        return env_token, app_token
 
-    # env unset — suggest setting it, but only when we have a viable App
-    # token to fall back to. Firing alongside an Aspect auth-failure warn
-    # would be misleading (the suggestion isn't what'd fix the auth error).
     if app_token:
-        _emit_gha_tip(ctx, TIP_ADD_GITHUB_TOKEN)
-    return app_token, None
+        return app_token, (env_token or None)
+
+    if _reason != None:
+        _reason["kind"] = local_reason.get("kind", "")
+        _reason["reason"] = local_reason.get("reason", "")
+
+    if env_token:
+        return env_token, None
+
+    _emit_gha_tip(ctx, TIP_ADD_GITHUB_TOKEN)
+    return None, None
 
 def _authenticate(ctx, owner, repo, profile = None, roles = None, _reason = None):
     """Resolve a GitHub token by exchanging Aspect credentials via the Aspect
     GitHub App (requires owner and repo to be provided).
 
     Returns the token string, or None if authentication is not possible.
-    If _reason is a dict, it will be populated with a "reason" key describing why auth failed.
+    If `_reason` is a dict, it is populated on failure with both a stable
+    `kind` (one of the `_AUTH_KIND_*` identifiers) and a human-readable
+    `reason` describing why auth failed.
+
+    Side-effect: when the failure kind is `_AUTH_KIND_NO_CREDENTIALS`,
+    emits the host-specific `add-aspect-api-token-<host>` tip via
+    `_emit_aspect_api_token_tip`. Emitted at this layer (not at
+    higher-level callers) so every App-using path — direct
+    `authenticate` calls from features, plus the supporting-call path
+    through `_preferred_token_pair` — surfaces the same actionable
+    suggestion alongside the per-feature WARNING.
     """
     if not owner or not repo:
-        if _reason != None:
-            _reason["reason"] = "owner/repo not provided"
+        _set_auth_reason(_reason, _AUTH_KIND_NO_OWNER_REPO, "owner/repo not provided")
         return None
 
     creds = ctx.aspect.auth.credentials(profile = profile)
     if not creds:
-        if _reason != None:
-            _reason["reason"] = _missing_credentials_reason(ctx)
+        kind, msg = _classify_missing_credentials(ctx)
+        _set_auth_reason(_reason, kind, msg)
+        if kind == _AUTH_KIND_NO_CREDENTIALS:
+            _emit_aspect_api_token_tip(ctx)
         return None
 
     if roles:
@@ -299,32 +386,41 @@ def _authenticate(ctx, owner, repo, profile = None, roles = None, _reason = None
     ).map_err(lambda e: str(e)).block()
 
     if type(resp) == "string":
-        if _reason != None:
-            _reason["reason"] = "Aspect API request failed (transport error): %s" % resp
+        _set_auth_reason(
+            _reason,
+            _AUTH_KIND_TRANSPORT_ERROR,
+            "Aspect API request failed (transport error): %s" % resp,
+        )
         return None
 
     if resp.status >= 200 and resp.status < 300:
-        # Aspect's auth endpoint returns JSON on success. Use try_decode
-        # so a malformed/empty 2xx body (rare, but possible during partial
+        # Aspect's auth endpoint returns JSON on success. try_decode so a
+        # malformed/empty 2xx body (rare, but possible during partial
         # outages) doesn't crash the parent task — falls through to the
-        # _reason error path instead.
+        # `_reason` error path instead.
         parsed = json.try_decode(resp.body, None)
         if parsed != None and "token" in parsed:
             return parsed["token"]
-        if _reason != None:
-            snippet = (resp.body or "")[:200].replace("\n", " ")
-            _reason["reason"] = "Aspect API returned 2xx but body was unusable: %s" % snippet
+        snippet = (resp.body or "")[:200].replace("\n", " ")
+        _set_auth_reason(
+            _reason,
+            _AUTH_KIND_BAD_RESPONSE,
+            "Aspect API returned 2xx but body was unusable: %s" % snippet,
+        )
         return None
 
-    if _reason != None:
-        if resp.status == 401:
-            _reason["reason"] = "credentials expired (run `aspect auth login`)"
-        elif resp.status == 403:
-            _reason["reason"] = "access denied: %s" % resp.body
-        elif resp.status == 404:
-            _reason["reason"] = "GitHub App not installed (see https://docs.aspect.build/cli/authentication)"
-        else:
-            _reason["reason"] = "API request failed (HTTP %d): %s" % (resp.status, resp.body)
+    if resp.status == 401:
+        _set_auth_reason(_reason, _AUTH_KIND_EXPIRED, "credentials expired (run `aspect auth login`)")
+    elif resp.status == 403:
+        _set_auth_reason(_reason, _AUTH_KIND_DENIED, "access denied: %s" % resp.body)
+    elif resp.status == 404:
+        _set_auth_reason(
+            _reason,
+            _AUTH_KIND_APP_NOT_INSTALLED,
+            "GitHub App not installed (see https://docs.aspect.build/cli/authentication)",
+        )
+    else:
+        _set_auth_reason(_reason, _AUTH_KIND_API_ERROR, "API request failed (HTTP %d): %s" % (resp.status, resp.body))
     return None
 
 # Check Runs
