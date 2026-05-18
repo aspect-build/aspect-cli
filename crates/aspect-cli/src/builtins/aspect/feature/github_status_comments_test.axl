@@ -30,9 +30,11 @@ load(
     "MARKER_FMT",
     "bucket_entries",
     "collect_tip_rows",
+    "dedup_by_run_attempt",
     "prepare_for_render",
     "render_body",
     "results_subset",
+    "should_quiet_delete_log",
 )
 load(
     "./test_fixtures.axl",
@@ -56,6 +58,11 @@ load(
     "make_test_running_flaky_only",
 )
 load("../lib/bazel_results.axl", "compute_reproducer_command")
+load("../lib/github.axl", "github")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
 
 _DEFAULT_RUN_URL = "https://github.com/aspect-build/aspect-cli/actions/runs/25615893249"
 _DEFAULT_ASPECT_URL = "https://app.aspect.build/build/sink-uuid-1234-5678-9abc"
@@ -437,10 +444,126 @@ def _check_collect_tip_rows(ctx):
     if rows[0]["task_keys"] != ["build-task", "test-task"]:
         fail("multi-accumulator merge: task_keys merge wrong: %r" % rows[0]["task_keys"])
 
+def _check_dedup_by_run_attempt():
+    """Functional assertions for `_dedup_by_run_attempt` — collapse
+    `(name, key, job)` duplicates from a re-run workflow's artifact
+    listing to the entry from the latest attempt."""
+
+    # Re-run scenario: attempt 1 left a stale "running" entry; attempt
+    # 2 is the terminal "passed". One entry per (name, key, job)
+    # survives, with the higher run_attempt's payload.
+    out = dedup_by_run_attempt([
+        {"name": "format", "key": "format-gha", "job": "format-task", "run_attempt": "1", "status": "running"},
+        {"name": "format", "key": "format-gha", "job": "format-task", "run_attempt": "2", "status": "passed"},
+    ])
+    if len(out) != 1:
+        fail("dedup_by_run_attempt rerun: expected 1 entry, got %d: %r" % (len(out), out))
+    if out[0]["status"] != "passed" or out[0]["run_attempt"] != "2":
+        fail("dedup_by_run_attempt rerun: expected attempt-2 payload to win, got %r" % out[0])
+
+    # Different `job` → NOT collapsed (matrix-style: same task surfaced
+    # by two distinct yaml jobs is two legitimate rows).
+    out = dedup_by_run_attempt([
+        {"name": "test", "key": "test-gha", "job": "cpu-test", "run_attempt": "1", "status": "passed"},
+        {"name": "test", "key": "test-gha", "job": "gpu-test", "run_attempt": "1", "status": "passed"},
+    ])
+    if len(out) != 2:
+        fail("dedup_by_run_attempt matrix: expected 2 distinct rows, got %d: %r" % (len(out), out))
+
+    # Numeric ordering, not lexicographic: "10" > "9".
+    out = dedup_by_run_attempt([
+        {"name": "x", "key": "x", "job": "j", "run_attempt": "9", "status": "running"},
+        {"name": "x", "key": "x", "job": "j", "run_attempt": "10", "status": "passed"},
+    ])
+    if out[0]["run_attempt"] != "10":
+        fail("dedup_by_run_attempt numeric: expected '10' to win over '9', got %r" % out[0])
+
+    # Missing / non-numeric run_attempt defaults to 1.
+    out = dedup_by_run_attempt([
+        {"name": "y", "key": "y", "job": "j", "status": "running"},
+        {"name": "y", "key": "y", "job": "j", "run_attempt": "2", "status": "passed"},
+    ])
+    if out[0].get("run_attempt") != "2":
+        fail("dedup_by_run_attempt missing-attempt: expected attempt-2 to win, got %r" % out[0])
+
+def _check_should_quiet_delete_log():
+    """Functional assertions for `_should_quiet_delete_log` — gate for
+    the WARN→INFO downgrade on a pre-upload `DeleteArtifact` failure."""
+
+    # First cycle: no prior upload → benign (delete will 404 because
+    # nothing was ever uploaded). Quiet.
+    if not should_quiet_delete_log(None, 1000.0):
+        fail("should_quiet_delete_log: first cycle (None last_upload_at) must be quiet")
+
+    # Recent upload (within the 15s window): eventual-consistency miss
+    # is the most likely cause of a failure. Quiet.
+    if not should_quiet_delete_log(990.0, 1000.0):
+        fail("should_quiet_delete_log: 10s after upload must be quiet")
+    if not should_quiet_delete_log(985.0, 1000.0):
+        fail("should_quiet_delete_log: exactly 15s after upload must be quiet")
+    if not should_quiet_delete_log(1000.0, 1000.0):
+        fail("should_quiet_delete_log: 0s after upload must be quiet")
+
+    # Past the window: WARN-worthy.
+    if should_quiet_delete_log(984.0, 1000.0):
+        fail("should_quiet_delete_log: 16s after upload must NOT be quiet")
+    if should_quiet_delete_log(0.0, 1000.0):
+        fail("should_quiet_delete_log: 1000s after upload must NOT be quiet")
+
+def _check_format_http_failure_detail():
+    """Functional assertions for `github.format_http_failure_detail` —
+    one-line failure-detail formatting shared by the WARN and INFO
+    failure-log paths."""
+    detail = github.format_http_failure_detail
+
+    # status=0 → transport-error path uses the error string or a default.
+    _eq(
+        "format_http_failure_detail status=0 with error",
+        detail(0, "DNS resolution failed"),
+        "DNS resolution failed",
+    )
+    _eq(
+        "format_http_failure_detail status=0 empty error → default",
+        detail(0, ""),
+        "transport error",
+    )
+
+    # status != 0 + no error → bare `HTTP N`.
+    _eq(
+        "format_http_failure_detail HTTP only",
+        detail(404, ""),
+        "HTTP 404",
+    )
+
+    # status != 0 + error → `HTTP N: <snippet>`.
+    _eq(
+        "format_http_failure_detail HTTP + body snippet",
+        detail(500, "internal server error"),
+        "HTTP 500: internal server error",
+    )
+
+    # Newline collapse: multi-line body renders as a single line.
+    _eq(
+        "format_http_failure_detail newline collapse",
+        detail(503, "line1\nline2\nline3"),
+        "HTTP 503: line1 line2 line3",
+    )
+
+    # Truncation at 200 chars + "...".
+    long_body = "x" * 250
+    truncated = detail(500, long_body)
+    if len(truncated) != len("HTTP 500: ") + 200 + 3:
+        fail("format_http_failure_detail truncation: expected cap at 200 + '...', got %d chars" % len(truncated))
+    if not truncated.endswith("..."):
+        fail("format_http_failure_detail truncation: expected '...' suffix, got %r" % truncated[-10:])
+
 def _test_impl(ctx):
     sep = "=" * 70
 
     _check_collect_tip_rows(ctx)
+    _check_dedup_by_run_attempt()
+    _check_should_quiet_delete_log()
+    _check_format_http_failure_detail()
 
     scenarios = [
         (

@@ -60,6 +60,9 @@ load(
 _ARTIFACT_PREFIX = "aspect-ci-status-"
 _MARKER_FMT = "<!-- aspect-ci-status:pr-%d -->"
 
+# Used by `_should_quiet_delete_log` — see that helper's docstring.
+_EVENTUAL_CONSISTENCY_WINDOW_S = 15
+
 # Status badges keyed by the precomputed `_badge_key` on each entry,
 # *not* the raw lifecycle status. `_badge_key` is one of:
 #   "failed"  — terminal `failed` or live `failing` (severity error)
@@ -299,6 +302,65 @@ def _prepare_for_render(entries):
         e.get("name", ""),
         e.get("key", ""),
     ))
+
+def _run_attempt_int(entry):
+    """Parse `entry.run_attempt` as int. Missing / non-numeric → 1."""
+    raw = entry.get("run_attempt", "1") or "1"
+    if type(raw) == "int":
+        return raw
+    if type(raw) != "string" or not raw.isdigit():
+        return 1
+    return int(raw)
+
+def _dedup_by_run_attempt(entries):
+    """Collapse entries that share a `(name, key, job)` identity to the
+    one with the highest `run_attempt`.
+
+    The artifacts API (`GET /actions/runs/{run_id}/artifacts`) doesn't
+    accept an `attempt_number` filter, so a re-run workflow's listing
+    returns artifacts from every prior attempt alongside the live
+    attempt's. Without this dedup, a task that uploaded a "Starting..."
+    payload on attempt 1 and then a terminal payload on attempt 2
+    surfaces in BOTH `running` and the relevant terminal section of
+    the rendered comment.
+
+    Same-task / different-job rows (e.g. matrix jobs) are NOT collapsed
+    because they're legitimately distinct entries — `job` is part of
+    the dedup key.
+
+    Tiebreak on equal `run_attempt`: the first entry to land in
+    `by_logical` wins. Callers feeding entries newest-first (e.g.
+    `_collect_sibling_entries`'s newest-id-first artifact sort) get
+    the newest-by-upstream-ordering as the tiebreaker — sufficient
+    for the only realistic tie scenario (two same-name artifacts on
+    the same attempt left over from a delete-race)."""
+    by_logical = {}
+    for e in entries:
+        key = (e.get("name", ""), e.get("key", ""), e.get("job", ""))
+        existing = by_logical.get(key)
+        if existing == None or _run_attempt_int(e) > _run_attempt_int(existing):
+            by_logical[key] = e
+    return list(by_logical.values())
+
+def _should_quiet_delete_log(last_upload_at, now):
+    """Decide whether a `DeleteArtifact` failure on a pre-upload cleanup
+    should log at INFO (`True`) or WARN (`False`).
+
+    Two benign cases:
+
+      - `last_upload_at == None` → first cycle, nothing was ever
+        uploaded for this artifact name. The Twirp `DeleteArtifact`
+        will return 404; that's expected.
+      - `(now - last_upload_at) <= _EVENTUAL_CONSISTENCY_WINDOW_S` →
+        the Azure-backed read replica handling the delete may not yet
+        see the freshly-uploaded artifact. The next cycle's delete
+        typically catches up once the consistency window closes.
+
+    Past the window, a continued failure is no longer attributable to
+    eventual consistency and stays at WARN."""
+    if last_upload_at == None:
+        return True
+    return (now - last_upload_at) <= _EVENTUAL_CONSISTENCY_WINDOW_S
 
 def _bucket_entries(entries):
     """Split entries into status sections for the rendered comment.
@@ -735,8 +797,12 @@ def _github_status_comments(ctx: FeatureContext):
         return payload
 
     def _publish_self(ctx, token):
-        """Skip the upload when nothing in our payload has changed since the
-        last successful upload — saves ~half the API calls on quiet builds."""
+        """Upload this task's status payload, replacing the prior
+        cycle's artifact in place. Skips the API round-trip when the
+        payload hasn't changed since the last successful upload —
+        saves ~half the API calls on quiet builds. The pre-upload
+        `delete_artifact` call uses `quiet_failure_log` gated on
+        `_should_quiet_delete_log` so benign 404s don't spam WARN."""
         if "_workdir" not in _state:
             _state["_workdir"] = ctx.std.fs.mkdtemp(prefix = "aspect-ci-status-")
         _state["_my_artifact_name"] = _ARTIFACT_PREFIX + job_name + "-" + _state["_task_key"] + "-" + run_attempt
@@ -749,7 +815,8 @@ def _github_status_comments(ctx: FeatureContext):
         payload_path = _state["_workdir"] + "/task.json"
         ctx.std.fs.write(payload_path, payload_str)
 
-        github.delete_artifact(ctx, _state["_my_artifact_name"])
+        quiet = _should_quiet_delete_log(_state.get("_last_upload_at"), monotonic())
+        github.delete_artifact(ctx, _state["_my_artifact_name"], quiet_failure_log = quiet)
 
         # Server-side TTL — fresh per-cycle so a still-polling task
         # keeps its artifact alive while inactive ones expire on their own.
@@ -759,15 +826,44 @@ def _github_status_comments(ctx: FeatureContext):
             _LOG.warn(ctx.std, "Upload failed: %s" % "; ".join(up.get("errors", []) or []))
             return False
         _state["_last_payload_str"] = payload_str
+        _state["_last_upload_at"] = monotonic()
         return True
 
     def _collect_sibling_entries(ctx, token):
-        """List sibling artifacts; reuse cached entries by artifact id and only
-        download artifacts whose id is new. Returns a sorted list of entry dicts,
-        or None on transport failure.
+        """List sibling artifacts and return one entry dict per logical task.
 
-        The artifact id changes on every replacement (we delete+upload), so a
-        stable id means the producer hasn't pushed a new payload since last poll.
+        Per-artifact downloads are cached by artifact id; only new ids
+        cost a download. The artifact id changes on every replacement
+        (delete + upload), so a stable id means the producer hasn't
+        pushed a new payload since the last poll.
+
+        Two duplicate-handling paths converge here:
+
+          - **Same artifact name appears multiple times.** GitHub's
+            artifact API is backed by Azure storage with eventual-
+            consistency reads, so a listing can briefly include a
+            previously-deleted artifact alongside the freshly-uploaded
+            one. We sort newest-first (by artifact id; ids are
+            monotonically increasing per repo) and skip names already
+            in `seen`, so the newest payload always wins.
+
+          - **Same logical `(name, key, job)` across run attempts.**
+            The artifacts endpoint doesn't accept an `attempt_number`
+            filter, so a re-run workflow's listing returns every prior
+            attempt's artifacts alongside the live attempt's.
+            `_dedup_by_run_attempt` collapses them to the latest
+            attempt before returning.
+
+        Eager same-cycle re-cleanup of duplicates was considered and
+        rejected: the same eventual-consistency window means a
+        delete-after-upload may not see the just-uploaded artifact,
+        leaving a fresh ghost AND a stale one. The natural per-cycle
+        `delete_artifact + upload_artifact` in `_publish_self`
+        converges over 1-2 cycles once the consistency window closes;
+        the two dedup paths above ensure correct rendering in the
+        meantime.
+
+        Returns `None` on transport failure listing artifacts.
         """
         listed = github.actions.list_run_artifacts(ctx, token, owner, repo, run_id, name_prefix = _ARTIFACT_PREFIX)
         if not listed.get("success"):
@@ -780,10 +876,14 @@ def _github_status_comments(ctx: FeatureContext):
         seen = {}  # artifact name -> entry
         current_ids = {}  # current ids in this listing → bool, used to GC cache
 
-        for a in listed["artifacts"]:
+        sorted_artifacts = sorted(listed["artifacts"], key = lambda a: -(a.get("id") or 0))
+        for a in sorted_artifacts:
             aname = a.get("name", "")
             aid = str(a["id"])
             current_ids[aid] = True
+
+            if aname in seen:
+                continue
 
             # We have authoritative data for our own task in _state — skip the
             # download and use it directly. Avoids reading our own zip back.
@@ -818,8 +918,7 @@ def _github_status_comments(ctx: FeatureContext):
             if aid not in current_ids:
                 cache.pop(aid)
 
-        # `_prepare_for_render` decorates and sorts; just return raw.
-        return list(seen.values())
+        return _dedup_by_run_attempt(list(seen.values()))
 
     def _upsert_comment(ctx, token, body):
         """PATCH the existing comment if known/findable, else POST and dedupe duplicates."""
@@ -1034,6 +1133,14 @@ def collect_tip_rows(ctx, entries):
 def bucket_entries(entries):
     """Public test hook; see `_bucket_entries`."""
     return _bucket_entries(entries)
+
+def dedup_by_run_attempt(entries):
+    """Public test hook; see `_dedup_by_run_attempt`."""
+    return _dedup_by_run_attempt(entries)
+
+def should_quiet_delete_log(last_upload_at, now):
+    """Public test hook; see `_should_quiet_delete_log`."""
+    return _should_quiet_delete_log(last_upload_at, now)
 
 def render_body(ctx, marker, entries, started_at, body_template, status_badges, sections):
     """Public test hook; see `_render_body`."""
