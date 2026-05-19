@@ -634,11 +634,6 @@ pub struct Build {
     #[allocative(skip)]
     execlog_stream: RefCell<Option<ExecLogStream>>,
 
-    /// Tracing emitter + decoded execlog file writers. Caller-passed sinks
-    /// own their own JoinHandles on the `BuildEventSink` handle, not here.
-    #[allocative(skip)]
-    internal_sink_handles: RefCell<Vec<JoinHandle<SinkOutcome>>>,
-
     /// Shared UUID every gRPC sink indexes this invocation under. Minted
     /// before bazel emits `build_started` so forwarders can start
     /// immediately; distinct from Bazel's `build_started.uuid`.
@@ -737,7 +732,7 @@ impl Build {
             }
         }
 
-        let execlog_stream = if execution_logs {
+        let mut execlog_stream = if execution_logs {
             // If there is a CompactFile sink, let Bazel write directly to its path
             // so no separate temp file or tee step is needed for that copy.
             let direct_path = if compact_paths.is_empty() {
@@ -831,20 +826,21 @@ impl Build {
             None
         };
 
-        // Tracing emitter and decoded execlog file writers — not exposed
-        // as handles; `build.wait()` joins these directly.
-        let mut internal_sink_handles: Vec<JoinHandle<SinkOutcome>> = vec![];
-        for sink in decoded_sinks {
-            if let ExecLogSink::File { path } = sink {
-                let handle =
-                    ExecLogSink::spawn_file(execlog_stream.as_ref().unwrap().receiver(), path);
-                internal_sink_handles.push(handle);
+        // Decoded execlog file sinks belong to the execlog stream — joined
+        // (and write errors propagated) inside `execlog_stream.join()`.
+        if let Some(stream) = execlog_stream.as_mut() {
+            for sink in decoded_sinks {
+                if let ExecLogSink::File { path } = sink {
+                    stream.attach_file_sink(ExecLogSink::spawn_file(stream.receiver(), path));
+                }
             }
         }
+        // The tracing sink only emits via `tracing::event!` and never fails;
+        // detach its JoinHandle so `build.wait()` stays bazel-only.
         if build_events {
-            internal_sink_handles.push(tracing_sink::Tracing::spawn(
+            let _ = tracing_sink::Tracing::spawn(
                 build_event_stream.as_ref().unwrap().subscribe(),
-            ));
+            );
         }
 
         drop(_enter);
@@ -853,7 +849,6 @@ impl Build {
             build_event_stream: RefCell::new(build_event_stream),
             workspace_event_stream: RefCell::new(workspace_event_stream),
             execlog_stream: RefCell::new(execlog_stream),
-            internal_sink_handles: RefCell::new(internal_sink_handles),
             sink_invocation_id: RefCell::new(sink_invocation_id),
             span: RefCell::new(span),
         })
@@ -975,19 +970,6 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
                 Err(err) => anyhow::bail!("execlog stream thread error: {}", err),
             }
         };
-
-        // Drain INTERNAL sink threads (tracing emitter, decoded execlog
-        // file writers). Caller-passed sinks aren't here — their
-        // JoinHandles live on the BuildEventSink handle, and the caller
-        // drives them via `sink.wait()`. Internal sink failures are
-        // logged at the sink (see `sink/grpc.rs::finalize`) and are
-        // otherwise non-fatal.
-        for handle in build.internal_sink_handles.take() {
-            match handle.join() {
-                Ok(_) => continue,
-                Err(err) => anyhow::bail!("internal sink thread panicked: {:#?}", err),
-            }
-        }
 
         // Drop the span to end the trace
         drop(build.span.replace(tracing::Span::none()));

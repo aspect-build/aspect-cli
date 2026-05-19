@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::thread::JoinHandle;
 use std::{env, thread};
 
+use super::super::sink::retry::SinkOutcome;
 use super::util::{MultiTeeReader, read_varint};
 use thiserror::Error;
 use zstd::Decoder;
@@ -58,6 +59,8 @@ pub struct ExecLogStream {
     // to stop decoding. Dropping it first means the sender sees Closed on the
     // first try_send when no external subscribers exist, skipping all decoding.
     recv: Option<Receiver<ExecLogEntry>>,
+    /// Decoded-file sink writer threads owned by this stream — joined in `join()`.
+    file_sink_handles: Vec<JoinHandle<SinkOutcome>>,
 }
 
 impl ExecLogStream {
@@ -172,6 +175,7 @@ impl ExecLogStream {
         Ok(Self {
             handle,
             recv: Some(recv),
+            file_sink_handles: vec![],
         })
     }
 
@@ -263,6 +267,7 @@ impl ExecLogStream {
             Self {
                 handle,
                 recv: Some(recv),
+                file_sink_handles: vec![],
             },
         ))
     }
@@ -274,13 +279,35 @@ impl ExecLogStream {
             .clone()
     }
 
+    /// Take ownership of a decoded-file sink worker thread. Its lifecycle is
+    /// tied to this stream — `join()` will wait for it and propagate write
+    /// errors so a truncated artifact doesn't slip past as success.
+    pub fn attach_file_sink(&mut self, handle: JoinHandle<SinkOutcome>) {
+        self.file_sink_handles.push(handle);
+    }
+
     /// Wait for the execlog stream to finish.
     ///
     /// Drops the struct's `recv` clone so that if no external subscriber exists
     /// the first `try_send` returns `Closed` and remaining bytes are drained
-    /// without proto decoding. Then waits for the thread to exit.
+    /// without proto decoding. Then waits for the reader thread and every
+    /// attached file-sink writer, surfacing the first write error if any.
     pub fn join(mut self) -> Result<(), ExecLogStreamError> {
         self.recv.take();
-        self.handle.join().expect("join error")
+        let reader_result = self.handle.join().expect("join error");
+        for h in self.file_sink_handles {
+            match h.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    return Err(ExecLogStreamError::IO(std::io::Error::other(e.last_error)));
+                }
+                Err(_) => {
+                    return Err(ExecLogStreamError::IO(std::io::Error::other(
+                        "execlog file sink panicked",
+                    )));
+                }
+            }
+        }
+        reader_result
     }
 }
