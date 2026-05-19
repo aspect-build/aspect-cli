@@ -2520,8 +2520,8 @@ def format_elapsed_with_phases(ctx, status):
       Phases, running:                   "4m13s · 🔨 Build 4m11s | ⚙ Setup 1.7s · 🔍 Detect 1.2s"
       Phases, failing:                   "4m13s · 🔨 Build (failing 4m11s) | ⚙ Setup 1.7s · 🔍 Detect 1.2s"
       Phases, passed (terminal):         "46.8s — ⚙ Setup 1.7s · 🔍 Detect 1.2s · 🔨 Build 45.3s"
-      Phases, failed-during-phase:       "1m 15s · 🔨 Build (failed after 1m 12s) | Init 2.3s"
-      Phases, failed-after-phase-bound:  "1m 15s — Init 2.3s · 🔨 Build 1m 12s"
+      Phases, failed-during-phase:       "1m 15s · 🔨 Build (failed after 1m 12s) | 🌱 Init 2.3s"
+      Phases, failed-after-phase-bound:  "1m 15s — 🌱 Init 2.3s · 🔨 Build 1m 12s"
 
     Each phase name leads with a small unicode icon supplied by the
     task at phase-transition time (`Phase(name="build", emoji="🔨")`);

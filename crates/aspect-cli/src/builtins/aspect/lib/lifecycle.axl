@@ -547,9 +547,9 @@ def setup_phase(ctx, lifecycle):
 
     Without an explicit phase mark, that 600ms-2.3s gets swallowed into
     the synthetic `init` phase — the breakdown line shows
-    `Init 1.5s · Pre-flight 245ms` and users wonder where the
+    `🌱 Init 1.5s · ✈ Pre-flight 245ms` and users wonder where the
     1.5s went. Opening a `setup` phase here makes it explicit:
-    `Setup 1.5s — Authenticating and creating CI status checks · Pre-flight 245ms`.
+    `⚙ Setup 1.5s — Authenticating and creating CI status checks · ✈ Pre-flight 245ms`.
 
     Locally those handlers are no-ops (no GitHub App auth, no
     `buildkite-agent`), so the time is negligible (~10ms) and the
