@@ -1,12 +1,10 @@
-"""Snapshot tests for `lib/lint_results.axl` template rendering.
+"""Tests for `lib/lint_results.axl`.
 
-Run with:
+Snapshot tests for template rendering and the annotation pipeline:
   aspect dev test-lint-template-snapshots
 
-Mirrors the shape of `bazel_results_test.axl` — hand-crafted data dicts
-covering the main scenarios (no findings / mixed severity / errors only /
-build failure), rendered through the lint renderer, printed for visual
-inspection of TITLE, SUMMARY, and DETAILS output.
+Pure-function tests for the PR auto-detect routing contract:
+  aspect dev test-lint-annotation-plan
 
 Scenarios:
   1. clean-passed    — no diagnostics, build succeeded
@@ -32,6 +30,7 @@ load(
     "chunk_annotations",
     "compute_annotations",
     "init_data",
+    "lint_annotation_plan",
     "render_check_output",
 )
 
@@ -668,5 +667,80 @@ lint_template_snapshot_tests = task(
     name = "test-lint-template-snapshots",
     group = ["dev"],
     implementation = _test_impl,
+    args = {},
+)
+
+# ─── lint_annotation_plan routing tests ───────────────────────────────────────
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _test_lint_annotation_plan(ctx):
+    # On a GitHub PR (pull_request, pull_request_target, BK PR, …).
+    _eq(
+        "auto + has_pr: non-fix annotate; fix-bearing → PR comments",
+        lint_annotation_plan("auto", has_pr = True),
+        (True, False),
+    )
+    _eq(
+        "both + has_pr: annotate everything (comments also post)",
+        lint_annotation_plan("both", has_pr = True),
+        (True, True),
+    )
+    _eq(
+        "comments + has_pr: annotations disabled; all findings → comments",
+        lint_annotation_plan("comments", has_pr = True),
+        (False, False),
+    )
+    _eq(
+        "annotations + has_pr: annotate everything; comment surfaces suppressed",
+        lint_annotation_plan("annotations", has_pr = True),
+        (True, True),
+    )
+
+    # Off a GitHub PR (push to main, GHA merge_group, scheduled, GitLab MR, …).
+    # `auto` is the only mode that pivots: with no PR-comment surface
+    # available, fix-bearing findings would otherwise have nowhere to land.
+    _eq(
+        "auto + no_pr: fall back to annotating everything (fix-bearing included)",
+        lint_annotation_plan("auto", has_pr = False),
+        (True, True),
+    )
+    _eq(
+        "both + no_pr: annotate everything",
+        lint_annotation_plan("both", has_pr = False),
+        (True, True),
+    )
+    _eq(
+        "comments + no_pr: annotations stay disabled (mode contract)",
+        lint_annotation_plan("comments", has_pr = False),
+        (False, False),
+    )
+    _eq(
+        "annotations + no_pr: annotate everything",
+        lint_annotation_plan("annotations", has_pr = False),
+        (True, True),
+    )
+
+    # PR-context invariant: `"auto"` is the ONLY destination whose plan
+    # depends on PR context. A future change that makes another mode
+    # PR-dependent (or collapses `auto`'s split) trips one of these.
+    for dest in ["annotations", "both", "comments"]:
+        _eq(
+            "PR-context invariant: %r returns the same plan on PR and off PR" % dest,
+            lint_annotation_plan(dest, has_pr = True),
+            lint_annotation_plan(dest, has_pr = False),
+        )
+    if lint_annotation_plan("auto", has_pr = True) == lint_annotation_plan("auto", has_pr = False):
+        fail("auto-detect contract: 'auto' must differ between has_pr=True and has_pr=False")
+
+    print("lint_results.axl::lint_annotation_plan: all cases OK")
+    return 0
+
+lint_annotation_plan_tests = task(
+    name = "test-lint-annotation-plan",
+    group = ["dev"],
+    implementation = _test_lint_annotation_plan,
     args = {},
 )

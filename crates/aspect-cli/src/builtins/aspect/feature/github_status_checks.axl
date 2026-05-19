@@ -50,6 +50,7 @@ load("../lib/lifecycle.axl", "TaskLifecycleTrait", "TaskUpdate")
 load(
     "../lib/lint_results.axl",
     LINT_ANNOTATIONS_PER_BATCH = "ANNOTATIONS_PER_BATCH",
+    "lint_annotation_plan",
     lint_chunk_annotations = "chunk_annotations",
     lint_compute_annotations = "compute_annotations",
 )
@@ -85,31 +86,6 @@ GitHubStatusChecksTrait = trait(
 _LOG = feature_logger("GitHub status checks")
 
 _SUBJECT_MAX_LEN = 60
-
-def lint_annotation_plan(destination, has_pr):
-    """Route lint findings between check-run annotations and PR-review comments.
-
-    Pure `(destination, has_pr) → (enabled, include_fix_bearing)` so the
-    contract stays testable. `has_pr` pivots `"auto"` only — the other
-    modes are PR-independent. PR-comment / suggested-fix channels silently
-    no-op off a PR (push, scheduled, GHA `merge_group`, GitLab MR), so
-    `"auto"` annotates fix-bearing findings then to avoid losing them.
-
-    Decision table:
-
-      destination    has_pr   →  (enabled, include_fix_bearing)
-      ──────────────────────────────────────────────────────────
-      "comments"     any      →  (False, False)   all findings → PR comments
-      "annotations"  any      →  (True, True)     all findings annotate
-      "both"         any      →  (True, True)     annotate + also post comments
-      "auto"         True     →  (True, False)    non-fix annotate; fix → comments
-      "auto"         False    →  (True, True)     annotate everything (fallback)
-    """
-    if destination == "comments":
-        return (False, False)
-    if destination == "auto":
-        return (True, False) if has_pr else (True, True)
-    return (True, True)
 
 def _truncate_subject(subject):
     """Truncate subject at a word boundary if it exceeds _SUBJECT_MAX_LEN characters."""

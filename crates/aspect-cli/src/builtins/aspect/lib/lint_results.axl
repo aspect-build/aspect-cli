@@ -1,4 +1,4 @@
-"""Lint task status-check rendering.
+"""Lint task status-check rendering + finding-routing policy.
 
 Parallel to `bazel_results.axl` for build/test, but driven by lint diagnostic
 events instead of Bazel build events. The feature-facing interface matches:
@@ -6,6 +6,8 @@ events instead of Bazel build events. The feature-facing interface matches:
   init_data()                                  → dict
   accumulate(data, diagnostics)                → mutates data in place
   render_check_output(ctx, data, status, …)    → {title, summary, text}
+  lint_annotation_plan(destination, has_pr)    → (enabled, include_fix_bearing)
+  compute_annotations(data, …)                 → list of annotation dicts
 
 The summary metadata rows (status/date, repo/branch/commit, user, runner info,
 custom links, tags, Aspect Workflows link, CI host link) are reused wholesale
@@ -747,6 +749,31 @@ def _changed_lines_index(data):
         region = entry.get("hunk_lines") or entry.get("lines", [])
         out[path] = {ln: True for ln in region}
     return out
+
+def lint_annotation_plan(destination, has_pr):
+    """Route lint findings between check-run annotations and PR-review comments.
+
+    Pure `(destination, has_pr) → (enabled, include_fix_bearing)` so the
+    contract stays testable. `has_pr` pivots `"auto"` only — the other
+    modes are PR-independent. PR-comment / suggested-fix channels silently
+    no-op off a PR (push, scheduled, GHA `merge_group`, GitLab MR), so
+    `"auto"` annotates fix-bearing findings then to avoid losing them.
+
+    Decision table:
+
+      destination    has_pr   →  (enabled, include_fix_bearing)
+      ──────────────────────────────────────────────────────────
+      "comments"     any      →  (False, False)   all findings → PR comments
+      "annotations"  any      →  (True, True)     all findings annotate
+      "both"         any      →  (True, True)     annotate + also post comments
+      "auto"         True     →  (True, False)    non-fix annotate; fix → comments
+      "auto"         False    →  (True, True)     annotate everything (fallback)
+    """
+    if destination == "comments":
+        return (False, False)
+    if destination == "auto":
+        return (True, False) if has_pr else (True, True)
+    return (True, True)
 
 def compute_annotations(data, max_annotations = DEFAULT_MAX_ANNOTATIONS, only_changed_regions = False, include_fix_bearing = True, suppress_anchors = None):
     """Build GitHub check-run annotation dicts from lint diagnostics.
