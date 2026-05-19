@@ -239,7 +239,10 @@ _SUMMARY_TEMPLATE = """{% if detail_rows %}{% for row in detail_rows %}
 :gear: {% for item in config_items %}**{{ item.key }}:** `{{ item.value }}`{% if not loop.last %} · {% endif %}{% endfor %}{% if last_update %}  {% endif %}{% endif %}{% if last_update %}
 :speech_balloon: **Last update:** `{{ last_update }}`{% endif %}""" + TIPS_BLOCK
 
-_DETAILS_TEMPLATE = """{% if gazelle_error %}
+_DETAILS_TEMPLATE = """{% if is_running %}
+> 🔄 Gazelle task in progress...
+
+{% elif gazelle_error %}
 > ❌ Gazelle exited with code {{ gazelle_error_code }} without producing a diff. This usually indicates a configuration error — check the task log.
 
 {% elif apply_error %}
@@ -247,6 +250,9 @@ _DETAILS_TEMPLATE = """{% if gazelle_error %}
 {% if apply_error_msg %}
 > Error: {{ apply_error_msg }}
 {% endif %}
+
+{% elif is_aborted %}
+> ⚠️ Gazelle task was aborted before producing a verdict. Check the task log for details.
 
 {% elif is_failed %}
 > ❌ Gazelle task failed before gazelle could run. Check the task log for details.
@@ -341,6 +347,14 @@ def _build_details_data(data, status):
         "file_list": "\n".join(shown),
         "overflow": str(overflow) if overflow > 0 else "",
         # Boolean flags for Jinja2 conditions.
+        # `is_running` short-circuits the rest so the body shows a
+        # "Gazelle task in progress..." placeholder before the diff
+        # phase records affected_files. Match `status == "running"`
+        # exactly: `warning` (terminal drift with --on-change=warn) and
+        # `failing` (mid-stream drift with --on-change=fail) both carry
+        # affected_files and must render the files-list body, not the
+        # placeholder. Mirrors format_results' `is_running` handling.
+        "is_running": status == "running",
         # `is_clean` is only true on a real passing run — `failed` with
         # no recorded affected_files happens on early-bail paths and
         # would otherwise misleadingly claim "All BUILD files are up to
@@ -354,6 +368,12 @@ def _build_details_data(data, status):
                      total == 0 and
                      not data["gazelle"].get("gazelle_error") and
                      not data["gazelle"].get("apply_error"),
+        # Aborted before producing a verdict — bazel terminated mid-build,
+        # so `affected_files` is empty and we don't have anything to
+        # render. Without this branch the template would fall through to
+        # the `else` and misleadingly emit "❌ 0 BUILD files are out of
+        # date".
+        "is_aborted": status == "aborted" and total == 0,
         "has_overflow": overflow > 0,
         # `check_only` mirrors the resolved `--check-only` bool — the
         # template uses it to surface "tree not modified" guidance.
