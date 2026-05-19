@@ -109,6 +109,8 @@ steps:
       $$LAUNCHER dev test-template-snapshots
       echo "--- :aspect: aspect dev test-lint-template-snapshots"
       $$LAUNCHER dev test-lint-template-snapshots
+      echo "--- :aspect: aspect dev test-lint-annotation-plan"
+      $$LAUNCHER dev test-lint-annotation-plan
       echo "--- :aspect: aspect dev test-format-template-snapshots"
       $$LAUNCHER dev test-format-template-snapshots
       echo "--- :aspect: aspect dev test-gazelle-template-snapshots"

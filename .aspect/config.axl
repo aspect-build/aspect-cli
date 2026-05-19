@@ -10,7 +10,7 @@ load("@aspect//lib/gazelle_results_test.axl", "gazelle_template_snapshot_tests")
 load("@aspect//lib/github_detect_test.axl", "github_detect_tests")
 load("@aspect//lib/gitlab_detect_test.axl", "gitlab_detect_tests")
 load("@aspect//lib/gitlab_test.axl", "gitlab_client_tests")
-load("@aspect//lib/lint_results_test.axl", "lint_template_snapshot_tests")
+load("@aspect//lib/lint_results_test.axl", "lint_annotation_plan_tests", "lint_template_snapshot_tests")
 load("@aspect//lib/rate_limit_test.axl", "rate_limit_tests")
 load("@aspect//lib/tips_test.axl", "tips_tests")
 load("@aspect//traits.axl", "BazelTrait", "LintTrait", "TipsTrait")
@@ -128,6 +128,11 @@ def config(ctx: ConfigContext):
     # phase / progress shapes.
     # Run with: aspect dev test-pr-comment-snapshots
     ctx.tasks.add(pr_comment_snapshot_tests)
+
+    # Pins the lint task's PR auto-detect contract for routing findings
+    # between check-run annotations and PR-review comments.
+    # Run with: aspect dev test-lint-annotation-plan
+    ctx.tasks.add(lint_annotation_plan_tests)
 
     # Inject a mix of secret-ish and safe Bazel flags on every task so the
     # status-check redaction path is exercised live against a real BES stream.
