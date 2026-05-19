@@ -55,11 +55,9 @@ impl BuildEventStream {
     /// client process (`Command::spawn().id()`). The BES thread checks
     /// it in the `expecting_retry` BrokenPipe branch; a live writer
     /// means an inter-attempt gap, a dead writer means end-of-build.
-    /// `file_sinks` is the list of `(path, signal)` pairs for each
-    /// `BuildEventSink::File` handle. The reader thread streams raw bytes
-    /// to every path and, when it exits (success or io error), calls
-    /// `signal.complete(result)` on each one. The handle's `sink.wait()`
-    /// blocks on that signal.
+    /// Each `(path, signal)` pair gets raw FIFO bytes mirrored to `path`;
+    /// `signal.complete(result)` fires after flush, unblocking the file
+    /// sink handle's `wait()`.
     pub fn spawn(
         path: PathBuf,
         server_pid: u32,
@@ -70,9 +68,6 @@ impl BuildEventStream {
         let thread_broadcaster = main_broadcaster.clone();
         let handle = thread::spawn(move || {
             let broadcaster = thread_broadcaster;
-            // Split paths from signals for ergonomic plumbing into the
-            // existing MultiWriter; we'll fan the terminal result back to
-            // every signal at exit.
             let raw_file_sink_paths: Vec<String> =
                 file_sinks.iter().map(|(p, _)| p.clone()).collect();
             let file_signals: Vec<std::sync::Arc<super::super::build::FileSignal>> =

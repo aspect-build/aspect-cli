@@ -849,11 +849,6 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     if bazel_trait.startup_flags:
         startup_flags = bazel_trait.startup_flags(startup_flags)
 
-    # BES sinks: lint always needs the BEP stream for SARIF file collection;
-    # the iterator handle is the local consumer, then any extra sinks from
-    # BazelTrait. The runtime subscribes the iterator before bazel opens
-    # the BEP FIFO so the early burst (build_started, named_set_of_files,
-    # target_completed) is buffered for SARIF aggregation.
     events = bazel.build_events.iterator()
     build_events = [events] + list(bazel_trait.build_event_sinks)
 
@@ -1006,9 +1001,6 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
     # 7. Wait for build
     build_status = build.wait()
-    # `build.wait()` is bazel-only — flush every caller-passed sink so
-    # any forwarded BES upload (e.g. Aspect Workflows backend) finishes
-    # before the task returns.
     for sink in bazel_trait.build_event_sinks:
         sink.wait()
     build_failed = not build_status.success

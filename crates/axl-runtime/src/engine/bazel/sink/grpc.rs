@@ -60,19 +60,10 @@ impl DriveOutcome {
 }
 
 impl Grpc {
-    /// Spawn a gRPC BES forwarding thread.
-    ///
-    /// The caller supplies `invocation_id` so that when multiple gRPC sinks
-    /// are configured for the same invocation (e.g. an Aspect backend plus
-    /// an internal mirror), every backend indexes this build under the same
-    /// UUID. That id is reported back to the AXL layer via
-    /// `Build.sink_invocation_id` — downstream consumers can build a single
-    /// "View invocation" URL that resolves on any backend configured for
-    /// this build.
-    ///
-    /// The returned thread never panics on transport or BES errors. Failures
-    /// are encoded in the `SinkOutcome` per the sink's `error_strategy`, so
-    /// `aspect`'s build is never killed by a flaky observability backend.
+    /// Spawn a gRPC BES forwarding thread. All sinks for a single build
+    /// share `invocation_id` so every backend indexes it under one UUID.
+    /// Transport / BES errors never panic; they surface as `SinkOutcome`
+    /// for the caller's `sink.wait()` to inspect.
     pub fn spawn(
         rt: AsyncRuntime,
         recv: Subscriber<BuildEvent>,
@@ -724,10 +715,9 @@ async fn drive_stream(
             //   * Buffer non-empty — the server stopped acking unacked
             //     events. Surface as Transient so the outer retry budget
             //     applies; if every replay attempt also times out, the
-            //     outer loop converts to a terminal SinkError that
-            //     `wait()` resolves per `error_strategy`. Returning Done
-            //     here would silently drop unacked events on `fail_at_end`
-            //     / `abort`.
+            //     outer loop converts to a terminal SinkError that the
+            //     caller's `sink.wait()` surfaces. Returning Done here
+            //     would silently drop unacked events.
             _ = async {
                 match half_close_deadline {
                     Some(d) => tokio::time::sleep_until(d).await,
@@ -793,10 +783,6 @@ async fn retry_lifecycle(
 }
 
 fn finalize(endpoint: &str, last_error: String) -> SinkError {
-    // Always log a warning when a sink gives up. The caller decides whether
-    // to surface the failure further (e.g. via `sink.failed` on a per-handle
-    // basis) — the runtime does NOT translate sink failure into a build
-    // exit code.
     eprintln!("WARNING: BES sink {endpoint} giving up: {last_error}");
     SinkError { last_error }
 }

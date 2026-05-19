@@ -81,10 +81,6 @@ fn resolve_stdio(
     Ok((to_stdio(stdout)?, to_stdio(stderr)?))
 }
 
-/// Partition the `build_events=` argument into the `(bool, sinks, iters)` triple
-/// that `Build::spawn` expects. `False` and `True` map cleanly; a list is split
-/// by entry kind. Iter handles in the list imply `build_events = True` so the
-/// runtime opens the BEP FIFO.
 fn partition_build_events(
     arg: Either<bool, UnpackList<Either<build::BuildEventSink, build::BuildEventIter>>>,
 ) -> (bool, Vec<build::BuildEventSink>, Vec<build::BuildEventIter>) {
@@ -700,31 +696,10 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
         Ok(build::BuildEventSink::new_file(path))
     }
 
-    /// Subscribe an AXL-side iterator to this build's BES stream.
-    ///
-    /// Create the handle *before* calling `ctx.bazel.build(...)` and include
-    /// it in the `build_events=[...]` list. The runtime subscribes the
-    /// receiver inside `Build::spawn` — before bazel opens the BEP FIFO —
-    /// so the early burst (`build_started`, `target_completed`,
-    /// `named_set_of_files`) is buffered for the consumer regardless of how
-    /// slow the AXL task is to start iterating.
-    ///
-    /// The receiver's mpsc buffer is unbounded; iterate promptly to keep
-    /// memory in check, or `iter.drain()` to stop accumulating events.
-    ///
-    /// # Arguments
-    /// * `kinds` - Optional allow-list of event kinds. Each entry is either a
-    ///   typed `bazel.build.build_event.*` constant or the matching string.
-    ///   Filtered events are dropped at iteration time, before yielding.
-    ///
-    /// # Example
-    /// ```python
-    /// iter = bazel.build_events.iterator(
-    ///     kinds = [bazel.build.build_event.TargetCompleted],
-    /// )
-    /// build = ctx.bazel.build("//...", build_events = [iter])
-    /// for event in iter: ...
-    /// ```
+    /// Create a handle iterating this build's BES stream. Pass it in
+    /// `build_events=[...]` and then `for event in iter:`. Optional
+    /// `kinds=[build_event.TargetCompleted, "named_set_of_files", ...]`
+    /// filters at iteration time.
     #[starlark(as_type = build::BuildEventIter)]
     fn iterator(
         #[starlark(require = named, default = NoneOr::None)] kinds: NoneOr<
@@ -750,10 +725,6 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
     }
 }
 
-/// Resolve a `kinds=` entry to its proto field number. Accepts both the
-/// typed `bazel.build.build_event.*` constants (which appear as a struct
-/// with a known field number) and string aliases for forward compatibility
-/// with kinds whose typed constant isn't exposed yet.
 fn parse_event_kind<'v>(value: values::Value<'v>) -> anyhow::Result<i32> {
     if let Some(n) = value.unpack_i32() {
         return Ok(n);

@@ -678,10 +678,7 @@ def _delivery_impl(ctx):
     if bazel_trait.startup_flags:
         startup_flags = bazel_trait.startup_flags(startup_flags)
 
-    # BES: delivery always needs the iterator for run_tracker — the iter
-    # handle is the local consumer; trait sinks (CI gRPC backend etc.)
-    # follow. The handle is bound to each phase 1 build inside the retry
-    # loop below; we only stash the trait-sink list here.
+    # iter handles are created per attempt inside the retry loop.
     build_events = list(bazel_trait.build_event_sinks)
 
     for handler in bazel_trait.build_start:

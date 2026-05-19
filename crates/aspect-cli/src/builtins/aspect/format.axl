@@ -339,14 +339,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
     r = runnable(ctx, [ctx.args.formatter_target])
 
-    # Pass `bazel_trait.build_event_sinks` (which includes the Aspect
-    # backend gRPC sink in CI deployments) so this build's BES events
-    # actually reach the backend and the "✨ Aspect Workflows" link in
-    # the format check-run / annotation header resolves to a real
-    # invocation. A bare iterator with no remote sink would set up a
-    # local pipe only — the runtime would still mint a sink_invocation_id,
-    # but the Aspect backend would have no record under that UUID,
-    # leading to the "invocation not found" 404 we observed live.
+    # Pass `bazel_trait.build_event_sinks` (which carries the Aspect
+    # backend gRPC sink in CI) so the "✨ Aspect Workflows" link resolves
+    # to a real backend record; otherwise we'd 404 on the sink_invocation_id.
     events = bazel.build_events.iterator()
     build_events = [events] + list(bazel_trait.build_event_sinks)
 
@@ -430,9 +425,6 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             break
 
     build_status = build.wait()
-    # `build.wait()` is bazel-only — flush every caller-passed sink so
-    # any forwarded BES upload (e.g. Aspect Workflows backend) finishes
-    # before the task returns.
     for sink in bazel_trait.build_event_sinks:
         sink.wait()
 

@@ -267,13 +267,9 @@ def run_bazel_task(ctx: TaskContext, command: str) -> TaskConclusion:
     if bazel_trait.startup_flags:
         startup_flags = bazel_trait.startup_flags(startup_flags)
 
-    # BES sinks: arg-based + trait sinks. Iteration intent (status surfaces
-    # or per-event hooks) is signaled via `need_bes`; the iter handle is
-    # created per retry attempt below, since each `iterator()` is single-use.
     bes_sinks = _collect_bes_from_args(ctx)
     if bazel_trait.build_event_sinks:
         bes_sinks.extend(bazel_trait.build_event_sinks)
-
     need_bes = bool(bazel_trait.build_event) or bool(lifecycle.task_update)
 
     for handler in bazel_trait.build_start:
@@ -351,9 +347,7 @@ def run_bazel_task(ctx: TaskContext, command: str) -> TaskConclusion:
             ),
         )
 
-        # Per-attempt iter handle (single-use rule). When this task doesn't
-        # iterate events, we pass just the bes_sinks; if neither are present,
-        # pass `False` to skip the BEP stream entirely.
+        # Per-attempt iter handle; single-use, so re-create each retry.
         events = bazel.build_events.iterator() if need_bes else None
         if events:
             build_events = [events] + bes_sinks
@@ -445,10 +439,8 @@ def run_bazel_task(ctx: TaskContext, command: str) -> TaskConclusion:
                     break
 
         invocation_status = invocation.wait()
-        # `invocation.wait()` is bazel-only. Flush each caller-passed sink
-        # before deciding whether to retry — if we retried while sinks were
-        # still draining, we'd race against their next-attempt subscription
-        # (sinks are single-use per build).
+        # Flush sinks before deciding whether to retry — re-binding a Live
+        # sink errors (see BuildEventSink::bind_grpc).
         for sink in bes_sinks:
             sink.wait()
 
