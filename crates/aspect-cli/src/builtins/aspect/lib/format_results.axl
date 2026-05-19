@@ -281,32 +281,22 @@ def _build_details_data(data, status):
         "file_list": "\n".join(shown),
         "overflow": str(overflow) if overflow > 0 else "",
         "ignored_count": str(ignored),
-        # Boolean flags used in Jinja2 conditions.
-        # `is_running` short-circuits the rest so the body shows a
-        # "Format task in progress…" placeholder while bazel is still
-        # building the formatter. Match `status == "running"` exactly:
-        # `warning` (terminal drift with --on-change=warn) and `failing`
-        # (mid-stream drift with --on-change=fail) both carry
+        # Boolean flags for Jinja2 conditions. `total == 0` guards
+        # ensure the files-list `else` branch wins whenever the
+        # formatter produced affected_files, even on non-passing
+        # statuses. `running` only — `warning` and `failing` carry
         # affected_files and must render the files-list body, not the
         # placeholder.
         "is_running": status == "running",
-        # `is_clean` is only true on a real passing run — `failed` with
-        # no recorded affected_files happens on early-bail paths and
-        # would otherwise misleadingly claim "All files are properly
-        # formatted."
         "is_clean": status == "passed" and total == 0,
-        # Reserved for early-bail terminal failures — `status="failed"`
-        # with no affected files and no specific failure mode flag.
-        # When `affected_files` IS populated the formatter ran and the
-        # template's normal "N files need formatting" branch should win.
+        # Early-bail terminal failure: `failed` with no affected_files
+        # and no specific failure mode (formatter_error / no_git /
+        # no_files_to_format).
         "is_failed": status == "failed" and
                      total == 0 and
                      not data["format"].get("formatter_error") and
                      not data["format"].get("no_git") and
                      not data["format"].get("no_files_to_format"),
-        # Aborted before producing a verdict — bazel terminated
-        # mid-build, so `affected_files` is empty and the `else` branch
-        # would misleadingly say "❌ 0 files need formatting".
         "is_aborted": status == "aborted" and total == 0,
         "applied": bool(data.get("applied")),
         # Optional count threaded into the "✅ All N files in scope are

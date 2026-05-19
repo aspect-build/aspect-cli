@@ -346,33 +346,19 @@ def _build_details_data(data, status):
         "verb": "is" if total == 1 else "are",
         "file_list": "\n".join(shown),
         "overflow": str(overflow) if overflow > 0 else "",
-        # Boolean flags for Jinja2 conditions.
-        # `is_running` short-circuits the rest so the body shows a
-        # "Gazelle task in progress..." placeholder before the diff
-        # phase records affected_files. Match `status == "running"`
-        # exactly: `warning` (terminal drift with --on-change=warn) and
-        # `failing` (mid-stream drift with --on-change=fail) both carry
-        # affected_files and must render the files-list body, not the
-        # placeholder. Mirrors format_results' `is_running` handling.
+        # Boolean flags for Jinja2 conditions. `total == 0` guards
+        # ensure the files-list `else` branch wins whenever gazelle
+        # produced affected_files, even on non-passing statuses.
+        # `running` only — `warning` and `failing` carry affected_files
+        # and must render the files-list body. Mirrors format_results.
         "is_running": status == "running",
-        # `is_clean` is only true on a real passing run — `failed` with
-        # no recorded affected_files happens on early-bail paths and
-        # would otherwise misleadingly claim "All BUILD files are up to
-        # date."
         "is_clean": status == "passed" and total == 0,
-        # Reserved for early-bail terminal failures — `status="failed"`
-        # with no affected files and no specific failure mode flag.
-        # When `affected_files` IS populated gazelle ran and the
-        # template's "N BUILD files out of date" branch should win.
+        # Early-bail terminal failure: `failed` with no affected_files
+        # and no specific failure mode (gazelle_error / apply_error).
         "is_failed": status == "failed" and
                      total == 0 and
                      not data["gazelle"].get("gazelle_error") and
                      not data["gazelle"].get("apply_error"),
-        # Aborted before producing a verdict — bazel terminated mid-build,
-        # so `affected_files` is empty and we don't have anything to
-        # render. Without this branch the template would fall through to
-        # the `else` and misleadingly emit "❌ 0 BUILD files are out of
-        # date".
         "is_aborted": status == "aborted" and total == 0,
         "has_overflow": overflow > 0,
         # `check_only` mirrors the resolved `--check-only` bool — the
