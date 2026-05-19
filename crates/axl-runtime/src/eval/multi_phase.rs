@@ -734,7 +734,7 @@ pub enum TimingMode {
     /// `→ ✅ Passed `lint` task in 46.8s`
     Total,
     /// Total + inline phase breakdown.
-    /// `→ ✅ Passed `lint` task in 46.8s — Init 0.2s · Detect 1.2s · ...`
+    /// `→ ✅ Passed `lint` task in 46.8s — 🌱 Init 0.2s · 🔍 Detect 1.2s · ...`
     Summary,
     /// Total + multi-line breakdown with descriptions. Default.
     Detailed,

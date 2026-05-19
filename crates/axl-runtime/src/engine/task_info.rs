@@ -408,15 +408,15 @@ fn task_info_methods(registry: &mut MethodsBuilder) {
         if current.is_none() && phases.is_empty() {
             // Synthetic "init" phase covers task spawn to now —
             // Aspect runtime startup, AXL eval, trait construction,
-            // and any pre-first-phase task code in `_impl`. No emoji
-            // and no display-name override — renderers titlecase
-            // `init` to `Init`.
+            // and any pre-first-phase task code in `_impl`. 🌱 is the
+            // "sprout / first moment" cue; no display-name override —
+            // renderers titlecase `init` to `Init`.
             phases.push(PhaseRecord {
                 name: "init".to_string(),
                 description: "Aspect runtime startup".to_string(),
                 duration: now.duration_since(this.started_at),
                 interrupted: false,
-                emoji: String::new(),
+                emoji: "🌱".to_string(),
                 display_name: String::new(),
             });
         } else if let Some(prev) = current.as_ref() {
