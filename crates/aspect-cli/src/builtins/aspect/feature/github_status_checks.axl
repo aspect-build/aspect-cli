@@ -49,8 +49,8 @@ load("../lib/github.axl", "detect_commit_sha", "detect_github_repo", "github")
 load("../lib/lifecycle.axl", "TaskLifecycleTrait", "TaskUpdate")
 load(
     "../lib/lint_results.axl",
-    LINT_ANNOTATIONS_PER_BATCH = "ANNOTATIONS_PER_BATCH",
     "lint_annotation_plan",
+    LINT_ANNOTATIONS_PER_BATCH = "ANNOTATIONS_PER_BATCH",
     lint_chunk_annotations = "chunk_annotations",
     lint_compute_annotations = "compute_annotations",
 )
