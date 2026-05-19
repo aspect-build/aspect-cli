@@ -28,12 +28,16 @@ load(
 )
 load("./repro_commands.axl", "patch_download_cmd")
 load("./result_text.axl", "emoji_for_status")
-load("./text.axl", "pluralize")
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
 _DETAILS_LIMIT = 65000  # GitHub check-run `output.text` hard limit
 _FILES_LIMIT = 200  # max files listed in the details body before truncating
+
+# Default --scope arg value (mirrors format.axl). The Configuration row
+# suppresses `Scope: <default>` because it adds no signal — only a
+# user-chosen non-default scope is worth surfacing.
+_DEFAULT_SCOPE = "changed"
 
 # ─── Public API ───────────────────────────────────────────────────────────────
 
@@ -232,17 +236,12 @@ def _config_items(data):
     """Build the Configuration row for the format summary.
 
     Surfaces the run-shape knobs directly above "Last update":
-      - Scope: always shown (`changed` is the default; `all` is the
-        whole-tree variant — the choice meaningfully changes what the
-        formatter touches and the changed-files preamble in the body
-        only signals the changed-scope path, so make the actual scope
-        explicit at-a-glance). When `scope == "changed"` and the task
-        recorded the post-ignore-pattern file count, append it as
-        " — filtered to N changed files" — analogous to lint's
-        "Strategy: hold-the-line — filtered to N changed files".
-        ("changed files" is OK here because the "filtered to" prefix
-        makes it clear these are files in the change set, not files
-        we modified.)
+      - Scope: only shown when the user picked a non-default value
+        (default is `_DEFAULT_SCOPE`); `all` is the whole-tree variant
+        and is worth calling out at-a-glance. The default-scope file
+        count is already surfaced in the body's "All N files in scope
+        are properly formatted" line, so suppressing the default here
+        avoids duplicating that signal.
       - Soft-fail: only shown when True. The default is False and
         showing `Soft-fail: false` on every clean run would be noise;
         the flag's whole purpose is to flag CI-bypass mode, so it
@@ -250,13 +249,11 @@ def _config_items(data):
     """
     items = []
     scope = data["format"].get("scope", "") or ""
-    if scope:
-        value = scope
-        if scope == "changed":
-            count = data.get("changed_files_count", 0) or 0
-            if count > 0:
-                value = "%s — filtered to %s" % (scope, pluralize(count, "changed file"))
-        items.append({"key": "Scope", "value": value})
+    if scope and scope != _DEFAULT_SCOPE:
+        # The default-scope ("changed") count-suffix path is unreachable
+        # here — only `--scope=all` ever reaches this branch — so the
+        # value is the raw scope name.
+        items.append({"key": "Scope", "value": scope})
     if data["format"].get("on_change_resolved") == "warn":
         items.append({"key": "On-change", "value": "warn"})
     return items
