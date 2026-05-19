@@ -368,6 +368,7 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
             if events.done:
                 break
         status = build.wait()
+
         # Flush trait sinks (e.g. bessie) before any potential retry —
         # re-binding a Live sink errors.
         for sink in build_events:

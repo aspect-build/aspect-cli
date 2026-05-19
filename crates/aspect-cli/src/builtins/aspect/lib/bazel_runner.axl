@@ -439,6 +439,7 @@ def run_bazel_task(ctx: TaskContext, command: str) -> TaskConclusion:
                     break
 
         invocation_status = invocation.wait()
+
         # Flush sinks before deciding whether to retry — re-binding a Live
         # sink errors (see BuildEventSink::bind_grpc).
         for sink in bes_sinks:
