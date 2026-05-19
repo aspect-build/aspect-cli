@@ -117,7 +117,7 @@ def to_display_name(name):
     """
     return "".join([w[0].upper() + w[1:] for w in name.split("_") if w])
 
-def make_render_ctx(state, default_targets = "", tips = None):
+def make_render_ctx(state, default_targets = "", tips = None, api_usage = "", last_updated_at = ""):
     """Build the render_ctx dict the per-kind renderers consume.
 
     Reads from `state` — the feature-private dict the caller maintains
@@ -135,6 +135,16 @@ def make_render_ctx(state, default_targets = "", tips = None):
     blockquote at the bottom of the check-run summary by the shared
     `TIPS_BLOCK` template. Features pass it; direct-render call sites
     that don't care leave it `None` and no tips render.
+
+    `api_usage` is the caller-supplied GitHub API quota summary
+    (typically `rate_limit.usage_footer(ctx)`) — a one-line string
+    like `"📊 GitHub API quota 4,800/5,000 (4% used)"` rendered into
+    the details surface just above the `Powered by` line, alongside
+    `last_updated_at`. Empty when no observation has been recorded.
+
+    `last_updated_at` is the wall-clock timestamp of this render,
+    shown alongside `api_usage`. Empty for snapshot tests /
+    direct-render sites that don't have a clock.
     """
     return {
         "triggered_by": state.get("_triggered_by", ""),
@@ -144,6 +154,8 @@ def make_render_ctx(state, default_targets = "", tips = None):
         "progress": state.get("_progress", ""),
         "task_name": state.get("_task_name", ""),
         "tips": tips or [],
+        "api_usage": api_usage or "",
+        "last_updated_at": last_updated_at or "",
     }
 
 def apply_artifact_links(links, artifacts_trait):

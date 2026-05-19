@@ -31,6 +31,8 @@ load(
     "bucket_entries",
     "collect_tip_rows",
     "dedup_by_run_attempt",
+    "lease_held",
+    "max_recent_upsert_epoch",
     "prepare_for_render",
     "render_body",
     "results_subset",
@@ -59,6 +61,8 @@ load(
 )
 load("../lib/bazel_results.axl", "compute_reproducer_command")
 load("../lib/github.axl", "github")
+load("../lib/rate_limit.axl", "GitHubApiRateLimitTrait")
+load("../lib/tips.axl", "TipsTrait")
 
 def _eq(label, got, want):
     if got != want:
@@ -557,6 +561,45 @@ def _check_format_http_failure_detail():
     if not truncated.endswith("..."):
         fail("format_http_failure_detail truncation: expected '...' suffix, got %r" % truncated[-10:])
 
+def _check_lease_held():
+    # First cycle: nobody has published → never honor the lease.
+    if lease_held(now_epoch = 100, last_upsert_epoch = 0, lease_window_s = 10):
+        fail("lease_held with last_upsert_epoch=0 must be False (no prior publish)")
+
+    # Within the window — lease held.
+    if not lease_held(now_epoch = 105, last_upsert_epoch = 100, lease_window_s = 10):
+        fail("lease_held at +5s with 10s window should be True")
+
+    # Past the window — lease expired.
+    if lease_held(now_epoch = 115, last_upsert_epoch = 100, lease_window_s = 10):
+        fail("lease_held at +15s with 10s window should be False")
+
+    # Boundary uses strict `<` — exactly window-seconds means expired.
+    if lease_held(now_epoch = 110, last_upsert_epoch = 100, lease_window_s = 10):
+        fail("lease_held at +10s exactly should be False (strict <)")
+
+    # Clock skew: sibling's epoch ahead of ours → diff is negative.
+    # Floor at 0 → diff < window → lease held (safer than under).
+    if not lease_held(now_epoch = 100, last_upsert_epoch = 150, lease_window_s = 10):
+        fail("lease_held under clock skew (sibling ahead) should be True")
+
+def _check_max_recent_upsert_epoch():
+    _eq("max_recent_upsert_epoch — empty entries", max_recent_upsert_epoch([]), 0)
+    _eq(
+        "max_recent_upsert_epoch — missing field treated as 0",
+        max_recent_upsert_epoch([{"name": "a"}, {"name": "b"}]),
+        0,
+    )
+    _eq(
+        "max_recent_upsert_epoch — picks the largest",
+        max_recent_upsert_epoch([
+            {"last_pr_comment_upsert_epoch_s": 100},
+            {"last_pr_comment_upsert_epoch_s": 300},
+            {"last_pr_comment_upsert_epoch_s": 200},
+        ]),
+        300,
+    )
+
 def _test_impl(ctx):
     sep = "=" * 70
 
@@ -564,6 +607,8 @@ def _test_impl(ctx):
     _check_dedup_by_run_attempt()
     _check_should_quiet_delete_log()
     _check_format_http_failure_detail()
+    _check_lease_held()
+    _check_max_recent_upsert_epoch()
 
     scenarios = [
         (
@@ -1306,4 +1351,5 @@ pr_comment_snapshot_tests = task(
     group = ["dev"],
     implementation = _test_impl,
     args = {},
+    traits = [GitHubApiRateLimitTrait, TipsTrait],
 )

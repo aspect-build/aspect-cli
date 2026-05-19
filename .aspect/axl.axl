@@ -2137,7 +2137,7 @@ def test_detect_build_url(ctx: TaskContext, tc: int) -> int:
     """detect_build_url for the env-var-only paths (Buildkite/CircleCI/GitLab).
 
     GitHub Actions has an auth-based deep-link upgrade we don't exercise here
-    (would require the Aspect App auth path to succeed); we just check that
+    (would require the Aspect Workflows GitHub App auth path to succeed); we just check that
     it gracefully falls through to the run URL when auth isn't available.
     """
     env = ctx.std.env

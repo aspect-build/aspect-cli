@@ -368,7 +368,7 @@ The `· `-separated rows above the **Last update** line (the same data on GH che
 | Row | Question it answers      | Items                                                                                                           |
 |-----|--------------------------|-----------------------------------------------------------------------------------------------------------------|
 | 1   | **What & when?**         | status icon + label · `📅` ISO date · `⏱` elapsed with phase breakdown                                          |
-| 2   | **Who & what tools?**    | `👤` user · `🖥` build host · `💎` aspect-cli version (`:aspect:` on Buildkite)                                 |
+| 2   | **Who & what tools?**    | `👤` user · `🖥` build host · `💎` aspect-cli version                                                           |
 | 3   | **Where did the code come from?** | `🐙`/`🦊`/`🦝` repo · `🔀` PR · `⎇` branch · `✏️` commit · `🤖` trigger                                  |
 | 4   | **What did bazel do?**   | `📦` targets · `⚡` actions executed/cached · `🧪` tests run/cached · `🔧` bazel cmd · `🎯` CPU · `⚙️` config   |
 | 5   | **Where did it run?**    | `🚀` Workflows runner version · `☁️` cloud · `📍` AZ · `💠` instance type · `🆔` instance ID                    |
@@ -388,7 +388,7 @@ Empty rows are skipped — the per-row `if row:` filter in the assembly loop kee
 
 Feature-local responsibilities (which can't be lifted because the surfaces differ):
 
-- **`GithubStatusChecks`** authenticates against GitHub via the Aspect App, fetches the running job URL via the Actions REST API, posts annotations only on the *terminal* update (GitHub appends across PATCHes — running emits would duplicate findings), and supports lint annotations + multi-batch chunking.
+- **`GithubStatusChecks`** authenticates against GitHub via the Aspect Workflows GitHub App, fetches the running job URL via the Actions REST API, posts annotations only on the *terminal* update (GitHub appends across PATCHes — running emits would duplicate findings), and supports lint annotations + multi-batch chunking.
 - **`BuildkiteAnnotations`** probes for `buildkite-agent` on PATH, builds a leading task pill (`[:aspect: task <key>]`) so a step that runs multiple tasks gets distinguishable annotations, and maps `(kind, data, status)` to `--style success/info/warning/error` via `_severity_for`.
 
 ---

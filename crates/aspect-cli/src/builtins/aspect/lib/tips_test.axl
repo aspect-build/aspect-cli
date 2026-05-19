@@ -650,7 +650,7 @@ def _test_impl(ctx):
     _test_tip_to_payload(ctx)
     _test_strip_code_fences(ctx)
     _test_auto_print_flag(ctx)
-    print("tips.axl: OK (28 sections)")
+    print("tips.axl: OK (29 sections)")
     return 0
 
 tips_tests = task(

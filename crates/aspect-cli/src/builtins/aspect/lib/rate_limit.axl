@@ -1,0 +1,902 @@
+"""Adaptive GitHub API rate-limit observation and throttle factor.
+
+aspect-cli routes supporting GitHub API calls through the Aspect
+GitHub App's installation token (shared org-wide, consumed only by
+aspect-cli) and falls back to the job-scoped `GITHUB_TOKEN` /
+`GH_TOKEN` only when the App can't authenticate (per-repository,
+shared across every workflow run in the repo). They're independent
+buckets; this module tracks each separately under the keys
+`BUCKET_APP` ("app") and `BUCKET_ENV` ("env"). See [GitHub's
+rate-limit docs](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api)
+for the current per-bucket numbers.
+
+# Observation flow
+
+Every GitHub REST response carries `X-RateLimit-Remaining`,
+`X-RateLimit-Limit`, `X-RateLimit-Used`, `X-RateLimit-Reset` headers.
+`github._do_request_once` calls `record_from_headers(ctx, bucket,
+response.headers)` after every response. The trait keeps:
+
+  - `observations[bucket]` — ring buffer of `(epoch_s, remaining,
+    limit, reset_epoch)` tuples (capped at `_RING_SIZE`).
+  - `sibling_observations[sibling_id][bucket]` — same shape, harvested
+    from sibling tasks via the artifact-share protocol.
+  - `watermark[bucket]` — lowest `remaining` seen this task; drives
+    `usage_footer`'s `% used` arithmetic.
+  - `limits[bucket]` — last-seen `limit` (footer denominator).
+  - `last_effective_factor[bucket]` — most recent factor computed for
+    surface display.
+  - `threshold_warned_tier[bucket]` — highest WARN tier already fired
+    (0 / LOW / IMPORTANT).
+
+A free `GET /rate_limit` probe in `lifecycle.setup_phase` seeds the
+App bucket before the task starts spending tokens — see
+`github.probe_rate_limit` and `seed_from_rate_limit_body` here. The
+env bucket self-announces on first observation (typically a
+4xx-auth fallback).
+
+# Swarm-shared observations
+
+`export_observations(ctx)` returns the JSON-serializable shape that
+features can piggyback on a sibling-visible artifact;
+`ingest_sibling_observations(ctx, sibling_id, …)` stashes a sibling's
+slice. `throttle_factor` reads `_merged_observations` (own ∪ siblings,
+sorted by `epoch_s`, capped at `_MERGED_RING_CAP`), so every member of
+a swarm computes burn-rate over the same sample set and converges on
+a consistent throttle factor.
+
+# Throttle factor
+
+`throttle_factor(ctx, bucket)` returns a float ≥ 1.0 that callers
+multiply into their heartbeat interval. With ≥ 2 observations, the
+factor is `max(1, burn_rate / safe_burn_rate)` where `safe_burn_rate`
+reserves a `_RESERVE_FRACTION` headroom (20% of `limit`) for terminal
+/ must-succeed calls. With < 2 observations, falls back to a
+threshold table on `remaining / limit`:
+
+      > 50% → 1×        20-50% → 2×
+      5-20% → 5×         < 5% → 999999× (terminal-only)
+
+The `max(1, ...)` floor is enforced inside — heartbeat intervals can
+only stretch, never compress. Terminal emits (final PATCH on task
+completion) bypass the throttle entirely in the caller.
+
+`time_throttle_factor(elapsed_s, min_interval_s)` adds a second
+dimension: reviewers stop watching the surface a few minutes in,
+so we relax cadence as the task runs longer (1× for the first 5
+minutes, ramping to a 60s effective interval at 30 minutes).
+`effective_throttle_factor(ctx, bucket, elapsed_s, min_interval_s)`
+combines both via `max(...)` so whichever pressure is greater drives
+the cadence.
+
+# Reset crossings
+
+When a fresh observation's `reset_epoch` jumps forward by more than
+`_RESET_JUMP_S` from the prior one, the rate-limit window rolled
+during the task. The ring buffer flushes and the watermark resets
+so burn-rate inference re-baselines instead of computing nonsense
+across the boundary, and `usage_footer`'s `% used` reflects the
+fresh window's accounting period.
+
+# Threshold warnings
+
+`_check_thresholds` emits a CLI `WARN` line once per bucket when
+`remaining / limit ≤ 0.20` and a second `WARN` line once per bucket
+when ≤ 0.05. Dedup is via `threshold_warned_tier` on the trait.
+There's nothing actionable a reviewer can do mid-run, so the warnings
+stay in the operator-facing log only — the `📊 GitHub API quota …`
+footer rendered by `usage_footer` is enough surface for reviewers.
+
+# Safety
+
+A rate-limit observation must NEVER fail a task. Every code path
+here is best-effort: malformed headers are silently skipped; an
+absent trait or empty buffer returns `1.0`. The probe at `setup_phase`
+catches all errors and returns silently. There are no `fail()` calls.
+"""
+
+load("./environment.axl", "info", "warn")
+
+# ── Public bucket keys ───────────────────────────────────────────────
+
+BUCKET_APP = "app"
+BUCKET_ENV = "env"
+
+_VALID_BUCKETS = [BUCKET_APP, BUCKET_ENV]
+
+# Human-readable label paired with each bucket id — shown in INFO
+# + WARN log lines. Co-located with `_VALID_BUCKETS` so adding a new
+# bucket lands its label in the same edit.
+_BUCKET_LABEL = {
+    BUCKET_APP: "Aspect Workflows GitHub App",
+    BUCKET_ENV: "GITHUB_TOKEN",
+}
+
+# ── Tuning constants ─────────────────────────────────────────────────
+
+# Ring-buffer cap per bucket. Older entries get dropped from the
+# head so we always look at the most recent traffic. 16 is enough
+# to span ~16 calls of heartbeat traffic without exceeding the
+# memory cost of the trait.
+_RING_SIZE = 16
+
+# A `reset_epoch` jump greater than this between consecutive
+# observations is interpreted as a window roll. Anything smaller is
+# noise (clock skew, micro-jitter near boundary).
+_RESET_JUMP_S = 600
+
+# Sentinel returned to signal "drop everything except terminal" —
+# callers multiply by this and the result is so large that the next
+# scheduled emit is effectively never.
+_TERMINAL_ONLY_FACTOR = 999999.0
+
+# Fractions of `limit` at which the LOW and IMPORTANT WARN lines
+# fire. The threshold ladder reuses these so the WARN boundary and
+# the throttle-factor step align by construction.
+_THRESHOLD_LOW_FRACTION = 0.20
+_THRESHOLD_IMPORTANT_FRACTION = 0.05
+
+# Threshold table for the `<2 observations` fallback factor. Order
+# matters: first row whose pct ≥ remaining/limit wins.
+_THRESHOLD_LADDER = [
+    (0.50, 1.0),
+    (_THRESHOLD_LOW_FRACTION, 2.0),
+    (_THRESHOLD_IMPORTANT_FRACTION, 5.0),
+    (0.00, _TERMINAL_ONLY_FACTOR),
+]
+
+# Floor on `time_to_reset` to avoid divide-by-zero and absurd safe-burn
+# values when the window is about to roll.
+_TIME_TO_RESET_FLOOR_S = 60
+
+# Fraction of `limit` to reserve as untouchable headroom for terminal
+# / must-succeed calls (final task verdicts, attribution-required
+# check-run conclusions). The burn-rate path
+# sizes itself so steady-state usage stops at `1 - _RESERVE_FRACTION`
+# of the limit — i.e., we aim to use at most 80% of the bucket before
+# yielding to terminal-only cadence.
+_RESERVE_FRACTION = 0.20
+
+# ── Trait ────────────────────────────────────────────────────────────
+
+GitHubApiRateLimitTrait = trait(
+    # Per-bucket ring buffer (cap `_RING_SIZE`) of `(epoch_s, remaining,
+    # limit, reset_epoch)` tuples. Wall-clock epoch on the time axis
+    # so observations stay meaningful when ingested by a sibling task.
+    observations = attr(dict, default = {"app": [], "env": []}),
+    # `{sibling_id: {bucket: [observation, ...]}}`. Written by
+    # `ingest_sibling_observations`; read into the merged view by
+    # `_merged_observations`. Re-ingest under the same `sibling_id`
+    # overwrites — at most one slice per sibling.
+    sibling_observations = attr(dict, default = {}),
+    # Per-bucket lowest `remaining` seen this task. Drives the
+    # `% used` arithmetic in `usage_footer`.
+    watermark = attr(dict, default = {"app": None, "env": None}),
+    # Per-bucket last-seen `limit` — the denominator in `usage_footer`.
+    limits = attr(dict, default = {"app": 0, "env": 0}),
+    # Per-bucket most recent `effective_throttle_factor` result. Read
+    # by `usage_footer` to render the `, throttle N×` clause.
+    last_effective_factor = attr(dict, default = {"app": 1.0, "env": 1.0}),
+    # Per-bucket last coarse step (1 / 2 / 5 / 999999) we logged an
+    # `INFO: GitHub API throttle …` transition for. Step-bucketing
+    # avoids spamming the log during the linear ramp of
+    # `time_throttle_factor`.
+    last_logged_factor_step = attr(dict, default = {"app": 1, "env": 1}),
+    # Per-bucket highest WARN tier already emitted (0 / LOW /
+    # IMPORTANT). See `_check_thresholds`.
+    threshold_warned_tier = attr(dict, default = {"app": 0, "env": 0}),
+)
+
+# ── Helpers ──────────────────────────────────────────────────────────
+
+def _header_value(headers, key):
+    """Case-insensitive lookup against the `(name, value)` tuple list
+    returned by the runtime's HTTP response. Returns `""` if absent."""
+    key_lower = key.lower()
+    for entry in headers or []:
+        # The runtime hands us 2-tuples but allow length-mismatched
+        # entries to fall through silently — we're best-effort here.
+        if type(entry) != "tuple" or len(entry) != 2:
+            continue
+        if entry[0].lower() == key_lower:
+            return entry[1] or ""
+    return ""
+
+def _parse_int(s, default = 0):
+    """Lenient int parse for header values. GitHub never sends
+    fractional or negative values, so anything non-digit-only is
+    treated as malformed → `default`."""
+    if not s:
+        return default
+    stripped = s.strip()
+    if not stripped:
+        return default
+    if stripped[0] == "-":
+        return default
+    if not stripped.isdigit():
+        return default
+    return int(stripped)
+
+def epoch_now_s(std):
+    """Wall-clock epoch seconds. We shell out to `date +%s` rather
+    than reach for a stdlib that doesn't expose a wall clock; the
+    cost is negligible (we read it once per `throttle_factor` call
+    and once per `record_observation`). Returns 0 on any failure or
+    when `std.process` is absent (test stubs); callers treat 0 as
+    "unknown" and gracefully skip the `resets in <duration>` text."""
+    if not hasattr(std, "process"):
+        return 0
+    result = std.process.command("date").args(["+%s"]).stdout("piped").spawn().wait_with_output()
+    if result.status.code != 0:
+        return 0
+    val = result.stdout.strip() if result.stdout else ""
+    return _parse_int(val, default = 0)
+
+def _format_duration(secs):
+    """Render seconds as a coarse human duration for INFO / tip
+    bodies (`47m`, `2h 15m`, `15s`). Below 60s shows seconds; below
+    1h shows minutes; otherwise hours + minutes."""
+    if secs <= 0:
+        return "0s"
+    if secs < 60:
+        return "%ds" % secs
+    if secs < 3600:
+        return "%dm" % (secs // 60)
+    return "%dh %dm" % (secs // 3600, (secs % 3600) // 60)
+
+def _percent_remaining(remaining, limit):
+    """Return `remaining / limit` as a float in [0.0, 1.0]. Guards
+    against missing / zero `limit` (treat as full-budget)."""
+    if not limit or limit <= 0:
+        return 1.0
+    return float(remaining) / float(limit)
+
+def _bucket_label(bucket):
+    """Human-readable label for `bucket`, with a sensible fallback
+    when an unknown bucket id is used (we want surfaces to never
+    crash on a future bucket name)."""
+    return _BUCKET_LABEL.get(bucket, bucket)
+
+# ── Recording ────────────────────────────────────────────────────────
+
+def record_observation(ctx, bucket, remaining, limit, reset_epoch, epoch_s = None):
+    """Append a fresh observation for `bucket` to the trait's ring
+    buffer, detect reset crossings, update the watermark, and fire
+    threshold WARN lines if either tier was just crossed.
+
+    Callers that have headers in hand (`record_from_headers`) and
+    callers that have JSON body fields (from `GET /rate_limit`)
+    both funnel through here. `epoch_s` defaults to the current
+    wall clock; tests pass an explicit value for determinism.
+
+    Wall-clock epoch (rather than a process-local `monotonic()`) is
+    the time axis so observations can be shared with sibling tasks
+    via `export_observations` / `ingest_sibling_observations` and
+    composed cleanly in `_merged_observations`.
+
+    Best-effort: any malformed value silently no-ops."""
+    if bucket not in _VALID_BUCKETS:
+        return
+    if limit <= 0 or remaining < 0:
+        return
+    if epoch_s == None:
+        epoch_s = epoch_now_s(ctx.std)
+    trait = ctx.traits[GitHubApiRateLimitTrait]
+
+    buf = list(trait.observations.get(bucket, []) or [])
+
+    # On reset crossing the fresh window is a fresh accounting period:
+    # flush the ring (burn-rate math across the boundary is nonsense),
+    # re-baseline the watermark (otherwise `% used` carries the
+    # pre-reset peak forward and the replenished bucket renders with a
+    # non-zero `used`), and drop the WARN tier (a fresh burn-through
+    # should re-fire the warnings).
+    if buf:
+        last_reset = buf[-1][3]
+        if last_reset and reset_epoch > last_reset + _RESET_JUMP_S:
+            buf = []
+            _reset_bucket_state(trait, bucket)
+
+    is_first = len(buf) == 0
+    buf.append((epoch_s, remaining, limit, reset_epoch))
+    if len(buf) > _RING_SIZE:
+        buf = buf[-_RING_SIZE:]
+    obs = dict(trait.observations)
+    obs[bucket] = buf
+    trait.observations = obs
+
+    # Limit can shift mid-task when GitHub bumps an installation's
+    # quota; track the latest.
+    lims = dict(trait.limits)
+    lims[bucket] = limit
+    trait.limits = lims
+
+    # Watermark — monotonically non-increasing across the task.
+    wm = dict(trait.watermark)
+    cur = wm.get(bucket)
+    if cur == None or remaining < cur:
+        wm[bucket] = remaining
+        trait.watermark = wm
+
+    # Log the starting-quota line on the first observation per bucket
+    # (for App: the setup-phase probe; for env: first 4xx-auth
+    # fallback). Reset-crossing flushes count as "first" so the new
+    # window's quota is re-logged on long-running tasks.
+    if is_first:
+        _log_rate_limit_quota(ctx, bucket, remaining, limit, reset_epoch)
+
+    _check_thresholds(ctx, bucket, remaining, limit, reset_epoch)
+
+def _reset_bucket_state(trait, bucket):
+    """Reset the per-bucket state that's window-scoped (watermark,
+    threshold-warned tier) when a reset crossing is detected. Leaves
+    `last_effective_factor` and `last_logged_factor_step` alone —
+    those self-correct on the next `effective_throttle_factor` call
+    once `_merged_observations` reflects the post-reset numbers."""
+    wm = dict(trait.watermark)
+    wm[bucket] = None
+    trait.watermark = wm
+
+    tiers = dict(trait.threshold_warned_tier or {})
+    tiers[bucket] = _THRESHOLD_TIER_NONE
+    trait.threshold_warned_tier = tiers
+
+def record_from_headers(ctx, bucket, headers, epoch_s = None):
+    """Parse `X-RateLimit-*` headers and forward to `record_observation`.
+    Called from `github._do_request_once` after every API response.
+    Silently no-ops on non-GitHub responses (no `X-RateLimit-Remaining`)
+    so callers don't have to gate on endpoint type.
+
+    `headers` is the list-of-2-tuples returned by the runtime's
+    `HttpResponse.headers`."""
+    if not headers:
+        return
+    remaining_s = _header_value(headers, "X-RateLimit-Remaining")
+    if not remaining_s:
+        return
+    limit = _parse_int(_header_value(headers, "X-RateLimit-Limit"))
+    reset = _parse_int(_header_value(headers, "X-RateLimit-Reset"))
+    remaining = _parse_int(remaining_s)
+    record_observation(ctx, bucket, remaining, limit, reset, epoch_s = epoch_s)
+
+# ── Threshold warnings ───────────────────────────────────────────────
+
+# Tier ordinals stored on `GitHubApiRateLimitTrait.threshold_warned_tier`
+# so each LOW / IMPORTANT WARN fires at most once per bucket per task.
+_THRESHOLD_TIER_NONE = 0
+_THRESHOLD_TIER_LOW = 1
+_THRESHOLD_TIER_IMPORTANT = 2
+
+def _check_thresholds(ctx, bucket, remaining, limit, reset_epoch):
+    """Emit a CLI `WARN` line the first time a bucket crosses LOW
+    (≤ 20%) and again the first time it crosses IMPORTANT (≤ 5%).
+    Dedup via the trait's `threshold_warned_tier[bucket]` int. A
+    first observation already below 5% fires both tiers on the same
+    call so the log shows the same escalation as a sequential crossing.
+
+    Logs only — there's nothing actionable a reviewer can do mid-run,
+    so the warning is kept out of the GHSC / BK / PR-comment surfaces;
+    the `📊 GitHub API quota …` footer rendered by `usage_footer` is
+    enough surface signal."""
+    if not hasattr(ctx, "traits"):
+        return
+    trait = ctx.traits[GitHubApiRateLimitTrait]
+    tiers = trait.threshold_warned_tier or {}
+    current_tier = tiers.get(bucket, _THRESHOLD_TIER_NONE)
+
+    fraction = _percent_remaining(remaining, limit)
+    if fraction > _THRESHOLD_LOW_FRACTION:
+        return
+
+    next_tier = current_tier
+    if current_tier < _THRESHOLD_TIER_LOW:
+        time_to_reset = max(0, reset_epoch - epoch_now_s(ctx.std))
+        warn(ctx.std, "GitHub API quota for %s is running low — %s/%s (%d%% used, resets in %s)" % (
+            _bucket_label(bucket),
+            _format_int(max(0, limit - remaining)),
+            _format_int(limit),
+            int((1.0 - fraction) * 100 + 0.5),
+            _format_duration(time_to_reset),
+        ))
+        next_tier = _THRESHOLD_TIER_LOW
+    if fraction <= _THRESHOLD_IMPORTANT_FRACTION and current_tier < _THRESHOLD_TIER_IMPORTANT:
+        warn(ctx.std, "GitHub API quota for %s is nearly exhausted — %s/%s (%d%% used); heartbeat status updates may be dropped, the terminal verdict will still post" % (
+            _bucket_label(bucket),
+            _format_int(max(0, limit - remaining)),
+            _format_int(limit),
+            int((1.0 - fraction) * 100 + 0.5),
+        ))
+        next_tier = _THRESHOLD_TIER_IMPORTANT
+    if next_tier != current_tier:
+        new_tiers = dict(tiers)
+        new_tiers[bucket] = next_tier
+        trait.threshold_warned_tier = new_tiers
+
+# ── Throttle factor ──────────────────────────────────────────────────
+
+def throttle_factor(ctx, bucket, now_epoch_s = None):
+    """Return a float ≥ 1.0 to multiply into a heartbeat interval.
+    With ≥ 2 observations: burn-rate inference (`max(1, observed /
+    safe)`). With < 2: a threshold table on `remaining / limit`.
+
+    Inputs come from `_merged_observations` — own ring buffer unioned
+    with whatever sibling tasks have shared via the artifact-share
+    protocol. Every swarm member that calls this function reads the
+    same union → `quota_factor` converges across tasks, which lets
+    `effective_throttle_factor` produce a swarm-consistent
+    `lease_window` for the GHSC coordination loop. Without the union,
+    a fresh task with only one local observation falls through to
+    the threshold ladder while a long-running task with a 16-deep
+    buffer computes a burn-rate factor — and the two disagree.
+
+    Callers always multiply, never divide — the `max(1, ...)` floor
+    means cadence can only relax. Terminal emits should bypass the
+    throttle in the caller; `_TERMINAL_ONLY_FACTOR` is returned when
+    the bucket is nearly exhausted, which the caller translates into
+    "skip every non-final emit".
+
+    `now_epoch_s` is a test seam — tests inject a deterministic wall
+    clock so the `time_to_reset` calculation is reproducible. In
+    production, callers omit it and the function reads the real
+    clock via `epoch_now_s(ctx.std)`."""
+    if not hasattr(ctx, "traits"):
+        return 1.0
+    obs = _merged_observations(ctx, bucket)
+    if len(obs) >= 2:
+        clock = now_epoch_s if now_epoch_s != None else epoch_now_s(ctx.std)
+        factor = _burn_rate_factor(obs, clock)
+        if factor != None:
+            return factor
+    if obs:
+        latest = obs[-1]
+        return _threshold_factor(latest[1], latest[2])
+    return 1.0
+
+# Cap on the merged-view buffer size. Slightly larger than `_RING_SIZE`
+# because we're unioning own + sibling rings; pulling the latest 32 by
+# epoch gives the burn-rate inference enough samples to stabilise
+# without letting an unbounded swarm balloon the dataset.
+_MERGED_RING_CAP = 32
+
+def _merged_observations(ctx, bucket):
+    """Return own + sibling observations for `bucket`, sorted by
+    `epoch_s` ascending, capped at the most recent `_MERGED_RING_CAP`.
+
+    The unioned buffer is what every swarm member reads, so burn-rate
+    math (`oldest.remaining - newest.remaining` over the wall-clock
+    span) produces the same answer regardless of how many calls this
+    task has personally made. Reset-crossing flushes the own buffer
+    in `record_observation`; sibling buffers naturally roll forward
+    on each ingest, so the merged view stays coherent post-reset
+    after one swarm-wide poll cycle."""
+    if not hasattr(ctx, "traits"):
+        return []
+    trait = ctx.traits[GitHubApiRateLimitTrait]
+    own = list(trait.observations.get(bucket, []) or [])
+    merged = list(own)
+    siblings = trait.sibling_observations or {}
+    for sibling_obs in siblings.values():
+        merged.extend(sibling_obs.get(bucket, []) or [])
+    if not merged:
+        return []
+    merged = sorted(merged, key = lambda o: o[0])
+    if len(merged) > _MERGED_RING_CAP:
+        merged = merged[-_MERGED_RING_CAP:]
+    return merged
+
+def export_observations(ctx):
+    """Serializable view of this task's recent rate-limit observations
+    for piggybacking on a status-artifact payload. Returns
+    `{bucket: [{epoch_s, remaining, limit, reset_epoch}, ...], ...}`;
+    every value is a JSON-friendly primitive so the payload survives
+    the artifact zip round-trip cleanly.
+
+    Only own observations are exported — sibling buffers are not
+    re-shared (would amplify the swarm's per-cycle artifact size with
+    no convergence benefit; every task already gets the same source
+    obs from the originating sibling).
+
+    Returns `{}` when the trait is absent (test stubs) or empty."""
+    if not hasattr(ctx, "traits"):
+        return {}
+    trait = ctx.traits[GitHubApiRateLimitTrait]
+    out = {}
+    for bucket in _VALID_BUCKETS:
+        bucket_obs = trait.observations.get(bucket, []) or []
+        if not bucket_obs:
+            continue
+        out[bucket] = [
+            {
+                "epoch_s": o[0],
+                "remaining": o[1],
+                "limit": o[2],
+                "reset_epoch": o[3],
+            }
+            for o in bucket_obs
+        ]
+    return out
+
+def ingest_sibling_observations(ctx, sibling_id, observations_by_bucket):
+    """Stash a sibling's exported observations under `sibling_id` so
+    they participate in `_merged_observations`. Subsequent ingests
+    with the same `sibling_id` overwrite — the trait holds at most
+    one slice per sibling, bounded by `_RING_SIZE` per slice.
+
+    Best-effort: malformed entries are silently skipped. Watermark /
+    limits updates and threshold WARN firing stay on the own-observation
+    path (`record_observation`) — sibling ingest only feeds the merged
+    view that drives `throttle_factor` and `usage_footer`'s reset
+    countdown."""
+    if not hasattr(ctx, "traits"):
+        return
+    if not sibling_id or type(observations_by_bucket) != "dict":
+        return
+    parsed = {}
+    for bucket in _VALID_BUCKETS:
+        raw = observations_by_bucket.get(bucket, []) or []
+        bucket_obs = []
+        for o in raw:
+            if type(o) != "dict":
+                continue
+            r = o.get("remaining", -1)
+            l = o.get("limit", 0)
+            if r < 0 or l <= 0:
+                continue
+            bucket_obs.append((
+                float(o.get("epoch_s", 0)),
+                int(r),
+                int(l),
+                int(o.get("reset_epoch", 0)),
+            ))
+        if bucket_obs:
+            # Bound each sibling slice at `_RING_SIZE` so a misbehaving
+            # producer can't blow up our trait — match the cap own
+            # observations already use.
+            if len(bucket_obs) > _RING_SIZE:
+                bucket_obs = bucket_obs[-_RING_SIZE:]
+            parsed[bucket] = bucket_obs
+    if not parsed:
+        return
+    trait = ctx.traits[GitHubApiRateLimitTrait]
+    siblings = dict(trait.sibling_observations or {})
+    siblings[sibling_id] = parsed
+    trait.sibling_observations = siblings
+
+def _burn_rate_factor(observations, now_epoch_s):
+    """Compute throttle factor from the buffer's oldest-to-newest
+    `remaining` delta. Returns `None` when the inputs are degenerate
+    (zero Δt, non-positive burn rate, missing reset) so the caller
+    can fall back to the threshold ladder."""
+    if len(observations) < 2:
+        return None
+    oldest = observations[0]
+    newest = observations[-1]
+    delta_remaining = oldest[1] - newest[1]
+    delta_t = newest[0] - oldest[0]
+    if delta_t <= 0:
+        return None
+    burn_rate = float(delta_remaining) / float(delta_t)
+
+    # `burn_rate <= 0` means the bucket replenished during the
+    # window — usually a reset crossing that escaped detection.
+    # No throttling needed; the caller will pick up the new bucket
+    # on its next call.
+    if burn_rate <= 0:
+        return 1.0
+
+    reset_epoch = newest[3]
+    if not reset_epoch:
+        return None
+    time_to_reset = max(_TIME_TO_RESET_FLOOR_S, reset_epoch - now_epoch_s)
+    remaining = newest[1]
+    limit = newest[2]
+    if remaining <= 0:
+        return _TERMINAL_ONLY_FACTOR
+
+    # Reserve a fraction of the limit as untouchable headroom for
+    # terminal / must-succeed calls. `safe_remaining` is what's
+    # available for non-terminal cadence; when it goes non-positive,
+    # we've crossed into the reserve and only terminal emits should
+    # land.
+    safe_remaining = float(remaining) - _RESERVE_FRACTION * float(limit)
+    if safe_remaining <= 0:
+        return _TERMINAL_ONLY_FACTOR
+    safe_burn_rate = safe_remaining / float(time_to_reset)
+    return max(1.0, burn_rate / safe_burn_rate)
+
+def _threshold_factor(remaining, limit):
+    """Threshold-ladder fallback for the `< 2 observations` case.
+    Walks `_THRESHOLD_LADDER` top-down, picking the first row whose
+    fraction the bucket meets. The terminal-only row at the bottom
+    catches anything ≤ 5%."""
+    fraction = _percent_remaining(remaining, limit)
+    for threshold, factor in _THRESHOLD_LADDER:
+        if fraction > threshold:
+            return factor
+    return _TERMINAL_ONLY_FACTOR
+
+# ── Time-based throttle ──────────────────────────────────────────────
+#
+# Reviewers watch the PR comment and check-run summary closely in the
+# first few minutes — fresh signals, active investigation. As a task
+# runs longer, real-time updates matter less: a reviewer comes back
+# after a meeting, not after every 10s tick. The time-based throttle
+# stretches the heartbeat interval as elapsed time grows so we spend
+# fewer API calls on signal nobody's watching, independent of quota
+# pressure.
+
+# Full-cadence window. Within this much elapsed time, no time throttle.
+_TIME_THROTTLE_FAST_PERIOD_S = 5 * 60
+
+# By this much elapsed time, the effective interval is clamped to
+# `_TIME_THROTTLE_TARGET_INTERVAL_S`. Between FAST_PERIOD_S and
+# SLOW_PERIOD_S the multiplier ramps linearly.
+_TIME_THROTTLE_SLOW_PERIOD_S = 30 * 60
+
+# Target effective interval (in seconds) past SLOW_PERIOD_S — once per
+# minute is plenty for a task that's been running half an hour.
+_TIME_THROTTLE_TARGET_INTERVAL_S = 60
+
+def time_throttle_factor(elapsed_s, min_interval_s):
+    """Sliding-scale throttle multiplier based on task elapsed time.
+    Returns a float ≥ 1.0 that callers compose with `throttle_factor`
+    via `max(...)` and multiply into a heartbeat interval.
+
+    Shape:
+
+      elapsed ≤ FAST_PERIOD_S (5 min)
+          → 1.0 (full cadence)
+      FAST_PERIOD_S < elapsed < SLOW_PERIOD_S (5..30 min)
+          → linear ramp from 1.0 to TARGET_INTERVAL_S/min_interval_s
+      elapsed ≥ SLOW_PERIOD_S (30 min)
+          → clamp at TARGET_INTERVAL_S/min_interval_s
+
+    Floored at 1.0 (heartbeats can only stretch). If
+    `min_interval_s` is already ≥ TARGET_INTERVAL_S the function
+    returns 1.0 throughout — the operator's configured cadence
+    already meets the long-running target."""
+    if elapsed_s <= 0 or min_interval_s <= 0:
+        return 1.0
+    if elapsed_s <= _TIME_THROTTLE_FAST_PERIOD_S:
+        return 1.0
+    target_factor = max(1.0, float(_TIME_THROTTLE_TARGET_INTERVAL_S) / float(min_interval_s))
+    if elapsed_s >= _TIME_THROTTLE_SLOW_PERIOD_S:
+        return target_factor
+    ramp_span = float(_TIME_THROTTLE_SLOW_PERIOD_S - _TIME_THROTTLE_FAST_PERIOD_S)
+    progress = float(elapsed_s - _TIME_THROTTLE_FAST_PERIOD_S) / ramp_span
+    return 1.0 + (target_factor - 1.0) * progress
+
+def effective_throttle_factor(ctx, bucket, elapsed_s, min_interval_s):
+    """Combine the quota-pressure and time-based throttles into a
+    single multiplier ≥ 1.0. Callers multiply this into their native
+    heartbeat interval (ms or s).
+
+    Side-effects:
+      - Records the resulting factor on
+        `GitHubApiRateLimitTrait.last_effective_factor[bucket]` so
+        `usage_footer` can surface the current throttle on every
+        rendered surface.
+      - Emits a one-shot `INFO: GitHub API throttle — <label>: …`
+        line when the factor crosses a step boundary (1× / 2× / 5× /
+        terminal-only). Step-bucketed so the linear ramp inside
+        `time_throttle_factor` doesn't spam a log line per heartbeat.
+
+    Centralizes the composition every heartbeat call site uses so
+    new throttle dimensions (or weight changes between the two
+    existing ones) land in one place."""
+    factor = max(
+        throttle_factor(ctx, bucket),
+        time_throttle_factor(elapsed_s, min_interval_s),
+    )
+    _record_effective_factor(ctx, bucket, factor, elapsed_s)
+    return factor
+
+# Step boundaries — keep in sync with `_THRESHOLD_LADDER` so the
+# transition log lines up with the points where the quota path
+# changes behavior.
+_FACTOR_STEP_TERMINAL = 100.0
+_FACTOR_STEP_HIGH = 5.0
+_FACTOR_STEP_MEDIUM = 2.0
+
+def _factor_step(factor):
+    """Categorize a continuous throttle factor into a coarse step for
+    transition logging. The step labels (1 / 2 / 5 / 999999) match
+    the rows of `_THRESHOLD_LADDER`."""
+    if factor >= _FACTOR_STEP_TERMINAL:
+        return 999999
+    if factor >= _FACTOR_STEP_HIGH:
+        return 5
+    if factor >= _FACTOR_STEP_MEDIUM:
+        return 2
+    return 1
+
+def _record_effective_factor(ctx, bucket, factor, elapsed_s):
+    """Store `factor` on the trait (for `usage_footer` to read) and
+    emit the transition INFO line on step changes."""
+    if not hasattr(ctx, "traits"):
+        return
+    trait = ctx.traits[GitHubApiRateLimitTrait]
+
+    fac_dict = dict(trait.last_effective_factor)
+    fac_dict[bucket] = factor
+    trait.last_effective_factor = fac_dict
+
+    step = _factor_step(factor)
+    last_step = trait.last_logged_factor_step.get(bucket, 1)
+    if step == last_step:
+        return
+    steps_dict = dict(trait.last_logged_factor_step)
+    steps_dict[bucket] = step
+    trait.last_logged_factor_step = steps_dict
+    _log_throttle_transition(ctx, bucket, factor, elapsed_s)
+
+def _log_throttle_transition(ctx, bucket, factor, elapsed_s):
+    """Emit `INFO: GitHub API throttle — <label>: factor=<F>× (quota=<U>% used, elapsed=<T>)`.
+    Fired on each step boundary crossing by `_record_effective_factor`."""
+    trait = ctx.traits[GitHubApiRateLimitTrait]
+    wm = trait.watermark or {}
+    lims = trait.limits or {}
+    cur = wm.get(bucket)
+    lim = lims.get(bucket, 0)
+    if cur != None and lim > 0:
+        used_pct = int(max(0, lim - cur) * 100.0 / float(lim) + 0.5)
+        quota_str = "quota=%d%% used" % used_pct
+    else:
+        quota_str = "quota=unknown"
+    info(ctx.std, "GitHub API throttle — %s: factor=%s (%s, elapsed=%s)" % (
+        _bucket_label(bucket),
+        _format_factor(factor),
+        quota_str,
+        _format_duration(int(elapsed_s)),
+    ))
+
+def _format_factor(factor):
+    """Render a throttle factor for human display: `2×`, `5×`, or
+    `terminal-only` for the sentinel. Factors come from the threshold
+    ladder (1.0, 2.0, 5.0) or burn-rate inference; rounded to the
+    nearest integer for display so the surface stays readable."""
+    if factor >= _FACTOR_STEP_TERMINAL:
+        return "terminal-only"
+    return "%d×" % int(factor + 0.5)
+
+# ── Seeding from `/rate_limit` JSON ──────────────────────────────────
+
+def _parse_rate_limit_body(body):
+    """Extract `(remaining, limit, reset_epoch)` from the JSON body
+    returned by `GET /rate_limit`. Returns `None` on a malformed body
+    so callers can short-circuit without further branching."""
+    if type(body) != "dict":
+        return None
+    resources = body.get("resources", {}) or {}
+    core = resources.get("core", {}) or {}
+    remaining = core.get("remaining", -1)
+    limit = core.get("limit", 0)
+    reset_epoch = core.get("reset", 0)
+    if remaining < 0 or limit <= 0:
+        return None
+    return (remaining, limit, reset_epoch)
+
+def _log_rate_limit_quota(ctx, bucket, remaining, limit, reset_epoch):
+    """Emit an `INFO: GitHub API quota — <label>: …` line on the
+    first observation per bucket. Unlike `usage_footer` (App-only,
+    no label), the INFO log carries the bucket label so operators
+    can tell App and env reports apart in mixed log output.
+    `used` is clamped to ≥ 0 against the unlikely case where a
+    stale `remaining` exceeds the latest `limit`."""
+    used = max(0, limit - remaining)
+    used_pct = int(used * 100.0 / float(limit) + 0.5)
+    info(ctx.std, "GitHub API quota — %s: %s/%s (%d%% used%s)" % (
+        _bucket_label(bucket),
+        _format_int(used),
+        _format_int(limit),
+        used_pct,
+        _resets_in_clause(ctx.std, reset_epoch),
+    ))
+
+def _resets_in_clause(std, reset_epoch):
+    """Return `", resets in <duration>"` or `""` when the clock is
+    unavailable (test stubs) or `reset_epoch` is missing. Centralises
+    the INFO / usage_footer rendering of the reset countdown."""
+    if not reset_epoch:
+        return ""
+    now_epoch = epoch_now_s(std)
+    if now_epoch <= 0:
+        return ""
+    return ", resets in " + _format_duration(max(0, reset_epoch - now_epoch))
+
+def seed_from_rate_limit_body(ctx, bucket, body):
+    """Parse the JSON body returned by `GET /rate_limit` and record
+    its `resources.core` sub-object as a fresh observation for
+    `bucket`. Used by `github.probe_rate_limit` at task init for the
+    App bucket (the bucket aspect-cli actively manages).
+
+    The starting-quota `INFO` line is emitted by `record_observation`
+    on the first observation, so the probe doesn't need to log
+    separately. Env-bucket observations come from real fallback calls
+    later in the task — the probe doesn't seed them, so env is silent
+    at startup and self-announces on first use. Silent no-op on a
+    malformed body."""
+    parsed = _parse_rate_limit_body(body)
+    if parsed == None:
+        return
+    remaining, limit, reset_epoch = parsed
+    record_observation(ctx, bucket, remaining, limit, reset_epoch)
+
+# ── Surface rendering ────────────────────────────────────────────────
+
+def usage_footer(ctx):
+    """Return a concise GitHub API quota summary line for the App
+    bucket. Used in the GHSC summary, BK annotation, and PR-comment
+    footers so reviewers see how close the run came to the rate-limit
+    wall.
+
+    Example output:
+      `📊 GitHub API quota 200/5,000 (4% used, resets in 47m)`
+      `📊 GitHub API quota 200/5,000 (4% used, resets in 47m, throttle 2×)`
+
+    The footer reports App-bucket usage only — the App installation
+    token is what aspect-cli actively manages and what the swarm
+    coordinates on. The env bucket (`GITHUB_TOKEN`) is reported in
+    CLI INFO logs (first-observation + threshold-transition lines)
+    but kept out of surface rendering to avoid cluttering the panel
+    with a fallback signal that's only sometimes present and not what
+    reviewers act on. `used` is derived from the App watermark (lowest
+    `remaining` seen during the task); the reset duration comes from
+    the latest merged-view observation's `reset_epoch`.
+
+    Returns `""` when the App bucket has no observation (e.g. local
+    runs that never hit GitHub)."""
+    if not hasattr(ctx, "traits"):
+        return ""
+    trait = ctx.traits[GitHubApiRateLimitTrait]
+    wm = trait.watermark or {}
+    lims = trait.limits or {}
+    factors = trait.last_effective_factor or {}
+
+    cur = wm.get(BUCKET_APP)
+    lim = lims.get(BUCKET_APP, 0)
+    if cur == None or lim <= 0:
+        return ""
+    used = max(0, lim - cur)
+    used_pct = int(used * 100.0 / float(lim) + 0.5)
+
+    # `resets in <duration>` derived from the latest observation's
+    # `reset_epoch` across the merged (own + sibling) view — picks up
+    # a fresher reset that a sibling observed before we did, so the
+    # footer's countdown stays in lockstep with the throttle factor's
+    # underlying data.
+    obs = _merged_observations(ctx, BUCKET_APP)
+    reset_epoch = obs[-1][3] if obs else 0
+    return "📊 GitHub API quota %s/%s (%d%% used%s%s)" % (
+        _format_int(used),
+        _format_int(lim),
+        used_pct,
+        _resets_in_clause(ctx.std, reset_epoch),
+        _throttle_clause(factors.get(BUCKET_APP, 1.0)),
+    )
+
+def _throttle_clause(factor):
+    """`, throttle 2×` / `, throttle terminal-only` / `""`. Spliced
+    into the parens of `usage_footer` so a reviewer can tell at a
+    glance whether heartbeat cadence is being stretched.
+
+    Gates on the *formatted* factor — `_format_factor` rounds to the
+    nearest integer, so a raw factor of 1.3 would otherwise render
+    as `, throttle 1×` (no visible stretch) and just add noise."""
+    formatted = _format_factor(factor)
+    if formatted == "1×":
+        return ""
+    return ", throttle " + formatted
+
+def _format_int(n):
+    """Format an integer with thousands separators (`4800` → `4,800`).
+    Used for human-readable numbers in the usage footer."""
+    s = str(n)
+    if len(s) <= 3:
+        return s
+    out = ""
+    for i in range(len(s)):
+        if i > 0 and (len(s) - i) % 3 == 0:
+            out = out + ","
+        out = out + s[i]
+    return out

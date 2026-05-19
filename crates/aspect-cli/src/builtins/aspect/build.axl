@@ -9,6 +9,7 @@ load("./lib/bazel_runner.axl", "run_bazel_task")
 load("./lib/checkrun.axl", "GitHubCheckRunTrait")
 load("./lib/health_check.axl", "HealthCheckTrait")
 load("./lib/lifecycle.axl", "TaskLifecycleTrait")
+load("./lib/rate_limit.axl", "GitHubApiRateLimitTrait")
 load("./lib/tips.axl", "TipsTrait")
 
 def _impl(ctx: TaskContext) -> int | TaskConclusion:
@@ -59,6 +60,7 @@ build = task(
         GitHubCheckRunTrait,
         GitHubStatusChecksTrait,
         HealthCheckTrait,
+        GitHubApiRateLimitTrait,
         TaskLifecycleTrait,
         TipsTrait,
     ],

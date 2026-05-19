@@ -2677,13 +2677,15 @@ def build_invocation_rows(ctx, data, render_ctx, status, links = None, run_date 
     if build_host:
         row2.append(_item("🖥", html_escape(build_host)))
 
-    # `:aspect:` is a BK-only emoji shortcode; everywhere else it
-    # renders as literal text, so fall back to 💎 off-BK.
+    # The rendered row goes to every surface (GHSC, BK, PR comment),
+    # so the icon has to render correctly on all of them. `💎` is a
+    # Unicode emoji that lands cleanly everywhere; a BK-specific
+    # shortcode like `:aspect:` would render as literal text on
+    # GitHub Status Checks when the runner is on Buildkite with a
+    # GitHub remote.
     cli_version = ctx.std.env.aspect_cli_version() if ctx else ""
     if cli_version:
-        on_bk = ctx and ctx.std.env.var("BUILDKITE")
-        cli_icon = ":aspect:" if on_bk else "💎"
-        row2.append(_item(cli_icon, "aspect-cli v" + cli_version))
+        row2.append(_item("💎", "aspect-cli v" + cli_version))
 
     # Row 3: VCS context — repo · PR · branch · commit · trigger.
     row3 = []
@@ -3298,7 +3300,8 @@ SHARED_DETAILS_BODY_TEMPLATE = """{% if artifacts_browse_url or artifact_links %
 {% endif %}
 ---
 
-<sub>Powered by [Aspect Build](https://aspect.build/) · [GitHub](https://github.com/aspect-build) · [X](https://twitter.com/aspect_build) · [LinkedIn](https://www.linkedin.com/company/aspect-dev/) · [YouTube](http://www.youtube.com/@aspectbuild)</sub>
+{% if last_updated_at or api_usage %}<sub>{% if last_updated_at %}⏱ Last updated {{ last_updated_at }}{% endif %}{% if last_updated_at and api_usage %} · {% endif %}{% if api_usage %}{{ api_usage }}{% endif %}</sub><br>
+{%- endif %}<sub>🚀 Powered by [Aspect CLI](https://github.com/aspect-build/aspect-cli) — [Aspect Build](https://aspect.build/) · [X](https://twitter.com/aspect_build) · [LinkedIn](https://www.linkedin.com/company/aspect-dev/) · [YouTube](http://www.youtube.com/@aspectbuild)</sub>
 """
 
 # Build/test detail template: bazel-aborted prelude, the hoisted
@@ -4149,6 +4152,13 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
         # sections at its top. True only when Bazel targets is the
         # primary actionable slot (build/test).
         "render_repro_in_targets": render_repro_in_targets,
+
+        # Read by `DETAILS_TEMPLATE` to render the `⏱ Last updated …
+        # · 📊 GitHub API quota …` line just above `Powered by`. Empty
+        # when the caller hasn't supplied them (snapshot tests /
+        # direct-render sites) — the template gates and skips.
+        "api_usage": (render_ctx.get("api_usage") if render_ctx else "") or "",
+        "last_updated_at": (render_ctx.get("last_updated_at") if render_ctx else "") or "",
     }
 
 def active_phase_data(ctx):

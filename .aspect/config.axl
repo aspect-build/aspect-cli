@@ -11,6 +11,7 @@ load("@aspect//lib/github_detect_test.axl", "github_detect_tests")
 load("@aspect//lib/gitlab_detect_test.axl", "gitlab_detect_tests")
 load("@aspect//lib/gitlab_test.axl", "gitlab_client_tests")
 load("@aspect//lib/lint_results_test.axl", "lint_template_snapshot_tests")
+load("@aspect//lib/rate_limit_test.axl", "rate_limit_tests")
 load("@aspect//lib/tips_test.axl", "tips_tests")
 load("@aspect//traits.axl", "BazelTrait", "LintTrait", "TipsTrait")
 load("./lambda.axl", "lambda_with_global_bind")
@@ -97,6 +98,13 @@ def config(ctx: ConfigContext):
     # silenced_tips short-circuit, and built-in template shape.
     # Run with: aspect dev test-tips
     ctx.tasks.add(tips_tests)
+
+    # Adaptive rate-limit throttling — observations / burn-rate
+    # inference / threshold ladder / tip firing / two-bucket
+    # independence / `prefer_app_when_env_critical` rebalancing /
+    # `seed_from_rate_limit_body` + watermark badge rendering.
+    # Run with: aspect dev test-rate-limit
+    ctx.tasks.add(rate_limit_tests)
 
     # Delivery template snapshot tests — renders delivery_results templates.
     # Run with: aspect dev test-delivery-template-snapshots

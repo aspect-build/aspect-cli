@@ -30,12 +30,13 @@ Body-template variables:
     entries        — list of per-task entry dicts, alphabetical by (job, name, key).
 """
 
-load("@std//time.axl", "monotonic")
+load("@std//time.axl", "monotonic", "time")
 load(
     "../lib/bazel_results.axl",
     "format_duration_ms",
     "format_run_date",
     "init_data",
+    "now_ms",
     "render_bes_url",
     "resolve_aspect_url",
 )
@@ -43,6 +44,15 @@ load("../lib/checkrun.axl", "GitHubCheckRunTrait")
 load("../lib/environment.axl", "feature_logger", "workflows_results_url")
 load("../lib/github.axl", "github")
 load("../lib/lifecycle.axl", "TaskLifecycleTrait")
+load(
+    "../lib/rate_limit.axl",
+    "BUCKET_APP",
+    "effective_throttle_factor",
+    "epoch_now_s",
+    "export_observations",
+    "ingest_sibling_observations",
+    "usage_footer",
+)
 load("../lib/repro_commands.axl", "dedup_and_attribute")
 load("../lib/result_text.axl", "severity_for_status")
 load("../lib/tar.axl", "bsdtar")
@@ -62,6 +72,15 @@ _MARKER_FMT = "<!-- aspect-ci-status:pr-%d -->"
 
 # Used by `_should_quiet_delete_log` — see that helper's docstring.
 _EVENTUAL_CONSISTENCY_WINDOW_S = 15
+
+# Buffer applied between a task's terminal publish and a one-shot
+# re-sweep. Catches the eventual-consistency race where two tasks
+# finish near-simultaneously: the LIST call on the artifact API may
+# not yet reflect the other task's freshly-uploaded terminal artifact,
+# so the first publish would render the sibling as still `running`.
+# The re-sweep re-collects after this delay and the body-diff
+# short-circuit skips the second PATCH when no race actually occurred.
+_TERMINAL_SETTLE_DELAY_MS = 5000
 
 # Status badges keyed by the precomputed `_badge_key` on each entry,
 # *not* the raw lifecycle status. `_badge_key` is one of:
@@ -153,7 +172,8 @@ _No tasks have reported yet._
 {% endif %}
 ---
 
-<sub>Powered by [Aspect Build](https://aspect.build/) · [GitHub](https://github.com/aspect-build) · [X](https://twitter.com/aspect_build) · [LinkedIn](https://www.linkedin.com/company/aspect-dev/) · [YouTube](http://www.youtube.com/@aspectbuild)</sub>
+{% if last_updated_at or api_usage %}<sub>{% if last_updated_at %}⏱ Last updated {{ last_updated_at }}{% endif %}{% if last_updated_at and api_usage %} · {% endif %}{% if api_usage %}{{ api_usage }}{% endif %}</sub><br>
+{%- endif %}<sub>🚀 Powered by [Aspect CLI](https://github.com/aspect-build/aspect-cli) — [Aspect Build](https://aspect.build/) · [X](https://twitter.com/aspect_build) · [LinkedIn](https://www.linkedin.com/company/aspect-dev/) · [YouTube](http://www.youtube.com/@aspectbuild)</sub>
 """
 
 # ─── Status → badge ───────────────────────────────────────────────────────────
@@ -431,6 +451,39 @@ def _earliest_start_ms(entries):
             best = s
     return best
 
+def _max_recent_upsert_epoch(entries):
+    """Largest `last_pr_comment_upsert_epoch_s` across entries
+    (including our own). Drives the lease decision in `_publish`."""
+    best = 0
+    for e in entries:
+        v = e.get("last_pr_comment_upsert_epoch_s", 0) or 0
+        if v > best:
+            best = v
+    return best
+
+def _running_sibling_count(entries):
+    """Count entries whose status is still live (`running` / `failing`).
+    Used by `_publish` to decide whether a terminal update should pay
+    the eventual-consistency settle delay — only the last couple of
+    finishers need it."""
+    n = 0
+    for e in entries:
+        s = e.get("status", "running")
+        if s == "running" or s == "failing":
+            n += 1
+    return n
+
+def _lease_held(now_epoch, last_upsert_epoch, lease_window_s):
+    """True when a swarm member published within `lease_window_s` of
+    `now_epoch`. `last_upsert_epoch == 0` means nobody has published
+    yet — lease never held on the first cycle. `max(0, …)` floors the
+    elapsed-since-upsert against GitHub Actions clock skew between
+    runners (negative diff → treat as lease held; slight over-throttle
+    is safer than under)."""
+    if last_upsert_epoch <= 0:
+        return False
+    return max(0, now_epoch - last_upsert_epoch) < lease_window_s
+
 def _iso_in(ctx, minutes):
     """RFC 3339 UTC timestamp `minutes` from now via GNU `date -u -d "+N minutes"`.
     Returns "" on failure so the caller can drop the field rather than send junk."""
@@ -657,7 +710,7 @@ def _collect_tip_rows(ctx, entries):
         out.append(decorated)
     return out
 
-def _render_body(ctx, marker, entries, started_at, body_template, status_badges, sections):
+def _render_body(ctx, marker, entries, started_at, body_template, status_badges, sections, last_updated_at = "", api_usage = ""):
     """Render the comment body via the (possibly user-overridden) Jinja2 template.
 
     `entries` is expected to be the output of `_prepare_for_render` —
@@ -676,6 +729,14 @@ def _render_body(ctx, marker, entries, started_at, body_template, status_badges,
     to the start so the headline timestamp doesn't wobble across
     PATCHes once the run is underway. Empty string until at least one
     task has started.
+
+    `last_updated_at` and `api_usage` are caller-supplied — the
+    publish path renders the body twice per cycle, once with both set
+    to `""` (the diff baseline — stable across polls so an unchanged
+    task state can short-circuit the PATCH) and once with their live
+    values for the actual upsert. Pulling them off the template's own
+    side-effecting calls (`now_ms`, `usage_footer`) into parameters
+    keeps the diff-render deterministic.
 
     `repro_rows` / `fix_rows` are computed from the per-entry
     `repro_commands` / `fix_commands` lists via
@@ -698,6 +759,8 @@ def _render_body(ctx, marker, entries, started_at, body_template, status_badges,
         "repro_rows": repro_rows,
         "fix_rows": fix_rows,
         "tip_rows": tip_rows,
+        "api_usage": api_usage,
+        "last_updated_at": last_updated_at,
     })
     if not body.endswith("\n"):
         body = body + "\n"
@@ -774,7 +837,21 @@ def _github_status_comments(ctx: FeatureContext):
         `tips` carries this task's tips at upload time (filtered + sorted by
         `collect_tips_sorted`); the comment aggregator dedups by id across
         siblings and attributes by task key. Trimmed to render fields so the
-        upload payload doesn't carry filter glob lists or other internals."""
+        upload payload doesn't carry filter glob lists or other internals.
+
+        `rate_limit_observations` piggybacks this task's recent GitHub-API
+        observations onto the artifact (`rate_limit.export_observations`).
+        Sibling tasks ingest the field in `_collect_sibling_entries` so every
+        swarm member computes `throttle_factor` over the same merged sample
+        set — that's what makes the `lease_window` computed in `_publish`
+        agree across the swarm.
+
+        `last_pr_comment_upsert_epoch_s` records the wall-clock epoch of our
+        last successful PR-comment upsert (`0` until we've published once).
+        The lease decision in `_publish` takes `max(...)` across this field
+        from all sibling entries: when any swarm member has published
+        recently, everyone else honors the lease and skips their own upsert.
+        Updated by `_publish` after `_upsert_comment` returns."""
 
         # Prefer the per-job URL when we have it — drops the reviewer
         # straight on the failing job's logs.
@@ -787,6 +864,8 @@ def _github_status_comments(ctx: FeatureContext):
             "status": _state.get("_status", "running"),
             "ci_run_url": link_url,
             "tips": [tip_to_payload(t) for t in collect_tips_sorted(ctx)],
+            "rate_limit_observations": export_observations(ctx),
+            "last_pr_comment_upsert_epoch_s": _state.get("_last_pr_comment_upsert_epoch_s", 0),
         }
         payload.update(_state.get("_results_subset") or _empty_results_subset())
 
@@ -913,6 +992,19 @@ def _github_status_comments(ctx: FeatureContext):
             cache[aid] = entry
             seen[aname] = entry
 
+            # Swarm-share: fold this sibling's recent GitHub-API
+            # observations into our merged ring buffer. The artifact
+            # name (stable per `(job, task_key, run_attempt)`) is the
+            # `sibling_id`, so a sibling that re-uploads under the
+            # same logical identity overwrites its prior slice
+            # instead of accumulating. Producers that predate the
+            # share protocol leave the field absent → ingest no-ops.
+            ingest_sibling_observations(
+                ctx,
+                aname,
+                entry.get("rate_limit_observations", {}) or {},
+            )
+
         # GC cache entries whose artifacts were replaced or deleted.
         for aid in list(cache.keys()):
             if aid not in current_ids:
@@ -921,17 +1013,27 @@ def _github_status_comments(ctx: FeatureContext):
         return _dedup_by_run_attempt(list(seen.values()))
 
     def _upsert_comment(ctx, token, body):
-        """PATCH the existing comment if known/findable, else POST and dedupe duplicates."""
+        """PATCH the existing comment if known/findable, else POST and
+        dedupe duplicates. The unchanged-content short-circuit lives
+        in `_publish` (gated on a timestamp-stripped diff); by the
+        time we reach here we're committing to an upsert.
+
+        Returns `True` when the upsert hit GitHub successfully (so the
+        caller can stamp `_last_pr_comment_upsert_epoch_s` and let the
+        swarm-wide lease honor it). `False` on any failure — the caller
+        skips the stamp so a sibling can take over the publisher role
+        instead of honoring a stale lease behind a broken upsert."""
         if "_comment_id" in _state:
             res = github.issues.update_comment(ctx, token, owner, repo, _state["_comment_id"], body)
             if not res.get("success"):
                 _LOG.warn(ctx.std, "Update failed: %s" % res.get("error", "unknown"))
-            return
+                return False
+            return True
 
         listed = github.issues.list_comments(ctx, token, owner, repo, pr_number)
         if not listed.get("success"):
             _LOG.warn(ctx.std, "List comments failed: %s" % listed.get("error", "unknown"))
-            return
+            return False
         for c in listed["comments"]:
             if marker in (c.get("body") or ""):
                 _state["_comment_id"] = c["id"]
@@ -941,12 +1043,13 @@ def _github_status_comments(ctx: FeatureContext):
             res = github.issues.update_comment(ctx, token, owner, repo, _state["_comment_id"], body)
             if not res.get("success"):
                 _LOG.warn(ctx.std, "Update failed: %s" % res.get("error", "unknown"))
-            return
+                return False
+            return True
 
         res = github.issues.create_comment(ctx, token, owner, repo, pr_number, body)
         if not res.get("success"):
             _LOG.warn(ctx.std, "Create failed: %s" % res.get("error", "unknown"))
-            return
+            return False
         _state["_comment_id"] = res["comment_id"]
 
         # Race mitigation: if two jobs both POSTed within the same window, keep the
@@ -954,16 +1057,17 @@ def _github_status_comments(ctx: FeatureContext):
         # so they converge on the same survivor.
         listed2 = github.issues.list_comments(ctx, token, owner, repo, pr_number)
         if not listed2.get("success"):
-            return
+            return True
         dupes = [c for c in listed2["comments"] if marker in (c.get("body") or "")]
         if len(dupes) <= 1:
-            return
+            return True
         dupes_sorted = sorted(dupes, key = lambda c: c["id"])
         _state["_comment_id"] = dupes_sorted[0]["id"]
         for d in dupes_sorted[1:]:
             github.issues.delete_comment(ctx, token, owner, repo, d["id"])
+        return True
 
-    def _publish(ctx):
+    def _publish(ctx, final = False):
         token = _state.get("_github_token")
         if not token:
             return
@@ -973,6 +1077,28 @@ def _github_status_comments(ctx: FeatureContext):
         if raw_entries == None:
             return
         prepared = _prepare_for_render(raw_entries)
+
+        # Terminal-settle delay: when we're terminal and look likely to
+        # be the last or second-to-last finisher, wait out the artifact
+        # LIST API's eventual-consistency window and re-collect.
+        # Catches the race where two tasks finish near-simultaneously
+        # and one of them snapshots the swarm before the other's
+        # terminal artifact is visible — without this, the PR comment
+        # can get stuck on a stale `running` entry.
+        #
+        # Gated on (a) a multi-task swarm — a solo task has nobody to
+        # race — and (b) ≤ 1 sibling still running, so mid-stream
+        # terminals skip the wait (the actual last task will catch up).
+        if (
+            final and
+            len(prepared) > 1 and
+            _running_sibling_count(prepared) <= 1
+        ):
+            time.sleep(_TERMINAL_SETTLE_DELAY_MS)
+            raw_entries = _collect_sibling_entries(ctx, token)
+            if raw_entries == None:
+                return
+            prepared = _prepare_for_render(raw_entries)
         sections = _bucket_entries(prepared)
 
         # Earliest start across all sibling tasks — formatted as the
@@ -980,7 +1106,40 @@ def _github_status_comments(ctx: FeatureContext):
         # start so it doesn't wobble across PATCHes.
         earliest_ms = _earliest_start_ms(prepared)
         started_at = format_run_date(ctx, earliest_ms)
-        body = _render_body(
+
+        # Swarm coordination: every task uploads its own status
+        # artifact (cheap, Twirp), but the quota-burning PR-comment
+        # upsert (REST PATCH on the App bucket) is gated on a lease
+        # that any swarm member can hold. `lease_window_s` is fed
+        # `swarm_elapsed_s` (time since the earliest sibling started)
+        # and the merged-view quota factor, so every member computes
+        # the same window from swarm-shared inputs and converges on
+        # the same skip-or-publish answer.
+        #
+        # Terminal updates (`final=True`) bypass the lease: if this is
+        # the last task to finish and a sibling published recently with
+        # us still rendered as "running", the lease would otherwise
+        # silently drop our terminal upsert and leave the PR comment
+        # frozen on the stale state. The body-diff short-circuit below
+        # still gates a redundant PATCH when our terminal status has
+        # already been picked up by a sibling's earlier publish.
+        now_epoch = epoch_now_s(ctx.std)
+        swarm_started_epoch = earliest_ms // 1000 if earliest_ms > 0 else now_epoch
+        swarm_elapsed_s = max(0, now_epoch - swarm_started_epoch)
+        factor = effective_throttle_factor(ctx, BUCKET_APP, swarm_elapsed_s, min_poll_interval_seconds)
+        lease_window_s = min_poll_interval_seconds * factor
+        if not final and _lease_held(now_epoch, _max_recent_upsert_epoch(prepared), lease_window_s):
+            return
+
+        # Two renders per cycle:
+        # 1. `stable_body` — `last_updated_at` and `api_usage` zeroed
+        #    out — used solely for the unchanged-content short-circuit.
+        #    Without this, the always-fresh `Last updated` timestamp
+        #    and continually-burning quota numbers would diff on every
+        #    poll and force a PATCH even when no task state changed.
+        # 2. `final_body` — the same content with live timestamp and
+        #    quota footer, used for the actual upsert.
+        stable_body = _render_body(
             ctx,
             marker,
             prepared,
@@ -989,7 +1148,30 @@ def _github_status_comments(ctx: FeatureContext):
             status_badges,
             sections,
         )
-        _upsert_comment(ctx, token, body)
+        if _state.get("_last_stable_body") == stable_body:
+            return
+        final_body = _render_body(
+            ctx,
+            marker,
+            prepared,
+            started_at,
+            body_template,
+            status_badges,
+            sections,
+            last_updated_at = format_run_date(ctx, now_ms(ctx)),
+            api_usage = usage_footer(ctx),
+        )
+        if not _upsert_comment(ctx, token, final_body):
+            # Skip stamping the lease — the swarm should retry rather
+            # than honor a stale lease behind a broken publisher.
+            return
+        _state["_last_stable_body"] = stable_body
+
+        # Siblings see this epoch on our next `_publish_self` upload
+        # (one outer cycle ≈ 10s later). Within that window a
+        # fast-waking sibling may double-publish; cheaper than paying
+        # for an extra Twirp upload to propagate sooner.
+        _state["_last_pr_comment_upsert_epoch_s"] = now_epoch
 
     def _task_started(ctx, subject):
         # Cache task identity from TaskContext so the FeatureContext-level closure
@@ -998,6 +1180,9 @@ def _github_status_comments(ctx: FeatureContext):
         _state["_task_name"] = ctx.task.name
         _state["_task_key"] = ctx.task.key
         _state["_status"] = "running"
+
+        # Anchor for the time-based throttle in `_task_update`.
+        _state["_task_started_at"] = monotonic()
 
         auth_reason = {}
         token = github.authenticate(
@@ -1026,8 +1211,8 @@ def _github_status_comments(ctx: FeatureContext):
         # as the 4xx-auth fallback. Falls back silently to
         # `_ci_run_url` if neither token has `actions:read`.
         if run_id:
-            read_token, app_fallback = github.preferred_token_pair(ctx, owner = owner, repo = repo, roles = ["actions.read"], existing_app_token = token)
-            job_url = github.resolve_current_job_url(ctx, read_token, owner, repo, run_id, app_fallback_token = app_fallback)
+            read_token, read_fallback, read_class = github.preferred_token_pair(ctx, owner = owner, repo = repo, roles = ["actions.read"], existing_app_token = token)
+            job_url = github.resolve_current_job_url(ctx, read_token, owner, repo, run_id, fallback_token = read_fallback, token_class = read_class)
             if job_url:
                 _state["_ci_link_url"] = job_url
 
@@ -1092,25 +1277,34 @@ def _github_status_comments(ctx: FeatureContext):
                 start_time_ms = data.get("start_time_ms", 0) or 0,
             )
 
-        # Final emits bypass the throttle so the terminal `body`
-        # ("Lint complete", "Bazel test failed (3 tests failed)", …)
-        # always lands on the artifact and the rendered PR comment
-        # picks it up — without this gate, a final emit that arrives
-        # within the poll-interval window after the prior phase's
-        # publish would be silently dropped, leaving the PR comment
-        # stuck on a stale phase progress line.
-        #
-        # Use `update.final` rather than `update.status in (passed, failed)`
-        # — the latter misses `warning` and `aborted`, which are also
-        # terminal statuses (e.g. a lint run with warning-only findings
-        # or a bazel-aborted task). Both arrive with `final = True`
-        # and need to bypass the throttle.
-        if not update.final:
+        # Bypass the throttle on:
+        #   - `update.final` — terminal emits ("Lint complete", "Bazel
+        #     test failed (3 tests failed)", …) always need to land.
+        #     Covers `warning` and `aborted` as well as `passed` /
+        #     `failed`; all four arrive with `final = True`.
+        #   - the *first* `update.priority` event per task — the one
+        #     that flips off the spawn-label placeholder once Bazel
+        #     starts emitting real data. Subsequent priority events
+        #     (phase transitions) are throttled normally; on a chatty
+        #     task with many phases they'd otherwise PATCH the PR
+        #     comment on every boundary and burn through App quota.
+        #     BK annotations honor every priority (no API cost); GHSC
+        #     and this surface honor only the first.
+        is_initial = update.priority and not _state.get("_saw_priority", False)
+        if update.priority:
+            _state["_saw_priority"] = True
+        if not (update.final or is_initial):
+            # Outer throttle on candidate-publish events. Task-local
+            # elapsed — per-task BES-tick rate-limiting. The swarm-wide
+            # lease in `_publish` is what actually gates the
+            # App-bucket-burning REST PATCH.
             now = monotonic()
-            if now - _state.get("_last_publish_s", 0.0) < min_poll_interval_seconds:
+            elapsed_s = now - _state.get("_task_started_at", now)
+            factor = effective_throttle_factor(ctx, BUCKET_APP, elapsed_s, min_poll_interval_seconds)
+            if now - _state.get("_last_publish_s", 0.0) < min_poll_interval_seconds * factor:
                 return
             _state["_last_publish_s"] = now
-        _publish(ctx)
+        _publish(ctx, final = update.final)
 
     lifecycle.task_started.append(_task_started)
     lifecycle.task_update.append(_task_update)
@@ -1145,6 +1339,14 @@ def should_quiet_delete_log(last_upload_at, now):
 def render_body(ctx, marker, entries, started_at, body_template, status_badges, sections):
     """Public test hook; see `_render_body`."""
     return _render_body(ctx, marker, entries, started_at, body_template, status_badges, sections)
+
+def lease_held(now_epoch, last_upsert_epoch, lease_window_s):
+    """Public test hook; see `_lease_held`."""
+    return _lease_held(now_epoch, last_upsert_epoch, lease_window_s)
+
+def max_recent_upsert_epoch(entries):
+    """Public test hook; see `_max_recent_upsert_epoch`."""
+    return _max_recent_upsert_epoch(entries)
 
 def results_subset(
         data,
@@ -1190,10 +1392,14 @@ GithubStatusComments = feature(
             description = "When to post PR comments: ci-only (default), local-only, or always.",
         ),
         "min_poll_interval_seconds": args.int(
-            default = 10,
-            description = "Lower bound on the gap between poll-render-PATCH cycles. " +
-                          "Acts as a throttle on event-paced ticks (each BES update is a candidate poll). " +
-                          "Different jobs land on different cadences naturally; tune higher to reduce API calls.",
+            default = 20,
+            description = "Minimum seconds between PR-comment refreshes. Default 20s. Each refresh counts " +
+                          "against the GitHub API rate limit; on busy repos this interval will automatically " +
+                          "stretch further as the remaining quota shrinks or the run goes on longer. When " +
+                          "multiple jobs in the same workflow run write to the same PR comment, they " +
+                          "coordinate so only one job refreshes the comment per interval — the cost stays " +
+                          "flat regardless of how many run in parallel. Terminal task verdicts always land " +
+                          "immediately.",
         ),
         "artifact_expires_minutes": args.int(
             default = 30,

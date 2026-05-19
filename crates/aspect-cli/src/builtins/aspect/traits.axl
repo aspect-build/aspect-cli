@@ -28,12 +28,14 @@ load(
     _TaskLifecycleTrait = "TaskLifecycleTrait",
     _TaskUpdate = "TaskUpdate",
 )
+load("./lib/rate_limit.axl", _GitHubApiRateLimitTrait = "GitHubApiRateLimitTrait")
 load("./lib/tips.axl", _TipsTrait = "TipsTrait")
 load("./lint.axl", _LintTrait = "LintTrait")
 
 ArtifactsTrait = _ArtifactsTrait
 BazelTrait = _BazelTrait
 DeliveryTrait = _DeliveryTrait
+GitHubApiRateLimitTrait = _GitHubApiRateLimitTrait
 GitHubCheckRunTrait = _GitHubCheckRunTrait
 GitHubStatusChecksTrait = _GitHubStatusChecksTrait
 HealthCheckTrait = _HealthCheckTrait
