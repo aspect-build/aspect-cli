@@ -1,0 +1,146 @@
+"""Runner job history — append-once-per-task to the Workflows
+`runner_job_history` file so Vigor's "Number of builds on this runner"
+status check renders an entry for every aspect-cli task, matching the
+historical Rosetta behavior.
+
+File format (line-per-task, opaque to the consumer):
+
+    [<human-readable date>] <task-URL> <task-path> <task-key>\\n
+
+Vigor reads the file, counts non-empty lines, and prints the latest 10
+verbatim. The date is rendered for humans (no parsing on the read
+side); we still match Rosetta's `new Date().toString()` shape closely
+so a single status check can mix Rosetta-era and AXL-era entries
+without visual jank. The trailing `<task-path>` (colon-separated
+group + name, e.g. `dev:test-runner-job-history`) and `<task-key>`
+fields are AXL-era additions — Rosetta wrote only `[<date>] <URL>`,
+and its reader regex strips the bracket prefix and treats the rest as
+the dedup key, so the extra trailing fields are forwards-compatible
+on both sides.
+
+Plumbing:
+
+  - `ASPECT_WORKFLOWS_RUNNER_JOB_HISTORY_FILE` — path to write. Unset
+    off-runner; we silently skip. Default on Workflows runners is
+    `/etc/aspect/workflows/platform/runner_job_history`.
+  - `append_runner_job_history(ctx)` — single entry-point, designed to
+    be called once per task from the lifecycle's `setup_phase`.
+
+Hard invariant: a failure to write the history file must NEVER fail
+the task. Every error path here is a silent no-op — missing env var,
+missing parent dir, permission denied, unwritable file, unreadable
+file, no URL to record. The user-visible task surface stays unchanged
+whether or not the runner history file write succeeds.
+
+Dedup: skip the append when the post-`] ` portion already appears as
+a line tail in the file. The dedup key is the full
+`<URL> <task-path> <task-key>` triple, so the same (job, task, key)
+tuple appearing across multiple aspect-cli invocations on a warm
+runner won't bloat the file. Different tasks on the same job land as
+distinct rows — an improvement over Rosetta's URL-only dedup, which
+collapsed all tasks in one job to a single entry.
+"""
+
+load("./ci.axl", "detect_build_url")
+
+# Env var the agent populates with the path. Mirrors
+# `PlatformConfigurationFiles.RUNNER_JOB_HISTORY()` on the Rosetta /
+# Vigor side — the agent points both writers and the readers at the
+# same file.
+_HISTORY_PATH_ENV = "ASPECT_WORKFLOWS_RUNNER_JOB_HISTORY_FILE"
+
+def _task_path(ctx):
+    """Colon-separated invocation path: `<group>:<name>`, or just `<name>`
+    when the task has no group. Mirrors the `aspect <group> <name>` CLI
+    shape (`aspect build` → `build`, `aspect dev test-foo` → `dev:test-foo`).
+    """
+    groups = ctx.task.group
+    if not groups:
+        return ctx.task.name
+    return ":".join(groups + [ctx.task.name])
+
+def _format_date(ctx):
+    """Human-readable timestamp for the `[<date>]` prefix.
+
+    Rosetta uses JS `Date.toString()` which produces
+    `Thu Jan 01 1970 00:00:00 GMT+0000 (Coordinated Universal Time)`.
+    We match the leading shape — `%a %b %d %Y %H:%M:%S GMT%z` — close
+    enough that a Rosetta-era line and an aspect-cli-era line render
+    consistently in Vigor's "Most recently" list. The trailing
+    `(Coordinated Universal Time)` annotation is JS-specific and not
+    parsed by anything; we drop it.
+
+    Falls back to an empty string on `date` failure; the caller treats
+    that as "skip the write" since a bare `[]` prefix is uglier than
+    no entry at all.
+    """
+    result = ctx.std.process.command("date").args(["+%a %b %d %Y %H:%M:%S GMT%z"]).stdout("piped").stderr("null").spawn().wait_with_output()
+    if result.status.code != 0:
+        return ""
+    return result.stdout.strip()
+
+def _existing_dedup_keys(ctx, path):
+    """Parse the post-prefix dedup payload out of each history line.
+
+    Each line has the shape `[<date>] <dedup-key>` (where dedup-key is
+    `<url> <path> <key>` for AXL-era entries or just `<url>` for
+    Rosetta-era entries). We split on `] ` and take the trimmed
+    remainder as the dedup key. Lines that don't match the prefix
+    shape are ignored — a malformed entry (hand-edit, partial write
+    from a crashed process) must not corrupt the dedup set.
+
+    Returns an empty set on any read failure (missing file, perms,
+    non-UTF-8 content). `try_read_to_string` swallows I/O errors so
+    the lifecycle hook never raises on a misconfigured runner. The
+    caller treats an empty set as "no dedup", which falls through to
+    a fresh append.
+    """
+    text = ctx.std.fs.try_read_to_string(path)
+    keys = {}
+    for line in text.split("\n"):
+        if not line:
+            continue
+        idx = line.find("] ")
+        if idx < 0:
+            continue
+        key = line[idx + 2:].strip()
+        if key:
+            keys[key] = True
+    return keys
+
+def append_runner_job_history(ctx):
+    """Append a `[<date>] <url> <path> <key>` line to the runner history file.
+
+    Silent no-op when:
+      - `ASPECT_WORKFLOWS_RUNNER_JOB_HISTORY_FILE` is unset (off-runner).
+      - No task URL can be derived (off-CI, missing env signals).
+      - The same `<url> <path> <key>` triple is already in the file (dedup).
+        Dedup tolerates an unreadable file via `try_read_to_string`,
+        which degrades to "no dedup".
+      - The `date` shell-out fails (rare; a bare `[]` prefix is uglier
+        than no entry).
+      - The append itself fails — permissions, missing parent dir,
+        target is a directory, disk full. The hard invariant is that
+        history-file plumbing never fails the task; every error path
+        is swallowed.
+
+    Returns `True` when a line was appended, `False` otherwise. The
+    return is for tests — production callers ignore it.
+    """
+    path = ctx.std.env.var(_HISTORY_PATH_ENV)
+    if not path:
+        return False
+
+    task_url = detect_build_url(ctx)
+    if not task_url:
+        return False
+
+    dedup_key = "%s %s %s" % (task_url, _task_path(ctx), ctx.task.key)
+    if dedup_key in _existing_dedup_keys(ctx, path):
+        return False
+
+    date_str = _format_date(ctx)
+    if not date_str:
+        return False
+
+    return ctx.std.fs.try_append(path, "[%s] %s\n" % (date_str, dedup_key))

@@ -642,42 +642,41 @@ def detect_default_branch_ref(ctx):
 
     return ""
 
-def detect_build_url(ctx):
-    """Detect the CI build URL from common environment variables.
+def detect_github_actions_build_url(ctx, existing_app_token = None):
+    """GitHub Actions build URL — job-scoped when the App is authenticated.
 
-    Returns the URL of the running CI build (the page a developer would visit
-    to see logs/status), or "" if no recognized CI host is detected.
+    Returns the run URL `/actions/runs/<run_id>` and transparently upgrades
+    to the per-job URL `/actions/runs/<run_id>/job/<job_id>` when the Aspect
+    Workflows GitHub App is authenticated with `actions:read`. Silently
+    falls back to the run URL on any failure. Returns "" off-GHA or when
+    the required env vars are missing.
 
-    On GitHub Actions, transparently upgrades the run URL
-    (`/actions/runs/<run_id>`) to the specific job URL
-    (`/actions/runs/<run_id>/job/<job_id>`) when the Aspect Workflows GitHub
-    App is installed and the active ASPECT_API_TOKEN has the `actions:read`
-    scope. Silently falls back to the run URL on any failure (no app,
-    missing scope, API error).
+    Exposed here (rather than in `lib/ci.axl`) so the multi-CI wrapper can
+    delegate without needing access to the module-private token helpers.
+
+    `existing_app_token` lets a caller that already minted an App token in
+    the same handler skip a redundant mint.
+
+    The caller (`lib/ci.axl::detect_build_url`) is responsible for caching
+    so the `_resolve_current_job_url` HTTP call only happens once per task.
     """
     env = ctx.std.env
-    if env.var("GITHUB_ACTIONS"):
-        server = env.var("GITHUB_SERVER_URL") or "https://github.com"
-        repository = env.var("GITHUB_REPOSITORY") or ""
-        run_id = env.var("GITHUB_RUN_ID") or ""
-        if not (repository and run_id):
-            return ""
-        run_url = server + "/" + repository + "/actions/runs/" + run_id
-        owner, repo = detect_github_repo(ctx.std)
-        if owner and repo:
-            token, fallback, token_class = _preferred_token_pair(ctx, owner, repo, roles = ["actions.read"])
-            if token:
-                job_url = _resolve_current_job_url(ctx, token, owner, repo, run_id, fallback_token = fallback, token_class = token_class)
-                if job_url:
-                    return job_url
-        return run_url
-    if env.var("BUILDKITE"):
-        return env.var("BUILDKITE_BUILD_URL") or ""
-    if env.var("CIRCLECI"):
-        return env.var("CIRCLE_BUILD_URL") or ""
-    if env.var("GITLAB_CI"):
-        return env.var("CI_JOB_URL") or ""
-    return ""
+    if not env.var("GITHUB_ACTIONS"):
+        return ""
+    server = env.var("GITHUB_SERVER_URL") or "https://github.com"
+    repository = env.var("GITHUB_REPOSITORY") or ""
+    run_id = env.var("GITHUB_RUN_ID") or ""
+    if not (repository and run_id):
+        return ""
+    run_url = server + "/" + repository + "/actions/runs/" + run_id
+    owner, repo = detect_github_repo(ctx.std)
+    if owner and repo:
+        token, fallback, token_class = _preferred_token_pair(ctx, owner, repo, roles = ["actions.read"], existing_app_token = existing_app_token)
+        if token:
+            job_url = _resolve_current_job_url(ctx, token, owner, repo, run_id, fallback_token = fallback, token_class = token_class)
+            if job_url:
+                return job_url
+    return run_url
 
 def detect_github_pr(std):
     """Detect GitHub pull-request context from common CI environment variables.

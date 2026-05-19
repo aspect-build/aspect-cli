@@ -127,6 +127,7 @@ User-facing migration guide: https://docs.aspect.build/cli/migration/delivery
 load("@aspect//bazel.axl", "BazelTrait")
 load("@aspect//lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "now_ms", "process_event", bazel_init_data = "init_data")
 load("@aspect//lib/checkrun.axl", "GitHubCheckRunTrait")
+load("@aspect//lib/ci.axl", "detect_build_url")
 load("@aspect//lib/delivery_results.axl", delivery_add_result = "add_result", delivery_conclusion = "conclusion", delivery_init_data = "init_data")
 load(
     "@aspect//lib/deliveryd.axl",
@@ -136,7 +137,7 @@ load(
     deliveryd_record = "record",
 )
 load("@aspect//lib/environment.axl", "color_enabled", "error", "info", "warn")
-load("@aspect//lib/github.axl", "detect_build_url", "detect_commit_sha")
+load("@aspect//lib/github.axl", "detect_commit_sha")
 load("@aspect//lib/health_check.axl", "HealthCheckTrait")
 load("@aspect//lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "preflight_phase", "setup_phase", "task_update")
 load("@aspect//lib/rate_limit.axl", "GitHubApiRateLimitTrait")

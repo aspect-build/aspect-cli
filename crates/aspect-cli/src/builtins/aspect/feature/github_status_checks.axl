@@ -44,6 +44,7 @@ load(
     "should_emit_update",
 )
 load("../lib/checkrun.axl", "GitHubCheckRunTrait")
+load("../lib/ci.axl", "detect_build_url", "detect_ci_host")
 load("../lib/environment.axl", "feature_logger", "workflows_results_url")
 load("../lib/github.axl", "detect_commit_sha", "detect_github_repo", "github")
 load("../lib/lifecycle.axl", "TaskLifecycleTrait", "TaskUpdate")
@@ -115,36 +116,12 @@ def _detect_triggered_by(env):
         return env.var("GITLAB_USER_LOGIN") or "GitLab CI"
     return ""
 
-def _collect_ci_links(env, results_base_url):
-    """Collect CI job URL and optional Aspect Web UI URL from the environment."""
-    ci_label = ""
-    ci_url = ""
-
-    if env.var("GITHUB_ACTIONS"):
-        ci_label = "GitHub Actions"
-        server = env.var("GITHUB_SERVER_URL") or "https://github.com"
-        repository = env.var("GITHUB_REPOSITORY") or ""
-        run_id = env.var("GITHUB_RUN_ID") or ""
-        if repository and run_id:
-            ci_url = server + "/" + repository + "/actions/runs/" + run_id
-    elif env.var("BUILDKITE"):
-        ci_label = "Buildkite"
-        build_url = env.var("BUILDKITE_BUILD_URL") or ""
-        step_id = env.var("BUILDKITE_STEP_ID") or ""
-        if build_url and step_id:
-            ci_url = build_url + "/steps/canvas?sid=" + step_id
-        else:
-            ci_url = build_url
-    elif env.var("CIRCLECI"):
-        ci_label = "CircleCI"
-        ci_url = env.var("CIRCLE_BUILD_URL") or ""
-    elif env.var("GITLAB_CI"):
-        ci_label = "GitLab CI"
-        ci_url = env.var("CI_JOB_URL") or ""
-
+def _collect_ci_links(ctx, results_base_url):
+    """Collect CI job URL and label, plus placeholders for sibling-feature URLs."""
+    host = detect_ci_host(ctx.std.env)
     return {
-        "ci_label": ci_label,
-        "ci_url": ci_url,
+        "ci_label": host["label"] if host else "",
+        "ci_url": detect_build_url(ctx),
         "aspect_url": "",
         "bes_url": "",
         "results_base_url": results_base_url,
@@ -181,7 +158,7 @@ def _github_status_checks(ctx: FeatureContext):
     if not sha or not owner or not repo:
         return
 
-    _ci_links_base = _collect_ci_links(ctx.std.env, workflows_results_url(ctx.std))
+    _ci_links_base = _collect_ci_links(ctx, workflows_results_url(ctx.std))
 
     # Sub-1-second cadences would burn API quota and rarely surface as
     # something a reviewer can react to in time — clamp to 1s floor.
@@ -251,18 +228,10 @@ def _github_status_checks(ctx: FeatureContext):
             return
         _state["_github_token"] = token
 
-        # Upgrade the CI link from the run page to the specific job
-        # page; falls back to the run URL if neither token has
-        # actions:read. Job URL lookup doesn't need App attribution,
-        # so spare App quota when a job-scoped GITHUB_TOKEN is
-        # exported. The check-run token is reused as the App fallback
-        # so `_resolve_current_job_url` can retry on 4xx-auth.
-        if ctx.std.env.var("GITHUB_ACTIONS"):
-            run_id = ctx.std.env.var("GITHUB_RUN_ID") or ""
-            read_token, read_fallback, read_class = github.preferred_token_pair(ctx, owner = owner, repo = repo, roles = ["actions.read"], existing_app_token = token)
-            job_url = github.resolve_current_job_url(ctx, read_token, owner, repo, run_id, fallback_token = read_fallback, token_class = read_class)
-            if job_url:
-                _ci_links_base["ci_url"] = job_url
+        # Re-resolve with the just-minted App token: upgrades the GHA
+        # run URL to the per-job URL if `_collect_ci_links` couldn't
+        # auth at feature setup. Hits the cache on the typical path.
+        _ci_links_base["ci_url"] = detect_build_url(ctx, existing_app_token = token) or _ci_links_base["ci_url"]
         _state["_ci_links"] = _ci_links_base
 
         # No `task_update.kind` yet — pick by task name, falling

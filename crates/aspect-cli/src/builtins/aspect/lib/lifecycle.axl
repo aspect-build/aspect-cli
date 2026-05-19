@@ -56,6 +56,7 @@ the verdict.
 
 load("./environment.axl", "color_enabled", "detect_ci")
 load("./github.axl", "detect_github_repo", "github")
+load("./runner_job_history.axl", "append_runner_job_history")
 
 # Structured update passed to task_update hooks.
 #
@@ -559,7 +560,12 @@ def setup_phase(ctx, lifecycle):
     `lifecycle.task_started` handlers. No-op when:
       - the trait has no started handlers, or
       - we're not running on a recognized CI host.
+
+    `append_runner_job_history` fires up top — it self-gates on
+    `ASPECT_WORKFLOWS_RUNNER_JOB_HISTORY_FILE`, so every task on a
+    Workflows runner records an entry independent of CI detection.
     """
+    append_runner_job_history(ctx)
     if not lifecycle.task_started:
         return
     if not _on_ci(ctx):

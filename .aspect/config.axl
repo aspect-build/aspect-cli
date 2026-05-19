@@ -12,6 +12,7 @@ load("@aspect//lib/gitlab_detect_test.axl", "gitlab_detect_tests")
 load("@aspect//lib/gitlab_test.axl", "gitlab_client_tests")
 load("@aspect//lib/lint_results_test.axl", "lint_annotation_plan_tests", "lint_template_snapshot_tests")
 load("@aspect//lib/rate_limit_test.axl", "rate_limit_tests")
+load("@aspect//lib/runner_job_history_test.axl", "runner_job_history_tests")
 load("@aspect//lib/tips_test.axl", "tips_tests")
 load("@aspect//traits.axl", "BazelTrait", "LintTrait", "TipsTrait")
 load("./lambda.axl", "lambda_with_global_bind")
@@ -105,6 +106,12 @@ def config(ctx: ConfigContext):
     # `seed_from_rate_limit_body` + watermark badge rendering.
     # Run with: aspect dev test-rate-limit
     ctx.tasks.add(rate_limit_tests)
+
+    # Runner job history — exercises the silent-no-op + dedup behavior
+    # of `append_runner_job_history`. Scenario list lives in the test
+    # file's module docstring.
+    # Run with: aspect dev test-runner-job-history
+    ctx.tasks.add(runner_job_history_tests)
 
     # Delivery template snapshot tests — renders delivery_results templates.
     # Run with: aspect dev test-delivery-template-snapshots

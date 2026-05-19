@@ -7,6 +7,7 @@ use starlark::values::ValueOfUnchecked;
 use starlark::values::list::UnpackList;
 use starlark::values::none::NoneType;
 use std::fs;
+use std::io::Write;
 use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 
@@ -494,6 +495,48 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
     ) -> anyhow::Result<NoneType> {
         fs::write(path.as_str(), content.as_str())?;
         Ok(NoneType)
+    }
+
+    /// Appends a string to the end of a file, creating it if it does not exist.
+    ///
+    /// Opens the file with `OpenOptions::append(true)` so concurrent writers
+    /// see their bytes interleaved at record boundaries rather than racing.
+    /// POSIX `O_APPEND` is atomic for writes ≤ `PIPE_BUF`, which covers the
+    /// short single-line records this is designed for (the
+    /// `runner_job_history` lines fit comfortably). The parent directory
+    /// must exist; this function will not create intermediate directories.
+    ///
+    /// Returns `True` on success and `False` on any I/O error (parent
+    /// directory missing, permissions denied, target is a directory, etc.).
+    /// Errors are swallowed because the primary caller is the runner job
+    /// history hook, where a write failure must never fail the task.
+    fn try_append<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        #[starlark(require = pos)] path: values::StringValue,
+        #[starlark(require = pos)] content: values::StringValue,
+    ) -> anyhow::Result<bool> {
+        let result = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path.as_str())
+            .and_then(|mut f| f.write_all(content.as_str().as_bytes()));
+        Ok(result.is_ok())
+    }
+
+    /// Reads the entire contents of a file into a string, or returns `""`
+    /// on any I/O error (missing file, permission denied, non-UTF-8 content,
+    /// transient read failure). Companion to `try_append`: the silent
+    /// fall-through lets callers handle never-fail invariants without
+    /// try/except — e.g. the runner job history dedup read, where a
+    /// failed read must degrade to "assume empty file" rather than fail
+    /// the task.
+    fn try_read_to_string<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        #[starlark(require = pos)] path: values::StringValue,
+        heap: Heap<'v>,
+    ) -> anyhow::Result<values::StringValue<'v>> {
+        let s = fs::read_to_string(path.as_str()).unwrap_or_default();
+        Ok(heap.alloc_str(s.as_str()))
     }
 
     /// Opens a file for reading and returns it as a readable stream.

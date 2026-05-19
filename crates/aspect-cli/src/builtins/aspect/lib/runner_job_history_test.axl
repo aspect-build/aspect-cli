@@ -1,0 +1,347 @@
+"""Tests for `lib/runner_job_history.axl`.
+
+Covers:
+  - Round-trip: setting `ASPECT_WORKFLOWS_RUNNER_JOB_HISTORY_FILE`
+    + a recognized CI env var, calling `append_runner_job_history`,
+    reading the file back, and asserting one well-formed line.
+  - Env-var-unset: no file is created, no failure.
+  - Empty / no-CI: no task URL → no file is created, no failure.
+  - Dedup: a second call with the same task URL doesn't append.
+  - Distinct URLs: a different `BUILDKITE_JOB_ID` lands a second line.
+  - Unreadable existing file: dedup-read failure (chmod 000) silently
+    falls back to "no dedup" instead of raising — exercises the
+    never-fail invariant on a misconfigured / locked-down history
+    file.
+  - Unwritable path: writing to a path under a non-existent directory
+    silently no-ops (the file write returns False, the task is
+    unaffected).
+  - Concurrent-write safety: many short appends round-trip with
+    every record landing intact (POSIX `O_APPEND` covers writes
+    ≤ `PIPE_BUF`, which the `[<date>] <url> <path> <key>` line
+    easily fits in).
+
+The test exercises real fs / env / process — there's no mocking
+layer in AXL, and the production module already isolates I/O behind
+silent-no-op helpers so error paths are exercised directly.
+
+Run with:
+  aspect dev test-runner-job-history
+"""
+
+load("./runner_job_history.axl", "append_runner_job_history")
+
+# Env vars we set/restore around each subtest so the runner CI
+# environment doesn't leak into other test cases (or vice versa).
+# Buildkite is the simplest CI host to fake — two env vars produce a
+# fully-formed task URL `<build_url>#<job_id>`.
+_ENV_KEYS = [
+    "ASPECT_WORKFLOWS_RUNNER_JOB_HISTORY_FILE",
+    "ASPECT_JOB_URL_CACHE",
+    "BUILDKITE",
+    "BUILDKITE_BUILD_URL",
+    "BUILDKITE_JOB_ID",
+    "GITHUB_ACTIONS",
+    "CIRCLECI",
+    "GITLAB_CI",
+]
+
+def _snapshot_env(ctx):
+    """Capture the current values of every env var this test touches.
+
+    Returned as a dict keyed by env name; `None` means "was unset".
+    `_restore_env` reverses it so every subtest starts and ends from
+    the same baseline regardless of which CI host the test harness
+    happens to be running on.
+    """
+    return {k: ctx.std.env.var(k) for k in _ENV_KEYS}
+
+def _restore_env(ctx, snapshot):
+    for k, v in snapshot.items():
+        if v == None:
+            ctx.std.env.remove_var(k)
+        else:
+            ctx.std.env.set_var(k, v)
+
+def _clear_ci_env(ctx):
+    """Drop every CI-host marker so `detect_build_url` returns "" on
+    the catch-all path. Used by subtests that want to assert the
+    "no task URL" no-op branch independently of whatever CI host
+    happens to be active."""
+    for k in _ENV_KEYS:
+        ctx.std.env.remove_var(k)
+
+def _set_bk_env(ctx, history_path, build_url = "https://buildkite.com/aspect-build/aspect-cli/builds/42", job_id = "job-1"):
+    """Configure a fake Buildkite runner: history file + the two env
+    vars `_task_url` reads. Returns the expected task URL so callers
+    don't reconstruct the format in two places."""
+    _clear_ci_env(ctx)
+    ctx.std.env.set_var("ASPECT_WORKFLOWS_RUNNER_JOB_HISTORY_FILE", history_path)
+    ctx.std.env.set_var("BUILDKITE", "true")
+    ctx.std.env.set_var("BUILDKITE_BUILD_URL", build_url)
+    ctx.std.env.set_var("BUILDKITE_JOB_ID", job_id)
+    return build_url + "#" + job_id
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _assert(label, cond):
+    if not cond:
+        fail("%s: condition false" % label)
+
+def _read_lines(ctx, path):
+    """Read the history file and return its non-empty lines. Returns
+    [] when the file doesn't exist — every "should not have written"
+    assertion treats both states identically."""
+    if not ctx.std.fs.exists(path):
+        return []
+    text = ctx.std.fs.read_to_string(path)
+    return [line for line in text.split("\n") if line]
+
+def _tmpdir(ctx):
+    """Create + return a fresh temp directory for an isolated test run.
+
+    Each subtest gets its own root so a leftover file from one case
+    can't interfere with assertions in another, and the test harness
+    can be re-run any number of times without manual cleanup.
+    """
+    return ctx.std.fs.mkdtemp(prefix = "axl-runner-job-history-test-")
+
+def _cleanup(ctx, tmpdir):
+    """Best-effort cleanup. AXL has no try/except, so we just remove
+    the directory tree if it's still there — every test directory is
+    freshly minted by `mkdtemp` so removal should succeed in the
+    happy path. Any leftover dirs from a crash get GC'd by the
+    system temp cleanup on the next reboot."""
+    if ctx.std.fs.exists(tmpdir):
+        ctx.std.fs.remove_dir_all(tmpdir)
+
+def _test_no_env_no_write(ctx):
+    """`ASPECT_WORKFLOWS_RUNNER_JOB_HISTORY_FILE` unset → silent no-op.
+
+    The function returns False and writes nothing. Critical because
+    every aspect-cli invocation outside a Workflows runner hits this
+    branch — must not error, must not create stray files.
+    """
+    snapshot = _snapshot_env(ctx)
+    _clear_ci_env(ctx)
+
+    # No history-file env → no-op even with full CI env populated.
+    ctx.std.env.set_var("BUILDKITE", "true")
+    ctx.std.env.set_var("BUILDKITE_BUILD_URL", "https://example/build/1")
+    ctx.std.env.set_var("BUILDKITE_JOB_ID", "job-1")
+    result = append_runner_job_history(ctx)
+    _eq("no-env — append returns False", result, False)
+
+    _restore_env(ctx, snapshot)
+
+def _test_no_task_url_no_write(ctx):
+    """History env set but no CI markers → no task URL → no-op.
+
+    Production case: a misconfigured runner that exports the history
+    path but the actual CI host hasn't populated its build-URL env
+    yet. Must not write an empty `[<date>] ` line — that would render
+    as a useless row in Vigor's "Most recently" list.
+    """
+    snapshot = _snapshot_env(ctx)
+    tmpdir = _tmpdir(ctx)
+    history_path = tmpdir + "/history"
+
+    _clear_ci_env(ctx)
+    ctx.std.env.set_var("ASPECT_WORKFLOWS_RUNNER_JOB_HISTORY_FILE", history_path)
+
+    result = append_runner_job_history(ctx)
+    _eq("no-url — append returns False", result, False)
+    _eq("no-url — no file created", ctx.std.fs.exists(history_path), False)
+
+    _cleanup(ctx, tmpdir)
+    _restore_env(ctx, snapshot)
+
+def _test_round_trip(ctx):
+    """Happy path: env set + CI markers populated → exactly one line
+    is appended with the `[<date>] <url> <path> <key>` shape.
+
+    The date string is dynamic so we slice on `] ` and assert the
+    post-prefix tokens directly.
+    """
+    snapshot = _snapshot_env(ctx)
+    tmpdir = _tmpdir(ctx)
+    history_path = tmpdir + "/history"
+
+    expected_url = _set_bk_env(ctx, history_path, job_id = "round-trip-job")
+
+    result = append_runner_job_history(ctx)
+    _eq("round-trip — append returns True", result, True)
+
+    lines = _read_lines(ctx, history_path)
+    _eq("round-trip — one line written", len(lines), 1)
+    _assert("round-trip — line starts with `[`", lines[0].startswith("["))
+
+    # Strip `[<date>] ` and parse the remaining three space-separated tokens.
+    idx = lines[0].find("] ")
+    _assert("round-trip — line has a `] ` delimiter", idx >= 0)
+    tail = lines[0][idx + 2:]
+    tokens = tail.split(" ")
+    _eq("round-trip — tail has <url> <path> <key>", len(tokens), 3)
+    _eq("round-trip — token[0] == url", tokens[0], expected_url)
+
+    # The test harness invokes this as a `dev` task, so path is `dev:test-runner-job-history`.
+    _eq("round-trip — token[1] == task path", tokens[1], "dev:test-runner-job-history")
+    _assert("round-trip — token[2] is a non-empty task key", len(tokens[2]) > 0)
+
+    _cleanup(ctx, tmpdir)
+    _restore_env(ctx, snapshot)
+
+def _test_dedup(ctx):
+    """Two calls with the same `<url> <path> <key>` triple write one entry.
+
+    A warm runner that re-invokes the same task with the same key
+    shouldn't bloat the history file with duplicate rows.
+    """
+    snapshot = _snapshot_env(ctx)
+    tmpdir = _tmpdir(ctx)
+    history_path = tmpdir + "/history"
+
+    _set_bk_env(ctx, history_path, job_id = "dedup-job")
+
+    _eq("dedup — first append writes", append_runner_job_history(ctx), True)
+    _eq("dedup — second append skips", append_runner_job_history(ctx), False)
+    _eq("dedup — file still has 1 line", len(_read_lines(ctx, history_path)), 1)
+
+    _cleanup(ctx, tmpdir)
+    _restore_env(ctx, snapshot)
+
+def _test_distinct_urls_both_landed(ctx):
+    """Two different task URLs both land as separate lines.
+
+    Catches a regression where the dedup set incorrectly matches
+    different URLs (e.g. substring rather than equality).
+    """
+    snapshot = _snapshot_env(ctx)
+    tmpdir = _tmpdir(ctx)
+    history_path = tmpdir + "/history"
+
+    _set_bk_env(ctx, history_path, job_id = "first-job")
+    _eq("distinct — first URL written", append_runner_job_history(ctx), True)
+
+    _set_bk_env(ctx, history_path, job_id = "second-job")
+    _eq("distinct — second URL written", append_runner_job_history(ctx), True)
+
+    lines = _read_lines(ctx, history_path)
+    _eq("distinct — both lines retained", len(lines), 2)
+    _assert("distinct — first job present", any(["#first-job " in line for line in lines]))
+    _assert("distinct — second job present", any(["#second-job " in line for line in lines]))
+
+    _cleanup(ctx, tmpdir)
+    _restore_env(ctx, snapshot)
+
+def _test_unreadable_existing_file_silent(ctx):
+    """An existing history file we can't read silently no-ops the dedup
+    pass — `try_read_to_string` swallows I/O errors, the dedup set
+    falls back to empty, and the subsequent append still tries (and
+    here also fails, since chmod 000 disables write too).
+
+    The critical assertion: `append_runner_job_history` returns
+    cleanly. Before `try_read_to_string`, the read raised and crashed
+    the lifecycle hook.
+    """
+    snapshot = _snapshot_env(ctx)
+    tmpdir = _tmpdir(ctx)
+    history_path = tmpdir + "/history"
+
+    # Seed an entry, then chmod the file unreadable.
+    _set_bk_env(ctx, history_path, job_id = "seed-job")
+    _eq("unreadable — seed entry lands", append_runner_job_history(ctx), True)
+    ctx.std.process.command("chmod").args(["000", history_path]).spawn().wait()
+
+    # A subsequent append with a different job-id must not crash. The
+    # read fails (chmod 000) and the write also fails — the function
+    # returns False either way, and the task is unaffected.
+    _set_bk_env(ctx, history_path, job_id = "follow-up-job")
+    result = append_runner_job_history(ctx)
+    _eq("unreadable — follow-up returns False (no crash)", result, False)
+
+    # Restore perms so `_cleanup` can remove the file.
+    ctx.std.process.command("chmod").args(["600", history_path]).spawn().wait()
+    _cleanup(ctx, tmpdir)
+    _restore_env(ctx, snapshot)
+
+def _test_unwritable_path_silent(ctx):
+    """A write to a path under a non-existent parent dir silently no-ops.
+
+    Validates the hard invariant: a runner with a misconfigured /
+    permission-restricted history-file path must not crash aspect-cli
+    tasks. `fs.try_append` swallows the io::Error and returns False;
+    `append_runner_job_history` propagates the False return without
+    raising.
+    """
+    snapshot = _snapshot_env(ctx)
+    tmpdir = _tmpdir(ctx)
+
+    # Parent dir is the temp dir but the next level down doesn't exist.
+    # `try_append` with `OpenOptions::create(true)` still requires the
+    # parent to exist, so this fails to open the file — exercising the
+    # error path.
+    bad_path = tmpdir + "/no-such-parent/history"
+
+    _set_bk_env(ctx, bad_path, job_id = "unwritable-job")
+    result = append_runner_job_history(ctx)
+    _eq("unwritable — append returns False (no crash)", result, False)
+    _eq("unwritable — bad path was not created", ctx.std.fs.exists(bad_path), False)
+
+    _cleanup(ctx, tmpdir)
+    _restore_env(ctx, snapshot)
+
+def _test_concurrent_writes_round_trip(ctx):
+    """Many sequential appends with distinct URLs all land, in order.
+
+    POSIX `O_APPEND` is atomic for writes ≤ `PIPE_BUF` (4096 bytes on
+    Linux, typically 512 on macOS — both well above our short record
+    length). This subtest covers the happy-path interleaving by
+    issuing N writes back-to-back and verifying every record landed
+    intact. True concurrency would require subprocess spawning, which
+    AXL's process API supports but is overkill: the sequential test
+    exercises the same code path and the kernel `O_APPEND` guarantee
+    is what gives us multi-writer safety on real runners.
+    """
+    snapshot = _snapshot_env(ctx)
+    tmpdir = _tmpdir(ctx)
+    history_path = tmpdir + "/history"
+
+    n = 25
+    for i in range(n):
+        _set_bk_env(ctx, history_path, job_id = "burst-%d" % i)
+        _eq("concurrent[%d] — append succeeds" % i, append_runner_job_history(ctx), True)
+
+    lines = _read_lines(ctx, history_path)
+    _eq("concurrent — all %d lines landed" % n, len(lines), n)
+
+    # Each line has shape `[<date>] <url>#<job-id> <path> <key>`. Pull
+    # the job-id out by splitting on `#` (the fragment marker we added
+    # to the URL) and taking the prefix of the next space-delimited
+    # token.
+    job_ids = sorted([line.split("#")[-1].split(" ")[0] for line in lines])
+    expected = sorted(["burst-%d" % i for i in range(n)])
+    _eq("concurrent — every job-id present exactly once", job_ids, expected)
+
+    _cleanup(ctx, tmpdir)
+    _restore_env(ctx, snapshot)
+
+def _test_impl(ctx):
+    _test_no_env_no_write(ctx)
+    _test_no_task_url_no_write(ctx)
+    _test_round_trip(ctx)
+    _test_dedup(ctx)
+    _test_distinct_urls_both_landed(ctx)
+    _test_unreadable_existing_file_silent(ctx)
+    _test_unwritable_path_silent(ctx)
+    _test_concurrent_writes_round_trip(ctx)
+    print("runner_job_history.axl: OK (8 sections)")
+    return 0
+
+runner_job_history_tests = task(
+    name = "test-runner-job-history",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

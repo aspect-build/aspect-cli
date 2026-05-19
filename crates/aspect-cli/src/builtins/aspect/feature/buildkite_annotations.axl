@@ -29,6 +29,7 @@ load(
     "renderer_for_kind",
     "should_emit_update",
 )
+load("../lib/ci.axl", "detect_build_url")
 load("../lib/environment.axl", "feature_logger", "workflows_results_url")
 load("../lib/lifecycle.axl", "TaskLifecycleTrait", "TaskUpdate")
 load("../lib/rate_limit.axl", "usage_footer")
@@ -238,16 +239,11 @@ def _buildkite_annotations(ctx: FeatureContext):
     _state = {}
 
     def _make_links(data):
-        # Minimal BK env scrape — the annotation IS on the BK job page,
-        # so we only need enough for the rendered summary's CI link.
-        build_url = ctx.std.env.var("BUILDKITE_BUILD_URL") or ""
-        step_id = ctx.std.env.var("BUILDKITE_STEP_ID") or ""
-        ci_url = build_url
-        if build_url and step_id:
-            ci_url = build_url + "/steps/canvas?sid=" + step_id
+        # The annotation IS on the BK job page, so we only need enough for
+        # the rendered summary's CI link.
         links = {
             "ci_label": "Buildkite",
-            "ci_url": ci_url,
+            "ci_url": detect_build_url(ctx),
             "aspect_url": "",
             "bes_url": "",
             "results_base_url": workflows_results_url(ctx.std),

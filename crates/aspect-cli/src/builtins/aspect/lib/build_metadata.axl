@@ -12,6 +12,8 @@ kilgore/app/layout/header/ExecutionContext.tsx). Canonical values are
 uppercase enum-style strings (VCS=GITHUB, CI_HOST=BUILDKITE, …).
 """
 
+load("./ci.axl", "detect_buildkite_build_url")
+
 _VCS_HOST_TO_ENUM = {
     "github.com": "GITHUB",
     "gitlab.com": "GITLAB",
@@ -322,15 +324,10 @@ def _collect_buildkite(env, meta):
     else:
         meta["RUN_TYPE"] = "BRANCH_PUSH"
 
-    # BUILD_URL should match exactly what the status-check CI link points at
-    # — the per-step "Buildkite" link in summary row 6. Without the step-id
-    # query suffix the link lands on the build page, not on this specific
-    # step's job page, which is often not what the user wants.
-    build_url = env.var("BUILDKITE_BUILD_URL") or ""
-    step_id = env.var("BUILDKITE_STEP_ID") or ""
-    if build_url and step_id:
-        meta["BUILD_URL"] = build_url + "/steps/canvas?sid=" + step_id
-    elif build_url:
+    # BUILD_URL — the job-anchored form so the link lands on the specific
+    # job execution rather than the build root.
+    build_url = detect_buildkite_build_url(env)
+    if build_url:
         meta["BUILD_URL"] = build_url
 
 # ---------------------------------------------------------------------------
