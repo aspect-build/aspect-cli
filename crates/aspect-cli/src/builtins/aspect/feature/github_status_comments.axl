@@ -41,6 +41,7 @@ load(
     "resolve_aspect_url",
 )
 load("../lib/checkrun.axl", "GitHubCheckRunTrait")
+load("../lib/ci.axl", "detect_build_url")
 load("../lib/environment.axl", "feature_logger", "workflows_results_url")
 load("../lib/github.axl", "github")
 load("../lib/lifecycle.axl", "TaskLifecycleTrait")
@@ -1201,20 +1202,11 @@ def _github_status_comments(ctx: FeatureContext):
             return
         _state["_github_token"] = token
 
-        # Upgrade the GHA workflow-run URL to the per-job URL via the
-        # GitHub Actions API. Same path as
-        # `feature/github_status_checks.axl::_create_check_run`. Routed
-        # through the GH_TOKEN-preferring resolver — the job URL
-        # lookup doesn't need App attribution, so spare the App
-        # quota when the workflow exposes a job-scoped token. The
-        # check-run feature's App token (already in scope) is passed
-        # as the 4xx-auth fallback. Falls back silently to
-        # `_ci_run_url` if neither token has `actions:read`.
-        if run_id:
-            read_token, read_fallback, read_class = github.preferred_token_pair(ctx, owner = owner, repo = repo, roles = ["actions.read"], existing_app_token = token)
-            job_url = github.resolve_current_job_url(ctx, read_token, owner, repo, run_id, fallback_token = read_fallback, token_class = read_class)
-            if job_url:
-                _state["_ci_link_url"] = job_url
+        # Re-resolve with the just-minted App token; cache-hits if a
+        # sibling feature already resolved.
+        upgraded = detect_build_url(ctx, existing_app_token = token)
+        if upgraded:
+            _state["_ci_link_url"] = upgraded
 
         _publish(ctx)
 

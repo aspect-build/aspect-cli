@@ -13,6 +13,7 @@ load(
     "version_gte",
     "version_tuple",
 )
+load("@aspect//lib/ci.axl", "detect_build_url")
 load("@aspect//lib/deliveryd.axl", deliveryd_parse_endpoint = "parse_endpoint")
 load("@aspect//lib/environment.axl", "color_enabled", "detect_ci", "parse_git_url_name", "sanitize_filename")
 load(
@@ -21,7 +22,7 @@ load(
     "dir_at_or_below",
     "extract_changed_dirs",
 )
-load("@aspect//lib/github.axl", "detect_build_url", "detect_commit_sha", "github")
+load("@aspect//lib/github.axl", "detect_commit_sha", "github")
 load("@aspect//lib/path_glob.axl", "match_any", "match_path")
 load("@aspect//lib/repro_commands.axl", "build_aspect_command", "dedup_and_attribute", "patch_download_cmd", "task_cli_path")
 load("@aspect//lib/result_text.axl", "severity_for_status")
@@ -1396,6 +1397,8 @@ _GH_PR_ENVS = [
     "BUILDKITE_COMMIT",
     "BUILDKITE_REPO",
     "BUILDKITE_BUILD_URL",
+    "BUILDKITE_JOB_ID",
+    "ASPECT_JOB_URL_CACHE",
     "CIRCLECI",
     "CIRCLE_PULL_REQUEST",
     "CIRCLE_SHA1",
@@ -2148,13 +2151,20 @@ def test_detect_build_url(ctx: TaskContext, tc: int) -> int:
     # No CI env → empty.
     tc = test_case(tc, detect_build_url(ctx) == "", "detect_build_url: no env → \"\"")
 
-    # Buildkite
+    # Buildkite — bare build URL when no job id is set.
     _clear_pr_env(env)
     env.set_var("BUILDKITE", "true")
     env.set_var("BUILDKITE_BUILD_URL", "https://buildkite.com/acme/widgets/builds/42")
-    tc = test_case(tc, detect_build_url(ctx) == "https://buildkite.com/acme/widgets/builds/42", "detect_build_url: Buildkite")
+    tc = test_case(tc, detect_build_url(ctx) == "https://buildkite.com/acme/widgets/builds/42", "detect_build_url: Buildkite (no job id)")
+
+    # Buildkite — job-anchored URL when BUILDKITE_JOB_ID is also set.
+    # Clear the URL cache so the prior bare-URL resolve isn't reused.
+    env.remove_var("ASPECT_JOB_URL_CACHE")
+    env.set_var("BUILDKITE_JOB_ID", "abc-123")
+    tc = test_case(tc, detect_build_url(ctx) == "https://buildkite.com/acme/widgets/builds/42#abc-123", "detect_build_url: Buildkite (with job id)")
 
     # Buildkite without BUILDKITE_BUILD_URL set.
+    env.remove_var("ASPECT_JOB_URL_CACHE")
     env.remove_var("BUILDKITE_BUILD_URL")
     tc = test_case(tc, detect_build_url(ctx) == "", "detect_build_url: Buildkite without URL → \"\"")
 
@@ -2185,8 +2195,21 @@ def test_detect_build_url(ctx: TaskContext, tc: int) -> int:
     tc = test_case(tc, got == expected, "detect_build_url: GHA falls back to run URL when auth unavailable (got %r)" % got)
 
     # GHA without GITHUB_REPOSITORY → empty.
+    env.remove_var("ASPECT_JOB_URL_CACHE")
     env.remove_var("GITHUB_REPOSITORY")
     tc = test_case(tc, detect_build_url(ctx) == "", "detect_build_url: GHA without GITHUB_REPOSITORY → \"\"")
+
+    # GHA cache hit: a previously-resolved job URL is reused as-is without
+    # touching the GitHub API.
+    _clear_pr_env(env)
+    env.set_var("GITHUB_ACTIONS", "true")
+    env.set_var("GITHUB_SERVER_URL", "https://github.com")
+    env.set_var("GITHUB_REPOSITORY", "fake-owner-axl-test/fake-repo-axl-test")
+    env.set_var("GITHUB_RUN_ID", "12345")
+    cached_job_url = "https://github.com/fake-owner-axl-test/fake-repo-axl-test/actions/runs/12345/job/99"
+    env.set_var("ASPECT_JOB_URL_CACHE", cached_job_url)
+    tc = test_case(tc, detect_build_url(ctx) == cached_job_url, "detect_build_url: GHA cache hit returns cached job URL")
+    env.remove_var("ASPECT_JOB_URL_CACHE")
 
     _clear_pr_env(env)
     return tc

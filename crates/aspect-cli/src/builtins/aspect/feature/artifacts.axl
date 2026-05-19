@@ -60,6 +60,7 @@ features like GithubStatusChecks can surface download links:
 
 load("../bazel.axl", "BazelTrait")
 load("../lib/artifacts.axl", "ArtifactsTrait", "artifact_name", "create_uploader")
+load("../lib/ci.axl", "detect_artifacts_browse_url")
 load("../lib/environment.axl", "detect_ci", "info", "warn")
 
 def _record_artifact_url(artifacts_trait, kind, url):
@@ -74,7 +75,7 @@ def _record_artifact_url(artifacts_trait, kind, url):
     urls[kind] = url
     artifacts_trait.artifact_urls = urls
 
-def _update_testlogs_trait(artifacts_trait, state, env, ci):
+def _update_testlogs_trait(artifacts_trait, state, ctx):
     """Sync testlogs-related fields from upload state to the trait.
 
     - artifacts_browse_url → CI artifacts page/tab (always a browse URL)
@@ -84,7 +85,7 @@ def _update_testlogs_trait(artifacts_trait, state, env, ci):
     group = state.get("_artifact_upload", {}).get("testlogs", {})
 
     # Browse URL is the CI artifacts page/tab — always the "Artifacts" link in the check run.
-    browse = _make_artifacts_browse_url(env, ci)
+    browse = detect_artifacts_browse_url(ctx)
     if browse:
         artifacts_trait.artifacts_browse_url = browse
 
@@ -224,69 +225,6 @@ def _init_upload_state(state):
             "testlogs": {"last_count": 0, "version": 0, "prev_ref": None, "download_url": "", "label_urls": {}},
         }
 
-def _circleci_vcs(env):
-    """Infer CircleCI's VCS path segment from CIRCLE_REPOSITORY_URL.
-
-    The modern app.circleci.com URL contains a VCS segment:
-        .../pipelines/{github|bitbucket|circleci}/...
-    CircleCI doesn't expose it directly, but CIRCLE_REPOSITORY_URL (SSH or HTTPS
-    form) contains the host. Defaults to `github` for unrecognized hosts since
-    that's the overwhelmingly common case.
-    """
-    url = env.var("CIRCLE_REPOSITORY_URL") or ""
-    if "bitbucket.org" in url:
-        return "bitbucket"
-    return "github"
-
-def _make_artifacts_browse_url(env, ci):
-    """Construct the CI artifacts browse URL for the current job.
-
-    This URL goes to the page/tab where a user can see all artifacts uploaded
-    during the job — it's the "Artifacts" link in status checks.
-
-      GitHub:    {server}/{repo}/actions/runs/{run_id}                               (run page, artifacts section)
-      Buildkite: {BUILDKITE_BUILD_URL}/steps/canvas?sid={step}&tab=artifacts         (step artifacts tab)
-      CircleCI:  app.circleci.com/pipelines/{vcs}/{org}/{repo}/{pipeline_num}/
-                 workflows/{workflow_id}/jobs/{job_num}/artifacts                    (modern UI artifacts tab)
-      GitLab:    "" — GitLab's {job}/artifacts/browse only works for artifacts
-                 uploaded via the standard `artifacts:` config. We upload via
-                 the Generic Packages API (see `_upload_file_gitlab` in
-                 lib/artifacts.axl), which lands files in the project's Package
-                 Registry with no clean per-job page. Users see per-file
-                 download URLs via artifact_urls/testlogs_label_urls instead.
-
-    Returns "" if the necessary env vars are missing, or if the CI host has no
-    usable browse URL for this upload strategy.
-    """
-    if ci == "github":
-        server = env.var("GITHUB_SERVER_URL") or "https://github.com"
-        repo = env.var("GITHUB_REPOSITORY") or ""
-        run_id = env.var("GITHUB_RUN_ID") or ""
-        if repo and run_id:
-            return server + "/" + repo + "/actions/runs/" + run_id
-    elif ci == "buildkite":
-        build_url = env.var("BUILDKITE_BUILD_URL") or ""
-        step_id = env.var("BUILDKITE_STEP_ID") or ""
-        if build_url and step_id:
-            return build_url + "/steps/canvas?sid=" + step_id + "&tab=artifacts"
-        return build_url
-    elif ci == "circleci":
-        # Build the modern app.circleci.com URL. The legacy circleci.com hash
-        # anchors (#artifacts, /artifacts) don't route reliably anymore.
-        org = env.var("CIRCLE_PROJECT_USERNAME") or ""
-        repo = env.var("CIRCLE_PROJECT_REPONAME") or ""
-        pipeline_num = env.var("CIRCLE_PIPELINE_NUMBER") or ""
-        workflow_id = env.var("CIRCLE_WORKFLOW_ID") or ""
-        job_num = env.var("CIRCLE_BUILD_NUM") or ""
-        if org and repo and pipeline_num and workflow_id and job_num:
-            vcs = _circleci_vcs(env)
-            return ("https://app.circleci.com/pipelines/" + vcs + "/" + org + "/" + repo +
-                    "/" + pipeline_num + "/workflows/" + workflow_id + "/jobs/" + job_num + "/artifacts")
-
-        # Fall back to the legacy build URL if the pipeline env vars aren't set.
-        return env.var("CIRCLE_BUILD_URL") or ""
-    return ""
-
 def _artifact_upload_impl(ctx: FeatureContext):
     """Wire interval-based artifact upload into BazelTrait lifecycle hooks.
 
@@ -357,7 +295,7 @@ def _artifact_upload_impl(ctx: FeatureContext):
             # Surface URLs as soon as the first batch lands so
             # GithubStatusChecks can add download links quickly.
             if success:
-                _update_testlogs_trait(artifacts_trait, state, ctx.std.env, ci)
+                _update_testlogs_trait(artifacts_trait, state, ctx)
 
     def _on_build_end(ctx, exit_code):
         if not is_local:
@@ -384,7 +322,7 @@ def _artifact_upload_impl(ctx: FeatureContext):
 
                     # Refresh after final so URLs reflect the complete set.
                     if success:
-                        _update_testlogs_trait(artifacts_trait, state, ctx.std.env, ci)
+                        _update_testlogs_trait(artifacts_trait, state, ctx)
 
                 # Upload profile/bep/execlog (opt-in each). Buildkite
                 # returns empty download_urls so artifact_urls stays
@@ -416,7 +354,7 @@ def _artifact_upload_impl(ctx: FeatureContext):
                 # Buildkite artifact_urls is empty because download_urls
                 # are short-lived, so we can't rely on it alone.
                 if uploaded_any and not artifacts_trait.artifacts_browse_url:
-                    browse = _make_artifacts_browse_url(ctx.std.env, ci)
+                    browse = detect_artifacts_browse_url(ctx)
                     if browse:
                         artifacts_trait.artifacts_browse_url = browse
 

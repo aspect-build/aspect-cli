@@ -131,6 +131,8 @@ steps:
       $$LAUNCHER dev test-tips
       echo "--- :aspect: aspect dev test-rate-limit"
       $$LAUNCHER dev test-rate-limit
+      echo "--- :aspect: aspect dev test-runner-job-history"
+      $$LAUNCHER dev test-runner-job-history
       echo "--- :aspect: aspect tests axl"
       # Run AXL tests last — cancel tests may kill the Bazel server,
       # which invalidates bazel-out paths used by $$LAUNCHER above.

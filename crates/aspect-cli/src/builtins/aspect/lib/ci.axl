@@ -1,0 +1,159 @@
+"""Cross-CI URL helpers.
+
+`detect_build_url` and `detect_artifacts_browse_url` centralize the
+URL shapes status surfaces, build metadata, and the runner job history
+all need. Each CI host yields a job-scoped URL when one is available
+so links land on the specific execution, not the build root.
+
+Shapes by host:
+
+  - GitHub Actions
+      build URL       — `<server>/<repo>/actions/runs/<run_id>` upgraded
+                        to `.../job/<job_id>` when the Aspect Workflows
+                        GitHub App is authenticated (`actions:read`).
+      artifacts URL   — the run page (the artifacts section lives there).
+  - Buildkite
+      build URL       — `<BUILDKITE_BUILD_URL>#<BUILDKITE_JOB_ID>`; the
+                        fragment anchor scrolls to the specific job.
+      artifacts URL   — `<BUILDKITE_BUILD_URL>/steps/canvas?sid=<step>&tab=artifacts`
+                        opens the step's artifacts tab.
+  - CircleCI
+      build URL       — `CIRCLE_BUILD_URL` (job-scoped already).
+      artifacts URL   — modern `app.circleci.com/.../artifacts` URL.
+  - GitLab
+      build URL       — `CI_JOB_URL` (job-scoped already).
+      artifacts URL   — `""`; our artifact upload uses the Generic
+                        Packages API, which has no clean per-job page.
+"""
+
+load("./github.axl", "detect_github_actions_build_url")
+
+# Per-process env var holding the once-resolved build URL. Populated by
+# the first `detect_build_url` caller in the task; subsequent callers
+# (sibling features, per-render lookups) short-circuit to this value.
+_JOB_URL_CACHE_ENV = "ASPECT_JOB_URL_CACHE"
+
+# Per-CI-host metadata. Order is the detection precedence: `detect_ci_host`
+# returns the first entry whose `marker` env var is set.
+_CI_HOSTS = [
+    {"marker": "GITHUB_ACTIONS", "label": "GitHub Actions", "icon": "🐙"},
+    {"marker": "BUILDKITE", "label": "Buildkite", "icon": "🏗"},
+    {"marker": "CIRCLECI", "label": "CircleCI", "icon": "⭕"},
+    {"marker": "GITLAB_CI", "label": "GitLab CI", "icon": "🦊"},
+]
+
+def detect_ci_host(env):
+    """Return the matching `_CI_HOSTS` entry for the current env, or `None`.
+
+    Entry shape: `{"marker": str, "label": str, "icon": str}`. Used by
+    status surfaces that need a human-readable CI label and/or icon
+    alongside the URL `detect_build_url` returns.
+    """
+    for host in _CI_HOSTS:
+        if env.var(host["marker"]):
+            return host
+    return None
+
+def detect_buildkite_build_url(env):
+    """Buildkite job-anchored build URL.
+
+    Returns `BUILDKITE_BUILD_URL#BUILDKITE_JOB_ID` when both env vars are
+    set; the bare build URL when only `BUILDKITE_BUILD_URL` is present;
+    or "" otherwise. Exposed as an `env`-only helper for callers that
+    don't have a full `ctx` in scope (e.g. the `_collect_*` metadata
+    functions in `lib/build_metadata.axl`).
+    """
+    build_url = env.var("BUILDKITE_BUILD_URL") or ""
+    job_id = env.var("BUILDKITE_JOB_ID") or ""
+    if build_url and job_id:
+        return build_url + "#" + job_id
+    return build_url
+
+def detect_build_url(ctx, existing_app_token = None):
+    """Detect the job-scoped CI build URL from the environment.
+
+    Returns the URL of the running CI build (the page a developer would
+    visit to see logs/status), or "" if no recognized CI host is detected
+    or the env vars aren't populated. See the module docstring for the
+    per-host shape.
+
+    Caches the resolved URL in `ASPECT_JOB_URL_CACHE` so sibling callers
+    in the same task share the result without re-resolving. Only GHA's
+    job URL requires an API call; the cache makes subsequent renders /
+    sibling features free.
+
+    `existing_app_token` is forwarded to the GHA upgrade path so a caller
+    with a freshly-minted App token in hand can skip a redundant mint.
+    """
+    env = ctx.std.env
+    cached = env.var(_JOB_URL_CACHE_ENV) or ""
+    if cached:
+        return cached
+    if env.var("GITHUB_ACTIONS"):
+        url = detect_github_actions_build_url(ctx, existing_app_token = existing_app_token)
+    elif env.var("BUILDKITE"):
+        url = detect_buildkite_build_url(env)
+    elif env.var("CIRCLECI"):
+        url = env.var("CIRCLE_BUILD_URL") or ""
+    elif env.var("GITLAB_CI"):
+        url = env.var("CI_JOB_URL") or ""
+    else:
+        return ""
+    if url:
+        env.set_var(_JOB_URL_CACHE_ENV, url)
+    return url
+
+def _circleci_vcs(env):
+    """Infer CircleCI's VCS path segment from CIRCLE_REPOSITORY_URL.
+
+    The modern app.circleci.com URL contains a VCS segment:
+        .../pipelines/{github|bitbucket|circleci}/...
+    CircleCI doesn't expose it directly, but CIRCLE_REPOSITORY_URL (SSH or
+    HTTPS form) contains the host. Defaults to `github` for unrecognized
+    hosts since that's the overwhelmingly common case.
+    """
+    url = env.var("CIRCLE_REPOSITORY_URL") or ""
+    if "bitbucket.org" in url:
+        return "bitbucket"
+    return "github"
+
+def detect_artifacts_browse_url(ctx):
+    """Detect the CI artifacts browse URL for the current job.
+
+    This URL goes to the page/tab where a user can see all artifacts
+    uploaded during the job — it's the "Artifacts" link in status checks.
+    See the module docstring for the per-host shape.
+    """
+    env = ctx.std.env
+    if env.var("GITHUB_ACTIONS"):
+        server = env.var("GITHUB_SERVER_URL") or "https://github.com"
+        repo = env.var("GITHUB_REPOSITORY") or ""
+        run_id = env.var("GITHUB_RUN_ID") or ""
+        if repo and run_id:
+            return server + "/" + repo + "/actions/runs/" + run_id
+    elif env.var("BUILDKITE"):
+        build_url = env.var("BUILDKITE_BUILD_URL") or ""
+        step_id = env.var("BUILDKITE_STEP_ID") or ""
+        if build_url and step_id:
+            return build_url + "/steps/canvas?sid=" + step_id + "&tab=artifacts"
+        return build_url
+    elif env.var("CIRCLECI"):
+        # Modern app.circleci.com URL — the legacy circleci.com hash
+        # anchors (#artifacts, /artifacts) don't route reliably anymore.
+        org = env.var("CIRCLE_PROJECT_USERNAME") or ""
+        repo = env.var("CIRCLE_PROJECT_REPONAME") or ""
+        pipeline_num = env.var("CIRCLE_PIPELINE_NUMBER") or ""
+        workflow_id = env.var("CIRCLE_WORKFLOW_ID") or ""
+        job_num = env.var("CIRCLE_BUILD_NUM") or ""
+        if org and repo and pipeline_num and workflow_id and job_num:
+            vcs = _circleci_vcs(env)
+            return ("https://app.circleci.com/pipelines/" + vcs + "/" + org + "/" + repo +
+                    "/" + pipeline_num + "/workflows/" + workflow_id + "/jobs/" + job_num + "/artifacts")
+
+        # Fall back to the legacy build URL if the pipeline env vars aren't set.
+        return env.var("CIRCLE_BUILD_URL") or ""
+
+    # GitLab: artifact upload uses the Generic Packages API (see
+    # `_upload_file_gitlab` in lib/artifacts.axl), which lands files
+    # in the project's Package Registry with no clean per-job page.
+    return ""

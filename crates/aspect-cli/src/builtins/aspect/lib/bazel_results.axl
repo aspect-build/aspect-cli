@@ -46,6 +46,7 @@ isn't worth it for a check run display. We show the failing target label plus
 the list of failing action mnemonics; users follow the CI link for the raw log.
 """
 
+load("./ci.axl", "detect_build_url", "detect_ci_host")
 load(
     "./environment.axl",
     "build_aspect_runner_rows",
@@ -2441,40 +2442,18 @@ STATUS_LABELS = {
 def ci_link_item(ctx, links):
     """Build the CI-host link item for the final summary row.
 
-    Prefers a pre-resolved ci_url from the feature (e.g. a job-level deep link
-    resolved against the GitHub API); falls back to deriving from env vars so
-    the link works even when the feature doesn't pass one through.
+    Prefers the feature-supplied `links["ci_url"]` (which may be a
+    job-scoped deep link resolved against the GitHub API); falls back to
+    `detect_build_url` so the link works even when the feature doesn't
+    pass one through.
     """
-    env = ctx.std.env
-    override_url = (links or {}).get("ci_url", "") or ""
-    if env.var("GITHUB_ACTIONS"):
-        url = override_url
-        if not url:
-            server = env.var("GITHUB_SERVER_URL") or "https://github.com"
-            repo = env.var("GITHUB_REPOSITORY") or ""
-            run_id = env.var("GITHUB_RUN_ID") or ""
-            if repo and run_id:
-                url = server + "/" + repo + "/actions/runs/" + run_id
-        if url:
-            return {"icon": "🐙", "value": "[GitHub Actions](" + url + ")"}
-    elif env.var("BUILDKITE"):
-        url = override_url
-        if not url:
-            build_url = env.var("BUILDKITE_BUILD_URL") or ""
-            step_id = env.var("BUILDKITE_STEP_ID") or ""
-            if build_url:
-                url = build_url + "/steps/canvas?sid=" + step_id if step_id else build_url
-        if url:
-            return {"icon": "🏗", "value": "[Buildkite](" + url + ")"}
-    elif env.var("CIRCLECI"):
-        url = override_url or env.var("CIRCLE_BUILD_URL") or ""
-        if url:
-            return {"icon": "⭕", "value": "[CircleCI](" + url + ")"}
-    elif env.var("GITLAB_CI"):
-        url = override_url or env.var("CI_JOB_URL") or ""
-        if url:
-            return {"icon": "🦊", "value": "[GitLab CI](" + url + ")"}
-    return None
+    host = detect_ci_host(ctx.std.env)
+    if not host:
+        return None
+    url = (links or {}).get("ci_url", "") or detect_build_url(ctx)
+    if not url:
+        return None
+    return {"icon": host["icon"], "value": "[%s](%s)" % (host["label"], url)}
 
 def _titlecase(s):
     """Title-case the first character and convert underscores to spaces.
