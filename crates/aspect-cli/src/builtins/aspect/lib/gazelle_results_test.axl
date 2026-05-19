@@ -16,9 +16,13 @@ Scenarios:
  10. in-progress         — task still running (initial state)
  11. metadata-all        — GitHubStatusChecksTrait.metadata_keys = ["*"]
  12. early-fail          — early-bail before gazelle ran
- 13. scope=changed       — Configuration row with Scope + default escalation list
- 14. scope=changed full  — all four Config rows fire (Scope, On-change, escalate, pattern)
- 15. scope=changed empty — no-op short-circuit, dirs=[]
+ 13. scope=changed       — non-default scope: Scope row + default escalation list
+ 14. scope=changed full  — non-default scope: all four Config rows fire
+ 15. scope=changed empty — non-default scope, no-op short-circuit, dirs=[]
+
+(Scenarios 1-12 use the default scope=all and therefore omit the
+Scope Configuration row entirely — that's the default-suppression
+path. 13-15 exercise the non-default rendered path.)
 """
 
 load("./gazelle_results.axl", "init_data", "render_check_output")
@@ -231,8 +235,10 @@ def _test_impl(ctx):
         # entrypoint resolution failed). Title and body must say "Failed",
         # NOT "Passed" / "All BUILD files are up to date."
         ("12. early-fail · GH", _make_early_fail(), "failed", "github", None),
-        # Scope=changed configs: surface Scope row + Scope-all-on-change
-        # + (when set) Changed-file-pattern + Soft-fail.
+        # Non-default --scope=changed: surfaces the Scope Configuration
+        # row + Scope-all-on-change + (when set) Changed-file-pattern.
+        # (All earlier scenarios use the default scope=all and therefore
+        # omit the Scope row — that's the default-suppression path.)
         ("13. scope=changed default · GH", _make_scope_changed(), "failed", "github", None),
         ("14. scope=changed full config · GH", _make_scope_changed_with_filter(), "failed", "github", None),
         ("15. scope=changed empty no-op · GH", _make_scope_changed_empty(), "passed", "github", None),

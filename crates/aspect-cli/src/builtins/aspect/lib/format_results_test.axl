@@ -5,8 +5,8 @@ Run with:
 
 Scenarios:
   1. clean-passed        — no files need formatting
-  2. files-need-format   — 3 files need formatting (scope=changed)
-  3. scope-all-many      — 15 files need formatting (scope=all)
+  2. files-need-format   — 3 files need formatting (default scope=changed)
+  3. scope-all-many      — 15 files need formatting (non-default scope=all)
   4. on-change-warn      — files need formatting, --on-change=warn; exits 0
   5. formatter-error     — formatter binary crashed
   6. no-git              — no initial commit / not in git repo
@@ -14,6 +14,10 @@ Scenarios:
   8. with-patch-url      — patch artifact uploaded; check run shows download link
   9. non-default-target  — custom formatter target label in repro command
  10. large               — 250 files to exercise the trim cascade
+
+The Scope Configuration row only renders for non-default scope —
+scenario 3 (scope=all) and 10 (scope=all). All other scenarios use
+the default scope=changed and omit the row.
 """
 
 load("./format_results.axl", "init_data", "render_check_output")
@@ -68,7 +72,9 @@ def _make_files_need_format():
 
     # changed_files_count is the input set the formatter saw (post-ignore-pattern);
     # affected_files is the post-format diff (what the formatter rewrote).
-    # Both populated to exercise the Scope-with-count Configuration row.
+    # Default scope (`changed`) — the Scope Configuration row is
+    # suppressed; changed_files_count surfaces in the body's
+    # "All N files in scope are properly formatted" line.
     r["changed_files_count"] = 42
     r["format"]["affected_files"] = [
         "apps/web/src/auth/login.ts",

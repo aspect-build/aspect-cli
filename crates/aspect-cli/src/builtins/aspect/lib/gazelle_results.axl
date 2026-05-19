@@ -34,6 +34,11 @@ load("./text.axl", "pluralize")
 _DETAILS_LIMIT = 65000
 _FILES_LIMIT = 200
 
+# Default --scope arg value (mirrors gazelle.axl). The Configuration row
+# suppresses `Scope: <default>` because it adds no signal — only a
+# user-chosen non-default scope is worth surfacing.
+_DEFAULT_SCOPE = "all"
+
 # ─── Public API ───────────────────────────────────────────────────────────────
 
 def init_data():
@@ -290,10 +295,11 @@ def _config_items(data):
     """Build the Configuration row for the gazelle summary.
 
     Surfaces the run-shape knobs directly above "Last update":
-      - Scope: always shown. When `scope == "changed"` and the task
-        recorded a non-zero post-intersection effective-dir count,
-        append it as ` — N changed dirs` so reviewers can tell at a
-        glance how many subtrees gazelle was asked to update.
+      - Scope: only shown when the user picked a non-default value
+        (default is `_DEFAULT_SCOPE`). When `scope == "changed"` and
+        the task recorded a non-zero post-intersection effective-dir
+        count, append it as ` — N changed dirs` so reviewers can tell
+        at a glance how many subtrees gazelle was asked to update.
       - Soft-fail: only shown when True. Default is False; rendering
         `Soft-fail: false` on every clean run would be noise.
       - Scope-all-on-change: only when `scope == "changed"` and the
@@ -308,7 +314,7 @@ def _config_items(data):
     items = []
     g = data["gazelle"]
     scope = g.get("scope", "") or ""
-    if scope:
+    if scope and scope != _DEFAULT_SCOPE:
         value = scope
         if scope == "changed":
             dirs_count = len(g.get("dirs", []) or [])
