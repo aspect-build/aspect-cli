@@ -19,6 +19,16 @@ Scenarios:
  13. scope=changed       — Configuration row with Scope + default escalation list
  14. scope=changed full  — all four Config rows fire (Scope, On-change, escalate, pattern)
  15. scope=changed empty — no-op short-circuit, dirs=[]
+ 16. in-progress empty   — status=running with no affected files yet (must not
+                           render "0 BUILD files are out of date")
+ 17. aborted             — bazel aborted mid-build, no recorded affected files
+ 18. warning-with-drift  — status=warning (terminal --on-change=warn): drift
+                           detected, body must show files list (not placeholder)
+ 19. failing-with-drift  — status=failing (mid-stream --on-change=fail): same
+
+Body-content invariant (asserted in the loop): the "Gazelle task in progress…"
+placeholder renders IFF status == "running". A regression where `warning` or
+`failing` short-circuits to the placeholder fails the suite.
 """
 
 load("./gazelle_results.axl", "init_data", "render_check_output")
@@ -183,6 +193,24 @@ def _make_large():
     ]
     return r
 
+def _make_aborted():
+    """Aborted-mid-build data: empty affected_files (paired with status=aborted)."""
+    return _make_base()
+
+def _make_warning_with_drift():
+    """`--on-change=warn` with drift; `pick_task_status` returns "warning"."""
+    r = _make_base()
+    r["gazelle"]["on_change_resolved"] = "warn"
+    r["gazelle"]["affected_files"] = _OUT_OF_DATE_FILES
+    return r
+
+def _make_failing_with_drift():
+    """`--on-change=fail` with mid-stream drift; `pick_task_status` returns "failing"."""
+    r = _make_base()
+    r["gazelle"]["on_change_resolved"] = "fail"
+    r["gazelle"]["affected_files"] = _OUT_OF_DATE_FILES
+    return r
+
 # ─── Test harness ─────────────────────────────────────────────────────────────
 
 def _render_ctx(task_name = "gazelle"):
@@ -236,9 +264,18 @@ def _test_impl(ctx):
         ("13. scope=changed default · GH", _make_scope_changed(), "failed", "github", None),
         ("14. scope=changed full config · GH", _make_scope_changed_with_filter(), "failed", "github", None),
         ("15. scope=changed empty no-op · GH", _make_scope_changed_empty(), "passed", "github", None),
+        # Non-passing statuses with empty affected_files must NOT render
+        # the "0 BUILD files are out of date" fall-through.
+        ("16. in-progress empty · GH", _make_clean(), "running", "github", None),
+        ("17. aborted · GH", _make_aborted(), "aborted", "github", None),
+        # Drift-detected non-running statuses must render the files-list
+        # body, NOT the in-progress placeholder.
+        ("18. warning-with-drift · GH", _make_warning_with_drift(), "warning", "github", None),
+        ("19. failing-with-drift · GH", _make_failing_with_drift(), "failing", "github", None),
     ]
 
     sep = "=" * 70
+    errors = []
 
     for (label, data, status, ci, metadata_keys) in scenarios:
         rc = _render_ctx()
@@ -255,6 +292,19 @@ def _test_impl(ctx):
         print("DETAILS (first 4000 chars):")
         print(out["text"][:4000])
         print("")
+
+        # Invariant: "Gazelle task in progress…" placeholder renders IFF
+        # status == "running".
+        has_placeholder = "Gazelle task in progress" in out["text"]
+        if status == "running" and not has_placeholder:
+            errors.append("%s: status=running but body has no in-progress placeholder" % label)
+        if status != "running" and has_placeholder:
+            errors.append("%s: status=%s rendered the in-progress placeholder" % (label, status))
+
+    if errors:
+        for e in errors:
+            print("FAIL: " + e)
+        fail("Body-content invariant violations: %d" % len(errors))
 
     print(sep)
     print("All " + str(len(scenarios)) + " gazelle scenarios rendered without error.")
