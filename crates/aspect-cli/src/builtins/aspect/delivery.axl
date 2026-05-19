@@ -365,9 +365,13 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
             if interesting or now_ms(ctx) - last_emit_ms >= MIN_HEARTBEAT_INTERVAL_MS:
                 _emit_update(ctx, lifecycle, data)
                 last_emit_ms = now_ms(ctx)
-            if events.done():
+            if events.done:
                 break
         status = build.wait()
+        # Flush trait sinks (e.g. bessie) before any potential retry —
+        # re-binding a Live sink errors.
+        for sink in build_events:
+            sink.wait()
         if status.code == 0 or not bazel_trait.build_retry(status.code):
             break
 

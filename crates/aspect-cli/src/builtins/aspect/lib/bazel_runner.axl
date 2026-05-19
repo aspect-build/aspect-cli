@@ -435,7 +435,7 @@ def run_bazel_task(ctx: TaskContext, command: str) -> TaskConclusion:
                     for handler in lifecycle.task_update:
                         handler(ctx, update)
                     last_emit_ms = now_ms(ctx)
-                if events.done():
+                if events.done:
                     break
 
         invocation_status = invocation.wait()

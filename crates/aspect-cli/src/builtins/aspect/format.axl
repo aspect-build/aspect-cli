@@ -421,7 +421,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                     progress = ProgressStyles(),
                 ))
             last_emit_ms = now_ms(ctx)
-        if events.done():
+        if events.done:
             break
 
     build_status = build.wait()
