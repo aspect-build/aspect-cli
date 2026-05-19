@@ -343,11 +343,12 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # backend gRPC sink in CI deployments) so this build's BES events
     # actually reach the backend and the "✨ Aspect Workflows" link in
     # the format check-run / annotation header resolves to a real
-    # invocation. Bare `build_events = True` would set up a local pipe
-    # only — the runtime would still mint a sink_invocation_id, but the
-    # Aspect backend would have no record under that UUID, leading to
-    # the "invocation not found" 404 we observed live.
-    build_events = list(bazel_trait.build_event_sinks) if bazel_trait.build_event_sinks else True
+    # invocation. A bare iterator with no remote sink would set up a
+    # local pipe only — the runtime would still mint a sink_invocation_id,
+    # but the Aspect backend would have no record under that UUID,
+    # leading to the "invocation not found" 404 we observed live.
+    events = bazel.build_events.iterator()
+    build_events = [events] + list(bazel_trait.build_event_sinks)
 
     # Fire `bazel_trait.build_start` hooks before spawning bazel —
     # Workflows registers the BK `--- :bazel: Running bazel …`
@@ -375,13 +376,6 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         build_events = build_events,
         flags = flags,
     )
-
-    # Subscribe BEFORE emitting (broadcaster only delivers to pre-existing
-    # subscribers); a warm daemon can stream BES events within milliseconds,
-    # so any delay between `ctx.bazel.build` returning and the subscribe
-    # risks missing the early burst — including the target_completed for
-    # the formatter that `runnable.determine_entrypoint` needs.
-    events = build.build_events()
 
     # `build.sink_invocation_id` is minted inside the runtime's `Build::spawn`
     # before it returns. Populate `data["sink_invocation_id"]` here and

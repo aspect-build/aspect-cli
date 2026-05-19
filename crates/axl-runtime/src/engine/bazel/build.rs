@@ -1,9 +1,11 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::process::Child;
 use std::process::Command;
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::thread::JoinHandle;
 
 use allocative::Allocative;
@@ -23,21 +25,24 @@ use starlark::values::NoSerialize;
 use starlark::values::ProvidesStaticType;
 use starlark::values::Trace;
 use starlark::values::UnpackValue;
+use starlark::values::Value;
 use starlark::values::ValueLike;
 use starlark::values::none::NoneOr;
 use starlark::values::starlark_value;
 
+use axl_proto::build_event_stream::BuildEvent;
+
 use crate::engine::r#async::rt::AsyncRuntime;
 
-use super::iter::BuildEventIterator;
 use super::iter::ExecutionLogIterator;
 use super::iter::WorkspaceEventIterator;
 use super::sink::execlog::ExecLogSink;
 use super::sink::grpc;
-use super::sink::retry::{ErrorStrategy, RetryConfig, SinkError, SinkOutcome};
+use super::sink::retry::{RetryConfig, SinkOutcome};
 use super::sink::tracing as tracing_sink;
 use super::stream::BuildEventStream;
 use super::stream::ExecLogStream;
+use super::stream::Subscriber;
 use super::stream::WorkspaceEventStream;
 
 /// Convert a Starlark `Writable` handle to a `std::process::Stdio` for use
@@ -143,11 +148,11 @@ impl<'v> values::StarlarkValue<'v> for BuildEventSink {}
 impl<'v> UnpackValue<'v> for BuildEventSink {
     type Error = anyhow::Error;
 
+    // `Ok(None)` (not `Err`) on type mismatch so this can compose with
+    // `Either<BuildEventSink, BuildEventIter>` — Either's UnpackValue
+    // tries the first branch and falls through on `Ok(None)`.
     fn unpack_value_impl(value: values::Value<'v>) -> Result<Option<Self>, Self::Error> {
-        let value = value
-            .downcast_ref_err::<BuildEventSink>()
-            .into_anyhow_result()?;
-        Ok(Some(value.clone()))
+        Ok(value.downcast_ref::<BuildEventSink>().cloned())
     }
 }
 
@@ -184,6 +189,277 @@ impl BuildEventSink {
     }
 }
 
+// =========================================================================
+// `bazel.build_events.iterator(...)` — AXL-side iterator handle.
+//
+// The handle is created by the caller *before* `ctx.bazel.build(...)`, passed
+// in via the `build_events=[...]` list, and then iterated. The runtime
+// subscribes the underlying receiver inside `Build::spawn` — before bazel
+// opens the BEP FIFO — so the early burst (`build_started`,
+// `target_completed`, `named_set_of_files`) is buffered for the consumer
+// regardless of how slow the AXL task is to start iterating.
+//
+// State is shared via `Arc<Mutex<IterState>>` so a `BuildEventIter` cloned
+// out of the `build_events=[...]` list (for use by `Build::spawn`) and the
+// original Starlark value (held by the caller for iteration) point to the
+// same state machine. The broadcaster doesn't know or care about this
+// handle's buffering policy — it fire-and-forgets into the receiver's
+// unbounded mpsc channel and that's it.
+// =========================================================================
+
+#[derive(Clone)]
+struct IterConfig {
+    /// `None` means no filter — every event yields. `Some(set)` keeps only
+    /// events whose payload tag is in the set.
+    kinds: Option<Arc<HashSet<i32>>>,
+}
+
+enum IterState {
+    /// Created but not yet bound to a build.
+    Pending,
+    /// `Build::spawn` subscribed us; iteration reads from `recv`.
+    Live { recv: Subscriber<BuildEvent> },
+    /// Stream ended (clean close or caller drained).
+    Done,
+}
+
+#[derive(Clone, Debug, ProvidesStaticType, Display, Trace, NoSerialize, Allocative)]
+#[display("<bazel.build.BuildEventIter>")]
+pub struct BuildEventIter {
+    #[allocative(skip)]
+    config: IterConfig,
+    #[allocative(skip)]
+    state: Arc<Mutex<IterState>>,
+}
+
+impl std::fmt::Debug for IterConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IterConfig")
+            .field("has_kinds_filter", &self.kinds.is_some())
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for IterState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IterState::Pending => write!(f, "Pending"),
+            IterState::Live { .. } => write!(f, "Live"),
+            IterState::Done => write!(f, "Done"),
+        }
+    }
+}
+
+impl BuildEventIter {
+    pub fn new(kinds: Option<HashSet<i32>>) -> Self {
+        Self {
+            config: IterConfig {
+                kinds: kinds.map(Arc::new),
+            },
+            state: Arc::new(Mutex::new(IterState::Pending)),
+        }
+    }
+
+    /// Called by `Build::spawn` to subscribe the iterator's receiver against
+    /// the build event broadcaster. Errors if this handle was already bound
+    /// to a build (single-use rule). Must run before bazel opens the BEP
+    /// FIFO so the early burst is buffered.
+    fn bind(&self, stream: &BuildEventStream) -> anyhow::Result<()> {
+        let mut state = self.state.lock().unwrap();
+        match *state {
+            IterState::Pending => {
+                let recv = stream.subscribe();
+                *state = IterState::Live { recv };
+                Ok(())
+            }
+            _ => anyhow::bail!(
+                "this `bazel.build_events.iterator()` handle was already bound to a build; \
+                 create a fresh one per build",
+            ),
+        }
+    }
+
+}
+
+impl<'v> AllocValue<'v> for BuildEventIter {
+    fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
+        heap.alloc_complex_no_freeze(self)
+    }
+}
+
+impl<'v> UnpackValue<'v> for BuildEventIter {
+    type Error = anyhow::Error;
+    fn unpack_value_impl(value: Value<'v>) -> Result<Option<Self>, Self::Error> {
+        let v = value
+            .downcast_ref_err::<BuildEventIter>()
+            .into_anyhow_result()?;
+        Ok(Some(v.clone()))
+    }
+}
+
+#[starlark_value(type = "bazel.build.BuildEventIter")]
+impl<'v> values::StarlarkValue<'v> for BuildEventIter {
+    fn get_methods() -> Option<&'static Methods> {
+        static RES: MethodsStatic = MethodsStatic::new();
+        RES.methods(build_event_iter_methods)
+    }
+
+    fn get_attr(&self, attribute: &str, heap: Heap<'v>) -> Option<Value<'v>> {
+        match attribute {
+            // True once the stream has ended (clean close or `drain()`).
+            "done" => {
+                let state = self.state.lock().unwrap();
+                Some(heap.alloc(matches!(*state, IterState::Done)))
+            }
+            _ => None,
+        }
+    }
+
+    fn has_attr(&self, attribute: &str, _heap: Heap<'v>) -> bool {
+        matches!(attribute, "done")
+    }
+
+    unsafe fn iterate(&self, me: Value<'v>, _heap: Heap<'v>) -> starlark::Result<Value<'v>> {
+        Ok(me)
+    }
+
+    unsafe fn iter_next(&self, _i: usize, heap: Heap<'v>) -> Option<Value<'v>> {
+        // Loop because `kinds=` may filter out events.
+        loop {
+            // Take the receiver out of the state so we can call `recv()`
+            // (blocking) without holding the Mutex. AXL is single-threaded,
+            // so no other thread can observe the intermediate empty Live state.
+            let recv = {
+                let mut state = self.state.lock().unwrap();
+                match std::mem::replace(&mut *state, IterState::Pending) {
+                    IterState::Live { recv } => recv,
+                    other => {
+                        *state = other;
+                        return None;
+                    }
+                }
+            };
+
+            let result = recv.recv();
+            match result {
+                Ok(event) => {
+                    // Put recv back before deciding whether to filter or yield.
+                    *self.state.lock().unwrap() = IterState::Live { recv };
+                    if matches_kinds(&event, self.config.kinds.as_ref()) {
+                        return Some(event.alloc_value(heap));
+                    }
+                    // Otherwise loop and read the next event.
+                }
+                Err(_) => {
+                    *self.state.lock().unwrap() = IterState::Done;
+                    return None;
+                }
+            }
+        }
+    }
+
+    unsafe fn iter_stop(&self) {}
+}
+
+#[starlark_module]
+pub(crate) fn build_event_iter_methods(registry: &mut MethodsBuilder) {
+    /// Stop iterating: unsubscribe, drop buffered events, transition to
+    /// `done`. Idempotent; safe to call when already done. Use when the
+    /// task already found what it needed and doesn't want to drain the
+    /// rest of the stream.
+    fn drain<'v>(this: Value<'v>) -> anyhow::Result<NoneOr<bool>> {
+        let iter = this
+            .downcast_ref_err::<BuildEventIter>()
+            .into_anyhow_result()?;
+        let mut state = iter.state.lock().unwrap();
+        if !matches!(*state, IterState::Done) {
+            // Dropping the recv unsubscribes from the broadcaster on its next
+            // send (the broadcaster's `retain` prunes senders whose receiver
+            // is gone).
+            *state = IterState::Done;
+        }
+        Ok(NoneOr::None)
+    }
+
+    /// Non-blocking pop. Returns `None` when the buffer is empty or the
+    /// stream has ended. Used by tick-driven drain loops that want to
+    /// process whatever's queued without blocking on the next event.
+    /// Honors the `kinds=` filter set at construction.
+    fn try_pop<'v>(this: Value<'v>) -> anyhow::Result<NoneOr<BuildEvent>> {
+        let iter = this
+            .downcast_ref_err::<BuildEventIter>()
+            .into_anyhow_result()?;
+        let kinds = iter.config.kinds.clone();
+        loop {
+            let mut state = iter.state.lock().unwrap();
+            let recv = match &*state {
+                IterState::Live { recv } => recv,
+                _ => return Ok(NoneOr::None),
+            };
+            match recv.try_recv() {
+                Ok(event) => {
+                    drop(state);
+                    if matches_kinds(&event, kinds.as_ref()) {
+                        return Ok(NoneOr::Other(event));
+                    }
+                    // Filtered out — loop and try the next event.
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => return Ok(NoneOr::None),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    *state = IterState::Done;
+                    return Ok(NoneOr::None);
+                }
+            }
+        }
+    }
+}
+
+fn matches_kinds(event: &BuildEvent, kinds: Option<&Arc<HashSet<i32>>>) -> bool {
+    let Some(kinds) = kinds else {
+        return true;
+    };
+    let Some(payload) = event.payload.as_ref() else {
+        return false;
+    };
+    kinds.contains(&payload_discriminant(payload))
+}
+
+/// Map a `BuildEvent::Payload` variant to its proto field number, which is
+/// what the auto-generated `bazel.build.build_event.*` constants resolve to.
+/// Keeping this list close to `axl_proto::build_event_stream::build_event::Payload`
+/// keeps a `kinds=[build_event.TargetComplete, ...]` filter cheap (no
+/// per-event clone or string compare — just an integer set lookup).
+fn payload_discriminant(p: &axl_proto::build_event_stream::build_event::Payload) -> i32 {
+    use axl_proto::build_event_stream::build_event::Payload;
+    match p {
+        Payload::Progress(_) => 3,
+        Payload::Aborted(_) => 4,
+        Payload::Started(_) => 5,
+        Payload::UnstructuredCommandLine(_) => 12,
+        Payload::StructuredCommandLine(_) => 13,
+        Payload::OptionsParsed(_) => 14,
+        Payload::WorkspaceStatus(_) => 16,
+        Payload::Fetch(_) => 17,
+        Payload::Configuration(_) => 19,
+        Payload::Expanded(_) => 6,
+        Payload::Configured(_) => 7,
+        Payload::Action(_) => 8,
+        Payload::NamedSetOfFiles(_) => 15,
+        Payload::Completed(_) => 9,
+        Payload::TestResult(_) => 10,
+        Payload::TestSummary(_) => 20,
+        Payload::TargetSummary(_) => 26,
+        Payload::Finished(_) => 11,
+        Payload::BuildToolLogs(_) => 21,
+        Payload::BuildMetrics(_) => 22,
+        Payload::WorkspaceInfo(_) => 25,
+        Payload::BuildMetadata(_) => 24,
+        Payload::ConvenienceSymlinksIdentified(_) => 27,
+        Payload::ExecRequest(_) => 28,
+        Payload::TestProgress(_) => 30,
+    }
+}
+
 #[derive(Debug, Display, ProvidesStaticType, Trace, NoSerialize, Allocative)]
 #[display("<bazel.build.Build>")]
 pub struct Build {
@@ -194,11 +470,11 @@ pub struct Build {
     #[allocative(skip)]
     execlog_stream: RefCell<Option<ExecLogStream>>,
 
-    /// Threads forwarding to BES, tracing, or file sinks. Every sink returns
-    /// a `SinkOutcome` so `wait()` can surface failures per the sink's
-    /// `error_strategy`. User-configured BES sinks default to `warn`;
-    /// internal sinks (tracing emitter, execlog writer) default to `abort`,
-    /// since their failures indicate a real bug rather than a flaky backend.
+    /// Threads forwarding to BES, tracing, or file sinks. `wait()` joins
+    /// these so the program doesn't exit before sinks have flushed. A
+    /// sink's `Err(SinkError)` is logged at the sink and is otherwise
+    /// non-fatal — the runtime never translates sink failure into a
+    /// build exit code (callers branch on per-handle state if they care).
     #[allocative(skip)]
     sink_handles: RefCell<Vec<JoinHandle<SinkOutcome>>>,
 
@@ -224,7 +500,7 @@ impl Build {
     pub fn spawn(
         verb: &str,
         targets: impl IntoIterator<Item = String>,
-        (build_events, sinks): (bool, Vec<BuildEventSink>),
+        (build_events, sinks, iters): (bool, Vec<BuildEventSink>, Vec<BuildEventIter>),
         (execution_logs, execlog_sinks): (bool, Vec<ExecLogSink>),
         workspace_events: bool,
         flags: Vec<String>,
@@ -346,6 +622,26 @@ impl Build {
             None => None,
         };
 
+        // Eagerly bind every iterator handle BEFORE the BES reader thread
+        // gets to read anything. The reader thread is currently blocked in
+        // `Pipe::open` waiting for bazel to open the FIFO write end (which
+        // happens after bazel's JVM startup — many ms later), so subscribing
+        // here closes the warm-daemon race where a lazy subscribe could miss
+        // the early burst (`build_started`, `target_completed`,
+        // `named_set_of_files`).
+        if !iters.is_empty() {
+            let stream = build_event_stream.as_ref().ok_or_else(|| {
+                io::Error::other(
+                    "ctx.bazel.build/test: build_events list contained `iterator()` handles \
+                     but no BEP stream is configured. Either include them when build_events \
+                     is omitted/True, or remove them.",
+                )
+            })?;
+            for iter in &iters {
+                iter.bind(stream).map_err(io::Error::other)?;
+            }
+        }
+
         // Build Event sinks for forwarding the build events.
         //
         // Generate ONE invocation_id and hand it to every sink so all backends
@@ -464,19 +760,6 @@ impl<'v> values::StarlarkValue<'v> for Build {
 
 #[starlark_module]
 pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
-    // Creates an iterable `BuildEventIterator` type.
-    // Every call to this function will return a new iterator.
-    // TODO: explain backpressure and build events sinks falling behind on poor network conditions.
-    fn build_events<'v>(this: values::Value<'v>) -> anyhow::Result<BuildEventIterator> {
-        let build = this.downcast_ref::<Build>().unwrap();
-        let event_stream = build.build_event_stream.borrow();
-        let event_stream = event_stream.as_ref().ok_or(anyhow::anyhow!(
-            "call `ctx.bazel.build` with `build_events = true` in order to receive build events."
-        ))?;
-
-        Ok(BuildEventIterator::new(event_stream.subscribe()))
-    }
-
     // Creates an iterable `ExecutionLogIterator` type.
     // Every call to this function will return a new iterator.
     fn execution_logs<'v>(this: values::Value<'v>) -> anyhow::Result<ExecutionLogIterator> {
@@ -560,30 +843,14 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
             }
         };
 
-        // Resolve all sink threads. Each returns a `SinkOutcome` describing
-        // its terminal state and how to surface a failure (per Bazel's BES
-        // upload error policy plus `abort` for internal sinks).
-        // `Warn` and `Ignore` already printed (or stayed silent) at the sink;
-        // only `Abort` and `FailAtEnd` propagate further.
-        let mut abort_msg: Option<String> = None;
-        let mut fail_at_end = false;
+        // Drain sink threads so the process doesn't exit before they flush.
+        // Failures are already logged by the sink itself (see
+        // `sink/grpc.rs::finalize`); the runtime treats them as non-fatal —
+        // callers branch on per-handle state if they want to surface a sink
+        // failure as a task failure.
         for handle in build.sink_handles.take() {
             match handle.join() {
-                Ok(Ok(())) => continue,
-                Ok(Err(SinkError {
-                    strategy,
-                    last_error,
-                })) => match strategy {
-                    ErrorStrategy::Abort => {
-                        if abort_msg.is_none() {
-                            abort_msg = Some(last_error);
-                        }
-                    }
-                    ErrorStrategy::FailAtEnd => {
-                        fail_at_end = true;
-                    }
-                    ErrorStrategy::Warn | ErrorStrategy::Ignore => {}
-                },
+                Ok(_) => continue,
                 Err(err) => anyhow::bail!("sink thread panicked: {:#?}", err),
             }
         }
@@ -591,30 +858,10 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
         // Drop the span to end the trace
         drop(build.span.replace(tracing::Span::none()));
 
-        if let Some(msg) = abort_msg {
-            anyhow::bail!("BES sink failure (abort): {}", msg);
-        }
-
-        let success = result.success() && !fail_at_end;
-        let code = finalize_exit_code(result.code(), fail_at_end);
-
-        Ok(BuildStatus { success, code })
-    }
-}
-
-/// Compute the surfaced exit code for `wait()`.
-///
-/// Sink-induced `fail_at_end` failures synthesize the reserved code 36 so
-/// callers can distinguish a sink failure from a real Bazel failure. We
-/// only rewrite when Bazel actually exited cleanly (`Some(0)`); a `None`
-/// means the child was killed by a signal and that abnormal termination
-/// must be preserved unchanged, and a nonzero exit is a genuine Bazel
-/// failure that already conveys the right signal to callers.
-fn finalize_exit_code(bazel_code: Option<i32>, fail_at_end: bool) -> Option<i32> {
-    if fail_at_end && bazel_code == Some(0) {
-        Some(36)
-    } else {
-        bazel_code
+        Ok(BuildStatus {
+            success: result.success(),
+            code: result.code(),
+        })
     }
 }
 
@@ -632,20 +879,26 @@ mod tests {
     /// `build.wait()` reports success, AND that AXL's `build.build_events()`
     /// iterator actually receives the two events basil emitted (`Started`
     /// and `Finished`).
+    /// The AXL iterator handle gets the early event burst on a warm daemon
+    /// because `Build::spawn` subscribes it before bazel opens the BEP FIFO.
+    /// Receives both `build_started` and `build_finished` from the success
+    /// scenario, with no extras (kinds=… would also work here but a plain
+    /// iter is the path most tasks take).
     #[test]
-    fn build_events_reach_axl_for_success_scenario() {
+    fn iterator_handle_receives_early_burst() {
         let exit = crate::test::eval(
             r#"
 def _impl(ctx):
+    iter = bazel.build_events.iterator()
     build = ctx.bazel.build(
         flags = ["--scenario=success"],
-        build_events = True,
+        build_events = [iter],
         stderr = None,
     )
     started = 0
     finished = 0
     other = 0
-    for event in build.build_events():
+    for event in iter:
         kind = event.kind
         if kind == "build_started":
             started += 1
@@ -685,12 +938,13 @@ Test = task(implementation = _impl)
             crate::test::eval(
                 r#"
 def _impl(ctx):
+    iter = bazel.build_events.iterator()
     build = ctx.bazel.build(
         flags = ["--scenario=cache_evicted_no_retry"],
-        build_events = True,
+        build_events = [iter],
         stderr = None,
     )
-    for _ in build.build_events():
+    for _ in iter:
         pass
     build.wait()
     return 0
@@ -711,25 +965,50 @@ Test = task(implementation = _impl)
         }
     }
 
+    /// `iterator()` is single-use: binding a handle that was already used by
+    /// a prior `ctx.bazel.build(...)` call errors out so callers don't
+    /// silently lose events.
+    #[test]
+    fn iterator_handle_rejects_reuse() {
+        let err = crate::test::eval(
+            r#"
+def _impl(ctx):
+    iter = bazel.build_events.iterator()
+    first = ctx.bazel.build(
+        flags = ["--scenario=success"],
+        build_events = [iter],
+        stderr = None,
+    )
+    for _ in iter:
+        pass
+    first.wait()
+    # second use of the same handle must error
+    second = ctx.bazel.build(
+        flags = ["--scenario=success"],
+        build_events = [iter],
+        stderr = None,
+    )
+    second.wait()
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+        )
+        .with_fake_bazel()
+        .run_task(0)
+        .expect_err("expected reuse error");
+        assert!(
+            err.to_string().contains("already bound"),
+            "unexpected error: {err}"
+        );
+    }
+
     // --- bazel.build_events.grpc validation ---
     //
     // These exercise the Starlark surface of the failure-knob feature.
     // `.check()` runs the snippet through eval_module — the call lives at
     // module level so the function's parameter validation is the *only*
     // thing under test. No basil, no real network.
-
-    #[test]
-    fn grpc_rejects_unknown_error_strategy() {
-        let err = crate::axl_check!(
-            r#"bazel.build_events.grpc(uri = "http://localhost:1", error_strategy = "nope")"#
-        )
-        .expect_err("expected validation error")
-        .to_string();
-        assert!(
-            err.contains("error_strategy") && err.contains("nope"),
-            "unexpected error: {err}"
-        );
-    }
 
     #[test]
     fn grpc_rejects_negative_max_retries() {
@@ -787,216 +1066,34 @@ Test = task(implementation = _impl)
     retry_min_delay = "500ms",
     retry_max_buffer_size = 16,
     timeout = "30s",
-    error_strategy = "fail_at_end",
 )"#
         )
         .expect("snippet should validate");
     }
 
-    // --- error_strategy end-to-end ---
-    //
-    // The tests below feed an unparseable URI into the gRPC sink so
-    // `Channel::from_shared` returns `InvalidEndpoint` (non-retryable) and
-    // the sink terminates without touching the network. We deliberately
-    // avoid a real TCP target — connect-refused timing varies by platform
-    // and would make these tests flaky.
-    //
-    // basil is told to run the "success" scenario, so bazel itself exits
-    // 0; only the sink path differs across these tests.
-
-    /// `error_strategy = "ignore"`: terminal sink error is suppressed.
-    /// `wait()` returns success and the original bazel exit code.
-    #[test]
-    fn grpc_error_strategy_ignore_swallows_terminal_failure() {
-        use std::time::Duration;
-        let result = crate::test::with_timeout(Duration::from_secs(15), || {
-            crate::test::eval(
-                r#"
-def _impl(ctx):
-    sink = bazel.build_events.grpc(
-        uri = "not a uri",
-        max_retries = 0,
-        retry_min_delay = "0s",
-        error_strategy = "ignore",
-    )
-    build = ctx.bazel.build(
-        flags = ["--scenario=success"],
-        build_events = [sink],
-        stderr = None,
-    )
-    status = build.wait()
-    if not status.success: return 1
-    if status.code != 0: return 2
-    return 0
-
-Test = task(implementation = _impl)
-"#,
-            )
-            .with_fake_bazel()
-            .run_task(0)
-        })
-        .expect("test hung");
-        assert_eq!(result.expect("run_task"), Some(0));
-    }
-
-    /// `error_strategy = "fail_at_end"`: bazel succeeded but the sink
-    /// failed terminally — `wait()` reports `success = False` with the
-    /// reserved exit code 36 so callers can distinguish a sink-induced
-    /// failure from a genuine build failure.
-    #[test]
-    fn grpc_error_strategy_fail_at_end_reports_code_36() {
-        use std::time::Duration;
-        let result = crate::test::with_timeout(Duration::from_secs(15), || {
-            crate::test::eval(
-                r#"
-def _impl(ctx):
-    sink = bazel.build_events.grpc(
-        uri = "not a uri",
-        max_retries = 0,
-        retry_min_delay = "0s",
-        error_strategy = "fail_at_end",
-    )
-    build = ctx.bazel.build(
-        flags = ["--scenario=success"],
-        build_events = [sink],
-        stderr = None,
-    )
-    status = build.wait()
-    if status.success: return 1
-    if status.code != 36: return 2
-    return 0
-
-Test = task(implementation = _impl)
-"#,
-            )
-            .with_fake_bazel()
-            .run_task(0)
-        })
-        .expect("test hung");
-        assert_eq!(result.expect("run_task"), Some(0));
-    }
-
-    /// `error_strategy = "fail_at_end"` + bazel killed by signal: the
-    /// sink failure must not mask the abnormal termination. wait()
-    /// reports `success = False` (sink failed) but `code = None`
-    /// (preserve signal-kill), not `Some(36)`. Regression for the
-    /// `result.code().unwrap_or(0) == 0` bug that conflated signal
-    /// kills with clean exits and overwrote them with the synthetic
-    /// fail_at_end code.
-    #[test]
-    fn grpc_error_strategy_fail_at_end_preserves_signal_kill() {
-        use std::time::Duration;
-        let result = crate::test::with_timeout(Duration::from_secs(15), || {
-            crate::test::eval(
-                r#"
-def _impl(ctx):
-    sink = bazel.build_events.grpc(
-        uri = "not a uri",
-        max_retries = 0,
-        retry_min_delay = "0s",
-        error_strategy = "fail_at_end",
-    )
-    build = ctx.bazel.build(
-        flags = ["--scenario=signal_killed_sigkill"],
-        build_events = [sink],
-        stderr = None,
-    )
-    status = build.wait()
-    if status.success: return 1
-    if status.code != None: return 2
-    return 0
-
-Test = task(implementation = _impl)
-"#,
-            )
-            .with_fake_bazel()
-            .run_task(0)
-        })
-        .expect("test hung");
-        assert_eq!(result.expect("run_task"), Some(0));
-    }
-
-    /// `error_strategy = "fail_at_end"` + genuine non-zero Bazel exit:
-    /// preserve Bazel's exit code rather than overwriting with the
-    /// synthetic 36, so callers can still see e.g. `code = 2` (build
-    /// failure) or `code = 39` (REMOTE_CACHE_EVICTED).
-    #[test]
-    fn grpc_error_strategy_fail_at_end_preserves_genuine_bazel_failure() {
-        use std::time::Duration;
-        let result = crate::test::with_timeout(Duration::from_secs(15), || {
-            crate::test::eval(
-                r#"
-def _impl(ctx):
-    sink = bazel.build_events.grpc(
-        uri = "not a uri",
-        max_retries = 0,
-        retry_min_delay = "0s",
-        error_strategy = "fail_at_end",
-    )
-    build = ctx.bazel.build(
-        flags = ["--scenario=nonzero_exit"],
-        build_events = [sink],
-        stderr = None,
-    )
-    status = build.wait()
-    if status.success: return 1
-    if status.code != 2: return 2
-    return 0
-
-Test = task(implementation = _impl)
-"#,
-            )
-            .with_fake_bazel()
-            .run_task(0)
-        })
-        .expect("test hung");
-        assert_eq!(result.expect("run_task"), Some(0));
-    }
-
-    // --- finalize_exit_code ---
-    //
-    // Unit-level coverage of the wait() exit-code mapping. Complements
-    // the e2e tests above by covering the matrix of (bazel exit, sink
-    // outcome) combinations without the cost of spawning basil for each.
+    // --- iterator factory validation ---
 
     #[test]
-    fn finalize_exit_code_preserves_signal_kill_under_fail_at_end() {
-        // `None` from `ExitStatus::code()` means the child was killed by a
-        // signal. fail_at_end must not mask that as the synthetic 36;
-        // callers need to see the abnormal termination unchanged.
-        assert_eq!(super::finalize_exit_code(None, true), None);
+    fn iterator_rejects_empty_kinds() {
+        let err = crate::axl_check!(r#"bazel.build_events.iterator(kinds = [])"#)
+            .expect_err("expected validation error")
+            .to_string();
+        assert!(err.contains("kinds"), "unexpected error: {err}");
     }
 
     #[test]
-    fn finalize_exit_code_preserves_signal_kill_without_fail_at_end() {
-        assert_eq!(super::finalize_exit_code(None, false), None);
+    fn iterator_rejects_unknown_kind_string() {
+        let err = crate::axl_check!(r#"bazel.build_events.iterator(kinds = ["bogus"])"#)
+            .expect_err("expected validation error")
+            .to_string();
+        assert!(err.contains("bogus"), "unexpected error: {err}");
     }
 
     #[test]
-    fn finalize_exit_code_rewrites_clean_exit_to_36_under_fail_at_end() {
-        // Bazel succeeded but a sink reported terminal failure. wait()
-        // exposes 36 so callers can distinguish a sink-induced failure
-        // from a genuine build failure.
-        assert_eq!(super::finalize_exit_code(Some(0), true), Some(36));
-    }
-
-    #[test]
-    fn finalize_exit_code_preserves_clean_exit_without_fail_at_end() {
-        assert_eq!(super::finalize_exit_code(Some(0), false), Some(0));
-    }
-
-    #[test]
-    fn finalize_exit_code_preserves_genuine_bazel_failure_under_fail_at_end() {
-        // A real Bazel failure (any non-zero code) is already meaningful;
-        // fail_at_end must not overwrite it with 36 or callers can't tell
-        // the original failure mode (e.g. 2 = build failure, 39 =
-        // REMOTE_CACHE_EVICTED) from a sink failure.
-        assert_eq!(super::finalize_exit_code(Some(2), true), Some(2));
-        assert_eq!(super::finalize_exit_code(Some(39), true), Some(39));
-    }
-
-    #[test]
-    fn finalize_exit_code_preserves_genuine_bazel_failure_without_fail_at_end() {
-        assert_eq!(super::finalize_exit_code(Some(2), false), Some(2));
+    fn iterator_accepts_kind_strings() {
+        crate::axl_check!(
+            r#"bazel.build_events.iterator(kinds = ["target_completed", "named_set_of_files"])"#
+        )
+        .expect("snippet should validate");
     }
 }

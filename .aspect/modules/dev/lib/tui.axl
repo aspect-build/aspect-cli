@@ -1,7 +1,6 @@
 load("@std//time.axl", "sleep_iter")
 
-def _fancy_tui(ctx: TaskContext, build: bazel.build.Build) -> int:
-    events = build.build_events()
+def _fancy_tui(ctx: TaskContext, build: bazel.build.Build, events: bazel.build.BuildEventIter) -> int:
     offset = 0
     in_flight = {}
     last_drawn_lines = 0
@@ -35,7 +34,7 @@ def _fancy_tui(ctx: TaskContext, build: bazel.build.Build) -> int:
                 ctx.std.io.stderr.write(event.payload.stderr)
                 ctx.std.io.stderr.flush()
 
-            if events.done():
+            if events.done:
                 exit = build.wait()
                 return exit.code
 
@@ -48,8 +47,8 @@ def _fancy_tui(ctx: TaskContext, build: bazel.build.Build) -> int:
             last_drawn_lines = len(in_flight)
             offset = (offset + 1) % len(in_flight)
 
-def _simple_tui(ctx: TaskContext, build: bazel.build.Build) -> int:
-    for event in build.build_events():
+def _simple_tui(ctx: TaskContext, build: bazel.build.Build, events: bazel.build.BuildEventIter) -> int:
+    for event in events:
         if event.kind == "progress":
             ctx.std.io.stdout.write(event.payload.stdout)
             ctx.std.io.stdout.flush()
@@ -59,9 +58,9 @@ def _simple_tui(ctx: TaskContext, build: bazel.build.Build) -> int:
     build_status = build.wait()
     return build_status.code
 
-def tui(ctx: TaskContext, build: bazel.build.Build) -> int:
+def tui(ctx: TaskContext, build: bazel.build.Build, events: bazel.build.BuildEventIter) -> int:
     stdout = ctx.std.io.stdout
     if stdout.is_tty:
-        return _fancy_tui(ctx, build)
+        return _fancy_tui(ctx, build, events)
     else:
-        return _simple_tui(ctx, build)
+        return _simple_tui(ctx, build, events)

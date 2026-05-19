@@ -1,8 +1,10 @@
 //! Retry / backoff machinery for the gRPC BES sink.
 //!
 //! Mirrors Bazel's `BuildEventServiceUploader`: bounded retry budget with
-//! full-jitter exponential backoff, an in-flight buffer for replay across
-//! reconnects, and four user-selectable terminal-failure strategies.
+//! full-jitter exponential backoff and an in-flight buffer for replay across
+//! reconnects. Terminal failures are surfaced via the sink's outcome — the
+//! caller decides what to do (warn, fail the task, etc.); the runtime never
+//! tries to second-guess the policy.
 
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -11,41 +13,12 @@ use axl_proto::google::devtools::build::v1::PublishBuildToolEventStreamRequest;
 use build_event_stream::client::ClientError;
 use rand::Rng;
 
-/// How a terminal sink failure surfaces to the user.
-///
-/// The user-configurable surface (Starlark `error_strategy`) is `warn`,
-/// `fail_at_end`, or `ignore`. `Abort` exists for *internal* sinks
-/// (e.g. the execution-log writer, whose failures indicate a real bug
-/// rather than a flaky backend) and is intentionally **not** exposed
-/// through the Starlark parser.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ErrorStrategy {
-    Abort,
-    FailAtEnd,
-    Warn,
-    Ignore,
-}
-
-impl ErrorStrategy {
-    pub fn parse(s: &str) -> Result<Self, String> {
-        match s {
-            "fail_at_end" => Ok(ErrorStrategy::FailAtEnd),
-            "warn" => Ok(ErrorStrategy::Warn),
-            "ignore" => Ok(ErrorStrategy::Ignore),
-            other => Err(format!(
-                "invalid error_strategy '{other}': expected one of 'fail_at_end', 'warn', 'ignore'"
-            )),
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct RetryConfig {
     pub max_retries: u32,
     pub retry_min_delay: Duration,
     pub retry_max_buffer_size: usize,
     pub timeout: Option<Duration>,
-    pub error_strategy: ErrorStrategy,
 }
 
 impl Default for RetryConfig {
@@ -55,7 +28,6 @@ impl Default for RetryConfig {
             retry_min_delay: Duration::from_secs(1),
             retry_max_buffer_size: 10_000,
             timeout: None,
-            error_strategy: ErrorStrategy::Warn,
         }
     }
 }
@@ -203,20 +175,18 @@ pub fn is_retryable(err: &ClientError) -> bool {
     }
 }
 
-/// Terminal failure of a sink. Carries the user-configured surface strategy
-/// plus a human-readable description of the underlying error. Implements
-/// `Error` via `thiserror` so sink work functions can use `?` and `wait()`
-/// can chain it through `anyhow` without ceremony.
+/// Terminal failure of a sink. Carries the human-readable description of
+/// the underlying error. Implements `Error` via `thiserror` so sink work
+/// functions can use `?` and callers can chain it through `anyhow` without
+/// ceremony. Surface policy lives in the caller, not on this struct.
 #[derive(Debug, thiserror::Error)]
 #[error("{last_error}")]
 pub struct SinkError {
-    pub strategy: ErrorStrategy,
     pub last_error: String,
 }
 
 /// What a sink thread returns. `Ok(())` on clean exit; `Err(SinkError)` when
-/// the sink gave up — `wait()` decides whether to abort, fail at end, or
-/// just warn based on `SinkError::strategy`.
+/// the sink gave up.
 pub type SinkOutcome = Result<(), SinkError>;
 
 #[cfg(test)]
@@ -285,19 +255,4 @@ mod tests {
         assert!(!is_retryable(&perm));
     }
 
-    #[test]
-    fn error_strategy_parse() {
-        assert_eq!(
-            ErrorStrategy::parse("fail_at_end").unwrap(),
-            ErrorStrategy::FailAtEnd
-        );
-        assert_eq!(ErrorStrategy::parse("warn").unwrap(), ErrorStrategy::Warn);
-        assert_eq!(
-            ErrorStrategy::parse("ignore").unwrap(),
-            ErrorStrategy::Ignore
-        );
-        // `abort` is internal-only; the Starlark surface must reject it.
-        assert!(ErrorStrategy::parse("abort").is_err());
-        assert!(ErrorStrategy::parse("nope").is_err());
-    }
 }

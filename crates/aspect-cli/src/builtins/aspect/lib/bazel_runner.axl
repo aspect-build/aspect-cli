@@ -267,18 +267,14 @@ def run_bazel_task(ctx: TaskContext, command: str) -> TaskConclusion:
     if bazel_trait.startup_flags:
         startup_flags = bazel_trait.startup_flags(startup_flags)
 
-    # BES: merge arg-based sinks with trait sinks.
-    build_events = _collect_bes_from_args(ctx)
+    # BES sinks: arg-based + trait sinks. Iteration intent (status surfaces
+    # or per-event hooks) is signaled via `need_bes`; the iter handle is
+    # created per retry attempt below, since each `iterator()` is single-use.
+    bes_sinks = _collect_bes_from_args(ctx)
     if bazel_trait.build_event_sinks:
-        build_events.extend(bazel_trait.build_event_sinks)
+        bes_sinks.extend(bazel_trait.build_event_sinks)
 
-    # Coerce to bool/list for ctx.bazel.build/test:
-    # - non-empty list → stream to those sinks + build_events() iterator.
-    # - True → stream without explicit sinks (build_event handler + result tracking)
-    # - False → no BEP stream at all
     need_bes = bool(bazel_trait.build_event) or bool(lifecycle.task_update)
-    if not build_events:
-        build_events = True if need_bes else False
 
     for handler in bazel_trait.build_start:
         handler(ctx)
@@ -355,6 +351,17 @@ def run_bazel_task(ctx: TaskContext, command: str) -> TaskConclusion:
             ),
         )
 
+        # Per-attempt iter handle (single-use rule). When this task doesn't
+        # iterate events, we pass just the bes_sinks; if neither are present,
+        # pass `False` to skip the BEP stream entirely.
+        events = bazel.build_events.iterator() if need_bes else None
+        if events:
+            build_events = [events] + bes_sinks
+        elif bes_sinks:
+            build_events = bes_sinks
+        else:
+            build_events = False
+
         if command == "test":
             invocation = ctx.bazel.test(
                 build_events = build_events,
@@ -369,15 +376,6 @@ def run_bazel_task(ctx: TaskContext, command: str) -> TaskConclusion:
                 flags = flags,
                 *ctx.args.targets
             )
-
-        # Subscribe BEFORE emitting any task_updates (the broadcaster only
-        # delivers to subscribers that joined before the event was sent).
-        # On a warm bazel daemon BES events stream within milliseconds, so
-        # the gap between `ctx.bazel.{build,test}` returning and the
-        # subscribe is enough to drop the early burst (`build_started`,
-        # `target_completed`, …) — which makes the running annotation
-        # render with stale/empty state.
-        events = invocation.build_events() if need_bes else None
 
         # Capture the sink invocation ID (the UUID used by the Aspect
         # backend; distinct from Bazel's build_started.uuid). The

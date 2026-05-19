@@ -188,10 +188,11 @@ use std::sync::{Arc, Mutex};
 /// Protected by a mutex to ensure thread-safe access.
 #[derive(Debug)]
 struct BroadcasterInner<T> {
-    /// Active subscriber senders. Each sender corresponds to one subscriber's buffer.
-    /// Senders are removed when:
-    /// - The corresponding receiver is dropped (detected on next send)
-    /// - The broadcaster is closed
+    /// Active subscriber senders. Each is a plain unbounded `mpsc::Sender`;
+    /// the broadcaster fire-and-forgets via `send` and prunes senders whose
+    /// receiver has been dropped. Any back-pressure / buffering / drop
+    /// policy is the consumer's responsibility — the broadcaster doesn't
+    /// know or care how a subscriber handles a slow consumer.
     subscribers: Vec<mpsc::Sender<T>>,
 
     /// Whether the broadcaster has been explicitly closed.
@@ -352,10 +353,8 @@ impl<T: Clone> Broadcaster<T> {
     pub fn send(&self, event: T) {
         let mut inner = self.inner.lock().unwrap();
 
-        // Use retain to both send and clean up dead subscribers in one pass.
-        // - send() returns Ok if the receiver is still alive
-        // - send() returns Err if the receiver has been dropped
-        // We keep only the subscribers where send succeeded.
+        // Fire-and-forget into every subscriber. The unbounded `send` only
+        // fails when the receiver has been dropped; drop such subs.
         inner
             .subscribers
             .retain(|tx| tx.send(event.clone()).is_ok());

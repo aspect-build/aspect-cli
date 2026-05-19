@@ -22,8 +22,7 @@ use crate::engine::r#async::rt::AsyncRuntime;
 
 use super::super::stream::Subscriber;
 use super::retry::{
-    BufferOverflow, ErrorStrategy, RetryBuffer, RetryConfig, SinkError, SinkOutcome, backoff,
-    is_retryable,
+    BufferOverflow, RetryBuffer, RetryConfig, SinkError, SinkOutcome, backoff, is_retryable,
 };
 
 #[derive(Debug)]
@@ -113,8 +112,8 @@ fn dbg(endpoint: &str, invocation_id: &str, msg: &str) {
 /// Send one of the unary lifecycle events (`build_enqueued`,
 /// `invocation_started`, `invocation_finished`, `build_finished`),
 /// timing the round trip and logging the result. Errors are wrapped
-/// via `finalize` so a failure surfaces per the configured
-/// `error_strategy` rather than propagating as a raw `ClientError`.
+/// via `finalize` so a failure exits the sink with a `SinkError`
+/// rather than propagating as a raw `ClientError`.
 async fn send_lifecycle_logged(
     name: &str,
     retry: &RetryConfig,
@@ -122,7 +121,6 @@ async fn send_lifecycle_logged(
     request: PublishLifecycleEventRequest,
     endpoint: &str,
     invocation_id: &str,
-    strategy: ErrorStrategy,
 ) -> Result<(), SinkError> {
     dbg(
         endpoint,
@@ -136,7 +134,7 @@ async fn send_lifecycle_logged(
             invocation_id,
             &format!("{name} FAILED after {:?}: {e}", t.elapsed()),
         );
-        finalize(strategy, endpoint, format!("{name}: {e}"))
+        finalize(endpoint, format!("{name}: {e}"))
     })?;
     dbg(
         endpoint,
@@ -153,8 +151,6 @@ async fn work(
     invocation_id: String,
     retry: RetryConfig,
 ) -> SinkOutcome {
-    let strategy = retry.error_strategy;
-
     dbg(
         &endpoint,
         &invocation_id,
@@ -187,12 +183,9 @@ async fn work(
     let connect_started = std::time::Instant::now();
     let mut client =
         match tokio::time::timeout(CONNECT_TIMEOUT, Client::new(endpoint.clone(), headers)).await {
-            Ok(r) => {
-                r.map_err(|e| finalize(strategy, &endpoint, format!("connect failed: {e}")))?
-            }
+            Ok(r) => r.map_err(|e| finalize(&endpoint, format!("connect failed: {e}")))?,
             Err(_) => {
                 return Err(finalize(
-                    strategy,
                     &endpoint,
                     "connect timed out after 10s".to_string(),
                 ));
@@ -216,7 +209,6 @@ async fn work(
         lifecycle::build_enqueued(build_id.clone(), invocation_id.clone()),
         &endpoint,
         &invocation_id,
-        strategy,
     )
     .await?;
     send_lifecycle_logged(
@@ -226,7 +218,6 @@ async fn work(
         lifecycle::invocation_started(build_id.clone(), invocation_id.clone()),
         &endpoint,
         &invocation_id,
-        strategy,
     )
     .await?;
 
@@ -273,7 +264,6 @@ async fn work(
             DriveOutcome::Transient(err) => {
                 if attempt >= retry.max_retries {
                     return Err(finalize(
-                        strategy,
                         &endpoint,
                         format!("giving up after {attempt} attempts: {err}"),
                     ));
@@ -289,14 +279,10 @@ async fn work(
                 continue 'reconnect;
             }
             DriveOutcome::Fatal(err) => {
-                return Err(finalize(
-                    strategy,
-                    &endpoint,
-                    format!("non-retryable: {err}"),
-                ));
+                return Err(finalize(&endpoint, format!("non-retryable: {err}")));
             }
             DriveOutcome::BufferFull(err) => {
-                return Err(finalize(strategy, &endpoint, err.to_string()));
+                return Err(finalize(&endpoint, err.to_string()));
             }
         }
     }
@@ -330,7 +316,6 @@ async fn work(
             ),
             &endpoint,
             &invocation_id,
-            strategy,
         )
         .await?;
         send_lifecycle_logged(
@@ -340,7 +325,6 @@ async fn work(
             lifecycle::build_finished(build_id.clone(), invocation_id.clone()),
             &endpoint,
             &invocation_id,
-            strategy,
         )
         .await?;
         Ok::<(), SinkError>(())
@@ -350,7 +334,6 @@ async fn work(
             Ok(Ok(())) => Ok(()),
             Ok(Err(e)) => Err(e),
             Err(_) => Err(finalize(
-                strategy,
                 &endpoint,
                 format!("post-stream lifecycle exceeded {d:?} budget"),
             )),
@@ -809,12 +792,11 @@ async fn retry_lifecycle(
     }
 }
 
-fn finalize(strategy: ErrorStrategy, endpoint: &str, last_error: String) -> SinkError {
-    if matches!(strategy, ErrorStrategy::Warn) {
-        eprintln!("WARN: BES sink {endpoint} giving up: {last_error}");
-    }
-    SinkError {
-        strategy,
-        last_error,
-    }
+fn finalize(endpoint: &str, last_error: String) -> SinkError {
+    // Always log a warning when a sink gives up. The caller decides whether
+    // to surface the failure further (e.g. via `sink.failed` on a per-handle
+    // basis) — the runtime does NOT translate sink failure into a build
+    // exit code.
+    eprintln!("WARNING: BES sink {endpoint} giving up: {last_error}");
+    SinkError { last_error }
 }
