@@ -316,16 +316,17 @@ def test_starlark(tc: int) -> int:
     return tc
 
 def test_build_events(ctx: TaskContext, tc: int, temp_dir: str) -> int:
-    # Test build_events() API
+    # Test build_events iterator API
 
+    iter = bazel.build_events.iterator()
     build = ctx.bazel.build(
         "//crates/aspect-cli:aspect-cli",
         flags = ["--nobuild"],  # Fast - just analysis phase
-        build_events = True,
+        build_events = [iter],
     )
 
     events = []
-    for event in build.build_events():
+    for event in iter:
         events.append(event.kind)
 
     status = build.wait()
@@ -342,17 +343,18 @@ def test_large_bes(ctx: TaskContext, tc: int, temp_dir: str) -> int:
     # Build targets to generate many BES events
     # The :all_targets filegroup depends on 1000 targets
     # Disable all caching to force fresh execution and generate >1000 BES events
+    iter = bazel.build_events.iterator()
     build = ctx.bazel.build(
         "//...",
         flags = ["--noremote_accept_cached"],
-        build_events = True,
+        build_events = [iter],
         current_dir = "./examples/large_bes",
     )
 
     # Iterate through all build events - this would hang before the fix
     event_count = 0
     event_kinds = set()
-    for event in build.build_events():
+    for event in iter:
         event_count += 1
         event_kinds.add(event.kind)
 

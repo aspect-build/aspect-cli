@@ -92,8 +92,8 @@ hc_trait.pre_health_check
   └─ Workflows prints `--- :computer: Workflows runner environment` / health check
 bazel_trait.build_start
   └─ Workflows prints `--- :bazel: Running bazel <task> [<task-key>] <targets>`
-ctx.bazel.build(...)
-events = build.build_events()                    # subscribe BEFORE the next emit
+events = bazel.build_events.iterator()           # create handle BEFORE the spawn
+ctx.bazel.build(..., build_events = [events])    # runtime subscribes pre-spawn
 data["sink_invocation_id"] = build.sink_invocation_id
 lifecycle.task_update(running)                   # link surfaces in the annotation
 for event in events:
@@ -151,34 +151,32 @@ def _artifact_upload_impl(ctx: FeatureContext):
 
 ---
 
-## BES streaming and the broadcaster race
+## BES streaming: handle-based iterator API
 
-A subtle but load-bearing design detail. The runtime exposes BES events via a *broadcaster* (see [`crates/axl-runtime/src/engine/bazel/stream/broadcaster.rs`](../../../../axl-runtime/src/engine/bazel/stream/broadcaster.rs)):
+BES events reach AXL through a broadcaster (see [`crates/axl-runtime/src/engine/bazel/stream/broadcaster.rs`](../../../../axl-runtime/src/engine/bazel/stream/broadcaster.rs)). It's fire-and-forget: every `send` clones into every subscriber's mpsc channel and never blocks. The broadcaster has no opinion about back-pressure or replay — subscribers manage their own buffering.
 
-- Subscribers register and get a private channel. The broadcaster dispatches every event to every subscriber's channel.
-- **Subscribers that join after an event has been broadcast do *not* receive that event.** There is no replay buffer.
-
-`ctx.bazel.build(...)` registers two subscribers internally before returning (a tracing sink and the gRPC sinks from `bazel_trait.build_event_sinks`). User code that wants its own iterator calls `build.build_events()`, which calls `event_stream.subscribe()` lazily.
-
-On a **warm bazel daemon** with a fully cached build, BES events stream within milliseconds. If the task does any meaningful work between `ctx.bazel.build(...)` returning and `build.build_events()` being called — including emitting a running `task_update` (which spawns `buildkite-agent annotate`, dozens of ms) — the user-side subscriber registers too late and the early burst (`build_started`, `target_completed`, `named_set_of_files`) is gone. `runnable.determine_entrypoint()` then can't find the target's executable, format/gazelle silently can't run their binary, lint can't read SARIF reports.
-
-**The rule: call `build.build_events()` immediately after `ctx.bazel.build(...)` returns, before any other work.** Stash the iterator and use it later:
+Tasks that need to consume events do so via an explicit iterator handle:
 
 ```python
-build = ctx.bazel.build(...)
-events = build.build_events()        # ← subscribe FIRST, the channel is now buffering
-
-# Now safe to do potentially-slow work — the broadcaster is feeding `events`'
-# channel from t=0 regardless of how slow we are below.
-data["sink_invocation_id"] = build.sink_invocation_id
-for handler in lifecycle.task_update:
-    handler(ctx, TaskUpdate(kind = "...", status = "running", data = data))
-
-for event in events:                  # iterate the already-buffered channel
+events = bazel.build_events.iterator()
+build = ctx.bazel.build(..., build_events = [events])
+for event in events:
     ...
 ```
 
-If you violate this rule, the failure mode is *intermittent* — cold-daemon runs work, warm-daemon runs fail — which is exactly the kind of bug that escapes local testing.
+The handle is created *before* `ctx.bazel.build(...)` and passed in via `build_events=[...]`. The runtime subscribes the receiver inside `Build::spawn`, before bazel opens the BEP FIFO — so the early burst (`build_started`, `target_completed`, `named_set_of_files`) is buffered for the consumer regardless of when iteration actually starts. The race window present with the old lazy `build.build_events()` is closed by construction: you can't pass a handle that doesn't exist yet, and once passed it's already subscribed.
+
+Handles are single-use; reusing one in a second `ctx.bazel.build(...)` call errors. For retries, create a fresh handle per attempt.
+
+Optional `kinds=` filter narrows the stream at iteration time:
+
+```python
+events = bazel.build_events.iterator(
+    kinds = [build_event.TargetCompleted, "named_set_of_files"],
+)
+```
+
+The mpsc channel between the broadcaster and the iterator is unbounded; iterate promptly to keep memory in check, or call `events.drain()` to stop accumulating events.
 
 ---
 
@@ -451,7 +449,9 @@ def _impl(ctx: TaskContext) -> int:
     # 4. Pass build_event_sinks (gRPC sinks the runtime registers BEFORE
     #    `Build::spawn` returns) so BES events reach the Aspect backend
     #    and the "Aspect Workflows" link resolves to a real invocation.
-    build_events = list(bazel_trait.build_event_sinks) if bazel_trait.build_event_sinks else True
+    #    The iter handle subscribes pre-spawn — no late-subscribe race.
+    events = bazel.build_events.iterator()
+    build_events = [events] + list(bazel_trait.build_event_sinks)
 
     # 5. Fire build_start hooks BEFORE spawning Bazel. The `Workflows`
     #    feature registers the `--- :bazel: Running bazel <task> [<key>]
@@ -464,11 +464,6 @@ def _impl(ctx: TaskContext) -> int:
         build_events = build_events,
         *ctx.args.targets,
     )
-
-    # 6. Subscribe to the BES stream IMMEDIATELY after Build::spawn
-    #    returns — BEFORE doing any potentially-slow work. See the
-    #    "BES streaming and the broadcaster race" section above.
-    events = build.build_events()
 
     # 7. Capture sink_invocation_id (the runtime mints it inside
     #    Build::spawn before returning, so it's available now without
@@ -617,11 +612,11 @@ When a task you change works in snapshots but fails live (artifact URL malformed
 
 When writing a new task or modifying an existing one, sanity-check:
 
-- [ ] Subscribe to BES events (`build.build_events()`) **immediately** after `ctx.bazel.build(...)` returns, before any other work.
-- [ ] Capture `data["sink_invocation_id"] = build.sink_invocation_id` right after, then emit a running `task_update` so the Aspect Workflows link surfaces live.
+- [ ] If the task iterates BES events, create the iterator handle with `bazel.build_events.iterator()` *before* calling `ctx.bazel.build(...)`, and include it in the `build_events=[...]` list. The runtime subscribes it pre-spawn; the race is closed by construction.
+- [ ] Capture `data["sink_invocation_id"] = build.sink_invocation_id` after `ctx.bazel.build` returns, then emit a running `task_update` so the Aspect Workflows link surfaces live.
 - [ ] Iterate `bazel_trait.build_start` / `build_event` / `build_end` so features fire (BK section markers, artifact upload).
 - [ ] Iterate `hc_trait.pre_health_check` / `post_health_check` so the runner-env sections render and post-failures surface.
 - [ ] Emit terminal `task_update` (`status="passed"` or `"failed"`) and `task_complete(exit_code)` *before* every `return`.
 - [ ] If a feature subscribes to `bazel_trait.build_event`, your BES loop must call those hooks per event — otherwise `_on_build_event` callbacks never run.
-- [ ] If your task rebuilds or retries, the broadcaster's per-attempt subscriber is fresh; don't reuse the iterator across attempts.
+- [ ] For tasks that retry the bazel invocation, create a fresh `iterator()` handle per attempt — handles are single-use.
 - [ ] Run the relevant snapshot suite (`./target/debug/aspect-cli dev test-<kind>-template-snapshots`) and `tests axl` before pushing.

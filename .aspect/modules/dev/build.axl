@@ -5,14 +5,15 @@ In development 'build' task with an AXL powered UI.
 load("./lib/tui.axl", "tui")
 
 def _build_impl(ctx: TaskContext) -> int:
+    events = bazel.build_events.iterator()
     build = ctx.bazel.build(
-        build_events = True,
+        build_events = [events],
         flags = ["--isatty=" + str(int(ctx.std.io.stdout.is_tty))],
         stdout = None,
         stderr = None,
         *ctx.args.targets
     )
-    return tui(ctx, build)
+    return tui(ctx, build, events)
 
 build = task(
     args = {

@@ -81,6 +81,25 @@ fn resolve_stdio(
     Ok((to_stdio(stdout)?, to_stdio(stderr)?))
 }
 
+fn partition_build_events(
+    arg: Either<bool, UnpackList<Either<build::BuildEventSink, build::BuildEventIter>>>,
+) -> (bool, Vec<build::BuildEventSink>, Vec<build::BuildEventIter>) {
+    match arg {
+        Either::Left(b) => (b, vec![], vec![]),
+        Either::Right(items) => {
+            let mut sinks = vec![];
+            let mut iters = vec![];
+            for item in items.items {
+                match item {
+                    Either::Left(s) => sinks.push(s),
+                    Either::Right(i) => iters.push(i),
+                }
+            }
+            (true, sinks, iters)
+        }
+    }
+}
+
 /// Resolve a mixed list of plain flags and conditional `(flag, constraint)` tuples into
 /// a `Vec<String>`. Returns only the flags whose semver constraint matches `version`.
 /// When `version` is `None` all items must be plain strings (i.e. `Either::Left`).
@@ -253,7 +272,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(args)] targets: UnpackTuple<values::StringValue>,
         #[starlark(require = named, default = Either::Left(false))] build_events: Either<
             bool,
-            UnpackList<build::BuildEventSink>,
+            UnpackList<Either<build::BuildEventSink, build::BuildEventIter>>,
         >,
         #[starlark(require = named, default = false)] workspace_events: bool,
         #[starlark(require = named, default = Either::Left(false))] execution_log: Either<
@@ -269,10 +288,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = NoneOr::None)] current_dir: NoneOr<String>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<build::Build> {
-        let build_events = match build_events {
-            Either::Left(events) => (events, vec![]),
-            Either::Right(sinks) => (true, sinks.items),
-        };
+        let build_events = partition_build_events(build_events);
         let execution_log = match execution_log {
             Either::Left(b) => (b, vec![]),
             Either::Right(sinks) => (true, sinks.items),
@@ -364,7 +380,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(args)] targets: UnpackTuple<values::StringValue>,
         #[starlark(require = named, default = Either::Left(false))] build_events: Either<
             bool,
-            UnpackList<build::BuildEventSink>,
+            UnpackList<Either<build::BuildEventSink, build::BuildEventIter>>,
         >,
         #[starlark(require = named, default = false)] workspace_events: bool,
         #[starlark(require = named, default = Either::Left(false))] execution_log: Either<
@@ -380,10 +396,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = NoneOr::None)] current_dir: NoneOr<String>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<build::Build> {
-        let build_events = match build_events {
-            Either::Left(events) => (events, vec![]),
-            Either::Right(sinks) => (true, sinks.items),
-        };
+        let build_events = partition_build_events(build_events);
         let execution_log = match execution_log {
             Either::Left(b) => (b, vec![]),
             Either::Right(sinks) => (true, sinks.items),
@@ -642,8 +655,6 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
     /// * `retry_max_buffer_size` - Cap on the in-flight unacked retry buffer
     ///   (default `10000`). Exceeding it mid-stream is terminal.
     /// * `timeout` - Overall upload deadline (default `"0s"` = no deadline).
-    /// * `error_strategy` - How a terminal failure surfaces. One of
-    ///   `"fail_at_end"`, `"warn"` (default), `"ignore"`.
     #[starlark(as_type = build::BuildEventSink)]
     fn grpc(
         #[starlark(require = named)] uri: String,
@@ -653,7 +664,6 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
         #[starlark(require = named, default = "1s")] retry_min_delay: &str,
         #[starlark(require = named, default = 10_000)] retry_max_buffer_size: i32,
         #[starlark(require = named, default = "0s")] timeout: &str,
-        #[starlark(require = named, default = "warn")] error_strategy: &str,
     ) -> anyhow::Result<build::BuildEventSink> {
         if max_retries < 0 {
             anyhow::bail!("max_retries must be >= 0, got {max_retries}");
@@ -670,24 +680,91 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
         } else {
             Some(timeout_dur)
         };
-        let error_strategy =
-            sink::retry::ErrorStrategy::parse(error_strategy).map_err(|e| anyhow::anyhow!(e))?;
-        Ok(build::BuildEventSink::Grpc {
-            uri: uri.replace("grpcs://", "https://"),
-            metadata: HashMap::from_iter(metadata.entries),
-            retry: sink::retry::RetryConfig {
+        Ok(build::BuildEventSink::new_grpc(
+            uri.replace("grpcs://", "https://"),
+            HashMap::from_iter(metadata.entries),
+            sink::retry::RetryConfig {
                 max_retries: max_retries as u32,
                 retry_min_delay,
                 retry_max_buffer_size: retry_max_buffer_size as usize,
                 timeout,
-                error_strategy,
             },
-        })
+        ))
     }
 
     fn file(#[starlark(require = named)] path: String) -> anyhow::Result<build::BuildEventSink> {
-        Ok(build::BuildEventSink::File { path })
+        Ok(build::BuildEventSink::new_file(path))
     }
+
+    /// Create a handle iterating this build's BES stream. Pass it in
+    /// `build_events=[...]` and then `for event in iter:`. Optional
+    /// `kinds=[build_event.TargetCompleted, "named_set_of_files", ...]`
+    /// filters at iteration time.
+    #[starlark(as_type = build::BuildEventIter)]
+    fn iterator(
+        #[starlark(require = named, default = NoneOr::None)] kinds: NoneOr<
+            UnpackList<values::Value>,
+        >,
+    ) -> anyhow::Result<build::BuildEventIter> {
+        let kinds = match kinds {
+            NoneOr::None => None,
+            NoneOr::Other(list) => {
+                if list.items.is_empty() {
+                    anyhow::bail!(
+                        "kinds=[] is not valid; omit `kinds` to receive every event kind"
+                    );
+                }
+                let mut set = std::collections::HashSet::new();
+                for item in &list.items {
+                    set.insert(parse_event_kind(*item)?);
+                }
+                Some(set)
+            }
+        };
+        Ok(build::BuildEventIter::new(kinds))
+    }
+}
+
+fn parse_event_kind<'v>(value: values::Value<'v>) -> anyhow::Result<i32> {
+    if let Some(n) = value.unpack_i32() {
+        return Ok(n);
+    }
+    if let Some(s) = value.unpack_str() {
+        return match s {
+            "progress" => Ok(3),
+            "aborted" => Ok(4),
+            "started" | "build_started" => Ok(5),
+            "expanded" | "pattern_expanded" => Ok(6),
+            "configured" | "target_configured" => Ok(7),
+            "action" | "action_completed" => Ok(8),
+            "completed" | "target_completed" => Ok(9),
+            "test_result" => Ok(10),
+            "finished" | "build_finished" => Ok(11),
+            "unstructured_command_line" => Ok(12),
+            "structured_command_line" => Ok(13),
+            "options_parsed" => Ok(14),
+            "named_set_of_files" | "named_set" => Ok(15),
+            "workspace_status" => Ok(16),
+            "fetch" => Ok(17),
+            "configuration" => Ok(19),
+            "test_summary" => Ok(20),
+            "build_tool_logs" => Ok(21),
+            "build_metrics" => Ok(22),
+            "build_metadata" => Ok(24),
+            "workspace_info" => Ok(25),
+            "target_summary" => Ok(26),
+            "convenience_symlinks_identified" => Ok(27),
+            "exec_request" => Ok(28),
+            other => anyhow::bail!(
+                "unknown build_event kind '{other}'; pass a `bazel.build.build_event.*` \
+                 constant or one of the documented string aliases",
+            ),
+        };
+    }
+    anyhow::bail!(
+        "kinds entry must be a `bazel.build.build_event.*` constant or a string alias; got {}",
+        value.get_type()
+    )
 }
 
 #[starlark_module]
@@ -709,8 +786,7 @@ fn register_execlog_sinks(globals: &mut GlobalsBuilder) {
 #[starlark_module]
 fn register_build_types(globals: &mut GlobalsBuilder) {
     const Build: StarlarkValueAsType<build::Build> = StarlarkValueAsType::new();
-    const BuildEventIterator: StarlarkValueAsType<iter::BuildEventIterator> =
-        StarlarkValueAsType::new();
+    const BuildEventIter: StarlarkValueAsType<build::BuildEventIter> = StarlarkValueAsType::new();
     const BuildEventSink: StarlarkValueAsType<build::BuildEventSink> = StarlarkValueAsType::new();
     const BuildStatus: StarlarkValueAsType<build::BuildStatus> = StarlarkValueAsType::new();
     const Cancellation: StarlarkValueAsType<cancel::Cancellation> = StarlarkValueAsType::new();

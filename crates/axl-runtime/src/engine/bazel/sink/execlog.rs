@@ -14,7 +14,7 @@ use starlark::values;
 use starlark::values::starlark_value;
 use starlark::values::{NoSerialize, ProvidesStaticType, UnpackValue, ValueLike};
 
-use super::retry::{ErrorStrategy, SinkError, SinkOutcome};
+use super::retry::{SinkError, SinkOutcome};
 
 /// Sink types for execution log output.
 ///
@@ -49,24 +49,19 @@ impl ExecLogSink {
     /// Spawns a thread that reads decoded `ExecLogEntry` values from `recv` and
     /// writes them to `path` in varint-length-prefixed binary proto format.
     ///
-    /// I/O errors surface as `Err(SinkError { strategy: Abort, .. })` so the
-    /// build fails cleanly instead of leaving a half-written log behind.
+    /// I/O errors surface as `Err(SinkError)`; the caller decides whether to
+    /// fail the task (e.g. by inspecting the sink's outcome).
     pub fn spawn_file(recv: Receiver<ExecLogEntry>, path: String) -> JoinHandle<SinkOutcome> {
         thread::spawn(move || {
-            let abort = |last_error: String| SinkError {
-                strategy: ErrorStrategy::Abort,
-                last_error,
-            };
+            let err = |last_error: String| SinkError { last_error };
             let file = File::create(&path)
-                .map_err(|e| abort(format!("ExecLog: failed to create '{path}': {e}")))?;
+                .map_err(|e| err(format!("ExecLog: failed to create '{path}': {e}")))?;
             let mut file = BufWriter::new(file);
             loop {
                 match recv.recv() {
                     Ok(entry) => {
                         file.write_all(&entry.encode_length_delimited_to_vec())
-                            .map_err(|e| {
-                                abort(format!("ExecLog: write to '{path}' failed: {e}"))
-                            })?;
+                            .map_err(|e| err(format!("ExecLog: write to '{path}' failed: {e}")))?;
                     }
                     Err(RecvError::Disconnected) => break,
                 }

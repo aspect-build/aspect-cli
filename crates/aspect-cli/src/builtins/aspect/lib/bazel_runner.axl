@@ -267,18 +267,10 @@ def run_bazel_task(ctx: TaskContext, command: str) -> TaskConclusion:
     if bazel_trait.startup_flags:
         startup_flags = bazel_trait.startup_flags(startup_flags)
 
-    # BES: merge arg-based sinks with trait sinks.
-    build_events = _collect_bes_from_args(ctx)
+    bes_sinks = _collect_bes_from_args(ctx)
     if bazel_trait.build_event_sinks:
-        build_events.extend(bazel_trait.build_event_sinks)
-
-    # Coerce to bool/list for ctx.bazel.build/test:
-    # - non-empty list → stream to those sinks + build_events() iterator.
-    # - True → stream without explicit sinks (build_event handler + result tracking)
-    # - False → no BEP stream at all
+        bes_sinks.extend(bazel_trait.build_event_sinks)
     need_bes = bool(bazel_trait.build_event) or bool(lifecycle.task_update)
-    if not build_events:
-        build_events = True if need_bes else False
 
     for handler in bazel_trait.build_start:
         handler(ctx)
@@ -355,6 +347,15 @@ def run_bazel_task(ctx: TaskContext, command: str) -> TaskConclusion:
             ),
         )
 
+        # Per-attempt iter handle; single-use, so re-create each retry.
+        events = bazel.build_events.iterator() if need_bes else None
+        if events:
+            build_events = [events] + bes_sinks
+        elif bes_sinks:
+            build_events = bes_sinks
+        else:
+            build_events = False
+
         if command == "test":
             invocation = ctx.bazel.test(
                 build_events = build_events,
@@ -369,15 +370,6 @@ def run_bazel_task(ctx: TaskContext, command: str) -> TaskConclusion:
                 flags = flags,
                 *ctx.args.targets
             )
-
-        # Subscribe BEFORE emitting any task_updates (the broadcaster only
-        # delivers to subscribers that joined before the event was sent).
-        # On a warm bazel daemon BES events stream within milliseconds, so
-        # the gap between `ctx.bazel.{build,test}` returning and the
-        # subscribe is enough to drop the early burst (`build_started`,
-        # `target_completed`, …) — which makes the running annotation
-        # render with stale/empty state.
-        events = invocation.build_events() if need_bes else None
 
         # Capture the sink invocation ID (the UUID used by the Aspect
         # backend; distinct from Bazel's build_started.uuid). The
@@ -443,10 +435,15 @@ def run_bazel_task(ctx: TaskContext, command: str) -> TaskConclusion:
                     for handler in lifecycle.task_update:
                         handler(ctx, update)
                     last_emit_ms = now_ms(ctx)
-                if events.done():
+                if events.done:
                     break
 
         invocation_status = invocation.wait()
+
+        # Flush sinks before deciding whether to retry — re-binding a Live
+        # sink errors (see BuildEventSink::bind_grpc).
+        for sink in bes_sinks:
+            sink.wait()
 
         if invocation_status.code == 0 or not bazel_trait.build_retry(invocation_status.code):
             break

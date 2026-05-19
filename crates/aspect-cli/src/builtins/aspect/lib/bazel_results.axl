@@ -90,7 +90,7 @@ MIN_HEARTBEAT_INTERVAL_MS = 5000
 # Sleep interval between BES event drain passes. Each tick:
 #   - drains all currently-available events via events.try_pop()
 #   - emits at most once (per interesting event batch or heartbeat)
-#   - checks events.done() for stream termination
+#   - checks events.done for stream termination
 # 250ms gives 4 wake-ups per second — heartbeats fire within 250ms of
 # the threshold, low CPU. Short enough that long event-quiet stretches
 # (e.g. CI's 60s progress-message reduction) don't stall the loop.

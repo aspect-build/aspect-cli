@@ -292,16 +292,13 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
             # historic snapshot isn't mutated by the next iteration.
             data["bazel"] = bazel_init_data()["bazel"]
             data["bazel_attempts"] = prior_attempts
+        events = bazel.build_events.iterator()
         build = ctx.bazel.build(
             flags = phase1_flags,
-            build_events = build_events,
+            build_events = [events] + build_events,
             execution_log = bazel_trait.execution_log_sinks or False,
             *targets
         )
-
-        # Subscribe BEFORE emitting (broadcaster only delivers to pre-existing
-        # subscribers); a warm daemon can stream BES events within milliseconds.
-        events = build.build_events()
 
         # Capture the sink-side invocation UUID from phase 1 (the
         # representative build) so the "✨ Aspect Workflows" link resolves
@@ -368,9 +365,14 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
             if interesting or now_ms(ctx) - last_emit_ms >= MIN_HEARTBEAT_INTERVAL_MS:
                 _emit_update(ctx, lifecycle, data)
                 last_emit_ms = now_ms(ctx)
-            if events.done():
+            if events.done:
                 break
         status = build.wait()
+
+        # Flush trait sinks (e.g. bessie) before any potential retry —
+        # re-binding a Live sink errors.
+        for sink in build_events:
+            sink.wait()
         if status.code == 0 or not bazel_trait.build_retry(status.code):
             break
 
@@ -681,9 +683,8 @@ def _delivery_impl(ctx):
     if bazel_trait.startup_flags:
         startup_flags = bazel_trait.startup_flags(startup_flags)
 
-    # BES: delivery always needs the iterator for run_tracker, so pass trait sinks
-    # when available and fall back to True otherwise.
-    build_events = list(bazel_trait.build_event_sinks) if bazel_trait.build_event_sinks else True
+    # iter handles are created per attempt inside the retry loop.
+    build_events = list(bazel_trait.build_event_sinks)
 
     for handler in bazel_trait.build_start:
         handler(ctx)
@@ -915,8 +916,14 @@ def _delivery_impl(ctx):
             "--build_runfile_links",
         ]
         _t_download = time.monotonic()
-        build = ctx.bazel.build(flags = phase3_flags, build_events = True, stderr = None, *delivery_targets)
-        for event in build.build_events():
+        phase3_events = bazel.build_events.iterator()
+        build = ctx.bazel.build(
+            flags = phase3_flags,
+            build_events = [phase3_events],
+            stderr = None,
+            *delivery_targets
+        )
+        for event in phase3_events:
             run_tracker.event(event)
         status = build.wait()
 

@@ -74,7 +74,6 @@ def _workflows_impl(ctx: FeatureContext):
                 retry_min_delay = ctx.args.bes_retry_min_delay,
                 retry_max_buffer_size = ctx.args.bes_retry_max_buffer_size,
                 timeout = ctx.args.bes_timeout,
-                error_strategy = ctx.args.bes_error_strategy,
             ))
 
         bazel_trait.extra_flags.extend(metadata_flags)
@@ -115,21 +114,13 @@ Workflows = feature(
         "bes_retry_max_buffer_size": args.int(
             default = 10000,
             description = "Cap on the in-flight unacked BES retry buffer. " +
-                          "Exceeding this mid-stream is treated as a terminal " +
-                          "failure per `bes_error_strategy`.",
+                          "Exceeding this mid-stream is a terminal failure; " +
+                          "the sink logs to stderr and stops uploading.",
         ),
         "bes_timeout": args.string(
             default = "0s",
             description = "Overall BES upload deadline. Duration string; '0s' " +
                           "disables the deadline. Mirrors Bazel's --bes_timeout.",
-        ),
-        "bes_error_strategy": args.string(
-            default = "warn",
-            values = ["fail_at_end", "warn", "ignore"],
-            description = "How a terminal BES failure surfaces. " +
-                          "'fail_at_end' lets the build complete then exits " +
-                          "non-zero; 'warn' (default) prints to stderr and " +
-                          "leaves the exit code alone; 'ignore' is silent.",
         ),
     },
 )
