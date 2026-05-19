@@ -125,23 +125,6 @@ pub(crate) fn build_status_methods(registry: &mut MethodsBuilder) {
     }
 }
 
-// =========================================================================
-// `bazel.build_events.{grpc, file}(...)` — sink handles.
-//
-// Each handle is a stateful value the caller creates and hands to
-// `ctx.bazel.build(build_events=[...])`. State is shared via `Arc<Mutex>` so
-// the original Starlark value and the clone unpacked into `Build::spawn`
-// point to the same state machine:
-//
-//   Pending(config) → Live(per-kind handles) → Done { failed, error }
-//
-// Once a build is spawned, the caller can `sink.wait()` to block until that
-// sink finishes flushing, then inspect `sink.failed` / `sink.error` to
-// decide whether to surface a sink-induced task failure.
-// `build.wait()` does NOT wait for caller-passed sinks — sink flush is the
-// caller's responsibility, not the build's.
-// =========================================================================
-
 #[derive(Clone)]
 enum SinkConfig {
     Grpc {
@@ -448,24 +431,6 @@ pub(crate) fn build_event_sink_methods(registry: &mut MethodsBuilder) {
         Ok(NoneOr::None)
     }
 }
-
-// =========================================================================
-// `bazel.build_events.iterator(...)` — AXL-side iterator handle.
-//
-// The handle is created by the caller *before* `ctx.bazel.build(...)`, passed
-// in via the `build_events=[...]` list, and then iterated. The runtime
-// subscribes the underlying receiver inside `Build::spawn` — before bazel
-// opens the BEP FIFO — so the early burst (`build_started`,
-// `target_completed`, `named_set_of_files`) is buffered for the consumer
-// regardless of how slow the AXL task is to start iterating.
-//
-// State is shared via `Arc<Mutex<IterState>>` so a `BuildEventIter` cloned
-// out of the `build_events=[...]` list (for use by `Build::spawn`) and the
-// original Starlark value (held by the caller for iteration) point to the
-// same state machine. The broadcaster doesn't know or care about this
-// handle's buffering policy — it fire-and-forgets into the receiver's
-// unbounded mpsc channel and that's it.
-// =========================================================================
 
 #[derive(Clone)]
 struct IterConfig {
