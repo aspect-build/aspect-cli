@@ -86,6 +86,69 @@ _LOG = feature_logger("GitHub status checks")
 
 _SUBJECT_MAX_LEN = 60
 
+def lint_annotation_plan(destination, has_pr):
+    """Pure (destination, has_pr) → (enabled, include_fix_bearing) decision.
+
+    Routes lint findings between check-run annotations (this feature,
+    channel 1) and PR-review comments (`GithubLintComments`, channels
+    2 and 3). The two surfaces interact differently depending on the
+    `findings_destination` mode AND whether a GitHub PR context was
+    detected — suggested-fix / PR-comment channels can't post on
+    non-PR runs (push to main, scheduled jobs, GitLab MR runs, GHA
+    `merge_group` events, …), so this function pivots on `has_pr` to
+    keep findings from getting lost when a PR isn't available.
+
+    Cases:
+      destination == "comments"     — never annotate. Every diagnostic
+                                      goes to a PR review comment.
+                                      Off PR there's no comments
+                                      surface, so the feature is moot
+                                      either way (channel 2 silently
+                                      no-ops via the `if not gh: return`
+                                      in `github_lint_comments.axl`).
+      destination == "annotations"  — annotate everything, all the
+                                      time. Comment channels are
+                                      suppressed; that's the explicit
+                                      "no PR review noise" choice.
+      destination == "auto"         — on a PR, fix-bearing diagnostics
+                                      ride channel 3 (suggested-fix
+                                      comments) and are dropped here
+                                      so each finding lands on exactly
+                                      one surface. Off a PR, channel 3
+                                      can't post — so we annotate
+                                      everything (including fix-bearing
+                                      findings) to avoid losing them.
+                                      This is the auto-fallback the
+                                      mode's name implies.
+      destination == "both"         — annotate everything. Differs
+                                      from "auto" only in NOT
+                                      suppressing fix-bearing
+                                      annotations even when a PR
+                                      comment exists for the same
+                                      anchor — the explicit "see
+                                      everything twice" choice.
+
+    Returns `(enabled, include_fix_bearing)`:
+      enabled              — bool, whether to emit any check-run
+                             annotations.
+      include_fix_bearing  — bool, whether fix-bearing diagnostics
+                             count toward annotations. Only consulted
+                             when `enabled` is True.
+    """
+    if destination == "comments":
+        return (False, False)
+    if destination == "auto":
+        # On a PR, fix-bearing → comments only; annotate the non-fix
+        # tail. Off a PR there's no comments surface, so annotate
+        # everything to avoid losing fix-bearing findings — this is
+        # the "auto" fallback for non-PR contexts (push to main, GHA
+        # merge_group, scheduled jobs, GitLab MRs, …).
+        return (True, False) if has_pr else (True, True)
+
+    # "annotations" and "both" — every SARIF finding annotates,
+    # including ones that also have a suggested-fix comment.
+    return (True, True)
+
 def _truncate_subject(subject):
     """Truncate subject at a word boundary if it exceeds _SUBJECT_MAX_LEN characters."""
     if len(subject) <= _SUBJECT_MAX_LEN:
@@ -379,51 +442,23 @@ def _github_status_checks(ctx: FeatureContext):
         _create_check_run(ctx)
 
     def _lint_annotation_plan(ctx):
-        """Decide whether to post annotations for this lint run, and
-        whether fix-bearing diagnostics should be included.
+        """Resolve the live PR context, then delegate to the pure
+        `lint_annotation_plan` decision so the case logic stays
+        testable. See the module-level function for the case table.
 
-        Returns (enabled, include_fix_bearing).
-
-        Cases:
-          findings_destination == "annotations" — always enabled, all
-            diagnostics annotate (suggestions are dropped; that's the
-            tradeoff this mode accepts).
-          findings_destination == "comments"    — never enabled. Every
-            diagnostic goes to a review comment via GithubLintComments.
-          findings_destination == "auto"        — on a PR, fix-bearing
-            diagnostics are SKIPPED at the annotation surface so each
-            finding lands on exactly one surface (fix-bearing →
-            suggestion comment; non-fix → annotation). Off a PR
-            comments can't be posted, so every finding annotates —
-            otherwise fix-bearing findings would have nowhere to land.
-            DORMANT-SPLIT — `has_fix` is False for every rules_lint
-            Go-errorformat linter today (see anchor on
-            `lib/sarif.axl::_result_has_fix`; tracked in
-            https://github.com/aspect-build/rules_lint/issues/749), so on-PR "auto" currently
-            annotates the same set as "both" in practice. The split
-            becomes observable once upstream rules_lint emits SARIF
-            `relatedLocations`.
-          findings_destination == "both"        — enabled, all
-            diagnostics annotate including fix-bearing ones. Comments
-            ALSO render suggested-fix comments for fix-bearing
-            findings — both surfaces show the finding (annotation in
-            Files Changed; suggestion comment with the Apply-suggestion
-            button). Useful when surface coverage matters more than
-            de-duplication.
+        DORMANT-SPLIT — `has_fix` is False for every rules_lint
+        Go-errorformat linter today (see anchor on
+        `lib/sarif.axl::_result_has_fix`; tracked in
+        https://github.com/aspect-build/rules_lint/issues/749), so
+        on-PR "auto" currently annotates the same set as "both" in
+        practice. The split becomes observable once upstream
+        rules_lint emits SARIF `relatedLocations`.
         """
-        dest = lint_trait.findings_destination
-        if dest == "comments":
-            return (False, False)
-        if dest == "auto":
-            # On a PR, fix-bearing → comments only; annotate the
-            # non-fix tail. Off a PR there's no comments surface, so
-            # annotate everything to avoid losing fix-bearing findings.
-            pr, _ = github.detect_pr(ctx.std)
-            return (True, False) if pr else (True, True)
-
-        # "annotations" and "both" — every SARIF finding annotates,
-        # including ones that also have a suggested-fix comment.
-        return (True, True)
+        pr, _ = github.detect_pr(ctx.std)
+        return lint_annotation_plan(
+            lint_trait.findings_destination,
+            has_pr = pr != None,
+        )
 
     def _send_extra_annotation_batches(ctx, token, check_run_id, output, batches):
         """Append annotation batches beyond the first via subsequent PATCHes.

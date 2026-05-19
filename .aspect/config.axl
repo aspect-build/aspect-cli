@@ -2,6 +2,7 @@ load("@aspect//feature/artifacts.axl", "ArtifactUpload")
 load("@aspect//feature/buildkite_annotations.axl", "BuildkiteAnnotations")
 load("@aspect//feature/buildkite_annotations_test.axl", "bk_annotation_snapshot_tests")
 load("@aspect//feature/github_status_checks.axl", "GithubStatusChecks")
+load("@aspect//feature/github_status_checks_test.axl", "lint_annotation_plan_tests")
 load("@aspect//feature/github_status_comments_test.axl", "pr_comment_snapshot_tests")
 load("@aspect//lib/bazel_results_test.axl", "template_snapshot_tests")
 load("@aspect//lib/delivery_results_test.axl", "delivery_template_snapshot_tests")
@@ -128,6 +129,13 @@ def config(ctx: ConfigContext):
     # phase / progress shapes.
     # Run with: aspect dev test-pr-comment-snapshots
     ctx.tasks.add(pr_comment_snapshot_tests)
+
+    # Lint annotation-plan auto-detect — pins the GitHub-PR auto-detect
+    # contract used by the lint task: on a PR, fix-bearing diagnostics
+    # route to suggested-fix comments; off a PR (push, scheduled,
+    # merge_group, GitLab MR, …) annotations pick up everything.
+    # Run with: aspect dev test-lint-annotation-plan
+    ctx.tasks.add(lint_annotation_plan_tests)
 
     # Inject a mix of secret-ish and safe Bazel flags on every task so the
     # status-check redaction path is exercised live against a real BES stream.
