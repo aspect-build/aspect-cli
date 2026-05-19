@@ -445,6 +445,12 @@ def run_bazel_task(ctx: TaskContext, command: str) -> TaskConclusion:
                     break
 
         invocation_status = invocation.wait()
+        # `invocation.wait()` is bazel-only. Flush each caller-passed sink
+        # before deciding whether to retry — if we retried while sinks were
+        # still draining, we'd race against their next-attempt subscription
+        # (sinks are single-use per build).
+        for sink in bes_sinks:
+            sink.wait()
 
         if invocation_status.code == 0 or not bazel_trait.build_retry(invocation_status.code):
             break

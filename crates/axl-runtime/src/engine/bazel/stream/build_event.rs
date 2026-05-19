@@ -55,16 +55,34 @@ impl BuildEventStream {
     /// client process (`Command::spawn().id()`). The BES thread checks
     /// it in the `expecting_retry` BrokenPipe branch; a live writer
     /// means an inter-attempt gap, a dead writer means end-of-build.
+    /// `file_sinks` is the list of `(path, signal)` pairs for each
+    /// `BuildEventSink::File` handle. The reader thread streams raw bytes
+    /// to every path and, when it exits (success or io error), calls
+    /// `signal.complete(result)` on each one. The handle's `sink.wait()`
+    /// blocks on that signal.
     pub fn spawn(
         path: PathBuf,
         server_pid: u32,
         writer_pid: u32,
-        raw_file_sink_paths: Vec<String>,
+        file_sinks: Vec<(String, std::sync::Arc<super::super::build::FileSignal>)>,
     ) -> io::Result<Self> {
         let main_broadcaster = Broadcaster::new();
         let thread_broadcaster = main_broadcaster.clone();
         let handle = thread::spawn(move || {
             let broadcaster = thread_broadcaster;
+            // Split paths from signals for ergonomic plumbing into the
+            // existing MultiWriter; we'll fan the terminal result back to
+            // every signal at exit.
+            let raw_file_sink_paths: Vec<String> =
+                file_sinks.iter().map(|(p, _)| p.clone()).collect();
+            let file_signals: Vec<std::sync::Arc<super::super::build::FileSignal>> =
+                file_sinks.into_iter().map(|(_, s)| s).collect();
+            let signal_all = |result: Result<(), String>| {
+                for s in &file_signals {
+                    s.complete(result.clone());
+                }
+            };
+
             let open_file_sinks = |paths: &[String]| -> io::Result<MultiWriter<BufWriter<File>>> {
                 let writers = paths
                     .iter()
@@ -73,7 +91,13 @@ impl BuildEventStream {
                 Ok(MultiWriter { writers })
             };
 
-            let mut raw_out = open_file_sinks(&raw_file_sink_paths)?;
+            let mut raw_out = match open_file_sinks(&raw_file_sink_paths) {
+                Ok(w) => w,
+                Err(e) => {
+                    signal_all(Err(format!("failed to open file sink(s): {e}")));
+                    return Err(BuildEventStreamError::IO(e));
+                }
+            };
             // mkfifo is idempotent (`Pipe::new` tolerates EEXIST), so this
             // works whether the caller pre-created the FIFO via
             // `reserve_path` (production) or not (unit tests).
@@ -163,6 +187,9 @@ impl BuildEventStream {
                                             raw_out = new_raw_out;
                                         }
                                         Err(e) => {
+                                            signal_all(Err(format!(
+                                                "failed to reopen file sink(s) for retry: {e}"
+                                            )));
                                             broadcaster.close();
                                             return Err(BuildEventStreamError::IO(e));
                                         }
@@ -180,7 +207,13 @@ impl BuildEventStream {
 
                         if last_message && !expecting_retry {
                             broadcaster.close();
-                            raw_out.flush()?;
+                            match raw_out.flush() {
+                                Ok(()) => signal_all(Ok(())),
+                                Err(e) => {
+                                    signal_all(Err(format!("flush failed: {e}")));
+                                    return Err(BuildEventStreamError::IO(e));
+                                }
+                            }
                             return Ok(());
                         }
                     }
@@ -210,7 +243,13 @@ impl BuildEventStream {
                             // events.
                             if !galvanize::is_pid_alive(writer_pid) {
                                 broadcaster.close();
-                                raw_out.flush()?;
+                                match raw_out.flush() {
+                                    Ok(()) => signal_all(Ok(())),
+                                    Err(e) => {
+                                        signal_all(Err(format!("flush failed: {e}")));
+                                        return Err(BuildEventStreamError::IO(e));
+                                    }
+                                }
                                 return Ok(());
                             }
                             // Writer is alive; Bazel is between attempts.
@@ -223,10 +262,17 @@ impl BuildEventStream {
                             continue;
                         }
                         broadcaster.close();
-                        raw_out.flush()?;
+                        match raw_out.flush() {
+                            Ok(()) => signal_all(Ok(())),
+                            Err(e) => {
+                                signal_all(Err(format!("flush failed: {e}")));
+                                return Err(BuildEventStreamError::IO(e));
+                            }
+                        }
                         return Ok(());
                     }
                     Err(err) => {
+                        signal_all(Err(format!("BES read error: {err}")));
                         broadcaster.close();
                         return Err(err);
                     }
@@ -417,7 +463,10 @@ mod tests {
             path.clone(),
             pid,
             pid,
-            vec![sink_path.to_str().unwrap().to_string()],
+            vec![(
+                sink_path.to_str().unwrap().to_string(),
+                std::sync::Arc::new(crate::engine::bazel::build::FileSignal::new()),
+            )],
         )
         .unwrap();
         wait_for_fifo(&path);
@@ -669,7 +718,10 @@ mod tests {
             path.clone(),
             pid,
             pid,
-            vec![sink_path.to_str().unwrap().to_string()],
+            vec![(
+                sink_path.to_str().unwrap().to_string(),
+                std::sync::Arc::new(crate::engine::bazel::build::FileSignal::new()),
+            )],
         )
         .unwrap();
         wait_for_fifo(&path);

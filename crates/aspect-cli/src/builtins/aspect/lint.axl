@@ -1006,6 +1006,11 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
     # 7. Wait for build
     build_status = build.wait()
+    # `build.wait()` is bazel-only — flush every caller-passed sink so
+    # any forwarded BES upload (e.g. Aspect Workflows backend) finishes
+    # before the task returns.
+    for sink in bazel_trait.build_event_sinks:
+        sink.wait()
     build_failed = not build_status.success
     data["lint"]["build_failed"] = build_failed
     data["lint"]["linter_exit_code"] = linter_exit_code

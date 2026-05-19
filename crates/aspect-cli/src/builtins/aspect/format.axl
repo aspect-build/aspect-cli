@@ -430,6 +430,11 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             break
 
     build_status = build.wait()
+    # `build.wait()` is bazel-only — flush every caller-passed sink so
+    # any forwarded BES upload (e.g. Aspect Workflows backend) finishes
+    # before the task returns.
+    for sink in bazel_trait.build_event_sinks:
+        sink.wait()
 
     # Fire `bazel_trait.build_end` hooks. The ArtifactUpload feature's
     # `_on_build_end` runs the actual artifact upload step here (Profile /

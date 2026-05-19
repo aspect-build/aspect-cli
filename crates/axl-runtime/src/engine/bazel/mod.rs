@@ -684,20 +684,20 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
         } else {
             Some(timeout_dur)
         };
-        Ok(build::BuildEventSink::Grpc {
-            uri: uri.replace("grpcs://", "https://"),
-            metadata: HashMap::from_iter(metadata.entries),
-            retry: sink::retry::RetryConfig {
+        Ok(build::BuildEventSink::new_grpc(
+            uri.replace("grpcs://", "https://"),
+            HashMap::from_iter(metadata.entries),
+            sink::retry::RetryConfig {
                 max_retries: max_retries as u32,
                 retry_min_delay,
                 retry_max_buffer_size: retry_max_buffer_size as usize,
                 timeout,
             },
-        })
+        ))
     }
 
     fn file(#[starlark(require = named)] path: String) -> anyhow::Result<build::BuildEventSink> {
-        Ok(build::BuildEventSink::File { path })
+        Ok(build::BuildEventSink::new_file(path))
     }
 
     /// Subscribe an AXL-side iterator to this build's BES stream.

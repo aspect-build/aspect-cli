@@ -17,7 +17,6 @@ use starlark::environment::MethodsStatic;
 
 use starlark::StarlarkResultExt;
 use starlark::starlark_module;
-use starlark::starlark_simple_value;
 use starlark::values;
 use starlark::values::AllocValue;
 use starlark::values::Heap;
@@ -126,13 +125,28 @@ pub(crate) fn build_status_methods(registry: &mut MethodsBuilder) {
     }
 }
 
-#[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative, Clone)]
-#[display("<bazel.build.BuildEventSink>")]
-pub enum BuildEventSink {
+// =========================================================================
+// `bazel.build_events.{grpc, file}(...)` — sink handles.
+//
+// Each handle is a stateful value the caller creates and hands to
+// `ctx.bazel.build(build_events=[...])`. State is shared via `Arc<Mutex>` so
+// the original Starlark value and the clone unpacked into `Build::spawn`
+// point to the same state machine:
+//
+//   Pending(config) → Live(per-kind handles) → Done { failed, error }
+//
+// Once a build is spawned, the caller can `sink.wait()` to block until that
+// sink finishes flushing, then inspect `sink.failed` / `sink.error` to
+// decide whether to surface a sink-induced task failure.
+// `build.wait()` does NOT wait for caller-passed sinks — sink flush is the
+// caller's responsibility, not the build's.
+// =========================================================================
+
+#[derive(Clone)]
+enum SinkConfig {
     Grpc {
         uri: String,
         metadata: HashMap<String, String>,
-        #[allocative(skip)]
         retry: RetryConfig,
     },
     File {
@@ -140,10 +154,217 @@ pub enum BuildEventSink {
     },
 }
 
-starlark_simple_value!(BuildEventSink);
+/// Lifecycle state of a sink. Handles are reusable across multiple
+/// `ctx.bazel.build(...)` calls (the retry loop in `bazel_runner.axl`
+/// relies on this) — each cycle goes Idle → Live → Idle. The Outcome
+/// of the most recent cycle is stored separately so `failed` / `error`
+/// can be queried after `wait()` without re-locking.
+enum SinkPhase {
+    /// Ready to bind. Either freshly constructed, or just finished a wait().
+    Idle,
+    /// Bound to a build; `wait()` will finalize.
+    Live(SinkLive),
+}
 
-#[starlark_value(type = "bazel.build.BuildEventSink")]
-impl<'v> values::StarlarkValue<'v> for BuildEventSink {}
+enum SinkLive {
+    /// gRPC sink: owns the worker thread's JoinHandle; `wait()` joins it.
+    Grpc {
+        join: JoinHandle<SinkOutcome>,
+    },
+    /// File sink: blocks on a one-shot signal driven by the BES reader
+    /// thread. All file sinks attached to the same build share the BES
+    /// stream's overall result — per-file error attribution would require
+    /// splitting MultiWriter, which isn't worth the complexity yet.
+    File {
+        signal: Arc<FileSignal>,
+    },
+}
+
+/// Outcome of the most recent `wait()`. Reset on every `bind`; populated
+/// when `wait()` returns. `times_bound > 0` means "this handle has been
+/// used at least once" — needed to distinguish "never bound" from "freshly
+/// bound but already waited" for the `done` attribute.
+#[derive(Debug, Default)]
+struct SinkOutcomeState {
+    failed: bool,
+    error: Option<String>,
+    times_bound: usize,
+}
+
+/// One-shot completion signal for a file sink. The BES reader thread fills
+/// `result` and notifies the condvar when writes are flushed; the handle's
+/// `wait()` blocks on it. Exposed for the BES stream module to call
+/// `complete` on its end.
+pub struct FileSignal {
+    result: Mutex<Option<Result<(), String>>>,
+    cv: std::sync::Condvar,
+}
+
+impl FileSignal {
+    pub fn new() -> Self {
+        Self {
+            result: Mutex::new(None),
+            cv: std::sync::Condvar::new(),
+        }
+    }
+
+    /// Called by the BES stream once writes are flushed (or have failed).
+    /// Idempotent; subsequent calls are no-ops.
+    pub fn complete(&self, result: Result<(), String>) {
+        let mut guard = self.result.lock().unwrap();
+        if guard.is_none() {
+            *guard = Some(result);
+            self.cv.notify_all();
+        }
+    }
+
+    /// Block until `complete` has been called, then return the result.
+    fn wait(&self) -> Result<(), String> {
+        let mut guard = self.result.lock().unwrap();
+        while guard.is_none() {
+            guard = self.cv.wait(guard).unwrap();
+        }
+        guard.as_ref().unwrap().clone()
+    }
+}
+
+#[derive(Clone, Debug, ProvidesStaticType, Display, Trace, NoSerialize, Allocative)]
+#[display("<bazel.build.BuildEventSink>")]
+pub struct BuildEventSink {
+    /// Immutable spec. Cloned per bind to spawn a fresh worker.
+    #[allocative(skip)]
+    config: Arc<SinkConfig>,
+    /// Current lifecycle position. Cycles Idle → Live → Idle across re-binds.
+    #[allocative(skip)]
+    phase: Arc<Mutex<SinkPhase>>,
+    /// Outcome of the most recent `wait()`. Reset on every `bind`.
+    #[allocative(skip)]
+    outcome: Arc<Mutex<SinkOutcomeState>>,
+}
+
+impl std::fmt::Debug for SinkConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SinkConfig::Grpc { uri, .. } => f.debug_struct("Grpc").field("uri", uri).finish(),
+            SinkConfig::File { path } => f.debug_struct("File").field("path", path).finish(),
+        }
+    }
+}
+
+impl std::fmt::Debug for SinkPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SinkPhase::Idle => write!(f, "Idle"),
+            SinkPhase::Live(_) => write!(f, "Live"),
+        }
+    }
+}
+
+impl BuildEventSink {
+    pub fn new_grpc(uri: String, metadata: HashMap<String, String>, retry: RetryConfig) -> Self {
+        Self::new(SinkConfig::Grpc {
+            uri,
+            metadata,
+            retry,
+        })
+    }
+
+    pub fn new_file(path: String) -> Self {
+        Self::new(SinkConfig::File { path })
+    }
+
+    fn new(config: SinkConfig) -> Self {
+        Self {
+            config: Arc::new(config),
+            phase: Arc::new(Mutex::new(SinkPhase::Idle)),
+            outcome: Arc::new(Mutex::new(SinkOutcomeState::default())),
+        }
+    }
+
+    /// True iff this sink wraps a file kind. Used by `Build::spawn` to route
+    /// file paths through the BES reader thread.
+    fn file_path(&self) -> Option<String> {
+        match &*self.config {
+            SinkConfig::File { path } => Some(path.clone()),
+            _ => None,
+        }
+    }
+
+    /// Bind a gRPC config to a freshly spawned worker thread. Errors if the
+    /// handle is currently `Live` (caller forgot to `wait()` before re-binding)
+    /// or if this isn't a gRPC sink.
+    fn bind_grpc(
+        &self,
+        rt: AsyncRuntime,
+        stream: &BuildEventStream,
+        invocation_id: String,
+    ) -> anyhow::Result<()> {
+        let SinkConfig::Grpc {
+            uri,
+            metadata,
+            retry,
+        } = &*self.config
+        else {
+            anyhow::bail!("BUG: bind_grpc called on a non-gRPC sink");
+        };
+        let mut phase = self.phase.lock().unwrap();
+        if matches!(*phase, SinkPhase::Live(_)) {
+            anyhow::bail!(
+                "this `bazel.build_events.grpc(...)` handle is still Live from a previous bind; \
+                 call `sink.wait()` before passing it to another `ctx.bazel.build(...)` call",
+            );
+        }
+        // Reset outcome at bind time so attrs reflect the current cycle, not
+        // a prior cycle's failure.
+        let mut outcome = self.outcome.lock().unwrap();
+        outcome.failed = false;
+        outcome.error = None;
+        outcome.times_bound += 1;
+        drop(outcome);
+        let join = grpc::Grpc::spawn(
+            rt,
+            stream.subscribe(),
+            uri.clone(),
+            metadata.clone(),
+            invocation_id,
+            retry.clone(),
+        );
+        *phase = SinkPhase::Live(SinkLive::Grpc { join });
+        Ok(())
+    }
+
+    /// Bind a file config to a `FileSignal` the BES reader thread will
+    /// complete after flushing writes. Returns the signal so the caller
+    /// can attach it to the BES stream.
+    fn bind_file(&self) -> anyhow::Result<Arc<FileSignal>> {
+        if !matches!(&*self.config, SinkConfig::File { .. }) {
+            anyhow::bail!("BUG: bind_file called on a non-file sink");
+        }
+        let mut phase = self.phase.lock().unwrap();
+        if matches!(*phase, SinkPhase::Live(_)) {
+            anyhow::bail!(
+                "this `bazel.build_events.file(...)` handle is still Live from a previous bind; \
+                 call `sink.wait()` before re-binding",
+            );
+        }
+        let mut outcome = self.outcome.lock().unwrap();
+        outcome.failed = false;
+        outcome.error = None;
+        outcome.times_bound += 1;
+        drop(outcome);
+        let signal = Arc::new(FileSignal::new());
+        *phase = SinkPhase::Live(SinkLive::File {
+            signal: signal.clone(),
+        });
+        Ok(signal)
+    }
+}
+
+impl<'v> AllocValue<'v> for BuildEventSink {
+    fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
+        heap.alloc_complex_no_freeze(self)
+    }
+}
 
 impl<'v> UnpackValue<'v> for BuildEventSink {
     type Error = anyhow::Error;
@@ -156,36 +377,75 @@ impl<'v> UnpackValue<'v> for BuildEventSink {
     }
 }
 
-impl BuildEventSink {
-    /// Spawn the sink. The same `invocation_id` is passed to every BES sink
-    /// so downstream backends all index this invocation under one UUID.
-    fn spawn(
-        &self,
-        rt: AsyncRuntime,
-        stream: &BuildEventStream,
-        invocation_id: String,
-    ) -> JoinHandle<SinkOutcome> {
-        match self {
-            BuildEventSink::Grpc {
-                uri,
-                metadata,
-                retry,
-            } => {
-                // Use subscribe_realtime() since sinks subscribe at stream creation
-                // and don't need history replay.
-                grpc::Grpc::spawn(
-                    rt,
-                    stream.subscribe(),
-                    uri.clone(),
-                    metadata.clone(),
-                    invocation_id,
-                    retry.clone(),
-                )
-            }
-            BuildEventSink::File { .. } => {
-                unreachable!("File sinks are handled as raw file paths, not subscriber threads")
-            }
+#[starlark_value(type = "bazel.build.BuildEventSink")]
+impl<'v> values::StarlarkValue<'v> for BuildEventSink {
+    fn get_methods() -> Option<&'static Methods> {
+        static RES: MethodsStatic = MethodsStatic::new();
+        RES.methods(build_event_sink_methods)
+    }
+
+    fn get_attr(&self, attribute: &str, heap: Heap<'v>) -> Option<Value<'v>> {
+        let phase = self.phase.lock().unwrap();
+        let outcome = self.outcome.lock().unwrap();
+        match attribute {
+            // True after at least one bind/wait cycle has completed.
+            "done" => Some(heap.alloc(
+                matches!(*phase, SinkPhase::Idle) && outcome.times_bound > 0,
+            )),
+            // Last cycle's failure flag. False before first wait, and reset
+            // at every bind, so this reflects the most recent attempt only.
+            "failed" => Some(heap.alloc(outcome.failed)),
+            "error" => Some(match &outcome.error {
+                Some(e) => heap.alloc_str(e).to_value(),
+                None => Value::new_none(),
+            }),
+            _ => None,
         }
+    }
+
+    fn has_attr(&self, attribute: &str, _heap: Heap<'v>) -> bool {
+        matches!(attribute, "done" | "failed" | "error")
+    }
+}
+
+#[starlark_module]
+pub(crate) fn build_event_sink_methods(registry: &mut MethodsBuilder) {
+    /// Block until this sink finishes flushing. gRPC sinks join their worker
+    /// thread; file sinks wait for the BES reader to close their file.
+    /// Idempotent — calling `wait()` on an idle sink returns immediately.
+    /// After `wait()`, inspect `.failed` and `.error` to decide whether to
+    /// surface a sink failure as a task failure. The handle is then ready
+    /// to be re-bound (the `bazel_runner.axl` retry loop relies on this).
+    fn wait<'v>(this: Value<'v>) -> anyhow::Result<NoneOr<bool>> {
+        let sink = this
+            .downcast_ref_err::<BuildEventSink>()
+            .into_anyhow_result()?;
+        // Take the Live payload out of the Mutex so we don't hold the lock
+        // across the blocking join; replace with Idle so concurrent waiters
+        // see a consistent state.
+        let live = {
+            let mut phase = sink.phase.lock().unwrap();
+            match std::mem::replace(&mut *phase, SinkPhase::Idle) {
+                SinkPhase::Live(live) => live,
+                SinkPhase::Idle => return Ok(NoneOr::None),
+            }
+        };
+        let outcome: Result<(), String> = match live {
+            SinkLive::Grpc { join } => match join.join() {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(e)) => Err(e.last_error),
+                Err(_) => Err("sink worker thread panicked".to_string()),
+            },
+            SinkLive::File { signal } => signal.wait(),
+        };
+        let (failed, error) = match outcome {
+            Ok(()) => (false, None),
+            Err(e) => (true, Some(e)),
+        };
+        let mut out = sink.outcome.lock().unwrap();
+        out.failed = failed;
+        out.error = error;
+        Ok(NoneOr::None)
     }
 }
 
@@ -470,13 +730,13 @@ pub struct Build {
     #[allocative(skip)]
     execlog_stream: RefCell<Option<ExecLogStream>>,
 
-    /// Threads forwarding to BES, tracing, or file sinks. `wait()` joins
-    /// these so the program doesn't exit before sinks have flushed. A
-    /// sink's `Err(SinkError)` is logged at the sink and is otherwise
-    /// non-fatal — the runtime never translates sink failure into a
-    /// build exit code (callers branch on per-handle state if they care).
+    /// Internal sink threads (tracing emitter, decoded execlog file
+    /// writers). `build.wait()` joins these so the program doesn't exit
+    /// before they finish. Caller-passed gRPC/file sinks are NOT here —
+    /// their JoinHandles live on the `BuildEventSink` value the caller
+    /// holds, and the caller drives them via `sink.wait()`.
     #[allocative(skip)]
-    sink_handles: RefCell<Vec<JoinHandle<SinkOutcome>>>,
+    internal_sink_handles: RefCell<Vec<JoinHandle<SinkOutcome>>>,
 
     /// The shared invocation_id that every gRPC BES sink uses when forwarding
     /// this build's events. `None` when no BES sinks were configured; `Some`
@@ -532,15 +792,19 @@ impl Build {
             cmd.current_dir(current_dir);
         }
 
-        // Split BES sinks: File sinks accumulate raw pipe bytes in memory and
-        // are written after the FIFO closes; subscriber sinks (Grpc, etc.) get
-        // a real-time channel subscription.
-        let mut bes_file_paths: Vec<String> = vec![];
-        let mut bes_subscriber_sinks: Vec<BuildEventSink> = vec![];
+        // Split BES sinks by kind. File sinks accumulate raw pipe bytes in
+        // memory and are written after the FIFO closes; gRPC sinks subscribe
+        // to the broadcaster in a worker thread. The handle holds Pending
+        // config that we transition to Live below — file handles need their
+        // FileSignal attached to the BES stream so wait() blocks correctly.
+        let mut file_sinks: Vec<(String, Arc<FileSignal>)> = vec![];
+        let mut grpc_sinks: Vec<BuildEventSink> = vec![];
         for sink in sinks {
-            match &sink {
-                BuildEventSink::File { path } => bes_file_paths.push(path.clone()),
-                _ => bes_subscriber_sinks.push(sink),
+            if let Some(path) = sink.file_path() {
+                let signal = sink.bind_file().map_err(io::Error::other)?;
+                file_sinks.push((path, signal));
+            } else {
+                grpc_sinks.push(sink);
             }
         }
 
@@ -618,7 +882,7 @@ impl Build {
         // galvanize stays alive across invocations and cannot signal
         // end-of-build, which is why we want a separate per-invocation pid.
         let build_event_stream = match bes_path {
-            Some(p) => Some(BuildEventStream::spawn(p, pid, child.id(), bes_file_paths)?),
+            Some(p) => Some(BuildEventStream::spawn(p, pid, child.id(), file_sinks)?),
             None => None,
         };
 
@@ -642,54 +906,42 @@ impl Build {
             }
         }
 
-        // Build Event sinks for forwarding the build events.
-        //
-        // Generate ONE invocation_id and hand it to every sink so all backends
-        // key this invocation under the same UUID. This lets us build a single
-        // "View invocation" URL that works on whichever backend a user checks.
-        // Without this, each sink would mint its own UUID and we'd have no way
-        // to know which one corresponded to any particular viewer URL.
+        // Bind each gRPC sink: spawn its worker thread and transfer the
+        // JoinHandle into the handle's Live state so the caller can
+        // `sink.wait()` later. The shared invocation_id is minted once
+        // and reused across every gRPC sink so all BES backends index
+        // this invocation under the same UUID.
         //
         // Subscribing here (after `cmd.spawn()` but before bazel's BEP open
         // unblocks the BES thread) is correct: the BES thread is currently
         // blocked in `Pipe::open` waiting for bazel to open the FIFO write
-        // end, which won't happen until bazel finishes JVM startup — well
-        // after these subscribe calls land.
-        let mut sink_handles: Vec<JoinHandle<SinkOutcome>> = vec![];
+        // end, which won't happen until bazel finishes JVM startup.
         let debug = std::env::var_os("ASPECT_DEBUG")
             .map(|v| !v.is_empty())
             .unwrap_or(false);
-        let sink_invocation_id: Option<String> = if !bes_subscriber_sinks.is_empty() {
+        let sink_invocation_id: Option<String> = if !grpc_sinks.is_empty() {
             let invocation_id = uuid::Uuid::new_v4().to_string();
             if debug {
                 eprintln!(
-                    "BES sinks: spawning {} subscriber sink(s) sink_invocation_id={}",
-                    bes_subscriber_sinks.len(),
+                    "BES sinks: spawning {} gRPC sink(s) sink_invocation_id={}",
+                    grpc_sinks.len(),
                     invocation_id
                 );
             }
-            for sink in bes_subscriber_sinks {
-                let handle = sink.spawn(
-                    rt.clone(),
-                    build_event_stream.as_ref().unwrap(),
-                    invocation_id.clone(),
-                );
-                sink_handles.push(handle);
+            let stream = build_event_stream.as_ref().unwrap();
+            for sink in grpc_sinks {
+                sink.bind_grpc(rt.clone(), stream, invocation_id.clone())
+                    .map_err(io::Error::other)?;
             }
             Some(invocation_id)
         } else {
-            // Positive-signal log so an empty sink list doesn't look
-            // identical to a debug-suppressed run. Dumps the env vars
-            // `feature/workflows.axl` consults so the cause of an
-            // empty list (env var missing, vs. feature wiring) is
-            // unambiguous from the log alone.
             if debug {
                 let bes_backend = std::env::var("ASPECT_WORKFLOWS_BES_BACKEND")
                     .unwrap_or_else(|_| "<unset>".to_string());
                 let bes_results = std::env::var("ASPECT_WORKFLOWS_BES_RESULTS_URL")
                     .unwrap_or_else(|_| "<unset>".to_string());
                 eprintln!(
-                    "BES sinks: 0 subscriber sinks configured (skipping spawn). \
+                    "BES sinks: 0 gRPC sinks configured (skipping spawn). \
                      ASPECT_WORKFLOWS_BES_BACKEND={bes_backend} \
                      ASPECT_WORKFLOWS_BES_RESULTS_URL={bes_results}"
                 );
@@ -697,21 +949,23 @@ impl Build {
             None
         };
 
-        // Decoded ExecLog File sinks — spawned after the execlog stream so the
-        // receiver is valid. They disconnect naturally when execlog_stream is joined.
+        // Internal sinks (not exposed as handles to AXL): the tracing
+        // emitter and the decoded execlog file writers. `build.wait()`
+        // joins these so the program doesn't exit before they finish;
+        // user-passed gRPC/file handles, by contrast, are joined via
+        // `sink.wait()` on the handle.
+        let mut internal_sink_handles: Vec<JoinHandle<SinkOutcome>> = vec![];
         for sink in decoded_sinks {
             if let ExecLogSink::File { path } = sink {
                 let handle =
                     ExecLogSink::spawn_file(execlog_stream.as_ref().unwrap().receiver(), path);
-                sink_handles.push(handle);
+                internal_sink_handles.push(handle);
             }
         }
         if build_events {
-            // Use subscribe_realtime() since this subscribes at stream creation
-            // and doesn't need history replay.
-            sink_handles.push(tracing_sink::Tracing::spawn(
+            internal_sink_handles.push(tracing_sink::Tracing::spawn(
                 build_event_stream.as_ref().unwrap().subscribe(),
-            ))
+            ));
         }
 
         drop(_enter);
@@ -720,7 +974,7 @@ impl Build {
             build_event_stream: RefCell::new(build_event_stream),
             workspace_event_stream: RefCell::new(workspace_event_stream),
             execlog_stream: RefCell::new(execlog_stream),
-            sink_handles: RefCell::new(sink_handles),
+            internal_sink_handles: RefCell::new(internal_sink_handles),
             sink_invocation_id: RefCell::new(sink_invocation_id),
             span: RefCell::new(span),
         })
@@ -843,15 +1097,16 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
             }
         };
 
-        // Drain sink threads so the process doesn't exit before they flush.
-        // Failures are already logged by the sink itself (see
-        // `sink/grpc.rs::finalize`); the runtime treats them as non-fatal —
-        // callers branch on per-handle state if they want to surface a sink
-        // failure as a task failure.
-        for handle in build.sink_handles.take() {
+        // Drain INTERNAL sink threads (tracing emitter, decoded execlog
+        // file writers). Caller-passed sinks aren't here — their
+        // JoinHandles live on the BuildEventSink handle, and the caller
+        // drives them via `sink.wait()`. Internal sink failures are
+        // logged at the sink (see `sink/grpc.rs::finalize`) and are
+        // otherwise non-fatal.
+        for handle in build.internal_sink_handles.take() {
             match handle.join() {
                 Ok(_) => continue,
-                Err(err) => anyhow::bail!("sink thread panicked: {:#?}", err),
+                Err(err) => anyhow::bail!("internal sink thread panicked: {:#?}", err),
             }
         }
 
@@ -1095,5 +1350,177 @@ Test = task(implementation = _impl)
             r#"bazel.build_events.iterator(kinds = ["target_completed", "named_set_of_files"])"#
         )
         .expect("snippet should validate");
+    }
+
+    /// `kinds=` filter at the broadcaster boundary: events whose payload tag
+    /// isn't in the allow-list are dropped before yielding. The success
+    /// scenario emits `build_started` + `build_finished`; requesting only
+    /// `build_finished` should yield exactly one event.
+    #[test]
+    fn iterator_kinds_filter_drops_non_matching_events() {
+        let exit = crate::test::eval(
+            r#"
+def _impl(ctx):
+    iter = bazel.build_events.iterator(kinds = ["build_finished"])
+    build = ctx.bazel.build(
+        flags = ["--scenario=success"],
+        build_events = [iter],
+        stderr = None,
+    )
+    count = 0
+    finished = 0
+    for event in iter:
+        count += 1
+        if event.kind == "build_finished":
+            finished += 1
+    build.wait()
+    if count != 1: return 1
+    if finished != 1: return 2
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+        )
+        .with_fake_bazel()
+        .run_task(0)
+        .expect("run_task");
+        assert_eq!(exit, Some(0));
+    }
+
+    /// `iter.drain()` makes subsequent iteration yield nothing and flips
+    /// `done` to True; idempotent on a drained iter.
+    #[test]
+    fn iterator_drain_terminates_early() {
+        let exit = crate::test::eval(
+            r#"
+def _impl(ctx):
+    iter = bazel.build_events.iterator()
+    build = ctx.bazel.build(
+        flags = ["--scenario=success"],
+        build_events = [iter],
+        stderr = None,
+    )
+    # drain immediately; we don't care about the events
+    iter.drain()
+    iter.drain()  # idempotent
+    seen = 0
+    for _ in iter:
+        seen += 1
+    build.wait()
+    if not iter.done: return 1
+    if seen != 0: return 2
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+        )
+        .with_fake_bazel()
+        .run_task(0)
+        .expect("run_task");
+        assert_eq!(exit, Some(0));
+    }
+
+    // --- sink wait/done/failed/error ---
+
+    /// Fresh sink: `done` is `False`, `failed` is `False`, `error` is `None`.
+    /// `wait()` on an idle (unbound) sink is a no-op.
+    #[test]
+    fn sink_attrs_default_before_bind() {
+        let exit = crate::test::eval(
+            r#"
+def _impl(ctx):
+    sink = bazel.build_events.grpc(uri = "grpcs://example.com")
+    if sink.done: return 1
+    if sink.failed: return 2
+    if sink.error != None: return 3
+    # wait on never-bound sink is fine; stays idle, sets nothing.
+    sink.wait()
+    if sink.done: return 4
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+        )
+        .run_task(0)
+        .expect("run_task");
+        assert_eq!(exit, Some(0));
+    }
+
+    /// After binding to a build and waiting, a gRPC sink with an unparseable
+    /// URI surfaces `failed = True` and a non-empty `error`. Bazel's exit
+    /// code is unaffected — sink failure is the caller's call.
+    #[test]
+    fn sink_grpc_failure_surfaces_on_wait() {
+        use std::time::Duration;
+        let result = crate::test::with_timeout(Duration::from_secs(15), || {
+            crate::test::eval(
+                r#"
+def _impl(ctx):
+    iter = bazel.build_events.iterator()
+    sink = bazel.build_events.grpc(
+        uri = "not a uri",
+        max_retries = 0,
+        retry_min_delay = "0s",
+    )
+    build = ctx.bazel.build(
+        flags = ["--scenario=success"],
+        build_events = [iter, sink],
+        stderr = None,
+    )
+    for _ in iter: pass
+    status = build.wait()
+    if not status.success: return 1
+    if status.code != 0: return 2
+    sink.wait()
+    if not sink.done: return 3
+    if not sink.failed: return 4
+    if sink.error == None: return 5
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+            )
+            .with_fake_bazel()
+            .run_task(0)
+        })
+        .expect("test hung");
+        assert_eq!(result.expect("run_task"), Some(0));
+    }
+
+    /// Re-binding a Live sink errors so callers don't accidentally pass the
+    /// same handle to two concurrent builds. The retry loop in
+    /// `bazel_runner.axl` avoids this by calling `sink.wait()` between
+    /// attempts; this test verifies the explicit error path.
+    #[test]
+    fn sink_rejects_double_bind_while_live() {
+        let err = crate::test::eval(
+            r#"
+def _impl(ctx):
+    sink = bazel.build_events.grpc(uri = "not a uri", max_retries = 0, retry_min_delay = "0s")
+    iter = bazel.build_events.iterator()
+    first = ctx.bazel.build(
+        flags = ["--scenario=success"],
+        build_events = [iter, sink],
+        stderr = None,
+    )
+    # bind again without sink.wait() in between
+    iter2 = bazel.build_events.iterator()
+    second = ctx.bazel.build(
+        flags = ["--scenario=success"],
+        build_events = [iter2, sink],
+        stderr = None,
+    )
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+        )
+        .with_fake_bazel()
+        .run_task(0)
+        .expect_err("expected Live-rebind error");
+        assert!(
+            err.to_string().contains("still Live"),
+            "unexpected error: {err}"
+        );
     }
 }
