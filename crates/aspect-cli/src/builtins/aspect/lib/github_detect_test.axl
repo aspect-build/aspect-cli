@@ -372,20 +372,22 @@ def _test_impl(ctx):
     def _ctx_with_env(env_vars):
         return struct(std = struct(env = struct(var = lambda name: env_vars.get(name, ""))))
 
+    # App token is primary; env token (when exported) is the fallback
+    # for the 4xx-auth retry path.
     _eq(
-        "preferred_token_pair: GITHUB_TOKEN wins; App token is fallback",
+        "preferred_token_pair: App token primary; GITHUB_TOKEN is fallback",
         github.preferred_token_pair(_ctx_with_env({"GITHUB_TOKEN": "gh-actions-tok"}), "o", "r", existing_app_token = "app-tok"),
-        ("gh-actions-tok", "app-tok"),
+        ("app-tok", "gh-actions-tok"),
     )
     _eq(
-        "preferred_token_pair: GH_TOKEN when GITHUB_TOKEN unset",
+        "preferred_token_pair: App primary; GH_TOKEN fallback when GITHUB_TOKEN unset",
         github.preferred_token_pair(_ctx_with_env({"GH_TOKEN": "gh-cli-tok"}), "o", "r", existing_app_token = "app-tok"),
-        ("gh-cli-tok", "app-tok"),
+        ("app-tok", "gh-cli-tok"),
     )
     _eq(
-        "preferred_token_pair: GITHUB_TOKEN beats GH_TOKEN when both set",
+        "preferred_token_pair: GITHUB_TOKEN preferred over GH_TOKEN in fallback slot when both set",
         github.preferred_token_pair(_ctx_with_env({"GITHUB_TOKEN": "gha", "GH_TOKEN": "gh"}), "o", "r", existing_app_token = "app-tok"),
-        ("gha", "app-tok"),
+        ("app-tok", "gha"),
     )
     _eq(
         "preferred_token_pair: env unset — App token is primary, no fallback",
@@ -394,26 +396,42 @@ def _test_impl(ctx):
     )
 
     # Auth-failed branch — `_authenticate` short-circuits to `None`
-    # when owner / repo are missing, populating `_reason`. We exercise
-    # that path here (no `existing_app_token` to bypass the mint, no
-    # env token to take priority) and check both halves of the
-    # `(None, None)` return plus the `_reason` plumbing.
+    # when owner / repo are missing, populating `_reason` with both a
+    # structured `kind` and a human-readable `reason`. Without an env
+    # token callers get `(None, None)`; with env exported, env becomes
+    # the last-resort primary so the call can still proceed.
     auth_reason = {}
     _eq(
-        "preferred_token_pair: auth failed — returns (None, None)",
+        "preferred_token_pair: App auth failed + env unset → (None, None)",
         github.preferred_token_pair(_ctx_with_env({}), "", "", _reason = auth_reason),
         (None, None),
     )
-    if "reason" not in auth_reason:
-        fail("preferred_token_pair: expected _reason to be populated on auth failure, got %r" % auth_reason)
+    _eq("preferred_token_pair: _reason.kind populated", auth_reason.get("kind"), "no-owner-repo")
+    if not auth_reason.get("reason"):
+        fail("preferred_token_pair: expected _reason['reason'] to be set, got %r" % auth_reason)
+    _eq(
+        "preferred_token_pair: App auth failed + env set → env as last-resort primary",
+        github.preferred_token_pair(_ctx_with_env({"GITHUB_TOKEN": "gha-fallback"}), "", "", _reason = {}),
+        ("gha-fallback", None),
+    )
+
+    # ── Failure-kind gate for TIP_ADD_ASPECT_API_TOKEN ────────────────
+    # `_authenticate` classifies failures via a stable `kind` field;
+    # `_preferred_token_pair` keys the missing-credentials tip off
+    # that field (not the human-readable message) and further restricts
+    # emission to CI hosts where `ASPECT_API_TOKEN` is a documented
+    # Aspect integration.
+    _test_aspect_api_token_tip_gate(ctx)
 
     # ── list_pull_request_files 4xx-auth fallback ─────────────────────
-    # When the env token (primary) returns 401 / 403 / 404 on page 1,
-    # `list_pull_request_files` retries with the App-token fallback and
+    # When the primary token returns 401 / 403 / 404 on page 1,
+    # `list_pull_request_files` retries with the fallback token and
     # accumulates the missing scope into the `add-github-token-scope`
-    # tip. This exercises the load-bearing call path that
-    # `_preferred_token_pair` enables for change-detection.
-    _test_pr_files_falls_back_to_app_token(ctx)
+    # tip. With App-primary, env-fallback the fallback is reached only
+    # when the App's installation token unexpectedly 4xx's on a
+    # supporting-call endpoint (rare; typically only when the App
+    # installation is mid-rotation or scope-pruned).
+    _test_pr_files_4xx_auth_fallback(ctx)
 
     print("github_detect.axl smoke: OK")
     return 0
@@ -461,31 +479,165 @@ def _stub_ctx(ctx, env_vars, http_client):
         template = ctx.template,
     )
 
-def _test_pr_files_falls_back_to_app_token(ctx):
+def _test_aspect_api_token_tip_gate(ctx):
+    """Verify `_authenticate` populates `_reason["kind"]` with the right
+    discriminator and emits `TIP_ADD_ASPECT_API_TOKEN` only when (1) the
+    kind is `no-credentials` AND (2) the CI host is in the
+    documented-Aspect-integration set (GHA / Buildkite / CircleCI).
+    Covers both call paths: features calling `authenticate` directly
+    (status-checks / status-comments / lint-comments) and the
+    supporting-call path through `preferred_token_pair`.
+    """
+    trait = ctx.traits[TipsTrait]
+
+    def _ctx_no_creds(env_vars):
+        # Stub ctx where `aspect.auth.credentials(...)` returns None so
+        # `_authenticate` short-circuits before any HTTP call.
+        return struct(
+            std = struct(env = struct(var = lambda name: env_vars.get(name, ""))),
+            aspect = struct(auth = struct(credentials = lambda profile = None: None)),
+            traits = ctx.traits,
+        )
+
+    def _reset_tips():
+        trait.tips = []
+        trait.silenced_tips = []
+        trait.auto_print = False
+
+    # GHA + missing Aspect creds + env token set → kind="no-credentials",
+    # tip fires (GHA is a supported host), env returns as last-resort
+    # primary so the only fired tip is the API-token one.
+    _reset_tips()
+    reason = {}
+    result = github.preferred_token_pair(
+        _ctx_no_creds({"CI": "true", "GITHUB_ACTIONS": "true", "GITHUB_TOKEN": "env-tok"}),
+        "o",
+        "r",
+        _reason = reason,
+    )
+    _eq("kind-gate GHA: kind populated", reason.get("kind"), "no-credentials")
+    _eq("kind-gate GHA: env-token returned as primary", result, ("env-tok", None))
+    _eq("kind-gate GHA: one tip fired", len(trait.tips), 1)
+    _eq("kind-gate GHA: tip id (GHA-specific)", trait.tips[0]["id"], "add-aspect-api-token-github-actions")
+    _eq("kind-gate GHA: tip is important", trait.tips[0]["severity"], "important")
+
+    # Buildkite + missing creds → kind via the BK branch of
+    # `_classify_missing_credentials`; tip fires because BUILDKITE is
+    # in the host gate.
+    _reset_tips()
+    github.preferred_token_pair(
+        _ctx_no_creds({
+            "BUILDKITE": "true",
+            "BUILDKITE_AGENT_ACCESS_TOKEN": "bk-tok",
+            "GITHUB_TOKEN": "env-tok",
+        }),
+        "o",
+        "r",
+    )
+    _eq("kind-gate Buildkite: tip fires", len(trait.tips), 1)
+    _eq("kind-gate Buildkite: tip id (BK-specific)", trait.tips[0]["id"], "add-aspect-api-token-buildkite")
+
+    # CircleCI + missing creds → kind via the generic-CI branch (no
+    # BK token); tip fires because CIRCLECI is in the host gate.
+    _reset_tips()
+    github.preferred_token_pair(
+        _ctx_no_creds({"CI": "true", "CIRCLECI": "true", "GITHUB_TOKEN": "env-tok"}),
+        "o",
+        "r",
+    )
+    _eq("kind-gate CircleCI: tip fires", len(trait.tips), 1)
+    _eq("kind-gate CircleCI: tip id (CircleCI-specific)", trait.tips[0]["id"], "add-aspect-api-token-circleci")
+
+    # GitLab + missing creds → kind="no-credentials" BUT the host gate
+    # in `_emit_aspect_api_token_tip` skips emission (no GHA / BK /
+    # CircleCI env var set). The tip is not relevant on GitLab since
+    # `ASPECT_API_TOKEN` isn't a documented integration there yet.
+    _reset_tips()
+    reason = {}
+    github.preferred_token_pair(
+        _ctx_no_creds({"CI": "true", "GITLAB_CI": "true", "GITHUB_TOKEN": "env-tok"}),
+        "o",
+        "r",
+        _reason = reason,
+    )
+    _eq("host-gate GitLab: kind", reason.get("kind"), "no-credentials")
+    _eq("host-gate GitLab: tip skipped (host not supported)", len(trait.tips), 0)
+
+    # Local (no CI env vars) + missing creds → kind="not-logged-in",
+    # tip skipped by the kind gate. The fix path here is `aspect auth
+    # login`, not `ASPECT_API_TOKEN`; the caller surfaces
+    # `_reason["reason"]` as a human-readable message.
+    _reset_tips()
+    reason = {}
+    github.preferred_token_pair(
+        _ctx_no_creds({"GITHUB_TOKEN": "env-tok"}),
+        "o",
+        "r",
+        _reason = reason,
+    )
+    _eq("kind-gate local: kind", reason.get("kind"), "not-logged-in")
+    _eq("kind-gate local: tip skipped (wrong fix path)", len(trait.tips), 0)
+
+    # Direct `github.authenticate` call path — exercises the same gate
+    # without going through `preferred_token_pair`. Features doing
+    # App-attribution-required calls (status-checks, status-comments,
+    # lint-comments) hit this path; the tip should still fire so they
+    # surface an actionable suggestion alongside the per-feature
+    # WARNING.
+    _reset_tips()
+    reason = {}
+    token = github.authenticate(
+        _ctx_no_creds({"CI": "true", "GITHUB_ACTIONS": "true"}),
+        owner = "o",
+        repo = "r",
+        _reason = reason,
+    )
+    _eq("direct authenticate: returns None on no-creds", token, None)
+    _eq("direct authenticate: kind populated", reason.get("kind"), "no-credentials")
+    _eq("direct authenticate: tip fires", len(trait.tips), 1)
+    _eq("direct authenticate: tip id (GHA-specific)", trait.tips[0]["id"], "add-aspect-api-token-github-actions")
+
+    # Direct `github.authenticate` on a host that's outside the
+    # supported-CI set — same kind, but host gate skips emission.
+    _reset_tips()
+    reason = {}
+    github.authenticate(
+        _ctx_no_creds({"CI": "true", "GITLAB_CI": "true"}),
+        owner = "o",
+        repo = "r",
+        _reason = reason,
+    )
+    _eq("direct authenticate (GitLab): kind", reason.get("kind"), "no-credentials")
+    _eq("direct authenticate (GitLab): tip skipped", len(trait.tips), 0)
+
+def _test_pr_files_4xx_auth_fallback(ctx):
     # Reset the real TipsTrait so we can assert what this test emits.
     trait = ctx.traits[TipsTrait]
     trait.tips = []
     trait.silenced_tips = []
     trait.auto_print = False
 
-    # Stub: page-1 with env-token → 403, page-1 retry with app-token → 200
-    # with a single-file body that ends pagination.
+    # Stub: page-1 with App token (primary) → 403, page-1 retry with
+    # env token (fallback) → 200 with a single-file body that ends
+    # pagination. The 4xx-auth fallback mechanism in
+    # `list_pull_request_files` is bucket-agnostic; only the strings
+    # change post-flip.
     state, http_client = _http_stub([
         (403, '{"message":"Resource not accessible by integration"}'),
         (200, '[{"filename":"src/foo.py","status":"modified","additions":1,"deletions":0}]'),
     ])
     stub = _stub_ctx(ctx, {"GITHUB_ACTIONS": "true"}, http_client)
 
-    result = github.pulls.list_files(stub, "env-tok", "o", "r", 42, app_fallback_token = "app-tok")
+    result = github.pulls.list_files(stub, "app-tok", "o", "r", 42, app_fallback_token = "env-tok")
 
     if not result["success"]:
         fail("pr-files fallback: expected success=True after retry, got %r" % result)
     _eq("pr-files fallback: file count", len(result["files"]), 1)
     _eq("pr-files fallback: filename", result["files"][0]["filename"], "src/foo.py")
 
-    _eq("pr-files fallback: 2 http calls (env-tok primary + app-tok retry)", len(state["calls"]), 2)
-    _eq("pr-files fallback: 1st call used env token", state["calls"][0]["auth"], "Bearer env-tok")
-    _eq("pr-files fallback: 2nd call used App-token fallback", state["calls"][1]["auth"], "Bearer app-tok")
+    _eq("pr-files fallback: 2 http calls (App primary + env fallback retry)", len(state["calls"]), 2)
+    _eq("pr-files fallback: 1st call used App token", state["calls"][0]["auth"], "Bearer app-tok")
+    _eq("pr-files fallback: 2nd call used env-token fallback", state["calls"][1]["auth"], "Bearer env-tok")
 
     # Tip emitted with the missing scope + endpoint accumulated.
     _eq("pr-files fallback: one tip surfaced", len(trait.tips), 1)
@@ -509,7 +661,7 @@ def _test_pr_files_falls_back_to_app_token(ctx):
         (403, '{"message":"Resource not accessible by integration"}'),
     ])
     stub2 = _stub_ctx(ctx, {"GITHUB_ACTIONS": "true"}, http2)
-    result2 = github.pulls.list_files(stub2, "env-tok", "o", "r", 42)
+    result2 = github.pulls.list_files(stub2, "app-tok", "o", "r", 42)
     if result2["success"]:
         fail("pr-files no-fallback: expected success=False on 403 with no fallback, got %r" % result2)
     _eq("pr-files no-fallback: only the primary call ran", len(state2["calls"]), 1)

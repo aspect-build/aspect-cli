@@ -23,7 +23,7 @@ Tip templates are dicts of the shape:
 
     {
         "id":        str,         # stable dedup key; vars are NOT interpolated here
-        "severity":  str,         # TIP_CRITICAL / TIP_WARNING / TIP_SUGGESTION / TIP_INFO
+        "severity":  str,         # TIP_IMPORTANT / TIP_WARNING / TIP_SUGGESTION / TIP_INFO
         "title":     str,         # short headline; interpolated per `type`
         "body":      str,         # markdown body; interpolated per `type`
         "type":      str,         # TIP_TEMPLATE_RAW / TIP_TEMPLATE_FORMAT (default) / TIP_TEMPLATE_JINJA2
@@ -53,13 +53,13 @@ Built-in tip templates are exported as module-level constants
   b) Preempt a built-in tip by calling `add_tip` with that built-in
      tip's id BEFORE the framework emits — dedup-by-id makes the
      user's version win.
-  c) Silence any non-critical tip (built-in or custom) by adding its
+  c) Silence any non-important tip (built-in or custom) by adding its
      id to `TipsTrait.silenced_tips`. `add_tip` short-circuits on a
      match so the tip never enters the trait. Each rendered tip's
-     footer names its id and points users at this knob. Critical
-     tips (severity `TIP_CRITICAL`) ignore the silence list — they
+     footer names its id and points users at this knob. Important
+     tips (severity `TIP_IMPORTANT`) ignore the silence list — they
      signal a problem that breaks key features, so a `silenced_tips`
-     entry for a critical id is a no-op.
+     entry for an important id is a no-op.
 
 `TipsTrait` is accessible from `.aspect/config.axl`, which doubles as
 the registry for tips that should seed every task's `TipsTrait` at
@@ -91,10 +91,10 @@ display the result.
 
 # Severity ordering (highest → lowest urgency)
 
-    TIP_CRITICAL    — action required; key features broken without it.
+    TIP_IMPORTANT   — action required; key features broken without it.
                       Cannot be silenced (`silenced_tips` is ignored).
                       Surface and terminal rendering omit the silence
-                      hint footer for critical tips.
+                      hint footer for important tips.
     TIP_WARNING     — degraded behavior; user should fix to restore full function.
     TIP_SUGGESTION  — improvement opportunity; product works fine without it.
     TIP_INFO        — FYI.
@@ -113,31 +113,31 @@ load("./path_glob.axl", "match_any")
 
 # ── Severity constants ───────────────────────────────────────────────
 
-TIP_CRITICAL = "critical"
+TIP_IMPORTANT = "important"
 TIP_WARNING = "warning"
 TIP_SUGGESTION = "suggestion"
 TIP_INFO = "info"
 
 _SEVERITY_ORDER = {
-    TIP_CRITICAL: 0,
+    TIP_IMPORTANT: 0,
     TIP_WARNING: 1,
     TIP_SUGGESTION: 2,
     TIP_INFO: 3,
 }
 
 _SEVERITY_EMOJI = {
-    TIP_CRITICAL: "🔥",
+    TIP_IMPORTANT: "🔥",
     TIP_WARNING: "⚠️",
     TIP_SUGGESTION: "💡",
     TIP_INFO: "ℹ️",
 }
 
 # Human-readable label paired with the emoji on each tip's header line
-# (e.g. `💡 **Tip:** ...`, `🔥 **Critical:** ...`). The label is part of
+# (e.g. `💡 **Tip:** ...`, `🔥 **Important:** ...`). The label is part of
 # the rendered tip — it makes the severity legible even where the emoji
 # may not render.
 _SEVERITY_LABEL = {
-    TIP_CRITICAL: "Critical",
+    TIP_IMPORTANT: "Important",
     TIP_WARNING: "Warning",
     TIP_SUGGESTION: "Tip",
     TIP_INFO: "Info",
@@ -187,10 +187,61 @@ ID_TOKEN_PERMISSIONS_YAML = """permissions:
 TIP_ADD_GITHUB_TOKEN = {
     "id": "add-github-token",
     "severity": TIP_SUGGESTION,
-    "title": "Export `GITHUB_TOKEN` to route supporting API calls through the job-scoped quota",
-    "body": "When `GITHUB_TOKEN` is set, aspect-cli sends supporting API calls (job URL lookup, PR file diff, etc.) using the job-scoped token rather than the Aspect Workflows GitHub App. The job-scoped token has [a higher rate limit](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api?apiVersion=2026-03-10#primary-rate-limit-for-github_token-in-github-actions) — up to 60,000 req/hr per repository — than [the App's quota](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api?apiVersion=2026-03-10#primary-rate-limit-for-github-app-installations) (5,000 req/hr, or 15,000 req/hr on GitHub Enterprise Cloud), and they're separate buckets. Routing supporting calls through the job-scoped token reduces App quota usage and prevents live job updates to GitHub Status Checks and Status Comments from being throttled on busy repos.\n\nGitHub Actions grants `GITHUB_TOKEN` implicit read access to the workflow's own run metadata and the PR that triggered it, so no extra `permissions:` block scopes are required for the supporting calls aspect-cli makes today. Add at the top level of the workflow (so every job inherits) or scope it to the specific job(s) that need it:\n\n```yaml\n" + GITHUB_TOKEN_ENV_YAML + "```",
+    "title": "Export `GITHUB_TOKEN` as a fallback for supporting API calls",
+    "body": "aspect-cli authenticates supporting GitHub API calls (job URL lookup, PR file diff, etc.) via the Aspect Workflows GitHub App. When the App can't authenticate — typically because `ASPECT_API_TOKEN` is missing or invalid — there's currently no fallback, and supporting calls fail.\n\nExporting `GITHUB_TOKEN` to the job env gives aspect-cli a last-resort token to fall back to. `GITHUB_TOKEN` is shared across every workflow step in the repo and has [a low default rate limit](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api), so it's not a permanent solution — fix the Aspect App authentication path when possible.\n\nGitHub Actions grants `GITHUB_TOKEN` implicit read access to the workflow's own run metadata and the PR that triggered it, so no extra `permissions:` block scopes are required for the supporting calls aspect-cli makes today. Add at the top level of the workflow (so every job inherits) or scope it to the specific job(s) that need it:\n\n```yaml\n" + GITHUB_TOKEN_ENV_YAML + "```",
     "type": TIP_TEMPLATE_RAW,
 }
+
+# IMPORTANT because every aspect-cli feature that calls the GitHub API
+# as the Aspect Workflows GitHub App depends on `ASPECT_API_TOKEN`:
+# without it those surfaces silently degrade.
+#
+# Three per-CI variants because both the wire-up *and* the list of
+# features that degrade differ per host (PR-summary-comment aggregation
+# is GHA-only today). The emit helper in `lib/github.axl` picks one
+# based on detected env. Each carries a host-suffixed id so users who
+# run multiple CI hosts off the same repo can silence them independently.
+
+def _aspect_api_token_tip(host_id, degraded_features, host_advice):
+    return {
+        "id": "add-aspect-api-token-" + host_id,
+        "severity": TIP_IMPORTANT,
+        "title": "Set ASPECT_API_TOKEN to authenticate the Aspect Workflows GitHub App",
+        "body": (
+            "aspect-cli authenticates GitHub API calls via the Aspect Workflows " +
+            "GitHub App, which needs `ASPECT_API_TOKEN` (a `client_id:client_secret` " +
+            "pair from your Aspect organization) provided to the CI job.\n\n" +
+            "Without it, " + degraded_features + " degrade. The task itself " +
+            "completes regardless — only the GitHub-side surfaces are affected.\n\n" +
+            "Issue an `ASPECT_API_TOKEN` from the Aspect Web UI " +
+            "(see https://docs.aspect.build/cli/authentication). " +
+            host_advice
+        ),
+        "type": TIP_TEMPLATE_RAW,
+    }
+
+TIP_ADD_ASPECT_API_TOKEN_GHA = _aspect_api_token_tip(
+    "github-actions",
+    "PR check-run creation and updates, and PR summary comment aggregation",
+    "On GitHub Actions, expose the secret to your workflow:\n\n" +
+    "```yaml\nenv:\n  ASPECT_API_TOKEN: ${{ secrets.ASPECT_API_TOKEN }}\n```",
+)
+
+TIP_ADD_ASPECT_API_TOKEN_BUILDKITE = _aspect_api_token_tip(
+    "buildkite",
+    "PR check-run creation and updates",
+    "On Buildkite, provision `ASPECT_API_TOKEN` using any of the approaches in " +
+    "[Buildkite's secrets docs](https://buildkite.com/docs/pipelines/security/secrets) " +
+    "— aspect-cli reads it from the agent's secret store automatically.",
+)
+
+TIP_ADD_ASPECT_API_TOKEN_CIRCLECI = _aspect_api_token_tip(
+    "circleci",
+    "PR check-run creation and updates",
+    "On CircleCI, add `ASPECT_API_TOKEN` as a project environment variable or via a " +
+    "[context](https://circleci.com/docs/contexts/); aspect-cli picks it up from the " +
+    "job env.",
+)
 
 # One tip per task accumulating both the missing scopes and the API
 # endpoints that fell back. Pluralization + per-scope snippet lines
@@ -214,14 +265,14 @@ API {{ "endpoint" if endpoints|length == 1 else "endpoints" }} that fell back ({
     "type": TIP_TEMPLATE_JINJA2,
 }
 
-# Severity is CRITICAL because key features depend on this permission:
+# Severity is IMPORTANT because key features depend on this permission:
 # artifact uploads (status payloads, BEP files, test logs, profiles)
 # fail outright, and PR summary comment aggregation breaks because
-# per-task payloads ride on the same artifact upload path. Critical
+# per-task payloads ride on the same artifact upload path. Important
 # tips can't be silenced.
 TIP_ADD_ID_TOKEN_PERMISSION = {
     "id": "add-id-token-permission",
-    "severity": TIP_CRITICAL,
+    "severity": TIP_IMPORTANT,
     "title": "Grant `id-token: write` to enable GitHub Actions artifact uploads",
     "body": "aspect-cli is trying to upload an artifact via GitHub Actions' ArtifactService but the API needs an OIDC token (`ACTIONS_ID_TOKEN_REQUEST_TOKEN`) that GitHub only exposes to the job when `id-token: write` is granted. Without it, the artifact upload fails.\n\nWhich features depend on this varies by configuration. When enabled, the PR summary comment aggregator and test-log / BEP / profile artifact uploads all ride on the ArtifactService — any of those features will be affected until the permission is granted. The task itself completes regardless.\n\nAdd at the top level of the workflow (so every job inherits) or scope it to the specific job(s) that upload artifacts:\n\n```yaml\n" + ID_TOKEN_PERMISSIONS_YAML + "```",
     "type": TIP_TEMPLATE_RAW,
@@ -261,7 +312,7 @@ def add_tip(
     to the terminal.
 
     No-op if `id` is listed in `TipsTrait.silenced_tips` AND
-    `severity != TIP_CRITICAL` (critical tips can't be silenced —
+    `severity != TIP_IMPORTANT` (important tips can't be silenced —
     see "Severity ordering" in the module docstring).
 
     Two storage shapes:
@@ -292,7 +343,7 @@ def add_tip(
     if severity not in _SEVERITY_ORDER:
         fail("unknown tip severity %r; valid: %s" % (severity, ", ".join(_SEVERITY_ORDER.keys())))
     trait = ctx.traits[TipsTrait]
-    if severity != TIP_CRITICAL and id in trait.silenced_tips:
+    if severity != TIP_IMPORTANT and id in trait.silenced_tips:
         return
 
     is_jinja2 = type_ == TIP_TEMPLATE_JINJA2
@@ -435,7 +486,7 @@ def severity_emoji(severity):
 
 def severity_label(severity):
     """Human-readable label for a tip's severity (e.g. "Tip",
-    "Warning", "Critical"). Paired with `severity_emoji` to introduce
+    "Warning", "Important"). Paired with `severity_emoji` to introduce
     each rendered tip — readable even where the emoji may not."""
     return _SEVERITY_LABEL.get(severity, "Info")
 
@@ -451,11 +502,11 @@ def silence_hint_line(id, severity):
     fine-print footer naming the tip's id and the knob to silence
     it via `.aspect/config.axl`.
 
-    Returns `""` for critical tips (which can't be silenced) and for
+    Returns `""` for important tips (which can't be silenced) and for
     blank ids. Used by the check-run summary's `TIPS_BLOCK` and by
     the PR-comment tip section so the two surfaces stay aligned on
     the silence affordance."""
-    if not id or severity == TIP_CRITICAL:
+    if not id or severity == TIP_IMPORTANT:
         return ""
     return '<sub>_Silence by adding `"%s"` to `ctx.traits[TipsTrait].silenced_tips` in `.aspect/config.axl`._</sub>' % id
 
@@ -509,35 +560,53 @@ def strip_code_fences(body):
     return "\n".join(kept)
 
 _TERMINAL_TIP_COLOR = {
-    TIP_CRITICAL: "1;31",  # bold red — required action, key features broken without it
-    TIP_WARNING: "0;33",  # yellow — degraded behavior
-    TIP_SUGGESTION: "1;35",  # bold magenta — improvement opportunity
-    TIP_INFO: "1;36",  # bold cyan — informational
+    TIP_IMPORTANT: "1;31",  # bold red — required action, key features broken without it
+    TIP_WARNING: "0;33",  # yellow — matches `warn()` in environment.axl
+    TIP_SUGGESTION: "1;32",  # bold green — helpful suggestion, distinct from INFO's cyan
+    TIP_INFO: "1;36",  # bold cyan — matches `info()` in environment.axl
 }
 
 def _print_tip(std, id, severity, title, body):
-    """Print a `TIP:` block to the terminal — called from `add_tip` on
-    each first add and (for `TIP_TEMPLATE_JINJA2` tips) on each
-    accumulator change. The format mirrors `warn` / `info` from
-    `environment.axl` so users recognize it as the same family of
-    framework messages. Prefix color scales with severity (red for
-    critical, yellow for warning, magenta for suggestion, cyan for
-    info). Code-fence delimiter lines are stripped from the body so
-    the inline YAML reads naturally on the terminal. The silence
-    footer is omitted for critical tips (they can't be silenced)."""
-    if color_enabled(std):
-        code = _TERMINAL_TIP_COLOR.get(severity, "1;35")
-        prefix = "\x1b[" + code + "mTIP\x1b[0m: "
-    else:
-        prefix = "TIP: "
-    print(prefix + title)
+    """Print a tip block to the terminal — called from `add_tip` on each
+    first add and (for `TIP_TEMPLATE_JINJA2` tips) on each accumulator
+    change.
+
+    Header line is `<emoji> <LABEL>: <title>`, rendered bold throughout.
+    The `<emoji> <LABEL>:` segment is colored by severity (red / yellow
+    / green / cyan; see `_TERMINAL_TIP_COLOR`); the title follows in
+    bold-default-color so the urgency reads loud at a glance without
+    the title blending into the colored prefix. Matches the
+    surface-template rendering on the GHSC check-run summary, BK
+    annotation, and PR summary comment, which bold the entire header.
+
+    Body and silence footer are prefixed with a colored vertical bar
+    (`│ `) so the tip boundary is visually drawn down the left edge of
+    the terminal — readers can see exactly where the tip starts and
+    ends in a stream of WARNINGs and INFO lines.
+
+    Code-fence delimiter lines are stripped from the body so the inline
+    YAML reads naturally on the terminal. The silence footer is
+    omitted for important tips (they can't be silenced)."""
+    code = _TERMINAL_TIP_COLOR.get(severity, "1;36")  # default to INFO's cyan for unknown severities
+    color_on = color_enabled(std)
+
+    prefix = "%s %s:" % (severity_emoji(severity), severity_label(severity).upper())
+    if color_on:
+        prefix = "\x1b[" + code + "m" + prefix + "\x1b[0m"
+
+        # Bold the title too (without color) so the whole header reads
+        # as a single emphasized line, matching the rendered surfaces.
+        title = "\x1b[1m" + title + "\x1b[0m"
+    print(prefix + " " + title)
+
+    bar = "\x1b[" + code + "m│\x1b[0m" if color_on else "│"
     cleaned = strip_code_fences(body)
     if cleaned:
-        print("")
-        print(cleaned)
-    if severity != TIP_CRITICAL:
-        print("")
-        print('(Silence this tip by adding "%s" to `ctx.traits[TipsTrait].silenced_tips` in `.aspect/config.axl`.)' % id)
+        for line in cleaned.split("\n"):
+            print(bar if line == "" else bar + " " + line)
+    if severity != TIP_IMPORTANT:
+        print(bar)
+        print(bar + ' (Silence this tip by adding "%s" to `ctx.traits[TipsTrait].silenced_tips` in `.aspect/config.axl`.)' % id)
 
 def blockquote_body(body):
     """Prefix every line of a tip body with `> ` (or `>` for empty

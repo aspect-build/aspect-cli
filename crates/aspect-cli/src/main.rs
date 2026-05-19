@@ -121,6 +121,13 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
 
             let dispatch = cmd.dispatch(matches)?;
 
+            // Print the "Running <task>" header before feature
+            // implementations run so any diagnostic output from feature
+            // initialization (auth WARNINGs, tip blocks, etc.) is
+            // framed by the header.
+            mpe.print_running_task_header(dispatch.task_id, &dispatch.task_key)
+                .map_err(anyhow::Error::from)?;
+
             // Phase 3: run enabled feature impls.
             mpe.execute_features_with_args(|f, h| dispatch.feature_args(f, h))
                 .map_err(anyhow::Error::from)?;

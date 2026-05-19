@@ -24,10 +24,13 @@ Run with:
 
 load(
     "./tips.axl",
+    "TIP_ADD_ASPECT_API_TOKEN_BUILDKITE",
+    "TIP_ADD_ASPECT_API_TOKEN_CIRCLECI",
+    "TIP_ADD_ASPECT_API_TOKEN_GHA",
     "TIP_ADD_GITHUB_TOKEN",
     "TIP_ADD_GITHUB_TOKEN_SCOPE",
     "TIP_ADD_ID_TOKEN_PERMISSION",
-    "TIP_CRITICAL",
+    "TIP_IMPORTANT",
     "TIP_INFO",
     "TIP_SUGGESTION",
     "TIP_TEMPLATE_FORMAT",
@@ -104,16 +107,16 @@ def _test_silenced_tips_blocks_emit_tip(ctx):
         [],
     )
 
-def _test_critical_tips_cannot_be_silenced(ctx):
-    """Critical tips ignore `silenced_tips` — they signal a key-feature
+def _test_important_tips_cannot_be_silenced(ctx):
+    """Important tips ignore `silenced_tips` — they signal a key-feature
     breakage and must always reach the user. Verified both via direct
-    `add_tip` and via `emit_tip` against a built-in critical template."""
+    `add_tip` and via `emit_tip` against a built-in important template."""
     _reset(ctx)
     ctx.traits[TipsTrait].silenced_tips = ["unsuppressable", "add-id-token-permission"]
-    add_tip(ctx, id = "unsuppressable", severity = TIP_CRITICAL, title = "T", body = "B")
+    add_tip(ctx, id = "unsuppressable", severity = TIP_IMPORTANT, title = "T", body = "B")
     emit_tip(ctx, TIP_ADD_ID_TOKEN_PERMISSION)
     _eq(
-        "critical — silence list ignored",
+        "important — silence list ignored",
         _ids(ctx.traits[TipsTrait].tips),
         ["unsuppressable", "add-id-token-permission"],
     )
@@ -329,15 +332,15 @@ def _test_jinja2_partial_overlap_appends_only_new(ctx):
 def _test_collect_sorted_by_severity(ctx):
     _reset(ctx)
     add_tip(ctx, id = "info-1", severity = TIP_INFO, title = "T", body = "B")
-    add_tip(ctx, id = "critical-1", severity = TIP_CRITICAL, title = "T", body = "B")
+    add_tip(ctx, id = "important-1", severity = TIP_IMPORTANT, title = "T", body = "B")
     add_tip(ctx, id = "warning-1", severity = TIP_WARNING, title = "T", body = "B")
     add_tip(ctx, id = "suggestion-1", severity = TIP_SUGGESTION, title = "T", body = "B")
-    add_tip(ctx, id = "critical-2", severity = TIP_CRITICAL, title = "T", body = "B")
+    add_tip(ctx, id = "important-2", severity = TIP_IMPORTANT, title = "T", body = "B")
     sorted_ids = _ids(collect_tips_sorted(ctx))
     _eq(
-        "sorted — critical → warning → suggestion → info; stable within bucket",
+        "sorted — important → warning → suggestion → info; stable within bucket",
         sorted_ids,
-        ["critical-1", "critical-2", "warning-1", "suggestion-1", "info-1"],
+        ["important-1", "important-2", "warning-1", "suggestion-1", "info-1"],
     )
 
 def _test_collect_task_keys_filter(ctx):
@@ -367,14 +370,14 @@ def _test_collect_limit(ctx):
     _eq("limit — 0 returns empty", len(collect_tips_sorted(ctx, limit = 0)), 0)
 
 def _test_severity_emoji(ctx):
-    _eq("emoji — critical", severity_emoji(TIP_CRITICAL), "🔥")
+    _eq("emoji — important", severity_emoji(TIP_IMPORTANT), "🔥")
     _eq("emoji — warning", severity_emoji(TIP_WARNING), "⚠️")
     _eq("emoji — suggestion", severity_emoji(TIP_SUGGESTION), "💡")
     _eq("emoji — info", severity_emoji(TIP_INFO), "ℹ️")
     _eq("emoji — unknown defaults to info", severity_emoji("bogus"), "ℹ️")
 
 def _test_severity_label(ctx):
-    _eq("label — critical", severity_label(TIP_CRITICAL), "Critical")
+    _eq("label — important", severity_label(TIP_IMPORTANT), "Important")
     _eq("label — warning", severity_label(TIP_WARNING), "Warning")
     _eq("label — suggestion", severity_label(TIP_SUGGESTION), "Tip")
     _eq("label — info", severity_label(TIP_INFO), "Info")
@@ -397,15 +400,60 @@ def _test_blockquote_body(ctx):
 
 def _test_builtin_templates_shape(ctx):
     """Smoke-test the built-in templates have the required keys so a
-    rename or restructure trips the test before users see a broken tip."""
-    for name, tmpl in [
+    rename or restructure trips the test before users see a broken tip.
+    Also pins severity + per-host id stability — distinct ids per CI host
+    let users silence one variant without silencing the others."""
+    aspect_token_variants = [
+        ("TIP_ADD_ASPECT_API_TOKEN_GHA", TIP_ADD_ASPECT_API_TOKEN_GHA, "add-aspect-api-token-github-actions"),
+        ("TIP_ADD_ASPECT_API_TOKEN_BUILDKITE", TIP_ADD_ASPECT_API_TOKEN_BUILDKITE, "add-aspect-api-token-buildkite"),
+        ("TIP_ADD_ASPECT_API_TOKEN_CIRCLECI", TIP_ADD_ASPECT_API_TOKEN_CIRCLECI, "add-aspect-api-token-circleci"),
+    ]
+    other_templates = [
         ("TIP_ADD_GITHUB_TOKEN", TIP_ADD_GITHUB_TOKEN),
         ("TIP_ADD_GITHUB_TOKEN_SCOPE", TIP_ADD_GITHUB_TOKEN_SCOPE),
         ("TIP_ADD_ID_TOKEN_PERMISSION", TIP_ADD_ID_TOKEN_PERMISSION),
-    ]:
+    ]
+    for name, tmpl, expected_id in aspect_token_variants:
         for key in ("id", "severity", "title", "body", "type"):
             if key not in tmpl:
                 fail("%s missing required key %r" % (name, key))
+        _eq("%s id" % name, tmpl["id"], expected_id)
+        _eq("%s severity is IMPORTANT" % name, tmpl["severity"], TIP_IMPORTANT)
+    for name, tmpl in other_templates:
+        for key in ("id", "severity", "title", "body", "type"):
+            if key not in tmpl:
+                fail("%s missing required key %r" % (name, key))
+    _eq(
+        "TIP_ADD_GITHUB_TOKEN severity is SUGGESTION (fallback hint, not failure)",
+        TIP_ADD_GITHUB_TOKEN["severity"],
+        TIP_SUGGESTION,
+    )
+
+    # Body specialization sanity-check — wire-up advice differs per host.
+    if "workflow" not in TIP_ADD_ASPECT_API_TOKEN_GHA["body"]:
+        fail("GHA tip body missing GHA-specific advice")
+    if "Buildkite's secrets docs" not in TIP_ADD_ASPECT_API_TOKEN_BUILDKITE["body"]:
+        fail("Buildkite tip body missing Buildkite-specific advice")
+    if "context" not in TIP_ADD_ASPECT_API_TOKEN_CIRCLECI["body"]:
+        fail("CircleCI tip body missing CircleCI-specific advice")
+
+    # PR-summary-comment aggregation is GHA-only today, so only the GHA
+    # tip should mention it. BK / CircleCI tips listing a feature that
+    # doesn't work there would mislead users into thinking the App
+    # unlocks it.
+    if "PR summary comment" not in TIP_ADD_ASPECT_API_TOKEN_GHA["body"]:
+        fail("GHA tip should mention PR summary comment aggregation (GHA-only feature)")
+    if "PR summary comment" in TIP_ADD_ASPECT_API_TOKEN_BUILDKITE["body"]:
+        fail("BK tip should not mention PR summary comment aggregation (not yet supported)")
+    if "PR summary comment" in TIP_ADD_ASPECT_API_TOKEN_CIRCLECI["body"]:
+        fail("CircleCI tip should not mention PR summary comment aggregation (not yet supported)")
+
+    # `--scope=changed` falls back to local git diff when the App is
+    # unavailable, so listing it as a "degraded" feature would be
+    # misleading — none of the variants should mention it.
+    for name, tmpl, _ in aspect_token_variants:
+        if "scope=changed" in tmpl["body"]:
+            fail("%s should not mention --scope=changed (App is only a fallback there)" % name)
 
 def _test_builtin_insufficient_scope_renders(ctx):
     """`TIP_ADD_GITHUB_TOKEN_SCOPE` is the canonical multi-accumulator
@@ -467,8 +515,8 @@ def _test_builtin_insufficient_scope_renders(ctx):
 def _test_silence_hint_line(ctx):
     _eq("silence_hint — empty id", silence_hint_line("", TIP_INFO), "")
     _eq(
-        "silence_hint — critical returns empty",
-        silence_hint_line("anything", TIP_CRITICAL),
+        "silence_hint — important returns empty",
+        silence_hint_line("anything", TIP_IMPORTANT),
         "",
     )
     for sev in (TIP_WARNING, TIP_SUGGESTION, TIP_INFO):
@@ -481,7 +529,7 @@ def _test_silence_hint_line(ctx):
             fail("silence_hint %s: must wrap in <sub>: %r" % (sev, line))
 
 def _test_severity_rank(ctx):
-    _eq("rank — critical most urgent", severity_rank(TIP_CRITICAL), 0)
+    _eq("rank — important most urgent", severity_rank(TIP_IMPORTANT), 0)
     _eq("rank — warning", severity_rank(TIP_WARNING), 1)
     _eq("rank — suggestion", severity_rank(TIP_SUGGESTION), 2)
     _eq("rank — info least urgent", severity_rank(TIP_INFO), 3)
@@ -536,11 +584,11 @@ def _test_decorate_tip(ctx):
     _eq("decorate_tip — title", decorated["title"], "T")
     _eq("decorate_tip — body_quoted prefixes each line", decorated["body_quoted"], "> line1\n> line2")
     if "silenced_tips" not in decorated["silence_hint"]:
-        fail("decorate_tip — non-critical row missing silence_hint: %r" % decorated["silence_hint"])
+        fail("decorate_tip — non-important row missing silence_hint: %r" % decorated["silence_hint"])
 
-    # Critical: silence_hint should be blank.
-    crit = decorate_tip({"id": "c", "severity": TIP_CRITICAL, "title": "C", "body": ""})
-    _eq("decorate_tip — critical silence_hint blank", crit["silence_hint"], "")
+    # Important: silence_hint should be blank.
+    crit = decorate_tip({"id": "c", "severity": TIP_IMPORTANT, "title": "C", "body": ""})
+    _eq("decorate_tip — important silence_hint blank", crit["silence_hint"], "")
 
 def _test_strip_code_fences(ctx):
     _eq("fences — empty body", strip_code_fences(""), "")
@@ -577,7 +625,7 @@ def _test_impl(ctx):
     _test_add_tip_dedup(ctx)
     _test_silenced_tips_short_circuits_add_tip(ctx)
     _test_silenced_tips_blocks_emit_tip(ctx)
-    _test_critical_tips_cannot_be_silenced(ctx)
+    _test_important_tips_cannot_be_silenced(ctx)
     _test_add_tip_task_keys_stored(ctx)
     _test_emit_tip_format(ctx)
     _test_emit_tip_raw_skips_interpolation(ctx)
