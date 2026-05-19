@@ -130,10 +130,8 @@ def config(ctx: ConfigContext):
     # Run with: aspect dev test-pr-comment-snapshots
     ctx.tasks.add(pr_comment_snapshot_tests)
 
-    # Lint annotation-plan auto-detect — pins the GitHub-PR auto-detect
-    # contract used by the lint task: on a PR, fix-bearing diagnostics
-    # route to suggested-fix comments; off a PR (push, scheduled,
-    # merge_group, GitLab MR, …) annotations pick up everything.
+    # Pins the lint task's PR auto-detect contract for routing findings
+    # between check-run annotations and PR-review comments.
     # Run with: aspect dev test-lint-annotation-plan
     ctx.tasks.add(lint_annotation_plan_tests)
 

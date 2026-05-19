@@ -3,23 +3,10 @@
 Run with:
   aspect dev test-lint-annotation-plan
 
-Verifies that the lint task auto-detects GitHub PR context when
-choosing between channel 1 (check-run annotations, this feature)
-and channels 2/3 (PR-review comments, `GithubLintComments`):
-
-  - On a GH PR (`has_pr = True`): behavior matches the configured
-    destination — `auto` and `comments` keep fix-bearing findings on
-    the PR-comment surfaces; only non-fix findings annotate.
-  - On a non-PR run (`has_pr = False` — push to main, scheduled
-    jobs, GHA `merge_group`, GitLab MR, etc.): channel 3 can't post,
-    so `auto` falls back to annotating EVERYTHING (including
-    fix-bearing findings). Without this fallback, fix-bearing
-    findings would silently disappear on push / scheduled / merge-queue
-    runs.
-  - The other destinations (`annotations` / `both`) are pure and
-    don't pivot on PR context — the test pins their behavior in
-    both states for completeness so a future refactor can't
-    inadvertently introduce PR-dependence.
+Pins the GitHub PR auto-detect contract used by the lint task to route
+findings between check-run annotations and PR-review comments. Covers
+all four `findings_destination` modes × PR / no-PR, plus the invariant
+that `"auto"` is the only destination whose plan depends on PR context.
 """
 
 load("./github_status_checks.axl", "lint_annotation_plan")
@@ -29,110 +16,63 @@ def _eq(label, got, want):
         fail("%s: got %r, want %r" % (label, got, want))
 
 def _test_impl(ctx):
-    # ── On a GitHub PR (pull_request, pull_request_target, BK PR, …) ─
-
-    # "auto" on PR — fix-bearing findings ride channel 3 (suggested-fix
-    # comments), so the annotation surface SKIPS fix-bearing diagnostics
-    # to keep each finding on exactly one surface.
+    # On a GitHub PR (pull_request, pull_request_target, BK PR, …).
     _eq(
-        "auto + has_pr: enabled, fix-bearing diagnostics route to PR comments",
+        "auto + has_pr: non-fix annotate; fix-bearing → PR comments",
         lint_annotation_plan("auto", has_pr = True),
         (True, False),
     )
-
-    # "both" — every finding annotates (fix-bearing items also post as
-    # suggestion comments; reviewer sees the same finding on both
-    # surfaces). PR context doesn't change this.
     _eq(
-        "both + has_pr: annotate everything (suggestion comments also post)",
+        "both + has_pr: annotate everything (comments also post)",
         lint_annotation_plan("both", has_pr = True),
         (True, True),
     )
-
-    # "comments" — every finding routes to a PR review comment;
-    # annotation surface is disabled.
     _eq(
-        "comments + has_pr: annotations disabled (all findings post as comments)",
+        "comments + has_pr: annotations disabled; all findings → comments",
         lint_annotation_plan("comments", has_pr = True),
         (False, False),
     )
-
-    # "annotations" — every finding annotates; PR-comment surfaces are
-    # the explicit "no review noise" suppressed in this mode (the
-    # tradeoff this mode accepts).
     _eq(
-        "annotations + has_pr: annotate everything, comment surfaces suppressed",
+        "annotations + has_pr: annotate everything; comment surfaces suppressed",
         lint_annotation_plan("annotations", has_pr = True),
         (True, True),
     )
 
-    # ── Off a GitHub PR (push to main, GHA merge_group, scheduled, GitLab MR, …) ─
-    # This is the auto-detect branch the lint task relies on: when
-    # there's no PR, channels 2 and 3 (PR review comments + suggested-fix
-    # comments) silently bail in `github_lint_comments.axl`. The
-    # annotation surface has to pick up the slack — otherwise
-    # fix-bearing findings have nowhere to land.
-
-    # "auto" off-PR — fall back to annotating EVERYTHING (including
-    # fix-bearing findings). This is the headline auto-detect
-    # behavior: it keeps fix-bearing diagnostics visible on push /
-    # scheduled / merge_queue runs where suggested-fix comments
-    # can't post.
+    # Off a GitHub PR (push to main, GHA merge_group, scheduled, GitLab MR, …).
+    # `auto` is the only mode that pivots: with no PR-comment surface
+    # available, fix-bearing findings would otherwise have nowhere to land.
     _eq(
         "auto + no_pr: fall back to annotating everything (fix-bearing included)",
         lint_annotation_plan("auto", has_pr = False),
         (True, True),
     )
-
-    # "both" off-PR — annotates everything. Suggestion comments would
-    # be skipped by `github_lint_comments` anyway (no PR), so this
-    # mode degrades cleanly to the same observable surface as "auto"
-    # off-PR.
     _eq(
         "both + no_pr: annotate everything",
         lint_annotation_plan("both", has_pr = False),
         (True, True),
     )
-
-    # "comments" off-PR — annotations stay disabled per the mode
-    # contract. Channel 2 in `github_lint_comments` bails (no PR),
-    # so findings have NO destination — that's the explicit user
-    # choice when picking "comments" without a PR context. The
-    # symmetry is preserved on purpose: switching destination mode
-    # shouldn't depend on PR context.
     _eq(
         "comments + no_pr: annotations stay disabled (mode contract)",
         lint_annotation_plan("comments", has_pr = False),
         (False, False),
     )
-
-    # "annotations" off-PR — annotate everything (the mode's whole
-    # point; comment channels were already off).
     _eq(
         "annotations + no_pr: annotate everything",
         lint_annotation_plan("annotations", has_pr = False),
         (True, True),
     )
 
-    # ── Cross-state assertion: the "auto" mode is the ONLY destination
-    # whose annotation plan depends on PR context. Everything else
-    # returns the same plan whether or not a PR is detected. Pinning
-    # this property as a single assertion makes the auto-detect
-    # contract explicit — a future refactor that accidentally makes
-    # another mode PR-dependent (or breaks the auto-detect on "auto")
-    # trips a single, named test.
+    # PR-context invariant: `"auto"` is the ONLY destination whose plan
+    # depends on PR context. A future change that makes another mode
+    # PR-dependent (or collapses `auto`'s split) trips one of these.
     for dest in ["annotations", "both", "comments"]:
         _eq(
             "PR-context invariant: %r returns the same plan on PR and off PR" % dest,
             lint_annotation_plan(dest, has_pr = True),
             lint_annotation_plan(dest, has_pr = False),
         )
-
-    # "auto" deliberately differs across PR contexts — the difference IS
-    # the auto-detect contract. Pin it so a future change that collapses
-    # the two trips this test.
     if lint_annotation_plan("auto", has_pr = True) == lint_annotation_plan("auto", has_pr = False):
-        fail("auto-detect contract: lint_annotation_plan('auto', has_pr=True) must differ from has_pr=False")
+        fail("auto-detect contract: 'auto' must differ between has_pr=True and has_pr=False")
 
     print("github_status_checks.axl::lint_annotation_plan: all cases OK")
     return 0
