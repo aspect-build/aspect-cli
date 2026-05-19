@@ -360,11 +360,11 @@ impl Build {
         // end, which won't happen until bazel finishes JVM startup — well
         // after these subscribe calls land.
         let mut sink_handles: Vec<JoinHandle<SinkOutcome>> = vec![];
+        let debug = std::env::var_os("ASPECT_DEBUG")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
         let sink_invocation_id: Option<String> = if !bes_subscriber_sinks.is_empty() {
             let invocation_id = uuid::Uuid::new_v4().to_string();
-            let debug = std::env::var_os("ASPECT_DEBUG")
-                .map(|v| !v.is_empty())
-                .unwrap_or(false);
             if debug {
                 eprintln!(
                     "BES sinks: spawning {} subscriber sink(s) sink_invocation_id={}",
@@ -382,6 +382,22 @@ impl Build {
             }
             Some(invocation_id)
         } else {
+            // Positive-signal log so an empty sink list doesn't look
+            // identical to a debug-suppressed run. Dumps the env vars
+            // `feature/workflows.axl` consults so the cause of an
+            // empty list (env var missing, vs. feature wiring) is
+            // unambiguous from the log alone.
+            if debug {
+                let bes_backend = std::env::var("ASPECT_WORKFLOWS_BES_BACKEND")
+                    .unwrap_or_else(|_| "<unset>".to_string());
+                let bes_results = std::env::var("ASPECT_WORKFLOWS_BES_RESULTS_URL")
+                    .unwrap_or_else(|_| "<unset>".to_string());
+                eprintln!(
+                    "BES sinks: 0 subscriber sinks configured (skipping spawn). \
+                     ASPECT_WORKFLOWS_BES_BACKEND={bes_backend} \
+                     ASPECT_WORKFLOWS_BES_RESULTS_URL={bes_results}"
+                );
+            }
             None
         };
 

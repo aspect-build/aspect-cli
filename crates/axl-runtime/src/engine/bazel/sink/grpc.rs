@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    sync::OnceLock,
     thread::{self, JoinHandle},
 };
 
@@ -46,6 +47,19 @@ enum DriveOutcome {
     UpstreamClosed,
 }
 
+impl DriveOutcome {
+    /// Short label for `ASPECT_DEBUG` logging.
+    fn label(&self) -> String {
+        match self {
+            DriveOutcome::Done => "Done".to_string(),
+            DriveOutcome::UpstreamClosed => "UpstreamClosed".to_string(),
+            DriveOutcome::Transient(e) => format!("Transient({e})"),
+            DriveOutcome::Fatal(e) => format!("Fatal({e})"),
+            DriveOutcome::BufferFull(e) => format!("BufferFull({e})"),
+        }
+    }
+}
+
 impl Grpc {
     /// Spawn a gRPC BES forwarding thread.
     ///
@@ -68,15 +82,68 @@ impl Grpc {
         invocation_id: String,
         retry: RetryConfig,
     ) -> JoinHandle<SinkOutcome> {
-        thread::spawn(move || {
-            // We block_on here so the worker can drive both async tonic calls
-            // and the synchronous broadcaster `recv`. block_on cannot itself
-            // fail the way the previous panic-on-error path implied — if the
-            // tokio handle is gone, that is a runtime-shutdown bug, not a
-            // sink failure, so we still let it surface as a panic.
-            rt.block_on(work(recv, endpoint, headers, invocation_id, retry))
-        })
+        thread::spawn(move || rt.block_on(work(recv, endpoint, headers, invocation_id, retry)))
     }
+}
+
+/// Whether `ASPECT_DEBUG` was set when the process started. Cached
+/// once so sink hot paths don't repeat the env lookup on every call.
+fn debug_enabled() -> bool {
+    static D: OnceLock<bool> = OnceLock::new();
+    *D.get_or_init(|| {
+        std::env::var_os("ASPECT_DEBUG")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
+    })
+}
+
+/// Emit a sink-lifecycle log line on stderr when `ASPECT_DEBUG` is set.
+/// Prefixed `BES sink <endpoint> [<id8>]:` so a single `grep BES\ sink`
+/// pulls every event for one sink across a run, and multi-sink
+/// configurations (e.g. an Aspect backend plus an internal mirror)
+/// stay distinguishable via the endpoint segment.
+fn dbg(endpoint: &str, invocation_id: &str, msg: &str) {
+    if !debug_enabled() {
+        return;
+    }
+    let short = invocation_id.get(..8).unwrap_or(invocation_id);
+    eprintln!("BES sink {endpoint} [{short}]: {msg}");
+}
+
+/// Send one of the unary lifecycle events (`build_enqueued`,
+/// `invocation_started`, `invocation_finished`, `build_finished`),
+/// timing the round trip and logging the result. Errors are wrapped
+/// via `finalize` so a failure surfaces per the configured
+/// `error_strategy` rather than propagating as a raw `ClientError`.
+async fn send_lifecycle_logged(
+    name: &str,
+    retry: &RetryConfig,
+    client: &mut Client,
+    request: PublishLifecycleEventRequest,
+    endpoint: &str,
+    invocation_id: &str,
+    strategy: ErrorStrategy,
+) -> Result<(), SinkError> {
+    dbg(
+        endpoint,
+        invocation_id,
+        &format!("sending lifecycle: {name}"),
+    );
+    let t = std::time::Instant::now();
+    retry_lifecycle(retry, client, request).await.map_err(|e| {
+        dbg(
+            endpoint,
+            invocation_id,
+            &format!("{name} FAILED after {:?}: {e}", t.elapsed()),
+        );
+        finalize(strategy, endpoint, format!("{name}: {e}"))
+    })?;
+    dbg(
+        endpoint,
+        invocation_id,
+        &format!("{name} ack'd in {:?}", t.elapsed()),
+    );
+    Ok(())
 }
 
 async fn work(
@@ -86,25 +153,24 @@ async fn work(
     invocation_id: String,
     retry: RetryConfig,
 ) -> SinkOutcome {
-    work_inner(recv, endpoint, headers, invocation_id, retry).await
-}
-
-async fn work_inner(
-    recv: Subscriber<BuildEvent>,
-    endpoint: String,
-    headers: HashMap<String, String>,
-    invocation_id: String,
-    retry: RetryConfig,
-) -> SinkOutcome {
     let strategy = retry.error_strategy;
-    let context = |stage: &str, err: &dyn std::fmt::Display| -> SinkError {
-        finalize(strategy, &endpoint, format!("{stage}: {err}"))
-    };
 
-    // Forward the synchronous broadcaster `recv` into a tokio mpsc so the
-    // state machine can `select!` over it alongside the bidi response
-    // stream. The forwarder runs once for the whole sink lifetime — events
-    // are queued on `event_rx` and pulled lazily as we (re)open streams.
+    dbg(
+        &endpoint,
+        &invocation_id,
+        &format!(
+            "starting work (headers={}, max_retries={}, timeout={:?})",
+            headers.len(),
+            retry.max_retries,
+            retry.timeout,
+        ),
+    );
+
+    // Forward the synchronous broadcaster `recv` into a tokio mpsc so
+    // `drive_stream` can pull from `event_rx` inside `tokio::select!`.
+    // The forwarder runs once for the whole sink lifetime — events
+    // queue up on `event_rx` even when no bidi stream is open, ready
+    // for the next `drive_stream` iteration to drain.
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<BuildEvent>();
     let _forwarder = tokio::task::spawn_blocking(move || {
         while let Ok(ev) = recv.recv() {
@@ -118,9 +184,12 @@ async fn work_inner(
     // endpoint can stall indefinitely without any of the retry machinery
     // ever running.
     const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+    let connect_started = std::time::Instant::now();
     let mut client =
         match tokio::time::timeout(CONNECT_TIMEOUT, Client::new(endpoint.clone(), headers)).await {
-            Ok(r) => r.map_err(|e| context("connect failed", &e))?,
+            Ok(r) => {
+                r.map_err(|e| finalize(strategy, &endpoint, format!("connect failed: {e}")))?
+            }
             Err(_) => {
                 return Err(finalize(
                     strategy,
@@ -129,24 +198,37 @@ async fn work_inner(
                 ));
             }
         };
+    dbg(
+        &endpoint,
+        &invocation_id,
+        &format!(
+            "Client::new returned in {:?} (lazy channel — no TCP/TLS yet)",
+            connect_started.elapsed()
+        ),
+    );
 
     let build_id = invocation_id.clone();
 
-    retry_lifecycle(
+    send_lifecycle_logged(
+        "build_enqueued",
         &retry,
         &mut client,
         lifecycle::build_enqueued(build_id.clone(), invocation_id.clone()),
+        &endpoint,
+        &invocation_id,
+        strategy,
     )
-    .await
-    .map_err(|e| context("build_enqueued", &e))?;
-
-    retry_lifecycle(
+    .await?;
+    send_lifecycle_logged(
+        "invocation_started",
         &retry,
         &mut client,
         lifecycle::invocation_started(build_id.clone(), invocation_id.clone()),
+        &endpoint,
+        &invocation_id,
+        strategy,
     )
-    .await
-    .map_err(|e| context("invocation_started", &e))?;
+    .await?;
 
     let mut buffer = RetryBuffer::new(retry.retry_max_buffer_size);
     let mut next_seq: i64 = 1;
@@ -154,6 +236,17 @@ async fn work_inner(
     let mut last_message_sent = false;
 
     'reconnect: loop {
+        dbg(
+            &endpoint,
+            &invocation_id,
+            &format!(
+                "entering drive_stream (attempt={}, next_seq={}, buffered={})",
+                attempt,
+                next_seq,
+                buffer.len()
+            ),
+        );
+        let drive_started = std::time::Instant::now();
         let outcome = drive_stream(
             &mut client,
             &build_id,
@@ -162,8 +255,18 @@ async fn work_inner(
             &mut buffer,
             &mut next_seq,
             &mut last_message_sent,
+            &endpoint,
         )
         .await;
+        dbg(
+            &endpoint,
+            &invocation_id,
+            &format!(
+                "drive_stream returned after {:?}: outcome={}",
+                drive_started.elapsed(),
+                outcome.label(),
+            ),
+        );
 
         match outcome {
             DriveOutcome::Done | DriveOutcome::UpstreamClosed => break 'reconnect,
@@ -176,6 +279,11 @@ async fn work_inner(
                     ));
                 }
                 let delay = backoff(retry.retry_min_delay, attempt);
+                dbg(
+                    &endpoint,
+                    &invocation_id,
+                    &format!("backoff {:?} before retry {}", delay, attempt + 1),
+                );
                 tokio::time::sleep(delay).await;
                 attempt += 1;
                 continue 'reconnect;
@@ -202,11 +310,11 @@ async fn work_inner(
     // silent backend. The events themselves were already streamed, so
     // failing these is non-fatal under the `Warn` default.
     //
-    // We don't know the bazel exit code at this point — that lives on
-    // the parent process. Submit a successful BuildStatus; a future
-    // revision can plumb the real status through.
+    // Bazel's exit code lives on the parent process and isn't reachable
+    // from here, so we submit a successful BuildStatus unconditionally.
     let post_stream = async {
-        retry_lifecycle(
+        send_lifecycle_logged(
+            "invocation_finished",
             &retry,
             &mut client,
             lifecycle::invocation_finished(
@@ -220,18 +328,21 @@ async fn work_inner(
                     details: None,
                 },
             ),
+            &endpoint,
+            &invocation_id,
+            strategy,
         )
-        .await
-        .map_err(|e| context("invocation_finished", &e))?;
-
-        retry_lifecycle(
+        .await?;
+        send_lifecycle_logged(
+            "build_finished",
             &retry,
             &mut client,
             lifecycle::build_finished(build_id.clone(), invocation_id.clone()),
+            &endpoint,
+            &invocation_id,
+            strategy,
         )
-        .await
-        .map_err(|e| context("build_finished", &e))?;
-
+        .await?;
         Ok::<(), SinkError>(())
     };
     match retry.timeout {
@@ -248,13 +359,128 @@ async fn work_inner(
     }
 }
 
+/// Bound for the `event_rx.recv()` wait inside `preload_first_event`.
+/// Bazel emits `build_started` very early after JVM startup; if nothing
+/// arrives within this window we proceed to open the bidi anyway and
+/// let the stream-open timeout bound the worst case.
+const FIRST_EVENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Push one message into the request-side mpsc channel before
+/// `drive_stream` awaits `publish_build_tool_event_stream`.
+///
+/// The Aspect Workflows BES backend (and several other BES backends)
+/// defers sending response headers until it sees the first client
+/// message on the bidi stream. Without a message in the channel, tonic's
+/// `await` blocks indefinitely on the response-header read and never
+/// returns. Pushing a message into the channel here is sufficient —
+/// tonic spawns a request-pump task at the start of the bidi call that
+/// pulls from the channel and writes to the wire concurrently with the
+/// response-header await, so as soon as the HTTP/2 stream is open our
+/// event flows out and the server responds.
+///
+/// Source of the first message:
+///   - **Reconnect** (`buffer` non-empty): replay the buffer's first entry.
+///   - **Fresh attempt** (`buffer` empty): wait up to `FIRST_EVENT_TIMEOUT`
+///     for the first event on `event_rx`. If none arrives, return `None`
+///     and let the caller open the bidi without pre-load (the stream-open
+///     timeout in `drive_stream` still bounds the worst case).
+///
+/// Returns the sequence number of the pre-loaded entry so `drive_stream`'s
+/// post-open replay loop can skip it (avoiding a wasted re-send; the server
+/// would dedup anyway).
+async fn preload_first_event(
+    sender: &tokio::sync::mpsc::Sender<PublishBuildToolEventStreamRequest>,
+    build_id: &str,
+    invocation_id: &str,
+    endpoint: &str,
+    event_rx: &mut tokio::sync::mpsc::UnboundedReceiver<BuildEvent>,
+    buffer: &mut RetryBuffer,
+    next_seq: &mut i64,
+    last_message_sent: &mut bool,
+) -> Result<Option<i64>, DriveOutcome> {
+    if let Some((seq, req)) = buffer.iter().next() {
+        let seq = *seq;
+        let req = req.clone();
+        if sender.send(req).await.is_err() {
+            return Err(DriveOutcome::Transient(ClientError::Status(
+                tonic::Status::unavailable("request stream closed before bidi open"),
+            )));
+        }
+        dbg(
+            endpoint,
+            invocation_id,
+            &format!("pre-loaded first event from buffer (seq={seq})"),
+        );
+        return Ok(Some(seq));
+    }
+
+    if *last_message_sent {
+        return Ok(None);
+    }
+
+    let started = std::time::Instant::now();
+    match tokio::time::timeout(FIRST_EVENT_TIMEOUT, event_rx.recv()).await {
+        Ok(Some(event)) => {
+            let seq = *next_seq;
+            *next_seq += 1;
+            let last = event.last_message;
+            let req = build_tool::bazel_event(
+                build_id.to_string(),
+                invocation_id.to_string(),
+                seq,
+                &event,
+            );
+            if let Err(overflow) = buffer.push(seq, req.clone()) {
+                return Err(DriveOutcome::BufferFull(overflow));
+            }
+            if sender.send(req).await.is_err() {
+                return Err(DriveOutcome::Transient(ClientError::Status(
+                    tonic::Status::unavailable("request stream closed before bidi open"),
+                )));
+            }
+            if last {
+                *last_message_sent = true;
+            }
+            dbg(
+                endpoint,
+                invocation_id,
+                &format!(
+                    "pre-loaded first event from event_rx (seq={seq} last_message={last}) in {:?}",
+                    started.elapsed()
+                ),
+            );
+            Ok(Some(seq))
+        }
+        Ok(None) => {
+            dbg(
+                endpoint,
+                invocation_id,
+                "event_rx closed before producing first event — opening bidi without pre-load",
+            );
+            Ok(None)
+        }
+        Err(_) => {
+            dbg(
+                endpoint,
+                invocation_id,
+                &format!(
+                    "no event from event_rx within {FIRST_EVENT_TIMEOUT:?} — opening bidi without pre-load"
+                ),
+            );
+            Ok(None)
+        }
+    }
+}
+
 /// Drive a single bidi stream until it ends (cleanly or with error).
 ///
 /// Owns the request channel for this connection. Pulls events from
-/// `event_rx`, assigns sequence numbers, buffers them in `buffer`, and pings
-/// them down the wire. In parallel reads responses and prunes the buffer up
-/// to each ack'd `sequence_number`. Replays any leftover buffered events
-/// under their original seqs at the start of the connection.
+/// `event_rx`, assigns sequence numbers, buffers them in `buffer`, and
+/// writes them down the wire. In parallel reads responses and prunes
+/// the buffer up to each ack'd `sequence_number`. Replays any leftover
+/// buffered events under their original seqs at the start of the
+/// connection (skipping the one already pre-loaded by
+/// `preload_first_event`).
 async fn drive_stream(
     client: &mut Client,
     build_id: &str,
@@ -263,21 +489,64 @@ async fn drive_stream(
     buffer: &mut RetryBuffer,
     next_seq: &mut i64,
     last_message_sent: &mut bool,
+    endpoint: &str,
 ) -> DriveOutcome {
     let (sender, receiver) = tokio::sync::mpsc::channel::<PublishBuildToolEventStreamRequest>(64);
     let request_stream = ReceiverStream::new(receiver);
 
+    let preloaded_seq = match preload_first_event(
+        &sender,
+        build_id,
+        invocation_id,
+        endpoint,
+        event_rx,
+        buffer,
+        next_seq,
+        last_message_sent,
+    )
+    .await
+    {
+        Ok(seq) => seq,
+        Err(outcome) => return outcome,
+    };
+
     // Bound the bidi stream open: tonic does not add a deadline and the
-    // server may accept the TCP/TLS handshake without ever responding.
+    // server may accept the TCP/TLS handshake without ever responding. With
+    // the pre-load above this should now succeed promptly; the timeout is
+    // belt-and-suspenders.
     const OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+    dbg(
+        endpoint,
+        invocation_id,
+        "opening publish_build_tool_event_stream bidi (10s timeout)",
+    );
+    let open_started = std::time::Instant::now();
     let response_stream = match tokio::time::timeout(
         OPEN_TIMEOUT,
         client.publish_build_tool_event_stream(request_stream),
     )
     .await
     {
-        Ok(Ok(s)) => s.into_inner(),
+        Ok(Ok(s)) => {
+            dbg(
+                endpoint,
+                invocation_id,
+                &format!(
+                    "publish_build_tool_event_stream returned response stream in {:?}",
+                    open_started.elapsed()
+                ),
+            );
+            s.into_inner()
+        }
         Ok(Err(e)) => {
+            dbg(
+                endpoint,
+                invocation_id,
+                &format!(
+                    "publish_build_tool_event_stream returned error in {:?}: {e}",
+                    open_started.elapsed()
+                ),
+            );
             return if is_retryable(&e) {
                 DriveOutcome::Transient(e)
             } else {
@@ -285,19 +554,39 @@ async fn drive_stream(
             };
         }
         Err(_) => {
+            dbg(
+                endpoint,
+                invocation_id,
+                &format!(
+                    "publish_build_tool_event_stream stream-open TIMED OUT after {:?}",
+                    open_started.elapsed()
+                ),
+            );
             return DriveOutcome::Transient(ClientError::Status(tonic::Status::deadline_exceeded(
                 "stream open timed out",
             )));
         }
     };
     let mut response_stream = response_stream;
+    dbg(
+        endpoint,
+        invocation_id,
+        &format!(
+            "replaying {} buffered events (skipping pre-loaded seq={:?})",
+            buffer.len(),
+            preloaded_seq
+        ),
+    );
 
     // Replay any buffered (unacked) events under their original sequence
     // numbers. The server dedups via OrderedBuildEvent.sequence_number.
-    for (_seq, req) in buffer.iter() {
+    // Skip the entry `preload_first_event` already sent — server would
+    // dedup anyway, but resending wastes bytes.
+    for (seq, req) in buffer.iter() {
+        if Some(*seq) == preloaded_seq {
+            continue;
+        }
         if sender.send(req.clone()).await.is_err() {
-            // Server side closed before we could even replay; treat as
-            // transient so the outer loop reconnects.
             return DriveOutcome::Transient(ClientError::Status(tonic::Status::unavailable(
                 "request stream closed during replay",
             )));
@@ -317,14 +606,15 @@ async fn drive_stream(
     const HALF_CLOSE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
     let mut half_close_deadline: Option<tokio::time::Instant> = None;
 
-    // If a previous attempt already sent last_message, the replay above
-    // resent it on this fresh stream. The event-receive arm below stays
-    // disabled (last_message_sent is set), so the `if last { ... }`
-    // branch that normally drops the sender will never fire on this
-    // attempt. Close the request side now and arm the half-close
-    // deadline ourselves — otherwise drive_stream parks in
-    // response_stream.next() forever waiting for an ack or close that a
-    // flaky backend may never send, and Build.wait() hangs.
+    // If a previous attempt already sent last_message, the pre-load
+    // and replay above resent it on this fresh stream. The
+    // event-receive arm below stays disabled (last_message_sent is
+    // set), so the `if last { ... }` branch that normally drops the
+    // sender will never fire on this attempt. Close the request side
+    // now and arm the half-close deadline ourselves — otherwise
+    // drive_stream parks in response_stream.next() forever waiting
+    // for an ack or close that a flaky backend may never send, and
+    // Build.wait() hangs.
     if *last_message_sent {
         sender_opt = None;
         half_close_deadline = Some(tokio::time::Instant::now() + HALF_CLOSE_DEADLINE);
@@ -374,6 +664,7 @@ async fn drive_stream(
 
                 if last {
                     *last_message_sent = true;
+                    dbg(endpoint, invocation_id, "last_message sent — half-closing");
                     // Drop the request side to signal half-close, but stay
                     // in the loop so we keep draining acks until the server
                     // closes the response side.
@@ -403,6 +694,11 @@ async fn drive_stream(
                         }
                     }
                     Some(Err(status)) => {
+                        dbg(
+                            endpoint,
+                            invocation_id,
+                            &format!("server returned error status: {status}"),
+                        );
                         let err = ClientError::Status(status);
                         return if is_retryable(&err) {
                             DriveOutcome::Transient(err)
@@ -411,6 +707,15 @@ async fn drive_stream(
                         };
                     }
                     None => {
+                        dbg(
+                            endpoint,
+                            invocation_id,
+                            &format!(
+                                "response stream closed (last_message_sent={}, buffered={})",
+                                *last_message_sent,
+                                buffer.len()
+                            ),
+                        );
                         // Server closed the response stream.
                         if *last_message_sent && buffer.is_empty() {
                             return DriveOutcome::Done;
