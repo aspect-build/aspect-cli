@@ -342,6 +342,14 @@ def init_data():
         "bazel": {
             # Failed build targets (not test-related): [{label}]
             "failed_targets": [],
+            # Skipped build targets — Bazel emitted a target_completed event
+            # with an Aborted payload (reason=SKIPPED). Typical sources are
+            # `--build_tag_filters`, `target_compatible_with`, and incompatible
+            # toolchain selection. [{label, kind, reason}], capped at
+            # MAX_BUILT_TARGETS so a filter-everything run doesn't blow up
+            # the body. The uncapped count lives on `skipped_targets_total`.
+            "skipped_targets": [],
+            "skipped_targets_total": 0,
             # Failed build actions, grouped by target label:
             #   [{label, mnemonics}]   where mnemonics = deduped list of strings
             # Capped at MAX_FAILED_ACTIONS unique labels. Deliberately NOT capturing
@@ -689,11 +697,27 @@ def process_event(data, event):
     elif kind == "target_completed":
         data["bazel"]["targets_total"] += 1
         payload = event.payload
-        success = _bes_get(payload, "success", None)
         label = _bes_get(event.id, "label", "") or ""
 
         # Kind was captured on the prior target_configured event.
         target_kind = data["bazel"]["target_kinds"].get(label, "") if label else ""
+
+        # Bazel emits skipped targets (build_tag_filters, target_compatible_with,
+        # incompatible toolchains) as target_completed events with an Aborted
+        # payload. Aborted has `reason` + `description`; TargetComplete has
+        # `success` — presence of `reason` is the cleanest payload-shape probe.
+        abort_reason = _bes_get(payload, "reason", None)
+        if abort_reason != None:
+            data["bazel"]["skipped_targets_total"] += 1
+            if len(data["bazel"]["skipped_targets"]) < MAX_BUILT_TARGETS:
+                data["bazel"]["skipped_targets"].append({
+                    "label": label,
+                    "kind": target_kind,
+                    "reason": abort_reason,
+                })
+            return True
+
+        success = _bes_get(payload, "success", None)
         if success == None:
             trace.log("warning: BES target_completed event missing expected field 'success' (label=" + label + ")")
         if not success:
@@ -992,7 +1016,10 @@ def process_event(data, event):
         data["bazel"]["aborted"] = True
         payload = event.payload
         if payload:
-            data["bazel"]["abort_reason"] = _bes_get(payload, "abort_reason", "") or ""
+            # Aborted proto fields are `reason` + `description` (not
+            # `abort_reason`). Our data-dict key stays `abort_reason` to
+            # avoid renaming the template variable.
+            data["bazel"]["abort_reason"] = _bes_get(payload, "reason", "") or ""
             data["bazel"]["abort_description"] = _bes_get(payload, "description", "") or ""
         return True
 
@@ -1861,6 +1888,7 @@ def _compute_bucket_counts(data):
       - failed_tests split by .status     → TEST_FAILED / TEST_TIMEOUT / FAILED_TO_BUILD
       - flaky_tests                       → TEST_FLAKY
       - passed_tests split by .cached     → TEST_PASSED / TEST_PASSED_CACHED
+      - skipped_targets                   → SKIPPED
       - built_targets (non-test only)     → SUCCESSFUL_BUILD
       - aborted flag                      → ABORTED_STATE
     """
@@ -1891,9 +1919,16 @@ def _compute_bucket_counts(data):
     counts[_BUCKET_TEST_PASSED_CACHED] = passed_cached
     counts[_BUCKET_TEST_PASSED] = passed_total - passed_cached if passed_total > passed_cached else 0
 
-    # successful − tests. Aggregates only, since the capped
-    # built_targets sample would under-count.
-    successful_target_count = data["bazel"].get("targets_total", 0) - len(data["bazel"].get("failed_targets", []))
+    # Uncapped count (the list itself is capped at MAX_BUILT_TARGETS).
+    skipped_total = data["bazel"].get("skipped_targets_total", 0)
+    counts[_BUCKET_SKIPPED] = skipped_total
+
+    # successful = targets_total − failed − skipped, minus the tests we
+    # already accounted for via the *_TEST_* buckets. Aggregates only,
+    # since the capped built_targets sample would under-count.
+    successful_target_count = (data["bazel"].get("targets_total", 0) -
+                               len(data["bazel"].get("failed_targets", [])) -
+                               skipped_total)
     if successful_target_count < 0:
         successful_target_count = 0
     test_target_count = passed_total + data["bazel"].get("failed_test_total", 0) + data["bazel"].get("flaky_test_total", 0)
@@ -3055,6 +3090,22 @@ BAZEL_TARGETS_TEMPLATE = """### 🎯 Bazel targets ({{ total_targets }})
 </details>
 
 {% endif %}
+{%- if skipped_targets_any %}
+<details>
+<summary>{{ skipped_targets_icon }} {{ skipped_targets_header }}</summary>
+
+<pre>
+{%- if skipped_targets %}
+{{- skipped_targets_table_head }}
+{{ skipped_targets_table_sep }}
+{%- for t in skipped_targets %}
+{{ t.aligned_label }} | {{ t.aligned_kind }}
+{%- endfor %}
+{%- endif %}
+{% if skipped_targets_overflow %}_{{ skipped_targets_overflow }} more not shown._{% endif %}</pre>
+</details>
+
+{% endif %}
 {% endif %}
 {% if render_repro_in_targets %}""" + REPRO_COMMANDS_BLOCK + FIX_COMMANDS_BLOCK + """{% endif %}
 """
@@ -3280,7 +3331,7 @@ SHARED_DETAILS_BODY_TEMPLATE = """{% if artifacts_browse_url or artifact_links %
 ---
 
 {% if last_updated_at or api_usage %}<sub>{% if last_updated_at %}⏱ Last updated {{ last_updated_at }}{% endif %}{% if last_updated_at and api_usage %} · {% endif %}{% if api_usage %}{{ api_usage }}{% endif %}</sub><br>
-{%- endif %}<sub>🚀 Powered by [Aspect CLI](https://github.com/aspect-build/aspect-cli) — [Aspect Build](https://aspect.build/) · [X](https://twitter.com/aspect_build) · [LinkedIn](https://www.linkedin.com/company/aspect-dev/) · [YouTube](http://www.youtube.com/@aspectbuild)</sub>
+{%- endif %}<sub>🚀 Powered by [Aspect CLI](https://github.com/aspect-build/aspect-cli) | [Aspect Build](https://aspect.build/) · [X](https://twitter.com/aspect_build) · [LinkedIn](https://www.linkedin.com/company/aspect-dev/) · [YouTube](http://www.youtube.com/@aspectbuild)</sub>
 """
 
 # Build/test detail template: bazel-aborted prelude, the hoisted
@@ -3866,6 +3917,16 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
         )
     ]
 
+    # Skipped targets — surfaced as their own section since they're neither
+    # built nor failed.
+    skipped_for_table = [
+        {"label": _truncate_label(t.get("label", "")), "kind": t.get("kind", "")}
+        for t in sorted(
+            data["bazel"].get("skipped_targets", []),
+            key = lambda t: t.get("label", ""),
+        )
+    ]
+
     # --- Partition failed_targets into root (own action failed) vs derived
     # (no own action failed — some dep broke). Surfaces the same "Broken by"
     # UX as the Aspect Web UI without requiring the full rdeps graph.
@@ -3901,6 +3962,7 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
         passed_test_count = 0
     cached_test_count = data["bazel"].get("cached_test_total", 0)
     built_non_test_count = bucket_counts.get(_BUCKET_SUCCESSFUL_BUILD, 0)
+    skipped_count = bucket_counts.get(_BUCKET_SKIPPED, 0)
 
     # --- Overflow detection for trim cascade ---
     # failed_actions is now per-label (deduped); overflow = total unique failing
@@ -3909,12 +3971,14 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
     passed_overflow = data["bazel"].get("passed_test_total", 0) - len(raw_passed)
     built_overflow = built_non_test_count - len(built_non_test)
     derived_failures_overflow = derived_failures_count - len(derived_failures)
+    skipped_overflow = skipped_count - len(skipped_for_table)
 
     # --- Build column-aligned tables for <pre> sections ---
     _passed_table = _align_for_pre(_with_duration(passed_executed), has_duration = True)
     _cached_table = _align_for_pre(_with_duration(passed_cached), has_duration = True)
     _built_table = _align_for_pre(built_non_test, has_duration = False)
     _derived_table = _align_for_pre(derived_failures, has_duration = False)
+    _skipped_table = _align_for_pre(skipped_for_table, has_duration = False)
 
     # Failed / timeout / flaky test buckets render as aligned tables
     # too — same `Label | Target Type | Duration` shape passed/cached
@@ -3964,7 +4028,8 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
         passed_test_count > 0 or
         cached_test_count > 0 or
         built_non_test_count > 0 or
-        derived_failures_count > 0
+        derived_failures_count > 0 or
+        skipped_count > 0
     )
 
     # --- Badges ---
@@ -4078,6 +4143,18 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
         "built_targets_header": _bucket_header(_BUCKET_SUCCESSFUL_BUILD, built_non_test_count),
         "built_targets_overflow": str(built_overflow) if built_overflow > 0 else "",
         "passed_tests_overflow": str(passed_overflow) if passed_overflow > 0 else "",
+
+        # Skipped-targets table: label | kind. Header uses the uncapped
+        # count; `skipped_targets_overflow` drives the "N more not shown"
+        # line and is halved further by the render-time trim cascade.
+        "skipped_targets": _skipped_table["rows"],
+        "skipped_targets_table_head": _skipped_table["header"],
+        "skipped_targets_table_sep": _skipped_table["separator"],
+        "skipped_targets_count": skipped_count,
+        "skipped_targets_any": "1" if skipped_count > 0 else "",
+        "skipped_targets_header": _bucket_header(_BUCKET_SKIPPED, skipped_count),
+        "skipped_targets_icon": _BUCKET_ICONS[_BUCKET_SKIPPED],
+        "skipped_targets_overflow": str(skipped_overflow) if skipped_overflow > 0 else "",
 
         # Command-line views (derived from options_parsed, redacted for secrets).
         # long form: multi-line reproducer. short: "bazel test //foo:bar"
@@ -4408,6 +4485,21 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
         if debug_render:
             trace.log("debug [render_check_output]   after test trim: details len=" + str(len(details_text)) +
                       " passed_tests=" + str(len(passed)))
+
+    if len(details_text) > _DETAILS_LIMIT:
+        skipped = details_data.get("skipped_targets", [])
+        skipped_total = details_data.get("skipped_targets_count", 0)
+        for _ in range(10):
+            if len(details_text) <= _DETAILS_LIMIT or len(skipped) == 0:
+                break
+            skipped = skipped[:len(skipped) // 2]
+            overflow = skipped_total - len(skipped)
+            details_data["skipped_targets"] = skipped
+            details_data["skipped_targets_overflow"] = str(overflow) if overflow > 0 else ""
+            details_text = ctx.template.jinja2(details_tmpl, data = details_data)
+        if debug_render:
+            trace.log("debug [render_check_output]   after skipped trim: details len=" + str(len(details_text)) +
+                      " skipped_targets=" + str(len(skipped)))
 
     if len(details_text) > _DETAILS_LIMIT:
         # Last resort: drop cached_tests too.

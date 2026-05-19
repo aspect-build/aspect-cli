@@ -174,7 +174,7 @@ _No tasks have reported yet._
 ---
 
 {% if last_updated_at or api_usage %}<sub>{% if last_updated_at %}⏱ Last updated {{ last_updated_at }}{% endif %}{% if last_updated_at and api_usage %} · {% endif %}{% if api_usage %}{{ api_usage }}{% endif %}</sub><br>
-{%- endif %}<sub>🚀 Powered by [Aspect CLI](https://github.com/aspect-build/aspect-cli) — [Aspect Build](https://aspect.build/) · [X](https://twitter.com/aspect_build) · [LinkedIn](https://www.linkedin.com/company/aspect-dev/) · [YouTube](http://www.youtube.com/@aspectbuild)</sub>
+{%- endif %}<sub>🚀 Powered by [Aspect CLI](https://github.com/aspect-build/aspect-cli) | [Aspect Build](https://aspect.build/) · [X](https://twitter.com/aspect_build) · [LinkedIn](https://www.linkedin.com/company/aspect-dev/) · [YouTube](http://www.youtube.com/@aspectbuild)</sub>
 """
 
 # ─── Status → badge ───────────────────────────────────────────────────────────
