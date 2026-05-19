@@ -1,21 +1,14 @@
-"""Snapshot tests for bazel_results template rendering.
+"""Tests for the bazel_results template rendering + invocation-state logic.
 
-Run with:
-  ASPECT_CLI_TESTING=template_snapshots aspect test-template-snapshots
-
-Each scenario prints TITLE, SUMMARY, and the first 3000 chars of DETAILS.
-Inspect the output to verify rendering is correct across failure modes.
-
-Scenarios covered:
-  1. all-passed  — fully cached test run, all green
-  2. failed      — build action failure + multiple test failures
-  3. flaky       — flaky tests with Bazel exiting 0
-  4. failing     — live "mid-build" state with some failures already seen
-  5. aborted     — build aborted mid-stream
-  6. large       — many targets/tests (exercises the trim cascade)
+Two task implementations live here:
+  * `template_snapshot_tests` (`aspect test-template-snapshots`) — renders
+    each scenario's TITLE, SUMMARY, and the first 3000 chars of DETAILS for
+    eyeball verification across failure modes.
+  * `bazel_results_unit_tests` (`aspect dev test-bazel-results`) — exercises
+    `compute_invocation_state`, `conclusion`, and skipped-bucket plumbing.
 """
 
-load("./bazel_results.axl", "build_details_data", "compute_invocation_state", "init_data", "render_check_output")
+load("./bazel_results.axl", "build_details_data", "compute_invocation_state", "conclusion", "init_data", "render_check_output")
 
 # ---------------------------------------------------------------------------
 # Fake data builders
@@ -647,11 +640,35 @@ template_snapshot_tests = task(
     args = {},
 )
 
-# ─── Unit tests — skipped target plumbing ────────────────────────────────────
+# ─── Unit tests — compute_invocation_state / conclusion ──────────────────────
 
 def _eq(label, got, want):
     if got != want:
         fail("%s: got %r, want %r" % (label, got, want))
+
+def _make_unaffected_targets_built():
+    """BES streamed 145 successful targets, no failure event recorded —
+    e.g. Bazel exited non-zero from a loading / analysis failure."""
+    r = init_data()
+    r["bazel"]["build_command"] = "build"
+    r["bazel"]["targets_total"] = 145
+    return r
+
+def _make_explicit_action_failure():
+    """One failed action produces a failed_target."""
+    r = init_data()
+    r["bazel"]["build_command"] = "build"
+    r["bazel"]["targets_total"] = 10
+    r["bazel"]["failed_actions_total"] = 1
+    r["bazel"]["failed_actions"] = [{"label": "//pkg:broken", "mnemonics": ["CppCompile"]}]
+    r["bazel"]["failed_action_labels"] = ["//pkg:broken"]
+    r["bazel"]["failed_targets"] = [{"label": "//pkg:broken"}]
+    return r
+
+def _make_aborted_data():
+    r = init_data()
+    r["bazel"]["aborted"] = True
+    return r
 
 def _make_skipped_only():
     """4 targets, all skipped — no built, no failed, no tests."""
@@ -696,21 +713,66 @@ def _make_skipped_with_failure():
     return r
 
 def _make_skipped_over_cap():
-    """5000 skipped targets — exceeds MAX_BUILT_TARGETS so the list IS capped
-    in production. Simulate the post-accumulation shape: capped list +
-    accurate total. Bucket count must come from the total (not list len),
-    and the body should render the overflow line."""
+    """5000 skipped targets — exceeds MAX_BUILT_TARGETS so the list is capped
+    in production. Bucket count must come from `skipped_targets_total` (not
+    list len) and the body must render the overflow line."""
     r = init_data()
     total = 5000
     r["bazel"]["targets_total"] = total
-
-    # Mimic what process_event leaves on disk after the cap fires.
     r["bazel"]["skipped_targets"] = [
         {"label": "//pkg/lib_%d:lib" % i, "kind": "py_library", "reason": "skipped"}
         for i in range(250)
     ]
     r["bazel"]["skipped_targets_total"] = total
     return r
+
+def _test_failed_status_without_failure_bucket(ctx):
+    data = _make_unaffected_targets_built()
+    _eq(
+        "compute_invocation_state — failed verdict without failure bucket",
+        compute_invocation_state(data, "failed"),
+        "Failed to build",
+    )
+    _eq(
+        "conclusion — failed verdict without failure bucket",
+        conclusion("failed", data),
+        "Failed to build",
+    )
+
+def _test_failed_status_with_explicit_action_failure(ctx):
+    _eq(
+        "compute_invocation_state — failed with failed_action",
+        compute_invocation_state(_make_explicit_action_failure(), "failed"),
+        "Failed to build",
+    )
+
+def _test_passed_status_returns_successful_build(ctx):
+    _eq(
+        "compute_invocation_state — passed verdict surfaces success",
+        compute_invocation_state(_make_unaffected_targets_built(), "passed"),
+        "Successful build",
+    )
+
+def _test_aborted_short_circuits(ctx):
+    """`bazel.aborted` overrides everything else."""
+    _eq(
+        "compute_invocation_state — aborted overrides status",
+        compute_invocation_state(_make_aborted_data(), "failed"),
+        "Invocation disconnected",
+    )
+
+def _test_running_returns_pending(ctx):
+    data = _make_unaffected_targets_built()
+    _eq(
+        "compute_invocation_state — running",
+        compute_invocation_state(data, "running"),
+        "Running...",
+    )
+    _eq(
+        "conclusion — running returns empty",
+        conclusion("running", data),
+        "",
+    )
 
 def _test_skipped_only_surfaces_invocation_skipped(ctx):
     _eq(
@@ -720,8 +782,6 @@ def _test_skipped_only_surfaces_invocation_skipped(ctx):
     )
 
 def _test_skipped_with_success_prefers_successful_build(ctx):
-    """A mixed run with both skipped and built targets surfaces the
-    successful-build label — skipped is lowest priority."""
     _eq(
         "compute_invocation_state — skipped + success",
         compute_invocation_state(_make_skipped_with_success(), "passed"),
@@ -729,7 +789,6 @@ def _test_skipped_with_success_prefers_successful_build(ctx):
     )
 
 def _test_skipped_with_failure_prefers_failure(ctx):
-    """Failed targets dominate skipped in the priority walk."""
     _eq(
         "compute_invocation_state — skipped + failure",
         compute_invocation_state(_make_skipped_with_failure(), "failed"),
@@ -758,16 +817,26 @@ def _test_skipped_over_cap_keeps_accurate_count(ctx):
         "4750",
     )
 
+_UNIT_TESTS = [
+    _test_failed_status_without_failure_bucket,
+    _test_failed_status_with_explicit_action_failure,
+    _test_passed_status_returns_successful_build,
+    _test_aborted_short_circuits,
+    _test_running_returns_pending,
+    _test_skipped_only_surfaces_invocation_skipped,
+    _test_skipped_with_success_prefers_successful_build,
+    _test_skipped_with_failure_prefers_failure,
+    _test_skipped_over_cap_keeps_accurate_count,
+]
+
 def _unit_test_impl(ctx):
-    _test_skipped_only_surfaces_invocation_skipped(ctx)
-    _test_skipped_with_success_prefers_successful_build(ctx)
-    _test_skipped_with_failure_prefers_failure(ctx)
-    _test_skipped_over_cap_keeps_accurate_count(ctx)
-    print("bazel_results.axl skipped-bucket: OK (4 sections)")
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("bazel_results.axl: OK (%d sections)" % len(_UNIT_TESTS))
     return 0
 
-bazel_results_skipped_tests = task(
-    name = "test-bazel-results-skipped",
+bazel_results_unit_tests = task(
+    name = "test-bazel-results",
     group = ["dev"],
     implementation = _unit_test_impl,
     args = {},

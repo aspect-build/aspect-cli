@@ -1936,6 +1936,14 @@ def _compute_bucket_counts(data):
     counts[_BUCKET_SUCCESSFUL_BUILD] = non_test_built
     return counts
 
+# Buckets eligible to label a failed invocation, walked in priority order.
+# ABORTED is short-circuited above; FLAKY doesn't fail the build.
+_FAILURE_BUCKETS = [
+    _BUCKET_FAILED_TO_BUILD,
+    _BUCKET_TEST_FAILED,
+    _BUCKET_TEST_TIMEOUT,
+]
+
 def compute_invocation_state(data, status):
     """Return the invocation-state label for the title.
 
@@ -1945,6 +1953,11 @@ def compute_invocation_state(data, status):
 
     Returns "Running..." while the build is in progress — that overrides
     bucket state since partial data aren't yet authoritative.
+
+    When `status == "failed"`, restricts the search to `_FAILURE_BUCKETS` and
+    falls back to "Failed to build" when none has a count — otherwise an
+    analysis-phase failure (Bazel exits non-zero but emits no failed_action
+    / failed_target) would fall through to "Successful build".
     """
 
     # Aborted build: label is fixed, no matter what else ran.
@@ -1955,6 +1968,13 @@ def compute_invocation_state(data, status):
     if status in ("running", "failing"):
         return _BUCKET_INVOCATION_LABELS[_BUCKET_PENDING]
     counts = _compute_bucket_counts(data)
+
+    if status == "failed":
+        for bucket in _FAILURE_BUCKETS:
+            if counts.get(bucket, 0) > 0:
+                return _BUCKET_INVOCATION_LABELS[bucket]
+        return _BUCKET_INVOCATION_LABELS[_BUCKET_FAILED_TO_BUILD]
+
     for group in _BUCKET_PRIORITY_GROUPS:
         for bucket in group:
             if counts.get(bucket, 0) > 0:
@@ -3331,7 +3351,7 @@ SHARED_DETAILS_BODY_TEMPLATE = """{% if artifacts_browse_url or artifact_links %
 ---
 
 {% if last_updated_at or api_usage %}<sub>{% if last_updated_at %}⏱ Last updated {{ last_updated_at }}{% endif %}{% if last_updated_at and api_usage %} · {% endif %}{% if api_usage %}{{ api_usage }}{% endif %}</sub><br>
-{%- endif %}<sub>🚀 Powered by [Aspect CLI](https://github.com/aspect-build/aspect-cli) | [Aspect Build](https://aspect.build/) · [X](https://twitter.com/aspect_build) · [LinkedIn](https://www.linkedin.com/company/aspect-dev/) · [YouTube](http://www.youtube.com/@aspectbuild)</sub>
+{%- endif %}<sub>🚀 Powered by [Aspect CLI](https://github.com/aspect-build/aspect-cli) &nbsp;|&nbsp; [Aspect Build](https://aspect.build/) · [X](https://twitter.com/aspect_build) · [LinkedIn](https://www.linkedin.com/company/aspect-dev/) · [YouTube](http://www.youtube.com/@aspectbuild)</sub>
 """
 
 # Build/test detail template: bazel-aborted prelude, the hoisted
