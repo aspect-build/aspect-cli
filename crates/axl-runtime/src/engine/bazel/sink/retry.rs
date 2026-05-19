@@ -254,5 +254,4 @@ mod tests {
         assert!(!is_retryable(&unauth));
         assert!(!is_retryable(&perm));
     }
-
 }

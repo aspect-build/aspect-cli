@@ -334,9 +334,9 @@ impl<'v> values::StarlarkValue<'v> for BuildEventSink {
         let phase = self.phase.lock().unwrap();
         let outcome = self.outcome.lock().unwrap();
         match attribute {
-            "done" => Some(
-                heap.alloc(matches!(*phase, SinkPhase::Idle) && outcome.times_bound > 0),
-            ),
+            "done" => {
+                Some(heap.alloc(matches!(*phase, SinkPhase::Idle) && outcome.times_bound > 0))
+            }
             "failed" => Some(heap.alloc(outcome.failed)),
             "error" => Some(match &outcome.error {
                 Some(e) => heap.alloc_str(e).to_value(),
@@ -455,7 +455,6 @@ impl BuildEventIter {
             ),
         }
     }
-
 }
 
 impl<'v> AllocValue<'v> for BuildEventIter {
@@ -838,9 +837,7 @@ impl Build {
         // The tracing sink only emits via `tracing::event!` and never fails;
         // detach its JoinHandle so `build.wait()` stays bazel-only.
         if build_events {
-            let _ = tracing_sink::Tracing::spawn(
-                build_event_stream.as_ref().unwrap().subscribe(),
-            );
+            let _ = tracing_sink::Tracing::spawn(build_event_stream.as_ref().unwrap().subscribe());
         }
 
         drop(_enter);
