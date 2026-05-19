@@ -15,7 +15,8 @@ Coverage:
     all-skipped, delivery all-failed, soft-format passing with files.
 """
 
-load("./buildkite_annotations.axl", "format_body")
+load("./buildkite_annotations.axl", "format_body", "should_render_update")
+load("../lib/lifecycle.axl", "TaskUpdate")
 
 # Shared fixture factories — also consumed by github_status_comments_test.axl.
 load(
@@ -177,5 +178,75 @@ bk_annotation_snapshot_tests = task(
     name = "test-bk-annotation-snapshots",
     group = ["dev"],
     implementation = _test_impl,
+    args = {},
+)
+
+# ─── should_render_update unit tests ──────────────────────────────────────────
+
+def _expect_render_decision(label, update, context_id, want_decision, want_reason):
+    got_decision, got_reason = should_render_update(update, context_id)
+    if got_decision != want_decision or got_reason != want_reason:
+        fail("%s: got (%r, %r), want (%r, %r)" %
+             (label, got_decision, got_reason, want_decision, want_reason))
+
+def _decision_test_impl(ctx):
+    # Phase-marker updates (setup_phase / preflight_phase) emit
+    # `kind=""` per the lifecycle docstring contract. The BK surface
+    # MUST skip them silently — logging would spam every phase
+    # boundary. This case is the regression guard for the
+    # `no renderer for kind=""` log noise.
+    _expect_render_decision(
+        "empty kind, no context_id (setup_phase ordering)",
+        TaskUpdate(kind = "", status = "running"),
+        "",
+        "skip",
+        "no_kind",
+    )
+    _expect_render_decision(
+        "empty kind, context_id set (preflight_phase ordering)",
+        TaskUpdate(kind = "", status = "running"),
+        "aspect-lint-bk",
+        "skip",
+        "no_kind",
+    )
+
+    # Renderable kind but no context yet — `task_started` hasn't run.
+    # Trace-worthy because a renderer-mapped update arrived before
+    # the BK annotation context was prepared.
+    _expect_render_decision(
+        "renderable kind, missing context_id",
+        TaskUpdate(kind = "lint_results", status = "running"),
+        "",
+        "skip",
+        "no_context_id",
+    )
+
+    # Kind present but not in RENDERERS — misconfig (new task kind
+    # added without a renderer registration).
+    _expect_render_decision(
+        "unknown kind",
+        TaskUpdate(kind = "wat_results", status = "running"),
+        "aspect-lint-bk",
+        "skip",
+        "unknown_kind",
+    )
+
+    # Happy path — known kind + populated context.
+    for kind in ["bazel_results", "lint_results", "delivery_results", "format_results", "gazelle_results"]:
+        _expect_render_decision(
+            "renderable: " + kind,
+            TaskUpdate(kind = kind, status = "running"),
+            "aspect-lint-bk",
+            "render",
+            "",
+        )
+
+    print("should_render_update: OK (9 scenarios)")
+    return 0
+
+bk_annotation_decision_tests = task(
+    name = "test-bk-annotation-decision",
+    group = ["dev"],
+    implementation = _decision_test_impl,
     args = {},
 )

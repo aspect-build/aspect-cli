@@ -1,6 +1,6 @@
 load("@aspect//feature/artifacts.axl", "ArtifactUpload")
 load("@aspect//feature/buildkite_annotations.axl", "BuildkiteAnnotations")
-load("@aspect//feature/buildkite_annotations_test.axl", "bk_annotation_snapshot_tests")
+load("@aspect//feature/buildkite_annotations_test.axl", "bk_annotation_decision_tests", "bk_annotation_snapshot_tests")
 load("@aspect//feature/github_status_checks.axl", "GithubStatusChecks")
 load("@aspect//feature/github_status_comments_test.axl", "pr_comment_snapshot_tests")
 load("@aspect//lib/bazel_results_test.axl", "template_snapshot_tests")
@@ -122,6 +122,13 @@ def config(ctx: ConfigContext):
     # `buildkite-agent annotate` for each task kind and status combo.
     # Run with: aspect dev test-bk-annotation-snapshots
     ctx.tasks.add(bk_annotation_snapshot_tests)
+
+    # Buildkite annotations — unit tests for the kind/context_id
+    # renderability decision. Locks in the contract that empty-kind
+    # phase markers (setup_phase / preflight_phase) skip silently
+    # without emitting "no renderer for kind=" trace noise.
+    # Run with: aspect dev test-bk-annotation-decision
+    ctx.tasks.add(bk_annotation_decision_tests)
 
     # GitHub PR comment — snapshots the aggregate-status PR comment
     # body across mixed task kinds, statuses, link availability, and

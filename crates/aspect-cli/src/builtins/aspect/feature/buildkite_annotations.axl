@@ -41,6 +41,40 @@ def format_body(out, kind, status, task_label = "", final = False):
     """Public test hook; see `_format_body` for behavior."""
     return _format_body(out, kind, status, task_label = task_label, final = final)
 
+def should_render_update(update, context_id):
+    """Decide whether a `TaskUpdate` is renderable by the BK annotation surface.
+
+    Returns `("render", "")` when the update should be rendered;
+    `("skip", reason)` otherwise. The `reason` is a short tag that
+    callers can log at trace level or assert against in tests.
+
+    Skip reasons:
+      `"no_kind"`         — empty `update.kind`. The documented
+                            "no template" contract (see
+                            `lib/lifecycle.axl`): phase-marker
+                            updates from `setup_phase` /
+                            `preflight_phase` emit so non-template
+                            observers (telemetry) see every state
+                            change, but have no per-kind data to
+                            render. Silent skip; not a bug.
+      `"no_context_id"`   — kind is non-empty but `task_started` hasn't
+                            populated the BK annotation context yet.
+                            Renderable update fired too early; the
+                            handler can't post the annotation.
+      `"unknown_kind"`    — kind is non-empty and routed past the
+                            empty-kind skip, but no entry exists in
+                            `RENDERERS`. Indicates a misconfig (new
+                            task kind added without registering a
+                            renderer).
+    """
+    if not update.kind:
+        return ("skip", "no_kind")
+    if not context_id:
+        return ("skip", "no_context_id")
+    if renderer_for_kind(update.kind) == None:
+        return ("skip", "unknown_kind")
+    return ("render", "")
+
 # ─── Body formatting ──────────────────────────────────────────────────────────
 
 _LOG = feature_logger("Buildkite annotations")
@@ -294,21 +328,26 @@ def _buildkite_annotations(ctx: FeatureContext):
         final = update.final
 
         # Keep the most recent phase label on bare refreshes (empty
-        # progress styles). BK renders the narrative `body` form.
+        # progress styles). BK renders the narrative `body` form. Done
+        # before the renderability check below so phase-marker updates
+        # (`kind=""` from `setup_phase` / `preflight_phase`) still latch
+        # their progress text for the next renderable kind to pick up.
         progress_text = update.progress.body
         if progress_text:
             _state["_progress"] = progress_text
 
         context_id = _state.get("_context_id", "")
-        if not context_id:
-            _LOG.trace("task_update fired but no context_id; ignoring (kind=%s status=%s)" %
-                       (update.kind, status))
+        decision, reason = should_render_update(update, context_id)
+        if decision == "skip":
+            # `no_kind` is the documented phase-marker contract — silent.
+            # `no_context_id` / `unknown_kind` are routing/config bugs:
+            # trace so they surface under `ASPECT_DEBUG=1`.
+            if reason != "no_kind":
+                _LOG.trace("ignoring task_update (reason=%s kind=%r status=%s)" %
+                           (reason, update.kind, status))
             return
 
         renderer = renderer_for_kind(update.kind)
-        if renderer == None:
-            _LOG.trace("no renderer for kind=%r; ignoring" % update.kind)
-            return
         data = update.data if update.data else renderer.init()
 
         # Bypass throttle on first-failing (so the red stripe lands
