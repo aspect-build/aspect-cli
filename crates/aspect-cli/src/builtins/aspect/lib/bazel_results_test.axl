@@ -15,7 +15,7 @@ Scenarios covered:
   6. large       — many targets/tests (exercises the trim cascade)
 """
 
-load("./bazel_results.axl", "init_data", "render_check_output")
+load("./bazel_results.axl", "build_details_data", "compute_invocation_state", "init_data", "render_check_output")
 
 # ---------------------------------------------------------------------------
 # Fake data builders
@@ -357,6 +357,53 @@ def _make_results_html_chars():
     }
     return r
 
+def _make_results_skipped():
+    """Build where every target was filtered out by `--build_tag_filters` /
+    `target_compatible_with`. Bazel exits 0 and emits target_completed events
+    with Aborted payloads (reason=SKIPPED). The status surface must render
+    "Invocation skipped", not "Successful build" or "Failed to build"."""
+    r = init_data()
+    r["bazel"]["invocation_id"] = "skip0000-1111-2222-3333-444455556666"
+    r["bazel"]["build_command"] = "build"
+    r["bazel"]["wall_time_ms"] = 1200
+    r["bazel"]["actions_executed"] = 0
+    r["bazel"]["actions_cached"] = 0
+    r["bazel"]["actions_total"] = 0
+    r["bazel"]["targets_total"] = 4
+    r["bazel"]["skipped_targets"] = [
+        {"label": "//apps/web:bundle", "kind": "ts_project", "reason": "skipped"},
+        {"label": "//apps/web:test", "kind": "vitest_test", "reason": "skipped"},
+        {"label": "//services/api:server", "kind": "go_binary", "reason": "skipped"},
+        {"label": "//services/api:test", "kind": "go_test", "reason": "skipped"},
+    ]
+    r["bazel"]["skipped_targets_total"] = 4
+    r["bazel"]["target_kinds"] = {
+        "//apps/web:bundle": "ts_project",
+        "//apps/web:test": "vitest_test",
+        "//services/api:server": "go_binary",
+        "//services/api:test": "go_test",
+    }
+    r["bazel"]["metadata"] = {"BRANCH": "main", "COMMIT_SHA": "00112233aabbccdd"}
+    return r
+
+def _make_results_skipped_over_cap():
+    """Filter-everything-out run on a large workspace: 5000 targets all
+    skipped, list capped at MAX_BUILT_TARGETS. Exercises the overflow
+    line + trim-cascade interaction."""
+    r = init_data()
+    r["bazel"]["invocation_id"] = "skip5000-1111-2222-3333-444455556666"
+    r["bazel"]["build_command"] = "build"
+    r["bazel"]["wall_time_ms"] = 8500
+    total = 5000
+    r["bazel"]["targets_total"] = total
+    r["bazel"]["skipped_targets"] = [
+        {"label": "//pkg/lib_%d:lib" % i, "kind": "py_library", "reason": "skipped"}
+        for i in range(250)
+    ]
+    r["bazel"]["skipped_targets_total"] = total
+    r["bazel"]["metadata"] = {"BRANCH": "main", "COMMIT_SHA": "deadbeef00112233"}
+    return r
+
 def _make_results_aborted():
     """Build aborted mid-stream (e.g. Ctrl-C or OOM)."""
     r = init_data()
@@ -561,6 +608,14 @@ def _test_impl(ctx):
         # render as escaped entities (`&lt;hr&gt;`) so BK/GHSC don't
         # interpret them as real HTML and break the metadata layout.
         ("16. html-chars-in-metadata · GH", _make_results_html_chars(), "passed", "//...", False, "github", ["*"], ""),
+        # Skipped-only build: target_completed events came in with Aborted
+        # payloads (reason=SKIPPED). Status is passed (Bazel exited 0); the
+        # title must surface "Invocation skipped" instead of "Successful build".
+        ("17. all-skipped · GH", _make_results_skipped(), "passed", "//...", False, "github", None, ""),
+        # Skipped-over-cap: 5000 skipped targets, list capped at
+        # MAX_BUILT_TARGETS. Header reports the uncapped count; body
+        # renders the overflow line.
+        ("18. skipped-over-cap · GH", _make_results_skipped_over_cap(), "passed", "//...", False, "github", None, ""),
     ]
 
     sep = "=" * 70
@@ -589,5 +644,131 @@ template_snapshot_tests = task(
     name = "test-template-snapshots",
     group = ["dev"],
     implementation = _test_impl,
+    args = {},
+)
+
+# ─── Unit tests — skipped target plumbing ────────────────────────────────────
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _make_skipped_only():
+    """4 targets, all skipped — no built, no failed, no tests."""
+    r = init_data()
+    r["bazel"]["targets_total"] = 4
+    r["bazel"]["skipped_targets"] = [
+        {"label": "//a:b", "kind": "py_library", "reason": "skipped"},
+        {"label": "//a:c", "kind": "py_library", "reason": "skipped"},
+        {"label": "//d:e", "kind": "go_binary", "reason": "skipped"},
+        {"label": "//d:f", "kind": "go_test", "reason": "skipped"},
+    ]
+    r["bazel"]["skipped_targets_total"] = 4
+    return r
+
+def _make_skipped_with_success():
+    """3 built + 2 skipped — SUCCESSFUL_BUILD outranks SKIPPED in the walk."""
+    r = init_data()
+    r["bazel"]["targets_total"] = 5
+    r["bazel"]["skipped_targets"] = [
+        {"label": "//x:a", "kind": "cc_library", "reason": "skipped"},
+        {"label": "//x:b", "kind": "cc_library", "reason": "skipped"},
+    ]
+    r["bazel"]["skipped_targets_total"] = 2
+    r["bazel"]["built_targets"] = [
+        {"label": "//y:a", "kind": "cc_library"},
+        {"label": "//y:b", "kind": "cc_binary"},
+        {"label": "//y:c", "kind": "py_binary"},
+    ]
+    return r
+
+def _make_skipped_with_failure():
+    """1 failed + 3 skipped — FAILED_TO_BUILD outranks SKIPPED."""
+    r = init_data()
+    r["bazel"]["targets_total"] = 4
+    r["bazel"]["failed_targets"] = [{"label": "//z:broken", "kind": "cc_binary"}]
+    r["bazel"]["skipped_targets"] = [
+        {"label": "//x:a", "kind": "cc_library", "reason": "skipped"},
+        {"label": "//x:b", "kind": "cc_library", "reason": "skipped"},
+        {"label": "//x:c", "kind": "cc_library", "reason": "skipped"},
+    ]
+    r["bazel"]["skipped_targets_total"] = 3
+    return r
+
+def _make_skipped_over_cap():
+    """5000 skipped targets — exceeds MAX_BUILT_TARGETS so the list IS capped
+    in production. Simulate the post-accumulation shape: capped list +
+    accurate total. Bucket count must come from the total (not list len),
+    and the body should render the overflow line."""
+    r = init_data()
+    total = 5000
+    r["bazel"]["targets_total"] = total
+
+    # Mimic what process_event leaves on disk after the cap fires.
+    r["bazel"]["skipped_targets"] = [
+        {"label": "//pkg/lib_%d:lib" % i, "kind": "py_library", "reason": "skipped"}
+        for i in range(250)
+    ]
+    r["bazel"]["skipped_targets_total"] = total
+    return r
+
+def _test_skipped_only_surfaces_invocation_skipped(ctx):
+    _eq(
+        "compute_invocation_state — skipped-only run",
+        compute_invocation_state(_make_skipped_only(), "passed"),
+        "Invocation skipped",
+    )
+
+def _test_skipped_with_success_prefers_successful_build(ctx):
+    """A mixed run with both skipped and built targets surfaces the
+    successful-build label — skipped is lowest priority."""
+    _eq(
+        "compute_invocation_state — skipped + success",
+        compute_invocation_state(_make_skipped_with_success(), "passed"),
+        "Successful build",
+    )
+
+def _test_skipped_with_failure_prefers_failure(ctx):
+    """Failed targets dominate skipped in the priority walk."""
+    _eq(
+        "compute_invocation_state — skipped + failure",
+        compute_invocation_state(_make_skipped_with_failure(), "failed"),
+        "Failed to build",
+    )
+
+def _test_skipped_over_cap_keeps_accurate_count(ctx):
+    """When the skipped list is capped at MAX_BUILT_TARGETS, the bucket
+    count must read from `skipped_targets_total` so the title header
+    and details overflow line reflect the true number."""
+    data = _make_skipped_over_cap()
+    _eq(
+        "compute_invocation_state — over-cap skipped count",
+        compute_invocation_state(data, "passed"),
+        "Invocation skipped",
+    )
+    details = build_details_data(data, links = {}, status = "passed", include_bazel_targets = True)
+    _eq(
+        "build_details_data — over-cap skipped count surfaces uncapped total",
+        details["skipped_targets_count"],
+        5000,
+    )
+    _eq(
+        "build_details_data — overflow field is the difference",
+        details["skipped_targets_overflow"],
+        "4750",
+    )
+
+def _unit_test_impl(ctx):
+    _test_skipped_only_surfaces_invocation_skipped(ctx)
+    _test_skipped_with_success_prefers_successful_build(ctx)
+    _test_skipped_with_failure_prefers_failure(ctx)
+    _test_skipped_over_cap_keeps_accurate_count(ctx)
+    print("bazel_results.axl skipped-bucket: OK (4 sections)")
+    return 0
+
+bazel_results_skipped_tests = task(
+    name = "test-bazel-results-skipped",
+    group = ["dev"],
+    implementation = _unit_test_impl,
     args = {},
 )
