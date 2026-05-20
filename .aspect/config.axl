@@ -3,7 +3,7 @@ load("@aspect//feature/buildkite_annotations.axl", "BuildkiteAnnotations")
 load("@aspect//feature/buildkite_annotations_test.axl", "bk_annotation_snapshot_tests")
 load("@aspect//feature/github_status_checks.axl", "GithubStatusChecks")
 load("@aspect//feature/github_status_comments_test.axl", "pr_comment_snapshot_tests")
-load("@aspect//lib/bazel_results_test.axl", "bazel_results_skipped_tests", "template_snapshot_tests")
+load("@aspect//lib/bazel_results_test.axl", "bazel_results_unit_tests", "template_snapshot_tests")
 load("@aspect//lib/delivery_results_test.axl", "delivery_template_snapshot_tests")
 load("@aspect//lib/format_results_test.axl", "format_template_snapshot_tests")
 load("@aspect//lib/gazelle_results_test.axl", "gazelle_template_snapshot_tests")
@@ -76,10 +76,10 @@ def config(ctx: ConfigContext):
     # Run with: aspect test-template-snapshots
     ctx.tasks.add(template_snapshot_tests)
 
-    # Skipped-bucket plumbing — exercises _compute_bucket_counts +
-    # compute_invocation_state for the SKIPPED target path.
-    # Run with: aspect dev test-bazel-results-skipped
-    ctx.tasks.add(bazel_results_skipped_tests)
+    # Bazel results unit tests — compute_invocation_state, conclusion,
+    # and skipped-bucket plumbing.
+    # Run with: aspect dev test-bazel-results
+    ctx.tasks.add(bazel_results_unit_tests)
 
     # GitLab HTTP client smoke tests — pure-fn URL helpers + input
     # validation on the network-touching surfaces.
