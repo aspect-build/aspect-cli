@@ -327,11 +327,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # BK section markers.
     preflight_phase(ctx, lifecycle, hc_trait)
 
-    flags = [
-        "--remote_download_outputs=toplevel",
-        "--build_runfile_links",
-        "--experimental_build_event_upload_strategy=local",
-    ]
+    flags = []
     flags.extend(ctx.args.bazel_flags)
     flags.extend(bazel_trait.extra_flags)
 
@@ -343,6 +339,15 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         flags.extend(hook(ctx))
     if bazel_trait.flags:
         flags = bazel_trait.flags(flags)
+
+    # Overrides — must come LAST so they win over any --config=X expansion
+    # introduced by user / trait flags. A customer .bazelrc with
+    # `common:workflows-ci --remote_download_outputs=minimal --nobuild_runfile_links`
+    # would otherwise leave the formatter binary undownloaded and spawn would
+    # ENOENT. See delivery.axl phase 3 for the same pattern.
+    flags.append("--experimental_build_event_upload_strategy=local")
+    flags.append("--remote_download_outputs=toplevel")
+    flags.append("--build_runfile_links")
 
     startup_flags = list(ctx.args.bazel_startup_flags)
     startup_flags.extend(bazel_trait.extra_startup_flags)
