@@ -616,11 +616,22 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     if bazel_trait.flags:
         flags = bazel_trait.flags(flags)
 
-    # Overrides — must come LAST so they win over any --config=X expansion
-    # introduced by user / trait flags. A customer .bazelrc with
-    # `common:workflows-ci --remote_download_outputs=minimal --nobuild_runfile_links`
-    # would otherwise leave the gazelle binary undownloaded and spawn would
-    # ENOENT. See delivery.axl phase 3 for the same pattern.
+    # Required flags — appended LAST so they win over any --config=X
+    # expansion introduced by user / trait flags (e.g. a customer .bazelrc
+    # with `common:workflows-ci --remote_download_outputs=minimal
+    # --nobuild_runfile_links` would otherwise shadow our settings and
+    # spawn would ENOENT on the gazelle binary). We set these explicitly
+    # even when Bazel's default agrees, since user rc / trait flags can
+    # flip the effective value otherwise. See delivery.axl phase 3 for the
+    # same pattern.
+    #   * upload strategy `local`: keep BES artifact references as local
+    #     paths. We're about to spawn the gazelle binary locally, so
+    #     re-uploading it via BES is wasted bandwidth and can stall when
+    #     the remote cache is slow.
+    #   * remote_download_outputs `toplevel`: ensure the gazelle binary
+    #     lands on local disk so we can spawn it.
+    #   * build_runfile_links: materialize the runfiles tree so the
+    #     binary's wrappers / data deps resolve at runtime.
     flags.append("--experimental_build_event_upload_strategy=local")
     flags.append("--remote_download_outputs=toplevel")
     flags.append("--build_runfile_links")
