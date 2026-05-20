@@ -84,6 +84,19 @@ def _snapshot_tracked_state(ctx):
     if head_code != 0:
         return None
 
+    # Refresh the index before `git stash create` to avoid a known git
+    # race: when the index's cached stat info disagrees with the working
+    # tree (common after a CI workspace restore via tar — content matches
+    # HEAD but mtimes don't), `git stash create`'s entry-point dirty
+    # check sees "changes", then its internal refresh clears the
+    # stat-mismatch, then the post-refresh check sees "no changes" and
+    # exits 1 silently with no stderr. Refreshing first makes the entry
+    # check observe the same state the internal refresh will produce.
+    # Exit code is intentionally ignored: --refresh exits 1 when any
+    # entry has a real content difference, which is fine — we want the
+    # stat-info sync, not a verdict.
+    _git_capture(ctx, "update-index", "--refresh", "-q")
+
     out, code, err = _git_capture(ctx, "stash", "create")
     if code != 0:
         msg = "`git stash create` failed (exit %d).\nstderr: %s\nThe formatter task uses this to snapshot pre-format state for diff detection. Ensure the workspace is a git repo." % (code, err.strip())
