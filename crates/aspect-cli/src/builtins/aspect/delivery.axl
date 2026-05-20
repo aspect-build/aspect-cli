@@ -908,12 +908,26 @@ def _delivery_impl(ctx):
             data = dr,
             phase = Phase(name = "download", description = "Download runfiles", emoji = "📥"),
         )
+
+        # Required flags — appended LAST so they win over any --config=X
+        # expansion in expanded_flags. We set these explicitly even when
+        # Bazel's default agrees, since user rc / trait flags can flip
+        # the effective value otherwise.
+        #   * upload strategy `local`: keep BES artifact references as
+        #     local paths. We're about to spawn the delivery target
+        #     locally, so re-uploading via BES is wasted bandwidth and
+        #     can stall when the remote cache is slow.
+        #   * noremote_upload_local_results: don't push this build's
+        #     outputs to the remote cache — the delivery target was
+        #     built for local execution, no other consumer benefits.
+        #   * remote_download_outputs `toplevel`: ensure the delivery
+        #     target lands on local disk so we can spawn it.
+        #   * build_runfile_links: materialize the runfiles tree so the
+        #     binary's wrappers / data deps resolve at runtime.
         phase3_flags = list(expanded_flags) + [
             "--experimental_build_event_upload_strategy=local",
             "--noremote_upload_local_results",
-            # Download the targets that needs delivery
             "--remote_download_outputs=toplevel",
-            # Build the runfiles tree before running the target
             "--build_runfile_links",
         ]
         _t_download = time.monotonic()
