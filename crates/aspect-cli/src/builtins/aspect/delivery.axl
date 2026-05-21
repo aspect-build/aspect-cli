@@ -495,11 +495,17 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
     if _unresolved == 0:
         print("  Resolved digests for all {} in {}.".format(targets_label, fmt_elapsed(time.monotonic() - _t_phase2)))
     else:
-        print("  Resolved {} of {} delivery digests in {}; {} could not be hashed (see per-target rows below).".format(
+        # Always point at the phase-2 log when anything went unresolved —
+        # the gRPC log may contain zero useful entries (auth/network/config
+        # error before any GetActionResult fired), in which case the
+        # SUSPECT branch below never executes and the log file is the only
+        # diagnostic surface left.
+        print("  Resolved {} of {} delivery digests in {}; {} could not be hashed. Phase-2 raw log: {}".format(
             len(output_shas),
             len(targets),
             fmt_elapsed(time.monotonic() - _t_phase2),
             _unresolved,
+            phase2_log_path,
         ))
 
     # Surface non-DeliveryHash cache misses. Lazy-parse the phase-1
