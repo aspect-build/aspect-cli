@@ -2,7 +2,7 @@
 A default 'build' task that wraps a 'bazel build' command.
 """
 
-load("./bazel.axl", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
+load("./bazel.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
 load("./feature/github_status_checks.axl", "GitHubStatusChecksTrait")
 load("./lib/artifacts.axl", "ArtifactsTrait")
 load("./lib/bazel_runner.axl", "run_bazel_task")
@@ -39,7 +39,7 @@ build = task(
         ),
         "bazel_retry_attempts": args.int(
             default = DEFAULT_BAZEL_RETRY_ATTEMPTS,
-            description = "Maximum number of Bazel invocation attempts (including the first attempt) before giving up. Only retried for exit codes the build_retry trait predicate accepts (BLAZE_INTERNAL_ERROR (37) and LOCAL_ENVIRONMENTAL_ERROR (36) by default). Set to 1 to disable retries.",
+            description = BAZEL_RETRY_ATTEMPTS_DESCRIPTION,
         ),
         "bes_backends": args.string_list(
             description = "Build Event Service backend(s) to stream BEP events to. Repeat the flag to pass multiple. Translated to --bes_backend=<value> on the Bazel command.",

@@ -124,7 +124,7 @@ selective runs).
 User-facing migration guide: https://docs.aspect.build/cli/migration/delivery
 """
 
-load("@aspect//bazel.axl", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
+load("@aspect//bazel.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
 load("@aspect//lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "now_ms", "process_event", bazel_init_data = "init_data")
 load("@aspect//lib/checkrun.axl", "GitHubCheckRunTrait")
 load("@aspect//lib/ci.axl", "detect_build_url")
@@ -1285,7 +1285,7 @@ Currently \x1b[3monly\x1b[23m supported on Aspect Workflows CI runners. Support 
         ),
         "bazel_retry_attempts": args.int(
             default = DEFAULT_BAZEL_RETRY_ATTEMPTS,
-            description = "Maximum number of Bazel invocation attempts (including the first attempt) per delivery build phase before giving up. Only retried for exit codes the build_retry trait predicate accepts (BLAZE_INTERNAL_ERROR (37) and LOCAL_ENVIRONMENTAL_ERROR (36) by default). Set to 1 to disable retries.",
+            description = BAZEL_RETRY_ATTEMPTS_DESCRIPTION,
         ),
         "salt": args.string(
             default = "",
