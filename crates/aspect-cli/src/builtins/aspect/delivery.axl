@@ -124,7 +124,7 @@ selective runs).
 User-facing migration guide: https://docs.aspect.build/cli/migration/delivery
 """
 
-load("@aspect//bazel.axl", "BazelTrait")
+load("@aspect//bazel.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
 load("@aspect//lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "now_ms", "process_event", bazel_init_data = "init_data")
 load("@aspect//lib/checkrun.axl", "GitHubCheckRunTrait")
 load("@aspect//lib/ci.axl", "detect_build_url")
@@ -278,7 +278,14 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
     # in place via .clear()+.update() so the caller's `dr` reference
     # stays valid across retries.
     pre_loop_state = dict(data)
-    for attempt in range(10):
+
+    # `hasattr` guard so a future caller of `_get_output_shas` without
+    # `--bazel-retry-attempts` wired up still works; `max(1, ...)` so a 0
+    # or negative value still runs bazel once instead of being a silent
+    # no-op.
+    requested = ctx.args.bazel_retry_attempts if hasattr(ctx.args, "bazel_retry_attempts") else DEFAULT_BAZEL_RETRY_ATTEMPTS
+    max_attempts = max(1, requested)
+    for attempt in range(max_attempts):
         if attempt > 0:
             # Archive the just-completed (now-failed) attempt before
             # resetting; the 0-indexed loop var matches the 1-indexed
@@ -1275,6 +1282,10 @@ Currently \x1b[3monly\x1b[23m supported on Aspect Workflows CI runners. Support 
             long = "bazel-startup-flag",
             default = [],
             description = "Additional Bazel startup flags.",
+        ),
+        "bazel_retry_attempts": args.int(
+            default = DEFAULT_BAZEL_RETRY_ATTEMPTS,
+            description = BAZEL_RETRY_ATTEMPTS_DESCRIPTION,
         ),
         "salt": args.string(
             default = "",

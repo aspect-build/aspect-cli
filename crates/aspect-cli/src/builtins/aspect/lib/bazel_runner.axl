@@ -19,7 +19,7 @@ load("./health_check.axl", "HealthCheckTrait")
 load("./lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "preflight_phase", "setup_phase", "task_update")
 load("./repro_commands.axl", "build_aspect_command", "task_cli_path")
 load("./text.axl", "pluralize")
-load("../bazel.axl", "BazelTrait")
+load("../bazel.axl", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
 
 # ─── Lifecycle status + Result-cell text ──────────────────────────────────────
 #
@@ -210,10 +210,11 @@ def run_bazel_task(ctx: TaskContext, command: str) -> TaskConclusion:
 
     Args:
         ctx:     TaskContext with the standard build/test args (targets,
-                 bazel_flags, bazel_startup_flags, bes_backends, bes_headers,
-                 cancel, output_base). Task-specific args (e.g. build's
-                 remote_executor) are not touched here — tasks can still read
-                 them from `ctx.args` before/after calling this function.
+                 bazel_flags, bazel_startup_flags, bazel_retry_attempts,
+                 bes_backends, bes_headers, cancel, output_base). Task-specific
+                 args (e.g. build's remote_executor) are not touched here —
+                 tasks can still read them from `ctx.args` before/after calling
+                 this function.
         command: "build" or "test" — selects which Bazel subcommand to invoke
                  and which rc section to expand. The shape of the BES event
                  stream (including the presence of test_summary events for
@@ -299,7 +300,14 @@ def run_bazel_task(ctx: TaskContext, command: str) -> TaskConclusion:
         trace.log(rc.announce(command = command, ansi = False))
 
     base_desc = "Run bazel tests" if command == "test" else "Build bazel targets"
-    for attempt in range(10):
+
+    # `hasattr` guard so a future task that calls `run_bazel_task` without
+    # wiring up `--bazel-retry-attempts` still works; `max(1, ...)` so a 0
+    # or negative value still runs bazel once instead of being a silent
+    # no-op.
+    requested = ctx.args.bazel_retry_attempts if hasattr(ctx.args, "bazel_retry_attempts") else DEFAULT_BAZEL_RETRY_ATTEMPTS
+    max_attempts = max(1, requested)
+    for attempt in range(max_attempts):
         # Distinct phase id per attempt so each retry surfaces as its
         # own row in the Task timing table — retries are exceptional
         # and should stand out, not hide inside a cumulative `Build`.

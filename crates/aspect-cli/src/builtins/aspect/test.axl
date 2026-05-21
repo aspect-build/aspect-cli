@@ -2,7 +2,7 @@
 A default 'test' task that wraps a 'bazel test' command.
 """
 
-load("./bazel.axl", "BazelTrait")
+load("./bazel.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
 load("./feature/github_status_checks.axl", "GitHubStatusChecksTrait")
 load("./lib/artifacts.axl", "ArtifactsTrait")
 load("./lib/bazel_runner.axl", "run_bazel_task")
@@ -36,6 +36,10 @@ test = task(
         "bazel_startup_flags": args.string_list(
             long = "bazel-startup-flag",
             description = "Additional Bazel startup flags. Repeat the flag to pass multiple. Note: changing startup flags restarts the Bazel server.",
+        ),
+        "bazel_retry_attempts": args.int(
+            default = DEFAULT_BAZEL_RETRY_ATTEMPTS,
+            description = BAZEL_RETRY_ATTEMPTS_DESCRIPTION,
         ),
         "bes_backends": args.string_list(
             long = "bes-backend",
