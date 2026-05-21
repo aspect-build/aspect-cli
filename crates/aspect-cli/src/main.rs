@@ -41,10 +41,21 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
     // acquire long-running resources. Catches SIGINT / SIGTERM (the
     // signals CI runners and humans use to cancel a job), forwards
     // SIGINT to every live bazel client subprocess registered in
-    // `bazel_live`, and force-exits aspect-cli after a grace period
-    // so we don't outlive the cancellation. Without this, a CI cancel
-    // can leave bazel clients orphaned on warm runners — they hold
-    // the JVM-server lock and block every subsequent invocation.
+    // `bazel_live`, and force-exits aspect-cli after a grace period.
+    //
+    // Without this, a CI cancel can hit bazel at a moment it can't
+    // gracefully recover from. Two known flakes — both rare per
+    // invocation, but bad when they fire on a warm runner:
+    //   1. *Potential sandbox-state corruption* (bazelbuild/bazel#23880):
+    //      if the bazel server is SIGKILL'd mid-sandbox-cleanup, it can
+    //      strand `_moved_trash_dir` / `sandbox_stash` in the sandbox
+    //      base. Every subsequent invocation on that runner then crashes
+    //      in `afterCommand` until runner is cleaned up.
+    //   2. *Potential orphaned bazel client*: the client outlives
+    //      aspect-cli briefly while still holding the JVM-server lock;
+    //      the next `aspect build` / `aspect test` on that runner hangs
+    //      at "Running Bazel server needs to be killed" until the
+    //      orphan exits on its own.
     install_shutdown_handler();
 
     if !do_not_track() {

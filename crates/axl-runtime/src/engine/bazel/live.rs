@@ -7,10 +7,18 @@
 //!
 //! On OS signal (SIGINT / SIGTERM to aspect-cli), the binary's signal
 //! handler iterates [`live_pids`] and sends SIGINT to each registered
-//! client so the bazel subprocesses don't outlive aspect-cli. Without
-//! this, a CI cancellation can leave bazel clients orphaned — they
-//! hold the JVM-server lock and block every subsequent invocation on
-//! that warm runner.
+//! client so the bazel subprocesses don't outlive aspect-cli.
+//!
+//! Without this, a CI cancellation can hit bazel at a moment it can't
+//! gracefully recover from. Two known flakes — both rare per
+//! invocation, but bad when they fire on a warm runner:
+//!   1. *Potential sandbox-state corruption* (bazelbuild/bazel#23880):
+//!      a SIGKILL during sandbox cleanup can strand `_moved_trash_dir`
+//!      / `sandbox_stash` in the sandbox base, and every subsequent
+//!      invocation on that runner crashes in `afterCommand`.
+//!   2. *Potential orphaned bazel client* holding the JVM-server lock:
+//!      the next invocation on that runner hangs at "Running Bazel
+//!      server needs to be killed" until the orphan exits.
 
 use std::sync::Mutex;
 use std::sync::OnceLock;
