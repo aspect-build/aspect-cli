@@ -242,9 +242,9 @@ _EXECLOG_PATH = "/tmp/aspect-delivery-execlog-{}.bin"
 
 # Mnemonic of the action our hashsum aspect registers per delivery target.
 # The gRPC log uses this to identify the entries that carry change-detection
-# digests. Anything else with a non-OK status is a real cache miss in the
-# target's closure; the phase-1 execution log's `remote_cacheable` field
-# distinguishes intentional opt-outs from suspicious misses.
+# digests. Anything else with a non-OK status is an action whose key drifted
+# between phases (non-hermetic input); the phase-1 execution log's
+# `remote_cacheable` field tells us whether the rule declared the opt-out.
 _DELIVERY_HASH_MNEMONIC = "DeliveryHash"
 
 def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_flags, remote_executor_uri, ansi, data):
@@ -307,15 +307,15 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
 
         # Phase 1 captures the execution log to disk for post-build
         # introspection: phase 2's gRPC log tells us *which* actions
-        # missed the remote cache, but not *why* (intentional opt-out,
-        # transient not-yet-uploaded, or non-hermetic action). The
-        # `remote_cacheable` field on each Spawn entry is the authoritative
-        # signal — captured here, parsed after wait() below. Spawn entries
-        # whose owning action hits the local persistent action cache are
-        # *not* logged (per spawn.proto), so the dict we build will only
-        # cover actions that actually executed in this attempt; that's fine
-        # since the alternative — running aquery — has the same blind spot
-        # for cache-hit actions but with an extra Bazel invocation.
+        # missed the cache but not whether the rule declared the
+        # underlying drift. The `remote_cacheable` field on each Spawn
+        # entry surfaces that declaration — captured here, parsed after
+        # wait() below. Spawn entries whose owning action hits the local
+        # persistent action cache are *not* logged (per spawn.proto), so
+        # the dict we build only covers actions that actually executed in
+        # this attempt; that's fine since the alternative — running
+        # aquery — has the same blind spot for cache-hit actions but with
+        # an extra Bazel invocation.
         phase1_execlog_path = _EXECLOG_PATH.format(ctx.task.key)
         phase1_execlog_sinks = list(bazel_trait.execution_log_sinks)
         phase1_execlog_sinks.append(bazel.execution_log.file(path = phase1_execlog_path))
@@ -508,23 +508,25 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
             phase2_log_path,
         ))
 
-    # Surface non-DeliveryHash cache misses. Lazy-parse the phase-1
-    # execution log (captured to disk above but skipped on the clean path)
-    # to build a per-`(target_label, mnemonic)` map of `remote_cacheable`,
-    # then split:
-    #   * INTENTIONAL — phase 1 recorded the action with
-    #     `remote_cacheable=False`. The rule opted it out of the remote
-    #     cache via tags, per-action `execution_requirements`, or
-    #     `--modify_execution_info`. Phase 2 always fails these under
-    #     require-cached and there's nothing to fix; surface for visibility
-    #     only.
-    #   * SUSPECT — phase 1 either didn't see the action (local
-    #     action-cache hit, never executed this build) or recorded it as
-    #     cacheable. The latter is the interesting bucket: either a
-    #     transient "not yet uploaded" state or a persistent non-hermetic
-    #     action whose key changes every build (e.g. `PyWriteBuildData`
-    #     with `--stamp`). Repeat deliveries tell the two apart — transient
-    #     misses resolve themselves; non-hermetic ones don't.
+    # Surface non-DeliveryHash cache misses. The root cause of a phase-2
+    # miss is always action-key drift between phase 1 and phase 2 — the
+    # persistent local action cache satisfies require-cached for any
+    # stably-keyed action, so a miss means the key recomputed differently.
+    # Drift in practice is non-hermetism: the action consumes
+    # volatile-status, host env, wall clock, or similar.
+    #
+    # `remote_cacheable=False` on the phase-1 spawn doesn't *cause* the
+    # miss (an opt-out tag still leaves the action in the local action
+    # cache); it only tells us whether the rule declared the drift. We
+    # split on that signal purely for triage ordering:
+    #   * INTENTIONAL — opt-out was declared (`no-remote-cache` tag,
+    #     execution_requirements, `--modify_execution_info`). The drift is
+    #     known; no rule fix expected.
+    #   * SUSPECT — no opt-out declared. Either transient (action result
+    #     not yet uploaded; resolves on a repeat delivery) or persistently
+    #     non-hermetic (e.g. a rule consuming `volatile-status.txt` as a
+    #     real input instead of via `ctx.version_file`'s special-cased
+    #     path). Repeat deliveries tell the two apart.
     if misses_by_producer:
         action_meta = {}
         execlog_file = ctx.std.fs.open(phase1_execlog_path)
@@ -559,7 +561,12 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
             print("    Phase-2 raw log: " + phase2_log_path)
         if intentional:
             print("")
-            print("  Note: actions opted out of the remote cache (expected; not a delivery problem):")
+            print("  Note: actions opted out of remote caching by rule declaration")
+            print("  (`no-cache` / `no-remote-cache` tags or per-action execution_requirements;")
+            print("  e.g. rules_python's uncachable_version_file uses {\"no-cache\":\"\"} to write")
+            print("  a stamped version file each build). Phase 2's missing-from-remote check")
+            print("  is informational here — delivery is unaffected unless a per-target")
+            print("  'no digest' row appears above.")
             for producer, mnemonics in intentional.items():
                 print("    " + producer + ": " + ", ".join(mnemonics))
     ctx.std.fs.remove_file(phase1_execlog_path)
@@ -1172,7 +1179,7 @@ def _delivery_impl(ctx):
                 # Bazel never reported an output for this target in the build
                 # event stream — usually an alias, a transition redirecting
                 # the build, or a target filtered out by configuration.
-                warn_msg = "no build output reported for this target (likely an alias, filtered, or transitioned away)"
+                warn_msg = "no build output reported for this target (possibly an alias, filtered, or transitioned away)"
                 pending_count += 1
                 data.append((label, "WARN", "warn", warn_msg, output_sha or "-", "-"))
                 delivery_add_result(dr, label, "warn", message = warn_msg, output_sha = output_sha or "", is_forced = is_forced)

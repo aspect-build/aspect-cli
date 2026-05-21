@@ -1,20 +1,10 @@
 load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
-
-# Delivery should still succeed when a dep opts out of the remote cache.
-genrule(
-    name = "non_cacheable_dep",
-    outs = ["non_cacheable_dep.txt"],
-    cmd = "echo non-cacheable-output > $@",
-    tags = ["no-remote-cache"],
-)
+load(":uncachable_version_file.bzl", "uncachable_version_file")
 
 sh_binary(
     name = "deliverable",
     srcs = ["deliver.sh"],
-    data = [
-        ":non_cacheable_dep",
-        "//crates/aspect-cli",
-    ],
+    data = ["//crates/aspect-cli"],
     tags = ["deliverable"],
 )
 
@@ -23,5 +13,20 @@ genrule(
     name = "non_executable_deliverable",
     outs = ["non_executable_deliverable.txt"],
     cmd = "echo not-runnable > $@",
+    tags = ["deliverable"],
+)
+
+uncachable_version_file(
+    name = "stamped_version",
+)
+
+# Delivery should fail for this target (no digest) but keep delivering the rest.
+sh_binary(
+    name = "deliverable_with_uncachable_dep",
+    srcs = ["deliver.sh"],
+    data = [
+        ":stamped_version",
+        "//crates/aspect-cli",
+    ],
     tags = ["deliverable"],
 )
