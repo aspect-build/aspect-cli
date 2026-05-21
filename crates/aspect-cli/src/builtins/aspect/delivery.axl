@@ -304,6 +304,7 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
             data["bazel"] = bazel_init_data()["bazel"]
             data["bazel_attempts"] = prior_attempts
         events = bazel.build_events.iterator()
+
         # Phase 1 captures the execution log to disk for post-build
         # introspection: phase 2's gRPC log tells us *which* actions
         # missed the remote cache, but not *why* (intentional opt-out,
@@ -482,6 +483,7 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
             if canonical_label in canonical_targets:
                 output_shas[canonical_targets[canonical_label]] = entry.details.details.request.action_digest.hash
             continue
+
         # Non-DeliveryHash entry; record only the cache misses.
         if entry.status.code != 0:
             existing = misses_by_producer.get(canonical_label, [])
@@ -494,7 +496,10 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
         print("  Resolved digests for all {} in {}.".format(targets_label, fmt_elapsed(time.monotonic() - _t_phase2)))
     else:
         print("  Resolved {} of {} delivery digests in {}; {} could not be hashed (see per-target rows below).".format(
-            len(output_shas), len(targets), fmt_elapsed(time.monotonic() - _t_phase2), _unresolved,
+            len(output_shas),
+            len(targets),
+            fmt_elapsed(time.monotonic() - _t_phase2),
+            _unresolved,
         ))
 
     # Surface non-DeliveryHash cache misses. Lazy-parse the phase-1
@@ -1047,6 +1052,7 @@ def _delivery_impl(ctx):
             "--build_runfile_links",
         ]
         _t_download = time.monotonic()
+
         # Suppress phase-3's raw output and redirect stderr to a log file.
         # Phase 3 re-materializes OCI image layers / runfiles trees that
         # phase 1/2 didn't need to keep on disk, so it spews "Tar ...",
