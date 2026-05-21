@@ -270,17 +270,32 @@ fn install_shutdown_handler() {
                 return;
             }
         };
+        // If SIGTERM install fails, fall back to SIGINT-only — do NOT return.
+        // Per tokio's docs, dropping a `Signal` stream does not uninstall the
+        // OS-level handler, so returning here would leave SIGINT registered
+        // with no listener: tokio would swallow Ctrl-C and aspect-cli would
+        // appear unkillable except via an external SIGKILL — exactly the hang
+        // this whole module exists to prevent.
         let mut sigterm = match signal(SignalKind::terminate()) {
-            Ok(s) => s,
+            Ok(s) => Some(s),
             Err(e) => {
-                tracing::warn!("install_shutdown_handler: failed to install SIGTERM handler: {e}");
-                return;
+                tracing::warn!(
+                    "install_shutdown_handler: failed to install SIGTERM handler ({e}); \
+                     continuing with SIGINT-only shutdown"
+                );
+                None
             }
         };
 
-        let signal_name = tokio::select! {
-            _ = sigint.recv()  => "SIGINT",
-            _ = sigterm.recv() => "SIGTERM",
+        let signal_name = match sigterm.as_mut() {
+            Some(sigterm) => tokio::select! {
+                _ = sigint.recv()  => "SIGINT",
+                _ = sigterm.recv() => "SIGTERM",
+            },
+            None => {
+                sigint.recv().await;
+                "SIGINT"
+            }
         };
         let exit_code = if signal_name == "SIGINT" { 130 } else { 143 };
 
