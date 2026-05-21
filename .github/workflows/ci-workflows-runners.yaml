@@ -1,4 +1,5 @@
-name: CI
+name: CI - Aspect Workflows (Workflows runners)
+
 on:
   push:
     branches: [main]
@@ -93,6 +94,7 @@ jobs:
   buildifier-task:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     needs: [pre-build]
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
         with:

@@ -1614,6 +1614,16 @@ def _issues_list_comments(ctx, token, owner, repo, issue_number, api_base = DEFA
             break
     return {"success": True, "comments": all_comments}
 
+def _issues_get_comment(ctx, token, owner, repo, comment_id, api_base = DEFAULT_GITHUB_API):
+    """GET a single issue/PR comment by id. Used by the PR-comment writer
+    to re-read the current comment body between cycles so it can merge
+    in entries written by other concurrent workflows."""
+    url = api_base + "/repos/" + owner + "/" + repo + "/issues/comments/" + str(comment_id)
+    success, status_code, body = _do_request(ctx, "GET", url, token)
+    if success and type(body) == "dict":
+        return {"success": True, "body": body.get("body", "") or "", "html_url": body.get("html_url", "")}
+    return {"success": False, "status_code": status_code, "error": "HTTP %d: %s" % (status_code, body)}
+
 def _issues_create_comment(ctx, token, owner, repo, issue_number, body, api_base = DEFAULT_GITHUB_API):
     url = api_base + "/repos/" + owner + "/" + repo + "/issues/" + str(issue_number) + "/comments"
     success, status_code, resp = _do_request(ctx, "POST", url, token, {"body": body})
@@ -2226,6 +2236,7 @@ github = struct(
     resolve_current_job_url = _resolve_current_job_url,
     issues = struct(
         list_comments = _issues_list_comments,
+        get_comment = _issues_get_comment,
         create_comment = _issues_create_comment,
         update_comment = _issues_update_comment,
         delete_comment = _issues_delete_comment,
