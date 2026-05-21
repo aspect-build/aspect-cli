@@ -96,31 +96,6 @@ Failure modes
                                                     deliver" and returns 0
 
 
-Why selective requires state tracking
--------------------------------------
-
-Change detection compares each target's action digest against the state
-backend's record of "what's already been delivered for this
-`--task-key[:--salt]` prefix". Without that state, every target looks fresh
-— selective is functionally identical to `always`. Rather than have two
-flag combinations produce the same behavior under different names, the impl
-rejects `--mode=selective --track-state=false` outright. Users who want a
-digest preview outside Aspect Workflows runners can use
-`--mode=always --dry-run --track-state=false`.
-
-
-Why `--mode=always` records by default
---------------------------------------
-
-When state tracking is enabled, `--mode=always` records the digests and
-deliveries it produces. This ensures a subsequent `--mode=selective` run
-sees those digests in its change-detection check — usually what you want
-from a backfill or cache-invalidation event. Pass `--track-state=false` if
-you specifically want `--mode=always` to skip recording (e.g., local
-development or one-off delivery flows that should not influence future
-selective runs).
-
-
 User-facing migration guide: https://docs.aspect.build/cli/migration/delivery
 """
 
@@ -248,26 +223,10 @@ _EXECLOG_PATH = "/tmp/aspect-delivery-execlog-{}.bin"
 _DELIVERY_HASH_MNEMONIC = "DeliveryHash"
 
 def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_flags, remote_executor_uri, ansi, data):
-    """
-    Build targets and extract action cache keys from the grpc log.
-
-    Phase 1: build actual targets with --nokeep_state_after_build to flush Skyframe,
-             ensuring the binaries are in the remote cache. This is the "main" build —
-             bazel_trait.build_event/build_retry/execution_log_sinks/build_event_sinks
-             all apply here.
-    Phase 2: build with the hashsum aspect + --experimental_remote_require_cached +
-             --remote_grpc_log. Bazel queries the remote cache for every action including
-             DeliveryHash; the GetActionResult request (hit or miss) is recorded in the
-             grpc log and contains the stable action_digest.hash we need. DeliveryHash is
-             marked no-local so it is never executed locally.
-
-    `data` is the delivery_results dict; phase-1 BES events feed its
-    summary metadata (workspace_status, build_metadata, build_metrics, …)
-    so the delivery check-run / annotation gets the same row layout as
-    build/test. Phases 2 and 3 don't drive metadata — phase 1 is the
-    representative invocation.
-
-    Returns (output_shas, exit_code) where output_shas is {label: action_digest_hash}.
+    """Run phase 1 (main build) + phase 2 (digest extraction) and return
+    `(output_shas, non_hermetic_misses, exit_code)`. Phase 1 BES events
+    drive the `data` (delivery_results) metadata; phase 2's gRPC log yields
+    the per-target action digests used for change detection.
     """
     repo_dir = "/tmp/aspect_delivery_" + ctx.task.key
     _write_aspect_repo(ctx, repo_dir)
@@ -281,41 +240,28 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
     phase1_flags = bazel_flags + ["--nokeep_state_after_build"]
     _t_phase1 = time.monotonic()
 
-    # Snapshot pre-loop state so a retry attempt starts from a clean
-    # slate of BES-derived counters (failed_actions_total, targets_total,
-    # actions_executed, …) without re-running the caller-managed setup
-    # done before this function (prefix, commit_sha, mode, …). Restored
-    # in place via .clear()+.update() so the caller's `dr` reference
-    # stays valid across retries.
+    # Snapshot pre-loop state so retries reset BES-derived counters
+    # without re-running caller-managed setup. Restored via clear+update
+    # to keep the caller's `dr` reference valid.
     pre_loop_state = dict(data)
     for attempt in range(10):
         if attempt > 0:
-            # Archive the just-completed (now-failed) attempt before
-            # resetting; the 0-indexed loop var matches the 1-indexed
-            # prior-attempt number.
+            # Archive the failed attempt before resetting state.
             prior_attempts = archive_bazel_attempt(data, attempt, status.code)
             data.clear()
             data.update(pre_loop_state)
 
-            # pre_loop_state's "bazel" ref is shared with the
-            # just-archived data["bazel"]; swap in a fresh sub-dict so
-            # (a) the retry starts from clean BES counters and (b) the
-            # historic snapshot isn't mutated by the next iteration.
+            # Fresh `bazel` sub-dict so the retry starts clean and the
+            # archived snapshot isn't mutated by the next iteration.
             data["bazel"] = bazel_init_data()["bazel"]
             data["bazel_attempts"] = prior_attempts
         events = bazel.build_events.iterator()
 
-        # Phase 1 captures the execution log to disk for post-build
-        # introspection: phase 2's gRPC log tells us *which* actions
-        # missed the cache but not whether the rule declared the
-        # underlying drift. The `remote_cacheable` field on each Spawn
-        # entry surfaces that declaration — captured here, parsed after
-        # wait() below. Spawn entries whose owning action hits the local
-        # persistent action cache are *not* logged (per spawn.proto), so
-        # the dict we build only covers actions that actually executed in
-        # this attempt; that's fine since the alternative — running
-        # aquery — has the same blind spot for cache-hit actions but with
-        # an extra Bazel invocation.
+        # Capture the execution log so we can read each spawn's
+        # `remote_cacheable` flag — used post-wait to decide whether a
+        # phase-2 miss was a declared opt-out or a real key drift.
+        # Local-action-cache hits aren't logged (per spawn.proto), but
+        # that's the same blind spot aquery has and we accept it.
         phase1_execlog_path = _EXECLOG_PATH.format(ctx.task.key)
         phase1_execlog_sinks = list(bazel_trait.execution_log_sinks)
         phase1_execlog_sinks.append(bazel.execution_log.file(path = phase1_execlog_path))
@@ -326,22 +272,13 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
             *targets
         )
 
-        # Capture the sink-side invocation UUID from phase 1 (the
-        # representative build) so the "✨ Aspect Workflows" link resolves
-        # to the right backend record. The runtime mints this inside
-        # `Build::spawn` before returning, so we can populate it here —
-        # before the BES loop and `build.wait()` — and emit a running
-        # task_update so the BK annotation / status check picks up the
-        # link as soon as the build is spawned. Each retry attempt runs
-        # against a fresh UUID and overwrites this field.
+        # Phase 1's sink UUID drives the "✨ Aspect Workflows" link in
+        # the BK annotation / status check. Retries overwrite it.
         data["sink_invocation_id"] = build.sink_invocation_id
 
-        # Kept on the CLI: phase 1 `bazel.build` does NOT inherit stdout/stderr
-        # (unlike phase 2/3), so without this `→` line the user sees the
-        # configuration table from `_print_header`, then nothing until
-        # `Build took Ns.` prints after the build completes — potentially
-        # minutes later. The announce is the only "we're working" signal
-        # during that gap.
+        # Phase 1 inherits the CLI's stdout/stderr (unlike phase 2/3), so
+        # this announce is the only "we're working" signal during the
+        # potentially-minutes-long build.
         targets_label = pluralize(len(targets), "target")
         status = _pick_status(data, had_failure = False, terminal = False)
         if attempt == 0:
@@ -402,21 +339,17 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
         if status.code == 0 or not bazel_trait.build_retry(status.code):
             break
 
-    # When retries occurred, append the final attempt so
-    # data["bazel_attempts"] holds the full history (failed priors +
-    # final) as one ordered list for the rendered section.
+    # Append the final attempt so bazel_attempts holds the full history.
     if data.get("bazel_attempts"):
         archive_bazel_attempt(data, attempt + 1, status.code)
 
     if status.code != 0:
-        return {}, status.code
+        return {}, {}, status.code
     print("  Build took {}.".format(fmt_elapsed(time.monotonic() - _t_phase1)))
 
-    # Phase 2: check every action against the remote cache without executing anything.
-    # --experimental_remote_require_cached forces GetActionResult for each action, so the
-    # DeliveryHash action digest flows into the grpc log even when it is a cache miss.
-    # We parse the log regardless of exit code; a non-zero result here simply means
-    # DeliveryHash was not yet cached remotely, which is expected on first delivery.
+    # Phase 2. We parse the gRPC log regardless of exit code — a non-zero
+    # result usually just means DeliveryHash wasn't cached remotely yet,
+    # which is normal on first delivery.
     targets_label = pluralize(len(targets), "target")
     status = _pick_status(data, had_failure = False, terminal = False)
     task_update(
@@ -440,16 +373,9 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
         "--keep_going",
     ]
 
-    # Suppress raw Bazel output for this phase and redirect stderr (where
-    # Bazel writes progress and per-action errors) to a log file. Phase 2
-    # runs under --experimental_remote_require_cached: any action whose
-    # result isn't already in the remote cache fails loudly, including
-    # DeliveryHash on a target's first delivery — which is normal and how
-    # we extract digests at all. Mixing those expected misses with
-    # rules-version warnings and WORKSPACE deprecation noise is uniformly
-    # confusing to anyone not reading the delivery source. The actionable
-    # signal lives in the gRPC log we parse below; the log file is the
-    # escape hatch if we ever need to debug deeper.
+    # Redirect stderr to a log file: require-cached failures on first
+    # delivery are noisy-but-expected, and the actionable signal lives in
+    # the gRPC log we parse below. The log file is the escape hatch.
     phase2_log_path = _PHASE2_LOG_PATH.format(ctx.task.key)
     ctx.bazel.build(
         flags = phase2_flags,
@@ -462,14 +388,9 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
     # the user-supplied targets before matching.
     canonical_targets = {_canonical(t): t for t in targets}
 
-    # Categorize the gRPC log entries:
-    #   * `output_shas[label]` — DeliveryHash digests, regardless of status.
-    #     A miss on DeliveryHash is normal on first delivery; we still get
-    #     the action_digest.hash for change detection.
-    #   * `misses_by_producer[producer_label] = [mnemonic, ...]` — non-OK
-    #     entries for any other mnemonic. The "producer" is the target whose
-    #     rule registered the action (often a transitive dep of a
-    #     deliverable, not a deliverable itself).
+    # output_shas: DeliveryHash action_digest per target (hit or miss).
+    # misses_by_producer: non-OK entries for any other mnemonic, keyed by
+    # the producing target (may be a transitive dep, not a deliverable).
     output_shas = {}
     misses_by_producer = {}
     log_file = ctx.std.fs.open(log_path)
@@ -498,8 +419,8 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
         # Always point at the phase-2 log when anything went unresolved —
         # the gRPC log may contain zero useful entries (auth/network/config
         # error before any GetActionResult fired), in which case the
-        # SUSPECT branch below never executes and the log file is the only
-        # diagnostic surface left.
+        # per-target row's inline diagnosis can't fire and the log file is
+        # the only diagnostic surface left.
         print("  Resolved {} of {} delivery digests in {}; {} could not be hashed. Phase-2 raw log: {}".format(
             len(output_shas),
             len(targets),
@@ -508,25 +429,10 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
             phase2_log_path,
         ))
 
-    # Surface non-DeliveryHash cache misses. The root cause of a phase-2
-    # miss is always action-key drift between phase 1 and phase 2 — the
-    # persistent local action cache satisfies require-cached for any
-    # stably-keyed action, so a miss means the key recomputed differently.
-    # Drift in practice is non-hermetism: the action consumes
-    # volatile-status, host env, wall clock, or similar.
-    #
-    # `remote_cacheable=False` on the phase-1 spawn doesn't *cause* the
-    # miss (an opt-out tag still leaves the action in the local action
-    # cache); it only tells us whether the rule declared the drift. We
-    # split on that signal purely for triage ordering:
-    #   * INTENTIONAL — opt-out was declared (`no-remote-cache` tag,
-    #     execution_requirements, `--modify_execution_info`). The drift is
-    #     known; no rule fix expected.
-    #   * SUSPECT — no opt-out declared. Either transient (action result
-    #     not yet uploaded; resolves on a repeat delivery) or persistently
-    #     non-hermetic (e.g. a rule consuming `volatile-status.txt` as a
-    #     real input instead of via `ctx.version_file`'s special-cased
-    #     path). Repeat deliveries tell the two apart.
+    # Filter to misses on actions that did NOT declare a remote-cache
+    # opt-out — these are real key-drift symptoms (transient or
+    # non-hermetic). Caller surfaces them inline on the failed row.
+    non_hermetic_misses = {}
     if misses_by_producer:
         action_meta = {}
         execlog_file = ctx.std.fs.open(phase1_execlog_path)
@@ -540,38 +446,17 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
                 "remote_cacheable": spawn.remote_cacheable,
                 "cacheable": spawn.cacheable,
             }
-
-        intentional = {}
-        suspect = {}
         for producer, mnemonics in misses_by_producer.items():
             for m in mnemonics:
                 meta = action_meta.get((producer, m))
-                bucket = intentional if (meta and not meta["remote_cacheable"]) else suspect
-                bucket.setdefault(producer, []).append(m)
-        if suspect:
-            print("")
-            print(_style("  SUSPECT non-DeliveryHash cache misses:", _BOLD, ansi))
-            print("    These actions weren't in the remote cache and weren't opted out via")
-            print("    tags/execution_requirements. Either transient (not yet uploaded; will")
-            print("    resolve on a repeat delivery) or non-hermetic (action key changes every")
-            print("    build; persistent until the rule is fixed). The affected delivery")
-            print("    targets may show 'no digest' in their per-target row.")
-            for producer, mnemonics in suspect.items():
-                print("      " + producer + ": " + ", ".join(mnemonics))
-            print("    Phase-2 raw log: " + phase2_log_path)
-        if intentional:
-            print("")
-            print("  Note: actions opted out of remote caching by rule declaration")
-            print("  (`no-cache` / `no-remote-cache` tags or per-action execution_requirements;")
-            print("  e.g. rules_python's uncachable_version_file uses {\"no-cache\":\"\"} to write")
-            print("  a stamped version file each build). Phase 2's missing-from-remote check")
-            print("  is informational here — delivery is unaffected unless a per-target")
-            print("  'no digest' row appears above.")
-            for producer, mnemonics in intentional.items():
-                print("    " + producer + ": " + ", ".join(mnemonics))
+                # Skip declared opt-outs — they don't cause delivery
+                # failures, so there's nowhere to surface them inline.
+                if meta and not meta["remote_cacheable"]:
+                    continue
+                non_hermetic_misses.setdefault(producer, []).append(m)
     ctx.std.fs.remove_file(phase1_execlog_path)
 
-    return output_shas, 0
+    return output_shas, non_hermetic_misses, 0
 
 def _pick_status(dr, had_failure, terminal):
     """Decide a delivery task's lifecycle status from accumulated data.
@@ -660,16 +545,9 @@ def _emit_final(ctx, lifecycle, dr, exit_code):
     if not dr.get("wall_time_ms") and dr.get("start_time_ms"):
         dr["wall_time_ms"] = dr["finish_time_ms"] - dr["start_time_ms"]
 
-    # Force `--mode=always --dry-run --track-state=false` — the only
-    # combo that runs off a Workflows runner (see module docstring).
-    # Pin commit-sha when known so the local rerun resolves to the
-    # same set CI did; omit when unset (track_state=false doesn't
-    # require it).
-    #
-    # Gated on `targets_total > 0`: when delivery resolved to zero
-    # targets (empty --query, no positional args, etc.) there's
-    # nothing for the user to dry-run locally — a repro that just
-    # re-runs the same nothing-to-do invocation is noise.
+    # Build a local-repro command pinned to `--mode=always --dry-run
+    # --track-state=false` (the only combo that runs off a Workflows
+    # runner). Skipped when zero targets resolved (repro would be noise).
     targets_total = (dr.get("delivery", {}) or {}).get("targets_total", 0) or 0
     if targets_total > 0:
         flags = []
@@ -715,10 +593,8 @@ def _delivery_impl(ctx):
     bazel_trait = ctx.traits[BazelTrait]
     lifecycle = ctx.traits[TaskLifecycleTrait]
 
-    # Build the delivery-data shell first, then fire task_started ASAP —
-    # so that any later failure (pre_health_check throwing, deliveryd endpoint
-    # missing, remote_cache missing) still shows up as a failed check run
-    # rather than a silent no-op.
+    # Build the delivery-data shell and fire task_started early so any
+    # later failure still produces a check run rather than a silent no-op.
     dr = delivery_init_data()
     dr["start_time_ms"] = now_ms(ctx)
     dr["delivery"]["prefix"] = ctx.task.key
@@ -733,11 +609,8 @@ def _delivery_impl(ctx):
     dr["delivery"]["dry_run"] = bool(ctx.args.dry_run)
     dr["delivery"]["track_state"] = bool(ctx.args.track_state)
 
-    # `subject` is what flows into `render_ctx["targets"]` for status-check
-    # rendering — without it `_assemble_explicit_command` has nothing to
-    # append after the bazel flags, so the "Explicit command line" detail
-    # block reads "bazel build <flags>" with no targets. Use the same
-    # space-joined form lint/build/test use.
+    # `subject` feeds the status-check "Explicit command line" block;
+    # without it the rendered command is missing the target list.
     ansi = color_enabled(ctx.std)
 
     targets_subject = " ".join(list(ctx.args.targets)) if ctx.args.targets else ""
@@ -761,16 +634,10 @@ def _delivery_impl(ctx):
         _emit_final(ctx, lifecycle, dr, exit_code = 1)
         fail(msg)
 
-    # Derived: phase 1/2 (action-digest computation) runs whenever digests are
-    # useful — i.e. anywhere they'll be recorded (--track-state=true) or
-    # surfaced in dry-run output. The only case it can be skipped is
-    # --mode=always without state tracking and without dry-run (a pure run,
-    # no preview).
+    # phase 1/2 runs whenever digests are needed (recorded or previewed).
     phase_1_2_runs = track_state or dry_run
 
-    # Derived: a "preview-only" run — phase 3 download is unnecessary because
-    # we won't actually `bazel run` and we don't need entrypoint info to build
-    # the result table (every candidate is reported as DRY-RUN).
+    # dry-run + --track-state=false: phase 3 has nothing to do.
     preview_only = dry_run and not track_state
 
     # deliveryd is the current state backend. Aspect Workflows runners start it
@@ -780,11 +647,8 @@ def _delivery_impl(ctx):
         _emit_final(ctx, lifecycle, dr, exit_code = 1)
         fail("ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT is not set. The delivery state backend must be running. (Pass --track-state=false to run without state tracking; allowed in combination with --dry-run or --mode=always.)")
 
-    # Delivery context. --commit-sha and --build-url are auto-detected from
-    # common CI env vars (GITHUB_*, BUILDKITE_*, CIRCLE_*, CI_* for GitLab)
-    # when the user doesn't pass them explicitly. commit_sha is only
-    # consumed by deliveryd_record / deliveryd_query (both gated on
-    # track_state), so we only fail when it's missing AND we'd actually use it.
+    # commit-sha / build-url auto-detect from CI env vars. commit_sha is
+    # only consumed under track_state, so we only fail when both apply.
     ci_host = ctx.args.ci_host
     commit_sha = ctx.args.commit_sha or detect_commit_sha(ctx.std)
     if not commit_sha and track_state:
@@ -841,11 +705,10 @@ def _delivery_impl(ctx):
     else:
         trace.log(rc.announce(command = "build", ansi = False))
 
-    # Delivery requires a remote cache to populate the grpc log with action digests.
-    # common-section flags are re-encoded as --default_override=0:common=--remote_cache=...
-    # so we must check for both forms.
-    # expand_all returns plain strings for unconditional flags and (value, condition)
-    # tuples for version-conditioned flags; take the first element in either case.
+    # Delivery requires a remote cache (and may surface via common
+    # section as --default_override=0:common=--remote_cache=...).
+    # expand_all returns either strings or (value, version-constraint)
+    # tuples; take the first element of the tuple form.
     remote_cache_uri = None
     _override_prefix = "--default_override=0:common="
     for flag in expanded_flags:
@@ -857,13 +720,9 @@ def _delivery_impl(ctx):
         elif f.startswith("--remote_executor="):
             remote_cache_uri = f[len("--remote_executor="):]
     if not remote_cache_uri and phase_1_2_runs:
-        # Graceful degradation: --mode=always --dry-run --track-state=false
-        # is a "best-effort preview" that's tolerant of missing prerequisites
-        # — skip phase 1/2 (no digests in output) and tell the user how to
-        # enable digest visibility. Other combinations need digests for
-        # correctness (recording, change-detection decisions) and still hard-error.
-        # The rc announce was already printed above; we just emit the
-        # mode-specific NOTE/ERROR here.
+        # --mode=always --dry-run --track-state=false degrades gracefully
+        # (skip phase 1/2, no digests). Other combinations need digests
+        # and hard-error.
         if mode == "always" and dry_run and not track_state:
             info(ctx.std, "No remote cache configured; the preview will list candidates without action digests." +
                           " Configure --bazel-flag=--remote_cache=<uri> (or set it in .bazelrc) to surface digests in the preview output.")
@@ -882,25 +741,20 @@ def _delivery_impl(ctx):
     else:
         targets = ctx.args.targets
 
-    # Accept --force-target plus ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS
-    # (whitespace-separated) so CI systems can wire a parameter field to
-    # the env var without templating the flag itself. Whitespace is the
-    # only safe separator: Bazel's label grammar allows commas in target
-    # names, so a comma-split would collide with valid labels.
+    # Also accept ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS (whitespace-
+    # separated; commas collide with valid Bazel labels) for CI systems
+    # that wire a parameter field to the env var.
     forced_targets = list(ctx.args.force_targets)
     env_forced = ctx.std.env.var("ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS") or ""
     for tok in env_forced.split():
         if tok and tok not in forced_targets:
             forced_targets.append(tok)
 
-    # Now that we know the target set, push an update so the check run's
-    # subject line reflects the actual targets (task_started fired earlier
-    # with an empty subject to guarantee the check is created before any
-    # failure point).
+    # task_started fired earlier with an empty subject; now that the
+    # target set is resolved, push it so the check run reflects it.
     dr["target_pattern"] = " ".join(list(targets)) if targets else ""
 
-    # Stash the total target count so the running compact can render
-    # `X/N delivered` once the per-target loop starts producing counts.
+    # Total target count for the "X/N delivered" running compact.
     dr["delivery"]["targets_total"] = len(targets)
     targets_label = pluralize(len(targets), "target")
     status = _pick_status(dr, had_failure = False, terminal = False)
@@ -921,11 +775,9 @@ def _delivery_impl(ctx):
         info(ctx.std, "No targets to deliver")
         return _emit_final(ctx, lifecycle, dr, exit_code = 0)
 
-    # --force-target / ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS only flip
-    # change detection for labels already in the resolved target set —
-    # they don't add labels. Hard-fail on any unmatched forced label so
-    # typos and stale labels are caught at startup rather than silently
-    # ignored.
+    # Hard-fail on forced labels not in the resolved set: force-target
+    # only flips change detection, it doesn't add labels. Catches typos
+    # at startup rather than silently ignoring them.
     unmatched_forced = [t for t in forced_targets if t not in targets]
     if unmatched_forced:
         msg = "--force-target / ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS labels not in the resolved delivery set: " + ", ".join(unmatched_forced) + ". Force-target re-delivers labels already selected by --query or positional args; it does not add new labels. Either fix the typo or update --query / positional targets to include them."
@@ -938,12 +790,10 @@ def _delivery_impl(ctx):
 
     _t_total = time.monotonic()
 
-    # Phase 1/2: build all targets and extract output_shas from the grpc log.
-    # Skipped only in --mode=always + --track-state=false: digests are neither
-    # recorded nor used for change detection, so there's nothing to compute.
+    # Phase 1/2 — skipped only in --mode=always + --track-state=false.
     if phase_1_2_runs:
         _t_build = time.monotonic()
-        output_shas, build_code = _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, expanded_flags, remote_cache_uri, ansi, dr)
+        output_shas, non_hermetic_misses, build_code = _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, expanded_flags, remote_cache_uri, ansi, dr)
         print("  Build+checksum total: {}.".format(fmt_elapsed(time.monotonic() - _t_build)))
 
         for handler in bazel_trait.build_end:
@@ -952,9 +802,7 @@ def _delivery_impl(ctx):
         if build_code != 0:
             error(ctx.std, "Build failed with exit code {}.".format(build_code))
 
-            # Record a synthetic warn entry so the status check conveys *why* the
-            # task failed, not just that it did. One row per target keeps the body
-            # readable without blowing up for large target sets.
+            # Synthetic warn rows so the check run conveys WHY it failed.
             for label in targets:
                 delivery_add_result(
                     dr,
@@ -965,6 +813,7 @@ def _delivery_impl(ctx):
             return _emit_final(ctx, lifecycle, dr, exit_code = build_code)
     else:
         output_shas = {}
+        non_hermetic_misses = {}
 
     # Record each target's digest with deliveryd. Skipped when --track-state=false.
     if track_state:
@@ -985,9 +834,8 @@ def _delivery_impl(ctx):
             if label in output_shas:
                 deliveryd_record(ctx, endpoint, ci_host, commit_sha, prefix, label, output_shas[label])
 
-    # Query deliveryd for delivery state. Skipped when --track-state=false (no
-    # endpoint to query) or in --mode=always (every target is a candidate
-    # regardless of state, so we don't need it).
+    # Query deliveryd. Skipped when --track-state=false (no endpoint) or
+    # in --mode=always (every target is a candidate regardless of state).
     if track_state and mode != "always":
         status = _pick_status(dr, had_failure = False, terminal = False)
         task_update(
@@ -1020,13 +868,9 @@ def _delivery_impl(ctx):
             )
         ]
 
-    # Phase 3 builds + materializes runfiles for `bazel run`. The remote-cache
-    # flags below are no-ops when no remote cache is configured, so the same
-    # build covers --mode=always with --track-state=false (builds everything from source or
-    # local cache) as well as the modes that still talk to the remote cache
-    # populated by phase 1/2.
-    # Skipped only for the dry-run + --track-state=false preview: targets are
-    # never run, and we don't need entrypoint info for the preview output.
+    # Phase 3 builds + materializes runfiles for `bazel run`. Skipped
+    # only for the dry-run + --track-state=false preview (nothing to
+    # run, no entrypoints needed).
     if delivery_targets and not preview_only:
         delivery_targets_label = pluralize(len(delivery_targets), "target")
         status = _pick_status(dr, had_failure = False, terminal = False)
@@ -1043,21 +887,11 @@ def _delivery_impl(ctx):
             phase = Phase(name = "download", description = "Download runfiles", emoji = "📥"),
         )
 
-        # Required flags — appended LAST so they win over any --config=X
-        # expansion in expanded_flags. We set these explicitly even when
-        # Bazel's default agrees, since user rc / trait flags can flip
-        # the effective value otherwise.
-        #   * upload strategy `local`: keep BES artifact references as
-        #     local paths. We're about to spawn the delivery target
-        #     locally, so re-uploading via BES is wasted bandwidth and
-        #     can stall when the remote cache is slow.
-        #   * noremote_upload_local_results: don't push this build's
-        #     outputs to the remote cache — the delivery target was
-        #     built for local execution, no other consumer benefits.
-        #   * remote_download_outputs `toplevel`: ensure the delivery
-        #     target lands on local disk so we can spawn it.
-        #   * build_runfile_links: materialize the runfiles tree so the
-        #     binary's wrappers / data deps resolve at runtime.
+        # Appended LAST so they override any --config=X expansion in
+        # expanded_flags and any user rc / trait flag that would flip
+        # them. Each flag is required for the delivery spawn to succeed:
+        # local artifacts for the spawn, no spurious cache uploads, the
+        # binary on disk, runfiles tree materialized.
         phase3_flags = list(expanded_flags) + [
             "--experimental_build_event_upload_strategy=local",
             "--noremote_upload_local_results",
@@ -1066,13 +900,9 @@ def _delivery_impl(ctx):
         ]
         _t_download = time.monotonic()
 
-        # Suppress phase-3's raw output and redirect stderr to a log file.
-        # Phase 3 re-materializes OCI image layers / runfiles trees that
-        # phase 1/2 didn't need to keep on disk, so it spews "Tar ...",
-        # "Creating runfiles tree ...", "[Prepa] OCI Image ..." progress
-        # lines that look — to anyone unfamiliar with the BwoB flow — like
-        # delivery is redundantly rebuilding images. The phase-overview
-        # header at startup describes the step; the log file is the
+        # Redirect stderr to a log file. Phase 3 re-materializes
+        # artifacts (OCI layers, runfiles trees) and the progress lines
+        # look misleadingly like redundant rebuilds; the log is the
         # escape hatch on real failure.
         phase3_log_path = _PHASE3_LOG_PATH.format(ctx.task.key)
         phase3_events = bazel.build_events.iterator()
@@ -1087,11 +917,8 @@ def _delivery_impl(ctx):
             run_tracker.event(event)
         status = build.wait()
 
-        # When phase 1/2 was skipped (--mode=always + --track-state=false), phase 3
-        # is the only Bazel build that ran. Run build_end hooks here with its
-        # status so features like ArtifactUpload can finalize uploads.
-        # Phase-1/2-having-run cases already dispatched build_end above with
-        # their own build_code.
+        # When phase 1/2 was skipped, phase 3 is the only build that ran
+        # — dispatch build_end hooks here with its status.
         if not phase_1_2_runs:
             for handler in bazel_trait.build_end:
                 handler(ctx, status.code)
@@ -1142,10 +969,15 @@ def _delivery_impl(ctx):
         output_sha = output_shas.get(label)
 
         if not output_sha and phase_1_2_runs:
-            # Expected a digest from phase 1/2 but none was recorded — usually
-            # an alias or a target that doesn't go through DeliveryHash.
+            # Surface the drifting mnemonic inline when we have one
+            # (e.g. PyWriteBuildData with --stamp); otherwise give the
+            # generic alias hint.
             pending_count += 1
-            msg = "no output_sha (not in grpc log; target may be an alias — use the actual target label)"
+            mnemonics = non_hermetic_misses.get(_canonical(label), [])
+            if mnemonics:
+                msg = "no digest: non-cacheable upstream action(s) ({}); likely non-hermetic. Phase-2 raw log: {}".format(", ".join(mnemonics), _PHASE2_LOG_PATH.format(ctx.task.key))
+            else:
+                msg = "no output_sha (not in grpc log; target may be an alias — use the actual target label)"
             data.append((label, "WARN", "warn", msg, "-", "-"))
             delivery_add_result(
                 dr,
@@ -1167,28 +999,16 @@ def _delivery_impl(ctx):
                 is_forced = is_forced,
             )
         elif preview_only:
-            # dry-run + --track-state=false: phase 3 was skipped, so run_tracker
-            # has no entrypoints. dry_run is True so the bazel run path below
-            # is never reached; entrypoint=None is safe.
+            # No entrypoint needed; dry_run=True skips the bazel run path.
             pending.append((label, None, is_forced, output_sha or "-"))
         else:
-            # Phase 3 ran (any mode/flag combination except the dry-run +
-            # --track-state=false preview) — run_tracker has entrypoints.
             entrypoint = run_tracker.determine_entrypoint(label)
             if entrypoint == None:
-                # Bazel never reported an output for this target in the build
-                # event stream — usually an alias, a transition redirecting
-                # the build, or a target filtered out by configuration.
                 warn_msg = "no build output reported for this target (possibly an alias, filtered, or transitioned away)"
                 pending_count += 1
                 data.append((label, "WARN", "warn", warn_msg, output_sha or "-", "-"))
                 delivery_add_result(dr, label, "warn", message = warn_msg, output_sha = output_sha or "", is_forced = is_forced)
             elif not run_tracker.is_runnable(entrypoint):
-                # Target produced an output but has no runfiles tree alongside
-                # it — it isn't actually runnable. Typically a macro
-                # forwarding the deliverable tag to a non-runnable internal
-                # rule (e.g. a genrule wrapped by sh_binary). Fix the macro
-                # to stop tagging the internal rule.
                 warn_msg = "tagged deliverable but not runnable (no runfiles tree at {}.runfiles)".format(entrypoint)
                 pending_count += 1
                 data.append((label, "WARN", "warn", warn_msg, output_sha or "-", "-"))
@@ -1198,17 +1018,13 @@ def _delivery_impl(ctx):
 
         delivery_trait.deliver_target(label, is_forced)
 
-    # Emit an intermediate update so that skip/warn state is visible in the
-    # check run before the (potentially long) per-target delivery loop starts.
+    # Intermediate update so skip/warn state is visible in the check run
+    # before the (potentially long) per-target loop starts.
     pending_label = pluralize(len(pending), "target")
     if dry_run:
         prepass_progress = "Previewing {}... (dry-run)".format(pending_label)
         prepass_cli = "Previewing {} (dry-run)".format(pending_label)
     elif pending:
-        # Pre-loop announce: just "Delivering N target(s)..." rather
-        # than "Delivering 0 of N target(s)..." — the leading "0 of"
-        # reads awkwardly at the entry to the phase. The per-chunk
-        # update inside the loop uses the "K of N" form once K > 0.
         prepass_progress = "Delivering {}...".format(pending_label)
         prepass_cli = "Delivering {}".format(pending_label)
     else:
@@ -1289,25 +1105,10 @@ def _delivery_impl(ctx):
                     is_forced = is_forced,
                 )
 
-            # Emit a running update after each chunk item so long-running
-            # deliveries show steady progress in the status check. The
-            # phase label counts completions only — pending/skip/warn
-            # entries are already reflected in `dr`'s counts so the
-            # check-run body shows them; "Delivering X of N" is the
-            # narrowest "what's still happening" signal.
+            # Per-completion progress update. priority=False throttles BK
+            # / GHSC PATCHes; stream="" suppresses the CLI line since the
+            # per-target "Delivering <label>..." already ticks.
             done = success_count + failed_count
-
-            # priority=False — fires per chunk-item completion;
-            # without throttling, parallel delivery of fast targets
-            # would spam BK / GHSC PATCHes. The phase boundary was
-            # the "Delivering 0 of N" announce above; this loop is
-            # mid-phase progress.
-            #
-            # stream="" suppresses the CLI line — the per-target
-            # `Delivering <label>...` already gives a tick per
-            # delivery; the aggregate would repeat the same info.
-            # Status surfaces still get the TaskUpdate so the BK
-            # annotation / check-run "Last update" ratchets up.
             status = _pick_status(dr, had_failure = failed_count > 0, terminal = False)
             task_update(
                 ctx,
