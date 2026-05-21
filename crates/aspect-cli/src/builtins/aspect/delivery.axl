@@ -449,6 +449,7 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
         for producer, mnemonics in misses_by_producer.items():
             for m in mnemonics:
                 meta = action_meta.get((producer, m))
+
                 # Skip declared opt-outs — they don't cause delivery
                 # failures, so there's nowhere to surface them inline.
                 if meta and not meta["remote_cacheable"]:
