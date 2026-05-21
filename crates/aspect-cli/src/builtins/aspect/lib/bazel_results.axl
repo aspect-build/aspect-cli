@@ -3351,7 +3351,7 @@ SHARED_DETAILS_BODY_TEMPLATE = """{% if artifacts_browse_url or artifact_links %
 ---
 
 {% if last_updated_at or api_usage %}<sub>{% if last_updated_at %}⏱ Last updated {{ last_updated_at }}{% endif %}{% if last_updated_at and api_usage %} · {% endif %}{% if api_usage %}{{ api_usage }}{% endif %}</sub><br>
-{%- endif %}<sub>🚀 Powered by [Aspect CLI](https://github.com/aspect-build/aspect-cli) &nbsp;|&nbsp; [Aspect Build](https://aspect.build/) · [X](https://twitter.com/aspect_build) · [LinkedIn](https://www.linkedin.com/company/aspect-dev/) · [YouTube](http://www.youtube.com/@aspectbuild)</sub>
+{%- endif %}<sub>🚀 Powered by [Aspect CLI](https://github.com/aspect-build/aspect-cli){% if cli_version %} (v{{ cli_version }}){% endif %} &nbsp;|&nbsp; [Aspect Build](https://aspect.build/) · [X](https://twitter.com/aspect_build) · [LinkedIn](https://www.linkedin.com/company/aspect-dev/) · [YouTube](http://www.youtube.com/@aspectbuild)</sub>
 """
 
 # Build/test detail template: bazel-aborted prelude, the hoisted
@@ -4235,6 +4235,11 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
         # direct-render sites) — the template gates and skips.
         "api_usage": (render_ctx.get("api_usage") if render_ctx else "") or "",
         "last_updated_at": (render_ctx.get("last_updated_at") if render_ctx else "") or "",
+
+        # Rendered next to the `Powered by Aspect CLI` footer link.
+        # Empty in direct-render sites that don't pass `std` (snapshot
+        # tests) — the template gates and skips the version suffix.
+        "cli_version": std.env.aspect_cli_version() if std else "",
     }
 
 def active_phase_data(ctx):
