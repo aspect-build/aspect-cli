@@ -1,0 +1,9 @@
+"""Standalone module for delivery e2e fixtures."""
+
+module(
+    name = "examples_deliverable",
+    version = "0.0.0",
+)
+
+bazel_dep(name = "rules_python", version = "2.0.1")
+bazel_dep(name = "rules_shell", version = "0.7.1")

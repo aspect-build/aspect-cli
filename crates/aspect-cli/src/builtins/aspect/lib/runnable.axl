@@ -26,13 +26,25 @@ def _process_bes(state: struct, event):
             state.workspace_name[0] = local_exec_root.rstrip("/").split("/")[-1]
 
 def _determine_entrypoint(state: struct, target: str) -> str | None:
+    """Best BES-reported derived output for `target`, or None if not in BES.
+
+    Picks the file whose basename matches the target name when present — that
+    is the binary's executable (e.g. sh_binary materializes `<name>`, with the
+    `.sh` sibling being the script srcs[0]). Falls back to the first derived
+    file. Does *not* check whether the result is actually runnable — the
+    caller pairs this with `is_runnable` to distinguish "not in BES" from
+    "in BES but no runfiles tree".
+    """
     target = canonical_label(target)
     if target not in state.target_fileset:
         return None
 
+    target_name = target.rsplit(":", 1)[-1]
+
     visited = {}
     frontier = [fs_ref.id for fs_ref in state.target_fileset[target]]
 
+    candidates = []
     for _depth in range(32):
         if not frontier:
             break
@@ -46,13 +58,29 @@ def _determine_entrypoint(state: struct, target: str) -> str | None:
                 continue
             for file in payload.files:
                 if len(file.path_prefix):
-                    return file.file.removeprefix("file://")
+                    candidates.append(file.file.removeprefix("file://"))
             for child in payload.file_sets:
                 if child.id not in visited:
                     next_frontier.append(child.id)
         frontier = next_frontier
 
-    return None
+    if not candidates:
+        return None
+
+    for c in candidates:
+        if c.rsplit("/", 1)[-1] == target_name:
+            return c
+    return candidates[0]
+
+def _is_runnable(state: struct, entrypoint: str) -> bool:
+    """True if `<entrypoint>.runfiles/` exists on disk.
+
+    `_spawn` sets current_dir to that path, so a missing runfiles tree means
+    spawn() will fail with a misleading ENOENT naming the executable. Lets
+    the caller distinguish "tagged deliverable but not runnable" (e.g. a
+    `gen_sh_binary` macro's internal genrule) from "not in BES at all".
+    """
+    return state.ctx.std.fs.exists(entrypoint + ".runfiles")
 
 def _spawn(ctx: TaskContext, state: struct, entrypoint: str, args: list[str], capture: bool = False) -> std.process.Child:
     runfiles = entrypoint + ".runfiles"
@@ -83,5 +111,6 @@ def runnable(ctx, targets: list[str]) -> struct:
     return struct(
         event = lambda event: _process_bes(state, event),
         determine_entrypoint = lambda target: _determine_entrypoint(state, target),
+        is_runnable = lambda entrypoint: _is_runnable(state, entrypoint),
         spawn = lambda entrypoint, args, capture = False: _spawn(ctx, state, entrypoint, args, capture),
     )
