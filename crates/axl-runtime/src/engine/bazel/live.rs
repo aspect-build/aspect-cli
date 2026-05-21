@@ -14,8 +14,10 @@
 //! invocation, but bad when they fire on a warm runner:
 //!   1. *Potential sandbox-state corruption* (bazelbuild/bazel#23880):
 //!      a SIGKILL during sandbox cleanup can strand `_moved_trash_dir`
-//!      / `sandbox_stash` in the sandbox base, and every subsequent
-//!      invocation on that runner crashes in `afterCommand`.
+//!      in the sandbox base, and every subsequent invocation on that
+//!      runner crashes in `afterCommand`. The health check
+//!      ([`super::health_check`]) now detects and removes the directory
+//!      on the next run so the runner recovers automatically.
 //!   2. *Potential orphaned bazel client* holding the JVM-server lock:
 //!      the next invocation on that runner hangs at "Running Bazel
 //!      server needs to be killed" until the orphan exits.

@@ -48,9 +48,11 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
     // invocation, but bad when they fire on a warm runner:
     //   1. *Potential sandbox-state corruption* (bazelbuild/bazel#23880):
     //      if the bazel server is SIGKILL'd mid-sandbox-cleanup, it can
-    //      strand `_moved_trash_dir` / `sandbox_stash` in the sandbox
-    //      base. Every subsequent invocation on that runner then crashes
-    //      in `afterCommand` until runner is cleaned up.
+    //      strand `_moved_trash_dir` in the sandbox base. Every
+    //      subsequent invocation on that runner then crashes in
+    //      `afterCommand` until the runner is cleaned up. The health
+    //      check (`engine::bazel::health_check`) now removes the dir
+    //      on detection, recovering automatically.
     //   2. *Potential orphaned bazel client*: the client outlives
     //      aspect-cli briefly while still holding the JVM-server lock;
     //      the next `aspect build` / `aspect test` on that runner hangs

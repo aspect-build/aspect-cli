@@ -145,12 +145,20 @@ fn get_output_base(startup_flags: &[String]) -> Option<PathBuf> {
     Some(PathBuf::from(path))
 }
 
-/// Directory entries that bazel can strand in `<output_base>/sandbox/`
-/// when an invocation is SIGKILL'd mid-cleanup. The next command on the
-/// same output_base then crashes in `SandboxBase.tidyUp` with
-/// `"... is supposed to be moved, but file exists"`. See
+/// Directory `<output_base>/sandbox/_moved_trash_dir` is the rename
+/// target that `SandboxBase.tidyUp` moves the live sandbox base into
+/// before async-deletion. If a prior invocation was SIGKILL'd between
+/// the rename and the deletion, the directory is left behind, and the
+/// next command on the same output_base aborts in `SandboxBase.tidyUp`
+/// with `"... is supposed to be moved, but file exists"`. See
 /// bazelbuild/bazel#23880.
-const STRANDED_SANDBOX_ENTRIES: &[&str] = &["_moved_trash_dir", "sandbox_stash"];
+///
+/// Deliberately excludes `sandbox_stash` — that is the persistent
+/// cross-invocation cache used by `--reuse_sandbox_directories` (on by
+/// default in this repo's `bazel/defaults.bazelrc`), and its presence is
+/// expected on a healthy runner. Wiping it on every health check would
+/// silently undo sandbox reuse on every job.
+const STRANDED_MOVED_TRASH_DIR: &str = "_moved_trash_dir";
 
 /// Removes stranded sandbox state left by a previous invocation that
 /// was SIGKILL'd before sandbox cleanup could finish. Without this, the
@@ -163,37 +171,35 @@ const STRANDED_SANDBOX_ENTRIES: &[&str] = &["_moved_trash_dir", "sandbox_stash"]
 /// next job on the runner proceed instead of hard-failing in
 /// `afterCommand`.
 ///
-/// Logs each removed path so the cleanup is visible in CI output.
-/// Returns the list of removed paths.
-fn cleanup_stranded_sandbox_state(output_base: &Path) -> Vec<PathBuf> {
-    let sandbox_base = output_base.join("sandbox");
-    let mut removed = Vec::new();
-    for name in STRANDED_SANDBOX_ENTRIES {
-        let path = sandbox_base.join(name);
-        // symlink_metadata so symlinks are inspected, not followed.
-        let Ok(meta) = std::fs::symlink_metadata(&path) else {
-            continue;
-        };
-        tracing::warn!(
-            path = %path.display(),
-            "Removing stranded sandbox state from a previous SIGKILL'd \
-             invocation (bazelbuild/bazel#23880)"
-        );
-        let res = if meta.file_type().is_dir() {
-            std::fs::remove_dir_all(&path)
-        } else {
-            std::fs::remove_file(&path)
-        };
-        match res {
-            Ok(()) => removed.push(path),
-            Err(e) => tracing::warn!(
+/// Logs the removal so it is visible in CI output. Returns `true` iff
+/// the entry was present and removed.
+fn cleanup_stranded_sandbox_state(output_base: &Path) -> bool {
+    let path = output_base.join("sandbox").join(STRANDED_MOVED_TRASH_DIR);
+    // symlink_metadata so symlinks are inspected, not followed.
+    let Ok(meta) = std::fs::symlink_metadata(&path) else {
+        return false;
+    };
+    tracing::warn!(
+        path = %path.display(),
+        "Removing stranded sandbox state from a previous SIGKILL'd \
+         invocation (bazelbuild/bazel#23880)"
+    );
+    let res = if meta.file_type().is_dir() {
+        std::fs::remove_dir_all(&path)
+    } else {
+        std::fs::remove_file(&path)
+    };
+    match res {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!(
                 path = %path.display(),
                 error = %e,
                 "Failed to remove stranded sandbox state — next invocation may still hit bazelbuild/bazel#23880",
-            ),
+            );
+            false
         }
     }
-    removed
 }
 
 pub fn run(startup_flags: &[String]) -> HealthCheckResult {
@@ -294,45 +300,55 @@ mod tests {
     #[test]
     fn cleanup_noop_when_sandbox_clean() {
         let base = make_output_base();
-        let removed = cleanup_stranded_sandbox_state(base.path());
-        assert!(removed.is_empty());
+        assert!(!cleanup_stranded_sandbox_state(base.path()));
     }
 
     #[test]
-    fn cleanup_removes_stranded_dirs() {
+    fn cleanup_removes_moved_trash_dir() {
         let base = make_output_base();
-        let sandbox = base.path().join("sandbox");
-        let moved_trash = sandbox.join("_moved_trash_dir");
-        let stash = sandbox.join("sandbox_stash");
+        let moved_trash = base.path().join("sandbox").join("_moved_trash_dir");
         std::fs::create_dir(&moved_trash).unwrap();
-        std::fs::create_dir(&stash).unwrap();
-        // Non-empty dirs — exercise remove_dir_all.
+        // Non-empty dir — exercise remove_dir_all.
         std::fs::write(moved_trash.join("leftover"), b"junk").unwrap();
-        std::fs::write(stash.join("leftover"), b"junk").unwrap();
 
-        let removed = cleanup_stranded_sandbox_state(base.path());
-        assert_eq!(removed.len(), 2);
+        assert!(cleanup_stranded_sandbox_state(base.path()));
         assert!(!moved_trash.exists());
-        assert!(!stash.exists());
+    }
+
+    #[test]
+    fn cleanup_preserves_sandbox_stash() {
+        // `sandbox_stash` is the persistent --reuse_sandbox_directories
+        // cache; the health check must NOT touch it. Regression test
+        // against an earlier draft that wiped it on every invocation.
+        let base = make_output_base();
+        let stash = base.path().join("sandbox").join("sandbox_stash");
+        std::fs::create_dir(&stash).unwrap();
+        std::fs::write(stash.join("cached_action"), b"reuse-me").unwrap();
+
+        assert!(!cleanup_stranded_sandbox_state(base.path()));
+        assert!(
+            stash.exists(),
+            "sandbox_stash must survive the health check"
+        );
     }
 
     #[test]
     fn cleanup_ignores_unrelated_entries() {
         let base = make_output_base();
-        let sandbox = base.path().join("sandbox");
-        let other = sandbox.join("linux-sandbox");
+        let other = base.path().join("sandbox").join("linux-sandbox");
         std::fs::create_dir(&other).unwrap();
 
-        let removed = cleanup_stranded_sandbox_state(base.path());
-        assert!(removed.is_empty());
-        assert!(other.exists(), "must not touch the per-strategy sandbox dirs");
+        assert!(!cleanup_stranded_sandbox_state(base.path()));
+        assert!(
+            other.exists(),
+            "must not touch the per-strategy sandbox dirs"
+        );
     }
 
     #[test]
     fn cleanup_handles_missing_sandbox_dir() {
         // No sandbox subdirectory at all — e.g. fresh output_base.
         let base = tempfile::tempdir().expect("tempdir");
-        let removed = cleanup_stranded_sandbox_state(base.path());
-        assert!(removed.is_empty());
+        assert!(!cleanup_stranded_sandbox_state(base.path()));
     }
 }
