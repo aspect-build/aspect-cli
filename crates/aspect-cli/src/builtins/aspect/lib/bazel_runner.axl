@@ -19,7 +19,7 @@ load("./health_check.axl", "HealthCheckTrait")
 load("./lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "preflight_phase", "setup_phase", "task_update")
 load("./repro_commands.axl", "build_aspect_command", "task_cli_path")
 load("./text.axl", "pluralize")
-load("../bazel.axl", "BazelTrait")
+load("../bazel.axl", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
 
 # ─── Lifecycle status + Result-cell text ──────────────────────────────────────
 #
@@ -301,9 +301,12 @@ def run_bazel_task(ctx: TaskContext, command: str) -> TaskConclusion:
 
     base_desc = "Run bazel tests" if command == "test" else "Build bazel targets"
 
-    # `max(1, ...)` so a 0 or negative `--bazel-retry-attempts` still runs
-    # bazel once instead of being a silent no-op.
-    max_attempts = max(1, ctx.args.bazel_retry_attempts)
+    # `hasattr` guard so a future task that calls `run_bazel_task` without
+    # wiring up `--bazel-retry-attempts` still works; `max(1, ...)` so a 0
+    # or negative value still runs bazel once instead of being a silent
+    # no-op.
+    requested = ctx.args.bazel_retry_attempts if hasattr(ctx.args, "bazel_retry_attempts") else DEFAULT_BAZEL_RETRY_ATTEMPTS
+    max_attempts = max(1, requested)
     for attempt in range(max_attempts):
         # Distinct phase id per attempt so each retry surfaces as its
         # own row in the Task timing table — retries are exceptional

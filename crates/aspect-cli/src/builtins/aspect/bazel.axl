@@ -28,6 +28,14 @@ exit_codes = struct(
     EXTERNAL_DEPS_ERROR = 48,
 )
 
+# Default attempt budget for the build/test/delivery retry loops. Tasks
+# that wire up `--bazel-retry-attempts` use this as their `args.int`
+# default; the `bazel_runner.axl` / `delivery.axl` retry loops also fall
+# back to it when a task doesn't define the arg at all, so adding a new
+# bazel-driving task doesn't silently inherit `range(0)` or fail at load
+# time.
+DEFAULT_BAZEL_RETRY_ATTEMPTS = 3
+
 # https://bazel.build/run/scripts#exit-codes
 def default_retry(code: int) -> bool:
     """Returns True if the given exit code is retryable.

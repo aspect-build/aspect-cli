@@ -124,7 +124,7 @@ selective runs).
 User-facing migration guide: https://docs.aspect.build/cli/migration/delivery
 """
 
-load("@aspect//bazel.axl", "BazelTrait")
+load("@aspect//bazel.axl", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
 load("@aspect//lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "now_ms", "process_event", bazel_init_data = "init_data")
 load("@aspect//lib/checkrun.axl", "GitHubCheckRunTrait")
 load("@aspect//lib/ci.axl", "detect_build_url")
@@ -279,9 +279,12 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
     # stays valid across retries.
     pre_loop_state = dict(data)
 
-    # `max(1, ...)` so a 0 or negative `--bazel-retry-attempts` still runs
-    # bazel once instead of being a silent no-op.
-    max_attempts = max(1, ctx.args.bazel_retry_attempts)
+    # `hasattr` guard so a future caller of `_get_output_shas` without
+    # `--bazel-retry-attempts` wired up still works; `max(1, ...)` so a 0
+    # or negative value still runs bazel once instead of being a silent
+    # no-op.
+    requested = ctx.args.bazel_retry_attempts if hasattr(ctx.args, "bazel_retry_attempts") else DEFAULT_BAZEL_RETRY_ATTEMPTS
+    max_attempts = max(1, requested)
     for attempt in range(max_attempts):
         if attempt > 0:
             # Archive the just-completed (now-failed) attempt before
@@ -1281,7 +1284,7 @@ Currently \x1b[3monly\x1b[23m supported on Aspect Workflows CI runners. Support 
             description = "Additional Bazel startup flags.",
         ),
         "bazel_retry_attempts": args.int(
-            default = 3,
+            default = DEFAULT_BAZEL_RETRY_ATTEMPTS,
             description = "Maximum number of Bazel invocation attempts (including the first attempt) per delivery build phase before giving up. Only retried for exit codes the build_retry trait predicate accepts (BLAZE_INTERNAL_ERROR (37) and LOCAL_ENVIRONMENTAL_ERROR (36) by default). Set to 1 to disable retries.",
         ),
         "salt": args.string(
