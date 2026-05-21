@@ -4,4 +4,21 @@ sh_binary(
     name = "deliverable",
     srcs = ["deliver.sh"],
     data = ["//crates/aspect-cli"],
+    tags = ["deliverable"],
+)
+
+# Delivery should ignore this target and still deliver the rest.
+genrule(
+    name = "broken_manual",
+    outs = ["broken_manual.out"],
+    cmd = "exit 1",
+    tags = ["manual"],
+)
+
+# Delivery should find this target but skip it as not runnable.
+genrule(
+    name = "non_executable_deliverable",
+    outs = ["non_executable_deliverable.txt"],
+    cmd = "echo not-runnable > $@",
+    tags = ["deliverable"],
 )

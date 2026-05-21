@@ -201,7 +201,7 @@ jobs:
           command: .aspect/bootstrap.sh
       - run:
           name: Delivery Task (ASPECT_DEBUG=1)
-          command: ASPECT_DEBUG=1 aspect delivery --task-key delivery-cci-debug //examples/deliverable
+          command: ASPECT_DEBUG=1 aspect delivery --task-key delivery-cci-debug --query 'attr(tags, deliverable, //...)'
       - run:
           name: Delivery Task
-          command: aspect delivery --task-key delivery-cci //examples/deliverable
+          command: aspect delivery --task-key delivery-cci --query 'attr(tags, deliverable, //...)'

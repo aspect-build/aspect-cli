@@ -355,5 +355,5 @@ steps:
           limit: 1
     command: |
       export ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS=$$(buildkite-agent meta-data get force_targets --default '')
-      ASPECT_DEBUG=1 aspect delivery --task-key delivery-bk-debug //examples/deliverable
-      aspect delivery --task-key delivery-bk //examples/deliverable
+      ASPECT_DEBUG=1 aspect delivery --task-key delivery-bk-debug --query 'attr(tags, deliverable, //...)'
+      aspect delivery --task-key delivery-bk --query 'attr(tags, deliverable, //...)'
