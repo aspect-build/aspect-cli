@@ -147,5 +147,6 @@ delivery-task:
     ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS: $FORCE_TARGETS
   script:
     - .aspect/bootstrap.sh
+    - cd examples/deliverable
     - ASPECT_DEBUG=1 aspect delivery --task-key delivery-gl-debug --query 'attr(tags, deliverable, //...)'
     - aspect delivery --task-key delivery-gl --query 'attr(tags, deliverable, //...)'

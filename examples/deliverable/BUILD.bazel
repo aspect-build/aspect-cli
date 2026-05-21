@@ -1,10 +1,16 @@
+load("@rules_python//python:py_binary.bzl", "py_binary")
 load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
-load(":uncachable_version_file.bzl", "uncachable_version_file")
+
+genrule(
+    name = "delivery_payload",
+    outs = ["delivery_payload.txt"],
+    cmd = "echo 'payload contents' > $@",
+)
 
 sh_binary(
     name = "deliverable",
     srcs = ["deliver.sh"],
-    data = ["//crates/aspect-cli"],
+    data = [":delivery_payload"],
     tags = ["deliverable"],
 )
 
@@ -16,17 +22,12 @@ genrule(
     tags = ["deliverable"],
 )
 
-uncachable_version_file(
-    name = "stamped_version",
-)
-
-# Delivery should fail for this target (no digest) but keep delivering the rest.
-sh_binary(
-    name = "deliverable_with_uncachable_dep",
-    srcs = ["deliver.sh"],
-    data = [
-        ":stamped_version",
-        "//crates/aspect-cli",
-    ],
+# rules_python's stamping injects an uncachable_version_file action into the
+# build. Delivery should still succeed: the action's output is marked as
+# constant_metadata so downstream action keys stay stable across phases.
+py_binary(
+    name = "py_deliverable",
+    srcs = ["py_deliverable.py"],
+    stamp = 1,
     tags = ["deliverable"],
 )

@@ -183,6 +183,8 @@ jobs:
       - name: Bootstrap
         run: .aspect/bootstrap.sh
       - name: Delivery Task (ASPECT_DEBUG=1)
+        working-directory: examples/deliverable
         run: ASPECT_DEBUG=1 aspect delivery --task-key delivery-gha-debug --query 'attr(tags, deliverable, //...)'
       - name: Delivery Task
+        working-directory: examples/deliverable
         run: aspect delivery --task-key delivery-gha --query 'attr(tags, deliverable, //...)'
