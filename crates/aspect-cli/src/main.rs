@@ -207,8 +207,8 @@ fn main() -> ExitCode {
 const SIGINT_TICK: Duration = Duration::from_millis(150);
 
 /// Time we wait for bazel clients to exit after the 3-SIGINT burst
-/// before escalating to SIGKILL. 5s matches `FORCE_KILL_TIMEOUT_MS`
-/// in `axl-runtime/src/engine/bazel/cancel.rs`, which is the timeout
+/// before escalating to SIGKILL. 5s matches `FORCE_KILL_GRACE` in
+/// `axl-runtime/src/engine/bazel/cancel.rs`, which is the timeout
 /// AXL's own programmatic 3-SIGINT path uses to wait for the client
 /// to exit before SIGKILL'ing. Reusing the same number here keeps
 /// the two cancellation paths consistent.
@@ -328,19 +328,15 @@ fn install_shutdown_handler() {
 async fn run_shutdown_sequence(signal_name: &str, exit_code: i32) {
     eprintln!("aspect-cli: received {signal_name}, cancelling bazel subprocesses…");
 
-    // 3-SIGINT burst — mirrors bazel's expected interactive cancel
-    // sequence, escalating to KillServerProcess on the third SIGINT.
-    bazel_live::signal_all_for_shutdown();
-    tokio::time::sleep(SIGINT_TICK).await;
-    bazel_live::signal_all_for_shutdown();
-    tokio::time::sleep(SIGINT_TICK).await;
-    bazel_live::signal_all_for_shutdown();
-
-    // Wait for bazel clients to wind down on their own.
-    tokio::time::sleep(SIGINT_GRACE).await;
-
-    // Anything still alive after the grace window gets SIGKILL.
-    let killed = bazel_live::force_kill_all_remaining();
+    // Shared escalation with the AXL-initiated `ctx.bazel.cancel_invocation`
+    // path in `axl-runtime`: 3-SIGINT burst → SIGINT_GRACE wait → SIGKILL
+    // stragglers. Runs in spawn_blocking because escalate uses sync sleeps
+    // (it's also called from sync AXL code where async isn't available).
+    let killed = tokio::task::spawn_blocking(move || {
+        bazel_live::escalate_shutdown(3, SIGINT_TICK, SIGINT_GRACE)
+    })
+    .await
+    .unwrap_or(0);
     if killed > 0 {
         eprintln!("aspect-cli: SIGKILL'd {killed} bazel subprocess(es) that didn't exit");
         tokio::time::sleep(POST_KILL_GRACE).await;

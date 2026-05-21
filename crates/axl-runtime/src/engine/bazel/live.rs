@@ -6,8 +6,9 @@
 //! completes and the `Child` is dropped).
 //!
 //! On OS signal (SIGINT / SIGTERM to aspect-cli), the binary's signal
-//! handler iterates [`live_pids`] and sends SIGINT to each registered
-//! client so the bazel subprocesses don't outlive aspect-cli.
+//! handler calls [`escalate_shutdown`] to run bazel's 3-SIGINT cancel
+//! protocol against the registered set so the bazel subprocesses don't
+//! outlive aspect-cli.
 //!
 //! Without this, a CI cancellation can hit bazel at a moment it can't
 //! gracefully recover from. Two known flakes — both rare per
@@ -68,43 +69,30 @@ pub fn live_pids() -> Vec<u32> {
     registry().lock().map(|g| g.clone()).unwrap_or_default()
 }
 
-/// Best-effort SIGINT to every registered bazel client. Non-blocking
-/// — this is meant to be called from a signal handler that has very
-/// little time to do work before forced exit. Idempotent — safe to
-/// call multiple times in succession to mimic bazel's 3-SIGINT
-/// cancel protocol (see [`bazel cancellation docs][1]):
+/// Run bazel's 3-SIGINT cancel protocol against every registered bazel
+/// client and SIGKILL any that don't exit within `grace`. Sync — the
+/// caller must invoke it from a thread that can block (typically
+/// `tokio::task::spawn_blocking` from the OS-signal handler).
 ///
+/// Returns the number of clients SIGKILL'd (i.e. those that didn't
+/// respond to `sigints` × SIGINT within `grace`).
+///
+/// The bazel protocol (see [`bazel cancellation docs`][1]):
 ///   1st SIGINT → graceful cancel of the in-flight command
 ///   2nd SIGINT → still graceful; gives a short window for cleanup
 ///   3rd SIGINT → triggers bazel's `KillServerProcess` and hard exit
 ///
+/// Shares its escalation mechanics with the AXL-initiated
+/// `cancel_invocation` path in [`super::cancel`] so the two
+/// cancellation entry points stay in lock-step.
+///
 /// [1]: https://bazel.build/run/cancellation
-pub fn signal_all_for_shutdown() {
-    for pid in live_pids() {
-        if process::is_pid_running(pid) {
-            tracing::warn!(
-                "received OS shutdown signal — sending SIGINT to live bazel client PID {pid}"
-            );
-            process::sigint(pid);
-        }
-    }
-}
-
-/// Best-effort SIGKILL to every registered bazel client that's still
-/// alive. Used as the post-grace escalation when SIGINT didn't get
-/// the client to exit. Returns the number of clients SIGKILL'd.
-pub fn force_kill_all_remaining() -> usize {
-    let mut killed = 0;
-    for pid in live_pids() {
-        if process::is_pid_running(pid) {
-            tracing::warn!(
-                "live bazel client PID {pid} did not exit after SIGINT grace — sending SIGKILL"
-            );
-            process::sigkill(pid);
-            killed += 1;
-        }
-    }
-    killed
+pub fn escalate_shutdown(
+    sigints: usize,
+    between: std::time::Duration,
+    grace: std::time::Duration,
+) -> usize {
+    process::escalate(&live_pids(), sigints, between, grace).len()
 }
 
 /// RAII guard returned by [`register`]. Removes the PID from the

@@ -149,50 +149,38 @@ fn validate_wait_params(timeout_ms: u64, force_kill_after_ms: u64) -> anyhow::Re
     Ok(())
 }
 
-/// How long to wait for the Bazel client to exit after a second SIGINT
-/// before escalating to SIGKILL.
-const FORCE_KILL_TIMEOUT_MS: u64 = 5000;
-const FORCE_KILL_POLL_MS: u64 = 100;
+/// How long to wait for the Bazel client to exit after the 3rd SIGINT
+/// before escalating to SIGKILL. Same value as aspect-cli's
+/// `SIGINT_GRACE` for the OS-signal path — both cancellation entry points
+/// give bazel the same window to exit gracefully.
+const FORCE_KILL_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Send a forceful cancellation signal following Bazel's 3-SIGINT protocol.
 ///
 /// cancel_invocation() already sent the 1st SIGINT (graceful cancel). This
-/// function sends the 2nd and 3rd SIGINTs to escalate:
+/// function sends the 2nd and 3rd SIGINTs via `process::escalate`:
 ///   - 2nd SIGINT: repeated CancelRequest (Bazel is already cancelling)
 ///   - 3rd SIGINT: triggers Bazel's built-in KillServerProcess + client exit
 ///
-/// If the client still doesn't exit after the 3rd SIGINT, we SIGKILL both
-/// the client and server ourselves as a last resort.
+/// If the client still doesn't exit within `FORCE_KILL_GRACE`, escalate
+/// SIGKILLs the client; we then SIGKILL the server ourselves too, since
+/// bazel's `KillServerProcess` is the only path that brings the server
+/// down on a normal cancel and the client never got there.
 fn force_kill(startup_flags: &[String]) -> bool {
     if let Some(client_pid) = info::client_pid(startup_flags) {
-        // 2nd SIGINT: repeated cancel request.
-        tracing::warn!("cancel_invocation: sending 2nd SIGINT to Bazel client PID {client_pid}");
-        process::sigint(client_pid);
-
-        // 3rd SIGINT: triggers Bazel's built-in server kill + client exit.
-        tracing::warn!("cancel_invocation: sending 3rd SIGINT to Bazel client PID {client_pid}");
-        process::sigint(client_pid);
-
-        // Monitor the client — if it doesn't exit within the timeout,
-        // SIGKILL both the client and the server ourselves.
-        let start = std::time::Instant::now();
-        while process::is_pid_running(client_pid) {
-            if start.elapsed() >= std::time::Duration::from_millis(FORCE_KILL_TIMEOUT_MS) {
+        let killed = process::escalate(
+            &[client_pid],
+            2,
+            std::time::Duration::ZERO,
+            FORCE_KILL_GRACE,
+        );
+        if !killed.is_empty() {
+            if let Some(server_pid) = info::server_pid_nonblocking(startup_flags) {
                 tracing::warn!(
-                    "cancel_invocation: Bazel client PID {client_pid} did not exit \
-                     after {FORCE_KILL_TIMEOUT_MS}ms, sending SIGKILL"
+                    "cancel_invocation: also sending SIGKILL to Bazel server PID {server_pid}"
                 );
-                process::sigkill(client_pid);
-                if let Some(server_pid) = info::server_pid_nonblocking(startup_flags) {
-                    tracing::warn!(
-                        "cancel_invocation: also sending SIGKILL to Bazel server PID \
-                         {server_pid}"
-                    );
-                    process::sigkill(server_pid);
-                }
-                return true;
+                process::sigkill(server_pid);
             }
-            std::thread::sleep(std::time::Duration::from_millis(FORCE_KILL_POLL_MS));
         }
         return true;
     }
