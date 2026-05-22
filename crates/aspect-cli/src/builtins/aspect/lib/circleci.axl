@@ -10,13 +10,7 @@ def _get_token(ctx):
 
     Returns a dict with "token" and optionally "runner_host", or None on failure.
     """
-    child = ctx.std.process.command("nc") \
-        .args(["-U", "/tmp/circleci-ts.sock"]) \
-        .stdout("piped") \
-        .stderr("piped") \
-        .spawn()
-    output = child.stdout().read_to_string().strip()
-    child.wait()
+    output = ctx.std.net.try_unix_request("/tmp/circleci-ts.sock").strip()
     if not output:
         return None
 
