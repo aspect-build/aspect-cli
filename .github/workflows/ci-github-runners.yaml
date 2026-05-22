@@ -1,4 +1,4 @@
-name: CI - Aspect Workflows (GitHub runners)
+name: CI - GitHub runners
 
 on:
   push:

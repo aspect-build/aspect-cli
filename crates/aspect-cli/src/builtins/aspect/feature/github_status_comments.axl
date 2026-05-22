@@ -1,14 +1,16 @@
 """GitHub Status Comments feature — aggregates per-task status from sibling CI jobs into one PR comment.
 
 Every job is both a producer (uploads its task identity + data subset as an
-artifact) and a writer (polls all sibling-job artifacts in the current run and
-PATCHes one PR comment). Polling is event-paced — the loop ticks when Bazel
-emits BES events, throttled by min_poll_interval_seconds.
+artifact) and a writer (polls sibling-job artifacts for its own run, refreshes
+sibling-workflow artifacts for other runs named in the comment's state block,
+and PATCHes one PR comment). Polling is event-paced — the loop ticks when
+Bazel emits BES events, throttled by min_poll_interval_seconds.
 
 GitHub Actions only.
 
 Requires the Aspect GitHub App with roles `prs.write` (issue-comment
-POST/PATCH/DELETE) and `actions.read` (run-artifact list/download).
+POST/PATCH/DELETE/GET) and `actions.read` (run-artifact list/download
+across any workflow on the same PR).
 
 The comment shape is precomputed in AXL — the Jinja2 template is a pure
 renderer. `_prepare_for_render` walks raw entry payloads and decorates
@@ -1036,11 +1038,10 @@ def _github_status_comments(ctx: FeatureContext):
             "tips": [tip_to_payload(t) for t in collect_tips_sorted(ctx)],
             "rate_limit_observations": export_observations(ctx),
             "last_pr_comment_upsert_epoch_s": _state.get("_last_pr_comment_upsert_epoch_s", 0),
-            # Cross-workflow merge tags. The PR comment carries entries
-            # from every concurrent workflow on the same head_sha; these
-            # fields let `_merge_entries` distinguish our rows from those
-            # of a sibling workflow's swarm and drop rows from a prior
-            # push (when head_sha changes).
+            # Cross-workflow merge tags. `head_sha` lets `_merge_state`
+            # drop rows from a prior push; `workflow_run_id` keys the
+            # snapshot-fallback bucket and the slot in `workflow_runs`;
+            # `workflow_name` is for display.
             "workflow_run_id": run_id,
             "workflow_name": workflow_name,
             "head_sha": head_sha,
@@ -1202,15 +1203,14 @@ def _github_status_comments(ctx: FeatureContext):
 
     def _collect_other_workflow_entries(ctx, token, other_run_id):
         """Discover entries from a sibling workflow's artifacts on the
-        same PR. Used to refresh data for workflows whose run_ids we
-        learned from the comment state block — eliminates the
-        read-then-write race that would otherwise let workflows clobber
-        each other's data.
+        same PR. Used to refresh data for workflow_run_ids we learned
+        from the comment state block, so our PATCH carries fresh
+        sibling-workflow values instead of stale snapshots.
 
         Returns `None` on API failure or empty listing (e.g. artifact
-        TTL expiry). Callers should fall back to the comment's snapshot
-        in that case so a finished workflow's terminal state survives
-        past its artifact retention window."""
+        TTL expiry). Callers fall back to the comment's snapshot in
+        that case so a finished workflow's terminal state survives past
+        its artifact retention window."""
         entries = _list_and_download_workflow_artifacts(ctx, token, other_run_id, is_own_swarm = False)
         if entries == None:
             return None
@@ -1322,30 +1322,23 @@ def _github_status_comments(ctx: FeatureContext):
             if raw_entries == None:
                 return
 
-        # Swarm coordination: every task uploads its own status artifact
-        # (cheap, Twirp), but the quota-burning PR-comment upsert (REST
-        # PATCH on the App bucket) is gated on a lease that any swarm
-        # member — across every workflow on the PR — can hold.
-        # `lease_window_s` is fed `swarm_elapsed_s` (time since the
-        # earliest sibling started) and the merged-view quota factor,
-        # so every member computes the same window from swarm-shared
-        # inputs and converges on the same skip-or-publish answer.
+        # Lease coordination — the quota-burning PR-comment PATCH (App
+        # bucket) is gated on a lease that any swarm member can hold.
+        # The combined lease epoch is `max(state.last_upsert_epoch_s,
+        # swarm-local last_upsert_epoch_s)`: the state block carries
+        # any-workflow's most-recent upsert, while the swarm-local term
+        # covers the bootstrap before any writer has stamped a state
+        # block. `lease_window_s` is fed `swarm_elapsed_s` and the
+        # merged-view quota factor so every member converges on the
+        # same answer.
         #
-        # The lease epoch is `max(state.last_upsert_epoch_s, swarm-local
-        # last_upsert_epoch_s)`: the state block carries the most-recent
-        # upsert from any workflow, while the swarm-local term covers
-        # the bootstrap window before any writer has stamped a state
-        # block on this PR.
-        #
-        # Fast path — if the swarm-local lease already holds, the
-        # combined cross-workflow lease (its `max(state, swarm-local)`
-        # formulation) holds too, so we wouldn't PATCH this cycle
-        # either way. Short-circuit before the comment GET and the
-        # per-sibling-workflow `list_run_artifacts` refresh. Skipping
-        # cross-workflow discovery for one cycle is harmless: any
-        # sibling workflow's data we missed will land in the next cycle
-        # when our swarm-local lease relaxes and we run the full path.
-        # Terminal updates (`final=True`) always run the full path.
+        # Fast path: if the swarm-local lease alone holds, the combined
+        # lease holds too — skip the comment GET and per-sibling-workflow
+        # `list_run_artifacts` refresh entirely. We'd miss a new
+        # sibling-workflow row for one cycle, but we wouldn't have
+        # PATCHed either; the next cycle catches up. `final=True`
+        # always runs the full path so terminal verdicts pick up the
+        # freshest cross-workflow state.
         prepared_local = _prepare_for_render(raw_entries)
         local_earliest_ms = _earliest_start_ms(prepared_local)
         now_epoch = epoch_now_s(ctx.std)
@@ -1378,15 +1371,12 @@ def _github_status_comments(ctx: FeatureContext):
         if cross_workflow_lease_epoch > _state.get("_last_pr_comment_upsert_epoch_s", 0):
             _state["_last_pr_comment_upsert_epoch_s"] = cross_workflow_lease_epoch
 
-        # Combined lease check: the cross-workflow term might still hold
-        # (a sibling workflow just published) even when the swarm-local
-        # term doesn't. Terminal updates (`final=True`) bypass the lease
-        # — if this is the last task to finish and a sibling published
-        # recently with us still rendered as "running", the lease would
-        # otherwise silently drop our terminal upsert and leave the PR
-        # comment frozen on stale state. The body-diff short-circuit
-        # below still gates a redundant PATCH when our terminal status
-        # has already been picked up by a sibling's earlier publish.
+        # Combined lease check — a sibling workflow may have published
+        # recently even when our own swarm hasn't. Terminal updates
+        # bypass the lease (or the verdict could be frozen on stale
+        # state); the body-diff short-circuit below still gates a
+        # redundant terminal PATCH when our verdict has already been
+        # picked up by a sibling's earlier publish.
         last_publish_epoch = max(cross_workflow_lease_epoch, swarm_local_lease_epoch)
         if not final and _lease_held(now_epoch, last_publish_epoch, lease_window_s):
             return
@@ -1411,18 +1401,13 @@ def _github_status_comments(ctx: FeatureContext):
         earliest_ms = _earliest_start_ms(prepared)
         started_at = format_run_date(ctx, earliest_ms)
 
-        # Two renders per cycle:
-        # 1. `stable_body` — `last_updated_at`, `api_usage`, and the
-        #    state block's `last_upsert_epoch_s` zeroed out — used
-        #    solely for the unchanged-content short-circuit. Without
-        #    this, the always-fresh `Last updated` timestamp, quota
-        #    footer, and lease epoch would diff every poll and force a
-        #    PATCH even when no task state changed. The state block's
-        #    `entries` and `workflow_runs` ARE included in the diff so a
-        #    new sibling workflow's row appearing properly invalidates
-        #    it.
-        # 2. `final_body` — the same content with live timestamp,
-        #    quota footer, and lease-stamped state block.
+        # Two renders: `stable_body` zeros out `last_updated_at`,
+        # `api_usage`, and the lease epoch so the unchanged-content
+        # short-circuit fires when no task state changed. `final_body`
+        # carries the live timestamp + quota footer + lease-stamped
+        # state block. The state block's `entries` and `workflow_runs`
+        # are in the diff so a new sibling-workflow row still
+        # invalidates the cache.
         stable_state = dict(new_state)
         stable_state["last_upsert_epoch_s"] = 0
         stable_body = _render_body(
