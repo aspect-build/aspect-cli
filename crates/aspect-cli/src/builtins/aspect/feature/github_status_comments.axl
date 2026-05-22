@@ -898,7 +898,13 @@ def _merge_state(existing_state, head_sha, my_run_id, my_workflow_name, my_entri
     other_runs = [r for r in existing_runs if str(r.get("run_id", "")) != str(my_run_id)]
     workflow_runs = other_runs + [{"run_id": str(my_run_id), "workflow_name": my_workflow_name}]
 
-    # Snapshot fallback table for sibling workflows we couldn't refresh.
+    # Per-task union of refreshed entries with the comment's prior
+    # snapshot. Refresh wins per `(name, key)`; snapshot fills any
+    # tasks the refresh didn't return. Mitigates artifact-listing
+    # eventual consistency: a partial refresh that's briefly missing
+    # some task's artifact would otherwise drop that row this cycle
+    # and re-add it next cycle when the listing converges, causing
+    # visible "entry count flips" thrashing on the comment.
     snapshot_by_run = {}
     for e in ((existing_state or {}).get("entries", []) or []):
         rid = str(e.get("workflow_run_id", ""))
@@ -907,11 +913,16 @@ def _merge_state(existing_state, head_sha, my_run_id, my_workflow_name, my_entri
     entries = list(my_entries)
     for r in other_runs:
         rid = str(r.get("run_id", ""))
+        snapshot = snapshot_by_run.get(rid, [])
         refreshed = refreshed_other_entries.get(rid)
-        if refreshed != None:
-            entries.extend(refreshed)
-        else:
-            entries.extend(snapshot_by_run.get(rid, []))
+        if refreshed == None:
+            entries.extend(snapshot)
+            continue
+        entries.extend(refreshed)
+        refreshed_keys = {(e.get("name", ""), e.get("key", "")): True for e in refreshed}
+        for e in snapshot:
+            if (e.get("name", ""), e.get("key", "")) not in refreshed_keys:
+                entries.append(e)
 
     # Deterministic ordering so the serialized state block is byte-stable
     # across writers. Without this, publish ownership alternating between
@@ -1207,14 +1218,14 @@ def _github_status_comments(ctx: FeatureContext):
         from the comment state block, so our PATCH carries fresh
         sibling-workflow values instead of stale snapshots.
 
-        Returns `None` on API failure or empty listing (e.g. artifact
-        TTL expiry). Callers fall back to the comment's snapshot in
-        that case so a finished workflow's terminal state survives past
-        its artifact retention window."""
-        entries = _list_and_download_workflow_artifacts(ctx, token, other_run_id, is_own_swarm = False)
-        if entries == None:
-            return None
-        return entries if entries else None
+        Returns the entry list (possibly empty) on success, or `None`
+        on API failure. `_merge_state` per-task-unions whatever we
+        return with the comment's snapshot — partial or empty refresh
+        results never drop entries that are still in the snapshot, so
+        a finished workflow's terminal state survives past its artifact
+        retention window and partial listings during the API's
+        eventual-consistency window don't cause comment thrashing."""
+        return _list_and_download_workflow_artifacts(ctx, token, other_run_id, is_own_swarm = False)
 
     def _upsert_comment(ctx, token, body):
         """PATCH the existing comment when its id is known (set by
