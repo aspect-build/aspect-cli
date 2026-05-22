@@ -1013,12 +1013,15 @@ def _github_status_comments(ctx: FeatureContext):
         set — that's what makes the `lease_window` computed in `_publish`
         agree across the swarm.
 
-        `last_pr_comment_upsert_epoch_s` records the wall-clock epoch of our
-        last successful PR-comment upsert (`0` until we've published once).
-        The lease decision in `_publish` takes `max(...)` across this field
-        from all sibling entries: when any swarm member has published
-        recently, everyone else honors the lease and skips their own upsert.
-        Updated by `_publish` after `_upsert_comment` returns."""
+        `last_pr_comment_upsert_epoch_s` is a high-water mark of any
+        PR-comment upsert this writer is aware of — either our own
+        successful upsert or a sibling-workflow upsert observed via the
+        comment's state block (`max(state.last_upsert_epoch_s, our prior
+        stamp)`). `0` until we've published or observed one. The lease
+        decision in `_publish` takes `max(...)` across this field from
+        all sibling entries: when any swarm member has published or seen
+        a recent cross-workflow publish, everyone else honors the lease
+        and skips both the comment GET and their own upsert."""
 
         # Prefer the per-job URL when we have it — drops the reviewer
         # straight on the failing job's logs.
@@ -1365,6 +1368,15 @@ def _github_status_comments(ctx: FeatureContext):
             return
         parsed = _parse_state(existing_body)
         cross_workflow_lease_epoch = parsed["last_upsert_epoch_s"] if parsed else 0
+
+        # Propagate the cross-workflow lease epoch into our own stamp so
+        # the next `_publish_self` carries it on our artifact. Sibling
+        # swarm members' `_collect_sibling_entries` then sees the higher
+        # value via `_max_recent_upsert_epoch` and their swarm-local
+        # fast-path above can skip the GET — only the leaseholder ever
+        # pays the cross-workflow GET cost per swarm.
+        if cross_workflow_lease_epoch > _state.get("_last_pr_comment_upsert_epoch_s", 0):
+            _state["_last_pr_comment_upsert_epoch_s"] = cross_workflow_lease_epoch
 
         # Combined lease check: the cross-workflow term might still hold
         # (a sibling workflow just published) even when the swarm-local
