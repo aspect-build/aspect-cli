@@ -19,6 +19,7 @@ use starlark::{
 mod env;
 mod fs;
 pub mod io;
+mod net;
 mod process;
 pub mod stream;
 
@@ -57,12 +58,18 @@ pub(crate) fn std_methods(registry: &mut MethodsBuilder) {
     fn process<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<process::Process> {
         Ok(process::Process::new())
     }
+
+    #[starlark(attribute)]
+    fn net<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<net::Net> {
+        Ok(net::Net::new())
+    }
 }
 
 #[starlark_module]
 fn register_types(globals: &mut GlobalsBuilder) {
     const Env: StarlarkValueAsType<env::Env> = StarlarkValueAsType::new();
     const FileSystem: StarlarkValueAsType<fs::Filesystem> = StarlarkValueAsType::new();
+    const Net: StarlarkValueAsType<net::Net> = StarlarkValueAsType::new();
     const Std: StarlarkValueAsType<Std> = StarlarkValueAsType::new();
 }
 
