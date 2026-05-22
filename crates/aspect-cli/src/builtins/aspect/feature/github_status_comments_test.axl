@@ -33,9 +33,12 @@ load(
     "dedup_by_run_attempt",
     "lease_held",
     "max_recent_upsert_epoch",
+    "merge_state",
+    "parse_state",
     "prepare_for_render",
     "render_body",
     "results_subset",
+    "serialize_state",
     "should_quiet_delete_log",
 )
 load(
@@ -600,6 +603,355 @@ def _check_max_recent_upsert_epoch():
         300,
     )
 
+def _check_state_serialize_round_trip():
+    """serialize_state → parse_state round-trips head_sha, lease epoch,
+    workflow_runs, and entries."""
+    state = {
+        "head_sha": "abc",
+        "last_upsert_epoch_s": 1700000000,
+        "workflow_runs": [
+            {"run_id": "100", "workflow_name": "ci-gha"},
+            {"run_id": "200", "workflow_name": "ci-workflows"},
+        ],
+        "entries": [
+            {"name": "build", "key": "build", "workflow_run_id": "100"},
+            {"name": "lint", "key": "lint", "workflow_run_id": "200"},
+        ],
+    }
+    block = serialize_state(state)
+    parsed = parse_state("some body content\n\n" + block + "\n")
+    if parsed == None:
+        fail("parse_state returned None for a round-tripped block")
+    _eq("round-trip head_sha", parsed["head_sha"], "abc")
+    _eq("round-trip last_upsert_epoch_s", parsed["last_upsert_epoch_s"], 1700000000)
+    _eq("round-trip workflow_runs", parsed["workflow_runs"], state["workflow_runs"])
+    _eq("round-trip entries", parsed["entries"], state["entries"])
+
+def _check_parse_state_absent():
+    """parse_state returns None when the body has no state block —
+    callers fall back to swarm-only behavior."""
+    _eq("parse_state — empty body", parse_state(""), None)
+    _eq("parse_state — body without marker", parse_state("# heading\n\nsome content\n"), None)
+
+def _check_parse_state_malformed():
+    """parse_state returns None on a malformed block — payload not
+    valid base64-of-JSON. We never want to crash the writer over a
+    corrupted comment body."""
+    bad = "<!-- aspect-ci-status-state-v1:not-base64-at-all -->"
+    _eq("parse_state — malformed payload", parse_state(bad), None)
+
+def _check_parse_state_missing_terminator():
+    """Block-open token without the matching close → no parse, no crash."""
+    bad = "<!-- aspect-ci-status-state-v1:eyJ4Ijoxfd"
+    _eq("parse_state — missing close token", parse_state(bad), None)
+
+def _check_merge_state_first_writer():
+    """First writer (existing_state=None) → state lists only our slot
+    and our entries."""
+    my_entries = [{"name": "build", "key": "build", "workflow_run_id": "100"}]
+    new = merge_state(None, "abc", "100", "ci-gha", my_entries, {})
+    _eq("merge — first writer head_sha", new["head_sha"], "abc")
+    _eq("merge — first writer workflow_runs", new["workflow_runs"], [{"run_id": "100", "workflow_name": "ci-gha"}])
+    _eq("merge — first writer entries", new["entries"], my_entries)
+
+def _check_merge_state_two_workflows_with_fresh_refresh():
+    """Cross-workflow: workflow A reads existing comment with B's slot
+    and snapshot entries, fetches B's fresh data via
+    `refreshed_other_entries`, builds merged state with both slots and
+    both workflows' entries — B's fresh data wins over snapshot."""
+    existing = {
+        "head_sha": "abc",
+        "last_upsert_epoch_s": 1699999000,
+        "workflow_runs": [{"run_id": "200", "workflow_name": "ci-workflows"}],
+        "entries": [
+            {"name": "lint", "key": "lint", "workflow_run_id": "200", "status": "running"},
+        ],
+    }
+    fresh_b_entries = [
+        {"name": "lint", "key": "lint", "workflow_run_id": "200", "status": "passed"},
+    ]
+    a_entries = [{"name": "build", "key": "build", "workflow_run_id": "100"}]
+    new = merge_state(existing, "abc", "100", "ci-gha", a_entries, {"200": fresh_b_entries})
+    _eq("merge — two slots count", len(new["workflow_runs"]), 2)
+    _eq(
+        "merge — slots preserved + own added",
+        sorted([r["run_id"] for r in new["workflow_runs"]]),
+        ["100", "200"],
+    )
+    _eq("merge — entries count", len(new["entries"]), 2)
+    by_name = {e["name"]: e for e in new["entries"]}
+    _eq("merge — B's lint reflects fresh status (not snapshot)", by_name["lint"]["status"], "passed")
+    _eq("merge — A's build present", by_name["build"]["workflow_run_id"], "100")
+
+def _check_merge_state_falls_back_to_snapshot_when_refresh_missing():
+    """When refreshed_other_entries doesn't carry a slot, fall back to
+    the snapshot in existing_state.entries for that workflow."""
+    existing = {
+        "head_sha": "abc",
+        "workflow_runs": [{"run_id": "200", "workflow_name": "ci-workflows"}],
+        "entries": [
+            {"name": "lint", "key": "lint", "workflow_run_id": "200", "status": "passed"},
+        ],
+    }
+    a_entries = [{"name": "build", "key": "build", "workflow_run_id": "100"}]
+    new = merge_state(existing, "abc", "100", "ci-gha", a_entries, {})
+    _eq("merge — fallback entries count", len(new["entries"]), 2)
+    by_name = {e["name"]: e for e in new["entries"]}
+    _eq("merge — snapshot lint preserved", by_name["lint"]["status"], "passed")
+
+def _check_merge_state_per_task_union_with_snapshot():
+    """When the cross-workflow refresh returns a SUBSET of the snapshot's
+    tasks (e.g. an artifact-listing eventual-consistency window briefly
+    hides some artifacts), per-task union keeps the snapshot rows for
+    tasks the refresh didn't return. Without this, the comment would
+    flap between "many tasks" and "few tasks" as the listing converged.
+
+    Refresh wins for tasks it does return — status updates on those
+    tasks land in this cycle."""
+    existing = {
+        "head_sha": "abc",
+        "workflow_runs": [{"run_id": "200", "workflow_name": "ci-b"}],
+        "entries": [
+            {"name": "lint", "key": "lint", "workflow_run_id": "200", "status": "running"},
+            {"name": "test", "key": "test", "workflow_run_id": "200", "status": "running"},
+            {"name": "build", "key": "build", "workflow_run_id": "200", "status": "running"},
+        ],
+    }
+
+    # Refresh returned only `lint` (with updated status). `test` and
+    # `build` were briefly invisible in the listing.
+    partial_refresh = [
+        {"name": "lint", "key": "lint", "workflow_run_id": "200", "status": "passed"},
+    ]
+    new = merge_state(existing, "abc", "100", "ci-a", [], {"200": partial_refresh})
+    by_name = {e["name"]: e for e in new["entries"]}
+    _eq("merge — per-task union: lint refresh wins", by_name["lint"]["status"], "passed")
+    _eq("merge — per-task union: test from snapshot", by_name["test"]["status"], "running")
+    _eq("merge — per-task union: build from snapshot", by_name["build"]["status"], "running")
+    _eq("merge — per-task union: no rows dropped", len(new["entries"]), 3)
+
+def _check_merge_state_empty_refresh_keeps_snapshot():
+    """An empty refresh result (the listing was authoritative but
+    returned no artifacts) still keeps the snapshot — equivalent to
+    refresh-missing."""
+    existing = {
+        "head_sha": "abc",
+        "workflow_runs": [{"run_id": "200", "workflow_name": "ci-b"}],
+        "entries": [
+            {"name": "lint", "key": "lint", "workflow_run_id": "200", "status": "passed"},
+        ],
+    }
+    new = merge_state(existing, "abc", "100", "ci-a", [], {"200": []})
+    _eq("merge — empty refresh keeps snapshot row count", len(new["entries"]), 1)
+    _eq("merge — empty refresh keeps snapshot row", new["entries"][0]["status"], "passed")
+
+def _check_merge_state_replaces_own_slot():
+    """Our previous slot in workflow_runs is replaced by our current
+    one; sibling slots untouched."""
+    existing = {
+        "head_sha": "abc",
+        "workflow_runs": [
+            {"run_id": "100", "workflow_name": "ci-gha-renamed-out-of-band"},
+            {"run_id": "200", "workflow_name": "ci-workflows"},
+        ],
+        "entries": [],
+    }
+    my_entries = [{"name": "build", "key": "build", "workflow_run_id": "100"}]
+    new = merge_state(existing, "abc", "100", "ci-gha", my_entries, {})
+    runs_by_rid = {r["run_id"]: r for r in new["workflow_runs"]}
+    _eq("merge — own slot has current workflow_name", runs_by_rid["100"]["workflow_name"], "ci-gha")
+    _eq("merge — sibling slot untouched", runs_by_rid["200"]["workflow_name"], "ci-workflows")
+
+def _check_merge_state_drops_orphan_snapshot_entries():
+    """Snapshot entries whose `workflow_run_id` doesn't match any slot in
+    `workflow_runs` are dropped on merge. They're orphaned (a writer that
+    once held that slot removed itself, or the entry was malformed). The
+    new state should only carry entries belonging to live slots."""
+    existing = {
+        "head_sha": "abc",
+        "workflow_runs": [
+            # No slot for run_id=999 below.
+            {"run_id": "200", "workflow_name": "ci-b"},
+        ],
+        "entries": [
+            {"name": "ghost", "key": "ghost", "workflow_run_id": "999"},
+            {"name": "lint", "key": "lint", "workflow_run_id": "200"},
+        ],
+    }
+    my_entries = [{"name": "build", "key": "build", "workflow_run_id": "100"}]
+    new = merge_state(existing, "abc", "100", "ci-a", my_entries, {})
+    names = sorted([e["name"] for e in new["entries"]])
+    _eq("merge — orphan snapshot entry dropped", names, ["build", "lint"])
+
+def _check_merge_state_workflow_runs_sorted():
+    """merge_state's workflow_runs is sorted by run_id so the serialized
+    state block is byte-stable across publish-ownership flips between
+    workflows. Without this, alternating writers would invalidate
+    `stable_body`'s unchanged-content short-circuit and force a PATCH
+    every cycle."""
+    existing = {
+        "head_sha": "abc",
+        "workflow_runs": [
+            {"run_id": "300", "workflow_name": "ci-c"},
+            {"run_id": "200", "workflow_name": "ci-b"},
+        ],
+        "entries": [],
+    }
+    new = merge_state(existing, "abc", "100", "ci-a", [], {})
+    _eq(
+        "merge — workflow_runs sorted by run_id",
+        [r["run_id"] for r in new["workflow_runs"]],
+        ["100", "200", "300"],
+    )
+
+def _check_merge_state_entries_sorted():
+    """merge_state's entries are sorted deterministically across
+    (workflow_run_id, job, key, name, run_attempt) so the serialized
+    block is byte-stable across writers — even when each writer
+    discovers its swarm in a different artifact-id order."""
+    my_entries = [
+        {"name": "z", "key": "z", "job": "j", "workflow_run_id": "100", "run_attempt": "1"},
+        {"name": "a", "key": "a", "job": "j", "workflow_run_id": "100", "run_attempt": "1"},
+    ]
+    refreshed = {
+        "200": [
+            {"name": "y", "key": "y", "job": "k", "workflow_run_id": "200", "run_attempt": "1"},
+            {"name": "b", "key": "b", "job": "k", "workflow_run_id": "200", "run_attempt": "1"},
+        ],
+    }
+    existing = {
+        "head_sha": "abc",
+        "workflow_runs": [{"run_id": "200", "workflow_name": "ci-b"}],
+        "entries": [],
+    }
+    new = merge_state(existing, "abc", "100", "ci-a", my_entries, refreshed)
+    keys = [e["key"] for e in new["entries"]]
+    _eq("merge — entries sorted by (run_id, job, key, ...)", keys, ["a", "z", "b", "y"])
+
+def _check_parse_state_validates_field_types():
+    """Wrong-shape payload (valid base64 JSON but unexpected field types)
+    is normalized to defaults rather than raising into the writer."""
+    bad_shape = {
+        "head_sha": 12345,  # int, not string
+        "last_upsert_epoch_s": "not-a-number",  # string, not int
+        "workflow_runs": "this should be a list",
+        "entries": {"oops": "this should be a list"},
+    }
+    block = serialize_state(bad_shape)
+    parsed = parse_state(block)
+    if parsed == None:
+        fail("parse_state should normalize wrong-shape payloads, not return None")
+    _eq("parse_state — head_sha non-string normalized to ''", parsed["head_sha"], "")
+    _eq("parse_state — epoch non-int normalized to 0", parsed["last_upsert_epoch_s"], 0)
+    _eq("parse_state — workflow_runs non-list normalized to []", parsed["workflow_runs"], [])
+    _eq("parse_state — entries non-list normalized to []", parsed["entries"], [])
+
+def _check_parse_state_filters_non_dict_rows():
+    """List fields with mixed-shape elements drop the non-dicts so
+    downstream merge/render can assume dict shape."""
+    payload = {
+        "head_sha": "abc",
+        "last_upsert_epoch_s": 100,
+        "workflow_runs": [
+            {"run_id": "100", "workflow_name": "ci-a"},
+            "this string should be dropped",
+            42,
+        ],
+        "entries": [
+            {"name": "build", "key": "build"},
+            None,
+            ["this list element should be dropped"],
+        ],
+    }
+    parsed = parse_state(serialize_state(payload))
+    _eq(
+        "parse_state — workflow_runs filtered to dicts",
+        parsed["workflow_runs"],
+        [{"run_id": "100", "workflow_name": "ci-a"}],
+    )
+    _eq(
+        "parse_state — entries filtered to dicts",
+        parsed["entries"],
+        [{"name": "build", "key": "build"}],
+    )
+
+def _check_merge_state_drops_stale_push():
+    """`existing_state.head_sha` mismatch → drop everything, start
+    fresh. Each push starts the comment over."""
+    existing = {
+        "head_sha": "old",
+        "workflow_runs": [{"run_id": "200", "workflow_name": "ci-workflows"}],
+        "entries": [{"name": "lint", "key": "lint", "workflow_run_id": "200"}],
+    }
+    my_entries = [{"name": "build", "key": "build", "workflow_run_id": "100"}]
+    new = merge_state(existing, "new", "100", "ci-gha", my_entries, {})
+    _eq("merge — stale-push drops slots", new["workflow_runs"], [{"run_id": "100", "workflow_name": "ci-gha"}])
+    _eq("merge — stale-push drops entries", new["entries"], my_entries)
+
+def _check_render_body_emits_state_block(ctx):
+    """When `state` is set, the rendered body carries an HTML-comment
+    state block whose payload parses back to the state we passed."""
+    state = {
+        "head_sha": "abc",
+        "last_upsert_epoch_s": 1700000000,
+        "workflow_runs": [{"run_id": "100", "workflow_name": "ci-gha"}],
+        "entries": [
+            {
+                "name": "build",
+                "key": "build",
+                "job": "ci",
+                "status": "running",
+                "workflow_run_id": "100",
+            },
+        ],
+    }
+    prepared = prepare_for_render(state["entries"])
+    sections = bucket_entries(prepared)
+    body = render_body(
+        ctx,
+        MARKER_FMT % 42,
+        prepared,
+        "2026-01-01 00:00:00 UTC",
+        DEFAULT_BODY_TEMPLATE,
+        DEFAULT_STATUS_BADGES,
+        sections,
+        state = state,
+    )
+    parsed = parse_state(body)
+    if parsed == None:
+        fail("render_body did not emit a parseable state block")
+    _eq("render_body — state head_sha", parsed["head_sha"], "abc")
+    _eq("render_body — state lease epoch", parsed["last_upsert_epoch_s"], 1700000000)
+    _eq("render_body — state workflow_runs", parsed["workflow_runs"], state["workflow_runs"])
+    _eq("render_body — state entries count", len(parsed["entries"]), 1)
+    _eq("render_body — state entry name", parsed["entries"][0]["name"], "build")
+
+def _check_render_body_no_state_block_when_state_none(ctx):
+    """Backward-compat path: omitting state (snapshot tests, callers
+    that don't need cross-workflow merge) suppresses the state block."""
+    entries = [
+        {
+            "name": "build",
+            "key": "build",
+            "job": "ci",
+            "kind": "build",
+            "status": "running",
+            "elapsed_ms": 1000,
+        },
+    ]
+    prepared = prepare_for_render(entries)
+    sections = bucket_entries(prepared)
+    body = render_body(
+        ctx,
+        MARKER_FMT % 42,
+        prepared,
+        "2026-01-01 00:00:00 UTC",
+        DEFAULT_BODY_TEMPLATE,
+        DEFAULT_STATUS_BADGES,
+        sections,
+    )
+    _eq("render_body — no state block when state is None", parse_state(body), None)
+
 def _test_impl(ctx):
     sep = "=" * 70
 
@@ -609,6 +961,24 @@ def _test_impl(ctx):
     _check_format_http_failure_detail()
     _check_lease_held()
     _check_max_recent_upsert_epoch()
+    _check_state_serialize_round_trip()
+    _check_parse_state_absent()
+    _check_parse_state_malformed()
+    _check_parse_state_missing_terminator()
+    _check_parse_state_validates_field_types()
+    _check_parse_state_filters_non_dict_rows()
+    _check_merge_state_first_writer()
+    _check_merge_state_two_workflows_with_fresh_refresh()
+    _check_merge_state_falls_back_to_snapshot_when_refresh_missing()
+    _check_merge_state_per_task_union_with_snapshot()
+    _check_merge_state_empty_refresh_keeps_snapshot()
+    _check_merge_state_replaces_own_slot()
+    _check_merge_state_drops_stale_push()
+    _check_merge_state_drops_orphan_snapshot_entries()
+    _check_merge_state_workflow_runs_sorted()
+    _check_merge_state_entries_sorted()
+    _check_render_body_emits_state_block(ctx)
+    _check_render_body_no_state_block_when_state_none(ctx)
 
     scenarios = [
         (

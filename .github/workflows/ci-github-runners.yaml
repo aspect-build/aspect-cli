@@ -1,0 +1,95 @@
+name: CI - GitHub runners
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  id-token: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+# The Dash0 OTLP endpoint and bearer token feed `.aspect/config.axl`'s `ctx.telemetry.exporters.add(...)`
+# call, which dogfoods the trace.event/trace.log pipeline against a real backend.
+# Both are no-ops if a secret isn't configured (unset env var = empty string,
+# config.axl skips registration).
+env:
+  ASPECT_API_TOKEN: ${{ secrets.ASPECT_API_TOKEN }}
+  DASH0_ENDPOINT: ${{ secrets.DASH0_ENDPOINT }}
+  DASH0_TOKEN: ${{ secrets.DASH0_TOKEN }}
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  pre-build:
+    runs-on: [self-hosted, aspect-workflows, aspect-default]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - name: Pre-build CLI
+        run: |
+          echo "Build and upload CLI to remote cache"
+          .aspect/bootstrap.sh
+      # Surface the just-built binary to the ephemeral (GitHub-hosted) jobs
+      # below. Those runners are small and don't have remote-cache access yet,
+      # so we re-use the binary that the self-hosted runner already built rather
+      # than rebuilding from source per ephemeral job.
+      - name: Upload aspect-cli binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: aspect-cli
+          path: target/ci/aspect-cli
+          retention-days: 1
+          if-no-files-found: error
+
+  # Dedicated buildifier-only step that runs in parallel with format-task.
+  # Models the legacy Rosetta `buildifier` task using a Starlark-only
+  # `format_multirun` target — see https://docs.aspect.build/cli/migration/buildifier.
+  buildifier-task:
+    runs-on: ubuntu-latest
+    needs: [pre-build]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+      - name: Buildifier Task
+        run: aspect format --task-key buildifier-gha-ephemeral --formatter-target=//tools/format:format-starlark
+
+  format-task:
+    runs-on: ubuntu-latest
+    needs: [pre-build]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+      # Starlark patterns are handled by buildifier-task; ignore them here so
+      # the two steps don't do duplicate work.
+      - name: Format Task
+        run: |
+          aspect format --task-key format-gha-ephemeral \
+            --ignore-pattern='**/*.axl' \
+            --ignore-pattern='**/*.bzl' \
+            --ignore-pattern='**/BUILD' \
+            --ignore-pattern='**/BUILD.bazel' \
+            --ignore-pattern='**/MODULE.bazel' \
+            --ignore-pattern='**/WORKSPACE' \
+            --ignore-pattern='**/WORKSPACE.bazel'
+
+  gazelle-task:
+    runs-on: ubuntu-latest
+    needs: [pre-build]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+      - name: Gazelle Task
+        run: aspect gazelle --task-key gazelle-gha-ephemeral

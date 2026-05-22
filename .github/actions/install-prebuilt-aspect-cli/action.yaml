@@ -1,0 +1,26 @@
+name: Install prebuilt aspect-cli (from in-run artifact)
+description: |
+  Internal-only — NOT a general-purpose aspect-cli installer.
+
+  Downloads the `aspect-cli` artifact uploaded earlier in this workflow
+  run by the `pre-build` job and installs it on PATH as `aspect`. Used
+  by GitHub-hosted ephemeral runners that don't have remote-cache
+  access to rebuild the CLI from source efficiently.
+
+  To install aspect-cli normally, see https://docs.aspect.build/cli.
+
+runs:
+  using: composite
+  steps:
+    - name: Download aspect-cli binary
+      uses: actions/download-artifact@v4
+      with:
+        name: aspect-cli
+        path: ${{ runner.temp }}/aspect-bin
+    - name: Install on PATH
+      shell: bash
+      run: |
+        chmod +x "${RUNNER_TEMP}/aspect-bin/aspect-cli"
+        mkdir -p "$HOME/.local/bin"
+        mv "${RUNNER_TEMP}/aspect-bin/aspect-cli" "$HOME/.local/bin/aspect"
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
