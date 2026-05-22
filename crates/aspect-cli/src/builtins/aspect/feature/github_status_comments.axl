@@ -1319,6 +1319,41 @@ def _github_status_comments(ctx: FeatureContext):
             if raw_entries == None:
                 return
 
+        # Swarm coordination: every task uploads its own status artifact
+        # (cheap, Twirp), but the quota-burning PR-comment upsert (REST
+        # PATCH on the App bucket) is gated on a lease that any swarm
+        # member — across every workflow on the PR — can hold.
+        # `lease_window_s` is fed `swarm_elapsed_s` (time since the
+        # earliest sibling started) and the merged-view quota factor,
+        # so every member computes the same window from swarm-shared
+        # inputs and converges on the same skip-or-publish answer.
+        #
+        # The lease epoch is `max(state.last_upsert_epoch_s, swarm-local
+        # last_upsert_epoch_s)`: the state block carries the most-recent
+        # upsert from any workflow, while the swarm-local term covers
+        # the bootstrap window before any writer has stamped a state
+        # block on this PR.
+        #
+        # Fast path — if the swarm-local lease already holds, the
+        # combined cross-workflow lease (its `max(state, swarm-local)`
+        # formulation) holds too, so we wouldn't PATCH this cycle
+        # either way. Short-circuit before the comment GET and the
+        # per-sibling-workflow `list_run_artifacts` refresh. Skipping
+        # cross-workflow discovery for one cycle is harmless: any
+        # sibling workflow's data we missed will land in the next cycle
+        # when our swarm-local lease relaxes and we run the full path.
+        # Terminal updates (`final=True`) always run the full path.
+        prepared_local = _prepare_for_render(raw_entries)
+        local_earliest_ms = _earliest_start_ms(prepared_local)
+        now_epoch = epoch_now_s(ctx.std)
+        swarm_started_epoch = local_earliest_ms // 1000 if local_earliest_ms > 0 else now_epoch
+        swarm_elapsed_s = max(0, now_epoch - swarm_started_epoch)
+        factor = effective_throttle_factor(ctx, BUCKET_APP, swarm_elapsed_s, min_poll_interval_seconds)
+        lease_window_s = min_poll_interval_seconds * factor
+        swarm_local_lease_epoch = _max_recent_upsert_epoch(prepared_local)
+        if not final and _lease_held(now_epoch, swarm_local_lease_epoch, lease_window_s):
+            return
+
         # Cross-workflow merge — see `_merge_state` for the contract.
         # Each writer fetches the current comment, refreshes every
         # sibling workflow's entries directly from that workflow's
@@ -1330,6 +1365,19 @@ def _github_status_comments(ctx: FeatureContext):
             return
         parsed = _parse_state(existing_body)
         cross_workflow_lease_epoch = parsed["last_upsert_epoch_s"] if parsed else 0
+
+        # Combined lease check: the cross-workflow term might still hold
+        # (a sibling workflow just published) even when the swarm-local
+        # term doesn't. Terminal updates (`final=True`) bypass the lease
+        # — if this is the last task to finish and a sibling published
+        # recently with us still rendered as "running", the lease would
+        # otherwise silently drop our terminal upsert and leave the PR
+        # comment frozen on stale state. The body-diff short-circuit
+        # below still gates a redundant PATCH when our terminal status
+        # has already been picked up by a sibling's earlier publish.
+        last_publish_epoch = max(cross_workflow_lease_epoch, swarm_local_lease_epoch)
+        if not final and _lease_held(now_epoch, last_publish_epoch, lease_window_s):
+            return
 
         refreshed_others = {}
         if parsed and parsed.get("head_sha") == head_sha:
@@ -1345,43 +1393,11 @@ def _github_status_comments(ctx: FeatureContext):
         prepared = _prepare_for_render(new_state["entries"])
         sections = _bucket_entries(prepared)
 
-        # Earliest start across all sibling tasks — formatted as the
-        # body's headline timestamp. Pinned to the run's wall-clock
-        # start so it doesn't wobble across PATCHes.
+        # Earliest start across all sibling tasks (own + cross-workflow)
+        # — formatted as the body's headline timestamp. Pinned to the
+        # run's wall-clock start so it doesn't wobble across PATCHes.
         earliest_ms = _earliest_start_ms(prepared)
         started_at = format_run_date(ctx, earliest_ms)
-
-        # Swarm coordination: every task uploads its own status
-        # artifact (cheap, Twirp), but the quota-burning PR-comment
-        # upsert (REST PATCH on the App bucket) is gated on a lease
-        # that any swarm member — across every workflow on the PR — can
-        # hold. `lease_window_s` is fed `swarm_elapsed_s` (time since
-        # the earliest sibling started) and the merged-view quota
-        # factor, so every member computes the same window from
-        # swarm-shared inputs and converges on the same skip-or-publish
-        # answer.
-        #
-        # The lease epoch is `max(state.last_upsert_epoch_s, swarm-local
-        # last_upsert_epoch_s)`: the state block carries the most-recent
-        # upsert from any workflow, while the swarm-local term covers
-        # the bootstrap window before any writer has stamped a state
-        # block on this PR.
-        #
-        # Terminal updates (`final=True`) bypass the lease: if this is
-        # the last task to finish and a sibling published recently with
-        # us still rendered as "running", the lease would otherwise
-        # silently drop our terminal upsert and leave the PR comment
-        # frozen on the stale state. The body-diff short-circuit below
-        # still gates a redundant PATCH when our terminal status has
-        # already been picked up by a sibling's earlier publish.
-        now_epoch = epoch_now_s(ctx.std)
-        swarm_started_epoch = earliest_ms // 1000 if earliest_ms > 0 else now_epoch
-        swarm_elapsed_s = max(0, now_epoch - swarm_started_epoch)
-        factor = effective_throttle_factor(ctx, BUCKET_APP, swarm_elapsed_s, min_poll_interval_seconds)
-        lease_window_s = min_poll_interval_seconds * factor
-        last_publish_epoch = max(cross_workflow_lease_epoch, _max_recent_upsert_epoch(prepared))
-        if not final and _lease_held(now_epoch, last_publish_epoch, lease_window_s):
-            return
 
         # Two renders per cycle:
         # 1. `stable_body` — `last_updated_at`, `api_usage`, and the
