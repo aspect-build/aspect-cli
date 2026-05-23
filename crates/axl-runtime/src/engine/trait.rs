@@ -18,7 +18,7 @@ use starlark::values::{
 };
 use starlark_map::small_map::SmallMap;
 
-use super::names::validate_type_name;
+use super::names::validate_trait_name;
 
 static TRAIT_TYPE_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -251,7 +251,7 @@ impl<'v> StarlarkValue<'v> for TraitType<'v> {
         variable_name: &str,
         _eval: &mut starlark::eval::Evaluator<'v, '_, '_>,
     ) -> starlark::Result<()> {
-        validate_type_name(variable_name, "trait")
+        validate_trait_name(variable_name)
             .map_err(|e| starlark::Error::new_other(anyhow::anyhow!(e)))?;
         // We use unsafe to mutate the name, which is safe because this is only
         // called during module loading.

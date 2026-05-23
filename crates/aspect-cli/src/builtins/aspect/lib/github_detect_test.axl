@@ -35,8 +35,8 @@ load(
     "./gitlab_detect.axl",
     "detect_gitlab_mr_base_sha",
 )
-load("./rate_limit.axl", "BUCKET_APP", "BUCKET_ENV", "GitHubApiRateLimitTrait")
-load("./tips.axl", "TipsTrait")
+load("./rate_limit.axl", "BUCKET_APP", "BUCKET_ENV", rate_limit_inspect = "inspect_for_test", rate_limit_reset = "reset_for_test")
+load("./tips.axl", "tips")
 
 def _fake_std(vars, files = {}):
     """Stub std with env + fs:
@@ -366,7 +366,7 @@ def _test_impl(ctx):
     # supporting GitHub API calls. The Aspect Workflows GitHub App's installation token
     # is preferred as primary; `GITHUB_TOKEN` / `GH_TOKEN` from env
     # sits in the fallback slot for the 4xx-auth retry path. The
-    # `primary_class` is the `GitHubApiRateLimitTrait` bucket the
+    # `primary_class` is the lib/rate_limit.axl's per-task state bucket the
     # primary's response headers belong to (`"app"` or `"env"`).
     # Fresh App-token mints via `_authenticate(...)` aren't covered
     # here — they require `ctx.aspect.auth` stubbing; the
@@ -473,18 +473,46 @@ def _http_stub(responses):
 def _stub_ctx(ctx, env_vars, http_client):
     """Build a stub ctx for github.axl helpers that need `std.env`,
     `ctx.http()`, `ctx.traits`, and `ctx.template`. Traits + template
-    pass through from the real ctx — the trait map carries the test
-    task's mutable `TipsTrait` and the template engine renders the
-    Jinja2 tip on emit, so assertions can read the merged tip back
-    out of `ctx.traits[TipsTrait].tips`."""
+    pass through from the real ctx — the template engine renders the
+    Jinja2 tip on emit, and assertions read the merged tip back via
+    `tips._inspect_for_test(ctx)` (storage is the tmpdir file under
+    `ASPECT_WORKFLOWS_RUNNER_JOB_TMPDIR`)."""
+
+    # Specific infrastructure env vars get passed through from the
+    # real env even when the test doesn't mention them. File-pattern
+    # libraries (rate-limit, checkrun) build per-task paths off
+    # `ASPECT_WORKFLOWS_RUNNER_JOB_TMPDIR` — if the stub returns ""
+    # for it but the real test ctx returns a runner-specific dir,
+    # stubbed-github writes and real-ctx reads land at different
+    # paths and the test's state assertions fail.
+    _PASSTHROUGH_ENV = ["ASPECT_WORKFLOWS_RUNNER_JOB_TMPDIR"]
+
+    def _var(name):
+        if name in env_vars:
+            return env_vars[name]
+        if name in _PASSTHROUGH_ENV:
+            return ctx.std.env.var(name)
+        return ""
+
     return struct(
         std = struct(
-            env = struct(var = lambda name: env_vars.get(name, "")),
+            env = struct(
+                var = _var,
+                temp_dir = ctx.std.env.temp_dir,
+            ),
             io = struct(stdout = struct(is_tty = False)),
+            # Real fs so the rate-limit `_load`/`_save` cycle that fires
+            # from inside the github HTTP wrapper actually round-trips.
+            fs = ctx.std.fs,
+            # Real process so `_path(ctx)` can scope by process id — the
+            # file-pattern libraries (rate-limit, checkrun) embed
+            # `ctx.std.process.id()` in the per-task state file path.
+            process = ctx.std.process,
         ),
         http = lambda: http_client,
         traits = ctx.traits,
         template = ctx.template,
+        task = ctx.task,
     )
 
 def _test_aspect_api_token_tip_gate(ctx):
@@ -496,7 +524,6 @@ def _test_aspect_api_token_tip_gate(ctx):
     (status-checks / status-comments / lint-comments) and the
     supporting-call path through `preferred_token_pair`.
     """
-    trait = ctx.traits[TipsTrait]
 
     def _ctx_no_creds(env_vars):
         # Stub ctx where `aspect.auth.credentials(...)` returns None so
@@ -508,9 +535,7 @@ def _test_aspect_api_token_tip_gate(ctx):
         )
 
     def _reset_tips():
-        trait.tips = []
-        trait.silenced_tips = []
-        trait.auto_print = False
+        tips._reset_for_test(ctx)
 
     # GHA + missing Aspect creds + env token set → kind="no-credentials",
     # tip fires (GHA is a supported host), env returns as last-resort
@@ -525,9 +550,9 @@ def _test_aspect_api_token_tip_gate(ctx):
     )
     _eq("kind-gate GHA: kind populated", reason.get("kind"), "no-credentials")
     _eq("kind-gate GHA: env-token returned as primary", result, ("env-tok", None, "env"))
-    _eq("kind-gate GHA: one tip fired", len(trait.tips), 1)
-    _eq("kind-gate GHA: tip id (GHA-specific)", trait.tips[0]["id"], "add-aspect-api-token-github-actions")
-    _eq("kind-gate GHA: tip is important", trait.tips[0]["severity"], "important")
+    _eq("kind-gate GHA: one tip fired", len(tips._inspect_for_test(ctx)), 1)
+    _eq("kind-gate GHA: tip id (GHA-specific)", tips._inspect_for_test(ctx)[0]["id"], "add-aspect-api-token-github-actions")
+    _eq("kind-gate GHA: tip is important", tips._inspect_for_test(ctx)[0]["severity"], "important")
 
     # Buildkite + missing creds → kind via the BK branch of
     # `_classify_missing_credentials`; tip fires because BUILDKITE is
@@ -542,8 +567,8 @@ def _test_aspect_api_token_tip_gate(ctx):
         "o",
         "r",
     )
-    _eq("kind-gate Buildkite: tip fires", len(trait.tips), 1)
-    _eq("kind-gate Buildkite: tip id (BK-specific)", trait.tips[0]["id"], "add-aspect-api-token-buildkite")
+    _eq("kind-gate Buildkite: tip fires", len(tips._inspect_for_test(ctx)), 1)
+    _eq("kind-gate Buildkite: tip id (BK-specific)", tips._inspect_for_test(ctx)[0]["id"], "add-aspect-api-token-buildkite")
 
     # CircleCI + missing creds → kind via the generic-CI branch (no
     # BK token); tip fires because CIRCLECI is in the host gate.
@@ -553,8 +578,8 @@ def _test_aspect_api_token_tip_gate(ctx):
         "o",
         "r",
     )
-    _eq("kind-gate CircleCI: tip fires", len(trait.tips), 1)
-    _eq("kind-gate CircleCI: tip id (CircleCI-specific)", trait.tips[0]["id"], "add-aspect-api-token-circleci")
+    _eq("kind-gate CircleCI: tip fires", len(tips._inspect_for_test(ctx)), 1)
+    _eq("kind-gate CircleCI: tip id (CircleCI-specific)", tips._inspect_for_test(ctx)[0]["id"], "add-aspect-api-token-circleci")
 
     # GitLab + missing creds → kind="no-credentials" BUT the host gate
     # in `_emit_aspect_api_token_tip` skips emission (no GHA / BK /
@@ -569,7 +594,7 @@ def _test_aspect_api_token_tip_gate(ctx):
         _reason = reason,
     )
     _eq("host-gate GitLab: kind", reason.get("kind"), "no-credentials")
-    _eq("host-gate GitLab: tip skipped (host not supported)", len(trait.tips), 0)
+    _eq("host-gate GitLab: tip skipped (host not supported)", len(tips._inspect_for_test(ctx)), 0)
 
     # Local (no CI env vars) + missing creds → kind="not-logged-in",
     # tip skipped by the kind gate. The fix path here is `aspect auth
@@ -584,7 +609,7 @@ def _test_aspect_api_token_tip_gate(ctx):
         _reason = reason,
     )
     _eq("kind-gate local: kind", reason.get("kind"), "not-logged-in")
-    _eq("kind-gate local: tip skipped (wrong fix path)", len(trait.tips), 0)
+    _eq("kind-gate local: tip skipped (wrong fix path)", len(tips._inspect_for_test(ctx)), 0)
 
     # Direct `github.authenticate` call path — exercises the same gate
     # without going through `preferred_token_pair`. Features doing
@@ -602,8 +627,8 @@ def _test_aspect_api_token_tip_gate(ctx):
     )
     _eq("direct authenticate: returns None on no-creds", token, None)
     _eq("direct authenticate: kind populated", reason.get("kind"), "no-credentials")
-    _eq("direct authenticate: tip fires", len(trait.tips), 1)
-    _eq("direct authenticate: tip id (GHA-specific)", trait.tips[0]["id"], "add-aspect-api-token-github-actions")
+    _eq("direct authenticate: tip fires", len(tips._inspect_for_test(ctx)), 1)
+    _eq("direct authenticate: tip id (GHA-specific)", tips._inspect_for_test(ctx)[0]["id"], "add-aspect-api-token-github-actions")
 
     # Direct `github.authenticate` on a host that's outside the
     # supported-CI set — same kind, but host gate skips emission.
@@ -616,14 +641,11 @@ def _test_aspect_api_token_tip_gate(ctx):
         _reason = reason,
     )
     _eq("direct authenticate (GitLab): kind", reason.get("kind"), "no-credentials")
-    _eq("direct authenticate (GitLab): tip skipped", len(trait.tips), 0)
+    _eq("direct authenticate (GitLab): tip skipped", len(tips._inspect_for_test(ctx)), 0)
 
 def _test_pr_files_4xx_auth_fallback(ctx):
-    # Reset the real TipsTrait so we can assert what this test emits.
-    trait = ctx.traits[TipsTrait]
-    trait.tips = []
-    trait.silenced_tips = []
-    trait.auto_print = False
+    # Reset the per-task tip storage so we can assert what this test emits.
+    tips._reset_for_test(ctx)
 
     # Stub: page-1 with App token (primary) → 403, page-1 retry with
     # env token (fallback) → 200 with a single-file body that ends
@@ -648,8 +670,8 @@ def _test_pr_files_4xx_auth_fallback(ctx):
     _eq("pr-files fallback: 2nd call used env-token fallback", state["calls"][1]["auth"], "Bearer env-tok")
 
     # Tip emitted with the missing scope + endpoint accumulated.
-    _eq("pr-files fallback: one tip surfaced", len(trait.tips), 1)
-    tip = trait.tips[0]
+    _eq("pr-files fallback: one tip surfaced", len(tips._inspect_for_test(ctx)), 1)
+    tip = tips._inspect_for_test(ctx)[0]
     _eq("pr-files fallback: tip id", tip["id"], "add-github-token-scope")
     _eq(
         "pr-files fallback: scope accumulated",
@@ -664,7 +686,7 @@ def _test_pr_files_4xx_auth_fallback(ctx):
 
     # No fallback supplied: same 403 surfaces as a hard failure
     # (no silent --scope=all expansion path because the caller decides).
-    trait.tips = []
+    tips._reset_for_test(ctx)
     state2, http2 = _http_stub([
         (403, '{"message":"Resource not accessible by integration"}'),
     ])
@@ -673,7 +695,7 @@ def _test_pr_files_4xx_auth_fallback(ctx):
     if result2["success"]:
         fail("pr-files no-fallback: expected success=False on 403 with no fallback, got %r" % result2)
     _eq("pr-files no-fallback: only the primary call ran", len(state2["calls"]), 1)
-    _eq("pr-files no-fallback: no tip emitted (fallback drives the tip)", len(trait.tips), 0)
+    _eq("pr-files no-fallback: no tip emitted (fallback drives the tip)", len(tips._inspect_for_test(ctx)), 0)
 
     _test_pr_files_bucket_class_routes_observations(ctx)
 
@@ -684,12 +706,8 @@ def _test_pr_files_bucket_class_routes_observations(ctx):
     retry uses the opposite bucket. Pins the bucket-class derivation
     against accidental inversion (e.g. assuming env is primary when a
     fallback exists)."""
-    rl = ctx.traits[GitHubApiRateLimitTrait]
-    rl.observations = {BUCKET_APP: [], BUCKET_ENV: []}
-    rl.watermark = {BUCKET_APP: None, BUCKET_ENV: None}
-    rl.limits = {BUCKET_APP: 0, BUCKET_ENV: 0}
-    trait = ctx.traits[TipsTrait]
-    trait.tips = []
+    rate_limit_reset(ctx)
+    tips._reset_for_test(ctx)
 
     # Primary call (App-bucket headers) → 403, then retry (env-bucket
     # headers) → 200. Distinct `Remaining` so the bucket attribution
@@ -709,8 +727,9 @@ def _test_pr_files_bucket_class_routes_observations(ctx):
     stub = _stub_ctx(ctx, {"GITHUB_ACTIONS": "true"}, http_client)
     github.pulls.list_files(stub, "app-tok", "o", "r", 42, fallback_token = "env-tok")
 
-    app_obs = ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_APP]
-    env_obs = ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_ENV]
+    rl_state = rate_limit_inspect(ctx)
+    app_obs = rl_state["observations"][BUCKET_APP]
+    env_obs = rl_state["observations"][BUCKET_ENV]
     _eq("bucket-class — App bucket has the primary call's observation", len(app_obs), 1)
     _eq("bucket-class — App `Remaining` matches primary response", app_obs[0][1], 4800)
     _eq("bucket-class — env bucket has the fallback retry's observation", len(env_obs), 1)
@@ -721,5 +740,5 @@ github_detect_tests = task(
     group = ["dev"],
     implementation = _test_impl,
     args = {},
-    traits = [GitHubApiRateLimitTrait, TipsTrait],
+    traits = tips.TRAITS,
 )

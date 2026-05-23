@@ -186,21 +186,19 @@ Usage:
 
 load("@std//time.axl", "sleep_iter")
 load("./bazel.axl", "BazelTrait")
-load("./lib/artifacts.axl", "ArtifactsTrait", "artifact_name", "create_uploader")
+load("./lib/artifacts.axl", "artifacts")
 load("./lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event")
 load("./lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
-load("./lib/checkrun.axl", "GitHubCheckRunTrait")
 load("./lib/environment.axl", "color_enabled", "detect_ci", "error", "info", "warn")
 load("./lib/gazelle_results.axl", "dedupe_subtrees", "dir_at_or_below", "extract_changed_dirs", gaz_init_data = "init_data", gazelle_conclusion = "conclusion")
 load("./lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_changed_files_listing")
 load("./lib/health_check.axl", "HealthCheckTrait")
 load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "pick_task_status", "preflight_phase", "resolve_on_change", "setup_phase", "task_update")
 load("./lib/path_glob.axl", "match_any")
-load("./lib/rate_limit.axl", "GitHubApiRateLimitTrait")
 load("./lib/repro_commands.axl", "build_aspect_command", "task_cli_path")
 load("./lib/runnable.axl", "runnable")
 load("./lib/text.axl", "pluralize")
-load("./lib/tips.axl", "TipsTrait")
+load("./lib/tips.axl", "tips")
 
 def _parse_diff_paths(diff_text):
     """Extract the set of affected paths from a unified diff.
@@ -232,45 +230,6 @@ def _parse_diff_paths(diff_text):
             continue
         paths[path] = True
     return sorted(paths.keys())
-
-def _try_upload_gazelle_diff(ctx, diff_text):
-    """Write gazelle's diff to a temp file and upload it via the
-    CI-specific artifact uploader. Failures are logged but don't fail
-    the task — the diff is informational, not load-bearing for the
-    verdict.
-
-    The download URL (when the CI provider returns one) lands in
-    `ArtifactsTrait.artifact_urls["gazelle_diff"]` so future
-    status-check features can surface a "View patch" link, mirroring
-    the format task's `format_diff` artifact.
-    """
-    ci = detect_ci(ctx.std.env)
-    uploader = create_uploader(ctx.std.env)
-    if not uploader:
-        info(ctx.std, "Skipping gazelle diff upload — not running on a recognized CI host.")
-        return
-
-    # Write the patch to a job-scoped tmpdir so concurrent gazelle
-    # runs in the same process don't collide.
-    tmp = ctx.std.env.temp_dir()
-    patch_path = tmp + "/gazelle-" + ctx.task.key + ".patch"
-    ctx.std.fs.write(patch_path, diff_text)
-
-    name = artifact_name(ci, ctx.task.name, ctx.task.key, "gazelle.patch")
-    result = uploader.upload_file(ctx, patch_path, name)
-    if not result["success"]:
-        warn(ctx.std, "Gazelle diff upload failed: %s" % "; ".join(result.get("errors") or ["unknown error"]))
-        return
-
-    download_url = result.get("download_url") or ""
-    if download_url:
-        artifacts_trait = ctx.traits[ArtifactsTrait]
-        urls = dict(artifacts_trait.artifact_urls) if artifacts_trait.artifact_urls else {}
-        urls["gazelle_diff"] = download_url
-        artifacts_trait.artifact_urls = urls
-        info(ctx.std, "Uploaded gazelle diff patch — %s" % download_url)
-    else:
-        info(ctx.std, "Uploaded gazelle diff patch (no stable URL on this CI host).")
 
 def _pick_status(data, had_failure, terminal):
     return pick_task_status(data, "gazelle", had_failure, terminal)
@@ -899,12 +858,16 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     data["gazelle"]["affected_files"] = affected
 
     if ctx.args.upload_gazelle_diff:
-        _try_upload_gazelle_diff(ctx, diff_stdout)
-
-        # Surface the patch URL in data.
-        artifacts_trait = ctx.traits[ArtifactsTrait]
-        if artifacts_trait.artifact_urls:
-            data["gazelle"]["patch_url"] = artifacts_trait.artifact_urls.get("gazelle_diff", "") or ""
+        # Upload as a CI artifact and surface the URL in data so the
+        # status-check renderer can link to it. `artifacts.upload`
+        # handles CI detection, naming, transport, and registration; a
+        # silent no-op (returning "") when off-CI or upload fails.
+        data["gazelle"]["patch_url"] = artifacts.upload(
+            ctx,
+            kind = "gazelle_diff",
+            name = "gazelle.patch",
+            content = diff_stdout,
+        )
 
     # Verdict from --on-change (resolved at entry).
     if on_change_resolved == "fail":
@@ -956,7 +919,7 @@ gazelle = task(
         ),
         "upload_gazelle_diff": args.boolean(
             default = True,
-            description = "Upload gazelle's diff as a CI artifact (named `gazelle.patch`) so reviewers can apply it locally without re-running gazelle. No-op when the working tree is clean (no diff to upload), or when not running on a recognized CI host (GitHub Actions, Buildkite, CircleCI, GitLab). The download URL (where the CI provider returns one) is surfaced via ArtifactsTrait.artifact_urls['gazelle_diff']. Pass `--upload-gazelle-diff=false` to disable.",
+            description = "Upload gazelle's diff as a CI artifact (named `gazelle.patch`) so reviewers can apply it locally without re-running gazelle. No-op when the working tree is clean (no diff to upload), or when not running on a recognized CI host (GitHub Actions, Buildkite, CircleCI, GitLab). The download URL (where the CI provider returns one) is surfaced via `artifacts` (kind=\"gazelle_diff\"). Pass `--upload-gazelle-diff=false` to disable.",
         ),
         "gazelle_target": args.string(
             default = "//tools/gazelle:gazelle",
@@ -983,13 +946,9 @@ gazelle = task(
         ),
     },
     traits = [
-        ArtifactsTrait,
         BazelTrait,
-        GitHubCheckRunTrait,
         HealthCheckTrait,
-        GitHubApiRateLimitTrait,
         TaskLifecycleTrait,
-        TipsTrait,
-    ],
+    ] + artifacts.TRAITS + tips.TRAITS,
     implementation = _impl,
 )

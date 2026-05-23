@@ -19,7 +19,6 @@ Usage in `.aspect/config.axl`:
         ctx.features[BuildkiteAnnotations].enabled = True
 """
 
-load("../lib/artifacts.axl", "ArtifactsTrait")
 load("../lib/bazel_results.axl", "format_run_date", "html_escape", "now_ms", "render_bes_url", "resolve_aspect_url")
 load(
     "../lib/check_dispatch.axl",
@@ -202,10 +201,6 @@ def _write_annotation(ctx, style, body, context_id):
 def _buildkite_annotations(ctx: FeatureContext):
     lifecycle = ctx.traits[TaskLifecycleTrait]
 
-    # Populated by the ArtifactUpload feature on each task that uploads
-    # — read here so we pick up URLs without per-task threading.
-    artifacts_trait = ctx.traits[ArtifactsTrait]
-
     mode = ctx.args.mode
     is_bk = bool(ctx.std.env.var("BUILDKITE"))
 
@@ -248,7 +243,7 @@ def _buildkite_annotations(ctx: FeatureContext):
             "bes_url": "",
             "results_base_url": workflows_results_url(ctx.std),
         }
-        apply_artifact_links(links, artifacts_trait)
+        apply_artifact_links(ctx, links)
 
         links["aspect_url"] = resolve_aspect_url(links, data)
         links["bes_url"] = render_bes_url(data)

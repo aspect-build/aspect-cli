@@ -21,13 +21,15 @@ load(
     "./rate_limit.axl",
     "BUCKET_APP",
     "BUCKET_ENV",
-    "GitHubApiRateLimitTrait",
     "effective_throttle_factor",
     "export_observations",
     "ingest_sibling_observations",
+    "inspect_for_test",
     "record_from_headers",
     "record_observation",
+    "reset_for_test",
     "seed_from_rate_limit_body",
+    "set_state_for_test",
     "throttle_factor",
     "time_throttle_factor",
     "usage_footer",
@@ -42,19 +44,13 @@ def _assert(label, cond):
         fail("%s: condition false" % label)
 
 def _reset(ctx):
-    """Clear the trait between subtests so each section runs from a
-    known-empty state."""
-    ctx.traits[GitHubApiRateLimitTrait].observations = {BUCKET_APP: [], BUCKET_ENV: []}
-    ctx.traits[GitHubApiRateLimitTrait].sibling_observations = {}
-    ctx.traits[GitHubApiRateLimitTrait].watermark = {BUCKET_APP: None, BUCKET_ENV: None}
-    ctx.traits[GitHubApiRateLimitTrait].limits = {BUCKET_APP: 0, BUCKET_ENV: 0}
-    ctx.traits[GitHubApiRateLimitTrait].last_effective_factor = {BUCKET_APP: 1.0, BUCKET_ENV: 1.0}
-    ctx.traits[GitHubApiRateLimitTrait].last_logged_factor_step = {BUCKET_APP: 1, BUCKET_ENV: 1}
-    ctx.traits[GitHubApiRateLimitTrait].threshold_warned_tier = {BUCKET_APP: 0, BUCKET_ENV: 0}
+    """Clear all rate-limit state between subtests so each
+    section runs from a known-empty starting point."""
+    reset_for_test(ctx)
 
 def _tier(ctx, bucket):
     """Project the trait's `threshold_warned_tier[bucket]` for assertions."""
-    return ctx.traits[GitHubApiRateLimitTrait].threshold_warned_tier.get(bucket, 0)
+    return inspect_for_test(ctx)["threshold_warned_tier"].get(bucket, 0)
 
 # Far-future reset epoch — `time_to_reset` clamps well above the
 # `_TIME_TO_RESET_FLOOR_S` floor, so the safe-burn calc has stable
@@ -64,17 +60,17 @@ _FAR_FUTURE = 9999999999
 def _test_record_basic(ctx):
     _reset(ctx)
     record_observation(ctx, BUCKET_APP, remaining = 4800, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 100.0)
-    obs = ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_APP]
+    obs = inspect_for_test(ctx)["observations"][BUCKET_APP]
     _eq("record_basic — single entry", len(obs), 1)
-    _eq("record_basic — values stored", obs[0], (100.0, 4800, 5000, _FAR_FUTURE))
-    _eq("record_basic — watermark seeded", ctx.traits[GitHubApiRateLimitTrait].watermark[BUCKET_APP], 4800)
-    _eq("record_basic — limit seeded", ctx.traits[GitHubApiRateLimitTrait].limits[BUCKET_APP], 5000)
+    _eq("record_basic — values stored", obs[0], [100.0, 4800, 5000, _FAR_FUTURE])
+    _eq("record_basic — watermark seeded", inspect_for_test(ctx)["watermark"][BUCKET_APP], 4800)
+    _eq("record_basic — limit seeded", inspect_for_test(ctx)["limits"][BUCKET_APP], 5000)
 
 def _test_record_buffer_truncation(ctx):
     _reset(ctx)
     for i in range(25):
         record_observation(ctx, BUCKET_APP, remaining = 5000 - i, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = float(i))
-    obs = ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_APP]
+    obs = inspect_for_test(ctx)["observations"][BUCKET_APP]
     _eq("buffer truncation — capped at 16", len(obs), 16)
 
     # The oldest entry kept is observation index 9 (remaining = 5000-9 = 4991).
@@ -86,7 +82,7 @@ def _test_watermark_monotone_decreasing(ctx):
     record_observation(ctx, BUCKET_APP, remaining = 4800, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 1.0)
     record_observation(ctx, BUCKET_APP, remaining = 3000, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 2.0)
     record_observation(ctx, BUCKET_APP, remaining = 4500, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 3.0)
-    _eq("watermark — tracks the lowest seen", ctx.traits[GitHubApiRateLimitTrait].watermark[BUCKET_APP], 3000)
+    _eq("watermark — tracks the lowest seen", inspect_for_test(ctx)["watermark"][BUCKET_APP], 3000)
 
 def _test_reset_crossing_flushes_buffer(ctx):
     _reset(ctx)
@@ -96,7 +92,7 @@ def _test_reset_crossing_flushes_buffer(ctx):
     # `reset_epoch` jumps +1800s — well past `_RESET_JUMP_S` (600s).
     # Buffer should flush, retaining only the new observation.
     record_observation(ctx, BUCKET_APP, remaining = 4900, limit = 5000, reset_epoch = 2800, epoch_s = 3.0)
-    obs = ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_APP]
+    obs = inspect_for_test(ctx)["observations"][BUCKET_APP]
     _eq("reset crossing — buffer flushed to length 1", len(obs), 1)
     _eq("reset crossing — only newest retained", obs[0][1], 4900)
 
@@ -114,7 +110,7 @@ def _test_reset_crossing_rebaselines_watermark(ctx):
     # Pre-reset: burn down to 100/5000 (98% used) — fires LOW + IMPORTANT.
     record_observation(ctx, BUCKET_APP, remaining = 4500, limit = 5000, reset_epoch = 1000, epoch_s = 1.0)
     record_observation(ctx, BUCKET_APP, remaining = 100, limit = 5000, reset_epoch = 1000, epoch_s = 50.0)
-    _eq("pre-reset — watermark at lowest", ctx.traits[GitHubApiRateLimitTrait].watermark[BUCKET_APP], 100)
+    _eq("pre-reset — watermark at lowest", inspect_for_test(ctx)["watermark"][BUCKET_APP], 100)
     _eq("pre-reset — WARN tier at IMPORTANT", _tier(ctx, BUCKET_APP), 2)
 
     # Reset crossing: reset_epoch jumps from 1000 → 4600 (+3600s,
@@ -122,12 +118,12 @@ def _test_reset_crossing_rebaselines_watermark(ctx):
     record_observation(ctx, BUCKET_APP, remaining = 5000, limit = 5000, reset_epoch = 4600, epoch_s = 100.0)
     _eq(
         "post-reset — watermark re-baselined to fresh remaining",
-        ctx.traits[GitHubApiRateLimitTrait].watermark[BUCKET_APP],
+        inspect_for_test(ctx)["watermark"][BUCKET_APP],
         5000,
     )
     _eq(
         "post-reset — buffer holds only the fresh observation",
-        len(ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_APP]),
+        len(inspect_for_test(ctx)["observations"][BUCKET_APP]),
         1,
     )
     _eq("post-reset — WARN tier cleared", _tier(ctx, BUCKET_APP), 0)
@@ -159,7 +155,7 @@ def _test_effective_factor_records_to_trait(ctx):
     effective_throttle_factor(ctx, BUCKET_APP, elapsed_s = 0, min_interval_s = 10)
     _eq(
         "effective-factor recording — initial 1.0 stored",
-        ctx.traits[GitHubApiRateLimitTrait].last_effective_factor[BUCKET_APP],
+        inspect_for_test(ctx)["last_effective_factor"][BUCKET_APP],
         1.0,
     )
 
@@ -167,7 +163,7 @@ def _test_effective_factor_records_to_trait(ctx):
     effective_throttle_factor(ctx, BUCKET_APP, elapsed_s = 3600, min_interval_s = 10)
     _eq(
         "effective-factor recording — 6× stored after time throttle kicks in",
-        ctx.traits[GitHubApiRateLimitTrait].last_effective_factor[BUCKET_APP],
+        inspect_for_test(ctx)["last_effective_factor"][BUCKET_APP],
         6.0,
     )
 
@@ -202,7 +198,7 @@ def _test_usage_footer_renders_throttle_clause(ctx):
     # has both watermark + factor to render.
     _reset(ctx)
     record_observation(ctx, BUCKET_APP, remaining = 4900, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 1.0)
-    ctx.traits[GitHubApiRateLimitTrait].last_effective_factor = {BUCKET_APP: 1.4, BUCKET_ENV: 1.0}
+    set_state_for_test(ctx, last_effective_factor = {BUCKET_APP: 1.4, BUCKET_ENV: 1.0})
     if ", throttle" in usage_footer(ctx):
         fail("usage_footer at factor=1.4 (rounds to 1×) should suppress throttle clause: %r" % usage_footer(ctx))
 
@@ -234,8 +230,8 @@ def _test_two_bucket_independence(ctx):
     _reset(ctx)
     record_observation(ctx, BUCKET_APP, remaining = 4900, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 1.0)
     record_observation(ctx, BUCKET_ENV, remaining = 40, limit = 1000, reset_epoch = _FAR_FUTURE, epoch_s = 2.0)
-    _eq("two-bucket — app buffer len 1", len(ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_APP]), 1)
-    _eq("two-bucket — env buffer len 1", len(ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_ENV]), 1)
+    _eq("two-bucket — app buffer len 1", len(inspect_for_test(ctx)["observations"][BUCKET_APP]), 1)
+    _eq("two-bucket — env buffer len 1", len(inspect_for_test(ctx)["observations"][BUCKET_ENV]), 1)
 
     # env at 4% (below IMPORTANT) bumps env tier to 2; app at 98% stays at 0.
     _eq("two-bucket — env tier at IMPORTANT", _tier(ctx, BUCKET_ENV), 2)
@@ -355,7 +351,7 @@ def _test_reset_crossing_exact_boundary(ctx):
     record_observation(ctx, BUCKET_APP, remaining = 90, limit = 5000, reset_epoch = 1600, epoch_s = 2.0)
     _eq(
         "reset crossing — exactly +600s preserves prior obs",
-        len(ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_APP]),
+        len(inspect_for_test(ctx)["observations"][BUCKET_APP]),
         2,
     )
 
@@ -363,7 +359,7 @@ def _test_reset_crossing_exact_boundary(ctx):
     record_observation(ctx, BUCKET_APP, remaining = 80, limit = 5000, reset_epoch = 2202, epoch_s = 3.0)
     _eq(
         "reset crossing — +601s flushes prior obs",
-        len(ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_APP]),
+        len(inspect_for_test(ctx)["observations"][BUCKET_APP]),
         1,
     )
 
@@ -411,21 +407,21 @@ def _test_seed_from_rate_limit_body(ctx):
         },
     }
     seed_from_rate_limit_body(ctx, BUCKET_APP, body)
-    obs = ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_APP]
+    obs = inspect_for_test(ctx)["observations"][BUCKET_APP]
     _eq("seed — single entry", len(obs), 1)
     _eq("seed — remaining recorded", obs[0][1], 4900)
     _eq("seed — limit recorded", obs[0][2], 5000)
-    _eq("seed — watermark seeded", ctx.traits[GitHubApiRateLimitTrait].watermark[BUCKET_APP], 4900)
+    _eq("seed — watermark seeded", inspect_for_test(ctx)["watermark"][BUCKET_APP], 4900)
 
     # Malformed body — silent no-op.
     _reset(ctx)
     seed_from_rate_limit_body(ctx, BUCKET_APP, "not a dict")
-    _eq("seed — non-dict body no-ops", len(ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_APP]), 0)
+    _eq("seed — non-dict body no-ops", len(inspect_for_test(ctx)["observations"][BUCKET_APP]), 0)
 
     # Missing resources.core — silent no-op.
     _reset(ctx)
     seed_from_rate_limit_body(ctx, BUCKET_APP, {"resources": {}})
-    _eq("seed — missing core no-ops", len(ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_APP]), 0)
+    _eq("seed — missing core no-ops", len(inspect_for_test(ctx)["observations"][BUCKET_APP]), 0)
 
 def _test_record_from_headers(ctx):
     """Header-list parsing path: case-insensitive name lookup, lenient
@@ -446,7 +442,7 @@ def _test_record_from_headers(ctx):
         ],
         epoch_s = 5.0,
     )
-    obs = ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_APP]
+    obs = inspect_for_test(ctx)["observations"][BUCKET_APP]
     _eq("headers — single observation recorded", len(obs), 1)
     _eq("headers — remaining parsed", obs[0][1], 4900)
     _eq("headers — limit parsed", obs[0][2], 5000)
@@ -455,17 +451,17 @@ def _test_record_from_headers(ctx):
     # No `X-RateLimit-Remaining` → silent no-op (non-GitHub response).
     _reset(ctx)
     record_from_headers(ctx, BUCKET_APP, [("Content-Type", "text/html")])
-    _eq("headers — no x-ratelimit-* no-ops", len(ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_APP]), 0)
+    _eq("headers — no x-ratelimit-* no-ops", len(inspect_for_test(ctx)["observations"][BUCKET_APP]), 0)
 
     # Empty header list → silent no-op.
     _reset(ctx)
     record_from_headers(ctx, BUCKET_APP, [])
-    _eq("headers — empty list no-ops", len(ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_APP]), 0)
+    _eq("headers — empty list no-ops", len(inspect_for_test(ctx)["observations"][BUCKET_APP]), 0)
 
     # None headers → silent no-op (e.g. transport error returns no response object).
     _reset(ctx)
     record_from_headers(ctx, BUCKET_APP, None)
-    _eq("headers — None no-ops", len(ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_APP]), 0)
+    _eq("headers — None no-ops", len(inspect_for_test(ctx)["observations"][BUCKET_APP]), 0)
 
     # Malformed limit string → silent no-op (limit ≤ 0 fails the validation
     # in record_observation, so the observation never lands).
@@ -475,7 +471,7 @@ def _test_record_from_headers(ctx):
         ("X-RateLimit-Limit", "not-a-number"),
         ("X-RateLimit-Reset", "1700000000"),
     ])
-    _eq("headers — malformed limit no-ops", len(ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_APP]), 0)
+    _eq("headers — malformed limit no-ops", len(inspect_for_test(ctx)["observations"][BUCKET_APP]), 0)
 
 def _test_record_validation(ctx):
     """`record_observation` silently rejects bad inputs so callers
@@ -484,24 +480,25 @@ def _test_record_validation(ctx):
 
     # Unknown bucket → no-op.
     record_observation(ctx, "unknown-bucket", remaining = 100, limit = 1000, reset_epoch = _FAR_FUTURE, epoch_s = 1.0)
-    _eq("validation — unknown bucket app empty", len(ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_APP]), 0)
-    _eq("validation — unknown bucket env empty", len(ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_ENV]), 0)
+    _eq("validation — unknown bucket app empty", len(inspect_for_test(ctx)["observations"][BUCKET_APP]), 0)
+    _eq("validation — unknown bucket env empty", len(inspect_for_test(ctx)["observations"][BUCKET_ENV]), 0)
 
     # Zero limit → no-op (can't meaningfully compute a fraction).
     _reset(ctx)
     record_observation(ctx, BUCKET_APP, remaining = 100, limit = 0, reset_epoch = _FAR_FUTURE, epoch_s = 1.0)
-    _eq("validation — zero limit no-ops", len(ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_APP]), 0)
+    _eq("validation — zero limit no-ops", len(inspect_for_test(ctx)["observations"][BUCKET_APP]), 0)
 
     # Negative limit → no-op (same reasoning).
     _reset(ctx)
     record_observation(ctx, BUCKET_APP, remaining = 100, limit = -5, reset_epoch = _FAR_FUTURE, epoch_s = 1.0)
-    _eq("validation — negative limit no-ops", len(ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_APP]), 0)
+    _eq("validation — negative limit no-ops", len(inspect_for_test(ctx)["observations"][BUCKET_APP]), 0)
 
-def _test_throttle_factor_no_trait(ctx):
-    """`throttle_factor` on a ctx without `GitHubApiRateLimitTrait` (test stubs)
-    returns 1.0 so the caller's heartbeat cadence is unaffected."""
-    fake_ctx = struct(std = struct(env = struct(var = lambda _name: "")))
-    _eq("no-trait — factor is 1.0", throttle_factor(fake_ctx, BUCKET_APP), 1.0)
+def _test_throttle_factor_empty_state(ctx):
+    """`throttle_factor` with no recorded observations (the moment a
+    task starts, before any GitHub API call) returns 1.0 so the
+    caller's heartbeat cadence is unaffected."""
+    _reset(ctx)
+    _eq("empty-state — factor is 1.0", throttle_factor(ctx, BUCKET_APP), 1.0)
 
 def _test_throttle_factor_exhausted(ctx):
     """With ≥ 2 observations and `remaining == 0`, the factor returns
@@ -540,21 +537,21 @@ def _test_seed_from_rate_limit_body_edge_cases(ctx):
     # Missing `resources` key entirely.
     _reset(ctx)
     seed_from_rate_limit_body(ctx, BUCKET_APP, {})
-    _eq("seed edge — missing resources no-ops", len(ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_APP]), 0)
+    _eq("seed edge — missing resources no-ops", len(inspect_for_test(ctx)["observations"][BUCKET_APP]), 0)
 
     # `resources.core.remaining = -1` (sentinel for unset in our parser).
     _reset(ctx)
     seed_from_rate_limit_body(ctx, BUCKET_APP, {
         "resources": {"core": {"limit": 5000, "remaining": -1, "reset": _FAR_FUTURE}},
     })
-    _eq("seed edge — negative remaining no-ops", len(ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_APP]), 0)
+    _eq("seed edge — negative remaining no-ops", len(inspect_for_test(ctx)["observations"][BUCKET_APP]), 0)
 
     # `resources.core.limit = 0` (invalid; can't compute fraction).
     _reset(ctx)
     seed_from_rate_limit_body(ctx, BUCKET_APP, {
         "resources": {"core": {"limit": 0, "remaining": 100, "reset": _FAR_FUTURE}},
     })
-    _eq("seed edge — zero limit no-ops", len(ctx.traits[GitHubApiRateLimitTrait].observations[BUCKET_APP]), 0)
+    _eq("seed edge — zero limit no-ops", len(inspect_for_test(ctx)["observations"][BUCKET_APP]), 0)
 
 def _test_usage_footer(ctx):
     """`usage_footer` is App-bucket-only — env-bucket pressure is
@@ -599,9 +596,9 @@ def _test_usage_footer(ctx):
     if "GITHUB_TOKEN" in footer or "900/1,000" in footer:
         fail("usage_footer — App + env: env payload must NOT appear in surface footer: %r" % footer)
 
-    # No-traits ctx → "" (test stubs that don't carry GitHubApiRateLimitTrait).
-    fake_ctx = struct(std = struct())
-    _eq("usage_footer — no-traits ctx → empty string", usage_footer(fake_ctx), "")
+    # Empty state → "" (the moment a task starts, before any HTTP call).
+    _reset(ctx)
+    _eq("usage_footer — empty state → empty string", usage_footer(ctx), "")
 
 def _test_time_throttle_factor_sliding_scale(ctx):
     """Verify the time-based sliding-scale throttle:
@@ -675,7 +672,7 @@ def _test_ingest_sibling_observations(ctx):
     }
     ingest_sibling_observations(ctx, "sibling-a", sibling_a)
 
-    sib = ctx.traits[GitHubApiRateLimitTrait].sibling_observations
+    sib = inspect_for_test(ctx)["sibling_observations"]
     _eq("ingest — sibling slice keyed by id", list(sib.keys()), ["sibling-a"])
     _eq("ingest — app bucket observations stored", len(sib["sibling-a"][BUCKET_APP]), 2)
 
@@ -687,17 +684,17 @@ def _test_ingest_sibling_observations(ctx):
         ],
     }
     ingest_sibling_observations(ctx, "sibling-a", sibling_a_v2)
-    sib = ctx.traits[GitHubApiRateLimitTrait].sibling_observations
+    sib = inspect_for_test(ctx)["sibling_observations"]
     _eq("ingest — overwrite by sibling_id", len(sib["sibling-a"][BUCKET_APP]), 1)
 
     # Malformed inputs silently no-op.
     _reset(ctx)
     ingest_sibling_observations(ctx, "", {BUCKET_APP: [{"epoch_s": 1, "remaining": 1, "limit": 1, "reset_epoch": 1}]})
-    _eq("ingest — empty sibling_id no-ops", ctx.traits[GitHubApiRateLimitTrait].sibling_observations, {})
+    _eq("ingest — empty sibling_id no-ops", inspect_for_test(ctx)["sibling_observations"], {})
     ingest_sibling_observations(ctx, "sibling-b", "not a dict")
-    _eq("ingest — non-dict payload no-ops", ctx.traits[GitHubApiRateLimitTrait].sibling_observations, {})
+    _eq("ingest — non-dict payload no-ops", inspect_for_test(ctx)["sibling_observations"], {})
     ingest_sibling_observations(ctx, "sibling-b", {BUCKET_APP: [{"remaining": -1, "limit": 100}]})
-    _eq("ingest — negative remaining filtered", ctx.traits[GitHubApiRateLimitTrait].sibling_observations, {})
+    _eq("ingest — negative remaining filtered", inspect_for_test(ctx)["sibling_observations"], {})
 
 def _test_merged_view_drives_throttle_factor(ctx):
     """A task with a single local observation falls back to the
@@ -767,7 +764,7 @@ def _test_impl(ctx):
     _test_two_bucket_independence(ctx)
     _test_threshold_factor_ladder(ctx)
     _test_throttle_factor_floor(ctx)
-    _test_throttle_factor_no_trait(ctx)
+    _test_throttle_factor_empty_state(ctx)
     _test_throttle_factor_exhausted(ctx)
     _test_throttle_factor_burn_rate_inference(ctx)
     _test_burn_rate_falls_back_on_degenerate_inputs(ctx)
@@ -796,5 +793,5 @@ rate_limit_tests = task(
     group = ["dev"],
     implementation = _test_impl,
     args = {},
-    traits = [GitHubApiRateLimitTrait],
+    traits = [],
 )

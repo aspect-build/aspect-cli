@@ -587,7 +587,7 @@ def setup_phase(ctx, lifecycle):
     )
 
 def _probe_rate_limit_quota(ctx):
-    """Seed `GitHubApiRateLimitTrait` with a fresh `GET /rate_limit` snapshot
+    """Seed lib/rate_limit.axl's per-task state with a fresh `GET /rate_limit` snapshot
     before the task starts spending tokens. The probe is free
     (doesn't count against the primary quota) and lets `throttle_factor`
     fall back to threshold-based rather than no-data behavior for

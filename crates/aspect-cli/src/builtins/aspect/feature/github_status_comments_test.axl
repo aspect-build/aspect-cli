@@ -64,8 +64,7 @@ load(
 )
 load("../lib/bazel_results.axl", "compute_reproducer_command")
 load("../lib/github.axl", "github")
-load("../lib/rate_limit.axl", "GitHubApiRateLimitTrait")
-load("../lib/tips.axl", "TipsTrait")
+load("../lib/tips.axl", "tips")
 
 def _eq(label, got, want):
     if got != want:
@@ -406,8 +405,8 @@ def _check_collect_tip_rows(ctx):
     by_id = {r["id"]: r for r in rows}
     if by_id["c"]["silence_hint"] != "":
         fail("collect_tip_rows: important row must have empty silence_hint")
-    if "silenced_tips" not in by_id["s"]["silence_hint"]:
-        fail("collect_tip_rows: suggestion row must reference silenced_tips in silence_hint")
+    if "tips" not in by_id["s"]["silence_hint"] or "silence" not in by_id["s"]["silence_hint"]:
+        fail("collect_tip_rows: suggestion row must reference the tips silence knob in silence_hint")
 
     # Multi-accumulator cross-task merge: two tasks each emit the
     # `add-github-token-scope` JINJA2 tip with distinct scopes and
@@ -1721,5 +1720,5 @@ pr_comment_snapshot_tests = task(
     group = ["dev"],
     implementation = _test_impl,
     args = {},
-    traits = [GitHubApiRateLimitTrait, TipsTrait],
+    traits = tips.TRAITS,
 )

@@ -43,7 +43,7 @@ load(
     "render_bes_url",
     "resolve_aspect_url",
 )
-load("../lib/checkrun.axl", "GitHubCheckRunTrait")
+load("../lib/checkrun.axl", "checkrun")
 load("../lib/ci.axl", "detect_build_url")
 load("../lib/environment.axl", "feature_logger", "workflows_results_url")
 load("../lib/github.axl", "github")
@@ -947,9 +947,8 @@ def _merge_state(existing_state, head_sha, my_run_id, my_workflow_name, my_entri
 def _github_status_comments(ctx: FeatureContext):
     lifecycle = ctx.traits[TaskLifecycleTrait]
 
-    # The GHSC check-run feature populates html_url after its API
-    # call; empty until then.
-    checkrun_trait = ctx.traits[GitHubCheckRunTrait]
+    # The GHSC check-run feature publishes the URL after its API call
+    # via `checkrun.set_url`; `checkrun.url(ctx)` returns "" until then.
 
     mode = ctx.args.mode
     is_ci = bool(ctx.std.env.var("CI"))
@@ -1002,7 +1001,7 @@ def _github_status_comments(ctx: FeatureContext):
             0,  # elapsed_ms
             "",  # aspect_url
             "",  # bes_url
-            checkrun_trait.html_url,  # check_run_url
+            checkrun.url(ctx),  # check_run_url
             "",  # current_phase
             0,  # current_phase_elapsed_ms
             None,  # progress_styles
@@ -1059,10 +1058,11 @@ def _github_status_comments(ctx: FeatureContext):
         }
         payload.update(_state.get("_results_subset") or _empty_results_subset())
 
-        # Re-read each publish — the check-run feature populates
-        # html_url asynchronously, after the first bazel_results update.
-        if checkrun_trait.html_url:
-            payload["check_run_url"] = checkrun_trait.html_url
+        # Re-read each publish — the check-run feature publishes the
+        # URL asynchronously, after the first bazel_results update.
+        check_run_url = checkrun.url(ctx)
+        if check_run_url:
+            payload["check_run_url"] = check_run_url
         return payload
 
     def _publish_self(ctx, token):
@@ -1545,7 +1545,7 @@ def _github_status_comments(ctx: FeatureContext):
                 ctx.task.elapsed_ms,
                 aspect_url,
                 bes_url,
-                checkrun_trait.html_url,
+                checkrun.url(ctx),
                 cur.name if cur else "",
                 cur.duration_ms if cur else 0,
                 _state.get("_progress_styles"),

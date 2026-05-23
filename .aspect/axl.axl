@@ -28,7 +28,7 @@ load("@aspect//lib/repro_commands.axl", "build_aspect_command", "dedup_and_attri
 load("@aspect//lib/result_text.axl", "severity_for_status")
 load("@aspect//lib/runnable.axl", "canonical_label", "runnable")
 load("@aspect//lib/sarif.axl", "get_sarif_summary", "parse_sarif", "parse_sarif_diagnostics", "sarif_to_review_comments")
-load("@aspect//lib/tips.axl", "TipsTrait")
+load("@aspect//lib/tips.axl", "tips")
 load("@aspect//lint.axl", "file_uri_to_path", "filter_all", "filter_changeset")
 load("@demo//answer.axl", "ANSWER")
 load("./lambda.axl", "lambda_with_global_bind")
@@ -3063,10 +3063,10 @@ axl = task(
     group = ["tests"],
     implementation = impl,
     args = {},
-    # TipsTrait must be in the trait list because several tested
+    # tips.TRAITS must be in the trait list because several tested
     # helpers (`detect_build_url`, `_preferred_token_pair`, …) emit
-    # tips on certain env-state branches and `add_tip` reads
-    # `ctx.traits[TipsTrait]`. The tip emit is dedup-by-id so the
-    # test run sees at most one fire per id.
-    traits = [TipsTrait],
+    # tips on certain env-state branches and `add_tip` dispatches
+    # through the underlying trait. The tip emit is dedup-by-id so
+    # the test run sees at most one fire per id.
+    traits = tips.TRAITS,
 )

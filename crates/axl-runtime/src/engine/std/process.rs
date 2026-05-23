@@ -58,6 +58,18 @@ pub(crate) fn process_methods(registry: &mut MethodsBuilder) {
             inner: RefCell::new(process::Command::new(program.as_str())),
         })
     }
+
+    /// Return the current (aspect-cli) process's ID. Stable for the
+    /// lifetime of this AXL evaluator and unique within the host OS
+    /// at any given moment, so it's a useful per-task identifier for
+    /// state files under the shared job tmpdir: each task invocation
+    /// gets its own aspect-cli process and therefore its own id.
+    /// Available from any ctx flavor (FeatureContext / TaskContext)
+    /// — `ctx.std` is on both, and `id()` doesn't depend on a task
+    /// being in scope.
+    fn id<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<i32> {
+        Ok(process::id() as i32)
+    }
 }
 
 #[derive(Debug, Display, Trace, ProvidesStaticType, NoSerialize, Allocative)]

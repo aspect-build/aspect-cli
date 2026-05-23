@@ -1214,7 +1214,7 @@ def now_ms(ctx):
 #   status    — "running" | "failing" | "passed" | "failed"
 #   render_ctx — feature-supplied display context (see render_check_output docstring)
 #   links     — dict with keys ci_label, ci_url, aspect_url, bes_invocation_url
-#   templates — optional override dict from GitHubStatusChecksTrait.templates
+#   templates — optional override dict from the GHSC feature's `templates` arg
 #   metadata_keys — optional list of extra BES metadata keys to surface
 # ---------------------------------------------------------------------------
 
@@ -2881,7 +2881,7 @@ def build_invocation_rows(ctx, data, render_ctx, status, links = None, run_date 
     # Row 6 — taxonomy: custom links · tags · operator-pinned metadata
     # 🏷 carries repo-defined tags (TAGS + TAG_*); 📌 carries the
     # operator-selected subset of arbitrary `--build_metadata=K=V`
-    # entries surfaced via `GitHubStatusChecksTrait.metadata_keys`.
+    # entries surfaced via the GHSC feature's `metadata_keys` arg.
     # ------------------------------------------------------------------
     row6 = []
     for lnk in parse_workflows_links(meta):
@@ -3837,11 +3837,12 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
     artifact_urls = links.get("artifact_urls", {}) or {}
 
     # Per-artifact-kind download links, stable ordering. Each link is
-    # only rendered when the URL is actually populated in
-    # `ArtifactsTrait.artifact_urls`, so kinds the current task didn't
-    # produce are silently omitted. The format/gazelle/lint patch
-    # entries here mirror the keys written by `feature/artifacts.axl`
-    # ("testlogs"/"profile"/"execlog"/"bep") and the in-task patch
+    # only rendered when the URL is actually populated by the artifacts
+    # registry (`artifacts.by_kind(ctx)`, surfaced via
+    # `apply_artifact_links`), so kinds the current task didn't produce
+    # are silently omitted. The kinds rendered here mirror those
+    # appended by the artifact-upload feature in `lib/artifacts.axl`
+    # ("testlogs"/"profile"/"execlog"/"bep") and the per-task patch
     # uploaders (`format.axl::_try_upload_format_diff` and the gazelle
     # equivalent), which write `format_diff` / `gazelle_diff`.
     artifact_links = []

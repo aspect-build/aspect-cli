@@ -66,11 +66,13 @@ load("../lib/result_text.axl", "severity_for_status")
 # ─── Test harness ─────────────────────────────────────────────────────────────
 
 def _bk_links():
-    # Mirror the live wiring: ArtifactsTrait fields are surfaced into the
-    # links dict by `_make_links` in the BK feature whenever the running
-    # task uploaded artifacts via the ArtifactUpload feature. The snapshot
-    # exercises that path so renderer regressions in the Artifacts row /
-    # Artifacts detail block trip a visible diff.
+    # Mirror the live wiring: the artifact URLs surfaced via the
+    # `artifacts` wrapper (lib/artifacts.axl) are projected into the
+    # links dict by `_make_links` -> `apply_artifact_links` in the BK
+    # feature whenever the running task uploaded artifacts via the
+    # ArtifactUpload feature. The snapshot exercises that path so
+    # renderer regressions in the Artifacts row / Artifacts detail
+    # block trip a visible diff.
     return {
         "ci_label": "Buildkite",
         "ci_url": "https://buildkite.com/aspect-build/silo-aws/builds/49508/steps/canvas?sid=s1",

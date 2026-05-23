@@ -3,14 +3,11 @@ A default 'build' task that wraps a 'bazel build' command.
 """
 
 load("./bazel.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
-load("./feature/github_status_checks.axl", "GitHubStatusChecksTrait")
-load("./lib/artifacts.axl", "ArtifactsTrait")
+load("./lib/artifacts.axl", "artifacts")
 load("./lib/bazel_runner.axl", "run_bazel_task")
-load("./lib/checkrun.axl", "GitHubCheckRunTrait")
 load("./lib/health_check.axl", "HealthCheckTrait")
 load("./lib/lifecycle.axl", "TaskLifecycleTrait")
-load("./lib/rate_limit.axl", "GitHubApiRateLimitTrait")
-load("./lib/tips.axl", "TipsTrait")
+load("./lib/tips.axl", "tips")
 
 def _impl(ctx: TaskContext) -> int | TaskConclusion:
     return run_bazel_task(ctx, command = "build")
@@ -59,14 +56,9 @@ build = task(
         ),
     },
     traits = [
-        ArtifactsTrait,
         BazelTrait,
-        GitHubCheckRunTrait,
-        GitHubStatusChecksTrait,
         HealthCheckTrait,
-        GitHubApiRateLimitTrait,
         TaskLifecycleTrait,
-        TipsTrait,
-    ],
+    ] + artifacts.TRAITS + tips.TRAITS,
     implementation = _impl,
 )

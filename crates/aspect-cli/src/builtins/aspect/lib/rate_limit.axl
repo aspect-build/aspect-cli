@@ -157,35 +157,72 @@ _TIME_TO_RESET_FLOOR_S = 60
 # yielding to terminal-only cadence.
 _RESERVE_FRACTION = 0.20
 
-# ── Trait ────────────────────────────────────────────────────────────
+# ── Per-task state (file pattern) ───────────────────────────────────
+#
+# Rate-limit state has no single feature owner (every HTTP caller is a
+# peer participant) and cross-task swarm aggregation is intrinsic to
+# the design (siblings export observations onto a per-job artifact;
+# we ingest them here). That's the textbook case for the file-pattern
+# (Pattern 3 in DEVELOPMENT.md): tmpdir + record + json.encode/decode.
+#
+# Each public function in this module loads the state at entry,
+# mutates as needed, and saves at exit. Internal helpers take the
+# loaded state as an argument so a single API call performs one
+# read + one write rather than a load-modify-save cycle per helper.
+#
+# Performance: every HTTP response funnels through `record_from_headers`,
+# so a long-running task with hundreds of API calls will load + save
+# hundreds of times. The file is ~kilobytes, page cache stays warm,
+# and AXL evaluation is single-threaded — measured cost is negligible.
+# If a profile flags this as a hotspot, the natural next move is a
+# per-invocation in-memory cache backed by rusqlite/Turso keyed by
+# task identity (the same hint the other libraries carry).
 
-GitHubApiRateLimitTrait = trait(
-    # Per-bucket ring buffer (cap `_RING_SIZE`) of `(epoch_s, remaining,
-    # limit, reset_epoch)` tuples. Wall-clock epoch on the time axis
-    # so observations stay meaningful when ingested by a sibling task.
-    observations = attr(dict, default = {"app": [], "env": []}),
-    # `{sibling_id: {bucket: [observation, ...]}}`. Written by
-    # `ingest_sibling_observations`; read into the merged view by
-    # `_merged_observations`. Re-ingest under the same `sibling_id`
-    # overwrites — at most one slice per sibling.
-    sibling_observations = attr(dict, default = {}),
-    # Per-bucket lowest `remaining` seen this task. Drives the
-    # `% used` arithmetic in `usage_footer`.
-    watermark = attr(dict, default = {"app": None, "env": None}),
-    # Per-bucket last-seen `limit` — the denominator in `usage_footer`.
-    limits = attr(dict, default = {"app": 0, "env": 0}),
-    # Per-bucket most recent `effective_throttle_factor` result. Read
-    # by `usage_footer` to render the `, throttle N×` clause.
-    last_effective_factor = attr(dict, default = {"app": 1.0, "env": 1.0}),
-    # Per-bucket last coarse step (1 / 2 / 5 / 999999) we logged an
-    # `INFO: GitHub API throttle …` transition for. Step-bucketing
-    # avoids spamming the log during the linear ramp of
-    # `time_throttle_factor`.
-    last_logged_factor_step = attr(dict, default = {"app": 1, "env": 1}),
-    # Per-bucket highest WARN tier already emitted (0 / LOW /
-    # IMPORTANT). See `_check_thresholds`.
-    threshold_warned_tier = attr(dict, default = {"app": 0, "env": 0}),
-)
+# State is a plain dict, not a `record`, because the rate-limit code
+# mutates many fields per call and AXL records are immutable (field
+# reassignment errors with `Operation .X= not supported`). Schema:
+#
+#   observations             {bucket: [[epoch_s, remaining, limit, reset_epoch], ...]}
+#   sibling_observations     {sibling_id: {bucket: [observation, ...]}}
+#   watermark                {bucket: int | None}  — lowest remaining seen
+#   limits                   {bucket: int}          — latest limit
+#   last_effective_factor    {bucket: float}
+#   last_logged_factor_step  {bucket: int}          — for log dedup
+#   threshold_warned_tier    {bucket: int}          — 0 / LOW / IMPORTANT
+
+def _new_state():
+    return {
+        "observations": {"app": [], "env": []},
+        "sibling_observations": {},
+        "watermark": {"app": None, "env": None},
+        "limits": {"app": 0, "env": 0},
+        "last_effective_factor": {"app": 1.0, "env": 1.0},
+        "last_logged_factor_step": {"app": 1, "env": 1},
+        "threshold_warned_tier": {"app": 0, "env": 0},
+    }
+
+def _path(ctx):
+    # Task-scoped path: `<job-tmpdir>/rate_limit/<id>.json`. Each task
+    # invocation runs as its own aspect-cli process, so the current
+    # process id is a per-task identifier — and it's available from
+    # any ctx flavor (`ctx.std.process.id()` doesn't require a
+    # TaskContext-scoped `ctx.task` field, unlike `ctx.task.key`).
+    # Cross-task aggregation (swarm) flows through the explicit
+    # `export_observations` / `ingest_sibling_observations` API,
+    # not through the tmpdir file.
+    base = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_JOB_TMPDIR") or ctx.std.env.temp_dir()
+    return base + "/rate_limit/" + str(ctx.std.process.id()) + ".json"
+
+def _load(ctx):
+    path = _path(ctx)
+    if not ctx.std.fs.exists(path):
+        return _new_state()
+    return json.decode(ctx.std.fs.read_to_string(path))
+
+def _save(ctx, state):
+    path = _path(ctx)
+    ctx.std.fs.create_dir_all(path.rsplit("/", 1)[0])
+    ctx.std.fs.write(path, json.encode(state))
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -281,9 +318,9 @@ def record_observation(ctx, bucket, remaining, limit, reset_epoch, epoch_s = Non
         return
     if epoch_s == None:
         epoch_s = epoch_now_s(ctx.std)
-    trait = ctx.traits[GitHubApiRateLimitTrait]
+    state = _load(ctx)
 
-    buf = list(trait.observations.get(bucket, []) or [])
+    buf = list(state["observations"].get(bucket, []) or [])
 
     # On reset crossing the fresh window is a fresh accounting period:
     # flush the ring (burn-rate math across the boundary is nonsense),
@@ -295,51 +332,56 @@ def record_observation(ctx, bucket, remaining, limit, reset_epoch, epoch_s = Non
         last_reset = buf[-1][3]
         if last_reset and reset_epoch > last_reset + _RESET_JUMP_S:
             buf = []
-            _reset_bucket_state(trait, bucket)
+            _reset_bucket_state(state, bucket)
 
     is_first = len(buf) == 0
-    buf.append((epoch_s, remaining, limit, reset_epoch))
+
+    # Stored as a list (not tuple) so it round-trips through json.encode.
+    buf.append([epoch_s, remaining, limit, reset_epoch])
     if len(buf) > _RING_SIZE:
         buf = buf[-_RING_SIZE:]
-    obs = dict(trait.observations)
+    obs = dict(state["observations"])
     obs[bucket] = buf
-    trait.observations = obs
+    state["observations"] = obs
 
     # Limit can shift mid-task when GitHub bumps an installation's
     # quota; track the latest.
-    lims = dict(trait.limits)
+    lims = dict(state["limits"])
     lims[bucket] = limit
-    trait.limits = lims
+    state["limits"] = lims
 
     # Watermark — monotonically non-increasing across the task.
-    wm = dict(trait.watermark)
+    wm = dict(state["watermark"])
     cur = wm.get(bucket)
     if cur == None or remaining < cur:
         wm[bucket] = remaining
-        trait.watermark = wm
+        state["watermark"] = wm
+
+    _check_thresholds_in_state(ctx, state, bucket, remaining, limit, reset_epoch)
+    _save(ctx, state)
 
     # Log the starting-quota line on the first observation per bucket
     # (for App: the setup-phase probe; for env: first 4xx-auth
     # fallback). Reset-crossing flushes count as "first" so the new
-    # window's quota is re-logged on long-running tasks.
+    # window's quota is re-logged on long-running tasks. Logged after
+    # save so the I/O doesn't sit between observation and the next op.
     if is_first:
         _log_rate_limit_quota(ctx, bucket, remaining, limit, reset_epoch)
 
-    _check_thresholds(ctx, bucket, remaining, limit, reset_epoch)
-
-def _reset_bucket_state(trait, bucket):
+def _reset_bucket_state(state, bucket):
     """Reset the per-bucket state that's window-scoped (watermark,
-    threshold-warned tier) when a reset crossing is detected. Leaves
-    `last_effective_factor` and `last_logged_factor_step` alone —
-    those self-correct on the next `effective_throttle_factor` call
-    once `_merged_observations` reflects the post-reset numbers."""
-    wm = dict(trait.watermark)
+    threshold-warned tier) when a reset crossing is detected. Mutates
+    `state` in place; the caller saves. Leaves `last_effective_factor`
+    and `last_logged_factor_step` alone — those self-correct on the
+    next `effective_throttle_factor` call once `_merged_observations`
+    reflects the post-reset numbers."""
+    wm = dict(state["watermark"])
     wm[bucket] = None
-    trait.watermark = wm
+    state["watermark"] = wm
 
-    tiers = dict(trait.threshold_warned_tier or {})
+    tiers = dict(state["threshold_warned_tier"] or {})
     tiers[bucket] = _THRESHOLD_TIER_NONE
-    trait.threshold_warned_tier = tiers
+    state["threshold_warned_tier"] = tiers
 
 def record_from_headers(ctx, bucket, headers, epoch_s = None):
     """Parse `X-RateLimit-*` headers and forward to `record_observation`.
@@ -361,27 +403,26 @@ def record_from_headers(ctx, bucket, headers, epoch_s = None):
 
 # ── Threshold warnings ───────────────────────────────────────────────
 
-# Tier ordinals stored on `GitHubApiRateLimitTrait.threshold_warned_tier`
+# Tier ordinals stored on `_State.threshold_warned_tier`
 # so each LOW / IMPORTANT WARN fires at most once per bucket per task.
 _THRESHOLD_TIER_NONE = 0
 _THRESHOLD_TIER_LOW = 1
 _THRESHOLD_TIER_IMPORTANT = 2
 
-def _check_thresholds(ctx, bucket, remaining, limit, reset_epoch):
+def _check_thresholds_in_state(ctx, state, bucket, remaining, limit, reset_epoch):
     """Emit a CLI `WARN` line the first time a bucket crosses LOW
     (≤ 20%) and again the first time it crosses IMPORTANT (≤ 5%).
-    Dedup via the trait's `threshold_warned_tier[bucket]` int. A
-    first observation already below 5% fires both tiers on the same
-    call so the log shows the same escalation as a sequential crossing.
+    Dedup via `state["threshold_warned_tier"][bucket]`. A first
+    observation already below 5% fires both tiers on the same call
+    so the log shows the same escalation as a sequential crossing.
+
+    Mutates `state["threshold_warned_tier"]` in place; the caller saves.
 
     Logs only — there's nothing actionable a reviewer can do mid-run,
     so the warning is kept out of the GHSC / BK / PR-comment surfaces;
     the `📊 GitHub API quota …` footer rendered by `usage_footer` is
     enough surface signal."""
-    if not hasattr(ctx, "traits"):
-        return
-    trait = ctx.traits[GitHubApiRateLimitTrait]
-    tiers = trait.threshold_warned_tier or {}
+    tiers = state["threshold_warned_tier"] or {}
     current_tier = tiers.get(bucket, _THRESHOLD_TIER_NONE)
 
     fraction = _percent_remaining(remaining, limit)
@@ -410,7 +451,7 @@ def _check_thresholds(ctx, bucket, remaining, limit, reset_epoch):
     if next_tier != current_tier:
         new_tiers = dict(tiers)
         new_tiers[bucket] = next_tier
-        trait.threshold_warned_tier = new_tiers
+        state["threshold_warned_tier"] = new_tiers
 
 # ── Throttle factor ──────────────────────────────────────────────────
 
@@ -439,11 +480,15 @@ def throttle_factor(ctx, bucket, now_epoch_s = None):
     clock so the `time_to_reset` calculation is reproducible. In
     production, callers omit it and the function reads the real
     clock via `epoch_now_s(ctx.std)`."""
-    if not hasattr(ctx, "traits"):
-        return 1.0
-    obs = _merged_observations(ctx, bucket)
+    return _throttle_factor_from_state(_load(ctx), bucket, now_epoch_s, ctx.std)
+
+def _throttle_factor_from_state(state, bucket, now_epoch_s, std):
+    """Pure version of `throttle_factor` that operates on already-loaded
+    state. `effective_throttle_factor` uses this so it doesn't load the
+    state file twice in one call."""
+    obs = _merged_observations_from_state(state, bucket)
     if len(obs) >= 2:
-        clock = now_epoch_s if now_epoch_s != None else epoch_now_s(ctx.std)
+        clock = now_epoch_s if now_epoch_s != None else epoch_now_s(std)
         factor = _burn_rate_factor(obs, clock)
         if factor != None:
             return factor
@@ -459,6 +504,13 @@ def throttle_factor(ctx, bucket, now_epoch_s = None):
 _MERGED_RING_CAP = 32
 
 def _merged_observations(ctx, bucket):
+    """Public version — loads state and delegates. Renderers /
+    callers that need the merged view but don't have state in hand
+    use this; internal helpers that already have state use
+    `_merged_observations_from_state` to avoid a redundant load."""
+    return _merged_observations_from_state(_load(ctx), bucket)
+
+def _merged_observations_from_state(state, bucket):
     """Return own + sibling observations for `bucket`, sorted by
     `epoch_s` ascending, capped at the most recent `_MERGED_RING_CAP`.
 
@@ -469,12 +521,9 @@ def _merged_observations(ctx, bucket):
     in `record_observation`; sibling buffers naturally roll forward
     on each ingest, so the merged view stays coherent post-reset
     after one swarm-wide poll cycle."""
-    if not hasattr(ctx, "traits"):
-        return []
-    trait = ctx.traits[GitHubApiRateLimitTrait]
-    own = list(trait.observations.get(bucket, []) or [])
+    own = list(state["observations"].get(bucket, []) or [])
     merged = list(own)
-    siblings = trait.sibling_observations or {}
+    siblings = state["sibling_observations"] or {}
     for sibling_obs in siblings.values():
         merged.extend(sibling_obs.get(bucket, []) or [])
     if not merged:
@@ -496,13 +545,11 @@ def export_observations(ctx):
     no convergence benefit; every task already gets the same source
     obs from the originating sibling).
 
-    Returns `{}` when the trait is absent (test stubs) or empty."""
-    if not hasattr(ctx, "traits"):
-        return {}
-    trait = ctx.traits[GitHubApiRateLimitTrait]
+    Returns `{}` when no observations have been recorded yet."""
+    state = _load(ctx)
     out = {}
     for bucket in _VALID_BUCKETS:
-        bucket_obs = trait.observations.get(bucket, []) or []
+        bucket_obs = state["observations"].get(bucket, []) or []
         if not bucket_obs:
             continue
         out[bucket] = [
@@ -527,8 +574,6 @@ def ingest_sibling_observations(ctx, sibling_id, observations_by_bucket):
     path (`record_observation`) — sibling ingest only feeds the merged
     view that drives `throttle_factor` and `usage_footer`'s reset
     countdown."""
-    if not hasattr(ctx, "traits"):
-        return
     if not sibling_id or type(observations_by_bucket) != "dict":
         return
     parsed = {}
@@ -542,25 +587,28 @@ def ingest_sibling_observations(ctx, sibling_id, observations_by_bucket):
             l = o.get("limit", 0)
             if r < 0 or l <= 0:
                 continue
-            bucket_obs.append((
+
+            # Stored as a list (not tuple) for JSON round-trip stability.
+            bucket_obs.append([
                 float(o.get("epoch_s", 0)),
                 int(r),
                 int(l),
                 int(o.get("reset_epoch", 0)),
-            ))
+            ])
         if bucket_obs:
             # Bound each sibling slice at `_RING_SIZE` so a misbehaving
-            # producer can't blow up our trait — match the cap own
+            # producer can't blow up our state — match the cap own
             # observations already use.
             if len(bucket_obs) > _RING_SIZE:
                 bucket_obs = bucket_obs[-_RING_SIZE:]
             parsed[bucket] = bucket_obs
     if not parsed:
         return
-    trait = ctx.traits[GitHubApiRateLimitTrait]
-    siblings = dict(trait.sibling_observations or {})
+    state = _load(ctx)
+    siblings = dict(state["sibling_observations"] or {})
     siblings[sibling_id] = parsed
-    trait.sibling_observations = siblings
+    state["sibling_observations"] = siblings
+    _save(ctx, state)
 
 def _burn_rate_factor(observations, now_epoch_s):
     """Compute throttle factor from the buffer's oldest-to-newest
@@ -673,7 +721,7 @@ def effective_throttle_factor(ctx, bucket, elapsed_s, min_interval_s):
 
     Side-effects:
       - Records the resulting factor on
-        `GitHubApiRateLimitTrait.last_effective_factor[bucket]` so
+        `_State.last_effective_factor[bucket]` (per-task tmpdir file) so
         `usage_footer` can surface the current throttle on every
         rendered surface.
       - Emits a one-shot `INFO: GitHub API throttle — <label>: …`
@@ -684,11 +732,13 @@ def effective_throttle_factor(ctx, bucket, elapsed_s, min_interval_s):
     Centralizes the composition every heartbeat call site uses so
     new throttle dimensions (or weight changes between the two
     existing ones) land in one place."""
+    state = _load(ctx)
     factor = max(
-        throttle_factor(ctx, bucket),
+        _throttle_factor_from_state(state, bucket, None, ctx.std),
         time_throttle_factor(elapsed_s, min_interval_s),
     )
-    _record_effective_factor(ctx, bucket, factor, elapsed_s)
+    _record_effective_factor_in_state(ctx, state, bucket, factor, elapsed_s)
+    _save(ctx, state)
     return factor
 
 # Step boundaries — keep in sync with `_THRESHOLD_LADDER` so the
@@ -710,32 +760,28 @@ def _factor_step(factor):
         return 2
     return 1
 
-def _record_effective_factor(ctx, bucket, factor, elapsed_s):
-    """Store `factor` on the trait (for `usage_footer` to read) and
-    emit the transition INFO line on step changes."""
-    if not hasattr(ctx, "traits"):
-        return
-    trait = ctx.traits[GitHubApiRateLimitTrait]
-
-    fac_dict = dict(trait.last_effective_factor)
+def _record_effective_factor_in_state(ctx, state, bucket, factor, elapsed_s):
+    """Update the per-bucket last-effective-factor on `state` (for
+    `usage_footer` to read), and emit the transition INFO line on
+    step changes. Mutates `state` in place; the caller saves."""
+    fac_dict = dict(state["last_effective_factor"])
     fac_dict[bucket] = factor
-    trait.last_effective_factor = fac_dict
+    state["last_effective_factor"] = fac_dict
 
     step = _factor_step(factor)
-    last_step = trait.last_logged_factor_step.get(bucket, 1)
+    last_step = state["last_logged_factor_step"].get(bucket, 1)
     if step == last_step:
         return
-    steps_dict = dict(trait.last_logged_factor_step)
+    steps_dict = dict(state["last_logged_factor_step"])
     steps_dict[bucket] = step
-    trait.last_logged_factor_step = steps_dict
-    _log_throttle_transition(ctx, bucket, factor, elapsed_s)
+    state["last_logged_factor_step"] = steps_dict
+    _log_throttle_transition_from_state(ctx, state, bucket, factor, elapsed_s)
 
-def _log_throttle_transition(ctx, bucket, factor, elapsed_s):
+def _log_throttle_transition_from_state(ctx, state, bucket, factor, elapsed_s):
     """Emit `INFO: GitHub API throttle — <label>: factor=<F>× (quota=<U>% used, elapsed=<T>)`.
-    Fired on each step boundary crossing by `_record_effective_factor`."""
-    trait = ctx.traits[GitHubApiRateLimitTrait]
-    wm = trait.watermark or {}
-    lims = trait.limits or {}
+    Fired on each step boundary crossing by `_record_effective_factor_in_state`."""
+    wm = state["watermark"] or {}
+    lims = state["limits"] or {}
     cur = wm.get(bucket)
     lim = lims.get(bucket, 0)
     if cur != None and lim > 0:
@@ -846,12 +892,10 @@ def usage_footer(ctx):
 
     Returns `""` when the App bucket has no observation (e.g. local
     runs that never hit GitHub)."""
-    if not hasattr(ctx, "traits"):
-        return ""
-    trait = ctx.traits[GitHubApiRateLimitTrait]
-    wm = trait.watermark or {}
-    lims = trait.limits or {}
-    factors = trait.last_effective_factor or {}
+    state = _load(ctx)
+    wm = state["watermark"] or {}
+    lims = state["limits"] or {}
+    factors = state["last_effective_factor"] or {}
 
     cur = wm.get(BUCKET_APP)
     lim = lims.get(BUCKET_APP, 0)
@@ -865,7 +909,7 @@ def usage_footer(ctx):
     # a fresher reset that a sibling observed before we did, so the
     # footer's countdown stays in lockstep with the throttle factor's
     # underlying data.
-    obs = _merged_observations(ctx, BUCKET_APP)
+    obs = _merged_observations_from_state(state, BUCKET_APP)
     reset_epoch = obs[-1][3] if obs else 0
     return "📊 GitHub API quota %s/%s (%d%% used%s%s)" % (
         _format_int(used),
@@ -900,3 +944,46 @@ def _format_int(n):
             out = out + ","
         out = out + s[i]
     return out
+
+# ── Test seams ───────────────────────────────────────────────────────
+#
+# Underscore-prefixed; production code should not call. Tests in
+# `lib/rate_limit_test.axl` and `lib/github_detect_test.axl` use these
+# to seed and inspect the per-task state file without going through
+# the public record/observe API.
+
+def reset_for_test(ctx):
+    """Clear all rate-limit state for the task. Used between subtests."""
+    _save(ctx, _new_state())
+
+def inspect_for_test(ctx):
+    """Return the full `_State` for assertions."""
+    return _load(ctx)
+
+def set_state_for_test(
+        ctx,
+        observations = None,
+        watermark = None,
+        limits = None,
+        sibling_observations = None,
+        last_effective_factor = None,
+        last_logged_factor_step = None,
+        threshold_warned_tier = None):
+    """Overwrite individual fields on the state for test setup. Each
+    arg is optional — unset fields keep their current value."""
+    state = _load(ctx)
+    if observations != None:
+        state["observations"] = observations
+    if watermark != None:
+        state["watermark"] = watermark
+    if limits != None:
+        state["limits"] = limits
+    if sibling_observations != None:
+        state["sibling_observations"] = sibling_observations
+    if last_effective_factor != None:
+        state["last_effective_factor"] = last_effective_factor
+    if last_logged_factor_step != None:
+        state["last_logged_factor_step"] = last_logged_factor_step
+    if threshold_warned_tier != None:
+        state["threshold_warned_tier"] = threshold_warned_tier
+    _save(ctx, state)
