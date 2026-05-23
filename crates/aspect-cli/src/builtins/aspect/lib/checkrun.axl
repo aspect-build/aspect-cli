@@ -1,21 +1,35 @@
-"""Cross-feature plumbing for the GitHub Status Check URL.
+"""Per-task GitHub check-run URL.
 
-`feature/github_status_checks.axl` populates `html_url` after creating
-the per-task check-run; `feature/github_status_comments.axl` reads it
-so the PR-comment can link directly to the per-task check-run page.
+The GitHub Status Checks feature creates a check-run via the GitHub
+API and publishes its URL via `checkrun.set_url`. Other features
+(today: GithubStatusComments) read it via `checkrun.url`. State lives
+in a per-task file under tmpdir, scoped by `ctx.std.process.id()` —
+each task invocation runs as its own aspect-cli process, so the
+process id is naturally a per-task identifier that's available from
+any ctx flavor (FeatureContext / TaskContext alike — `ctx.std` is
+on both, and `id()` doesn't require a TaskContext-scoped `ctx.task`
+field).
 
-Same pattern as `ArtifactsTrait` in `lib/artifacts.axl` —
-producer-feature writes, consumer-feature reads, both within the
-same task instance. Empty string until populated (or when the GHSC
-checkrun feature is disabled / its create_check_run hasn't returned
-yet).
+When GHSC isn't loaded, the file is never written and `checkrun.url(ctx)`
+returns "" (null-object falls out from the file's absence).
 """
 
-GitHubCheckRunTrait = trait(
-    # The check-run's html_url, populated by github_status_checks.axl
-    # right after its create_check_run API call returns. Surfaces that
-    # render per-task links (currently github_status_comments.axl) read
-    # it; consumers must tolerate empty (no checkrun feature, or
-    # API call hasn't returned yet).
-    html_url = attr(str, default = ""),
+def _path(ctx):
+    base = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_JOB_TMPDIR") or ctx.std.env.temp_dir()
+    return base + "/checkrun/" + str(ctx.std.process.id()) + ".url"
+
+def _set_url(ctx, url):
+    path = _path(ctx)
+    ctx.std.fs.create_dir_all(path.rsplit("/", 1)[0])
+    ctx.std.fs.write(path, url or "")
+
+def _url(ctx):
+    path = _path(ctx)
+    if not ctx.std.fs.exists(path):
+        return ""
+    return ctx.std.fs.read_to_string(path).strip()
+
+checkrun = struct(
+    set_url = _set_url,
+    url = _url,
 )

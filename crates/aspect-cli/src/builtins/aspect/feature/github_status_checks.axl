@@ -16,18 +16,19 @@ The per-kind dispatch table + helpers live in
 `lib/check_dispatch.axl` so they stay in lockstep with the parallel
 `BuildkiteAnnotations` feature. New task kinds plug in there.
 
-Templates can be customized per-task via GitHubStatusChecksTrait:
+Templates and BES-metadata surfacing are configured via this feature's
+own args (see the `args` block on the `GithubStatusChecks = feature(...)`
+declaration below):
 
     def config(ctx: ConfigContext):
-        gh = ctx.traits[GitHubStatusChecksTrait]
-        gh.templates["summary"] = "my custom {{ status_label }} template"
-        # Show custom --bes_metadata keys in the summary:
-        gh.metadata_keys = ["DEPLOY_ENV", "WORKSPACE"]
+        ctx.features[GithubStatusChecks].args.templates = {
+            "summary": "my custom {{ status_label }} template",
+        }
+        ctx.features[GithubStatusChecks].args.metadata_keys = ["DEPLOY_ENV", "WORKSPACE"]
         # Or show everything:
-        gh.metadata_keys = ["*"]
+        ctx.features[GithubStatusChecks].args.metadata_keys = ["*"]
 """
 
-load("../lib/artifacts.axl", "ArtifactsTrait")
 load(
     "../lib/bazel_results.axl",
     "format_run_date",
@@ -43,7 +44,7 @@ load(
     "renderer_for_kind",
     "should_emit_update",
 )
-load("../lib/checkrun.axl", "GitHubCheckRunTrait")
+load("../lib/checkrun.axl", "checkrun")
 load("../lib/ci.axl", "detect_build_url", "detect_ci_host")
 load("../lib/environment.axl", "feature_logger", "workflows_results_url")
 load("../lib/github.axl", "detect_commit_sha", "detect_github_repo", "github")
@@ -59,30 +60,16 @@ load("../lib/rate_limit.axl", "BUCKET_APP", "effective_throttle_factor", "usage_
 load("../lib/tips.axl", "collect_tips_sorted")
 load("../lint.axl", "LintTrait")
 
-# Configures the GitHub status check output templates for a task.
-# By default the GithubStatusChecks feature uses its built-in Jinja2 templates.
-# Operators can override individual templates in their config.axl:
+# The previous `GitHubStatusChecksTrait` (templates, metadata_keys) was
+# user-facing config riding on a trait — abuse-2 in the resolved design.
+# Both fields are now `args` on the `GithubStatusChecks` feature below;
+# users set them in `.aspect/config.axl` like any other feature arg:
 #
 #   def config(ctx: ConfigContext):
-#       gh = ctx.traits[GitHubStatusChecksTrait]
-#       gh.templates["summary"] = """my custom {{ status_label }} template"""
-#
-# Available template keys: "summary", "details"
-GitHubStatusChecksTrait = trait(
-    # Map of template overrides. Empty dict → use feature defaults.
-    templates = attr(dict, default = {}),
-
-    # Additional BES build_metadata keys to surface in the check run summary,
-    # beyond the built-in set (BRANCH, COMMIT_SHA, TAG, COMMIT_MESSAGE).
-    #
-    # Use ["*"] to show ALL metadata keys from the BES stream.
-    # Users inject custom keys via --bes_metadata=MY_KEY=value or
-    # --build_metadata=MY_KEY=value on their Bazel invocation.
-    #
-    # Example — show a custom deploy environment and workspace name:
-    #   gh.metadata_keys = ["DEPLOY_ENV", "WORKSPACE"]
-    metadata_keys = attr(list[str], default = []),
-)
+#       ctx.features[GithubStatusChecks].args.templates = {
+#           "summary": "my custom {{ status_label }} template",
+#       }
+#       ctx.features[GithubStatusChecks].args.metadata_keys = ["DEPLOY_ENV"]
 
 _LOG = feature_logger("GitHub status checks")
 
@@ -129,12 +116,18 @@ def _collect_ci_links(ctx, results_base_url):
 
 def _github_status_checks(ctx: FeatureContext):
     lifecycle = ctx.traits[TaskLifecycleTrait]
-    gh_trait = ctx.traits[GitHubStatusChecksTrait]
-    artifacts_trait = ctx.traits[ArtifactsTrait]
 
-    # Populated below with the check-run's html_url for sibling
-    # features (e.g. GithubStatusComments) to deep-link into.
-    checkrun_trait = ctx.traits[GitHubCheckRunTrait]
+    # Feature args (formerly GitHubStatusChecksTrait fields).
+    templates = ctx.args.templates or {}
+    metadata_keys = list(ctx.args.metadata_keys or [])
+
+    # Per-task check-run URL is published below via `checkrun.set_url`
+    # after the API call returns; sibling features (today:
+    # GithubStatusComments) read it via `checkrun.url(ctx)`. Storage
+    # is the per-task `<tmpdir>/checkrun/<pid>.url` file —
+    # `ctx.std.process.pid()` is the task-scoped identifier (works
+    # from any ctx flavor, including FeatureContext-captured
+    # closures like `_make_links`).
 
     # Captured at config time per feature instance. Only consulted
     # when handling kind="lint_results" updates; harmless on others.
@@ -193,8 +186,8 @@ def _github_status_checks(ctx: FeatureContext):
         links["bes_url"] = render_bes_url(data)
 
         # Per-task check-run page URL.
-        links["check_run_url"] = checkrun_trait.html_url or ""
-        apply_artifact_links(links, artifacts_trait)
+        links["check_run_url"] = checkrun.url(ctx)
+        apply_artifact_links(ctx, links)
         return links
 
     def _create_check_run(ctx):
@@ -244,8 +237,8 @@ def _github_status_checks(ctx: FeatureContext):
             "running",
             make_render_ctx(_state, default_targets = "//...", tips = collect_tips_sorted(ctx), api_usage = usage_footer(ctx), last_updated_at = format_run_date(ctx, now_ms(ctx))),
             dict(_ci_links_base),
-            gh_trait.templates,
-            gh_trait.metadata_keys,
+            templates,
+            metadata_keys,
         )
 
         # Match the CLI invocation name (`aspect <name>`) so the row
@@ -257,11 +250,12 @@ def _github_status_checks(ctx: FeatureContext):
             return
         _state["_check_run_id"] = result["check_run_id"]
 
-        # Publish on GitHubCheckRunTrait so sibling features (today:
-        # GithubStatusComments) can deep-link to this per-task check
-        # run. Consumers tolerate the empty case.
+        # Publish the URL via `lib/checkrun.axl` so sibling features
+        # (today: GithubStatusComments) can deep-link to this per-task
+        # check run. Consumers tolerate the empty case — `checkrun.url`
+        # returns "" until this fires.
         html_url = result.get("html_url") or ""
-        checkrun_trait.html_url = html_url
+        checkrun.set_url(ctx, html_url)
 
         # Point details_url at the check-run page itself so external
         # integrations (e.g. Graphite) link users to the rendered
@@ -466,8 +460,8 @@ def _github_status_checks(ctx: FeatureContext):
             status,
             make_render_ctx(_state, default_targets = "//...", tips = collect_tips_sorted(ctx), api_usage = usage_footer(ctx), last_updated_at = format_run_date(ctx, now_ms(ctx))),
             _make_links(data),
-            gh_trait.templates,
-            gh_trait.metadata_keys,
+            templates,
+            metadata_keys,
         )
 
         # Only emit annotations on the terminal update — GitHub
@@ -538,6 +532,21 @@ GithubStatusChecks = feature(
         "only_annotate_changed_regions": args.boolean(
             default = True,
             description = "Restrict lint check-run annotations to the displayed hunk regions of changed files (added lines + surrounding context from `detect_changed_files`). When false, off-region annotations are still posted but GitHub only renders them on the check-run detail page and commit page, not in Files Changed. Skipped silently when no changed-files context is available.",
+        ),
+        "templates": args.custom(
+            dict,
+            default = {},
+            description = "Map of template overrides for the rendered check-run output. " +
+                          "Keys: \"summary\", \"details\". Each value is a Jinja2 template " +
+                          "string. Empty dict (default) uses the feature's built-in templates.",
+        ),
+        "metadata_keys": args.string_list(
+            default = [],
+            description = "Additional BES build_metadata keys to surface in the check run summary, " +
+                          "beyond the built-in set (BRANCH, COMMIT_SHA, TAG, COMMIT_MESSAGE). Use " +
+                          "[\"*\"] to show ALL metadata keys from the BES stream. Users inject " +
+                          "custom keys via --bes_metadata=MY_KEY=value or --build_metadata=MY_KEY=value " +
+                          "on their Bazel invocation.",
         ),
     },
 )

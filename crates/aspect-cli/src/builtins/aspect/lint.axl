@@ -20,21 +20,19 @@ Usage:
 
 load("@std//time.axl", "sleep_iter")
 load("./bazel.axl", "BazelTrait")
-load("./lib/artifacts.axl", "create_uploader")
+load("./lib/artifacts.axl", "artifacts")
 load("./lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event")
 load("./lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
-load("./lib/checkrun.axl", "GitHubCheckRunTrait")
 load("./lib/environment.axl", "color_enabled", "warn")
 load("./lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_changed_files_listing")
 load("./lib/health_check.axl", "HealthCheckTrait")
 load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "preflight_phase", "setup_phase", "task_update")
 load("./lib/lint_results.axl", lint_accumulate = "accumulate", lint_conclusion = "conclusion", lint_init_data = "init_data")
-load("./lib/rate_limit.axl", "GitHubApiRateLimitTrait")
 load("./lib/repro_commands.axl", "build_aspect_command", "task_cli_path")
 load("./lib/sarif.axl", "get_sarif_summary", "parse_sarif", "parse_sarif_diagnostics")
 load("./lib/tar.axl", "tar_create")
 load("./lib/text.axl", "pluralize")
-load("./lib/tips.axl", "TipsTrait")
+load("./lib/tips.axl", "tips")
 
 # bb_clientd FUSE mount root for resolving bytestream:// URIs on Aspect Workflows runners.
 _BB_CLIENTD_ROOT = "/mnt/ephemeral/buildbarn/bb_clientd"
@@ -560,18 +558,16 @@ def _print_relevant_findings(ctx, relevant, strategy_name):
 
 def _upload_patches_artifact(ctx, patches):
     """Bundle the lint task's `.patch` files into a single tar.gz and
-    upload it as a CI artifact (GitHub Actions / Buildkite / GitLab /
-    CircleCI). No-op locally and on unrecognized CI hosts.
+    upload it as a CI artifact via `artifacts.upload_file` (GitHub /
+    Buildkite / GitLab / CircleCI). No-op when no patches were emitted
+    or when not on a recognized CI host.
 
     Each patch is placed under its original repo-relative directory in
     the archive so a downloader can `tar xf` and `git apply` the lot
-    without rewriting paths. Archive name: `<task>-<key>-lint-patches`.
+    without rewriting paths.
     """
     if not patches:
         return
-    uploader = create_uploader(ctx.std.env)
-    if uploader == None:
-        return  # not on CI
 
     tmpdir = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_JOB_TMPDIR") or ctx.std.env.temp_dir()
     archive_dir = ctx.std.fs.mkdtemp(prefix = "aspect-lint-patches-", parent = tmpdir)
@@ -587,22 +583,17 @@ def _upload_patches_artifact(ctx, patches):
         if idx < 0:
             idx = patch.find("/bazel-bin/")
         if idx >= 0:
-            # Skip past `bazel-out/<config>/bin/` prefix to get a clean repo-relative path.
             tail = patch[idx + 1:]
             for prefix in ("bazel-out/", "bazel-bin/"):
                 if tail.startswith(prefix):
                     rest = tail[len(prefix):]
 
-                    # Drop one more path segment for `bazel-out` (the
-                    # `<config>/bin/` part). For `bazel-bin`, the next
-                    # segment is already the repo-relative path.
+                    # `bazel-out/<config>/bin/...` — drop two segments.
+                    # `bazel-bin/...` — already repo-relative.
                     if prefix == "bazel-out/":
-                        # Skip `<config>/`
                         slash1 = rest.find("/")
                         if slash1 >= 0:
                             rest = rest[slash1 + 1:]
-
-                            # Skip `bin/`
                             if rest.startswith("bin/"):
                                 rest = rest[4:]
                     tail = rest
@@ -617,15 +608,10 @@ def _upload_patches_artifact(ctx, patches):
         warn(ctx.std, "Failed to create patch archive.")
         return
 
-    artifact_name = "%s-%s-lint-patches.tar.gz" % (ctx.task.name, ctx.task.key)
-    result = uploader.upload_file(ctx, archive_path, artifact_name)
+    artifacts.upload_file(ctx, kind = "lint_patches", name = "lint-patches.tar.gz", path = archive_path)
 
     if ctx.std.fs.exists(archive_path):
         ctx.std.fs.remove_file(archive_path)
-
-    if not result["success"]:
-        for err in result["errors"]:
-            warn(ctx.std, "Patch artifact upload error: " + err)
 
 # ─── Lifecycle status + Result-cell text ──────────────────────────────────────
 #
@@ -1251,12 +1237,9 @@ lint = task(
     },
     traits = [
         BazelTrait,
-        GitHubCheckRunTrait,
         HealthCheckTrait,
         LintTrait,
-        GitHubApiRateLimitTrait,
         TaskLifecycleTrait,
-        TipsTrait,
-    ],
+    ] + artifacts.TRAITS + tips.TRAITS,
     implementation = _impl,
 )

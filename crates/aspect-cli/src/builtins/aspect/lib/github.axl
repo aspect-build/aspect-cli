@@ -177,7 +177,7 @@ def _do_request(ctx, method, url, token, payload = None, quiet_4xx_auth = False,
 
     `token_class` is forwarded to `_do_request_once` so the
     `X-RateLimit-*` headers on the response land in the right
-    bucket of `GitHubApiRateLimitTrait.observations` — see the per-bucket
+    bucket of `rate-limit state observations` — see the per-bucket
     contract in [lib/rate_limit.axl](./rate_limit.axl)."""
     if method in _IDEMPOTENT_METHODS:
         success, status, body, attempts = _retry_http(lambda: _do_request_once(ctx, method, url, token, payload, token_class = token_class))
@@ -311,7 +311,7 @@ def _preferred_token_pair(ctx, owner, repo, profile = None, roles = None, existi
     they vary by plan: https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api
 
     Returns `(primary_token, fallback_token, primary_bucket)`. The
-    bucket constant identifies which `GitHubApiRateLimitTrait` bucket
+    bucket constant identifies which lib/rate_limit.axl's per-task state bucket
     the primary's response headers should be recorded into; callers
     forward it as `token_class` to `_do_request` (or pass it through
     to API helpers like `_resolve_current_job_url` that thread it
@@ -1974,7 +1974,7 @@ def _resolve_current_job_url(ctx, token, owner, repo, run_id, fallback_token = N
     by RUNNER_NAME + status=in_progress (most reliable: one job per runner).
     The caller must supply a token with `actions: read` scope.
 
-    `token_class` is the `GitHubApiRateLimitTrait` bucket that
+    `token_class` is the lib/rate_limit.axl's per-task state bucket that
     response headers from the primary `token` should be recorded into.
     `_preferred_token_pair` returns this alongside the token pair; the
     fallback retry below uses the flipped bucket.
@@ -2037,7 +2037,7 @@ def list_pull_request_files(ctx, token, owner, repo, pull_number, fallback_token
     parsing needed. The 30-page safety cap matches GitHub's hard limit.
 
     `token_class` follows the same contract as
-    `_resolve_current_job_url`: the `GitHubApiRateLimitTrait` bucket
+    `_resolve_current_job_url`: the lib/rate_limit.axl's per-task state bucket
     that the primary token's response headers belong to. The fallback's
     bucket is the other one.
 
@@ -2158,7 +2158,7 @@ def delete_review_comment(ctx, token, owner, repo, comment_id, api_base = DEFAUL
 
 def _probe_rate_limit(ctx, owner, repo, profile = None, api_base = DEFAULT_GITHUB_API):
     """Probe `GET /rate_limit` once at task init to seed both buckets
-    of `GitHubApiRateLimitTrait` for the App bucket only. The endpoint
+    of lib/rate_limit.axl for the App bucket only. The endpoint
     doesn't count against the primary quota
     ([docs](https://docs.github.com/en/rest/rate-limit/rate-limit)).
 

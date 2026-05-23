@@ -12,11 +12,11 @@ Covers the tip framework primitives directly:
                         so they render as Markdown blockquotes.
   - `strip_code_fences` — fence-line strip used by the terminal
                             `TIP:` printer.
-  - `TipsTrait.auto_print` — `add_tip` reads this to gate its terminal
-                              print; tests pin it `False`.
+  - `_State.auto_print` — `add_tip` reads this to gate its terminal
+                           print; tests pin it `False` via
+                           `tips._reset_for_test`.
 
-These tests need a real `ctx` (the trait map lives on it). The test
-task registers `TipsTrait` so `ctx.traits[TipsTrait]` resolves.
+These tests need a real `ctx` (storage is keyed off `ctx`'s tmpdir).
 
 Run with:
   aspect dev test-tips
@@ -37,7 +37,6 @@ load(
     "TIP_TEMPLATE_JINJA2",
     "TIP_TEMPLATE_RAW",
     "TIP_WARNING",
-    "TipsTrait",
     "add_tip",
     "blockquote_body",
     "collect_tips_sorted",
@@ -49,6 +48,7 @@ load(
     "silence_hint_line",
     "strip_code_fences",
     "tip_to_payload",
+    "tips",
 )
 
 def _eq(label, got, want):
@@ -56,13 +56,12 @@ def _eq(label, got, want):
         fail("%s: got %r, want %r" % (label, got, want))
 
 def _reset(ctx):
-    """Clear the TipsTrait between subtests so each section runs from
-    a known-empty state. The trait persists across the whole `_test_impl`
-    invocation otherwise. Also pin `auto_print = False` so the
-    `add_tip` terminal print doesn't drown out the test-runner output."""
-    ctx.traits[TipsTrait].tips = []
-    ctx.traits[TipsTrait].silenced_tips = []
-    ctx.traits[TipsTrait].auto_print = False
+    """Clear tip storage between subtests so each section runs from a
+    known-empty state. Storage persists across the whole `_test_impl`
+    invocation otherwise (single per-task tmpdir file). Pins
+    `auto_print = False` so `add_tip`'s terminal print doesn't drown
+    out the test-runner output."""
+    tips._reset_for_test(ctx)
 
 def _ids(tips):
     """Project to id strings — most assertions only care about which
@@ -73,37 +72,37 @@ def _test_add_tip_basic(ctx):
     _reset(ctx)
     add_tip(ctx, id = "a", severity = TIP_INFO, title = "T", body = "B")
     add_tip(ctx, id = "b", severity = TIP_WARNING, title = "T", body = "B")
-    _eq("add_tip basic — count", len(ctx.traits[TipsTrait].tips), 2)
-    _eq("add_tip basic — ids in insertion order", _ids(ctx.traits[TipsTrait].tips), ["a", "b"])
+    _eq("add_tip basic — count", len(tips._inspect_for_test(ctx)), 2)
+    _eq("add_tip basic — ids in insertion order", _ids(tips._inspect_for_test(ctx)), ["a", "b"])
 
 def _test_add_tip_dedup(ctx):
     _reset(ctx)
     add_tip(ctx, id = "a", severity = TIP_INFO, title = "first", body = "first body")
     add_tip(ctx, id = "a", severity = TIP_WARNING, title = "second", body = "second body")
-    tips = ctx.traits[TipsTrait].tips
-    _eq("dedup — count is 1", len(tips), 1)
-    _eq("dedup — first add wins (title)", tips[0]["title"], "first")
-    _eq("dedup — first add wins (severity)", tips[0]["severity"], TIP_INFO)
+    stored = tips._inspect_for_test(ctx)
+    _eq("dedup — count is 1", len(stored), 1)
+    _eq("dedup — first add wins (title)", stored[0]["title"], "first")
+    _eq("dedup — first add wins (severity)", stored[0]["severity"], TIP_INFO)
 
 def _test_silenced_tips_short_circuits_add_tip(ctx):
     _reset(ctx)
-    ctx.traits[TipsTrait].silenced_tips = ["noisy", "also-noisy"]
+    tips._set_silenced_for_test(ctx, ["noisy", "also-noisy"])
     add_tip(ctx, id = "noisy", severity = TIP_INFO, title = "T", body = "B")
     add_tip(ctx, id = "also-noisy", severity = TIP_WARNING, title = "T", body = "B")
     add_tip(ctx, id = "keep-me", severity = TIP_INFO, title = "T", body = "B")
     _eq(
         "silenced — only non-silenced ids survive",
-        _ids(ctx.traits[TipsTrait].tips),
+        _ids(tips._inspect_for_test(ctx)),
         ["keep-me"],
     )
 
 def _test_silenced_tips_blocks_emit_tip(ctx):
     _reset(ctx)
-    ctx.traits[TipsTrait].silenced_tips = ["add-github-token"]
+    tips._set_silenced_for_test(ctx, ["add-github-token"])
     emit_tip(ctx, TIP_ADD_GITHUB_TOKEN)
     _eq(
         "silenced — emit_tip respects silence list",
-        ctx.traits[TipsTrait].tips,
+        tips._inspect_for_test(ctx),
         [],
     )
 
@@ -112,12 +111,12 @@ def _test_important_tips_cannot_be_silenced(ctx):
     breakage and must always reach the user. Verified both via direct
     `add_tip` and via `emit_tip` against a built-in important template."""
     _reset(ctx)
-    ctx.traits[TipsTrait].silenced_tips = ["unsuppressable", "add-id-token-permission"]
+    tips._set_silenced_for_test(ctx, ["unsuppressable", "add-id-token-permission"])
     add_tip(ctx, id = "unsuppressable", severity = TIP_IMPORTANT, title = "T", body = "B")
     emit_tip(ctx, TIP_ADD_ID_TOKEN_PERMISSION)
     _eq(
         "important — silence list ignored",
-        _ids(ctx.traits[TipsTrait].tips),
+        _ids(tips._inspect_for_test(ctx)),
         ["unsuppressable", "add-id-token-permission"],
     )
 
@@ -125,9 +124,9 @@ def _test_add_tip_task_keys_stored(ctx):
     _reset(ctx)
     add_tip(ctx, id = "a", severity = TIP_INFO, title = "T", body = "B", task_keys = ["lint-*", "format-*"])
     add_tip(ctx, id = "b", severity = TIP_INFO, title = "T", body = "B")
-    tips = ctx.traits[TipsTrait].tips
-    _eq("task_keys stored", tips[0]["task_keys"], ["lint-*", "format-*"])
-    _eq("task_keys default — empty list when None", tips[1]["task_keys"], [])
+    stored = tips._inspect_for_test(ctx)
+    _eq("task_keys stored", stored[0]["task_keys"], ["lint-*", "format-*"])
+    _eq("task_keys default — empty list when None", stored[1]["task_keys"], [])
 
 def _test_emit_tip_format(ctx):
     _reset(ctx)
@@ -139,7 +138,7 @@ def _test_emit_tip_format(ctx):
         "type": TIP_TEMPLATE_FORMAT,
     }
     emit_tip(ctx, template, vars = {"scope": "actions: read", "endpoint": "/runs/jobs"})
-    tip = ctx.traits[TipsTrait].tips[0]
+    tip = tips._inspect_for_test(ctx)[0]
     _eq("format — title interpolated", tip["title"], "Token lacks `actions: read` scope")
     _eq("format — body interpolated", tip["body"], "Endpoint /runs/jobs returned 403.")
 
@@ -153,7 +152,7 @@ def _test_emit_tip_raw_skips_interpolation(ctx):
         "type": TIP_TEMPLATE_RAW,
     }
     emit_tip(ctx, template, vars = {"literal": "shouldn't be touched"})
-    tip = ctx.traits[TipsTrait].tips[0]
+    tip = tips._inspect_for_test(ctx)[0]
     _eq("raw — title untouched", tip["title"], "Title with {literal} braces")
     _eq("raw — body untouched", tip["body"], "Body with {curly} braces")
 
@@ -167,7 +166,7 @@ def _test_emit_tip_default_type_is_format(ctx):
         # no `type` field — should default to TIP_TEMPLATE_FORMAT.
     }
     emit_tip(ctx, template, vars = {"name": "world"})
-    _eq("default type — interpolated as FORMAT", ctx.traits[TipsTrait].tips[0]["title"], "Hello world")
+    _eq("default type — interpolated as FORMAT", tips._inspect_for_test(ctx)[0]["title"], "Hello world")
 
 def _test_emit_tip_id_suffix(ctx):
     _reset(ctx)
@@ -181,7 +180,7 @@ def _test_emit_tip_id_suffix(ctx):
     emit_tip(ctx, template)
     emit_tip(ctx, template, id_suffix = "variant-a")
     emit_tip(ctx, template, id_suffix = "variant-b")
-    _eq("id_suffix — distinct ids", _ids(ctx.traits[TipsTrait].tips), ["base", "base-variant-a", "base-variant-b"])
+    _eq("id_suffix — distinct ids", _ids(tips._inspect_for_test(ctx)), ["base", "base-variant-a", "base-variant-b"])
 
 def _test_emit_tip_task_keys_override(ctx):
     _reset(ctx)
@@ -195,9 +194,9 @@ def _test_emit_tip_task_keys_override(ctx):
     }
     emit_tip(ctx, template)
     emit_tip(ctx, template, id_suffix = "override", task_keys = ["format-*", "gazelle-*"])
-    tips = ctx.traits[TipsTrait].tips
-    _eq("emit_tip — template task_keys honored", tips[0]["task_keys"], ["lint-*"])
-    _eq("emit_tip — explicit task_keys override template", tips[1]["task_keys"], ["format-*", "gazelle-*"])
+    stored = tips._inspect_for_test(ctx)
+    _eq("emit_tip — template task_keys honored", stored[0]["task_keys"], ["lint-*"])
+    _eq("emit_tip — explicit task_keys override template", stored[1]["task_keys"], ["format-*", "gazelle-*"])
 
 _JINJA2_TEMPLATE = {
     "id": "scope-fail",
@@ -218,23 +217,23 @@ def _test_jinja2_first_emit_seeds_accumulators(ctx):
         _JINJA2_TEMPLATE,
         accumulators = {"scopes": "actions: read", "endpoints": "/jobs"},
     )
-    tips = ctx.traits[TipsTrait].tips
-    _eq("jinja2 first-emit — single tip", len(tips), 1)
-    _eq("jinja2 first-emit — type recorded", tips[0]["type"], TIP_TEMPLATE_JINJA2)
+    stored = tips._inspect_for_test(ctx)
+    _eq("jinja2 first-emit — single tip", len(stored), 1)
+    _eq("jinja2 first-emit — type recorded", stored[0]["type"], TIP_TEMPLATE_JINJA2)
     _eq(
         "jinja2 first-emit — accumulators seeded as lists",
-        tips[0]["accumulators"],
+        stored[0]["accumulators"],
         {"scopes": ["actions: read"], "endpoints": ["/jobs"]},
     )
-    if "actions: read" not in tips[0]["title"]:
-        fail("jinja2 first-emit — title missing scope: %r" % tips[0]["title"])
-    if "/jobs" not in tips[0]["body"]:
-        fail("jinja2 first-emit — body missing endpoint: %r" % tips[0]["body"])
+    if "actions: read" not in stored[0]["title"]:
+        fail("jinja2 first-emit — title missing scope: %r" % stored[0]["title"])
+    if "/jobs" not in stored[0]["body"]:
+        fail("jinja2 first-emit — body missing endpoint: %r" % stored[0]["body"])
 
     # Templates retained for later re-render on accumulator merge.
-    if not tips[0].get("title_template"):
+    if not stored[0].get("title_template"):
         fail("jinja2 first-emit — title_template not retained")
-    if not tips[0].get("body_template"):
+    if not stored[0].get("body_template"):
         fail("jinja2 first-emit — body_template not retained")
 
 def _test_jinja2_dedup_merges_new_values(ctx):
@@ -252,28 +251,28 @@ def _test_jinja2_dedup_merges_new_values(ctx):
         _JINJA2_TEMPLATE,
         accumulators = {"scopes": "pull-requests: read", "endpoints": "/files"},
     )
-    tips = ctx.traits[TipsTrait].tips
-    _eq("jinja2 dedup — still single tip", len(tips), 1)
+    stored = tips._inspect_for_test(ctx)
+    _eq("jinja2 dedup — still single tip", len(stored), 1)
     _eq(
         "jinja2 dedup — scopes unioned in order",
-        tips[0]["accumulators"]["scopes"],
+        stored[0]["accumulators"]["scopes"],
         ["actions: read", "pull-requests: read"],
     )
     _eq(
         "jinja2 dedup — endpoints unioned in order",
-        tips[0]["accumulators"]["endpoints"],
+        stored[0]["accumulators"]["endpoints"],
         ["/jobs", "/files"],
     )
 
     # Title plural form now applies (2 scopes).
-    if "2 scopes" not in tips[0]["title"]:
-        fail("jinja2 dedup — title not re-rendered with plural form: %r" % tips[0]["title"])
+    if "2 scopes" not in stored[0]["title"]:
+        fail("jinja2 dedup — title not re-rendered with plural form: %r" % stored[0]["title"])
 
     # Body lists both endpoints with plural noun.
-    if "/jobs" not in tips[0]["body"] or "/files" not in tips[0]["body"]:
-        fail("jinja2 dedup — body missing one endpoint: %r" % tips[0]["body"])
-    if "2 calls" not in tips[0]["body"]:
-        fail("jinja2 dedup — body not re-rendered with plural form: %r" % tips[0]["body"])
+    if "/jobs" not in stored[0]["body"] or "/files" not in stored[0]["body"]:
+        fail("jinja2 dedup — body missing one endpoint: %r" % stored[0]["body"])
+    if "2 calls" not in stored[0]["body"]:
+        fail("jinja2 dedup — body not re-rendered with plural form: %r" % stored[0]["body"])
 
 def _test_jinja2_dedup_skips_duplicate_values(ctx):
     """Re-emitting the same accumulator values is a no-op — no
@@ -289,7 +288,7 @@ def _test_jinja2_dedup_skips_duplicate_values(ctx):
         _JINJA2_TEMPLATE,
         accumulators = {"scopes": "actions: read", "endpoints": "/jobs"},
     )
-    tip = ctx.traits[TipsTrait].tips[0]
+    tip = tips._inspect_for_test(ctx)[0]
     _eq(
         "jinja2 dedup — duplicate scope skipped",
         tip["accumulators"]["scopes"],
@@ -317,7 +316,7 @@ def _test_jinja2_partial_overlap_appends_only_new(ctx):
         _JINJA2_TEMPLATE,
         accumulators = {"scopes": "actions: read", "endpoints": "/runs"},
     )
-    tip = ctx.traits[TipsTrait].tips[0]
+    tip = tips._inspect_for_test(ctx)[0]
     _eq(
         "jinja2 partial overlap — scopes deduped",
         tip["accumulators"]["scopes"],
@@ -470,7 +469,7 @@ def _test_builtin_insufficient_scope_renders(ctx):
             "endpoints": "GET /repos/{owner}/{repo}/pulls/{pull_number}/files",
         },
     )
-    tip = ctx.traits[TipsTrait].tips[0]
+    tip = tips._inspect_for_test(ctx)[0]
     _eq("scope tip — id is the canonical id (no suffix)", tip["id"], "add-github-token-scope")
     _eq("scope tip — severity is WARNING", tip["severity"], TIP_WARNING)
     _eq("scope tip — type is JINJA2", tip["type"], TIP_TEMPLATE_JINJA2)
@@ -494,8 +493,8 @@ def _test_builtin_insufficient_scope_renders(ctx):
             "endpoints": "GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs",
         },
     )
-    _eq("scope tip — still single tip after merge", len(ctx.traits[TipsTrait].tips), 1)
-    merged = ctx.traits[TipsTrait].tips[0]
+    _eq("scope tip — still single tip after merge", len(tips._inspect_for_test(ctx)), 1)
+    merged = tips._inspect_for_test(ctx)[0]
     _eq(
         "scope tip — both scopes unioned",
         merged["accumulators"]["scopes"],
@@ -523,8 +522,8 @@ def _test_silence_hint_line(ctx):
         line = silence_hint_line("add-github-token", sev)
         if "add-github-token" not in line:
             fail("silence_hint %s: missing tip id: %r" % (sev, line))
-        if "silenced_tips" not in line:
-            fail("silence_hint %s: missing silenced_tips ref: %r" % (sev, line))
+        if "tips" not in line or "silence" not in line:
+            fail("silence_hint %s: missing tips/silence ref: %r" % (sev, line))
         if not line.startswith("<sub>"):
             fail("silence_hint %s: must wrap in <sub>: %r" % (sev, line))
 
@@ -583,7 +582,7 @@ def _test_decorate_tip(ctx):
     _eq("decorate_tip — severity_label", decorated["severity_label"], "Warning")
     _eq("decorate_tip — title", decorated["title"], "T")
     _eq("decorate_tip — body_quoted prefixes each line", decorated["body_quoted"], "> line1\n> line2")
-    if "silenced_tips" not in decorated["silence_hint"]:
+    if "tips" not in decorated["silence_hint"] or "silence" not in decorated["silence_hint"]:
         fail("decorate_tip — non-important row missing silence_hint: %r" % decorated["silence_hint"])
 
     # Important: silence_hint should be blank.
@@ -610,15 +609,15 @@ def _test_strip_code_fences(ctx):
     )
 
 def _test_auto_print_flag(ctx):
-    """`add_tip` reads `TipsTrait.auto_print` to gate the terminal
-    print. Tests run with `auto_print = False` (set by `_reset`) — so
-    we just verify the storage still works in that mode, which
-    indirectly proves the `auto_print = False` branch doesn't crash
-    or interfere with the dedup / silence paths."""
+    """`add_tip` reads `_State.auto_print` to gate the terminal print.
+    Tests run with `auto_print = False` (set by `_reset` →
+    `tips._reset_for_test`) — so we just verify the storage still
+    works in that mode, which indirectly proves the `auto_print =
+    False` branch doesn't crash or interfere with the dedup / silence
+    paths."""
     _reset(ctx)
-    _eq("auto_print — pinned False in test reset", ctx.traits[TipsTrait].auto_print, False)
     add_tip(ctx, id = "x", severity = TIP_INFO, title = "T", body = "B")
-    _eq("auto_print False — tip still recorded", _ids(ctx.traits[TipsTrait].tips), ["x"])
+    _eq("auto_print False — tip still recorded", _ids(tips._inspect_for_test(ctx)), ["x"])
 
 def _test_impl(ctx):
     _test_add_tip_basic(ctx)
@@ -658,5 +657,5 @@ tips_tests = task(
     group = ["dev"],
     implementation = _test_impl,
     args = {},
-    traits = [TipsTrait],
+    traits = tips.TRAITS,
 )

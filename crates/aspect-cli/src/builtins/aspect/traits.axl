@@ -7,39 +7,33 @@ files can load the full trait set with a single import:
     load("@aspect//:traits.axl",
          "BazelTrait",
          "TaskLifecycleTrait",
-         "GitHubStatusChecksTrait",
-         "ArtifactsTrait",
          "DeliveryTrait",
          "HealthCheckTrait",
          "TaskUpdate")
 
 Internal modules should load directly from the owning module — this
 facade is purely a user-facing convenience.
+
+Note: artifact URLs are no longer exposed via a trait. Use the
+`artifacts` struct from `@aspect//lib/artifacts.axl` instead — it
+carries `append` / `list` / `by_kind` / `by_label` / `browse_url`
+and `TRAITS` for task registration (splat `+ artifacts.TRAITS` into
+the task's trait list).
 """
 
 load("./bazel.axl", _BazelTrait = "BazelTrait")
 load("./delivery.axl", _DeliveryTrait = "DeliveryTrait")
-load("./feature/github_status_checks.axl", _GitHubStatusChecksTrait = "GitHubStatusChecksTrait")
-load("./lib/artifacts.axl", _ArtifactsTrait = "ArtifactsTrait")
-load("./lib/checkrun.axl", _GitHubCheckRunTrait = "GitHubCheckRunTrait")
 load("./lib/health_check.axl", _HealthCheckTrait = "HealthCheckTrait")
 load(
     "./lib/lifecycle.axl",
     _TaskLifecycleTrait = "TaskLifecycleTrait",
     _TaskUpdate = "TaskUpdate",
 )
-load("./lib/rate_limit.axl", _GitHubApiRateLimitTrait = "GitHubApiRateLimitTrait")
-load("./lib/tips.axl", _TipsTrait = "TipsTrait")
 load("./lint.axl", _LintTrait = "LintTrait")
 
-ArtifactsTrait = _ArtifactsTrait
 BazelTrait = _BazelTrait
 DeliveryTrait = _DeliveryTrait
-GitHubApiRateLimitTrait = _GitHubApiRateLimitTrait
-GitHubCheckRunTrait = _GitHubCheckRunTrait
-GitHubStatusChecksTrait = _GitHubStatusChecksTrait
 HealthCheckTrait = _HealthCheckTrait
 LintTrait = _LintTrait
 TaskLifecycleTrait = _TaskLifecycleTrait
 TaskUpdate = _TaskUpdate
-TipsTrait = _TipsTrait

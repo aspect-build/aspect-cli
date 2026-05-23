@@ -95,11 +95,11 @@ pub(crate) fn camel_to_kebab_words(s: &str) -> Vec<String> {
     words
 }
 
-/// Validate that a feature or trait export name conforms to `[A-Z][A-Za-z0-9]*` (CamelCase).
+/// Validate that a feature export name conforms to `[A-Z][A-Za-z0-9]*` (CamelCase).
 ///
-/// Features and traits are referenced as map keys (`ctx.features[ArtifactUpload]`,
-/// `ctx.traits[MyConfig]`), which reads like a type key. CamelCase is enforced to
-/// match Bazel's provider convention (`dep[CcInfo]`) and signal this type-key role.
+/// Features are referenced as map keys (`ctx.features[ArtifactUpload]`),
+/// which reads like a type key. CamelCase is enforced to match Bazel's
+/// provider convention (`dep[CcInfo]`) and signal this type-key role.
 pub fn validate_type_name(name: &str, kind: &str) -> Result<(), String> {
     let mut chars = name.chars();
     match chars.next() {
@@ -116,6 +116,52 @@ pub fn validate_type_name(name: &str, kind: &str) -> Result<(), String> {
         if !c.is_ascii_alphanumeric() {
             return Err(format!(
                 "{kind} name {:?} contains invalid character {:?} (allowed: A-Z, a-z, 0-9)",
+                name, c
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Validate that a trait export name conforms to `_?[A-Z][A-Za-z0-9]*`.
+///
+/// Same shape as feature names (CamelCase, alphanumeric-only after the
+/// first letter), with one extra allowance: an optional leading
+/// underscore for module-private traits.
+///
+/// Private traits are how AXL libraries hold per-task state they don't
+/// want to expose: the underscore prefix signals "implementation
+/// detail, do not import," and Starlark's load semantics block the
+/// import from other modules. Libraries that wrap trait dispatch
+/// behind a public struct (the `tips` / `artifacts` / `checkrun`
+/// patterns) declare the trait with a leading underscore so consumers
+/// can only reach it through the wrapper API.
+///
+/// Embedded underscores (`My_Config`) stay invalid — single optional
+/// underscore at the start, then CamelCase.
+pub fn validate_trait_name(name: &str) -> Result<(), String> {
+    let after_underscore = name.strip_prefix('_').unwrap_or(name);
+    if after_underscore.is_empty() {
+        return Err(format!(
+            "trait name {:?} cannot be only an underscore",
+            name
+        ));
+    }
+    let mut chars = after_underscore.chars();
+    match chars.next() {
+        None => return Err("trait name cannot be empty".to_string()),
+        Some(c) if !c.is_ascii_uppercase() => {
+            return Err(format!(
+                "trait name {:?} must start with an uppercase letter (optionally prefixed with `_` for module-private traits)",
+                name
+            ));
+        }
+        _ => {}
+    }
+    for c in chars {
+        if !c.is_ascii_alphanumeric() {
+            return Err(format!(
+                "trait name {:?} contains invalid character {:?} (allowed: A-Z, a-z, 0-9; optional leading `_`)",
                 name, c
             ));
         }
@@ -560,7 +606,7 @@ my_config = trait(
     }
 
     #[test]
-    fn trait_export_underscore_rejected() {
+    fn trait_export_embedded_underscore_rejected() {
         let err = eval_err(
             r#"
 My_Config = trait(
@@ -570,7 +616,58 @@ My_Config = trait(
         );
         assert!(
             err.contains("invalid character"),
-            "expected invalid character error for underscore in trait export, got: {}",
+            "expected invalid character error for embedded underscore in trait export, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn trait_leading_underscore_accepted() {
+        // Module-private trait — underscore prefix signals "implementation
+        // detail, do not import." Starlark's load semantics block import
+        // of underscore-prefixed names, so libraries can use private
+        // traits to hold per-task state without exposing the storage
+        // surface to consumers.
+        assert!(
+            eval(
+                r#"
+_PrivateConfig = trait(
+    message = attr(str),
+)
+"#
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn trait_leading_underscore_then_lowercase_rejected() {
+        let err = eval_err(
+            r#"
+_my_config = trait(
+    message = attr(str),
+)
+"#,
+        );
+        assert!(
+            err.contains("uppercase"),
+            "expected uppercase error for `_my_config` (after the underscore, the next char must be uppercase), got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn trait_only_underscore_rejected() {
+        let err = eval_err(
+            r#"
+_ = trait(
+    message = attr(str),
+)
+"#,
+        );
+        assert!(
+            err.contains("only an underscore") || err.contains("uppercase"),
+            "expected error for trait name that is only `_`, got: {}",
             err
         );
     }

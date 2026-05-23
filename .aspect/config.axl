@@ -14,7 +14,7 @@ load("@aspect//lib/lint_results_test.axl", "lint_annotation_plan_tests", "lint_t
 load("@aspect//lib/rate_limit_test.axl", "rate_limit_tests")
 load("@aspect//lib/runner_job_history_test.axl", "runner_job_history_tests")
 load("@aspect//lib/tips_test.axl", "tips_tests")
-load("@aspect//traits.axl", "BazelTrait", "LintTrait", "TipsTrait")
+load("@aspect//traits.axl", "BazelTrait", "LintTrait")
 load("./lambda.axl", "lambda_with_global_bind")
 
 def _user_task_impl(ctx: TaskContext) -> int:
@@ -66,8 +66,10 @@ def config(ctx: ConfigContext):
     ctx.features[ArtifactUpload].args.upload_profile = True
     ctx.features[ArtifactUpload].args.upload_bep = True
 
-    # Silence tips
-    ctx.traits[TipsTrait].silenced_tips = []
+    # Silence tips — was `ctx.traits[TipsTrait].silenced_tips = [...]`
+    # before the tips refactor; now done via the Tips feature's args.
+    # Example: ctx.features["tips"].args.silence.append("add-github-token")
+    # (Left empty — append ids here to suppress specific tips.)
 
     # Add a new task
     ctx.tasks.add(_user_task)

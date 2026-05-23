@@ -18,9 +18,9 @@ Split here, not in the features:
                              Build the render_ctx dict the per-kind
                              renderers consume from a feature's
                              closure-state dict.
-  apply_artifact_links(links, artifacts_trait)
-                             Copy ArtifactsTrait fields onto a links
-                             dict in place.
+  apply_artifact_links(ctx, links)
+                             Copy artifact URLs onto a links dict in place
+                             via the `artifacts` wrapper API.
   should_emit_update(state, now_ms, min_interval_ms, final)
                              Throttle non-final updates by elapsed
                              ms-since-last; terminal updates always
@@ -30,6 +30,7 @@ Kept in `lib/` rather than `feature/` so per-task result libraries can
 load it without creating a feature-↔-feature edge.
 """
 
+load("./artifacts.axl", "artifacts")
 load(
     "./bazel_results.axl",
     bazel_init_data = "init_data",
@@ -158,14 +159,20 @@ def make_render_ctx(state, default_targets = "", tips = None, api_usage = "", la
         "last_updated_at": last_updated_at or "",
     }
 
-def apply_artifact_links(links, artifacts_trait):
-    """Copy ArtifactsTrait fields onto a links dict in place. Shared
-    between the check-run and BK-annotation features so the threading
-    stays in one spot.
+def apply_artifact_links(ctx, links):
+    """Copy artifact URLs from the `artifacts` registry onto a links
+    dict in place. Shared between the check-run and BK-annotation
+    features so the threading stays in one spot.
+
+    `artifacts_browse_url` is only surfaced when the registry has at
+    least one Artifact — an empty registry means nothing was uploaded
+    for this task, so a "browse CI artifacts" link would point at an
+    empty page.
     """
-    links["artifacts_browse_url"] = artifacts_trait.artifacts_browse_url or ""
-    links["artifact_urls"] = dict(artifacts_trait.artifact_urls) if artifacts_trait.artifact_urls else {}
-    links["testlogs_label_urls"] = dict(artifacts_trait.testlogs_label_urls) if artifacts_trait.testlogs_label_urls else {}
+    have_artifacts = bool(artifacts.list(ctx))
+    links["artifacts_browse_url"] = artifacts.browse_url(ctx) if have_artifacts else ""
+    links["artifact_urls"] = artifacts.by_kind(ctx)
+    links["testlogs_label_urls"] = artifacts.by_label(ctx)
 
 def should_emit_update(state, now_ms_val, min_interval_ms, final):
     """Decide whether a `task_update` should produce an outbound emit.

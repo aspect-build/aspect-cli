@@ -53,34 +53,37 @@ Built-in tip templates are exported as module-level constants
   b) Preempt a built-in tip by calling `add_tip` with that built-in
      tip's id BEFORE the framework emits — dedup-by-id makes the
      user's version win.
-  c) Silence any non-important tip (built-in or custom) by adding its
-     id to `TipsTrait.silenced_tips`. `add_tip` short-circuits on a
-     match so the tip never enters the trait. Each rendered tip's
-     footer names its id and points users at this knob. Important
-     tips (severity `TIP_IMPORTANT`) ignore the silence list — they
-     signal a problem that breaks key features, so a `silenced_tips`
-     entry for an important id is a no-op.
+  c) Silence any non-important tip (built-in or custom) by appending
+     its id to the `Tips` feature's `silence` arg from
+     `.aspect/config.axl`, or by passing `--tips:silence=<id>` on the
+     command line. `add_tip` short-circuits on a match so the tip
+     never enters the storage. Each rendered tip's footer names its
+     id and points users at this knob. Important tips (severity
+     `TIP_IMPORTANT`) ignore the silence list — they signal a problem
+     that breaks key features, so a silence entry for an important id
+     is a no-op.
 
-`TipsTrait` is accessible from `.aspect/config.axl`, which doubles as
-the registry for tips that should seed every task's `TipsTrait` at
-setup. Combined with the `task_keys` glob filter (see below) this is
-how user-defined tips get scoped to specific tasks; the same trait
-is also where users silence noisy tips:
+The tip subsystem is owned by the `Tips` feature (co-located below in
+this file). Configure it from `.aspect/config.axl`:
 
     # In .aspect/config.axl
     def config(ctx):
-        ctx.traits[TipsTrait].silenced_tips = [
-            "add-github-token",  # tip id from its footer
-        ]
-        ctx.traits[TipsTrait].tips = [
-            {
-                "id": "internal-docs-reminder",
-                "severity": TIP_INFO,
-                "title": "Internal docs link for lint failures",
-                "body": "See https://wiki.example/lint for triage notes.",
-                "task_keys": ["lint-*"],
-            },
-        ]
+        ctx.features["tips"].args.silence.append("add-github-token")
+        ctx.features["tips"].args.seed.append({
+            "id": "internal-docs-reminder",
+            "severity": TIP_INFO,
+            "title": "Internal docs link for lint failures",
+            "body": "See https://wiki.example/lint for triage notes.",
+            "task_keys": ["lint-*"],
+        })
+
+Or on the command line: `--tips:silence=add-github-token`.
+
+The whole subsystem can be turned off with
+`ctx.features["tips"].enabled = False` (or `--tips:enabled=false`). When
+disabled, the trait's null-object defaults take over: `add_tip` is a
+silent no-op everywhere, `collect_tips_sorted` returns []. Emit sites
+don't need to probe for the feature — the data flow just goes quiet.
 
 # Surface rendering
 
@@ -151,21 +154,36 @@ TIP_TEMPLATE_JINJA2 = "jinja2"
 
 _VALID_TEMPLATE_TYPES = [TIP_TEMPLATE_RAW, TIP_TEMPLATE_FORMAT, TIP_TEMPLATE_JINJA2]
 
-# ── Trait ────────────────────────────────────────────────────────────
+# ── Private trait — owner-feature implementation detail ────────────
+#
+# Pre-rendered tips carry `{id, severity, title, body, type, task_keys}`;
+# JINJA2 tips additionally carry `title_template`, `body_template`, and
+# `accumulators` (dict<name, list<value>>) so `add_tip` can re-render
+# on each accumulation event. Dedup by `id`; ids in the silence list
+# are dropped on `add_tip` (unless severity is TIP_IMPORTANT).
+#
+# When the `Tips` feature isn't loaded (user set `enabled = False` or
+# the framework didn't enable it), the trait callable defaults are
+# null-objects: `add` is a silent no-op, `collect` returns []. Emit
+# sites don't need to probe — they just call `add_tip` / `emit_tip`
+# and the disabled state propagates as zero output.
 
-TipsTrait = trait(
-    # Insertion-ordered list of stored tip dicts. Pre-rendered tips
-    # carry `{id, severity, title, body, type, task_keys}`; JINJA2
-    # tips additionally carry `title_template`, `body_template`, and
-    # `accumulators` (dict<name, list<value>>) so `add_tip` can
-    # re-render on each accumulation event. Dedup by `id`; tips in
-    # `silenced_tips` are dropped on `add_tip`.
-    tips = attr(list, default = []),
-    silenced_tips = attr(list, default = []),
-    # Gate on the `add_tip` terminal print. Tests flip to False so
-    # unit-test output stays clean while exercising storage / filter
-    # logic.
-    auto_print = attr(bool, default = True),
+_TipsTrait = trait(
+    # Add a constructed tip dict. The owner's closure handles dedup,
+    # jinja2 accumulator merge / re-render, silence-list checks, and
+    # the terminal-print side effect. Takes ctx for jinja2 rendering
+    # (`ctx.template.jinja2`) and the print path (`ctx.std`).
+    add = attr(typing.Callable[[TaskContext, dict], None], default = lambda ctx, t: None),
+
+    # Return the raw, insertion-ordered list of stored tip dicts.
+    # `collect_tips_sorted` filters by task_keys and sorts on top.
+    collect = attr(typing.Callable[[], list], default = lambda: []),
+
+    # Test seams. Owner feature binds these; production code should
+    # not call them (defaults are no-ops / empty).
+    _reset = attr(typing.Callable[[], None], default = lambda: None),
+    _set_silenced = attr(typing.Callable[[list], None], default = lambda ids: None),
+    _set_auto_print = attr(typing.Callable[[bool], None], default = lambda v: None),
 )
 
 # ── Built-in tip templates ───────────────────────────────────────────
@@ -308,12 +326,16 @@ def add_tip(
         title_template = "",
         body_template = "",
         accumulators = None):
-    """Add a tip to the task's `TipsTrait` and print a `TIP:` block
-    to the terminal.
+    """Add a tip to the task's tip storage and print a `TIP:` block to
+    the terminal (subject to the owner feature's `auto_print` arg).
 
-    No-op if `id` is listed in `TipsTrait.silenced_tips` AND
-    `severity != TIP_IMPORTANT` (important tips can't be silenced —
-    see "Severity ordering" in the module docstring).
+    No-op if `id` is in the silence list AND `severity != TIP_IMPORTANT`
+    (important tips can't be silenced — see "Severity ordering" in the
+    module docstring). Users seed the silence list via the `Tips`
+    feature's `silence` arg in `.aspect/config.axl`:
+
+        def config(ctx):
+            ctx.features["tips"].args.silence.append("add-github-token")
 
     Two storage shapes:
 
@@ -323,68 +345,42 @@ def add_tip(
 
       - Jinja2 tips (`type_ == TIP_TEMPLATE_JINJA2`):
         `title_template` and `body_template` are stored as Jinja2
-        source. `accumulators` is a dict<name, value> for the
-        initial emit. The framework converts each value to a
-        single-entry list and re-renders title + body with the
-        accumulators as `dict<name, list<value>>`. On every
-        subsequent emit with the same id, the new accumulator
-        values get unioned into the stored lists (skipping
-        duplicates), the title and body are re-rendered, and the
-        terminal re-prints so each accumulation event surfaces in
-        the log. Plain dedups (no accumulator change) stay silent.
+        source. `accumulators` is a dict<name, value> for the initial
+        emit. The framework converts each value to a single-entry list
+        and re-renders title + body with the accumulators as
+        `dict<name, list<value>>`. On every subsequent emit with the
+        same id, the new accumulator values get unioned into the
+        stored lists (skipping duplicates), the title and body are
+        re-rendered, and the terminal re-prints so each accumulation
+        event surfaces in the log. Plain dedups (no accumulator
+        change) stay silent.
 
     `task_keys` is an optional list of glob patterns; when set, the
     renderer only shows the tip on tasks whose key matches one of the
     patterns. When unset / empty, the tip shows on the task it was
-    emitted into (natural for framework tips emitted during a
-    specific task's run). The terminal print fires regardless of
-    `task_keys`.
+    emitted into. The terminal print fires regardless of `task_keys`.
+
+    No-op overall when the `Tips` feature is disabled — the trait's
+    `add` callable falls back to its null-object default.
     """
     if severity not in _SEVERITY_ORDER:
         fail("unknown tip severity %r; valid: %s" % (severity, ", ".join(_SEVERITY_ORDER.keys())))
-    trait = ctx.traits[TipsTrait]
-    if severity != TIP_IMPORTANT and id in trait.silenced_tips:
-        return
-
     is_jinja2 = type_ == TIP_TEMPLATE_JINJA2
     if is_jinja2 and not [v for v in (accumulators or {}).values() if v]:
         fail("TIP_TEMPLATE_JINJA2 tip %r requires at least one non-empty accumulator value" % id)
 
-    for i, existing in enumerate(trait.tips):
-        if existing.get("id") != id:
-            continue
-        if not is_jinja2:
-            return
-        merged, changed = _merge_accumulators(existing.get("accumulators", {}), accumulators)
-        if not changed:
-            return
-        stored_severity = existing.get("severity", severity)
-        rendered_title = ctx.template.jinja2(existing["title_template"], data = merged)
-        rendered_body = ctx.template.jinja2(existing["body_template"], data = merged)
-        updated = dict(existing)
-        updated["title"] = rendered_title
-        updated["body"] = rendered_body
-        updated["accumulators"] = merged
-        trait.tips = trait.tips[:i] + [updated] + trait.tips[i + 1:]
-        if trait.auto_print:
-            _print_tip(ctx.std, id, stored_severity, rendered_title, rendered_body)
-        return
-
     if is_jinja2:
-        seeded = {name: [value] for name, value in accumulators.items() if value}
-        new_tip = {
+        tip = {
             "id": id,
             "severity": severity,
-            "title": ctx.template.jinja2(title_template, data = seeded),
-            "body": ctx.template.jinja2(body_template, data = seeded),
             "task_keys": list(task_keys) if task_keys else [],
             "type": TIP_TEMPLATE_JINJA2,
             "title_template": title_template,
             "body_template": body_template,
-            "accumulators": seeded,
+            "accumulators": dict(accumulators or {}),
         }
     else:
-        new_tip = {
+        tip = {
             "id": id,
             "severity": severity,
             "title": title,
@@ -392,9 +388,7 @@ def add_tip(
             "task_keys": list(task_keys) if task_keys else [],
             "type": type_,
         }
-    trait.tips = list(trait.tips) + [new_tip]
-    if trait.auto_print:
-        _print_tip(ctx.std, id, severity, new_tip["title"], new_tip["body"])
+    ctx.traits[_TipsTrait].add(ctx, tip)
 
 def emit_tip(ctx, template, vars = None, accumulators = None, id_suffix = "", task_keys = None):
     """Render a tip template and add it via `add_tip`.
@@ -467,10 +461,9 @@ def collect_tips_sorted(ctx, limit = None):
     Pass `limit` to cap the result for space-constrained surfaces
     (e.g. PR comment summary).
     """
-    trait = ctx.traits[TipsTrait]
     task_key = ctx.task.key
     filtered = []
-    for t in trait.tips:
+    for t in ctx.traits[_TipsTrait].collect():
         patterns = t.get("task_keys") or []
         if patterns and not match_any(patterns, task_key):
             continue
@@ -508,7 +501,7 @@ def silence_hint_line(id, severity):
     the silence affordance."""
     if not id or severity == TIP_IMPORTANT:
         return ""
-    return '<sub>_Silence by adding `"%s"` to `ctx.traits[TipsTrait].silenced_tips` in `.aspect/config.axl`._</sub>' % id
+    return '<sub>_Silence by adding `"%s"` to `ctx.features["tips"].args.silence` in `.aspect/config.axl`, or pass `--tips:silence=%s` on the command line._</sub>' % (id, id)
 
 def tip_to_payload(t):
     """Project a stored tip dict into the render-only field subset
@@ -606,7 +599,7 @@ def _print_tip(std, id, severity, title, body):
             print(bar if line == "" else bar + " " + line)
     if severity != TIP_IMPORTANT:
         print(bar)
-        print(bar + ' (Silence this tip by adding "%s" to `ctx.traits[TipsTrait].silenced_tips` in `.aspect/config.axl`.)' % id)
+        print(bar + ' (Silence this tip with `--tips:silence=%s` or by adding it to `ctx.features["tips"].args.silence` in `.aspect/config.axl`.)' % id)
 
 def blockquote_body(body):
     """Prefix every line of a tip body with `> ` (or `>` for empty
@@ -625,3 +618,138 @@ def blockquote_body(body):
         else:
             out.append("> " + line)
     return "\n".join(out)
+
+# ── Owner feature — co-located with the trait so it can bind closures ─
+
+def _tips_impl(ctx):
+    """Owner feature impl. Holds the per-task tip list and silence list
+    in closure state; reads `silence` / `seed` / `auto_print` from
+    feature args at bind time so user configuration in .aspect/config.axl
+    or via `--tips:*` command-line flags propagates."""
+    state = []
+
+    # `args.custom(...)` returns None at runtime when unset, even when
+    # the declaration has `default = []` (same quirk used elsewhere with
+    # `args.custom(dict, ...)`). Coalesce defensively.
+    silenced = list(ctx.args.silence or [])
+    seed_list = list(ctx.args.seed or [])
+    auto_print = [ctx.args.auto_print]  # boxed so test seam can mutate
+
+    # Pre-seed from feature args. Idempotent dedup-by-id with framework
+    # `add_tip` calls — first add wins (or accumulator-merge for jinja2).
+    for t in seed_list:
+        if not any([existing.get("id") == t.get("id") for existing in state]):
+            state.append(dict(t))
+
+    def _add(call_ctx, tip):
+        id = tip["id"]
+        severity = tip["severity"]
+        if severity != TIP_IMPORTANT and id in silenced:
+            return
+        is_jinja2 = tip.get("type") == TIP_TEMPLATE_JINJA2
+
+        for i, existing in enumerate(state):
+            if existing.get("id") != id:
+                continue
+            if not is_jinja2:
+                return
+            merged, changed = _merge_accumulators(existing.get("accumulators", {}), tip.get("accumulators"))
+            if not changed:
+                return
+            stored_severity = existing.get("severity", severity)
+            rendered_title = call_ctx.template.jinja2(existing["title_template"], data = merged)
+            rendered_body = call_ctx.template.jinja2(existing["body_template"], data = merged)
+            updated = dict(existing)
+            updated["title"] = rendered_title
+            updated["body"] = rendered_body
+            updated["accumulators"] = merged
+            state[i] = updated
+            if auto_print[0]:
+                _print_tip(call_ctx.std, id, stored_severity, rendered_title, rendered_body)
+            return
+
+        if is_jinja2:
+            seeded = {name: [value] for name, value in tip["accumulators"].items() if value}
+            stored = {
+                "id": id,
+                "severity": severity,
+                "title": call_ctx.template.jinja2(tip["title_template"], data = seeded),
+                "body": call_ctx.template.jinja2(tip["body_template"], data = seeded),
+                "task_keys": list(tip.get("task_keys") or []),
+                "type": TIP_TEMPLATE_JINJA2,
+                "title_template": tip["title_template"],
+                "body_template": tip["body_template"],
+                "accumulators": seeded,
+            }
+        else:
+            stored = dict(tip)
+        state.append(stored)
+        if auto_print[0]:
+            _print_tip(call_ctx.std, id, severity, stored["title"], stored["body"])
+
+    def _collect():
+        return list(state)
+
+    def _reset():
+        # Clear in place. `state = []` inside the closure would shadow
+        # the outer name; `state.clear()` mutates the underlying list
+        # the closures over `state` (in `_add`, `_collect`) share.
+        # Pin `auto_print = False` since this seam is only ever called
+        # from tests — production never invokes it.
+        state.clear()
+        silenced.clear()
+        auto_print[0] = False
+
+    def _set_silenced(ids):
+        silenced.clear()
+        for id in ids:
+            silenced.append(id)
+
+    def _set_auto_print(v):
+        auto_print[0] = v
+
+    ctx.traits[_TipsTrait].add = _add
+    ctx.traits[_TipsTrait].collect = _collect
+    ctx.traits[_TipsTrait]._reset = _reset
+    ctx.traits[_TipsTrait]._set_silenced = _set_silenced
+    ctx.traits[_TipsTrait]._set_auto_print = _set_auto_print
+
+Tips = feature(
+    display_name = "Tips",
+    summary = "Collect and surface non-fatal tips (suggestions / warnings / important notices) on each task. Disable with `--tips:enabled=false` or `ctx.features[\"tips\"].enabled = False` in `.aspect/config.axl`.",
+    implementation = _tips_impl,
+    enabled = True,
+    args = {
+        "silence": args.string_list(
+            default = [],
+            description = "Tip ids to suppress for this task. Important tips (severity=important) ignore this list — they signal key-feature breakages. Append from config: `ctx.features[\"tips\"].args.silence.append(\"<id>\")`. Pass on CLI: `--tips:silence=<id>` (repeat for multiple).",
+        ),
+        "seed": args.custom(
+            list,
+            default = [],
+            description = "Pre-seed list of tip dicts to register at task start. Each entry must have {id, severity, title, body, type?, task_keys?}. Useful for user-defined tips scoped to specific tasks via `task_keys` globs. Append from config: `ctx.features[\"tips\"].args.seed.append({...})`.",
+        ),
+        "auto_print": args.boolean(
+            default = True,
+            description = "Print tips to the terminal on emit. Set False to suppress the `TIP:` blocks (tips still surface on rendered check-runs / PR comments).",
+        ),
+    },
+)
+
+# ── Public wrapper struct ────────────────────────────────────────────
+#
+# Consumers go through this. Internal storage (the trait, the closure
+# state inside `_tips_impl`) stays hidden — emit sites only see
+# `tips.emit / .add / .collect`. Test seams are underscore-prefixed.
+
+tips = struct(
+    emit = emit_tip,
+    add = add_tip,
+    collect = collect_tips_sorted,
+    # Test seams — production code should not call.
+    _reset_for_test = lambda ctx: ctx.traits[_TipsTrait]._reset(),
+    _inspect_for_test = lambda ctx: ctx.traits[_TipsTrait].collect(),
+    _set_silenced_for_test = lambda ctx, ids: ctx.traits[_TipsTrait]._set_silenced(ids),
+    _set_auto_print_for_test = lambda ctx, v: ctx.traits[_TipsTrait]._set_auto_print(v),
+    TRAITS = [_TipsTrait],
+)
