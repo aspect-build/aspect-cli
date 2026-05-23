@@ -102,9 +102,9 @@ jobs:
       - name: Bootstrap
         run: .aspect/bootstrap.sh
       - name: Buildifier Task (ASPECT_DEBUG=1)
-        run: ASPECT_DEBUG=1 aspect format --task-key buildifier-gha-debug --formatter-target=//tools/format:format-starlark
+        run: ASPECT_DEBUG=1 aspect buildifier --task-key buildifier-gha-debug
       - name: Buildifier Task
-        run: aspect format --task-key buildifier-gha --formatter-target=//tools/format:format-starlark
+        run: aspect buildifier --task-key buildifier-gha
 
   format-task:
     runs-on: [self-hosted, aspect-workflows, aspect-default]

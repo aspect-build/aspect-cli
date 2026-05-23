@@ -9,6 +9,7 @@ use starlark::eval::Evaluator;
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
 use starlark::values::FrozenValue;
+use starlark::values::Heap;
 use starlark::values::NoSerialize;
 use starlark::values::ProvidesStaticType;
 use starlark::values::StarlarkValue;
@@ -19,6 +20,7 @@ use starlark::values::list::UnpackList;
 use starlark::values::none::NoneOr;
 use starlark::values::starlark_value;
 use starlark::values::starlark_value_as_type::StarlarkValueAsType;
+use starlark::values::typing::TypeCompiled;
 
 #[derive(Clone, Debug, ProvidesStaticType, NoSerialize, Allocative)]
 pub enum Arg {
@@ -148,6 +150,125 @@ impl Arg {
             Self::Positional { .. } | Self::TrailingVarArgs { .. } | Self::Custom { .. } => None,
         }
     }
+
+    /// Return a clone of `self` with this variant's `default` replaced by `value`.
+    ///
+    /// Used by `task.alias(defaults = {...})` to overlay new defaults on a base
+    /// task's arg schema. `value`'s Starlark type must match the variant — a
+    /// mismatch produces an error mentioning `arg_name`. The schema constraints
+    /// declared on the original arg are re-enforced: `args.string(values =
+    /// [...])` membership and `args.custom(type, ...)` type predicates.
+    ///
+    /// `TrailingVarArgs` carries no schema-level default and rejects override
+    /// attempts. `Custom` defaults that cannot be frozen (live containers,
+    /// inline lambdas) drop to `None` — the same limitation `args.custom(...)`
+    /// has at definition time.
+    pub fn with_default<'v>(
+        &self,
+        arg_name: &str,
+        value: Value<'v>,
+        heap: Heap<'v>,
+    ) -> anyhow::Result<Arg> {
+        let mut next = self.clone();
+        match &mut next {
+            Self::String {
+                default, values, ..
+            } => {
+                *default = unpack_typed::<String>(arg_name, "string", value)?;
+                if let Some(allowed) = values
+                    && !allowed.iter().any(|v| v == default)
+                {
+                    return Err(anyhow::anyhow!(
+                        "arg {:?}: value {:?} is not one of the allowed values {:?}",
+                        arg_name,
+                        default,
+                        allowed,
+                    ));
+                }
+            }
+            Self::Boolean { default, .. } => {
+                *default = unpack_typed::<bool>(arg_name, "boolean", value)?;
+            }
+            Self::Int { default, .. } => {
+                *default = unpack_typed::<i32>(arg_name, "int", value)?;
+            }
+            Self::UInt { default, .. } => {
+                *default = unpack_typed::<u32>(arg_name, "uint", value)?;
+            }
+            Self::Positional { default, .. } => {
+                *default = Some(unpack_list_items::<String>(arg_name, "positional", value)?);
+            }
+            Self::StringList { default, .. } => {
+                *default = unpack_list_items::<String>(arg_name, "string_list", value)?;
+            }
+            Self::BooleanList { default, .. } => {
+                *default = unpack_list_items::<bool>(arg_name, "boolean_list", value)?;
+            }
+            Self::IntList { default, .. } => {
+                *default = unpack_list_items::<i32>(arg_name, "int_list", value)?;
+            }
+            Self::UIntList { default, .. } => {
+                *default = unpack_list_items::<u32>(arg_name, "uint_list", value)?;
+            }
+            Self::Custom {
+                typ_value, default, ..
+            } => {
+                if let Some(typ) = typ_value {
+                    let compiled = TypeCompiled::new(typ.to_value(), heap)
+                        .map_err(|e| anyhow::anyhow!("{:?}", e))?;
+                    if !compiled.matches(value) {
+                        return Err(anyhow::anyhow!(
+                            "arg {:?}: value `{}` does not match arg type `{}`",
+                            arg_name,
+                            value,
+                            compiled,
+                        ));
+                    }
+                }
+                *default = value.unpack_frozen();
+            }
+            Self::TrailingVarArgs { .. } => {
+                return Err(anyhow::anyhow!(
+                    "arg {:?}: cannot override a trailing_var_args default — \
+                     the schema does not carry one",
+                    arg_name,
+                ));
+            }
+        }
+        Ok(next)
+    }
+}
+
+fn type_error(arg_name: &str, expected: &str, got: Value<'_>) -> anyhow::Error {
+    anyhow::anyhow!(
+        "arg {:?}: expected {}, got '{}'",
+        arg_name,
+        expected,
+        got.get_type(),
+    )
+}
+
+fn unpack_typed<'v, T: UnpackValue<'v>>(
+    arg_name: &str,
+    expected: &str,
+    value: Value<'v>,
+) -> anyhow::Result<T> {
+    T::unpack_value(value)
+        .ok()
+        .flatten()
+        .ok_or_else(|| type_error(arg_name, expected, value))
+}
+
+fn unpack_list_items<'v, T: UnpackValue<'v>>(
+    arg_name: &str,
+    expected: &str,
+    value: Value<'v>,
+) -> anyhow::Result<Vec<T>> {
+    UnpackList::<T>::unpack_value(value)
+        .ok()
+        .flatten()
+        .map(|l| l.items)
+        .ok_or_else(|| type_error(arg_name, expected, value))
 }
 
 impl Display for Arg {
