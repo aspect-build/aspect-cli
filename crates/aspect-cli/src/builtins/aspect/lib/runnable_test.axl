@@ -1,0 +1,80 @@
+"""Tests for `lib/runnable.axl`'s label canonicalizer.
+
+Covers `canonical_label` across:
+  - Absolute labels: `//pkg:name`, `//pkg` (shorthand), `//:name`, `@repo//pkg:name`, `@repo//pkg` (shorthand).
+  - Relative labels: `:name`, bare `name`, `pkg:name` — both at the workspace root and inside a nested package.
+
+`_current_package` derives the package from cwd vs workspace root; that path
+needs a real cwd/root pair and is exercised by the live `aspect run` smoke
+in CI rather than mocked here.
+
+Run with:
+  aspect dev test-runnable
+"""
+
+load("./runnable.axl", "canonical_label")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _test_absolute_unchanged_when_target_present():
+    _eq("//foo/bar:baz", canonical_label("//foo/bar:baz"), "//foo/bar:baz")
+    _eq("//:foo", canonical_label("//:foo"), "//:foo")
+    _eq("//foo/bar:baz with pkg context", canonical_label("//foo/bar:baz", "ignored"), "//foo/bar:baz")
+
+def _test_absolute_shorthand_expands_basename():
+    _eq("//foo/bar -> //foo/bar:bar", canonical_label("//foo/bar"), "//foo/bar:bar")
+    _eq("//foo -> //foo:foo", canonical_label("//foo"), "//foo:foo")
+
+def _test_external_repo_labels():
+    _eq("@repo//foo:bar", canonical_label("@repo//foo:bar"), "@repo//foo:bar")
+    _eq("@repo//foo -> @repo//foo:foo", canonical_label("@repo//foo"), "@repo//foo:foo")
+    _eq("@@_main//foo:bar (bzlmod canonical)", canonical_label("@@_main//foo:bar"), "@@_main//foo:bar")
+
+def _test_relative_colon_name_at_root():
+    _eq(":foo at root -> //:foo", canonical_label(":foo", ""), "//:foo")
+
+def _test_relative_colon_name_in_nested_package():
+    _eq(":foo in examples/deliverable", canonical_label(":foo", "examples/deliverable"), "//examples/deliverable:foo")
+
+def _test_bare_name_at_root():
+    _eq("foo at root -> //:foo", canonical_label("foo", ""), "//:foo")
+
+def _test_bare_name_in_nested_package():
+    _eq("foo in examples -> //examples:foo", canonical_label("foo", "examples"), "//examples:foo")
+
+def _test_relative_pkg_colon_name_at_root():
+    _eq("sub:foo at root -> //sub:foo", canonical_label("sub:foo", ""), "//sub:foo")
+
+def _test_relative_pkg_colon_name_in_nested_package():
+    _eq("sub:foo in foo -> //foo/sub:foo", canonical_label("sub:foo", "foo"), "//foo/sub:foo")
+
+def _test_default_current_package_is_root():
+    """Callers that omit `current_package` (e.g. `_process_bes` on BES events)
+    get root-package resolution, which is correct because BES always emits
+    absolute labels — so the default never actually engages on a relative
+    input in practice."""
+    _eq(":foo with default pkg", canonical_label(":foo"), "//:foo")
+    _eq("foo with default pkg", canonical_label("foo"), "//:foo")
+
+def _test_impl(ctx):
+    _test_absolute_unchanged_when_target_present()
+    _test_absolute_shorthand_expands_basename()
+    _test_external_repo_labels()
+    _test_relative_colon_name_at_root()
+    _test_relative_colon_name_in_nested_package()
+    _test_bare_name_at_root()
+    _test_bare_name_in_nested_package()
+    _test_relative_pkg_colon_name_at_root()
+    _test_relative_pkg_colon_name_in_nested_package()
+    _test_default_current_package_is_root()
+    print("runnable.axl: OK (10 sections)")
+    return 0
+
+runnable_tests = task(
+    name = "test-runnable",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

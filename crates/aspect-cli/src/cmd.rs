@@ -303,7 +303,8 @@ fn arg_to_clap(scope: Scope<'_>, name: &str, arg: &Arg) -> ClapArg {
                 .value_parser(value_parser!(String))
                 .value_name(id)
                 .help(help_text(description))
-                .num_args(*minimum as usize..=*maximum as usize);
+                .num_args(*minimum as usize..=*maximum as usize)
+                .required(*minimum > 0 && default.is_none());
             if let Some(default) = default {
                 it = it.default_values(default);
             }

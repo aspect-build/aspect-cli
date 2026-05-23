@@ -1,9 +1,52 @@
 _DEFAULT_WORKSPACE_NAME = "_main"
 
-def canonical_label(label):
-    if ":" not in label:
-        return label + ":" + label.split("/")[-1]
-    return label
+def canonical_label(label: str, current_package: str = "") -> str:
+    """Normalize a Bazel label to `//<pkg>:<name>` (or `@<repo>//<pkg>:<name>`) form.
+
+    `current_package` is the workspace-relative path of the user's working
+    package (e.g. "foo/bar", or "" for the root package). Required to resolve
+    relative labels (`:foo`, `foo`, `pkg:foo`). Absolute labels (`//...`,
+    `@repo//...`) ignore it.
+
+      canonical_label("//foo/bar")            -> "//foo/bar:bar"
+      canonical_label("//foo/bar:baz")        -> "//foo/bar:baz"
+      canonical_label("@repo//foo")           -> "@repo//foo:foo"
+      canonical_label(":baz", "foo/bar")      -> "//foo/bar:baz"
+      canonical_label("baz", "foo/bar")       -> "//foo/bar:baz"
+      canonical_label("sub:baz", "foo")       -> "//foo/sub:baz"
+      canonical_label("baz", "")              -> "//:baz"
+    """
+    # Absolute: //pkg[:name] or @repo//pkg[:name].
+    if label.startswith("//") or label.startswith("@"):
+        pkg_part = label.split("//", 1)[-1]
+        if ":" in pkg_part:
+            return label
+        if pkg_part:
+            return label + ":" + pkg_part.rsplit("/", 1)[-1]
+        return label
+
+    # `:name` -> //<current_package>:name
+    if label.startswith(":"):
+        return "//" + current_package + label
+
+    # `pkg:name` -> //<current_package>/<pkg>:name (or //<pkg>:name when at root)
+    if ":" in label:
+        pkg, _, name = label.partition(":")
+        joined = current_package + "/" + pkg if current_package else pkg
+        return "//" + joined + ":" + name
+
+    # Bare `name` -> //<current_package>:name
+    return "//" + current_package + ":" + label
+
+def _current_package(ctx) -> str:
+    """Workspace-relative path of cwd, used as the package for relative labels."""
+    root = ctx.std.env.root_dir().rstrip("/")
+    cwd = ctx.std.env.current_dir().rstrip("/")
+    if cwd == root:
+        return ""
+    if cwd.startswith(root + "/"):
+        return cwd[len(root) + 1:]
+    return ""
 
 def _process_bes(state: struct, event):
     if event.kind == "named_set_of_files":
@@ -35,7 +78,7 @@ def _determine_entrypoint(state: struct, target: str) -> str | None:
     caller pairs this with `is_runnable` to distinguish "not in BES" from
     "in BES but no runfiles tree".
     """
-    target = canonical_label(target)
+    target = canonical_label(target, state.current_package)
     if target not in state.target_fileset:
         return None
 
@@ -98,9 +141,11 @@ def _spawn(ctx: TaskContext, state: struct, entrypoint: str, args: list[str], ca
     return cmd.spawn()
 
 def runnable(ctx, targets: list[str]) -> struct:
+    current_package = _current_package(ctx)
     state = struct(
         ctx = ctx,
-        targets = {canonical_label(t): t for t in targets},
+        current_package = current_package,
+        targets = {canonical_label(t, current_package): t for t in targets},
         filesets = {},
         target_fileset = {},
         # Single-element list so `_process_bes` can mutate it (struct fields are
