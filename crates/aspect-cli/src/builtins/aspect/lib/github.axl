@@ -1863,7 +1863,7 @@ def _upload_artifact(ctx, path, name, expires_at = ""):
     # side. v1 (where GitHub wrapped server-side) was turned off April 2024.
     # Uploading raw bytes results in a "download" that fails to unzip — the
     # file gets served with a .zip suffix but the content isn't a valid
-    # archive. actions/upload-artifact@v4 does the same thing.
+    # archive. actions/upload-artifact@v7 does the same thing.
     #
     # If `path` is already a .zip (e.g. lib/artifacts.axl::_upload_testlogs_zip
     # built a multi-entry testlogs archive), upload it verbatim. Otherwise

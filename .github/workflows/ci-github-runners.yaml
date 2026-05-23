@@ -38,7 +38,7 @@ jobs:
       # so we re-use the binary that the self-hosted runner already built rather
       # than rebuilding from source per ephemeral job.
       - name: Upload aspect-cli binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: aspect-cli
           path: target/ci/aspect-cli

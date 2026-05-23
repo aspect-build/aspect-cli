@@ -38,7 +38,7 @@ jobs:
           sudo chmod +x /usr/bin/bazel
 
       - name: Setup bazel
-        uses: bazel-contrib/setup-bazel@4fd964a13a440a8aeb0be47350db2fc640f19ca8 # 0.15.0
+        uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
         with:
           # Avoid downloading Bazel every time.
           bazelisk-cache: true
@@ -75,7 +75,7 @@ jobs:
           subject-path: "upload_root/assets/*"
 
       - name: Upload release artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           path: upload_root/
           retention-days: 1
