@@ -38,7 +38,7 @@ jobs:
           sudo chmod +x /usr/bin/bazel
 
       - name: Setup bazel
-        uses: bazel-contrib/setup-bazel@0.15.0
+        uses: bazel-contrib/setup-bazel@4fd964a13a440a8aeb0be47350db2fc640f19ca8 # 0.15.0
         with:
           # Avoid downloading Bazel every time.
           bazelisk-cache: true
