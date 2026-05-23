@@ -120,24 +120,10 @@ jobs:
       # the two steps don't do duplicate work.
       - name: Format Task (ASPECT_DEBUG=1)
         run: |
-          ASPECT_DEBUG=1 aspect format --task-key format-gha-debug \
-            --ignore-pattern='**/*.axl' \
-            --ignore-pattern='**/*.bzl' \
-            --ignore-pattern='**/BUILD' \
-            --ignore-pattern='**/BUILD.bazel' \
-            --ignore-pattern='**/MODULE.bazel' \
-            --ignore-pattern='**/WORKSPACE' \
-            --ignore-pattern='**/WORKSPACE.bazel'
+          ASPECT_DEBUG=1 aspect format --task-key format-gha-debug
       - name: Format Task
         run: |
-          aspect format --task-key format-gha \
-            --ignore-pattern='**/*.axl' \
-            --ignore-pattern='**/*.bzl' \
-            --ignore-pattern='**/BUILD' \
-            --ignore-pattern='**/BUILD.bazel' \
-            --ignore-pattern='**/MODULE.bazel' \
-            --ignore-pattern='**/WORKSPACE' \
-            --ignore-pattern='**/WORKSPACE.bazel'
+          aspect format --task-key format-gha
 
   gazelle-task:
     runs-on: [self-hosted, aspect-workflows, aspect-default]

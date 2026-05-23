@@ -130,26 +130,10 @@ jobs:
       # the two steps don't do duplicate work.
       - run:
           name: Format Task (ASPECT_DEBUG=1)
-          command: |
-            ASPECT_DEBUG=1 aspect format --task-key format-cci-debug \
-              --ignore-pattern='**/*.axl' \
-              --ignore-pattern='**/*.bzl' \
-              --ignore-pattern='**/BUILD' \
-              --ignore-pattern='**/BUILD.bazel' \
-              --ignore-pattern='**/MODULE.bazel' \
-              --ignore-pattern='**/WORKSPACE' \
-              --ignore-pattern='**/WORKSPACE.bazel'
+          command: ASPECT_DEBUG=1 aspect format --task-key format-cci-debug
       - run:
           name: Format Task
-          command: |
-            aspect format --task-key format-cci \
-              --ignore-pattern='**/*.axl' \
-              --ignore-pattern='**/*.bzl' \
-              --ignore-pattern='**/BUILD' \
-              --ignore-pattern='**/BUILD.bazel' \
-              --ignore-pattern='**/MODULE.bazel' \
-              --ignore-pattern='**/WORKSPACE' \
-              --ignore-pattern='**/WORKSPACE.bazel'
+          command: aspect format --task-key format-cci
 
   gazelle-task:
     machine: true

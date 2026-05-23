@@ -211,22 +211,8 @@ steps:
     # Starlark patterns are handled by buildifier-task; ignore them here so
     # the two steps don't do duplicate work.
     command: |
-      ASPECT_DEBUG=1 aspect format --task-key format-bk-debug \
-        --ignore-pattern='**/*.axl' \
-        --ignore-pattern='**/*.bzl' \
-        --ignore-pattern='**/BUILD' \
-        --ignore-pattern='**/BUILD.bazel' \
-        --ignore-pattern='**/MODULE.bazel' \
-        --ignore-pattern='**/WORKSPACE' \
-        --ignore-pattern='**/WORKSPACE.bazel'
-      aspect format --task-key format-bk \
-        --ignore-pattern='**/*.axl' \
-        --ignore-pattern='**/*.bzl' \
-        --ignore-pattern='**/BUILD' \
-        --ignore-pattern='**/BUILD.bazel' \
-        --ignore-pattern='**/MODULE.bazel' \
-        --ignore-pattern='**/WORKSPACE' \
-        --ignore-pattern='**/WORKSPACE.bazel'
+      ASPECT_DEBUG=1 aspect format --task-key format-bk-debug
+      aspect format --task-key format-bk
 
   - key: gazelle-task
     label: ":aspect: Gazelle Task"

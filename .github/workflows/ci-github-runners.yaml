@@ -73,14 +73,7 @@ jobs:
       # the two steps don't do duplicate work.
       - name: Format Task
         run: |
-          aspect format --task-key format-gha-ephemeral \
-            --ignore-pattern='**/*.axl' \
-            --ignore-pattern='**/*.bzl' \
-            --ignore-pattern='**/BUILD' \
-            --ignore-pattern='**/BUILD.bazel' \
-            --ignore-pattern='**/MODULE.bazel' \
-            --ignore-pattern='**/WORKSPACE' \
-            --ignore-pattern='**/WORKSPACE.bazel'
+          aspect format --task-key format-gha-ephemeral
 
   gazelle-task:
     runs-on: ubuntu-latest
