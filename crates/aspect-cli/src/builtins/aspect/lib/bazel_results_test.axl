@@ -8,7 +8,7 @@ Two task implementations live here:
     `compute_invocation_state`, `conclusion`, and skipped-bucket plumbing.
 """
 
-load("./bazel_results.axl", "MAX_TEST_TARGETS", "bes_get", "build_details_data", "compute_invocation_state", "conclusion", "init_data", "process_event", "render_check_output")
+load("./bazel_results.axl", "MAX_TEST_TARGETS", "bes_get", "build_details_data", "common_label_root", "compute_invocation_state", "conclusion", "init_data", "process_event", "render_check_output", "repro_targets")
 
 # ---------------------------------------------------------------------------
 # Fake data builders
@@ -895,6 +895,149 @@ def _test_flaky_test_survives_passed_bucket_cap(ctx):
     _eq("flaky test recorded despite full passed bucket", flaky, ["//pkg/flake:test"])
     _eq("flaky_test_total reflects the flake", data["bazel"]["flaky_test_total"], 1)
 
+# ─── common_label_root / repro_targets ──────────────────────────────────────
+
+def _test_common_label_root_same_package_returns_all_pattern(ctx):
+    _eq(
+        "single package",
+        common_label_root(["//pkg/foo:t1", "//pkg/foo:t2", "//pkg/foo:t3"]),
+        "//pkg/foo:all",
+    )
+
+def _test_common_label_root_returns_shared_prefix(ctx):
+    _eq(
+        "shared prefix",
+        common_label_root(["//app/foo:t1", "//app/foo:t2", "//app/bar:t1"]),
+        "//app/...",
+    )
+
+def _test_common_label_root_no_prefix_returns_empty(ctx):
+    """Labels in disjoint top-level packages have no useful collapse —
+    `//...` is no narrower than the original `aspect <build|test>`."""
+    _eq(
+        "disjoint packages",
+        common_label_root(["//app:t1", "//other:t2"]),
+        "",
+    )
+
+def _test_common_label_root_external_repo_returns_empty(ctx):
+    """External-repo labels (`@foo//pkg:t`) can't be collapsed into a
+    workspace-relative pattern without lying about scope."""
+    _eq(
+        "external repo present",
+        common_label_root(["//app/foo:t1", "@third_party//lib:bar"]),
+        "",
+    )
+
+def _test_common_label_root_empty_input(ctx):
+    _eq("empty list", common_label_root([]), "")
+
+def _test_common_label_root_single_label(ctx):
+    _eq("single target", common_label_root(["//pkg/foo:test"]), "//pkg/foo:all")
+
+def _test_repro_targets_small_set_passes_through(ctx):
+    """A handful of failures render verbatim — small enough to fit."""
+    data = init_data()
+    data["bazel"]["failed_tests"] = [
+        {"label": "//pkg/a:test", "status": "failed"},
+        {"label": "//pkg/b:test", "status": "timeout"},
+        {"label": "//pkg/c:test", "status": "failed"},
+    ]
+    _eq(
+        "small set passes through",
+        repro_targets(data, ["//..."]),
+        ["//pkg/a:test", "//pkg/b:test", "//pkg/c:test"],
+    )
+
+def _test_repro_targets_large_set_collapses_to_root(ctx):
+    """Above the inline cap, collapse to the common-root pattern."""
+    data = init_data()
+    data["bazel"]["failed_tests"] = [
+        {"label": "//app/feature/foo:test_%d" % i, "status": "failed"}
+        for i in range(15)
+    ]
+    _eq(
+        "large set → //app/feature/foo:all",
+        repro_targets(data, ["//..."]),
+        ["//app/feature/foo:all"],
+    )
+
+def _test_repro_targets_large_set_falls_back_when_no_common_root(ctx):
+    """No useful collapse → original command."""
+    data = init_data()
+    data["bazel"]["failed_tests"] = [
+        {"label": "//app%d:test_%d" % (i, i), "status": "failed"}
+        for i in range(15)
+    ]
+    _eq(
+        "large set, no shared root → fallback",
+        repro_targets(data, ["//..."]),
+        ["//..."],
+    )
+
+def _test_repro_targets_no_failures_falls_back(ctx):
+    """Empty failure set (warning-level invocation) → original command."""
+    data = init_data()
+    _eq(
+        "no failures → fallback",
+        repro_targets(data, ["//app/..."]),
+        ["//app/..."],
+    )
+
+def _test_repro_targets_includes_target_failures(ctx):
+    """Build failures land in `failed_targets` (with action-level entries
+    when present, plus any failed_targets without a matching action —
+    analysis / loading / link failures, derived consumers). Both feed
+    the repro: the action label is the most informative, and including
+    target-only entries means a mixed-failure run doesn't drop targets
+    that broke during analysis."""
+    data = init_data()
+    data["bazel"]["failed_action_labels"] = ["//pkg/broken:lib"]
+    data["bazel"]["failed_actions"] = [{"label": "//pkg/broken:lib", "mnemonics": ["CppCompile"]}]
+    data["bazel"]["failed_targets"] = [
+        {"label": "//pkg/broken:lib"},  # root with an action failure
+        {"label": "//pkg/analysis:bad"},  # analysis-only failure
+        {"label": "//pkg/consumer:bin"},  # derived consumer
+    ]
+    _eq(
+        "build — action + target failures both surface",
+        repro_targets(data, ["//..."]),
+        ["//pkg/broken:lib", "//pkg/analysis:bad", "//pkg/consumer:bin"],
+    )
+
+def _test_repro_targets_preserves_explicit_label_through_collapse(ctx):
+    """A failed label that the user named directly in the original
+    command stays as an explicit entry alongside the collapse pattern —
+    `bazel test //pkg:all` (and `//pkg/...`) skip `tags = ["manual"]`
+    rules, so a wildcard repro could silently lose a manual test the
+    user invoked by label."""
+    data = init_data()
+    data["bazel"]["failed_tests"] = [
+        {"label": "//app/foo:test_%d" % i, "status": "failed"}
+        for i in range(12)
+    ] + [
+        {"label": "//app/foo:manual_test", "status": "failed"},
+    ]
+    _eq(
+        "collapse keeps the explicit manual label",
+        repro_targets(data, ["//app/...", "//app/foo:manual_test"]),
+        ["//app/foo:manual_test", "//app/foo:all"],
+    )
+
+def _test_repro_targets_collapse_with_only_wildcard_originals(ctx):
+    """When the original command has no explicit labels, the collapse
+    stands alone — no extra entries to preserve."""
+    data = init_data()
+    data["bazel"]["failed_tests"] = [
+        {"label": "//app/foo:test_%d" % i, "status": "failed"}
+        for i in range(15)
+    ]
+    _eq(
+        "wildcard-only original → collapse only",
+        repro_targets(data, ["//app/...", "-//app/legacy/..."]),
+        ["//app/foo:all"],
+    )
+
 _UNIT_TESTS = [
     _test_failed_status_without_failure_bucket,
     _test_failed_status_with_explicit_action_failure,
@@ -910,6 +1053,19 @@ _UNIT_TESTS = [
     _test_bes_get_handles_none,
     _test_failed_test_survives_passed_bucket_cap,
     _test_flaky_test_survives_passed_bucket_cap,
+    _test_common_label_root_same_package_returns_all_pattern,
+    _test_common_label_root_returns_shared_prefix,
+    _test_common_label_root_no_prefix_returns_empty,
+    _test_common_label_root_external_repo_returns_empty,
+    _test_common_label_root_empty_input,
+    _test_common_label_root_single_label,
+    _test_repro_targets_small_set_passes_through,
+    _test_repro_targets_large_set_collapses_to_root,
+    _test_repro_targets_large_set_falls_back_when_no_common_root,
+    _test_repro_targets_no_failures_falls_back,
+    _test_repro_targets_includes_target_failures,
+    _test_repro_targets_preserves_explicit_label_through_collapse,
+    _test_repro_targets_collapse_with_only_wildcard_originals,
 ]
 
 def _unit_test_impl(ctx):
