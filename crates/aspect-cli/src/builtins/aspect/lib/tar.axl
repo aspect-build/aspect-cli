@@ -24,8 +24,7 @@ def _platform_key(ctx):
     os = _OS_MAP.get(ctx.std.env.os())
     arch = _ARCH_MAP.get(ctx.std.env.arch())
     if not os or not arch:
-        msg = "unsupported platform: " + ctx.std.env.os() + "/" + ctx.std.env.arch()
-        fail(msg)
+        return None, None
     return os, arch
 
 def _cache_dir(ctx):
@@ -42,6 +41,14 @@ def _file_sha256(ctx, path):
 
 def bsdtar(ctx):
     """Return the path to a cached bsdtar binary, downloading if necessary.
+
+    All failure modes (unknown platform, no $HOME, transient HTTP error on
+    download, post-download rename failure) degrade to `None` + a warning
+    rather than raising. The binary is downloaded only to power best-effort
+    artifact archiving, so a download blip on github.com must not take down
+    the user-facing task that triggered it. Callers (`tar_create`,
+    `zip_create`, `tar_create_from_dir`, `_extract_zip`) treat `None` as a
+    skip signal and return `False`.
 
     Downloads to a unique staging path and atomically rename into place. Two
     benefits fall out of this pattern:
@@ -71,9 +78,14 @@ def bsdtar(ctx):
     """
     cache = _cache_dir(ctx)
     if not cache:
-        fail("cannot determine home directory for bsdtar cache")
+        warn(ctx.std, "bsdtar: cannot determine home directory for cache; archive operations will be skipped")
+        return None
 
     os, arch = _platform_key(ctx)
+    if not os or not arch:
+        warn(ctx.std, "bsdtar: unsupported platform %s/%s; archive operations will be skipped" % (ctx.std.env.os(), ctx.std.env.arch()))
+        return None
+
     bin_path = cache + "/tar"
     expected = _SHA256.get(os + "-" + arch)
 
@@ -98,7 +110,20 @@ def bsdtar(ctx):
     # tmpdir are typically on different mounts.
     staging = ctx.std.fs.mkdtemp(prefix = "bsdtar-dl-", parent = cache)
     tmp_path = staging + "/tar"
-    ctx.http().download(url = url, output = tmp_path, mode = 0o755, sha256 = expected).block()
+
+    # Soft-fail on HTTP errors (502s, DNS hiccups, etc.). The github.com
+    # release CDN occasionally serves 5xx; we never want that to abort the
+    # task that owned this archive request.
+    download_result = ctx.http().download(
+        url = url,
+        output = tmp_path,
+        mode = 0o755,
+        sha256 = expected,
+    ).map_err(lambda e: str(e)).block()
+    if type(download_result) == "string":
+        warn(ctx.std, "bsdtar: download from %s failed (%s); archive operations will be skipped" % (url, download_result))
+        return None
+
     ctx.std.fs.rename(tmp_path, bin_path)
     # Intentionally no cleanup of `staging` here. After the rename it's an empty
     # directory named `bsdtar-dl-<random>` inside the cache; leaving it behind
@@ -117,9 +142,12 @@ def tar_create_from_dir(ctx, archive_path, dir_path):
         dir_path: str - directory to archive
 
     Returns:
-        bool - True on success
+        bool - True on success; False if the bsdtar binary is unavailable
+        or the archive command exited non-zero.
     """
     bin_path = bsdtar(ctx)
+    if not bin_path:
+        return False
     child = ctx.std.process.command(bin_path).args([
         "czf",
         archive_path,
@@ -139,9 +167,12 @@ def tar_create(ctx, archive_path, mtree_spec):
         mtree_spec: str - mtree spec content mapping archive paths to source files
 
     Returns:
-        bool - True on success
+        bool - True on success; False if the bsdtar binary is unavailable
+        or the archive command exited non-zero.
     """
     bin_path = bsdtar(ctx)
+    if not bin_path:
+        return False
     mtree_path = archive_path + ".mtree"
 
     ctx.std.fs.write(mtree_path, mtree_spec)
@@ -172,9 +203,12 @@ def zip_create(ctx, archive_path, mtree_spec):
         mtree_spec: str - mtree spec content mapping archive paths to source files
 
     Returns:
-        bool - True on success
+        bool - True on success; False if the bsdtar binary is unavailable
+        or the archive command exited non-zero.
     """
     bin_path = bsdtar(ctx)
+    if not bin_path:
+        return False
     mtree_path = archive_path + ".mtree"
 
     ctx.std.fs.write(mtree_path, mtree_spec)
