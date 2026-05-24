@@ -14,6 +14,7 @@ load("@aspect//lib/gitlab_test.axl", "gitlab_client_tests")
 load("@aspect//lib/lint_results_test.axl", "lint_annotation_plan_tests", "lint_template_snapshot_tests")
 load("@aspect//lib/rate_limit_test.axl", "rate_limit_tests")
 load("@aspect//lib/runner_job_history_test.axl", "runner_job_history_tests")
+load("@aspect//lib/tar_test.axl", "tar_tests")
 load("@aspect//lib/tips_test.axl", "tips_tests")
 load("@aspect//traits.axl", "BazelTrait", "LintTrait")
 load("./lambda.axl", "lambda_with_global_bind")
@@ -120,6 +121,11 @@ def config(ctx: ConfigContext):
     # silenced_tips short-circuit, and built-in template shape.
     # Run with: aspect dev test-tips
     ctx.tasks.add(tips_tests)
+
+    # bsdtar platform-key mapping — supported (darwin/linux × amd64/arm64)
+    # and unsupported host inputs.
+    # Run with: aspect dev test-tar
+    ctx.tasks.add(tar_tests)
 
     # Adaptive rate-limit throttling — observations / burn-rate
     # inference / threshold ladder / tip firing / two-bucket
