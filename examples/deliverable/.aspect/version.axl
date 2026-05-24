@@ -1,5 +1,5 @@
 version(
-    "2026.20.8",
+    "2026.21.44",
     sources = [
         # Sibling-of-sub-module paths up to the parent workspace where the
         # CLI is actually built/copied. The launcher resolves these relative
