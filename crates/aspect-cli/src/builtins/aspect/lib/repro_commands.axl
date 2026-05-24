@@ -28,8 +28,14 @@ the per-task lists into a single rolled-up view across tasks: two
 contributions of the same `(command, description)` collapse into one
 row that lists every contributing task_key.
 
-Both helpers are pure — no I/O, no ctx access.
+`print_repro_and_fix(std, data, status)` prints the same blocks to
+the CLI so a developer reading the raw CI log sees the actionable
+commands without opening the status surface.
+
+`build_aspect_command` and `dedup_and_attribute` are pure (no I/O).
 """
+
+load("./environment.axl", "color_enabled")
 
 # Soft cap on a composed command's length; targets past it collapse to
 # ` … +N more` so the output stays copy-paste-able.
@@ -255,3 +261,54 @@ def patch_download_cmd(patch_url, strip = 1):
                     "  && unzip -p /tmp/aspect-patch.zip \\\n" +
                     "  | %s") % (owner, repo, artifact_id, apply_cmd)
     return ""
+
+# ── CLI rendering ─────────────────────────────────────────────────────
+
+def print_repro_and_fix(std, data, status):
+    """Print the `data["repro_commands"]` and `data["fix_commands"]`
+    blocks to the CLI as a plain-text counterpart to the
+    `### 🔁 Reproduce` / `### 🛠️ Fix` Markdown sections that render on
+    status surfaces. Mirrors the same content so a developer reading
+    the raw CI log can copy the actionable command without opening
+    the status surface.
+
+    No-op when `status == "passed"` (no need to nag a clean run) or
+    when both lists are empty. Caller passes `ctx.std` for color
+    detection and the terminal-state `data` dict; safe to call from
+    any task's terminal-emit path."""
+    if status == "passed":
+        return
+    repros = data.get("repro_commands", []) or []
+    fixes = data.get("fix_commands", []) or []
+    if not repros and not fixes:
+        return
+
+    ansi = color_enabled(std)
+    if repros:
+        print("")
+        print(_repro_header(ansi, "🔁 Reproduce:"))
+        for entry in repros:
+            _print_repro_entry(ansi, entry)
+    if fixes:
+        print("")
+        print(_repro_header(ansi, "🛠️ Fix:"))
+        for entry in fixes:
+            _print_repro_entry(ansi, entry)
+    print("")
+
+def _repro_header(ansi, label):
+    return "\x1b[1m" + label + "\x1b[0m" if ansi else label
+
+def _print_repro_entry(ansi, entry):
+    """Print one `{command, description}` entry, indenting every
+    command line two spaces so multi-line composed commands (the
+    backslash-continuation form `build_aspect_command` produces for
+    long flag/target lists) keep their visual grouping."""
+    command = entry.get("command", "") or ""
+    description = entry.get("description", "") or ""
+    if not command:
+        return
+    for line in command.split("\n"):
+        print("  " + line)
+    if description:
+        print(("  \x1b[2m" + description + "\x1b[0m") if ansi else ("  " + description))
