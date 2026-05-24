@@ -445,6 +445,11 @@ fn merge_args<'v>(
                 if let Some(val) = clap_to_value(cli, &key, matches, heap) {
                     args.insert(name.clone(), val);
                 }
+                // Track CLI-explicit keys so `ctx.args.is_explicit(name)`
+                // can tell defaults from user-typed values downstream.
+                if matches.value_source(&key) == Some(ValueSource::CommandLine) {
+                    args.mark_explicit(name.clone());
+                }
             }
         }
     }

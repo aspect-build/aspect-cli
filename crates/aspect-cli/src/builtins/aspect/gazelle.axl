@@ -195,7 +195,7 @@ load("./lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_ch
 load("./lib/health_check.axl", "HealthCheckTrait")
 load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "pick_task_status", "preflight_phase", "resolve_on_change", "setup_phase", "task_update")
 load("./lib/path_glob.axl", "match_any")
-load("./lib/repro_commands.axl", "build_aspect_command", "print_repro_and_fix", "task_cli_path")
+load("./lib/repro_commands.axl", "build_aspect_command", "explicit_flags", "print_repro_and_fix", "task_cli_path")
 load("./lib/runnable.axl", "runnable")
 load("./lib/text.axl", "pluralize")
 load("./lib/tips.axl", "tips")
@@ -267,55 +267,54 @@ def _body_text(status, data):
 # fallback that uses the detection flags.
 _FIX_DIRS_LIMIT = 20
 
-# Per-task forwarded flags that aren't scope/check related — included
-# in every emitted repro / fix command so local re-runs use the same
-# gazelle target and subcommand CI used.
-def _forwarded_flags(ctx):
-    flags = []
-    if ctx.args.gazelle_command:
-        flags.append(("--gazelle-command", ctx.args.gazelle_command))
-    if ctx.args.gazelle_flags:
-        flags.append(("--gazelle-flag", list(ctx.args.gazelle_flags)))
-    return flags
+# Per-task forwarded flags that aren't scope/check related — echoed
+# in every emitted repro / fix command iff the user passed them.
+_FORWARDED_PAIRS = [
+    ("gazelle_command", "--gazelle-command"),
+    ("gazelle_flags", "--gazelle-flag"),
+]
+
+# Plain-default scope / change-detection flags echoed iff the user
+# explicitly passed them. Auto / env-resolved flags (`--on-change`,
+# `--check-only`, `--base-ref`) are pinned by the callers below.
+_SCOPE_PAIRS = [
+    ("scope", "--scope"),
+    ("gazelle_target", "--gazelle-target"),
+]
+_CHANGED_SCOPE_PAIRS = [
+    ("merge_base", "--merge-base"),
+    ("scope_all_on_change", "--scope-all-on-change"),
+    ("changed_file_patterns", "--changed-file-pattern"),
+]
+
+def _mode_prefix(mode):
+    """Pin the auto-style `--on-change` and `--check-only` flags to the
+    explicit values needed to reproduce CI's behavior locally:
+    `mode="check"` → diagnose-then-fail, `mode="apply"` → apply-locally."""
+    if mode == "check":
+        return [("--on-change", "fail"), ("--check-only", "true")]
+    return [("--on-change", "silent"), ("--check-only", "false")]
 
 def _detection_flags(ctx, mode):
     """Flag set that recreates the original change-detection invocation.
-    Used by both the repro command and the fix-command's re-discovery
-    fallback. Omits `--base-ref` when it's the default so the rendered
-    command stays short. The repro/fix renderers pass `mode="check"` to
-    reproduce CI's check-only run, or `mode="apply"` to apply locally;
-    that maps to `--on-change=fail --check-only=true` and
-    `--on-change=silent --check-only=false` respectively."""
-    if mode == "check":
-        flags = [("--on-change", "fail"), ("--check-only", "true")]
-    else:
-        flags = [("--on-change", "silent"), ("--check-only", "false")]
-    flags = flags + [
-        ("--scope", ctx.args.scope),
-        ("--gazelle-target", ctx.args.gazelle_target),
-    ]
+    Used by the repro command and by the fix-command's re-discovery
+    fallback. `--base-ref` is surfaced from `detect_ci_base_ref` so
+    the repro encodes CI's resolved base ref even when CI itself ran
+    without `--base-ref`."""
+    flags = _mode_prefix(mode) + explicit_flags(ctx, _SCOPE_PAIRS)
     if ctx.args.scope == "changed":
         surfaced_base_ref = ctx.args.base_ref or detect_ci_base_ref(ctx.std)
         if surfaced_base_ref:
             flags.append(("--base-ref", surfaced_base_ref))
-        if ctx.args.merge_base:
-            flags.append(("--merge-base", ctx.args.merge_base))
-        if ctx.args.scope_all_on_change:
-            flags.append(("--scope-all-on-change", list(ctx.args.scope_all_on_change)))
-        if ctx.args.changed_file_patterns:
-            flags.append(("--changed-file-pattern", list(ctx.args.changed_file_patterns)))
-    return flags + _forwarded_flags(ctx)
+        flags += explicit_flags(ctx, _CHANGED_SCOPE_PAIRS)
+    return flags + explicit_flags(ctx, _FORWARDED_PAIRS)
 
 def _explicit_dirs_flags(ctx, mode):
     """Flag set for invocations that scope via explicit positional dirs
     and bypass change detection. Smaller subset of `_detection_flags`."""
-    if mode == "check":
-        flags = [("--on-change", "fail"), ("--check-only", "true")]
-    else:
-        flags = [("--on-change", "silent"), ("--check-only", "false")]
-    return flags + [
-        ("--gazelle-target", ctx.args.gazelle_target),
-    ] + _forwarded_flags(ctx)
+    return (_mode_prefix(mode) +
+            explicit_flags(ctx, [("gazelle_target", "--gazelle-target")]) +
+            explicit_flags(ctx, _FORWARDED_PAIRS))
 
 def _append_repro_command(ctx, data):
     """Append the always-rendered Reproduce command. Re-runs the same
