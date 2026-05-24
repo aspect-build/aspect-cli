@@ -30,8 +30,8 @@ _user_task = task(
 )
 
 # `aspect buildifier` — alias of `aspect format` preset to the Starlark-only
-# formatter target. CI runs `aspect buildifier` instead of repeating the
-# `--formatter-target` flag in each pipeline.
+# formatter target. CI and local users can run `aspect buildifier` instead
+# of `aspect format --formatter-target=//tools/format:buildifier`.
 buildifier = format.alias(
     defaults = {
         "formatter_target": "//tools/format:buildifier",
