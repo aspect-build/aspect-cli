@@ -451,8 +451,17 @@ def _bucket_entries(entries):
     }
 
 def _extract_zip(ctx, zip_path, dest_dir):
-    """Extract a zip into dest_dir using bsdtar (already cached for zip_create)."""
+    """Extract a zip into dest_dir using bsdtar (already cached for zip_create).
+
+    Returns False (with a warning) if the bsdtar binary is unavailable —
+    sibling-artifact discovery is best-effort and must not abort the task
+    when github.com's release CDN has a hiccup. The root-cause warning is
+    emitted by `bsdtar` itself; this one surfaces what was skipped.
+    """
     bin_path = bsdtar(ctx)
+    if not bin_path:
+        _LOG.warn(ctx.std, "Sibling-artifact extraction skipped: bsdtar unavailable")
+        return False
     child = ctx.std.process.command(bin_path).args(["xf", zip_path, "-C", dest_dir]).stdout("piped").stderr("piped").spawn()
     return child.wait().code == 0
 

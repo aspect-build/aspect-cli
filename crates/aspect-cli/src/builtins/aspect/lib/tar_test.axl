@@ -1,0 +1,52 @@
+"""Unit tests for `lib/tar.axl`.
+
+Exercises the pure `platform_key` host-mapping function. The `bsdtar`
+download path and the archive creators are I/O-heavy and validated by
+the live artifact-upload paths in CI; no AXL-level mocking surface
+exists for them today.
+"""
+
+load("./tar.axl", "platform_key")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _test_supported_platforms_round_trip(ctx):
+    """Every (os, arch) combo we ship a prebuilt for maps to the release
+    asset's naming convention."""
+    _eq("macos × x86_64", platform_key("macos", "x86_64"), ("darwin", "amd64"))
+    _eq("macos × aarch64", platform_key("macos", "aarch64"), ("darwin", "arm64"))
+    _eq("linux × x86_64", platform_key("linux", "x86_64"), ("linux", "amd64"))
+    _eq("linux × aarch64", platform_key("linux", "aarch64"), ("linux", "arm64"))
+
+def _test_unsupported_os_returns_none(ctx):
+    _eq("windows host", platform_key("windows", "x86_64"), (None, None))
+    _eq("empty os", platform_key("", "x86_64"), (None, None))
+
+def _test_unsupported_arch_returns_none(ctx):
+    _eq("riscv64 arch", platform_key("linux", "riscv64"), (None, None))
+    _eq("empty arch", platform_key("linux", ""), (None, None))
+
+def _test_both_unsupported_returns_none(ctx):
+    _eq("both unknown", platform_key("plan9", "ppc64"), (None, None))
+
+_UNIT_TESTS = [
+    _test_supported_platforms_round_trip,
+    _test_unsupported_os_returns_none,
+    _test_unsupported_arch_returns_none,
+    _test_both_unsupported_returns_none,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("tar.axl: OK (%d sections)" % len(_UNIT_TESTS))
+    return 0
+
+tar_tests = task(
+    name = "test-tar",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)
