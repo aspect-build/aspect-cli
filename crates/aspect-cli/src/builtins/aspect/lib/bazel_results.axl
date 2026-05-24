@@ -1104,6 +1104,110 @@ def failed_labels(data):
 
     return labels
 
+# Test-failure repro: above this count, collapse to a common-root pattern (when
+# one exists) rather than listing every failing label. Tuned so the rendered
+# command stays comfortably under `build_aspect_command`'s soft wrap of ~100
+# chars when targets are short (e.g. `//pkg:test`).
+_REPRO_INLINE_MAX = 10
+
+def common_label_root(labels):
+    """Return a Bazel target pattern that covers every label in `labels`.
+
+    - All labels in the same package -> `//<pkg>:all`
+    - Labels sharing a package-path prefix -> `//<prefix>/...`
+    - No useful prefix (root-package labels, mixed-repo labels, etc.) -> ``""``
+
+    Skips external-repo labels (`@foo//...`) — collapsing them into a
+    workspace-relative pattern would be wrong. Pure function.
+    """
+    if not labels:
+        return ""
+
+    packages = []
+    for lbl in labels:
+        if not lbl.startswith("//"):
+            # External repo (`@foo//...`), `@@`, or some other non-workspace form.
+            # No safe single-pattern collapse, so bail.
+            return ""
+        pkg = lbl[2:]
+        if ":" in pkg:
+            pkg, _, _ = pkg.partition(":")
+        packages.append(pkg)
+
+    distinct = {pkg: True for pkg in packages}
+    if len(distinct) == 1:
+        pkg = packages[0]
+        return "//" + pkg + ":all" if pkg else ""
+
+    split = [pkg.split("/") for pkg in packages]
+    min_depth = min([len(s) for s in split])
+    shared = []
+    for i in range(min_depth):
+        head = split[0][i]
+        if all([s[i] == head for s in split]):
+            shared.append(head)
+        else:
+            break
+    if not shared or shared == [""]:
+        return ""
+    return "//" + "/".join(shared) + "/..."
+
+def _is_explicit_label(target):
+    """True when `target` names a single rule (no wildcard).
+
+    Used to detect user-named labels that must survive a `//pkg/...` or
+    `//pkg:all` collapse: Bazel's wildcard test patterns skip
+    `tags = ["manual"]` rules, so an explicitly-named manual test could
+    otherwise disappear from the repro once we collapse to a pattern.
+    """
+    if "..." in target:
+        return False
+    if not (target.startswith("//") or target.startswith("@")):
+        # Negation (`-//foo:bar`) or other non-label form.
+        return False
+    _, sep, name = target.partition(":")
+    if not sep or not name:
+        return False  # package-shorthand like `//pkg` with no `:name`
+    if name in ("all", "*", "all-targets"):
+        return False
+    return True
+
+def repro_targets(data, original_targets):
+    """Pick the target list to render in the repro command for a failing
+    build/test task.
+
+    Small failure sets (≤ `_REPRO_INLINE_MAX`) pass through verbatim.
+    Larger sets collapse to a common-root pattern (`//pkg/...` or
+    `//pkg:all`) when one exists. Failed labels that the user named
+    explicitly in the original command are kept alongside the collapse —
+    Bazel's wildcard test patterns skip manual-tagged rules, and we
+    don't want to silently lose explicit failures to that. No usable
+    collapse → fall back to `original_targets`.
+
+    Builds and tests run through the same logic: `failed_labels(data)`
+    merges action failures, target-level failures (analysis / link /
+    derived), and failed test labels. We don't try to subtract derived
+    consumers — we can't reliably distinguish them from analysis-only
+    failures, and rebuilding a derived target is harmless once the
+    root is fixed.
+
+    `original_targets` is the user-supplied positional list (e.g.
+    `ctx.args.targets`). Returns a list[str] suitable for
+    `build_aspect_command`'s `targets` arg.
+    """
+    failed = failed_labels(data)
+    if not failed:
+        return list(original_targets)
+    if len(failed) <= _REPRO_INLINE_MAX:
+        return failed
+    root = common_label_root(failed)
+    if not root:
+        return list(original_targets)
+
+    explicit_in_original = {t: True for t in original_targets if _is_explicit_label(t)}
+    explicit_failed = [l for l in failed if l in explicit_in_original]
+    return explicit_failed + [root]
+
 def compute_reproducer_command(data, task_name, max_chars = MAX_REPRO_CHARS):
     """Legacy helper preserved for test fixtures. New code should append
     `{"command", "description"}` entries to `data["repro_commands"]`

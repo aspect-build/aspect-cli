@@ -13,7 +13,7 @@ applies uniformly to both tasks.
 """
 
 load("@std//time.axl", "sleep_iter")
-load("./bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "failed_labels", "init_data", "now_ms", "process_event", bazel_conclusion = "conclusion")
+load("./bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "init_data", "now_ms", "process_event", "repro_targets", bazel_conclusion = "conclusion")
 load("./environment.axl", "color_enabled")
 load("./health_check.axl", "HealthCheckTrait")
 load("./lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "preflight_phase", "setup_phase", "task_update")
@@ -465,10 +465,11 @@ def run_bazel_task(ctx: TaskContext, command: str) -> TaskConclusion:
     if data.get("bazel_attempts"):
         archive_bazel_attempt(data, attempt + 1, invocation_status.code)
 
-    # Narrow the repro to failed labels when present; else fall back to the task's target pattern.
-    _failed = failed_labels(data)
-    _repro_targets = _failed if _failed else list(ctx.args.targets)
-    _repro_cmd = build_aspect_command(task_cli_path(ctx.task), [], _repro_targets)
+    _repro_cmd = build_aspect_command(
+        task_cli_path(ctx.task),
+        [],
+        repro_targets(data, ctx.args.targets),
+    )
     if _repro_cmd:
         data["repro_commands"].append({"command": _repro_cmd, "description": ""})
 
