@@ -7,7 +7,7 @@ bazel_dep(name = "aspect_gazelle_prebuilt", version = "0.0.8")
 bazel_dep(name = "aspect_rules_lint", version = "2.5.2")
 bazel_dep(name = "rules_nodejs", version = "6.7.3")  # Transitive dep; bump for bazel9
 bazel_dep(name = "bazel_skylib", version = "1.8.2")
-bazel_dep(name = "bazelrc-preset.bzl", version = "1.4.0")
+bazel_dep(name = "bazelrc-preset.bzl", version = "1.9.2")
 bazel_dep(name = "buildifier_prebuilt", version = "8.5.1.2")
 bazel_dep(name = "gazelle", version = "0.45.0")  # for the build-from-source `//tools/gazelle:gazelle_from_source` regression target; the prebuilt binary is what most users will want
 bazel_dep(name = "platforms", version = "1.0.0")
