@@ -8,7 +8,7 @@ Two task implementations live here:
     `compute_invocation_state`, `conclusion`, and skipped-bucket plumbing.
 """
 
-load("./bazel_results.axl", "build_details_data", "compute_invocation_state", "conclusion", "init_data", "render_check_output")
+load("./bazel_results.axl", "bes_get", "build_details_data", "compute_invocation_state", "conclusion", "init_data", "render_check_output")
 
 # ---------------------------------------------------------------------------
 # Fake data builders
@@ -817,6 +817,28 @@ def _test_skipped_over_cap_keeps_accurate_count(ctx):
         "4750",
     )
 
+def _test_bes_get_returns_default_for_missing_field(ctx):
+    """The aborted variant of a `test_result` payload has no `status` /
+    `cached_locally` / `test_action_output` fields. `bes_get` must return
+    the supplied default instead of raising AttributeError — that's the
+    contract the BES-event readers rely on."""
+    aborted_payload = struct(reason = "USER_INTERRUPTED")
+    _eq("bes_get missing → default", bes_get(aborted_payload, "status", ""), "")
+    _eq("bes_get missing → typed default", bes_get(aborted_payload, "cached_locally", False), False)
+    _eq("bes_get missing → list default", bes_get(aborted_payload, "test_action_output", None), None)
+
+def _test_bes_get_returns_value_for_present_field(ctx):
+    payload = struct(status = "PASSED", cached_locally = True, test_action_output = [1, 2])
+    _eq("bes_get present → value", bes_get(payload, "status", ""), "PASSED")
+    _eq("bes_get present → bool", bes_get(payload, "cached_locally", False), True)
+    _eq("bes_get present → list", bes_get(payload, "test_action_output", None), [1, 2])
+
+def _test_bes_get_handles_none(ctx):
+    """`bes_get(None, ...)` short-circuits to the default rather than
+    raising — lets callers chain accesses without intermediate guards."""
+    _eq("bes_get(None) → default", bes_get(None, "status", ""), "")
+    _eq("bes_get(None) → None default", bes_get(None, "anything"), None)
+
 _UNIT_TESTS = [
     _test_failed_status_without_failure_bucket,
     _test_failed_status_with_explicit_action_failure,
@@ -827,6 +849,9 @@ _UNIT_TESTS = [
     _test_skipped_with_success_prefers_successful_build,
     _test_skipped_with_failure_prefers_failure,
     _test_skipped_over_cap_keeps_accurate_count,
+    _test_bes_get_returns_default_for_missing_field,
+    _test_bes_get_returns_value_for_present_field,
+    _test_bes_get_handles_none,
 ]
 
 def _unit_test_impl(ctx):

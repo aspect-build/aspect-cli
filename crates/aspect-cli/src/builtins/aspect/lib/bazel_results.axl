@@ -227,7 +227,7 @@ def _miss_reason_display(reason):
     s = reason.lower().replace("_", " ")
     return s[0].upper() + s[1:] if s else s
 
-def _bes_get(obj, field, default = None):
+def bes_get(obj, field, default = None):
     """Safely access a single attribute on a BES event object.
 
     Returns default if obj is None or if the attribute is not present on the
@@ -235,7 +235,7 @@ def _bes_get(obj, field, default = None):
 
     This prevents AttributeError on malformed or schema-mismatched BES events.
     For chained access (e.g. payload.stderr.file) call it twice:
-        uri = _bes_get(_bes_get(payload, "stderr"), "file", "")
+        uri = bes_get(bes_get(payload, "stderr"), "file", "")
     """
     if obj == None:
         return default
@@ -503,7 +503,7 @@ def init_data():
 def process_event(data, event):
     """Update data in-place from a single build event.
 
-    All BES field accesses go through _bes_get() to guard against AttributeError
+    All BES field accesses go through bes_get() to guard against AttributeError
     on schema-mismatched or malformed events. Diagnostic warnings about missing
     BES fields go through `trace`, so they only surface under ASPECT_DEBUG
     or when an OTel endpoint is configured.
@@ -533,16 +533,16 @@ def process_event(data, event):
 
         # Capture fields from build_started for invocation details.
         payload = event.payload
-        uuid = _bes_get(payload, "uuid", "") or ""
+        uuid = bes_get(payload, "uuid", "") or ""
         if not uuid:
             trace.log("warning: BES build_started event missing expected field 'uuid'")
         data["bazel"]["invocation_id"] = uuid
-        data["bazel"]["build_tool_version"] = _bes_get(payload, "build_tool_version", "") or ""
-        data["bazel"]["build_command"] = _bes_get(payload, "command", "") or ""
-        data["start_time_ms"] = _bes_get(payload, "start_time_millis", 0) or 0
-        data["bazel"]["workspace_directory"] = _bes_get(payload, "workspace_directory", "") or ""
-        data["bazel"]["working_directory"] = _bes_get(payload, "working_directory", "") or ""
-        data["bazel"]["server_pid"] = _bes_get(payload, "server_pid", 0) or 0
+        data["bazel"]["build_tool_version"] = bes_get(payload, "build_tool_version", "") or ""
+        data["bazel"]["build_command"] = bes_get(payload, "command", "") or ""
+        data["start_time_ms"] = bes_get(payload, "start_time_millis", 0) or 0
+        data["bazel"]["workspace_directory"] = bes_get(payload, "workspace_directory", "") or ""
+        data["bazel"]["working_directory"] = bes_get(payload, "working_directory", "") or ""
+        data["bazel"]["server_pid"] = bes_get(payload, "server_pid", 0) or 0
 
         # Return True so live task_updates pick up the first burst of metadata
         # (invocation_id, build_command, start_time, etc.) the moment bazel
@@ -557,12 +557,12 @@ def process_event(data, event):
         # is done from the cleaner options_parsed event instead — see below.
         payload = event.payload
         if payload:
-            for section in (_bes_get(payload, "sections", None) or []):
-                sec_type = _bes_get(section, "section_type", None)
+            for section in (bes_get(payload, "sections", None) or []):
+                sec_type = bes_get(section, "section_type", None)
                 if sec_type:
-                    for opt in (_bes_get(sec_type, "option", None) or []):
-                        if _bes_get(opt, "option_name", "") == "bes_results_url":
-                            val = _bes_get(opt, "option_value", "") or ""
+                    for opt in (bes_get(sec_type, "option", None) or []):
+                        if bes_get(opt, "option_name", "") == "bes_results_url":
+                            val = bes_get(opt, "option_value", "") or ""
                             if val:
                                 data["bazel"]["bes_results_url"] = val
                                 trace.log("debug: captured bes_results_url=" + val)
@@ -577,9 +577,9 @@ def process_event(data, event):
         # structured_command_line which dumps every .bazelrc default override.
         payload = event.payload
         if payload:
-            data["bazel"]["options_parsed"]["explicit_cmd_line"] = list(_bes_get(payload, "explicit_cmd_line", None) or [])
-            data["bazel"]["options_parsed"]["startup_options"] = list(_bes_get(payload, "startup_options", None) or [])
-            data["bazel"]["options_parsed"]["cmd_line"] = list(_bes_get(payload, "cmd_line", None) or [])
+            data["bazel"]["options_parsed"]["explicit_cmd_line"] = list(bes_get(payload, "explicit_cmd_line", None) or [])
+            data["bazel"]["options_parsed"]["startup_options"] = list(bes_get(payload, "startup_options", None) or [])
+            data["bazel"]["options_parsed"]["cmd_line"] = list(bes_get(payload, "cmd_line", None) or [])
 
             # Fallback capture of bes_results_url in case the structured_command_line
             # event arrives after us or is absent.
@@ -603,7 +603,7 @@ def process_event(data, event):
         # This event arrives once per invocation, early in the stream.
         payload = event.payload
         if payload:
-            payload_meta = _bes_get(payload, "metadata", None)
+            payload_meta = bes_get(payload, "metadata", None)
             if payload_meta:
                 for k, v in payload_meta.items():
                     if k and v:
@@ -618,10 +618,10 @@ def process_event(data, event):
         # The proto field is `item` — a repeated list of {key, value} structs.
         payload = event.payload
         if payload:
-            for ws_item in (_bes_get(payload, "item", None) or []):
+            for ws_item in (bes_get(payload, "item", None) or []):
                 if ws_item:
-                    key = _bes_get(ws_item, "key", "") or ""
-                    val = _bes_get(ws_item, "value", "") or ""
+                    key = bes_get(ws_item, "key", "") or ""
+                    val = bes_get(ws_item, "value", "") or ""
                     if key and val:
                         data["bazel"]["workspace_status"][key] = val
 
@@ -631,8 +631,8 @@ def process_event(data, event):
 
     elif kind == "action_completed":
         payload = event.payload
-        success = _bes_get(payload, "success", None)
-        label = _bes_get(event.id, "label", "") or ""
+        success = bes_get(payload, "success", None)
+        label = bes_get(event.id, "label", "") or ""
 
         # Mnemonic is small (unlike payload.stderr, which Bazel may inline at
         # 40+ MB — we deliberately never touch it) and useful for the failure
@@ -640,7 +640,7 @@ def process_event(data, event):
         # build_metrics.action_summary.action_data when build_metrics arrives
         # (that tally includes cached actions which never fire this event, so
         # counting here would systematically under-report on incremental builds).
-        mnemonic = _bes_get(payload, "type", "") or ""
+        mnemonic = bes_get(payload, "type", "") or ""
         if success == None:
             trace.log("warning: BES action_completed event missing expected field 'success' (label=" + label + ")")
         if not success:
@@ -685,8 +685,8 @@ def process_event(data, event):
         # from skyframe on incremental rebuilds — so this counter stays
         # accurate when build_metrics reports zero newly-configured targets.
         payload = event.payload
-        label = _bes_get(event.id, "label", "") or ""
-        target_kind = _bes_get(payload, "target_kind", "") or ""
+        label = bes_get(event.id, "label", "") or ""
+        target_kind = bes_get(payload, "target_kind", "") or ""
         if target_kind.endswith(" rule"):
             target_kind = target_kind[:-len(" rule")]
         if label and target_kind:
@@ -697,7 +697,7 @@ def process_event(data, event):
     elif kind == "target_completed":
         data["bazel"]["targets_total"] += 1
         payload = event.payload
-        label = _bes_get(event.id, "label", "") or ""
+        label = bes_get(event.id, "label", "") or ""
 
         # Kind was captured on the prior target_configured event.
         target_kind = data["bazel"]["target_kinds"].get(label, "") if label else ""
@@ -706,7 +706,7 @@ def process_event(data, event):
         # incompatible toolchains) as target_completed events with an Aborted
         # payload. Aborted has `reason` + `description`; TargetComplete has
         # `success` — presence of `reason` is the cleanest payload-shape probe.
-        abort_reason = _bes_get(payload, "reason", None)
+        abort_reason = bes_get(payload, "reason", None)
         if abort_reason != None:
             data["bazel"]["skipped_targets_total"] += 1
             if len(data["bazel"]["skipped_targets"]) < MAX_BUILT_TARGETS:
@@ -717,7 +717,7 @@ def process_event(data, event):
                 })
             return True
 
-        success = _bes_get(payload, "success", None)
+        success = bes_get(payload, "success", None)
         if success == None:
             trace.log("warning: BES target_completed event missing expected field 'success' (label=" + label + ")")
         if not success:
@@ -731,15 +731,15 @@ def process_event(data, event):
         # Capture the log file URI and duration for the most recent attempt.
         # test_result fires once per shard/run/attempt; the last write wins.
         # test_summary (processed later) provides the authoritative final outcome.
-        label = _bes_get(event.id, "label", "") or ""
+        label = bes_get(event.id, "label", "") or ""
         payload = event.payload
         log_uri = ""
         if payload:
-            for output in (_bes_get(payload, "test_action_output", None) or []):
-                if output and _bes_get(output, "name", "") == "test.log":
-                    log_uri = _bes_get(output, "file", "") or ""
+            for output in (bes_get(payload, "test_action_output", None) or []):
+                if output and bes_get(output, "name", "") == "test.log":
+                    log_uri = bes_get(output, "file", "") or ""
                     break
-        duration_ms = (_bes_get(payload, "test_attempt_duration_millis", 0) or 0) if payload else 0
+        duration_ms = (bes_get(payload, "test_attempt_duration_millis", 0) or 0) if payload else 0
         data["bazel"]["test_details"][label] = {
             "log_path": _file_uri_to_path(log_uri),
             "duration_ms": duration_ms,
@@ -750,13 +750,13 @@ def process_event(data, event):
 
     elif kind == "test_summary":
         payload = event.payload
-        status = _bes_get(payload, "overall_status", "") or ""
-        label = _bes_get(event.id, "label", "") or ""
-        num_cached = _bes_get(payload, "total_num_cached", 0) or 0
+        status = bes_get(payload, "overall_status", "") or ""
+        label = bes_get(event.id, "label", "") or ""
+        num_cached = bes_get(payload, "total_num_cached", 0) or 0
 
         # total_run_duration_millis is deprecated in the proto but still populated by Bazel.
         # Bucket duration by whether the test actually ran or was served from cache.
-        duration_ms = _bes_get(payload, "total_run_duration_millis", 0) or 0
+        duration_ms = bes_get(payload, "total_run_duration_millis", 0) or 0
         if not status:
             trace.log("warning: BES test_summary event missing expected field 'overall_status' (label=" + label + ")")
         if not label:
@@ -818,13 +818,13 @@ def process_event(data, event):
 
     elif kind == "build_metrics":
         payload = event.payload
-        action_summary = _bes_get(payload, "action_summary", None)
+        action_summary = bes_get(payload, "action_summary", None)
         if action_summary:
-            executed = _bes_get(action_summary, "actions_executed", 0) or 0
+            executed = bes_get(action_summary, "actions_executed", 0) or 0
 
             # Use total - executed rather than remote_cache_hits (deprecated) because
             # this captures local cache hits too, giving a more accurate cached count.
-            total = _bes_get(action_summary, "actions_created", 0) or 0
+            total = bes_get(action_summary, "actions_created", 0) or 0
             data["bazel"]["actions_executed"] = executed
             data["bazel"]["actions_cached"] = total - executed if total > executed else 0
             data["bazel"]["actions_total"] = total
@@ -841,13 +841,13 @@ def process_event(data, event):
             # aspect-inclusive grand total for the "Actions (N created)" line.
             per_mnemonic = {}
             per_mnemonic_sum_created = 0
-            for ad in (_bes_get(action_summary, "action_data", None) or []):
+            for ad in (bes_get(action_summary, "action_data", None) or []):
                 if ad:
-                    m = _bes_get(ad, "mnemonic", "") or ""
-                    c = _bes_get(ad, "actions_executed", 0) or 0
+                    m = bes_get(ad, "mnemonic", "") or ""
+                    c = bes_get(ad, "actions_executed", 0) or 0
                     if m and c > 0:
                         per_mnemonic[m] = per_mnemonic.get(m, 0) + c
-                    created = _bes_get(ad, "actions_created", 0) or 0
+                    created = bes_get(ad, "actions_created", 0) or 0
                     if created > 0:
                         per_mnemonic_sum_created += created
             if per_mnemonic:
@@ -864,11 +864,11 @@ def process_event(data, event):
             # and including it would double-count in the distribution table
             # and make the percentages add up to 200%.
             per_runner = {}
-            for rc in (_bes_get(action_summary, "runner_count", None) or []):
+            for rc in (bes_get(action_summary, "runner_count", None) or []):
                 if rc:
-                    name = _bes_get(rc, "name", "") or ""
-                    count = _bes_get(rc, "count", 0) or 0
-                    exec_kind = _bes_get(rc, "exec_kind", "") or ""
+                    name = bes_get(rc, "name", "") or ""
+                    count = bes_get(rc, "count", 0) or 0
+                    exec_kind = bes_get(rc, "exec_kind", "") or ""
                     if name == "total":
                         continue
                     if name and count > 0:
@@ -880,18 +880,18 @@ def process_event(data, event):
                 data["bazel"]["runner_counts"] = per_runner
         else:
             trace.log("warning: BES build_metrics event missing expected field 'action_summary'")
-        timing_metrics = _bes_get(payload, "timing_metrics", None)
+        timing_metrics = bes_get(payload, "timing_metrics", None)
         if timing_metrics:
-            wall_time = _bes_get(timing_metrics, "wall_time_in_ms", 0) or 0
+            wall_time = bes_get(timing_metrics, "wall_time_in_ms", 0) or 0
             if wall_time > 0:
                 data["bazel"]["wall_time_ms"] = wall_time
-            cpu_time = _bes_get(timing_metrics, "cpu_time_in_ms", 0) or 0
+            cpu_time = bes_get(timing_metrics, "cpu_time_in_ms", 0) or 0
             if cpu_time > 0:
                 data["bazel"]["cpu_time_ms"] = cpu_time
-            analysis_time = _bes_get(timing_metrics, "analysis_phase_time_in_ms", 0) or 0
+            analysis_time = bes_get(timing_metrics, "analysis_phase_time_in_ms", 0) or 0
             if analysis_time > 0:
                 data["bazel"]["analysis_phase_time_ms"] = analysis_time
-            execution_time = _bes_get(timing_metrics, "execution_phase_time_in_ms", 0) or 0
+            execution_time = bes_get(timing_metrics, "execution_phase_time_in_ms", 0) or 0
             if execution_time > 0:
                 data["bazel"]["execution_phase_time_ms"] = execution_time
 
@@ -900,23 +900,23 @@ def process_event(data, event):
             # google.protobuf.Duration (seconds + nanos), not an int-ms, so
             # we have to decode it. Older Bazel used int-ms fields; we check
             # both shapes so we work across versions.
-            cp_field = _bes_get(timing_metrics, "critical_path_time", None)
+            cp_field = bes_get(timing_metrics, "critical_path_time", None)
             cp_ms = 0
             if cp_field != None:
                 # Duration proto: {seconds, nanos}. AXL surfaces it as a
                 # struct/dict-ish with those fields; fall back to 0 when either
                 # is missing so a stray {} entry doesn't blow up arithmetic.
-                cp_secs = _bes_get(cp_field, "seconds", 0) or 0
-                cp_nanos = _bes_get(cp_field, "nanos", 0) or 0
+                cp_secs = bes_get(cp_field, "seconds", 0) or 0
+                cp_nanos = bes_get(cp_field, "nanos", 0) or 0
                 cp_ms = cp_secs * 1000 + cp_nanos // 1000000
             if cp_ms == 0:
-                cp_ms = (_bes_get(timing_metrics, "critical_path_duration_millis", 0) or
-                         _bes_get(timing_metrics, "critical_path_in_ms", 0) or 0)
+                cp_ms = (bes_get(timing_metrics, "critical_path_duration_millis", 0) or
+                         bes_get(timing_metrics, "critical_path_in_ms", 0) or 0)
             if cp_ms > 0:
                 data["bazel"]["critical_path_ms"] = cp_ms
-        target_metrics = _bes_get(payload, "target_metrics", None)
+        target_metrics = bes_get(payload, "target_metrics", None)
         if target_metrics:
-            configured = _bes_get(target_metrics, "targets_configured", 0) or 0
+            configured = bes_get(target_metrics, "targets_configured", 0) or 0
             if configured > 0:
                 data["bazel"]["targets_configured"] = configured
 
@@ -924,35 +924,35 @@ def process_event(data, event):
             # "targets_configured_not_including_aspects" (just rule targets).
             # We keep both so the Performance section's Build graph row can split them:
             #   "134,094 configured, 133 aspect applications".
-            without_aspects = _bes_get(target_metrics, "targets_configured_not_including_aspects", 0) or 0
+            without_aspects = bes_get(target_metrics, "targets_configured_not_including_aspects", 0) or 0
             if without_aspects > 0:
                 data["bazel"]["targets_configured_not_including_aspects"] = without_aspects
-        package_metrics = _bes_get(payload, "package_metrics", None)
+        package_metrics = bes_get(payload, "package_metrics", None)
         if package_metrics:
-            loaded = _bes_get(package_metrics, "packages_loaded", 0) or 0
+            loaded = bes_get(package_metrics, "packages_loaded", 0) or 0
             if loaded > 0:
                 data["bazel"]["packages_loaded"] = loaded
-        cumulative_metrics = _bes_get(payload, "cumulative_metrics", None)
+        cumulative_metrics = bes_get(payload, "cumulative_metrics", None)
         if cumulative_metrics:
-            num_analyses = _bes_get(cumulative_metrics, "num_analyses", 0) or 0
-            num_builds = _bes_get(cumulative_metrics, "num_builds", 0) or 0
+            num_analyses = bes_get(cumulative_metrics, "num_analyses", 0) or 0
+            num_builds = bes_get(cumulative_metrics, "num_builds", 0) or 0
             if num_analyses > 0:
                 data["bazel"]["num_analyses"] = num_analyses
             if num_builds > 0:
                 data["bazel"]["num_builds"] = num_builds
 
         # Local action cache — hits/misses and reasons for misses.
-        action_cache = _bes_get(payload, "action_cache_statistics", None)
+        action_cache = bes_get(payload, "action_cache_statistics", None)
         if action_cache:
-            hits = _bes_get(action_cache, "hits", 0) or 0
-            misses = _bes_get(action_cache, "misses", 0) or 0
+            hits = bes_get(action_cache, "hits", 0) or 0
+            misses = bes_get(action_cache, "misses", 0) or 0
             data["bazel"]["action_cache_stats"]["hits"] = hits
             data["bazel"]["action_cache_stats"]["misses"] = misses
             md_list = []
-            for md in (_bes_get(action_cache, "miss_details", None) or []):
+            for md in (bes_get(action_cache, "miss_details", None) or []):
                 if md:
-                    reason = _bes_get(md, "reason", "") or ""
-                    count = _bes_get(md, "count", 0) or 0
+                    reason = bes_get(md, "reason", "") or ""
+                    count = bes_get(md, "count", 0) or 0
                     if reason and count > 0:
                         md_list.append({"reason": reason, "count": count})
             if md_list:
@@ -967,7 +967,7 @@ def process_event(data, event):
         # Populated once at the very end of the stream.
         payload = event.payload
         if payload:
-            finish_ms = _bes_get(payload, "finish_time_millis", 0) or 0
+            finish_ms = bes_get(payload, "finish_time_millis", 0) or 0
             if finish_ms > 0:
                 data["finish_time_ms"] = finish_ms
         return False
@@ -982,14 +982,14 @@ def process_event(data, event):
         #     These carry the Bazel-idiomatic names users recognize
         #     ("aarch64", "fastbuild"); the top-level `cpu` field is the
         #     internal platform name ("darwin_arm64") which reads poorly.
-        id_config = _bes_get(event.id, "configuration", None)
-        config_id = _bes_get(id_config, "id", "") or ""
+        id_config = bes_get(event.id, "configuration", None)
+        config_id = bes_get(id_config, "id", "") or ""
         if config_id == "none":
             return False
         payload = event.payload
         cpu_or_mode_changed = False
         if payload:
-            make_vars = _bes_get(payload, "make_variable", None)
+            make_vars = bes_get(payload, "make_variable", None)
             cpu = ""
             mode = ""
             if make_vars:
@@ -999,9 +999,9 @@ def process_event(data, event):
             # Fallback to top-level fields for older Bazel that may not
             # populate make_variable. Matches our prior behavior.
             if not cpu:
-                cpu = _bes_get(payload, "cpu", "") or ""
+                cpu = bes_get(payload, "cpu", "") or ""
             if not mode:
-                mode = _bes_get(payload, "compilation_mode", "") or ""
+                mode = bes_get(payload, "compilation_mode", "") or ""
             if cpu:
                 data["bazel"]["cpu_arch"] = cpu
                 cpu_or_mode_changed = True
@@ -1019,8 +1019,8 @@ def process_event(data, event):
             # Aborted proto fields are `reason` + `description` (not
             # `abort_reason`). Our data-dict key stays `abort_reason` to
             # avoid renaming the template variable.
-            data["bazel"]["abort_reason"] = _bes_get(payload, "reason", "") or ""
-            data["bazel"]["abort_description"] = _bes_get(payload, "description", "") or ""
+            data["bazel"]["abort_reason"] = bes_get(payload, "reason", "") or ""
+            data["bazel"]["abort_description"] = bes_get(payload, "description", "") or ""
         return True
 
     return False

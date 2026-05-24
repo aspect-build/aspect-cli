@@ -40,6 +40,7 @@ Consumer:
     artifacts.browse_url(ctx)  # → CI artifacts page URL (env-derived)
 """
 
+load("./bazel_results.axl", "bes_get")
 load("./buildkite.axl", "buildkite")
 load("./ci.axl", "detect_artifacts_browse_url")
 load("./circleci.axl", "circleci")
@@ -547,19 +548,27 @@ def _should_collect_test(strategy, status, cached_locally):
 
 def _collect_test_files(ctx, event, strategy, test_entries, skipped_files):
     """Append testlog entries (and per-file skip reasons) from a test_result
-    BES event into the closure-private lists."""
+    BES event into the closure-private lists.
+
+    BES can deliver a `test_result`-kinded event whose payload is the `aborted`
+    union variant (e.g. the test was aborted before running) — that variant
+    lacks `status` / `cached_locally` / `test_action_output`. All payload
+    field accesses go through `bes_get` so a schema-mismatched payload no-ops
+    instead of raising.
+    """
     if event.kind != "test_result":
         return
 
-    status = event.payload.status or ""
-    cached_locally = bool(event.payload.cached_locally)
+    payload = event.payload
+    status = bes_get(payload, "status", "") or ""
+    cached_locally = bool(bes_get(payload, "cached_locally", False))
     if not _should_collect_test(strategy, status, cached_locally):
         return
 
     label = event.id.label
     label_path = label.lstrip("/").replace(":", "/")
 
-    for file in event.payload.test_action_output:
+    for file in (bes_get(payload, "test_action_output", None) or []):
         raw_uri = file.file
         src = _file_uri_to_path(raw_uri)
         if not src:
