@@ -131,17 +131,28 @@ _RESET_JUMP_S = 600
 _TERMINAL_ONLY_FACTOR = 999999.0
 
 # Fractions of `limit` at which the LOW and IMPORTANT WARN lines
-# fire. The threshold ladder reuses these so the WARN boundary and
-# the throttle-factor step align by construction.
+# fire. Independent from the threshold ladder below — these are the
+# "user-visible" boundaries; the ladder is finer-grained.
 _THRESHOLD_LOW_FRACTION = 0.20
 _THRESHOLD_IMPORTANT_FRACTION = 0.05
 
-# Threshold table for the `<2 observations` fallback factor. Order
-# matters: first row whose pct ≥ remaining/limit wins.
+# Throttle-factor table used when burn-rate inference is unavailable
+# (`< 2 observations` in the merged buffer). Order matters: first row
+# whose threshold the bucket fraction exceeds wins.
+#
+# Pinned for swarms: the 20-50% band is sliced so the at-risk 20-30%
+# slice steps to 5× (was 2× under the old single 20-50% tier), the
+# 10-20% band sits at 20×, and the 5-10% band lifts to 50× — at that
+# pressure the only API calls worth making are initial spawn-label
+# flips and terminal verdicts (both of which bypass the throttle in
+# their callers), so the 50× factor stretches every heartbeat past
+# any realistic task lifetime.
 _THRESHOLD_LADDER = [
     (0.50, 1.0),
-    (_THRESHOLD_LOW_FRACTION, 2.0),
-    (_THRESHOLD_IMPORTANT_FRACTION, 5.0),
+    (0.30, 2.0),
+    (_THRESHOLD_LOW_FRACTION, 5.0),
+    (0.10, 20.0),
+    (_THRESHOLD_IMPORTANT_FRACTION, 50.0),
     (0.00, _TERMINAL_ONLY_FACTOR),
 ]
 
@@ -151,11 +162,13 @@ _TIME_TO_RESET_FLOOR_S = 60
 
 # Fraction of `limit` to reserve as untouchable headroom for terminal
 # / must-succeed calls (final task verdicts, attribution-required
-# check-run conclusions). The burn-rate path
-# sizes itself so steady-state usage stops at `1 - _RESERVE_FRACTION`
-# of the limit — i.e., we aim to use at most 80% of the bucket before
-# yielding to terminal-only cadence.
-_RESERVE_FRACTION = 0.20
+# check-run conclusions). The burn-rate path sizes itself so
+# steady-state usage stops at `1 - _RESERVE_FRACTION` of the limit —
+# i.e., we aim to use at most 70% of the bucket before yielding to
+# terminal-only cadence. The cushion is wide enough to absorb the
+# overshoot a swarm of concurrent tasks generates while burn-rate
+# inference converges on the per-task interval.
+_RESERVE_FRACTION = 0.30
 
 # ── Per-task state (file pattern) ───────────────────────────────────
 #
@@ -485,7 +498,17 @@ def throttle_factor(ctx, bucket, now_epoch_s = None):
 def _throttle_factor_from_state(state, bucket, now_epoch_s, std):
     """Pure version of `throttle_factor` that operates on already-loaded
     state. `effective_throttle_factor` uses this so it doesn't load the
-    state file twice in one call."""
+    state file twice in one call.
+
+    Burn-rate inference is preferred because the merged buffer
+    already encodes swarm pressure (own + sibling observations →
+    swarm-wide burn). When that path can't fire (`< 2 observations`),
+    the threshold-ladder fallback is multiplied by the visible swarm
+    size for the App bucket — without that scaling, a fresh task in a
+    busy swarm reads the same ladder factor as a solo task and emits
+    at the same cadence, undercutting the swarm's collective throttle.
+    The Env bucket is per-job, so siblings are not competing for it
+    and the factor stays unscaled."""
     obs = _merged_observations_from_state(state, bucket)
     if len(obs) >= 2:
         clock = now_epoch_s if now_epoch_s != None else epoch_now_s(std)
@@ -494,8 +517,22 @@ def _throttle_factor_from_state(state, bucket, now_epoch_s, std):
             return factor
     if obs:
         latest = obs[-1]
-        return _threshold_factor(latest[1], latest[2])
+        swarm = _competing_swarm_size(state, bucket)
+        return _threshold_factor(latest[1], latest[2]) * float(swarm)
     return 1.0
+
+def _competing_swarm_size(state, bucket):
+    """Count tasks competing for `bucket`'s quota. Shared App-bucket:
+    self + every sibling that's posted an App-bucket observation.
+    Per-job Env bucket: always 1 (each task has its own quota)."""
+    if bucket != BUCKET_APP:
+        return 1
+    siblings = state.get("sibling_observations") or {}
+    count = 1  # self
+    for sibling_obs in siblings.values():
+        if sibling_obs.get(bucket, []):
+            count += 1
+    return count
 
 # Cap on the merged-view buffer size. Slightly larger than `_RING_SIZE`
 # because we're unioning own + sibling rings; pulling the latest 32 by
@@ -743,17 +780,22 @@ def effective_throttle_factor(ctx, bucket, elapsed_s, min_interval_s):
 
 # Step boundaries — keep in sync with `_THRESHOLD_LADDER` so the
 # transition log lines up with the points where the quota path
-# changes behavior.
-_FACTOR_STEP_TERMINAL = 100.0
+# changes behavior. The TERMINAL step is the sentinel itself so
+# swarm-scaled factors of (say) 50 × 28 = 1400 still display as a
+# real multiplier rather than masquerading as "terminal-only".
+_FACTOR_STEP_TERMINAL = _TERMINAL_ONLY_FACTOR
+_FACTOR_STEP_AGGRESSIVE = 50.0
 _FACTOR_STEP_HIGH = 5.0
 _FACTOR_STEP_MEDIUM = 2.0
 
 def _factor_step(factor):
     """Categorize a continuous throttle factor into a coarse step for
-    transition logging. The step labels (1 / 2 / 5 / 999999) match
+    transition logging. The step labels (1 / 2 / 5 / 50 / 999999) match
     the rows of `_THRESHOLD_LADDER`."""
     if factor >= _FACTOR_STEP_TERMINAL:
         return 999999
+    if factor >= _FACTOR_STEP_AGGRESSIVE:
+        return 50
     if factor >= _FACTOR_STEP_HIGH:
         return 5
     if factor >= _FACTOR_STEP_MEDIUM:
