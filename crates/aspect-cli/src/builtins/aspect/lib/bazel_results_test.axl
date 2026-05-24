@@ -8,7 +8,7 @@ Two task implementations live here:
     `compute_invocation_state`, `conclusion`, and skipped-bucket plumbing.
 """
 
-load("./bazel_results.axl", "bes_get", "build_details_data", "compute_invocation_state", "conclusion", "init_data", "render_check_output")
+load("./bazel_results.axl", "MAX_TEST_TARGETS", "bes_get", "build_details_data", "compute_invocation_state", "conclusion", "init_data", "process_event", "render_check_output")
 
 # ---------------------------------------------------------------------------
 # Fake data builders
@@ -839,6 +839,62 @@ def _test_bes_get_handles_none(ctx):
     _eq("bes_get(None) → default", bes_get(None, "status", ""), "")
     _eq("bes_get(None) → None default", bes_get(None, "anything"), None)
 
+def _make_test_summary(label, status, cached = False, duration_ms = 0):
+    """Synthesize a minimal `test_summary` BES event for `process_event`."""
+    return struct(
+        kind = "test_summary",
+        id = struct(label = label),
+        payload = struct(
+            overall_status = status,
+            total_num_cached = 1 if cached else 0,
+            total_run_duration_millis = duration_ms,
+        ),
+    )
+
+def _test_failed_test_survives_passed_bucket_cap(ctx):
+    """Regression: a failed test arriving after `passed_tests` hits
+    `MAX_TEST_TARGETS` must still land in `failed_tests`. A previous
+    shared-cap implementation left `failed_tests` empty in this case,
+    which silently broke repro narrowing and the rendered failure list.
+
+    BES status strings are snake_case (see `_FAILED_STATUSES`)."""
+    data = init_data()
+
+    # Drive `passed_tests` past the cap.
+    for i in range(MAX_TEST_TARGETS + 50):
+        process_event(data, _make_test_summary("//pkg/p:test_%d" % i, "passed"))
+
+    _eq(
+        "passed bucket capped at MAX_TEST_TARGETS",
+        len(data["bazel"]["passed_tests"]),
+        MAX_TEST_TARGETS,
+    )
+    _eq(
+        "passed_test_total counts every passed test",
+        data["bazel"]["passed_test_total"],
+        MAX_TEST_TARGETS + 50,
+    )
+
+    # The failure arrives after the cap was hit. With per-bucket caps it lands.
+    process_event(data, _make_test_summary("//pkg/broken:test", "failed", duration_ms = 1000))
+
+    failed = [t["label"] for t in data["bazel"]["failed_tests"]]
+    _eq("failed test recorded despite full passed bucket", failed, ["//pkg/broken:test"])
+    _eq("failed_test_total reflects the failure", data["bazel"]["failed_test_total"], 1)
+
+def _test_flaky_test_survives_passed_bucket_cap(ctx):
+    """Same reasoning as failed-tests: flakies are diagnostic and must
+    survive a full passed bucket."""
+    data = init_data()
+    for i in range(MAX_TEST_TARGETS + 5):
+        process_event(data, _make_test_summary("//pkg/p:test_%d" % i, "passed"))
+
+    process_event(data, _make_test_summary("//pkg/flake:test", "flaky"))
+
+    flaky = [t["label"] for t in data["bazel"]["flaky_tests"]]
+    _eq("flaky test recorded despite full passed bucket", flaky, ["//pkg/flake:test"])
+    _eq("flaky_test_total reflects the flake", data["bazel"]["flaky_test_total"], 1)
+
 _UNIT_TESTS = [
     _test_failed_status_without_failure_bucket,
     _test_failed_status_with_explicit_action_failure,
@@ -852,6 +908,8 @@ _UNIT_TESTS = [
     _test_bes_get_returns_default_for_missing_field,
     _test_bes_get_returns_value_for_present_field,
     _test_bes_get_handles_none,
+    _test_failed_test_survives_passed_bucket_cap,
+    _test_flaky_test_survives_passed_bucket_cap,
 ]
 
 def _unit_test_impl(ctx):

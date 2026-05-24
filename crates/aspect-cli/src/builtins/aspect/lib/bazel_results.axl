@@ -770,13 +770,13 @@ def process_event(data, event):
             if duration_ms:
                 data["bazel"]["executed_duration_ms"] += duration_ms
 
-        total_tracked = (len(data["bazel"]["failed_tests"]) +
-                         len(data["bazel"]["flaky_tests"]) +
-                         len(data["bazel"]["passed_tests"]))
-
+        # Each bucket is capped independently so failures aren't crowded out
+        # by the (much larger) passed-test set on big invocations. A shared
+        # cap left `failed_tests` empty whenever `passed_tests` filled first,
+        # silently breaking repro narrowing and the rendered failure list.
         if status in _FAILED_STATUSES:
             data["bazel"]["failed_test_total"] += 1
-            if total_tracked < MAX_TEST_TARGETS:
+            if len(data["bazel"]["failed_tests"]) < MAX_TEST_TARGETS:
                 data["bazel"]["failed_tests"].append({
                     "label": label,
                     "cached": cached,
@@ -790,7 +790,7 @@ def process_event(data, event):
             return True
         elif status == _TEST_STATUS_FLAKY:
             data["bazel"]["flaky_test_total"] += 1
-            if total_tracked < MAX_TEST_TARGETS:
+            if len(data["bazel"]["flaky_tests"]) < MAX_TEST_TARGETS:
                 data["bazel"]["flaky_tests"].append({
                     "label": label,
                     "cached": cached,
@@ -807,7 +807,7 @@ def process_event(data, event):
             data["bazel"]["passed_test_total"] += 1
             if cached:
                 data["bazel"]["cached_test_total"] += 1
-            if label and total_tracked < MAX_TEST_TARGETS:
+            if label and len(data["bazel"]["passed_tests"]) < MAX_TEST_TARGETS:
                 data["bazel"]["passed_tests"].append({
                     "label": label,
                     "cached": cached,
