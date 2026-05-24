@@ -9,6 +9,32 @@ use starlark_syntax::syntax::ast::{ArgumentP, AstExpr, AstLiteral, CallArgsP, Ex
 use starlark_syntax::syntax::{AstModule, Dialect};
 
 const AXL_MODULE_FILE: &str = "MODULE.aspect";
+const AXL_VERSION_AXL_REL: &str = ".aspect/version.axl";
+
+/// Boundary files identifying an Aspect project root. Probed before the Bazel
+/// markers so a nested Aspect workspace inside a Bazel monorepo (e.g.
+/// `/mono/proj/.aspect/version.axl` under `/mono/MODULE.bazel`) resolves to
+/// the Aspect workspace, not the outer Bazel one.
+const ASPECT_BOUNDARY_FILES: &[&str] = &[AXL_MODULE_FILE, AXL_VERSION_AXL_REL];
+
+/// Bazel repository boundary marker files (see
+/// https://bazel.build/external/overview#repository), probed only when no
+/// Aspect boundary file is found.
+const BAZEL_BOUNDARY_FILES: &[&str] = &[
+    "MODULE.bazel",
+    "MODULE.bazel.lock",
+    "REPO.bazel",
+    "WORKSPACE",
+    "WORKSPACE.bazel",
+];
+
+/// Walk ancestors of `start` and return the deepest one containing any of `markers`.
+fn find_ancestor_with_any(start: &Path, markers: &[&str]) -> Option<PathBuf> {
+    start
+        .ancestors()
+        .find(|dir| markers.iter().any(|m| dir.join(m).exists()))
+        .map(Path::to_path_buf)
+}
 
 #[derive(Debug, Clone)]
 pub struct AspectLauncherConfig {
@@ -302,13 +328,18 @@ pub fn load_config(path: &PathBuf) -> Result<AspectLauncherConfig> {
 
 /// Automatically determines the project root directory and loads the Aspect configuration.
 ///
-/// The root dir is identified as the first (deepest) ancestor directory of the current working
-/// directory that contains at least one of the following boundary files: MODULE.aspect, MODULE.bazel,
-/// MODULE.bazel.lock, REPO.bazel, WORKSPACE, or WORKSPACE.bazel. If no such directory is found, the
-/// current working directory is used as the project root.
+/// Two-pass walk over the ancestors of the current working directory, deepest
+/// to shallowest:
+/// 1. Returns the first ancestor containing any [`ASPECT_BOUNDARY_FILES`] entry
+///    (`MODULE.aspect` or `.aspect/version.axl`).
+/// 2. If none found, returns the first ancestor containing any [`BAZEL_BOUNDARY_FILES`] entry.
+/// 3. If still none found, the current working directory is used.
 ///
-/// It then constructs the path to `.aspect/version.axl` within the project root directory and loads the
-/// configuration using `load_config`.
+/// The Aspect-first ordering lets a nested Aspect workspace inside a Bazel
+/// monorepo opt out of the surrounding Bazel root by dropping a `.aspect/`
+/// directory or a `MODULE.aspect` file at its boundary.
+///
+/// After resolving the root, `.aspect/version.axl` is loaded via `load_config`.
 ///
 /// **Returns**
 ///
@@ -574,34 +605,76 @@ version(
             } if org == "aspect-build" && repo == "aspect-cli"
         ));
     }
+
+    /// Resolve the project root from `start`, replicating `autoconf`'s
+    /// two-pass walk without touching the process cwd or filesystem read of
+    /// `.aspect/version.axl`.
+    fn resolve_root(start: &Path) -> PathBuf {
+        find_ancestor_with_any(start, ASPECT_BOUNDARY_FILES)
+            .or_else(|| find_ancestor_with_any(start, BAZEL_BOUNDARY_FILES))
+            .unwrap_or_else(|| start.to_path_buf())
+    }
+
+    /// Aspect markers anywhere in the ancestor chain take precedence over a
+    /// Bazel marker higher up — that's the sub-workspace case.
+    #[test]
+    fn root_prefers_aspect_marker_over_outer_bazel_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("MODULE.bazel"), "").unwrap();
+        let nested = root.join("proj");
+        std::fs::create_dir_all(nested.join(".aspect")).unwrap();
+        std::fs::write(nested.join(".aspect/version.axl"), "").unwrap();
+        let cwd = nested.join("src");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        assert_eq!(resolve_root(&cwd), nested);
+    }
+
+    /// MODULE.aspect is a valid Aspect marker too.
+    #[test]
+    fn root_resolves_to_module_aspect() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("MODULE.aspect"), "").unwrap();
+        let cwd = root.join("sub/dir");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        assert_eq!(resolve_root(&cwd), root);
+    }
+
+    /// Pure Bazel monorepo with no Aspect markers: fall back to Bazel markers.
+    #[test]
+    fn root_falls_back_to_bazel_markers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("MODULE.bazel"), "").unwrap();
+        let cwd = root.join("sub/dir");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        assert_eq!(resolve_root(&cwd), root);
+    }
+
+    /// No markers anywhere → fall back to the starting directory itself.
+    #[test]
+    fn root_falls_back_to_start_when_no_markers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().join("sub/dir");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        assert_eq!(resolve_root(&cwd), cwd);
+    }
 }
 
 pub fn autoconf() -> Result<(PathBuf, AspectLauncherConfig)> {
     let current_dir =
         current_dir().map_err(|e| miette!("failed to get current directory: {}", e))?;
 
-    let root_dir = if let Some(repo_root) = current_dir
-        .ancestors()
-        .filter(|dir| {
-            dir.join(PathBuf::from(AXL_MODULE_FILE)).exists()
-                // Repository boundary marker files: https://bazel.build/external/overview#repository
-                || dir.join(PathBuf::from("MODULE.bazel")).exists()
-                || dir.join(PathBuf::from("MODULE.bazel.lock")).exists()
-                || dir.join(PathBuf::from("REPO.bazel")).exists()
-                || dir.join(PathBuf::from("WORKSPACE")).exists()
-                || dir.join(PathBuf::from("WORKSPACE.bazel")).exists()
-        })
-        .next()
-        .map(Path::to_path_buf)
-    {
-        repo_root
-    } else {
-        current_dir
-    };
+    let root_dir = find_ancestor_with_any(&current_dir, ASPECT_BOUNDARY_FILES)
+        .or_else(|| find_ancestor_with_any(&current_dir, BAZEL_BOUNDARY_FILES))
+        .unwrap_or(current_dir);
 
-    let version_axl = root_dir
-        .join(PathBuf::from(".aspect/version.axl"))
-        .to_path_buf();
+    let version_axl = root_dir.join(PathBuf::from(AXL_VERSION_AXL_REL));
     let config = load_config(&version_axl)?;
     Ok((root_dir, config))
 }
