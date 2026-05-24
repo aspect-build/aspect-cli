@@ -28,7 +28,7 @@ load("./lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_ch
 load("./lib/health_check.axl", "HealthCheckTrait")
 load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "preflight_phase", "setup_phase", "task_update")
 load("./lib/lint_results.axl", lint_accumulate = "accumulate", lint_conclusion = "conclusion", lint_init_data = "init_data")
-load("./lib/repro_commands.axl", "build_aspect_command", "task_cli_path")
+load("./lib/repro_commands.axl", "build_aspect_command", "print_repro_and_fix", "task_cli_path")
 load("./lib/sarif.axl", "get_sarif_summary", "parse_sarif", "parse_sarif_diagnostics")
 load("./lib/tar.axl", "tar_create")
 load("./lib/text.axl", "pluralize")
@@ -1170,6 +1170,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                 body = _body_text(final_status, data),
             ),
         ))
+    print_repro_and_fix(ctx.std, data, final_status)
     for handler in lifecycle.task_complete:
         handler(ctx, exit_code)
 

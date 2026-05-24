@@ -17,7 +17,7 @@ load("./bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "a
 load("./environment.axl", "color_enabled")
 load("./health_check.axl", "HealthCheckTrait")
 load("./lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "preflight_phase", "setup_phase", "task_update")
-load("./repro_commands.axl", "build_aspect_command", "task_cli_path")
+load("./repro_commands.axl", "build_aspect_command", "print_repro_and_fix", "task_cli_path")
 load("./text.axl", "pluralize")
 load("../bazel.axl", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
 
@@ -196,6 +196,7 @@ def _emit_terminal(ctx, lifecycle, command, data, exit_code):
             data = data,
             progress = _live_progress(data, command, final_status),
         ))
+    print_repro_and_fix(ctx.std, data, final_status)
     for handler in lifecycle.task_complete:
         handler(ctx, exit_code)
 

@@ -195,7 +195,7 @@ load("./lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_ch
 load("./lib/health_check.axl", "HealthCheckTrait")
 load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "pick_task_status", "preflight_phase", "resolve_on_change", "setup_phase", "task_update")
 load("./lib/path_glob.axl", "match_any")
-load("./lib/repro_commands.axl", "build_aspect_command", "task_cli_path")
+load("./lib/repro_commands.axl", "build_aspect_command", "print_repro_and_fix", "task_cli_path")
 load("./lib/runnable.axl", "runnable")
 load("./lib/text.axl", "pluralize")
 load("./lib/tips.axl", "tips")
@@ -514,6 +514,7 @@ def _emit_final(ctx, lifecycle, data, exit_code):
                 body = _body_text(status, data),
             ),
         ))
+    print_repro_and_fix(ctx.std, data, status)
     for handler in lifecycle.task_complete:
         handler(ctx, exit_code)
 
@@ -871,11 +872,10 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
     # Verdict from --on-change (resolved at entry).
     if on_change_resolved == "fail":
-        error(ctx.std, "BUILD files are out of date. Run `aspect gazelle` locally and commit the result.")
+        error(ctx.std, "BUILD files are out of date.")
         return _emit_final(ctx, lifecycle, data, 1)
     if on_change_resolved == "warn":
-        info(ctx.std, "BUILD files are out of date. --on-change=warn → exiting 0 with a warning signal. " +
-                      "Run `aspect gazelle` locally and commit the result, or set --on-change=fail to gate.")
+        info(ctx.std, "BUILD files are out of date. --on-change=warn → exiting 0 with a warning signal.")
     elif not check_only:
         # Local apply, silent: we just updated the tree; don't tell the
         # user to run what they just ran.
