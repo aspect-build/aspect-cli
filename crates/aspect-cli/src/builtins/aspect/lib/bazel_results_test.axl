@@ -1038,6 +1038,22 @@ def _test_repro_targets_collapse_with_only_wildcard_originals(ctx):
         ["//app/foo:all"],
     )
 
+def _test_repro_targets_dedups_fallback_input(ctx):
+    """Fallback to `original_targets` passes through whatever the user
+    typed; if they listed the same label twice, the rendered repro must
+    not echo the duplicate."""
+    data = init_data()  # no failures → fallback
+    _eq(
+        "duplicate explicit labels collapsed",
+        repro_targets(data, ["//pkg:a", "//pkg:b", "//pkg:a"]),
+        ["//pkg:a", "//pkg:b"],
+    )
+    _eq(
+        "duplicate wildcards collapsed",
+        repro_targets(data, ["//pkg/...", "//pkg/..."]),
+        ["//pkg/..."],
+    )
+
 _UNIT_TESTS = [
     _test_failed_status_without_failure_bucket,
     _test_failed_status_with_explicit_action_failure,
@@ -1066,6 +1082,7 @@ _UNIT_TESTS = [
     _test_repro_targets_includes_target_failures,
     _test_repro_targets_preserves_explicit_label_through_collapse,
     _test_repro_targets_collapse_with_only_wildcard_originals,
+    _test_repro_targets_dedups_fallback_input,
 ]
 
 def _unit_test_impl(ctx):
