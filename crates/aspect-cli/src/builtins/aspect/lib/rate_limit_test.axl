@@ -140,9 +140,9 @@ def _test_reset_crossing_rebaselines_watermark(ctx):
     # post-reset observations now, so it computes a meaningful rate.
     record_observation(ctx, BUCKET_APP, remaining = 4900, limit = 5000, reset_epoch = 4600, epoch_s = 110.0)
 
-    # 100 calls in 10s = 10/s. safe_remaining = 4900 - 0.20*5000 = 3900.
-    # time_to_reset = max(60, 4600-0) = 4600. safe_burn = 3900/4600 ≈ 0.85/s.
-    # factor ≈ 10/0.85 ≈ 11.8.
+    # 100 calls in 10s = 10/s. safe_remaining = 4900 - 0.30*5000 = 3400.
+    # time_to_reset = max(60, 4600-0) = 4600. safe_burn = 3400/4600 ≈ 0.74/s.
+    # factor ≈ 10/0.74 ≈ 13.5.
     factor = throttle_factor(ctx, BUCKET_APP, now_epoch_s = 0)
     _assert("post-reset — burn-rate sees only fresh-window data", factor > 5.0)
 
@@ -239,19 +239,28 @@ def _test_two_bucket_independence(ctx):
 
 def _test_threshold_factor_ladder(ctx):
     """With a single observation, the factor falls through the
-    threshold ladder. Verifies the boundaries: 95% → 1×, 30% → 2×,
-    10% → 5×, 3% → terminal-only."""
+    threshold ladder. Solo task (no visible siblings) means the
+    swarm-size multiplier is 1, so the factor reads back as the raw
+    ladder row. Verifies every boundary."""
     _reset(ctx)
     record_observation(ctx, BUCKET_APP, remaining = 4800, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 1.0)
     _eq("threshold — 96% → 1×", throttle_factor(ctx, BUCKET_APP, now_epoch_s = 0), 1.0)
 
     _reset(ctx)
-    record_observation(ctx, BUCKET_APP, remaining = 1500, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 1.0)
-    _eq("threshold — 30% → 2×", throttle_factor(ctx, BUCKET_APP, now_epoch_s = 0), 2.0)
+    record_observation(ctx, BUCKET_APP, remaining = 2000, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 1.0)
+    _eq("threshold — 40% → 2×", throttle_factor(ctx, BUCKET_APP, now_epoch_s = 0), 2.0)
 
     _reset(ctx)
-    record_observation(ctx, BUCKET_APP, remaining = 500, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 1.0)
-    _eq("threshold — 10% → 5×", throttle_factor(ctx, BUCKET_APP, now_epoch_s = 0), 5.0)
+    record_observation(ctx, BUCKET_APP, remaining = 1250, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 1.0)
+    _eq("threshold — 25% → 5×", throttle_factor(ctx, BUCKET_APP, now_epoch_s = 0), 5.0)
+
+    _reset(ctx)
+    record_observation(ctx, BUCKET_APP, remaining = 600, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 1.0)
+    _eq("threshold — 12% → 20×", throttle_factor(ctx, BUCKET_APP, now_epoch_s = 0), 20.0)
+
+    _reset(ctx)
+    record_observation(ctx, BUCKET_APP, remaining = 400, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 1.0)
+    _eq("threshold — 8% → 50×", throttle_factor(ctx, BUCKET_APP, now_epoch_s = 0), 50.0)
 
     _reset(ctx)
     record_observation(ctx, BUCKET_APP, remaining = 150, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 1.0)
@@ -273,8 +282,9 @@ def _test_throttle_factor_burn_rate_inference(ctx):
     _reset(ctx)
 
     # Reset 1 hour out (now_epoch_s = 0). Bucket has burned 100/sec
-    # over 10s = effectively 100 calls/sec. safe_burn = 4900/3600 ≈ 1.36/sec.
-    # factor ≈ 100/1.36 ≈ 73.5×.
+    # over 10s = effectively 100 calls/sec. safe_remaining = 4900 -
+    # 0.30*6000 = 3100. safe_burn = 3100/3600 ≈ 0.86/sec. factor ≈
+    # 100/0.86 ≈ 116×.
     reset_epoch = 3600
     record_observation(ctx, BUCKET_APP, remaining = 5900, limit = 6000, reset_epoch = reset_epoch, epoch_s = 100.0)
     record_observation(ctx, BUCKET_APP, remaining = 4900, limit = 6000, reset_epoch = reset_epoch, epoch_s = 110.0)
@@ -383,13 +393,13 @@ def _test_effective_throttle_factor_picks_larger(ctx):
         6.0,
     )
 
-    # Drop the quota into the threshold ladder's 5% step (factor 5.0).
+    # Drop the quota into the threshold ladder's 5-10% step (factor 50.0).
     # Time at 0 elapsed → 1.0. Quota factor wins.
-    record_observation(ctx, BUCKET_APP, remaining = 500, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 1.0)
+    record_observation(ctx, BUCKET_APP, remaining = 400, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 1.0)
     _eq(
         "effective — quota pressure dominates time at task start",
         effective_throttle_factor(ctx, BUCKET_APP, elapsed_s = 0, min_interval_s = 10),
-        5.0,
+        50.0,
     )
 
 def _test_seed_from_rate_limit_body(ctx):
@@ -524,11 +534,11 @@ def _test_burn_rate_falls_back_on_degenerate_inputs(ctx):
     # Missing reset_epoch — burn-rate calc can't compute time_to_reset
     # without it, so falls back to the threshold ladder.
     _reset(ctx)
-    record_observation(ctx, BUCKET_APP, remaining = 600, limit = 5000, reset_epoch = 0, epoch_s = 1.0)
-    record_observation(ctx, BUCKET_APP, remaining = 500, limit = 5000, reset_epoch = 0, epoch_s = 2.0)
+    record_observation(ctx, BUCKET_APP, remaining = 700, limit = 5000, reset_epoch = 0, epoch_s = 1.0)
+    record_observation(ctx, BUCKET_APP, remaining = 600, limit = 5000, reset_epoch = 0, epoch_s = 2.0)
 
-    # 10% remaining on the threshold ladder → 5×.
-    _eq("no reset_epoch — falls back to threshold (10% → 5×)", throttle_factor(ctx, BUCKET_APP, now_epoch_s = 0), 5.0)
+    # 12% remaining on the threshold ladder → 20×.
+    _eq("no reset_epoch — falls back to threshold (12% → 20×)", throttle_factor(ctx, BUCKET_APP, now_epoch_s = 0), 20.0)
 
 def _test_seed_from_rate_limit_body_edge_cases(ctx):
     """`seed_from_rate_limit_body` ignores partially-missing bodies
@@ -707,8 +717,8 @@ def _test_merged_view_drives_throttle_factor(ctx):
     _reset(ctx)
 
     # Reset 1 hour out (now_epoch_s = 0). Sibling A burned 100 calls
-    # in 10s = ~10/s. safe_burn ≈ (4700 - 0.20*5000) / 3600 = 1.0/s.
-    # factor ≈ 10× — well above threshold-ladder (96% remaining → 1×).
+    # in 10s = ~10/s. safe_burn ≈ (4700 - 0.30*5000) / 3600 ≈ 0.89/s.
+    # factor ≈ 11× — well above threshold-ladder (96% remaining → 1×).
     reset_epoch = 3600
 
     # Only our own first observation: 4700/5000 → threshold ladder hits the 96% row → 1×.
@@ -754,6 +764,62 @@ def _test_merged_view_handles_flat_burn(ctx):
         1.0,
     )
 
+def _test_threshold_factor_scales_with_visible_swarm(ctx):
+    """A cold-started task with one App-bucket observation reads the
+    threshold ladder. When siblings are visible *for the same shared
+    bucket*, the factor is multiplied by the swarm size (self +
+    siblings) so the per-task interval stretches by enough to keep
+    the swarm's collective burn under safe. Burn-rate inference
+    covers the steady-state case; this multiplier covers the
+    cold-start window before burn-rate observations stabilize.
+
+    The test reaches the threshold-path branch by giving siblings
+    the same `epoch_s` as the own observation — `delta_t == 0` makes
+    `_burn_rate_factor` return None, so the fallback path runs."""
+    _reset(ctx)
+
+    # Solo task at 25% App-bucket remaining — ladder picks the 5× row.
+    record_observation(ctx, BUCKET_APP, remaining = 1250, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 1.0)
+    _eq("swarm — solo task at 25% → 5×", throttle_factor(ctx, BUCKET_APP, now_epoch_s = 0), 5.0)
+
+    # Three siblings, each with one App-bucket observation at the same
+    # `epoch_s` as the own observation. Merged buffer has 4 samples
+    # but `delta_t == 0`, so burn-rate inference returns None and the
+    # threshold-path branch runs with `swarm = 4`.
+    for i in range(3):
+        ingest_sibling_observations(ctx, "sibling-%d" % i, {
+            BUCKET_APP: [
+                {"epoch_s": 1.0, "remaining": 1250, "limit": 5000, "reset_epoch": _FAR_FUTURE},
+            ],
+        })
+    _eq(
+        "swarm — 1 + 3 siblings at 25% → 5× × 4 = 20×",
+        throttle_factor(ctx, BUCKET_APP, now_epoch_s = 0),
+        20.0,
+    )
+
+def _test_threshold_factor_swarm_scaling_skips_env_bucket(ctx):
+    """The Env bucket is the per-job `GITHUB_TOKEN` — siblings don't
+    compete for it because each has its own quota. The swarm-size
+    multiplier must stay 1 for Env even when many siblings are
+    visible."""
+    _reset(ctx)
+    record_observation(ctx, BUCKET_ENV, remaining = 250, limit = 1000, reset_epoch = _FAR_FUTURE, epoch_s = 1.0)
+    _eq("env — solo at 25% → 5×", throttle_factor(ctx, BUCKET_ENV, now_epoch_s = 0), 5.0)
+
+    # Three siblings, each with App-bucket activity (irrelevant to env quota).
+    for i in range(3):
+        ingest_sibling_observations(ctx, "sibling-%d" % i, {
+            BUCKET_APP: [
+                {"epoch_s": 0.5, "remaining": 4000, "limit": 5000, "reset_epoch": _FAR_FUTURE},
+            ],
+        })
+    _eq(
+        "env — siblings active on App bucket don't compete for Env → 5× unchanged",
+        throttle_factor(ctx, BUCKET_ENV, now_epoch_s = 0),
+        5.0,
+    )
+
 def _test_impl(ctx):
     _test_record_basic(ctx)
     _test_record_buffer_truncation(ctx)
@@ -785,7 +851,9 @@ def _test_impl(ctx):
     _test_ingest_sibling_observations(ctx)
     _test_merged_view_drives_throttle_factor(ctx)
     _test_merged_view_handles_flat_burn(ctx)
-    print("rate_limit.axl: OK (30 sections)")
+    _test_threshold_factor_scales_with_visible_swarm(ctx)
+    _test_threshold_factor_swarm_scaling_skips_env_bucket(ctx)
+    print("rate_limit.axl: OK (32 sections)")
     return 0
 
 rate_limit_tests = task(
