@@ -235,24 +235,53 @@ pub(crate) fn env_methods(registry: &mut MethodsBuilder) {
         ))
     }
 
-    /// Returns the project root directory.
+    /// Returns the Aspect project root directory — the anchor for axl /
+    /// config loading.
     ///
-    /// This project root directory is found starting at current working directory and searching upwards
-    /// through its ancestors for repository boundary marker files (such as `MODULE.aspect`, `MODULE.bazel`,
-    /// `MODULE.bazel.lock`, `REPO.bazel`, `WORKSPACE`, or `WORKSPACE.bazel`). The first ancestor directory
-    /// containing any of these files is considered the project root. If no such directory is found, the
-    /// current directory is used as the project root.
-    fn root_dir<'v>(
+    /// Found by walking upwards from the current working directory looking
+    /// for an `.aspect/version.axl` or `MODULE.aspect` marker. Falls back
+    /// to the deepest Bazel workspace marker (`MODULE.bazel`, `WORKSPACE`,
+    /// etc.) so a pure-Bazel monorepo still resolves to a sane project
+    /// anchor, and finally to the current working directory if no marker
+    /// exists anywhere.
+    ///
+    /// Distinct from the Bazel workspace root — bazelrc discovery and
+    /// `bazel info workspace` use the deepest Bazel marker, which can
+    /// differ when a Bazel sub-workspace sits under an Aspect root.
+    fn aspect_root_dir<'v>(
         #[allow(unused)] this: values::Value<'v>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<values::StringValue<'v>> {
         let env = RuntimeEnv::from_eval(eval)?;
-        Ok(eval.heap().alloc_str(
-            &env.root_dir
-                .to_str()
-                // to_str() returns None() if string is not UTF-8 (https://doc.rust-lang.org/std/path/struct.Path.html#method.to_str)
-                .ok_or(anyhow::anyhow!("root dir is non utf-8"))?,
-        ))
+        let s = env
+            .aspect_root_dir
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("aspect root dir is non utf-8"))?;
+        Ok(eval.heap().alloc_str(s))
+    }
+
+    /// Returns the Bazel workspace root directory — the anchor for bazelrc
+    /// discovery, `bazel info workspace`, and BES output paths.
+    ///
+    /// Found by walking upwards from the current working directory looking
+    /// for a `MODULE.bazel` / `WORKSPACE` marker. Falls back to the deepest
+    /// `.aspect/version.axl` or `MODULE.aspect` marker so a pure-Aspect
+    /// workspace still resolves, and finally to the current working
+    /// directory if no marker exists anywhere.
+    ///
+    /// Distinct from the Aspect project root — axl / config loading uses
+    /// the deepest `.aspect/` marker, which can differ when a Bazel
+    /// sub-workspace sits under an Aspect root.
+    fn bazel_root_dir<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<values::StringValue<'v>> {
+        let env = RuntimeEnv::from_eval(eval)?;
+        let s = env
+            .bazel_root_dir
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("bazel root dir is non utf-8"))?;
+        Ok(eval.heap().alloc_str(s))
     }
 
     /// Returns the operating system name.

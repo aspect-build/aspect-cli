@@ -48,7 +48,7 @@ pub enum CmdError {
 pub struct Cmd<'a, 'v> {
     pub tasks: Vec<&'v dyn TaskLike<'v>>,
     pub features: Vec<&'v dyn FeatureLike<'v>>,
-    pub repo_root: &'a Path,
+    pub aspect_root: &'a Path,
     pub modules: &'a [Mod],
 }
 
@@ -67,12 +67,12 @@ impl<'a, 'v> Cmd<'a, 'v> {
         let feature_blocks: Vec<FeatureBlock> = self
             .features
             .iter()
-            .filter_map(|f| feature_block(*f, self.repo_root, self.modules))
+            .filter_map(|f| feature_block(*f, self.aspect_root, self.modules))
             .collect();
 
         let mut tree = Tree::default();
         for (idx, task) in self.tasks.iter().enumerate() {
-            let label = defined_in_label(task.path(), self.repo_root, self.modules);
+            let label = defined_in_label(task.path(), self.aspect_root, self.modules);
             let task_cmd = task_command(idx, *task, &label, &feature_blocks);
             tree.insert(*task, &label, task_cmd)?;
         }
@@ -565,7 +565,7 @@ struct FeatureBlock {
 
 fn feature_block(
     feat: &dyn FeatureLike<'_>,
-    repo_root: &Path,
+    aspect_root: &Path,
     modules: &[Mod],
 ) -> Option<FeatureBlock> {
     let mut args: Vec<(String, Arg)> = feat
@@ -602,7 +602,7 @@ fn feature_block(
     }
 
     let identifier = feat.export_name().unwrap_or_default();
-    let label = defined_in_label(feat.path(), repo_root, modules);
+    let label = defined_in_label(feat.path(), aspect_root, modules);
     let heading = format!("{} Options", feat.display_name());
     let context = format!(
         "\x1b[3m{}\x1b[0m feature defined in \x1b[3m{}\x1b[0m",
@@ -836,7 +836,7 @@ fn group_section(group_names: &[String]) -> String {
 
 // ── Misc helpers ───────────────────────────────────────────────────────────
 
-fn defined_in_label(path: &Path, repo_root: &Path, modules: &[Mod]) -> String {
+fn defined_in_label(path: &Path, aspect_root: &Path, modules: &[Mod]) -> String {
     for r#mod in modules {
         if r#mod.is_root() || !path.starts_with(&r#mod.root) {
             continue;
@@ -844,7 +844,7 @@ fn defined_in_label(path: &Path, repo_root: &Path, modules: &[Mod]) -> String {
         let rel = path.strip_prefix(&r#mod.root).unwrap_or(path);
         return format!("@{}//{}", r#mod.name, rel.display());
     }
-    let rel = path.strip_prefix(repo_root).unwrap_or(path);
+    let rel = path.strip_prefix(aspect_root).unwrap_or(path);
     format!("{}", rel.display())
 }
 
@@ -988,7 +988,7 @@ mod tests {
         let cmd = Cmd {
             tasks: vec![&t as &dyn TaskLike],
             features: vec![],
-            repo_root: Path::new("/repo"),
+            aspect_root: Path::new("/repo"),
             modules: &[],
         };
         let root = cmd.build("0.0.0").expect("build ok");
@@ -1002,7 +1002,7 @@ mod tests {
         let cmd = Cmd {
             tasks: vec![&t1, &t2],
             features: vec![],
-            repo_root: Path::new("/repo"),
+            aspect_root: Path::new("/repo"),
             modules: &[],
         };
         let root = cmd.build("0.0.0").expect("build ok");
@@ -1018,7 +1018,7 @@ mod tests {
         let cmd = Cmd {
             tasks: vec![&t1, &t2],
             features: vec![],
-            repo_root: Path::new("/repo"),
+            aspect_root: Path::new("/repo"),
             modules: &[],
         };
         match cmd.build("0.0.0") {
@@ -1035,7 +1035,7 @@ mod tests {
         let cmd = Cmd {
             tasks: vec![&t],
             features: vec![],
-            repo_root: Path::new("/repo"),
+            aspect_root: Path::new("/repo"),
             modules: &[],
         };
         let root = cmd.build("0.0.0").expect("build ok");
@@ -1054,7 +1054,7 @@ mod tests {
         let cmd = Cmd {
             tasks: vec![&t],
             features: vec![],
-            repo_root: Path::new("/repo"),
+            aspect_root: Path::new("/repo"),
             modules: &[],
         };
         let root = cmd.build("0.0.0").expect("build ok");
@@ -1075,7 +1075,7 @@ mod tests {
         let cmd = Cmd {
             tasks: vec![&t],
             features: vec![],
-            repo_root: Path::new("/repo"),
+            aspect_root: Path::new("/repo"),
             modules: &[],
         };
         let root = cmd.build("0.0.0").expect("build ok");

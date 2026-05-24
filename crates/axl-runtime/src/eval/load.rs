@@ -53,9 +53,14 @@ pub struct AxlLoader<'m> {
 }
 
 impl<'m> AxlLoader<'m> {
-    pub fn new(cli_version: String, repo_root: PathBuf, modules: &'m [Mod]) -> Self {
+    pub fn new(
+        cli_version: String,
+        aspect_root: PathBuf,
+        bazel_root: PathBuf,
+        modules: &'m [Mod],
+    ) -> Self {
         Self {
-            env: Env::new(cli_version, repo_root),
+            env: Env::new(cli_version, aspect_root, bazel_root),
             dialect: api::dialect(),
             globals: api::get_globals().build(),
             modules,

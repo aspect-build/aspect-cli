@@ -842,9 +842,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     for hook in bazel_trait.build_start:
         hook(ctx)
 
-    # 5. Parse bazelrc and hand startup flags to the Bazel server
+    # 5. Parse bazelrc and hand startup flags to the Bazel server.
     rc = ctx.bazel.parse_rc(
-        root = ctx.std.env.root_dir(),
         startup_flags = startup_flags,
         flags = flags,
     )

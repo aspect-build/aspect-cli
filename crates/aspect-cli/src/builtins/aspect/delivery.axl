@@ -694,9 +694,8 @@ def _delivery_impl(ctx):
     for handler in bazel_trait.build_start:
         handler(ctx)
 
-    # Expand .bazelrc so remote cache config flows in automatically
+    # Expand .bazelrc so remote cache config flows in automatically.
     rc = ctx.bazel.parse_rc(
-        root = ctx.std.env.root_dir(),
         flags = flags,
         startup_flags = startup_flags,
     )

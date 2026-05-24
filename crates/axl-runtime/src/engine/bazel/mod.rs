@@ -530,16 +530,15 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         Ok(health_check::run(&startup_flags))
     }
 
-    /// Cancel whatever invocation is currently running on the Bazel server.
-    ///
-    /// Finds the bazel client process holding the server lock and sends it
-    /// SIGINT (graceful cancellation, like Ctrl+C). The client then forwards
-    /// a CancelRequest RPC to the server.
-    /// Returns an `Cancellation` with status and control methods.
     /// Parse `.bazelrc` files rooted at `root` and return a `BazelRC` object.
     ///
     /// # Arguments
-    /// * `root` - Workspace root directory. Defaults to the workspace root from `ctx`.
+    /// * `root` - Bazel workspace root directory. Defaults to
+    ///   `env.bazel_root_dir` — the deepest `MODULE.bazel` / `WORKSPACE`
+    ///   ancestor of `cwd`. Pass an explicit `root` only to read a
+    ///   bazelrc outside the surrounding workspace; passing the Aspect
+    ///   root here in a sub-workspace layout would read the outer
+    ///   `.bazelrc` and leak the parent project's flags.
     /// * `startup_flags` - Startup flags (e.g. `["--bazelrc=/path/to/extra.bazelrc"]`).
     /// * `flags` - Command-line flags to inject as synthetic `always` options
     ///   (e.g. `["--config=opt"]`).
@@ -591,7 +590,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         let root = root
             .into_option()
             .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| env.root_dir.clone());
+            .unwrap_or_else(|| env.bazel_root_dir.clone());
         let startup_flags_vec: Vec<&str> = startup_flags
             .items
             .iter()
@@ -617,6 +616,14 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         })
     }
 
+    /// Cancel whatever invocation is currently running on the Bazel server.
+    ///
+    /// Finds the bazel client process holding the server lock and sends it
+    /// SIGINT (graceful cancellation, like Ctrl+C). The client then forwards
+    /// a CancelRequest RPC to the server. Returns a `Cancellation` with
+    /// status and control methods.
+    ///
+    /// # Arguments
     /// * `force_kill_after_ms` - If the build is still running after this many
     ///   milliseconds, `wait()` will automatically escalate by sending the 2nd
     ///   and 3rd SIGINT to the Bazel client (the 3rd triggers Bazel's built-in

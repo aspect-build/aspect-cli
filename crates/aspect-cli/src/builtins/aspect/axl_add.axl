@@ -235,7 +235,7 @@ def generate_axl_archive_dep(name: str, url: str, integrity: str, strip_prefix: 
 
 def read_module_aspect(ctx: TaskContext) -> str:
     """Read the current MODULE.aspect file content."""
-    module_path = ctx.std.env.root_dir() + "/MODULE.aspect"
+    module_path = ctx.std.env.aspect_root_dir() + "/MODULE.aspect"
 
     if ctx.std.fs.exists(module_path):
         return ctx.std.fs.read_to_string(module_path)
@@ -244,7 +244,7 @@ def read_module_aspect(ctx: TaskContext) -> str:
 
 def write_module_aspect(ctx: TaskContext, content: str):
     """Write content to MODULE.aspect file."""
-    module_path = ctx.std.env.root_dir() + "/MODULE.aspect"
+    module_path = ctx.std.env.aspect_root_dir() + "/MODULE.aspect"
     ctx.std.fs.write(module_path, content)
 
 def check_existing_dep(content: str, name: str) -> bool:

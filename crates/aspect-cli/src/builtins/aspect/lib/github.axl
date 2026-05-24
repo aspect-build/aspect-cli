@@ -1254,7 +1254,7 @@ def detect_changed_files(ctx, line_level = True, base_ref = "", merge_base = Non
             if result["success"]:
                 # `git rev-parse --show-prefix` strips the workspace prefix so
                 # GitHub-API paths line up with local relative paths.
-                git_out = ctx.std.process.command("git").arg("rev-parse").arg("--show-prefix").current_dir(ctx.std.env.root_dir()).stdout("piped").stderr("null").spawn().wait_with_output()
+                git_out = ctx.std.process.command("git").arg("rev-parse").arg("--show-prefix").current_dir(ctx.std.env.aspect_root_dir()).stdout("piped").stderr("null").spawn().wait_with_output()
                 prefix = git_out.stdout.strip() if git_out.status.success else ""
                 files = []
                 skipped = []
