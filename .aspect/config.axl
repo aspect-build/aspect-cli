@@ -34,7 +34,7 @@ _user_task = task(
 # `--formatter-target` flag in each pipeline.
 buildifier = format.alias(
     defaults = {
-        "formatter_target": "//tools/format:format-starlark",
+        "formatter_target": "//tools/format:buildifier",
     },
     summary = "Format Starlark files using buildifier.",
 )

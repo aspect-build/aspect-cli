@@ -543,7 +543,7 @@ fn task_methods(builder: &mut MethodsBuilder) {
     ///
     /// buildifier = format.alias(
     ///     defaults = {
-    ///         "formatter_target": "//tools/format:format-starlark",
+    ///         "formatter_target": "//tools/format:buildifier",
     ///     },
     ///     summary = "Format Starlark files with buildifier.",
     /// )

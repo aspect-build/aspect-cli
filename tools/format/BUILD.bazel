@@ -10,6 +10,6 @@ format_multirun(
 # `aspect format --task-key=format` ignores Starlark patterns to avoid
 # duplicate work. See https://docs.aspect.build/cli/migration/buildifier.
 format_multirun(
-    name = "format-starlark",
+    name = "buildifier",
     starlark = "@buildifier_prebuilt//:buildifier",
 )
