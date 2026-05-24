@@ -250,7 +250,7 @@ if [ -n "${ASPECT_WORKFLOWS_RUNNER:-}" ]; then
   fi
 
   # Derive workspace subdir from the checkout path.
-  # Mirrors the root_dir derivation in get_bazelrc_flags in environment.axl.
+  # Mirrors the aspect_root_dir derivation in get_bazelrc_flags in environment.axl.
   WORKSPACE_DIR="${BUILDKITE_BUILD_CHECKOUT_PATH:-${GITHUB_WORKSPACE:-${CIRCLE_WORKING_DIRECTORY:-${CI_PROJECT_DIR:-$(pwd)}}}}"
   SUBDIR=$(basename "${WORKSPACE_DIR}" | sed 's|[^a-zA-Z0-9._-]|_|g')
 

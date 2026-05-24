@@ -50,7 +50,7 @@ def _workflows_impl(ctx: FeatureContext):
         # Flags to optimize build & test
         (startup_flags, build_flags) = get_bazelrc_flags(
             environment = environment,
-            root_dir = ctx.std.env.root_dir(),
+            aspect_root_dir = ctx.std.env.aspect_root_dir(),
         )
 
         bazel_trait.extra_startup_flags.extend(startup_flags)

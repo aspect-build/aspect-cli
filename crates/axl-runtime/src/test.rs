@@ -68,7 +68,7 @@ impl EvalBuilder {
         let globals = get_globals().build();
         let rt = Runtime::new().map_err(|e| anyhow!("failed to create runtime: {}", e))?;
         let _g = rt.enter();
-        let env_store = Env::new("test".to_string(), PathBuf::from("/"));
+        let env_store = Env::new("test".to_string(), PathBuf::from("/"), PathBuf::from("/"));
         ModuleEnv::with(|env| {
             let mut eval = Evaluator::new(&env.0);
             eval.extra = Some(&env_store);
@@ -81,7 +81,7 @@ impl EvalBuilder {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let rt = Runtime::new()?;
         let _g = rt.enter();
-        let loader = Loader::new("test".to_string(), manifest_dir, &[]);
+        let loader = Loader::new("test".to_string(), manifest_dir.clone(), manifest_dir, &[]);
         let ast = AstModule::parse("test", self.code, &dialect()).map_err(|e| anyhow!("{}", e))?;
         Module::with_temp_heap(|module| {
             let mut eval = Evaluator::new(&module);
@@ -104,7 +104,7 @@ impl EvalBuilder {
         let globals = get_globals().build();
         let rt = Runtime::new().expect("failed to create runtime");
         let _g = rt.enter();
-        let env_store = Env::new("test".to_string(), PathBuf::from("/"));
+        let env_store = Env::new("test".to_string(), PathBuf::from("/"), PathBuf::from("/"));
         Module::with_temp_heap(|module| {
             let mut eval = Evaluator::new(&module);
             eval.extra = Some(&env_store);
@@ -142,7 +142,12 @@ impl EvalBuilder {
                 "_root".to_string(),
                 tmp.path().to_path_buf(),
             );
-            let loader = Loader::new("test".to_string(), tmp.path().to_path_buf(), &modules);
+            let loader = Loader::new(
+                "test".to_string(),
+                tmp.path().to_path_buf(),
+                tmp.path().to_path_buf(),
+                &modules,
+            );
             let mut mpe = MultiPhaseEval::new(env, &loader);
             let scripts = vec![script_path];
             mpe.eval(&scripts, &root_mod, &modules)

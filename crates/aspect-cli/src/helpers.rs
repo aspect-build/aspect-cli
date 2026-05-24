@@ -6,19 +6,14 @@ use axl_runtime::module::{
 use tokio::fs;
 use tracing::instrument;
 
-// Constants for special directory names used in module resolution.
-// These define the structure for local modules (e.g., .aspect/axl/module_name).
+/// Conventional name of the `.aspect` directory under an Aspect project root.
 pub const DOT_ASPECT_FOLDER: &str = ".aspect";
 
-/// Boundary files identifying an Aspect project root. Probed before the Bazel
-/// markers so a nested Aspect workspace inside a Bazel monorepo (e.g.
-/// `/mono/proj/.aspect/version.axl` under `/mono/MODULE.bazel`) resolves to
-/// the Aspect workspace, not the outer Bazel one.
+/// Markers identifying an Aspect project root.
 const ASPECT_BOUNDARY_FILES: &[&str] = &[AXL_MODULE_FILE, ".aspect/version.axl"];
 
-/// Bazel repository boundary marker files (see
-/// https://bazel.build/external/overview#repository), probed only when no
-/// Aspect boundary file is found.
+/// Markers identifying a Bazel workspace root (see
+/// https://bazel.build/external/overview#repository).
 const BAZEL_BOUNDARY_FILES: &[&str] = &[
     "MODULE.bazel",
     "MODULE.bazel.lock",
@@ -27,25 +22,54 @@ const BAZEL_BOUNDARY_FILES: &[&str] = &[
     "WORKSPACE.bazel",
 ];
 
-/// Asynchronously finds the project root directory starting from `current_work_dir`.
+/// Aspect project root for axl / config loading.
 ///
-/// Two-pass walk over the ancestors of `current_work_dir`, deepest to shallowest:
-/// 1. Returns the first ancestor containing any [`ASPECT_BOUNDARY_FILES`] entry.
-/// 2. If none found, returns the first ancestor containing any [`BAZEL_BOUNDARY_FILES`] entry.
-/// 3. If still none found, returns `current_work_dir`.
-///
-/// The Aspect-first ordering lets a nested Aspect workspace inside a Bazel
-/// monorepo opt out of the surrounding Bazel root by dropping a `.aspect/`
-/// directory or a `MODULE.aspect` file at its boundary.
+/// Deepest ancestor of `current_work_dir` containing `.aspect/version.axl`
+/// or `MODULE.aspect`. Falls back to the deepest Bazel workspace marker so
+/// a pure-Bazel monorepo still resolves to a sane project anchor. Returns
+/// `None` only when neither marker exists anywhere in the ancestry.
 #[instrument]
-pub async fn find_repo_root(current_work_dir: &PathBuf) -> Result<PathBuf, ()> {
-    if let Some(root) = find_ancestor_with_any(current_work_dir, ASPECT_BOUNDARY_FILES).await {
-        return Ok(root);
+pub async fn find_aspect_root(current_work_dir: &Path) -> Option<PathBuf> {
+    find_root_with_fallback(
+        current_work_dir,
+        ASPECT_BOUNDARY_FILES,
+        BAZEL_BOUNDARY_FILES,
+    )
+    .await
+}
+
+/// Bazel workspace root for bazelrc discovery, `bazel info workspace`, and
+/// BES output paths.
+///
+/// Deepest ancestor of `current_work_dir` containing a Bazel marker. Falls
+/// back to the deepest Aspect marker so a pure-Aspect workspace still
+/// resolves. Returns `None` only when neither marker exists.
+///
+/// Diverges from [`find_aspect_root`] when both markers exist in the
+/// ancestry: with `/proj/.aspect/version.axl` and `/proj/e2e/MODULE.bazel`,
+/// invoking from `/proj/e2e/sub/` puts the Aspect root at `/proj` and the
+/// Bazel root at `/proj/e2e`.
+#[instrument]
+pub async fn find_bazel_root(current_work_dir: &Path) -> Option<PathBuf> {
+    find_root_with_fallback(
+        current_work_dir,
+        BAZEL_BOUNDARY_FILES,
+        ASPECT_BOUNDARY_FILES,
+    )
+    .await
+}
+
+/// Walk ancestors of `start` looking for `primary` markers; on miss, walk
+/// again looking for `fallback`. Returns `None` if neither set is found.
+async fn find_root_with_fallback(
+    start: &Path,
+    primary: &[&str],
+    fallback: &[&str],
+) -> Option<PathBuf> {
+    if let Some(root) = find_ancestor_with_any(start, primary).await {
+        return Some(root);
     }
-    if let Some(root) = find_ancestor_with_any(current_work_dir, BAZEL_BOUNDARY_FILES).await {
-        return Ok(root);
-    }
-    Ok(current_work_dir.clone())
+    find_ancestor_with_any(start, fallback).await
 }
 
 /// Walk ancestors of `start` and return the deepest one containing any of `markers`.
@@ -60,18 +84,19 @@ async fn find_ancestor_with_any(start: &Path, markers: &[&str]) -> Option<PathBu
     None
 }
 
-/// Returns a list of axl search paths by constructing paths from the `root_dir` up to the `current_dir`,
-/// appending ".aspect" to each path. If the relative path from `root_dir` to `current_dir` includes
-/// a ".aspect" component, the search stops at the parent directory of that ".aspect", excluding
-/// ".aspect" and any subdirectories from the results.
+/// Returns a list of axl search paths by constructing paths from the
+/// `aspect_root_dir` up to `current_work_dir`, appending `.aspect` to each.
+/// If the relative path from `aspect_root_dir` to `current_work_dir` includes
+/// a `.aspect` component, the search stops at the parent directory of that
+/// `.aspect`, excluding `.aspect` and any subdirectories from the results.
 #[instrument]
 pub fn get_default_axl_search_paths(
     current_work_dir: &PathBuf,
-    root_dir: &PathBuf,
+    aspect_root_dir: &PathBuf,
 ) -> Vec<PathBuf> {
-    if let Ok(rel_path) = current_work_dir.strip_prefix(root_dir) {
-        let mut paths = vec![root_dir.join(DOT_ASPECT_FOLDER)];
-        let mut current = root_dir.clone();
+    if let Ok(rel_path) = current_work_dir.strip_prefix(aspect_root_dir) {
+        let mut paths = vec![aspect_root_dir.join(DOT_ASPECT_FOLDER)];
+        let mut current = aspect_root_dir.clone();
         for component in rel_path.components() {
             if component.as_os_str() == DOT_ASPECT_FOLDER {
                 break;
@@ -122,4 +147,96 @@ pub async fn search_sources(
     }
 
     Ok((found, configs))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::{TempDir, tempdir};
+    use tokio::fs as tokio_fs;
+
+    /// Set up a temp directory with the given markers. Each entry is a
+    /// path relative to the temp root; empty content is written. Returns
+    /// the temp handle (kept alive for the test) and the root path.
+    async fn setup(layout: &[&str]) -> (TempDir, PathBuf) {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        for rel in layout {
+            let p = root.join(rel);
+            if let Some(parent) = p.parent() {
+                tokio_fs::create_dir_all(parent).await.unwrap();
+            }
+            tokio_fs::write(&p, "").await.unwrap();
+        }
+        (tmp, root)
+    }
+
+    /// Aspect marker outside, Bazel marker in a sub-workspace: the two
+    /// roots diverge at exactly the boundary their consumers care about.
+    #[tokio::test]
+    async fn aspect_and_bazel_roots_diverge_in_sub_workspace() {
+        let (_tmp, root) = setup(&[".aspect/version.axl", "e2e/MODULE.bazel"]).await;
+        let cwd = root.join("e2e/sub");
+        tokio_fs::create_dir_all(&cwd).await.unwrap();
+
+        assert_eq!(find_aspect_root(&cwd).await, Some(root.clone()));
+        assert_eq!(find_bazel_root(&cwd).await, Some(root.join("e2e")));
+    }
+
+    /// Pure-Aspect workspace → both roots resolve to the Aspect marker.
+    #[tokio::test]
+    async fn bazel_root_falls_back_to_aspect_marker() {
+        let (_tmp, root) = setup(&[".aspect/version.axl"]).await;
+        let cwd = root.join("sub");
+        tokio_fs::create_dir_all(&cwd).await.unwrap();
+
+        assert_eq!(find_aspect_root(&cwd).await, Some(root.clone()));
+        assert_eq!(find_bazel_root(&cwd).await, Some(root));
+    }
+
+    /// Pure-Bazel monorepo → both roots resolve to the Bazel marker.
+    #[tokio::test]
+    async fn aspect_root_falls_back_to_bazel_marker() {
+        let (_tmp, root) = setup(&["MODULE.bazel"]).await;
+        let cwd = root.join("sub");
+        tokio_fs::create_dir_all(&cwd).await.unwrap();
+
+        assert_eq!(find_aspect_root(&cwd).await, Some(root.clone()));
+        assert_eq!(find_bazel_root(&cwd).await, Some(root));
+    }
+
+    /// No markers anywhere → both roots are `None`; callers supply their
+    /// own fallback (typically cwd).
+    #[tokio::test]
+    async fn both_roots_are_none_when_no_markers() {
+        let (_tmp, root) = setup(&[]).await;
+        let cwd = root.join("sub");
+        tokio_fs::create_dir_all(&cwd).await.unwrap();
+
+        assert_eq!(find_aspect_root(&cwd).await, None);
+        assert_eq!(find_bazel_root(&cwd).await, None);
+    }
+
+    /// `MODULE.aspect` is recognized as an Aspect marker.
+    #[tokio::test]
+    async fn aspect_root_recognizes_module_aspect() {
+        let (_tmp, root) = setup(&["MODULE.aspect"]).await;
+        let cwd = root.join("sub");
+        tokio_fs::create_dir_all(&cwd).await.unwrap();
+
+        assert_eq!(find_aspect_root(&cwd).await, Some(root.clone()));
+        assert_eq!(find_bazel_root(&cwd).await, Some(root));
+    }
+
+    /// Every documented Bazel marker is recognized — guards against
+    /// silent drift in `BAZEL_BOUNDARY_FILES`.
+    #[tokio::test]
+    async fn bazel_root_recognizes_every_marker() {
+        for marker in BAZEL_BOUNDARY_FILES {
+            let (_tmp, root) = setup(&[marker]).await;
+            let cwd = root.join("sub");
+            tokio_fs::create_dir_all(&cwd).await.unwrap();
+            assert_eq!(find_bazel_root(&cwd).await, Some(root), "marker: {marker}");
+        }
+    }
 }

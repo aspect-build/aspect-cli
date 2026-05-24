@@ -76,11 +76,17 @@ def test_env(ctx: TaskContext, tc: int, temp_dir: str) -> int:
         tc = test_case(tc, type(var[0]) == "string" and type(var[1]) == "string", "Var entries should be string pairs")
         break
 
-    # Test root_dir
-    root_dir = ctx.std.env.root_dir()
-    tc = test_case(tc, root_dir != None and root_dir != "", "root_dir should return a non-empty value")
-    tc = test_case(tc, type(root_dir) == "string", "root_dir should be a string")
-    tc = test_case(tc, ctx.std.fs.is_dir(root_dir), "root_dir should be a directory")
+    # Test aspect_root_dir
+    aspect_root_dir = ctx.std.env.aspect_root_dir()
+    tc = test_case(tc, aspect_root_dir != None and aspect_root_dir != "", "aspect_root_dir should return a non-empty value")
+    tc = test_case(tc, type(aspect_root_dir) == "string", "aspect_root_dir should be a string")
+    tc = test_case(tc, ctx.std.fs.is_dir(aspect_root_dir), "aspect_root_dir should be a directory")
+
+    # Test bazel_root_dir
+    bazel_root_dir = ctx.std.env.bazel_root_dir()
+    tc = test_case(tc, bazel_root_dir != None and bazel_root_dir != "", "bazel_root_dir should return a non-empty value")
+    tc = test_case(tc, type(bazel_root_dir) == "string", "bazel_root_dir should be a string")
+    tc = test_case(tc, ctx.std.fs.is_dir(bazel_root_dir), "bazel_root_dir should be a directory")
 
     # Test set_var: set a new variable and read it back
     ctx.std.env.set_var("AXL_TEST_SET_VAR", "hello")
@@ -385,9 +391,9 @@ def test_bazel_info(ctx: TaskContext, tc: int) -> int:
     # output_base should be an absolute path
     tc = test_case(tc, info["output_base"].startswith("/"), "output_base should be an absolute path")
 
-    # workspace should match root_dir
-    root_dir = ctx.std.env.root_dir()
-    tc = test_case(tc, info["workspace"] == root_dir, "bazel.info()['workspace'] should match ctx.std.env.root_dir()")
+    # workspace should match aspect_root_dir
+    aspect_root_dir = ctx.std.env.aspect_root_dir()
+    tc = test_case(tc, info["workspace"] == aspect_root_dir, "bazel.info()['workspace'] should match ctx.std.env.aspect_root_dir()")
 
     # calling info() again should return the same output_base
     info2 = ctx.bazel.info()

@@ -90,7 +90,7 @@ def _spawn(ctx: TaskContext, state: struct, entrypoint: str, args: list[str], ca
         .env("RUNFILES_DIR", runfiles) \
         .env("JAVA_RUNFILES", runfiles) \
         .env("RUNFILES_MANIFEST_FILE", runfiles + "_manifest") \
-        .env("BUILD_WORKSPACE_DIRECTORY", ctx.std.env.root_dir()) \
+        .env("BUILD_WORKSPACE_DIRECTORY", ctx.std.env.aspect_root_dir()) \
         .env("BUILD_WORKING_DIRECTORY", ctx.std.env.current_dir()) \
         .args(args)
     if capture:

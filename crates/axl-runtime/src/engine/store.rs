@@ -11,15 +11,22 @@ use super::r#async::rt::AsyncRuntime;
 #[derive(Debug, ProvidesStaticType, Clone)]
 pub struct Env {
     pub cli_version: String,
-    pub root_dir: PathBuf,
+    /// Aspect project root — anchor for axl / config loading.
+    pub aspect_root_dir: PathBuf,
+    /// Bazel workspace root — anchor for bazelrc discovery,
+    /// `bazel info workspace`, and BES output paths. Distinct from
+    /// `aspect_root_dir` when a Bazel sub-workspace sits under an
+    /// Aspect root.
+    pub bazel_root_dir: PathBuf,
     pub rt: AsyncRuntime,
 }
 
 impl Env {
-    pub fn new(cli_version: String, root_dir: PathBuf) -> Self {
+    pub fn new(cli_version: String, aspect_root_dir: PathBuf, bazel_root_dir: PathBuf) -> Self {
         Self {
             cli_version,
-            root_dir,
+            aspect_root_dir,
+            bazel_root_dir,
             rt: AsyncRuntime::new(),
         }
     }

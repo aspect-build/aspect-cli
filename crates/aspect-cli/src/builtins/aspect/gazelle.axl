@@ -833,7 +833,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         patch_path = tmp + "/gazelle-" + ctx.task.key + ".patch"
         ctx.std.fs.write(patch_path, diff_stdout)
         apply_result = ctx.std.process.command("git").args(["apply", "-p0", patch_path]) \
-            .current_dir(ctx.std.env.root_dir()) \
+            .current_dir(ctx.std.env.aspect_root_dir()) \
             .stdout("piped").stderr("piped").spawn().wait_with_output()
         ctx.std.fs.remove_file(patch_path)
         if not apply_result.status.success:

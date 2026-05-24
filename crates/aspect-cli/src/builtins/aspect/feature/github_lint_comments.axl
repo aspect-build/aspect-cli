@@ -873,7 +873,7 @@ def _github_lint_impl(ctx: FeatureContext):
         # Workspace prefix relative to the git root (e.g. "subdir/") —
         # _post_individually prepends it when posting because SARIF paths are
         # workspace-relative but GitHub expects repo-relative paths.
-        git_out = ctx.std.process.command("git").arg("rev-parse").arg("--show-prefix").current_dir(ctx.std.env.root_dir()).stdout("piped").stderr("null").spawn().wait_with_output()
+        git_out = ctx.std.process.command("git").arg("rev-parse").arg("--show-prefix").current_dir(ctx.std.env.aspect_root_dir()).stdout("piped").stderr("null").spawn().wait_with_output()
         if git_out.status.success:
             gh["prefix"] = git_out.stdout.strip()
 

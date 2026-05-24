@@ -469,7 +469,7 @@ def sanitize_filename(name: str) -> str:
             result += "_"
     return result
 
-def get_bazelrc_flags(environment: WorkflowsEnvironment, root_dir: str) -> (list, list):
+def get_bazelrc_flags(environment: WorkflowsEnvironment, aspect_root_dir: str) -> (list, list):
     """
     Generate bazelrc flags from platform configuration.
 
@@ -478,7 +478,7 @@ def get_bazelrc_flags(environment: WorkflowsEnvironment, root_dir: str) -> (list
                      Caller is expected to have already verified
                      `environment.runner != None` since the output_base
                      / output_user_root paths come from the runner.
-        root_dir: absolute path to the workspace root directory
+        aspect_root_dir: absolute path to the Aspect project root.
 
     Returns:
         (startup_flags, build_flags): two lists of flag strings
@@ -488,7 +488,7 @@ def get_bazelrc_flags(environment: WorkflowsEnvironment, root_dir: str) -> (list
         fail("get_bazelrc_flags called without a Workflows runner — gate on environment.runner != None")
 
     repo_name = environment.ci.scm_repo_name if environment.ci else ""
-    subdir = sanitize_filename(root_dir.rstrip("/").split("/")[-1]) if root_dir else "__main__"
+    subdir = sanitize_filename(aspect_root_dir.rstrip("/").split("/")[-1]) if aspect_root_dir else "__main__"
 
     build_flags = []
 

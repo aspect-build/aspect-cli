@@ -17,7 +17,9 @@ use tokio::task::spawn_blocking;
 use tracing::info_span;
 
 use crate::cmd::Cmd;
-use crate::helpers::{find_repo_root, get_default_axl_search_paths, search_sources};
+use crate::helpers::{
+    find_aspect_root, find_bazel_root, get_default_axl_search_paths, search_sources,
+};
 
 // Must use a multi thread runtime with at least 3 threads for following reasons;
 //
@@ -73,15 +75,20 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
     .entered();
 
     let current_work_dir = std::env::current_dir()?;
-    let repo_root = find_repo_root(&current_work_dir)
+    // `Env` requires both roots; cwd is the last-resort fallback when no
+    // marker file exists anywhere up the tree.
+    let aspect_root = find_aspect_root(&current_work_dir)
         .await
-        .map_err(|_| anyhow::anyhow!("could not find root directory"))?;
+        .unwrap_or_else(|| current_work_dir.clone());
+    let bazel_root = find_bazel_root(&current_work_dir)
+        .await
+        .unwrap_or_else(|| current_work_dir.clone());
 
-    let disk_store = DiskStore::new(repo_root.clone());
-    let mode = ModEvaluator::new(repo_root.clone());
+    let disk_store = DiskStore::new(aspect_root.clone());
+    let mode = ModEvaluator::new(aspect_root.clone());
 
-    let root_mod = mode.evaluate(AXL_ROOT_MODULE_NAME.to_string(), repo_root.clone())?;
-    let builtins = builtins::expand_builtins(repo_root.clone(), disk_store.builtins_path())?;
+    let root_mod = mode.evaluate(AXL_ROOT_MODULE_NAME.to_string(), aspect_root.clone())?;
+    let builtins = builtins::expand_builtins(aspect_root.clone(), disk_store.builtins_path())?;
     let module_roots = disk_store.expand_store(&root_mod, builtins).await?;
 
     let mut modules: Vec<Mod> = vec![];
@@ -91,7 +98,7 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
         modules.push(r#mod)
     }
 
-    let search_paths = get_default_axl_search_paths(&current_work_dir, &repo_root);
+    let search_paths = get_default_axl_search_paths(&current_work_dir, &aspect_root);
     let (scripts, configs) = search_sources(&search_paths).await?;
 
     // `_root` is entered on this thread; spawn_blocking moves work to a
@@ -103,7 +110,12 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
         let cli_version = cargo_pkg_short_version();
 
         ModuleEnv::with(|env| -> Result<ExitCode, anyhow::Error> {
-            let loader = Loader::new(cli_version.clone(), repo_root.clone(), &modules);
+            let loader = Loader::new(
+                cli_version.clone(),
+                aspect_root.clone(),
+                bazel_root.clone(),
+                &modules,
+            );
             let mut mpe = MultiPhaseEval::new(env, &loader);
 
             // Phase 1: discover tasks and features.
@@ -118,7 +130,7 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
             let cmd = Cmd {
                 tasks: mpe.tasks(),
                 features: mpe.features(),
-                repo_root: &repo_root,
+                aspect_root: &aspect_root,
                 modules: &modules,
             };
             let mut root_cmd = cmd.build(&cli_version)?;
