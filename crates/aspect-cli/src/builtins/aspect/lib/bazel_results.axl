@@ -1172,6 +1172,16 @@ def _is_explicit_label(target):
         return False
     return True
 
+def _dedup_preserve_order(items):
+    """Order-preserving dedup of a list of strings."""
+    seen = {}
+    out = []
+    for x in items:
+        if x not in seen:
+            seen[x] = True
+            out.append(x)
+    return out
+
 def repro_targets(data, original_targets):
     """Pick the target list to render in the repro command for a failing
     build/test task.
@@ -1192,17 +1202,19 @@ def repro_targets(data, original_targets):
     root is fixed.
 
     `original_targets` is the user-supplied positional list (e.g.
-    `ctx.args.targets`). Returns a list[str] suitable for
-    `build_aspect_command`'s `targets` arg.
+    `ctx.args.targets`). The returned list is always order-preserving
+    deduped so the rendered repro never carries duplicate labels — the
+    fallback path passes through whatever the user typed, which is the
+    one place a duplicate can sneak in.
     """
     failed = failed_labels(data)
     if not failed:
-        return list(original_targets)
+        return _dedup_preserve_order(original_targets)
     if len(failed) <= _REPRO_INLINE_MAX:
         return failed
     root = common_label_root(failed)
     if not root:
-        return list(original_targets)
+        return _dedup_preserve_order(original_targets)
 
     explicit_in_original = {t: True for t in original_targets if _is_explicit_label(t)}
     explicit_failed = [l for l in failed if l in explicit_in_original]
