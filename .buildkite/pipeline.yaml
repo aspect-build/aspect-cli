@@ -194,8 +194,8 @@ steps:
         - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
           limit: 1
     command: |
-      ASPECT_DEBUG=1 aspect format --task-key buildifier-bk-debug --formatter-target=//tools/format:format-starlark
-      aspect format --task-key buildifier-bk --formatter-target=//tools/format:format-starlark
+      ASPECT_DEBUG=1 aspect buildifier --task-key buildifier-bk-debug
+      aspect buildifier --task-key buildifier-bk
 
   - key: format-task
     label: ":aspect: Format Task"

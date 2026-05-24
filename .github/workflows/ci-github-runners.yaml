@@ -58,7 +58,7 @@ jobs:
           fetch-depth: 2
       - uses: ./.github/actions/install-prebuilt-aspect-cli
       - name: Buildifier Task
-        run: aspect format --task-key buildifier-gha-ephemeral --formatter-target=//tools/format:format-starlark
+        run: aspect buildifier --task-key buildifier-gha-ephemeral
 
   format-task:
     runs-on: ubuntu-latest

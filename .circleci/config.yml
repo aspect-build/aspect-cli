@@ -112,10 +112,10 @@ jobs:
           command: .aspect/bootstrap.sh
       - run:
           name: Buildifier Task (ASPECT_DEBUG=1)
-          command: ASPECT_DEBUG=1 aspect format --task-key buildifier-cci-debug --formatter-target=//tools/format:format-starlark
+          command: ASPECT_DEBUG=1 aspect buildifier --task-key buildifier-cci-debug
       - run:
           name: Buildifier Task
-          command: aspect format --task-key buildifier-cci --formatter-target=//tools/format:format-starlark
+          command: aspect buildifier --task-key buildifier-cci
 
   format-task:
     machine: true
