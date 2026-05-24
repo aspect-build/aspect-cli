@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use axl_runtime::module::{
     AXL_CONFIG_EXTENSION, AXL_MODULE_FILE, AXL_SCRIPT_EXTENSION, AXL_VERSION_EXTENSION,
@@ -10,42 +10,54 @@ use tracing::instrument;
 // These define the structure for local modules (e.g., .aspect/axl/module_name).
 pub const DOT_ASPECT_FOLDER: &str = ".aspect";
 
-/// Asynchronously finds the root directory starting from the given `current_work_dir`.
-/// It traverses the ancestors of `current_work_dir` from deepest to shallowest.
-/// The root dir is identified as the first (deepest) ancestor directory of the current working
-/// directory that contains at least one of the following boundary files: MODULE.aspect, MODULE.bazel,
-/// MODULE.bazel.lock, REPO.bazel, WORKSPACE, or WORKSPACE.bazel.
-/// If such a directory is found, it returns Ok with the PathBuf of that directory.
-/// If no such directory is found, returns the `current_work_dir`
+/// Boundary files identifying an Aspect project root. Probed before the Bazel
+/// markers so a nested Aspect workspace inside a Bazel monorepo (e.g.
+/// `/mono/proj/.aspect/version.axl` under `/mono/MODULE.bazel`) resolves to
+/// the Aspect workspace, not the outer Bazel one.
+const ASPECT_BOUNDARY_FILES: &[&str] = &[AXL_MODULE_FILE, ".aspect/version.axl"];
+
+/// Bazel repository boundary marker files (see
+/// https://bazel.build/external/overview#repository), probed only when no
+/// Aspect boundary file is found.
+const BAZEL_BOUNDARY_FILES: &[&str] = &[
+    "MODULE.bazel",
+    "MODULE.bazel.lock",
+    "REPO.bazel",
+    "WORKSPACE",
+    "WORKSPACE.bazel",
+];
+
+/// Asynchronously finds the project root directory starting from `current_work_dir`.
+///
+/// Two-pass walk over the ancestors of `current_work_dir`, deepest to shallowest:
+/// 1. Returns the first ancestor containing any [`ASPECT_BOUNDARY_FILES`] entry.
+/// 2. If none found, returns the first ancestor containing any [`BAZEL_BOUNDARY_FILES`] entry.
+/// 3. If still none found, returns `current_work_dir`.
+///
+/// The Aspect-first ordering lets a nested Aspect workspace inside a Bazel
+/// monorepo opt out of the surrounding Bazel root by dropping a `.aspect/`
+/// directory or a `MODULE.aspect` file at its boundary.
 #[instrument]
 pub async fn find_repo_root(current_work_dir: &PathBuf) -> Result<PathBuf, ()> {
-    async fn err_if_exists(path: PathBuf) -> Result<(), ()> {
-        match fs::try_exists(path).await {
-            Ok(true) => Err(()),
-            Ok(false) => Ok(()),
-            Err(_) => Ok(()),
+    if let Some(root) = find_ancestor_with_any(current_work_dir, ASPECT_BOUNDARY_FILES).await {
+        return Ok(root);
+    }
+    if let Some(root) = find_ancestor_with_any(current_work_dir, BAZEL_BOUNDARY_FILES).await {
+        return Ok(root);
+    }
+    Ok(current_work_dir.clone())
+}
+
+/// Walk ancestors of `start` and return the deepest one containing any of `markers`.
+async fn find_ancestor_with_any(start: &Path, markers: &[&str]) -> Option<PathBuf> {
+    for ancestor in start.ancestors() {
+        for marker in markers {
+            if fs::try_exists(ancestor.join(marker)).await.unwrap_or(false) {
+                return Some(ancestor.to_path_buf());
+            }
         }
     }
-
-    for ancestor in current_work_dir.ancestors().into_iter() {
-        let repo_root = tokio::try_join!(
-            err_if_exists(ancestor.join(AXL_MODULE_FILE)),
-            // Repository boundary marker files: https://bazel.build/external/overview#repository
-            err_if_exists(ancestor.join("MODULE.bazel")),
-            err_if_exists(ancestor.join("MODULE.bazel.lock")),
-            err_if_exists(ancestor.join("REPO.bazel")),
-            err_if_exists(ancestor.join("WORKSPACE")),
-            err_if_exists(ancestor.join("WORKSPACE.bazel")),
-        );
-        // No error means there was no match for any of the branches.
-        if repo_root.is_ok() {
-            continue;
-        } else {
-            return Ok(ancestor.to_path_buf());
-        }
-    }
-
-    return Ok(current_work_dir.clone());
+    None
 }
 
 /// Returns a list of axl search paths by constructing paths from the `root_dir` up to the `current_dir`,
