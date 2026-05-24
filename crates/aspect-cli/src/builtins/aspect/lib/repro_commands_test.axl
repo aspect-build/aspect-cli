@@ -1,0 +1,103 @@
+"""Unit tests for `lib/repro_commands.axl::explicit_flags`.
+
+A struct-based fake `ctx` substitutes for a real `TaskContext` so the
+test can run without the CLI / merge plumbing. Wiring of `ctx.args.
+is_explicit` through clap's `ValueSource::CommandLine` is covered by
+the Rust unit tests on `Arguments`.
+"""
+
+load("./repro_commands.axl", "explicit_flags")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _explicit_in(names):
+    """Build an `is_explicit` predicate that returns True iff its
+    argument is in `names`."""
+    lookup = {n: True for n in names}
+    return lambda name: name in lookup
+
+def _test_returns_empty_when_no_explicit(ctx):
+    fake = struct(args = struct(
+        is_explicit = _explicit_in([]),
+        scope = "changed",
+        formatter_target = "//tools/format",
+    ))
+    _eq(
+        "no explicit args → empty list",
+        explicit_flags(fake, [("scope", "--scope"), ("formatter_target", "--formatter-target")]),
+        [],
+    )
+
+def _test_includes_only_explicit_pairs(ctx):
+    fake = struct(args = struct(
+        is_explicit = _explicit_in(["scope"]),
+        scope = "all",
+        formatter_target = "//tools/format",
+    ))
+    _eq(
+        "only scope is explicit → only --scope returned",
+        explicit_flags(fake, [("scope", "--scope"), ("formatter_target", "--formatter-target")]),
+        [("--scope", "all")],
+    )
+
+def _test_preserves_input_pair_order(ctx):
+    """The output order tracks the `pairs` argument, not the order in
+    which keys were marked explicit."""
+    fake = struct(args = struct(
+        is_explicit = _explicit_in(["formatter_target", "scope", "merge_base"]),
+        scope = "all",
+        formatter_target = "//x",
+        merge_base = "abc",
+    ))
+    _eq(
+        "order follows input pairs",
+        explicit_flags(fake, [
+            ("scope", "--scope"),
+            ("formatter_target", "--formatter-target"),
+            ("merge_base", "--merge-base"),
+        ]),
+        [("--scope", "all"), ("--formatter-target", "//x"), ("--merge-base", "abc")],
+    )
+
+def _test_handles_list_valued_args(ctx):
+    """List-valued args round-trip without conversion — the rendered
+    command emits `--name=a --name=b` via `build_aspect_command`."""
+    fake = struct(args = struct(
+        is_explicit = _explicit_in(["ignore_patterns"]),
+        ignore_patterns = ["*.txt", "vendor/*"],
+    ))
+    _eq(
+        "list-valued args round-trip",
+        explicit_flags(fake, [("ignore_patterns", "--ignore-pattern")]),
+        [("--ignore-pattern", ["*.txt", "vendor/*"])],
+    )
+
+def _test_empty_pairs_list_returns_empty(ctx):
+    fake = struct(args = struct(
+        is_explicit = _explicit_in(["scope"]),
+        scope = "all",
+    ))
+    _eq("empty pairs → empty list", explicit_flags(fake, []), [])
+
+_UNIT_TESTS = [
+    _test_returns_empty_when_no_explicit,
+    _test_includes_only_explicit_pairs,
+    _test_preserves_input_pair_order,
+    _test_handles_list_valued_args,
+    _test_empty_pairs_list_returns_empty,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("repro_commands.axl: OK (%d sections)" % len(_UNIT_TESTS))
+    return 0
+
+repro_commands_tests = task(
+    name = "test-repro-commands",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

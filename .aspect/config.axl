@@ -13,6 +13,7 @@ load("@aspect//lib/gitlab_detect_test.axl", "gitlab_detect_tests")
 load("@aspect//lib/gitlab_test.axl", "gitlab_client_tests")
 load("@aspect//lib/lint_results_test.axl", "lint_annotation_plan_tests", "lint_template_snapshot_tests")
 load("@aspect//lib/rate_limit_test.axl", "rate_limit_tests")
+load("@aspect//lib/repro_commands_test.axl", "repro_commands_tests")
 load("@aspect//lib/runner_job_history_test.axl", "runner_job_history_tests")
 load("@aspect//lib/tar_test.axl", "tar_tests")
 load("@aspect//lib/tips_test.axl", "tips_tests")
@@ -126,6 +127,12 @@ def config(ctx: ConfigContext):
     # and unsupported host inputs.
     # Run with: aspect dev test-tar
     ctx.tasks.add(tar_tests)
+
+    # Repro-command filtering — `explicit_flags` skips flags whose
+    # values match the task's default (including alias-overridden
+    # defaults and config.axl overrides).
+    # Run with: aspect dev test-repro-commands
+    ctx.tasks.add(repro_commands_tests)
 
     # Adaptive rate-limit throttling — observations / burn-rate
     # inference / threshold ladder / tip firing / two-bucket

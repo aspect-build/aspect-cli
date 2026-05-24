@@ -72,6 +72,29 @@ def task_cli_path(task):
     """
     return " ".join(list(task.group) + [task.name])
 
+def explicit_flags(ctx, pairs):
+    """Convert `[(arg_name, flag_name), ...]` into the subset of
+    `(flag_name, ctx.args.<arg_name>)` tuples the user actually passed
+    on the CLI for the current invocation.
+
+    Use to compose the `flags` list handed to `build_aspect_command`
+    when building repro / fix commands. Skips flags whose values
+    would just re-emit the task's default — including alias-overridden
+    defaults and `config.axl` overrides. The developer copying the
+    rendered command gets back exactly what they (or CI) typed.
+
+    Auto / env-resolved args (`--on-change`, `--check-only`,
+    `--base-ref`, ...) are NOT served by this helper; their callers
+    pin the resolved value explicitly because the local default
+    typically differs from CI's resolution and the repro must encode
+    CI's behavior to be faithful.
+    """
+    out = []
+    for arg_name, flag_name in pairs:
+        if ctx.args.is_explicit(arg_name):
+            out.append((flag_name, getattr(ctx.args, arg_name)))
+    return out
+
 def build_aspect_command(subcommand, flags, targets, max_chars = _DEFAULT_MAX_CHARS, wrap_at = _DEFAULT_WRAP_AT):
     """Compose `aspect <subcommand> <flags...> [-- <targets>]`.
 

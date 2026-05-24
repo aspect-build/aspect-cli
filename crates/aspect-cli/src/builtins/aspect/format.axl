@@ -28,7 +28,7 @@ load("./lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_ch
 load("./lib/health_check.axl", "HealthCheckTrait")
 load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "pick_task_status", "preflight_phase", "resolve_on_change", "setup_phase", "task_update")
 load("./lib/path_glob.axl", "match_any")
-load("./lib/repro_commands.axl", "build_aspect_command", "print_repro_and_fix", "task_cli_path")
+load("./lib/repro_commands.axl", "build_aspect_command", "explicit_flags", "print_repro_and_fix", "task_cli_path")
 load("./lib/runnable.axl", "runnable")
 load("./lib/text.axl", "pluralize")
 load("./lib/tips.axl", "tips")
@@ -150,24 +150,33 @@ def _body_text(status, data):
 # fallback that uses the detection flags.
 _FIX_FILES_LIMIT = 20
 
+# Plain-default flags echoed iff the user explicitly passed them on
+# the CLI. Auto / env-resolved flags (`--on-change`, `--base-ref`) are
+# pinned by the repro / fix callers themselves — the local default
+# typically differs from CI's resolution, so the repro must encode
+# CI's behavior to be faithful.
+_DETECTION_PAIRS = [
+    ("scope", "--scope"),
+    ("formatter_target", "--formatter-target"),
+    ("ignore_patterns", "--ignore-pattern"),
+    ("merge_base", "--merge-base"),
+]
+
+def _surfaced_base_ref_flag(ctx):
+    """`--base-ref` carrying CI's resolved base ref (env var if unset).
+    Returned as a one-element list for `+`-concatenation, empty when
+    no base ref is known."""
+    surfaced = ctx.args.base_ref or detect_ci_base_ref(ctx.std)
+    return [("--base-ref", surfaced)] if surfaced else []
+
 def _append_repro_command(ctx, data):
     """Append the always-rendered "Reproduce" command. Re-runs the
-    same `aspect format --on-change=fail ...` invocation CI ran, with
-    the same scope / formatter / ignore-pattern flags, so the user
-    gets the same diagnose-then-fail behavior locally.
-    """
-    flags = [
-        ("--on-change", "fail"),
-        ("--scope", ctx.args.scope),
-        ("--formatter-target", ctx.args.formatter_target),
-    ]
-    if ctx.args.ignore_patterns:
-        flags.append(("--ignore-pattern", list(ctx.args.ignore_patterns)))
-    surfaced_base_ref = ctx.args.base_ref or detect_ci_base_ref(ctx.std)
-    if surfaced_base_ref:
-        flags.append(("--base-ref", surfaced_base_ref))
-    if ctx.args.merge_base:
-        flags.append(("--merge-base", ctx.args.merge_base))
+    same `aspect format ...` invocation CI ran so the user gets the
+    same diagnose-then-fail behavior locally. `--on-change=fail` is
+    pinned — the repro intent is "make me see the failure"."""
+    flags = ([("--on-change", "fail")] +
+             explicit_flags(ctx, _DETECTION_PAIRS) +
+             _surfaced_base_ref_flag(ctx))
     data["repro_commands"].append({
         "command": build_aspect_command(task_cli_path(ctx.task), flags, []),
         "description": "",
@@ -187,15 +196,14 @@ def _append_fix_commands(ctx, data):
         return
     task_path = task_cli_path(ctx.task)
 
-    # Positionals bypass --scope / --base-ref / --merge-base /
-    # --ignore-pattern, so the explicit-file fix command omits them.
-    explicit_flags = [
-        ("--on-change", "silent"),
-        ("--formatter-target", ctx.args.formatter_target),
-    ]
+    # Positional file list bypasses --scope / --base-ref / --merge-base /
+    # --ignore-pattern, so the explicit-file fix command omits them
+    # and only preserves the user-explicit `--formatter-target`.
+    positional_flags = ([("--on-change", "silent")] +
+                        explicit_flags(ctx, [("formatter_target", "--formatter-target")]))
     if len(affected) <= _FIX_FILES_LIMIT:
         data["fix_commands"].append({
-            "command": build_aspect_command(task_path, explicit_flags, affected, max_chars = 4096),
+            "command": build_aspect_command(task_path, positional_flags, affected, max_chars = 4096),
             "description": "",
         })
         return
@@ -203,7 +211,7 @@ def _append_fix_commands(ctx, data):
     shown = affected[:_FIX_FILES_LIMIT]
     remaining = len(affected) - _FIX_FILES_LIMIT
     data["fix_commands"].append({
-        "command": build_aspect_command(task_path, explicit_flags, shown, max_chars = 4096),
+        "command": build_aspect_command(task_path, positional_flags, shown, max_chars = 4096),
         "description": "First %d of %d affected files (plus %d other%s)" % (
             _FIX_FILES_LIMIT,
             len(affected),
@@ -212,19 +220,11 @@ def _append_fix_commands(ctx, data):
         ),
     })
 
-    detection_flags = [
-        ("--scope", ctx.args.scope),
-        ("--formatter-target", ctx.args.formatter_target),
-    ]
-    if ctx.args.ignore_patterns:
-        detection_flags.append(("--ignore-pattern", list(ctx.args.ignore_patterns)))
-    surfaced_base_ref = ctx.args.base_ref or detect_ci_base_ref(ctx.std)
-    if surfaced_base_ref:
-        detection_flags.append(("--base-ref", surfaced_base_ref))
-    if ctx.args.merge_base:
-        detection_flags.append(("--merge-base", ctx.args.merge_base))
+    detection = ([("--on-change", "silent")] +
+                 explicit_flags(ctx, _DETECTION_PAIRS) +
+                 _surfaced_base_ref_flag(ctx))
     data["fix_commands"].append({
-        "command": build_aspect_command(task_path, [("--on-change", "silent")] + detection_flags, []),
+        "command": build_aspect_command(task_path, detection, []),
         "description": "Or re-discover and format all %d affected files" % len(affected),
     })
 
