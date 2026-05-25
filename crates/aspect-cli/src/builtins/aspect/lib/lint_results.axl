@@ -434,6 +434,44 @@ def _pad_left(s, width):
         return s
     return " " * n + s
 
+# BES output extensions emitted by rules_lint aspects (see
+# `aspect-build/rules_lint`). The full filename shape is
+# `<target>.AspectRulesLint<Tool>.<ext>` — anchoring on this exact
+# shape (segment-boundary `.AspectRulesLint` prefix + known suffix)
+# keeps `detect_lint_tool` from matching unrelated build outputs whose
+# name happens to contain `AspectRulesLint` as a free-floating
+# substring (e.g. a user target literally named that).
+_RULES_LINT_EXTS = (".report", ".patch", ".exit_code", ".out")
+_RULES_LINT_MARKER = ".AspectRulesLint"
+
+def detect_lint_tool(filename):
+    """Extract the rules_lint tool name from a BES output file name.
+
+    rules_lint outputs follow `<target>.AspectRulesLint<Tool>.<ext>`
+    (e.g. `hello.AspectRulesLintShellCheck.patch` → `ShellCheck`),
+    where `<ext>` is one of `_RULES_LINT_EXTS`. Returns the tool name
+    only when both the segment-boundary marker AND a known extension
+    are present; otherwise returns empty string. This double anchor
+    is what keeps the zero-aspect safeguard in `lint.axl` from being
+    bypassed by an unrelated output whose name happens to contain
+    `AspectRulesLint` as a substring.
+    """
+    has_ext = False
+    for ext in _RULES_LINT_EXTS:
+        if filename.endswith(ext):
+            has_ext = True
+            break
+    if not has_ext:
+        return ""
+    idx = filename.find(_RULES_LINT_MARKER)
+    if idx < 0:
+        return ""
+    start = idx + len(_RULES_LINT_MARKER)
+    end = filename.find(".", start)
+    if end < 0 or end == start:
+        return ""
+    return filename[start:end]
+
 def linter_rows(data):
     """Return per-linter aggregate rows as
     `{tool: {errors, warnings, infos, fixes}}`.

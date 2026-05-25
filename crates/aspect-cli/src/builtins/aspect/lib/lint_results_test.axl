@@ -29,6 +29,7 @@ load(
     "accumulate",
     "chunk_annotations",
     "compute_annotations",
+    "detect_lint_tool",
     "init_data",
     "lint_annotation_plan",
     "linter_rows",
@@ -817,5 +818,61 @@ linter_rows_tests = task(
     name = "test-lint-linter-rows",
     group = ["dev"],
     implementation = _test_linter_rows,
+    args = {},
+)
+
+# ─── detect_lint_tool (BES filename parsing) ──────────────────────────────────
+
+def _test_detect_lint_tool(ctx):
+    """Pin the rules_lint filename shape so the zero-aspect safeguard
+    can't be bypassed by an unrelated build output whose name contains
+    `AspectRulesLint` as a substring. Match requires both the
+    segment-boundary `.AspectRulesLint` prefix AND a known
+    rules_lint extension."""
+
+    # 1. Canonical shapes — all four extensions parse to the tool name.
+    for ext in (".patch", ".report", ".exit_code", ".out"):
+        got = detect_lint_tool("examples/lint/hello.AspectRulesLintShellCheck" + ext)
+        _eq("canonical %s" % ext, got, "ShellCheck")
+
+    # 2. Multi-segment tool names — extract stops at the next `.`.
+    _eq(
+        "multi-camelcase tool",
+        detect_lint_tool("pkg/foo.AspectRulesLintGoogleJavaFormat.patch"),
+        "GoogleJavaFormat",
+    )
+
+    # 3. Substring without segment boundary — must NOT match. Guards
+    #    against a target literally named with the marker embedded.
+    _eq(
+        "no leading dot → no match",
+        detect_lint_tool("some_AspectRulesLintShellCheck_target.patch"),
+        "",
+    )
+
+    # 4. Marker present at segment boundary but unrecognised extension —
+    #    must NOT match. Guards against unrelated mnemonics that happen
+    #    to share the marker prefix.
+    _eq(
+        "unknown extension → no match",
+        detect_lint_tool("hello.AspectRulesLintShellCheck.txt"),
+        "",
+    )
+
+    # 5. Marker absent entirely — must NOT match.
+    _eq("no marker → no match", detect_lint_tool("hello.SomethingElse.patch"), "")
+
+    # 6. Empty tool segment (`.AspectRulesLint.<ext>`) — must NOT match.
+    #    Defensive; not a shape rules_lint emits, but if it ever did we
+    #    don't want a zero-length entry polluting lint_tools_run.
+    _eq("empty tool → no match", detect_lint_tool("hello.AspectRulesLint.patch"), "")
+
+    print("lint_results.axl::detect_lint_tool: all cases OK")
+    return 0
+
+detect_lint_tool_tests = task(
+    name = "test-lint-detect-tool",
+    group = ["dev"],
+    implementation = _test_detect_lint_tool,
     args = {},
 )
