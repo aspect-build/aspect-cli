@@ -71,6 +71,37 @@ def file_uri_to_path(uri):
         return _BB_CLIENTD_ROOT + "/cas/" + host + "/blobs/" + digest_fn + "/file/" + blob_hash + "-" + blob_size
     return uri
 
+def resolve_bes_file_path(ctx, file):
+    """Pick the best local path for a BES `File` entry.
+
+    BES carries the file's location in two places:
+      - `file.path_prefix + [file.name]` → workspace-relative path
+        (e.g. `bazel-out/k8-fastbuild/bin/pkg/foo.AspectRulesLint…`).
+        Bazel materializes outputs here whenever it downloads them
+        (including for everything matching the lint task's
+        `--remote_download_regex='.*AspectRulesLint.*'`), so this is
+        the right answer on local dev machines and any CI host.
+      - `file.file` → the canonical URI. For locally-produced files
+        this is `file://…`; for remote-cached files it's
+        `bytestream://…`, which `file_uri_to_path` resolves to a
+        bb_clientd FUSE path (Workflows runners only).
+
+    Try the workspace-relative materialization first — it works on
+    any host as long as the file was downloaded. Fall back to the
+    URI resolution so we still pick up bytestream-only files on
+    Workflows runners. Returns "" when neither resolves; callers
+    treat that as "skip this entry".
+    """
+    if file.path_prefix:
+        rel = "/".join(list(file.path_prefix) + [file.name])
+        local = ctx.std.env.current_dir() + "/" + rel
+        if ctx.std.fs.exists(local):
+            return local
+    uri_path = file_uri_to_path(file.file)
+    if ctx.std.fs.exists(uri_path):
+        return uri_path
+    return ""
+
 # Filter functions — (all_diagnostics, changed_files) -> relevant_diagnostics
 def filter_all(diagnostics, changed_files):
     return diagnostics
@@ -980,18 +1011,17 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                     )
                     if not is_lint_output:
                         continue
-                    filepath = file_uri_to_path(file.file)
+                    filepath = resolve_bes_file_path(ctx, file)
 
-                    # On CI hosts without bb_clientd, BES emits
-                    # `bytestream://` URIs that resolve under
-                    # `_BB_CLIENTD_ROOT` — a path that doesn't exist
-                    # there. Skip + count so we don't crash mid-stream;
-                    # the post-drain warn surfaces the impact in one
-                    # line, and the lint aspect's tool name is still
-                    # in `lint_tools_run` (extracted from `file.name`
-                    # above) so the zero-aspect safeguard isn't
-                    # falsely tripped.
-                    if not ctx.std.fs.exists(filepath):
+                    # Empty means neither the workspace-relative
+                    # materialization nor the URI-based fallback
+                    # resolved to an existing file. Skip + count so
+                    # we don't crash mid-stream; the post-drain warn
+                    # surfaces the impact. The lint aspect's tool
+                    # name is already in `lint_tools_run` (extracted
+                    # from `file.name`) so the zero-aspect safeguard
+                    # isn't falsely tripped.
+                    if not filepath:
                         unreadable_outputs += 1
                         trace.log("lint: BES output not available locally, skipping: " + file.name)
                         continue
