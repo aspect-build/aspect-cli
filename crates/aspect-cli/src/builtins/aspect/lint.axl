@@ -820,6 +820,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     if lint_trait.lint_report:
         flags.append("--output_groups=rules_lint_machine")
 
+    flags.extend(ctx.args.bazel_flags)
     flags.extend(bazel_trait.extra_flags)
 
     # Task-time flag contributors — features register hooks that need
@@ -831,7 +832,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     if bazel_trait.flags:
         flags = bazel_trait.flags(flags)
 
-    startup_flags = list(bazel_trait.extra_startup_flags)
+    startup_flags = list(ctx.args.bazel_startup_flags)
+    startup_flags.extend(bazel_trait.extra_startup_flags)
     if bazel_trait.startup_flags:
         startup_flags = bazel_trait.startup_flags(startup_flags)
 
@@ -1195,6 +1197,14 @@ lint = task(
             default = False,
             description = "Print the resolved Bazel `.bazelrc` flags before running the lint build. Useful when debugging which config sections fired or what the final flag set looks like.",
         ),
+        "bazel_flags": args.string_list(
+            description = "Additional Bazel flags forwarded to the build (e.g. --bazel-flag=--config=ci --bazel-flag=--keep_going). Repeat the flag to pass multiple.",
+            long = "bazel-flag",
+        ),
+        "bazel_startup_flags": args.string_list(
+            description = "Additional Bazel startup flags (e.g. --bazel-startup-flag=--host_jvm_args=-Xmx2g). Repeat the flag to pass multiple. Note: changing startup flags restarts the Bazel server.",
+            long = "bazel-startup-flag",
+        ),
         "fix": args.boolean(
             description = (
                 "Apply auto-fixes from rules_lint to the working tree. " +
@@ -1228,6 +1238,8 @@ lint = task(
         "merge_base": args.string(
             description = "Explicit merge-base SHA for the local-git fallback's diff base. When set, skips the `git merge-base HEAD <base-ref>` resolution and uses this SHA directly. Ignored on the GitHub PR Files API path.",
         ),
+        # TODO: Support a long --pattern_file like bazel does (@./targets)
+        # TODO: Support - (list from stdin)
         "targets": args.positional(
             minimum = 0,
             maximum = 512,
