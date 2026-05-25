@@ -120,6 +120,17 @@ TaskUpdate = record(
     status = field(str, default = "running"),
     kind = field(str, default = ""),
     priority = field(bool, default = False),
+    # True iff this update crossed a phase boundary — set by
+    # `task_update(...)` when `phase != None` and `phase.name` differs
+    # from the previous `ctx.task.current_phase().name`. Surfaces that
+    # apply a cold-start swarm-throttle (GithubStatusChecks,
+    # GithubStatusComments) read this to gate phase emits on a separate
+    # short debounce so fast early phases stay visible during the
+    # rate-limit cold-start window without burning quota at the 10×
+    # heartbeat floor. Same condition that triggers the BK section
+    # header emit upstream, plumbed through so downstream features can
+    # branch on it without re-computing the boundary.
+    phase_change = field(bool, default = False),
     # True iff this is the final TaskUpdate the producer will emit before
     # `task_complete` fires. Used by surfaces that distinguish live from
     # terminal renders even when status alone wouldn't (e.g. `warning`
@@ -405,6 +416,13 @@ def task_update(ctx, lifecycle, status, progress, kind = "", data = None, priori
     # surfaces, where the `→` print is the only phase marker.
     bk_section_emitted = False
 
+    # True iff this emit crossed a phase boundary — same condition as
+    # the BK section header. Plumbed onto `TaskUpdate.phase_change`
+    # below so cold-start-aware features (GithubStatusChecks,
+    # GithubStatusComments) can gate phase emits on a debounce
+    # separate from the heartbeat throttle.
+    phase_change = False
+
     if phase != None:
         # `ctx.task.phase()` no-ops on same-name; capture the prior
         # phase name so we only auto-emit a BK section header on real
@@ -420,6 +438,7 @@ def task_update(ctx, lifecycle, status, progress, kind = "", data = None, priori
         if phase.name != prev_phase:
             _emit_bk_phase_section(ctx, phase, progress_styles)
             bk_section_emitted = bool(ctx.std.env.var("BUILDKITE"))
+            phase_change = True
 
     cli_text = progress_styles.stream
     if cli_text:
@@ -457,6 +476,7 @@ def task_update(ctx, lifecycle, status, progress, kind = "", data = None, priori
         status = status,
         progress = progress_styles,
         priority = priority,
+        phase_change = phase_change,
         final = final,
         conclusion = conclusion,
         data = data if data != None else {},

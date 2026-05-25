@@ -56,7 +56,7 @@ load(
     lint_chunk_annotations = "chunk_annotations",
     lint_compute_annotations = "compute_annotations",
 )
-load("../lib/rate_limit.axl", "BUCKET_APP", "effective_throttle_factor", "usage_footer")
+load("../lib/rate_limit.axl", "BUCKET_APP", "cold_start_phase_change_gate_seconds", "effective_throttle_factor", "usage_footer")
 load("../lib/tips.axl", "collect_tips_sorted")
 load("../lint.axl", "LintTrait")
 
@@ -447,9 +447,36 @@ def _github_status_checks(ctx: FeatureContext):
         if not (is_conclusion_transition or is_initial):
             now = now_ms(ctx)
             elapsed_s = float(now - _state.get("_started_ms", now)) / 1000.0
-            factor = effective_throttle_factor(ctx, BUCKET_APP, elapsed_s, min_update_interval_s)
-            if not should_emit_update(_state, now, int(min_update_interval_ms * factor), final):
-                return
+
+            # Cold-start phase-change debounce. During the swarm
+            # cold-start window the heartbeat factor floors at 10×
+            # (50s at the 5s base, 200s at the 20s GHSC default) —
+            # which collapses fast early phase transitions into
+            # invisible silence on tasks that finish quickly. Phase
+            # boundaries get a separate 5s debounce so the swarm-
+            # defensive floor stays in effect for heartbeats while
+            # phase emits remain visible. Once burn-rate inference
+            # stabilizes (≥ 3 obs spanning ≥ 30s) the gate returns
+            # 0 and phase emits fall back to the normal heartbeat
+            # throttle below.
+            phase_gate_s = 0
+            if update.phase_change:
+                phase_gate_s = cold_start_phase_change_gate_seconds(ctx, BUCKET_APP)
+            if phase_gate_s > 0:
+                last_pc = _state.get("_last_phase_change_ms", 0)
+                if now - last_pc < phase_gate_s * 1000:
+                    return
+                _state["_last_phase_change_ms"] = now
+
+                # Stamp `_last_update_ms` too so a heartbeat
+                # immediately after this phase emit honors the 10×
+                # factor relative to *this* emit, not the one before
+                # the phase boundary.
+                _state["_last_update_ms"] = now
+            else:
+                factor = effective_throttle_factor(ctx, BUCKET_APP, elapsed_s, min_update_interval_s)
+                if not should_emit_update(_state, now, int(min_update_interval_ms * factor), final):
+                    return
         elif final:
             # The terminal render needs _ended_ms for duration.
             _state["_ended_ms"] = now_ms(ctx)

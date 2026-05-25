@@ -51,6 +51,7 @@ load("../lib/lifecycle.axl", "TaskLifecycleTrait")
 load(
     "../lib/rate_limit.axl",
     "BUCKET_APP",
+    "cold_start_phase_change_gate_seconds",
     "effective_throttle_factor",
     "epoch_now_s",
     "export_observations",
@@ -1585,10 +1586,31 @@ def _github_status_comments(ctx: FeatureContext):
             # App-bucket-burning REST PATCH.
             now = monotonic()
             elapsed_s = now - _state.get("_task_started_at", now)
-            factor = effective_throttle_factor(ctx, BUCKET_APP, elapsed_s, min_poll_interval_seconds)
-            if now - _state.get("_last_publish_s", 0.0) < min_poll_interval_seconds * factor:
-                return
-            _state["_last_publish_s"] = now
+
+            # Cold-start phase-change debounce — see the matching
+            # comment in `feature/github_status_checks.axl::_task_update`.
+            # During the swarm cold-start window phase boundaries
+            # bypass the 10× heartbeat factor and gate on a 5s
+            # debounce instead, so fast early phases stay visible
+            # without spending quota in lockstep with heartbeats.
+            phase_gate_s = 0
+            if update.phase_change:
+                phase_gate_s = cold_start_phase_change_gate_seconds(ctx, BUCKET_APP)
+            if phase_gate_s > 0:
+                last_pc = _state.get("_last_phase_change_s", 0.0)
+                if now - last_pc < float(phase_gate_s):
+                    return
+                _state["_last_phase_change_s"] = now
+
+                # Stamp the heartbeat clock too so a heartbeat after
+                # this phase emit honors the 10× factor relative to
+                # *this* emit, not the prior one.
+                _state["_last_publish_s"] = now
+            else:
+                factor = effective_throttle_factor(ctx, BUCKET_APP, elapsed_s, min_poll_interval_seconds)
+                if now - _state.get("_last_publish_s", 0.0) < min_poll_interval_seconds * factor:
+                    return
+                _state["_last_publish_s"] = now
         _publish(ctx, final = update.final)
 
     lifecycle.task_started.append(_task_started)

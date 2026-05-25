@@ -21,6 +21,7 @@ load(
     "./rate_limit.axl",
     "BUCKET_APP",
     "BUCKET_ENV",
+    "cold_start_phase_change_gate_seconds",
     "effective_throttle_factor",
     "export_observations",
     "ingest_sibling_observations",
@@ -35,6 +36,20 @@ load(
     "usage_footer",
 )
 
+# CI env markers `_is_ci` consults — cleared at test setup so the
+# cold-start floor stays off for every test that doesn't explicitly
+# opt in. Without this, running `aspect dev test-rate-limit` under a
+# CI host (where one of these is set) would flip on the floor and
+# break the existing factor / footer assertions.
+_CI_ENV_MARKERS = (
+    "CI",
+    "BUILDKITE",
+    "GITHUB_ACTIONS",
+    "CIRCLECI",
+    "GITLAB_CI",
+    "ASPECT_RATE_LIMIT_COLD_START",
+)
+
 def _eq(label, got, want):
     if got != want:
         fail("%s: got %r, want %r" % (label, got, want))
@@ -45,8 +60,19 @@ def _assert(label, cond):
 
 def _reset(ctx):
     """Clear all rate-limit state between subtests so each
-    section runs from a known-empty starting point."""
+    section runs from a known-empty starting point. Also clears
+    every CI env marker the cold-start floor checks, so tests that
+    don't opt into cold-start CI detection don't pick up the host's
+    real CI markers."""
     reset_for_test(ctx)
+    for marker in _CI_ENV_MARKERS:
+        ctx.std.env.remove_var(marker)
+
+def _force_cold_start_ci(ctx):
+    """Force `_is_ci` to return True via the test-only override env
+    var. Use in tests that need the cold-start floor to apply
+    regardless of whether the host happens to be on CI."""
+    ctx.std.env.set_var("ASPECT_RATE_LIMIT_COLD_START", "1")
 
 def _tier(ctx, bucket):
     """Project the trait's `threshold_warned_tier[bucket]` for assertions."""
@@ -820,6 +846,178 @@ def _test_threshold_factor_swarm_scaling_skips_env_bucket(ctx):
         5.0,
     )
 
+def _test_cold_start_floor_off_ci(ctx):
+    """Without any CI marker set, `effective_throttle_factor` skips
+    the cold-start floor — solo / local invocations don't pay the
+    swarm-defensive 10× factor when no swarm is plausible."""
+    _reset(ctx)
+    record_observation(ctx, BUCKET_APP, remaining = 4900, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 1.0)
+    _eq(
+        "cold-start off-CI — sparse buffer at 98% remaining → 1.0 (no floor)",
+        effective_throttle_factor(ctx, BUCKET_APP, elapsed_s = 0, min_interval_s = 10),
+        1.0,
+    )
+
+def _test_cold_start_floor_on_ci_applies(ctx):
+    """On a CI host with a sparse merged buffer (< 3 obs OR span < 30s),
+    `effective_throttle_factor` floors at 10× even when remaining
+    quota is high — the swarm could be burning quota in parallel that
+    this task can't see yet."""
+    _reset(ctx)
+    _force_cold_start_ci(ctx)
+
+    # 1 observation, 98% remaining. Without the floor: threshold ladder
+    # row at > 50% → 1×. With the floor: 10×.
+    record_observation(ctx, BUCKET_APP, remaining = 4900, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 1.0)
+    _eq(
+        "cold-start on-CI — sparse buffer at 98% remaining → 10× floor",
+        effective_throttle_factor(ctx, BUCKET_APP, elapsed_s = 0, min_interval_s = 10),
+        10.0,
+    )
+
+def _test_cold_start_floor_clears_when_buffer_dense(ctx):
+    """The cold-start floor drops once the merged buffer has ≥ 3
+    observations spanning ≥ 30s — burn-rate inference is stable and
+    the floor is no longer needed. Below either bound it still applies.
+
+    `reset_epoch = 0` on each observation forces `_burn_rate_factor`
+    to return None (missing reset_epoch), so the threshold-ladder
+    fallback runs at the 98% remaining row (1×). That keeps the test
+    deterministic regardless of the test runner's wall clock — without
+    it, `_FAR_FUTURE` against the real clock makes `time_to_reset`
+    enormous and `safe_burn ≈ 0`, blowing up the factor."""
+    _reset(ctx)
+    _force_cold_start_ci(ctx)
+
+    # 3 obs but only a 10s span — still in cold start.
+    record_observation(ctx, BUCKET_APP, remaining = 4900, limit = 5000, reset_epoch = 0, epoch_s = 1.0)
+    record_observation(ctx, BUCKET_APP, remaining = 4895, limit = 5000, reset_epoch = 0, epoch_s = 5.0)
+    record_observation(ctx, BUCKET_APP, remaining = 4890, limit = 5000, reset_epoch = 0, epoch_s = 11.0)
+    _eq(
+        "cold-start on-CI — 3 obs spanning 10s still in cold start",
+        effective_throttle_factor(ctx, BUCKET_APP, elapsed_s = 0, min_interval_s = 10),
+        10.0,
+    )
+
+    # Extend the span past 30s — burn-rate falls back to threshold
+    # ladder (1×), and the cold-start floor releases too. Factor
+    # drops to 1.0.
+    _reset(ctx)
+    _force_cold_start_ci(ctx)
+    record_observation(ctx, BUCKET_APP, remaining = 4900, limit = 5000, reset_epoch = 0, epoch_s = 1.0)
+    record_observation(ctx, BUCKET_APP, remaining = 4899, limit = 5000, reset_epoch = 0, epoch_s = 15.0)
+    record_observation(ctx, BUCKET_APP, remaining = 4898, limit = 5000, reset_epoch = 0, epoch_s = 30.0)
+    record_observation(ctx, BUCKET_APP, remaining = 4897, limit = 5000, reset_epoch = 0, epoch_s = 46.0)
+    _eq(
+        "cold-start on-CI — 4 obs spanning 45s release the floor",
+        effective_throttle_factor(ctx, BUCKET_APP, elapsed_s = 0, min_interval_s = 10),
+        1.0,
+    )
+
+def _test_cold_start_floor_does_not_lower_higher_pressure(ctx):
+    """The cold-start floor is a *floor*, not a ceiling — when the
+    quota-pressure factor or time-throttle factor exceeds 10×, the
+    larger value still wins. Verifies the floor composes as `max(...)`."""
+    _reset(ctx)
+    _force_cold_start_ci(ctx)
+
+    # 1 obs at 8% remaining — threshold ladder picks the 5-10% row (50×).
+    record_observation(ctx, BUCKET_APP, remaining = 400, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 1.0)
+    _eq(
+        "cold-start floor — 50× quota pressure wins over 10× floor",
+        effective_throttle_factor(ctx, BUCKET_APP, elapsed_s = 0, min_interval_s = 10),
+        50.0,
+    )
+
+def _test_cold_start_phase_change_gate_off_ci(ctx):
+    """Without a CI marker, the phase-change gate is always 0 —
+    local invocations have no swarm pressure to debounce against."""
+    _reset(ctx)
+    _eq(
+        "phase-gate off-CI — empty state → 0s gate",
+        cold_start_phase_change_gate_seconds(ctx, BUCKET_APP),
+        0,
+    )
+
+    # Same answer with observations in hand.
+    record_observation(ctx, BUCKET_APP, remaining = 4900, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 1.0)
+    _eq(
+        "phase-gate off-CI — sparse buffer still → 0s gate",
+        cold_start_phase_change_gate_seconds(ctx, BUCKET_APP),
+        0,
+    )
+
+def _test_cold_start_phase_change_gate_on_ci(ctx):
+    """On CI, the gate is 5s while the merged buffer is sparse (< 3 obs
+    OR span < 30s), then drops to 0 once burn-rate inference stabilises."""
+    _reset(ctx)
+    _force_cold_start_ci(ctx)
+
+    # No observations yet — in cold start by the `< 3` branch.
+    _eq(
+        "phase-gate on-CI — empty buffer → 5s gate",
+        cold_start_phase_change_gate_seconds(ctx, BUCKET_APP),
+        5,
+    )
+
+    # 2 observations spanning 5s — still in cold start.
+    record_observation(ctx, BUCKET_APP, remaining = 4900, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 1.0)
+    record_observation(ctx, BUCKET_APP, remaining = 4895, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 6.0)
+    _eq(
+        "phase-gate on-CI — 2 obs / 5s span → 5s gate",
+        cold_start_phase_change_gate_seconds(ctx, BUCKET_APP),
+        5,
+    )
+
+    # 3 obs spanning > 30s — gate releases to 0.
+    record_observation(ctx, BUCKET_APP, remaining = 4890, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 40.0)
+    _eq(
+        "phase-gate on-CI — 3 obs / 39s span → 0s gate (released)",
+        cold_start_phase_change_gate_seconds(ctx, BUCKET_APP),
+        0,
+    )
+
+def _test_cold_start_phase_change_gate_uses_sibling_observations(ctx):
+    """The merged-view check means a task with only one local
+    observation but enough sibling observations spanning > 30s
+    correctly leaves the cold-start window — every swarm member
+    agrees on whether the gate is open or closed."""
+    _reset(ctx)
+    _force_cold_start_ci(ctx)
+
+    # Only one local observation — `< 3` would normally trip cold start.
+    record_observation(ctx, BUCKET_APP, remaining = 4900, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 50.0)
+    _eq(
+        "phase-gate on-CI — solo with 1 obs → 5s gate",
+        cold_start_phase_change_gate_seconds(ctx, BUCKET_APP),
+        5,
+    )
+
+    # A sibling exports two observations spanning 40s — merged buffer
+    # now holds 3 obs across a 49s span. Gate releases.
+    ingest_sibling_observations(ctx, "sibling-a", {
+        BUCKET_APP: [
+            {"epoch_s": 1.0, "remaining": 4990, "limit": 5000, "reset_epoch": _FAR_FUTURE},
+            {"epoch_s": 41.0, "remaining": 4950, "limit": 5000, "reset_epoch": _FAR_FUTURE},
+        ],
+    })
+    _eq(
+        "phase-gate on-CI — merged view (1 local + 2 siblings, 49s span) → 0s gate",
+        cold_start_phase_change_gate_seconds(ctx, BUCKET_APP),
+        0,
+    )
+
+def _test_cold_start_phase_change_gate_invalid_bucket(ctx):
+    """Unknown bucket names short-circuit to 0 so callers don't have
+    to validate the bucket before calling."""
+    _reset(ctx)
+    _force_cold_start_ci(ctx)
+    _eq(
+        "phase-gate — unknown bucket → 0s gate",
+        cold_start_phase_change_gate_seconds(ctx, "no-such-bucket"),
+        0,
+    )
+
 def _test_impl(ctx):
     _test_record_basic(ctx)
     _test_record_buffer_truncation(ctx)
@@ -853,7 +1051,15 @@ def _test_impl(ctx):
     _test_merged_view_handles_flat_burn(ctx)
     _test_threshold_factor_scales_with_visible_swarm(ctx)
     _test_threshold_factor_swarm_scaling_skips_env_bucket(ctx)
-    print("rate_limit.axl: OK (32 sections)")
+    _test_cold_start_floor_off_ci(ctx)
+    _test_cold_start_floor_on_ci_applies(ctx)
+    _test_cold_start_floor_clears_when_buffer_dense(ctx)
+    _test_cold_start_floor_does_not_lower_higher_pressure(ctx)
+    _test_cold_start_phase_change_gate_off_ci(ctx)
+    _test_cold_start_phase_change_gate_on_ci(ctx)
+    _test_cold_start_phase_change_gate_uses_sibling_observations(ctx)
+    _test_cold_start_phase_change_gate_invalid_bucket(ctx)
+    print("rate_limit.axl: OK (40 sections)")
     return 0
 
 rate_limit_tests = task(
