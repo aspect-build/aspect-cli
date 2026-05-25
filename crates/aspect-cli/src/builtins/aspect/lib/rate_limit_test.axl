@@ -21,6 +21,9 @@ load(
     "./rate_limit.axl",
     "BUCKET_APP",
     "BUCKET_ENV",
+    "PHASE_EMIT",
+    "PHASE_FALL_THROUGH",
+    "PHASE_SUPPRESS",
     "cold_start_phase_change_gate_seconds",
     "effective_throttle_factor",
     "export_observations",
@@ -31,24 +34,34 @@ load(
     "reset_for_test",
     "seed_from_rate_limit_body",
     "set_state_for_test",
+    "should_emit_phase_change",
     "throttle_factor",
     "time_throttle_factor",
     "usage_footer",
 )
 
-# CI env markers `_is_ci` consults — cleared at test setup so the
-# cold-start floor stays off for every test that doesn't explicitly
-# opt in. Without this, running `aspect dev test-rate-limit` under a
-# CI host (where one of these is set) would flip on the floor and
-# break the existing factor / footer assertions.
+# CI markers `_is_ci` consults via `environment.detect_ci`, plus the
+# `ASPECT_RATE_LIMIT_COLD_START` override seam — cleared at every
+# subtest setup so the cold-start floor stays off unless explicitly
+# enabled. Running `aspect dev test-rate-limit` on a host where any
+# of these is set would otherwise flip the floor on and break the
+# existing factor / footer assertions.
 _CI_ENV_MARKERS = (
-    "CI",
-    "BUILDKITE",
     "GITHUB_ACTIONS",
-    "CIRCLECI",
-    "GITLAB_CI",
+    "BUILDKITE_AGENT_ACCESS_TOKEN",
+    "CI_JOB_TOKEN",
+    "CIRCLE_PROJECT_REPONAME",
+    "CI",
     "ASPECT_RATE_LIMIT_COLD_START",
 )
+
+# Stub TaskUpdate-shaped value for tests of `should_emit_phase_change`.
+# The helper only reads `update.phase_change`; using a tiny local
+# record avoids depending on the full `lifecycle.TaskUpdate` type.
+_StubUpdate = record(phase_change = field(bool, default = False))
+
+def _stub_update(phase_change):
+    return _StubUpdate(phase_change = phase_change)
 
 def _eq(label, got, want):
     if got != want:
@@ -1018,6 +1031,149 @@ def _test_cold_start_phase_change_gate_invalid_bucket(ctx):
         0,
     )
 
+def _test_should_emit_phase_change_non_phase_emit(ctx):
+    """A non-phase-change emit always returns PHASE_FALL_THROUGH so
+    the caller falls back to its normal heartbeat throttle."""
+    _reset(ctx)
+    _force_cold_start_ci(ctx)
+    state = {}
+    _eq(
+        "phase-emit — heartbeat falls through",
+        should_emit_phase_change(ctx, BUCKET_APP, _stub_update(False), state, 1000, "_pc", "_emit"),
+        PHASE_FALL_THROUGH,
+    )
+
+def _test_should_emit_phase_change_outside_cold_start(ctx):
+    """A phase change outside the cold-start window returns
+    PHASE_FALL_THROUGH so steady-state phase emits use the normal
+    heartbeat throttle (avoiding the burst on chatty tasks past the
+    cold-start window)."""
+    _reset(ctx)
+    state = {}
+
+    # No CI marker — gate inactive, even for a phase emit.
+    _eq(
+        "phase-emit — off-CI phase change falls through",
+        should_emit_phase_change(ctx, BUCKET_APP, _stub_update(True), state, 1000, "_pc", "_emit"),
+        PHASE_FALL_THROUGH,
+    )
+
+def _test_should_emit_phase_change_first_emit_passes(ctx):
+    """The first phase emit in cold-start always passes — `last_pc=0`
+    means "never stamped" and the debounce only applies between
+    successive stamped emits. Without this carve-out a fast task
+    whose first stamped phase advance happens at t < 5s would lose
+    visibility."""
+    _reset(ctx)
+    _force_cold_start_ci(ctx)
+    state = {}
+
+    # First emit at t=50ms — `_pc` defaults to 0, would otherwise
+    # trip the 5s × 1000ms gate. The first-emit carve-out lets it
+    # through.
+    _eq(
+        "phase-emit — first emit passes regardless of `now`",
+        should_emit_phase_change(ctx, BUCKET_APP, _stub_update(True), state, 50, "_pc", "_emit"),
+        PHASE_EMIT,
+    )
+    _eq("phase-emit — first emit stamps phase clock", state["_pc"], 50)
+    _eq("phase-emit — first emit stamps heartbeat clock", state["_emit"], 50)
+
+def _test_should_emit_phase_change_within_debounce_suppresses(ctx):
+    """A second phase emit within the 5s debounce of a previously
+    stamped emit returns PHASE_SUPPRESS and does NOT re-stamp state."""
+    _reset(ctx)
+    _force_cold_start_ci(ctx)
+    state = {"_pc": 1000, "_emit": 1000}
+    _eq(
+        "phase-emit — within debounce → suppress",
+        should_emit_phase_change(ctx, BUCKET_APP, _stub_update(True), state, 3000, "_pc", "_emit"),
+        PHASE_SUPPRESS,
+    )
+    _eq("phase-emit — suppressed call leaves phase clock untouched", state["_pc"], 1000)
+    _eq("phase-emit — suppressed call leaves heartbeat clock untouched", state["_emit"], 1000)
+
+def _test_should_emit_phase_change_after_debounce_emits(ctx):
+    """A phase emit past the 5s × scale gap from the previous stamped
+    emit passes and re-stamps both clocks."""
+    _reset(ctx)
+    _force_cold_start_ci(ctx)
+    state = {"_pc": 1000, "_emit": 1000}
+
+    # 6s later (1000 + 6000 = 7000ms). Past the 5s × 1000ms gate.
+    _eq(
+        "phase-emit — past debounce → emit",
+        should_emit_phase_change(ctx, BUCKET_APP, _stub_update(True), state, 7000, "_pc", "_emit"),
+        PHASE_EMIT,
+    )
+    _eq("phase-emit — emit re-stamps phase clock", state["_pc"], 7000)
+    _eq("phase-emit — emit re-stamps heartbeat clock", state["_emit"], 7000)
+
+def _test_should_emit_phase_change_scale_seconds(ctx):
+    """A caller using a second-clock (`monotonic()`) passes `scale=1`
+    so the 5s gate compares directly against `now` in seconds."""
+    _reset(ctx)
+    _force_cold_start_ci(ctx)
+    state = {"_pc": 10.0, "_emit": 10.0}
+
+    # 3s later — still within the 5s gate.
+    _eq(
+        "phase-emit — second-clock within debounce → suppress",
+        should_emit_phase_change(ctx, BUCKET_APP, _stub_update(True), state, 13.0, "_pc", "_emit", scale = 1),
+        PHASE_SUPPRESS,
+    )
+
+    # 6s later — past the gate.
+    _eq(
+        "phase-emit — second-clock past debounce → emit",
+        should_emit_phase_change(ctx, BUCKET_APP, _stub_update(True), state, 16.0, "_pc", "_emit", scale = 1),
+        PHASE_EMIT,
+    )
+
+def _test_cold_start_floor_records_to_last_effective_factor(ctx):
+    """The cold-start floor must be recorded onto
+    `last_effective_factor[bucket]` so `usage_footer` renders the
+    correct `throttle 10×` clause during the cold-start window."""
+    _reset(ctx)
+    _force_cold_start_ci(ctx)
+    record_observation(ctx, BUCKET_APP, remaining = 4900, limit = 5000, reset_epoch = _FAR_FUTURE, epoch_s = 1.0)
+    effective_throttle_factor(ctx, BUCKET_APP, elapsed_s = 0, min_interval_s = 10)
+    _eq(
+        "cold-start floor — recorded as last_effective_factor",
+        inspect_for_test(ctx)["last_effective_factor"][BUCKET_APP],
+        10.0,
+    )
+    if "throttle 10×" not in usage_footer(ctx):
+        fail("cold-start floor — usage_footer should render `throttle 10×`: %r" % usage_footer(ctx))
+
+def _test_cold_start_floor_re_engages_after_reset_crossing(ctx):
+    """A reset-window crossing flushes the observation buffer (see
+    `_test_reset_crossing_flushes_buffer`). The cold-start floor must
+    re-engage in the new window because the post-reset buffer is
+    sparse again — otherwise a long-running CI task in the middle
+    of a fresh window would spend uncapped quota."""
+    _reset(ctx)
+    _force_cold_start_ci(ctx)
+
+    # Accumulate enough observations to release the floor:
+    # 4 obs across 45s, all in the same reset window (reset_epoch = 1000).
+    for (epoch, remaining) in [(1.0, 4900), (15.0, 4899), (30.0, 4898), (46.0, 4897)]:
+        record_observation(ctx, BUCKET_APP, remaining = remaining, limit = 5000, reset_epoch = 1000, epoch_s = epoch)
+    _eq(
+        "pre-reset — floor released with dense buffer",
+        effective_throttle_factor(ctx, BUCKET_APP, elapsed_s = 0, min_interval_s = 10),
+        1.0,
+    )
+
+    # Reset crossing — `reset_epoch` jumps +3600s (well past `_RESET_JUMP_S`).
+    # Buffer flushes; the new window has 1 observation.
+    record_observation(ctx, BUCKET_APP, remaining = 5000, limit = 5000, reset_epoch = 4600, epoch_s = 100.0)
+    _eq(
+        "post-reset — floor re-engages on fresh sparse buffer",
+        effective_throttle_factor(ctx, BUCKET_APP, elapsed_s = 0, min_interval_s = 10),
+        10.0,
+    )
+
 def _test_impl(ctx):
     _test_record_basic(ctx)
     _test_record_buffer_truncation(ctx)
@@ -1055,11 +1211,19 @@ def _test_impl(ctx):
     _test_cold_start_floor_on_ci_applies(ctx)
     _test_cold_start_floor_clears_when_buffer_dense(ctx)
     _test_cold_start_floor_does_not_lower_higher_pressure(ctx)
+    _test_cold_start_floor_records_to_last_effective_factor(ctx)
+    _test_cold_start_floor_re_engages_after_reset_crossing(ctx)
     _test_cold_start_phase_change_gate_off_ci(ctx)
     _test_cold_start_phase_change_gate_on_ci(ctx)
     _test_cold_start_phase_change_gate_uses_sibling_observations(ctx)
     _test_cold_start_phase_change_gate_invalid_bucket(ctx)
-    print("rate_limit.axl: OK (40 sections)")
+    _test_should_emit_phase_change_non_phase_emit(ctx)
+    _test_should_emit_phase_change_outside_cold_start(ctx)
+    _test_should_emit_phase_change_first_emit_passes(ctx)
+    _test_should_emit_phase_change_within_debounce_suppresses(ctx)
+    _test_should_emit_phase_change_after_debounce_emits(ctx)
+    _test_should_emit_phase_change_scale_seconds(ctx)
+    print("rate_limit.axl: OK (48 sections)")
     return 0
 
 rate_limit_tests = task(

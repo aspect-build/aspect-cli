@@ -114,7 +114,7 @@ absent trait or empty buffer returns `1.0`. The probe at `setup_phase`
 catches all errors and returns silently. There are no `fail()` calls.
 """
 
-load("./environment.axl", "info", "warn")
+load("./environment.axl", "detect_ci", "info", "warn")
 
 # ── Public bucket keys ───────────────────────────────────────────────
 
@@ -191,50 +191,17 @@ _RESERVE_FRACTION = 0.30
 
 # ── Cold-start window ────────────────────────────────────────────────
 #
-# When a swarm of matrix-axis tasks all start at once (e.g. rules_js
-# with ~100 jobs in a single workflow), every task initially has only
-# the setup-phase `/rate_limit` probe in its merged buffer. Burn-rate
-# inference needs ≥ 2 observations across a non-zero Δt, so the
-# `< 2 observations` branch runs — which at 100% remaining returns the
-# `> 50%` threshold-ladder row (1×, no throttle). Siblings haven't
-# yet propagated their observations through the artifact-share cycle,
-# so the swarm-size multiplier is 1. Result: every task in the swarm
-# runs at full cadence for ~30–60s before burn-rate stabilizes, and
-# the shared App-bucket quota can be largely spent in that window.
-#
-# The cold-start window adds a defensive floor for that gap: while
-# the merged buffer has fewer than `_COLD_START_MIN_OBS` observations
-# OR spans less than `_COLD_START_MIN_SPAN_S` of wall-clock time AND
-# we're running on a recognized CI host (where a matrix swarm is
-# likely), the heartbeat throttle floors at `_COLD_START_HEARTBEAT_FACTOR`
-# regardless of remaining quota. Once both conditions are satisfied,
-# burn-rate inference takes over and the cold-start floor is dropped.
-#
-# Fast early phases (preflight → detect → build, often firing within
-# a few seconds) shouldn't disappear behind the 10× heartbeat factor
-# — that's UX-hostile on tasks that finish quickly. They get a
-# separate debounce gate (`_COLD_START_PHASE_CHANGE_GATE_S` seconds)
-# exposed via `cold_start_phase_change_gate_seconds`; callers track
-# a per-task `_last_phase_change_ms` independently of their main
-# heartbeat clock so phase transitions remain visible during the
-# cold-start window without burning quota in lockstep with heartbeats.
+# See the module docstring section "Cold-start window" for the design
+# rationale. Numbers below tune the window's boundaries.
 _COLD_START_MIN_OBS = 3
 _COLD_START_MIN_SPAN_S = 30
 _COLD_START_HEARTBEAT_FACTOR = 10.0
 _COLD_START_PHASE_CHANGE_GATE_S = 5
 
-# Env-var override (test seam). Tests set `ASPECT_RATE_LIMIT_COLD_START`
-# to "1" / "0" to force cold-start CI detection on or off without
-# touching the host CI markers. Unset (the default) falls through to
-# the real CI markers via `lifecycle._on_ci`. Kept private — production
-# callers never set it.
+# Test seam — `"1"` forces `_is_ci` True, `"0"` forces False. Unset
+# (the default) falls through to `detect_ci`. Production callers
+# never set this.
 _COLD_START_OVERRIDE_VAR = "ASPECT_RATE_LIMIT_COLD_START"
-
-# CI markers consulted by `_is_ci`. Mirrors `lifecycle._on_ci` rather
-# than reaching across modules, so this file stays self-contained for
-# test isolation (the lifecycle module pulls in trait machinery the
-# rate-limit tests don't want to depend on).
-_CI_ENV_MARKERS = ("CI", "BUILDKITE", "GITHUB_ACTIONS", "CIRCLECI", "GITLAB_CI")
 
 # ── Per-task state (file pattern) ───────────────────────────────────
 #
@@ -818,62 +785,81 @@ def time_throttle_factor(elapsed_s, min_interval_s):
     return 1.0 + (target_factor - 1.0) * progress
 
 def _is_ci(std):
-    """True iff one of `_CI_ENV_MARKERS` is set, or the
-    `_COLD_START_OVERRIDE_VAR` env var explicitly forces the answer
-    (test seam — `"1"` forces True, `"0"` forces False)."""
+    """True iff the process is running on a recognized CI host.
+    Reads `_COLD_START_OVERRIDE_VAR` first as a test seam; otherwise
+    delegates to `detect_ci`."""
     override = std.env.var(_COLD_START_OVERRIDE_VAR)
     if override == "1":
         return True
     if override == "0":
         return False
-    for marker in _CI_ENV_MARKERS:
-        if std.env.var(marker):
-            return True
-    return False
+    return detect_ci(std.env) != None
 
 def _in_cold_start(merged_obs):
     """True iff the merged observation buffer is too sparse for
-    burn-rate inference to be stable. The cold-start floor applies
-    until BOTH `_COLD_START_MIN_OBS` observations have accumulated
-    AND the buffer spans at least `_COLD_START_MIN_SPAN_S` seconds.
-    Pure — operates on the buffer alone; callers gate on `_is_ci`
-    separately."""
+    burn-rate inference to be stable. Pure — operates on the buffer
+    alone; callers gate on `_is_ci` separately."""
     if len(merged_obs) < _COLD_START_MIN_OBS:
         return True
-    span_s = merged_obs[-1][0] - merged_obs[0][0]
-    return span_s < _COLD_START_MIN_SPAN_S
+    return merged_obs[-1][0] - merged_obs[0][0] < _COLD_START_MIN_SPAN_S
 
 def cold_start_phase_change_gate_seconds(ctx, bucket):
-    """Return the cold-start phase-change debounce gate in seconds.
+    """Return the cold-start phase-change debounce gate in seconds, or
+    0 when the gate is inactive.
 
-    Returns `_COLD_START_PHASE_CHANGE_GATE_S` (5s) when the task is
-    on a CI host AND `_in_cold_start` is true for `bucket`. Returns 0
-    once burn-rate inference is stable so callers fall back to their
-    normal heartbeat throttle for subsequent phase emits.
+    Returns `_COLD_START_PHASE_CHANGE_GATE_S` (5s) when on a CI host
+    AND the merged buffer is still in cold start for `bucket`. Returns
+    0 on an unknown bucket so callers don't have to validate.
 
-    Callers track a separate `_last_phase_change_ms` from their main
-    heartbeat clock and gate phase-change emits on this debounce
-    (when > 0) instead of the 10× heartbeat factor — that keeps fast
-    early phases (preflight → detect → build inside a few seconds)
-    visible during the cold-start window without spending quota in
-    lockstep with the heartbeat floor.
-
-    Best-effort: returns 0 on an unknown bucket so callers don't have
-    to validate."""
+    Most callers should use `should_emit_phase_change` instead — it
+    encapsulates the gate-evaluation + state-stamping pattern."""
     if bucket not in _VALID_BUCKETS:
         return 0
     if not _is_ci(ctx.std):
         return 0
-    state = _load(ctx)
-    obs = _merged_observations_from_state(state, bucket)
-    if _in_cold_start(obs):
+    if _in_cold_start(_merged_observations_from_state(_load(ctx), bucket)):
         return _COLD_START_PHASE_CHANGE_GATE_S
     return 0
 
+# Tri-state return values for `should_emit_phase_change`. String values
+# are arbitrary; callers compare by name.
+PHASE_EMIT = "emit"
+PHASE_SUPPRESS = "suppress"
+PHASE_FALL_THROUGH = "fall_through"
+
+def should_emit_phase_change(ctx, bucket, update, state, now, last_phase_key, last_emit_key, scale = 1000):
+    """Apply the cold-start phase-change debounce for one emit.
+
+    Returns one of:
+      PHASE_EMIT         — phase change passes; render + push. `state[last_phase_key]`
+                           and `state[last_emit_key]` are stamped to `now`.
+      PHASE_SUPPRESS     — phase change is within the debounce window; drop the emit.
+      PHASE_FALL_THROUGH — not a cold-start phase change. Use the heartbeat throttle.
+
+    The first phase emit while the gate is active always passes —
+    `state[last_phase_key]` defaults to 0 (never stamped) and the
+    debounce only applies between successive stamped emits. Without
+    this carve-out a fast task whose first phase advance happens
+    before any prior emit ever stamped the key would lose visibility.
+
+    `scale` converts seconds to the caller's clock unit: 1000 for
+    millisecond clocks (`now_ms`), 1 for second clocks (`monotonic`)."""
+    if not update.phase_change:
+        return PHASE_FALL_THROUGH
+    gate_s = cold_start_phase_change_gate_seconds(ctx, bucket)
+    if gate_s <= 0:
+        return PHASE_FALL_THROUGH
+    last_pc = state.get(last_phase_key, 0)
+    if last_pc > 0 and now - last_pc < gate_s * scale:
+        return PHASE_SUPPRESS
+    state[last_phase_key] = now
+    state[last_emit_key] = now
+    return PHASE_EMIT
+
 def effective_throttle_factor(ctx, bucket, elapsed_s, min_interval_s):
-    """Combine the quota-pressure and time-based throttles into a
-    single multiplier ≥ 1.0. Callers multiply this into their native
-    heartbeat interval (ms or s).
+    """Combine the quota-pressure, time-based, and cold-start throttles
+    into a single multiplier ≥ 1.0. Callers multiply this into their
+    native heartbeat interval (ms or s).
 
     Side-effects:
       - Records the resulting factor on
@@ -885,28 +871,16 @@ def effective_throttle_factor(ctx, bucket, elapsed_s, min_interval_s):
         terminal-only). Step-bucketed so the linear ramp inside
         `time_throttle_factor` doesn't spam a log line per heartbeat.
 
-    Cold-start floor: when the merged observation buffer is too
-    sparse for burn-rate inference to be stable (see `_in_cold_start`)
-    AND the task is running on a recognized CI host (where a matrix
-    swarm is likely), the heartbeat factor floors at
-    `_COLD_START_HEARTBEAT_FACTOR`. That covers the gap between task
-    start and burn-rate stabilization where, today, every task in a
-    fresh swarm sees only its own setup-phase probe (100% remaining,
-    no siblings yet propagated through the artifact-share cycle) and
-    returns 1× from the threshold ladder. Phase-change emits use a
-    separate debounce gate via `cold_start_phase_change_gate_seconds`
-    so they don't disappear behind the 10× floor.
-
-    Centralizes the composition every heartbeat call site uses so
-    new throttle dimensions (or weight changes between the two
-    existing ones) land in one place."""
+    Centralizes composition so new throttle dimensions land in one
+    place. See the module docstring "Cold-start window" for the
+    swarm-defensive floor applied during the cold-start window."""
     state = _load(ctx)
-    quota_factor = _throttle_factor_from_state(state, bucket, None, ctx.std)
-    factor = max(quota_factor, time_throttle_factor(elapsed_s, min_interval_s))
-    if _is_ci(ctx.std):
-        obs = _merged_observations_from_state(state, bucket)
-        if _in_cold_start(obs):
-            factor = max(factor, _COLD_START_HEARTBEAT_FACTOR)
+    factor = max(
+        _throttle_factor_from_state(state, bucket, None, ctx.std),
+        time_throttle_factor(elapsed_s, min_interval_s),
+    )
+    if _is_ci(ctx.std) and _in_cold_start(_merged_observations_from_state(state, bucket)):
+        factor = max(factor, _COLD_START_HEARTBEAT_FACTOR)
     _record_effective_factor_in_state(ctx, state, bucket, factor, elapsed_s)
     _save(ctx, state)
     return factor

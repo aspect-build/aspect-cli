@@ -51,11 +51,13 @@ load("../lib/lifecycle.axl", "TaskLifecycleTrait")
 load(
     "../lib/rate_limit.axl",
     "BUCKET_APP",
-    "cold_start_phase_change_gate_seconds",
+    "PHASE_FALL_THROUGH",
+    "PHASE_SUPPRESS",
     "effective_throttle_factor",
     "epoch_now_s",
     "export_observations",
     "ingest_sibling_observations",
+    "should_emit_phase_change",
     "usage_footer",
 )
 load("../lib/repro_commands.axl", "dedup_and_attribute")
@@ -1585,28 +1587,20 @@ def _github_status_comments(ctx: FeatureContext):
             # lease in `_publish` is what actually gates the
             # App-bucket-burning REST PATCH.
             now = monotonic()
-            elapsed_s = now - _state.get("_task_started_at", now)
-
-            # Cold-start phase-change debounce — see the matching
-            # comment in `feature/github_status_checks.axl::_task_update`.
-            # During the swarm cold-start window phase boundaries
-            # bypass the 10× heartbeat factor and gate on a 5s
-            # debounce instead, so fast early phases stay visible
-            # without spending quota in lockstep with heartbeats.
-            phase_gate_s = 0
-            if update.phase_change:
-                phase_gate_s = cold_start_phase_change_gate_seconds(ctx, BUCKET_APP)
-            if phase_gate_s > 0:
-                last_pc = _state.get("_last_phase_change_s", 0.0)
-                if now - last_pc < float(phase_gate_s):
-                    return
-                _state["_last_phase_change_s"] = now
-
-                # Stamp the heartbeat clock too so a heartbeat after
-                # this phase emit honors the 10× factor relative to
-                # *this* emit, not the prior one.
-                _state["_last_publish_s"] = now
-            else:
+            phase_result = should_emit_phase_change(
+                ctx,
+                BUCKET_APP,
+                update,
+                _state,
+                now,
+                "_last_phase_change_s",
+                "_last_publish_s",
+                scale = 1,
+            )
+            if phase_result == PHASE_SUPPRESS:
+                return
+            if phase_result == PHASE_FALL_THROUGH:
+                elapsed_s = now - _state.get("_task_started_at", now)
                 factor = effective_throttle_factor(ctx, BUCKET_APP, elapsed_s, min_poll_interval_seconds)
                 if now - _state.get("_last_publish_s", 0.0) < min_poll_interval_seconds * factor:
                     return
