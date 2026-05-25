@@ -1264,6 +1264,8 @@ Currently \x1b[3monly\x1b[23m supported on Aspect Workflows CI runners. Support 
             default = 1,
             description = "Maximum number of delivery targets to run concurrently. When greater than 1, stdout/stderr is captured and printed atomically after each target finishes.",
         ),
+        # TODO: Support a long --pattern_file like bazel does (@./targets)
+        # TODO: Support - (list from stdin)
         "targets": args.positional(
             maximum = 1000000000,
             description = "Bazel target labels to deliver.",
