@@ -56,7 +56,15 @@ load(
     lint_chunk_annotations = "chunk_annotations",
     lint_compute_annotations = "compute_annotations",
 )
-load("../lib/rate_limit.axl", "BUCKET_APP", "effective_throttle_factor", "usage_footer")
+load(
+    "../lib/rate_limit.axl",
+    "BUCKET_APP",
+    "PHASE_FALL_THROUGH",
+    "PHASE_SUPPRESS",
+    "effective_throttle_factor",
+    "should_emit_phase_change",
+    "usage_footer",
+)
 load("../lib/tips.axl", "collect_tips_sorted")
 load("../lint.axl", "LintTrait")
 
@@ -446,10 +454,22 @@ def _github_status_checks(ctx: FeatureContext):
             _state["_saw_priority"] = True
         if not (is_conclusion_transition or is_initial):
             now = now_ms(ctx)
-            elapsed_s = float(now - _state.get("_started_ms", now)) / 1000.0
-            factor = effective_throttle_factor(ctx, BUCKET_APP, elapsed_s, min_update_interval_s)
-            if not should_emit_update(_state, now, int(min_update_interval_ms * factor), final):
+            phase_result = should_emit_phase_change(
+                ctx,
+                BUCKET_APP,
+                update,
+                _state,
+                now,
+                "_last_phase_change_ms",
+                "_last_update_ms",
+            )
+            if phase_result == PHASE_SUPPRESS:
                 return
+            if phase_result == PHASE_FALL_THROUGH:
+                elapsed_s = float(now - _state.get("_started_ms", now)) / 1000.0
+                factor = effective_throttle_factor(ctx, BUCKET_APP, elapsed_s, min_update_interval_s)
+                if not should_emit_update(_state, now, int(min_update_interval_ms * factor), final):
+                    return
         elif final:
             # The terminal render needs _ended_ms for duration.
             _state["_ended_ms"] = now_ms(ctx)
