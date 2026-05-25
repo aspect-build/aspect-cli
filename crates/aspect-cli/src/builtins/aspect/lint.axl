@@ -938,6 +938,13 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # Set of rules_lint tool names observed in BES file-name markers.
     lint_tools_run = {}
 
+    # Count of BES outputs we couldn't read off disk. Non-zero on CI
+    # hosts where bb_clientd isn't mounted: BES emits `bytestream://`
+    # URIs that resolve under `_BB_CLIENTD_ROOT`, which doesn't exist
+    # there, so `read_to_string` would crash on every read. We skip
+    # gracefully and surface a single summary warning after the drain.
+    unreadable_outputs = 0
+
     # Tick-driven drain: each tick non-blocking-polls events and
     # emits at most once (interesting batch or heartbeat). Heartbeats
     # fire every MIN_HEARTBEAT_INTERVAL_MS even when bazel is quiet —
@@ -956,10 +963,39 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                 interesting = True
             if event.kind == "named_set_of_files":
                 for file in event.payload.files:
-                    filepath = file_uri_to_path(file.file)
                     tool = detect_lint_tool(file.name)
                     if tool:
                         lint_tools_run[tool] = True
+
+                    # `named_set_of_files` carries every build output;
+                    # narrow to the four rules_lint extensions before
+                    # any read so non-lint files don't inflate the
+                    # `unreadable_outputs` counter (which gates the
+                    # summary warn below).
+                    is_lint_output = (
+                        file.name.endswith(".out") or
+                        file.name.endswith(".report") or
+                        file.name.endswith(".patch") or
+                        file.name.endswith(".exit_code")
+                    )
+                    if not is_lint_output:
+                        continue
+                    filepath = file_uri_to_path(file.file)
+
+                    # On CI hosts without bb_clientd, BES emits
+                    # `bytestream://` URIs that resolve under
+                    # `_BB_CLIENTD_ROOT` — a path that doesn't exist
+                    # there. Skip + count so we don't crash mid-stream;
+                    # the post-drain warn surfaces the impact in one
+                    # line, and the lint aspect's tool name is still
+                    # in `lint_tools_run` (extracted from `file.name`
+                    # above) so the zero-aspect safeguard isn't
+                    # falsely tripped.
+                    if not ctx.std.fs.exists(filepath):
+                        unreadable_outputs += 1
+                        trace.log("lint: BES output not available locally, skipping: " + file.name)
+                        continue
+
                     if file.name.endswith(".out"):
                         ctx.std.io.stderr.write(ctx.std.fs.read_to_string(filepath))
                     if file.name.endswith(".report"):
@@ -987,10 +1023,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                         if github_output:
                             ctx.std.fs.write(github_output, "lint-report=" + filepath)
                     if file.name.endswith(".patch"):
-                        patch_path = file_uri_to_path(file.file)
-                        patches.append(patch_path)
+                        patches.append(filepath)
                         for hook in lint_trait.lint_patch:
-                            hook(ctx, patch_path, file.name)
+                            hook(ctx, filepath, file.name)
                     if file.name.endswith(".exit_code"):
                         if int(ctx.std.fs.read_to_string(filepath).rstrip()) != 0:
                             linter_exit_code = 1
@@ -1016,6 +1051,13 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             last_emit_ms = now_ms(ctx)
         if events.done:
             break
+
+    # Surface a single heads-up if any BES outputs were unavailable
+    # locally — results may be incomplete (missing diagnostics,
+    # missing patches, missing linter exit codes) but the task itself
+    # ran to completion rather than crashing mid-stream.
+    if unreadable_outputs > 0:
+        warn(ctx.std, "lint: %d BES output(s) were unavailable locally and skipped; lint results may be incomplete. Set ASPECT_DEBUG=1 to see the file names." % unreadable_outputs)
 
     # 7. Wait for build
     build_status = build.wait()
