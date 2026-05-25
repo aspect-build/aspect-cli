@@ -201,7 +201,7 @@ _COLD_START_PHASE_CHANGE_GATE_S = 5
 # Test seam — `"1"` forces `_is_ci` True, `"0"` forces False. Unset
 # (the default) falls through to `detect_ci`. Production callers
 # never set this.
-_COLD_START_OVERRIDE_VAR = "ASPECT_RATE_LIMIT_COLD_START"
+_COLD_START_OVERRIDE_VAR = "ASPECT_WORKFLOWS_GITHUB_API_RATE_LIMIT_COLD_START"
 
 # ── Per-task state (file pattern) ───────────────────────────────────
 #

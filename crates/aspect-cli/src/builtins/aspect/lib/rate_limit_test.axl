@@ -41,18 +41,18 @@ load(
 )
 
 # CI markers `_is_ci` consults via `environment.detect_ci`, plus the
-# `ASPECT_RATE_LIMIT_COLD_START` override seam — cleared at every
-# subtest setup so the cold-start floor stays off unless explicitly
-# enabled. Running `aspect dev test-rate-limit` on a host where any
-# of these is set would otherwise flip the floor on and break the
-# existing factor / footer assertions.
+# `ASPECT_WORKFLOWS_GITHUB_API_RATE_LIMIT_COLD_START` override seam —
+# cleared at every subtest setup so the cold-start floor stays off
+# unless explicitly enabled. Running `aspect dev test-rate-limit` on
+# a host where any of these is set would otherwise flip the floor on
+# and break the existing factor / footer assertions.
 _CI_ENV_MARKERS = (
     "GITHUB_ACTIONS",
     "BUILDKITE_AGENT_ACCESS_TOKEN",
     "CI_JOB_TOKEN",
     "CIRCLE_PROJECT_REPONAME",
     "CI",
-    "ASPECT_RATE_LIMIT_COLD_START",
+    "ASPECT_WORKFLOWS_GITHUB_API_RATE_LIMIT_COLD_START",
 )
 
 # Stub TaskUpdate-shaped value for tests of `should_emit_phase_change`.
@@ -85,7 +85,7 @@ def _force_cold_start_ci(ctx):
     """Force `_is_ci` to return True via the test-only override env
     var. Use in tests that need the cold-start floor to apply
     regardless of whether the host happens to be on CI."""
-    ctx.std.env.set_var("ASPECT_RATE_LIMIT_COLD_START", "1")
+    ctx.std.env.set_var("ASPECT_WORKFLOWS_GITHUB_API_RATE_LIMIT_COLD_START", "1")
 
 def _tier(ctx, bucket):
     """Project the trait's `threshold_warned_tier[bucket]` for assertions."""
