@@ -227,36 +227,13 @@ def run_bazel_task(ctx: TaskContext, command: str) -> TaskConclusion:
 
     data = init_data()
 
-    # Mark the `setup` phase BEFORE `task_started` so the time spent in
-    # CI-platform handlers (GitHub check-run create, Buildkite annotate)
-    # is tracked as a named phase rather than absorbed into init. CI-only
-    # gate; locally it's a no-op (handlers are fast). See setup_phase().
-    setup_phase(ctx, lifecycle)
-
-    # Fire task_started FIRST so any subsequent failure (pre_health_check
-    # throwing, rc parse error) still surfaces as a failed check run
-    # rather than a silent no-op. This matches the lint / format /
-    # gazelle / delivery convention.
-    for handler in lifecycle.task_started:
-        handler(ctx, " ".join(ctx.args.targets))
-
-    preflight_phase(ctx, lifecycle, hc_trait)
-
-    for hook in hc_trait.post_health_check:
-        result = hook(ctx)
-        if result != None:
-            _emit_terminal(ctx, lifecycle, command, data, 1)
-            fail(result)
-
-    # Flags: accumulate data, then optionally transform.
+    # Resolve all bazelrc references before any lifecycle hooks fire. An rc-
+    # resolution error (e.g. undefined `--config=ci`) then aborts with no CI
+    # side effects — no status checks created, no API quota burned, no stuck
+    # "running" state from a Starlark error bypassing the terminal lifecycle.
     flags = ["--isatty=" + str(int(ctx.std.io.stdout.is_tty))]
     flags.extend(ctx.args.bazel_flags)
     flags.extend(bazel_trait.extra_flags)
-
-    # Task-time flag contributors — features register hooks that need
-    # ctx.task (e.g. --build_metadata=ASPECT_TASK_NAME=...) which features
-    # can't produce at activation time because FeatureContext has no task.
-    # See Workflows in feature/workflows.axl for the metadata registration.
     for hook in bazel_trait.task_flags:
         flags.extend(hook(ctx))
     if bazel_trait.flags:
@@ -268,6 +245,31 @@ def run_bazel_task(ctx: TaskContext, command: str) -> TaskConclusion:
         startup_flags.insert(0, "--output_base=" + ctx.args.output_base)
     if bazel_trait.startup_flags:
         startup_flags = bazel_trait.startup_flags(startup_flags)
+
+    rc = ctx.bazel.parse_rc(
+        startup_flags = startup_flags,
+        flags = flags,
+    )
+    trace.event("build.flags", fields = {"flags": flags})
+    rc_startup_flags, flags = rc.expand_all(command = command)
+    ctx.bazel.startup_flags.extend(startup_flags + rc_startup_flags + ["--ignore_all_rc_files"])
+
+    # Mark the `setup` phase before `task_started` so the time spent in
+    # CI-platform handlers (GitHub check-run create, Buildkite annotate) is
+    # tracked as a named phase rather than absorbed into init. CI-only gate;
+    # locally it's a no-op (handlers are fast). See setup_phase().
+    setup_phase(ctx, lifecycle)
+
+    for handler in lifecycle.task_started:
+        handler(ctx, " ".join(ctx.args.targets))
+
+    preflight_phase(ctx, lifecycle, hc_trait)
+
+    for hook in hc_trait.post_health_check:
+        result = hook(ctx)
+        if result != None:
+            _emit_terminal(ctx, lifecycle, command, data, 1)
+            fail(result)
 
     bes_sinks = _collect_bes_from_args(ctx)
     if bazel_trait.build_event_sinks:
@@ -281,15 +283,6 @@ def run_bazel_task(ctx: TaskContext, command: str) -> TaskConclusion:
         trace.event("build.cancel", fields = {"cancelling": True})
         cancellation = ctx.bazel.cancel_invocation()
         cancellation.wait()
-
-    rc = ctx.bazel.parse_rc(
-        startup_flags = startup_flags,
-        flags = flags,
-    )
-
-    trace.event("build.flags", fields = {"flags": flags})
-    rc_startup_flags, flags = rc.expand_all(command = command)
-    ctx.bazel.startup_flags.extend(startup_flags + rc_startup_flags + ["--ignore_all_rc_files"])
 
     # Parsed-rc disclosure is verbose; print on user opt-in via
     # --announce-rc, otherwise gate behind trace.log so it only

@@ -72,7 +72,10 @@ steps:
           limit: 1
     command: |
       echo "--- :bazel: aspect build //crates/aspect-launcher //crates/aspect-cli"
-      ASPECT_DEBUG=1 aspect build --task-key build-bk-axl-tests-bootstrap //crates/aspect-launcher //crates/aspect-cli
+      ASPECT_DEBUG=1 aspect build \
+        --task-key build-bk-axl-tests-bootstrap \
+        --bazel-flag=--remote_download_outputs=toplevel \
+        //crates/aspect-launcher //crates/aspect-cli
       # Use cquery to get the actual output paths (handles platform transitions on Linux)
       WORKSPACE_ROOT=$$(pwd)
       LAUNCHER=$$WORKSPACE_ROOT/$$(bazel $$BAZEL_STARTUP_OPTS cquery $$BAZEL_BUILD_OPTS --output=files //crates/aspect-launcher)

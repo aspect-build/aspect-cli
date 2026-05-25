@@ -4,6 +4,7 @@ pub mod docs;
 pub mod engine;
 pub mod eval;
 pub mod module;
+pub mod term;
 pub mod trace;
 
 /// Bazel subprocess live-tracking. Re-exported so `aspect-cli`'s
