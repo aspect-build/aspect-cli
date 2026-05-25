@@ -64,6 +64,7 @@ aspect-telemetry = { path = "../aspect-telemetry" }
 bazelrc = { path = "../bazelrc" }
 axl-types = { path = "../axl-types" }
 axl-proto = { path = "../axl-proto" }
+starbuf-derive = { path = "../starbuf-derive" }
 build-event-stream = { path = "../build-event-stream" }
 galvanize = { path = "../galvanize" }
 

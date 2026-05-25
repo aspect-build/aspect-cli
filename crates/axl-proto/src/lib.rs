@@ -16,9 +16,9 @@ include!(concat!(env!("OUT_DIR"), "/blaze_query.rs"));
 include!(concat!(env!("OUT_DIR"), "/tools.protos.rs"));
 pub mod build {
     pub mod bazel {
-        pub mod semver {
-            include!(concat!(env!("OUT_DIR"), "/build.bazel.semver.rs"));
-        }
+        // `semver` is wrapped by `axl-proto/build.rs` — see the include!
+        // pattern around it in lib.rs.
+        include!(concat!(env!("OUT_DIR"), "/build.bazel.semver.rs"));
         pub mod remote {
             pub mod execution {
                 include!(concat!(
@@ -42,6 +42,17 @@ pub mod build {
                     )
                 )]
                 pub struct ActionCache;
+
+                #[starbuf_derive::service(
+                    client = "crate::build::bazel::remote::execution::v2::capabilities_client::CapabilitiesClient",
+                    methods(
+                        name = "GetCapabilities",
+                        method = "get_capabilities",
+                        request = "crate::build::bazel::remote::execution::v2::GetCapabilitiesRequest",
+                        response = "crate::build::bazel::remote::execution::v2::ServerCapabilities",
+                    )
+                )]
+                pub struct Capabilities;
 
                 #[starbuf_derive::service(
                     client = "crate::build::bazel::remote::execution::v2::execution_client::ExecutionClient",
@@ -100,9 +111,11 @@ pub mod build {
 mod pb_impl;
 
 pub mod google {
-    pub mod bytestream {
-        include!(concat!(env!("OUT_DIR"), "/google.bytestream.rs"));
-    }
+    // bytestream / rpc / longrunning are wrapped in their own
+    // `#[starbuf_derive::types] pub mod <name>` block by
+    // `axl-proto/build.rs`, so the `include!`'d content brings in both
+    // the inner mod and its sibling `<name>_toplevels` function.
+    include!(concat!(env!("OUT_DIR"), "/google.bytestream.rs"));
     pub mod devtools {
         pub mod build {
             pub mod v1 {
@@ -110,12 +123,8 @@ pub mod google {
             }
         }
     }
-    pub mod rpc {
-        include!(concat!(env!("OUT_DIR"), "/google.rpc.rs"));
-    }
-    pub mod longrunning {
-        include!(concat!(env!("OUT_DIR"), "/google.longrunning.rs"));
-    }
+    include!(concat!(env!("OUT_DIR"), "/google.rpc.rs"));
+    include!(concat!(env!("OUT_DIR"), "/google.longrunning.rs"));
 }
 
 pub mod analysis {

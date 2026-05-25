@@ -121,6 +121,7 @@ load("@aspect//lib/repro_commands.axl", "build_aspect_command", "print_repro_and
 load("@aspect//lib/runnable.axl", "LOCAL_SPAWN_BASE_FLAGS", "LOCAL_SPAWN_FLAGS", "apparent_label", "runnable")
 load("@aspect//lib/text.axl", "pluralize")
 load("@aspect//lib/tips.axl", "tips")
+load("@bazel//proto/remote_logging.axl", "remote_logging")
 load("@std//time.axl", "sleep_iter", "time")
 
 DeliveryTrait = trait(
@@ -412,7 +413,7 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
     output_shas = {}
     misses_by_producer = {}
     log_file = ctx.std.fs.open(log_path)
-    for entry in remote.logging.LogEntry().parse_from_delimited(log_file):
+    for entry in remote_logging.LogEntry().parse_from_delimited(log_file):
         if entry.method_name != "build.bazel.remote.execution.v2.ActionCache/GetActionResult":
             continue
         trace.log(entry)

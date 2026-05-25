@@ -69,6 +69,12 @@ fn check_std_context(eval: &Evaluator) -> anyhow::Result<()> {
     }
 }
 
+/// Public reexport of [`check_std_context`] for sibling submodules (`grpc`)
+/// that need to gate `__builtins__.<name>()` accessors.
+pub fn check_std_context_pub(eval: &Evaluator) -> anyhow::Result<()> {
+    check_std_context(eval)
+}
+
 /// Returned by `__builtins__.hash()`. Each method returns a fresh HashObject.
 #[derive(Debug, Clone, Copy, ProvidesStaticType, NoSerialize, Allocative)]
 pub struct BuiltinsHash;
@@ -518,6 +524,17 @@ fn builtins_methods(registry: &mut MethodsBuilder) {
         let _ = this;
         check_std_context(eval)?;
         Ok(BuiltinsTime)
+    }
+
+    /// Returns the gRPC namespace, exposing `Server` and `Status`
+    /// constructors. Only callable from within `@std`/`@bazel` modules;
+    /// public modules should `load("@bazel//grpc.axl", "grpc")`.
+    fn grpc<'v>(
+        this: Value<'v>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<super::grpc::BuiltinsGrpc> {
+        let _ = this;
+        super::grpc::make_builtins_grpc(eval)
     }
 }
 

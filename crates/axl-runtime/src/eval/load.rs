@@ -217,13 +217,15 @@ impl<'m> FileLoader for AxlLoader<'m> {
         }
 
         let (resolved_script_path, target): (PathBuf, Target<'m>) = match &load_path {
-            LoadPath::ModuleSpecifier { module, subpath } if module == "std" => {
+            LoadPath::ModuleSpecifier { module, subpath }
+                if module == "std" || module == "bazel" =>
+            {
                 let filename = subpath
                     .to_str()
-                    .ok_or_else(|| anyhow!("invalid @std path: {:?}", subpath))?;
-                let content = crate::builtins::get(filename)
-                    .ok_or_else(|| anyhow!("'{}' does not exist in @std", filename))?;
-                let path = PathBuf::from(format!("/@std/{}", filename));
+                    .ok_or_else(|| anyhow!("invalid @{} path: {:?}", module, subpath))?;
+                let content = crate::builtins::get(module, filename)
+                    .ok_or_else(|| anyhow!("'{}' does not exist in @{}", filename, module))?;
+                let path = PathBuf::from(format!("/@{}/{}", module, filename));
                 (path, Target::Std(content))
             }
             LoadPath::ModuleSpecifier { module, subpath } => {
