@@ -133,6 +133,13 @@ def init_data():
         "linter_exit_code": 0,  # 0 = all linters clean; non-zero → at least one linter errored
         "changed_files": [],  # [{"file", "lines", "hunk_lines"}] — only populated for hold-the-line / hold-the-file
 
+        # Distinct rules_lint tool names seen via BES file-name
+        # markers (`*.AspectRulesLint<Tool>.*`). Populated even for
+        # clean linters that emit no diagnostics so the rendered
+        # chart can list every linter that ran, not just the noisy
+        # ones. Sorted ascending by lint.axl on terminal emit.
+        "tools_run": [],  # e.g. ["ESLint", "ShellCheck"]
+
         # Pre-computed aggregates populated by accumulate().
         "counts_by_severity": {},  # {"error": 3, ...}
         "counts_by_tool": {},  # {"eslint": 7, ...}
@@ -427,24 +434,67 @@ def _pad_left(s, width):
         return s
     return " " * n + s
 
-def _linters_chart(data):
-    """Build the per-linter breakdown as a column-aligned <pre> body.
+# BES output extensions emitted by rules_lint aspects (see
+# `aspect-build/rules_lint`). The full filename shape is
+# `<target>.AspectRulesLint<Tool>.<ext>` — anchoring on this exact
+# shape (segment-boundary `.AspectRulesLint` prefix + known suffix)
+# keeps `detect_lint_tool` from matching unrelated build outputs whose
+# name happens to contain `AspectRulesLint` as a free-floating
+# substring (e.g. a user target literally named that).
+_RULES_LINT_EXTS = (".report", ".patch", ".exit_code", ".out")
+_RULES_LINT_MARKER = ".AspectRulesLint"
 
-    Cross-tabulates `data["lint"]["diagnostics"]` and
-    `data["lint"]["suggestions"]` by tool, producing one row per
-    linter with error / warning / info / auto-fix counts. Sorted by
-    total finding+fix volume descending, then linter name ascending —
-    so the noisiest linter sits at the top, where it earns the eye.
+def detect_lint_tool(filename):
+    """Extract the rules_lint tool name from a BES output file name.
 
-    Returns the chart body (no wrapping <pre> tags). Empty string
-    when no diagnostics and no suggestions were reported.
+    rules_lint outputs follow `<target>.AspectRulesLint<Tool>.<ext>`
+    (e.g. `hello.AspectRulesLintShellCheck.patch` → `ShellCheck`),
+    where `<ext>` is one of `_RULES_LINT_EXTS`. Returns the tool name
+    only when both the segment-boundary marker AND a known extension
+    are present; otherwise returns empty string. This double anchor
+    is what keeps the zero-aspect safeguard in `lint.axl` from being
+    bypassed by an unrelated output whose name happens to contain
+    `AspectRulesLint` as a substring.
     """
-    counts = {}
+    has_ext = False
+    for ext in _RULES_LINT_EXTS:
+        if filename.endswith(ext):
+            has_ext = True
+            break
+    if not has_ext:
+        return ""
+    idx = filename.find(_RULES_LINT_MARKER)
+    if idx < 0:
+        return ""
+    start = idx + len(_RULES_LINT_MARKER)
+    end = filename.find(".", start)
+    if end < 0 or end == start:
+        return ""
+    return filename[start:end]
+
+def linter_rows(data):
+    """Return per-linter aggregate rows as
+    `{tool: {errors, warnings, infos, fixes}}`.
+
+    Union of three sources:
+      1. diagnostics — severity-counted
+      2. suggestions — fix-counted
+      3. `data["lint"]["tools_run"]` — zero-row for clean linters
+         that didn't emit diagnostics or suggestions
+
+    Source 3 dedupes against sources 1/2 case-insensitively because
+    the BES file-name marker ("ShellCheck") and the SARIF driver name
+    ("shellcheck") can disagree — one row per tool, not one per
+    casing. Shared by `_linters_chart` (renders the rows) and
+    `_build_details_data` (uses the row count for the section header)
+    so they always agree.
+    """
+    rows = {}
 
     def _row(tool):
-        if tool not in counts:
-            counts[tool] = {"errors": 0, "warnings": 0, "infos": 0, "fixes": 0}
-        return counts[tool]
+        if tool not in rows:
+            rows[tool] = {"errors": 0, "warnings": 0, "infos": 0, "fixes": 0}
+        return rows[tool]
 
     for d in data["lint"].get("diagnostics", []) or []:
         tool = d.get("tool", "") or "unknown"
@@ -459,11 +509,29 @@ def _linters_chart(data):
     for s in data["lint"].get("suggestions", []) or []:
         _row(s.get("tool", "") or "unknown")["fixes"] += 1
 
-    if not counts:
+    known_lower = {t.lower(): True for t in rows}
+    for t in data["lint"].get("tools_run", []) or []:
+        if t.lower() not in known_lower:
+            _row(t)
+
+    return rows
+
+def _linters_chart(data):
+    """Render `linter_rows(data)` as a column-aligned <pre> body.
+
+    Sorted by total finding+fix volume descending, then linter name
+    ascending — the noisiest linter sits at the top where it earns
+    the eye; clean linters land at the bottom in alphabetical order.
+
+    Returns the chart body (no wrapping <pre> tags). Empty string
+    when nothing ran and nothing surfaced.
+    """
+    rows = linter_rows(data)
+    if not rows:
         return ""
 
     items = sorted(
-        [(t, counts[t]) for t in counts],
+        [(t, rows[t]) for t in rows],
         key = lambda kv: (
             -(kv[1]["errors"] + kv[1]["warnings"] + kv[1]["infos"] + kv[1]["fixes"]),
             kv[0],
@@ -587,7 +655,6 @@ def _build_details_data(data, render_ctx, status, links = None):
         if file_ and line:
             # Patch-derived suggestion comment — always fix-bearing.
             suggestion_links[(file_, line)] = {"url": url, "is_fix": True}
-    counts_by_tool = data["lint"].get("counts_by_tool", {}) or {}
     return {
         # str() everywhere we interpolate an int — Jinja2 receives
         # values as serde_json::Number for Python ints, which renders
@@ -595,7 +662,9 @@ def _build_details_data(data, render_ctx, status, links = None):
         # defensively at the template boundary.
         "total": str(total),
         "linters_chart": _linters_chart(data),
-        "linters_count": str(len(counts_by_tool)),
+        # Same source of truth as the chart so the section header and
+        # the row count never disagree.
+        "linters_count": str(len(linter_rows(data))),
         "groups": _groups_for_template(_group_diagnostics(data, suggestion_links)),
         # All auto-fixes — correlated AND uncorrelated — land in one
         # consolidated "Auto fixes" section. Correlated entries are

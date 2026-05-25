@@ -29,8 +29,10 @@ load(
     "accumulate",
     "chunk_annotations",
     "compute_annotations",
+    "detect_lint_tool",
     "init_data",
     "lint_annotation_plan",
+    "linter_rows",
     "render_check_output",
 )
 
@@ -742,5 +744,135 @@ lint_annotation_plan_tests = task(
     name = "test-lint-annotation-plan",
     group = ["dev"],
     implementation = _test_lint_annotation_plan,
+    args = {},
+)
+
+# ─── linter_rows (tools_run integration) ──────────────────────────────────────
+
+def _test_linter_rows(ctx):
+    """Verify the shared row builder consumed by `_linters_chart` and
+    the rendered section header. Covers the three sources of truth
+    (diagnostics, suggestions, tools_run) and the case-insensitive
+    dedupe between BES file-name markers and SARIF driver names."""
+
+    # 1. tools_run alone — clean linters get zero rows so the chart
+    #    can list every linter that fired, not just the noisy ones.
+    rows = linter_rows({"lint": {
+        "diagnostics": [],
+        "suggestions": [],
+        "tools_run": ["ShellCheck", "ESLint"],
+    }})
+    _eq("clean tools_run keys", sorted(rows.keys()), ["ESLint", "ShellCheck"])
+    _eq("clean tools_run counts", rows["ShellCheck"], {"errors": 0, "warnings": 0, "infos": 0, "fixes": 0})
+
+    # 2. Casing-collision dedupe: SARIF driver "shellcheck" and BES
+    #    marker "ShellCheck" must produce a single row. The diagnostic
+    #    name wins because it appears first (case-sensitive key).
+    rows = linter_rows({"lint": {
+        "diagnostics": [{"tool": "shellcheck", "severity": "warning", "file": "a.sh", "line": 1}],
+        "suggestions": [],
+        "tools_run": ["ShellCheck"],
+    }})
+    _eq("casing dedupe row count", len(rows), 1)
+    _eq("casing dedupe key", "shellcheck" in rows, True)
+
+    # 3. Mixed: noisy linter + clean linter. Both appear, the clean
+    #    one with all-zero counts.
+    rows = linter_rows({"lint": {
+        "diagnostics": [{"tool": "eslint", "severity": "error", "file": "a.ts", "line": 1}],
+        "suggestions": [{"tool": "eslint", "file": "a.ts", "start_line": 1, "end_line": 1}],
+        "tools_run": ["ShellCheck", "eslint"],
+    }})
+    _eq("mixed keys", sorted(rows.keys()), ["ShellCheck", "eslint"])
+    _eq("mixed eslint errors", rows["eslint"]["errors"], 1)
+    _eq("mixed eslint fixes", rows["eslint"]["fixes"], 1)
+    _eq("mixed ShellCheck clean", rows["ShellCheck"], {"errors": 0, "warnings": 0, "infos": 0, "fixes": 0})
+
+    # 4. Diagnostic with empty/missing tool falls into the "unknown"
+    #    bucket — pre-existing behaviour, just guard against regression.
+    rows = linter_rows({"lint": {
+        "diagnostics": [{"tool": "", "severity": "error", "file": "a", "line": 1}],
+        "suggestions": [],
+        "tools_run": [],
+    }})
+    _eq("empty tool → unknown", list(rows.keys()), ["unknown"])
+
+    # 5. Header count matches the rendered chart's row count. Renders
+    #    end-to-end and asserts the "🧹 Linters (N)" header agrees
+    #    with the linter_rows snapshot used by `_linters_chart`.
+    data = _make_base()
+    accumulate(data, [{"tool": "eslint", "file": "a.ts", "line": 1, "rule_id": "x", "severity": "error", "message": "m"}])
+    data["lint"]["tools_run"] = ["ESLint", "ShellCheck", "yamllint"]
+    out = render_check_output(ctx, data, "failed", _render_ctx(), _links())
+    expected_count = len(linter_rows(data))
+    if expected_count != 3:
+        fail("linter_rows union mismatch: got %d, want 3" % expected_count)
+    header = "🧹 Linters (%d)" % expected_count
+    if header not in out["text"]:
+        fail("header / chart disagree: expected %r in rendered details" % header)
+
+    print("lint_results.axl::linter_rows: all cases OK")
+    return 0
+
+linter_rows_tests = task(
+    name = "test-lint-linter-rows",
+    group = ["dev"],
+    implementation = _test_linter_rows,
+    args = {},
+)
+
+# ─── detect_lint_tool (BES filename parsing) ──────────────────────────────────
+
+def _test_detect_lint_tool(ctx):
+    """Pin the rules_lint filename shape so the zero-aspect safeguard
+    can't be bypassed by an unrelated build output whose name contains
+    `AspectRulesLint` as a substring. Match requires both the
+    segment-boundary `.AspectRulesLint` prefix AND a known
+    rules_lint extension."""
+
+    # 1. Canonical shapes — all four extensions parse to the tool name.
+    for ext in (".patch", ".report", ".exit_code", ".out"):
+        got = detect_lint_tool("examples/lint/hello.AspectRulesLintShellCheck" + ext)
+        _eq("canonical %s" % ext, got, "ShellCheck")
+
+    # 2. Multi-segment tool names — extract stops at the next `.`.
+    _eq(
+        "multi-camelcase tool",
+        detect_lint_tool("pkg/foo.AspectRulesLintGoogleJavaFormat.patch"),
+        "GoogleJavaFormat",
+    )
+
+    # 3. Substring without segment boundary — must NOT match. Guards
+    #    against a target literally named with the marker embedded.
+    _eq(
+        "no leading dot → no match",
+        detect_lint_tool("some_AspectRulesLintShellCheck_target.patch"),
+        "",
+    )
+
+    # 4. Marker present at segment boundary but unrecognised extension —
+    #    must NOT match. Guards against unrelated mnemonics that happen
+    #    to share the marker prefix.
+    _eq(
+        "unknown extension → no match",
+        detect_lint_tool("hello.AspectRulesLintShellCheck.txt"),
+        "",
+    )
+
+    # 5. Marker absent entirely — must NOT match.
+    _eq("no marker → no match", detect_lint_tool("hello.SomethingElse.patch"), "")
+
+    # 6. Empty tool segment (`.AspectRulesLint.<ext>`) — must NOT match.
+    #    Defensive; not a shape rules_lint emits, but if it ever did we
+    #    don't want a zero-length entry polluting lint_tools_run.
+    _eq("empty tool → no match", detect_lint_tool("hello.AspectRulesLint.patch"), "")
+
+    print("lint_results.axl::detect_lint_tool: all cases OK")
+    return 0
+
+detect_lint_tool_tests = task(
+    name = "test-lint-detect-tool",
+    group = ["dev"],
+    implementation = _test_detect_lint_tool,
     args = {},
 )
