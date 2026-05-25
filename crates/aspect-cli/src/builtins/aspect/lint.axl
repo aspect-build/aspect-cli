@@ -23,7 +23,7 @@ load("./bazel.axl", "BazelTrait")
 load("./lib/artifacts.axl", "artifacts")
 load("./lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event")
 load("./lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
-load("./lib/environment.axl", "color_enabled", "warn")
+load("./lib/environment.axl", "color_enabled", "error", "warn")
 load("./lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_changed_files_listing")
 load("./lib/health_check.axl", "HealthCheckTrait")
 load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "preflight_phase", "setup_phase", "task_update")
@@ -505,6 +505,20 @@ _SEV_CLI_ICON = {
     "info": "ℹ️",
 }
 
+def _print_linters_run(ctx, tools_run):
+    """Print a one-line summary of the linters that fired.
+
+    Paired with `_print_relevant_findings` to give a "what ran / what's
+    wrong" pair on the CLI. No-op when nothing ran.
+    """
+    if not tools_run:
+        return
+    ansi = color_enabled(ctx.std)
+    bold = "\033[1m" if ansi else ""
+    reset = "\033[0m" if ansi else ""
+    print("")
+    print("%s🧹 Linters%s (%d): %s" % (bold, reset, len(tools_run), ", ".join(tools_run)))
+
 def _print_relevant_findings(ctx, relevant, strategy_name):
     """Print the strategy-filtered findings to stderr.
 
@@ -713,6 +727,32 @@ def _body_text(status, data):
         return "Lint aborted"
     return ""
 
+def _has_aspect_flag(flags):
+    """True iff `flags` (post-rc-expansion) contains any `--aspects`
+    entry — `--aspects=<label>` or bare `--aspects` (the value lands
+    in the next arg). Used to differentiate "no aspect configured"
+    from "aspect configured but produced no rules_lint output" in
+    the post-build error path."""
+    for f in flags:
+        if f == "--aspects" or f.startswith("--aspects="):
+            return True
+    return False
+
+def _detect_lint_tool(filename):
+    """Extract the rules_lint tool name from a BES output file name.
+
+    rules_lint outputs follow `<target>.AspectRulesLint<Tool>.<ext>`
+    (e.g. `hello.AspectRulesLintShellCheck.patch` → `ShellCheck`).
+    Returns empty string if the marker is absent.
+    """
+    marker = "AspectRulesLint"
+    idx = filename.find(marker)
+    if idx < 0:
+        return ""
+    start = idx + len(marker)
+    end = filename.find(".", start)
+    return filename[start:] if end < 0 else filename[start:end]
+
 # buildifier: disable=function-docstring
 def _impl(ctx: TaskContext) -> int | TaskConclusion:
     lint_trait = ctx.traits[LintTrait]
@@ -864,8 +904,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         lifecycle,
         status,
         ProgressStyles(
-            body = "Running %s..." % pluralize(len(ctx.args.aspects), "lint aspect"),
-            stream = "Running " + pluralize(len(ctx.args.aspects), "lint aspect"),
+            body = "Running lint aspects...",
+            stream = "Running lint aspects",
         ),
         kind = "lint_results",
         data = data,
@@ -900,7 +940,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         lifecycle,
         status,
         ProgressStyles(
-            body = "Running %s..." % pluralize(len(ctx.args.aspects), "lint aspect"),
+            body = "Running lint aspects...",
         ),
         kind = "lint_results",
         data = data,
@@ -909,6 +949,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     linter_exit_code = 0
     patches = []
     github_output = ctx.std.env.var("GITHUB_OUTPUT")
+
+    # Set of rules_lint tool names observed in BES file-name markers.
+    lint_tools_run = {}
 
     # Tick-driven drain: each tick non-blocking-polls events and
     # emits at most once (interesting batch or heartbeat). Heartbeats
@@ -929,6 +972,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             if event.kind == "named_set_of_files":
                 for file in event.payload.files:
                     filepath = file_uri_to_path(file.file)
+                    tool = _detect_lint_tool(file.name)
+                    if tool:
+                        lint_tools_run[tool] = True
                     if file.name.endswith(".out"):
                         ctx.std.io.stderr.write(ctx.std.fs.read_to_string(filepath))
                     if file.name.endswith(".report"):
@@ -1051,16 +1097,15 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
     # 10. Apply strategy filter → relevant diagnostics for reporting and exit code.
     #
-    # Skip the `filter` phase emit when the build failed. The strategy
-    # filter still runs (any partial SARIF that did stream through
-    # gets surfaced), but we don't want a "Filter" entry in the closing
-    # phase breakdown — `close_active_phase` would mark it interrupted
-    # and the renderer would tag it `(failed)` even though the actual
-    # failure was in the lint phase. Without the phase boundary, the
-    # `lint` phase remains active until `_emit_final` runs, so the
-    # breakdown correctly tags `Lint (failed)` and the GHSC
-    # `_failed_in_phase` latch picks up "lint".
-    if not build_failed:
+    # Skip the `filter` phase emit when the build failed OR no lint
+    # aspect actually ran — in either case the failure originates in
+    # the `lint` phase, and emitting a `filter` phase boundary here
+    # would cause `close_active_phase` to tag Filter as `(failed)` in
+    # the breakdown instead of Lint. Without the boundary, the `lint`
+    # phase stays active until `_emit_final`, so the breakdown
+    # correctly tags `Lint (failed)` and the GHSC `_failed_in_phase`
+    # latch picks up "lint".
+    if not build_failed and lint_tools_run:
         status = _pick_status(data, had_failure = False, terminal = False)
         task_update(
             ctx,
@@ -1082,6 +1127,11 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # set. The `Filter` phase emit above is the UI / Task-timing
     # marker; no separate filtering pass is needed here.
     relevant = list(data["lint"]["diagnostics"])
+
+    # Thread the linter set onto data so the rendered "🧹 Linters"
+    # chart and the CLI summary share a sorted snapshot.
+    data["lint"]["tools_run"] = sorted(lint_tools_run.keys())
+    _print_linters_run(ctx, data["lint"]["tools_run"])
 
     # Print the post-filter findings on the CLI so users see *what
     # actually matters* after strategy filtering. The linter's raw
@@ -1118,8 +1168,24 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # for the per-finding-row link semantics.
     data["lint"]["comment_urls"] = dict(lint_trait.comment_urls)
 
-    # 12. Determine exit code
+    # 12. Determine exit code. `not lint_tools_run` guards against the
+    # silent zero-aspect case — in CI a green `aspect lint` must mean
+    # "lint passed", not "lint never ran".
     if build_failed:
+        exit_code = 1
+    elif not lint_tools_run:
+        if _has_aspect_flag(flags):
+            error(ctx.std, (
+                "Lint aspect(s) configured but produced no rules_lint output. " +
+                "Verify the configured aspect is from aspect_rules_lint and " +
+                "that your target pattern includes lintable targets."
+            ))
+        else:
+            error(ctx.std, (
+                "No lint aspect configured. Pass --aspect=<label> " +
+                "(e.g. --aspect=//tools/lint:linters.bzl%shellcheck) or add " +
+                "--aspects=… via a bazelrc --config."
+            ))
         exit_code = 1
     elif strategy.fail_on_severity and any([d["severity"] == strategy.fail_on_severity for d in relevant]):
         exit_code = 1
@@ -1190,8 +1256,7 @@ lint = task(
     args = {
         "aspects": args.string_list(
             long = "aspect",
-            required = True,
-            description = "Bazel aspect label(s) to apply for linting (e.g. //tools/lint:linters.bzl%eslint). Repeat the flag to run multiple aspects in a single invocation. At least one aspect is required.",
+            description = "Bazel aspect label(s) to apply for linting (e.g. //tools/lint:linters.bzl%eslint). Repeat the flag to run multiple aspects in a single invocation. Aspects may also be supplied via `--bazel-flag=--aspects=…` or a bazelrc `--config`; at least one rules_lint aspect must reach Bazel one way or another.",
         ),
         "announce_rc": args.boolean(
             default = False,

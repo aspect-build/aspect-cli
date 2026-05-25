@@ -11,7 +11,7 @@ load("@aspect//lib/gazelle_results_test.axl", "gazelle_template_snapshot_tests")
 load("@aspect//lib/github_detect_test.axl", "github_detect_tests")
 load("@aspect//lib/gitlab_detect_test.axl", "gitlab_detect_tests")
 load("@aspect//lib/gitlab_test.axl", "gitlab_client_tests")
-load("@aspect//lib/lint_results_test.axl", "lint_annotation_plan_tests", "lint_template_snapshot_tests")
+load("@aspect//lib/lint_results_test.axl", "lint_annotation_plan_tests", "lint_template_snapshot_tests", "linter_rows_tests")
 load("@aspect//lib/rate_limit_test.axl", "rate_limit_tests")
 load("@aspect//lib/repro_commands_test.axl", "repro_commands_tests")
 load("@aspect//lib/runner_job_history_test.axl", "runner_job_history_tests")
@@ -174,6 +174,12 @@ def config(ctx: ConfigContext):
     # between check-run annotations and PR-review comments.
     # Run with: aspect dev test-lint-annotation-plan
     ctx.tasks.add(lint_annotation_plan_tests)
+
+    # Pins the lint-data → per-linter row builder consumed by both the
+    # rendered chart and the section header count, so the "Linters (N)"
+    # label always matches the rows beneath it.
+    # Run with: aspect dev test-lint-linter-rows
+    ctx.tasks.add(linter_rows_tests)
 
     # Inject a mix of secret-ish and safe Bazel flags on every task so the
     # status-check redaction path is exercised live against a real BES stream.

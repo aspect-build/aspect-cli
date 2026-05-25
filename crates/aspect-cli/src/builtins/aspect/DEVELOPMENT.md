@@ -529,7 +529,8 @@ data = {
   ┌─ Per-kind extensions (added by lib/<kind>_results.init_data) ───┐
   │ # lint     → data["lint"]                                          │
   │   "diagnostics", "strategy", "build_failed", "linter_exit_code",   │
-  │   "changed_files", "counts_by_severity", "counts_by_tool"          │
+  │   "changed_files", "tools_run",                                    │
+  │   "counts_by_severity", "counts_by_tool"                           │
   │ # format   → data["format"]                                        │
   │   "scope", "formatter_target", "on_change_resolved",               │
   │   "affected_files", ...                                            │
