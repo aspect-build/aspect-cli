@@ -100,6 +100,7 @@ User-facing migration guide: https://docs.aspect.build/cli/migration/delivery
 """
 
 load("@aspect//bazel.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
+load("@aspect//lib/artifacts.axl", "artifacts")
 load("@aspect//lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "now_ms", "process_event", bazel_init_data = "init_data")
 load("@aspect//lib/ci.axl", "detect_build_url")
 load("@aspect//lib/delivery_results.axl", delivery_add_result = "add_result", delivery_conclusion = "conclusion", delivery_init_data = "init_data")
@@ -1276,6 +1277,6 @@ Currently \x1b[3monly\x1b[23m supported on Aspect Workflows CI runners. Support 
         DeliveryTrait,
         HealthCheckTrait,
         TaskLifecycleTrait,
-    ] + tips.TRAITS,
+    ] + artifacts.TRAITS + tips.TRAITS,
     implementation = _delivery_impl,
 )
