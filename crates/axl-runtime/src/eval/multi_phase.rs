@@ -543,7 +543,9 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         eval.set_loader(self.loader);
         eval.extra = Some(&self.loader.env);
 
-        let ret = eval.eval_function(task.implementation(), &[context], &[])?;
+        let impl_result = eval.eval_function(task.implementation(), &[context], &[]);
+        run_deferred(context, &mut eval);
+        let ret = impl_result?;
         let (exit_code, flagged, conclusion) = unpack_task_return(ret);
 
         // Reads elapsed + phases off the heap-allocated TaskInfo. Closes
@@ -614,6 +616,18 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
 
     pub fn finish(self) -> FinishedEval {
         FinishedEval
+    }
+}
+
+fn run_deferred<'v>(context: Value<'v>, eval: &mut Evaluator<'v, '_, '_>) {
+    let Some(ctx) = context.downcast_ref::<TaskContext>() else {
+        return;
+    };
+    let defers = ctx.drain_defers();
+    for defer in defers {
+        if let Err(e) = eval.eval_function(defer.callable, &defer.args, &defer.kwargs) {
+            tracing::error!(error = %e, "ctx.defer callable failed");
+        }
     }
 }
 
