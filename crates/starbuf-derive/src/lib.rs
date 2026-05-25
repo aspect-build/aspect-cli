@@ -1368,9 +1368,13 @@ fn try_service(attr: TokenStream, item: TokenStream) -> Result<TokenStream, Erro
     let ident = &input.ident;
 
     let handle_ident = Ident::new(&format!("{}ClientHandle", ident), ident.span());
+    // Exported constructor name (see also #ctor_ident below): the .axl
+    // surface refers to clients as `<ServiceName>Client`, matching the
+    // server-side `<ServiceName>Service` from `service_server`.
+    let ctor_ident = Ident::new(&format!("{}Client", ident), ident.span());
     let ident_snake = snake(ident.to_string());
     let methods_ident = Ident::new(&format!("{}_client_methods", ident_snake), ident.span());
-    let module_ident = Ident::new(&format!("{}_service", ident_snake), ident.span());
+    let module_ident = Ident::new(&format!("{}_client_module", ident_snake), ident.span());
     let starlark_type = format!("{}_client", ident_snake);
 
     // Generate stream handle types for streaming methods.
@@ -1683,7 +1687,7 @@ fn try_service(attr: TokenStream, item: TokenStream) -> Result<TokenStream, Erro
 
         #[::starlark::starlark_module]
         pub fn #module_ident(globals: &mut ::starlark::environment::GlobalsBuilder) {
-            fn #ident<'v>(
+            fn #ctor_ident<'v>(
                 #[starlark(require = named)] uri: String,
                 #[starlark(require = named)] headers: ::starlark::values::Value<'v>,
                 #[starlark(require = named, default = 10000)] timeout: u64,
@@ -1720,6 +1724,814 @@ pub fn service(
     item: proc_macro::TokenStream,
 ) -> proc_macro::TokenStream {
     try_service(attr.into(), item.into()).unwrap().into()
+}
+
+// ---------------- service_server ----------------
+//
+// Symmetric to `service`/`try_service` above: instead of emitting a Starlark
+// client handle that wraps a tonic-generated `*Client<Channel>`, we emit a
+// dispatch struct that implements the tonic-generated `*Server` trait by
+// invoking Starlark callables stored alongside.
+//
+// Attribute shape mirrors `service`:
+//
+// ```ignore
+// #[starbuf_derive::service_server(
+//     proto_path = "build.bazel.remote.execution.v2.Capabilities",
+//     server_trait = "<path::to::*_server::*>",
+//     tonic_server = "<path::to::*_server::*Server>",
+//     methods(
+//         name = "GetCapabilities",
+//         method = "get_capabilities",
+//         request = "...GetCapabilitiesRequest",
+//         response = "...ServerCapabilities",
+//         request_streaming = false,
+//         response_streaming = false,
+//     ),
+//     ...
+// )]
+// pub struct Capabilities;
+// ```
+//
+// In v1 each RPC body is stubbed with `Status::unimplemented` — the
+// Starlark-from-tokio dispatch (creating a fresh `Evaluator` on a tokio
+// worker, invoking the stored callable, marshalling proto<->Starlark)
+// lands in a focused follow-up. The structural pieces (constructor,
+// `ServiceHandle` impl, tonic server wrapping) compile end-to-end now so
+// the API surface is testable.
+
+struct ServerRpc {
+    name: Ident,
+    method: Ident,
+    request: Type,
+    response: Type,
+    request_streaming: bool,
+    response_streaming: bool,
+}
+
+fn parse_service_server_attr(
+    attr: TokenStream,
+) -> Result<(String, Type, Type, Vec<ServerRpc>), Error> {
+    let args: syn::punctuated::Punctuated<Meta, syn::Token![,]> =
+        syn::punctuated::Punctuated::parse_terminated.parse2(attr)?;
+
+    let mut proto_path: Option<String> = None;
+    let mut server_trait: Option<Type> = None;
+    let mut tonic_server: Option<Type> = None;
+    let mut methods: Vec<ServerRpc> = Vec::new();
+
+    for arg in args {
+        match arg {
+            Meta::NameValue(nv) if nv.path.is_ident("proto_path") => {
+                let syn::Expr::Lit(expr_lit) = &nv.value else {
+                    bail!("proto_path must be a string literal");
+                };
+                let Lit::Str(lit) = &expr_lit.lit else {
+                    bail!("proto_path must be a string literal");
+                };
+                proto_path = Some(lit.value());
+            }
+            Meta::NameValue(nv) if nv.path.is_ident("server_trait") => {
+                let syn::Expr::Lit(expr_lit) = &nv.value else {
+                    bail!("server_trait must be a string literal type path");
+                };
+                let Lit::Str(lit) = &expr_lit.lit else {
+                    bail!("server_trait must be a string literal type path");
+                };
+                server_trait = Some(parse_str(&lit.value())?);
+            }
+            Meta::NameValue(nv) if nv.path.is_ident("tonic_server") => {
+                let syn::Expr::Lit(expr_lit) = &nv.value else {
+                    bail!("tonic_server must be a string literal type path");
+                };
+                let Lit::Str(lit) = &expr_lit.lit else {
+                    bail!("tonic_server must be a string literal type path");
+                };
+                tonic_server = Some(parse_str(&lit.value())?);
+            }
+            Meta::List(list) if list.path.is_ident("methods") => {
+                let mut name: Option<Ident> = None;
+                let mut method: Option<Ident> = None;
+                let mut request: Option<Type> = None;
+                let mut response: Option<Type> = None;
+                let mut request_streaming = false;
+                let mut response_streaming = false;
+
+                let nested: syn::punctuated::Punctuated<Meta, syn::Token![,]> =
+                    syn::punctuated::Punctuated::parse_terminated.parse2(list.tokens.clone())?;
+
+                for nested_meta in nested.iter() {
+                    match nested_meta {
+                        Meta::NameValue(nv) if nv.path.is_ident("name") => {
+                            let syn::Expr::Lit(expr_lit) = &nv.value else {
+                                bail!("method name must be a string literal");
+                            };
+                            let Lit::Str(lit) = &expr_lit.lit else {
+                                bail!("method name must be a string literal");
+                            };
+                            name = Some(Ident::new(&lit.value(), lit.span()));
+                        }
+                        Meta::NameValue(nv) if nv.path.is_ident("method") => {
+                            let syn::Expr::Lit(expr_lit) = &nv.value else {
+                                bail!("method must be a string literal");
+                            };
+                            let Lit::Str(lit) = &expr_lit.lit else {
+                                bail!("method must be a string literal");
+                            };
+                            method = Some(Ident::new(&lit.value(), lit.span()));
+                        }
+                        Meta::NameValue(nv) if nv.path.is_ident("request") => {
+                            let syn::Expr::Lit(expr_lit) = &nv.value else {
+                                bail!("request must be a string literal type path");
+                            };
+                            let Lit::Str(lit) = &expr_lit.lit else {
+                                bail!("request must be a string literal type path");
+                            };
+                            request = Some(parse_str(&lit.value())?);
+                        }
+                        Meta::NameValue(nv) if nv.path.is_ident("response") => {
+                            let syn::Expr::Lit(expr_lit) = &nv.value else {
+                                bail!("response must be a string literal type path");
+                            };
+                            let Lit::Str(lit) = &expr_lit.lit else {
+                                bail!("response must be a string literal type path");
+                            };
+                            response = Some(parse_str(&lit.value())?);
+                        }
+                        Meta::NameValue(nv) if nv.path.is_ident("request_streaming") => {
+                            let syn::Expr::Lit(expr_lit) = &nv.value else {
+                                bail!("request_streaming must be a bool literal");
+                            };
+                            let Lit::Bool(lit) = &expr_lit.lit else {
+                                bail!("request_streaming must be a bool literal");
+                            };
+                            request_streaming = lit.value;
+                        }
+                        Meta::NameValue(nv) if nv.path.is_ident("response_streaming") => {
+                            let syn::Expr::Lit(expr_lit) = &nv.value else {
+                                bail!("response_streaming must be a bool literal");
+                            };
+                            let Lit::Bool(lit) = &expr_lit.lit else {
+                                bail!("response_streaming must be a bool literal");
+                            };
+                            response_streaming = lit.value;
+                        }
+                        _ => {}
+                    }
+                }
+                let Some(name) = name else {
+                    bail!("each methods(...) entry must include name");
+                };
+                let Some(method) = method else {
+                    bail!("each methods(...) entry must include method");
+                };
+                let Some(request) = request else {
+                    bail!("each methods(...) entry must include request");
+                };
+                let Some(response) = response else {
+                    bail!("each methods(...) entry must include response");
+                };
+
+                methods.push(ServerRpc {
+                    name,
+                    method,
+                    request,
+                    response,
+                    request_streaming,
+                    response_streaming,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    let proto_path = proto_path
+        .ok_or_else(|| anyhow::anyhow!("service_server attribute requires proto_path = \"...\""))?;
+    let server_trait = server_trait.ok_or_else(|| {
+        anyhow::anyhow!("service_server attribute requires server_trait = \"...\"")
+    })?;
+    let tonic_server = tonic_server.ok_or_else(|| {
+        anyhow::anyhow!("service_server attribute requires tonic_server = \"...\"")
+    })?;
+    if methods.is_empty() {
+        bail!("service_server attribute requires at least one methods(...) entry");
+    }
+
+    Ok((proto_path, server_trait, tonic_server, methods))
+}
+
+fn try_service_server(attr: TokenStream, item: TokenStream) -> Result<TokenStream, Error> {
+    let (proto_path, server_trait, tonic_server, methods) = parse_service_server_attr(attr)?;
+
+    let input: ItemStruct = syn::parse2(item)?;
+    let ident = &input.ident;
+    let ident_snake = snake(ident.to_string());
+
+    let dispatch_ident = Ident::new(&format!("{}Dispatch", ident), ident.span());
+    let module_ident = Ident::new(&format!("{}_service_module", ident_snake), ident.span());
+    let ctor_ident = Ident::new(&format!("{}Service", ident), ident.span());
+
+    // Per-method async fn bodies on the dispatch struct. v1: every body is
+    // a stub returning `tonic::Status::unimplemented` so the trait impl
+    // compiles. Real dispatch (invoking the stored Starlark callable on a
+    // tokio worker via a fresh `Evaluator`) lands in a follow-up.
+    let trait_methods = methods.iter().map(|m| {
+        let rpc_method = &m.method;
+        let req_ty = &m.request;
+        let resp_ty = &m.response;
+        // `rpc_name_str` was used by the old stub bodies that embedded the
+        // RPC name in error strings. Real dispatch now lives in the
+        // `__dispatch_<method>` helpers, so this trait-side `rpc_name`
+        // string isn't needed — prefix with underscore to silence the
+        // unused-variable lint without restructuring the loop.
+        let _rpc_name_str = m.name.to_string();
+        if m.response_streaming {
+            // Server-streaming dispatch: trait method delegates to a
+            // free-standing helper just like the unary case.
+            //
+            // Tonic's generated trait declares the associated type as
+            // `<MethodName>Stream` (RPC name + "Stream"), e.g.
+            // `ReadStream`, `GetTreeStream`. Our impl must use the same
+            // name verbatim.
+            let stream_ident = Ident::new(&format!("{}Stream", m.name), m.name.span());
+            let field_ident = Ident::new(&format!("on_{}", m.method), m.method.span());
+            let helper_ident = Ident::new(
+                &format!("__dispatch_{}", m.method),
+                m.method.span(),
+            );
+            quote! {
+                type #stream_ident = ::tokio_stream::wrappers::ReceiverStream<
+                    ::core::result::Result<#resp_ty, ::tonic::Status>
+                >;
+
+                async fn #rpc_method(
+                    &self,
+                    request: ::tonic::Request<#req_ty>,
+                ) -> ::core::result::Result<::tonic::Response<Self::#stream_ident>, ::tonic::Status> {
+                    let inner = request.into_inner();
+                    let on_method = ::std::sync::Arc::clone(&self.#field_ident);
+                    let rx = Self::#helper_ident(on_method, inner);
+                    ::core::result::Result::Ok(::tonic::Response::new(
+                        ::tokio_stream::wrappers::ReceiverStream::new(rx),
+                    ))
+                }
+            }
+        } else if m.request_streaming {
+            // Client-streaming dispatch: trait method delegates to the
+            // helper which builds a Starlark-iterable wrapper around the
+            // incoming `tonic::Streaming<Req>`, allocates it as the
+            // handler's first arg, and unpacks the handler's response.
+            let field_ident = Ident::new(&format!("on_{}", m.method), m.method.span());
+            let helper_ident = Ident::new(
+                &format!("__dispatch_{}", m.method),
+                m.method.span(),
+            );
+            quote! {
+                async fn #rpc_method(
+                    &self,
+                    request: ::tonic::Request<::tonic::Streaming<#req_ty>>,
+                ) -> ::core::result::Result<::tonic::Response<#resp_ty>, ::tonic::Status> {
+                    let inner = request.into_inner();
+                    let on_method = ::std::sync::Arc::clone(&self.#field_ident);
+                    let resp = Self::#helper_ident(on_method, inner).await?;
+                    ::core::result::Result::Ok(::tonic::Response::new(resp))
+                }
+            }
+        } else {
+            // Unary RPC dispatch: trait method delegates to a free-standing
+            // helper function that does the Starlark-from-tokio call-out.
+            // Splitting it out keeps the trait impl thin and lets compile
+            // errors point at concrete lines (instead of into a macro
+            // expansion) for any future tuning of the dispatch body.
+            let field_ident = Ident::new(&format!("on_{}", m.method), m.method.span());
+            let helper_ident = Ident::new(
+                &format!("__dispatch_{}", m.method),
+                m.method.span(),
+            );
+            quote! {
+                async fn #rpc_method(
+                    &self,
+                    request: ::tonic::Request<#req_ty>,
+                ) -> ::core::result::Result<::tonic::Response<#resp_ty>, ::tonic::Status> {
+                    let inner = request.into_inner();
+                    let on_method = ::std::sync::Arc::clone(&self.#field_ident);
+                    let resp = Self::#helper_ident(on_method, inner).await?;
+                    ::core::result::Result::Ok(::tonic::Response::new(resp))
+                }
+            }
+        }
+    });
+
+    // Per-RPC dispatch helpers, emitted as inherent impl methods on the
+    // dispatch struct. The trait method delegates to these via
+    // `Self::__dispatch_<method>(...)`, which keeps the `async_trait`
+    // expansion free of the Starlark plumbing and gives us direct
+    // compile-error locations in the helper bodies.
+    let helper_methods = methods.iter().filter_map(|m| {
+        let rpc_name_str = m.name.to_string();
+        let req_ty = &m.request;
+        let resp_ty = &m.response;
+        let helper_ident = Ident::new(&format!("__dispatch_{}", m.method), m.method.span());
+        if m.request_streaming {
+            // Client-streaming: handler receives a Starlark iter wrapper
+            // around the incoming `tonic::Streaming<Req>` as its first
+            // arg, plus the `rpc` value. Per-RPC iter wrapper struct is
+            // emitted alongside via `req_stream_types`.
+            let req_stream_ident = Ident::new(&format!("__{}ReqStream", m.name), m.name.span());
+            return Some(quote! {
+                #[allow(non_snake_case)]
+                async fn #helper_ident(
+                    on_method: ::std::sync::Arc<::starlark::values::OwnedFrozenValue>,
+                    inner: ::tonic::Streaming<#req_ty>,
+                ) -> ::core::result::Result<#resp_ty, ::tonic::Status> {
+                    let rt = ::tokio::runtime::Handle::current();
+                    ::tokio::task::spawn_blocking(move || {
+                        #[allow(unused_imports)]
+                        use ::starlark::values::ValueLike as _;
+                        let rpc_inner =
+                            ::axl_runtime::engine::grpc::context::RpcContextInner::new();
+                        ::starlark::environment::Module::with_temp_heap(|module| {
+                            let mut eval = ::starlark::eval::Evaluator::new(&module);
+                            let callable = eval
+                                .heap()
+                                .access_owned_frozen_value(&on_method);
+                            let req_stream_value = eval.heap().alloc(#req_stream_ident {
+                                rt: rt.clone(),
+                                stream: ::std::cell::RefCell::new(
+                                    ::core::option::Option::Some(inner),
+                                ),
+                            });
+                            let rpc_value = eval.heap().alloc(
+                                ::axl_runtime::engine::grpc::context::GrpcRpcContext::new(
+                                    ::std::sync::Arc::clone(&rpc_inner),
+                                ),
+                            );
+                            let result = eval.eval_function(
+                                callable,
+                                &[req_stream_value, rpc_value],
+                                &[],
+                            );
+                            if let ::core::option::Option::Some(status) =
+                                rpc_inner.take_abort()
+                            {
+                                return ::core::result::Result::Err(status);
+                            }
+                            let resp_value = result.map_err(|e| {
+                                ::tonic::Status::internal(format!(
+                                    concat!("handler error in ", #rpc_name_str, ": {}"),
+                                    e,
+                                ))
+                            })?;
+                            let resp_ref = resp_value
+                                .downcast_ref::<#resp_ty>()
+                                .ok_or_else(|| {
+                                    ::tonic::Status::internal(format!(
+                                        concat!(
+                                            "handler for ",
+                                            #rpc_name_str,
+                                            " returned wrong type: got {}",
+                                        ),
+                                        resp_value.get_type(),
+                                    ))
+                                })?;
+                            ::core::result::Result::Ok(resp_ref.clone())
+                        })
+                    })
+                    .await
+                    .map_err(|e| ::tonic::Status::internal(format!(
+                        concat!("handler task panicked for ", #rpc_name_str, ": {}"),
+                        e,
+                    )))?
+                }
+            });
+        }
+        if m.response_streaming {
+            // Server-streaming dispatch helper. The per-RPC `DynSender`
+            // impl (with the concrete response type baked in) is emitted
+            // alongside via the `sender_impls` collection below.
+            let sender_ident = Ident::new(&format!("__{}Sender", m.name), m.name.span());
+            return Some(quote! {
+                #[allow(non_snake_case)]
+                fn #helper_ident(
+                    on_method: ::std::sync::Arc<::starlark::values::OwnedFrozenValue>,
+                    inner: #req_ty,
+                ) -> ::tokio::sync::mpsc::Receiver<
+                    ::core::result::Result<#resp_ty, ::tonic::Status>
+                > {
+                    // 128-message buffer: a soft cap. `stream.push` from
+                    // Starlark blocks via `blocking_send` once full —
+                    // backpressure pushes back to the producer rather
+                    // than memory-bombing the server.
+                    let (tx, rx) = ::tokio::sync::mpsc::channel::<
+                        ::core::result::Result<#resp_ty, ::tonic::Status>
+                    >(128);
+                    let sender: ::std::sync::Arc<dyn ::axl_runtime::engine::grpc::DynSender> =
+                        ::std::sync::Arc::new(#sender_ident {
+                            tx: ::std::sync::Mutex::new(::core::option::Option::Some(tx)),
+                        });
+
+                    let sender_for_handler = ::std::sync::Arc::clone(&sender);
+                    ::tokio::task::spawn_blocking(move || {
+                        let rpc_inner =
+                            ::axl_runtime::engine::grpc::context::RpcContextInner::new();
+                        let close_on_exit = ::std::sync::Arc::clone(&sender_for_handler);
+                        let outcome: ::core::result::Result<(), ::tonic::Status> =
+                            ::starlark::environment::Module::with_temp_heap(|module| {
+                                let mut eval = ::starlark::eval::Evaluator::new(&module);
+                                let callable = eval
+                                    .heap()
+                                    .access_owned_frozen_value(&on_method);
+                                let req_value = eval.heap().alloc(inner);
+                                let stream_value = eval.heap().alloc(
+                                    ::axl_runtime::engine::grpc::GrpcStream::new(
+                                        ::std::sync::Arc::clone(&sender_for_handler),
+                                        ::std::sync::Arc::clone(&rpc_inner),
+                                    ),
+                                );
+                                let rpc_value = eval.heap().alloc(
+                                    ::axl_runtime::engine::grpc::context::GrpcRpcContext::new(
+                                        ::std::sync::Arc::clone(&rpc_inner),
+                                    ),
+                                );
+                                let result = eval.eval_function(
+                                    callable,
+                                    &[req_value, stream_value, rpc_value],
+                                    &[],
+                                );
+                                if let ::core::option::Option::Some(status) =
+                                    rpc_inner.take_abort()
+                                {
+                                    return ::core::result::Result::Err(status);
+                                }
+                                result.map(|_| ()).map_err(|e| {
+                                    ::tonic::Status::internal(format!(
+                                        concat!("handler error in ", #rpc_name_str, ": {}"),
+                                        e,
+                                    ))
+                                })
+                            });
+                        if let ::core::result::Result::Err(status) = outcome {
+                            close_on_exit.close(::core::option::Option::Some(status));
+                        }
+                        // Success path: do NOT close. Long-running streams
+                        // need the channel open. If the handler stashed
+                        // the stream and forgot to call complete(), the
+                        // client will hang until server shutdown — that's
+                        // an .axl user bug, not something we paper over.
+                    });
+
+                    rx
+                }
+            });
+        }
+        Some(quote! {
+            #[allow(non_snake_case)]
+            async fn #helper_ident(
+                on_method: ::std::sync::Arc<::starlark::values::OwnedFrozenValue>,
+                inner: #req_ty,
+            ) -> ::core::result::Result<#resp_ty, ::tonic::Status> {
+                // `downcast_ref` / `get_type` come from the `ValueLike`
+                // trait; pulling it in here keeps the macro's emission
+                // self-contained instead of leaking a `use` into the
+                // caller's scope.
+                #[allow(unused_imports)]
+                use ::starlark::values::ValueLike as _;
+                ::tokio::task::spawn_blocking(move || {
+                    let rpc_inner =
+                        ::axl_runtime::engine::grpc::context::RpcContextInner::new();
+                    ::starlark::environment::Module::with_temp_heap(|module| {
+                        let mut eval = ::starlark::eval::Evaluator::new(&module);
+                        // `access_owned_frozen_value` adds the source
+                        // frozen heap as a dependency of the eval heap and
+                        // brands the value with the eval heap's `'v`
+                        // lifetime — required because `eval_function`
+                        // expects `Value<'v>`.
+                        let callable = eval
+                            .heap()
+                            .access_owned_frozen_value(&on_method);
+                        let req_value = eval.heap().alloc(inner);
+                        let rpc_value = eval.heap().alloc(
+                            ::axl_runtime::engine::grpc::context::GrpcRpcContext::new(
+                                ::std::sync::Arc::clone(&rpc_inner),
+                            ),
+                        );
+                        let result = eval.eval_function(
+                            callable,
+                            &[req_value, rpc_value],
+                            &[],
+                        );
+                        // `rpc.abort(...)` is a side-effect, not a raise —
+                        // pick up the recorded status here. If the handler
+                        // also returned a value, the abort wins (any return
+                        // is treated as garbage post-abort).
+                        if let Some(status) = rpc_inner.take_abort() {
+                            return Err(status);
+                        }
+                        let resp_value = result.map_err(|e| {
+                            ::tonic::Status::internal(format!(
+                                concat!("handler error in ", #rpc_name_str, ": {}"),
+                                e,
+                            ))
+                        })?;
+                        let resp_ref = resp_value
+                            .downcast_ref::<#resp_ty>()
+                            .ok_or_else(|| {
+                                ::tonic::Status::internal(format!(
+                                    concat!(
+                                        "handler for ",
+                                        #rpc_name_str,
+                                        " returned wrong type: got {}",
+                                    ),
+                                    resp_value.get_type(),
+                                ))
+                            })?;
+                        Ok(resp_ref.clone())
+                    })
+                })
+                .await
+                .map_err(|e| ::tonic::Status::internal(format!(
+                    concat!("handler task panicked for ", #rpc_name_str, ": {}"),
+                    e,
+                )))?
+            }
+        })
+    });
+
+    // Per-RPC `DynSender` impls for server-streaming methods. Each one
+    // bakes in the concrete response type so `stream.push` can downcast
+    // and forward without any generic plumbing on the Starlark side.
+    // Emitted as top-level items alongside the dispatch struct.
+    // Per-RPC `__<Name>ReqStream` types for client-streaming methods.
+    // Each one wraps the incoming `tonic::Streaming<Req>` with a
+    // Starlark iter impl that blocks on `Handle::block_on(stream.message())`
+    // for each call to `iter_next`. Mirrors the existing client-side
+    // stream wrapper emitted by `try_service`.
+    let req_stream_types = methods.iter().filter_map(|m| {
+        if !m.request_streaming {
+            return None;
+        }
+        let req_ty = &m.request;
+        let req_stream_ident = Ident::new(&format!("__{}ReqStream", m.name), m.name.span());
+        let req_stream_starlark_type = format!("{}.req_stream", snake(m.name.to_string()),);
+        Some(quote! {
+            #[allow(non_camel_case_types, non_snake_case)]
+            #[derive(
+                Debug,
+                ::allocative::Allocative,
+                ::starlark::values::NoSerialize,
+                ::starlark::values::ProvidesStaticType,
+                ::starlark::values::Trace,
+            )]
+            pub struct #req_stream_ident {
+                #[allocative(skip)]
+                pub rt: ::tokio::runtime::Handle,
+                #[allocative(skip)]
+                pub stream: ::std::cell::RefCell<
+                    ::core::option::Option<::tonic::Streaming<#req_ty>>
+                >,
+            }
+
+            impl ::std::fmt::Display for #req_stream_ident {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                    write!(f, stringify!(#req_stream_ident))
+                }
+            }
+
+            impl<'v> ::starlark::values::AllocValue<'v> for #req_stream_ident {
+                fn alloc_value(
+                    self,
+                    heap: ::starlark::values::Heap<'v>,
+                ) -> ::starlark::values::Value<'v> {
+                    heap.alloc_complex_no_freeze(self)
+                }
+            }
+
+            #[::starlark::values::starlark_value(type = #req_stream_starlark_type)]
+            impl<'v> ::starlark::values::StarlarkValue<'v> for #req_stream_ident {
+                unsafe fn iterate(
+                    &self,
+                    me: ::starlark::values::Value<'v>,
+                    _heap: ::starlark::values::Heap<'v>,
+                ) -> ::starlark::Result<::starlark::values::Value<'v>> {
+                    ::core::result::Result::Ok(me)
+                }
+
+                unsafe fn iter_next(
+                    &self,
+                    _index: usize,
+                    heap: ::starlark::values::Heap<'v>,
+                ) -> ::core::option::Option<::starlark::values::Value<'v>> {
+                    use ::starlark::values::AllocValue;
+                    let mut stream_opt = self.stream.borrow_mut();
+                    let stream = stream_opt.as_mut()?;
+                    match self.rt.block_on(stream.message()) {
+                        ::core::result::Result::Ok(::core::option::Option::Some(msg)) => {
+                            ::core::option::Option::Some(msg.alloc_value(heap))
+                        }
+                        ::core::result::Result::Ok(::core::option::Option::None) => {
+                            *stream_opt = ::core::option::Option::None;
+                            ::core::option::Option::None
+                        }
+                        ::core::result::Result::Err(_) => {
+                            *stream_opt = ::core::option::Option::None;
+                            ::core::option::Option::None
+                        }
+                    }
+                }
+
+                unsafe fn iter_stop(&self) {}
+            }
+        })
+    });
+
+    let sender_impls = methods.iter().filter_map(|m| {
+        if !m.response_streaming {
+            return None;
+        }
+        let resp_ty = &m.response;
+        let sender_ident = Ident::new(&format!("__{}Sender", m.name), m.name.span());
+        let resp_type_name_lit = m.response.to_token_stream().to_string();
+        Some(quote! {
+            #[allow(non_camel_case_types, non_snake_case)]
+            #[derive(Debug)]
+            pub struct #sender_ident {
+                pub tx: ::std::sync::Mutex<::core::option::Option<
+                    ::tokio::sync::mpsc::Sender<
+                        ::core::result::Result<#resp_ty, ::tonic::Status>
+                    >
+                >>,
+            }
+
+            impl ::axl_runtime::engine::grpc::DynSender for #sender_ident {
+                fn send_value(
+                    &self,
+                    value: ::starlark::values::Value<'_>,
+                ) -> ::anyhow::Result<()> {
+                    #[allow(unused_imports)]
+                    use ::starlark::values::ValueLike as _;
+                    let msg = value
+                        .downcast_ref::<#resp_ty>()
+                        .ok_or_else(|| ::anyhow::anyhow!(
+                            "stream.push: expected {}, got {}",
+                            #resp_type_name_lit,
+                            value.get_type(),
+                        ))?
+                        .clone();
+                    let tx_opt = self.tx.lock().unwrap();
+                    let ::core::option::Option::Some(tx) = tx_opt.as_ref() else {
+                        return ::core::result::Result::Err(::anyhow::anyhow!(
+                            "stream.push: stream already closed",
+                        ));
+                    };
+                    // `blocking_send` parks the calling thread (a tokio
+                    // blocking worker) until the channel accepts. On
+                    // client cancellation the receiver is dropped and
+                    // this returns Err — treat as best-effort and let
+                    // the producer notice via `stream.cancelled()`.
+                    match tx.blocking_send(::core::result::Result::Ok(msg)) {
+                        ::core::result::Result::Ok(()) => ::core::result::Result::Ok(()),
+                        ::core::result::Result::Err(_) => ::core::result::Result::Ok(()),
+                    }
+                }
+
+                fn close(&self, status: ::core::option::Option<::tonic::Status>) {
+                    let tx = self.tx.lock().unwrap().take();
+                    if let ::core::option::Option::Some(tx) = tx {
+                        if let ::core::option::Option::Some(s) = status {
+                            // `blocking_send` is OK to call from a sync
+                            // context; the message is the final trailing
+                            // status, after which dropping `tx` closes
+                            // the stream.
+                            let _ = tx.blocking_send(::core::result::Result::Err(s));
+                        }
+                        // Drop the sender — receiver sees the close.
+                        drop(tx);
+                    }
+                }
+
+                fn is_closed(&self) -> bool {
+                    self.tx.lock().unwrap().is_none()
+                }
+
+                fn response_type_name(&self) -> &'static str {
+                    #resp_type_name_lit
+                }
+            }
+        })
+    });
+
+    // Constructor parameter list — one named callable per RPC.
+    let ctor_params = methods.iter().map(|m| {
+        let on_ident = Ident::new(&format!("on_{}", m.method), m.method.span());
+        quote! {
+            #[starlark(require = named)] #on_ident: ::starlark::values::Value<'v>
+        }
+    });
+
+    let ctor_freezes = methods.iter().map(|m| {
+        let on_ident = Ident::new(&format!("on_{}", m.method), m.method.span());
+        let frozen_ident = Ident::new(&format!("frozen_{}", m.method), m.method.span());
+        quote! {
+            let #frozen_ident = ::axl_runtime::engine::util::freeze_value(#on_ident)?;
+        }
+    });
+
+    let dispatch_fields = methods.iter().map(|m| {
+        let frozen_ident = Ident::new(&format!("frozen_{}", m.method), m.method.span());
+        let field_ident = Ident::new(&format!("on_{}", m.method), m.method.span());
+        quote! {
+            #field_ident: ::std::sync::Arc::new(#frozen_ident),
+        }
+    });
+
+    let dispatch_field_decls = methods.iter().map(|m| {
+        let field_ident = Ident::new(&format!("on_{}", m.method), m.method.span());
+        quote! {
+            #[allow(dead_code)]
+            pub #field_ident: ::std::sync::Arc<::starlark::values::OwnedFrozenValue>,
+        }
+    });
+
+    let expanded = quote! {
+        // Dispatch struct: holds one frozen Starlark callable per RPC plus
+        // a tokio handle for re-entering an Evaluator from server tasks.
+        // Real dispatch (creating an Evaluator on a worker, invoking the
+        // callable) is filled in by a follow-up.
+        #[derive(Clone)]
+        pub struct #dispatch_ident {
+            #(#dispatch_field_decls)*
+        }
+
+        impl ::std::fmt::Debug for #dispatch_ident {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                f.debug_struct(stringify!(#dispatch_ident)).finish_non_exhaustive()
+            }
+        }
+
+        // Per-RPC dispatch helpers used by the trait impl below. Split out
+        // so compile errors in the dispatch body don't get buried under
+        // `async_trait`'s expansion.
+        impl #dispatch_ident {
+            #(#helper_methods)*
+        }
+
+        // Per-RPC `DynSender` impls — one struct + trait impl per
+        // server-streaming RPC. Top-level items because the trait impl
+        // can't live inside an inherent `impl Dispatch` block.
+        #(#sender_impls)*
+
+        // Per-RPC request-stream Starlark wrappers for client-streaming
+        // RPCs. Same reasoning as `sender_impls` — top-level items.
+        #(#req_stream_types)*
+
+        #[::tonic::async_trait]
+        impl #server_trait for #dispatch_ident {
+            #(#trait_methods)*
+        }
+
+        impl ::axl_runtime::engine::grpc::ServiceHandle for #dispatch_ident {
+            fn proto_service_name(&self) -> &'static str {
+                #proto_path
+            }
+
+            fn install(
+                &self,
+                routes: ::tonic::service::Routes,
+            ) -> ::tonic::service::Routes {
+                routes.add_service(#tonic_server::new(self.clone()))
+            }
+        }
+
+        // Starlark constructor exposed to .axl as `<Name>Service`. Takes
+        // one named callable per RPC, freezes them, and returns a
+        // `GrpcService` wrapping the dispatch struct.
+        #[::starlark::starlark_module]
+        pub fn #module_ident(globals: &mut ::starlark::environment::GlobalsBuilder) {
+            fn #ctor_ident<'v>(
+                #(#ctor_params,)*
+            ) -> ::anyhow::Result<::axl_runtime::engine::grpc::GrpcService> {
+                #(#ctor_freezes)*
+                let dispatch = #dispatch_ident {
+                    #(#dispatch_fields)*
+                };
+                Ok(::axl_runtime::engine::grpc::GrpcService::new(
+                    ::std::sync::Arc::new(dispatch),
+                ))
+            }
+        }
+
+        #input
+    };
+
+    Ok(expanded)
+}
+
+#[proc_macro_attribute]
+pub fn service_server(
+    attr: proc_macro::TokenStream,
+    item: proc_macro::TokenStream,
+) -> proc_macro::TokenStream {
+    try_service_server(attr.into(), item.into()).unwrap().into()
 }
 
 #[cfg(test)]

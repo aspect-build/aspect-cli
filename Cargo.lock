@@ -375,6 +375,7 @@ dependencies = [
  "sha2",
  "sha256",
  "ssri",
+ "starbuf-derive",
  "starlark",
  "starlark_derive",
  "starlark_map",

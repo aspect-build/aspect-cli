@@ -1,3 +1,4 @@
+load("@bazel//proto/remote_logging.axl", "remote_logging")
 load("./remote_config.axl", "remote_config")
 
 def _idea_impl(ctx):
@@ -24,7 +25,7 @@ def _idea_impl(ctx):
     r = build.wait()
 
     log_file = ctx.std.fs.open("bazel-log.bin")
-    for entry in remote.logging.LogEntry().parse_from_delimited(log_file):
+    for entry in remote_logging.LogEntry().parse_from_delimited(log_file):
         if entry.method_name == "build.bazel.remote.execution.v2.ActionCache/GetActionResult":
             metadata = entry.metadata
             status = entry.status

@@ -38,7 +38,7 @@ pub fn documentation() -> anyhow::Result<Documentation> {
 
     let mut builtins = Vec::new();
     for filename in list_std_files() {
-        let content = builtins::get(filename)
+        let content = builtins::get("std", filename)
             .ok_or_else(|| anyhow!("'{}' does not exist in @std", filename))?;
         let path = PathBuf::from(format!("/@std/{filename}"));
         let frozen = loader
