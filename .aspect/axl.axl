@@ -26,7 +26,7 @@ load("@aspect//lib/github.axl", "detect_commit_sha", "github")
 load("@aspect//lib/path_glob.axl", "match_any", "match_path")
 load("@aspect//lib/repro_commands.axl", "build_aspect_command", "dedup_and_attribute", "patch_download_cmd", "task_cli_path")
 load("@aspect//lib/result_text.axl", "severity_for_status")
-load("@aspect//lib/runnable.axl", "canonical_label", "runnable")
+load("@aspect//lib/runnable.axl", "apparent_label", "runnable")
 load("@aspect//lib/sarif.axl", "get_sarif_summary", "parse_sarif", "parse_sarif_diagnostics", "sarif_to_review_comments")
 load("@aspect//lib/tips.axl", "tips")
 load("@aspect//lint.axl", "file_uri_to_path", "filter_all", "filter_changeset")
@@ -2690,16 +2690,12 @@ def test_repro_commands_lib(tc: int) -> int:
     return tc
 
 def test_process_bes_target_completed(ctx: TaskContext, tc: int) -> int:
-    """Regression test for the canonical_label-shadow bug in _process_bes.
+    """Regression test for the apparent_label-shadow bug in _process_bes.
 
-    When `_canonical` was renamed to `canonical_label` (matching the function
-    in lib/runnable.axl), the local `canonical_label = canonical_label(...)`
-    inside `_process_bes` started shadowing the module-level function for the
-    whole function scope, breaking the call with "referenced before assignment".
-
-    This test wires up `runnable()` and feeds a fake `target_completed` event
-    through `r.event(...)` — the same call path delivery and format use. Before
-    the fix this raised; after the fix it succeeds and populates target_fileset.
+    The local variable assigned inside `_process_bes` must not shadow the
+    module-level `apparent_label` function used on the right-hand side of the
+    same assignment. Before the fix, this raised "referenced before assignment";
+    after the fix it succeeds and populates target_fileset.
     """
     r = runnable(ctx, ["//foo:bar"])
     fake_event = struct(
@@ -2712,7 +2708,7 @@ def test_process_bes_target_completed(ctx: TaskContext, tc: int) -> int:
 
     # Pre-fix this call raised; post-fix it returns None and updates state.
     r.event(fake_event)
-    tc = test_case(tc, True, "_process_bes: target_completed does not raise (canonical_label shadow regression)")
+    tc = test_case(tc, True, "_process_bes: target_completed does not raise (apparent_label shadow regression)")
 
     # named_set_of_files event also goes through _process_bes — sanity check.
     fake_nsf = struct(
@@ -2785,8 +2781,8 @@ def test_json_try_decode(tc: int) -> int:
 
     return tc
 
-def test_canonical_label(tc: int) -> int:
-    """Coverage for runnable.canonical_label — Bazel label normalization."""
+def test_apparent_label(tc: int) -> int:
+    """Coverage for runnable.apparent_label — Bazel label normalization."""
     cases = [
         ("//foo", "//foo:foo", "//foo → //foo:foo"),
         ("//foo:bar", "//foo:bar", "explicit target unchanged"),
@@ -2797,10 +2793,13 @@ def test_canonical_label(tc: int) -> int:
         ("@repo//foo", "@repo//foo:foo", "repo-prefixed label"),
         ("@repo//foo:bar", "@repo//foo:bar", "repo-prefixed with target"),
         ("//foo:", "//foo:", "empty target name kept (caller error, not normalized)"),
+        ("@@buildifier_prebuilt+//buildifier:buildifier", "@buildifier_prebuilt//buildifier:buildifier", "bzlmod no-version"),
+        ("@@rules_python+0.40.0//python:python", "@rules_python//python:python", "bzlmod with-version"),
+        ("@@rules_python+pip+numpy//:pkg", "@numpy//:pkg", "bzlmod extension repo"),
     ]
     for (input, expected, desc) in cases:
-        got = canonical_label(input)
-        tc = test_case(tc, got == expected, "canonical_label: %s → %r (got %r)" % (desc, expected, got))
+        got = apparent_label(input)
+        tc = test_case(tc, got == expected, "apparent_label: %s → %r (got %r)" % (desc, expected, got))
     return tc
 
 def test_color_enabled(ctx: TaskContext, tc: int) -> int:
@@ -3046,7 +3045,7 @@ def impl(ctx: TaskContext) -> int:
     tc = test_sarif_lib(tc)
     tc = test_file_uri_to_path(tc)
     tc = test_json_try_decode(tc)
-    tc = test_canonical_label(tc)
+    tc = test_apparent_label(tc)
     tc = test_process_bes_target_completed(ctx, tc)
     tc = test_validate_role(tc)
     tc = test_lint_filters(tc)
