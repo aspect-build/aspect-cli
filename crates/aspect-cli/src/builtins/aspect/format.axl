@@ -158,7 +158,8 @@ _FIX_FILES_LIMIT = 20
 _DETECTION_PAIRS = [
     ("scope", "--scope"),
     ("formatter_target", "--formatter-target"),
-    ("ignore_patterns", "--ignore-pattern"),
+    ("exclude_patterns", "--exclude-pattern"),
+    ("include_patterns", "--include-pattern"),
     ("merge_base", "--merge-base"),
 ]
 
@@ -197,7 +198,7 @@ def _append_fix_commands(ctx, data):
     task_path = task_cli_path(ctx.task)
 
     # Positional file list bypasses --scope / --base-ref / --merge-base /
-    # --ignore-pattern, so the explicit-file fix command omits them
+    # --exclude-pattern, so the explicit-file fix command omits them
     # and only preserves the user-explicit `--formatter-target`.
     positional_flags = ([("--on-change", "silent")] +
                         explicit_flags(ctx, [("formatter_target", "--formatter-target")]))
@@ -433,11 +434,12 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         _emit_final(ctx, lifecycle, data, 1)
         fail("Failed to determine the formatter entrypoint.")
 
-    ignore_patterns = list(ctx.args.ignore_patterns)
+    exclude_patterns = list(ctx.args.exclude_patterns)
+    include_patterns = list(ctx.args.include_patterns)
 
     # Positional files explicitly provided → bypass change-detection
-    # entirely. `--scope`, `--base-ref`, `--merge-base`, and
-    # `--ignore-pattern` are silently ignored here; the formatter
+    # entirely. `--scope`, `--base-ref`, `--merge-base`, `--exclude-pattern`,
+    # and `--include-pattern` are silently ignored here; the formatter
     # receives exactly the listed paths. This is the typical local
     # repro path: the user copies the fix command from CI which
     # carries a positional file list, runs it as-is.
@@ -490,11 +492,17 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             format_args = []
         else:
             changed_files = detect_result["files"]
-            if ignore_patterns:
-                kept = [f for f in changed_files if not match_any(ignore_patterns, f)]
-                ignored_count = len(changed_files) - len(kept)
-                if ignored_count > 0:
-                    info(ctx.std, "Filtered %d file(s) via --ignore-pattern." % ignored_count)
+            if include_patterns:
+                kept = [f for f in changed_files if match_any(include_patterns, f)]
+                skipped_count = len(changed_files) - len(kept)
+                if skipped_count > 0:
+                    info(ctx.std, "Skipped %d file(s) not matching --include-pattern." % skipped_count)
+                changed_files = kept
+            if exclude_patterns:
+                kept = [f for f in changed_files if not match_any(exclude_patterns, f)]
+                n_excluded = len(changed_files) - len(kept)
+                if n_excluded > 0:
+                    info(ctx.std, "Filtered %d file(s) via --exclude-pattern." % n_excluded)
                 changed_files = kept
             if not changed_files:
                 info(ctx.std, "No files to format")
@@ -504,7 +512,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             # Surface the input file count so the Configuration row can show
             # `Scope: changed — N file(s)` (analogous to lint's
             # "Strategy: hold-the-line — filtered to N changed files"). This
-            # is the post-ignore-pattern set the formatter actually saw.
+            # is the post-filter set the formatter actually sees.
             data["changed_files_count"] = len(changed_files)
             format_args = changed_files
 
@@ -600,27 +608,26 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         print("No files%s were modified." % scope_text)
         return _emit_final(ctx, lifecycle, data, 0)
 
-    # List the affected file set, then filter through --ignore-pattern.
-    # Ignore patterns hide files from BOTH the user-facing affected list
-    # and the failure decision below. They don't undo the formatter's
-    # changes — those still sit in the working tree — but they prevent
-    # files in (e.g.) nested Bazel workspaces or vendored directories
+    # List the affected file set, then filter through --include-pattern and
+    # --exclude-pattern. Both hide files from the user-facing affected list
+    # and the failure decision below. They don't undo the formatter's changes —
+    # those still sit in the working tree — but they prevent unexpected files
     # from failing this task.
     name_out, _, _ = _git_capture(ctx, "diff", "--name-only", pre_snap if pre_snap else "HEAD")
-    affected_all = [f for f in name_out.strip().split("\n") if f]
-    if ignore_patterns:
-        affected = [f for f in affected_all if not match_any(ignore_patterns, f)]
-        ignored_count = len(affected_all) - len(affected)
-    else:
-        affected = affected_all
-        ignored_count = 0
+    affected_raw = [f for f in name_out.strip().split("\n") if f]
+    affected = affected_raw
+    if include_patterns and not explicit_files:
+        affected = [f for f in affected if match_any(include_patterns, f)]
+    if exclude_patterns:
+        affected = [f for f in affected if not match_any(exclude_patterns, f)]
+    filtered_count = len(affected_raw) - len(affected)
 
     if not affected:
-        # All formatter changes are in ignored paths — task is OK from the
-        # user's perspective. Note any working-tree changes the formatter
-        # made so they aren't surprising downstream.
-        if ignored_count > 0:
-            info(ctx.std, "Formatter modified %d file(s), all matching --ignore-pattern; treating as OK." % ignored_count)
+        # All formatter changes are hidden by pattern filters — task is OK
+        # from the user's perspective. Note the working-tree changes so they
+        # aren't surprising downstream.
+        if filtered_count > 0:
+            info(ctx.std, "Formatter modified %d file(s), all filtered by pattern rules; treating as OK." % filtered_count)
         return _emit_final(ctx, lifecycle, data, 0)
 
     n = len(affected)
@@ -636,26 +643,25 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         print("%d files%s were modified:" % (n, scope_qual))
     for f in affected:
         print("  - %s" % f)
-    if ignored_count > 0:
-        print("(also modified %d file(s) matching --ignore-pattern; not counted toward failure)" % ignored_count)
+    if filtered_count > 0:
+        print("(also modified %d file(s) hidden by pattern filters; not counted toward failure)" % filtered_count)
 
-    # Populate data with the affected file set and ignore count for status checks.
+    # Populate data with the affected file set and filtered count for status checks.
     data["format"]["affected_files"] = affected
-    data["format"]["ignored_count"] = ignored_count
+    data["format"]["filtered_count"] = filtered_count
 
     # Optional: archive the diff as a CI artifact so reviewers can apply
     # it locally without re-running the formatter. Off by default.
     #
-    # Scope the uploaded patch to `affected` (the post-ignore file set)
-    # so it matches the failure-decision basis. In --scope=changed mode
-    # this is redundant — the formatter never saw ignored files, so
-    # `formatter_diff` is already scoped to un-ignored paths. In
-    # --scope=all mode the formatter discovers files itself via
-    # `git ls-files` and rewrites ignored ones; without re-scoping, the
-    # uploaded patch would carry those changes even though they don't
-    # contribute to failure or appear in the user-facing affected list.
+    # Scope the uploaded patch to `affected` (the post-filter file set) so
+    # it matches the failure-decision basis. In --scope=changed mode this
+    # is redundant — the formatter never saw filtered files, so the diff is
+    # already scoped. In --scope=all mode the formatter discovers files
+    # itself via `git ls-files` and rewrites filtered ones; without re-
+    # scoping, the patch would carry changes that don't contribute to
+    # failure or appear in the user-facing affected list.
     if ctx.args.upload_format_diff:
-        if ignored_count > 0:
+        if filtered_count > 0:
             upload_diff, _, _ = _git_capture(
                 ctx,
                 "diff",
@@ -701,9 +707,13 @@ format = task(
             long = "on-change",
             description = "Verdict when the formatter modified files. 'silent' exits 0 (status=passed). 'warn' exits 0 with status=warning — a non-fatal yellow signal in CI surfaces. 'fail' exits 1 with status=failed — the CI gate. 'auto' (default) resolves to 'fail' on a recognized CI host and 'silent' off CI. The formatter binary's own non-zero exits surface as task failures regardless.",
         ),
-        "ignore_patterns": args.string_list(
-            long = "ignore-pattern",
-            description = "Glob pattern(s) of paths to exclude from formatting. Repeat the flag to pass multiple — e.g. `--ignore-pattern='vendor/**' --ignore-pattern='**/*.generated.go'`. Patterns match against repo-relative file paths. In `--scope=changed` (default), filtered files are dropped from the file list passed to the formatter. In `--scope=all`, the formatter discovers files itself, so ignored files may still be rewritten on disk; in either scope, ignored files are excluded from the post-format diff used to decide whether the task fails. Useful for nested Bazel workspaces (where running the parent's formatter would stomp the child's files) and for vendored / generated directories. Pattern syntax: `*` (one segment), `**` (zero or more segments), `?` (one char); case-sensitive.",
+        "include_patterns": args.string_list(
+            long = "include-pattern",
+            description = "Glob pattern(s) of paths to include in formatting. When set, only files matching at least one pattern are passed to the formatter; all others are silently skipped. Repeat the flag to pass multiple — e.g. `--include-pattern='**/*.bzl' --include-pattern='**/BUILD'`. Patterns match against repo-relative file paths (note: `*` matches within one directory level, so use `**/*.bzl` not `*.bzl` to match files at any depth). Useful when the formatter_target is a raw binary that handles only a single file type. In `--scope=changed` (default), non-matching files are dropped from the file list before invoking the formatter. Applied before --exclude-pattern. Pattern syntax: `*` (one segment), `**` (zero or more segments), `?` (one char); case-sensitive.",
+        ),
+        "exclude_patterns": args.string_list(
+            long = "exclude-pattern",
+            description = "Glob pattern(s) of paths to exclude from formatting. Repeat the flag to pass multiple — e.g. `--exclude-pattern='vendor/**' --exclude-pattern='**/*.generated.go'`. Patterns match against repo-relative file paths. In `--scope=changed` (default), filtered files are dropped from the file list passed to the formatter. In `--scope=all`, the formatter discovers files itself, so excluded files may still be rewritten on disk; in either scope, excluded files are omitted from the post-format diff used to decide whether the task fails. Useful for nested Bazel workspaces (where running the parent's formatter would stomp the child's files) and for vendored / generated directories. Pattern syntax: `*` (one segment), `**` (zero or more segments), `?` (one char); case-sensitive.",
         ),
         "upload_format_diff": args.boolean(
             default = True,
@@ -731,7 +741,7 @@ format = task(
         # Positional file list. When non-empty, the formatter receives
         # these files directly — change-detection is skipped, and
         # `--scope`, `--base-ref`, `--merge-base`, and
-        # `--ignore-pattern` are silently ignored. This is the "format
+        # `--exclude-pattern` are silently ignored. This is the "format
         # these specific files" mode reviewers use locally after
         # picking up a fix command from CI:
         #
@@ -743,7 +753,7 @@ format = task(
         # format -- file1 file2`).
         "files": args.positional(
             default = [],
-            description = "Optional positional list of files to format. When non-empty the formatter runs on exactly these paths and the change-detection flags (--scope / --base-ref / --merge-base / --ignore-pattern) are ignored. When empty, the task auto-discovers files via the configured --scope.",
+            description = "Optional positional list of files to format. When non-empty the formatter runs on exactly these paths and the change-detection flags (--scope / --base-ref / --merge-base / --exclude-pattern) are ignored. When empty, the task auto-discovers files via the configured --scope.",
             maximum = 4096,
             minimum = 0,
         ),
