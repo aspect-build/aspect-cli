@@ -2787,7 +2787,7 @@ def test_canonical_label(tc: int) -> int:
         ("//foo/bar", "//foo/bar:bar", "deep path → leaf as target"),
         ("//foo/bar/baz", "//foo/bar/baz:baz", "deeper path"),
         ("//foo/bar:baz", "//foo/bar:baz", "explicit target with deep path"),
-        ("//", "//:", "root-only edge case"),
+        ("//", "//", "root-only edge case (no package, no target — kept as-is)"),
         ("@repo//foo", "@repo//foo:foo", "repo-prefixed label"),
         ("@repo//foo:bar", "@repo//foo:bar", "repo-prefixed with target"),
         ("//foo:", "//foo:", "empty target name kept (caller error, not normalized)"),
