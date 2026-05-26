@@ -116,7 +116,7 @@ load("@aspect//lib/github.axl", "detect_commit_sha")
 load("@aspect//lib/health_check.axl", "HealthCheckTrait")
 load("@aspect//lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "preflight_phase", "setup_phase", "task_update")
 load("@aspect//lib/repro_commands.axl", "build_aspect_command", "task_cli_path")
-load("@aspect//lib/runnable.axl", "runnable")
+load("@aspect//lib/runnable.axl", "apparent_label", "runnable")
 load("@aspect//lib/text.axl", "pluralize")
 load("@aspect//lib/tips.axl", "tips")
 load("@std//time.axl", "sleep_iter", "time")
@@ -181,12 +181,6 @@ def _print_captured_output(label, exit_code, stdout, stderr, ansi):
     if combined.strip():
         print(combined)
     print(_style(sep, _BOLD, ansi))
-
-def _canonical(label):
-    """Normalize a Bazel label to canonical form: //foo/bar -> //foo/bar:bar."""
-    if ":" not in label:
-        return label + ":" + label.split("/")[-1]
-    return label
 
 def _write_aspect_repo(ctx, repo_dir):
     ctx.std.fs.create_dir_all(repo_dir)
@@ -390,9 +384,9 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
         *targets
     ).wait()
 
-    # The grpc log always records the canonical label (//foo/bar:bar), so normalize
-    # the user-supplied targets before matching.
-    canonical_targets = {_canonical(t): t for t in targets}
+    # Normalize user-supplied targets to apparent form so they match however
+    # the gRPC log records the label (canonical @@module+// or apparent @module//).
+    apparent_targets = {apparent_label(t): t for t in targets}
 
     # output_shas: DeliveryHash action_digest per target (hit or miss).
     # misses_by_producer: non-OK entries for any other mnemonic, keyed by
@@ -404,19 +398,19 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
         if entry.method_name != "build.bazel.remote.execution.v2.ActionCache/GetActionResult":
             continue
         trace.log(entry)
-        canonical_label = entry.metadata.target_id
+        entry_label = apparent_label(entry.metadata.target_id)
         mnemonic = entry.metadata.action_mnemonic
         if mnemonic == _DELIVERY_HASH_MNEMONIC:
-            if canonical_label in canonical_targets:
-                output_shas[canonical_targets[canonical_label]] = entry.details.details.request.action_digest.hash
+            if entry_label in apparent_targets:
+                output_shas[apparent_targets[entry_label]] = entry.details.details.request.action_digest.hash
             continue
 
         # Non-DeliveryHash entry; record only the cache misses.
         if entry.status.code != 0:
-            existing = misses_by_producer.get(canonical_label, [])
+            existing = misses_by_producer.get(entry_label, [])
             if mnemonic not in existing:
                 existing.append(mnemonic)
-                misses_by_producer[canonical_label] = existing
+                misses_by_producer[entry_label] = existing
     ctx.std.fs.remove_file(log_path)
     _unresolved = len(targets) - len(output_shas)
     if _unresolved == 0:
@@ -979,7 +973,7 @@ def _delivery_impl(ctx):
             # (e.g. PyWriteBuildData with --stamp); otherwise give the
             # generic alias hint.
             pending_count += 1
-            mnemonics = non_hermetic_misses.get(_canonical(label), [])
+            mnemonics = non_hermetic_misses.get(apparent_label(label), [])
             if mnemonics:
                 msg = "no digest: non-cacheable upstream action(s) ({}); likely non-hermetic. Phase-2 raw log: {}".format(", ".join(mnemonics), _PHASE2_LOG_PATH.format(ctx.task.key))
             else:

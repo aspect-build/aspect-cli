@@ -1,6 +1,31 @@
 _DEFAULT_WORKSPACE_NAME = "_main"
 
-def canonical_label(label):
+def apparent_label(label):
+    """Normalize any Bazel label form to apparent form with an explicit target name.
+
+    Bazel surfaces two label forms depending on context:
+    - Apparent:   `@module//pkg:tgt`      — what users write; what BES emits for WORKSPACE repos
+    - Canonical:  `@@module+ver//pkg:tgt` — what BES emits for bzlmod repos
+
+    This function converts either input to apparent form and appends the
+    implicit target name when no `:` is present, yielding a stable key
+    suitable for matching user-supplied targets against BES event labels.
+
+    Canonical → apparent stripping rules:
+        Module repo:    `@@module+version//pkg:tgt`  → `@module//pkg:tgt`
+        Extension repo: `@@module+ext+repo//pkg:tgt` → `@repo//pkg:tgt`
+    """
+    if label.startswith("@@"):
+        rest = label[2:]
+        idx = rest.find("//")
+        if idx >= 0:
+            canonical_repo = rest[:idx]
+            parts = canonical_repo.split("+")
+
+            # Module repos:    module+version     → apparent name is parts[0]
+            # Extension repos: module+ext+repo    → apparent name is parts[-1]
+            apparent_repo = parts[-1] if len(parts) >= 3 else parts[0]
+            label = "@" + apparent_repo + rest[idx:]
     if ":" not in label:
         return label + ":" + label.split("/")[-1]
     return label
@@ -9,11 +34,9 @@ def _process_bes(state: struct, event):
     if event.kind == "named_set_of_files":
         state.filesets[event.id.id] = event.payload
     elif event.kind == "target_completed":
-        # Bind to a fresh name; assigning to `canonical_label` here would shadow
-        # the module-level function (which gets called on the right-hand side)
-        # for the entire function body, breaking the call with
-        # "referenced before assignment".
-        canonical = canonical_label(event.id.label)
+        # Use a fresh local name to avoid shadowing the module-level `apparent_label`
+        # function on the right-hand side of the same assignment.
+        canonical = apparent_label(event.id.label)
         if canonical in state.targets:
             for og in event.payload.output_group:
                 if og.name == "default":
@@ -35,7 +58,7 @@ def _determine_entrypoint(state: struct, target: str) -> str | None:
     caller pairs this with `is_runnable` to distinguish "not in BES" from
     "in BES but no runfiles tree".
     """
-    target = canonical_label(target)
+    target = apparent_label(target)
     if target not in state.target_fileset:
         return None
 
@@ -100,7 +123,7 @@ def _spawn(ctx: TaskContext, state: struct, entrypoint: str, args: list[str], ca
 def runnable(ctx, targets: list[str]) -> struct:
     state = struct(
         ctx = ctx,
-        targets = {canonical_label(t): t for t in targets},
+        targets = {apparent_label(t): t for t in targets},
         filesets = {},
         target_fileset = {},
         # Single-element list so `_process_bes` can mutate it (struct fields are
