@@ -1,31 +1,31 @@
-"""Unit tests for lib/runnable.axl: canonical_label and BES label matching."""
+"""Unit tests for lib/runnable.axl: apparent_label normalization and BES matching."""
 
-load("./runnable.axl", "canonical_label", "runnable")
+load("./runnable.axl", "apparent_label", "runnable")
 
 def _eq(label, got, want):
     if got != want:
         fail("%s: got %r, want %r" % (label, got, want))
 
 def _test_local_label_with_colon(ctx):
-    _eq("local label unchanged", canonical_label("//tools/format:format"), "//tools/format:format")
+    _eq("local label unchanged", apparent_label("//tools/format:format"), "//tools/format:format")
 
 def _test_local_label_without_colon(ctx):
-    _eq("appends :name", canonical_label("//tools/format"), "//tools/format:format")
+    _eq("appends :name", apparent_label("//tools/format"), "//tools/format:format")
 
 def _test_external_label_with_colon(ctx):
-    _eq("external label unchanged", canonical_label("@repo//pkg:target"), "@repo//pkg:target")
+    _eq("external label unchanged", apparent_label("@repo//pkg:target"), "@repo//pkg:target")
 
 def _test_external_label_without_colon(ctx):
-    _eq("external label gets :name", canonical_label("@repo//pkg"), "@repo//pkg:pkg")
+    _eq("external label gets :name", apparent_label("@repo//pkg"), "@repo//pkg:pkg")
 
 def _test_root_package_label(ctx):
-    _eq("root package alias", canonical_label("@repo//:alias"), "@repo//:alias")
+    _eq("root package alias", apparent_label("@repo//:alias"), "@repo//:alias")
 
 def _test_bzlmod_no_version(ctx):
     """@@module+//pkg:tgt — bzlmod canonical form with no version."""
     _eq(
         "bzlmod no version",
-        canonical_label("@@buildifier_prebuilt+//buildifier:buildifier"),
+        apparent_label("@@buildifier_prebuilt+//buildifier:buildifier"),
         "@buildifier_prebuilt//buildifier:buildifier",
     )
 
@@ -33,7 +33,7 @@ def _test_bzlmod_with_version(ctx):
     """@@module+version//pkg:tgt — bzlmod canonical form with version string."""
     _eq(
         "bzlmod with version",
-        canonical_label("@@rules_python+0.40.0//python:python"),
+        apparent_label("@@rules_python+0.40.0//python:python"),
         "@rules_python//python:python",
     )
 
@@ -41,7 +41,7 @@ def _test_bzlmod_without_colon(ctx):
     """@@module+//pkg — bzlmod canonical form that also needs :name appended."""
     _eq(
         "bzlmod without colon",
-        canonical_label("@@buildifier_prebuilt+//buildifier"),
+        apparent_label("@@buildifier_prebuilt+//buildifier"),
         "@buildifier_prebuilt//buildifier:buildifier",
     )
 
@@ -49,7 +49,7 @@ def _test_bzlmod_root_alias(ctx):
     """@@module+//:alias — bzlmod canonical alias in root package."""
     _eq(
         "bzlmod root alias",
-        canonical_label("@@buildifier_prebuilt+//:buildifier"),
+        apparent_label("@@buildifier_prebuilt+//:buildifier"),
         "@buildifier_prebuilt//:buildifier",
     )
 
@@ -57,7 +57,7 @@ def _test_bzlmod_extension_repo(ctx):
     """@@module+ext+repo//... — extension-generated repo; apparent name is the last segment."""
     _eq(
         "extension repo",
-        canonical_label("@@rules_python+pip+numpy//:pkg"),
+        apparent_label("@@rules_python+pip+numpy//:pkg"),
         "@numpy//:pkg",
     )
 
@@ -65,7 +65,7 @@ def _test_bzlmod_extension_repo_without_colon(ctx):
     """@@module+ext+repo//pkg — extension repo that also needs :name appended."""
     _eq(
         "extension repo without colon",
-        canonical_label("@@rules_python+pip+numpy//numpy"),
+        apparent_label("@@rules_python+pip+numpy//numpy"),
         "@numpy//numpy:numpy",
     )
 
@@ -73,7 +73,7 @@ def _test_bzlmod_4seg_extension_repo(ctx):
     """@@a+b+c+d//... — 4-segment canonical form; apparent name is still the last segment."""
     _eq(
         "4-segment extension repo",
-        canonical_label("@@rules_python+0.40.0+pip+numpy//numpy:pkg"),
+        apparent_label("@@rules_python+0.40.0+pip+numpy//numpy:pkg"),
         "@numpy//numpy:pkg",
     )
 
@@ -83,9 +83,9 @@ def _test_bzlmod_4seg_extension_repo(ctx):
 # These construct minimal mock BES events and verify that the full
 # runnable() → _process_bes → _determine_entrypoint pipeline correctly
 # maps bzlmod canonical labels emitted by the BES back to the apparent
-# labels registered by the caller.  A test here would FAIL on the old
-# canonical_label (before the @@-stripping fix) because target_completed
-# events would never land in state.target_fileset.
+# labels registered by the caller.  Each test here would FAIL before the
+# @@-stripping fix because target_completed events with canonical bzlmod
+# labels never landed in state.target_fileset.
 # ---------------------------------------------------------------------------
 
 def _make_fileset_event(set_id, file_path):
@@ -179,7 +179,7 @@ _UNIT_TESTS = [
 def _test_impl(ctx):
     for t in _UNIT_TESTS:
         t(ctx)
-    print("runnable.axl: OK (%d sections)" % len(_UNIT_TESTS))
+    print("runnable.axl: OK (%d tests)" % len(_UNIT_TESTS))
     return 0
 
 runnable_tests = task(
