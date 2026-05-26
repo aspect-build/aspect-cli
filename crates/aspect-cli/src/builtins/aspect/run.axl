@@ -46,9 +46,14 @@ def _impl(ctx: TaskContext) -> int:
         startup_flags = startup_flags,
     )
 
-    # `run` inherits the `build` section in Bazel's rc hierarchy, so this picks
-    # up `common`, `build`, and `run` flags. Forwarded as-is to ctx.bazel.build.
-    rc_startup_flags, flags = rc.expand_all(command = "run")
+    # Expand for `build`, not `run`: this task invokes `ctx.bazel.build`, which
+    # spawns a literal `bazel build`. Expanding for `run` would inject run-only
+    # options (e.g. `--script_path`, listed under Bazel's Run Options) that
+    # `bazel build` rejects as "unrecognized option", so users with entries in
+    # the `run:` section of their .bazelrc would fail before execution. Aspect
+    # spawns the runnable itself after the build, so the run-section is not
+    # the right source of flags here.
+    rc_startup_flags, flags = rc.expand_all(command = "build")
     ctx.bazel.startup_flags.extend(startup_flags + rc_startup_flags + ["--ignore_all_rc_files"])
 
     # Required for the spawn to succeed: keep BES artifact references
