@@ -16,6 +16,7 @@ def canonical_label(label: str, current_package: str = "") -> str:
       canonical_label("sub:baz", "foo")       -> "//foo/sub:baz"
       canonical_label("baz", "")              -> "//:baz"
     """
+
     # Absolute: //pkg[:name] or @repo//pkg[:name].
     if label.startswith("//") or label.startswith("@"):
         pkg_part = label.split("//", 1)[-1]
