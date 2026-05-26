@@ -14,6 +14,7 @@ load("@aspect//lib/gitlab_test.axl", "gitlab_client_tests")
 load("@aspect//lib/lint_results_test.axl", "detect_lint_tool_tests", "lint_annotation_plan_tests", "lint_template_snapshot_tests", "linter_rows_tests")
 load("@aspect//lib/rate_limit_test.axl", "rate_limit_tests")
 load("@aspect//lib/repro_commands_test.axl", "repro_commands_tests")
+load("@aspect//lib/runnable_test.axl", "runnable_tests")
 load("@aspect//lib/runner_job_history_test.axl", "runner_job_history_tests")
 load("@aspect//lib/tar_test.axl", "tar_tests")
 load("@aspect//lib/tips_test.axl", "tips_tests")
@@ -127,6 +128,11 @@ def config(ctx: ConfigContext):
     # and unsupported host inputs.
     # Run with: aspect dev test-tar
     ctx.tasks.add(tar_tests)
+
+    # canonical_label normalization — local labels, external labels, and bzlmod
+    # canonical @@module+version//... → @module//... conversion.
+    # Run with: aspect dev test-runnable
+    ctx.tasks.add(runnable_tests)
 
     # Repro-command filtering — `explicit_flags` skips flags whose
     # values match the task's default (including alias-overridden

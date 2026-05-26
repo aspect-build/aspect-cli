@@ -1,0 +1,97 @@
+"""Unit tests for `lib/runnable.axl::canonical_label`."""
+
+load("./runnable.axl", "canonical_label")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _test_local_label_with_colon(ctx):
+    _eq("local label unchanged", canonical_label("//tools/format:format"), "//tools/format:format")
+
+def _test_local_label_without_colon(ctx):
+    _eq("appends :name", canonical_label("//tools/format"), "//tools/format:format")
+
+def _test_external_label_with_colon(ctx):
+    _eq("external label unchanged", canonical_label("@repo//pkg:target"), "@repo//pkg:target")
+
+def _test_external_label_without_colon(ctx):
+    _eq("external label gets :name", canonical_label("@repo//pkg"), "@repo//pkg:pkg")
+
+def _test_root_package_label(ctx):
+    _eq("root package alias", canonical_label("@repo//:alias"), "@repo//:alias")
+
+def _test_bzlmod_no_version(ctx):
+    """@@module+//pkg:tgt — bzlmod canonical form with no version."""
+    _eq(
+        "bzlmod no version",
+        canonical_label("@@buildifier_prebuilt+//buildifier:buildifier"),
+        "@buildifier_prebuilt//buildifier:buildifier",
+    )
+
+def _test_bzlmod_with_version(ctx):
+    """@@module+version//pkg:tgt — bzlmod canonical form with version string."""
+    _eq(
+        "bzlmod with version",
+        canonical_label("@@rules_python+0.40.0//python:python"),
+        "@rules_python//python:python",
+    )
+
+def _test_bzlmod_without_colon(ctx):
+    """@@module+//pkg — bzlmod canonical form that also needs :name appended."""
+    _eq(
+        "bzlmod without colon",
+        canonical_label("@@buildifier_prebuilt+//buildifier"),
+        "@buildifier_prebuilt//buildifier:buildifier",
+    )
+
+def _test_bzlmod_root_alias(ctx):
+    """@@module+//:alias — bzlmod canonical alias in root package."""
+    _eq(
+        "bzlmod root alias",
+        canonical_label("@@buildifier_prebuilt+//:buildifier"),
+        "@buildifier_prebuilt//:buildifier",
+    )
+
+def _test_bzlmod_extension_repo(ctx):
+    """@@module+ext+repo//... — extension-generated repo; apparent name is the last segment."""
+    _eq(
+        "extension repo",
+        canonical_label("@@rules_python+pip+numpy//:pkg"),
+        "@numpy//:pkg",
+    )
+
+def _test_bzlmod_extension_repo_without_colon(ctx):
+    """@@module+ext+repo//pkg — extension repo that also needs :name appended."""
+    _eq(
+        "extension repo without colon",
+        canonical_label("@@rules_python+pip+numpy//numpy"),
+        "@numpy//numpy:numpy",
+    )
+
+_UNIT_TESTS = [
+    _test_local_label_with_colon,
+    _test_local_label_without_colon,
+    _test_external_label_with_colon,
+    _test_external_label_without_colon,
+    _test_root_package_label,
+    _test_bzlmod_no_version,
+    _test_bzlmod_with_version,
+    _test_bzlmod_without_colon,
+    _test_bzlmod_root_alias,
+    _test_bzlmod_extension_repo,
+    _test_bzlmod_extension_repo_without_colon,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("runnable.axl: OK (%d sections)" % len(_UNIT_TESTS))
+    return 0
+
+runnable_tests = task(
+    name = "test-runnable",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

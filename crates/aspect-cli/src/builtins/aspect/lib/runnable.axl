@@ -1,6 +1,25 @@
 _DEFAULT_WORKSPACE_NAME = "_main"
 
 def canonical_label(label):
+    """Normalize a Bazel label to its user-visible apparent form.
+
+    Handles two cases:
+    - bzlmod canonical prefix → apparent form (BES emits canonical; users write apparent):
+        Module repo:    `@@module+version//pkg:tgt`     → `@module//pkg:tgt`
+        Extension repo: `@@module+ext+repo//pkg:tgt`    → `@repo//pkg:tgt`
+    - implicit target name: `@repo//pkg` → `@repo//pkg:pkg`
+    """
+    if label.startswith("@@"):
+        rest = label[2:]
+        idx = rest.find("//")
+        if idx >= 0:
+            canonical_repo = rest[:idx]
+            parts = canonical_repo.split("+")
+
+            # Module repos:    module+version     → apparent name is parts[0]
+            # Extension repos: module+ext+repo    → apparent name is parts[-1]
+            apparent_repo = parts[-1] if len(parts) >= 3 else parts[0]
+            label = "@" + apparent_repo + rest[idx:]
     if ":" not in label:
         return label + ":" + label.split("/")[-1]
     return label
