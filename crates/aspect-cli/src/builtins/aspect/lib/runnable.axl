@@ -34,13 +34,11 @@ def _process_bes(state: struct, event):
     if event.kind == "named_set_of_files":
         state.filesets[event.id.id] = event.payload
     elif event.kind == "target_completed":
-        # Use a fresh local name to avoid shadowing the module-level `apparent_label`
-        # function on the right-hand side of the same assignment.
-        canonical = apparent_label(event.id.label)
-        if canonical in state.targets:
+        label_key = apparent_label(event.id.label)
+        if label_key in state.targets:
             for og in event.payload.output_group:
                 if og.name == "default":
-                    state.target_fileset[canonical] = og.file_sets
+                    state.target_fileset[label_key] = og.file_sets
     elif event.kind == "workspace_config":
         # WorkspaceConfig.local_exec_root is "<output_base>/execroot/<workspace_name>".
         # Its basename is the canonical repo name Bazel uses inside runfiles trees.
@@ -54,20 +52,22 @@ def _determine_entrypoint(state: struct, target: str) -> str | None:
     Picks the file whose basename matches the target name when present — that
     is the binary's executable (e.g. sh_binary materializes `<name>`, with the
     `.sh` sibling being the script srcs[0]). Falls back to the first derived
-    file. Does *not* check whether the result is actually runnable — the
-    caller pairs this with `is_runnable` to distinguish "not in BES" from
-    "in BES but no runfiles tree".
+    file. Also records whether the target has a runfiles tree in
+    `state.entrypoint_runfiles` so that `_is_runnable` can answer without a
+    disk check.
     """
     target = apparent_label(target)
     if target not in state.target_fileset:
         return None
 
     target_name = target.rsplit(":", 1)[-1]
+    manifest_name = target_name + ".runfiles_manifest"
 
     visited = {}
     frontier = [fs_ref.id for fs_ref in state.target_fileset[target]]
 
     candidates = []
+    has_manifest = False
     for _depth in range(32):
         if not frontier:
             break
@@ -81,7 +81,10 @@ def _determine_entrypoint(state: struct, target: str) -> str | None:
                 continue
             for file in payload.files:
                 if len(file.path_prefix):
-                    candidates.append(file.file.removeprefix("file://"))
+                    path = file.file.removeprefix("file://")
+                    candidates.append(path)
+                    if path.rsplit("/", 1)[-1] == manifest_name:
+                        has_manifest = True
             for child in payload.file_sets:
                 if child.id not in visited:
                     next_frontier.append(child.id)
@@ -90,26 +93,47 @@ def _determine_entrypoint(state: struct, target: str) -> str | None:
     if not candidates:
         return None
 
+    entrypoint = None
     for c in candidates:
         if c.rsplit("/", 1)[-1] == target_name:
-            return c
-    return candidates[0]
+            entrypoint = c
+            break
+    if entrypoint == None:
+        entrypoint = candidates[0]
+
+    state.entrypoint_runfiles[entrypoint] = has_manifest
+    return entrypoint
 
 def _is_runnable(state: struct, entrypoint: str) -> bool:
-    """True if `<entrypoint>.runfiles/` exists on disk.
+    """True if the BES output for `entrypoint` included a .runfiles_manifest.
 
-    `_spawn` sets current_dir to that path, so a missing runfiles tree means
-    spawn() will fail with a misleading ENOENT naming the executable. Lets
-    the caller distinguish "tagged deliverable but not runnable" (e.g. a
-    `gen_sh_binary` macro's internal genrule) from "not in BES at all".
+    Lets the caller distinguish "tagged deliverable but not runnable" (e.g. a
+    `gen_sh_binary` macro's internal genrule) from "not in BES at all", without
+    a disk check — the manifest's presence in the BES output is the canonical
+    signal that Bazel produced a runfiles tree for the target.
     """
-    return state.ctx.std.fs.exists(entrypoint + ".runfiles")
+    return state.entrypoint_runfiles.get(entrypoint, False)
 
-def _spawn(ctx: TaskContext, state: struct, entrypoint: str, args: list[str], capture: bool = False) -> std.process.Child:
+def _spawn(ctx: TaskContext, state: struct, entrypoint: str, args: list[str], capture: bool = False, cwd: str | None = None) -> std.process.Child:
+    """Spawn `entrypoint` with `args` in the Bazel runfiles environment.
+
+    Sets RUNFILES_DIR / RUNFILES_MANIFEST_FILE (absolute paths) so that
+    `rlocation` in sh_binary wrappers works regardless of the process's
+    working directory — the bash runfiles helper checks these env vars before
+    falling back to `$BASH_SOURCE[0].runfiles`. Also sets
+    BUILD_WORKSPACE_DIRECTORY / BUILD_WORKING_DIRECTORY so formatter wrappers
+    (e.g. rules_lint's format.sh) can cd to the workspace root.
+
+    `cwd` overrides the working directory. The default is the runfiles tree
+    (`entrypoint.runfiles/<workspace>`), matching `bazel run` behaviour.
+    Passing an explicit `cwd` is safe for sh_binary wrappers because their
+    runfiles resolution uses the env vars above, not the process cwd.
+    """
     runfiles = entrypoint + ".runfiles"
     workspace_name = state.workspace_name[0] or _DEFAULT_WORKSPACE_NAME
+    effective_cwd = cwd if cwd else (runfiles + "/" + workspace_name)
     cmd = ctx.std.process.command(entrypoint) \
-        .current_dir(runfiles + "/" + workspace_name) \
+        .current_dir(effective_cwd) \
         .env("RUNFILES_DIR", runfiles) \
         .env("JAVA_RUNFILES", runfiles) \
         .env("RUNFILES_MANIFEST_FILE", runfiles + "_manifest") \
@@ -126,6 +150,8 @@ def runnable(ctx, targets: list[str]) -> struct:
         targets = {apparent_label(t): t for t in targets},
         filesets = {},
         target_fileset = {},
+        # Maps entrypoint path → True when BES output included a .runfiles_manifest.
+        entrypoint_runfiles = {},
         # Single-element list so `_process_bes` can mutate it (struct fields are
         # otherwise read-only after construction).
         workspace_name = [""],
@@ -135,5 +161,5 @@ def runnable(ctx, targets: list[str]) -> struct:
         event = lambda event: _process_bes(state, event),
         determine_entrypoint = lambda target: _determine_entrypoint(state, target),
         is_runnable = lambda entrypoint: _is_runnable(state, entrypoint),
-        spawn = lambda entrypoint, args, capture = False: _spawn(ctx, state, entrypoint, args, capture),
+        spawn = lambda entrypoint, args, capture = False, cwd = None: _spawn(ctx, state, entrypoint, args, capture, cwd),
     )

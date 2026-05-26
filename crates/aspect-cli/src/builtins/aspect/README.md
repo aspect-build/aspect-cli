@@ -109,13 +109,13 @@ Renderer: `lint_results`. Body has by-severity counts, by-tool counts, per-sever
 [`format.axl`](format.axl) · build a formatter target, run it on the changed file list, diff before-and-after.
 
 ```sh
-aspect format                                                       # changed scope (default)
-aspect format --scope=all                                           # whole tree
-aspect format --formatter-target=//tools/format:buildifier          # buildifier-only
-aspect format --include-pattern='**/*.bzl'                          # only bzl files
-aspect format --exclude-pattern='**/*.md'                           # exclude all markdown files
-aspect format --on-change=warn                                      # warn but don't fail CI
-aspect format --upload-format-diff                                  # upload `format.patch`
+aspect format                                                        # changed scope (default)
+aspect format --scope=all                                            # whole tree
+aspect format --formatter-target=@buildifier_prebuilt//buildifier   # buildifier-only
+aspect format --include-pattern='**/*.bzl'                           # only Starlark
+aspect format --exclude-pattern='vendor/**'                          # skip vendor
+aspect format --on-change=warn                                       # warn but don't fail CI
+aspect format --upload-format-diff                                   # upload `format.patch`
 ```
 
 Verdict comes from a `git diff` between the pre-format and post-format working tree (after applying `--include-pattern` and `--exclude-pattern`). Non-empty diff + `--on-change=fail` → exit 1; `--on-change=warn` → exit 0 with status=warning; `--on-change=silent` → exit 0 with status=passed. The formatter binary's own non-zero exit fails the task regardless of `--on-change`.

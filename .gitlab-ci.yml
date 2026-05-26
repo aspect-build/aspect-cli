@@ -78,8 +78,8 @@ buildifier-task:
     - aspect-default
   script:
     - .aspect/bootstrap.sh
-    - ASPECT_DEBUG=1 aspect format --task-key buildifier-gl-debug --formatter-target=//tools/format:buildifier
-    - aspect format --task-key buildifier-gl --formatter-target=//tools/format:buildifier
+    - ASPECT_DEBUG=1 aspect buildifier --task-key buildifier-gl-debug
+    - aspect buildifier --task-key buildifier-gl
 
 format-task:
   stage: CI

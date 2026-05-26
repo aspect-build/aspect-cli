@@ -32,12 +32,25 @@ _user_task = task(
     args = {},
 )
 
-# `aspect buildifier` — alias of `aspect format` preset to the Starlark-only
-# formatter target. CI and local users can run `aspect buildifier` instead
-# of `aspect format --formatter-target=//tools/format:buildifier`.
 buildifier = format.alias(
     defaults = {
-        "formatter_target": "//tools/format:buildifier",
+        "formatter_target": "@buildifier_prebuilt//buildifier",
+        # buildifier only handles Starlark files; without include_patterns the
+        # raw binary receives all changed files and errors on non-Starlark ones.
+        # **/prefix is required: patterns use * (one segment) not ** (any depth).
+        "include_patterns": [
+            "**/BUCK",
+            "**/BUILD",
+            "**/BUILD.bazel",
+            "**/MODULE.bazel",
+            "**/*.MODULE.bazel",
+            "**/Tiltfile",
+            "**/WORKSPACE",
+            "**/WORKSPACE.bazel",
+            "**/*.axl",
+            "**/*.bzl",
+            "**/*.star",
+        ],
     },
     summary = "Format Starlark files using buildifier.",
 )
@@ -139,6 +152,11 @@ def config(ctx: ConfigContext):
     # defaults and config.axl overrides).
     # Run with: aspect dev test-repro-commands
     ctx.tasks.add(repro_commands_tests)
+
+    # canonical_label normalization — local labels, external labels, and bzlmod
+    # canonical @@module+version//... → @module//... conversion.
+    # Run with: aspect dev test-runnable
+    ctx.tasks.add(runnable_tests)
 
     # Adaptive rate-limit throttling — observations / burn-rate
     # inference / threshold ladder / tip firing / two-bucket

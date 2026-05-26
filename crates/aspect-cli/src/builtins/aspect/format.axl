@@ -1,18 +1,15 @@
 """Define the 'format' task
 
-Format builds a multi-formatter target and then runs it on the changed files.
-It's a simple example of interaction with version control, which Bazel only does via the workspace_status_command.
-
-Install:
-    Add rules_lint to MODULE.aspect.
-    See examples in https://github.com/bazel-starters
+Builds a formatter target and runs it against changed (or all) files in the
+workspace. Supports format_multirun targets from rules_lint as well as any
+standalone runnable formatter binary.
 
 Usage:
     # Format changed files (default)
     aspect format
     # Format every file the formatter knows how to handle
     aspect format --scope=all
-    # Specify the label of the format_multirun binary
+    # Specify the formatter target
     aspect format --formatter-target=//path/to:formatter_bin
 
 """
@@ -438,8 +435,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     include_patterns = list(ctx.args.include_patterns)
 
     # Positional files explicitly provided → bypass change-detection
-    # entirely. `--scope`, `--base-ref`, `--merge-base`, `--exclude-pattern`,
-    # and `--include-pattern` are silently ignored here; the formatter
+    # entirely. `--scope`, `--base-ref`, `--merge-base`, `--include-pattern`,
+    # and `--exclude-pattern` are silently ignored here; the formatter
     # receives exactly the listed paths. This is the typical local
     # repro path: the user copies the fix command from CI which
     # carries a positional file list, runs it as-is.
@@ -553,7 +550,18 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             data = data,
             phase = Phase(name = "format", description = "Format files", emoji = "✨"),
         )
-    exit = r.spawn(formatter, format_args).wait()
+
+    workspace_root = ctx.std.env.aspect_root_dir()
+    abs_format_args = [
+        workspace_root + "/" + f if (f and not f.startswith("/")) else f
+        for f in format_args
+    ]
+    # Raw binaries (no .runfiles tree) must start from the workspace root so
+    # --scope=all scans the right tree and relative file paths resolve.
+    # sh_binary wrappers (format_multirun) cd to BUILD_WORKSPACE_DIRECTORY
+    # internally, so their default cwd (the runfiles tree) is fine.
+    effective_cwd = None if r.is_runnable(formatter) else workspace_root
+    exit = r.spawn(formatter, abs_format_args, cwd = effective_cwd).wait()
 
     if not exit.success:
         # Formatter binary itself errored — surface that and skip the
@@ -608,11 +616,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         print("No files%s were modified." % scope_text)
         return _emit_final(ctx, lifecycle, data, 0)
 
-    # List the affected file set, then filter through --include-pattern and
-    # --exclude-pattern. Both hide files from the user-facing affected list
-    # and the failure decision below. They don't undo the formatter's changes —
-    # those still sit in the working tree — but they prevent unexpected files
-    # from failing this task.
+    # Pattern filters hide files from the user-facing affected list and the
+    # failure decision. They don't undo the formatter's changes — those still
+    # sit in the working tree — but they prevent unexpected files from failing.
     name_out, _, _ = _git_capture(ctx, "diff", "--name-only", pre_snap if pre_snap else "HEAD")
     affected_raw = [f for f in name_out.strip().split("\n") if f]
     affected = affected_raw
@@ -623,9 +629,6 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     filtered_count = len(affected_raw) - len(affected)
 
     if not affected:
-        # All formatter changes are hidden by pattern filters — task is OK
-        # from the user's perspective. Note the working-tree changes so they
-        # aren't surprising downstream.
         if filtered_count > 0:
             info(ctx.std, "Formatter modified %d file(s), all filtered by pattern rules; treating as OK." % filtered_count)
         return _emit_final(ctx, lifecycle, data, 0)
@@ -646,20 +649,16 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     if filtered_count > 0:
         print("(also modified %d file(s) hidden by pattern filters; not counted toward failure)" % filtered_count)
 
-    # Populate data with the affected file set and filtered count for status checks.
     data["format"]["affected_files"] = affected
     data["format"]["filtered_count"] = filtered_count
 
     # Optional: archive the diff as a CI artifact so reviewers can apply
     # it locally without re-running the formatter. Off by default.
     #
-    # Scope the uploaded patch to `affected` (the post-filter file set) so
-    # it matches the failure-decision basis. In --scope=changed mode this
-    # is redundant — the formatter never saw filtered files, so the diff is
-    # already scoped. In --scope=all mode the formatter discovers files
-    # itself via `git ls-files` and rewrites filtered ones; without re-
-    # scoping, the patch would carry changes that don't contribute to
-    # failure or appear in the user-facing affected list.
+    # Scope the uploaded patch to `affected` so it matches the failure-decision
+    # basis. In --scope=all mode the formatter rewrites filtered files too;
+    # without re-scoping the uploaded patch would carry those changes even
+    # though they don't contribute to failure or appear in the affected list.
     if ctx.args.upload_format_diff:
         if filtered_count > 0:
             upload_diff, _, _ = _git_capture(

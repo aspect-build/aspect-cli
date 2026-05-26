@@ -6,6 +6,10 @@ def _eq(label, got, want):
     if got != want:
         fail("%s: got %r, want %r" % (label, got, want))
 
+# ---------------------------------------------------------------------------
+# apparent_label unit tests
+# ---------------------------------------------------------------------------
+
 def _test_local_label_with_colon(ctx):
     _eq("local label unchanged", apparent_label("//tools/format:format"), "//tools/format:format")
 
@@ -89,7 +93,7 @@ def _test_bzlmod_4seg_extension_repo(ctx):
 # ---------------------------------------------------------------------------
 
 def _make_fileset_event(set_id, file_path):
-    """Minimal named_set_of_files BES event."""
+    """Minimal named_set_of_files BES event with a single file."""
     return struct(
         kind = "named_set_of_files",
         id = struct(id = set_id),
@@ -98,6 +102,20 @@ def _make_fileset_event(set_id, file_path):
                 path_prefix = ["bazel-out/opt/bin"],
                 file = "file://" + file_path,
             )],
+            file_sets = [],
+        ),
+    )
+
+def _make_fileset_event_multi(set_id, file_paths):
+    """named_set_of_files BES event with multiple files."""
+    return struct(
+        kind = "named_set_of_files",
+        id = struct(id = set_id),
+        payload = struct(
+            files = [struct(
+                path_prefix = ["bazel-out/opt/bin"],
+                file = "file://" + p,
+            ) for p in file_paths],
             file_sets = [],
         ),
     )
@@ -156,6 +174,41 @@ def _test_bes_unknown_target_returns_none(ctx):
     if got != None:
         fail("bes unknown target: expected None, got %r" % got)
 
+# ---------------------------------------------------------------------------
+# is_runnable tests — BES-based runfiles manifest detection
+# ---------------------------------------------------------------------------
+
+def _test_is_runnable_true_when_manifest_present(ctx):
+    """is_runnable returns True when BES output includes a .runfiles_manifest."""
+    r = runnable(None, ["//tools/format:format"])
+    r.event(_make_fileset_event_multi("s1", [
+        "/out/bin/tools/format/format",
+        "/out/bin/tools/format/format.runfiles_manifest",
+    ]))
+    r.event(_make_target_event("//tools/format:format", "s1"))
+    ep = r.determine_entrypoint("//tools/format:format")
+    if ep == None:
+        fail("is_runnable/manifest: expected entrypoint, got None")
+    if not r.is_runnable(ep):
+        fail("is_runnable/manifest: expected True (manifest in BES), got False")
+
+def _test_is_runnable_false_when_no_manifest(ctx):
+    """is_runnable returns False when BES output has no .runfiles_manifest (raw binary)."""
+    r = runnable(None, ["@buildifier_prebuilt//buildifier"])
+    r.event(_make_fileset_event("s1", "/out/bin/external/buildifier_prebuilt/buildifier/buildifier"))
+    r.event(_make_target_event("@@buildifier_prebuilt+//buildifier:buildifier", "s1"))
+    ep = r.determine_entrypoint("@buildifier_prebuilt//buildifier")
+    if ep == None:
+        fail("is_runnable/no-manifest: expected entrypoint, got None")
+    if r.is_runnable(ep):
+        fail("is_runnable/no-manifest: expected False (no manifest in BES), got True")
+
+def _test_is_runnable_false_for_unknown_entrypoint(ctx):
+    """is_runnable returns False for an entrypoint that was never resolved."""
+    r = runnable(None, ["//tools/format:format"])
+    if r.is_runnable("/some/unknown/path"):
+        fail("is_runnable/unknown: expected False for unknown entrypoint, got True")
+
 _UNIT_TESTS = [
     _test_local_label_with_colon,
     _test_local_label_without_colon,
@@ -174,6 +227,9 @@ _UNIT_TESTS = [
     _test_bes_bzlmod_extension_repo,
     _test_bes_local_target,
     _test_bes_unknown_target_returns_none,
+    _test_is_runnable_true_when_manifest_present,
+    _test_is_runnable_false_when_no_manifest,
+    _test_is_runnable_false_for_unknown_entrypoint,
 ]
 
 def _test_impl(ctx):

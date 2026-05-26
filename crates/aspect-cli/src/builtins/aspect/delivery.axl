@@ -1009,7 +1009,7 @@ def _delivery_impl(ctx):
                 data.append((label, "WARN", "warn", warn_msg, output_sha or "-", "-"))
                 delivery_add_result(dr, label, "warn", message = warn_msg, output_sha = output_sha or "", is_forced = is_forced)
             elif not run_tracker.is_runnable(entrypoint):
-                warn_msg = "tagged deliverable but not runnable (no runfiles tree at {}.runfiles)".format(entrypoint)
+                warn_msg = "tagged deliverable but not runnable (no .runfiles_manifest in BES output for {})".format(entrypoint)
                 pending_count += 1
                 data.append((label, "WARN", "warn", warn_msg, output_sha or "-", "-"))
                 delivery_add_result(dr, label, "warn", message = warn_msg, output_sha = output_sha or "", is_forced = is_forced)
