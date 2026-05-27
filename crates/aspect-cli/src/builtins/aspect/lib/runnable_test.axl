@@ -77,6 +77,42 @@ def _test_bzlmod_4seg_extension_repo(ctx):
         "@numpy//numpy:pkg",
     )
 
+def _test_bzlmod_bazel7_module_repo(ctx):
+    """@@module~//pkg:tgt — Bazel 7 canonical form for a module repo (tilde separator)."""
+    _eq(
+        "bazel7 module repo",
+        apparent_label("@@buildifier_prebuilt~//buildifier:buildifier"),
+        "@buildifier_prebuilt//buildifier:buildifier",
+    )
+
+def _test_bzlmod_bazel7_module_repo_no_colon(ctx):
+    """@@module~//pkg — Bazel 7 canonical form that also needs :name appended."""
+    _eq(
+        "bazel7 module repo without colon",
+        apparent_label("@@buildifier_prebuilt~//buildifier"),
+        "@buildifier_prebuilt//buildifier:buildifier",
+    )
+
+def _test_bzlmod_bazel7_extension_repo(ctx):
+    """@@module~~ext~repo//... — Bazel 7 canonical form for an extension-generated repo."""
+    _eq(
+        "bazel7 extension repo",
+        apparent_label("@@buildifier_prebuilt~~buildifier_prebuilt_deps_extension~buildifier_darwin_arm64//file:buildifier"),
+        "@buildifier_darwin_arm64//file:buildifier",
+    )
+
+def _test_bzlmod_bazel7_version_with_plus_build_metadata(ctx):
+    """@@module~1.2.3+meta//... — Bazel 7 version containing SemVer build metadata.
+
+    `+` appears inside the Bazel 7 version string, not as a Bazel 8+ separator.
+    Probing for `~` first avoids the false-positive split on `+`.
+    """
+    _eq(
+        "bazel7 version with + build metadata",
+        apparent_label("@@foo~1.2.3+meta//pkg:tgt"),
+        "@foo//pkg:tgt",
+    )
+
 # ---------------------------------------------------------------------------
 # BES matching integration tests
 #
@@ -133,6 +169,16 @@ def _test_bes_bzlmod_extension_repo(ctx):
     r.event(_make_target_event("@@rules_python+pip+numpy//:pkg", "s1"))
     got = r.determine_entrypoint("@numpy//:pkg")
     _eq("bzlmod extension-repo entrypoint", got.path, "/out/bin/external/rules_python+pip+numpy/pkg")
+
+def _test_bes_bzlmod_bazel7_module_repo(ctx):
+    """@@module~//pkg:tgt in BES (Bazel 7) matches @module//pkg:tgt registered target."""
+    r = runnable(None, ["@buildifier_prebuilt//buildifier"])
+    r.event(_make_fileset_event("s1", ["/out/bin/external/buildifier_prebuilt~/buildifier/buildifier"]))
+    r.event(_make_target_event("@@buildifier_prebuilt~//buildifier:buildifier", "s1"))
+    got = r.determine_entrypoint("@buildifier_prebuilt//buildifier")
+    if got == None:
+        fail("bazel7 bes module repo: expected entrypoint, got None")
+    _eq("bazel7 bes module repo entrypoint", got.path, "/out/bin/external/buildifier_prebuilt~/buildifier/buildifier")
 
 def _test_bes_local_target(ctx):
     """Local //pkg:tgt labels round-trip through BES matching unchanged."""
@@ -269,6 +315,11 @@ _UNIT_TESTS = [
     _test_bzlmod_extension_repo,
     _test_bzlmod_extension_repo_without_colon,
     _test_bzlmod_4seg_extension_repo,
+    _test_bzlmod_bazel7_module_repo,
+    _test_bzlmod_bazel7_module_repo_no_colon,
+    _test_bzlmod_bazel7_extension_repo,
+    _test_bzlmod_bazel7_version_with_plus_build_metadata,
+    _test_bes_bzlmod_bazel7_module_repo,
     _test_bes_bzlmod_no_version,
     _test_bes_bzlmod_with_version,
     _test_bes_bzlmod_extension_repo,
