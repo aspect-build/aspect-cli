@@ -1,18 +1,16 @@
 """Define the 'format' task
 
-Format builds a multi-formatter target and then runs it on the changed files.
-It's a simple example of interaction with version control, which Bazel only does via the workspace_status_command.
-
-Install:
-    Add rules_lint to MODULE.aspect.
-    See examples in https://github.com/bazel-starters
+Builds a formatter target and runs it against changed (or all) files in the
+workspace. Supports bazel binary targets such as format_multirun targets from
+rules_lint as well as any standalone runnable formatter binary targets such as
+@buildifier_prebuilt//buildifier.
 
 Usage:
     # Format changed files (default)
     aspect format
     # Format every file the formatter knows how to handle
     aspect format --scope=all
-    # Specify the label of the format_multirun binary
+    # Specify the formatter target
     aspect format --formatter-target=//path/to:formatter_bin
 
 """

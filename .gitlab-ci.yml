@@ -68,8 +68,6 @@ lint-task:
     - aspect lint --task-key lint-gl --fix --aspect=//tools/lint:linters.bzl%shellcheck -- //examples/lint/... -//exclude/...
 
 # Dedicated buildifier-only step that runs in parallel with format-task.
-# Models the legacy Rosetta `buildifier` task using a Starlark-only
-# `format_multirun` target — see https://docs.aspect.build/cli/migration/buildifier.
 buildifier-task:
   stage: CI
   needs: [pre-build]
@@ -78,8 +76,8 @@ buildifier-task:
     - aspect-default
   script:
     - .aspect/bootstrap.sh
-    - ASPECT_DEBUG=1 aspect format --task-key buildifier-gl-debug --formatter-target=//tools/format:buildifier
-    - aspect format --task-key buildifier-gl --formatter-target=//tools/format:buildifier
+    - ASPECT_DEBUG=1 aspect buildifier --task-key buildifier-gl-debug
+    - aspect buildifier --task-key buildifier-gl
 
 format-task:
   stage: CI
