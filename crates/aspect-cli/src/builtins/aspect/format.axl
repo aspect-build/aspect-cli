@@ -429,8 +429,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         _emit_final(ctx, lifecycle, data, build_status.code or 1)
         fail("Building the formatter has failed.")
 
-    formatter = r.determine_entrypoint(ctx.args.formatter_target)
-    if not formatter:
+    ep = r.determine_entrypoint(ctx.args.formatter_target)
+    if not ep:
         _emit_final(ctx, lifecycle, data, 1)
         fail("Failed to determine the formatter entrypoint.")
 
@@ -553,7 +553,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             data = data,
             phase = Phase(name = "format", description = "Format files", emoji = "✨"),
         )
-    exit = r.spawn(formatter, format_args).wait()
+    exit = r.spawn(ep, format_args).wait()
 
     if not exit.success:
         # Formatter binary itself errored — surface that and skip the

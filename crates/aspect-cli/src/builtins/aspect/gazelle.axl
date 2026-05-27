@@ -698,8 +698,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         _emit_final(ctx, lifecycle, data, build_status.code or 1)
         fail("Building the gazelle target has failed.")
 
-    gazelle = r.determine_entrypoint(ctx.args.gazelle_target)
-    if not gazelle:
+    ep = r.determine_entrypoint(ctx.args.gazelle_target)
+    if not ep:
         _emit_final(ctx, lifecycle, data, 1)
         fail("Failed to determine the gazelle target's entrypoint.")
 
@@ -712,8 +712,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # the runfiles tree as `<name>.runfiles` (matching the sh_binary).
     # Stripping the suffix points us at the sh_binary symlink instead,
     # whose runfiles dir resolves correctly.
-    if gazelle.endswith("-runner.bash"):
-        gazelle = gazelle[:-len("-runner.bash")]
+    if ep.path.endswith("-runner.bash"):
+        ep = struct(path = ep.path[:-len("-runner.bash")], runfiles_dir = ep.runfiles_dir)
 
     # Diff phase: run with -mode=diff to get the verdict and the patch
     # without modifying the tree. The aspect_gazelle wrapper hardcodes
@@ -769,7 +769,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         data = data,
         phase = Phase(name = "diff", description = "Compute BUILD-file diff", emoji = "📋"),
     )
-    diff_proc = r.spawn(gazelle, diff_args, capture = True)
+    diff_proc = r.spawn(ep, diff_args, capture = True)
     diff_stdout = diff_proc.stdout().read_to_string()
     diff_stderr = diff_proc.stderr().read_to_string()
     diff_status = diff_proc.wait()

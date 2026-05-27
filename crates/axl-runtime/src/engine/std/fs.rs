@@ -79,11 +79,14 @@ impl<'v> values::Freeze for DirEntry<'v> {
 starlark_simple_value!(FrozenDirEntry);
 
 #[derive(Debug, Clone, ProvidesStaticType, Display, Trace, NoSerialize, Allocative)]
-#[display("<fs.Metadata is_dir:{is_dir} is_file:{is_file} is_symlink:{is_symlink} size:{size}>")]
+#[display(
+    "<fs.Metadata is_dir:{is_dir} is_file:{is_file} is_symlink:{is_symlink} executable:{executable} size:{size}>"
+)]
 pub struct Metadata<'v> {
     is_dir: values::Value<'v>,
     is_file: values::Value<'v>,
     is_symlink: values::Value<'v>,
+    executable: values::Value<'v>,
     size: values::Value<'v>,
     modified: values::Value<'v>,
     accessed: values::Value<'v>,
@@ -98,6 +101,7 @@ impl<'v> values::StarlarkValue<'v> for Metadata<'v> {
             "is_dir" => Some(self.is_dir),
             "is_file" => Some(self.is_file),
             "is_symlink" => Some(self.is_symlink),
+            "executable" => Some(self.executable),
             "size" => Some(self.size),
             "modified" => Some(self.modified),
             "accessed" => Some(self.accessed),
@@ -111,6 +115,7 @@ impl<'v> values::StarlarkValue<'v> for Metadata<'v> {
             "is_dir".into(),
             "is_file".into(),
             "is_symlink".into(),
+            "executable".into(),
             "size".into(),
             "modified".into(),
             "accessed".into(),
@@ -132,6 +137,7 @@ pub struct FrozenMetadata {
     is_dir: values::FrozenValue,
     is_file: values::FrozenValue,
     is_symlink: values::FrozenValue,
+    executable: values::FrozenValue,
     size: values::FrozenValue,
     modified: values::FrozenValue,
     accessed: values::FrozenValue,
@@ -151,6 +157,7 @@ impl<'v> values::Freeze for Metadata<'v> {
             is_dir: freezer.freeze(self.is_dir)?,
             is_file: freezer.freeze(self.is_file)?,
             is_symlink: freezer.freeze(self.is_symlink)?,
+            executable: freezer.freeze(self.executable)?,
             size: freezer.freeze(self.size)?,
             modified: freezer.freeze(self.modified)?,
             accessed: freezer.freeze(self.accessed)?,
@@ -329,6 +336,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
     ///
     /// The modified, accessed, created fields of the Metadata result might not be available on all platforms, and will
     /// be set to None on platforms where they is not available.
+    /// The executable field reflects the Unix execute bit; it is always false on non-Unix platforms.
     fn metadata<'v>(
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = pos)] path: values::StringValue,
@@ -474,6 +482,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
     ///
     /// The modified, accessed, created fields of the Metadata result might not be available on all platforms, and will
     /// be set to None on platforms where they is not available.
+    /// The executable field reflects the Unix execute bit; it is always false on non-Unix platforms.
     fn symlink_metadata<'v>(
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = pos)] path: values::StringValue,
@@ -589,10 +598,18 @@ fn marshal_metadata<'v>(m: &fs::Metadata, heap: Heap<'v>) -> Metadata<'v> {
         Err(_) => heap.alloc(NoneType),
     };
     let permissions = m.permissions();
+    #[cfg(unix)]
+    let executable = {
+        use std::os::unix::fs::PermissionsExt;
+        heap.alloc(permissions.mode() & 0o111 != 0)
+    };
+    #[cfg(not(unix))]
+    let executable = heap.alloc(false);
     Metadata {
         is_dir: heap.alloc(file_type.is_dir()),
         is_file: heap.alloc(file_type.is_file()),
         is_symlink: heap.alloc(file_type.is_symlink()),
+        executable,
         size: heap.alloc(m.len()),
         modified,
         accessed,
