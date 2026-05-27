@@ -26,3 +26,18 @@ exports_files(
     ],
     visibility = ["//visibility:public"],
 )
+
+alias(
+    name = "buildifier",
+    actual = "@buildifier_prebuilt//buildifier",
+)
+
+alias(
+    name = "format",
+    actual = "//tools/format",
+)
+
+alias(
+    name = "gazelle",
+    actual = "//tools/gazelle",
+)
