@@ -198,8 +198,8 @@ def _append_fix_commands(ctx, data):
     task_path = task_cli_path(ctx.task)
 
     # Positional file list bypasses --scope / --base-ref / --merge-base /
-    # --exclude-pattern, so the explicit-file fix command omits them
-    # and only preserves the user-explicit `--formatter-target`.
+    # --include-pattern / --exclude-pattern, so the explicit-file fix command
+    # omits them and only preserves the user-explicit `--formatter-target`.
     positional_flags = ([("--on-change", "silent")] +
                         explicit_flags(ctx, [("formatter_target", "--formatter-target")]))
     if len(affected) <= _FIX_FILES_LIMIT:
