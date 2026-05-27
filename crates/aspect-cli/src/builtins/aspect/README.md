@@ -60,7 +60,13 @@ Produces:
 
 [`test.axl`](test.axl) · `bazel test` over the user's target patterns.
 
-Same flag surface as [`build`](#build). The renderer adds:
+Same flag surface as [`build`](#build), plus:
+
+- `--target-pattern-file=FILE` — read newline-separated target patterns from a file instead of the command line (mirrors Bazel's `--target_pattern_file`). Blanks and `#` comments are skipped; cannot be combined with command-line patterns.
+- `--coverage` — collect code coverage (`--collect_code_coverage --combined_report=lcov`).
+- `--coverage-report=PATH` — copy the merged LCOV report to `PATH` after a successful `--coverage` run.
+
+The renderer adds:
 
 - **Test summary** rows in the BK / GHSC body: passed / failed / flaky / cached / timed-out, with per-test logs linked from the artifacts row when uploads are enabled.
 - **Reproducer command** unifying build failures + failed tests (one copy-paste reruns everything that broke).

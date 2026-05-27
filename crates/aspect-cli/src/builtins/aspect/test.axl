@@ -9,18 +9,85 @@ load("./lib/health_check.axl", "HealthCheckTrait")
 load("./lib/lifecycle.axl", "TaskLifecycleTrait")
 load("./lib/tips.axl", "tips")
 
+_DEFAULT_TARGETS = ["..."]
+
+# Where `--combined_report=lcov` writes the merged LCOV report, relative to
+# `bazel info output_path`. Bazel has no flag to redirect this, so `--coverage-report`
+# copies it out after the run.
+_COMBINED_REPORT_RELPATH = "_coverage/_coverage_report.dat"
+
+def _read_target_patterns(ctx, path):
+    """Read newline-separated target patterns from `path`.
+
+    Mirrors Bazel's `--target_pattern_file`: blank lines and `#` comments are
+    skipped. Errors if the file is missing or yields no patterns so the run
+    fails loudly rather than silently falling back to the `...` default.
+    """
+    if not ctx.std.fs.exists(path):
+        fail("--target-pattern-file: file not found: " + path)
+    patterns = []
+    for line in ctx.std.fs.read_to_string(path).splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            patterns.append(stripped)
+    if not patterns:
+        fail("--target-pattern-file: no target patterns found in " + path)
+    return patterns
+
+def _copy_combined_report(ctx, dest):
+    """Copy the merged LCOV report to `dest` after a `--coverage` run."""
+    output_path = ctx.bazel.info().get("output_path")
+    if not output_path:
+        ctx.std.io.stderr.write("--coverage-report: could not resolve bazel output_path\n")
+        return
+    report = output_path + "/" + _COMBINED_REPORT_RELPATH
+    if not ctx.std.fs.exists(report):
+        ctx.std.io.stderr.write("--coverage-report: combined report not found at " + report + "\n")
+        return
+    parent = dest.rpartition("/")[0]
+    if parent:
+        ctx.std.fs.create_dir_all(parent)
+    ctx.std.fs.copy(report, dest)
+    print("Coverage report written to " + dest)
+
 def _impl(ctx: TaskContext) -> int | TaskConclusion:
-    return run_bazel_task(ctx, command = "test")
+    targets = None
+    if ctx.args.target_pattern_file:
+        if ctx.args.is_explicit("targets"):
+            fail("--target-pattern-file cannot be combined with command-line target patterns")
+        targets = _read_target_patterns(ctx, ctx.args.target_pattern_file)
+
+    extra_flags = []
+    if ctx.args.coverage:
+        extra_flags = ["--collect_code_coverage", "--combined_report=lcov"]
+
+    conclusion = run_bazel_task(ctx, command = "test", extra_flags = extra_flags, targets = targets)
+
+    if ctx.args.coverage and ctx.args.coverage_report and conclusion.exit_code == 0:
+        _copy_combined_report(ctx, ctx.args.coverage_report)
+
+    return conclusion
 
 test = task(
     args = {
-        # TODO: Support a long --pattern_file like bazel does (@./targets)
         # TODO: Support - (list from stdin)
         "targets": args.positional(
             minimum = 1,
             maximum = 512,
-            default = ["..."],
+            default = _DEFAULT_TARGETS,
             description = "Bazel target patterns to test. Defaults to '...' which expands to all rule targets in the package at and beneath the current directory. When any pattern is hyphen-led (e.g. excludes like `-//experimental/...`), separate them from flags with `--`: `aspect test -- //... -//experimental/...`.",
+        ),
+        "target_pattern_file": args.string(
+            default = "",
+            description = "Read newline-separated target patterns from this file instead of the command line (mirrors Bazel's --target_pattern_file). Blank lines and `#` comments are ignored. Cannot be combined with command-line target patterns.",
+        ),
+        "coverage": args.boolean(
+            default = False,
+            description = "Collect code coverage while testing. Adds --collect_code_coverage and --combined_report=lcov to the test invocation so Bazel writes a merged LCOV report.",
+        ),
+        "coverage_report": args.string(
+            default = "",
+            description = "Copy the merged LCOV report produced by --coverage to this path once the run succeeds. Parent directories are created as needed. No effect unless --coverage is set.",
         ),
         "announce_rc": args.boolean(
             default = False,
