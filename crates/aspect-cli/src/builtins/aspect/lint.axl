@@ -18,12 +18,12 @@ Usage:
     aspect lint --fix
 """
 
-load("@std//time.axl", "sleep_iter")
+load("@std//time.axl", "sleep", "sleep_iter")
 load("./bazel.axl", "BazelTrait")
 load("./lib/artifacts.axl", "artifacts")
 load("./lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event")
 load("./lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
-load("./lib/environment.axl", "color_enabled", "error", "warn")
+load("./lib/environment.axl", "color_enabled", "detect_ci", "error", "warn")
 load("./lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_changed_files_listing")
 load("./lib/health_check.axl", "HealthCheckTrait")
 load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "preflight_phase", "setup_phase", "task_update")
@@ -36,6 +36,11 @@ load("./lib/tips.axl", "tips")
 
 # bb_clientd FUSE mount root for resolving bytestream:// URIs on Aspect Workflows runners.
 _BB_CLIENTD_ROOT = "/mnt/ephemeral/buildbarn/bb_clientd"
+
+# How long to poll for pending lint output files after build.wait() returns.
+# Remote downloads are async; the BES event can arrive before the file lands.
+# 30 s is a generous upper bound — in practice downloads complete in < 1 s.
+_POST_BUILD_DOWNLOAD_TIMEOUT_MS = 30000
 
 def file_uri_to_path(uri):
     """Resolve a BES file URI to a local path via the bb_clientd FUSE mount.
@@ -738,6 +743,80 @@ def _has_aspect_flag(flags):
             return True
     return False
 
+def _try_process_lint_file(ctx, file, filepath, data, strategy, changed_files, lint_trait, github_output, patches):
+    """Read and process one BES lint output file.
+
+    Returns None when the file is not yet on disk (Bazel's remote-cache download
+    is still in flight), or {"interesting": bool, "linter_exit_code": int} on
+    success.
+
+    Bazel downloads outputs to a unique temp path first, then moves them to the
+    final path atomically via FileSystemUtils.moveFile (moveOutputsToFinalLocation
+    L930, called at L1396):
+    https://github.com/bazelbuild/bazel/blob/d3c9a2080e30cecd661c02a8f0cce84caa696aed/src/main/java/com/google/devtools/build/lib/remote/RemoteExecutionService.java#L930
+    fs.exists() returning True therefore means the file is fully written.
+
+    SARIF reports are filtered per-batch against the strategy scope so the live
+    status surface never shows out-of-scope findings mid-build. The strategy
+    filter is pure (diag + changed_files), so per-batch results equal a single
+    terminal pass — findings don't flicker as later batches arrive.
+    """
+    if file.name.endswith(".out"):
+        if not ctx.std.fs.exists(filepath):
+            return None
+        ctx.std.io.stderr.write(ctx.std.fs.read_to_string(filepath))
+        return {"interesting": False, "linter_exit_code": 0}
+
+    if file.name.endswith(".report"):
+        if not ctx.std.fs.exists(filepath):
+            return None
+        report = ctx.std.fs.read_to_string(filepath)
+        if "sarif-" in report:
+            lint_accumulate(data, strategy.filter(parse_sarif_diagnostics(report), changed_files))
+            for hook in lint_trait.lint_report:
+                hook(ctx, filepath)
+            return {"interesting": True, "linter_exit_code": 0}
+        ctx.std.io.stdout.write(report)
+        if github_output:
+            ctx.std.fs.write(github_output, "lint-report=" + filepath)
+        return {"interesting": False, "linter_exit_code": 0}
+
+    if file.name.endswith(".patch"):
+        if not ctx.std.fs.exists(filepath):
+            return None
+        patches.append(filepath)
+        for hook in lint_trait.lint_patch:
+            hook(ctx, filepath, file.name)
+        return {"interesting": False, "linter_exit_code": 0}
+
+    if file.name.endswith(".exit_code"):
+        if not ctx.std.fs.exists(filepath):
+            return None
+        return {"interesting": False, "linter_exit_code": int(ctx.std.fs.read_to_string(filepath).rstrip())}
+
+    return {"interesting": False, "linter_exit_code": 0}
+
+def _drain_pending_files(ctx, pending, data, strategy, changed_files, lint_trait, github_output, patches):
+    """Process one pass over pending files, attempting to read each.
+
+    Returns (still_pending, was_interesting, linter_exit_code).
+    still_pending contains files whose remote download hasn't landed yet.
+    """
+    still_pending = []
+    interesting = False
+    linter_exit_code = 0
+    for pfile in pending:
+        pfilepath = file_uri_to_path(pfile.file)
+        result = _try_process_lint_file(ctx, pfile, pfilepath, data, strategy, changed_files, lint_trait, github_output, patches)
+        if result == None:
+            still_pending.append(pfile)
+        else:
+            if result["interesting"]:
+                interesting = True
+            if result["linter_exit_code"] != 0:
+                linter_exit_code = 1
+    return (still_pending, interesting, linter_exit_code)
+
 # buildifier: disable=function-docstring
 def _impl(ctx: TaskContext) -> int | TaskConclusion:
     lint_trait = ctx.traits[LintTrait]
@@ -837,12 +916,15 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         flags.append("--output_groups=rules_lint_patch")
         flags.append("--@aspect_rules_lint//lint:fix")
 
-    # Note: to test the non-interactive codepath, run with:
-    # echo > nohup.out; nohup aspect lint ; cat nohup.out
-    if ctx.std.io.stdout.is_tty:
+    # rules_lint_human and rules_lint_machine are separate action sets: requesting
+    # both runs each linter twice. Human gives colored terminal output; machine
+    # gives exit codes + SARIF. detect_ci() guards against CI hosts (e.g. GHA)
+    # that allocate a pseudo-TTY — making is_tty True while still needing machine output.
+    is_interactive = ctx.std.io.stdout.is_tty and not detect_ci(ctx.std.env)
+    if is_interactive:
         flags.append("--output_groups=rules_lint_human")
 
-    if lint_trait.lint_report:
+    if lint_trait.lint_report or not is_interactive:
         flags.append("--output_groups=rules_lint_machine")
 
     flags.extend(ctx.args.bazel_flags)
@@ -935,17 +1017,34 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     patches = []
     github_output = ctx.std.env.var("GITHUB_OUTPUT")
 
+    # Files whose remote-cache download hadn't completed when their
+    # named_set_of_files BES event arrived. Retried each tick.
+    pending_files = []
+
     # Set of rules_lint tool names observed in BES file-name markers.
     lint_tools_run = {}
 
-    # Tick-driven drain: each tick non-blocking-polls events and
-    # emits at most once (interesting batch or heartbeat). Heartbeats
-    # fire every MIN_HEARTBEAT_INTERVAL_MS even when bazel is quiet —
-    # without that, long stretches of action execution would let the
-    # rendered elapsed timer stall on the status surface.
+    # Emit a status update on each interesting tick, and at least every
+    # MIN_HEARTBEAT_INTERVAL_MS to keep the rendered elapsed timer live.
     last_emit_ms = now_ms(ctx)
     for _tick in sleep_iter(BES_DRAIN_TICK_MS):
         interesting = False
+
+        pending_files, pending_interesting, pending_exit_code = _drain_pending_files(
+            ctx,
+            pending_files,
+            data,
+            strategy,
+            changed_files,
+            lint_trait,
+            github_output,
+            patches,
+        )
+        if pending_interesting:
+            interesting = True
+        if pending_exit_code != 0:
+            linter_exit_code = 1
+
         for _ in range(10000):
             event = events.try_pop()
             if event == None:
@@ -960,50 +1059,18 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                     tool = detect_lint_tool(file.name)
                     if tool:
                         lint_tools_run[tool] = True
-                    if file.name.endswith(".out"):
-                        ctx.std.io.stderr.write(ctx.std.fs.read_to_string(filepath))
-                    if file.name.endswith(".report"):
-                        report = ctx.std.fs.read_to_string(filepath)
-                        if "sarif-" in report:
-                            diags = parse_sarif_diagnostics(report)
-
-                            # Filter per-batch (not just at terminal) so
-                            # the live status surface only ever shows
-                            # in-scope findings. Without this, SARIF
-                            # reports for files outside the strategy's
-                            # scope surface diagnostics on the heartbeat
-                            # task_update, then "disappear" on terminal
-                            # when the final filter writes back —
-                            # confusing in PR reviews. Built-in strategy
-                            # filters are pure (depend only on the diag
-                            # + `changed_files`), so per-batch yields
-                            # the same set as a single union filter.
-                            lint_accumulate(data, strategy.filter(diags, changed_files))
-                            interesting = True
-                            for hook in lint_trait.lint_report:
-                                hook(ctx, filepath)
-                            continue
-                        ctx.std.io.stdout.write(report)
-                        if github_output:
-                            ctx.std.fs.write(github_output, "lint-report=" + filepath)
-                    if file.name.endswith(".patch"):
-                        patch_path = file_uri_to_path(file.file)
-                        patches.append(patch_path)
-                        for hook in lint_trait.lint_patch:
-                            hook(ctx, patch_path, file.name)
-                    if file.name.endswith(".exit_code"):
-                        if int(ctx.std.fs.read_to_string(filepath).rstrip()) != 0:
-                            linter_exit_code = 1
+                    if file.name.endswith(".patch") or file.name.endswith(".out") or file.name.endswith(".report") or file.name.endswith(".exit_code"):
+                        result = _try_process_lint_file(ctx, file, filepath, data, strategy, changed_files, lint_trait, github_output, patches)
+                        if result == None:
+                            pending_files.append(file)
+                        else:
+                            if result["interesting"]:
+                                interesting = True
+                            if result["linter_exit_code"] != 0:
+                                linter_exit_code = 1
         if interesting or now_ms(ctx) - last_emit_ms >= MIN_HEARTBEAT_INTERVAL_MS:
-            # Action failures during the lint build (e.g. a missing
-            # config input file, a linter binary that can't be
-            # resolved) should flip the live status to `failing`
-            # while we're still in the lint phase. Without this, the
-            # build silently rolls into `filter` and the final emit
-            # latches `failed_in_phase = "filter"` — misattributing
-            # the failure to the (innocent) downstream phase. Mirror
-            # bazel_runner's mid-build-failure signaling here so the
-            # phase that actually broke is the one tagged.
+            # Flip to "failing" on action failure mid-build so the breakdown
+            # tags Lint (not the downstream Filter phase) as the failure point.
             had_action_failure = data["bazel"].get("failed_actions_total", 0) > 0
             heartbeat_status = _pick_status(data, had_failure = had_action_failure, terminal = False)
             for handler in lifecycle.task_update:
@@ -1021,6 +1088,42 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     build_status = build.wait()
     for sink in bazel_trait.build_event_sinks:
         sink.wait()
+
+    # Final drain: build is complete; poll until all pending downloads land
+    # or the timeout expires. Bazel schedules --remote_download_regex
+    # transfers asynchronously, so files can still be in flight here even
+    # though build.wait() has returned.
+    if pending_files:
+        _POST_BUILD_SLOW_WARN_MS = 3000
+        post_build_start_ms = now_ms(ctx)
+        post_build_deadline_ms = post_build_start_ms + _POST_BUILD_DOWNLOAD_TIMEOUT_MS
+        slow_warned = False
+        for _i in range(_POST_BUILD_DOWNLOAD_TIMEOUT_MS // BES_DRAIN_TICK_MS + 1):
+            pending_files, _, pending_exit_code = _drain_pending_files(
+                ctx,
+                pending_files,
+                data,
+                strategy,
+                changed_files,
+                lint_trait,
+                github_output,
+                patches,
+            )
+            if pending_exit_code != 0:
+                linter_exit_code = 1
+            if not pending_files:
+                break
+            elapsed_ms = now_ms(ctx) - post_build_start_ms
+            if not slow_warned and elapsed_ms >= _POST_BUILD_SLOW_WARN_MS:
+                print("Waiting for lint reports to finish downloading from the remote cache...")
+                slow_warned = True
+            if now_ms(ctx) >= post_build_deadline_ms:
+                for pfile in pending_files:
+                    pfilepath = file_uri_to_path(pfile.file)
+                    warn(ctx.std, "Lint file not downloaded %ds after build completed (skipping): %s" % (_POST_BUILD_DOWNLOAD_TIMEOUT_MS // 1000, pfilepath))
+                break
+            sleep(BES_DRAIN_TICK_MS)
+
     build_failed = not build_status.success
     data["lint"]["build_failed"] = build_failed
     data["lint"]["linter_exit_code"] = linter_exit_code
