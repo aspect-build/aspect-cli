@@ -61,17 +61,44 @@ def _test_preserves_input_pair_order(ctx):
         [("--scope", "all"), ("--formatter-target", "//x"), ("--merge-base", "abc")],
     )
 
-def _test_handles_list_valued_args(ctx):
-    """List-valued args round-trip without conversion — the rendered
-    command emits `--name=a --name=b` via `build_aspect_command`."""
+def _test_handles_exclude_pattern_list(ctx):
+    """--exclude-pattern list-valued args round-trip."""
     fake = struct(args = struct(
-        is_explicit = _explicit_in(["ignore_patterns"]),
-        ignore_patterns = ["*.txt", "vendor/*"],
+        is_explicit = _explicit_in(["exclude_patterns"]),
+        exclude_patterns = ["*.txt", "vendor/*"],
     ))
     _eq(
-        "list-valued args round-trip",
-        explicit_flags(fake, [("ignore_patterns", "--ignore-pattern")]),
-        [("--ignore-pattern", ["*.txt", "vendor/*"])],
+        "exclude_patterns round-trip",
+        explicit_flags(fake, [("exclude_patterns", "--exclude-pattern")]),
+        [("--exclude-pattern", ["*.txt", "vendor/*"])],
+    )
+
+def _test_handles_include_pattern_list(ctx):
+    """--include-pattern list-valued args round-trip."""
+    fake = struct(args = struct(
+        is_explicit = _explicit_in(["include_patterns"]),
+        include_patterns = ["**/*.bzl", "**/BUILD"],
+    ))
+    _eq(
+        "include_patterns round-trip",
+        explicit_flags(fake, [("include_patterns", "--include-pattern")]),
+        [("--include-pattern", ["**/*.bzl", "**/BUILD"])],
+    )
+
+def _test_include_and_exclude_patterns_independent(ctx):
+    """include_patterns and exclude_patterns are independent — only explicit ones appear."""
+    fake = struct(args = struct(
+        is_explicit = _explicit_in(["include_patterns"]),
+        include_patterns = ["**/*.bzl"],
+        exclude_patterns = ["vendor/**"],
+    ))
+    _eq(
+        "only include_patterns is explicit",
+        explicit_flags(fake, [
+            ("include_patterns", "--include-pattern"),
+            ("exclude_patterns", "--exclude-pattern"),
+        ]),
+        [("--include-pattern", ["**/*.bzl"])],
     )
 
 def _test_empty_pairs_list_returns_empty(ctx):
@@ -85,7 +112,9 @@ _UNIT_TESTS = [
     _test_returns_empty_when_no_explicit,
     _test_includes_only_explicit_pairs,
     _test_preserves_input_pair_order,
-    _test_handles_list_valued_args,
+    _test_handles_exclude_pattern_list,
+    _test_handles_include_pattern_list,
+    _test_include_and_exclude_patterns_independent,
     _test_empty_pairs_list_returns_empty,
 ]
 

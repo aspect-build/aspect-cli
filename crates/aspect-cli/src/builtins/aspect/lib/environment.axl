@@ -121,7 +121,7 @@ def color_enabled(std):
 #                       narrative because a specific branch fired.
 #                       "Skipping upload — not on a recognized CI
 #                       host", "Filtered N files via
-#                       --ignore-pattern", "Auto-resolved Z". What
+#                       --exclude-pattern", "Auto-resolved Z". What
 #                       the task *noticed*.
 #   warn(std, msg)    — yellow `WARNING:` — subsystem-level problem;
 #                       task continues. Artifact upload failures, GH

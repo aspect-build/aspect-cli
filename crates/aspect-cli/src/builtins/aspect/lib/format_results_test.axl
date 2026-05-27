@@ -77,7 +77,7 @@ def _make_clean():
 def _make_files_need_format():
     r = _make_base()
 
-    # changed_files_count is the input set the formatter saw (post-ignore-pattern);
+    # changed_files_count is the input set the formatter saw (post-exclude-pattern);
     # affected_files is the post-format diff (what the formatter rewrote).
     # Both populated to exercise the Scope-with-count Configuration row.
     r["changed_files_count"] = 42

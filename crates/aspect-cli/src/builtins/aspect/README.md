@@ -106,20 +106,21 @@ Renderer: `lint_results`. Body has by-severity counts, by-tool counts, per-sever
 
 ## format
 
-[`format.axl`](format.axl) · build a `format_multirun` target, run it on the changed file list, diff before-and-after.
+[`format.axl`](format.axl) · build a formatter target, run it on the changed file list, diff before-and-after.
 
 ```sh
-aspect format                                                    # changed scope (default)
-aspect format --scope=all                                        # whole tree
-aspect format --formatter-target=//tools/format:buildifier.      # buildifier-only
-aspect format --ignore-pattern='**/*.bzl'                        # exclude Starlark
-aspect format --on-change=warn                                   # warn but don't fail CI
-aspect format --upload-format-diff                               # upload `format.patch`
+aspect format                                                       # changed scope (default)
+aspect format --scope=all                                           # whole tree
+aspect format --formatter-target=//tools/format:buildifier          # buildifier-only
+aspect format --include-pattern='**/*.bzl'                          # only bzl files
+aspect format --exclude-pattern='**/*.md'                           # exclude all markdown files
+aspect format --on-change=warn                                      # warn but don't fail CI
+aspect format --upload-format-diff                                  # upload `format.patch`
 ```
 
-Verdict comes from a `git diff` between the pre-format and post-format working tree (after applying `--ignore-pattern`). Non-empty diff + `--on-change=fail` → exit 1; `--on-change=warn` → exit 0 with status=warning; `--on-change=silent` → exit 0 with status=passed. The formatter binary's own non-zero exit fails the task regardless of `--on-change`.
+Verdict comes from a `git diff` between the pre-format and post-format working tree (after applying `--include-pattern` and `--exclude-pattern`). Non-empty diff + `--on-change=fail` → exit 1; `--on-change=warn` → exit 0 with status=warning; `--on-change=silent` → exit 0 with status=passed. The formatter binary's own non-zero exit fails the task regardless of `--on-change`.
 
-Renderer: `format_results`. The check-run / annotation summary shows the formatter-target label in the title (e.g. `Format //tools/format:buildifier · 3 files need formatting`); the body lists affected files with a `aspect format` repro command and (when `--upload-format-diff`) a download link to the captured patch.
+Renderer: `format_results`. The check-run / annotation summary shows the formatter-target label in the title (e.g. `Format //tools/format · 3 files need formatting`); the body lists affected files with a `aspect format` repro command and (when `--upload-format-diff`) a download link to the captured patch.
 
 ---
 

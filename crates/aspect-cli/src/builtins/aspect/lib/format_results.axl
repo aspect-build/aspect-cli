@@ -47,7 +47,7 @@ def init_data():
     r = bazel_init_data()
     r["format"] = {
         "affected_files": [],  # file paths that need formatting
-        "ignored_count": 0,  # files filtered by --ignore-pattern
+        "filtered_count": 0,  # files hidden by --include-pattern / --exclude-pattern
         "scope": "",  # "changed" | "all"
         "formatter_target": "",  # Bazel label of the formatter binary
         # Resolved `--on-change` policy: "silent" | "warn" | "fail".
@@ -206,8 +206,8 @@ The formatter rewrote {{ total }} {{ noun }} in your working tree. Review and co
 {% if has_overflow %}
 _… {{ overflow }} more file(s) not shown._
 {% endif %}
-{% if has_ignored %}
-_({{ ignored_count }} file(s) matching `--ignore-pattern` were excluded from this check.)_
+{% if has_filtered %}
+_({{ filtered_count }} file(s) hidden by pattern filters; not counted toward failure.)_
 {% endif %}
 {% if warn_signal %}
 > ⚠️ `--on-change=warn` is set — this task returned 0 with a warning signal despite formatting being required.
@@ -240,7 +240,7 @@ def _config_items(data):
         formatter touches and the changed-files preamble in the body
         only signals the changed-scope path, so make the actual scope
         explicit at-a-glance). When `scope == "changed"` and the task
-        recorded the post-ignore-pattern file count, append it as
+        recorded the post-filter file count, append it as
         " — filtered to N changed files" — analogous to lint's
         "Strategy: hold-the-line — filtered to N changed files".
         ("changed files" is OK here because the "filtered to" prefix
@@ -269,7 +269,7 @@ def _build_details_data(data, status):
     total = len(affected)
     shown = affected[:_FILES_LIMIT]
     overflow = total - len(shown)
-    ignored = data["format"].get("ignored_count", 0) or 0
+    filtered = data["format"].get("filtered_count", 0) or 0
 
     return {
         # Display strings (Jinja2 treats these as truthy even when "0" — use
@@ -280,7 +280,7 @@ def _build_details_data(data, status):
         "verb_suffix": "s" if total == 1 else "",
         "file_list": "\n".join(shown),
         "overflow": str(overflow) if overflow > 0 else "",
-        "ignored_count": str(ignored),
+        "filtered_count": str(filtered),
         # Boolean flags for Jinja2 conditions. `total == 0` guards
         # ensure the files-list `else` branch wins whenever the
         # formatter produced affected_files, even on non-passing
@@ -305,7 +305,7 @@ def _build_details_data(data, status):
         # falls back to the no-count phrasing.
         "checked_count": str(data.get("changed_files_count", 0) or "") if (data.get("changed_files_count", 0) or 0) > 0 else "",
         "has_overflow": overflow > 0,
-        "has_ignored": ignored > 0,
+        "has_filtered": filtered > 0,
         "warn_signal": data["format"].get("on_change_resolved") == "warn",
         "formatter_error": bool(data["format"].get("formatter_error")),
         "formatter_error_code": str(data["format"].get("formatter_error_code", 0) or 0),
