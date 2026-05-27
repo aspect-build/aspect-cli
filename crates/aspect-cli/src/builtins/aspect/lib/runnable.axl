@@ -34,13 +34,11 @@ def _process_bes(state: struct, event):
     if event.kind == "named_set_of_files":
         state.filesets[event.id.id] = event.payload
     elif event.kind == "target_completed":
-        # Use a fresh local name to avoid shadowing the module-level `apparent_label`
-        # function on the right-hand side of the same assignment.
-        canonical = apparent_label(event.id.label)
-        if canonical in state.targets:
+        label_key = apparent_label(event.id.label)
+        if label_key in state.targets:
             for og in event.payload.output_group:
                 if og.name == "default":
-                    state.target_fileset[canonical] = og.file_sets
+                    state.target_fileset[label_key] = og.file_sets
     elif event.kind == "workspace_config":
         # WorkspaceConfig.local_exec_root is "<output_base>/execroot/<workspace_name>".
         # Its basename is the canonical repo name Bazel uses inside runfiles trees.
@@ -48,21 +46,31 @@ def _process_bes(state: struct, event):
         if local_exec_root:
             state.workspace_name[0] = local_exec_root.rstrip("/").split("/")[-1]
 
-def _determine_entrypoint(state: struct, target: str) -> str | None:
+def _determine_entrypoint(state: struct, target: str) -> struct | None:
     """Best BES-reported derived output for `target`, or None if not in BES.
 
-    Picks the file whose basename matches the target name when present — that
-    is the binary's executable (e.g. sh_binary materializes `<name>`, with the
-    `.sh` sibling being the script srcs[0]). Falls back to the first derived
-    file. Does *not* check whether the result is actually runnable — the
-    caller pairs this with `is_runnable` to distinguish "not in BES" from
-    "in BES but no runfiles tree".
+    Returns struct(path, runfiles_dir) where `runfiles_dir` is the resolved
+    runfiles directory path (e.g. `…/format.runfiles`), or `None` when the target
+    emits no runfiles tree (e.g. a prebuilt binary like buildifier).
+
+    Entrypoint selection runs three passes over the default-output-group files:
+      1. Exact match on `target_name` — the runnable wrapper that Bazel binary
+         rules (cc_binary, py_binary, sh_binary, …) always emit.
+      2. `target_name + ".sh"` — present on sh_binary as the user-supplied
+         source script; selected when no wrapper was found.
+      3. First file with the executable bit set (skipping `.runfiles_manifest`) —
+         last-resort for custom rules that emit a binary under a non-standard name.
+
+    The runfiles dir is derived from the manifest file's directory — not the
+    entrypoint's, which may differ in non-standard rules. Both names are tied to the
+    target label (a Bazel invariant).
     """
     target = apparent_label(target)
     if target not in state.target_fileset:
         return None
 
     target_name = target.rsplit(":", 1)[-1]
+    manifest_name = target_name + ".runfiles_manifest"
 
     visited = {}
     frontier = [fs_ref.id for fs_ref in state.target_fileset[target]]
@@ -90,37 +98,87 @@ def _determine_entrypoint(state: struct, target: str) -> str | None:
     if not candidates:
         return None
 
+    entrypoint = None
     for c in candidates:
         if c.rsplit("/", 1)[-1] == target_name:
-            return c
-    return candidates[0]
+            entrypoint = c
+            break
+    if entrypoint == None:
+        for c in candidates:
+            if c.rsplit("/", 1)[-1] == target_name + ".sh":
+                entrypoint = c
+                break
+    if entrypoint == None:
+        for c in candidates:
+            if c.rsplit("/", 1)[-1].endswith(".runfiles_manifest"):
+                continue
+            if state.ctx == None or state.ctx.std.fs.metadata(c).executable:
+                entrypoint = c
+                break
 
-def _is_runnable(state: struct, entrypoint: str) -> bool:
-    """True if `<entrypoint>.runfiles/` exists on disk.
+    if entrypoint == None:
+        return None
 
-    `_spawn` sets current_dir to that path, so a missing runfiles tree means
-    spawn() will fail with a misleading ENOENT naming the executable. Lets
-    the caller distinguish "tagged deliverable but not runnable" (e.g. a
-    `gen_sh_binary` macro's internal genrule) from "not in BES at all".
+    manifest_dir = None
+    for c in candidates:
+        if c.rsplit("/", 1)[-1] == manifest_name:
+            manifest_dir = c.rsplit("/", 1)[0]
+            break
+    runfiles_dir = (manifest_dir + "/" + target_name + ".runfiles") if manifest_dir != None else None
+    return struct(path = entrypoint, runfiles_dir = runfiles_dir)
+
+def _spawn(ctx: TaskContext, state: struct, ep: struct, args: list[str], capture: bool = False, cwd: str | None = None) -> std.process.Child:
+    """Spawn `ep.path` with `args` in the Bazel runfiles environment.
+
+    Always sets BUILD_WORKSPACE_DIRECTORY / BUILD_WORKING_DIRECTORY so
+    formatter wrappers (e.g. rules_lint's format.sh) can cd to the workspace
+    root. When `ep.runfiles_dir` is set, also sets RUNFILES_DIR /
+    RUNFILES_MANIFEST_FILE so that `rlocation` in sh_binary wrappers works
+    regardless of the process's working directory.
+
+    `cwd` overrides the working directory. When omitted: defaults to
+    `ep.runfiles_dir/<workspace>` when a runfiles tree is present (matching
+    `bazel run`), or to the workspace root for bare binaries so
+    workspace-relative file arguments resolve correctly.
     """
-    return state.ctx.std.fs.exists(entrypoint + ".runfiles")
-
-def _spawn(ctx: TaskContext, state: struct, entrypoint: str, args: list[str], capture: bool = False) -> std.process.Child:
-    runfiles = entrypoint + ".runfiles"
     workspace_name = state.workspace_name[0] or _DEFAULT_WORKSPACE_NAME
-    cmd = ctx.std.process.command(entrypoint) \
-        .current_dir(runfiles + "/" + workspace_name) \
-        .env("RUNFILES_DIR", runfiles) \
-        .env("JAVA_RUNFILES", runfiles) \
-        .env("RUNFILES_MANIFEST_FILE", runfiles + "_manifest") \
+    if cwd:
+        effective_cwd = cwd
+    elif ep.runfiles_dir:
+        effective_cwd = ep.runfiles_dir + "/" + workspace_name
+    else:
+        effective_cwd = ctx.std.env.aspect_root_dir()
+    cmd = ctx.std.process.command(ep.path) \
+        .current_dir(effective_cwd) \
         .env("BUILD_WORKSPACE_DIRECTORY", ctx.std.env.aspect_root_dir()) \
         .env("BUILD_WORKING_DIRECTORY", ctx.std.env.current_dir()) \
         .args(args)
+    if ep.runfiles_dir:
+        cmd = cmd \
+            .env("RUNFILES_DIR", ep.runfiles_dir) \
+            .env("JAVA_RUNFILES", ep.runfiles_dir) \
+            .env("RUNFILES_MANIFEST_FILE", ep.runfiles_dir + "_manifest")
     if capture:
         cmd = cmd.stdout("piped").stderr("piped")
     return cmd.spawn()
 
 def runnable(ctx, targets: list[str]) -> struct:
+    """Build a BES event tracker that resolves entrypoints for `targets`.
+
+    Feed BES events via `.event(event)` as they arrive from the build. Once the
+    build completes, query results per target through the returned struct:
+
+      determine_entrypoint(target) → struct(path, runfiles_dir) | None
+          Best executable output for `target` from its BES default output group,
+          or None if no BES data was received for it. `runfiles_dir` is the
+          resolved runfiles directory (e.g. `…/format.runfiles`), or `None`
+          when the target has no runfiles tree (e.g. a prebuilt binary).
+
+      spawn(ep, args, capture=False, cwd=None) → Child
+          Spawn `ep.path` with Bazel runfiles environment variables set.
+          `cwd` defaults to `ep.runfiles_dir/<workspace>` when a runfiles tree
+          is present, or to the workspace root for bare binaries.
+    """
     state = struct(
         ctx = ctx,
         targets = {apparent_label(t): t for t in targets},
@@ -134,6 +192,5 @@ def runnable(ctx, targets: list[str]) -> struct:
     return struct(
         event = lambda event: _process_bes(state, event),
         determine_entrypoint = lambda target: _determine_entrypoint(state, target),
-        is_runnable = lambda entrypoint: _is_runnable(state, entrypoint),
-        spawn = lambda entrypoint, args, capture = False: _spawn(ctx, state, entrypoint, args, capture),
+        spawn = lambda ep, args, capture = False, cwd = None: _spawn(ctx, state, ep, args, capture, cwd),
     )

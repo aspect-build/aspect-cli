@@ -80,24 +80,22 @@ def _test_bzlmod_4seg_extension_repo(ctx):
 # ---------------------------------------------------------------------------
 # BES matching integration tests
 #
-# These construct minimal mock BES events and verify that the full
+# Construct minimal mock BES events and verify that the full
 # runnable() → _process_bes → _determine_entrypoint pipeline correctly
-# maps bzlmod canonical labels emitted by the BES back to the apparent
-# labels registered by the caller.  Each test here would FAIL before the
-# @@-stripping fix because target_completed events with canonical bzlmod
-# labels never landed in state.target_fileset.
+# maps BES-emitted labels (including bzlmod canonical forms) to the
+# apparent labels registered by the caller.
 # ---------------------------------------------------------------------------
 
-def _make_fileset_event(set_id, file_path):
-    """Minimal named_set_of_files BES event."""
+def _make_fileset_event(set_id, file_paths):
+    """Minimal named_set_of_files BES event. file_paths is a list of absolute paths."""
     return struct(
         kind = "named_set_of_files",
         id = struct(id = set_id),
         payload = struct(
             files = [struct(
                 path_prefix = ["bazel-out/opt/bin"],
-                file = "file://" + file_path,
-            )],
+                file = "file://" + p,
+            ) for p in file_paths],
             file_sets = [],
         ),
     )
@@ -115,46 +113,148 @@ def _make_target_event(bes_label, set_id):
 def _test_bes_bzlmod_no_version(ctx):
     """@@module+//pkg:tgt in BES matches @module//pkg:tgt registered target."""
     r = runnable(None, ["@buildifier_prebuilt//buildifier"])
-    r.event(_make_fileset_event("s1", "/out/bin/external/buildifier_prebuilt/buildifier/buildifier"))
+    r.event(_make_fileset_event("s1", ["/out/bin/external/buildifier_prebuilt/buildifier/buildifier"]))
     r.event(_make_target_event("@@buildifier_prebuilt+//buildifier:buildifier", "s1"))
     got = r.determine_entrypoint("@buildifier_prebuilt//buildifier")
-    if got == None:
-        fail("bes bzlmod no-version: expected entrypoint, got None — @@module+ label not matched")
+    _eq("bzlmod no-version entrypoint", got.path, "/out/bin/external/buildifier_prebuilt/buildifier/buildifier")
 
 def _test_bes_bzlmod_with_version(ctx):
     """@@module+version//pkg:tgt in BES matches @module//pkg:tgt registered target."""
     r = runnable(None, ["@rules_python//python/bin:python"])
-    r.event(_make_fileset_event("s1", "/out/bin/external/rules_python+0.40.0/python/bin/python"))
+    r.event(_make_fileset_event("s1", ["/out/bin/external/rules_python+0.40.0/python/bin/python"]))
     r.event(_make_target_event("@@rules_python+0.40.0//python/bin:python", "s1"))
     got = r.determine_entrypoint("@rules_python//python/bin:python")
-    if got == None:
-        fail("bes bzlmod with-version: expected entrypoint, got None — @@module+version label not matched")
+    _eq("bzlmod with-version entrypoint", got.path, "/out/bin/external/rules_python+0.40.0/python/bin/python")
 
 def _test_bes_bzlmod_extension_repo(ctx):
     """@@module+ext+repo//pkg:tgt in BES matches @repo//pkg:tgt registered target."""
     r = runnable(None, ["@numpy//:pkg"])
-    r.event(_make_fileset_event("s1", "/out/bin/external/rules_python+pip+numpy/pkg"))
+    r.event(_make_fileset_event("s1", ["/out/bin/external/rules_python+pip+numpy/pkg"]))
     r.event(_make_target_event("@@rules_python+pip+numpy//:pkg", "s1"))
     got = r.determine_entrypoint("@numpy//:pkg")
-    if got == None:
-        fail("bes bzlmod extension-repo: expected entrypoint, got None — @@module+ext+repo label not matched")
+    _eq("bzlmod extension-repo entrypoint", got.path, "/out/bin/external/rules_python+pip+numpy/pkg")
 
 def _test_bes_local_target(ctx):
     """Local //pkg:tgt labels round-trip through BES matching unchanged."""
     r = runnable(None, ["//tools/format:format"])
-    r.event(_make_fileset_event("s1", "/out/bin/tools/format/format"))
+    r.event(_make_fileset_event("s1", ["/out/bin/tools/format/format"]))
     r.event(_make_target_event("//tools/format:format", "s1"))
     got = r.determine_entrypoint("//tools/format:format")
-    if got == None:
-        fail("bes local target: expected entrypoint, got None")
-    _eq("local entrypoint path", got, "/out/bin/tools/format/format")
+    _eq("local entrypoint path", got.path, "/out/bin/tools/format/format")
 
 def _test_bes_unknown_target_returns_none(ctx):
     """A target that never appeared in BES returns None from determine_entrypoint."""
     r = runnable(None, ["//tools/format:format"])
-    got = r.determine_entrypoint("//tools/format:format")
-    if got != None:
-        fail("bes unknown target: expected None, got %r" % got)
+    if r.determine_entrypoint("//tools/format:format") != None:
+        fail("bes unknown target: expected None")
+
+# ---------------------------------------------------------------------------
+# runfiles_dir tests — BES-based runfiles manifest detection
+# ---------------------------------------------------------------------------
+
+def _test_has_runfiles_when_manifest_present(ctx):
+    """runfiles_dir is non-empty when BES output includes a .runfiles_manifest."""
+    r = runnable(None, ["//tools/format:format"])
+    r.event(_make_fileset_event("s1", [
+        "/out/bin/tools/format/format",
+        "/out/bin/tools/format/format.runfiles_manifest",
+    ]))
+    r.event(_make_target_event("//tools/format:format", "s1"))
+    ep = r.determine_entrypoint("//tools/format:format")
+    if ep == None:
+        fail("has-runfiles/manifest: expected entrypoint, got None")
+    if not ep.runfiles_dir:
+        fail("has-runfiles/manifest: expected non-None runfiles_dir (manifest in BES), got None")
+    _eq(
+        "has-runfiles/manifest: runfiles dir",
+        ep.runfiles_dir,
+        "/out/bin/tools/format/format.runfiles",
+    )
+
+def _test_no_runfiles_when_no_manifest(ctx):
+    """runfiles_dir is None when BES output has no .runfiles_manifest (raw binary)."""
+    r = runnable(None, ["@buildifier_prebuilt//buildifier"])
+    r.event(_make_fileset_event("s1", ["/out/bin/external/buildifier_prebuilt/buildifier/buildifier"]))
+    r.event(_make_target_event("@@buildifier_prebuilt+//buildifier:buildifier", "s1"))
+    ep = r.determine_entrypoint("@buildifier_prebuilt//buildifier")
+    if ep == None:
+        fail("no-runfiles/no-manifest: expected entrypoint, got None")
+    if ep.runfiles_dir != None:
+        fail("no-runfiles/no-manifest: expected runfiles_dir=None (no manifest in BES), got %r" % ep.runfiles_dir)
+
+def _test_sh_pass_with_manifest(ctx):
+    """Pass 2 (.sh) selects the entrypoint when no wrapper matches; manifest still named after target label."""
+    r = runnable(None, ["//tools/format:runner"])
+    r.event(_make_fileset_event("s1", [
+        "/out/bin/tools/format/runner.sh",
+        "/out/bin/tools/format/runner.runfiles_manifest",
+    ]))
+    r.event(_make_target_event("//tools/format:runner", "s1"))
+    ep = r.determine_entrypoint("//tools/format:runner")
+    if ep == None:
+        fail("sh-pass/manifest: expected entrypoint, got None")
+    if ep.path.rsplit("/", 1)[-1] != "runner.sh":
+        fail("sh-pass/manifest: expected runner.sh, got %r" % ep.path)
+    if not ep.runfiles_dir:
+        fail("sh-pass/manifest: expected non-None runfiles_dir (runner.runfiles_manifest in BES)")
+
+def _test_sh_pass_no_manifest(ctx):
+    """Pass 2 (.sh) selects the entrypoint; runfiles_dir is None when no manifest in BES."""
+    r = runnable(None, ["//tools/format:runner"])
+    r.event(_make_fileset_event("s1", ["/out/bin/tools/format/runner.sh"]))
+    r.event(_make_target_event("//tools/format:runner", "s1"))
+    ep = r.determine_entrypoint("//tools/format:runner")
+    if ep == None:
+        fail("sh-pass/no-manifest: expected entrypoint, got None")
+    if ep.path.rsplit("/", 1)[-1] != "runner.sh":
+        fail("sh-pass/no-manifest: expected runner.sh, got %r" % ep.path)
+    if ep.runfiles_dir != None:
+        fail("sh-pass/no-manifest: expected runfiles_dir=None (no manifest in BES), got %r" % ep.runfiles_dir)
+
+def _test_fallback_skips_manifest_files(ctx):
+    """Pass 3 skips .runfiles_manifest entries and selects the first other file."""
+    r = runnable(None, ["//tools/format:runner"])
+    r.event(_make_fileset_event("s1", [
+        "/out/bin/tools/format/runner.runfiles_manifest",
+        "/out/bin/tools/format/format_impl",
+    ]))
+    r.event(_make_target_event("//tools/format:runner", "s1"))
+    ep = r.determine_entrypoint("//tools/format:runner")
+    if ep == None:
+        fail("fallback-skip: expected entrypoint, got None")
+    if ep.path.rsplit("/", 1)[-1] != "format_impl":
+        fail("fallback-skip: expected format_impl (manifest skipped), got %r" % ep.path)
+
+def _test_none_when_only_manifest_candidate(ctx):
+    """determine_entrypoint returns None when the only BES output is a .runfiles_manifest."""
+    r = runnable(None, ["//tools/format:runner"])
+    r.event(_make_fileset_event("s1", ["/out/bin/tools/format/runner.runfiles_manifest"]))
+    r.event(_make_target_event("//tools/format:runner", "s1"))
+    if r.determine_entrypoint("//tools/format:runner") != None:
+        fail("only-manifest: expected None (no executable candidate)")
+
+def _test_runfiles_dir_derived_from_manifest_not_entrypoint(ctx):
+    """Runfiles dir is colocated with the manifest, not with the entrypoint.
+
+    Pass 3 may select an entrypoint in a subdirectory of the target's output dir
+    (e.g. a custom rule emitting out/bin/pkg/subdir/impl alongside the manifest at
+    out/bin/pkg/runner.runfiles_manifest). The runfiles dir must be a sibling of
+    the manifest, not of the entrypoint.
+    """
+    r = runnable(None, ["//tools/format:runner"])
+    r.event(_make_fileset_event("s1", [
+        "/out/bin/tools/format/runner.runfiles_manifest",
+        "/out/bin/tools/format/subdir/impl",
+    ]))
+    r.event(_make_target_event("//tools/format:runner", "s1"))
+    ep = r.determine_entrypoint("//tools/format:runner")
+    if ep == None:
+        fail("runfiles-dir-from-manifest: expected entrypoint, got None")
+    _eq(
+        "runfiles-dir-from-manifest: runfiles dir",
+        ep.runfiles_dir,
+        "/out/bin/tools/format/runner.runfiles",
+    )
 
 _UNIT_TESTS = [
     _test_local_label_with_colon,
@@ -174,6 +274,13 @@ _UNIT_TESTS = [
     _test_bes_bzlmod_extension_repo,
     _test_bes_local_target,
     _test_bes_unknown_target_returns_none,
+    _test_has_runfiles_when_manifest_present,
+    _test_no_runfiles_when_no_manifest,
+    _test_sh_pass_with_manifest,
+    _test_sh_pass_no_manifest,
+    _test_fallback_skips_manifest_files,
+    _test_none_when_only_manifest_candidate,
+    _test_runfiles_dir_derived_from_manifest_not_entrypoint,
 ]
 
 def _test_impl(ctx):
