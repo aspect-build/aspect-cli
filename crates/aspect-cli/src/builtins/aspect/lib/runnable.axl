@@ -5,25 +5,38 @@ def apparent_label(label):
 
     Bazel surfaces two label forms depending on context:
     - Apparent:   `@module//pkg:tgt`      — what users write; what BES emits for WORKSPACE repos
-    - Canonical:  `@@module+ver//pkg:tgt` — what BES emits for bzlmod repos
+    - Canonical:  `@@module+ver//pkg:tgt` — what BES emits for bzlmod repos (Bazel 8+)
+    - Canonical:  `@@module~//pkg:tgt`    — what BES emits for bzlmod repos (Bazel 7)
 
     This function converts either input to apparent form and appends the
     implicit target name when no `:` is present, yielding a stable key
     suitable for matching user-supplied targets against BES event labels.
 
-    Canonical → apparent stripping rules:
-        Module repo:    `@@module+version//pkg:tgt`  → `@module//pkg:tgt`
-        Extension repo: `@@module+ext+repo//pkg:tgt` → `@repo//pkg:tgt`
+    Canonical → apparent stripping rules (Bazel 8+, using `+` separator):
+        Module repo:    `@@module+version//pkg:tgt`      → `@module//pkg:tgt`
+        Extension repo: `@@module+ext+repo//pkg:tgt`     → `@repo//pkg:tgt`
+
+    Canonical → apparent stripping rules (Bazel 7, using `~` separator):
+        Module repo:    `@@module~//pkg:tgt`             → `@module//pkg:tgt`
+        Extension repo: `@@module~~ext~repo//pkg:tgt`    → `@repo//pkg:tgt`
     """
     if label.startswith("@@"):
         rest = label[2:]
         idx = rest.find("//")
         if idx >= 0:
             canonical_repo = rest[:idx]
-            parts = canonical_repo.split("+")
 
-            # Module repos:    module+version     → apparent name is parts[0]
-            # Extension repos: module+ext+repo    → apparent name is parts[-1]
+            # Bazel 7 uses `~` as the bzlmod separator; Bazel 8+ uses `+`.
+            # We probe for `~` first because `+` can appear in SemVer build
+            # metadata (e.g. `@@foo~1.2.3+meta//...`), which would produce a
+            # false-positive split on `+` inside a Bazel 7 version string.
+            # `~` is not valid in SemVer versions, so its presence is an
+            # unambiguous signal that we are in Bazel 7 canonical form.
+            sep = "~" if "~" in canonical_repo else "+"
+            parts = canonical_repo.split(sep)
+
+            # Module repos:    module+version or module~  → apparent name is parts[0]
+            # Extension repos: module+ext+repo or module~~ext~repo → apparent name is parts[-1]
             apparent_repo = parts[-1] if len(parts) >= 3 else parts[0]
             label = "@" + apparent_repo + rest[idx:]
     if ":" not in label:
