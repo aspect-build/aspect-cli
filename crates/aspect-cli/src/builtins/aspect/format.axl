@@ -740,9 +740,9 @@ format = task(
         ),
         # Positional file list. When non-empty, the formatter receives
         # these files directly — change-detection is skipped, and
-        # `--scope`, `--base-ref`, `--merge-base`, and
-        # `--exclude-pattern` are silently ignored. This is the "format
-        # these specific files" mode reviewers use locally after
+        # `--scope`, `--base-ref`, `--merge-base`, `--include-pattern`,
+        # and `--exclude-pattern` are silently ignored. This is the
+        # "format these specific files" mode reviewers use locally after
         # picking up a fix command from CI:
         #
         #   aspect format -- crates/aspect-cli/src/foo.axl crates/aspect-cli/src/bar.axl
@@ -753,7 +753,7 @@ format = task(
         # format -- file1 file2`).
         "files": args.positional(
             default = [],
-            description = "Optional positional list of files to format. When non-empty the formatter runs on exactly these paths and the change-detection flags (--scope / --base-ref / --merge-base / --exclude-pattern) are ignored. When empty, the task auto-discovers files via the configured --scope.",
+            description = "Optional positional list of files to format. When non-empty the formatter runs on exactly these paths and the change-detection flags (--scope / --base-ref / --merge-base / --include-pattern / --exclude-pattern) are ignored. When empty, the task auto-discovers files via the configured --scope.",
             maximum = 4096,
             minimum = 0,
         ),
