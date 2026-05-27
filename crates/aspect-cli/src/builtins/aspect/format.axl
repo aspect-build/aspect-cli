@@ -606,11 +606,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         print("No files%s were modified." % scope_text)
         return _emit_final(ctx, lifecycle, data, 0)
 
-    # List the affected file set, then filter through --include-pattern and
-    # --exclude-pattern. Both hide files from the user-facing affected list
-    # and the failure decision below. They don't undo the formatter's changes —
-    # those still sit in the working tree — but they prevent unexpected files
-    # from failing this task.
+    # Pattern filters hide files from the user-facing affected list and the
+    # failure decision. They don't undo the formatter's changes — those still
+    # sit in the working tree — but they prevent unexpected files from failing.
     name_out, _, _ = _git_capture(ctx, "diff", "--name-only", pre_snap if pre_snap else "HEAD")
     affected_raw = [f for f in name_out.strip().split("\n") if f]
     affected = affected_raw
@@ -621,9 +619,6 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     filtered_count = len(affected_raw) - len(affected)
 
     if not affected:
-        # All formatter changes are hidden by pattern filters — task is OK
-        # from the user's perspective. Note the working-tree changes so they
-        # aren't surprising downstream.
         if filtered_count > 0:
             info(ctx.std, "Formatter modified %d file(s), all filtered by pattern rules; treating as OK." % filtered_count)
         return _emit_final(ctx, lifecycle, data, 0)
@@ -644,20 +639,16 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     if filtered_count > 0:
         print("(also modified %d file(s) hidden by pattern filters; not counted toward failure)" % filtered_count)
 
-    # Populate data with the affected file set and filtered count for status checks.
     data["format"]["affected_files"] = affected
     data["format"]["filtered_count"] = filtered_count
 
     # Optional: archive the diff as a CI artifact so reviewers can apply
     # it locally without re-running the formatter. Off by default.
     #
-    # Scope the uploaded patch to `affected` (the post-filter file set) so
-    # it matches the failure-decision basis. In --scope=changed mode this
-    # is redundant — the formatter never saw filtered files, so the diff is
-    # already scoped. In --scope=all mode the formatter discovers files
-    # itself via `git ls-files` and rewrites filtered ones; without re-
-    # scoping, the patch would carry changes that don't contribute to
-    # failure or appear in the user-facing affected list.
+    # Scope the uploaded patch to `affected` so it matches the failure-decision
+    # basis. In --scope=all mode the formatter rewrites filtered files too;
+    # without re-scoping the uploaded patch would carry those changes even
+    # though they don't contribute to failure or appear in the affected list.
     if ctx.args.upload_format_diff:
         if filtered_count > 0:
             upload_diff, _, _ = _git_capture(
