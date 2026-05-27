@@ -1094,7 +1094,10 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # transfers asynchronously, so files can still be in flight here even
     # though build.wait() has returned.
     if pending_files:
-        post_build_deadline_ms = now_ms(ctx) + _POST_BUILD_DOWNLOAD_TIMEOUT_MS
+        _POST_BUILD_SLOW_WARN_MS = 3000
+        post_build_start_ms = now_ms(ctx)
+        post_build_deadline_ms = post_build_start_ms + _POST_BUILD_DOWNLOAD_TIMEOUT_MS
+        slow_warned = False
         for _i in range(_POST_BUILD_DOWNLOAD_TIMEOUT_MS // BES_DRAIN_TICK_MS + 1):
             pending_files, _, pending_exit_code = _drain_pending_files(
                 ctx,
@@ -1110,6 +1113,10 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                 linter_exit_code = 1
             if not pending_files:
                 break
+            elapsed_ms = now_ms(ctx) - post_build_start_ms
+            if not slow_warned and elapsed_ms >= _POST_BUILD_SLOW_WARN_MS:
+                print("Waiting for lint reports to finish downloading from the remote cache...")
+                slow_warned = True
             if now_ms(ctx) >= post_build_deadline_ms:
                 for pfile in pending_files:
                     pfilepath = file_uri_to_path(pfile.file)
