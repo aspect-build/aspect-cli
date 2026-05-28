@@ -206,24 +206,50 @@ def _emit_terminal(ctx, lifecycle, command, data, exit_code):
         flagged = final_status == "warning",
     )
 
-def run_bazel_task(ctx: TaskContext, command: str) -> TaskConclusion:
+def run_bazel_task(ctx: TaskContext, command: str, extra_flags = [], targets = None) -> TaskConclusion:
     """Shared impl for build/test tasks.
 
     Args:
         ctx:     TaskContext with the standard build/test args (targets,
                  bazel_flags, bazel_startup_flags, bazel_retry_attempts,
-                 bes_backends, bes_headers, cancel, output_base). Task-specific
-                 args (e.g. build's remote_executor) are not touched here —
-                 tasks can still read them from `ctx.args` before/after calling
-                 this function.
+                 bes_backends, bes_headers, cancel, output_base,
+                 optionally target_pattern_file). Task-specific args (e.g.
+                 build's remote_executor) are not touched here — tasks can
+                 still read them from `ctx.args` before/after calling this
+                 function.
         command: "build" or "test" — selects which Bazel subcommand to invoke
                  and which rc section to expand. The shape of the BES event
                  stream (including the presence of test_summary events for
                  tests) follows naturally from this.
+        extra_flags: Task-supplied Bazel flags appended after `--bazel-flag`
+                 values (e.g. test's `--collect_code_coverage`). The caller
+                 owns their meaning; the runner just forwards them.
+        targets: Target-pattern override. When `None` the runner honors
+                 `--target-pattern-file` (if the task declares it) by
+                 forwarding `--target_pattern_file=<path>` to Bazel
+                 directly, and otherwise reads `ctx.args.targets`.
     """
     hc_trait = ctx.traits[HealthCheckTrait]
     bazel_trait = ctx.traits[BazelTrait]
     lifecycle = ctx.traits[TaskLifecycleTrait]
+
+    if targets == None:
+        # Optional arg — only honored when the task declares it. Tasks that
+        # don't expose --target-pattern-file behave as before.
+        pattern_file = getattr(ctx.args, "target_pattern_file", "") if hasattr(ctx.args, "target_pattern_file") else ""
+        if pattern_file:
+            if ctx.args.is_explicit("targets"):
+                fail("--target-pattern-file cannot be combined with command-line target patterns")
+            if not ctx.std.fs.exists(pattern_file):
+                fail("--target-pattern-file: file not found: " + pattern_file)
+
+            # Forward the flag to Bazel instead of expanding the file into
+            # argv. Expanding would defeat the flag's purpose: it exists to
+            # let huge target lists bypass OS command-line length limits.
+            extra_flags = list(extra_flags) + ["--target_pattern_file=" + pattern_file]
+            targets = []
+        else:
+            targets = ctx.args.targets
 
     data = init_data()
 
@@ -238,7 +264,7 @@ def run_bazel_task(ctx: TaskContext, command: str) -> TaskConclusion:
     # rather than a silent no-op. This matches the lint / format /
     # gazelle / delivery convention.
     for handler in lifecycle.task_started:
-        handler(ctx, " ".join(ctx.args.targets))
+        handler(ctx, " ".join(targets))
 
     preflight_phase(ctx, lifecycle, hc_trait)
 
@@ -251,6 +277,7 @@ def run_bazel_task(ctx: TaskContext, command: str) -> TaskConclusion:
     # Flags: accumulate data, then optionally transform.
     flags = ["--isatty=" + str(int(ctx.std.io.stdout.is_tty))]
     flags.extend(ctx.args.bazel_flags)
+    flags.extend(extra_flags)
     flags.extend(bazel_trait.extra_flags)
 
     # Task-time flag contributors — features register hooks that need
@@ -369,14 +396,14 @@ def run_bazel_task(ctx: TaskContext, command: str) -> TaskConclusion:
                 build_events = build_events,
                 execution_log = bazel_trait.execution_log_sinks or False,
                 flags = flags,
-                *ctx.args.targets
+                *targets
             )
         else:
             invocation = ctx.bazel.build(
                 build_events = build_events,
                 execution_log = bazel_trait.execution_log_sinks or False,
                 flags = flags,
-                *ctx.args.targets
+                *targets
             )
 
         # Capture the sink invocation ID (the UUID used by the Aspect
@@ -468,7 +495,7 @@ def run_bazel_task(ctx: TaskContext, command: str) -> TaskConclusion:
     _repro_cmd = build_aspect_command(
         task_cli_path(ctx.task),
         [],
-        repro_targets(data, ctx.args.targets),
+        repro_targets(data, targets),
     )
     if _repro_cmd:
         data["repro_commands"].append({"command": _repro_cmd, "description": ""})
