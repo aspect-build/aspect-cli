@@ -63,7 +63,7 @@ def apparent_label(label, current_package = ""):
 
 def _current_package(ctx) -> str:
     """Workspace-relative path of cwd, used as the package for relative labels."""
-    root = ctx.std.env.root_dir().rstrip("/")
+    root = ctx.std.env.bazel_root_dir().rstrip("/")
     cwd = ctx.std.env.current_dir().rstrip("/")
     if cwd == root:
         return ""

@@ -91,7 +91,6 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         startup_flags = bazel_trait.startup_flags(startup_flags)
 
     rc = ctx.bazel.parse_rc(
-        root = ctx.std.env.root_dir(),
         flags = flags,
         startup_flags = startup_flags,
     )
