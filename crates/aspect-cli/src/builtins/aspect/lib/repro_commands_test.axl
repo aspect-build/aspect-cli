@@ -128,6 +128,16 @@ def _test_subdir_prefix_root_is_proper_prefix_of_cwd(_ctx):
     # "/repo-extra" starts with "/repo" but is NOT a child of "/repo"
     _eq("path-prefix but not directory-child", subdir_prefix("/repo-extra/sub", "/repo"), "")
 
+def _test_subdir_prefix_path_with_spaces(_ctx):
+    _eq("space in subdir → quoted", subdir_prefix("/repo/my service", "/repo"), "cd 'my service'\n")
+
+def _test_subdir_prefix_path_with_parens(_ctx):
+    _eq("parens in subdir → quoted", subdir_prefix("/repo/apps/(special)", "/repo"), "cd 'apps/(special)'\n")
+
+def _test_subdir_prefix_simple_path_unquoted(_ctx):
+    """Simple paths must not be wrapped in quotes — they stay copy-paste clean."""
+    _eq("simple path → no quotes", subdir_prefix("/repo/e2e/runner", "/repo"), "cd e2e/runner\n")
+
 # ---------------------------------------------------------------------------
 # repro_prefix — uses a struct-based fake ctx
 # ---------------------------------------------------------------------------
@@ -173,6 +183,9 @@ _UNIT_TESTS = [
     _test_subdir_prefix_nested,
     _test_subdir_prefix_outside_root,
     _test_subdir_prefix_root_is_proper_prefix_of_cwd,
+    _test_subdir_prefix_path_with_spaces,
+    _test_subdir_prefix_path_with_parens,
+    _test_subdir_prefix_simple_path_unquoted,
     _test_repro_prefix_from_subdir_with_git_root,
     _test_repro_prefix_at_git_root,
     _test_repro_prefix_nested_subdir,

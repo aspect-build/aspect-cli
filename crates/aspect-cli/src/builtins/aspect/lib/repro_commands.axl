@@ -304,7 +304,7 @@ def subdir_prefix(cwd, root):
         return ""
     prefix = root + "/"
     if cwd.startswith(prefix):
-        return "cd " + cwd[len(prefix):] + "\n"
+        return "cd " + _shell_quote(cwd[len(prefix):]) + "\n"
     return ""
 
 def repro_prefix(ctx):
