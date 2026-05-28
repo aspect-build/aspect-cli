@@ -248,6 +248,7 @@ def run_bazel_task(ctx: TaskContext, command: str, extra_flags = [], targets = N
                 fail("--target-pattern-file cannot be combined with command-line target patterns")
             if not ctx.std.fs.exists(pattern_file):
                 fail("--target-pattern-file: file not found: " + pattern_file)
+
             # Forward the flag to Bazel instead of expanding the file into
             # argv. Expanding would defeat the flag's purpose: it exists to
             # let huge target lists bypass OS command-line length limits.
