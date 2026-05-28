@@ -14,13 +14,16 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
 build = task(
     args = {
-        # TODO: Support a long --pattern_file like bazel does (@./targets)
         # TODO: Support - (list from stdin)
         "targets": args.positional(
             default = ["..."],
             description = "Bazel target patterns to build. Defaults to '...' which expands to all rule targets in the package at and beneath the current directory. When any pattern is hyphen-led (e.g. excludes like `-//experimental/...`), separate them from flags with `--`: `aspect build -- //... -//experimental/...`.",
             maximum = 512,
             minimum = 1,
+        ),
+        "target_pattern_file": args.string(
+            default = "",
+            description = "Read newline-separated target patterns from this file instead of the command line (mirrors Bazel's --target_pattern_file). Blank lines and `#` comments are ignored. Cannot be combined with command-line target patterns.",
         ),
         "announce_rc": args.boolean(
             default = False,

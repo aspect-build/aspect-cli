@@ -9,62 +9,88 @@ load("./lib/health_check.axl", "HealthCheckTrait")
 load("./lib/lifecycle.axl", "TaskLifecycleTrait")
 load("./lib/tips.axl", "tips")
 
-_DEFAULT_TARGETS = ["..."]
-
 # Where `--combined_report=lcov` writes the merged LCOV report, relative to
-# `bazel info output_path`. Bazel has no flag to redirect this, so `--coverage-report`
-# copies it out after the run.
+# `bazel info output_path`. Bazel has no flag to redirect this, so
+# `--coverage-report` copies it out and `--coverage-tool` passes the path on.
 _COMBINED_REPORT_RELPATH = "_coverage/_coverage_report.dat"
 
-def _read_target_patterns(ctx, path):
-    """Read newline-separated target patterns from `path`.
+# Tokens in --coverage-tool/--coverage-tool-arg that get replaced with the
+# absolute LCOV report path before the tool is spawned. Both spellings are
+# accepted so users don't have to remember which one we picked.
+_REPORT_PLACEHOLDERS = ["{report}", "{lcov}"]
 
-    Mirrors Bazel's `--target_pattern_file`: blank lines and `#` comments are
-    skipped. Errors if the file is missing or yields no patterns so the run
-    fails loudly rather than silently falling back to the `...` default.
-    """
-    if not ctx.std.fs.exists(path):
-        fail("--target-pattern-file: file not found: " + path)
-    patterns = []
-    for line in ctx.std.fs.read_to_string(path).splitlines():
-        stripped = line.strip()
-        if stripped and not stripped.startswith("#"):
-            patterns.append(stripped)
-    if not patterns:
-        fail("--target-pattern-file: no target patterns found in " + path)
-    return patterns
-
-def _copy_combined_report(ctx, dest):
-    """Copy the merged LCOV report to `dest` after a `--coverage` run."""
+def _resolve_report(ctx):
+    """Locate the merged LCOV report; empty string when unavailable."""
     output_path = ctx.bazel.info().get("output_path")
     if not output_path:
-        ctx.std.io.stderr.write("--coverage-report: could not resolve bazel output_path\n")
-        return
+        return ""
     report = output_path + "/" + _COMBINED_REPORT_RELPATH
-    if not ctx.std.fs.exists(report):
-        ctx.std.io.stderr.write("--coverage-report: combined report not found at " + report + "\n")
-        return
+    return report if ctx.std.fs.exists(report) else ""
+
+def _copy_combined_report(ctx, src, dest):
+    """Copy the merged LCOV report from `src` to `dest`."""
     parent = dest.rpartition("/")[0]
     if parent:
         ctx.std.fs.create_dir_all(parent)
-    ctx.std.fs.copy(report, dest)
+    ctx.std.fs.copy(src, dest)
     print("Coverage report written to " + dest)
 
-def _impl(ctx: TaskContext) -> int | TaskConclusion:
-    targets = None
-    if ctx.args.target_pattern_file:
-        if ctx.args.is_explicit("targets"):
-            fail("--target-pattern-file cannot be combined with command-line target patterns")
-        targets = _read_target_patterns(ctx, ctx.args.target_pattern_file)
+def _substitute(arg, report_path):
+    out = arg
+    matched = False
+    for token in _REPORT_PLACEHOLDERS:
+        if token in out:
+            out = out.replace(token, report_path)
+            matched = True
+    return out, matched
 
+def _run_coverage_tool(ctx, bin, raw_args, report_path):
+    """Spawn `bin` with `raw_args`, substituting {report}/{lcov} placeholders.
+
+    If no placeholder appears anywhere, the report path is appended as the
+    last positional argument so simple tools like `genhtml` work without
+    extra ceremony. A non-zero exit code from the tool is surfaced as a
+    warning — it does not fail the test task, so uploaders (e.g. codecov)
+    can still publish partial coverage when some tests failed.
+    """
+    bin, bin_matched = _substitute(bin, report_path)
+    final_args = []
+    any_match = bin_matched
+    for a in raw_args:
+        substituted, matched = _substitute(a, report_path)
+        any_match = any_match or matched
+        final_args.append(substituted)
+    if not any_match:
+        final_args.append(report_path)
+
+    print("Running coverage tool: " + bin + " " + " ".join(final_args))
+    status = ctx.std.process.command(bin).args(final_args).spawn().wait()
+    if status.code != 0:
+        ctx.std.io.stderr.write(
+            "--coverage-tool: '" + bin + "' exited with code " + str(status.code) +
+            " (continuing; tool failure does not fail the test task)\n",
+        )
+
+def _impl(ctx: TaskContext) -> int | TaskConclusion:
     extra_flags = []
     if ctx.args.coverage:
         extra_flags = ["--collect_code_coverage", "--combined_report=lcov"]
 
-    conclusion = run_bazel_task(ctx, command = "test", extra_flags = extra_flags, targets = targets)
+    conclusion = run_bazel_task(ctx, command = "test", extra_flags = extra_flags)
 
-    if ctx.args.coverage and ctx.args.coverage_report and conclusion.exit_code == 0:
-        _copy_combined_report(ctx, ctx.args.coverage_report)
+    if ctx.args.coverage:
+        report_path = _resolve_report(ctx)
+        if not report_path:
+            if ctx.args.coverage_report or ctx.args.coverage_tool:
+                ctx.std.io.stderr.write("--coverage: combined LCOV report not found; skipping --coverage-report / --coverage-tool\n")
+        else:
+            if ctx.args.coverage_report:
+                _copy_combined_report(ctx, report_path, ctx.args.coverage_report)
+            if ctx.args.coverage_tool:
+                # Tool sees the original Bazel output path. If --coverage-report
+                # was also set, the copied file is identical, so it doesn't
+                # matter which one the tool reads.
+                _run_coverage_tool(ctx, ctx.args.coverage_tool, ctx.args.coverage_tool_args, report_path)
 
     return conclusion
 
@@ -74,7 +100,7 @@ test = task(
         "targets": args.positional(
             minimum = 1,
             maximum = 512,
-            default = _DEFAULT_TARGETS,
+            default = ["..."],
             description = "Bazel target patterns to test. Defaults to '...' which expands to all rule targets in the package at and beneath the current directory. When any pattern is hyphen-led (e.g. excludes like `-//experimental/...`), separate them from flags with `--`: `aspect test -- //... -//experimental/...`.",
         ),
         "target_pattern_file": args.string(
@@ -87,7 +113,15 @@ test = task(
         ),
         "coverage_report": args.string(
             default = "",
-            description = "Copy the merged LCOV report produced by --coverage to this path once the run succeeds. Parent directories are created as needed. No effect unless --coverage is set.",
+            description = "Copy the merged LCOV report produced by --coverage to this path. Parent directories are created as needed. No effect unless --coverage is set.",
+        ),
+        "coverage_tool": args.string(
+            default = "",
+            description = "External binary to run against the merged LCOV report after a --coverage run (e.g. `genhtml`, `codecov`). The report path is substituted into any `--coverage-tool-arg` containing the `{report}` (or `{lcov}`) placeholder; if no placeholder is present, the path is appended as the last argument. The tool runs regardless of the test exit code so uploaders can publish partial coverage; a non-zero exit from the tool is surfaced as a warning and does not fail the test task. No effect unless --coverage is set.",
+        ),
+        "coverage_tool_args": args.string_list(
+            long = "coverage-tool-arg",
+            description = "Argument forwarded to --coverage-tool. Repeat the flag to pass multiple. The `{report}` (or `{lcov}`) placeholder is replaced with the absolute path of the merged LCOV report. Example: `--coverage-tool=codecov --coverage-tool-arg=-f --coverage-tool-arg={report}`.",
         ),
         "announce_rc": args.boolean(
             default = False,

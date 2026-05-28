@@ -47,6 +47,7 @@ Key flags:
 | `--bes-header`             | (none)  | `--bes_header=<value>`. Repeatable. |
 | `--cancel`                 | `false` | Cancels any running invocation first. |
 | `--bazel-output-base`      | (none)  | Pin the Bazel server instance. |
+| `--target-pattern-file`    | (none)  | Newline-separated target patterns (mirrors Bazel `--target_pattern_file`). Cannot be combined with command-line patterns. |
 
 Produces:
 
@@ -62,9 +63,19 @@ Produces:
 
 Same flag surface as [`build`](#build), plus:
 
-- `--target-pattern-file=FILE` — read newline-separated target patterns from a file instead of the command line (mirrors Bazel's `--target_pattern_file`). Blanks and `#` comments are skipped; cannot be combined with command-line patterns.
 - `--coverage` — collect code coverage (`--collect_code_coverage --combined_report=lcov`).
-- `--coverage-report=PATH` — copy the merged LCOV report to `PATH` after a successful `--coverage` run.
+- `--coverage-report=PATH` — copy the merged LCOV report to `PATH` after a `--coverage` run.
+- `--coverage-tool=BIN` + `--coverage-tool-arg=ARG` (repeatable) — run an external tool against the merged LCOV report (e.g. `genhtml`, `codecov`). `{report}` (or `{lcov}`) in any arg is replaced with the absolute report path; absent any placeholder, the path is appended as the last positional arg. The tool runs regardless of the test exit code, and tool failures surface as warnings (so uploaders can publish partial coverage).
+
+  ```sh
+  # genhtml: report path as positional
+  aspect test --coverage \
+    --coverage-tool=genhtml --coverage-tool-arg=-o --coverage-tool-arg=coverage-html
+
+  # codecov: report path behind a flag
+  aspect test --coverage \
+    --coverage-tool=codecov --coverage-tool-arg=-f --coverage-tool-arg={report}
+  ```
 
 The renderer adds:
 

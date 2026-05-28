@@ -206,16 +206,35 @@ def _emit_terminal(ctx, lifecycle, command, data, exit_code):
         flagged = final_status == "warning",
     )
 
+def read_target_patterns(ctx, path):
+    """Read newline-separated target patterns from `path`.
+
+    Mirrors Bazel's `--target_pattern_file`: blank lines and `#` comments
+    are skipped. Errors if the file is missing or yields no patterns so
+    the run fails loudly rather than silently falling back to defaults.
+    """
+    if not ctx.std.fs.exists(path):
+        fail("--target-pattern-file: file not found: " + path)
+    patterns = []
+    for line in ctx.std.fs.read_to_string(path).splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            patterns.append(stripped)
+    if not patterns:
+        fail("--target-pattern-file: no target patterns found in " + path)
+    return patterns
+
 def run_bazel_task(ctx: TaskContext, command: str, extra_flags = [], targets = None) -> TaskConclusion:
     """Shared impl for build/test tasks.
 
     Args:
         ctx:     TaskContext with the standard build/test args (targets,
                  bazel_flags, bazel_startup_flags, bazel_retry_attempts,
-                 bes_backends, bes_headers, cancel, output_base). Task-specific
-                 args (e.g. build's remote_executor) are not touched here —
-                 tasks can still read them from `ctx.args` before/after calling
-                 this function.
+                 bes_backends, bes_headers, cancel, output_base,
+                 optionally target_pattern_file). Task-specific args (e.g.
+                 build's remote_executor) are not touched here — tasks can
+                 still read them from `ctx.args` before/after calling this
+                 function.
         command: "build" or "test" — selects which Bazel subcommand to invoke
                  and which rc section to expand. The shape of the BES event
                  stream (including the presence of test_summary events for
@@ -223,16 +242,24 @@ def run_bazel_task(ctx: TaskContext, command: str, extra_flags = [], targets = N
         extra_flags: Task-supplied Bazel flags appended after `--bazel-flag`
                  values (e.g. test's `--collect_code_coverage`). The caller
                  owns their meaning; the runner just forwards them.
-        targets: Target-pattern override. When `None` the runner reads
-                 `ctx.args.targets`; tasks pass an explicit list to source
-                 patterns from elsewhere (e.g. `--target-pattern-file`).
+        targets: Target-pattern override. When `None` the runner honors
+                 `--target-pattern-file` (if the task declares it) and
+                 otherwise reads `ctx.args.targets`.
     """
     hc_trait = ctx.traits[HealthCheckTrait]
     bazel_trait = ctx.traits[BazelTrait]
     lifecycle = ctx.traits[TaskLifecycleTrait]
 
     if targets == None:
-        targets = ctx.args.targets
+        # Optional arg — only honored when the task declares it. Tasks that
+        # don't expose --target-pattern-file behave as before.
+        pattern_file = getattr(ctx.args, "target_pattern_file", "") if hasattr(ctx.args, "target_pattern_file") else ""
+        if pattern_file:
+            if ctx.args.is_explicit("targets"):
+                fail("--target-pattern-file cannot be combined with command-line target patterns")
+            targets = read_target_patterns(ctx, pattern_file)
+        else:
+            targets = ctx.args.targets
 
     data = init_data()
 
