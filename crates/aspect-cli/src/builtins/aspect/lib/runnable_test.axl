@@ -114,6 +114,36 @@ def _test_bzlmod_bazel7_version_with_plus_build_metadata(ctx):
     )
 
 # ---------------------------------------------------------------------------
+# Relative-label resolution
+#
+# `apparent_label` resolves relative labels (`:foo`, bare `foo`, `pkg:foo`)
+# against the caller's `current_package` so `aspect run :foo` works from a
+# subdirectory. Absolute and repo-prefixed labels ignore `current_package`.
+# ---------------------------------------------------------------------------
+
+def _test_relative_colon_name_at_root(ctx):
+    _eq(":foo at root", apparent_label(":foo", ""), "//:foo")
+
+def _test_relative_colon_name_in_nested_package(ctx):
+    _eq(":foo in examples/deliverable", apparent_label(":foo", "examples/deliverable"), "//examples/deliverable:foo")
+
+def _test_bare_name_at_root(ctx):
+    _eq("foo at root", apparent_label("foo", ""), "//:foo")
+
+def _test_bare_name_in_nested_package(ctx):
+    _eq("foo in examples", apparent_label("foo", "examples"), "//examples:foo")
+
+def _test_relative_pkg_colon_name_at_root(ctx):
+    _eq("sub:foo at root", apparent_label("sub:foo", ""), "//sub:foo")
+
+def _test_relative_pkg_colon_name_in_nested_package(ctx):
+    _eq("sub:foo in foo", apparent_label("sub:foo", "foo"), "//foo/sub:foo")
+
+def _test_absolute_ignores_current_package(ctx):
+    """Absolute labels are not rewritten by a non-empty current_package."""
+    _eq("//foo/bar:baz with pkg context", apparent_label("//foo/bar:baz", "ignored"), "//foo/bar:baz")
+
+# ---------------------------------------------------------------------------
 # BES matching integration tests
 #
 # Construct minimal mock BES events and verify that the full
@@ -319,6 +349,13 @@ _UNIT_TESTS = [
     _test_bzlmod_bazel7_module_repo_no_colon,
     _test_bzlmod_bazel7_extension_repo,
     _test_bzlmod_bazel7_version_with_plus_build_metadata,
+    _test_relative_colon_name_at_root,
+    _test_relative_colon_name_in_nested_package,
+    _test_bare_name_at_root,
+    _test_bare_name_in_nested_package,
+    _test_relative_pkg_colon_name_at_root,
+    _test_relative_pkg_colon_name_in_nested_package,
+    _test_absolute_ignores_current_package,
     _test_bes_bzlmod_bazel7_module_repo,
     _test_bes_bzlmod_no_version,
     _test_bes_bzlmod_with_version,

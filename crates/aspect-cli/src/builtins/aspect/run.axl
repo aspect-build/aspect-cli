@@ -1,0 +1,198 @@
+"""A default 'run' task that builds a target with `bazel build` and runs the resulting binary."""
+
+load("@std//time.axl", "sleep_iter")
+load("./bazel.axl", "BazelTrait")
+load("./lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "init_data", "process_event", bazel_conclusion = "conclusion")
+load("./lib/environment.axl", "error")
+load("./lib/health_check.axl", "HealthCheckTrait")
+load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "preflight_phase", "setup_phase", "task_update")
+load("./lib/runnable.axl", "runnable")
+load("./lib/tips.axl", "tips")
+
+def _terminal_status(data, exit_code):
+    """Lifecycle status for the run task's terminal emit.
+
+    `aborted` wins when bazel terminated the build (timeout/OOM/ctrl-c);
+    otherwise a non-zero exit (build failure, run-setup failure, or a
+    non-zero exit from the spawned binary) is `failed`, and zero is
+    `passed`. The run task has no flaky/warning outcome.
+    """
+    if data.get("bazel", {}).get("aborted"):
+        return "aborted"
+    return "passed" if exit_code == 0 else "failed"
+
+def _emit_terminal(ctx, lifecycle, data, exit_code, conclusion_text = None):
+    """Fire the terminal `task_update(final=True)` + `task_complete` hooks
+    and return a `TaskConclusion` for `_impl` to return.
+
+    Mirrors `bazel_runner._emit_terminal` so the run task concludes its
+    status surfaces (GitHub check runs, Buildkite annotations) the same
+    way `build`/`test` do — without this the surfaces stay stuck at
+    "running" because nothing ever delivers a final update or fires
+    `task_complete`. Called from every exit path (build failure,
+    run-setup failure, and the spawned binary's exit).
+
+    `conclusion_text` overrides the bookend summary for cases the bazel
+    bucket logic can't describe (e.g. a built target whose binary exits
+    non-zero — not a build failure). When None, falls back to the bazel
+    conclusion derived from the accumulated BES counters.
+    """
+    status = _terminal_status(data, exit_code)
+    bookend = conclusion_text if conclusion_text != None else bazel_conclusion(status, data)
+
+    for handler in lifecycle.task_update:
+        handler(ctx, TaskUpdate(
+            kind = "bazel_results",
+            status = status,
+            final = True,
+            conclusion = bookend,
+            data = data,
+            progress = ProgressStyles(body = bookend),
+        ))
+    for handler in lifecycle.task_complete:
+        handler(ctx, exit_code)
+
+    return TaskConclusion(
+        exit_code = exit_code,
+        text = bookend,
+        flagged = status == "warning",
+    )
+
+def _impl(ctx: TaskContext) -> int | TaskConclusion:
+    bazel_trait = ctx.traits[BazelTrait]
+    hc_trait = ctx.traits[HealthCheckTrait]
+    lifecycle = ctx.traits[TaskLifecycleTrait]
+
+    target = ctx.args.target[0]
+    forward_args = list(ctx.args.run_args)
+
+    data = init_data()
+    setup_phase(ctx, lifecycle)
+    for handler in lifecycle.task_started:
+        handler(ctx, target)
+
+    preflight_phase(ctx, lifecycle, hc_trait)
+
+    for hook in hc_trait.post_health_check:
+        result = hook(ctx)
+        if result != None:
+            _emit_terminal(ctx, lifecycle, data, 1)
+            fail(result)
+
+    flags = []
+    flags.extend(bazel_trait.extra_flags)
+    for hook in bazel_trait.task_flags:
+        flags.extend(hook(ctx))
+    if bazel_trait.flags:
+        flags = bazel_trait.flags(flags)
+
+    startup_flags = list(bazel_trait.extra_startup_flags)
+    if bazel_trait.startup_flags:
+        startup_flags = bazel_trait.startup_flags(startup_flags)
+
+    rc = ctx.bazel.parse_rc(
+        root = ctx.std.env.root_dir(),
+        flags = flags,
+        startup_flags = startup_flags,
+    )
+
+    # Expand for `build`, not `run`: this task invokes `ctx.bazel.build`, which
+    # spawns a literal `bazel build`. Expanding for `run` would inject run-only
+    # options (e.g. `--script_path`, listed under Bazel's Run Options) that
+    # `bazel build` rejects as "unrecognized option", so users with entries in
+    # the `run:` section of their .bazelrc would fail before execution. Aspect
+    # spawns the runnable itself after the build, so the run-section is not
+    # the right source of flags here.
+    rc_startup_flags, flags = rc.expand_all(command = "build")
+    ctx.bazel.startup_flags.extend(startup_flags + rc_startup_flags + ["--ignore_all_rc_files"])
+
+    # Required for the spawn to succeed: keep BES artifact references
+    # local, materialize the binary on disk, and lay down the runfiles
+    # tree. Appended LAST so they win over any --config=X expansion
+    # introduced by the rc.
+    flags.append("--experimental_build_event_upload_strategy=local")
+    flags.append("--remote_download_outputs=toplevel")
+    flags.append("--build_runfile_links")
+
+    r = runnable(ctx, [target])
+    events = bazel.build_events.iterator()
+    build_events = [events] + list(bazel_trait.build_event_sinks)
+
+    for hook in bazel_trait.build_start:
+        hook(ctx)
+
+    task_update(
+        ctx,
+        lifecycle,
+        "running",
+        ProgressStyles(
+            body = "Building %s..." % target,
+            stream = "Building %s" % target,
+        ),
+        kind = "bazel_results",
+        data = data,
+        phase = Phase(name = "build", description = "Build run target", emoji = "🔨"),
+    )
+
+    build = ctx.bazel.build(target, build_events = build_events, flags = flags)
+
+    for _tick in sleep_iter(BES_DRAIN_TICK_MS):
+        for _ in range(10000):
+            event = events.try_pop()
+            if event == None:
+                break
+            r.event(event)
+            for handler in bazel_trait.build_event:
+                handler(ctx, event)
+            process_event(data, event)
+        if events.done:
+            break
+
+    build_status = build.wait()
+    for sink in bazel_trait.build_event_sinks:
+        sink.wait()
+    for hook in bazel_trait.build_end:
+        hook(ctx, build_status.code)
+
+    if not build_status.success:
+        return _emit_terminal(ctx, lifecycle, data, build_status.code or 1)
+
+    entrypoint = r.determine_entrypoint(target)
+    if entrypoint == None:
+        error(ctx.std, "Failed to determine the run entrypoint for %s." % target)
+        return _emit_terminal(ctx, lifecycle, data, 1, conclusion_text = "Failed to determine run entrypoint")
+
+    task_update(
+        ctx,
+        lifecycle,
+        "running",
+        ProgressStyles(
+            body = "Running %s..." % target,
+            stream = "Running %s" % target,
+        ),
+        phase = Phase(name = "run", description = "Run target", emoji = "🚀"),
+    )
+
+    code = r.spawn(entrypoint, forward_args).wait().code
+    bookend = "Ran %s" % target if code == 0 else "%s exited with code %d" % (target, code)
+    return _emit_terminal(ctx, lifecycle, data, code, conclusion_text = bookend)
+
+run = task(
+    summary = "Build a target with bazel and run the resulting binary.",
+    args = {
+        "target": args.positional(
+            minimum = 1,
+            maximum = 1,
+            description = "Bazel target to build and run.",
+        ),
+        "run_args": args.trailing_var_args(
+            description = "Arguments forwarded to the target binary. Separate from `aspect run`'s own flags with `--`, e.g. `aspect run //foo:bar -- --binary-arg value`.",
+        ),
+    },
+    traits = [
+        BazelTrait,
+        HealthCheckTrait,
+        TaskLifecycleTrait,
+    ] + tips.TRAITS,
+    implementation = _impl,
+)

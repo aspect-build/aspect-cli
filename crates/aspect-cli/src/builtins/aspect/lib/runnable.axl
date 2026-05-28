@@ -1,6 +1,6 @@
 _DEFAULT_WORKSPACE_NAME = "_main"
 
-def apparent_label(label):
+def apparent_label(label, current_package = ""):
     """Normalize any Bazel label form to apparent form with an explicit target name.
 
     Bazel surfaces two label forms depending on context:
@@ -8,9 +8,15 @@ def apparent_label(label):
     - Canonical:  `@@module+ver//pkg:tgt` — what BES emits for bzlmod repos (Bazel 8+)
     - Canonical:  `@@module~//pkg:tgt`    — what BES emits for bzlmod repos (Bazel 7)
 
-    This function converts either input to apparent form and appends the
-    implicit target name when no `:` is present, yielding a stable key
-    suitable for matching user-supplied targets against BES event labels.
+    Converts either to apparent form, resolves relative labels (`:foo`,
+    `foo`, `pkg:foo`) against `current_package`, and appends the implicit
+    target name when no `:` is present — yielding a stable key suitable
+    for matching user-supplied targets against BES event labels.
+
+    `current_package` is the workspace-relative path of the user's working
+    package (e.g. "foo/bar", or "" for the root package). Only relative
+    labels consult it; absolute (`//...`) and repo-prefixed (`@repo//...`,
+    `@@...`) labels ignore it.
 
     Canonical → apparent stripping rules (Bazel 8+, using `+` separator):
         Module repo:    `@@module+version//pkg:tgt`      → `@module//pkg:tgt`
@@ -39,9 +45,31 @@ def apparent_label(label):
             # Extension repos: module+ext+repo or module~~ext~repo → apparent name is parts[-1]
             apparent_repo = parts[-1] if len(parts) >= 3 else parts[0]
             label = "@" + apparent_repo + rest[idx:]
+
+    # Relative labels resolve against `current_package` before the
+    # no-colon fallback below (which assumes an absolute label).
+    if not label.startswith("//") and not label.startswith("@"):
+        if label.startswith(":"):
+            return "//" + current_package + label
+        if ":" in label:
+            pkg, _, name = label.partition(":")
+            joined = current_package + "/" + pkg if current_package else pkg
+            return "//" + joined + ":" + name
+        return "//" + current_package + ":" + label
+
     if ":" not in label:
         return label + ":" + label.split("/")[-1]
     return label
+
+def _current_package(ctx) -> str:
+    """Workspace-relative path of cwd, used as the package for relative labels."""
+    root = ctx.std.env.root_dir().rstrip("/")
+    cwd = ctx.std.env.current_dir().rstrip("/")
+    if cwd == root:
+        return ""
+    if cwd.startswith(root + "/"):
+        return cwd[len(root) + 1:]
+    return ""
 
 def _process_bes(state: struct, event):
     if event.kind == "named_set_of_files":
@@ -78,7 +106,7 @@ def _determine_entrypoint(state: struct, target: str) -> struct | None:
     entrypoint's, which may differ in non-standard rules. Both names are tied to the
     target label (a Bazel invariant).
     """
-    target = apparent_label(target)
+    target = apparent_label(target, state.current_package)
     if target not in state.target_fileset:
         return None
 
@@ -202,9 +230,11 @@ def runnable(ctx, targets: list[str]) -> struct:
           `cwd` defaults to `ep.runfiles_dir/<workspace>` when a runfiles tree
           is present, or to the aspect invocation directory for bare binaries.
     """
+    current_package = _current_package(ctx) if ctx else ""
     state = struct(
         ctx = ctx,
-        targets = {apparent_label(t): t for t in targets},
+        current_package = current_package,
+        targets = {apparent_label(t, current_package): t for t in targets},
         filesets = {},
         target_fileset = {},
         # Single-element list so `_process_bes` can mutate it (struct fields are

@@ -93,6 +93,17 @@ steps:
         cd crates/aspect-cli
         $$LAUNCHER user user-task-subdir
       )
+      echo "--- :aspect: aspect run smoke (in examples/deliverable)"
+      # Exercises the run task end-to-end across the three label forms
+      # apparent_label resolves (:name, //:name, bare name) and verifies
+      # trailing args are forwarded to the spawned binary.
+      (
+        cd examples/deliverable
+        $$LAUNCHER run :py_deliverable
+        $$LAUNCHER run //:py_deliverable
+        $$LAUNCHER run py_deliverable
+        $$LAUNCHER run :deliverable -- forwarded-arg
+      )
       echo "--- :aspect: aspect help"
       $$LAUNCHER help
       echo "--- :aspect: aspect-launcher --version"
