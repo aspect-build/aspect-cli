@@ -40,7 +40,8 @@ load("./lib/tips.axl", "tips")
 # Max characters per formatter invocation batch (same cap as rules_lint's format.sh).
 _MAX_BATCH_CHARS = 128000
 
-# .gitattributes attributes that mark files as generated/lint-ignored.
+# .gitattributes attributes that mark files as generated/ignored.
+# Files with any of these set to "true" or "set" are excluded by --scope=tracked.
 _GITATTR_IGNORED = ["aspect-format-ignored", "rules-lint-ignored", "linguist-generated", "gitlab-generated"]
 
 def _git_capture_in(ctx, work_dir, *args):
@@ -86,10 +87,13 @@ def _chunk_files(files):
 
 
 def _filter_git_attributes(ctx, files):
-    """Exclude files flagged as generated/lint-ignored via .gitattributes.
+    """Exclude files flagged as generated/ignored via .gitattributes.
 
-    Checks rules-lint-ignored, linguist-generated, and gitlab-generated
-    attributes, mirroring rules_lint's ls-files function.
+    Checks the following attributes (any set to "true" causes exclusion):
+      aspect-format-ignored  — aspect-native escape hatch
+      rules-lint-ignored     — rules_lint compatibility
+      linguist-generated     — GitHub Linguist / standard generated-file marker
+      gitlab-generated       — GitLab equivalent of linguist-generated
     """
     if not files:
         return files
