@@ -148,7 +148,7 @@ def _git_ls_files(ctx):
     del_out, del_code, _ = _git_capture_root(ctx, "ls-files", "--deleted",
                                               "--full-name", "--", path_scope)
     if del_code == 0:
-        deleted = {f for f in del_out.strip().split("\n") if f}
+        deleted = {f: True for f in del_out.strip().split("\n") if f}
         files = [f for f in files if f not in deleted]
 
     return _filter_git_attributes(ctx, files)
