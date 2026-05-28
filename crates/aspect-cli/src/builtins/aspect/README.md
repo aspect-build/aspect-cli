@@ -63,7 +63,7 @@ Produces:
 
 Same flag surface as [`build`](#build), plus:
 
-- `--coverage` — collect code coverage (`--collect_code_coverage --combined_report=lcov`).
+- `--coverage` — collect code coverage. Switches the underlying Bazel verb from `test` to `coverage` (only `bazel coverage` runs the report-generator action that merges per-test coverage data) and passes `--combined_report=lcov` so the merged report lands at `$(bazel info output_path)/_coverage/_coverage_report.dat`.
 - `--coverage-report=PATH` — copy the merged LCOV report to `PATH` after a `--coverage` run.
 - `--coverage-tool=BIN` + `--coverage-tool-arg=ARG` (repeatable) — run an external tool against the merged LCOV report (e.g. `genhtml`, `codecov`). `{report}` (or `{lcov}`) in any arg is replaced with the absolute report path; absent any placeholder, the path is appended as the last positional arg. The tool runs regardless of the test exit code, and tool failures surface as warnings (so uploaders can publish partial coverage).
 

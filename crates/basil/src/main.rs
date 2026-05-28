@@ -47,7 +47,7 @@ fn main() {
 
     match verb {
         "info" => run_info(&args),
-        "build" | "test" => run_build(&args),
+        "build" | "test" | "coverage" => run_build(&args),
         "" => {
             eprintln!("basil: no verb given");
             process::exit(2);

@@ -72,11 +72,15 @@ def _run_coverage_tool(ctx, bin, raw_args, report_path):
         )
 
 def _impl(ctx: TaskContext) -> int | TaskConclusion:
-    extra_flags = []
-    if ctx.args.coverage:
-        extra_flags = ["--collect_code_coverage", "--combined_report=lcov"]
+    # `bazel coverage` is the only verb that runs the coverage report
+    # generator action that produces the merged LCOV file. `bazel test
+    # --collect_code_coverage` only writes per-test coverage.dat and
+    # would leave --coverage-report / --coverage-tool with nothing to
+    # operate on, so the verb itself flips when --coverage is set.
+    command = "coverage" if ctx.args.coverage else "test"
+    extra_flags = ["--combined_report=lcov"] if ctx.args.coverage else []
 
-    conclusion = run_bazel_task(ctx, command = "test", extra_flags = extra_flags)
+    conclusion = run_bazel_task(ctx, command = command, extra_flags = extra_flags)
 
     if ctx.args.coverage:
         report_path = _resolve_report(ctx)
@@ -109,7 +113,7 @@ test = task(
         ),
         "coverage": args.boolean(
             default = False,
-            description = "Collect code coverage while testing. Adds --collect_code_coverage and --combined_report=lcov to the test invocation so Bazel writes a merged LCOV report.",
+            description = "Collect code coverage. Switches the underlying Bazel verb from `test` to `coverage` (Bazel's coverage report generator only runs under `bazel coverage`) and passes --combined_report=lcov so the merged LCOV report lands at `$(bazel info output_path)/_coverage/_coverage_report.dat`.",
         ),
         "coverage_report": args.string(
             default = "",
