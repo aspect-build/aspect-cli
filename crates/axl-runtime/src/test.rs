@@ -68,7 +68,12 @@ impl EvalBuilder {
         let globals = get_globals().build();
         let rt = Runtime::new().map_err(|e| anyhow!("failed to create runtime: {}", e))?;
         let _g = rt.enter();
-        let env_store = Env::new("test".to_string(), PathBuf::from("/"), PathBuf::from("/"));
+        let env_store = Env::new(
+            "test".to_string(),
+            PathBuf::from("/"),
+            PathBuf::from("/"),
+            None,
+        );
         ModuleEnv::with(|env| {
             let mut eval = Evaluator::new(&env.0);
             eval.extra = Some(&env_store);
@@ -81,7 +86,13 @@ impl EvalBuilder {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let rt = Runtime::new()?;
         let _g = rt.enter();
-        let loader = Loader::new("test".to_string(), manifest_dir.clone(), manifest_dir, &[]);
+        let loader = Loader::new(
+            "test".to_string(),
+            manifest_dir.clone(),
+            manifest_dir,
+            None,
+            &[],
+        );
         let ast = AstModule::parse("test", self.code, &dialect()).map_err(|e| anyhow!("{}", e))?;
         Module::with_temp_heap(|module| {
             let mut eval = Evaluator::new(&module);
@@ -104,7 +115,12 @@ impl EvalBuilder {
         let globals = get_globals().build();
         let rt = Runtime::new().expect("failed to create runtime");
         let _g = rt.enter();
-        let env_store = Env::new("test".to_string(), PathBuf::from("/"), PathBuf::from("/"));
+        let env_store = Env::new(
+            "test".to_string(),
+            PathBuf::from("/"),
+            PathBuf::from("/"),
+            None,
+        );
         Module::with_temp_heap(|module| {
             let mut eval = Evaluator::new(&module);
             eval.extra = Some(&env_store);
@@ -146,6 +162,7 @@ impl EvalBuilder {
                 "test".to_string(),
                 tmp.path().to_path_buf(),
                 tmp.path().to_path_buf(),
+                None,
                 &modules,
             );
             let mut mpe = MultiPhaseEval::new(env, &loader);

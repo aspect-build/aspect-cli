@@ -23,6 +23,14 @@ way producers compose these strings — handling flag normalization,
 target joining, the `--` separator before targets, and length-bounded
 truncation when the target list is large.
 
+`repro_prefix(ctx)` / `subdir_prefix(cwd, root)` prepend `cd <rel>\n`
+to commands when aspect was called from a subdirectory, so CI failures
+are reproducible without guessing the original working directory.
+
+`explicit_flags(ctx, pairs)` filters `(arg_name, flag_name)` pairs to
+those the user actually passed on the CLI — used to rebuild repro/fix
+commands that faithfully encode the invocation.
+
 `dedup_and_attribute(entries)` is what status surfaces use to merge
 the per-task lists into a single rolled-up view across tasks: two
 contributions of the same `(command, description)` collapse into one
@@ -32,7 +40,8 @@ row that lists every contributing task_key.
 the CLI so a developer reading the raw CI log sees the actionable
 commands without opening the status surface.
 
-`build_aspect_command` and `dedup_and_attribute` are pure (no I/O).
+`build_aspect_command`, `repro_prefix`, `subdir_prefix`,
+`explicit_flags`, and `dedup_and_attribute` are pure (no I/O).
 """
 
 load("./environment.axl", "color_enabled")
@@ -284,6 +293,37 @@ def patch_download_cmd(patch_url, strip = 1):
                     "  && unzip -p /tmp/aspect-patch.zip \\\n" +
                     "  | %s") % (owner, repo, artifact_id, apply_cmd)
     return ""
+
+def subdir_prefix(cwd, root):
+    """Return 'cd <rel>\\n' when cwd is a subdirectory of root, else ''.
+
+    Returns '' when cwd == root or when cwd is not under root (e.g. the
+    process is outside the repo entirely).
+    """
+    if cwd == root:
+        return ""
+    prefix = root + "/"
+    if cwd.startswith(prefix):
+        return "cd " + _shell_quote(cwd[len(prefix):]) + "\n"
+    return ""
+
+def repro_prefix(ctx):
+    """'cd <rel>\\n' for repro commands when aspect was called from a sub-directory.
+
+    Uses the git repository root as the reference anchor (the directory users
+    naturally navigate relative to), falling back to aspect_root_dir() when
+    not inside a git repo. Returns '' when aspect was called from the root.
+
+    Prepend this to every repro/fix command string so CI failures are
+    reproducible without guessing the original working directory:
+
+        cd e2e/runner
+        aspect gazelle --on-change=fail --check-only=true ...
+    """
+    return subdir_prefix(
+        ctx.std.env.current_dir(),
+        ctx.std.env.git_root_dir() or ctx.std.env.aspect_root_dir(),
+    )
 
 # ── CLI rendering ─────────────────────────────────────────────────────
 

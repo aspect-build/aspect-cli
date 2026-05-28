@@ -26,7 +26,8 @@ load("./lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_ch
 load("./lib/health_check.axl", "HealthCheckTrait")
 load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "pick_task_status", "preflight_phase", "resolve_on_change", "setup_phase", "task_update")
 load("./lib/path_glob.axl", "match_any")
-load("./lib/repro_commands.axl", "build_aspect_command", "explicit_flags", "print_repro_and_fix", "task_cli_path")
+load("./lib/path_normalize.axl", "normalize_files_for_cwd")
+load("./lib/repro_commands.axl", "build_aspect_command", "explicit_flags", "print_repro_and_fix", "repro_prefix", "task_cli_path")
 load("./lib/runnable.axl", "runnable")
 load("./lib/text.axl", "pluralize")
 load("./lib/tips.axl", "tips")
@@ -113,6 +114,20 @@ def _diff_against(ctx, base):
         fail(msg)
     return out
 
+def _normalize_files_for_formatter(ctx, files):
+    """Rebase git-root-relative `files` to CWD-relative paths.
+
+    Thin wrapper around `normalize_files_for_cwd` that reads CWD and git root
+    from ctx. CWD-relative paths work for the formatter because bare binaries
+    spawn in CWD, and sh_binary wrappers (e.g. format_multirun) cd to
+    BUILD_WORKING_DIRECTORY (= CWD) before invoking the underlying formatter.
+    """
+    return normalize_files_for_cwd(
+        ctx.std.env.current_dir(),
+        ctx.std.env.git_root_dir(),
+        files,
+    )
+
 def _pick_status(data, had_failure, terminal):
     return pick_task_status(data, "format", had_failure, terminal)
 
@@ -176,8 +191,9 @@ def _append_repro_command(ctx, data):
     flags = ([("--on-change", "fail")] +
              explicit_flags(ctx, _DETECTION_PAIRS) +
              _surfaced_base_ref_flag(ctx))
+    prefix = repro_prefix(ctx)
     data["repro_commands"].append({
-        "command": build_aspect_command(task_cli_path(ctx.task), flags, []),
+        "command": prefix + build_aspect_command(task_cli_path(ctx.task), flags, []),
         "description": "",
     })
 
@@ -194,6 +210,7 @@ def _append_fix_commands(ctx, data):
     if not affected:
         return
     task_path = task_cli_path(ctx.task)
+    prefix = repro_prefix(ctx)
 
     # Positional file list bypasses --scope / --base-ref / --merge-base /
     # --include-pattern / --exclude-pattern, so the explicit-file fix command
@@ -202,7 +219,7 @@ def _append_fix_commands(ctx, data):
                         explicit_flags(ctx, [("formatter_target", "--formatter-target")]))
     if len(affected) <= _FIX_FILES_LIMIT:
         data["fix_commands"].append({
-            "command": build_aspect_command(task_path, positional_flags, affected, max_chars = 4096),
+            "command": prefix + build_aspect_command(task_path, positional_flags, affected, max_chars = 4096),
             "description": "",
         })
         return
@@ -210,7 +227,7 @@ def _append_fix_commands(ctx, data):
     shown = affected[:_FIX_FILES_LIMIT]
     remaining = len(affected) - _FIX_FILES_LIMIT
     data["fix_commands"].append({
-        "command": build_aspect_command(task_path, positional_flags, shown, max_chars = 4096),
+        "command": prefix + build_aspect_command(task_path, positional_flags, shown, max_chars = 4096),
         "description": "First %d of %d affected files (plus %d other%s)" % (
             _FIX_FILES_LIMIT,
             len(affected),
@@ -223,7 +240,7 @@ def _append_fix_commands(ctx, data):
                  explicit_flags(ctx, _DETECTION_PAIRS) +
                  _surfaced_base_ref_flag(ctx))
     data["fix_commands"].append({
-        "command": build_aspect_command(task_path, detection, []),
+        "command": prefix + build_aspect_command(task_path, detection, []),
         "description": "Or re-discover and format all %d affected files" % len(affected),
     })
 
@@ -358,6 +375,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         ctx.args.formatter_target,
         build_events = build_events,
         flags = flags,
+        current_dir = ctx.std.env.aspect_root_dir(),
     )
 
     # `build.sink_invocation_id` is minted inside the runtime's `Build::spawn`
@@ -502,6 +520,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                 if n_excluded > 0:
                     info(ctx.std, "Filtered %d file(s) via --exclude-pattern." % n_excluded)
                 changed_files = kept
+            changed_files = _normalize_files_for_formatter(ctx, changed_files)
             if not changed_files:
                 info(ctx.std, "No files to format")
                 data["format"]["no_files_to_format"] = True
@@ -617,6 +636,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     if exclude_patterns:
         affected = [f for f in affected if not match_any(exclude_patterns, f)]
     filtered_count = len(affected_raw) - len(affected)
+    affected = _normalize_files_for_formatter(ctx, affected)
 
     if not affected:
         if filtered_count > 0:

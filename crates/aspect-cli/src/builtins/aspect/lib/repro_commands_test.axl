@@ -1,12 +1,12 @@
-"""Unit tests for `lib/repro_commands.axl::explicit_flags`.
+"""Unit tests for lib/repro_commands.axl.
 
-A struct-based fake `ctx` substitutes for a real `TaskContext` so the
-test can run without the CLI / merge plumbing. Wiring of `ctx.args.
-is_explicit` through clap's `ValueSource::CommandLine` is covered by
-the Rust unit tests on `Arguments`.
+A struct-based fake `ctx` substitutes for a real `TaskContext` so tests
+run without the CLI / merge plumbing. Wiring of `ctx.args.is_explicit`
+through clap's `ValueSource::CommandLine` is covered by the Rust unit
+tests on `Arguments`.
 """
 
-load("./repro_commands.axl", "explicit_flags")
+load("./repro_commands.axl", "explicit_flags", "repro_prefix", "subdir_prefix")
 
 def _eq(label, got, want):
     if got != want:
@@ -108,6 +108,68 @@ def _test_empty_pairs_list_returns_empty(ctx):
     ))
     _eq("empty pairs → empty list", explicit_flags(fake, []), [])
 
+# ---------------------------------------------------------------------------
+# subdir_prefix
+# ---------------------------------------------------------------------------
+
+def _test_subdir_prefix_at_root(_ctx):
+    _eq("cwd == root → no prefix", subdir_prefix("/repo", "/repo"), "")
+
+def _test_subdir_prefix_direct_child(_ctx):
+    _eq("direct child", subdir_prefix("/repo/sub", "/repo"), "cd sub\n")
+
+def _test_subdir_prefix_nested(_ctx):
+    _eq("nested", subdir_prefix("/repo/a/b/c", "/repo"), "cd a/b/c\n")
+
+def _test_subdir_prefix_outside_root(_ctx):
+    _eq("cwd outside root → no prefix", subdir_prefix("/other/path", "/repo"), "")
+
+def _test_subdir_prefix_root_is_proper_prefix_of_cwd(_ctx):
+    # "/repo-extra" starts with "/repo" but is NOT a child of "/repo"
+    _eq("path-prefix but not directory-child", subdir_prefix("/repo-extra/sub", "/repo"), "")
+
+def _test_subdir_prefix_path_with_spaces(_ctx):
+    _eq("space in subdir → quoted", subdir_prefix("/repo/my service", "/repo"), "cd 'my service'\n")
+
+def _test_subdir_prefix_path_with_parens(_ctx):
+    _eq("parens in subdir → quoted", subdir_prefix("/repo/apps/(special)", "/repo"), "cd 'apps/(special)'\n")
+
+def _test_subdir_prefix_simple_path_unquoted(_ctx):
+    """Simple paths must not be wrapped in quotes — they stay copy-paste clean."""
+    _eq("simple path → no quotes", subdir_prefix("/repo/e2e/runner", "/repo"), "cd e2e/runner\n")
+
+# ---------------------------------------------------------------------------
+# repro_prefix — uses a struct-based fake ctx
+# ---------------------------------------------------------------------------
+
+def _fake_env(cwd, git_root, aspect_root = None):
+    """Build a minimal ctx.std.env struct for repro_prefix tests."""
+    return struct(std = struct(env = struct(
+        current_dir = lambda: cwd,
+        git_root_dir = lambda: git_root,
+        aspect_root_dir = lambda: aspect_root or cwd,
+    )))
+
+def _test_repro_prefix_from_subdir_with_git_root(_ctx):
+    fake = _fake_env("/repo/pkg", "/repo")
+    _eq("subdir under git root", repro_prefix(fake), "cd pkg\n")
+
+def _test_repro_prefix_at_git_root(_ctx):
+    fake = _fake_env("/repo", "/repo")
+    _eq("at git root → empty", repro_prefix(fake), "")
+
+def _test_repro_prefix_nested_subdir(_ctx):
+    fake = _fake_env("/repo/a/b", "/repo")
+    _eq("nested subdir", repro_prefix(fake), "cd a/b\n")
+
+def _test_repro_prefix_no_git_root_falls_back_to_aspect_root(_ctx):
+    fake = _fake_env("/project/sub", None, aspect_root = "/project")
+    _eq("fallback to aspect_root", repro_prefix(fake), "cd sub\n")
+
+def _test_repro_prefix_no_git_root_at_aspect_root(_ctx):
+    fake = _fake_env("/project", None, aspect_root = "/project")
+    _eq("at aspect_root, no git → empty", repro_prefix(fake), "")
+
 _UNIT_TESTS = [
     _test_returns_empty_when_no_explicit,
     _test_includes_only_explicit_pairs,
@@ -116,12 +178,25 @@ _UNIT_TESTS = [
     _test_handles_include_pattern_list,
     _test_include_and_exclude_patterns_independent,
     _test_empty_pairs_list_returns_empty,
+    _test_subdir_prefix_at_root,
+    _test_subdir_prefix_direct_child,
+    _test_subdir_prefix_nested,
+    _test_subdir_prefix_outside_root,
+    _test_subdir_prefix_root_is_proper_prefix_of_cwd,
+    _test_subdir_prefix_path_with_spaces,
+    _test_subdir_prefix_path_with_parens,
+    _test_subdir_prefix_simple_path_unquoted,
+    _test_repro_prefix_from_subdir_with_git_root,
+    _test_repro_prefix_at_git_root,
+    _test_repro_prefix_nested_subdir,
+    _test_repro_prefix_no_git_root_falls_back_to_aspect_root,
+    _test_repro_prefix_no_git_root_at_aspect_root,
 ]
 
 def _test_impl(ctx):
     for t in _UNIT_TESTS:
         t(ctx)
-    print("repro_commands.axl: OK (%d sections)" % len(_UNIT_TESTS))
+    print("repro_commands.axl: OK (%d tests)" % len(_UNIT_TESTS))
     return 0
 
 repro_commands_tests = task(

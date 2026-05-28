@@ -1,0 +1,149 @@
+"""Unit tests for lib/path_normalize.axl."""
+
+load("./path_normalize.axl", "normalize_files_for_cwd")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _test_at_git_root(_ctx):
+    """cwd == git_root → no rebasing needed, return files unchanged."""
+    _eq(
+        "at git root → unchanged",
+        normalize_files_for_cwd("/repo", "/repo", ["pkg/foo.go", "bar.go"]),
+        ["pkg/foo.go", "bar.go"],
+    )
+
+def _test_direct_child(_ctx):
+    """cwd is a direct child of git_root → strip one path component."""
+    _eq(
+        "direct child",
+        normalize_files_for_cwd("/repo/pkg", "/repo", ["pkg/foo.go", "pkg/bar.go", "other/baz.go"]),
+        ["foo.go", "bar.go"],
+    )
+
+def _test_nested_cwd(_ctx):
+    """cwd nested deeper — multiple prefix components stripped."""
+    _eq(
+        "nested cwd",
+        normalize_files_for_cwd("/repo/a/b", "/repo", ["a/b/foo.go", "a/bar.go", "other.go"]),
+        ["foo.go"],
+    )
+
+def _test_files_outside_cwd_dropped(_ctx):
+    """Files in sibling directories are dropped entirely."""
+    _eq(
+        "sibling dirs dropped",
+        normalize_files_for_cwd("/repo/pkg", "/repo", ["other/foo.go", "pkg/bar.go"]),
+        ["bar.go"],
+    )
+
+def _test_all_files_outside_cwd(_ctx):
+    """All files outside CWD → empty list."""
+    _eq(
+        "all outside → empty",
+        normalize_files_for_cwd("/repo/pkg", "/repo", ["other/foo.go", "third/bar.go"]),
+        [],
+    )
+
+def _test_empty_files(_ctx):
+    """Empty input list → empty output, regardless of cwd."""
+    _eq("empty files", normalize_files_for_cwd("/repo/pkg", "/repo", []), [])
+
+def _test_no_git_root(_ctx):
+    """git_root is None → return files unchanged (best-effort, can't rebase)."""
+    files = ["pkg/foo.go", "bar.go"]
+    _eq("no git root → unchanged", normalize_files_for_cwd("/repo/pkg", None, files), files)
+
+def _test_cwd_outside_git_root(_ctx):
+    """cwd not under git_root → return files unchanged."""
+    files = ["foo.go"]
+    _eq(
+        "cwd outside repo → unchanged",
+        normalize_files_for_cwd("/other/dir", "/repo", files),
+        files,
+    )
+
+def _test_cwd_is_string_prefix_but_not_dir_child(_ctx):
+    """'/repo-extra' starts with '/repo' but is not a child of '/repo'."""
+    files = ["repo-extra/sub/foo.go"]
+    _eq(
+        "string-prefix but not dir-child → unchanged",
+        normalize_files_for_cwd("/repo-extra/sub", "/repo", files),
+        files,
+    )
+
+def _test_preserves_order(_ctx):
+    """Output order matches input order of matched files."""
+    _eq(
+        "order preserved",
+        normalize_files_for_cwd("/repo/pkg", "/repo", ["pkg/b.go", "pkg/a.go", "other/c.go"]),
+        ["b.go", "a.go"],
+    )
+
+# ---------------------------------------------------------------------------
+# Case 3: git_root is under cwd — prefix must be added
+# ---------------------------------------------------------------------------
+
+def _test_git_root_under_cwd_direct(_ctx):
+    """git_root is a direct child of cwd — prepend the git_root basename."""
+    _eq(
+        "git_root direct child of cwd",
+        normalize_files_for_cwd("/workspace", "/workspace/project", ["src/foo.go", "bar.go"]),
+        ["project/src/foo.go", "project/bar.go"],
+    )
+
+def _test_git_root_under_cwd_nested(_ctx):
+    """git_root is multiple levels under cwd."""
+    _eq(
+        "git_root nested under cwd",
+        normalize_files_for_cwd("/workspace", "/workspace/a/b/project", ["foo.go"]),
+        ["a/b/project/foo.go"],
+    )
+
+def _test_git_root_string_prefix_of_cwd_dir_not_child(_ctx):
+    """'/workspace/project-extra' is not under '/workspace/project'."""
+    files = ["foo.go"]
+    _eq(
+        "git_root is string-prefix of cwd but not dir-ancestor",
+        normalize_files_for_cwd("/workspace/project-extra/sub", "/workspace/project", files),
+        files,
+    )
+
+def _test_git_root_under_cwd_empty_files(_ctx):
+    """Empty file list → empty output even in the prefix-add case."""
+    _eq(
+        "empty files with git_root under cwd",
+        normalize_files_for_cwd("/workspace", "/workspace/project", []),
+        [],
+    )
+
+_UNIT_TESTS = [
+    _test_at_git_root,
+    _test_direct_child,
+    _test_nested_cwd,
+    _test_files_outside_cwd_dropped,
+    _test_all_files_outside_cwd,
+    _test_empty_files,
+    _test_no_git_root,
+    _test_cwd_outside_git_root,
+    _test_cwd_is_string_prefix_but_not_dir_child,
+    _test_preserves_order,
+    _test_git_root_under_cwd_direct,
+    _test_git_root_under_cwd_nested,
+    _test_git_root_string_prefix_of_cwd_dir_not_child,
+    _test_git_root_under_cwd_empty_files,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("path_normalize.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+path_normalize_tests = task(
+    name = "test-path-normalize",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

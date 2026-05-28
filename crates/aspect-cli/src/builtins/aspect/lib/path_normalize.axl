@@ -1,0 +1,43 @@
+"""Path normalization utilities."""
+
+def normalize_files_for_cwd(cwd, git_root, files):
+    """Rebase git-root-relative paths to cwd-relative paths.
+
+    Three cases based on the relationship between cwd and git_root:
+
+    1. cwd == git_root: no rebasing needed, return files unchanged.
+
+    2. cwd is under git_root: files outside the cwd subtree are dropped;
+       the cwd prefix is stripped from the rest.
+
+         git_root /repo, cwd /repo/pkg:
+           "pkg/foo.go"   → "foo.go"   (kept, prefix stripped)
+           "other/bar.go" → dropped
+
+    3. git_root is under cwd: a prefix is added so paths reach the git
+       repository from cwd. This happens when aspect is invoked from an
+       ancestor directory that contains the git repo as a subdirectory
+       (e.g. aspect_root = /workspace, git_root = /workspace/project).
+
+         git_root /workspace/project, cwd /workspace:
+           "src/foo.go"  → "project/src/foo.go"
+
+    When cwd and git_root are unrelated (neither is an ancestor of the
+    other), or when git_root is None, returns files unchanged.
+    """
+    if not files or not git_root:
+        return files
+    if cwd == git_root:
+        return files
+    git_root_slash = git_root + "/"
+    cwd_slash = cwd + "/"
+    if cwd.startswith(git_root_slash):
+        # Case 2: cwd is under git_root — strip the cwd prefix.
+        rel_cwd = cwd[len(git_root_slash):]
+        cwd_prefix = rel_cwd + "/"
+        return [f[len(cwd_prefix):] for f in files if f.startswith(cwd_prefix)]
+    if git_root.startswith(cwd_slash):
+        # Case 3: git_root is under cwd — add the relative path to git_root.
+        rel_git = git_root[len(cwd_slash):]
+        return [rel_git + "/" + f for f in files]
+    return files
