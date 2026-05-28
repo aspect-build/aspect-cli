@@ -59,6 +59,13 @@ def config(ctx: ConfigContext):
     # assert we can call a lambda with a global bind from another module in a config script
     lambda_with_global_bind()("assert")
 
+    is_ci = bool(ctx.std.env.var("CI"))
+
+    if is_ci:
+        ctx.traits[BazelTrait].extra_flags.extend([
+            "--config=ci",
+        ])
+
     # Dogfood the telemetry.exporters API: when our GitHub Actions workflow
     # injects DASH0_ENDPOINT / DASH0_TOKEN, ship aspect-cli's own traces and
     # logs to Dash0 so the team can see real instrumentation data from CI

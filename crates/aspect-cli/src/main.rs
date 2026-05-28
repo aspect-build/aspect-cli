@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use aspect_telemetry::{cargo_pkg_short_version, do_not_track, send_telemetry};
 use axl_runtime::bazel_live;
-use axl_runtime::eval::{Loader, ModuleEnv, MultiPhaseEval};
+use axl_runtime::eval::{EvalError, Loader, ModuleEnv, MultiPhaseEval};
 use axl_runtime::module::{AXL_ROOT_MODULE_NAME, Mod};
 use axl_runtime::module::{DiskStore, ModEvaluator};
 use tokio::task;
@@ -209,7 +209,17 @@ fn main() -> ExitCode {
     match run() {
         Ok(code) => code,
         Err(err) => {
-            eprintln!("error: {err:?}");
+            // Pre-shaped user-facing errors (a `bazelrc:` block, etc.) use Display
+            // — `EvalError`'s custom impl strips the AXL call-stack traceback. Other
+            // errors use Debug so AXL/Aspect authors keep the full diagnostic.
+            if err
+                .downcast_ref::<EvalError>()
+                .is_some_and(EvalError::is_pre_shaped_user_error)
+            {
+                eprintln!("error: {err}");
+            } else {
+                eprintln!("error: {err:?}");
+            }
             ExitCode::FAILURE
         }
     }

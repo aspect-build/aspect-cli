@@ -1,4 +1,3 @@
-use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
@@ -45,25 +44,13 @@ const SGR_RESET: &str = "\x1b[0m";
 const DEFAULT_HIGHLIGHT_COLOR: &str = "1;36";
 const HIGHLIGHT_COLOR_ENV: &str = "ASPECT_CLI_HIGHLIGHT_COLOR";
 
-/// True on any recognized CI host (Buildkite / GitHub Actions / CircleCI /
-/// GitLab CI / generic `CI=...`). Used to gate task-key suffix on the
-/// running-task header and to force-enable color when stderr is piped to
-/// a CI log viewer that renders ANSI.
-fn on_recognized_ci() -> bool {
-    std::env::var_os("BUILDKITE").is_some()
-        || std::env::var_os("CI").is_some()
-        || std::env::var_os("GITHUB_ACTIONS").is_some()
-        || std::env::var_os("CIRCLECI").is_some()
-        || std::env::var_os("GITLAB_CI").is_some()
-}
-
 /// Return `(verb_color_prefix, reset)` for the "Running" verb on the
 /// task-starting line. `verb_color_prefix` is empty when color is
 /// disabled or `ASPECT_CLI_HIGHLIGHT_COLOR=""`; `reset` is empty when
-/// color is disabled. Color is enabled when stderr is a TTY or we're on
-/// a recognized CI host.
+/// color is disabled. The color decision is delegated to
+/// [`crate::term::color_enabled`].
 fn running_verb_color() -> (String, &'static str) {
-    let color = std::io::stderr().is_terminal() || on_recognized_ci();
+    let color = crate::term::color_enabled();
     let highlight = std::env::var(HIGHLIGHT_COLOR_ENV)
         .ok()
         .unwrap_or_else(|| DEFAULT_HIGHLIGHT_COLOR.to_string());
@@ -374,7 +361,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             EvalError::UnknownError(anyhow!("task index {} out of range", task_index))
         })?;
         let (verb_seq, reset) = running_verb_color();
-        let key_suffix = if on_recognized_ci() {
+        let key_suffix = if crate::term::on_recognized_ci() {
             format!(" [{}]", task_key)
         } else {
             String::new()
@@ -501,7 +488,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         // the task body are still announced from AXL via
         // `lib/lifecycle.axl::announce`. Color setup mirrors the helper
         // so the verdict glyph and labels match.
-        let color = std::io::stderr().is_terminal() || on_recognized_ci();
+        let color = crate::term::color_enabled();
         let sgr = |params: &str| {
             if color {
                 format!("\x1b[{}m", params)

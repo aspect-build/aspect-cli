@@ -609,7 +609,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             .map(|v| unpack_rc_option(*v))
             .collect::<anyhow::Result<_>>()?;
         let inner = bazelrc::BazelRC::new(root, &startup_flags_vec, &flags_vec)
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+            .map_err(|e| anyhow::anyhow!("{}", e))?
+            .with_ansi_errors(crate::term::color_enabled());
         Ok(rc::StarlarkBazelRC {
             inner,
             skip_config_if_missing: skip_config_if_missing.items,

@@ -95,9 +95,15 @@ fn expand_args(
                 if is_implicit_platform || skip_config_if_missing.contains(&config_name) {
                     continue;
                 }
+                let ansi = rc.ansi_errors();
                 return Err(BazelRcError::UndefinedConfig {
                     command: command.to_owned(),
                     name: config_name.to_owned(),
+                    flag_source: rc.source_of(opt).to_path_buf(),
+                    workspace_root: rc.workspace_root().to_path_buf(),
+                    loaded_rc_files: rc.loaded_rc_files(),
+                    applicable_rc_state: rc.announce(command, ansi, 120),
+                    ansi,
                 });
             }
 

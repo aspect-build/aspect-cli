@@ -72,7 +72,7 @@ fn bazelrc_methods(registry: &mut MethodsBuilder) {
         let opts = this
             .inner
             .expand_configs(&command, &ignore)
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+            .map_err(anyhow::Error::from)?;
         let mut result = Vec::with_capacity(opts.len());
         for opt in &opts {
             let v = match &opt.version_condition {
@@ -114,7 +114,7 @@ fn bazelrc_methods(registry: &mut MethodsBuilder) {
         let opts = this
             .inner
             .expand_configs(&command, &ignore)
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+            .map_err(anyhow::Error::from)?;
 
         let mut startup_flags: Vec<Value<'v>> = Vec::new();
 

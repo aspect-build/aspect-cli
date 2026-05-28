@@ -23,8 +23,21 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use std::fmt;
+use std::fmt::Write as _;
 
 use thiserror::Error;
+
+/// Synthetic source label used for `--config=` and other flags supplied to
+/// [`BazelRC::new`] outside any rc file — i.e. the command line.
+pub const CLI_SOURCE_PATH: &str = "<command line>";
+
+// SGR escape parameters for error-block styling. Callers (see
+// `axl-runtime/src/term.rs`) decide whether to enable ANSI and pass the
+// answer through [`BazelRC::with_ansi_errors`].
+const SGR_BOLD: &str = "\x1b[1m";
+const SGR_BOLD_RED: &str = "\x1b[1;31m";
+const SGR_DIM: &str = "\x1b[2m";
+const SGR_RESET: &str = "\x1b[0m";
 
 /// A single option value parsed from a bazelrc file.
 #[derive(Debug, Clone, Default)]
@@ -68,8 +81,29 @@ pub enum BazelRcError {
     #[error("--config expansion cycle: {}", cycle.join(" → "))]
     ConfigCycle { cycle: Vec<String> },
 
-    #[error("undefined config '{name}' for command '{command}'")]
-    UndefinedConfig { command: String, name: String },
+    #[error("{}", render_undefined_config(.command, .name, .flag_source, .workspace_root, .loaded_rc_files, .applicable_rc_state, *.ansi))]
+    UndefinedConfig {
+        command: String,
+        name: String,
+        /// Source path the unresolved `--config={name}` flag came from. Either
+        /// [`CLI_SOURCE_PATH`] (CLI flag or `config.axl`) or a real `.bazelrc`
+        /// path (when the reference lives in an rc line).
+        flag_source: PathBuf,
+        /// Bazel workspace root used for rc-file discovery. Surfaced in the
+        /// error so users can spot a sub-workspace anchor mismatch — e.g. an
+        /// outer `config.axl` setting `--config=ci` while the inner `.bazelrc`
+        /// lives in a different workspace and doesn't define `:ci`.
+        workspace_root: PathBuf,
+        /// Real `.bazelrc` paths that were loaded (excludes [`CLI_SOURCE_PATH`]).
+        loaded_rc_files: Vec<PathBuf>,
+        /// Pre-formatted [`BazelRC::announce`] output for the failing command —
+        /// the same view `--announce-rc` would print. Surfacing it inline saves
+        /// the user from re-running with the flag to inspect the loaded state.
+        applicable_rc_state: String,
+        /// Whether to render with ANSI escape codes (bold headers, red prefix).
+        /// Snapshotted from [`BazelRC::ansi_errors`] at construction time.
+        ansi: bool,
+    },
 
     #[error("invalid import directive arguments: {directive}")]
     InvalidImportArgs { directive: String },
@@ -82,6 +116,100 @@ pub enum BazelRcError {
     },
 }
 
+/// Format a Bazel-style multi-line error block for an undefined `--config=` reference.
+///
+/// Sections, in order: a `bazelrc:` headline (naming the subsystem so the
+/// message reads as a configuration problem, not a crash); a one-line gloss
+/// of what the subsystem does; for rc-file sources, the file that owns the
+/// unresolved reference; the Bazel workspace root (surfaces sub-workspace
+/// anchor mismatches); the loaded `.bazelrc` files; the same view
+/// `--announce-rc` would print for the failing command; and two fix hints.
+///
+/// The hints stay neutral on *how* `--config=` got set — it can come from a
+/// CLI flag, a `config.axl`, or any of several internal hooks.
+fn render_undefined_config(
+    command: &str,
+    name: &str,
+    flag_source: &Path,
+    workspace_root: &Path,
+    loaded_rc_files: &[PathBuf],
+    applicable_rc_state: &str,
+    ansi: bool,
+) -> String {
+    let (red, bold, dim, reset) = if ansi {
+        (SGR_BOLD_RED, SGR_BOLD, SGR_DIM, SGR_RESET)
+    } else {
+        ("", "", "", "")
+    };
+
+    let mut out = String::new();
+    writeln!(
+        out,
+        "{red}bazelrc:{reset} {bold}--config={name} is not defined for command '{command}'{reset}"
+    )
+    .unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "  {dim}Aspect CLI parses .bazelrc files and resolves --config= flags like Bazel.{reset}"
+    )
+    .unwrap();
+    writeln!(out).unwrap();
+
+    // For rc-file references (e.g. `common --config=foo` in a `.bazelrc`),
+    // name the file so users know where to grep. The CLI-source case is
+    // already visible as the `client` line in the rc-state dump below.
+    if flag_source != Path::new(CLI_SOURCE_PATH) {
+        writeln!(
+            out,
+            "  {bold}Unresolved --config={name} reference in:{reset}"
+        )
+        .unwrap();
+        writeln!(out, "    {}", flag_source.display()).unwrap();
+        writeln!(out).unwrap();
+    }
+
+    writeln!(out, "  {bold}Bazel workspace root:{reset}").unwrap();
+    writeln!(out, "    {}", workspace_root.display()).unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(out, "  {bold}Loaded .bazelrc files:{reset}").unwrap();
+    if loaded_rc_files.is_empty() {
+        writeln!(out, "    (none)").unwrap();
+    } else {
+        for p in loaded_rc_files {
+            writeln!(out, "    {}", p.display()).unwrap();
+        }
+    }
+    writeln!(out).unwrap();
+
+    writeln!(
+        out,
+        "  {bold}Applicable rc state for '{command}' (same as --announce-rc):{reset}"
+    )
+    .unwrap();
+    // Indent each line of the announce dump 4 spaces so file headers nest under
+    // the section title. Strip the trailing newline `announce()` emits so the
+    // blank-line separator that follows isn't doubled.
+    for line in applicable_rc_state.trim_end_matches('\n').lines() {
+        if line.is_empty() {
+            writeln!(out).unwrap();
+        } else {
+            writeln!(out, "    {line}").unwrap();
+        }
+    }
+    writeln!(out).unwrap();
+
+    writeln!(out, "  {bold}Try one of:{reset}").unwrap();
+    writeln!(
+        out,
+        "    - Add `common:{name} ...` (or `build:{name}`, `test:{name}`) to a loaded .bazelrc"
+    )
+    .unwrap();
+    write!(out, "    - Don't set --config={name}").unwrap();
+    out
+}
+
 /// Parsed representation of one or more `.bazelrc` files.
 #[derive(Debug)]
 pub struct BazelRC {
@@ -89,6 +217,12 @@ pub struct BazelRC {
     options: HashMap<String, Vec<RcOption>>,
     /// Ordered list of source files that were loaded.
     sources: Vec<PathBuf>,
+    /// Workspace root used for rc-file discovery and `%workspace%` substitution.
+    /// Surfaced via [`workspace_root`](Self::workspace_root) for error context.
+    workspace_root: PathBuf,
+    /// Render [`BazelRcError`] messages with ANSI escape codes. Set via
+    /// [`with_ansi_errors`](Self::with_ansi_errors); defaults to `false`.
+    ansi_errors: bool,
 }
 
 impl fmt::Display for BazelRC {
@@ -139,7 +273,7 @@ impl BazelRC {
         // options_for() and expand_configs() like any rc-file entry.
         if !flags.is_empty() {
             let cli_source_index = sources.len();
-            sources.push(PathBuf::from("<command line>"));
+            sources.push(PathBuf::from(CLI_SOURCE_PATH));
             let always_opts = options.entry("always".to_owned()).or_default();
             for flag in flags {
                 always_opts.push(RcOption {
@@ -150,12 +284,49 @@ impl BazelRC {
             }
         }
 
-        Ok(BazelRC { options, sources })
+        Ok(BazelRC {
+            options,
+            sources,
+            workspace_root: root.to_path_buf(),
+            ansi_errors: false,
+        })
     }
 
-    /// The ordered list of source files that were loaded.
+    /// Builder: render [`BazelRcError`] messages with ANSI escape codes.
+    /// Callers detect terminal/CI/`NO_COLOR` themselves (see `axl-runtime`'s
+    /// `term::color_enabled`) and pass the answer in; tests leave the
+    /// default (`false`).
+    pub fn with_ansi_errors(mut self, ansi: bool) -> Self {
+        self.ansi_errors = ansi;
+        self
+    }
+
+    /// Whether [`BazelRcError`] rendering will include ANSI escape codes.
+    pub fn ansi_errors(&self) -> bool {
+        self.ansi_errors
+    }
+
+    /// Every source that contributed to this resolution, in load order. Includes
+    /// the synthetic [`CLI_SOURCE_PATH`] entry when caller-supplied flags were
+    /// passed to [`BazelRC::new`]. Use [`loaded_rc_files`](Self::loaded_rc_files)
+    /// when you only want the on-disk rc files.
     pub fn sources(&self) -> &[PathBuf] {
         &self.sources
+    }
+
+    /// On-disk `.bazelrc` paths that contributed to this resolution. Mirrors
+    /// [`sources`](Self::sources) minus the synthetic [`CLI_SOURCE_PATH`] entry.
+    pub fn loaded_rc_files(&self) -> Vec<PathBuf> {
+        self.sources
+            .iter()
+            .filter(|p| p.as_path() != Path::new(CLI_SOURCE_PATH))
+            .cloned()
+            .collect()
+    }
+
+    /// Workspace root used for rc-file discovery and `%workspace%` substitution.
+    pub fn workspace_root(&self) -> &Path {
+        &self.workspace_root
     }
 
     /// Return the source file path for the given option.
@@ -176,20 +347,20 @@ impl BazelRC {
     /// Order: RC-file `always` + `common` + ancestor commands (general → specific) +
     /// `<command>` + CLI-provided flags.
     ///
-    /// CLI-provided flags (those passed via the `flags` parameter to `BazelRC::new`, stored as
-    /// `always` with source `"<command line>"`) are placed **last** so that any `--config=`
-    /// flags they carry expand after all RC-file flags.  This matches Bazel's own semantics
+    /// CLI-provided flags (those passed via the `flags` parameter to [`BazelRC::new`], stored
+    /// as `always` with source [`CLI_SOURCE_PATH`]) are placed **last** so any `--config=`
+    /// flags they carry expand after all RC-file flags. This matches Bazel's own semantics
     /// where command-line flags override `.bazelrc` defaults under last-write-wins.
     ///
     /// For example, `options_for("test")` returns:
     ///   `always` (rc-file) + `common` + `build` + `test` + `always` (cli)
     pub fn options_for(&self, command: &str) -> Vec<&RcOption> {
-        // CLI-provided flags live in the "always" bucket but with source "<command line>".
-        // We need to separate them so they can be appended last.
+        // CLI-provided flags share the "always" bucket; partition them out by
+        // source so they can be appended last for last-write-wins.
         let cli_source_idx = self
             .sources
             .iter()
-            .position(|p| p.as_path() == std::path::Path::new("<command line>"));
+            .position(|p| p.as_path() == Path::new(CLI_SOURCE_PATH));
 
         let mut result = Vec::new();
         // RC-file always flags first (not from the synthetic CLI source)
@@ -241,22 +412,21 @@ impl BazelRC {
             }
         };
 
-        // Shorten an absolute path to its last two components (e.g. "bazel/defaults.bazelrc").
+        // Render rc-file paths relative to the Bazel workspace root when they live
+        // inside it (`./bazel/defaults.bazelrc`), absolute otherwise (`/Users/greg/.bazelrc`).
+        // The workspace root may not be canonical (caller-controlled), so canonicalize
+        // it once here before prefix-matching against the canonical rc-file paths.
+        let workspace_canonical = self.workspace_root.canonicalize().ok();
         let shorten = |p: &Path| -> String {
-            if p == Path::new("<command line>") {
+            if p == Path::new(CLI_SOURCE_PATH) {
                 return "client".to_owned();
             }
-            let comps: Vec<_> = p.components().collect();
-            if comps.len() <= 2 {
-                p.display().to_string()
-            } else {
-                let n = comps.len();
-                format!(
-                    "{}/{}",
-                    comps[n - 2].as_os_str().to_string_lossy(),
-                    comps[n - 1].as_os_str().to_string_lossy()
-                )
+            if let Some(root) = &workspace_canonical {
+                if let Ok(rel) = p.strip_prefix(root) {
+                    return format!("./{}", rel.display());
+                }
             }
+            p.display().to_string()
         };
 
         // Fit flags onto lines starting at `start_col`, wrapping at `max_width`.
@@ -309,7 +479,7 @@ impl BazelRC {
         // Single pass per source file: emit direct sections then config sections together.
         let direct_keys = ["startup", "always", "common", command];
         for (source_idx, source_path) in self.sources.iter().enumerate() {
-            let is_client = source_path == Path::new("<command line>");
+            let is_client = source_path == Path::new(CLI_SOURCE_PATH);
             let short = shorten(source_path);
 
             // Collect direct sections for this source.
@@ -404,15 +574,16 @@ impl BazelRC {
 
     /// Append a synthetic `always` option, optionally version-gated.
     ///
-    /// The option is attributed to the synthetic `<command line>` source (created on first use).
+    /// The option is attributed to the synthetic [`CLI_SOURCE_PATH`] source
+    /// (created on first use).
     pub fn push_flag(&mut self, value: &str, version_condition: Option<&str>) {
         let source_index = self
             .sources
             .iter()
-            .position(|p| p == std::path::Path::new("<command line>"))
+            .position(|p| p == Path::new(CLI_SOURCE_PATH))
             .unwrap_or_else(|| {
                 let idx = self.sources.len();
-                self.sources.push(PathBuf::from("<command line>"));
+                self.sources.push(PathBuf::from(CLI_SOURCE_PATH));
                 idx
             });
         self.options
@@ -610,6 +781,213 @@ build:b --config=a
         assert!(matches!(err, BazelRcError::UndefinedConfig { .. }));
     }
 
+    /// CLI-supplied `--config=ci` with a section defined for the wrong command —
+    /// golden-test the full rendered block end to end including the inline
+    /// `--announce-rc` dump. Substring assertions miss blank-line drift and
+    /// indentation regressions, so the whole message is pinned.
+    ///
+    /// The rc file defines `test --test_output=errors` (no `:ci` section) so the
+    /// lookup fails *and* the announce block has visible content. Test runs the
+    /// default `ansi=false` path so the assertion is plain text without escapes.
+    #[test]
+    fn undefined_config_error_renders_cli_source_block() {
+        let dir = make_workspace();
+        let root = dir.path();
+        let rc_path = root.join(".bazelrc");
+        fs::write(&rc_path, "test --test_output=errors\n").unwrap();
+
+        let rc = BazelRC::new(root, ISOLATE, &flags(&["--config=ci"])).unwrap();
+        let err = rc.expand_configs("test", &[]).unwrap_err();
+
+        let rc_canonical = rc_path.canonicalize().unwrap();
+        let expected = format!(
+            "bazelrc: --config=ci is not defined for command 'test'
+
+  Aspect CLI parses .bazelrc files and resolves --config= flags like Bazel.
+
+  Bazel workspace root:
+    {root}
+
+  Loaded .bazelrc files:
+    {rc_path}
+
+  Applicable rc state for 'test' (same as --announce-rc):
+    ./.bazelrc
+      test  --test_output=errors
+
+    client  --config=ci
+
+  Try one of:
+    - Add `common:ci ...` (or `build:ci`, `test:ci`) to a loaded .bazelrc
+    - Don't set --config=ci",
+            root = root.display(),
+            rc_path = rc_canonical.display(),
+        );
+        assert_eq!(err.to_string(), expected);
+    }
+
+    /// `common --config=foo` in a .bazelrc but no `:foo` section — the
+    /// "Unresolved --config=X reference in: <path>" block must point at the rc
+    /// file that owns the `--config=foo` line so users know where to grep.
+    #[test]
+    fn undefined_config_error_attributes_rc_file_source() {
+        let dir = make_workspace();
+        let root = dir.path();
+        let rc_path = root.join(".bazelrc");
+        fs::write(&rc_path, "common --config=foo\n").unwrap();
+
+        let rc = BazelRC::new(root, ISOLATE, &[]).unwrap();
+        let msg = rc.expand_configs("build", &[]).unwrap_err().to_string();
+
+        let rc_canonical = rc_path.canonicalize().unwrap();
+        assert!(
+            msg.contains(&format!(
+                "Unresolved --config=foo reference in:\n    {}",
+                rc_canonical.display()
+            )),
+            "expected rc-file source attribution, got: {msg}"
+        );
+    }
+
+    /// Transitive expansion: `build:a --config=missing` triggers the error.
+    /// The reference must be attributed to the rc file owning the
+    /// `--config=missing` line (not the CLI flag `--config=a` that started the
+    /// expansion), so users can grep the right file.
+    #[test]
+    fn undefined_config_error_attributes_transitive_source() {
+        let dir = make_workspace();
+        let root = dir.path();
+        let rc_path = root.join(".bazelrc");
+        fs::write(&rc_path, "build:a --config=missing\n").unwrap();
+
+        let rc = BazelRC::new(root, ISOLATE, &flags(&["--config=a"])).unwrap();
+        let msg = rc.expand_configs("build", &[]).unwrap_err().to_string();
+
+        let rc_canonical = rc_path.canonicalize().unwrap();
+        assert!(
+            msg.starts_with("bazelrc: --config=missing is not defined"),
+            "expected error to name the inner config: {msg}"
+        );
+        assert!(
+            msg.contains(&format!(
+                "Unresolved --config=missing reference in:\n    {}",
+                rc_canonical.display()
+            )),
+            "expected rc-file source for transitive --config=: {msg}"
+        );
+    }
+
+    /// `--ignore_all_rc_files` removes every real rc file; the listing has to
+    /// render cleanly with "(none)" rather than producing an empty section.
+    #[test]
+    fn undefined_config_error_renders_empty_rc_list() {
+        let dir = make_workspace();
+        let root = dir.path();
+
+        let rc = BazelRC::new(root, &["--ignore_all_rc_files"], &flags(&["--config=ci"])).unwrap();
+        let msg = rc.expand_configs("build", &[]).unwrap_err().to_string();
+
+        assert!(
+            msg.contains("Loaded .bazelrc files:\n    (none)\n"),
+            "expected (none) placeholder followed by blank line: {msg}"
+        );
+    }
+
+    /// The error message must never use the word "injection" or name the
+    /// `BazelTrait` internals — `--config=` can be set through many surfaces
+    /// (CLI, config.axl, task_flags hooks, the BazelTrait.flags transform),
+    /// and naming one would mislead users. Regression guard for prior wording.
+    #[test]
+    fn undefined_config_error_avoids_internal_jargon() {
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(root.join(".bazelrc"), "build --jobs=4\n").unwrap();
+
+        let rc = BazelRC::new(root, ISOLATE, &flags(&["--config=ci"])).unwrap();
+        let msg = rc.expand_configs("build", &[]).unwrap_err().to_string();
+
+        for forbidden in ["injection", "BazelTrait", "extra_flags"] {
+            assert!(!msg.contains(forbidden), "found '{forbidden}' in: {msg}");
+        }
+    }
+
+    /// `with_ansi_errors(true)` makes the rendered block embed SGR escape codes
+    /// for the section headers, prefix, and intro line; `with_ansi_errors(false)`
+    /// (the default) keeps the message plain.
+    #[test]
+    fn undefined_config_error_emits_ansi_when_enabled() {
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(root.join(".bazelrc"), "build --jobs=4\n").unwrap();
+
+        let rc = BazelRC::new(root, ISOLATE, &flags(&["--config=ci"]))
+            .unwrap()
+            .with_ansi_errors(true);
+        let msg = rc.expand_configs("build", &[]).unwrap_err().to_string();
+
+        assert!(msg.starts_with(SGR_BOLD_RED), "missing red prefix: {msg}");
+        assert!(msg.contains(SGR_BOLD), "missing bold section header: {msg}");
+        assert!(msg.contains(SGR_DIM), "missing dim intro line: {msg}");
+        assert!(msg.contains(SGR_RESET), "missing reset: {msg}");
+    }
+
+    /// `loaded_rc_files()` returns the on-disk rc files, excluding the synthetic
+    /// `<command line>` source created when caller-supplied flags are passed.
+    #[test]
+    fn loaded_rc_files_excludes_synthetic_cli_source() {
+        let dir = make_workspace();
+        let root = dir.path();
+        let rc_path = root.join(".bazelrc");
+        fs::write(&rc_path, "build --jobs=4\n").unwrap();
+
+        let rc = BazelRC::new(root, ISOLATE, &flags(&["--config=opt"])).unwrap();
+        // `sources()` includes the CLI bucket; `loaded_rc_files()` should not.
+        assert!(
+            rc.sources().iter().any(|p| p == Path::new(CLI_SOURCE_PATH)),
+            "sources() should include the synthetic CLI entry"
+        );
+        let loaded = rc.loaded_rc_files();
+        assert_eq!(
+            loaded.len(),
+            1,
+            "expected exactly the workspace rc: {loaded:?}"
+        );
+        assert_eq!(loaded[0], rc_path.canonicalize().unwrap());
+    }
+
+    /// `announce()` renders rc files inside the workspace root as `./relative`
+    /// paths so users can tell at a glance the file is in-tree, and rc files
+    /// outside the root as absolute paths.
+    #[test]
+    fn announce_renders_workspace_relative_and_absolute_paths() {
+        let dir = make_workspace();
+        let root = dir.path();
+        // In-tree rc with a `build` section (the announce loop emits sources
+        // only when they have a section matching one of the direct keys).
+        let in_tree = root.join(".bazelrc");
+        fs::write(&in_tree, "build --jobs=4\n").unwrap();
+
+        // Out-of-tree rc loaded via --bazelrc=. Sibling of `root` so it never
+        // matches `root.canonicalize()` as a prefix.
+        let outside_dir = make_workspace();
+        let outside = outside_dir.path().join("external.bazelrc");
+        fs::write(&outside, "build --verbose_failures\n").unwrap();
+
+        let outside_flag = format!("--bazelrc={}", outside.display());
+        let rc = BazelRC::new(root, &["--nosystem_rc", "--nohome_rc", &outside_flag], &[]).unwrap();
+        let announced = rc.announce("build", false, 200);
+
+        assert!(
+            announced.contains("./.bazelrc"),
+            "in-tree rc should render as ./.bazelrc; got: {announced}"
+        );
+        let outside_canonical = outside.canonicalize().unwrap();
+        assert!(
+            announced.contains(&outside_canonical.display().to_string()),
+            "out-of-tree rc should render as an absolute path; got: {announced}"
+        );
+    }
+
     // ── File discovery order and deduplication ───────────────────────────────
 
     #[test]
@@ -752,10 +1130,10 @@ test --config=opt
             .collect();
         assert_eq!(opts, vec!["--jobs=4", "--config=foo", "--verbose_failures"]);
 
-        // Source of CLI flags is the synthetic "<command line>" entry
+        // Source of CLI flags is the synthetic CLI_SOURCE_PATH entry
         let always = rc.raw_options("always");
         assert_eq!(always.len(), 2);
-        assert_eq!(rc.source_of(&always[0]), Path::new("<command line>"));
+        assert_eq!(rc.source_of(&always[0]), Path::new(CLI_SOURCE_PATH));
     }
 
     #[test]
