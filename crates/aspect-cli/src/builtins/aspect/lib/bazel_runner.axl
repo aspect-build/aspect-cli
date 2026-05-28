@@ -26,15 +26,10 @@ load("../bazel.axl", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
 # Build and test share the same data shape (BES counters in `data["bazel"]`)
 # so the runner owns both branches of the kind-aware switch directly.
 
-def _is_test_like(command):
-    """Coverage runs tests too, so the BES event shape and the renderer
-    treat `coverage` exactly like `test` — only the Bazel verb differs."""
-    return command == "test" or command == "coverage"
-
 def _pick_status(command, data, had_failure, terminal):
     """Decide a build/test task's lifecycle status from accumulated BES counters.
 
-    `command` — "build", "test", or "coverage".
+    `command` — "build" or "test".
     `had_failure` — hard signal: failed actions or failed tests > 0.
 
     Aborted is detected via `data["bazel"]["aborted"]` set by the runtime
@@ -46,7 +41,7 @@ def _pick_status(command, data, had_failure, terminal):
         return "aborted"
     if had_failure:
         return "failed" if terminal else "failing"
-    if _is_test_like(command) and data.get("bazel", {}).get("flaky_test_total", 0) > 0:
+    if command == "test" and data.get("bazel", {}).get("flaky_test_total", 0) > 0:
         return "warning"
     return "passed" if terminal else "running"
 
@@ -54,7 +49,7 @@ def _compact_text(command, status, data):
     """Compact Result-cell text for the PR-comment surface."""
     bz = data.get("bazel", {}) or {}
     if status == "running":
-        if _is_test_like(command):
+        if command == "test":
             ran = bz.get("passed_test_total", 0) + bz.get("failed_test_total", 0)
             total = bz.get("targets_total", 0)
             if total > 0 and ran > 0:
@@ -71,7 +66,7 @@ def _compact_text(command, status, data):
     if status == "passed":
         return _passed_text(command, bz)
     if status == "failing" or status == "failed":
-        if _is_test_like(command):
+        if command == "test":
             f = bz.get("failed_test_total", 0)
             if f > 0:
                 return "%d test%s failed" % (f, "s" if f != 1 else "")
@@ -84,7 +79,7 @@ def _compact_text(command, status, data):
     return ""
 
 def _passed_text(command, bz):
-    if _is_test_like(command):
+    if command == "test":
         passed = bz.get("passed_test_total", 0)
         failed = bz.get("failed_test_total", 0)
         flaky = bz.get("flaky_test_total", 0)
@@ -132,7 +127,7 @@ def _live_progress(data, command, status):
         # Live form: `Bazel <cmd> running` with a past-participle
         # parenthetical snapshot of completed BES events.
         running_detail = ""
-        if _is_test_like(command):
+        if command == "test":
             passed = data["bazel"].get("passed_test_total", 0) or 0
             failed = data["bazel"].get("failed_test_total", 0) or 0
             flaky = data["bazel"].get("flaky_test_total", 0) or 0
@@ -222,13 +217,12 @@ def run_bazel_task(ctx: TaskContext, command: str, extra_flags = [], targets = N
                  build's remote_executor) are not touched here — tasks can
                  still read them from `ctx.args` before/after calling this
                  function.
-        command: "build", "test", or "coverage" — selects which Bazel
-                 subcommand to invoke and which rc section to expand. The
-                 shape of the BES event stream (including the presence of
-                 test_summary events for tests/coverage) follows naturally
-                 from this.
+        command: "build" or "test" — selects which Bazel subcommand to invoke
+                 and which rc section to expand. The shape of the BES event
+                 stream (including the presence of test_summary events for
+                 tests) follows naturally from this.
         extra_flags: Task-supplied Bazel flags appended after `--bazel-flag`
-                 values (e.g. test's `--combined_report=lcov`). The caller
+                 values (e.g. test's `--collect_code_coverage`). The caller
                  owns their meaning; the runner just forwards them.
         targets: Target-pattern override. When `None` the runner honors
                  `--target-pattern-file` (if the task declares it) by
@@ -332,12 +326,7 @@ def run_bazel_task(ctx: TaskContext, command: str, extra_flags = [], targets = N
     else:
         trace.log(rc.announce(command = command, ansi = False))
 
-    if command == "test":
-        base_desc = "Run bazel tests"
-    elif command == "coverage":
-        base_desc = "Run bazel coverage"
-    else:
-        base_desc = "Build bazel targets"
+    base_desc = "Run bazel tests" if command == "test" else "Build bazel targets"
 
     # `hasattr` guard so a future task that calls `run_bazel_task` without
     # wiring up `--bazel-retry-attempts` still works; `max(1, ...)` so a 0
@@ -389,7 +378,7 @@ def run_bazel_task(ctx: TaskContext, command: str, extra_flags = [], targets = N
                 # `build` / `test` (and their `<command>_retry_N` variants)
                 # all reuse the same icon — retries are the same kind of
                 # work, just attempted again.
-                emoji = "🧪" if _is_test_like(command) else "🔨",
+                emoji = "🧪" if command == "test" else "🔨",
             ),
         )
 
@@ -404,13 +393,6 @@ def run_bazel_task(ctx: TaskContext, command: str, extra_flags = [], targets = N
 
         if command == "test":
             invocation = ctx.bazel.test(
-                build_events = build_events,
-                execution_log = bazel_trait.execution_log_sinks or False,
-                flags = flags,
-                *targets
-            )
-        elif command == "coverage":
-            invocation = ctx.bazel.coverage(
                 build_events = build_events,
                 execution_log = bazel_trait.execution_log_sinks or False,
                 flags = flags,
