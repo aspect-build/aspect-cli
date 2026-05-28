@@ -41,7 +41,7 @@ load("./lib/tips.axl", "tips")
 _MAX_BATCH_CHARS = 128000
 
 # .gitattributes attributes that mark files as generated/lint-ignored.
-_GITATTR_IGNORED = ["rules-lint-ignored", "linguist-generated", "gitlab-generated"]
+_GITATTR_IGNORED = ["aspect-format-ignored", "rules-lint-ignored", "linguist-generated", "gitlab-generated"]
 
 def _git_capture_in(ctx, work_dir, *args):
     """Run `git <args>` in `work_dir` and return (stdout, exit_code, stderr)."""
