@@ -48,7 +48,7 @@ def init_data():
     r["format"] = {
         "affected_files": [],  # file paths that need formatting
         "filtered_count": 0,  # files hidden by --include-pattern / --exclude-pattern
-        "scope": "",  # "changed" | "all" | "git"
+        "scope": "",  # "changed" | "tracked" | "all"
         "formatter_target": "",  # Bazel label of the formatter binary
         # Resolved `--severity` policy: "info" | "warn" | "fail".
         # Stamped by `_impl` after resolving `auto`.

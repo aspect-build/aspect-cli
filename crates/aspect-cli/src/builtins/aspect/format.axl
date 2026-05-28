@@ -10,10 +10,10 @@ Usage:
     aspect format
     # Format every file the formatter knows how to handle (self-discovery)
     aspect format --scope=all
-    # Format all non-gitignored files via git ls-files
-    aspect format --scope=git
+    # Format all non-gitignored tracked files
+    aspect format --scope=tracked
     # Scope to specific file types (useful with raw formatters)
-    aspect format --scope=git --include-pattern='**/*.bzl' --include-pattern='**/BUILD*'
+    aspect format --scope=tracked --include-pattern='**/*.bzl' --include-pattern='**/BUILD*'
     # Specify the formatter target
     aspect format --formatter-target=//path/to:formatter_bin
 
@@ -648,7 +648,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             data["changed_files_count"] = len(changed_files)
             format_args = changed_files
 
-    elif ctx.args.scope == "git":
+    elif ctx.args.scope == "tracked":
         git_files = _git_ls_files(ctx)
         if git_files != None:
             git_files = _apply_pattern_filters(ctx, git_files, include_patterns, exclude_patterns)
@@ -687,9 +687,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             phase = Phase(name = "format", description = "Format files", emoji = "✨"),
         )
     else:
-        # format_args=[] — formatter self-discovers (scope=all always; scope=git when
-        # git is unavailable; scope=changed when change-detection could not determine
-        # the base).
+        # format_args=[] — formatter self-discovers (scope=all always; scope=tracked
+        # when git is unavailable; scope=changed when change-detection could not
+        # determine the base).
         status = _pick_status(data, had_failure = False, terminal = False)
         task_update(
             ctx,
@@ -848,8 +848,8 @@ format = task(
     args = {
         "scope": args.string(
             default = "changed",
-            values = ["changed", "all", "git"],
-            description = "Which files to format. 'changed' (default) formats only files that differ from the merge base — the GitHub PR Files API in PR contexts, otherwise `git diff <merge-base>`. 'all' lets the formatter discover files itself across the working tree (subject to its own extension coverage). 'git' enumerates all non-gitignored files via `git ls-files` (respecting .gitignore and .gitattributes) and passes them to the formatter; raw formatters that handle only specific file types should pair --scope=git with --include-pattern (e.g. `--include-pattern='**/*.bzl'` for buildifier). 'all' and 'git' are both useful as a nightly-job mode and when introducing a new formatter to a repo for the first time.",
+            values = ["changed", "tracked", "all"],
+            description = "Which files to format. 'changed' (default) formats only files that differ from the merge base — the GitHub PR Files API in PR contexts, otherwise `git diff <merge-base>`. 'tracked' enumerates all non-gitignored files via `git ls-files` (respecting .gitignore and .gitattributes) and passes them to the formatter; raw formatters that handle only specific file types should pair --scope=tracked with --include-pattern (e.g. `--include-pattern='**/*.bzl'` for buildifier). 'all' lets the formatter discover files itself across the working tree (subject to its own extension coverage). 'tracked' and 'all' are both useful as a nightly-job mode and when introducing a new formatter to a repo for the first time.",
         ),
         "severity": args.string(
             default = "auto",
@@ -858,11 +858,11 @@ format = task(
         ),
         "include_patterns": args.string_list(
             long = "include-pattern",
-            description = "Glob pattern(s) of paths to include in formatting. When set, only files matching at least one pattern are passed to the formatter; all others are silently skipped. Repeat the flag to pass multiple — e.g. `--include-pattern='**/*.bzl' --include-pattern='**/BUILD'`. Patterns match against repo-relative file paths (note: `*` matches within one directory level, so use `**/*.bzl` not `*.bzl` to match files at any depth). Most useful with --scope=git when the formatter_target is a raw binary that handles only a single file type (e.g. `--include-pattern='**/*.bzl' --include-pattern='**/BUILD*'` for buildifier). Applied before --exclude-pattern. Pattern syntax: `*` (one segment), `**` (zero or more segments), `?` (one char); case-sensitive.",
+            description = "Glob pattern(s) of paths to include in formatting. When set, only files matching at least one pattern are passed to the formatter; all others are silently skipped. Repeat the flag to pass multiple — e.g. `--include-pattern='**/*.bzl' --include-pattern='**/BUILD'`. Patterns match against repo-relative file paths (note: `*` matches within one directory level, so use `**/*.bzl` not `*.bzl` to match files at any depth). Most useful with --scope=tracked when the formatter_target is a raw binary that handles only a single file type (e.g. `--include-pattern='**/*.bzl' --include-pattern='**/BUILD*'` for buildifier). Applied before --exclude-pattern. Pattern syntax: `*` (one segment), `**` (zero or more segments), `?` (one char); case-sensitive.",
         ),
         "exclude_patterns": args.string_list(
             long = "exclude-pattern",
-            description = "Glob pattern(s) of paths to exclude from formatting. Repeat the flag to pass multiple — e.g. `--exclude-pattern='vendor/**' --exclude-pattern='**/*.generated.go'`. Patterns match against repo-relative file paths. In `--scope=changed` and `--scope=git`, excluded files are dropped from the file list before the formatter is invoked. In `--scope=all`, the formatter discovers files itself so excluded files may still be rewritten on disk; in all scopes, excluded files are omitted from the post-format diff used to decide whether the task fails. Useful for nested Bazel workspaces (where running the parent's formatter would stomp the child's files) and for vendored / generated directories. Pattern syntax: `*` (one segment), `**` (zero or more segments), `?` (one char); case-sensitive.",
+            description = "Glob pattern(s) of paths to exclude from formatting. Repeat the flag to pass multiple — e.g. `--exclude-pattern='vendor/**' --exclude-pattern='**/*.generated.go'`. Patterns match against repo-relative file paths. In `--scope=changed` and `--scope=tracked`, excluded files are dropped from the file list before the formatter is invoked. In `--scope=all`, the formatter discovers files itself so excluded files may still be rewritten on disk; in all scopes, excluded files are omitted from the post-format diff used to decide whether the task fails. Useful for nested Bazel workspaces (where running the parent's formatter would stomp the child's files) and for vendored / generated directories. Pattern syntax: `*` (one segment), `**` (zero or more segments), `?` (one char); case-sensitive.",
         ),
         "upload_format_diff": args.boolean(
             default = True,
