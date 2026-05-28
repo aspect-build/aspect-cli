@@ -285,11 +285,14 @@ steps:
 
   # Smoke-tests the new test-task flags. `--target-pattern-file` is forwarded
   # to Bazel verbatim, so the assertion is just that aspect resolves the file
-  # and the run completes. `--coverage` adds `--collect_code_coverage
-  # --combined_report=lcov`; Rust tests in this repo aren't coverage-
-  # instrumented, so this exercises flag plumbing + the "report not found"
-  # warning path in --coverage-report / --coverage-tool rather than verifying
-  # an LCOV payload.
+  # and the run completes. `--coverage` is exercised against an sh_test rather
+  # than a rust_test: `toolchains_llvm_bootstrapped` 0.5.2 (pinned in
+  # MODULE.bazel) ships without `libclang_rt.profile.a`, so any rust_test under
+  # --collect_code_coverage fails CppLink on libld/libc shared libs (upstream
+  # hermeticbuild/hermetic-llvm#318, fixed in #468 — not in 0.5.2 yet). sh_test
+  # has no coverage instrumentation so this exercises flag plumbing + the
+  # "report not found" warning path in --coverage-report / --coverage-tool
+  # rather than verifying an LCOV payload.
   - key: test-flags-task
     depends_on:
       - pre-build
@@ -305,7 +308,7 @@ steps:
       echo "--- :aspect: aspect test --target-pattern-file"
       PATTERNS=$$(mktemp)
       echo "# smoke: targets forwarded via --target_pattern_file" > $$PATTERNS
-      echo "//crates/bazelrc:bazelrc_test" >> $$PATTERNS
+      echo "//examples/test_states:always_pass" >> $$PATTERNS
       aspect test --task-key test-bk-target-pattern-file --target-pattern-file=$$PATTERNS
       rm -f $$PATTERNS
 
@@ -315,7 +318,7 @@ steps:
         --coverage \
         --coverage-report=$$REPORT \
         --coverage-tool=cat --coverage-tool-arg={report} \
-        //crates/bazelrc:bazelrc_test
+        //examples/test_states:always_pass
       rm -f $$REPORT
 
   - key: lint-task
