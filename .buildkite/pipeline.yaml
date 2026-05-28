@@ -283,6 +283,41 @@ steps:
       ASPECT_DEBUG=1 aspect test --task-key test-bk-debug -- //... -//exclude/...
       aspect test --task-key test-bk -- //... -//exclude/...
 
+  # Smoke-tests the new test-task flags. `--target-pattern-file` is forwarded
+  # to Bazel verbatim, so the assertion is just that aspect resolves the file
+  # and the run completes. `--coverage` adds `--collect_code_coverage
+  # --combined_report=lcov`; Rust tests in this repo aren't coverage-
+  # instrumented, so this exercises flag plumbing + the "report not found"
+  # warning path in --coverage-report / --coverage-tool rather than verifying
+  # an LCOV payload.
+  - key: test-flags-task
+    depends_on:
+      - pre-build
+    label: ":aspect: Test Task – new flags"
+    agents:
+      queue: aspect-default
+    timeout_in_minutes: 10
+    retry:
+      automatic:
+        - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
+          limit: 1
+    command: |
+      echo "--- :aspect: aspect test --target-pattern-file"
+      PATTERNS=$$(mktemp)
+      echo "# smoke: targets forwarded via --target_pattern_file" > $$PATTERNS
+      echo "//crates/bazelrc:bazelrc_test" >> $$PATTERNS
+      aspect test --task-key test-bk-target-pattern-file --target-pattern-file=$$PATTERNS
+      rm -f $$PATTERNS
+
+      echo "--- :aspect: aspect test --coverage (+ --coverage-report + --coverage-tool)"
+      REPORT=$$(mktemp)
+      aspect test --task-key test-bk-coverage \
+        --coverage \
+        --coverage-report=$$REPORT \
+        --coverage-tool=cat --coverage-tool-arg={report} \
+        //crates/bazelrc:bazelrc_test
+      rm -f $$REPORT
+
   - key: lint-task
     depends_on:
       - pre-build
