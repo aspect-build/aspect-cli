@@ -42,6 +42,9 @@ _MAX_BATCH_CHARS = 128000
 
 # .gitattributes attributes that mark files as generated/ignored.
 # Files with any of these set to "true" or "set" are excluded by --scope=tracked.
+# The rules_lint-sourced subset (rules-lint-ignored, linguist-generated, gitlab-generated)
+# was pulled from format.sh line 242 at commit 624d58b:
+# https://github.com/aspect-build/rules_lint/blob/624d58ba63ff4aaf196ceb553f9ca8a32de5e489/format/private/format.sh#L242
 _GITATTR_IGNORED = ["aspect-format-ignored", "rules-lint-ignored", "linguist-generated", "gitlab-generated"]
 
 def _git_capture_in(ctx, work_dir, *args):
