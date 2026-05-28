@@ -594,14 +594,14 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # carries a positional file list, runs it as-is.
     explicit_files = list(ctx.args.files)
 
-    format_args = []
+    format_files = []
     if explicit_files:
         print("Formatting %d file%s from positional arguments." % (
             len(explicit_files),
             "" if len(explicit_files) == 1 else "s",
         ))
         data["changed_files_count"] = len(explicit_files)
-        format_args = explicit_files
+        format_files = explicit_files
     elif ctx.args.scope == "changed":
         # Prefers the GitHub PR Files API when authenticated and in a PR
         # context (works on any CI host), falling back to a local
@@ -638,7 +638,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             # Change-detection failed — fall back to formatter self-discovery
             # (no positional args), equivalent to --scope=all.
             warn(ctx.std, "Could not determine the changed-file set (%s). Falling back to formatter self-discovery. Override with --merge-base=<sha> or set --base-ref to a ref available locally." % detect_result["source"])
-            format_args = []
+            format_files = []
         else:
             changed_files = detect_result["files"]
             changed_files = _apply_pattern_filters(ctx, changed_files, include_patterns, exclude_patterns)
@@ -653,7 +653,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             # "Strategy: hold-the-line — filtered to N changed files"). This
             # is the post-filter set the formatter actually sees.
             data["changed_files_count"] = len(changed_files)
-            format_args = changed_files
+            format_files = changed_files
 
     elif ctx.args.scope == "tracked":
         git_files = _git_ls_files(ctx)
@@ -666,7 +666,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             # Normalize repo-relative → CWD-relative so the formatter can find the files.
             git_files = _normalize_files_for_formatter(ctx, git_files)
             data["changed_files_count"] = len(git_files)
-            format_args = git_files
+            format_files = git_files
         else:
             warn(ctx.std, "git ls-files unavailable; falling back to formatter self-discovery.")
 
@@ -677,8 +677,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # working tree, index, or stash list. Empty output = clean tree.
     pre_snap = _snapshot_tracked_state(ctx)
 
-    if format_args:
-        files_label = pluralize(len(format_args), "file")
+    if format_files:
+        files_label = pluralize(len(format_files), "file")
         scope_label = " in scope" if (not explicit_files and ctx.args.scope == "changed") else ""
         status = _pick_status(data, had_failure = False, terminal = False)
         task_update(
@@ -694,7 +694,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             phase = Phase(name = "format", description = "Format files", emoji = "✨"),
         )
     else:
-        # format_args=[] — formatter self-discovers (scope=all always; scope=tracked
+        # format_files=[] — formatter self-discovers (scope=all always; scope=tracked
         # when git is unavailable; scope=changed when change-detection could not
         # determine the base).
         status = _pick_status(data, had_failure = False, terminal = False)
@@ -715,7 +715,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
     # Spawn the formatter once per batch to stay under OS arg limits.
     exit = None
-    for chunk in _chunk_files(format_args):
+    for chunk in _chunk_files(format_files):
         exit = r.spawn(ep, list(ctx.args.formatter_args) + chunk, cwd = spawn_cwd).wait()
         if not exit.success:
             break
