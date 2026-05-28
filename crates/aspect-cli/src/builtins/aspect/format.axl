@@ -33,6 +33,14 @@ load("./lib/runnable.axl", "LOCAL_SPAWN_FLAGS", "runnable")
 load("./lib/text.axl", "pluralize")
 load("./lib/tips.axl", "tips")
 
+# Max characters per formatter invocation batch.
+# Mirrors rules_lint format.sh: ARG_MAX-2048 capped at 128000.
+_MAX_BATCH_CHARS = 128000
+
+# git check-attr attributes that mark files as generated/lint-ignored.
+# Mirrors the ls-files function in rules_lint's format.sh.
+_GITATTR_IGNORED = ["rules-lint-ignored", "linguist-generated", "gitlab-generated"]
+
 def _git_capture(ctx, *args):
     """Run `git <args>` and return (stdout, exit_code, stderr).
 
@@ -43,6 +51,83 @@ def _git_capture(ctx, *args):
         .current_dir(ctx.std.env.current_dir()) \
         .stdout("piped").stderr("piped").spawn().wait_with_output()
     return result.stdout, result.status.code, result.stderr
+
+def _filter_git_attributes(ctx, files):
+    """Exclude files flagged as generated/lint-ignored via .gitattributes.
+
+    Checks rules-lint-ignored, linguist-generated, and gitlab-generated
+    attributes, mirroring the ls-files function in rules_lint's format.sh.
+    """
+    if not files:
+        return files
+
+    excluded = {}
+    i = 0
+    while i < len(files):
+        batch = files[i:i + 500]
+        i += 500
+        check_args = ["check-attr"] + _GITATTR_IGNORED + ["--"] + batch
+        out, code, _ = _git_capture(ctx, *check_args)
+        if code != 0:
+            continue
+        for line in out.strip().split("\n"):
+            if not line:
+                continue
+            # Output: "<path>: <attr>: <value>". Split from the right so
+            # paths containing ": " are handled correctly.
+            parts = line.split(": ")
+            if len(parts) >= 3:
+                filepath = ": ".join(parts[:-2])
+                value = parts[-1].strip()
+                if value in ("set", "true"):
+                    excluded[filepath] = True
+
+    return [f for f in files if f not in excluded]
+
+
+def _git_ls_files(ctx):
+    """Return all tracked and untracked-but-not-ignored files, with .gitattributes filtering.
+
+    Paths are CWD-relative (git ls-files runs under ctx.std.env.current_dir()).
+    Returns None when git is unavailable or ls-files fails.
+    """
+    out, code, _ = _git_capture(ctx, "ls-files", "--cached", "--others", "--exclude-standard")
+    if code != 0:
+        return None
+    files = [f for f in out.strip().split("\n") if f]
+
+    # Exclude files staged for deletion (still in index, absent from working tree).
+    del_out, del_code, _ = _git_capture(ctx, "ls-files", "--deleted")
+    if del_code == 0:
+        deleted = {f for f in del_out.strip().split("\n") if f}
+        files = [f for f in files if f not in deleted]
+
+    return _filter_git_attributes(ctx, files)
+
+
+def _chunk_files(files):
+    """Split files into batches that fit within OS arg limits.
+
+    Uses the same 128 000-char cap as rules_lint's format.sh (derived from
+    ARG_MAX-2048 capped at 128 000). Always returns ≥1 batch.
+    """
+    if not files:
+        return [files]
+    batches = []
+    current = []
+    current_chars = 0
+    for f in files:
+        f_chars = len(f) + 1  # +1 for the arg separator
+        if current_chars + f_chars > _MAX_BATCH_CHARS and current:
+            batches.append(current)
+            current = []
+            current_chars = 0
+        current.append(f)
+        current_chars += f_chars
+    if current:
+        batches.append(current)
+    return batches
+
 
 def _snapshot_tracked_state(ctx):
     """Snapshot the current tracked-tree state via `git stash create`.
@@ -528,6 +613,32 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             data["changed_files_count"] = len(changed_files)
             format_args = changed_files
 
+    elif ctx.args.scope == "all":
+        # Enumerate via git ls-files so the formatter is scoped to tracked
+        # files (same as format_multirun's internal behavior) and
+        # --include-pattern / --exclude-pattern take effect.
+        git_files = _git_ls_files(ctx)
+        if git_files != None:
+            if include_patterns:
+                kept = [f for f in git_files if match_any(include_patterns, f)]
+                skipped_count = len(git_files) - len(kept)
+                if skipped_count > 0:
+                    info(ctx.std, "Skipped %d file(s) not matching --include-pattern." % skipped_count)
+                git_files = kept
+            if exclude_patterns:
+                kept = [f for f in git_files if not match_any(exclude_patterns, f)]
+                n_excluded = len(git_files) - len(kept)
+                if n_excluded > 0:
+                    info(ctx.std, "Filtered %d file(s) via --exclude-pattern." % n_excluded)
+                git_files = kept
+            if not git_files:
+                info(ctx.std, "No files to format")
+                data["format"]["no_files_to_format"] = True
+                return _emit_final(ctx, lifecycle, data, 0)
+            data["changed_files_count"] = len(git_files)
+            format_args = git_files
+        # else: git unavailable — format_args stays [] and the formatter self-discovers
+
     # Snapshot pre-format tracked state so we can detect what the formatter
     # changed independently of any pre-existing dirty files. `git stash
     # create` is non-destructive: writes a commit object representing the
@@ -535,9 +646,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # working tree, index, or stash list. Empty output = clean tree.
     pre_snap = _snapshot_tracked_state(ctx)
 
-    if explicit_files or ctx.args.scope == "changed":
+    if format_args:
         files_label = pluralize(len(format_args), "file")
-        scope_label = "" if explicit_files else " in scope"
+        scope_label = " in scope" if (not explicit_files and ctx.args.scope == "changed") else ""
         status = _pick_status(data, had_failure = False, terminal = False)
         task_update(
             ctx,
@@ -552,6 +663,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             phase = Phase(name = "format", description = "Format files", emoji = "✨"),
         )
     else:
+        # scope=all with git unavailable — formatter self-discovers
         status = _pick_status(data, had_failure = False, terminal = False)
         task_update(
             ctx,
@@ -568,11 +680,13 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
     spawn_cwd = ctx.std.env.current_dir() if ctx.args.run_in_cwd else None
 
-    # `formatter_args` are extra args always passed to the formatter binary —
-    # an alias-level knob for formatter-specific flags (e.g. `--check=false`).
-    # Order: formatter args first, then the discovered file list.
-    spawn_args = list(ctx.args.formatter_args) + format_args
-    exit = r.spawn(ep, spawn_args, cwd = spawn_cwd).wait()
+    # Spawn the formatter once per batch to stay under OS arg limits.
+    # formatter_args (alias-level flags) always precede the file chunk.
+    exit = None
+    for chunk in _chunk_files(format_args):
+        exit = r.spawn(ep, list(ctx.args.formatter_args) + chunk, cwd = spawn_cwd).wait()
+        if not exit.success:
+            break
 
     if not exit.success:
         # Formatter binary itself errored — surface that and skip the
