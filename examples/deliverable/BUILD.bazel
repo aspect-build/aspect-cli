@@ -1,5 +1,6 @@
 load("@rules_python//python:py_binary.bzl", "py_binary")
 load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+load(":gen_sh_binary.bzl", "gen_sh_binary")
 
 genrule(
     name = "delivery_payload",
@@ -11,6 +12,14 @@ sh_binary(
     name = "deliverable",
     srcs = ["deliver.sh"],
     data = [":delivery_payload"],
+    tags = ["deliverable"],
+)
+
+# A custom rule emitting a .sh script with no runfiles tree. Delivery must run
+# it without requiring a .runfiles_manifest in BES output.
+gen_sh_binary(
+    name = "custom_sh_deliverable",
+    content = "#!/usr/bin/env bash\necho 'custom rule delivery works'\n",
     tags = ["deliverable"],
 )
 

@@ -1009,11 +1009,6 @@ def _delivery_impl(ctx):
                 pending_count += 1
                 data.append((label, "WARN", "warn", warn_msg, output_sha or "-", "-"))
                 delivery_add_result(dr, label, "warn", message = warn_msg, output_sha = output_sha or "", is_forced = is_forced)
-            elif not ep.runfiles_dir:
-                warn_msg = "tagged deliverable but not runnable (no .runfiles_manifest in BES output for {})".format(ep.path)
-                pending_count += 1
-                data.append((label, "WARN", "warn", warn_msg, output_sha or "-", "-"))
-                delivery_add_result(dr, label, "warn", message = warn_msg, output_sha = output_sha or "", is_forced = is_forced)
             else:
                 pending.append((label, ep, is_forced, output_sha or "-"))
 
