@@ -43,19 +43,24 @@ _MAX_BATCH_CHARS = 128000
 # .gitattributes attributes that mark files as generated/lint-ignored.
 _GITATTR_IGNORED = ["rules-lint-ignored", "linguist-generated", "gitlab-generated"]
 
-def _git_capture(ctx, *args):
-    """Run `git <args>` in the user's CWD and return (stdout, exit_code, stderr)."""
+def _git_capture_in(ctx, work_dir, *args):
+    """Run `git <args>` in `work_dir` and return (stdout, exit_code, stderr)."""
     result = ctx.std.process.command("git").args(list(args)) \
-        .current_dir(ctx.std.env.current_dir()) \
+        .current_dir(work_dir) \
         .stdout("piped").stderr("piped").spawn().wait_with_output()
     return result.stdout, result.status.code, result.stderr
 
+def _git_capture(ctx, *args):
+    """Run `git <args>` in the user's CWD and return (stdout, exit_code, stderr)."""
+    return _git_capture_in(ctx, ctx.std.env.current_dir(), *args)
+
 def _git_capture_root(ctx, *args):
-    """Run `git <args>` from the git root and return (stdout, exit_code, stderr)."""
-    result = ctx.std.process.command("git").args(list(args)) \
-        .current_dir(ctx.std.env.git_root_dir()) \
-        .stdout("piped").stderr("piped").spawn().wait_with_output()
-    return result.stdout, result.status.code, result.stderr
+    """Run `git <args>` from the git root and return (stdout, exit_code, stderr).
+
+    Disables core.quotePath so file paths in output are never C-quoted,
+    allowing non-ASCII filenames to be compared and matched correctly.
+    """
+    return _git_capture_in(ctx, ctx.std.env.git_root_dir(), "-c", "core.quotePath=false", *args)
 
 def _chunk_files(files):
     """Split files into batches sized to stay under OS arg limits.
@@ -124,10 +129,11 @@ def _git_ls_files(ctx):
         return None
 
     # Pathspec to scope ls-files to the user's CWD when invoked from a subdirectory.
-    if cwd == git_root or not cwd.startswith(git_root + "/"):
-        path_scope = "."
-    else:
+    # Falls back to "." (whole repo) if CWD is the root or outside the repo.
+    if cwd.startswith(git_root + "/"):
         path_scope = cwd[len(git_root) + 1:]
+    else:
+        path_scope = "."
 
     # --full-name produces repo-relative paths regardless of CWD.
     # Run from the git root so the pathspec resolves correctly.
@@ -643,14 +649,6 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             format_args = changed_files
 
     elif ctx.args.scope == "git":
-        # Enumerate via git ls-files so the formatter only sees files git
-        # knows about — gitignored and generated files are excluded.
-        # Paths are repo-relative so --include-pattern / --exclude-pattern
-        # match consistently regardless of invocation directory.
-        # Falls back to formatter self-discovery when git is unavailable.
-        #
-        # Raw formatters that handle only specific file types (e.g. buildifier
-        # for .bzl/BUILD files) should pair this scope with --include-pattern.
         git_files = _git_ls_files(ctx)
         if git_files != None:
             git_files = _apply_pattern_filters(ctx, git_files, include_patterns, exclude_patterns)
@@ -662,7 +660,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             git_files = _normalize_files_for_formatter(ctx, git_files)
             data["changed_files_count"] = len(git_files)
             format_args = git_files
-        # else: git unavailable — format_args stays [] and the formatter self-discovers
+        else:
+            warn(ctx.std, "git ls-files unavailable; falling back to formatter self-discovery.")
 
     # Snapshot pre-format tracked state so we can detect what the formatter
     # changed independently of any pre-existing dirty files. `git stash
