@@ -40,13 +40,16 @@ _MAX_BATCH_CHARS = 128000
 _GITATTR_IGNORED = ["rules-lint-ignored", "linguist-generated", "gitlab-generated"]
 
 def _git_capture(ctx, *args):
-    """Run `git <args>` and return (stdout, exit_code, stderr).
-
-    All stderr goes to a string so caller can include it in a fail()
-    message. Stdout is captured as-is (no trim).
-    """
+    """Run `git <args>` in the user's CWD and return (stdout, exit_code, stderr)."""
     result = ctx.std.process.command("git").args(list(args)) \
         .current_dir(ctx.std.env.current_dir()) \
+        .stdout("piped").stderr("piped").spawn().wait_with_output()
+    return result.stdout, result.status.code, result.stderr
+
+def _git_capture_root(ctx, *args):
+    """Run `git <args>` from the git root and return (stdout, exit_code, stderr)."""
+    result = ctx.std.process.command("git").args(list(args)) \
+        .current_dir(ctx.std.env.git_root_dir()) \
         .stdout("piped").stderr("piped").spawn().wait_with_output()
     return result.stdout, result.status.code, result.stderr
 
@@ -85,7 +88,8 @@ def _filter_git_attributes(ctx, files):
     excluded = {}
     for batch in _chunk_files(files):
         check_args = ["check-attr"] + _GITATTR_IGNORED + ["--"] + batch
-        out, code, _ = _git_capture(ctx, *check_args)
+        # Run from the git root so repo-relative paths resolve correctly.
+        out, code, _ = _git_capture_root(ctx, *check_args)
         if code != 0:
             continue
         for line in out.strip().split("\n"):
@@ -101,18 +105,38 @@ def _filter_git_attributes(ctx, files):
 
 
 def _git_ls_files(ctx):
-    """Return all tracked and untracked-but-not-ignored files, with .gitattributes filtering.
+    """Return tracked and untracked-but-not-ignored files as repo-relative paths.
 
-    Paths are CWD-relative (git ls-files runs under ctx.std.env.current_dir()).
+    Results are scoped to the user's CWD (a subdirectory run sees only that
+    subtree). Paths are repo-relative so they can be matched against
+    --include-pattern / --exclude-pattern which are documented as repo-relative.
+    Call _normalize_files_for_formatter on the result before spawning the formatter.
+
     Returns None when git is unavailable or ls-files fails.
     """
-    out, code, _ = _git_capture(ctx, "ls-files", "--cached", "--others", "--exclude-standard")
+    cwd = ctx.std.env.current_dir()
+    git_root = ctx.std.env.git_root_dir()
+    if not git_root:
+        return None
+
+    # Pathspec to scope ls-files to the user's CWD when invoked from a subdirectory.
+    if cwd == git_root or not cwd.startswith(git_root + "/"):
+        path_scope = "."
+    else:
+        path_scope = cwd[len(git_root) + 1:]
+
+    # --full-name produces repo-relative paths regardless of CWD.
+    # Run from the git root so the pathspec resolves correctly.
+    out, code, _ = _git_capture_root(ctx, "ls-files", "--cached", "--others",
+                                      "--exclude-standard", "--full-name",
+                                      "--", path_scope)
     if code != 0:
         return None
     files = [f for f in out.strip().split("\n") if f]
 
     # Exclude files tracked in the index but missing from disk (deleted with or without staging).
-    del_out, del_code, _ = _git_capture(ctx, "ls-files", "--deleted")
+    del_out, del_code, _ = _git_capture_root(ctx, "ls-files", "--deleted",
+                                              "--full-name", "--", path_scope)
     if del_code == 0:
         deleted = {f for f in del_out.strip().split("\n") if f}
         files = [f for f in files if f not in deleted]
@@ -616,18 +640,24 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             format_args = changed_files
 
     elif ctx.args.scope == "all":
-        # Enumerate via git ls-files so the formatter is scoped to tracked
-        # files and --include-pattern / --exclude-pattern take effect.
-        git_files = _git_ls_files(ctx)
-        if git_files != None:
-            git_files = _apply_pattern_filters(ctx, git_files, include_patterns, exclude_patterns)
-            if not git_files:
-                info(ctx.std, "No files to format")
-                data["format"]["no_files_to_format"] = True
-                return _emit_final(ctx, lifecycle, data, 0)
-            data["changed_files_count"] = len(git_files)
-            format_args = git_files
-        # else: git unavailable — format_args stays [] and the formatter self-discovers
+        # Enumerate via git ls-files only when --include-pattern is set.
+        # Without include patterns the formatter self-discovers its own file types
+        # (safe for bare formatters like buildifier that only handle specific extensions).
+        # With include patterns, enumerate tracked files (repo-relative) and apply
+        # both include and exclude patterns before passing to the formatter.
+        if include_patterns:
+            git_files = _git_ls_files(ctx)
+            if git_files != None:
+                git_files = _apply_pattern_filters(ctx, git_files, include_patterns, exclude_patterns)
+                if not git_files:
+                    info(ctx.std, "No files to format")
+                    data["format"]["no_files_to_format"] = True
+                    return _emit_final(ctx, lifecycle, data, 0)
+                # Normalize repo-relative → CWD-relative so the formatter can find the files.
+                git_files = _normalize_files_for_formatter(ctx, git_files)
+                data["changed_files_count"] = len(git_files)
+                format_args = git_files
+            # else: git unavailable — format_args stays [] and the formatter self-discovers
 
     # Snapshot pre-format tracked state so we can detect what the formatter
     # changed independently of any pre-existing dirty files. `git stash
@@ -814,7 +844,7 @@ format = task(
         "scope": args.string(
             default = "changed",
             values = ["changed", "all"],
-            description = "Which files to format. 'changed' (default) formats only files that differ from the merge base — the GitHub PR Files API in PR contexts, otherwise `git diff <merge-base>`. 'all' lets the formatter discover files itself across the working tree (subject to its own extension coverage). Useful as a nightly-job mode and when introducing a new formatter to a repo for the first time.",
+            description = "Which files to format. 'changed' (default) formats only files that differ from the merge base — the GitHub PR Files API in PR contexts, otherwise `git diff <merge-base>`. 'all' lets the formatter discover files itself across the working tree (subject to its own extension coverage); when --include-pattern is also set, files are instead enumerated via `git ls-files` (respecting .gitignore and .gitattributes) and filtered to the pattern set before being passed to the formatter. Useful as a nightly-job mode and when introducing a new formatter to a repo for the first time.",
         ),
         "severity": args.string(
             default = "auto",
@@ -823,7 +853,7 @@ format = task(
         ),
         "include_patterns": args.string_list(
             long = "include-pattern",
-            description = "Glob pattern(s) of paths to include in formatting. When set, only files matching at least one pattern are passed to the formatter; all others are silently skipped. Repeat the flag to pass multiple — e.g. `--include-pattern='**/*.bzl' --include-pattern='**/BUILD'`. Patterns match against repo-relative file paths (note: `*` matches within one directory level, so use `**/*.bzl` not `*.bzl` to match files at any depth). Useful when the formatter_target is a raw binary that handles only a single file type. In `--scope=changed` (default), non-matching files are dropped from the file list before invoking the formatter. Applied before --exclude-pattern. Pattern syntax: `*` (one segment), `**` (zero or more segments), `?` (one char); case-sensitive.",
+            description = "Glob pattern(s) of paths to include in formatting. When set, only files matching at least one pattern are passed to the formatter; all others are silently skipped. Repeat the flag to pass multiple — e.g. `--include-pattern='**/*.bzl' --include-pattern='**/BUILD'`. Patterns match against repo-relative file paths (note: `*` matches within one directory level, so use `**/*.bzl` not `*.bzl` to match files at any depth). Useful when the formatter_target is a raw binary that handles only a single file type (e.g. `--include-pattern='**/*.bzl' --include-pattern='**/BUILD*'` for buildifier). In `--scope=changed` (default), non-matching files are dropped from the file list before invoking the formatter. In `--scope=all`, setting this flag switches from formatter self-discovery to `git ls-files` enumeration, which also respects .gitignore and .gitattributes. Applied before --exclude-pattern. Pattern syntax: `*` (one segment), `**` (zero or more segments), `?` (one char); case-sensitive.",
         ),
         "exclude_patterns": args.string_list(
             long = "exclude-pattern",
