@@ -18,7 +18,7 @@ use tracing::info_span;
 
 use crate::cmd::Cmd;
 use crate::helpers::{
-    find_aspect_root, find_bazel_root, get_default_axl_search_paths, search_sources,
+    find_aspect_root, find_bazel_root, find_git_root, get_default_axl_search_paths, search_sources,
 };
 
 // Must use a multi thread runtime with at least 3 threads for following reasons;
@@ -83,6 +83,7 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
     let bazel_root = find_bazel_root(&current_work_dir)
         .await
         .unwrap_or_else(|| current_work_dir.clone());
+    let git_root = find_git_root(&current_work_dir).await;
 
     let disk_store = DiskStore::new(aspect_root.clone());
     let mode = ModEvaluator::new(aspect_root.clone());
@@ -114,6 +115,7 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                 cli_version.clone(),
                 aspect_root.clone(),
                 bazel_root.clone(),
+                git_root.clone(),
                 &modules,
             );
             let mut mpe = MultiPhaseEval::new(env, &loader);

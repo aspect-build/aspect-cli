@@ -195,7 +195,7 @@ load("./lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_ch
 load("./lib/health_check.axl", "HealthCheckTrait")
 load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "pick_task_status", "preflight_phase", "resolve_on_change", "setup_phase", "task_update")
 load("./lib/path_glob.axl", "match_any")
-load("./lib/repro_commands.axl", "build_aspect_command", "explicit_flags", "print_repro_and_fix", "task_cli_path")
+load("./lib/repro_commands.axl", "build_aspect_command", "explicit_flags", "print_repro_and_fix", "repro_prefix", "task_cli_path")
 load("./lib/runnable.axl", "runnable")
 load("./lib/text.axl", "pluralize")
 load("./lib/tips.axl", "tips")
@@ -322,8 +322,9 @@ def _append_repro_command(ctx, data):
     CI ran, with the post-resolution effective dirs as positionals so
     the user reproduces CI's exact working set."""
     effective_dirs = (data.get("gazelle", {}) or {}).get("dirs", []) or []
+    prefix = repro_prefix(ctx)
     data["repro_commands"].append({
-        "command": build_aspect_command(
+        "command": prefix + build_aspect_command(
             task_cli_path(ctx.task),
             _detection_flags(ctx, "check"),
             list(effective_dirs),
@@ -350,10 +351,11 @@ def _append_fix_commands(ctx, data):
     task_path = task_cli_path(ctx.task)
     fix_dirs = dedupe_subtrees(extract_changed_dirs(affected))
     explicit_flags = _explicit_dirs_flags(ctx, "apply")
+    prefix = repro_prefix(ctx)
 
     if len(fix_dirs) <= _FIX_DIRS_LIMIT:
         data["fix_commands"].append({
-            "command": build_aspect_command(task_path, explicit_flags, fix_dirs, max_chars = 4096),
+            "command": prefix + build_aspect_command(task_path, explicit_flags, fix_dirs, max_chars = 4096),
             "description": "",
         })
         return
@@ -361,7 +363,7 @@ def _append_fix_commands(ctx, data):
     shown = fix_dirs[:_FIX_DIRS_LIMIT]
     remaining = len(fix_dirs) - _FIX_DIRS_LIMIT
     data["fix_commands"].append({
-        "command": build_aspect_command(task_path, explicit_flags, shown, max_chars = 4096),
+        "command": prefix + build_aspect_command(task_path, explicit_flags, shown, max_chars = 4096),
         "description": "First %d of %d affected dirs (plus %d other%s)" % (
             _FIX_DIRS_LIMIT,
             len(fix_dirs),
@@ -370,7 +372,7 @@ def _append_fix_commands(ctx, data):
         ),
     })
     data["fix_commands"].append({
-        "command": build_aspect_command(task_path, _detection_flags(ctx, "apply"), []),
+        "command": prefix + build_aspect_command(task_path, _detection_flags(ctx, "apply"), []),
         "description": "Or re-discover and update all %d affected dirs" % len(fix_dirs),
     })
 
@@ -631,6 +633,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         ctx.args.gazelle_target,
         build_events = build_events,
         flags = flags,
+        current_dir = ctx.std.env.bazel_root_dir(),
     )
 
     # `build.sink_invocation_id` is minted inside the runtime's `Build::spawn`
@@ -769,7 +772,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         data = data,
         phase = Phase(name = "diff", description = "Compute BUILD-file diff", emoji = "📋"),
     )
-    diff_proc = r.spawn(ep, diff_args, capture = True)
+    diff_proc = r.spawn(ep, diff_args, capture = True, cwd = ctx.std.env.bazel_root_dir())
     diff_stdout = diff_proc.stdout().read_to_string()
     diff_stderr = diff_proc.stderr().read_to_string()
     diff_status = diff_proc.wait()

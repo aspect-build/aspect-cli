@@ -961,6 +961,9 @@ mod tests {
         fn trait_type_ids(&self) -> Vec<u64> {
             vec![]
         }
+        fn trait_values(&self) -> Vec<starlark::values::Value<'v>> {
+            vec![]
+        }
     }
 
     fn stub_task(name: &str, group: &[&str], args: SmallMap<String, Arg>) -> StubTask {

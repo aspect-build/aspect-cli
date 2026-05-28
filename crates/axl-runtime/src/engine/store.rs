@@ -18,15 +18,24 @@ pub struct Env {
     /// `aspect_root_dir` when a Bazel sub-workspace sits under an
     /// Aspect root.
     pub bazel_root_dir: PathBuf,
+    /// Git repository root — directory containing `.git`. `None` when
+    /// not inside a git repository.
+    pub git_root_dir: Option<PathBuf>,
     pub rt: AsyncRuntime,
 }
 
 impl Env {
-    pub fn new(cli_version: String, aspect_root_dir: PathBuf, bazel_root_dir: PathBuf) -> Self {
+    pub fn new(
+        cli_version: String,
+        aspect_root_dir: PathBuf,
+        bazel_root_dir: PathBuf,
+        git_root_dir: Option<PathBuf>,
+    ) -> Self {
         Self {
             cli_version,
             aspect_root_dir,
             bazel_root_dir,
+            git_root_dir,
             rt: AsyncRuntime::new(),
         }
     }

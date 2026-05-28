@@ -57,10 +57,11 @@ impl<'m> AxlLoader<'m> {
         cli_version: String,
         aspect_root: PathBuf,
         bazel_root: PathBuf,
+        git_root: Option<PathBuf>,
         modules: &'m [Mod],
     ) -> Self {
         Self {
-            env: Env::new(cli_version, aspect_root, bazel_root),
+            env: Env::new(cli_version, aspect_root, bazel_root, git_root),
             dialect: api::dialect(),
             globals: api::get_globals().build(),
             modules,

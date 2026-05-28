@@ -143,16 +143,22 @@ def _determine_entrypoint(state: struct, target: str) -> struct | None:
 def _spawn(ctx: TaskContext, state: struct, ep: struct, args: list[str], capture: bool = False, cwd: str | None = None) -> std.process.Child:
     """Spawn `ep.path` with `args` in the Bazel runfiles environment.
 
-    Always sets BUILD_WORKSPACE_DIRECTORY / BUILD_WORKING_DIRECTORY so
-    formatter wrappers (e.g. rules_lint's format.sh) can cd to the workspace
-    root. When `ep.runfiles_dir` is set, also sets RUNFILES_DIR /
-    RUNFILES_MANIFEST_FILE so that `rlocation` in sh_binary wrappers works
-    regardless of the process's working directory.
+    Always sets BUILD_WORKSPACE_DIRECTORY (= bazel_root_dir) and
+    BUILD_WORKING_DIRECTORY (= current_dir) so tool wrappers can locate the
+    workspace. When `ep.runfiles_dir` is set, also sets
+    RUNFILES_DIR / RUNFILES_MANIFEST_FILE / JAVA_RUNFILES so `rlocation` in
+    sh_binary wrappers works regardless of cwd.
+
+    Also sets four ASPECT_CLI_* variables for tools that prefer aspect-native
+    conventions over Bazel-specific vars:
+      ASPECT_CLI_WORKING_DIRECTORY      — where the user invoked aspect
+      ASPECT_CLI_ASPECT_ROOT_DIRECTORY  — .aspect/ / MODULE.aspect anchor
+      ASPECT_CLI_BAZEL_ROOT_DIRECTORY   — MODULE.bazel / WORKSPACE anchor
+      ASPECT_CLI_GIT_ROOT_DIRECTORY     — .git anchor (empty when absent)
 
     `cwd` overrides the working directory. When omitted: defaults to
     `ep.runfiles_dir/<workspace>` when a runfiles tree is present (matching
-    `bazel run`), or to the workspace root for bare binaries so
-    workspace-relative file arguments resolve correctly.
+    `bazel run`), or to the aspect invocation directory for bare binaries.
     """
     workspace_name = state.workspace_name[0] or _DEFAULT_WORKSPACE_NAME
     if cwd:
@@ -160,11 +166,15 @@ def _spawn(ctx: TaskContext, state: struct, ep: struct, args: list[str], capture
     elif ep.runfiles_dir:
         effective_cwd = ep.runfiles_dir + "/" + workspace_name
     else:
-        effective_cwd = ctx.std.env.aspect_root_dir()
+        effective_cwd = ctx.std.env.current_dir()
     cmd = ctx.std.process.command(ep.path) \
         .current_dir(effective_cwd) \
-        .env("BUILD_WORKSPACE_DIRECTORY", ctx.std.env.aspect_root_dir()) \
+        .env("BUILD_WORKSPACE_DIRECTORY", ctx.std.env.bazel_root_dir()) \
         .env("BUILD_WORKING_DIRECTORY", ctx.std.env.current_dir()) \
+        .env("ASPECT_CLI_WORKING_DIRECTORY", ctx.std.env.current_dir()) \
+        .env("ASPECT_CLI_ASPECT_ROOT_DIRECTORY", ctx.std.env.aspect_root_dir()) \
+        .env("ASPECT_CLI_BAZEL_ROOT_DIRECTORY", ctx.std.env.bazel_root_dir()) \
+        .env("ASPECT_CLI_GIT_ROOT_DIRECTORY", ctx.std.env.git_root_dir() or "") \
         .args(args)
     if ep.runfiles_dir:
         cmd = cmd \
@@ -190,7 +200,7 @@ def runnable(ctx, targets: list[str]) -> struct:
       spawn(ep, args, capture=False, cwd=None) → Child
           Spawn `ep.path` with Bazel runfiles environment variables set.
           `cwd` defaults to `ep.runfiles_dir/<workspace>` when a runfiles tree
-          is present, or to the workspace root for bare binaries.
+          is present, or to the aspect invocation directory for bare binaries.
     """
     state = struct(
         ctx = ctx,

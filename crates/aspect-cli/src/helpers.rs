@@ -38,6 +38,16 @@ pub async fn find_aspect_root(current_work_dir: &Path) -> Option<PathBuf> {
     .await
 }
 
+/// Git repository root — the directory containing the `.git` entry.
+///
+/// Walks upward from `current_work_dir` looking for `.git` (a directory for
+/// normal repos or a file for git worktrees). Returns `None` when not inside
+/// a git repository.
+#[instrument]
+pub async fn find_git_root(current_work_dir: &Path) -> Option<PathBuf> {
+    find_ancestor_with_any(current_work_dir, &[".git"]).await
+}
+
 /// Bazel workspace root for bazelrc discovery, `bazel info workspace`, and
 /// BES output paths.
 ///
@@ -238,5 +248,49 @@ mod tests {
             tokio_fs::create_dir_all(&cwd).await.unwrap();
             assert_eq!(find_bazel_root(&cwd).await, Some(root), "marker: {marker}");
         }
+    }
+
+    /// `.git` directory found by walking up from a subdirectory.
+    #[tokio::test]
+    async fn git_root_found_from_subdirectory() {
+        let (_tmp, root) = setup(&[]).await;
+        tokio_fs::create_dir_all(root.join(".git")).await.unwrap();
+        let cwd = root.join("a/b/c");
+        tokio_fs::create_dir_all(&cwd).await.unwrap();
+
+        assert_eq!(find_git_root(&cwd).await, Some(root));
+    }
+
+    /// `.git` file (git worktree) is recognized.
+    #[tokio::test]
+    async fn git_root_recognizes_worktree_git_file() {
+        let (_tmp, root) = setup(&[".git"]).await;
+        let cwd = root.join("sub");
+        tokio_fs::create_dir_all(&cwd).await.unwrap();
+
+        assert_eq!(find_git_root(&cwd).await, Some(root));
+    }
+
+    /// Returns `None` when not inside any git repository.
+    #[tokio::test]
+    async fn git_root_none_outside_repo() {
+        let (_tmp, root) = setup(&[]).await;
+        let cwd = root.join("sub");
+        tokio_fs::create_dir_all(&cwd).await.unwrap();
+
+        assert_eq!(find_git_root(&cwd).await, None);
+    }
+
+    /// When aspect and git roots diverge (e.g. git repo contains a
+    /// sub-workspace with its own Bazel markers), git root is the outermost
+    /// ancestor with `.git` and is independent of the Bazel/Aspect roots.
+    #[tokio::test]
+    async fn git_root_is_independent_of_bazel_and_aspect_roots() {
+        let (_tmp, root) = setup(&[".git", "e2e/MODULE.bazel"]).await;
+        let cwd = root.join("e2e/sub");
+        tokio_fs::create_dir_all(&cwd).await.unwrap();
+
+        assert_eq!(find_git_root(&cwd).await, Some(root.clone()));
+        assert_eq!(find_bazel_root(&cwd).await, Some(root.join("e2e")));
     }
 }

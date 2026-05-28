@@ -21,7 +21,6 @@ impl Env {
     }
 }
 
-/// Documentation here
 #[starlark_value(type = "std.Env")]
 impl<'v> StarlarkValue<'v> for Env {
     fn get_methods() -> Option<&'static Methods> {
@@ -258,6 +257,24 @@ pub(crate) fn env_methods(registry: &mut MethodsBuilder) {
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("aspect root dir is non utf-8"))?;
         Ok(eval.heap().alloc_str(s))
+    }
+
+    /// Returns the git repository root — the directory containing `.git` —
+    /// or `None` when not inside a git repository.
+    fn git_root_dir<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneOr<values::StringValue<'v>>> {
+        let env = RuntimeEnv::from_eval(eval)?;
+        Ok(match &env.git_root_dir {
+            Some(path) => {
+                let s = path
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("git root dir is non utf-8"))?;
+                NoneOr::Other(eval.heap().alloc_str(s))
+            }
+            None => NoneOr::None,
+        })
     }
 
     /// Returns the Bazel workspace root directory — the anchor for bazelrc
