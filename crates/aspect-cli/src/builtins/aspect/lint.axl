@@ -21,6 +21,7 @@ Usage:
 load("@std//time.axl", "sleep", "sleep_iter")
 load("./bazel.axl", "BazelTrait")
 load("./lib/artifacts.axl", "artifacts")
+load("./lib/bazel_flags.axl", "setup_bazel_command")
 load("./lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event")
 load("./lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
 load("./lib/environment.axl", "color_enabled", "detect_ci", "error", "warn")
@@ -840,6 +841,36 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     for handler in lifecycle.task_started:
         handler(ctx, data["target_pattern"])
 
+    # Lint-specific base flags. Flag computation happens here (not after
+    # detect_changed_files) so parse_rc + ctx.bazel.startup_flags are ready
+    # before preflight.
+    base_flags = ["--remote_download_regex='.*AspectRulesLint.*'"]
+    for aspect in ctx.args.aspects:
+        base_flags.append("--aspects=" + aspect)
+
+    # Patch production is gated by --fix OR any registered lint_patch
+    # hook (e.g. GithubLintComments translates hunks into review-comment
+    # suggestion blocks). Applying patches still requires --fix; a
+    # hook-only run produces patches without mutating the working tree.
+    fix_apply = ctx.args.fix
+    fix_produce = fix_apply or bool(lint_trait.lint_patch)
+    if fix_produce:
+        base_flags.append("--output_groups=rules_lint_patch")
+        base_flags.append("--@aspect_rules_lint//lint:fix")
+
+    # rules_lint_human and rules_lint_machine are separate action sets:
+    # requesting both runs each linter twice. Human gives colored terminal
+    # output; machine gives exit codes + SARIF. detect_ci() guards against
+    # CI hosts (e.g. GHA) that allocate a pseudo-TTY while still needing
+    # machine output.
+    is_interactive = ctx.std.io.stdout.is_tty and not detect_ci(ctx.std.env)
+    if is_interactive:
+        base_flags.append("--output_groups=rules_lint_human")
+    if lint_trait.lint_report or not is_interactive:
+        base_flags.append("--output_groups=rules_lint_machine")
+
+    flags = setup_bazel_command(ctx, "build", bazel_trait, base_flags = base_flags)
+
     # 1. Pre-flight (env table, health checks).
     preflight_phase(ctx, lifecycle, hc_trait)
 
@@ -893,77 +924,11 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     for hook in lint_trait.lint_start:
         hook(ctx)
 
-    # 3. Build flags — lint-specific first, then BazelTrait additions.
-    # Each --aspect=<label> from the user becomes a Bazel --aspects=<label>.
-    # At least one aspect is required (enforced by args.string_list(required=True)).
-    flags = [
-        "--remote_download_regex='.*AspectRulesLint.*'",
-    ]
-    for aspect in ctx.args.aspects:
-        flags.append("--aspects=" + aspect)
-
-    # Patch production is gated by EITHER:
-    #   - `--fix` is set (we'll apply the patches locally afterward), or
-    #   - a feature registered a `lint_patch` hook (e.g.
-    #     GithubLintComments wants to translate hunks into review-comment
-    #     suggestion blocks). The apply step itself remains gated on
-    #     `ctx.args.fix` alone, so a hook-only run produces patches but
-    #     doesn't modify the working tree — that's the "auto" behavior:
-    #     suggestions surface on CI, local trees stay clean.
-    fix_apply = ctx.args.fix
-    fix_produce = fix_apply or bool(lint_trait.lint_patch)
-    if fix_produce:
-        flags.append("--output_groups=rules_lint_patch")
-        flags.append("--@aspect_rules_lint//lint:fix")
-
-    # rules_lint_human and rules_lint_machine are separate action sets: requesting
-    # both runs each linter twice. Human gives colored terminal output; machine
-    # gives exit codes + SARIF. detect_ci() guards against CI hosts (e.g. GHA)
-    # that allocate a pseudo-TTY — making is_tty True while still needing machine output.
-    is_interactive = ctx.std.io.stdout.is_tty and not detect_ci(ctx.std.env)
-    if is_interactive:
-        flags.append("--output_groups=rules_lint_human")
-
-    if lint_trait.lint_report or not is_interactive:
-        flags.append("--output_groups=rules_lint_machine")
-
-    flags.extend(ctx.args.bazel_flags)
-    flags.extend(bazel_trait.extra_flags)
-
-    # Task-time flag contributors — features register hooks that need
-    # ctx.task (e.g. --build_metadata=ASPECT_TASK_NAME=...) which features
-    # can't produce at activation time because FeatureContext has no task.
-    # See Workflows in feature/workflows.axl.
-    for hook in bazel_trait.task_flags:
-        flags.extend(hook(ctx))
-    if bazel_trait.flags:
-        flags = bazel_trait.flags(flags)
-
-    startup_flags = list(ctx.args.bazel_startup_flags)
-    startup_flags.extend(bazel_trait.extra_startup_flags)
-    if bazel_trait.startup_flags:
-        startup_flags = bazel_trait.startup_flags(startup_flags)
-
     events = bazel.build_events.iterator()
     build_events = [events] + list(bazel_trait.build_event_sinks)
 
-    # 4. BazelTrait.build_start hooks
     for hook in bazel_trait.build_start:
         hook(ctx)
-
-    # 5. Parse bazelrc and hand startup flags to the Bazel server.
-    rc = ctx.bazel.parse_rc(
-        startup_flags = startup_flags,
-        flags = flags,
-    )
-    rc_startup_flags, flags = rc.expand_all(command = "build")
-    ctx.bazel.startup_flags.extend(startup_flags + rc_startup_flags + ["--ignore_all_rc_files"])
-
-    if ctx.args.announce_rc:
-        print(rc.announce(command = "build", ansi = color_enabled(ctx.std)))
-    else:
-        # Always available under ASPECT_DEBUG without --announce-rc.
-        trace.log(rc.announce(command = "build", ansi = False))
 
     status = _pick_status(data, had_failure = False, terminal = False)
     task_update(

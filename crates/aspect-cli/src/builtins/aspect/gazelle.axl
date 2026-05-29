@@ -187,6 +187,7 @@ Usage:
 load("@std//time.axl", "sleep_iter")
 load("./bazel.axl", "BazelTrait")
 load("./lib/artifacts.axl", "artifacts")
+load("./lib/bazel_flags.axl", "setup_bazel_command")
 load("./lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event")
 load("./lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
 load("./lib/environment.axl", "color_enabled", "detect_ci", "error", "info", "warn")
@@ -196,7 +197,7 @@ load("./lib/health_check.axl", "HealthCheckTrait")
 load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "pick_task_status", "preflight_phase", "resolve_on_change", "setup_phase", "task_update")
 load("./lib/path_glob.axl", "match_any")
 load("./lib/repro_commands.axl", "build_aspect_command", "explicit_flags", "print_repro_and_fix", "repro_prefix", "task_cli_path")
-load("./lib/runnable.axl", "runnable")
+load("./lib/runnable.axl", "LOCAL_SPAWN_FLAGS", "runnable")
 load("./lib/text.axl", "pluralize")
 load("./lib/tips.axl", "tips")
 
@@ -560,48 +561,10 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         data["gazelle"]["no_changed_dirs"] = True
         return _emit_final(ctx, lifecycle, data, 0)
 
-    # Pre-flight: Workflows' `print_environment_info` +
-    # `agent_health_check` hooks fire here, printing the
-    # `--- :computer: Workflows runner environment` and health check
-    # BK section markers.
+    flags = setup_bazel_command(ctx, "build", bazel_trait)
     preflight_phase(ctx, lifecycle, hc_trait)
 
-    flags = []
-    flags.extend(ctx.args.bazel_flag)
-    flags.extend(bazel_trait.extra_flags)
-
-    # Task-time flag contributors — features register hooks that need
-    # ctx.task (e.g. --build_metadata=ASPECT_TASK_NAME=...).
-    for hook in bazel_trait.task_flags:
-        flags.extend(hook(ctx))
-    if bazel_trait.flags:
-        flags = bazel_trait.flags(flags)
-
-    # Required flags — appended LAST so they win over any --config=X
-    # expansion introduced by user / trait flags (e.g. a customer .bazelrc
-    # with `common:workflows-ci --remote_download_outputs=minimal
-    # --nobuild_runfile_links` would otherwise shadow our settings and
-    # spawn would ENOENT on the gazelle binary). We set these explicitly
-    # even when Bazel's default agrees, since user rc / trait flags can
-    # flip the effective value otherwise. See delivery.axl phase 3 for the
-    # same pattern.
-    #   * upload strategy `local`: keep BES artifact references as local
-    #     paths. We're about to spawn the gazelle binary locally, so
-    #     re-uploading it via BES is wasted bandwidth and can stall when
-    #     the remote cache is slow.
-    #   * remote_download_outputs `toplevel`: ensure the gazelle binary
-    #     lands on local disk so we can spawn it.
-    #   * build_runfile_links: materialize the runfiles tree so the
-    #     binary's wrappers / data deps resolve at runtime.
-    flags.append("--experimental_build_event_upload_strategy=local")
-    flags.append("--remote_download_outputs=toplevel")
-    flags.append("--build_runfile_links")
-
-    startup_flags = list(ctx.args.bazel_startup_flag)
-    startup_flags.extend(bazel_trait.extra_startup_flags)
-    if bazel_trait.startup_flags:
-        startup_flags = bazel_trait.startup_flags(startup_flags)
-    ctx.bazel.startup_flags.extend(startup_flags)
+    flags.extend(LOCAL_SPAWN_FLAGS)
 
     r = runnable(ctx, [ctx.args.gazelle_target])
 
@@ -940,11 +903,17 @@ gazelle = task(
             maximum = 4096,
             description = "Directories gazelle should update BUILD files in. When empty (default), gazelle considers every directory in the workspace. Combine with --scope=changed to take the intersection with directories that contain changed files. Useful for scoping to a sub-workspace within a monorepo. CAUTION: under --scope=changed, supplying narrow dirs intersection-filters the derived set. Changed dirs that fall outside the listed roots are dropped, so the BUILD updates those changes would have triggered are silently missed. NOTE: positional dirs only narrow the BUILD-regeneration step. Under gazelle's default `-index=all`, gazelle still traverses every workspace directory, parses every BUILD, and re-determines target exports (often re-parsing source) repo-wide. Pair with `--gazelle-flag=-index=lazy` (plus `# gazelle:go_search` / `# gazelle:proto_search` directives) to also narrow that traversal + parse + indexing work. Optionally also pass `--gazelle-flag=-r=false` to skip recursion on top of that, but some gazelle language extensions are incompatible with non-recursive mode — test against your plugin set first. See https://github.com/bazel-contrib/bazel-gazelle#lazy-indexing-in-fix-and-update.",
         ),
-        "bazel_flag": args.string_list(
-            description = "Additional Bazel flags forwarded to the gazelle build. Repeat the flag to pass multiple — e.g. `--bazel-flag=--config=ci --bazel-flag=--keep_going`.",
+        "announce_rc": args.boolean(
+            default = False,
+            description = "Print the resolved Bazel `.bazelrc` flags before running the gazelle build. Useful when debugging which config sections fired or what the final flag set looks like. ASPECT_DEBUG=1 logs the same disclosure regardless of this flag.",
         ),
-        "bazel_startup_flag": args.string_list(
-            description = "Additional Bazel startup flags. Repeat the flag to pass multiple. Note: changing startup flags restarts the Bazel server.",
+        "bazel_flags": args.string_list(
+            description = "Additional Bazel flags forwarded to the gazelle build. Repeat the flag to pass multiple — e.g. `--bazel-flag=--config=ci --bazel-flag=--keep_going`.",
+            long = "bazel-flag",
+        ),
+        "bazel_startup_flags": args.string_list(
+            description = "Additional Bazel startup flags (e.g. --bazel-startup-flag=--host_jvm_args=-Xmx2g). Repeat the flag to pass multiple. Note: changing startup flags restarts the Bazel server.",
+            long = "bazel-startup-flag",
         ),
     },
     traits = [

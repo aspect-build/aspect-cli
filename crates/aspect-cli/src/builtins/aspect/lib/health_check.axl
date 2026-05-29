@@ -1,13 +1,20 @@
-"""
-Agent Health Check Library
+"""HealthCheckTrait and the Workflows runner-agent health check.
 
-Implements the runner agent health check step that runs at the start of every
-job. It does two things:
+`HealthCheckTrait` lets tasks register pre/post hooks around their
+bazel invocation. `agent_health_check` is the Workflows-registered
+`pre_health_check` hook that:
 
-1. Waits for warming — polls until the runner's cache warming completes, then
-   reports the result.
-2. Displays the last runner health check — reads the JSON file written by the
-   fleet service between jobs and prints its contents.
+  1. Waits for runner cache warming to complete.
+  2. Displays the last runner health check.
+  3. Verifies `ctx.bazel.startup_flags` targets the project-specific
+     Bazel server (`assert_ctx_bazel_ready_for_health_check`).
+  4. Runs `ctx.bazel.health_check()` and displays the result.
+  5. Signals the agent if the Bazel server is unhealthy.
+
+The `assert_ctx_bazel_ready_for_health_check` guard is exported so
+custom tasks composing `BazelTrait` + `HealthCheckTrait` get the same
+fail-loud contract enforcement — see `lib/bazel_flags.axl` for the
+canonical helpers that satisfy it.
 """
 
 load("@std//time.axl", "time")
@@ -192,20 +199,54 @@ HealthCheckTrait = trait(
     post_health_check = attr(list[typing.Callable[[TaskContext], str | None]], default = [], description = "Hooks called after the build; return a non-None string to report a warning"),
 )
 
-def agent_health_check(ctx, environment):
+def ctx_bazel_ready_for_health_check(ctx, environment):
+    """True if `ctx.bazel.startup_flags` is populated such that the Bazel
+    health check would target the project-specific server.
+
+    Returns True off-runner (no project-specific server to protect) or
+    when `--output_base=` appears in `ctx.bazel.startup_flags`. Returns
+    False on a Workflows runner with no `--output_base` configured.
+
+    Pure predicate; see `assert_ctx_bazel_ready_for_health_check` for
+    the failing variant used as the runtime guard.
     """
-    Post health check hook for HealthCheckFragment.
+    if environment.runner == None:
+        return True
+    for flag in ctx.bazel.startup_flags:
+        if flag.startswith("--output_base="):
+            return True
+    return False
 
-    Runs the agent health check at the start of every job:
-    1. Waits for warming to complete
-    2. Displays the last runner health check
-    3. Runs the Bazel health check and displays the result
+def assert_ctx_bazel_ready_for_health_check(ctx, environment):
+    """Fail if a Workflows runner is in use and `ctx.bazel.startup_flags`
+    is missing `--output_base`.
 
-    Args:
-        ctx: TaskContext
+    Custom tasks composing `BazelTrait` + `HealthCheckTrait` must apply
+    startup flags onto `ctx.bazel.startup_flags` before calling
+    `preflight_phase`. The canonical entry point is
+    `lib/bazel_flags.axl::setup_bazel_command`.
+    """
+    if ctx_bazel_ready_for_health_check(ctx, environment):
+        return
+    fail(
+        "Bazel health check would target the wrong server: " +
+        "ctx.bazel.startup_flags is missing --output_base on a Workflows " +
+        "runner. Call lib/bazel_flags.axl::setup_bazel_command BEFORE " +
+        "preflight_phase to populate ctx.bazel.startup_flags.",
+    )
+
+def agent_health_check(ctx, environment):
+    """Workflows pre-health-check hook that runs at the start of every job.
+
+    1. Waits for runner cache warming to complete.
+    2. Displays the last runner health check.
+    3. Asserts the `ctx.bazel.startup_flags` ordering contract holds.
+    4. Runs `ctx.bazel.health_check()` and displays the result.
+    5. Signals the agent if the Bazel server is unhealthy.
 
     Returns:
-        None if healthy, or a str error message if the Bazel server is unhealthy.
+      None if healthy, or a str error message if the Bazel server is
+      unhealthy.
     """
     if environment.ci and environment.ci.host == "buildkite":
         print("--- :thermometer: Workflows runner health check")
@@ -213,6 +254,7 @@ def agent_health_check(ctx, environment):
     environment = _wait_for_warming(ctx.std, environment)
     _display_runner_health(environment)
     _display_warming(environment)
+    assert_ctx_bazel_ready_for_health_check(ctx, environment)
     health = ctx.bazel.health_check()
     _display_bazel_health(health)
 

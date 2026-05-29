@@ -53,10 +53,6 @@ build = task(
             default = False,
             description = "Cancel any running Bazel invocation before starting the build.",
         ),
-        "output_base": args.string(
-            default = "",
-            description = "Bazel output base path. Use to target a specific Bazel server instance — distinct paths run independent JVMs and cache contents.",
-        ),
     },
     traits = [
         BazelTrait,
