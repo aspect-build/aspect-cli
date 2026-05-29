@@ -1,3 +1,14 @@
+//! Embedded built-in task tree extraction.
+//!
+//! Release builds embed the `src/builtins/aspect` tree via `include_dir!`
+//! and extract it to disk on first use so the AXL runtime can `load(...)`
+//! files by path. Debug builds skip extraction and point straight at the
+//! source tree.
+//!
+//! Extraction is crash-safe: writes go to a temp directory and are
+//! published with an atomic `rename`, gated by a `.complete` marker
+//! written last. See [`extract_aspect_builtins`] for the full protocol.
+
 use std::path::{Path, PathBuf};
 
 #[cfg(not(debug_assertions))]
@@ -37,33 +48,26 @@ pub fn expand_builtins(
     Ok(vec![("aspect".to_string(), aspect_dir)])
 }
 
-// Marker file written into `{content_hash}/` after every file has been
-// flushed. Its presence is the sole signal that extraction is complete
-// — `{content_hash}/aspect/...` existing on its own means nothing (a
-// previous run could have been killed mid-write, leaving a partial
-// tree behind).
+/// Marker written into `{content_hash}/` after every file is flushed.
+/// Its presence is the sole signal that extraction is complete.
 const COMPLETE_MARKER: &str = ".complete";
 
-/// Atomically extract the embedded built-in tree into
-/// `{broot}/{content_hash}/aspect/` and return that path.
+/// Atomically extract `files` into `{broot}/{content_hash}/aspect/` and
+/// return that path.
 ///
-/// Extraction strategy:
-///   1. If `{broot}/{content_hash}/.complete` exists → reuse as-is.
-///   2. Otherwise: nuke any leftover `{broot}/{content_hash}/` (from a
-///      previous crashed run or an older CLI that didn't write the
-///      marker), write all files into a sibling temp dir, write
-///      `.complete`, then `rename` the temp dir into place.
+/// Protocol:
+///   1. `{content_hash}/.complete` present → reuse, no work.
+///   2. Otherwise, write to a unique sibling temp dir, write
+///      `.complete`, then `rename` it into place. Any pre-existing
+///      partial `{content_hash}/` (no marker — left by a crashed run
+///      or an older CLI version) is first moved aside via rename to a
+///      unique trash path, then removed.
 ///
-/// The rename is atomic on a single filesystem, so concurrent CLI
-/// invocations can race safely: the loser observes `ENOTEMPTY` /
-/// `EEXIST`, sees the winner's `.complete`, and drops its temp dir.
-///
-/// Failure mode this prevents: process A creates `{content_hash}/`
-/// during the first `fs::create_dir_all(parent)`, gets killed before
-/// writing all files. Process B's `aspect_dir.exists()` returns true,
-/// it skips extraction, and downstream `load("../lib/foo.axl")` fails
-/// with ENOENT. Reported by a CI customer running on an ephemeral
-/// cache mount.
+/// Concurrent invocations race on `rename(2)`: the winner publishes,
+/// losers observe the winner's `.complete` and drop their temp dirs.
+/// Using rename (not `remove_dir_all`) for both the stale-cleanup and
+/// the publish step keeps every transition atomic, so a loser can
+/// never delete a winner's just-published tree.
 fn extract_aspect_builtins(
     broot: &Path,
     content_hash: &str,
@@ -80,56 +84,63 @@ fn extract_aspect_builtins(
 
     fs::create_dir_all(broot)?;
 
-    // Per-call temp dir avoids collisions between concurrent invocations
-    // racing on the same content hash, including in-process concurrency
-    // (multiple threads in tests, or future callers). The `rename` below
-    // is the cross-process serialization point.
     let tmp_dir = broot.join(format!("{}.tmp.{}", content_hash, uuid::Uuid::new_v4()));
-    let tmp_aspect = tmp_dir.join("aspect");
+    let result = write_and_publish(&tmp_dir, &final_dir, files);
+    // Clean up the temp dir whenever it still exists — error paths and
+    // the loser-adopts-winner path both leave it behind. The success-
+    // rename path moves tmp_dir into final_dir, so remove is a no-op.
+    let _ = fs::remove_dir_all(&tmp_dir);
+    result.map(|_| aspect_dir)
+}
 
+/// Write `files` into `tmp_dir/aspect/`, mark complete, and rename into
+/// `final_dir`. Splits the body of [`extract_aspect_builtins`] so the
+/// caller can centralize tmp-dir cleanup on any failure.
+fn write_and_publish(
+    tmp_dir: &Path,
+    final_dir: &Path,
+    files: &[(PathBuf, &[u8])],
+) -> std::io::Result<()> {
+    use std::fs;
+
+    let tmp_aspect = tmp_dir.join("aspect");
     for (rel_path, contents) in files {
         let out_path = tmp_aspect.join(rel_path);
         fs::create_dir_all(out_path.parent().unwrap())?;
         fs::write(&out_path, contents)?;
     }
-
-    // Marker written LAST: a crash anywhere above leaves the temp dir
-    // without `.complete`, and the next run treats it as garbage.
     fs::write(tmp_dir.join(COMPLETE_MARKER), "")?;
 
-    // Two cleanup scenarios at publish time:
-    //   - final_dir doesn't exist: rename publishes our tree.
-    //   - final_dir exists without `.complete` (stale partial from a
-    //     prior crashed run, or older CLI version): atomically move it
-    //     aside, then publish our tree.
-    //
-    // The "move aside" is itself a rename to a unique trash path so
-    // concurrent threads / processes can't race on a non-atomic
-    // remove_dir_all + rename sequence (where T1's remove would delete
-    // T2's just-published work). If the trash-rename loses to a
-    // concurrent winner, we fall through and pick up their `.complete`.
-    if final_dir.exists() && !final_dir.join(COMPLETE_MARKER).exists() {
-        let trash = broot.join(format!("{}.trash.{}", content_hash, uuid::Uuid::new_v4()));
-        // Best-effort: rename can fail if someone else moved it first.
-        // That's fine — they'll either publish a complete copy or fail
-        // outright, and we'll observe the outcome at our own rename.
-        let _ = fs::rename(&final_dir, &trash);
-        let _ = fs::remove_dir_all(&trash);
-    }
+    evict_stale_dir(final_dir);
 
-    match fs::rename(&tmp_dir, &final_dir) {
-        Ok(_) => Ok(aspect_dir),
-        Err(_) if final_dir.join(COMPLETE_MARKER).exists() => {
-            // Someone else won the race and published a complete copy.
-            // Drop our temp dir and use theirs.
-            let _ = fs::remove_dir_all(&tmp_dir);
-            Ok(aspect_dir)
-        }
-        Err(e) => {
-            let _ = fs::remove_dir_all(&tmp_dir);
-            Err(e)
-        }
+    match fs::rename(tmp_dir, final_dir) {
+        Ok(_) => Ok(()),
+        // Concurrent winner published first — adopt their copy.
+        Err(_) if final_dir.join(COMPLETE_MARKER).exists() => Ok(()),
+        Err(e) => Err(e),
     }
+}
+
+/// Move a stale partial `final_dir` aside (rename-to-trash, then
+/// remove) so the subsequent publish rename has a clear target. No-op
+/// when `final_dir` doesn't exist or already carries `.complete`.
+///
+/// Best-effort throughout: a concurrent thread may have already
+/// trashed the same dir, or our trash-remove may race a sibling's
+/// remove. The post-rename marker check is the authoritative outcome.
+fn evict_stale_dir(final_dir: &Path) {
+    use std::fs;
+
+    if !final_dir.exists() || final_dir.join(COMPLETE_MARKER).exists() {
+        return;
+    }
+    let Some(parent) = final_dir.parent() else {
+        return;
+    };
+    let name = final_dir.file_name().and_then(|s| s.to_str()).unwrap_or("");
+    let trash = parent.join(format!("{}.trash.{}", name, uuid::Uuid::new_v4()));
+    let _ = fs::rename(final_dir, &trash);
+    let _ = fs::remove_dir_all(&trash);
 }
 
 #[cfg(test)]
@@ -143,7 +154,10 @@ mod tests {
                 PathBuf::from("feature/github_status_checks.axl"),
                 b"load(\"../lib/artifacts.axl\", \"ArtifactsTrait\")\n" as &[u8],
             ),
-            (PathBuf::from("lib/artifacts.axl"), b"artifacts = struct()\n"),
+            (
+                PathBuf::from("lib/artifacts.axl"),
+                b"artifacts = struct()\n",
+            ),
             (PathBuf::from("format.axl"), b"format = task()\n"),
         ]
     }
@@ -154,13 +168,23 @@ mod tests {
         assert!(aspect_dir.join("format.axl").exists());
     }
 
+    fn assert_no_debris(broot: &Path) {
+        for entry in fs::read_dir(broot).unwrap() {
+            let name = entry.unwrap().file_name().into_string().unwrap();
+            assert!(
+                !name.contains(".tmp.") && !name.contains(".trash."),
+                "leftover debris: {name}"
+            );
+        }
+    }
+
     #[test]
     fn cold_extract_writes_full_tree_and_marker() {
         let tmp = tempfile::tempdir().unwrap();
-        let aspect_dir =
-            extract_aspect_builtins(tmp.path(), "abc123", &sample_files()).unwrap();
+        let aspect_dir = extract_aspect_builtins(tmp.path(), "abc123", &sample_files()).unwrap();
         assert_full_tree(&aspect_dir);
         assert!(tmp.path().join("abc123").join(COMPLETE_MARKER).exists());
+        assert_no_debris(tmp.path());
     }
 
     #[test]
@@ -171,9 +195,7 @@ mod tests {
             .unwrap()
             .modified()
             .unwrap();
-        // Second call must not rewrite — we trust the marker.
-        let aspect_dir =
-            extract_aspect_builtins(tmp.path(), "abc123", &sample_files()).unwrap();
+        let aspect_dir = extract_aspect_builtins(tmp.path(), "abc123", &sample_files()).unwrap();
         let mtime_after = fs::metadata(aspect_dir.join("format.axl"))
             .unwrap()
             .modified()
@@ -183,9 +205,6 @@ mod tests {
 
     #[test]
     fn partial_extraction_without_marker_is_repaired() {
-        // Simulates the reported failure: a previous run crashed after
-        // writing one nested file (and `create_dir_all` materialized the
-        // parent directories), leaving `lib/artifacts.axl` missing.
         let tmp = tempfile::tempdir().unwrap();
         let stale_dir = tmp.path().join("abc123");
         let stale_aspect = stale_dir.join("aspect");
@@ -196,33 +215,26 @@ mod tests {
         )
         .unwrap();
         assert!(!stale_dir.join(COMPLETE_MARKER).exists());
-        assert!(!stale_aspect.join("lib/artifacts.axl").exists());
 
-        let aspect_dir =
-            extract_aspect_builtins(tmp.path(), "abc123", &sample_files()).unwrap();
+        let aspect_dir = extract_aspect_builtins(tmp.path(), "abc123", &sample_files()).unwrap();
         assert_full_tree(&aspect_dir);
         assert!(tmp.path().join("abc123").join(COMPLETE_MARKER).exists());
-
-        // Stale content should be overwritten with the real payload.
-        let bytes =
-            fs::read(aspect_dir.join("feature/github_status_checks.axl")).unwrap();
         assert_eq!(
-            bytes,
+            fs::read(aspect_dir.join("feature/github_status_checks.axl")).unwrap(),
             b"load(\"../lib/artifacts.axl\", \"ArtifactsTrait\")\n"
         );
+        assert_no_debris(tmp.path());
     }
 
     #[test]
     fn extraction_is_concurrency_safe() {
-        // Two threads racing on the same content hash must both observe
-        // a complete tree, with no partial dirs left behind.
         use std::sync::Arc;
         use std::thread;
 
         let tmp = Arc::new(tempfile::tempdir().unwrap());
         let files = Arc::new(sample_files());
 
-        let handles: Vec<_> = (0..4)
+        let handles: Vec<_> = (0..8)
             .map(|_| {
                 let tmp = Arc::clone(&tmp);
                 let files = Arc::clone(&files);
@@ -232,15 +244,40 @@ mod tests {
             })
             .collect();
         for h in handles {
-            let aspect_dir = h.join().unwrap();
-            assert_full_tree(&aspect_dir);
+            assert_full_tree(&h.join().unwrap());
         }
         assert!(tmp.path().join("abc123").join(COMPLETE_MARKER).exists());
+        assert_no_debris(tmp.path());
+    }
 
-        // No leftover `<hash>.tmp.<pid>` debris.
-        for entry in fs::read_dir(tmp.path()).unwrap() {
-            let name = entry.unwrap().file_name().into_string().unwrap();
-            assert!(!name.contains(".tmp."), "leftover temp dir: {name}");
-        }
+    #[test]
+    fn evict_stale_dir_skips_complete_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let final_dir = tmp.path().join("abc123");
+        fs::create_dir_all(final_dir.join("aspect")).unwrap();
+        fs::write(final_dir.join(COMPLETE_MARKER), "").unwrap();
+        fs::write(final_dir.join("aspect/keepme"), b"x").unwrap();
+
+        evict_stale_dir(&final_dir);
+
+        assert!(final_dir.join("aspect/keepme").exists());
+    }
+
+    #[test]
+    fn evict_stale_dir_removes_partial_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let final_dir = tmp.path().join("abc123");
+        fs::create_dir_all(final_dir.join("aspect/feature")).unwrap();
+
+        evict_stale_dir(&final_dir);
+
+        assert!(!final_dir.exists());
+        assert_no_debris(tmp.path());
+    }
+
+    #[test]
+    fn evict_stale_dir_no_op_when_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        evict_stale_dir(&tmp.path().join("never-existed"));
     }
 }
