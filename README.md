@@ -1,7 +1,3 @@
-> [!WARNING]
-> **Early Preview**<br>
-> This is an early preview of Aspect CLI. It is under active development, and API changes are expected. We plan to stabilize the API and release a stable version in early 2026.
-
 # Aspect CLI
 
 Aspect CLI is a programmable task runner built on top of Bazel that "just fits" with your repository and developer workflows.
