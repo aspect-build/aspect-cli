@@ -435,8 +435,46 @@ def _test_impl(ctx):
     # installation is mid-rotation or scope-pruned).
     _test_pr_files_4xx_auth_fallback(ctx)
 
+    # ── pr_file_is_skipped bucketing decision ─────────────────────────
+    _test_pr_file_is_skipped()
+
     print("github_detect.axl smoke: OK")
     return 0
+
+def _test_pr_file_is_skipped():
+    """The bucketing predicate that splits GitHub PR Files API entries
+    between `files` (actionable for lint / format) and `skipped`
+    (diagnostic listing only). Pure renames are the asymmetric case
+    that motivated the helper — present in `files` for format,
+    skipped for lint."""
+
+    # `removed`: always skipped (no content).
+    _eq("removed +0/-0 → skipped (format)", github.pr_file_is_skipped("removed", 0, 0, False), True)
+    _eq("removed +0/-0 → skipped (lint)", github.pr_file_is_skipped("removed", 0, 0, True), True)
+    _eq("removed with -N still skipped", github.pr_file_is_skipped("removed", 0, 7, False), True)
+
+    # `modified` with line changes: actionable.
+    _eq("modified +3/-1 → kept (format)", github.pr_file_is_skipped("modified", 3, 1, False), False)
+    _eq("modified +3/-1 → kept (lint)", github.pr_file_is_skipped("modified", 3, 1, True), False)
+
+    # `modified` with +0/-0: rebase-stale, skipped on both paths.
+    _eq("modified +0/-0 → skipped (format)", github.pr_file_is_skipped("modified", 0, 0, False), True)
+    _eq("modified +0/-0 → skipped (lint)", github.pr_file_is_skipped("modified", 0, 0, True), True)
+
+    # `added` with +0: legit empty new file but nothing to lint/format.
+    _eq("added +0 → skipped (format)", github.pr_file_is_skipped("added", 0, 0, False), True)
+    _eq("added +0 → skipped (lint)", github.pr_file_is_skipped("added", 0, 0, True), True)
+    _eq("added +5 → kept (format)", github.pr_file_is_skipped("added", 5, 0, False), False)
+
+    # `renamed` with content change: kept on both paths.
+    _eq("renamed +2/-1 → kept (format)", github.pr_file_is_skipped("renamed", 2, 1, False), False)
+    _eq("renamed +2/-1 → kept (lint)", github.pr_file_is_skipped("renamed", 2, 1, True), False)
+
+    # `renamed` with +0/-0 (pure rename): the customer-reported bug.
+    # Format MUST format the destination; lint must skip to mirror the
+    # local `git diff --unified=0` path and avoid hold-the-file regressions.
+    _eq("renamed +0/-0 → kept (format) — fixes customer bug", github.pr_file_is_skipped("renamed", 0, 0, False), False)
+    _eq("renamed +0/-0 → skipped (lint) — preserves hold-the-file scoping", github.pr_file_is_skipped("renamed", 0, 0, True), True)
 
 def _http_stub(responses):
     """Stub `ctx.http()` returning canned responses in order. `responses`

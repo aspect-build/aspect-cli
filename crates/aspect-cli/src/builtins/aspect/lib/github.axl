@@ -1118,6 +1118,29 @@ def _local_diff_exhausted_prefix(diff_base_source):
     tried and why it didn't yield a diff."""
     return "Local `git diff` couldn't determine a base for change detection (%s)" % (diff_base_source or "no base candidate")
 
+def _pr_file_is_skipped(status, additions, deletions, line_level):
+    """Decide whether a GitHub PR Files API entry belongs in the
+    diagnostic-only `skipped` bucket (vs. the actionable `files` bucket).
+
+    Skipped entries:
+      - `removed`: deleted file — no content to lint or format.
+      - `modified` / `added` with `+0/-0`: rebase-stale or empty
+        change — no line diff to anchor comments or annotations.
+      - `renamed` with `+0/-0` AND `line_level=True` (lint only): the
+        local `git diff --unified=0` path emits no `+++ b/...` for a
+        100%-rename, so the file isn't in `changed_files` on that path
+        either. Including it would also regress `--strategy=hold-the-file`
+        by surfacing pre-existing findings unrelated to the PR.
+
+    Pure renames flow into `files` for `line_level=False` (format) so
+    the formatter actually runs on the destination — matches the local
+    `git diff --name-only` path."""
+    if status == "removed":
+        return True
+    if status == "renamed" and not line_level:
+        return False
+    return additions + deletions == 0
+
 def detect_changed_files(ctx, line_level = True, base_ref = "", merge_base = None):
     """Detect changed files for a build.
 
@@ -1281,18 +1304,6 @@ def detect_changed_files(ctx, line_level = True, base_ref = "", merge_base = Non
                     if status == "modified" and additions == 0 and deletions == 0:
                         suspects.append("%s — API says modified with +0/-0 (no line diff to operate on)" % filename)
 
-                    # Bucket each entry:
-                    #   - `removed` and zero-change entries land in
-                    #     `skipped` so they appear in the diagnostic
-                    #     listing (deleted files; rename-only and
-                    #     rebase-stale modified entries with +0/-0)
-                    #     but don't poison the strategy filter
-                    #     (deleted files have no content to lint;
-                    #     rebase-stale entries have no line diff to
-                    #     anchor comments / annotations on).
-                    #   - everything else (modified with real
-                    #     additions+deletions, added, renamed with a
-                    #     real content change) flows into `files`.
                     if line_level:
                         added_lines, hunk_lines = _parse_github_pr_patch(f.get("patch", "") or "")
                         entry = {
@@ -1306,8 +1317,7 @@ def detect_changed_files(ctx, line_level = True, base_ref = "", merge_base = Non
                         }
                     else:
                         entry = filename
-                    is_skipped = status == "removed" or additions + deletions == 0
-                    if is_skipped:
+                    if _pr_file_is_skipped(status, additions, deletions, line_level):
                         skipped.append(entry)
                     else:
                         files.append(entry)
@@ -2259,6 +2269,7 @@ github = struct(
     # raw GitHub PR-file or `git diff --unified=0` output.
     parse_pr_patch = _parse_github_pr_patch,
     parse_local_diff = _parse_local_diff_output,
+    pr_file_is_skipped = _pr_file_is_skipped,
     extract_owner_repo = _extract_github_owner_repo_from_url,
     format_http_failure_detail = _format_http_failure_detail,
 )
