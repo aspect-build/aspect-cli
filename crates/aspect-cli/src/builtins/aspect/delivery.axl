@@ -101,6 +101,7 @@ User-facing migration guide: https://docs.aspect.build/cli/migration/delivery
 
 load("@aspect//bazel.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
 load("@aspect//lib/artifacts.axl", "artifacts")
+load("@aspect//lib/bazel_flags.axl", "setup_bazel_command")
 load("@aspect//lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "now_ms", "process_event", bazel_init_data = "init_data")
 load("@aspect//lib/ci.axl", "detect_build_url")
 load("@aspect//lib/delivery_results.axl", delivery_add_result = "add_result", delivery_conclusion = "conclusion", delivery_init_data = "init_data")
@@ -116,7 +117,7 @@ load("@aspect//lib/github.axl", "detect_commit_sha")
 load("@aspect//lib/health_check.axl", "HealthCheckTrait")
 load("@aspect//lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "preflight_phase", "setup_phase", "task_update")
 load("@aspect//lib/repro_commands.axl", "build_aspect_command", "repro_prefix", "task_cli_path")
-load("@aspect//lib/runnable.axl", "apparent_label", "runnable")
+load("@aspect//lib/runnable.axl", "LOCAL_SPAWN_FLAGS", "apparent_label", "runnable")
 load("@aspect//lib/text.axl", "pluralize")
 load("@aspect//lib/tips.axl", "tips")
 load("@std//time.axl", "sleep_iter", "time")
@@ -620,6 +621,18 @@ def _delivery_impl(ctx):
     for handler in lifecycle.task_started:
         handler(ctx, targets_subject)
 
+    # phase1/2/3_flags layer on top of expanded_flags later.
+    # --remote_download_outputs=minimal is mandatory for phases 1/2 (we
+    # never download outputs while computing shas). Phase 3 additionally
+    # appends ctx.args.release_bazel_flags for release-only Bazel flags
+    # like --stamp.
+    expanded_flags = setup_bazel_command(
+        ctx,
+        "build",
+        bazel_trait,
+        base_flags = ["--remote_download_outputs=minimal"],
+    )
+
     preflight_phase(ctx, lifecycle, hc_trait)
 
     delivery_trait = ctx.traits[DeliveryTrait]
@@ -669,42 +682,11 @@ def _delivery_impl(ctx):
         prefix = ctx.task.key
         prefix_source = "--task-key"
 
-    # Flags: accumulate data, then optionally transform. --remote_download_outputs=minimal
-    # is mandatory for phase 1/2 (we never want to download outputs while computing shas).
-    flags = ["--remote_download_outputs=minimal"]
-    flags.extend(ctx.args.bazel_flags)
-    flags.extend(bazel_trait.extra_flags)
-    if not ctx.args.bazel_flags:
-        flags.append("--stamp")
-    if bazel_trait.flags:
-        flags = bazel_trait.flags(flags)
-
-    startup_flags = list(ctx.args.bazel_startup_flags)
-    startup_flags.extend(bazel_trait.extra_startup_flags)
-    if bazel_trait.startup_flags:
-        startup_flags = bazel_trait.startup_flags(startup_flags)
-
     # iter handles are created per attempt inside the retry loop.
     build_events = list(bazel_trait.build_event_sinks)
 
     for handler in bazel_trait.build_start:
         handler(ctx)
-
-    # Expand .bazelrc so remote cache config flows in automatically.
-    rc = ctx.bazel.parse_rc(
-        flags = flags,
-        startup_flags = startup_flags,
-    )
-    rc_startup_flags, expanded_flags = rc.expand_all(command = "build")
-    ctx.bazel.startup_flags.extend(startup_flags + rc_startup_flags + ["--ignore_all_rc_files"])
-
-    # Parsed-rc disclosure is verbose; print on user opt-in via
-    # --announce-rc, otherwise gate behind trace.log so it only
-    # surfaces under ASPECT_DEBUG.
-    if ctx.args.announce_rc:
-        print(rc.announce(command = "build", ansi = ansi))
-    else:
-        trace.log(rc.announce(command = "build", ansi = False))
 
     # Delivery requires a remote cache (and may surface via common
     # section as --default_override=0:common=--remote_cache=...).
@@ -785,7 +767,7 @@ def _delivery_impl(ctx):
         _emit_final(ctx, lifecycle, dr, exit_code = 1)
         fail(msg)
 
-    _print_header(ansi, endpoint, ci_host, commit_sha, prefix, prefix_source, build_url, flags, targets, forced_targets, mode, dry_run, track_state)
+    _print_header(ansi, endpoint, ci_host, commit_sha, prefix, prefix_source, build_url, expanded_flags, targets, forced_targets, mode, dry_run, track_state)
 
     run_tracker = runnable(ctx, targets)
 
@@ -888,16 +870,15 @@ def _delivery_impl(ctx):
             phase = Phase(name = "download", description = "Download runfiles", emoji = "📥"),
         )
 
-        # Appended LAST so they override any --config=X expansion in
-        # expanded_flags and any user rc / trait flag that would flip
-        # them. Each flag is required for the delivery spawn to succeed:
-        # local artifacts for the spawn, no spurious cache uploads, the
-        # binary on disk, runfiles tree materialized.
-        phase3_flags = list(expanded_flags) + [
-            "--experimental_build_event_upload_strategy=local",
+        # release_bazel_flags sit between expanded_flags and the trailing
+        # spawn-required flags so release-only values (e.g. --stamp) win
+        # over --config=X expansion. The trailing block is appended LAST
+        # and overrides everything — must take effect for the delivery
+        # spawn to succeed.
+        # --noremote_upload_local_results: release artifacts shouldn't
+        #     pollute the shared remote cache (delivery-specific).
+        phase3_flags = list(expanded_flags) + list(ctx.args.release_bazel_flags) + LOCAL_SPAWN_FLAGS + [
             "--noremote_upload_local_results",
-            "--remote_download_outputs=toplevel",
-            "--build_runfile_links",
         ]
         _t_download = time.monotonic()
 
@@ -1223,7 +1204,12 @@ Currently \x1b[3monly\x1b[23m supported on Aspect Workflows CI runners. Support 
         "bazel_flags": args.string_list(
             long = "bazel-flag",
             default = [],
-            description = "Additional Bazel flags passed to every build phase. When unset, --stamp is added automatically; passing any --bazel-flag replaces this default, so include --bazel-flag=--stamp explicitly if you still want stamping alongside your custom flags.",
+            description = "Additional Bazel flags passed to every build phase (change detection + final delivery build). Flags that add non-determinism to release artifacts (e.g. --stamp, --workspace_status_command) belong in --release-bazel-flag instead so they apply only to the final delivery build and don't shift the change-detection digest.",
+        ),
+        "release_bazel_flags": args.string_list(
+            long = "release-bazel-flag",
+            default = ["--stamp"],
+            description = "Bazel flags applied ONLY to the final delivery build, not to the change-detection phases. Use this for flags that add non-determinism to release artifacts and would otherwise spuriously shift the change-detection digest — e.g. --stamp, --workspace_status_command=<path>. Defaults to [\"--stamp\"] so delivered binaries embed workspace status; pass --release-bazel-flag=--nostamp to opt out.",
         ),
         "bazel_startup_flags": args.string_list(
             long = "bazel-startup-flag",

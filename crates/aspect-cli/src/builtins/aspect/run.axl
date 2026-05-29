@@ -2,11 +2,12 @@
 
 load("@std//time.axl", "sleep_iter")
 load("./bazel.axl", "BazelTrait")
+load("./lib/bazel_flags.axl", "setup_bazel_command")
 load("./lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "init_data", "process_event", bazel_conclusion = "conclusion")
 load("./lib/environment.axl", "error")
 load("./lib/health_check.axl", "HealthCheckTrait")
 load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "preflight_phase", "setup_phase", "task_update")
-load("./lib/runnable.axl", "runnable")
+load("./lib/runnable.axl", "LOCAL_SPAWN_FLAGS", "runnable")
 load("./lib/tips.axl", "tips")
 
 def _terminal_status(data, exit_code):
@@ -71,6 +72,12 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     for handler in lifecycle.task_started:
         handler(ctx, target)
 
+    # Expand the "build" rc section, not "run": this task ultimately
+    # invokes `ctx.bazel.build`, which spawns a literal `bazel build`.
+    # The `run:` rc section can contain options Bazel's `build` command
+    # rejects as unrecognized (e.g. `--script_path`).
+    flags = setup_bazel_command(ctx, "build", bazel_trait)
+
     preflight_phase(ctx, lifecycle, hc_trait)
 
     for hook in hc_trait.post_health_check:
@@ -79,39 +86,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             _emit_terminal(ctx, lifecycle, data, 1)
             fail(result)
 
-    flags = []
-    flags.extend(bazel_trait.extra_flags)
-    for hook in bazel_trait.task_flags:
-        flags.extend(hook(ctx))
-    if bazel_trait.flags:
-        flags = bazel_trait.flags(flags)
-
-    startup_flags = list(bazel_trait.extra_startup_flags)
-    if bazel_trait.startup_flags:
-        startup_flags = bazel_trait.startup_flags(startup_flags)
-
-    rc = ctx.bazel.parse_rc(
-        flags = flags,
-        startup_flags = startup_flags,
-    )
-
-    # Expand for `build`, not `run`: this task invokes `ctx.bazel.build`, which
-    # spawns a literal `bazel build`. Expanding for `run` would inject run-only
-    # options (e.g. `--script_path`, listed under Bazel's Run Options) that
-    # `bazel build` rejects as "unrecognized option", so users with entries in
-    # the `run:` section of their .bazelrc would fail before execution. Aspect
-    # spawns the runnable itself after the build, so the run-section is not
-    # the right source of flags here.
-    rc_startup_flags, flags = rc.expand_all(command = "build")
-    ctx.bazel.startup_flags.extend(startup_flags + rc_startup_flags + ["--ignore_all_rc_files"])
-
-    # Required for the spawn to succeed: keep BES artifact references
-    # local, materialize the binary on disk, and lay down the runfiles
-    # tree. Appended LAST so they win over any --config=X expansion
-    # introduced by the rc.
-    flags.append("--experimental_build_event_upload_strategy=local")
-    flags.append("--remote_download_outputs=toplevel")
-    flags.append("--build_runfile_links")
+    flags.extend(LOCAL_SPAWN_FLAGS)
 
     r = runnable(ctx, [target])
     events = bazel.build_events.iterator()
@@ -186,6 +161,18 @@ run = task(
         ),
         "run_args": args.trailing_var_args(
             description = "Arguments forwarded to the target binary. Separate from `aspect run`'s own flags with `--`, e.g. `aspect run //foo:bar -- --binary-arg value`.",
+        ),
+        "announce_rc": args.boolean(
+            default = False,
+            description = "Print the resolved Bazel `.bazelrc` flags before running the build. Useful when debugging which config sections fired or what the final flag set looks like. ASPECT_DEBUG=1 logs the same disclosure regardless of this flag.",
+        ),
+        "bazel_flags": args.string_list(
+            description = "Additional Bazel flags forwarded to the build (e.g. --bazel-flag=--config=ci --bazel-flag=--keep_going). Repeat the flag to pass multiple.",
+            long = "bazel-flag",
+        ),
+        "bazel_startup_flags": args.string_list(
+            description = "Additional Bazel startup flags (e.g. --bazel-startup-flag=--host_jvm_args=-Xmx2g). Repeat the flag to pass multiple. Note: changing startup flags restarts the Bazel server.",
+            long = "bazel-startup-flag",
         ),
     },
     traits = [

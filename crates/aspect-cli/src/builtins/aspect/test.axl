@@ -72,11 +72,12 @@ def _run_coverage_tool(ctx, bin, raw_args, report_path):
         )
 
 def _impl(ctx: TaskContext) -> int | TaskConclusion:
-    extra_flags = []
     if ctx.args.coverage:
-        extra_flags = ["--collect_code_coverage", "--combined_report=lcov"]
+        bazel_trait = ctx.traits[BazelTrait]
+        bazel_trait.extra_flags.append("--collect_code_coverage")
+        bazel_trait.extra_flags.append("--combined_report=lcov")
 
-    conclusion = run_bazel_task(ctx, command = "test", extra_flags = extra_flags)
+    conclusion = run_bazel_task(ctx, command = "test")
 
     if ctx.args.coverage:
         report_path = _resolve_report(ctx)
@@ -150,10 +151,6 @@ test = task(
         "cancel": args.boolean(
             default = False,
             description = "Cancel any running Bazel invocation before starting the test.",
-        ),
-        "output_base": args.string(
-            default = "",
-            description = "Bazel output base path. Use to target a specific Bazel server instance — distinct paths run independent JVMs and cache contents.",
         ),
     },
     traits = [

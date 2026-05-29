@@ -1,5 +1,25 @@
 _DEFAULT_WORKSPACE_NAME = "_main"
 
+# Bazel flags required for a task that immediately spawns the built binary
+# (format, gazelle, run, delivery phase 3). Append these LAST so they win
+# over any rc or trait flag that would flip them — user .bazelrc can carry
+# `common:-ci --remote_download_outputs=minimal --nobuild_runfile_links`
+# which would otherwise ENOENT the spawn.
+#
+#   --experimental_build_event_upload_strategy=local: have BES report
+#       artifacts as local file:// paths so we can locate the binary
+#       on disk to spawn it. With the remote strategy, BES reports
+#       bytestream:// URIs, which aren't on-disk paths.
+#   --remote_download_outputs=toplevel: materialize the binary itself on
+#       disk so we can spawn it.
+#   --build_runfile_links: lay down the runfiles tree so the binary's
+#       wrappers and data deps resolve at runtime.
+LOCAL_SPAWN_FLAGS = [
+    "--experimental_build_event_upload_strategy=local",
+    "--remote_download_outputs=toplevel",
+    "--build_runfile_links",
+]
+
 def apparent_label(label, current_package = ""):
     """Normalize any Bazel label form to apparent form with an explicit target name.
 

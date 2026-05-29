@@ -615,6 +615,16 @@ def _probe_rate_limit_quota(ctx):
 def preflight_phase(ctx, lifecycle, hc_trait):
     """Mark the `preflight` phase and run the pre-health-check hooks.
 
+    ⚠️  Contract: when the calling task composes `BazelTrait` alongside
+    `HealthCheckTrait`, `ctx.bazel.startup_flags` MUST be populated
+    before this function is called so the Bazel health check
+    (`agent_health_check`, registered as a `pre_health_check`) targets
+    the project-specific server. Use `setup_bazel_command` from
+    `lib/bazel_flags.axl` — it handles startup-flag resolution, rc
+    parsing, and populating `ctx.bazel.startup_flags`. The
+    `assert_ctx_bazel_ready_for_health_check` guard fails loudly if
+    the contract is violated on a Workflows runner.
+
     On CI hosts (BK / GHA / CircleCI / GitLab / generic CI), the
     pre-health-check hooks Workflows registers print substantial
     structural output: the `--- :computer: Workflows runner environment`

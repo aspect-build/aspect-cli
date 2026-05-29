@@ -1,0 +1,141 @@
+"""Helpers for resolving and applying Bazel flags in tasks that compose
+`BazelTrait` and `HealthCheckTrait`.
+
+Tasks that use these helpers MUST declare three CLI args (the helpers
+enforce this with a clear error if a task forgets):
+
+  - `bazel_flags`         (read by `resolve_flags`)
+  - `bazel_startup_flags` (read by `resolve_startup_flags`)
+  - `announce_rc`         (read by `setup_bazel_command`)
+
+Ordering contract: startup flags must be on `ctx.bazel.startup_flags`
+BEFORE `preflight_phase` runs, so the Bazel health check inside
+preflight targets the correct server. The contract is enforced at
+runtime by `assert_ctx_bazel_ready_for_health_check` (see
+`lib/health_check.axl`).
+
+  - `setup_bazel_command` — the one-stop entry point. Resolves startup
+    flags + command flags, parses `.bazelrc`, populates
+    `ctx.bazel.startup_flags` with the full startup-flag set
+    (including any rc-derived `startup …` lines), emits the parsed-rc
+    disclosure, and returns the command flag list ready for
+    `ctx.bazel.build` / `ctx.bazel.test`. Use this from every
+    Bazel-calling task; the smaller building blocks below exist mostly
+    for testing and unusual layering needs.
+
+  - `resolve_startup_flags` — combine `ctx.args.bazel_startup_flags`
+    with `BazelTrait.extra_startup_flags` + transform. Returns the list
+    without mutating `ctx.bazel.startup_flags`.
+
+  - `resolve_flags` — combine CLI bazel-flags + `BazelTrait` additions
+    + task-time hooks + transform into a single command flag list.
+"""
+
+load("./environment.axl", "color_enabled")
+
+def _require_arg(ctx, name):
+    """Fail with a clear contract error when a helper's required CLI
+    arg is missing from the calling task."""
+    if not hasattr(ctx.args, name):
+        fail(
+            ("Task is missing required `%s` arg. Tasks that use " +
+             "lib/bazel_flags.axl helpers must declare " +
+             "bazel_flags, bazel_startup_flags, and announce_rc on " +
+             "the task definition.") % name,
+        )
+
+def resolve_startup_flags(ctx, bazel_trait):
+    """Build the startup flag list:
+
+        ctx.args.bazel_startup_flags + bazel_trait.extra_startup_flags
+            then bazel_trait.startup_flags(flags) transform if set.
+
+    Requires the task to declare a `bazel_startup_flags` CLI arg.
+
+    Returns:
+      list[str]: resolved startup flags, ready to apply to
+      `ctx.bazel.startup_flags`.
+    """
+    _require_arg(ctx, "bazel_startup_flags")
+    flags = list(ctx.args.bazel_startup_flags)
+    flags.extend(bazel_trait.extra_startup_flags)
+    if bazel_trait.startup_flags:
+        flags = bazel_trait.startup_flags(flags)
+    return flags
+
+def resolve_flags(ctx, bazel_trait):
+    """Build the common Bazel command flag list:
+
+        ctx.args.bazel_flags + bazel_trait.extra_flags
+            + bazel_trait.task_flags(ctx) hooks
+            then bazel_trait.flags(flags) transform if set.
+
+    Requires the task to declare a `bazel_flags` CLI arg.
+
+    Returns:
+      list[str]: resolved command flags.
+    """
+    _require_arg(ctx, "bazel_flags")
+    flags = list(ctx.args.bazel_flags)
+    flags.extend(bazel_trait.extra_flags)
+    for hook in bazel_trait.task_flags:
+        flags.extend(hook(ctx))
+    if bazel_trait.flags:
+        flags = bazel_trait.flags(flags)
+    return flags
+
+def setup_bazel_command(ctx, command, bazel_trait, base_flags = []):
+    """Prepare `ctx.bazel` for an upcoming `ctx.bazel.<command>` call
+    and return the command flag list.
+
+    Resolves startup flags + command flags, parses the workspace
+    `.bazelrc`, populates `ctx.bazel.startup_flags` with the full
+    startup-flag set, emits the parsed-rc disclosure, and returns the
+    command flag list ready for `ctx.bazel.build` / `ctx.bazel.test`.
+
+    Composed flag order:
+
+        base_flags + ctx.args.bazel_flags + bazel_trait.extra_flags
+            + bazel_trait.task_flags(ctx) hooks
+            then bazel_trait.flags(flags) transform
+            then rc expansion for `--config=…` keys.
+
+    MUST be called before `preflight_phase` so the Bazel health check
+    inside preflight sees the same startup flags every other Bazel
+    call sees, including any rc-derived `startup --output_base=...`.
+
+    The parsed-rc disclosure is emitted via `trace.log` unconditionally
+    (visible under `ASPECT_DEBUG`); the user-facing terminal print fires
+    only when `--announce-rc` is set.
+
+    Args:
+      ctx: TaskContext.
+      command: Bazel subcommand whose rc sections to expand
+        (e.g. `"build"`, `"test"`). Tasks that ultimately spawn
+        `bazel build` (lint, delivery, run, format, gazelle) should
+        pass `"build"`.
+      bazel_trait: `BazelTrait` instance from `ctx.traits`.
+      base_flags: task-injected defaults the user can override via
+        `--bazel-flag=...` (last-wins after rc expansion). Examples:
+        build/test's `--isatty=...`, lint's `--aspects=...`,
+        delivery's `--remote_download_outputs=minimal`.
+
+    Requires the task to declare `bazel_startup_flags`, `bazel_flags`,
+    and `announce_rc` CLI args.
+
+    Returns:
+      list[str]: command flags after `:config` expansion.
+    """
+    startup_flags = resolve_startup_flags(ctx, bazel_trait)
+    flags = list(base_flags) + resolve_flags(ctx, bazel_trait)
+    rc = ctx.bazel.parse_rc(startup_flags = startup_flags, flags = flags)
+    trace.event("bazel.flags", fields = {"command": command, "flags": flags, "startup_flags": startup_flags})
+    rc_startup_flags, expanded_flags = rc.expand_all(command = command)
+    ctx.bazel.startup_flags.extend(startup_flags + rc_startup_flags + ["--ignore_all_rc_files"])
+
+    _require_arg(ctx, "announce_rc")
+    if ctx.args.announce_rc:
+        print(rc.announce(command = command, ansi = color_enabled(ctx.std)))
+    trace.log(rc.announce(command = command, ansi = False))
+
+    return expanded_flags

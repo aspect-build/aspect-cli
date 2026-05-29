@@ -202,26 +202,50 @@ fn cleanup_stranded_sandbox_state(output_base: &Path) -> bool {
     }
 }
 
-pub fn run(startup_flags: &[String]) -> HealthCheckResult {
-    // Step 1: Determine server directories
-    let output_base = get_output_base(startup_flags);
-
-    // Step 1.5: Clean up stranded sandbox state from any prior SIGKILL'd
-    // invocation before bazel touches the sandbox in this command. See
-    // `cleanup_stranded_sandbox_state` for context.
-    if let Some(ref base) = output_base {
-        let _ = cleanup_stranded_sandbox_state(base);
+/// Extract `--output_base=<path>` from the passed startup flags without
+/// invoking bazel. Returns `None` when no `--output_base` flag is present
+/// or its value is empty.
+///
+/// Used in failure-path recovery where we can't safely run `bazel info
+/// output_base` — the server is wedged holding the workspace lock, and
+/// `bazel info` (without `--noblock_for_lock`) would queue behind it.
+fn output_base_from_flags(startup_flags: &[String]) -> Option<PathBuf> {
+    for flag in startup_flags {
+        if let Some(value) = flag.strip_prefix("--output_base=") {
+            if !value.is_empty() {
+                return Some(PathBuf::from(value));
+            }
+        }
     }
+    None
+}
 
-    let server_pid_file = output_base
-        .as_ref()
-        .map(|base| base.join("server").join("server.pid.txt"));
-
-    // Step 2: Run health check
+/// Probe the Bazel server and recover from a wedged-lock state when possible.
+///
+/// Outcomes:
+///   - `healthy` — `--noblock_for_lock info server_pid` returned 0 (either
+///     on the first try or after the recovery SIGKILL + retry).
+///   - `inconclusive` — non-retryable error (likely a configuration issue).
+///   - `unhealthy` — retryable failure we couldn't recover from (PID file
+///     missing, or retry probe still fails after SIGKILL).
+///
+/// The `--noblock_for_lock` probe is intentionally the FIRST bazel call.
+/// Any other invocation (in particular `bazel info output_base`) lacks the
+/// flag and would queue behind a wedged server holding the workspace lock
+/// — defeating the entire purpose of the health check. On the recovery
+/// path we extract `--output_base` from the passed startup flags rather
+/// than asking bazel, for the same reason.
+///
+/// On success, best-effort cleans up stranded sandbox state from a prior
+/// SIGKILL'd invocation (bazelbuild/bazel#23880) before the next bazel
+/// command runs.
+pub fn run(startup_flags: &[String]) -> HealthCheckResult {
     let result = check_bazel_server(startup_flags);
 
-    // Step 3: Success
     if result.success {
+        if let Some(base) = get_output_base(startup_flags) {
+            let _ = cleanup_stranded_sandbox_state(&base);
+        }
         return HealthCheckResult {
             outcome: "healthy".to_string(),
             message: None,
@@ -229,10 +253,8 @@ pub fn run(startup_flags: &[String]) -> HealthCheckResult {
         };
     }
 
-    // Step 4: Failure
     let exit_code = result.exit_code;
 
-    // 4a: Non-retryable error → inconclusive
     if let Some(code) = exit_code {
         if !RETRYABLE_EXIT_CODES.contains(&code) {
             return HealthCheckResult {
@@ -246,17 +268,15 @@ pub fn run(startup_flags: &[String]) -> HealthCheckResult {
         }
     }
 
-    // 4b: Retryable error → attempt recovery
+    // Retryable failure: the server is wedged holding the workspace lock.
+    // Find its PID via the on-disk PID file (asking bazel would block),
+    // SIGKILL it, and retry the noblock probe.
     let diagnostic = format!(
         "Bazel server returned an exit code ({}) that has caused the health check to fail",
         exit_code.map_or("unknown".to_string(), |c| c.to_string())
     );
 
-    // 4b.i: Extract server PID from filesystem
-    let pid = extract_server_pid(server_pid_file.as_deref());
-
-    // 4b.ii: PID cannot be determined
-    let Some(pid) = pid else {
+    let Some(output_base) = output_base_from_flags(startup_flags) else {
         return HealthCheckResult {
             outcome: "unhealthy".to_string(),
             message: Some(diagnostic),
@@ -264,15 +284,23 @@ pub fn run(startup_flags: &[String]) -> HealthCheckResult {
         };
     };
 
-    // 4b.iii / 4b.iv: Kill if running, then retry
+    let server_pid_file = output_base.join("server").join("server.pid.txt");
+    let Some(pid) = extract_server_pid(Some(&server_pid_file)) else {
+        return HealthCheckResult {
+            outcome: "unhealthy".to_string(),
+            message: Some(diagnostic),
+            exit_code,
+        };
+    };
+
     if super::process::is_pid_running(pid) {
         super::process::sigkill(pid);
     }
 
-    // Retry health check
     let retry = check_bazel_server(startup_flags);
 
     if retry.success {
+        let _ = cleanup_stranded_sandbox_state(&output_base);
         HealthCheckResult {
             outcome: "healthy".to_string(),
             message: None,
@@ -318,8 +346,7 @@ mod tests {
     #[test]
     fn cleanup_preserves_sandbox_stash() {
         // `sandbox_stash` is the persistent --reuse_sandbox_directories
-        // cache; the health check must NOT touch it. Regression test
-        // against an earlier draft that wiped it on every invocation.
+        // cache; the health check must NOT touch it.
         let base = make_output_base();
         let stash = base.path().join("sandbox").join("sandbox_stash");
         std::fs::create_dir(&stash).unwrap();
@@ -350,5 +377,43 @@ mod tests {
         // No sandbox subdirectory at all — e.g. fresh output_base.
         let base = tempfile::tempdir().expect("tempdir");
         assert!(!cleanup_stranded_sandbox_state(base.path()));
+    }
+
+    #[test]
+    fn output_base_from_flags_finds_explicit_flag() {
+        let flags = vec![
+            "--nohome_rc".to_string(),
+            "--output_base=/mnt/ephemeral/output/repo".to_string(),
+            "--nosystem_rc".to_string(),
+        ];
+        assert_eq!(
+            output_base_from_flags(&flags),
+            Some(PathBuf::from("/mnt/ephemeral/output/repo"))
+        );
+    }
+
+    #[test]
+    fn output_base_from_flags_absent_returns_none() {
+        let flags = vec![
+            "--nohome_rc".to_string(),
+            "--output_user_root=/mnt/ephemeral/bazel".to_string(),
+        ];
+        assert_eq!(output_base_from_flags(&flags), None);
+    }
+
+    #[test]
+    fn output_base_from_flags_empty_value_returns_none() {
+        // Defensive: malformed `--output_base=` should not silently
+        // produce PathBuf::from("") which would join into nonsense.
+        let flags = vec!["--output_base=".to_string()];
+        assert_eq!(output_base_from_flags(&flags), None);
+    }
+
+    #[test]
+    fn output_base_from_flags_prefix_match_only() {
+        // `--output_user_root` shares a `--output_` prefix; must not
+        // accidentally match.
+        let flags = vec!["--output_user_root=/mnt/foo".to_string()];
+        assert_eq!(output_base_from_flags(&flags), None);
     }
 }

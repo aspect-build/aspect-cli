@@ -1,0 +1,61 @@
+"""Tests for `ctx_bazel_ready_for_health_check` — the predicate
+underlying the runtime guard that enforces the
+`ctx.bazel.startup_flags` ordering contract on Workflows runners.
+
+Run with:
+  aspect dev test-health-check-ready
+"""
+
+load("./health_check.axl", "ctx_bazel_ready_for_health_check")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+_ON_RUNNER = struct(runner = struct(bazel_root_dir = "/tmp/health-check-ready-test"))
+_OFF_RUNNER = struct(runner = None)
+
+def _test_off_runner_passes(ctx):
+    """Off-runner: no project-specific server to protect, predicate is
+    True regardless of `ctx.bazel.startup_flags`."""
+    _eq(
+        "off-runner — predicate True",
+        ctx_bazel_ready_for_health_check(ctx, _OFF_RUNNER),
+        True,
+    )
+
+def _test_on_runner_missing_output_base_returns_false(ctx):
+    """On-runner with no --output_base in `ctx.bazel.startup_flags` — the
+    exact regression signature the guard exists to catch."""
+    _eq(
+        "on-runner missing --output_base — predicate False",
+        ctx_bazel_ready_for_health_check(ctx, _ON_RUNNER),
+        False,
+    )
+
+def _test_on_runner_with_output_base_passes(ctx):
+    """Once --output_base is in `ctx.bazel.startup_flags`, the predicate
+    transitions to True."""
+    ctx.bazel.startup_flags.extend(["--output_base=/tmp/health-check-ready-test/sentinel"])
+    _eq(
+        "on-runner with --output_base — predicate True",
+        ctx_bazel_ready_for_health_check(ctx, _ON_RUNNER),
+        True,
+    )
+
+def _test_impl(ctx):
+    # `ctx.bazel.startup_flags` is shared mutable state across subtests
+    # (no clear() method). The "missing" subtest must run BEFORE the
+    # "with_output_base" subtest, which permanently appends the sentinel.
+    _test_off_runner_passes(ctx)
+    _test_on_runner_missing_output_base_returns_false(ctx)
+    _test_on_runner_with_output_base_passes(ctx)
+    print("health_check_ready_test.axl: OK (3 sections)")
+    return 0
+
+health_check_ready_tests = task(
+    name = "test-health-check-ready",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)
