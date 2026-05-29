@@ -1290,12 +1290,25 @@ def detect_changed_files(ctx, line_level = True, base_ref = "", merge_base = Non
                     #     to lint; rebase-stale entries have no line
                     #     diff to anchor comments / annotations on).
                     #   - everything else (modified with real
-                    #     additions+deletions, added, renamed) flows
-                    #     into `files`. Pure renames (status=renamed
-                    #     with +0/-0) MUST flow through: format needs
-                    #     to format the destination, and lint's
-                    #     `line_level=True` path naturally produces no
-                    #     findings on a zero-line diff anyway.
+                    #     additions+deletions, added, renamed with a
+                    #     real content change) flows into `files`.
+                    #
+                    # Pure renames (status=renamed with +0/-0) get
+                    # line_level-conditional treatment:
+                    #   - line_level=False (format) → flow through into
+                    #     `files`. format needs to format the
+                    #     destination; the local-git path's
+                    #     `git diff --name-only` lists it too, so this
+                    #     keeps the two sources aligned.
+                    #   - line_level=True (lint) → stay in `skipped`.
+                    #     The local-git path's `git diff --unified=0`
+                    #     emits no `+++ b/...` for a 100%-rename, so
+                    #     the file isn't in `changed_files` there
+                    #     either. Including it would also regress
+                    #     `--strategy=hold-the-file`, which surfaces
+                    #     every pre-existing finding in any "changed"
+                    #     file — a pure rename would suddenly fail
+                    #     lint on stale findings unrelated to the PR.
                     if line_level:
                         added_lines, hunk_lines = _parse_github_pr_patch(f.get("patch", "") or "")
                         entry = {
@@ -1309,7 +1322,8 @@ def detect_changed_files(ctx, line_level = True, base_ref = "", merge_base = Non
                         }
                     else:
                         entry = filename
-                    is_skipped = status == "removed" or (status != "renamed" and additions + deletions == 0)
+                    rename_passthrough = status == "renamed" and not line_level
+                    is_skipped = status == "removed" or (not rename_passthrough and additions + deletions == 0)
                     if is_skipped:
                         skipped.append(entry)
                     else:
