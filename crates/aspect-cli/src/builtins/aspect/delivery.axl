@@ -563,8 +563,7 @@ def _emit_final(ctx, lifecycle, dr, exit_code):
         if repro:
             desc = "Local dry-run preview of every resolved target."
             if ctx.args.mode != "always":
-                desc = ("CI ran `--mode=%s`; `--mode=always` is the off-runner equivalent " +
-                        "(selective change detection needs the Aspect Workflows delivery state backend).") % ctx.args.mode
+                desc = "CI ran --mode=%s; --mode=always --track-state=false for off-runner with no state backend." % ctx.args.mode
             prefix = repro_prefix(ctx)
             dr["repro_commands"].append({"command": prefix + repro, "description": desc})
 

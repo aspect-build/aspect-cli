@@ -42,7 +42,7 @@ Consumer:
 
 load("./bazel_results.axl", "bes_get")
 load("./buildkite.axl", "buildkite")
-load("./ci.axl", "detect_artifacts_browse_url")
+load("./ci.axl", "detect_artifacts_browse_url", "detect_ci_host")
 load("./circleci.axl", "circleci")
 load("./environment.axl", "detect_ci", "info", "warn")
 load("./github.axl", "github")
@@ -140,7 +140,7 @@ def _upload_file(ctx, kind, name, path):
     """
     uploader = _create_uploader(ctx.std.env)
     if uploader == None:
-        info(ctx.std, "Skipping artifact upload (%s): not on a recognized CI host." % name)
+        _info_skip_no_ci_host(ctx, name)
         return ""
     if not ctx.std.fs.exists(path):
         warn(ctx.std, "Artifact upload (%s) failed: file not found: %s" % (name, path))
@@ -169,7 +169,7 @@ def _upload(ctx, kind, name, content):
     the tmp file themselves.
     """
     if _create_uploader(ctx.std.env) == None:
-        info(ctx.std, "Skipping artifact upload (%s): not on a recognized CI host." % name)
+        _info_skip_no_ci_host(ctx, name)
         return ""
     tmpdir = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_JOB_TMPDIR") or ctx.std.env.temp_dir()
 
@@ -422,6 +422,16 @@ def _upload_testlogs_per_file(ctx, provider, group, entries, name):
 # ============================================================================
 # Provider factory — pick the right strategy + auth check per CI host
 # ============================================================================
+
+def _info_skip_no_ci_host(ctx, name):
+    """Print the artifact-upload skip message — but only when something
+    signals we're on CI. Locally (no `CI` env var, no recognized host
+    marker) artifact uploads aren't expected, so the message is noise.
+    """
+    env = ctx.std.env
+    on_ci = bool(env.var("CI")) or detect_ci_host(env) != None
+    if on_ci:
+        info(ctx.std, "Skipping artifact upload (%s): not on a recognized CI host." % name)
 
 def _create_uploader(env):
     """Returns a per-CI uploader struct, or None when not on a recognized

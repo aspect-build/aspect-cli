@@ -17,14 +17,14 @@ Scenarios:
  11. metadata-all        — GitHubStatusChecksTrait.metadata_keys = ["*"]
  12. early-fail          — early-bail before gazelle ran
  13. scope=changed       — Configuration row with Scope + default escalation list
- 14. scope=changed full  — all four Config rows fire (Scope, On-change, escalate, pattern)
+ 14. scope=changed full  — all four Config rows fire (Scope, Severity, escalate, pattern)
  15. scope=changed empty — no-op short-circuit, dirs=[]
  16. in-progress empty   — status=running with no affected files yet (must not
                            render "0 BUILD files are out of date")
  17. aborted             — bazel aborted mid-build, no recorded affected files
- 18. warning-with-drift  — status=warning (terminal --on-change=warn): drift
+ 18. warning-with-drift  — status=warning (terminal --severity=warn): drift
                            detected, body must show files list (not placeholder)
- 19. failing-with-drift  — status=failing (mid-stream --on-change=fail): same
+ 19. failing-with-drift  — status=failing (mid-stream --severity=fail): same
 
 Body-content invariant (asserted in the loop): the "Gazelle task in progress…"
 placeholder renders IFF status == "running". A regression where `warning` or
@@ -160,12 +160,12 @@ def _make_scope_changed():
 def _make_scope_changed_with_filter():
     """--scope=changed with a custom --changed-file-pattern list (e.g.
     'I only care about Python and TS changes'). All four Config rows
-    fire: Scope, On-change, Scope-all-on-change, Changed-file-pattern."""
+    fire: Scope, Severity, Scope-all-on-change, Changed-file-pattern."""
     r = _make_base()
     r["gazelle"]["scope"] = "changed"
     r["gazelle"]["scope_all_on_change"] = ["BUILD.bazel", "MODULE.bazel", "gazelle_python.yaml"]
     r["gazelle"]["changed_file_patterns"] = ["**/*.py", "**/*.ts", "**/*.tsx", "**/BUILD.bazel"]
-    r["gazelle"]["on_change_resolved"] = "warn"
+    r["gazelle"]["severity_resolved"] = "warn"
     r["gazelle"]["dirs"] = ["apps/web", "services/api"]
     r["gazelle"]["affected_files"] = [
         "apps/web/BUILD.bazel",
@@ -198,16 +198,16 @@ def _make_aborted():
     return _make_base()
 
 def _make_warning_with_drift():
-    """`--on-change=warn` with drift; `pick_task_status` returns "warning"."""
+    """`--severity=warn` with drift; `pick_task_status` returns "warning"."""
     r = _make_base()
-    r["gazelle"]["on_change_resolved"] = "warn"
+    r["gazelle"]["severity_resolved"] = "warn"
     r["gazelle"]["affected_files"] = _OUT_OF_DATE_FILES
     return r
 
 def _make_failing_with_drift():
-    """`--on-change=fail` with mid-stream drift; `pick_task_status` returns "failing"."""
+    """`--severity=fail` with mid-stream drift; `pick_task_status` returns "failing"."""
     r = _make_base()
-    r["gazelle"]["on_change_resolved"] = "fail"
+    r["gazelle"]["severity_resolved"] = "fail"
     r["gazelle"]["affected_files"] = _OUT_OF_DATE_FILES
     return r
 

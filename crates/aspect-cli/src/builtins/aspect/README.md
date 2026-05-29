@@ -131,11 +131,11 @@ aspect format --scope=all                                            # whole tre
 aspect format --formatter-target=@buildifier_prebuilt//buildifier    # buildifier-only
 aspect format --include-pattern='**/*.bzl'                           # only bzl files
 aspect format --exclude-pattern='vendor/**'                          # skip vendor
-aspect format --on-change=warn                                       # warn but don't fail CI
+aspect format --severity=warn                                        # warn but don't fail CI
 aspect format --upload-format-diff                                   # upload `format.patch`
 ```
 
-Verdict comes from a `git diff` between the pre-format and post-format working tree (after applying `--include-pattern` and `--exclude-pattern`). Non-empty diff + `--on-change=fail` → exit 1; `--on-change=warn` → exit 0 with status=warning; `--on-change=silent` → exit 0 with status=passed. The formatter binary's own non-zero exit fails the task regardless of `--on-change`.
+Verdict comes from a `git diff` between the pre-format and post-format working tree (after applying `--include-pattern` and `--exclude-pattern`). Non-empty diff + `--severity=fail` → exit 1; `--severity=warn` → exit 0 with status=warning; `--severity=info` → exit 0 with status=passed. The formatter binary's own non-zero exit fails the task regardless of `--severity`.
 
 Renderer: `format_results`. The check-run / annotation summary shows the formatter-target label in the title (e.g. `Format //tools/format · 3 files need formatting`); the body lists affected files with a `aspect format` repro command and (when `--upload-format-diff`) a download link to the captured patch.
 

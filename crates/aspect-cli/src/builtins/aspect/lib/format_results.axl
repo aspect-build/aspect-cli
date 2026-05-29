@@ -50,9 +50,9 @@ def init_data():
         "filtered_count": 0,  # files hidden by --include-pattern / --exclude-pattern
         "scope": "",  # "changed" | "all"
         "formatter_target": "",  # Bazel label of the formatter binary
-        # Resolved `--on-change` policy: "silent" | "warn" | "fail".
+        # Resolved `--severity` policy: "info" | "warn" | "fail".
         # Stamped by `_impl` after resolving `auto`.
-        "on_change_resolved": "silent",
+        "severity_resolved": "info",
         "formatter_error": False,  # formatter binary itself crashed
         "formatter_error_code": 0,  # exit code when formatter_error is True
         "no_git": False,  # no initial git commit / not in a git repo
@@ -153,7 +153,7 @@ def conclusion(status, data):
 
     # Format always applies (the formatter rewrites the tree before the
     # verdict is computed). On status=failed (the CI gate path with
-    # --on-change=fail), the user-facing framing is "N files need
+    # --severity=fail), the user-facing framing is "N files need
     # formatting" — they still need to commit. Otherwise: "Reformatted".
     if status == "failed" or status == "failing":
         verb = "needs" if n == 1 else "need"
@@ -210,7 +210,7 @@ _… {{ overflow }} more file(s) not shown._
 _({{ filtered_count }} file(s) hidden by pattern filters; not counted toward failure.)_
 {% endif %}
 {% if warn_signal %}
-> ⚠️ `--on-change=warn` is set — this task returned 0 with a warning signal despite formatting being required.
+> ⚠️ `--severity=warn` is set — this task returned 0 with a warning signal despite formatting being required.
 {% endif %}
 
 """ + FIX_COMMANDS_BLOCK + """{% if not applied and patch_url %}
@@ -260,8 +260,8 @@ def _config_items(data):
             if count > 0:
                 value = "%s — filtered to %s" % (scope, pluralize(count, "changed file"))
         items.append({"key": "Scope", "value": value})
-    if data["format"].get("on_change_resolved") == "warn":
-        items.append({"key": "On-change", "value": "warn"})
+    if data["format"].get("severity_resolved") == "warn":
+        items.append({"key": "Severity", "value": "warn"})
     return items
 
 def _build_details_data(data, status):
@@ -306,7 +306,7 @@ def _build_details_data(data, status):
         "checked_count": str(data.get("changed_files_count", 0) or "") if (data.get("changed_files_count", 0) or 0) > 0 else "",
         "has_overflow": overflow > 0,
         "has_filtered": filtered > 0,
-        "warn_signal": data["format"].get("on_change_resolved") == "warn",
+        "warn_signal": data["format"].get("severity_resolved") == "warn",
         "formatter_error": bool(data["format"].get("formatter_error")),
         "formatter_error_code": str(data["format"].get("formatter_error_code", 0) or 0),
         "no_git": bool(data["format"].get("no_git")),
