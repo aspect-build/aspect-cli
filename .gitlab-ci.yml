@@ -130,5 +130,5 @@ delivery-task:
   script:
     - .aspect/bootstrap.sh
     - cd examples/deliverable
-    - ASPECT_DEBUG=1 aspect delivery --task-key delivery-gl-debug --query 'attr(tags, deliverable, //...)'
-    - aspect delivery --task-key delivery-gl --query 'attr(tags, deliverable, //...)'
+    - ASPECT_DEBUG=1 aspect delivery --task-key delivery-gl-debug --warn-not-runnable --query 'attr(tags, deliverable, //...)'
+    - aspect delivery --task-key delivery-gl --warn-not-runnable --query 'attr(tags, deliverable, //...)'
