@@ -735,7 +735,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         data = data,
         phase = Phase(name = "diff", description = "Compute BUILD-file diff", emoji = "📋"),
     )
-    diff_proc = r.spawn(ep, diff_args, capture = True, cwd = ctx.std.env.bazel_root_dir())
+    diff_proc = r.spawn(ep, diff_args, capture = True)
     diff_stdout = diff_proc.stdout().read_to_string()
     diff_stderr = diff_proc.stderr().read_to_string()
     diff_status = diff_proc.wait()

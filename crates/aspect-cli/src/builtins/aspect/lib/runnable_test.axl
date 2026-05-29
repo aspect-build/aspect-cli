@@ -1,4 +1,5 @@
-"""Unit tests for lib/runnable.axl: apparent_label normalization and BES matching."""
+"""Unit tests for lib/runnable.axl: apparent_label normalization, BES matching,
+entrypoint selection (passes 1–3), and runfiles directory detection."""
 
 load("./runnable.axl", "apparent_label", "runnable")
 
@@ -225,112 +226,169 @@ def _test_bes_unknown_target_returns_none(ctx):
         fail("bes unknown target: expected None")
 
 # ---------------------------------------------------------------------------
-# runfiles_dir tests — BES-based runfiles manifest detection
+# runfiles_dir tests — runfiles directory detection
 # ---------------------------------------------------------------------------
 
-def _test_has_runfiles_when_manifest_present(ctx):
-    """runfiles_dir is non-empty when BES output includes a .runfiles_manifest."""
-    r = runnable(None, ["//tools/format:format"])
-    r.event(_make_fileset_event("s1", [
-        "/out/bin/tools/format/format",
-        "/out/bin/tools/format/format.runfiles_manifest",
-    ]))
-    r.event(_make_target_event("//tools/format:format", "s1"))
-    ep = r.determine_entrypoint("//tools/format:format")
-    if ep == None:
-        fail("has-runfiles/manifest: expected entrypoint, got None")
-    if not ep.runfiles_dir:
-        fail("has-runfiles/manifest: expected non-None runfiles_dir (manifest in BES), got None")
-    _eq(
-        "has-runfiles/manifest: runfiles dir",
-        ep.runfiles_dir,
-        "/out/bin/tools/format/format.runfiles",
-    )
+def _test_no_runfiles_dir_when_ctx_none(ctx):
+    """runfiles_dir is None when ctx is None — filesystem probe requires ctx.
 
-def _test_no_runfiles_when_no_manifest(ctx):
-    """runfiles_dir is None when BES output has no .runfiles_manifest (raw binary)."""
+    `_test_filesystem_*` cover the ctx-present detection paths.
+    """
     r = runnable(None, ["@buildifier_prebuilt//buildifier"])
     r.event(_make_fileset_event("s1", ["/out/bin/external/buildifier_prebuilt/buildifier/buildifier"]))
     r.event(_make_target_event("@@buildifier_prebuilt+//buildifier:buildifier", "s1"))
     ep = r.determine_entrypoint("@buildifier_prebuilt//buildifier")
     if ep == None:
-        fail("no-runfiles/no-manifest: expected entrypoint, got None")
+        fail("no-runfiles/ctx-none: expected entrypoint, got None")
     if ep.runfiles_dir != None:
-        fail("no-runfiles/no-manifest: expected runfiles_dir=None (no manifest in BES), got %r" % ep.runfiles_dir)
+        fail("no-runfiles/ctx-none: expected runfiles_dir=None (no ctx for fs check), got %r" % ep.runfiles_dir)
 
-def _test_sh_pass_with_manifest(ctx):
-    """Pass 2 (.sh) selects the entrypoint when no wrapper matches; manifest still named after target label."""
-    r = runnable(None, ["//tools/format:runner"])
-    r.event(_make_fileset_event("s1", [
-        "/out/bin/tools/format/runner.sh",
-        "/out/bin/tools/format/runner.runfiles_manifest",
-    ]))
-    r.event(_make_target_event("//tools/format:runner", "s1"))
-    ep = r.determine_entrypoint("//tools/format:runner")
+def _test_bash_pass2_selected(ctx):
+    """Pass 2 selects .bash-extensioned entrypoint (rules_multirun pattern)."""
+    r = runnable(None, ["//tools:my_target"])
+    r.event(_make_fileset_event("s1", ["/out/bin/tools/my_target.bash"]))
+    r.event(_make_target_event("//tools:my_target", "s1"))
+    ep = r.determine_entrypoint("//tools:my_target")
     if ep == None:
-        fail("sh-pass/manifest: expected entrypoint, got None")
-    if ep.path.rsplit("/", 1)[-1] != "runner.sh":
-        fail("sh-pass/manifest: expected runner.sh, got %r" % ep.path)
-    if not ep.runfiles_dir:
-        fail("sh-pass/manifest: expected non-None runfiles_dir (runner.runfiles_manifest in BES)")
+        fail("bash-pass2: expected entrypoint, got None")
+    _eq("bash-pass2: path", ep.path, "/out/bin/tools/my_target.bash")
 
-def _test_sh_pass_no_manifest(ctx):
-    """Pass 2 (.sh) selects the entrypoint; runfiles_dir is None when no manifest in BES."""
+def _test_exe_pass2_selected(ctx):
+    """Pass 2 selects .exe-extensioned entrypoint (hermetic_launcher / rules_img pattern)."""
+    r = runnable(None, ["//tools:my_target"])
+    r.event(_make_fileset_event("s1", ["/out/bin/tools/my_target.exe"]))
+    r.event(_make_target_event("//tools:my_target", "s1"))
+    ep = r.determine_entrypoint("//tools:my_target")
+    if ep == None:
+        fail("exe-pass2: expected entrypoint, got None")
+    _eq("exe-pass2: path", ep.path, "/out/bin/tools/my_target.exe")
+
+def _test_bat_pass2_selected(ctx):
+    """Pass 2 selects .bat-extensioned entrypoint (Windows wrappers, buildifier-prebuilt buildifier rule)."""
+    r = runnable(None, ["//tools:my_target"])
+    r.event(_make_fileset_event("s1", ["/out/bin/tools/my_target.bat"]))
+    r.event(_make_target_event("//tools:my_target", "s1"))
+    ep = r.determine_entrypoint("//tools:my_target")
+    if ep == None:
+        fail("bat-pass2: expected entrypoint, got None")
+    _eq("bat-pass2: path", ep.path, "/out/bin/tools/my_target.bat")
+
+def _test_sh_pass2_selected(ctx):
+    """Pass 2 selects .sh-extensioned entrypoint (oci_image_sign / ad-hoc wrapper pattern)."""
     r = runnable(None, ["//tools/format:runner"])
     r.event(_make_fileset_event("s1", ["/out/bin/tools/format/runner.sh"]))
     r.event(_make_target_event("//tools/format:runner", "s1"))
     ep = r.determine_entrypoint("//tools/format:runner")
     if ep == None:
-        fail("sh-pass/no-manifest: expected entrypoint, got None")
-    if ep.path.rsplit("/", 1)[-1] != "runner.sh":
-        fail("sh-pass/no-manifest: expected runner.sh, got %r" % ep.path)
-    if ep.runfiles_dir != None:
-        fail("sh-pass/no-manifest: expected runfiles_dir=None (no manifest in BES), got %r" % ep.runfiles_dir)
+        fail("sh-pass2: expected entrypoint, got None")
+    _eq("sh-pass2: path", ep.path, "/out/bin/tools/format/runner.sh")
 
-def _test_fallback_skips_manifest_files(ctx):
-    """Pass 3 skips .runfiles_manifest entries and selects the first other file."""
+def _test_pass2_extension_priority(ctx):
+    """Pass 2 honours _SCRIPT_EXTENSIONS order: .sh wins over .bash when both are present."""
+    r = runnable(None, ["//tools:my_target"])
+    r.event(_make_fileset_event("s1", [
+        "/out/bin/tools/my_target.bash",
+        "/out/bin/tools/my_target.sh",
+    ]))
+    r.event(_make_target_event("//tools:my_target", "s1"))
+    ep = r.determine_entrypoint("//tools:my_target")
+    if ep == None:
+        fail("pass2-priority: expected entrypoint, got None")
+    _eq("pass2-priority: .sh wins over .bash", ep.path, "/out/bin/tools/my_target.sh")
+
+def _test_pass3_first_executable(ctx):
+    """Pass 3 picks the first file with the executable bit set when passes 1 and 2 fail."""
     r = runnable(None, ["//tools/format:runner"])
     r.event(_make_fileset_event("s1", [
-        "/out/bin/tools/format/runner.runfiles_manifest",
+        "/out/bin/tools/format/format_impl",
+        "/out/bin/tools/format/extra_artifact",
+    ]))
+    r.event(_make_target_event("//tools/format:runner", "s1"))
+    ep = r.determine_entrypoint("//tools/format:runner")
+    if ep == None:
+        fail("pass3: expected entrypoint, got None")
+    if ep.path.rsplit("/", 1)[-1] != "format_impl":
+        fail("pass3: expected format_impl, got %r" % ep.path)
+
+def _test_pass3_skips_non_executable(ctx):
+    """Pass 3 with a real ctx skips files whose executable bit is not set."""
+    mock = _make_mock_ctx(
+        existing_paths = [],
+        executable_paths = ["/out/bin/tools/format/format_impl"],
+    )
+    r = runnable(mock, ["//tools/format:runner"])
+    r.event(_make_fileset_event("s1", [
+        "/out/bin/tools/format/data_file",
         "/out/bin/tools/format/format_impl",
     ]))
     r.event(_make_target_event("//tools/format:runner", "s1"))
     ep = r.determine_entrypoint("//tools/format:runner")
     if ep == None:
-        fail("fallback-skip: expected entrypoint, got None")
-    if ep.path.rsplit("/", 1)[-1] != "format_impl":
-        fail("fallback-skip: expected format_impl (manifest skipped), got %r" % ep.path)
+        fail("pass3-exec-bit: expected entrypoint, got None")
+    _eq("pass3-exec-bit: non-executable skipped", ep.path, "/out/bin/tools/format/format_impl")
 
-def _test_none_when_only_manifest_candidate(ctx):
-    """determine_entrypoint returns None when the only BES output is a .runfiles_manifest."""
-    r = runnable(None, ["//tools/format:runner"])
-    r.event(_make_fileset_event("s1", ["/out/bin/tools/format/runner.runfiles_manifest"]))
-    r.event(_make_target_event("//tools/format:runner", "s1"))
-    if r.determine_entrypoint("//tools/format:runner") != None:
-        fail("only-manifest: expected None (no executable candidate)")
+# ---------------------------------------------------------------------------
+# Filesystem detection tests — exercise `<entrypoint>.runfiles` discovery on
+# disk with a minimal mock ctx.
+# ---------------------------------------------------------------------------
 
-def _test_runfiles_dir_derived_from_manifest_not_entrypoint(ctx):
-    """Runfiles dir is colocated with the manifest, not with the entrypoint.
+def _make_mock_ctx(existing_paths, executable_paths = None):
+    """Minimal TaskContext mock for filesystem detection tests.
 
-    Pass 3 may select an entrypoint in a subdirectory of the target's output dir
-    (e.g. a custom rule emitting out/bin/pkg/subdir/impl alongside the manifest at
-    out/bin/pkg/runner.runfiles_manifest). The runfiles dir must be a sibling of
-    the manifest, not of the entrypoint.
+    existing_paths: absolute paths that `std.fs.exists()` returns True for.
+    executable_paths: absolute paths that `std.fs.metadata().executable` is True
+        for. None means "every path is executable" — the right default for tests
+        that don't exercise pass-3's executable-bit check.
     """
-    r = runnable(None, ["//tools/format:runner"])
-    r.event(_make_fileset_event("s1", [
-        "/out/bin/tools/format/runner.runfiles_manifest",
-        "/out/bin/tools/format/subdir/impl",
-    ]))
+    is_executable = (lambda path: True) if executable_paths == None else (lambda path: path in executable_paths)
+    return struct(
+        std = struct(
+            env = struct(
+                bazel_root_dir = lambda: "/workspace",
+                current_dir = lambda: "/workspace",
+            ),
+            fs = struct(
+                exists = lambda path: path in existing_paths,
+                metadata = lambda path: struct(executable = is_executable(path)),
+            ),
+        ),
+    )
+
+def _test_filesystem_sh_extension(ctx):
+    """.sh-extensioned executable: runfiles dir found on disk as runner.sh.runfiles."""
+    mock = _make_mock_ctx(["/out/bin/tools/format/runner.sh.runfiles"])
+    r = runnable(mock, ["//tools/format:runner"])
+    r.event(_make_fileset_event("s1", ["/out/bin/tools/format/runner.sh"]))
     r.event(_make_target_event("//tools/format:runner", "s1"))
     ep = r.determine_entrypoint("//tools/format:runner")
     if ep == None:
-        fail("runfiles-dir-from-manifest: expected entrypoint, got None")
-    _eq(
-        "runfiles-dir-from-manifest: runfiles dir",
-        ep.runfiles_dir,
-        "/out/bin/tools/format/runner.runfiles",
-    )
+        fail("fs/sh: expected entrypoint, got None")
+    _eq("fs/sh: path", ep.path, "/out/bin/tools/format/runner.sh")
+    _eq("fs/sh: runfiles_dir", ep.runfiles_dir, "/out/bin/tools/format/runner.sh.runfiles")
+
+def _test_filesystem_bash_extension(ctx):
+    """.bash-extensioned executable (mirrors rules_multirun): pass-2 selects .bash, filesystem finds the runfiles dir."""
+    mock = _make_mock_ctx(["/out/bin/tools/my_target.bash.runfiles"])
+    r = runnable(mock, ["//tools:my_target"])
+    r.event(_make_fileset_event("s1", ["/out/bin/tools/my_target.bash"]))
+    r.event(_make_target_event("//tools:my_target", "s1"))
+    ep = r.determine_entrypoint("//tools:my_target")
+    if ep == None:
+        fail("fs/bash: expected entrypoint, got None")
+    _eq("fs/bash: path", ep.path, "/out/bin/tools/my_target.bash")
+    _eq("fs/bash: runfiles_dir", ep.runfiles_dir, "/out/bin/tools/my_target.bash.runfiles")
+
+def _test_filesystem_no_runfiles(ctx):
+    """Bare binary with no .runfiles on disk: runfiles_dir stays None even with a real ctx."""
+    mock = _make_mock_ctx([])  # nothing on disk
+    r = runnable(mock, ["@buildifier_prebuilt//buildifier"])
+    r.event(_make_fileset_event("s1", ["/out/bin/external/buildifier_prebuilt/buildifier/buildifier"]))
+    r.event(_make_target_event("@@buildifier_prebuilt+//buildifier:buildifier", "s1"))
+    ep = r.determine_entrypoint("@buildifier_prebuilt//buildifier")
+    if ep == None:
+        fail("fs/no-runfiles: expected entrypoint, got None")
+    if ep.runfiles_dir != None:
+        fail("fs/no-runfiles: expected runfiles_dir=None (no .runfiles on disk), got %r" % ep.runfiles_dir)
 
 _UNIT_TESTS = [
     _test_local_label_with_colon,
@@ -362,13 +420,17 @@ _UNIT_TESTS = [
     _test_bes_bzlmod_extension_repo,
     _test_bes_local_target,
     _test_bes_unknown_target_returns_none,
-    _test_has_runfiles_when_manifest_present,
-    _test_no_runfiles_when_no_manifest,
-    _test_sh_pass_with_manifest,
-    _test_sh_pass_no_manifest,
-    _test_fallback_skips_manifest_files,
-    _test_none_when_only_manifest_candidate,
-    _test_runfiles_dir_derived_from_manifest_not_entrypoint,
+    _test_no_runfiles_dir_when_ctx_none,
+    _test_sh_pass2_selected,
+    _test_bash_pass2_selected,
+    _test_exe_pass2_selected,
+    _test_bat_pass2_selected,
+    _test_pass2_extension_priority,
+    _test_pass3_first_executable,
+    _test_pass3_skips_non_executable,
+    _test_filesystem_sh_extension,
+    _test_filesystem_bash_extension,
+    _test_filesystem_no_runfiles,
 ]
 
 def _test_impl(ctx):

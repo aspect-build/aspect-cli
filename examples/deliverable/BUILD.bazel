@@ -1,5 +1,6 @@
 load("@rules_python//python:py_binary.bzl", "py_binary")
 load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+load(":custom_deliverable.bzl", "bash_deliverable", "custom_deliverable")
 
 genrule(
     name = "delivery_payload",
@@ -14,7 +15,7 @@ sh_binary(
     tags = ["deliverable"],
 )
 
-# Delivery should find this target but skip it as not runnable.
+# Non-executable genrule tagged deliverable — exercises --warn-not-runnable.
 genrule(
     name = "non_executable_deliverable",
     outs = ["non_executable_deliverable.txt"],
@@ -22,9 +23,23 @@ genrule(
     tags = ["deliverable"],
 )
 
-# rules_python's stamping injects an uncachable_version_file action into the
-# build. Delivery should still succeed: the action's output is marked as
-# constant_metadata so downstream action keys stay stable across phases.
+# Custom .sh executable — exercises runfiles discovery for extensioned binaries.
+custom_deliverable(
+    name = "custom_deliverable",
+    data = [":delivery_payload"],
+    tags = ["deliverable"],
+)
+
+# Custom .bash executable — mirrors the rules_multirun naming convention.
+bash_deliverable(
+    name = "bash_deliverable",
+    data = [":delivery_payload"],
+    tags = ["deliverable"],
+)
+
+# py_binary with stamp=1 — exercises delivery with stamped actions
+# (rules_python injects a constant_metadata version file that must not
+# invalidate downstream action keys across delivery phases).
 py_binary(
     name = "py_deliverable",
     srcs = ["py_deliverable.py"],

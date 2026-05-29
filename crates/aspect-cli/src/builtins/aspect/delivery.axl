@@ -600,7 +600,6 @@ def _delivery_impl(ctx):
     # later failure still produces a check run rather than a silent no-op.
     dr = delivery_init_data()
     dr["start_time_ms"] = now_ms(ctx)
-    dr["delivery"]["prefix"] = ctx.task.key
     dr["delivery"]["commit_sha"] = ctx.args.commit_sha
     dr["delivery"]["build_url"] = ctx.args.build_url
     dr["delivery"]["ci_host"] = ctx.args.ci_host
@@ -681,6 +680,12 @@ def _delivery_impl(ctx):
     else:
         prefix = ctx.task.key
         prefix_source = "--task-key"
+
+    # Surface the salt-augmented prefix to renderers so the "KEY" column
+    # shows `<prefix>:<hash>` — the change-detection identity. The raw
+    # output_sha alone is identical across salt namespaces, hiding that
+    # records are stored separately per salt.
+    dr["delivery"]["prefix"] = prefix
 
     # iter handles are created per attempt inside the retry loop.
     build_events = list(bazel_trait.build_event_sinks)
@@ -991,10 +996,15 @@ def _delivery_impl(ctx):
                 data.append((label, "WARN", "warn", warn_msg, output_sha or "-", "-"))
                 delivery_add_result(dr, label, "warn", message = warn_msg, output_sha = output_sha or "", is_forced = is_forced)
             elif not ep.runfiles_dir:
-                warn_msg = "tagged deliverable but not runnable (no .runfiles_manifest in BES output for {})".format(ep.path)
-                pending_count += 1
-                data.append((label, "WARN", "warn", warn_msg, output_sha or "-", "-"))
-                delivery_add_result(dr, label, "warn", message = warn_msg, output_sha = output_sha or "", is_forced = is_forced)
+                not_runnable_msg = "tagged 'deliverable' but not runnable: no runfiles directory at {}.runfiles (target may not be an executable rule)".format(ep.path)
+                if ctx.args.warn_not_runnable:
+                    pending_count += 1
+                    data.append((label, "WARN", "warn", not_runnable_msg, output_sha or "-", "-"))
+                    delivery_add_result(dr, label, "warn", message = not_runnable_msg, output_sha = output_sha or "", is_forced = is_forced)
+                else:
+                    failed_count += 1
+                    data.append((label, "FAIL", "fail", not_runnable_msg, output_sha or "-", "-"))
+                    delivery_add_result(dr, label, "fail", message = not_runnable_msg, output_sha = output_sha or "", is_forced = is_forced)
             else:
                 pending.append((label, ep, is_forced, output_sha or "-"))
 
@@ -1048,7 +1058,7 @@ def _delivery_impl(ctx):
         for label, entrypoint, is_forced, output_sha in chunk:
             forced_marker = " (FORCED)" if is_forced else ""
             print("  {} {}{}...".format(_style("Delivering", _BOLD, ansi), label, forced_marker))
-            children.append((label, is_forced, output_sha, time.monotonic(), run_tracker.spawn(ep, [], capture)))
+            children.append((label, is_forced, output_sha, time.monotonic(), run_tracker.spawn(entrypoint, [], capture)))
 
         for label, is_forced, output_sha, t_start, child in children:
             forced_marker = " (FORCED)" if is_forced else ""
@@ -1128,25 +1138,29 @@ def _delivery_impl(ctx):
         "fail": _BOLD + _RED,
     }
 
+    # KEY = <prefix>:<hash[:12]> — the change-detection identity that
+    # uniquely names this delivery (namespace + content).
+    key_width = max(len("KEY"), len(prefix) + 13)
+
     print("")
     header = "  {}  {}  {}  {}  {}".format(
         pad("TARGET", max_label_width),
         pad("STATUS", max_status_width),
         pad("DURATION", max_duration_width),
-        pad("HASH", 32),
+        pad("KEY", key_width),
         "BUILD URL",
     )
     print(_style(header, _BOLD, ansi))
     for label, status_text, status_type, delivered_by, output_sha, duration in data:
         styled_status = _style(status_text, status_styles[status_type], ansi)
         padding = " " * (max_status_width - len(status_text))
-        short_hash = output_sha[:32] if output_sha != "-" else "-"
+        key = prefix + ":" + output_sha[:12] if output_sha and output_sha != "-" else "-"
         print("  {}  {}{}  {}  {}  {}".format(
             pad(label, max_label_width),
             styled_status,
             padding,
             pad(duration, max_duration_width),
-            pad(short_hash, 32),
+            pad(key, key_width),
             delivered_by,
         ))
 
@@ -1245,6 +1259,10 @@ Currently \x1b[3monly\x1b[23m supported on Aspect Workflows CI runners. Support 
         "max_parallelization": args.int(
             default = 1,
             description = "Maximum number of delivery targets to run concurrently. When greater than 1, stdout/stderr is captured and printed atomically after each target finishes.",
+        ),
+        "warn_not_runnable": args.boolean(
+            default = False,
+            description = "Downgrade a non-runnable deliverable from a hard failure (exit 1) to a warning. A target tagged 'deliverable' whose entrypoint has no runfiles tree fails by default. Set this flag if your repo intentionally tags non-executable targets as deliverable.",
         ),
         # TODO: Support a long --pattern_file like bazel does (@./targets)
         # TODO: Support - (list from stdin)

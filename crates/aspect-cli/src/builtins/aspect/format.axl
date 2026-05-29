@@ -531,7 +531,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             data = data,
             phase = Phase(name = "format", description = "Format files", emoji = "✨"),
         )
-    exit = r.spawn(ep, format_args).wait()
+
+    spawn_cwd = ctx.std.env.current_dir() if ctx.args.run_in_cwd else None
+    exit = r.spawn(ep, format_args, cwd = spawn_cwd).wait()
 
     if not exit.success:
         # Formatter binary itself errored — surface that and skip the
@@ -699,6 +701,10 @@ format = task(
         "formatter_target": args.string(
             default = "//tools/format",
             description = "Bazel label of the format_multirun target (or any runnable target) to invoke as the formatter. The target is built first, then run with the changed-file list passed as positional arguments.",
+        ),
+        "run_in_cwd": args.boolean(
+            default = False,
+            description = "Spawn the formatter with the current working directory as cwd, rather than the `bazel run` default of `<runfiles_dir>/<workspace>`. Mirrors Bazel's `--run_in_cwd` flag. Set this for formatter targets that do not switch to `$BUILD_WORKSPACE_DIRECTORY` on their own and instead resolve workspace-relative file arguments against the process cwd — for example, `@buildifier_prebuilt//buildifier`, which is a `buildifier_binary` rule (symlink to the raw Go binary, no shell wrapper). Wrapper-based formatters such as `format_multirun` from rules_lint already `cd $BUILD_WORKSPACE_DIRECTORY` on entry, so this flag is a no-op for them. (A truly bare binary — one with no runfiles tree at all — already spawns in cwd because there is no `runfiles_dir/<workspace>` to fall back to.)",
         ),
         "announce_rc": args.boolean(
             default = False,
