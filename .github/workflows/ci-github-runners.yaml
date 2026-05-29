@@ -58,7 +58,10 @@ jobs:
           fetch-depth: 2
       - uses: ./.github/actions/install-prebuilt-aspect-cli
       - name: Buildifier Task
-        run: aspect buildifier --task-key buildifier-gha-ephemeral
+        run: |
+          aspect buildifier --task-key buildifier-gha-ephemeral
+          aspect buildifier --scope=tracked --task-key buildifier-gha-ephemeral-tracked
+          aspect buildifier --scope=all --task-key buildifier-gha-ephemeral-all
 
   format-task:
     runs-on: ubuntu-latest
@@ -74,6 +77,8 @@ jobs:
       - name: Format Task
         run: |
           aspect format --task-key format-gha-ephemeral
+          aspect format --scope=tracked --task-key format-gha-ephemeral-tracked
+          aspect format --scope=all --task-key format-gha-ephemeral-all
 
   gazelle-task:
     runs-on: ubuntu-latest

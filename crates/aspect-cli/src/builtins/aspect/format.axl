@@ -88,7 +88,6 @@ def _chunk_files(files):
         batches.append(current)
     return batches
 
-
 def _filter_git_attributes(ctx, files):
     """Exclude files flagged as generated/ignored via .gitattributes.
 
@@ -104,6 +103,7 @@ def _filter_git_attributes(ctx, files):
     excluded = {}
     for batch in _chunk_files(files):
         check_args = ["check-attr"] + _GITATTR_IGNORED + ["--"] + batch
+
         # Run from the git root so repo-relative paths resolve correctly.
         out, code, _ = _git_capture_root(ctx, *check_args)
         if code != 0:
@@ -111,6 +111,7 @@ def _filter_git_attributes(ctx, files):
         for line in out.strip().split("\n"):
             if not line:
                 continue
+
             # Format: "<path>: <attr>: <value>". Join all parts except the
             # last two so paths containing ": " are reconstructed correctly.
             parts = line.split(": ")
@@ -118,7 +119,6 @@ def _filter_git_attributes(ctx, files):
                 excluded[": ".join(parts[:-2])] = True
 
     return [f for f in files if f not in excluded]
-
 
 def _git_ls_files(ctx):
     """Return tracked and untracked-but-not-ignored files as repo-relative paths.
@@ -144,22 +144,34 @@ def _git_ls_files(ctx):
 
     # --full-name produces repo-relative paths regardless of CWD.
     # Run from the git root so the pathspec resolves correctly.
-    out, code, _ = _git_capture_root(ctx, "ls-files", "--cached", "--others",
-                                      "--exclude-standard", "--full-name",
-                                      "--", path_scope)
+    out, code, _ = _git_capture_root(
+        ctx,
+        "ls-files",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+        "--full-name",
+        "--",
+        path_scope,
+    )
     if code != 0:
         return None
     files = [f for f in out.strip().split("\n") if f]
 
     # Exclude files tracked in the index but missing from disk (deleted with or without staging).
-    del_out, del_code, _ = _git_capture_root(ctx, "ls-files", "--deleted",
-                                              "--full-name", "--", path_scope)
+    del_out, del_code, _ = _git_capture_root(
+        ctx,
+        "ls-files",
+        "--deleted",
+        "--full-name",
+        "--",
+        path_scope,
+    )
     if del_code == 0:
         deleted = {f: True for f in del_out.strip().split("\n") if f}
         files = [f for f in files if f not in deleted]
 
     return _filter_git_attributes(ctx, files)
-
 
 def _snapshot_tracked_state(ctx):
     """Snapshot the current tracked-tree state via `git stash create`.
@@ -416,7 +428,6 @@ def _apply_pattern_filters(ctx, files, include_patterns, exclude_patterns):
         files = kept
     return files
 
-
 def _emit_final(ctx, lifecycle, data, exit_code):
     """Emit the terminal task_update and task_complete for status-check consumers."""
     status = _pick_status(data, had_failure = exit_code != 0, terminal = True)
@@ -663,6 +674,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                 info(ctx.std, "No files to format")
                 data["format"]["no_files_to_format"] = True
                 return _emit_final(ctx, lifecycle, data, 0)
+
             # Normalize repo-relative → CWD-relative so the formatter can find the files.
             git_files = _normalize_files_for_formatter(ctx, git_files)
             data["changed_files_count"] = len(git_files)

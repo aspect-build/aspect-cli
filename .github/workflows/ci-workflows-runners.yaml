@@ -105,6 +105,14 @@ jobs:
         run: ASPECT_DEBUG=1 aspect buildifier --task-key buildifier-gha-debug
       - name: Buildifier Task
         run: aspect buildifier --task-key buildifier-gha
+      - name: Buildifier Task (scope=tracked)
+        run: |
+          ASPECT_DEBUG=1 aspect buildifier --scope=tracked --task-key buildifier-gha-tracked-debug
+          aspect buildifier --scope=tracked --task-key buildifier-gha-tracked
+      - name: Buildifier Task (scope=all)
+        run: |
+          ASPECT_DEBUG=1 aspect buildifier --scope=all --task-key buildifier-gha-all-debug
+          aspect buildifier --scope=all --task-key buildifier-gha-all
 
   format-task:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
@@ -124,6 +132,14 @@ jobs:
       - name: Format Task
         run: |
           aspect format --task-key format-gha
+      - name: Format Task (scope=tracked)
+        run: |
+          ASPECT_DEBUG=1 aspect format --scope=tracked --task-key format-gha-tracked-debug
+          aspect format --scope=tracked --task-key format-gha-tracked
+      - name: Format Task (scope=all)
+        run: |
+          ASPECT_DEBUG=1 aspect format --scope=all --task-key format-gha-all-debug
+          aspect format --scope=all --task-key format-gha-all
 
   gazelle-task:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
