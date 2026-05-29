@@ -266,14 +266,19 @@ def _truncate(s, max_len):
         return s[:max_len]
     return s[:max_len - 3] + "..."
 
-def _outcome_table(diags, outcome):
-    """Render a small table per outcome: label, hash, context.
+def _outcome_table(diags, outcome, prefix):
+    """Render a small table per outcome: label, key, context.
+
+    `prefix` is the salt-augmented change-detection prefix (`task_key`
+    optionally extended by `:salt`); each row's key is rendered as
+    `<prefix>:<output_sha[:12]>` so two runs collide iff they would resolve
+    to the same deliveryd record.
 
     Column shape depends on outcome to surface the most useful context:
-      - fail    → label, hash, error message
-      - skip    → label, hash, delivered-by URL  (rendered as <a> link)
+      - fail    → label, key, error message
+      - skip    → label, key, delivered-by URL  (rendered as <a> link)
       - warn    → label, reason
-      - ok      → label, hash, build URL         (rendered as <a> link)
+      - ok      → label, key, build URL         (rendered as <a> link)
       - pending → label, marker
 
     Rendered inside `<pre>` so HTML anchors in the context column are
@@ -286,26 +291,27 @@ def _outcome_table(diags, outcome):
     rows = []
     for d in diags:
         label = _truncate(d["label"] + (" *" if d.get("is_forced") else ""), _LABEL_MAX)
-        sha = (d["output_sha"] or "-")[:12]
+        sha = d["output_sha"] or ""
+        key = prefix + ":" + sha[:12] if sha else "-"
         ctx = d.get("message", "") or "-"
 
         # Don't truncate URL context — a truncated URL is useless as a
         # link. Non-URL context columns still truncate.
         if not url_context:
             ctx = _truncate(ctx, _MESSAGE_MAX)
-        rows.append((label, sha, ctx))
+        rows.append((label, key, ctx))
 
     if not rows:
         return ""
 
     label_w = max([len("Target")] + [len(r[0]) for r in rows])
-    sha_w = max([len("Hash")] + [len(r[1]) for r in rows])
+    key_w = max([len("Key")] + [len(r[1]) for r in rows])
     ctx_w = max([len(ctx_col)] + [len(r[2]) for r in rows])
 
     lines = []
-    lines.append(_pad_right("Target", label_w) + "  " + _pad_right("Hash", sha_w) + "  " + ctx_col)
-    lines.append("-" * label_w + "  " + "-" * sha_w + "  " + "-" * ctx_w)
-    for label, sha, ctx in rows:
+    lines.append(_pad_right("Target", label_w) + "  " + _pad_right("Key", key_w) + "  " + ctx_col)
+    lines.append("-" * label_w + "  " + "-" * key_w + "  " + "-" * ctx_w)
+    for label, key, ctx in rows:
         if url_context and ctx and ctx != "-":
             # HTML-escape both halves — URLs can carry `&`, `"`, etc.
             # in query strings, which would break the anchor and the
@@ -313,7 +319,7 @@ def _outcome_table(diags, outcome):
             ctx_out = '<a href="%s">%s</a>' % (html_escape(ctx), html_escape(ctx))
         else:
             ctx_out = ctx
-        lines.append(_pad_right(label, label_w) + "  " + _pad_right(sha, sha_w) + "  " + ctx_out)
+        lines.append(_pad_right(label, label_w) + "  " + _pad_right(key, key_w) + "  " + ctx_out)
     return "\n".join(lines)
 
 def _ctx_column_for(outcome):
@@ -328,6 +334,7 @@ def _ctx_column_for(outcome):
     return "Build URL"
 
 def _group_deliveries(data):
+    prefix = data["delivery"].get("prefix", "") or ""
     by_outcome = {}
     for d in data["delivery"].get("deliveries", []):
         outcome = d.get("outcome", "pending") or "pending"
@@ -350,7 +357,7 @@ def _group_deliveries(data):
             "count": str(count),
             "heading": _OUTCOME_GROUP_HEADINGS.get(outcome, outcome),
             "label_singular": _OUTCOME_LABELS_SINGULAR.get(outcome, outcome),
-            "table": _outcome_table(shown, outcome),
+            "table": _outcome_table(shown, outcome, prefix),
             "overflow": str(overflow) if overflow > 0 else "",
             # Open the actionable / informative outcomes (delivered,
             # warned, failed). Skipped / pending stay collapsed.

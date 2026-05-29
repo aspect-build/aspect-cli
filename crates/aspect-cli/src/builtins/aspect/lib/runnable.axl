@@ -20,6 +20,16 @@ LOCAL_SPAWN_FLAGS = [
     "--build_runfile_links",
 ]
 
+# Pass-2 entrypoint selection: rules that declare
+# ctx.actions.declare_file(ctx.label.name + EXT) produce no no-extension
+# wrapper, so the extensioned file itself is the entrypoint.
+# Ordered from most to least common in the Bazel ecosystem.
+#   .sh   — oci_image_sign, ad-hoc wrappers
+#   .bash — rules_multirun (format_multirun, lint_multirun, etc.)
+#   .exe  — rules_img push (hermetic_launcher), Windows binaries
+#   .bat  — buildifier-prebuilt's `buildifier` rule on Windows, generic Windows wrappers
+_SCRIPT_EXTENSIONS = [".sh", ".bash", ".exe", ".bat"]
+
 def apparent_label(label, current_package = ""):
     """Normalize any Bazel label form to apparent form with an explicit target name.
 
@@ -108,30 +118,36 @@ def _process_bes(state: struct, event):
             state.workspace_name[0] = local_exec_root.rstrip("/").split("/")[-1]
 
 def _determine_entrypoint(state: struct, target: str) -> struct | None:
-    """Best BES-reported derived output for `target`, or None if not in BES.
+    """Resolve `target` to an executable path and runfiles directory.
 
-    Returns struct(path, runfiles_dir) where `runfiles_dir` is the resolved
-    runfiles directory path (e.g. `…/format.runfiles`), or `None` when the target
-    emits no runfiles tree (e.g. a prebuilt binary like buildifier).
+    Returns `struct(path, runfiles_dir)` or `None` when the target produced
+    no BES `target_completed` event or its default output group has no
+    selectable executable. `runfiles_dir` is the resolved runfiles directory
+    path (e.g. `…/format.runfiles`), or `None` when no
+    `<entrypoint>.runfiles` directory exists on disk.
 
-    Entrypoint selection runs three passes over the default-output-group files:
-      1. Exact match on `target_name` — the runnable wrapper that Bazel binary
-         rules (cc_binary, py_binary, sh_binary, …) always emit.
-      2. `target_name + ".sh"` — present on sh_binary as the user-supplied
-         source script; selected when no wrapper was found.
-      3. First file with the executable bit set (skipping `.runfiles_manifest`) —
-         last-resort for custom rules that emit a binary under a non-standard name.
+    Entrypoint selection — three passes over the default-output-group files:
+      1. Exact match on `target_name`.
+      2. `target_name + EXT` for each extension in `_SCRIPT_EXTENSIONS`
+         (.sh, .bash, .exe, .bat).
+      3. First file with the executable bit set —
+         last-resort for any remaining non-standard output name.
 
-    The runfiles dir is derived from the manifest file's directory — not the
-    entrypoint's, which may differ in non-standard rules. Both names are tied to the
-    target label (a Bazel invariant).
+    Runfiles detection — Bazel names the runfiles dir after the
+    executable FILE (including any extension), not the target label:
+      sh_binary //foo:bar  →  bar (no ext)    →  bar.runfiles
+      other rule :bar      →  bar.sh          →  bar.sh.runfiles
+    Source: RunfilesSupport.java
+    https://github.com/bazelbuild/bazel/blob/9.0.0rc1/src/main/java/com/google/devtools/build/lib/analysis/RunfilesSupport.java#L83-L84
+
+    Detection checks `<entrypoint>.runfiles` on disk, materialized
+    by `--build_runfile_links` (included in `LOCAL_SPAWN_FLAGS`).
     """
     target = apparent_label(target, state.current_package)
     if target not in state.target_fileset:
         return None
 
     target_name = target.rsplit(":", 1)[-1]
-    manifest_name = target_name + ".runfiles_manifest"
 
     visited = {}
     frontier = [fs_ref.id for fs_ref in state.target_fileset[target]]
@@ -165,14 +181,15 @@ def _determine_entrypoint(state: struct, target: str) -> struct | None:
             entrypoint = c
             break
     if entrypoint == None:
-        for c in candidates:
-            if c.rsplit("/", 1)[-1] == target_name + ".sh":
-                entrypoint = c
+        for ext in _SCRIPT_EXTENSIONS:
+            for c in candidates:
+                if c.rsplit("/", 1)[-1] == target_name + ext:
+                    entrypoint = c
+                    break
+            if entrypoint != None:
                 break
     if entrypoint == None:
         for c in candidates:
-            if c.rsplit("/", 1)[-1].endswith(".runfiles_manifest"):
-                continue
             if state.ctx == None or state.ctx.std.fs.metadata(c).executable:
                 entrypoint = c
                 break
@@ -180,41 +197,39 @@ def _determine_entrypoint(state: struct, target: str) -> struct | None:
     if entrypoint == None:
         return None
 
-    manifest_dir = None
-    for c in candidates:
-        if c.rsplit("/", 1)[-1] == manifest_name:
-            manifest_dir = c.rsplit("/", 1)[0]
-            break
-    runfiles_dir = (manifest_dir + "/" + target_name + ".runfiles") if manifest_dir != None else None
+    runfiles_dir = None
+    if state.ctx != None:
+        if state.ctx.std.fs.exists(entrypoint + ".runfiles"):
+            runfiles_dir = entrypoint + ".runfiles"
+
     return struct(path = entrypoint, runfiles_dir = runfiles_dir)
+
+def _runfiles_cwd(state: struct, ep: struct) -> str | None:
+    """`bazel run` default cwd: <runfiles_dir>/<workspace>, or None if no runfiles."""
+    if not ep.runfiles_dir:
+        return None
+    return ep.runfiles_dir + "/" + (state.workspace_name[0] or _DEFAULT_WORKSPACE_NAME)
 
 def _spawn(ctx: TaskContext, state: struct, ep: struct, args: list[str], capture: bool = False, cwd: str | None = None) -> std.process.Child:
     """Spawn `ep.path` with `args` in the Bazel runfiles environment.
 
-    Always sets BUILD_WORKSPACE_DIRECTORY (= bazel_root_dir) and
-    BUILD_WORKING_DIRECTORY (= current_dir) so tool wrappers can locate the
-    workspace. When `ep.runfiles_dir` is set, also sets
-    RUNFILES_DIR / RUNFILES_MANIFEST_FILE / JAVA_RUNFILES so `rlocation` in
-    sh_binary wrappers works regardless of cwd.
+    Always sets BUILD_WORKSPACE_DIRECTORY / BUILD_WORKING_DIRECTORY so tool
+    wrappers can locate the workspace, and the four ASPECT_CLI_* variables for
+    tools that prefer aspect-native conventions.
 
-    Also sets four ASPECT_CLI_* variables for tools that prefer aspect-native
-    conventions over Bazel-specific vars:
-      ASPECT_CLI_WORKING_DIRECTORY      — where the user invoked aspect
-      ASPECT_CLI_ASPECT_ROOT_DIRECTORY  — .aspect/ / MODULE.aspect anchor
-      ASPECT_CLI_BAZEL_ROOT_DIRECTORY   — MODULE.bazel / WORKSPACE anchor
-      ASPECT_CLI_GIT_ROOT_DIRECTORY     — .git anchor (empty when absent)
+    When `ep.runfiles_dir` is set, also injects RUNFILES_DIR /
+    RUNFILES_MANIFEST_FILE / JAVA_RUNFILES so `rlocation` in sh_binary wrappers
+    and the bash runfiles library resolve data deps regardless of cwd.
 
-    `cwd` overrides the working directory. When omitted: defaults to
-    `ep.runfiles_dir/<workspace>` when a runfiles tree is present (matching
-    `bazel run`), or to the aspect invocation directory for bare binaries.
+    Working directory defaults to `runfiles_dir/<workspace>` (matching `bazel run`)
+    when a runfiles tree is present, falling back to the aspect invocation directory
+    when the target has no runfiles tree. Pass `cwd` explicitly to override — e.g.
+    `format.axl` passes the invocation directory under `--run-in-cwd` so targets
+    that don't switch to `$BUILD_WORKSPACE_DIRECTORY` on their own (such as
+    `@buildifier_prebuilt//buildifier`) resolve workspace-relative arguments
+    against the user's cwd.
     """
-    workspace_name = state.workspace_name[0] or _DEFAULT_WORKSPACE_NAME
-    if cwd:
-        effective_cwd = cwd
-    elif ep.runfiles_dir:
-        effective_cwd = ep.runfiles_dir + "/" + workspace_name
-    else:
-        effective_cwd = ctx.std.env.current_dir()
+    effective_cwd = cwd or _runfiles_cwd(state, ep) or ctx.std.env.current_dir()
     cmd = ctx.std.process.command(ep.path) \
         .current_dir(effective_cwd) \
         .env("BUILD_WORKSPACE_DIRECTORY", ctx.std.env.bazel_root_dir()) \
@@ -243,12 +258,14 @@ def runnable(ctx, targets: list[str]) -> struct:
           Best executable output for `target` from its BES default output group,
           or None if no BES data was received for it. `runfiles_dir` is the
           resolved runfiles directory (e.g. `…/format.runfiles`), or `None`
-          when the target has no runfiles tree (e.g. a prebuilt binary).
+          when no `<entrypoint>.runfiles` directory exists on disk.
 
       spawn(ep, args, capture=False, cwd=None) → Child
           Spawn `ep.path` with Bazel runfiles environment variables set.
           `cwd` defaults to `ep.runfiles_dir/<workspace>` when a runfiles tree
-          is present, or to the aspect invocation directory for bare binaries.
+          is present (matching `bazel run`), falling back to the aspect
+          invocation directory when there is no runfiles tree. Pass an
+          explicit `cwd` to override — e.g. for `--run-in-cwd` semantics.
     """
     current_package = _current_package(ctx) if ctx else ""
     state = struct(
