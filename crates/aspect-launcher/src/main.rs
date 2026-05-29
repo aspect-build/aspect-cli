@@ -514,21 +514,46 @@ async fn configure_tool_task(
                             tool_dest_file
                         );
                     };
-                    let req = gh_request(&client, direct_url)
-                        .header(
-                            HeaderName::from_static("accept"),
-                            HeaderValue::from_static("application/octet-stream"),
-                        )
-                        .build()
-                        .into_diagnostic()?;
                     let download_msg = format!(
                         "downloading aspect cli version {} file {}",
                         resolved_tag, artifact
                     );
-                    if let err @ Err(_) =
-                        _download_into_cache(&client, &tool_dest_file, req, &download_msg).await
-                    {
-                        errs.push(err);
+
+                    // Retry up to 3 times with exponential backoff (0 s, 1 s, 2 s) to
+                    // survive transient failures such as a mid-stream connection reset.
+                    const MAX_DOWNLOAD_ATTEMPTS: u32 = 3;
+                    let mut download_err: Option<miette::Error> = None;
+                    for attempt in 0..MAX_DOWNLOAD_ATTEMPTS {
+                        if attempt > 0 {
+                            let delay = std::time::Duration::from_secs(1 << (attempt - 1));
+                            tokio::time::sleep(delay).await;
+                            eprintln!(
+                                "retrying download (attempt {}/{})",
+                                attempt + 1,
+                                MAX_DOWNLOAD_ATTEMPTS
+                            );
+                        }
+                        let req = gh_request(&client, direct_url.clone())
+                            .header(
+                                HeaderName::from_static("accept"),
+                                HeaderValue::from_static("application/octet-stream"),
+                            )
+                            .build()
+                            .into_diagnostic()?;
+                        match _download_into_cache(&client, &tool_dest_file, req, &download_msg)
+                            .await
+                        {
+                            Ok(()) => {
+                                download_err = None;
+                                break;
+                            }
+                            Err(e) => {
+                                download_err = Some(e);
+                            }
+                        }
+                    }
+                    if let Some(e) = download_err {
+                        errs.push(Err(e));
                         continue;
                     }
                     return Ok((
