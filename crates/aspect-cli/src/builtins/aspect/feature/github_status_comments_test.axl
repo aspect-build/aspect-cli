@@ -951,10 +951,66 @@ def _check_render_body_no_state_block_when_state_none(ctx):
     )
     _eq("render_body — no state block when state is None", parse_state(body), None)
 
+def _check_repro_dedup_consecutive_headings(ctx):
+    """Two fix commands from the same task collapse to one heading.
+
+    Exercises the `show_heading` flag set by `_collect_repro_fix_rows` via
+    end-to-end `render_body`: a `buildifier` task contributes both an
+    `aspect …` fix and a `bazel run …` vanilla-bazel alternate (the
+    production shape produced by `format.axl::_append_fix_commands`). The
+    rendered body should carry the `#### ❌ buildifier (…)` heading
+    exactly once under the Fix section, not twice.
+    """
+    entries = [
+        {
+            "name": "buildifier",
+            "key": "buildifier-task",
+            "job": "ci",
+            "kind": "format",
+            "status": "failed",
+            "elapsed_ms": 1000,
+            "repro_commands": [
+                {"command": "aspect buildifier --severity=fail", "description": ""},
+            ],
+            "fix_commands": [
+                {"command": "aspect buildifier --severity=info BUILD.bazel", "description": ""},
+                {"command": "bazel run --run_in_cwd @buildifier_prebuilt//buildifier -- -r .", "description": "without Aspect CLI"},
+            ],
+        },
+    ]
+    prepared = prepare_for_render(entries)
+    sections = bucket_entries(prepared)
+    body = render_body(
+        ctx,
+        MARKER_FMT % 42,
+        prepared,
+        "2026-01-01 00:00:00 UTC",
+        DEFAULT_BODY_TEMPLATE,
+        DEFAULT_STATUS_BADGES,
+        sections,
+    )
+    heading_count = body.count("#### ❌ buildifier")
+
+    # One heading in Reproduce + one heading in Fix = 2 total; both sections
+    # only show the buildifier heading once, even though Fix has 2 commands.
+    if heading_count != 2:
+        fail("repro dedup: expected 2 buildifier headings (one per section), got %d" % heading_count)
+    if "aspect buildifier --severity=fail" not in body:
+        fail("repro dedup: aspect repro command missing from body")
+    if "aspect buildifier --severity=info BUILD.bazel" not in body:
+        fail("repro dedup: aspect fix command missing from body")
+    if "bazel run --run_in_cwd @buildifier_prebuilt//buildifier -- -r ." not in body:
+        fail("repro dedup: bazel alt fix command missing from body")
+    if "# without Aspect CLI" not in body:
+        fail("repro dedup: description-as-comment missing from body")
+    if "Install `aspect`" not in body:
+        fail("repro dedup: install hint missing from body")
+
 def _test_impl(ctx):
     sep = "=" * 70
 
     _check_collect_tip_rows(ctx)
+    _check_repro_dedup_consecutive_headings(ctx)
     _check_dedup_by_run_attempt()
     _check_should_quiet_delete_log()
     _check_format_http_failure_detail()

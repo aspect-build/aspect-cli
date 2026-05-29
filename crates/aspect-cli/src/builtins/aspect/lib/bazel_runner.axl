@@ -17,7 +17,7 @@ load("./bazel_flags.axl", "setup_bazel_command")
 load("./bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "init_data", "now_ms", "process_event", "repro_targets", bazel_conclusion = "conclusion")
 load("./health_check.axl", "HealthCheckTrait")
 load("./lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "preflight_phase", "setup_phase", "task_update")
-load("./repro_commands.axl", "build_aspect_command", "print_repro_and_fix", "task_cli_path")
+load("./repro_commands.axl", "build_aspect_command", "build_bazel_command", "print_repro_and_fix", "task_cli_path")
 load("./text.axl", "pluralize")
 load("../bazel.axl", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
 
@@ -457,12 +457,16 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
     if data.get("bazel_attempts"):
         archive_bazel_attempt(data, attempt + 1, invocation_status.code)
 
-    _repro_cmd = build_aspect_command(
-        task_cli_path(ctx.task),
-        [],
-        repro_targets(data, targets),
-    )
+    _repro_targets = repro_targets(data, targets)
+    _repro_cmd = build_aspect_command(task_cli_path(ctx.task), [], _repro_targets)
     if _repro_cmd:
         data["repro_commands"].append({"command": _repro_cmd, "description": ""})
+
+        # Alternate vanilla-bazel repro for users who don't have the Aspect CLI
+        # installed. Flags are intentionally omitted — best-effort, not faithful.
+        data["repro_commands"].append({
+            "command": build_bazel_command(command, _repro_targets),
+            "description": "without Aspect CLI",
+        })
 
     return _emit_terminal(ctx, lifecycle, command, data, invocation_status.code)

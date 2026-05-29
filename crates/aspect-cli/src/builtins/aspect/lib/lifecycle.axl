@@ -495,43 +495,43 @@ def _on_ci(ctx):
     )
 
 # ---------------------------------------------------------------------------
-# --on-change policy: shared resolver + lifecycle-status helper
+# --severity policy: shared resolver + lifecycle-status helper
 #
 # Tasks that detect drift and want to gate / signal / fix on it (format,
-# gazelle, and future task types with the same shape) expose an
-# `--on-change=auto|silent|warn|fail` flag. `resolve_on_change` resolves
+# gazelle, and future task types with the same shape) expose a
+# `--severity=auto|info|warn|fail` flag. `resolve_severity` resolves
 # `auto` per environment; `pick_task_status` derives the lifecycle status
 # from the resolved policy and per-task data.
 # ---------------------------------------------------------------------------
 
-def resolve_on_change(ctx):
-    """Resolve `--on-change=auto` to a concrete `silent|warn|fail` value.
+def resolve_severity(ctx):
+    """Resolve `--severity=auto` to a concrete `info|warn|fail` value.
 
     `auto` picks `fail` on a recognized CI host (CI gates remain
-    effective) and `silent` off CI (local invocations don't surface
+    effective) and `info` off CI (local invocations don't surface
     the task doing its job as a warning). Any explicit value passes
     through unchanged. Tasks stamp the resolved value onto their
-    `data[kind]["on_change_resolved"]` field for `pick_task_status` to
+    `data[kind]["severity_resolved"]` field for `pick_task_status` to
     read.
     """
-    val = ctx.args.on_change
+    val = ctx.args.severity
     if val == "auto":
-        return "fail" if detect_ci(ctx.std.env) else "silent"
+        return "fail" if detect_ci(ctx.std.env) else "info"
     return val
 
 def pick_task_status(data, kind_key, had_failure, terminal):
-    """Lifecycle status for a task whose verdict gates on `--on-change`.
+    """Lifecycle status for a task whose verdict gates on `--severity`.
 
     `kind_key` is the data namespace (e.g. `"format"`, `"gazelle"`).
     Inputs the function reads off `data[kind_key]`:
 
       - `affected_files` (list)        — non-empty iff drift was found
-      - `on_change_resolved` (str)     — `silent|warn|fail`
+      - `severity_resolved` (str)      — `info|warn|fail`
 
     Aborted (bazel terminated mid-build) → `"aborted"`.
     Hard failure (`had_failure=True`)    → `"failed"` / `"failing"`.
-    Drift + `on_change_resolved`:
-      - `silent` → `"passed"` (apply silently)
+    Drift + `severity_resolved`:
+      - `info`   → `"passed"` (apply silently)
       - `warn`   → `"warning"` (audit / soft-fail signal)
       - `fail`   → `"failed"` / `"failing"` (CI gate)
     No drift → `"passed"` / `"running"`.
@@ -541,10 +541,10 @@ def pick_task_status(data, kind_key, had_failure, terminal):
     if had_failure:
         return "failed" if terminal else "failing"
     if (data.get(kind_key, {}) or {}).get("affected_files"):
-        on_change = (data.get(kind_key, {}) or {}).get("on_change_resolved", "silent")
-        if on_change == "warn":
+        severity = (data.get(kind_key, {}) or {}).get("severity_resolved", "info")
+        if severity == "warn":
             return "warning"
-        if on_change == "fail":
+        if severity == "fail":
             return "failed" if terminal else "failing"
     return "passed" if terminal else "running"
 

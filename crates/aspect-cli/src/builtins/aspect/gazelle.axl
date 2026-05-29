@@ -65,35 +65,35 @@ Install:
         )
 
 Usage:
-    # Default — apply locally (exit 0, silent), gate on CI (exit 1 on diff).
-    # `--on-change=auto` resolves to "fail" on a recognized CI host and
-    # "silent" otherwise; `--check-only=auto` resolves to True on CI and
+    # Default — apply locally (exit 0, no signal), gate on CI (exit 1 on diff).
+    # `--severity=auto` resolves to "fail" on a recognized CI host and
+    # "info" otherwise; `--check-only=auto` resolves to True on CI and
     # False locally. Together: local applies the patch silently, CI
     # detects drift and fails the build.
     aspect gazelle
 
     # CI gate: detect drift, exit 1 (`fail`), don't modify the tree.
-    aspect gazelle --on-change=fail --check-only=true
+    aspect gazelle --severity=fail --check-only=true
 
     # Limit BUILD-file updates to specific directories.
-    aspect gazelle --on-change=fail --check-only=true tools/go services/api
+    aspect gazelle --severity=fail --check-only=true tools/go services/api
 
     # Fast incremental mode: restrict updates to directories that
     # contain changed files (against `--base-ref`, default origin/main).
-    aspect gazelle --on-change=fail --check-only=true --scope=changed
+    aspect gazelle --severity=fail --check-only=true --scope=changed
 
     # Combine --scope=changed with positional dirs to intersect — only
     # update changed subtrees that fall under apps/web/.
-    aspect gazelle --on-change=fail --check-only=true --scope=changed apps/web/
+    aspect gazelle --severity=fail --check-only=true --scope=changed apps/web/
 
     # Soft-fail mode for incremental adoption — surface a yellow warning
     # instead of failing the build when BUILD files are out of date.
-    aspect gazelle --on-change=warn --check-only=true
+    aspect gazelle --severity=warn --check-only=true
 
     # Audit mode — apply locally AND surface a warning that something
     # was out of date. Useful for maintainers wanting an explicit
     # "BUILD files needed regen" signal even on a successful local run.
-    aspect gazelle --on-change=warn
+    aspect gazelle --severity=warn
 
     # Pass arbitrary gazelle flags (e.g. aspect-gazelle's --progress).
     aspect gazelle --gazelle-flag=-progress --gazelle-flag=-r tools/go
@@ -102,12 +102,12 @@ Usage:
     aspect gazelle --gazelle-command=fix
 
     # CI patch upload: archives the diff as a `gazelle.patch` artifact.
-    aspect gazelle --on-change=fail --check-only=true --upload-gazelle-diff
+    aspect gazelle --severity=fail --check-only=true --upload-gazelle-diff
 
     # Override the gazelle target (e.g. build-from-source variant).
     # Combine with `--bazel-flag=--config=pure_go` if linking against
     # toolchains_llvm_bootstrapped on Linux.
-    aspect gazelle --on-change=fail --check-only=true \\
+    aspect gazelle --severity=fail --check-only=true \\
         --gazelle-target=//tools/gazelle:gazelle_from_source \\
         --bazel-flag=--config=pure_go
 
@@ -152,7 +152,7 @@ Usage:
   is much smaller than it looks. For the full incremental win, pass
   gazelle's `-index=lazy`:
 
-      aspect gazelle --on-change=fail --check-only=true --scope=changed \\
+      aspect gazelle --severity=fail --check-only=true --scope=changed \\
           --gazelle-flag=-index=lazy
 
   With lazy indexing gazelle restricts the traverse + parse + export
@@ -194,9 +194,9 @@ load("./lib/environment.axl", "color_enabled", "detect_ci", "error", "info", "wa
 load("./lib/gazelle_results.axl", "dedupe_subtrees", "dir_at_or_below", "extract_changed_dirs", gaz_init_data = "init_data", gazelle_conclusion = "conclusion")
 load("./lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_changed_files_listing")
 load("./lib/health_check.axl", "HealthCheckTrait")
-load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "pick_task_status", "preflight_phase", "resolve_on_change", "setup_phase", "task_update")
+load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "pick_task_status", "preflight_phase", "resolve_severity", "setup_phase", "task_update")
 load("./lib/path_glob.axl", "match_any")
-load("./lib/repro_commands.axl", "build_aspect_command", "explicit_flags", "print_repro_and_fix", "repro_prefix", "task_cli_path")
+load("./lib/repro_commands.axl", "build_aspect_command", "build_bazel_command", "explicit_flags", "print_repro_and_fix", "repro_prefix", "task_cli_path")
 load("./lib/runnable.axl", "LOCAL_SPAWN_FLAGS", "runnable")
 load("./lib/text.axl", "pluralize")
 load("./lib/tips.axl", "tips")
@@ -276,7 +276,7 @@ _FORWARDED_PAIRS = [
 ]
 
 # Plain-default scope / change-detection flags echoed iff the user
-# explicitly passed them. Auto / env-resolved flags (`--on-change`,
+# explicitly passed them. Auto / env-resolved flags (`--severity`,
 # `--check-only`, `--base-ref`) are pinned by the callers below.
 _SCOPE_PAIRS = [
     ("scope", "--scope"),
@@ -289,12 +289,12 @@ _CHANGED_SCOPE_PAIRS = [
 ]
 
 def _mode_prefix(mode):
-    """Pin the auto-style `--on-change` and `--check-only` flags to the
+    """Pin the auto-style `--severity` and `--check-only` flags to the
     explicit values needed to reproduce CI's behavior locally:
     `mode="check"` → diagnose-then-fail, `mode="apply"` → apply-locally."""
     if mode == "check":
-        return [("--on-change", "fail"), ("--check-only", "true")]
-    return [("--on-change", "silent"), ("--check-only", "false")]
+        return [("--severity", "fail"), ("--check-only", "true")]
+    return [("--severity", "info"), ("--check-only", "false")]
 
 def _detection_flags(ctx, mode):
     """Flag set that recreates the original change-detection invocation.
@@ -319,9 +319,15 @@ def _explicit_dirs_flags(ctx, mode):
 
 def _append_repro_command(ctx, data):
     """Append the always-rendered Reproduce command. Re-runs the same
-    `aspect gazelle --on-change=fail --check-only=true ...` invocation
+    `aspect gazelle --severity=fail --check-only=true ...` invocation
     CI ran, with the post-resolution effective dirs as positionals so
-    the user reproduces CI's exact working set."""
+    the user reproduces CI's exact working set.
+
+    The vanilla-bazel alternate goes in fix_commands (see
+    `_append_fix_commands`): `bazel run <gazelle_target>` actually
+    applies BUILD-file updates rather than re-reporting the diff,
+    which is the semantic of a fix, not a repro.
+    """
     effective_dirs = (data.get("gazelle", {}) or {}).get("dirs", []) or []
     prefix = repro_prefix(ctx)
     data["repro_commands"].append({
@@ -337,15 +343,21 @@ def _append_fix_commands(ctx, data):
     """Append fix-command entries to `data["fix_commands"]`. Emitted
     only when gazelle actually found something to update.
 
-    The primary fix flips to `--on-change=silent --check-only=false` and carries the parent dirs
-    of the affected BUILD files as positionals — gazelle re-walks
-    those subtrees and applies the captured diff via `git apply -p0`.
-    Positionals supersede scope=changed (gazelle walks the listed dirs
-    under the implicit --scope=all), so the detection flags are omitted.
+    Three commands at most:
 
-    When `len(fix_dirs) > _FIX_DIRS_LIMIT` the explicit-positional
-    command would get unwieldy, so it's truncated and a re-discovery
-    entry is appended as a fallback."""
+      1. Aspect fix on the affected dir list (or first N when long) —
+         `aspect gazelle --severity=info --check-only=false <dirs>`.
+      2. Re-discover fallback (only when the dir list was truncated).
+      3. Vanilla-bazel alternate — `bazel run <gazelle_target>`. The
+         standard gazelle binary runs in fix/update mode by default
+         when invoked via `bazel run`.
+
+    The primary fix flips to `--severity=info --check-only=false` and
+    carries the parent dirs of the affected BUILD files as positionals —
+    gazelle re-walks those subtrees and applies the captured diff via
+    `git apply -p0`. Positionals supersede scope=changed (gazelle walks
+    the listed dirs under the implicit --scope=all), so the detection
+    flags are omitted."""
     affected = (data.get("gazelle", {}) or {}).get("affected_files", []) or []
     if not affected:
         return
@@ -359,22 +371,26 @@ def _append_fix_commands(ctx, data):
             "command": prefix + build_aspect_command(task_path, explicit_flags, fix_dirs, max_chars = 4096),
             "description": "",
         })
-        return
+    else:
+        shown = fix_dirs[:_FIX_DIRS_LIMIT]
+        remaining = len(fix_dirs) - _FIX_DIRS_LIMIT
+        data["fix_commands"].append({
+            "command": prefix + build_aspect_command(task_path, explicit_flags, shown, max_chars = 4096),
+            "description": "First %d of %d affected dirs (plus %d other%s)" % (
+                _FIX_DIRS_LIMIT,
+                len(fix_dirs),
+                remaining,
+                "" if remaining == 1 else "s",
+            ),
+        })
+        data["fix_commands"].append({
+            "command": prefix + build_aspect_command(task_path, _detection_flags(ctx, "apply"), []),
+            "description": "Or re-discover and update all %d affected dirs" % len(fix_dirs),
+        })
 
-    shown = fix_dirs[:_FIX_DIRS_LIMIT]
-    remaining = len(fix_dirs) - _FIX_DIRS_LIMIT
     data["fix_commands"].append({
-        "command": prefix + build_aspect_command(task_path, explicit_flags, shown, max_chars = 4096),
-        "description": "First %d of %d affected dirs (plus %d other%s)" % (
-            _FIX_DIRS_LIMIT,
-            len(fix_dirs),
-            remaining,
-            "" if remaining == 1 else "s",
-        ),
-    })
-    data["fix_commands"].append({
-        "command": prefix + build_aspect_command(task_path, _detection_flags(ctx, "apply"), []),
-        "description": "Or re-discover and update all %d affected dirs" % len(fix_dirs),
+        "command": prefix + build_bazel_command("run", [ctx.args.gazelle_target]),
+        "description": "without Aspect CLI",
     })
 
 def _resolve_check_only(ctx):
@@ -382,8 +398,8 @@ def _resolve_check_only(ctx):
 
     `auto` → True on CI (don't dirty the tree at the gate), False
     locally (apply the patch as part of the task). `true` / `false`
-    pass through. Independent of `--on-change`: check-only controls
-    whether gazelle applies the patch, on-change controls the verdict.
+    pass through. Independent of `--severity`: check-only controls
+    whether gazelle applies the patch, severity controls the verdict.
     """
     val = ctx.args.check_only
     if val == "auto":
@@ -542,9 +558,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     data["gazelle"]["scope"] = ctx.args.scope
     data["gazelle"]["scope_all_on_change"] = list(ctx.args.scope_all_on_change or [])
     data["gazelle"]["changed_file_patterns"] = list(ctx.args.changed_file_patterns or [])
-    on_change_resolved = resolve_on_change(ctx)
+    severity_resolved = resolve_severity(ctx)
     check_only = _resolve_check_only(ctx)
-    data["gazelle"]["on_change_resolved"] = on_change_resolved
+    data["gazelle"]["severity_resolved"] = severity_resolved
     data["gazelle"]["check_only"] = check_only
     setup_phase(ctx, lifecycle)
     for handler in lifecycle.task_started:
@@ -758,7 +774,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
     if not diff_stdout.strip():
         # Clean — gazelle reports no changes needed regardless of
-        # --on-change / --check-only mode.
+        # --severity / --check-only mode.
         print("✅ All BUILD files are up to date.")
         return _emit_final(ctx, lifecycle, data, 0)
 
@@ -835,12 +851,12 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             content = diff_stdout,
         )
 
-    # Verdict from --on-change (resolved at entry).
-    if on_change_resolved == "fail":
+    # Verdict from --severity (resolved at entry).
+    if severity_resolved == "fail":
         error(ctx.std, "BUILD files are out of date.")
         return _emit_final(ctx, lifecycle, data, 1)
-    if on_change_resolved == "warn":
-        info(ctx.std, "BUILD files are out of date. --on-change=warn → exiting 0 with a warning signal.")
+    if severity_resolved == "warn":
+        info(ctx.std, "BUILD files are out of date. --severity=warn → exiting 0 with a warning signal.")
     elif not check_only:
         # Local apply, silent: we just updated the tree; don't tell the
         # user to run what they just ran.
@@ -849,17 +865,16 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
 gazelle = task(
     args = {
-        "on_change": args.string(
+        "severity": args.string(
             default = "auto",
-            values = ["auto", "silent", "warn", "fail"],
-            long = "on-change",
-            description = "Verdict when gazelle wants to update BUILD files. 'silent' exits 0 (status=passed). 'warn' exits 0 with status=warning — a non-fatal yellow signal in CI surfaces. 'fail' exits 1 with status=failed — the CI gate. 'auto' (default) resolves to 'fail' on a recognized CI host and 'silent' off CI. Gazelle's own non-zero exits (configuration errors, missing language plugins) surface as task failures regardless.",
+            values = ["auto", "info", "warn", "fail"],
+            description = "Severity raised when gazelle wants to update BUILD files. 'info' exits 0 (status=passed). 'warn' exits 0 with status=warning — a non-fatal yellow signal in CI surfaces. 'fail' exits 1 with status=failed — the CI gate. 'auto' (default) resolves to 'fail' on a recognized CI host and 'info' off CI. Gazelle's own non-zero exits (configuration errors, missing language plugins) surface as task failures regardless.",
         ),
         "check_only": args.string(
             default = "auto",
             values = ["auto", "true", "false"],
             long = "check-only",
-            description = "Whether to skip the `git apply` step (detect-only) or apply the patch as part of the task. 'true' detect-only (don't modify the working tree). 'false' apply via `git apply -p0`. 'auto' (default) resolves to 'true' on a recognized CI host and 'false' off CI. Independent of --on-change: this controls apply behavior; --on-change controls the verdict.",
+            description = "Whether to skip the `git apply` step (detect-only) or apply the patch as part of the task. 'true' detect-only (don't modify the working tree). 'false' apply via `git apply -p0`. 'auto' (default) resolves to 'true' on a recognized CI host and 'false' off CI. Independent of --severity: this controls apply behavior; --severity controls the verdict.",
         ),
         "scope": args.string(
             default = "all",

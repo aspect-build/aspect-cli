@@ -532,10 +532,10 @@ data = {
   │   "changed_files", "tools_run",                                    │
   │   "counts_by_severity", "counts_by_tool"                           │
   │ # format   → data["format"]                                        │
-  │   "scope", "formatter_target", "on_change_resolved",               │
+  │   "scope", "formatter_target", "severity_resolved",                │
   │   "affected_files", ...                                            │
   │ # gazelle  → data["gazelle"]                                       │
-  │   "gazelle_target", "check_only", "on_change_resolved",            │
+  │   "gazelle_target", "check_only", "severity_resolved",             │
   │   "dirs", "affected_files", ...                                    │
   │ # delivery → data["delivery"]                                      │
   │   "prefix", "commit_sha", "build_url", "ci_host", "mode", ...      │

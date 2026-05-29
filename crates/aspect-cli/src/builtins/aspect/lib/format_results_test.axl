@@ -7,7 +7,7 @@ Scenarios:
   1. clean-passed        — no files need formatting
   2. files-need-format   — 3 files need formatting (scope=changed)
   3. scope-all-many      — 15 files need formatting (scope=all)
-  4. on-change-warn      — status=warning + drift; body must show files list
+  4. severity-warn       — status=warning + drift; body must show files list
   5. formatter-error     — formatter binary crashed
   6. no-git              — no initial commit / not in git repo
   7. no-files-to-format  — scope=changed, no changed files found
@@ -16,10 +16,10 @@ Scenarios:
  10. large               — 250 files to exercise the trim cascade
  11. in-progress         — status=running with affected_files (placeholder body)
  12. metadata-all        — GitHubStatusChecksTrait.metadata_keys = ["*"]
- 13. applied             — formatter rewrote files (--on-change=silent path)
+ 13. applied             — formatter rewrote files (--severity=info path)
  14. early-fail          — status=failed, no specific failure mode (body says "Failed")
  15. aborted             — bazel aborted mid-build, no recorded affected files
- 16. failing-with-drift  — status=failing (mid-stream --on-change=fail): drift
+ 16. failing-with-drift  — status=failing (mid-stream --severity=fail): drift
                            detected, body must show files list (not placeholder)
 
 Body-content invariant (asserted in the loop): the "Format task in progress…"
@@ -66,7 +66,7 @@ def _make_base():
     }
     r["format"]["scope"] = "changed"
     r["format"]["formatter_target"] = "//tools/format"
-    r["format"]["on_change_resolved"] = "silent"
+    r["format"]["severity_resolved"] = "info"
     return r
 
 def _make_clean():
@@ -110,9 +110,9 @@ def _make_scope_all_many():
     ]
     return r
 
-def _make_on_change_warn():
+def _make_severity_warn():
     r = _make_base()
-    r["format"]["on_change_resolved"] = "warn"
+    r["format"]["severity_resolved"] = "warn"
     r["format"]["affected_files"] = [
         "apps/web/src/auth/login.ts",
         "apps/api/handler.go",
@@ -120,7 +120,7 @@ def _make_on_change_warn():
     return r
 
 def _make_applied():
-    """`--on-change=silent` (or `auto` off CI) — formatter rewrote
+    """`--severity=info` (or `auto` off CI) — formatter rewrote
     files, task exited 0. Title says "Formatted N file(s)"; body has
     no Fix section because the work has already been done locally."""
     r = _make_base()
@@ -189,9 +189,9 @@ def _make_aborted():
     return _make_base()
 
 def _make_failing_with_drift():
-    """`--on-change=fail` with mid-stream drift; `pick_task_status` returns "failing"."""
+    """`--severity=fail` with mid-stream drift; `pick_task_status` returns "failing"."""
     r = _make_base()
-    r["format"]["on_change_resolved"] = "fail"
+    r["format"]["severity_resolved"] = "fail"
     r["format"]["affected_files"] = [
         "apps/web/src/auth/login.ts",
         "apps/api/handler.go",
@@ -233,7 +233,7 @@ def _test_impl(ctx):
         ("1. clean-passed · GH", _make_clean(), "passed", "github", None),
         ("2. files-need-format · GH", _make_files_need_format(), "failed", "github", None),
         ("3. scope-all-many · BK", _make_scope_all_many(), "failed", "buildkite", None),
-        ("4. on-change-warn · GH", _make_on_change_warn(), "warning", "github", None),
+        ("4. severity-warn · GH", _make_severity_warn(), "warning", "github", None),
         ("5. formatter-error · GH", _make_formatter_error(), "failed", "github", None),
         ("6. no-git · GH", _make_no_git(), "passed", "github", None),
         ("7. no-files-to-format · GH", _make_no_files_to_format(), "passed", "github", None),
@@ -243,7 +243,7 @@ def _test_impl(ctx):
         ("11. in-progress · GH", _make_files_need_format(), "running", "github", None),
         # Exercise GitHubStatusChecksTrait.metadata_keys through the shared summary renderer.
         ("12. files-need-format · meta=*", _make_files_need_format(), "failed", "github", ["*"]),
-        # `--on-change=silent` (or `auto` off-CI) — formatter rewrote
+        # `--severity=info` (or `auto` off-CI) — formatter rewrote
         # files and the task exited 0. Title and body should reflect
         # that the work has been applied (no "Fix" section, no failure
         # marker).

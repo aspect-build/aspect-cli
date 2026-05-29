@@ -60,7 +60,7 @@ load(
     "should_emit_phase_change",
     "usage_footer",
 )
-load("../lib/repro_commands.axl", "dedup_and_attribute")
+load("../lib/repro_commands.axl", "ASPECT_CLI_INSTALL_HINT_MARKDOWN", "dedup_and_attribute")
 load("../lib/result_text.axl", "severity_for_status")
 load("../lib/tar.axl", "bsdtar")
 load(
@@ -170,23 +170,25 @@ _No tasks have reported yet._
 {% endfor %}{% endif -%}
 {% if repro_rows %}
 ## 🔁 Reproduce
-{% for r in repro_rows %}
-#### {% if r.severity_emoji %}{{ r.severity_emoji }} {% endif %}{% if r.kind %}{{ r.kind }}{% endif %}{% if r.task_keys %} ({{ r.task_keys|join(" · ") }}){% endif %}
+{% for r in repro_rows %}{% if r.show_heading %}
+#### {% if r.severity_emoji %}{{ r.severity_emoji }} {% endif %}{% if r.kind %}{{ r.kind }}{% endif %}{% if r.task_keys %} ({{ r.task_keys|join(" · ") }}){% endif %}{% endif %}
 ```
-{{ r.command }}
+{% if r.description %}# {{ r.description }}
+{% endif %}{{ r.command }}
 ```
-{% if r.description %}_{{ r.description }}_
-{% endif %}{% endfor %}
+{% endfor %}
+""" + ASPECT_CLI_INSTALL_HINT_MARKDOWN + """
 {% endif -%}
 {% if fix_rows %}
 ## 🛠️ Fix
-{% for r in fix_rows %}
-#### {% if r.severity_emoji %}{{ r.severity_emoji }} {% endif %}{% if r.kind %}{{ r.kind }}{% endif %}{% if r.task_keys %} ({{ r.task_keys|join(" · ") }}){% endif %}
+{% for r in fix_rows %}{% if r.show_heading %}
+#### {% if r.severity_emoji %}{{ r.severity_emoji }} {% endif %}{% if r.kind %}{{ r.kind }}{% endif %}{% if r.task_keys %} ({{ r.task_keys|join(" · ") }}){% endif %}{% endif %}
 ```
-{{ r.command }}
+{% if r.description %}# {{ r.description }}
+{% endif %}{{ r.command }}
 ```
-{% if r.description %}_{{ r.description }}_
-{% endif %}{% endfor %}
+{% endfor %}
+""" + ASPECT_CLI_INSTALL_HINT_MARKDOWN + """
 {% endif -%}
 {% endif %}
 ---
@@ -652,7 +654,18 @@ def _collect_repro_fix_rows(sections):
             r["severity_emoji"] = _RANK_EMOJI.get(r["_rank"], "")
 
         # Stable sort: most-severe first, first-seen for the tiebreak.
-        return sorted(rows, key = lambda r: -r["_rank"])
+        sorted_rows = sorted(rows, key = lambda r: -r["_rank"])
+
+        # Collapse consecutive headings when (kind, task_keys) repeats —
+        # producers may contribute multiple commands per task (e.g. the
+        # `aspect …` + vanilla `bazel …` alternates) and rendering the
+        # same `#### kind (task_keys)` heading twice in a row is noise.
+        prev_heading_key = None
+        for r in sorted_rows:
+            heading_key = (r["kind"], tuple(r["task_keys"]))
+            r["show_heading"] = heading_key != prev_heading_key
+            prev_heading_key = heading_key
+        return sorted_rows
 
     repro_rows = _gather(("failed", "failing", "flagged"), "repro_commands")
     fix_rows = _gather(("running", "failed", "failing", "flagged", "successful"), "fix_commands")

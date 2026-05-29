@@ -48,9 +48,9 @@ def init_data():
         "affected_files": [],  # BUILD file paths extracted from gazelle's diff
         "gazelle_target": "",  # Bazel label of the gazelle target
         "gazelle_command": "",  # subcommand forwarded to gazelle ("fix", "update", "")
-        # Resolved `--on-change` policy: "silent" | "warn" | "fail".
+        # Resolved `--severity` policy: "info" | "warn" | "fail".
         # Stamped by `_impl` after resolving `auto`.
-        "on_change_resolved": "silent",
+        "severity_resolved": "info",
         # Resolved `--check-only` (detect-only vs apply).
         "check_only": False,
         "scope": "all",  # raw --scope arg value ("all" | "changed")
@@ -271,9 +271,7 @@ _DETAILS_TEMPLATE = """{% if is_running %}
 _… {{ overflow }} more file(s) not shown._
 {% endif %}
 
-""" + FIX_COMMANDS_BLOCK + """{% if check_only %}
-> ℹ️ This task ran with `--check-only=true` (tree not modified). Re-run with `--check-only=false` (the fix command above) to apply the changes.
-{% endif %}
+""" + FIX_COMMANDS_BLOCK + """
 {% if patch_url %}
 ### 📥 Patch
 [Download the patch]({{ patch_url }}), then run `git apply -p0 <file>` in your workspace.
@@ -321,8 +319,8 @@ def _config_items(data):
             if dirs_count > 0:
                 value = "%s — %s" % (scope, pluralize(dirs_count, "changed dir"))
         items.append({"key": "Scope", "value": value})
-    if g.get("on_change_resolved") == "warn":
-        items.append({"key": "On-change", "value": "warn"})
+    if g.get("severity_resolved") == "warn":
+        items.append({"key": "Severity", "value": "warn"})
     if scope == "changed":
         triggers = g.get("scope_all_on_change", []) or []
         if triggers:

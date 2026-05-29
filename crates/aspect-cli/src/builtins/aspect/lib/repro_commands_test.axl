@@ -6,7 +6,7 @@ through clap's `ValueSource::CommandLine` is covered by the Rust unit
 tests on `Arguments`.
 """
 
-load("./repro_commands.axl", "explicit_flags", "repro_prefix", "subdir_prefix")
+load("./repro_commands.axl", "build_bazel_command", "explicit_flags", "repro_prefix", "subdir_prefix")
 
 def _eq(label, got, want):
     if got != want:
@@ -170,6 +170,96 @@ def _test_repro_prefix_no_git_root_at_aspect_root(_ctx):
     fake = _fake_env("/project", None, aspect_root = "/project")
     _eq("at aspect_root, no git → empty", repro_prefix(fake), "")
 
+def _test_bazel_build_with_targets(_ctx):
+    _eq(
+        "bazel build with targets",
+        build_bazel_command("build", ["//foo/...", "//bar:baz"]),
+        "bazel build -- //foo/... //bar:baz",
+    )
+
+def _test_bazel_test_with_targets(_ctx):
+    _eq(
+        "bazel test with targets",
+        build_bazel_command("test", ["//foo:test"]),
+        "bazel test -- //foo:test",
+    )
+
+def _test_bazel_run_single_target(_ctx):
+    # `bazel run` puts the target BEFORE `--`; `--` only separates target args.
+    _eq(
+        "bazel run single target",
+        build_bazel_command("run", ["//tools/format"]),
+        "bazel run //tools/format",
+    )
+
+def _test_bazel_command_no_targets(_ctx):
+    _eq("bazel command with no targets", build_bazel_command("build", []), "bazel build")
+
+def _test_bazel_run_with_flag(_ctx):
+    _eq(
+        "bazel run with --run_in_cwd flag",
+        build_bazel_command("run", ["@buildifier_prebuilt//buildifier"], flags = ["--run_in_cwd"]),
+        "bazel run --run_in_cwd @buildifier_prebuilt//buildifier",
+    )
+
+def _test_bazel_run_with_target_args(_ctx):
+    # First element is the label; remaining elements forward to the target after `--`.
+    _eq(
+        "bazel run with target args",
+        build_bazel_command("run", ["@buildifier_prebuilt//buildifier", "-r", "."]),
+        "bazel run @buildifier_prebuilt//buildifier -- -r .",
+    )
+
+def _test_bazel_run_with_flag_and_target_args(_ctx):
+    _eq(
+        "bazel run with flag + target args",
+        build_bazel_command(
+            "run",
+            ["@buildifier_prebuilt//buildifier", "-r", "."],
+            flags = ["--run_in_cwd"],
+        ),
+        "bazel run --run_in_cwd @buildifier_prebuilt//buildifier -- -r .",
+    )
+
+def _test_bazel_run_no_targets(_ctx):
+    # No target → fallback "bazel run" so the caller sees the misuse; the
+    # function does not crash.
+    _eq("bazel run with no targets", build_bazel_command("run", []), "bazel run")
+
+def _test_bazel_run_multiline_continuation_form(_ctx):
+    # Exact multi-line shape: head + ` --` on the first line, then each arg
+    # indented two spaces. ` \` continuations between lines come from the
+    # join — guards against accidentally pre-pending `\` to the head, which
+    # produced `-- \ \` (double backslash) in an earlier version.
+    got = build_bazel_command(
+        "run",
+        ["//tools/format", "fileA.bzl", "fileB.bzl"],
+        wrap_at = 20,
+    )
+    want = "bazel run //tools/format -- \\\n  fileA.bzl \\\n  fileB.bzl"
+    _eq("bazel run multi-line continuation", got, want)
+
+def _test_bazel_run_truncates_long_arg_list(_ctx):
+    # Long target-arg list overflows max_chars → multi-line form with a
+    # trailing `# +N more` shell comment marking the truncation. The
+    # included args are whole tokens (never mid-token).
+    files = ["pkg/file_%d.bzl" % i for i in range(20)]
+    got = build_bazel_command(
+        "run",
+        ["//tools/format"] + files,
+        max_chars = 100,
+        wrap_at = 80,
+    )
+    if "# +" not in got:
+        fail("bazel run truncation: expected `# +N more` marker, got:\n%s" % got)
+    if "bazel run //tools/format -- \\" not in got:
+        fail("bazel run truncation: expected multi-line `bazel run -- \\\\` head, got:\n%s" % got)
+
+    # Sanity: at least one file was included, not all 20.
+    included_count = got.count("pkg/file_")
+    if included_count == 0 or included_count >= 20:
+        fail("bazel run truncation: expected partial inclusion (some included, some omitted); included %d/20" % included_count)
+
 _UNIT_TESTS = [
     _test_returns_empty_when_no_explicit,
     _test_includes_only_explicit_pairs,
@@ -191,6 +281,16 @@ _UNIT_TESTS = [
     _test_repro_prefix_nested_subdir,
     _test_repro_prefix_no_git_root_falls_back_to_aspect_root,
     _test_repro_prefix_no_git_root_at_aspect_root,
+    _test_bazel_build_with_targets,
+    _test_bazel_test_with_targets,
+    _test_bazel_run_single_target,
+    _test_bazel_command_no_targets,
+    _test_bazel_run_with_flag,
+    _test_bazel_run_with_target_args,
+    _test_bazel_run_with_flag_and_target_args,
+    _test_bazel_run_no_targets,
+    _test_bazel_run_multiline_continuation_form,
+    _test_bazel_run_truncates_long_arg_list,
 ]
 
 def _test_impl(ctx):

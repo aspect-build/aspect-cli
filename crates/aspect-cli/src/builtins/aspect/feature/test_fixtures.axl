@@ -238,12 +238,12 @@ def make_format_files_need_format():
     ]
     return r
 
-def make_format_on_change_warn():
-    """Files need formatting with --on-change=warn; exits 0 → status=warning → BK warning."""
+def make_format_severity_warn():
+    """Files need formatting with --severity=warn; exits 0 → status=warning → BK warning."""
     r = seed_metadata(format_init_data())
     r["format"]["scope"] = "changed"
     r["format"]["formatter_target"] = "//tools/format"
-    r["format"]["on_change_resolved"] = "warn"
+    r["format"]["severity_resolved"] = "warn"
     r["format"]["affected_files"] = [
         "apps/web/src/auth/login.ts",
         "apps/api/handler.go",
@@ -273,7 +273,7 @@ def make_gazelle_out_of_date():
 
 def make_gazelle_fix_applied():
     """Apply mode rewrote BUILDs; tree carries affected_files. Caller
-    picks the status (passed when --on-change=silent, warning when warn)."""
+    picks the status (passed when --severity=info, warning when warn)."""
     r = seed_metadata(gazelle_init_data())
     r["gazelle"]["gazelle_target"] = "//tools/gazelle:gazelle"
     r["gazelle"]["gazelle_command"] = ""

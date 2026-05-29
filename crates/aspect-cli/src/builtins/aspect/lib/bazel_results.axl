@@ -54,6 +54,7 @@ load(
     "is_aspect_workflows_runner",
 )
 load("./path_glob.axl", "match_path")
+load("./repro_commands.axl", "ASPECT_CLI_INSTALL_HINT_MARKDOWN")
 load("./result_text.axl", "emoji_for_status")
 load("./text.axl", "format_int_comma", "pluralize")
 load("./tips.axl", "decorate_tip")
@@ -3081,11 +3082,11 @@ REPRO_COMMANDS_BLOCK = """{%- if repro_commands %}
 ### 🔁 Reproduce
 {% for c in repro_commands %}
 ```
-{{ c.command }}
+{% if c.description %}# {{ c.description }}
+{% endif %}{{ c.command }}
 ```
-{% if c.description %}_{{ c.description }}_
-
-{% endif %}{% endfor %}
+{% endfor %}
+""" + ASPECT_CLI_INSTALL_HINT_MARKDOWN + """
 
 {% endif %}"""
 
@@ -3093,11 +3094,11 @@ FIX_COMMANDS_BLOCK = """{%- if fix_commands %}
 ### 🛠️ Fix
 {% for c in fix_commands %}
 ```
-{{ c.command }}
+{% if c.description %}# {{ c.description }}
+{% endif %}{{ c.command }}
 ```
-{% if c.description %}_{{ c.description }}_
-
-{% endif %}{% endfor %}
+{% endfor %}
+""" + ASPECT_CLI_INSTALL_HINT_MARKDOWN + """
 
 {% endif %}"""
 

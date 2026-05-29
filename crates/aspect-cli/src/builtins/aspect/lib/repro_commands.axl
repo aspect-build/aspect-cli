@@ -46,6 +46,18 @@ commands without opening the status surface.
 
 load("./environment.axl", "color_enabled")
 
+# Install docs URL surfaced in the small-text hint at the bottom of each
+# repro/fix section — developers who don't yet have `aspect` on their PATH
+# need this to be able to copy a repro command and actually run it.
+_INSTALL_URL = "https://docs.aspect.build/cli/install"
+
+# Plain-text hint used by the CLI renderer.
+ASPECT_CLI_INSTALL_HINT = "Install aspect: " + _INSTALL_URL
+
+# Markdown `<sub>` hint spliced into per-task check-run and PR-comment
+# templates. Single source of truth for the install URL across all surfaces.
+ASPECT_CLI_INSTALL_HINT_MARKDOWN = "<sub>Install `aspect`: [docs.aspect.build/cli/install](" + _INSTALL_URL + ")</sub>"
+
 # Soft cap on a composed command's length; targets past it collapse to
 # ` … +N more` so the output stays copy-paste-able.
 _DEFAULT_MAX_CHARS = 1000
@@ -92,7 +104,7 @@ def explicit_flags(ctx, pairs):
     defaults and `config.axl` overrides. The developer copying the
     rendered command gets back exactly what they (or CI) typed.
 
-    Auto / env-resolved args (`--on-change`, `--check-only`,
+    Auto / env-resolved args (`--severity`, `--check-only`,
     `--base-ref`, ...) are NOT served by this helper; their callers
     pin the resolved value explicitly because the local default
     typically differs from CI's resolution and the repro must encode
@@ -105,14 +117,103 @@ def explicit_flags(ctx, pairs):
     return out
 
 def build_aspect_command(subcommand, flags, targets, max_chars = _DEFAULT_MAX_CHARS, wrap_at = _DEFAULT_WRAP_AT):
-    """Compose `aspect <subcommand> <flags...> [-- <targets>]`.
+    """Compose `aspect <subcommand> <flags...> [-- <targets>]`. See `_build_command` for arg semantics."""
+    return _build_command("aspect " + subcommand, flags, targets, max_chars, wrap_at)
+
+def build_bazel_command(subcommand, targets, flags = [], max_chars = _DEFAULT_MAX_CHARS, wrap_at = _DEFAULT_WRAP_AT):
+    """Compose a vanilla `bazel <subcommand> ...` command string.
+
+    Surfaced under failed-task surfaces as the alternate repro / fix for
+    users without the Aspect CLI. `subcommand` is the bazel verb (`"build"`,
+    `"test"`, `"run"`, ...); `flags` is intentionally a narrow set — pass
+    only what changes behavior (e.g. `--run_in_cwd` when the task ran with
+    it), not the full task flag set. See `_build_command` for `flags` shape.
+
+    Two shapes, picked by `subcommand`:
+
+      `run`: `bazel run <flags> <label> [-- <target_args>...]`
+          The target label is positional and goes BEFORE `--`. Anything after
+          `--` is forwarded to the target binary at runtime. Callers pass
+          `[label, *target_args]` as `targets`; the first element is rendered
+          as the target, the rest are forwarded as target args.
+
+      other (`build`, `test`, ...): `bazel <subcommand> <flags> [-- <patterns>...]`
+          Target patterns are positional, rendered after `--` so hyphen-prefixed
+          patterns (e.g. `-//exclude/...`) aren't parsed as flags.
+    """
+    if subcommand == "run":
+        return _build_run_command(targets, flags, max_chars, wrap_at)
+    return _build_command("bazel " + subcommand, flags, targets, max_chars, wrap_at)
+
+def _build_run_command(targets, flags, max_chars, wrap_at):
+    """`bazel run <flags> <label> [-- <target_args>...]`.
+
+    `targets[0]` is the target label; remaining elements (if any) are forwarded
+    to the target binary after a `--` separator. Empty `targets` is invalid for
+    `bazel run` (no target to launch); we still emit `bazel run` so the caller
+    sees the misuse.
+
+    Target args are truncated entry-wise (whole tokens, never mid-token) when
+    `max_chars` would be exceeded; a `# +N more` shell-comment line indicates
+    the truncation so the command stays copy-paste-runnable.
+    """
+    if not targets:
+        return "bazel run"
+    label = targets[0]
+    target_args = targets[1:]
+    flag_str = _format_flag_parts(flags)
+    head = " ".join(["bazel run"] + flag_str + [_shell_quote(label)])
+    if not target_args:
+        return head
+
+    separator = " -- "
+    quoted_args = [_shell_quote(a) for a in target_args]
+    single_line = head + separator + " ".join(quoted_args)
+    if len(single_line) <= max_chars and len(single_line) <= wrap_at:
+        return single_line
+
+    used = len(head) + len(separator)
+    included = []
+    omitted = 0
+    for q in quoted_args:
+        needed = (1 if included else 0) + len(q)
+        if used + needed > max_chars:
+            omitted = len(quoted_args) - len(included)
+            break
+        included.append(q)
+        used += needed
+
+    # `_join_continued` is responsible for the trailing ` \` continuation
+    # between lines — don't pre-add it to the head, or the rendered output
+    # ends up with `-- \ \` (the literal backslash plus the join's separator).
+    lines = [head + " --"] + ["  " + q for q in included]
+    if omitted > 0:
+        lines.append("  # +%d more" % omitted)
+    return _join_continued(lines)
+
+def _format_flag_parts(flags):
+    """Render a flag list into shell tokens. See `_build_command` for entry shape."""
+    parts = []
+    for f in flags:
+        if type(f) == "string":
+            parts.append(f)
+            continue
+        name = f[0]
+        value = f[1] if len(f) > 1 else None
+        if value == None:
+            parts.append(name)
+        elif type(value) == "list":
+            for v in value:
+                parts.append("%s=%s" % (name, v))
+        else:
+            parts.append("%s=%s" % (name, value))
+    return parts
+
+def _build_command(head, flags, targets, max_chars, wrap_at):
+    """Compose `<head> <flags...> [-- <targets>]` with shell quoting + wrapping.
 
     Args:
-        subcommand:  the aspect CLI subcommand path — either a bare
-                     task name (`"test"`, `"lint"`, …) or the
-                     fully-qualified group path (`"utils frontend
-                     format"`). Use `task_cli_path(ctx.task)` to
-                     derive it from a task value.
+        head:        the leading verb (`"aspect <task>"` or `"bazel <cmd>"`).
         flags:       list of flag specs. Each entry is one of:
                        - `"--name"` — bare flag, no value
                        - `("--name", "value")` — single value
@@ -140,25 +241,9 @@ def build_aspect_command(subcommand, flags, targets, max_chars = _DEFAULT_MAX_CH
                      line stretches the whole panel.
 
     Returns:
-        The composed command string. Never None / empty when at least
-        `subcommand` is provided.
+        The composed command string.
     """
-    head = "aspect " + subcommand
-    flag_parts = []
-    for f in flags:
-        if type(f) == "string":
-            flag_parts.append(f)
-            continue
-        name = f[0]
-        value = f[1] if len(f) > 1 else None
-        if value == None:
-            flag_parts.append(name)
-        elif type(value) == "list":
-            for v in value:
-                flag_parts.append("%s=%s" % (name, v))
-        else:
-            flag_parts.append("%s=%s" % (name, value))
-
+    flag_parts = _format_flag_parts(flags)
     head_part = " ".join([head] + flag_parts)
 
     if not targets:
@@ -318,7 +403,7 @@ def repro_prefix(ctx):
     reproducible without guessing the original working directory:
 
         cd e2e/runner
-        aspect gazelle --on-change=fail --check-only=true ...
+        aspect gazelle --severity=fail --check-only=true ...
     """
     return subdir_prefix(
         ctx.std.env.current_dir(),
@@ -338,7 +423,12 @@ def print_repro_and_fix(std, data, status):
     No-op when `status == "passed"` (no need to nag a clean run) or
     when both lists are empty. Caller passes `ctx.std` for color
     detection and the terminal-state `data` dict; safe to call from
-    any task's terminal-emit path."""
+    any task's terminal-emit path.
+
+    The install-hint footer only renders on CI (any `CI` env var). The
+    person running aspect locally already has `aspect` on PATH; the hint
+    is for someone reading the CI log later who doesn't.
+    """
     if status == "passed":
         return
     repros = data.get("repro_commands", []) or []
@@ -347,31 +437,48 @@ def print_repro_and_fix(std, data, status):
         return
 
     ansi = color_enabled(std)
+    on_ci = bool(std.env.var("CI"))
     if repros:
         print("")
         print(_repro_header(ansi, "🔁 Reproduce:"))
         for entry in repros:
             _print_repro_entry(ansi, entry)
+        if on_ci:
+            print(_install_hint_line(ansi))
     if fixes:
         print("")
         print(_repro_header(ansi, "🛠️ Fix:"))
         for entry in fixes:
             _print_repro_entry(ansi, entry)
+        if on_ci:
+            print(_install_hint_line(ansi))
     print("")
 
 def _repro_header(ansi, label):
     return "\x1b[1m" + label + "\x1b[0m" if ansi else label
 
+def _install_hint_line(ansi):
+    """Dim-formatted install hint printed under each repro/fix header."""
+    text = "  " + ASPECT_CLI_INSTALL_HINT
+    return ("\x1b[2m" + text + "\x1b[0m") if ansi else text
+
 def _print_repro_entry(ansi, entry):
     """Print one `{command, description}` entry, indenting every
     command line two spaces so multi-line composed commands (the
     backslash-continuation form `build_aspect_command` produces for
-    long flag/target lists) keep their visual grouping."""
+    long flag/target lists) keep their visual grouping.
+
+    Description renders as a dim `# <description>` shell-comment line
+    ABOVE the command — copy-paste still runs the command (bash ignores
+    `#` lines), and the comment reads as a header explaining what's
+    coming.
+    """
     command = entry.get("command", "") or ""
     description = entry.get("description", "") or ""
     if not command:
         return
+    if description:
+        comment = "  # " + description
+        print(("\x1b[2m" + comment + "\x1b[0m") if ansi else comment)
     for line in command.split("\n"):
         print("  " + line)
-    if description:
-        print(("  \x1b[2m" + description + "\x1b[0m") if ansi else ("  " + description))
