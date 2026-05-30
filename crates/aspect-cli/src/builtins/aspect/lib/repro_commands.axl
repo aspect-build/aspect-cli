@@ -420,53 +420,66 @@ def print_repro_and_fix(std, data, status):
     the raw CI log can copy the actionable command without opening
     the status surface.
 
-    No-op when `status == "passed"` (no need to nag a clean run) or
-    when both lists are empty. Caller passes `ctx.std` for color
-    detection and the terminal-state `data` dict; safe to call from
-    any task's terminal-emit path.
+    Two independent gates, matching the status-surface behavior:
+
+    - The Reproduce block is CI-only and renders regardless of pass/fail
+      (the status surface shows "how CI ran this" on a green check too),
+      but is suppressed locally — you're already at the failure and don't
+      need a command to reproduce it.
+    - The Fix block renders whenever there are fix commands. Tasks only
+      populate fixes on failure, so this is naturally pass-gated without
+      an explicit `status` check.
+
+    No-op when neither block has anything to show. Caller passes
+    `ctx.std` for color detection and the terminal-state `data` dict;
+    safe to call from any task's terminal-emit path.
 
     The install-hint footer only renders on CI (any `CI` env var). The
     person running aspect locally already has `aspect` on PATH; the hint
     is for someone reading the CI log later who doesn't.
     """
-    if status == "passed":
-        return
     repros = data.get("repro_commands", []) or []
     fixes = data.get("fix_commands", []) or []
-    if not repros and not fixes:
-        return
-
     ansi = color_enabled(std)
     on_ci = bool(std.env.var("CI"))
-    if repros:
+
+    # Repro block is CI-only (locally you're already staring at the failure).
+    # Fixes are always shown.
+    if not fixes and (not on_ci or not repros):
+        return
+
+    if on_ci and repros:
         print("")
         print(_repro_header(ansi, "🔁 Reproduce:"))
-        for entry in repros:
+        for i, entry in enumerate(repros):
+            if i > 0:
+                print("")
             _print_repro_entry(ansi, entry)
-        if on_ci:
-            print(_install_hint_line(ansi))
     if fixes:
         print("")
         print(_repro_header(ansi, "🛠️ Fix:"))
-        for entry in fixes:
+        for i, entry in enumerate(fixes):
+            if i > 0:
+                print("")
             _print_repro_entry(ansi, entry)
-        if on_ci:
-            print(_install_hint_line(ansi))
+    if on_ci:
+        print("")
+        print(_install_hint_line(ansi))
     print("")
 
 def _repro_header(ansi, label):
     return "\x1b[1m" + label + "\x1b[0m" if ansi else label
 
 def _install_hint_line(ansi):
-    """Dim-formatted install hint printed under each repro/fix header."""
-    text = "  " + ASPECT_CLI_INSTALL_HINT
-    return ("\x1b[2m" + text + "\x1b[0m") if ansi else text
+    """Dim-formatted install hint printed under each repro/fix block."""
+    return ("\x1b[2m" + ASPECT_CLI_INSTALL_HINT + "\x1b[0m") if ansi else ASPECT_CLI_INSTALL_HINT
 
 def _print_repro_entry(ansi, entry):
-    """Print one `{command, description}` entry, indenting every
-    command line two spaces so multi-line composed commands (the
-    backslash-continuation form `build_aspect_command` produces for
-    long flag/target lists) keep their visual grouping.
+    """Print one `{command, description}` entry as a fenced code block.
+
+    The comment and command lines are wrapped in ``` … ``` fences and
+    printed flush-left, so the copy-paste region is unambiguous and can
+    be selected without stripping leading whitespace.
 
     Description renders as a dim `# <description>` shell-comment line
     ABOVE the command — copy-paste still runs the command (bash ignores
@@ -477,8 +490,10 @@ def _print_repro_entry(ansi, entry):
     description = entry.get("description", "") or ""
     if not command:
         return
+    print("```")
     if description:
-        comment = "  # " + description
+        comment = "# " + description
         print(("\x1b[2m" + comment + "\x1b[0m") if ansi else comment)
     for line in command.split("\n"):
-        print("  " + line)
+        print(line)
+    print("```")
