@@ -201,6 +201,16 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
                 .finalize()
                 .map_err(|e| anyhow::anyhow!("{}: {}", output, e))?;
 
+            // Ensure the fd is synchronously closed before returning.
+            // tokio::fs::File::drop is non-async: it sends the underlying
+            // std::fs::File to a blocking thread for closure. If the caller
+            // renames this file and exec()s it before that thread runs, the
+            // kernel sees an open write fd on the inode and returns ETXTBSY
+            // (errno 26). into_std().await completes all pending blocking
+            // ops and returns a std::fs::File whose drop is synchronous,
+            // guaranteeing the write fd is gone before we return.
+            drop(file.into_std().await);
+
             Ok(response)
         };
 
