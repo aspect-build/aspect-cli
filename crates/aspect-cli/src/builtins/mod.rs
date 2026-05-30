@@ -9,7 +9,9 @@
 //! published with an atomic `rename`, gated by a `.complete` marker
 //! written last. See [`extract_aspect_builtins`] for the full protocol.
 
-use std::path::{Path, PathBuf};
+#[cfg(any(not(debug_assertions), test))]
+use std::path::Path;
+use std::path::PathBuf;
 
 #[cfg(not(debug_assertions))]
 use include_dir::{Dir, DirEntry, include_dir};
@@ -50,6 +52,7 @@ pub fn expand_builtins(
 
 /// Marker written into `{content_hash}/` after every file is flushed.
 /// Its presence is the sole signal that extraction is complete.
+#[cfg(any(not(debug_assertions), test))]
 const COMPLETE_MARKER: &str = ".complete";
 
 /// Atomically extract `files` into `{broot}/{content_hash}/aspect/` and
@@ -68,6 +71,7 @@ const COMPLETE_MARKER: &str = ".complete";
 /// Using rename (not `remove_dir_all`) for both the stale-cleanup and
 /// the publish step keeps every transition atomic, so a loser can
 /// never delete a winner's just-published tree.
+#[cfg(any(not(debug_assertions), test))]
 fn extract_aspect_builtins(
     broot: &Path,
     content_hash: &str,
@@ -96,6 +100,7 @@ fn extract_aspect_builtins(
 /// Write `files` into `tmp_dir/aspect/`, mark complete, and rename into
 /// `final_dir`. Splits the body of [`extract_aspect_builtins`] so the
 /// caller can centralize tmp-dir cleanup on any failure.
+#[cfg(any(not(debug_assertions), test))]
 fn write_and_publish(
     tmp_dir: &Path,
     final_dir: &Path,
@@ -128,6 +133,7 @@ fn write_and_publish(
 /// Best-effort throughout: a concurrent thread may have already
 /// trashed the same dir, or our trash-remove may race a sibling's
 /// remove. The post-rename marker check is the authoritative outcome.
+#[cfg(any(not(debug_assertions), test))]
 fn evict_stale_dir(final_dir: &Path) {
     use std::fs;
 
