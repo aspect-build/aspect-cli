@@ -98,6 +98,24 @@ def _by_kind(ctx):
             out[a.kind] = a.url
     return out
 
+def _list_kind(ctx, kind):
+    """Every registered singleton artifact with `kind`, in registration order.
+
+    Unlike `by_kind` (which collapses to one URL per kind), this returns
+    the full list so callers can surface every artifact a task uploaded.
+    Used by the status-surface link renderer for kinds that legitimately
+    produce multiple artifacts (e.g. `delivery_manifest` when a customer
+    `upload_manifest` hook splits the manifest into per-format files).
+
+    Skips entries with a non-empty `label` (those belong to `by_label`)
+    and entries with no URL (the CI host returned no stable link).
+    """
+    out = []
+    for a in ctx.traits[_ArtifactsTrait].list():
+        if a.kind == kind and not a.label and a.url:
+            out.append(a)
+    return out
+
 def _by_label(ctx):
     """Per-bazel-target file map: `{label: {filename: url}}`."""
     out = {}
@@ -197,6 +215,7 @@ artifacts = struct(
     append = lambda ctx, a: ctx.traits[_ArtifactsTrait].append(a),
     list = lambda ctx: ctx.traits[_ArtifactsTrait].list(),
     by_kind = _by_kind,
+    list_kind = _list_kind,
     by_label = _by_label,
     browse_url = lambda ctx: detect_artifacts_browse_url(ctx),
     TRAITS = [_ArtifactsTrait],

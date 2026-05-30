@@ -42,6 +42,42 @@ custom_deliverable = rule(
     attrs = {"data": attr.label_list(allow_files = True)},
 )
 
+def _oci_like_deliverable_impl(ctx):
+    """Sim of `rules_oci`'s push rule: an executable plus two sibling
+    default outputs (.digest and .layer), where only .digest is exposed
+    via runfiles. .layer reaches disk via `--remote_download_outputs=toplevel`
+    (materializing the target's default outputs), but is NOT reachable
+    from inside `runfiles_dir`. The customer hook in `.aspect/config.axl`
+    must locate it via the entry's `default_outputs` list.
+    """
+    runner = ctx.actions.declare_file(ctx.label.name)
+    digest = ctx.actions.declare_file(ctx.label.name + ".digest")
+    layer = ctx.actions.declare_file(ctx.label.name + ".layer")
+
+    ctx.actions.write(
+        output = runner,
+        is_executable = True,
+        content = "#!/usr/bin/env bash\necho 'oci_like_deliverable ran'\n",
+    )
+    ctx.actions.write(
+        output = digest,
+        content = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n",
+    )
+    ctx.actions.write(
+        output = layer,
+        content = "layer-blob-placeholder\n",
+    )
+    return [DefaultInfo(
+        files = depset([runner, digest, layer]),
+        executable = runner,
+        runfiles = ctx.runfiles(files = [digest]),
+    )]
+
+oci_like_deliverable = rule(
+    implementation = _oci_like_deliverable_impl,
+    executable = True,
+)
+
 def _bash_deliverable_impl(ctx):
     runner = ctx.actions.declare_file(ctx.label.name + ".bash")
     ctx.actions.write(

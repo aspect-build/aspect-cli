@@ -379,7 +379,7 @@ def _test_filesystem_bash_extension(ctx):
     _eq("fs/bash: runfiles_dir", ep.runfiles_dir, "/out/bin/tools/my_target.bash.runfiles")
 
 def _test_filesystem_no_runfiles(ctx):
-    """Bare binary with no .runfiles on disk: runfiles_dir stays None even with a real ctx."""
+    """Bare binary with no .runfiles on disk: runfiles_dir + runfiles_workspace_dir stay None even with a real ctx."""
     mock = _make_mock_ctx([])  # nothing on disk
     r = runnable(mock, ["@buildifier_prebuilt//buildifier"])
     r.event(_make_fileset_event("s1", ["/out/bin/external/buildifier_prebuilt/buildifier/buildifier"]))
@@ -389,6 +389,139 @@ def _test_filesystem_no_runfiles(ctx):
         fail("fs/no-runfiles: expected entrypoint, got None")
     if ep.runfiles_dir != None:
         fail("fs/no-runfiles: expected runfiles_dir=None (no .runfiles on disk), got %r" % ep.runfiles_dir)
+    if ep.runfiles_workspace_dir != None:
+        fail("fs/no-runfiles: expected runfiles_workspace_dir=None (no runfiles_dir), got %r" % ep.runfiles_workspace_dir)
+
+# ---------------------------------------------------------------------------
+# runfiles_workspace_dir tests — `<runfiles_dir>/<workspace>`, the cwd
+# `bazel run` uses. The workspace name comes from a `workspace_config`
+# BES event; falls back to `_main` when none arrives.
+# ---------------------------------------------------------------------------
+
+def _make_workspace_config_event(workspace_name):
+    """Minimal workspace_config BES event. `_process_bes` reads the
+    basename of `local_exec_root` to seed `state.workspace_name[0]`."""
+    return struct(
+        kind = "workspace_config",
+        payload = struct(
+            local_exec_root = "/out/execroot/" + workspace_name,
+        ),
+    )
+
+def _test_runfiles_workspace_dir_uses_bes_workspace_name(ctx):
+    """workspace_config supplies the canonical name; runfiles_workspace_dir
+    appends it to runfiles_dir."""
+    mock = _make_mock_ctx(["/out/bin/tools/format/runner.runfiles"])
+    r = runnable(mock, ["//tools/format:runner"])
+    r.event(_make_workspace_config_event("_main"))
+    r.event(_make_fileset_event("s1", ["/out/bin/tools/format/runner"]))
+    r.event(_make_target_event("//tools/format:runner", "s1"))
+    ep = r.determine_entrypoint("//tools/format:runner")
+    if ep == None:
+        fail("rwd: expected entrypoint, got None")
+    _eq("rwd: runfiles_workspace_dir", ep.runfiles_workspace_dir, "/out/bin/tools/format/runner.runfiles/_main")
+
+def _test_runfiles_workspace_dir_non_default_workspace(ctx):
+    """An explicit `workspace(name = "my_repo")` flows through to
+    runfiles_workspace_dir verbatim (no hardcoded `_main`)."""
+    mock = _make_mock_ctx(["/out/bin/tools/format/runner.runfiles"])
+    r = runnable(mock, ["//tools/format:runner"])
+    r.event(_make_workspace_config_event("my_repo"))
+    r.event(_make_fileset_event("s1", ["/out/bin/tools/format/runner"]))
+    r.event(_make_target_event("//tools/format:runner", "s1"))
+    ep = r.determine_entrypoint("//tools/format:runner")
+    if ep == None:
+        fail("rwd/named: expected entrypoint, got None")
+    _eq("rwd/named: runfiles_workspace_dir", ep.runfiles_workspace_dir, "/out/bin/tools/format/runner.runfiles/my_repo")
+
+def _test_runfiles_workspace_dir_default_when_no_workspace_config(ctx):
+    """Without a workspace_config event, fall back to `_main` (the bzlmod default)."""
+    mock = _make_mock_ctx(["/out/bin/tools/format/runner.runfiles"])
+    r = runnable(mock, ["//tools/format:runner"])
+    r.event(_make_fileset_event("s1", ["/out/bin/tools/format/runner"]))
+    r.event(_make_target_event("//tools/format:runner", "s1"))
+    ep = r.determine_entrypoint("//tools/format:runner")
+    if ep == None:
+        fail("rwd/default: expected entrypoint, got None")
+    _eq("rwd/default: runfiles_workspace_dir", ep.runfiles_workspace_dir, "/out/bin/tools/format/runner.runfiles/_main")
+
+# ---------------------------------------------------------------------------
+# get_default_outputs tests — full BES default-output-group enumeration,
+# regardless of whether any file is an executable entrypoint.
+# ---------------------------------------------------------------------------
+
+def _make_nested_fileset_event(set_id, file_paths, child_set_ids):
+    """named_set_of_files event whose payload references other filesets by id."""
+    return struct(
+        kind = "named_set_of_files",
+        id = struct(id = set_id),
+        payload = struct(
+            files = [struct(
+                path_prefix = ["bazel-out/opt/bin"],
+                file = "file://" + p,
+            ) for p in file_paths],
+            file_sets = [struct(id = c) for c in child_set_ids],
+        ),
+    )
+
+def _test_get_default_outputs_unknown_target_returns_empty(ctx):
+    """No BES target_completed for the target → empty list, no error."""
+    r = runnable(None, ["//tools:my_target"])
+    if r.get_default_outputs("//tools:my_target") != []:
+        fail("unknown target: expected [], got %r" % r.get_default_outputs("//tools:my_target"))
+
+def _test_get_default_outputs_single_fileset(ctx):
+    """All files in a single default-output fileset surface in order."""
+    r = runnable(None, ["//apps:image_push"])
+    r.event(_make_fileset_event("s1", [
+        "/out/bin/apps/image_push",
+        "/out/bin/apps/image_push.digest",
+        "/out/bin/apps/image_push.json",
+    ]))
+    r.event(_make_target_event("//apps:image_push", "s1"))
+    got = r.get_default_outputs("//apps:image_push")
+    want = [
+        "/out/bin/apps/image_push",
+        "/out/bin/apps/image_push.digest",
+        "/out/bin/apps/image_push.json",
+    ]
+    if got != want:
+        fail("single fileset: got %r, want %r" % (got, want))
+
+def _test_get_default_outputs_walks_nested_filesets(ctx):
+    """Nested file_sets references are followed; every leaf file surfaces."""
+    r = runnable(None, ["//apps:image_push"])
+    r.event(_make_fileset_event("child", ["/out/bin/apps/image_push.digest"]))
+    r.event(_make_nested_fileset_event("root", ["/out/bin/apps/image_push"], ["child"]))
+    r.event(_make_target_event("//apps:image_push", "root"))
+    got = r.get_default_outputs("//apps:image_push")
+    if "/out/bin/apps/image_push" not in got:
+        fail("nested filesets: missing root file in %r" % got)
+    if "/out/bin/apps/image_push.digest" not in got:
+        fail("nested filesets: missing child file in %r" % got)
+
+def _test_get_default_outputs_apparent_label_normalization(ctx):
+    """A bzlmod canonical label registered to the BES event matches the
+    apparent label the caller asks for — same path as determine_entrypoint."""
+    r = runnable(None, ["@rules_python//python/bin:python"])
+    r.event(_make_fileset_event("s1", [
+        "/out/bin/external/rules_python+0.40.0/python/bin/python",
+        "/out/bin/external/rules_python+0.40.0/python/bin/python.runfiles_manifest",
+    ]))
+    r.event(_make_target_event("@@rules_python+0.40.0//python/bin:python", "s1"))
+    got = r.get_default_outputs("@rules_python//python/bin:python")
+    if len(got) != 2:
+        fail("apparent label: expected 2 files, got %r" % got)
+
+def _test_get_default_outputs_strips_file_uri_prefix(ctx):
+    """BES emits `file://`-prefixed URIs; the helper must strip the prefix
+    so consumers receive plain absolute filesystem paths."""
+    r = runnable(None, ["//apps:image_push"])
+    r.event(_make_fileset_event("s1", ["/out/bin/apps/image_push"]))
+    r.event(_make_target_event("//apps:image_push", "s1"))
+    got = r.get_default_outputs("//apps:image_push")
+    if got[0].startswith("file://"):
+        fail("file:// prefix not stripped: %r" % got[0])
 
 # ---------------------------------------------------------------------------
 # resolve_run_in — `--run-in=<choice>` cwd resolution
@@ -488,6 +621,14 @@ _UNIT_TESTS = [
     _test_run_in_absolute_path,
     _test_run_in_relative_dot,
     _test_run_in_relative_dotdot,
+    _test_runfiles_workspace_dir_uses_bes_workspace_name,
+    _test_runfiles_workspace_dir_non_default_workspace,
+    _test_runfiles_workspace_dir_default_when_no_workspace_config,
+    _test_get_default_outputs_unknown_target_returns_empty,
+    _test_get_default_outputs_single_fileset,
+    _test_get_default_outputs_walks_nested_filesets,
+    _test_get_default_outputs_apparent_label_normalization,
+    _test_get_default_outputs_strips_file_uri_prefix,
 ]
 
 def _test_impl(ctx):
