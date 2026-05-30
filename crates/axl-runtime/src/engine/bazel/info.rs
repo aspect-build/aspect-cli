@@ -4,15 +4,33 @@ use std::process::Stdio;
 
 use anyhow::anyhow;
 
+/// Parse the value of `bazel info release` into a semver version.
+///
+/// The value looks like `release 9.0.0`, or `release 9.0.0-rc1` for a
+/// release candidate. Non-release builds report a value with no version
+/// number — `development version` (built from source) or `no_version` —
+/// and return `None` rather than erroring, so a non-release Bazel doesn't
+/// abort the task. Callers treat `None` as "version unknown".
+fn parse_release(value: &str) -> Option<semver::Version> {
+    let ver_str = value.trim().trim_start_matches("release ").trim();
+    // Drop any pre-release suffix so an rc/pre build (`9.0.0-rc1`) matches the
+    // same constraints its eventual release will.
+    let ver_str = ver_str.split('-').next().unwrap_or(ver_str);
+    semver::Version::parse(ver_str).ok()
+}
+
 /// Query bazel server info (server_pid, release version).
-pub fn server_info() -> io::Result<(u32, semver::Version)> {
+///
+/// The version is `None` when Bazel reports a non-release build (see
+/// [`parse_release`]); the pid is always required.
+pub fn server_info() -> io::Result<(u32, Option<semver::Version>)> {
     server_info_with_startup_flags(&[])
 }
 
 /// Query bazel server info with startup flags prepended before the subcommand.
 pub fn server_info_with_startup_flags(
     startup_flags: &[String],
-) -> io::Result<(u32, semver::Version)> {
+) -> io::Result<(u32, Option<semver::Version>)> {
     let mut cmd = Command::new(super::bazel_binary());
     cmd.args(startup_flags);
     cmd.arg("info");
@@ -52,19 +70,16 @@ pub fn server_info_with_startup_flags(
                     pid = value.trim().parse::<u32>().ok();
                 }
                 "release" => {
-                    // Value is like "release 9.0.0" or "release 9.0.0-rc1"
-                    let ver_str = value.trim().trim_start_matches("release ").trim();
-                    // Strip pre-release suffix: "9.0.0-rc1" -> "9.0.0"
-                    let ver_str = ver_str.split('-').next().unwrap_or(ver_str);
-                    version = semver::Version::parse(ver_str)
-                        .map_err(|e| {
-                            io::Error::other(anyhow!(
-                                "failed to parse Bazel version '{}': {}",
-                                ver_str,
-                                e
-                            ))
-                        })
-                        .ok();
+                    version = parse_release(value);
+                    if version.is_none() {
+                        // Not an error; version-conditional flags assume latest.
+                        // Logged for diagnosability when flag resolution looks off.
+                        tracing::debug!(
+                            release = %value.trim(),
+                            "bazel reported a non-release version; \
+                             version-conditional flags will assume latest"
+                        );
+                    }
                 }
                 _ => {}
             }
@@ -73,11 +88,6 @@ pub fn server_info_with_startup_flags(
 
     let pid =
         pid.ok_or_else(|| io::Error::other(anyhow!("bazel info did not return server_pid")))?;
-    let version = version.ok_or_else(|| {
-        io::Error::other(anyhow!(
-            "bazel info did not return a parseable release version"
-        ))
-    })?;
 
     Ok((pid, version))
 }
@@ -151,4 +161,37 @@ pub fn server_pid_nonblocking(startup_flags: &[String]) -> Option<u32> {
     let pid_path = std::path::Path::new(output_base.trim()).join("server/server.pid.txt");
     let contents = std::fs::read_to_string(pid_path).ok()?;
     contents.trim().parse::<u32>().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_release;
+
+    #[test]
+    fn parses_a_plain_release() {
+        assert_eq!(
+            parse_release("release 9.0.0"),
+            Some(semver::Version::new(9, 0, 0))
+        );
+    }
+
+    #[test]
+    fn strips_rc_and_pre_suffixes() {
+        assert_eq!(
+            parse_release("release 9.0.0-rc1"),
+            Some(semver::Version::new(9, 0, 0))
+        );
+        assert_eq!(
+            parse_release("release 8.0.0-pre.20251201.1"),
+            Some(semver::Version::new(8, 0, 0))
+        );
+    }
+
+    #[test]
+    fn non_release_builds_have_no_version() {
+        assert_eq!(parse_release("development version"), None);
+        assert_eq!(parse_release("no_version"), None);
+        assert_eq!(parse_release(""), None);
+        assert_eq!(parse_release("   "), None);
+    }
 }

@@ -102,8 +102,8 @@ fn partition_build_events(
 }
 
 /// Resolve a mixed list of plain flags and conditional `(flag, constraint)` tuples into
-/// a `Vec<String>`. Returns only the flags whose semver constraint matches `version`.
-/// When `version` is `None` all items must be plain strings (i.e. `Either::Left`).
+/// a `Vec<String>`. Plain flags are always included; conditional flags are
+/// included only when [`constraint_matches`] holds for `version`.
 fn resolve_flags<'v>(
     items: &[Either<values::StringValue<'v>, (values::StringValue<'v>, values::StringValue<'v>)>],
     version: Option<&semver::Version>,
@@ -113,22 +113,29 @@ fn resolve_flags<'v>(
         match item {
             Either::Left(s) => result.push(s.as_str().to_string()),
             Either::Right((flag, constraint)) => {
-                let version =
-                    version.expect("server_info must be called when conditional flags are present");
-                let req = semver::VersionReq::parse(constraint.as_str()).map_err(|e| {
-                    anyhow::anyhow!(
-                        "invalid version constraint '{}': {}",
-                        constraint.as_str(),
-                        e
-                    )
-                })?;
-                if req.matches(version) {
+                if constraint_matches(constraint.as_str(), version)? {
                     result.push(flag.as_str().to_string());
                 }
             }
         }
     }
     Ok(result)
+}
+
+/// Whether a semver `constraint` is satisfied by the running Bazel `version`.
+///
+/// `version` is `None` when Bazel reports a non-release build (a
+/// `development version` has no version number to parse). Such a build is
+/// compiled from HEAD, so it is effectively newer than any release: it is
+/// matched against a max version, so lower-bound gates (`>=N`, the usual
+/// shape) match and upper-bound gates (`<N`) don't.
+///
+/// An unparseable constraint is a hard error naming the offending value.
+fn constraint_matches(constraint: &str, version: Option<&semver::Version>) -> anyhow::Result<bool> {
+    let req = semver::VersionReq::parse(constraint)
+        .map_err(|e| anyhow::anyhow!("invalid version constraint '{}': {}", constraint, e))?;
+    let assumed_latest = semver::Version::new(u64::MAX, u64::MAX, u64::MAX);
+    Ok(req.matches(version.unwrap_or(&assumed_latest)))
 }
 
 #[derive(Debug, Display, ProvidesStaticType, Trace, NoSerialize, Allocative)]
@@ -295,10 +302,12 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             Either::Right(sinks) => (true, sinks.items),
         };
         let has_conditional = flags.items.iter().any(|f| f.is_right());
+        // `server_info` returns `None` for the version on a non-release Bazel;
+        // `resolve_flags` then assumes the latest version for conditional flags.
         let bazel_version = if has_conditional {
             let (_, version) = info::server_info()
                 .map_err(|e| anyhow::anyhow!("failed to get Bazel server info: {}", e))?;
-            Some(version)
+            version
         } else {
             None
         };
@@ -403,10 +412,12 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             Either::Right(sinks) => (true, sinks.items),
         };
         let has_conditional = flags.items.iter().any(|f| f.is_right());
+        // `server_info` returns `None` for the version on a non-release Bazel;
+        // `resolve_flags` then assumes the latest version for conditional flags.
         let bazel_version = if has_conditional {
             let (_, version) = info::server_info()
                 .map_err(|e| anyhow::anyhow!("failed to get Bazel server info: {}", e))?;
-            Some(version)
+            version
         } else {
             None
         };
@@ -850,4 +861,38 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         register_execlog_types(globals);
         register_execlog_sinks(globals);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::constraint_matches;
+
+    fn version(s: &str) -> semver::Version {
+        semver::Version::parse(s).unwrap()
+    }
+
+    #[test]
+    fn matches_against_a_known_version() {
+        let v = version("8.5.1");
+        assert!(constraint_matches(">=8", Some(&v)).unwrap());
+        assert!(constraint_matches(">=8, <9", Some(&v)).unwrap());
+        assert!(!constraint_matches(">=9", Some(&v)).unwrap());
+        assert!(!constraint_matches("<7", Some(&v)).unwrap());
+    }
+
+    #[test]
+    fn unknown_version_assumes_latest() {
+        // A non-release build is newer than any release: lower-bound gates
+        // match, upper-bound gates and old-major ranges don't.
+        assert!(constraint_matches(">=8", None).unwrap());
+        assert!(constraint_matches(">=9", None).unwrap());
+        assert!(!constraint_matches("<7", None).unwrap());
+        assert!(!constraint_matches(">=8, <9", None).unwrap());
+    }
+
+    #[test]
+    fn invalid_constraint_is_an_error() {
+        let err = constraint_matches("not-a-constraint", None).unwrap_err();
+        assert!(err.to_string().contains("invalid version constraint"));
+    }
 }
