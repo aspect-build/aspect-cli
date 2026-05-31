@@ -25,7 +25,6 @@ load(
     "BUCKET_APP",
     "BUCKET_ENV",
     "record_from_headers",
-    "seed_from_rate_limit_body",
 )
 load("./tar.axl", "zip_create")
 load("./text.axl", "pluralize")
@@ -2176,58 +2175,10 @@ def delete_review_comment(ctx, token, owner, repo, comment_id, api_base = DEFAUL
     success, status_code, _ = _do_request(ctx, "DELETE", url, token)
     return {"success": success}
 
-def _probe_rate_limit(ctx, owner, repo, profile = None, api_base = DEFAULT_GITHUB_API):
-    """Probe `GET /rate_limit` once at task init to seed both buckets
-    of lib/rate_limit.axl for the App bucket only. The endpoint
-    doesn't count against the primary quota
-    ([docs](https://docs.github.com/en/rest/rate-limit/rate-limit)).
-
-    Env-bucket probing is deliberately skipped: env is only used as a
-    4xx-auth fallback for supporting calls, and a probe-time seed
-    would surface `GITHUB_TOKEN` in `usage_footer` and in the startup
-    `INFO:` log even when we never actually fell back to it. The first
-    real env-bucket observation (from a fallback call) is what seeds
-    the trait and triggers the starting-quota INFO log.
-
-    Silent on any failure — never blocks `setup_phase`.
-
-    Doesn't go through `_do_request` because that path records the
-    response's `X-RateLimit-*` headers into the buffer, which would
-    double-count the probe's own response on top of the JSON body's
-    `resources.core` block.
-    """
-
-    # Mint the App token. We don't pass `existing_app_token` (we ARE
-    # the first auth call this task makes) so this is the canonical
-    # App-token resolution path.
-    app_token = _authenticate(ctx, owner = owner, repo = repo, profile = profile)
-    if not app_token:
-        return
-    url = api_base + "/rate_limit"
-    headers = {
-        "Authorization": "Bearer " + app_token,
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-    fut = ctx.http().get(url = url, headers = headers)
-    response = fut.map_err(lambda e: str(e)).block()
-    if type(response) == "string":
-        return
-    if response.status < 200 or response.status >= 300:
-        return
-    body = response.body
-    if not body:
-        return
-    parsed = json.try_decode(body, None)
-    if parsed == None:
-        return
-    seed_from_rate_limit_body(ctx, BUCKET_APP, parsed)
-
 github = struct(
     VALID_ROLES = VALID_ROLES,
     authenticate = _authenticate,
     preferred_token_pair = _preferred_token_pair,
-    probe_rate_limit = _probe_rate_limit,
     missing_credentials_reason = _missing_credentials_reason,
     validate_role = validate_role,
     check_token = _check_token,

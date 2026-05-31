@@ -807,12 +807,9 @@ fn render_phase_breakdown(phases: &[PhaseRecord], mode: TimingMode, failed: bool
     if visible.is_empty() {
         return String::new();
     }
-    // CLI surfaces only render the emoji the caller supplied via
-    // `Phase(emoji=...)`; empty stays bare. Emoji rendering on plain
-    // terminals varies (some terminfos double-width them and break
-    // column alignment, some render `?`), so we render bare rather
-    // than inconsistently. Users who want emoji on CLI supply it
-    // explicitly per phase.
+    // Prefix the caller-supplied `Phase(emoji=...)` when present; an empty
+    // emoji stays bare. The Detailed branch aligns columns by `display_width`
+    // (which counts the emoji as two cells); Summary mode has no columns.
     let phase_label = |p: &PhaseRecord| -> String {
         let name = if p.display_name.is_empty() {
             titlecase(&p.name)
@@ -841,12 +838,12 @@ fn render_phase_breakdown(phases: &[PhaseRecord], mode: TimingMode, failed: bool
             format!(" — {}", parts.join(" · "))
         }
         TimingMode::Detailed => {
-            // Compute column widths so durations align. Emoji gets
-            // prefixed inside the name column — names with emoji
-            // render slightly wider, but the dur+desc columns still
-            // line up.
+            // Pad the label column to align the duration column. Widths are
+            // in terminal display cells (see `display_width`) — the phase
+            // emoji renders two cells wide but is one codepoint, so a naive
+            // char or byte count would misalign rows with vs without emoji.
             let labels: Vec<String> = visible.iter().map(|p| phase_label(p)).collect();
-            let name_w = labels.iter().map(|s| s.chars().count()).max().unwrap_or(0);
+            let name_w = labels.iter().map(|s| display_width(s)).max().unwrap_or(0);
             let dur_strs: Vec<String> = visible
                 .iter()
                 .map(|p| format_duration(p.duration))
@@ -864,9 +861,7 @@ fn render_phase_breakdown(phases: &[PhaseRecord], mode: TimingMode, failed: bool
                 } else {
                     ""
                 };
-                // Pad the label to `name_w` *characters* (not bytes) —
-                // emoji sequences confuse byte-width Rust formatters.
-                let pad = name_w.saturating_sub(label.chars().count());
+                let pad = name_w.saturating_sub(display_width(label));
                 out.push_str(&format!(
                     "\n    {}{}  {:>dw$}  {}{}",
                     label,
@@ -887,9 +882,8 @@ fn render_phase_breakdown(phases: &[PhaseRecord], mode: TimingMode, failed: bool
 /// Phase names are lowercase identifiers (`detect`, `build`,
 /// `bazel_query`, `init`); this renders them as `Detect`, `Build`,
 /// `Bazel query`, `Init` for display. Callers that need a non-naive
-/// display label (e.g. `preflight` → `Pre-flight`) pass an explicit
-/// `display_name` to `ctx.task.phase(...)`; renderers prefer that
-/// over this helper.
+/// display label pass an explicit `display_name` to
+/// `ctx.task.phase(...)`; renderers prefer that over this helper.
 fn titlecase(s: &str) -> String {
     let mut chars = s.chars();
     match chars.next() {
@@ -906,6 +900,106 @@ fn titlecase(s: &str) -> String {
             out
         }
         None => String::new(),
+    }
+}
+
+/// Terminal display width of `s`, in cells, for column alignment.
+///
+/// Phase labels are `<emoji> <ascii-name>` or a bare ASCII name. ASCII is
+/// one cell; the variation selector U+FE0F is zero-width; every other
+/// (non-ASCII) char — i.e. the phase emoji — counts as two cells. This
+/// avoids a full Unicode width table.
+///
+/// The two-cell assumption holds only because every phase emoji is one that
+/// terminals render double-width: a single astral codepoint (`🔨` U+1F528
+/// and friends) or a BMP symbol with default *emoji* presentation (`✨`
+/// U+2728). It would mis-measure a symbol with default *text* presentation
+/// — e.g. the gear U+2699 or warning U+26A0, which render one cell even with
+/// a U+FE0F selector in many terminals — so phase emoji must be chosen from
+/// the double-width set (see the `Phase(emoji=…)` call sites). The U+FE0F
+/// case is handled as zero-width defensively; no current phase emoji uses it.
+fn display_width(s: &str) -> usize {
+    s.chars()
+        .map(|c| match c {
+            '\u{FE0F}' => 0,
+            c if c.is_ascii() => 1,
+            _ => 2,
+        })
+        .sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TimingMode, display_width, render_phase_breakdown};
+    use crate::engine::task_info::PhaseRecord;
+    use std::time::Duration;
+
+    fn phase(name: &str, emoji: &str, secs: u64) -> PhaseRecord {
+        PhaseRecord {
+            name: name.to_string(),
+            description: format!("{name} desc"),
+            duration: Duration::from_secs(secs),
+            interrupted: false,
+            emoji: emoji.to_string(),
+            display_name: String::new(),
+        }
+    }
+
+    #[test]
+    fn display_width_counts_emoji_as_two_ascii_as_one() {
+        assert_eq!(display_width("Setup"), 5);
+        assert_eq!(display_width("🔨 Build"), 8); // astral emoji 2 + " " + "Build"
+        assert_eq!(display_width("🔧 Setup"), 8); // wrench (astral) 2 + 1 + 5
+        assert_eq!(display_width("✨ Format"), 9); // default-emoji BMP 2 + 1 + 6
+        // VS16 is handled as zero-width (defensive; no phase emoji uses it).
+        assert_eq!(display_width("x\u{FE0F}"), 1);
+    }
+
+    /// Re-derives the expected cell width with the same FE0F/ascii/wide model
+    /// as `display_width`, but separately — so the alignment assertion below
+    /// catches a typo/regression in `display_width` (it would still miss a flaw
+    /// in the shared model itself, which the emoji set is curated to avoid).
+    fn cells(s: &str) -> usize {
+        s.chars()
+            .map(|c| {
+                if c == '\u{FE0F}' {
+                    0
+                } else if c.is_ascii() {
+                    1
+                } else {
+                    2
+                }
+            })
+            .sum()
+    }
+
+    #[test]
+    fn detailed_breakdown_aligns_description_column_across_rows() {
+        // Mix an emoji-prefixed phase with a bare-ASCII phase of a different
+        // name length, so codepoint-count and cell-count diverge between rows
+        // — the exact case the old `chars().count()` padding misaligned. The
+        // description column (after the fixed-width duration field) must land
+        // at the same display cell on every row.
+        let out = render_phase_breakdown(
+            &[phase("setup", "🔧", 2), phase("compute_digests", "", 1)],
+            TimingMode::Detailed,
+            false,
+        );
+        let desc_cols: Vec<usize> = out
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| {
+                // Description is the last column; it starts after the final
+                // run of 2+ spaces separating it from the duration field.
+                let gap = l.rfind("  ").unwrap();
+                cells(&l[..gap + 2])
+            })
+            .collect();
+        assert_eq!(desc_cols.len(), 2);
+        assert_eq!(
+            desc_cols[0], desc_cols[1],
+            "description columns misaligned: {out:?}"
+        );
     }
 }
 

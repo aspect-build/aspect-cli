@@ -81,18 +81,6 @@ load("../lint.axl", "LintTrait")
 
 _LOG = feature_logger("GitHub status checks")
 
-_SUBJECT_MAX_LEN = 60
-
-def _truncate_subject(subject):
-    """Truncate subject at a word boundary if it exceeds _SUBJECT_MAX_LEN characters."""
-    if len(subject) <= _SUBJECT_MAX_LEN:
-        return subject
-    window = subject[:_SUBJECT_MAX_LEN - 3]
-    last_space = window.rfind(" ")
-    if last_space > 0:
-        return window[:last_space] + "..."
-    return window + "..."
-
 def _detect_triggered_by(env):
     """Return a short string describing who/what triggered this build."""
     if env.var("GITHUB_ACTIONS"):
@@ -243,7 +231,7 @@ def _github_status_checks(ctx: FeatureContext):
             ctx,
             initial_renderer.init(),
             "running",
-            make_render_ctx(_state, default_targets = "//...", tips = collect_tips_sorted(ctx), api_usage = usage_footer(ctx), last_updated_at = format_run_date(ctx, now_ms(ctx))),
+            make_render_ctx(_state, tips = collect_tips_sorted(ctx), api_usage = usage_footer(ctx), last_updated_at = format_run_date(ctx, now_ms(ctx))),
             dict(_ci_links_base),
             templates,
             metadata_keys,
@@ -339,14 +327,15 @@ def _github_status_checks(ctx: FeatureContext):
     # TaskLifecycleTrait hooks
     # -------------------------------------------------------------------------
 
-    def _task_started(ctx, subject):
+    def _init(ctx):
+        # One-time init on the first task_update: stash the task name (the
+        # shared `make_render_ctx` helper reads it — FeatureContext has no
+        # .task), then create the check run. The subject was already latched
+        # into `_state` by the caller. The title's leading emoji is derived
+        # from the status at compose time (verdict, not kind).
+        subject = _state.get("_subject", "")
         subject_str = (" " + subject) if subject else ""
         _LOG.trace("aspect/%s (%s)%s" % (ctx.task.name, ctx.task.key, subject_str))
-        _state["_subject"] = _truncate_subject(subject)
-
-        # Stash for the shared `make_render_ctx` helper (FeatureContext
-        # has no .task). The title's leading emoji is derived from the
-        # status at compose time (verdict, not kind).
         _state["_task_name"] = ctx.task.name
         _create_check_run(ctx)
 
@@ -404,6 +393,26 @@ def _github_status_checks(ctx: FeatureContext):
                 return
 
     def _task_update(ctx, update):
+        # Latch the subject (raw) before init/render: `setup_phase` sets it on
+        # the first update, but a later update may refine it (e.g. a query task
+        # resolving its targets). Empty means "no change", so keep the prior
+        # value. Stored untruncated — the title composer (`summary_title`) caps
+        # it, while the "Explicit command line" block needs the full pattern.
+        # `_create_check_run` (in `_init`) reads it for the initial title, so
+        # this must run before the init guard.
+        if update.subject:
+            _state["_subject"] = update.subject
+
+        if not _state.get("_initialized"):
+            _state["_initialized"] = True
+            _init(ctx)
+
+            # `_init` (`_create_check_run`) already created the check run and
+            # PATCHed its initial "running" body + details_url. Don't re-render
+            # this same (Setup-mark) update — that would be a redundant PATCH
+            # against the App quota. Subsequent updates render normally.
+            return
+
         status = update.status
         final = update.final
 
@@ -478,7 +487,7 @@ def _github_status_checks(ctx: FeatureContext):
             ctx,
             data,
             status,
-            make_render_ctx(_state, default_targets = "//...", tips = collect_tips_sorted(ctx), api_usage = usage_footer(ctx), last_updated_at = format_run_date(ctx, now_ms(ctx))),
+            make_render_ctx(_state, tips = collect_tips_sorted(ctx), api_usage = usage_footer(ctx), last_updated_at = format_run_date(ctx, now_ms(ctx))),
             _make_links(data),
             templates,
             metadata_keys,
@@ -526,7 +535,6 @@ def _github_status_checks(ctx: FeatureContext):
         if final and extra_batches:
             _send_extra_annotation_batches(ctx, token, check_run_id, output, extra_batches)
 
-    lifecycle.task_started.append(_task_started)
     lifecycle.task_update.append(_task_update)
 
 GithubStatusChecks = feature(

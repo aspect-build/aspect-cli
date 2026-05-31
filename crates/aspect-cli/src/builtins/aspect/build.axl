@@ -4,6 +4,7 @@ A default 'build' task that wraps a 'bazel build' command.
 
 load("./bazel.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
 load("./lib/artifacts.axl", "artifacts")
+load("./lib/bazel_flags.axl", "announce_bazel_args")
 load("./lib/bazel_runner.axl", "run_bazel_task")
 load("./lib/health_check.axl", "HealthCheckTrait")
 load("./lib/lifecycle.axl", "TaskLifecycleTrait")
@@ -24,10 +25,6 @@ build = task(
         "target_pattern_file": args.string(
             default = "",
             description = "Read newline-separated target patterns from this file instead of the command line (mirrors Bazel's --target_pattern_file). Blank lines and `#` comments are ignored. Cannot be combined with command-line target patterns.",
-        ),
-        "announce_rc": args.boolean(
-            default = False,
-            description = "Print the resolved Bazel `.bazelrc` flags before running the build. Useful when debugging which config sections fired or what the final flag set looks like. ASPECT_DEBUG=1 logs the same disclosure regardless of this flag.",
         ),
         "bazel_flags": args.string_list(
             description = "Additional Bazel flags forwarded to the build (e.g. --bazel-flag=--config=ci --bazel-flag=--keep_going). Repeat the flag to pass multiple.",
@@ -53,7 +50,7 @@ build = task(
             default = False,
             description = "Cancel any running Bazel invocation before starting the build.",
         ),
-    },
+    } | announce_bazel_args("the build"),
     traits = [
         BazelTrait,
         HealthCheckTrait,

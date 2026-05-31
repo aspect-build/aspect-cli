@@ -158,6 +158,15 @@ impl BazelRC {
         &self.sources
     }
 
+    /// Every option string across all command sections, in no particular
+    /// order. Used to seed redaction allowlists (e.g.
+    /// `--build_metadata=ALLOW_ENV=…`) before rendering the announce output.
+    pub fn all_option_values(&self) -> impl Iterator<Item = &str> {
+        self.options
+            .values()
+            .flat_map(|opts| opts.iter().map(|o| o.value.as_str()))
+    }
+
     /// Return the source file path for the given option.
     pub fn source_of(&self, option: &RcOption) -> &Path {
         &self.sources[option.source_index]
@@ -220,14 +229,28 @@ impl BazelRC {
         result
     }
 
-    /// Produce a human-readable summary of all options loaded for `command`.
+    /// Render a human-readable summary of all options loaded for `command`,
+    /// for the `--announce-bazel-rc` disclosure.
     ///
-    /// Output is grouped by source file, with flags wrapped at `max_width` columns.
-    /// When `ansi` is true, headers and section names are styled with ANSI escape codes.
+    /// Output is grouped by source file, with flags wrapped at `max_width`
+    /// columns; when `ansi` is true, headers and section names are styled with
+    /// ANSI escapes. Version-gated flags (from `try-import-if-bazel-version`)
+    /// are annotated with `[if <cond>]`.
     ///
-    /// Version-gated flags (from `try-import-if-bazel-version`) are annotated with
-    /// `[if <cond>]` so the condition is visible.
-    pub fn announce(&self, command: &str, ansi: bool, max_width: usize) -> String {
+    /// `root` is the workspace root and `home` the user's home directory; they
+    /// drive how source paths are displayed (see `shorten`). `redact` scrubs
+    /// each flag's value before it's printed — the caller passes the same
+    /// redaction the rest of the CLI uses, so secrets in `--remote_header=…` /
+    /// `--action_env=…` etc. don't leak into CI logs.
+    pub fn announce(
+        &self,
+        command: &str,
+        ansi: bool,
+        max_width: usize,
+        root: &Path,
+        home: Option<&Path>,
+        redact: impl Fn(&str) -> String,
+    ) -> String {
         let (b, d, y, r) = if ansi {
             ("\x1b[1m", "\x1b[2m", "\x1b[33m", "\x1b[0m")
         } else {
@@ -235,28 +258,31 @@ impl BazelRC {
         };
 
         let fmt_flag = |opt: &RcOption| -> String {
+            let value = redact(&opt.value);
             match &opt.version_condition {
-                None => opt.value.clone(),
-                Some(cond) => format!("{}[if {}]{} {}", y, cond, r, opt.value),
+                None => value,
+                Some(cond) => format!("{}[if {}]{} {}", y, cond, r, value),
             }
         };
 
-        // Shorten an absolute path to its last two components (e.g. "bazel/defaults.bazelrc").
+        // Display an rc source path relative to the most meaningful anchor:
+        //   - under the workspace root → `./relative/path`
+        //   - else under $HOME         → `~/relative/path`
+        //   - else                     → the absolute path
+        // so the reader can tell workspace, user, and system rc files apart.
         let shorten = |p: &Path| -> String {
             if p == Path::new("<command line>") {
                 return "client".to_owned();
             }
-            let comps: Vec<_> = p.components().collect();
-            if comps.len() <= 2 {
-                p.display().to_string()
-            } else {
-                let n = comps.len();
-                format!(
-                    "{}/{}",
-                    comps[n - 2].as_os_str().to_string_lossy(),
-                    comps[n - 1].as_os_str().to_string_lossy()
-                )
+            if let Ok(rel) = p.strip_prefix(root) {
+                return format!("./{}", rel.display());
             }
+            if let Some(home) = home
+                && let Ok(rel) = p.strip_prefix(home)
+            {
+                return format!("~/{}", rel.display());
+            }
+            p.display().to_string()
         };
 
         // Fit flags onto lines starting at `start_col`, wrapping at `max_width`.
@@ -555,6 +581,98 @@ import {}
 
         // d is imported twice → --jobs=4 appears twice
         assert_eq!(options.get("build").map(|v| v.len()), Some(2));
+    }
+
+    // ── announce ─────────────────────────────────────────────────────────────
+
+    fn rc_with(sources: &[&Path], options: &[(&str, usize, &str)]) -> BazelRC {
+        let mut map: HashMap<String, Vec<RcOption>> = HashMap::new();
+        for (key, source_index, value) in options {
+            map.entry(key.to_string()).or_default().push(RcOption {
+                value: value.to_string(),
+                command: key.to_string(),
+                source_index: *source_index,
+                version_condition: None,
+            });
+        }
+        BazelRC {
+            options: map,
+            sources: sources.iter().map(|p| p.to_path_buf()).collect(),
+        }
+    }
+
+    #[test]
+    fn announce_shortens_paths_by_anchor() {
+        let root = Path::new("/work/repo");
+        let home = Path::new("/home/dev");
+        let rc = rc_with(
+            &[
+                &root.join(".bazelrc"),          // → ./.bazelrc
+                &home.join(".bazelrc"),          // → ~/.bazelrc
+                Path::new("/etc/bazel.bazelrc"), // → absolute
+            ],
+            &[
+                ("common", 0, "--jobs=4"),
+                ("common", 1, "--keep_going"),
+                ("common", 2, "--curses=no"),
+            ],
+        );
+        let out = rc.announce("build", false, 200, root, Some(home), |s| s.to_string());
+        assert!(out.contains("./.bazelrc"), "{out}");
+        assert!(out.contains("~/.bazelrc"), "{out}");
+        assert!(out.contains("/etc/bazel.bazelrc"), "{out}");
+        assert!(
+            !out.contains("repo/.bazelrc"),
+            "should not show last-2-components: {out}"
+        );
+    }
+
+    #[test]
+    fn announce_anchor_matches_path_segments_not_string_prefix() {
+        // `/work/repo-foo` shares the string prefix `/work/repo` but is NOT a
+        // path-segment descendant, so it must render absolute, not `./-foo/…`.
+        let root = Path::new("/work/repo");
+        let rc = rc_with(
+            &[Path::new("/work/repo-foo/.bazelrc")],
+            &[("common", 0, "--jobs=4")],
+        );
+        let out = rc.announce("build", false, 200, root, None, |s| s.to_string());
+        assert!(out.contains("/work/repo-foo/.bazelrc"), "{out}");
+        assert!(!out.contains("./"), "string-prefix must not anchor: {out}");
+    }
+
+    #[test]
+    fn announce_anchor_prefers_root_when_root_under_home() {
+        // root is itself under home; an rc under root must anchor to the more
+        // specific `./`, not `~/repo/…` (root is checked first).
+        let home = Path::new("/home/dev");
+        let root = Path::new("/home/dev/repo");
+        let rc = rc_with(&[&root.join(".bazelrc")], &[("common", 0, "--jobs=4")]);
+        let out = rc.announce("build", false, 200, root, Some(home), |s| s.to_string());
+        assert!(out.contains("./.bazelrc"), "{out}");
+        assert!(
+            !out.contains("~/repo"),
+            "root anchor must win over home: {out}"
+        );
+    }
+
+    #[test]
+    fn announce_redacts_flag_values() {
+        let root = Path::new("/work/repo");
+        let rc = rc_with(
+            &[&root.join(".bazelrc")],
+            &[("common", 0, "--remote_header=Authorization: Bearer s3cr3t")],
+        );
+        // Redactor that drops everything after the first '=' for env/header-like flags.
+        let redact = |flag: &str| -> String {
+            match flag.split_once('=') {
+                Some((name, _)) => format!("{name}=<REDACTED>"),
+                None => flag.to_string(),
+            }
+        };
+        let out = rc.announce("build", false, 200, root, None, redact);
+        assert!(out.contains("--remote_header=<REDACTED>"), "{out}");
+        assert!(!out.contains("s3cr3t"), "secret leaked: {out}");
     }
 
     // ── Config expansion ─────────────────────────────────────────────────────

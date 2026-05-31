@@ -17,12 +17,10 @@ Aspect-CLI ships with six built-in tasks that drive Bazel for the most common CI
 
 Every task:
 
-- emits a **`task_started`** lifecycle event (drives an initial GitHub check run + BK annotation),
-- emits **`task_update`** events as the build streams BES events (live-rendered status),
-- emits a **`task_complete`** event with the final exit code,
+- emits **`task_update`** events through its lifecycle — the *first* (the `🔧 Setup` phase mark from `setup_phase`) drives surface init (GitHub check run + BK annotation) and carries the `subject`; middle ones live-render BES progress; the *last* (`final=True`) concludes the surfaces. There is a single lifecycle hook; the first and last updates carry the start/complete intent,
 - captures the gRPC sink's invocation UUID into `results["sink_invocation_id"]` immediately after `ctx.bazel.build(...)` returns so the **Aspect Workflows** link surfaces in the live annotation rather than only on completion,
 - runs `bazel_trait.build_start` / `bazel_trait.build_event` / `bazel_trait.build_end` hooks so features (artifact upload, BK section markers) fire,
-- runs `hc_trait.pre_health_check` / `hc_trait.post_health_check` hooks so the runner-environment / health-check BK sections render and so a failed post-check fails the task.
+- runs `hc_trait.health_check` hooks inside `setup_phase` so the runner-environment / health-check BK sections render before the build.
 
 ---
 

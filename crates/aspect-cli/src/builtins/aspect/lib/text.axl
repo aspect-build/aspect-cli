@@ -4,8 +4,10 @@ Currently:
   - `format_int_comma(n)` — thousands separators on integers.
   - `pluralize(count, singular, plural=None)` — `"N noun"` / `"N nouns"`
     with thousands-separated count.
+  - `truncate_for_title(text, max_len)` — word-boundary truncation with a
+    `…` suffix, for status-surface titles.
 
-Both are stateless, pure-string helpers. Add a new function here when
+All are stateless, pure-string helpers. Add a new function here when
 it's wanted by more than one module and not specific to any one
 domain (bazel results, lint results, etc.).
 """
@@ -46,3 +48,25 @@ def pluralize(count, singular, plural = None):
     if plural == None:
         plural = singular + "s"
     return format_int_comma(count) + " " + (singular if count == 1 else plural)
+
+# Default character budget for the subject (target pattern / formatter
+# target / …) embedded in a status-surface title. Long target lists —
+# e.g. a delivery run over dozens of resolved labels — are truncated to
+# this so the title stays scannable.
+SUBJECT_TITLE_MAX = 60
+
+def truncate_for_title(text, max_len = SUBJECT_TITLE_MAX):
+    """Truncate `text` to `max_len` chars for a status-surface title,
+    preferring a word boundary in the back half and appending a `…`.
+
+    Returns `text` unchanged when it already fits. Used by the per-kind
+    `summary_title` helpers to cap the subject, and by the bazel renderer
+    to cap the whole composed title to GitHub's length limit.
+    """
+    if len(text) <= max_len:
+        return text
+    window = text[:max_len - 1]
+    last_space = window.rfind(" ")
+    if last_space > max_len // 2:
+        return window[:last_space] + "…"
+    return window + "…"

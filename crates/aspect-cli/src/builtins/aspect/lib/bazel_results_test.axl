@@ -458,10 +458,10 @@ def _make_results_large():
 # Shared render context and links
 # ---------------------------------------------------------------------------
 
-def _render_ctx(targets = "//...", task_name = "test", progress = ""):
+def _render_ctx(subject = "//...", task_name = "test", progress = ""):
     return {
         "triggered_by": "ci-bot (workflow_dispatch)",
-        "targets": targets,
+        "subject": subject,
         "started_ms": 1744630000000,
         "ended_ms": 1744630002200,
         "progress": progress,
@@ -614,7 +614,7 @@ def _test_impl(ctx):
     sep = "=" * 70
 
     for (label, data, status, targets, with_artifact, ci, metadata_keys, progress) in scenarios:
-        rc = _render_ctx(targets = targets, progress = progress)
+        rc = _render_ctx(subject = targets, progress = progress)
         lk = _links(with_artifact = with_artifact, ci = ci)
         out = render_check_output(ctx, data, status, rc, lk, metadata_keys = metadata_keys)
         print(sep)

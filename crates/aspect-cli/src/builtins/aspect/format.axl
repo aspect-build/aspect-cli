@@ -18,14 +18,14 @@ Usage:
 load("@std//time.axl", "sleep_iter")
 load("./bazel.axl", "BazelTrait")
 load("./lib/artifacts.axl", "artifacts")
-load("./lib/bazel_flags.axl", "setup_bazel_command")
+load("./lib/bazel_flags.axl", "announce_bazel_args", "resolve_bazel_announce")
 load("./lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event")
 load("./lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
 load("./lib/environment.axl", "color_enabled", "error", "info", "warn")
 load("./lib/format_results.axl", fmt_init_data = "init_data", format_conclusion = "conclusion")
 load("./lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_changed_files_listing")
 load("./lib/health_check.axl", "HealthCheckTrait")
-load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "pick_task_status", "preflight_phase", "resolve_severity", "setup_phase", "task_update")
+load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "pick_task_status", "resolve_severity", "setup_phase", "task_update")
 load("./lib/path_glob.axl", "match_any")
 load("./lib/path_normalize.axl", "normalize_files_for_cwd")
 load("./lib/repro_commands.axl", "build_aspect_command", "build_bazel_command", "explicit_flags", "print_repro_and_fix", "repro_prefix", "task_cli_path")
@@ -280,7 +280,7 @@ def _append_fix_commands(ctx, data):
     })
 
 def _emit_final(ctx, lifecycle, data, exit_code):
-    """Emit the terminal task_update and task_complete for status-check consumers."""
+    """Emit the terminal task_update for status-check consumers."""
     status = _pick_status(data, had_failure = exit_code != 0, terminal = True)
     if not data.get("finish_time_ms"):
         data["finish_time_ms"] = now_ms(ctx)
@@ -304,8 +304,6 @@ def _emit_final(ctx, lifecycle, data, exit_code):
             ),
         ))
     print_repro_and_fix(ctx.std, data, status)
-    for handler in lifecycle.task_complete:
-        handler(ctx, exit_code)
 
     return TaskConclusion(
         exit_code = exit_code,
@@ -320,20 +318,19 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     lifecycle = ctx.traits[TaskLifecycleTrait]
     ansi = color_enabled(ctx.std)
 
-    # Initialize data and fire task_started FIRST so any subsequent failure
-    # still creates a visible status check.
+    # Initialize data for status-check emission.
     data = fmt_init_data()
     data["start_time_ms"] = now_ms(ctx)
     data["format"]["scope"] = ctx.args.scope
     data["format"]["formatter_target"] = ctx.args.formatter_target
     severity_resolved = resolve_severity(ctx)
     data["format"]["severity_resolved"] = severity_resolved
-    setup_phase(ctx, lifecycle)
-    for handler in lifecycle.task_started:
-        handler(ctx, ctx.args.formatter_target)
 
-    flags = setup_bazel_command(ctx, "build", bazel_trait)
-    preflight_phase(ctx, lifecycle, hc_trait)
+    # The single pre-task setup phase (status surface, rc parse, health
+    # checks); returns the resolved flags (a failed health check fails the task
+    # inside setup_phase).
+    flags = setup_phase(ctx, lifecycle, ctx.args.formatter_target, "format_results", data, hc_trait, bazel_trait)
+    announce_version, announce_command = resolve_bazel_announce(ctx)
 
     flags.extend(LOCAL_SPAWN_FLAGS)
 
@@ -371,6 +368,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         build_events = build_events,
         flags = flags,
         current_dir = ctx.std.env.aspect_root_dir(),
+        announce_version = announce_version,
+        announce_command = announce_command,
     )
 
     # `build.sink_invocation_id` is minted inside the runtime's `Build::spawn`
@@ -748,10 +747,6 @@ format = task(
             long = "formatter-arg",
             description = "Extra positional arguments forwarded to the formatter binary on every invocation, before the file list. Set this in a format alias's `defaults` to encode formatter-specific flags (e.g. `--check=false`, language toggles). Threaded through both the aspect-task spawn (`<formatter_target> <formatter_args> <files>`) and the vanilla-bazel alternate fix command (`bazel run <formatter_target> -- <formatter_args> <files>`).",
         ),
-        "announce_rc": args.boolean(
-            default = False,
-            description = "Print the resolved Bazel `.bazelrc` flags before running the formatter build. Useful when debugging which config sections fired or what the final flag set looks like. ASPECT_DEBUG=1 logs the same disclosure regardless of this flag.",
-        ),
         "bazel_flags": args.string_list(
             long = "bazel-flag",
             description = "Additional Bazel flags forwarded to the formatter build. Repeat the flag to pass multiple — e.g. `--bazel-flag=--config=ci --bazel-flag=--keep_going`.",
@@ -779,7 +774,7 @@ format = task(
             maximum = 4096,
             minimum = 0,
         ),
-    },
+    } | announce_bazel_args("the formatter build"),
     traits = [
         BazelTrait,
         HealthCheckTrait,

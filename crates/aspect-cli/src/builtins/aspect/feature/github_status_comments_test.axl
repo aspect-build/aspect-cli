@@ -247,8 +247,8 @@ def _gazelle_compact(status, data):
         return ""
     return ""
 
-def _delivery_compact(status, dr):
-    counts = (dr.get("delivery", {}) or {}).get("counts", {}) or {}
+def _delivery_compact(status, data):
+    counts = (data.get("delivery", {}) or {}).get("counts", {}) or {}
     ok = counts.get("ok", 0)
     skip = counts.get("skip", 0)
     warn = counts.get("warn", 0)
@@ -270,7 +270,7 @@ def _delivery_compact(status, dr):
         return "no deliveries" if status == "passed" else ""
     if status == "running":
         done = ok + skip + warn + fail
-        total = (dr.get("delivery", {}) or {}).get("targets_total", 0) or 0
+        total = (data.get("delivery", {}) or {}).get("targets_total", 0) or 0
         if done > 0:
             if total > 0:
                 return "%d/%d delivered" % (done, total)

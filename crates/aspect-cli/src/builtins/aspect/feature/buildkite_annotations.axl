@@ -23,7 +23,6 @@ load("../lib/bazel_results.axl", "format_run_date", "html_escape", "now_ms", "re
 load(
     "../lib/check_dispatch.axl",
     "apply_artifact_links",
-    "kind_for_task",
     "make_render_ctx",
     "renderer_for_kind",
     "should_emit_update",
@@ -249,8 +248,13 @@ def _buildkite_annotations(ctx: FeatureContext):
         links["bes_url"] = render_bes_url(data)
         return links
 
-    def _task_started(ctx, subject):
-        _state["_subject"] = subject
+    def _init(ctx):
+        # One-time init on the first task_update — cache identity for
+        # `make_render_ctx` (FeatureContext has no .task). The subject was
+        # already latched into `_state` by the caller. The "in progress"
+        # annotation is written by the render path below, not here: the first
+        # task_update is the Setup phase mark, which carries a `kind`, so the
+        # normal render emits the initial annotation.
         _state["_started_ms"] = now_ms(ctx)
         _state["_task_name"] = ctx.task.name
         _state["_triggered_by"] = (ctx.std.env.var("BUILDKITE_BUILD_CREATOR") or
@@ -258,29 +262,23 @@ def _buildkite_annotations(ctx: FeatureContext):
         _state["_context_id"] = "aspect-%s-%s" % (ctx.task.name, ctx.task.key)
         _state["_task_label"] = _task_label(ctx.task.key)
 
+        subject = _state.get("_subject", "")
         subject_str = (" " + subject) if subject else ""
         _LOG.trace("aspect/%s (%s)%s (ctx=%s)" %
                    (ctx.task.name, ctx.task.key, subject_str, _state["_context_id"]))
 
-        # Emit "in progress" up-front so the annotation appears on the
-        # BK build page immediately. Aspect Web UI link fills in later
-        # when the terminal task_update has a sink_invocation_id.
-        initial_kind = kind_for_task(ctx.task.name)
-        renderer = renderer_for_kind(initial_kind) or renderer_for_kind("bazel_results")
-        initial_results = renderer.init()
-        out = renderer.render(
-            ctx,
-            initial_results,
-            "running",
-            make_render_ctx(_state, tips = collect_tips_sorted(ctx), api_usage = usage_footer(ctx), last_updated_at = format_run_date(ctx, now_ms(ctx))),
-            _make_links(initial_results),
-            None,
-            None,
-        )
-        body = _format_body(out, initial_kind, "running", task_label = _state["_task_label"])
-        _write_annotation(ctx, "info", body, _state["_context_id"])
-
     def _task_update(ctx, update):
+        # Latch the subject before init/render: `setup_phase` sets it on the
+        # first update, but a later update may refine it (e.g. a query task
+        # resolving its targets). Empty means "no change", so keep the prior
+        # value. Init reads `_state["_subject"]`, so this must run first.
+        if update.subject:
+            _state["_subject"] = update.subject
+
+        if not _state.get("_initialized"):
+            _state["_initialized"] = True
+            _init(ctx)
+
         status = update.status
         final = update.final
 
@@ -334,7 +332,6 @@ def _buildkite_annotations(ctx: FeatureContext):
                        (context_id, style, len(body)))
         _write_annotation(ctx, style, body, context_id)
 
-    lifecycle.task_started.append(_task_started)
     lifecycle.task_update.append(_task_update)
 
 BuildkiteAnnotations = feature(

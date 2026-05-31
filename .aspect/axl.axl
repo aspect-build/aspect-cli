@@ -644,7 +644,7 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
     }
     render_ctx = {
         "triggered_by": "tester",
-        "targets": "//...",
+        "subject": "//...",
         "started_ms": 1744630000000,
         "ended_ms": 1744630002000,
         "progress": "",

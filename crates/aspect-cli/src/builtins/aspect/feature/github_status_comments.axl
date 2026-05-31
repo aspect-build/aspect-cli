@@ -1019,8 +1019,8 @@ def _github_status_comments(ctx: FeatureContext):
     _state = {}
 
     def _empty_results_subset():
-        """Default _results_subset for the brief window between
-        _task_started and the first BES update."""
+        """Default _results_subset for the brief window between the first
+        task_update (init) and the first BES-data update."""
         return _results_subset(
             init_data(),
             0,  # elapsed_ms
@@ -1483,13 +1483,13 @@ def _github_status_comments(ctx: FeatureContext):
         # immediately via the state block we just PATCHed.
         _state["_last_pr_comment_upsert_epoch_s"] = now_epoch
 
-    def _task_started(ctx, subject):
-        # Cache task identity from TaskContext so the FeatureContext-level closure
-        # can build the artifact name without reaching for ctx.task (which doesn't
-        # exist on FeatureContext).
+    def _init(ctx):
+        # One-time init on the first task_update. Caches task identity from
+        # TaskContext so the FeatureContext-level closure can build the artifact
+        # name without reaching for ctx.task (which doesn't exist on
+        # FeatureContext), then authenticates so `_publish` has a token.
         _state["_task_name"] = ctx.task.name
         _state["_task_key"] = ctx.task.key
-        _state["_status"] = "running"
 
         # Anchor for the time-based throttle in `_task_update`.
         _state["_task_started_at"] = monotonic()
@@ -1503,6 +1503,8 @@ def _github_status_comments(ctx: FeatureContext):
             _reason = auth_reason,
         )
         if not token:
+            # `_publish` no-ops without `_github_token`, so leaving it unset
+            # disables this surface for the rest of the task.
             _LOG.warn(ctx.std, "Authentication failed for %s/%s — %s" % (
                 owner,
                 repo,
@@ -1517,9 +1519,11 @@ def _github_status_comments(ctx: FeatureContext):
         if upgraded:
             _state["_ci_link_url"] = upgraded
 
-        _publish(ctx)
-
     def _task_update(ctx, update):
+        if not _state.get("_initialized"):
+            _state["_initialized"] = True
+            _init(ctx)
+
         _state["_status"] = update.status
 
         # Latch the producer-supplied progress record. Mirrors the BK /
@@ -1620,7 +1624,6 @@ def _github_status_comments(ctx: FeatureContext):
                 _state["_last_publish_s"] = now
         _publish(ctx, final = update.final)
 
-    lifecycle.task_started.append(_task_started)
     lifecycle.task_update.append(_task_update)
 
 # ─── Public test hooks ────────────────────────────────────────────────────────

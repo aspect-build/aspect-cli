@@ -42,9 +42,8 @@ use starlark::values::starlark_value;
 /// `display_name` is an optional caller-supplied override for the
 /// phase's display label. When non-empty, renderers use it verbatim;
 /// when empty, they titlecase `name` themselves (`build` → `Build`,
-/// `bazel_query` → `Bazel query`). The only standard phase that needs
-/// this is `preflight` → `Pre-flight` (naive titlecase produces
-/// `Preflight` which reads oddly).
+/// `bazel_query` → `Bazel query`). Set it only when naive titlecase
+/// reads oddly for a given phase id.
 #[derive(Debug, Clone)]
 pub struct PhaseRecord {
     pub name: String,
@@ -102,7 +101,7 @@ impl<'v> StarlarkValue<'v> for TaskPhase {
 
 #[starlark_module]
 fn task_phase_methods(registry: &mut MethodsBuilder) {
-    /// Phase id (`build`, `test`, `preflight`, `init`, …) — the
+    /// Phase id (`setup`, `build`, `test`, `init`, …) — the
     /// lowercase identifier callers passed as `Phase(name=...)`.
     #[starlark(attribute)]
     fn name<'v>(this: Value<'v>) -> anyhow::Result<String> {
@@ -143,9 +142,9 @@ fn task_phase_methods(registry: &mut MethodsBuilder) {
         Ok(this.downcast_ref::<TaskPhase>().unwrap().emoji.clone())
     }
 
-    /// Producer-supplied display-label override (e.g. `"Pre-flight"`)
-    /// from the input `Phase(display_name=...)`. Renderers use this
-    /// verbatim when non-empty; when empty, they titlecase `name`.
+    /// Producer-supplied display-label override from the input
+    /// `Phase(display_name=...)`. Renderers use this verbatim when
+    /// non-empty; when empty, they titlecase `name`.
     #[starlark(attribute)]
     fn display_name<'v>(this: Value<'v>) -> anyhow::Result<String> {
         Ok(this
@@ -383,9 +382,8 @@ fn task_info_methods(registry: &mut MethodsBuilder) {
     ///
     /// `display_name` is an optional display-label override. When
     /// non-empty, renderers use it verbatim; when empty, they
-    /// titlecase `name`. Use it when naive titlecasing diverges from
-    /// the natural English form (`preflight` → `Pre-flight`); regular
-    /// underscore-separated identifiers (`bazel_query` →
+    /// titlecase `name`. Use it when naive titlecasing reads oddly;
+    /// regular underscore-separated identifiers (`bazel_query` →
     /// `Bazel query`) don't need it.
     ///
     /// Same-name no-op calls don't update emoji or display_name on

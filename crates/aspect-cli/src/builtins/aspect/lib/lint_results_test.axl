@@ -357,10 +357,10 @@ def _make_results_annotations_changed_regions():
 
 # ─── Test harness ─────────────────────────────────────────────────────────────
 
-def _render_ctx(targets = "//...", task_name = "lint"):
+def _render_ctx(subject = "//...", task_name = "lint"):
     return {
         "triggered_by": "Greg Magolan (workflow_dispatch)",
-        "targets": targets,
+        "subject": subject,
         "started_ms": 1744630000000,
         "ended_ms": 1744630004500,
         "progress": "",
@@ -642,7 +642,7 @@ def _test_impl(ctx):
     sep = "=" * 70
 
     for (label, data, status, targets, with_artifact, ci, metadata_keys) in scenarios:
-        rc = _render_ctx(targets = targets)
+        rc = _render_ctx(subject = targets)
         lk = _links(with_artifact = with_artifact, ci = ci)
         out = render_check_output(ctx, data, status, rc, lk, metadata_keys = metadata_keys)
         print(sep)

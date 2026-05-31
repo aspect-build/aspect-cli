@@ -20,6 +20,12 @@ Scenarios:
 """
 
 load("./delivery_results.axl", "add_result", "init_data", "render_check_output")
+load("./text.axl", "SUBJECT_TITLE_MAX")
+
+# A resolved subject far longer than the title's character budget (60),
+# as a query-driven delivery over many labels would produce. The title
+# must truncate it; see `_check_long_subject_title_is_capped`.
+_LONG_SUBJECT = " ".join(["//apps/service_%d:release" % i for i in range(12)])
 
 # ─── Fake-data builders ───────────────────────────────────────────────────────
 
@@ -245,10 +251,10 @@ def _make_build_failed():
 
 # ─── Test harness ─────────────────────────────────────────────────────────────
 
-def _render_ctx(targets = "//apps/...", task_name = "delivery", progress = ""):
+def _render_ctx(subject = "//apps/...", task_name = "delivery", progress = ""):
     return {
         "triggered_by": "Greg Magolan (workflow_dispatch)",
-        "targets": targets,
+        "subject": subject,
         "started_ms": 1744630000000,
         "ended_ms": 1744630012500,
         "progress": progress,
@@ -280,7 +286,7 @@ def _links(ci = "buildkite"):
 
 def _test_impl(ctx):
     scenarios = [
-        # (label,                            data,                     status,     targets,        ci,          metadata_keys, progress)
+        # (label,                            data,                     status,     subject,        ci,          metadata_keys, progress)
         ("1. all-delivered · BK", _make_all_delivered(), "passed", "//apps/...", "buildkite", None, ""),
         ("2. mixed-outcomes · BK", _make_mixed(), "failed", "//apps/...", "buildkite", None, ""),
         ("3. all-skipped · GH", _make_all_skipped(), "passed", "//apps/...", "github", None, ""),
@@ -301,12 +307,16 @@ def _test_impl(ctx):
         # all-modifiers path. The dry-run scenario above covers the
         # single-modifier case.
         ("13. mode=always · dry-run · untracked", _make_always_dry_run_untracked(), "passed", "//apps/...", "buildkite", None, ""),
+        # Long resolved subject — a query-driven delivery resolves many
+        # labels and emits them as a refined `subject`. The title must cap
+        # it (asserted in `_check_long_subject_title_is_capped`).
+        ("14. long resolved subject (capped)", _make_all_delivered(), "passed", _LONG_SUBJECT, "buildkite", None, ""),
     ]
 
     sep = "=" * 70
 
-    for (label, data, status, targets, ci, metadata_keys, progress) in scenarios:
-        rc = _render_ctx(targets = targets, progress = progress)
+    for (label, data, status, subject, ci, metadata_keys, progress) in scenarios:
+        rc = _render_ctx(subject = subject, progress = progress)
         lk = _links(ci = ci)
         out = render_check_output(ctx, data, status, rc, lk, metadata_keys = metadata_keys)
         print(sep)
@@ -321,9 +331,29 @@ def _test_impl(ctx):
         print(out["text"][:4000])
         print("")
 
+    _check_long_subject_title_is_capped(ctx)
+
     print(sep)
     print("All " + str(len(scenarios)) + " delivery scenarios rendered without error.")
     return 0
+
+def _check_long_subject_title_is_capped(ctx):
+    """A resolved subject longer than the title budget is truncated with a
+    `…` in the rendered title, not emitted whole."""
+    rc = _render_ctx(subject = _LONG_SUBJECT)
+    out = render_check_output(ctx, _make_all_delivered(), "passed", rc, _links())
+    title = out["title"]
+    if _LONG_SUBJECT in title:
+        fail("long subject not truncated in title: %r" % title)
+    if "…" not in title:
+        fail("truncated title missing `…` ellipsis: %r" % title)
+
+    # The subject is capped at SUBJECT_TITLE_MAX; the rest of the title is the
+    # emoji + " delivery " + " · N delivered" verdict (~30 chars). A bound just
+    # past that catches a partial- or non-truncation regression — a full
+    # untruncated subject (300+ chars) would blow well past it.
+    if len(title) > SUBJECT_TITLE_MAX + 40:
+        fail("title unexpectedly long (%d chars): %r" % (len(title), title))
 
 delivery_template_snapshot_tests = task(
     name = "test-delivery-template-snapshots",

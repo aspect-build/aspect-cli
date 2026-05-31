@@ -4,7 +4,7 @@ Run with:
   aspect dev test-bazel-flags
 """
 
-load("./bazel_flags.axl", "resolve_flags", "resolve_startup_flags", "setup_bazel_command")
+load("./bazel_flags.axl", "announce_bazel_args", "resolve_announce", "resolve_bazel_announce", "resolve_flags", "resolve_startup_flags", "setup_bazel_command")
 
 def _eq(label, got, want):
     if got != want:
@@ -29,6 +29,41 @@ def _fake_ctx(bazel_startup_flags = [], bazel_flags = []):
         bazel_startup_flags = bazel_startup_flags,
         bazel_flags = bazel_flags,
     ))
+
+def _ctx_with_ci(on_ci):
+    """Stand-in `ctx` whose `std.env.var` reports a CI marker (or not),
+    so `resolve_announce`'s `auto` branch can be exercised deterministically."""
+    env_vars = {"CI": "1"} if on_ci else {}
+    return struct(std = struct(env = struct(var = lambda name: env_vars.get(name))))
+
+# ── resolve_announce ─────────────────────────────────────────────────────
+
+def _test_resolve_announce_auto_follows_ci(ctx):
+    _eq("auto on CI", resolve_announce(_ctx_with_ci(True), "auto"), True)
+    _eq("auto off CI", resolve_announce(_ctx_with_ci(False), "auto"), False)
+
+def _test_resolve_announce_explicit_overrides_ci(ctx):
+    # Explicit true/false ignore the environment.
+    _eq("true off CI", resolve_announce(_ctx_with_ci(False), "true"), True)
+    _eq("false on CI", resolve_announce(_ctx_with_ci(True), "false"), False)
+
+def _test_resolve_bazel_announce_maps_args_to_tuple(_ctx):
+    # Distinct version/command values catch a swapped or copy-pasted read.
+    ctx = struct(
+        std = struct(env = struct(var = lambda name: None)),  # off CI
+        args = struct(announce_bazel_version = "true", announce_bazel_command = "false"),
+    )
+    _eq("(version, command) order", resolve_bazel_announce(ctx), (True, False))
+
+def _test_announce_bazel_args_shape(_ctx):
+    """`announce_bazel_args` returns exactly the three flags every
+    Bazel-spawning task must declare (the `resolve_*` contract)."""
+    aa = announce_bazel_args("the build")
+    _eq(
+        "announce arg keys",
+        sorted(aa.keys()),
+        ["announce_bazel_command", "announce_bazel_rc", "announce_bazel_version"],
+    )
 
 # ── resolve_startup_flags ────────────────────────────────────────────────
 
@@ -136,10 +171,10 @@ def _test_setup_bazel_command_applies_to_ctx_bazel(ctx):
 # ── contract enforcement ─────────────────────────────────────────────────
 #
 # The helpers fail with a clear message when a calling task omits the
-# required args (`bazel_flags`, `bazel_startup_flags`, `announce_rc`).
-# Happy-path coverage is implicit in every other subtest — the test
-# task declares all three args. Failure-path coverage would require a
-# second task without the args, which isn't worth the test plumbing.
+# required args (`bazel_flags`, `bazel_startup_flags`, the `announce_bazel_*`
+# trio). Happy-path coverage is implicit in every other subtest — the test
+# task declares them all. Failure-path coverage would require a second task
+# without the args, which isn't worth the test plumbing.
 
 def _test_impl(ctx):
     _test_startup_cli_only(ctx)
@@ -149,11 +184,15 @@ def _test_impl(ctx):
     _test_startup_input_list_not_mutated(ctx)
     _test_flags_full_chain_order(ctx)
     _test_flags_empty_defaults(ctx)
+    _test_resolve_announce_auto_follows_ci(ctx)
+    _test_resolve_announce_explicit_overrides_ci(ctx)
+    _test_resolve_bazel_announce_maps_args_to_tuple(ctx)
+    _test_announce_bazel_args_shape(ctx)
 
     # setup_bazel_command mutates the real `ctx.bazel.startup_flags`;
     # run last so the mutation can't bleed into earlier pure subtests.
     _test_setup_bazel_command_applies_to_ctx_bazel(ctx)
-    print("bazel_flags_test.axl: OK (8 sections)")
+    print("bazel_flags_test.axl: OK (12 sections)")
     return 0
 
 bazel_flags_tests = task(
@@ -164,7 +203,9 @@ bazel_flags_tests = task(
     # the standard arg set so the test task satisfies the helper
     # contracts.
     args = {
-        "announce_rc": args.boolean(default = False),
+        "announce_bazel_rc": args.string(default = "auto", values = ["auto", "true", "false"], long = "announce-bazel-rc"),
+        "announce_bazel_version": args.string(default = "auto", values = ["auto", "true", "false"], long = "announce-bazel-version"),
+        "announce_bazel_command": args.string(default = "auto", values = ["auto", "true", "false"], long = "announce-bazel-command"),
         "bazel_flags": args.string_list(long = "bazel-flag"),
         "bazel_startup_flags": args.string_list(long = "bazel-startup-flag"),
     },
