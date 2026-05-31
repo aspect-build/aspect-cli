@@ -569,8 +569,18 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
     # `formatter_args` are extra args always passed to the formatter binary —
     # an alias-level knob for formatter-specific flags (e.g. `--check=false`).
-    # Order: formatter args first, then the discovered file list.
+    # `formatter_args_for_scope_all` is appended only when the spawn would
+    # otherwise pass zero positional files (typically `--scope=all`): designed
+    # for bare binaries that need an explicit tree-walk flag like buildifier's
+    # `-r .`. Gating on `not format_args` keeps the flag inert in
+    # `--scope=changed` and explicit-file modes so it can't turn a per-file
+    # invocation into a whole-tree rewrite.
+    # Order: formatter args first, then the (possibly empty) discovered file
+    # list. Scope-all extras come after the file list so they sit where a
+    # user-typed `-r .` would naturally land relative to file paths.
     spawn_args = list(ctx.args.formatter_args) + format_args
+    if not format_args:
+        spawn_args = spawn_args + list(ctx.args.formatter_args_for_scope_all)
     exit = r.spawn(ep, spawn_args, cwd = spawn_cwd).wait()
 
     if not exit.success:
@@ -624,6 +634,32 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         else:
             scope_text = ""
         print("No files%s were modified." % scope_text)
+
+        # `--scope=all` passes no positionals; the formatter is expected to
+        # walk the tree itself. Bare binaries (e.g. buildifier) exit 0 having
+        # done nothing in that case, which the diff phase then reports as
+        # "all files are properly formatted" — misleading when the tree
+        # actually has formatting issues. The `run_in_cwd=True + empty
+        # formatter_args_for_scope_all` combination is the strong signal:
+        # users only set `run_in_cwd` for bare binaries, and an empty
+        # `formatter_args_for_scope_all` means no tree-walk flag was supplied
+        # for the scope-all path. Recommend the scope-all-only knob so the
+        # `--scope=changed` path stays unaffected.
+        if (
+            ctx.args.scope == "all" and
+            not explicit_files and
+            ctx.args.run_in_cwd and
+            not ctx.args.formatter_args_for_scope_all
+        ):
+            info(ctx.std, (
+                "Formatter ran in `--scope=all` mode with no positional files. Bare formatter " +
+                "binaries (e.g. `@buildifier_prebuilt//buildifier`) exit silently in this case. " +
+                "Set `formatter_args_for_scope_all` in your alias to the formatter's tree-walk " +
+                "flag (e.g. `[\"-r\", \".\"]` for buildifier); the flag fires only when no " +
+                "positional files are passed, so `--scope=changed` keeps working unchanged. " +
+                "Alternatively, wrap the binary in a `format_multirun` target from rules_lint, " +
+                "which walks the tree itself."
+            ))
         return _emit_final(ctx, lifecycle, data, 0)
 
     # Pattern filters hide files from the user-facing affected list and the
@@ -745,7 +781,11 @@ format = task(
         ),
         "formatter_args": args.string_list(
             long = "formatter-arg",
-            description = "Extra positional arguments forwarded to the formatter binary on every invocation, before the file list. Set this in a format alias's `defaults` to encode formatter-specific flags (e.g. `--check=false`, language toggles). Threaded through both the aspect-task spawn (`<formatter_target> <formatter_args> <files>`) and the vanilla-bazel alternate fix command (`bazel run <formatter_target> -- <formatter_args> <files>`).",
+            description = "Extra positional arguments forwarded to the formatter binary on every invocation, before the file list. Set this in a format alias's `defaults` to encode formatter-specific flags (e.g. `--check=false`, language toggles). Threaded through both the aspect-task spawn (`<formatter_target> <formatter_args> <files>`) and the vanilla-bazel alternate fix command (`bazel run <formatter_target> -- <formatter_args> <files>`). For tree-walk flags that should fire only in `--scope=all` (e.g. buildifier's `-r .`), use `formatter_args_for_scope_all` instead — args set here also fire in `--scope=changed` mode and would reformat the whole tree instead of the file list.",
+        ),
+        "formatter_args_for_scope_all": args.string_list(
+            long = "formatter-arg-for-scope-all",
+            description = "Extra positional arguments appended to the formatter binary's argv only when the spawn would otherwise pass zero positional files — i.e. when `--scope=all` is in effect, no positional `files` were supplied, and change-detection did not produce a file list. Designed for bare formatter binaries that need an explicit tree-walk flag to do anything useful in scope-all mode. Example: `formatter_args_for_scope_all = [\"-r\", \".\"]` for `@buildifier_prebuilt//buildifier`. Has no effect in `--scope=changed` (the default) or when positional files are supplied, so it cannot accidentally turn a per-file invocation into a whole-tree rewrite. Wrapper targets like `format_multirun` from rules_lint walk on their own and don't need this.",
         ),
         "bazel_flags": args.string_list(
             long = "bazel-flag",
