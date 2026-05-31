@@ -661,9 +661,30 @@ def _test_impl(ctx):
     # any failure surfaces with the renderer scenarios already validated.
     _annotation_scenarios(ctx)
 
+    _check_fix_renders_before_reproduce(ctx)
+
     print(sep)
     print("All " + str(len(scenarios)) + " lint scenarios + annotation pipeline rendered without error.")
     return 0
+
+def _check_fix_renders_before_reproduce(ctx):
+    """The Fix block renders before the Reproduce block in the details body.
+
+    lint is the canonical kind carrying both: a `--fix` command (Fix) and the
+    rerun command (Reproduce). The fix — the actionable command — must lead."""
+    data = _make_results_mixed()
+    data["fix_commands"] = [{"command": "aspect lint --fix //...", "description": ""}]
+    data["repro_commands"] = [{"command": "aspect lint //...", "description": ""}]
+    out = render_check_output(ctx, data, "failed", _render_ctx(), _links())
+    body = out["text"]
+    fix_at = body.find("### 🛠️ Fix")
+    repro_at = body.find("### 🔁 Reproduce")
+    if fix_at < 0:
+        fail("Fix block missing from rendered body: %r" % body[:400])
+    if repro_at < 0:
+        fail("Reproduce block missing from rendered body: %r" % body[:400])
+    if fix_at > repro_at:
+        fail("Fix block must render before Reproduce (fix@%d, repro@%d)" % (fix_at, repro_at))
 
 lint_template_snapshot_tests = task(
     name = "test-lint-template-snapshots",

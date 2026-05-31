@@ -251,7 +251,7 @@ _… {{ group.overflow }} more {{ group.label_singular }} not shown._
 {% endif %}
 </details>
 {% endfor %}{% endif %}
-""" + REPRO_COMMANDS_BLOCK + FIX_COMMANDS_BLOCK + SHARED_DETAILS_BODY_TEMPLATE
+""" + FIX_COMMANDS_BLOCK + REPRO_COMMANDS_BLOCK + SHARED_DETAILS_BODY_TEMPLATE
 
 # ─── Details body ─────────────────────────────────────────────────────────────
 

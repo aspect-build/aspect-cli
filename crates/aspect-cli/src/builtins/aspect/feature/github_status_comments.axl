@@ -168,9 +168,9 @@ _No tasks have reported yet._
 > {{ tip.silence_hint }}{% endif %}
 
 {% endfor %}{% endif -%}
-{% if repro_rows %}
-## 🔁 Reproduce
-{% for r in repro_rows %}{% if r.show_heading %}
+{% if fix_rows %}
+## 🛠️ Fix
+{% for r in fix_rows %}{% if r.show_heading %}
 #### {% if r.severity_emoji %}{{ r.severity_emoji }} {% endif %}{% if r.kind %}{{ r.kind }}{% endif %}{% if r.task_keys %} ({{ r.task_keys|join(" · ") }}){% endif %}{% endif %}
 ```
 {% if r.description %}# {{ r.description }}
@@ -179,9 +179,9 @@ _No tasks have reported yet._
 {% endfor %}
 """ + ASPECT_CLI_INSTALL_HINT_MARKDOWN + """
 {% endif -%}
-{% if fix_rows %}
-## 🛠️ Fix
-{% for r in fix_rows %}{% if r.show_heading %}
+{% if repro_rows %}
+## 🔁 Reproduce
+{% for r in repro_rows %}{% if r.show_heading %}
 #### {% if r.severity_emoji %}{{ r.severity_emoji }} {% endif %}{% if r.kind %}{{ r.kind }}{% endif %}{% if r.task_keys %} ({{ r.task_keys|join(" · ") }}){% endif %}{% endif %}
 ```
 {% if r.description %}# {{ r.description }}

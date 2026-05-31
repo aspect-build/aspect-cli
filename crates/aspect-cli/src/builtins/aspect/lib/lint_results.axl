@@ -305,7 +305,7 @@ _… {{ group.overflow }} more {{ group.label_singular }} not shown._
 {{ linters_chart }}
 </pre>
 {% endif %}
-""" + REPRO_COMMANDS_BLOCK + FIX_COMMANDS_BLOCK + SHARED_DETAILS_BODY_TEMPLATE
+""" + FIX_COMMANDS_BLOCK + REPRO_COMMANDS_BLOCK + SHARED_DETAILS_BODY_TEMPLATE
 
 def _truncate(s, max_len):
     if len(s) <= max_len:
