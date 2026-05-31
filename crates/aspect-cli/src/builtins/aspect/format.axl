@@ -23,6 +23,7 @@ load("./lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS"
 load("./lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
 load("./lib/environment.axl", "color_enabled", "error", "info", "warn")
 load("./lib/format_results.axl", fmt_init_data = "init_data", format_conclusion = "conclusion")
+load("./lib/format_spawn.axl", "compute_spawn_args")
 load("./lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_changed_files_listing")
 load("./lib/health_check.axl", "HealthCheckTrait")
 load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "pick_task_status", "resolve_severity", "setup_phase", "task_update")
@@ -181,11 +182,9 @@ _DETECTION_PAIRS = [
     ("exclude_patterns", "--exclude-pattern"),
     ("include_patterns", "--include-pattern"),
     ("merge_base", "--merge-base"),
-    # Preserve user-passed formatter args in the repro and re-discovery
-    # fix commands. Without these, an explicit
-    # `--formatter-arg-for-tree-walk=-r --formatter-arg-for-tree-walk=.`
-    # invocation would render a repro stripped of the tree-walk flags
-    # that silently no-ops against a bare buildifier — false clean.
+    # Explicit formatter args survive into the Reproduce command and the
+    # re-discovery fallback Fix command so a CLI-passed tree-walk flag
+    # isn't lost when CI surfaces a failure.
     ("formatter_args", "--formatter-arg"),
     ("formatter_args_for_tree_walk", "--formatter-arg-for-tree-walk"),
 ]
@@ -574,21 +573,11 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
     spawn_cwd = ctx.std.env.current_dir() if ctx.args.run_in_cwd else None
 
-    # `formatter_args` are extra args always passed to the formatter binary —
-    # an alias-level knob for formatter-specific flags (e.g. `--check=false`).
-    # `formatter_args_for_tree_walk` is appended only when zero positional
-    # files would reach the formatter: designed for bare binaries that need
-    # an explicit tree-walk flag like buildifier's `-r .` to do anything
-    # useful when the task delegates discovery to them. Gating on
-    # `not format_args` keeps the flag inert as soon as any file is passed
-    # (`--scope=changed` with detected files, or explicit positional files),
-    # so it can't turn a per-file invocation into a whole-tree rewrite.
-    # Order: formatter args first, then the (possibly empty) discovered file
-    # list, then any tree-walk extras after — where a user-typed `-r .` would
-    # naturally land relative to file paths.
-    spawn_args = list(ctx.args.formatter_args) + format_args
-    if not format_args:
-        spawn_args = spawn_args + list(ctx.args.formatter_args_for_tree_walk)
+    spawn_args = compute_spawn_args(
+        ctx.args.formatter_args,
+        format_args,
+        ctx.args.formatter_args_for_tree_walk,
+    )
     exit = r.spawn(ep, spawn_args, cwd = spawn_cwd).wait()
 
     if not exit.success:
@@ -642,34 +631,6 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         else:
             scope_text = ""
         print("No files%s were modified." % scope_text)
-
-        # When zero positional files reached the formatter, it was expected
-        # to walk the tree itself. Bare binaries (e.g. buildifier) exit 0
-        # having done nothing in that case, which the diff phase then reports
-        # as "all files are properly formatted" — misleading when the tree
-        # actually has formatting issues. The `run_in_cwd=True + empty
-        # formatter_args_for_tree_walk` combination is the strong signal:
-        # users only set `run_in_cwd` for bare binaries, and an empty
-        # `formatter_args_for_tree_walk` means no tree-walk flag was supplied
-        # for the no-file-list spawn. `not format_args` matches both
-        # `--scope=all` and `--scope=changed` runs that degraded to scope-all
-        # because change-detection returned no matches.
-        if (
-            not format_args and
-            not explicit_files and
-            ctx.args.run_in_cwd and
-            not ctx.args.formatter_args_for_tree_walk
-        ):
-            info(ctx.std, (
-                "Formatter received no positional files and is expected to walk the tree " +
-                "itself, but no `formatter_args_for_tree_walk` is configured. Bare formatter " +
-                "binaries (e.g. `@buildifier_prebuilt//buildifier`) exit silently in this " +
-                "case. Set `formatter_args_for_tree_walk` in your alias to the formatter's " +
-                "tree-walk flag (e.g. `[\"-r\", \".\"]` for buildifier); the flag fires only " +
-                "when no positional files reach the formatter, so `--scope=changed` keeps " +
-                "working unchanged. Alternatively, wrap the binary in a `format_multirun` " +
-                "target from rules_lint, which walks the tree itself."
-            ))
         return _emit_final(ctx, lifecycle, data, 0)
 
     # Pattern filters hide files from the user-facing affected list and the
