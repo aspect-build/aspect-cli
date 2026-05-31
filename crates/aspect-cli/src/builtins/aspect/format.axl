@@ -23,6 +23,7 @@ load("./lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS"
 load("./lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
 load("./lib/environment.axl", "color_enabled", "error", "info", "warn")
 load("./lib/format_results.axl", fmt_init_data = "init_data", format_conclusion = "conclusion")
+load("./lib/format_spawn.axl", "compute_spawn_args")
 load("./lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_changed_files_listing")
 load("./lib/health_check.axl", "HealthCheckTrait")
 load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "pick_task_status", "resolve_severity", "setup_phase", "task_update")
@@ -181,6 +182,11 @@ _DETECTION_PAIRS = [
     ("exclude_patterns", "--exclude-pattern"),
     ("include_patterns", "--include-pattern"),
     ("merge_base", "--merge-base"),
+    # Explicit formatter args survive into the Reproduce command and the
+    # re-discovery fallback Fix command so a CLI-passed tree-walk flag
+    # isn't lost when CI surfaces a failure.
+    ("formatter_args", "--formatter-arg"),
+    ("formatter_args_for_tree_walk", "--formatter-arg-for-tree-walk"),
 ]
 
 def _surfaced_base_ref_flag(ctx):
@@ -567,10 +573,11 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
     spawn_cwd = ctx.std.env.current_dir() if ctx.args.run_in_cwd else None
 
-    # `formatter_args` are extra args always passed to the formatter binary —
-    # an alias-level knob for formatter-specific flags (e.g. `--check=false`).
-    # Order: formatter args first, then the discovered file list.
-    spawn_args = list(ctx.args.formatter_args) + format_args
+    spawn_args = compute_spawn_args(
+        ctx.args.formatter_args,
+        format_args,
+        ctx.args.formatter_args_for_tree_walk,
+    )
     exit = r.spawn(ep, spawn_args, cwd = spawn_cwd).wait()
 
     if not exit.success:
@@ -745,7 +752,11 @@ format = task(
         ),
         "formatter_args": args.string_list(
             long = "formatter-arg",
-            description = "Extra positional arguments forwarded to the formatter binary on every invocation, before the file list. Set this in a format alias's `defaults` to encode formatter-specific flags (e.g. `--check=false`, language toggles). Threaded through both the aspect-task spawn (`<formatter_target> <formatter_args> <files>`) and the vanilla-bazel alternate fix command (`bazel run <formatter_target> -- <formatter_args> <files>`).",
+            description = "Extra positional arguments forwarded to the formatter binary on every invocation, before the file list. Set this in a format alias's `defaults` to encode formatter-specific flags (e.g. `--check=false`, language toggles). Threaded through both the aspect-task spawn (`<formatter_target> <formatter_args> <files>`) and the vanilla-bazel alternate fix command (`bazel run <formatter_target> -- <formatter_args> <files>`). For tree-walk flags (e.g. buildifier's `-r .`) that should fire only when no positional files are passed to the formatter, use `formatter_args_for_tree_walk` instead — args set here always fire and would turn a per-file invocation into a whole-tree rewrite.",
+        ),
+        "formatter_args_for_tree_walk": args.string_list(
+            long = "formatter-arg-for-tree-walk",
+            description = "Extra positional arguments appended to the formatter binary's argv only when no positional files would otherwise reach it — i.e. when `aspect format` is invoked without explicit file args AND change-detection produced no file list (typically `--scope=all`, but also `--scope=changed` runs where the change-detection source returned no matches or degraded to scope-all). Appended after the (empty) file list and after `formatter_args`. Designed for bare formatter binaries that need an explicit tree-walk flag to do anything useful when the task delegates discovery to them. Example: `formatter_args_for_tree_walk = [\"-r\", \".\"]` for `@buildifier_prebuilt//buildifier`. Has no effect when the formatter receives at least one file (positionally or via `--scope=changed`), so it cannot accidentally turn a per-file invocation into a whole-tree rewrite. Wrapper targets like `format_multirun` from rules_lint walk on their own and don't need this.",
         ),
         "bazel_flags": args.string_list(
             long = "bazel-flag",

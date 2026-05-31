@@ -1,0 +1,78 @@
+"""Unit tests for `lib/format_spawn.axl`."""
+
+load("./format_spawn.axl", "compute_spawn_args")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+# ─── compute_spawn_args ──────────────────────────────────────────────────────
+#
+# Files always win over tree-walk args, and formatter_args always lead.
+
+def _test_files_present_emits_formatter_args_then_files(_ctx):
+    _eq(
+        "files present → formatter_args + file list",
+        compute_spawn_args(["--check=false"], ["a.bzl", "b.bzl"], ["-r", "."]),
+        ["--check=false", "a.bzl", "b.bzl"],
+    )
+
+def _test_files_present_ignores_tree_walk_args(_ctx):
+    # Guards against the bug fixed by `formatter_args_for_tree_walk`: if
+    # `-r .` leaked into a per-file invocation, buildifier would walk the
+    # whole tree instead of formatting the listed file.
+    _eq(
+        "single file + tree-walk args set → tree-walk args inert",
+        compute_spawn_args([], ["BUILD.bazel"], ["-r", "."]),
+        ["BUILD.bazel"],
+    )
+
+def _test_no_files_appends_tree_walk_args(_ctx):
+    _eq(
+        "no files → formatter_args + tree_walk_args",
+        compute_spawn_args(["--check=false"], [], ["-r", "."]),
+        ["--check=false", "-r", "."],
+    )
+
+def _test_no_files_no_tree_walk_yields_only_formatter_args(_ctx):
+    _eq(
+        "no files, no tree walk → just formatter_args",
+        compute_spawn_args(["--check=false"], [], []),
+        ["--check=false"],
+    )
+
+def _test_all_empty_yields_empty(_ctx):
+    _eq(
+        "all empty → empty argv",
+        compute_spawn_args([], [], []),
+        [],
+    )
+
+def _test_tree_walk_only(_ctx):
+    _eq(
+        "no formatter_args, no files, tree walk set → just tree_walk_args",
+        compute_spawn_args([], [], ["-r", "."]),
+        ["-r", "."],
+    )
+
+_UNIT_TESTS = [
+    _test_files_present_emits_formatter_args_then_files,
+    _test_files_present_ignores_tree_walk_args,
+    _test_no_files_appends_tree_walk_args,
+    _test_no_files_no_tree_walk_yields_only_formatter_args,
+    _test_all_empty_yields_empty,
+    _test_tree_walk_only,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("format_spawn.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+format_spawn_tests = task(
+    name = "test-format-spawn",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

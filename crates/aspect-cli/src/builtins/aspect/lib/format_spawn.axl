@@ -1,0 +1,29 @@
+"""Pure helpers for the format task's formatter binary spawn.
+
+Extracted from `format.axl` so the spawn-argv composition and the
+tree-walk hint condition can be unit-tested without standing up the
+full task lifecycle. Both helpers are total functions over their
+inputs — no I/O, no ctx access — so the tests in
+`lib/format_spawn_test.axl` cover every code path directly.
+"""
+
+def compute_spawn_args(formatter_args, format_args, tree_walk_args):
+    """Compose the formatter binary's argv.
+
+    `formatter_args` always fire — the alias-level knob for formatter
+    flags like `--check=false` or language toggles. `format_args` is
+    the file list the task discovered (positional, possibly empty).
+    `tree_walk_args` is appended only when `format_args` is empty —
+    designed for bare binaries like buildifier that need an explicit
+    `-r .` to walk the tree on their own. Gating on the file list
+    keeps tree-walk flags from leaking into per-file invocations and
+    turning them into whole-tree rewrites.
+
+    Order: formatter args, then file list, then tree-walk extras —
+    matching where a user-typed `-r .` would naturally land relative
+    to file paths.
+    """
+    out = list(formatter_args) + list(format_args)
+    if not format_args:
+        out = out + list(tree_walk_args)
+    return out

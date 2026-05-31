@@ -8,6 +8,7 @@ load("@aspect//lib/bazel_flags_test.axl", "bazel_flags_tests")
 load("@aspect//lib/bazel_results_test.axl", "bazel_results_unit_tests", "template_snapshot_tests")
 load("@aspect//lib/delivery_results_test.axl", "delivery_template_snapshot_tests")
 load("@aspect//lib/format_results_test.axl", "format_template_snapshot_tests")
+load("@aspect//lib/format_spawn_test.axl", "format_spawn_tests")
 load("@aspect//lib/gazelle_results_test.axl", "gazelle_template_snapshot_tests")
 load("@aspect//lib/github_detect_test.axl", "github_detect_tests")
 load("@aspect//lib/gitlab_detect_test.axl", "gitlab_detect_tests")
@@ -187,6 +188,10 @@ def config(ctx: ConfigContext):
     # Format template snapshot tests — renders format_results templates.
     # Run with: aspect dev test-format-template-snapshots
     ctx.tasks.add(format_template_snapshot_tests)
+
+    # Format spawn-args + tree-walk-hint unit tests.
+    # Run with: aspect dev test-format-spawn
+    ctx.tasks.add(format_spawn_tests)
 
     # Gazelle template snapshot tests — renders gazelle_results templates.
     # Run with: aspect dev test-gazelle-template-snapshots
