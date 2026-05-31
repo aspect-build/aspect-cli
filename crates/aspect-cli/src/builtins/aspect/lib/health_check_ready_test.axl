@@ -4,16 +4,30 @@
     Workflows runners.
   - `run_health_checks` — runs the `health_check` hooks and surfaces the first
     error, the signal that fails a task on an unhealthy environment.
+  - `render_local_job_history` / `rewrite_runner_health_output` — the
+    Vigor-output rewrite that swaps the buggy first-10 Job History
+    section for a locally-rendered last-10 section. See the function
+    docstring in `health_check.axl` for the bug context.
 
 Run with:
   aspect dev test-health-check-ready
 """
 
-load("./health_check.axl", "ctx_bazel_ready_for_health_check", "run_health_checks")
+load(
+    "./health_check.axl",
+    "ctx_bazel_ready_for_health_check",
+    "render_local_job_history",
+    "rewrite_runner_health_output",
+    "run_health_checks",
+)
 
 def _eq(label, got, want):
     if got != want:
         fail("%s: got %r, want %r" % (label, got, want))
+
+def _assert(label, cond):
+    if not cond:
+        fail("%s: condition false" % label)
 
 _ON_RUNNER = struct(runner = struct(bazel_root_dir = "/tmp/health-check-ready-test"))
 _OFF_RUNNER = struct(runner = None)
@@ -69,6 +83,151 @@ def _test_run_health_checks_surfaces_first_error(ctx):
     _eq("first error wins", run_health_checks(ctx, trait), "server unhealthy")
     _eq("all hooks ran (no short-circuit)", ran, ["a", "d"])
 
+# Vigor-style ANSI-colored bullet header.
+_BULLET = "\x1b[34m•\x1b[0m"
+
+def _vigor_header(label):
+    """Reconstruct Vigor's `stylish::ansi::format!` bullet header so the
+    rewrite tests exercise the same byte sequence Vigor emits on the
+    runner."""
+    return "%s \x1b[34m%s\x1b[0m" % (_BULLET, label)
+
+def _entry(date, url, path, key):
+    """Build a `[<date>] <url> <path> <key>` job history line, matching
+    `lib/runner_job_history.axl::append_runner_job_history` output."""
+    return "[%s] %s %s %s" % (date, url, path, key)
+
+def _test_render_local_job_history_zero(ctx):
+    """Empty history → header + `Number of builds: 0` + trailing blank.
+    Mirrors Vigor's zero-count rendering shape (no `Most recently` block)."""
+    got = render_local_job_history("")
+    want = "\x1b[34m• Job History\x1b[0m\n\tNumber of builds on this runner: 0\n"
+    _eq("render empty history", got, want)
+
+def _test_render_local_job_history_under_ten(ctx):
+    """N=3 entries → all three appear in the `Most recently` block in
+    file order (oldest first), with the count matching."""
+    history = "\n".join([
+        _entry("Sun May 31 2026 18:05:44 GMT+0000", "https://example.com/builds/1#a", "test", "test-bk"),
+        _entry("Sun May 31 2026 18:06:19 GMT+0000", "https://example.com/builds/2#b", "test", "test-bk"),
+        _entry("Sun May 31 2026 18:07:32 GMT+0000", "https://example.com/builds/3#c", "test", "test-bk"),
+    ]) + "\n"
+    got = render_local_job_history(history)
+    _assert("under-10 — header", "• Job History" in got)
+    _assert("under-10 — count line", "Number of builds on this runner: 3" in got)
+    _assert("under-10 — has Most recently", "Most recently:" in got)
+    _assert("under-10 — first entry present", "https://example.com/builds/1#a" in got)
+    _assert("under-10 — last entry present", "https://example.com/builds/3#c" in got)
+    _assert("under-10 — trailing blank", got.endswith("\n"))
+
+def _test_render_local_job_history_over_ten_takes_last_ten(ctx):
+    """N=12 entries → count=12, `Most recently` shows entries 3..12 (the
+    LAST ten — the bug we're fixing on the Vigor side took the FIRST
+    ten). Entries 1 and 2 must be absent; 3 and 12 must be present."""
+    entries = []
+    for i in range(12):
+        entries.append(_entry(
+            "date-%d" % i,
+            "https://example.com/builds/%d#job-%d" % (i, i),
+            "test",
+            "test-bk",
+        ))
+    history = "\n".join(entries) + "\n"
+    got = render_local_job_history(history)
+    _assert("over-10 — count is 12", "Number of builds on this runner: 12" in got)
+    _assert("over-10 — entry 0 absent (oldest, dropped)", "#job-0 " not in got)
+    _assert("over-10 — entry 1 absent (dropped)", "#job-1 " not in got)
+    _assert("over-10 — entry 2 present (kept)", "#job-2 " in got)
+    _assert("over-10 — entry 11 present (newest)", "#job-11 " in got)
+
+def _test_rewrite_replaces_job_history_section(ctx):
+    """Inline rewrite swaps the buggy first-10 section for the local
+    last-10 render, leaves other sections verbatim, preserves ordering."""
+    output = "\n".join([
+        _vigor_header("Uptime"),
+        "\t25 min",
+        "",
+        _vigor_header("Job History"),
+        "\tNumber of builds on this runner: 12",
+        "\tMost recently:",
+        "\t[date-0] https://example.com/builds/0#job-0 test test-bk",
+        "\t[date-1] https://example.com/builds/1#job-1 test test-bk",
+        "",
+        _vigor_header("Workflows Version"),
+        "\t\x1b[32m✓\x1b[0m workflows version check passed",
+        "",
+    ]) + "\n"
+    history_entries = []
+    for i in range(12):
+        history_entries.append(_entry(
+            "date-%d" % i,
+            "https://example.com/builds/%d#job-%d" % (i, i),
+            "test",
+            "test-bk",
+        ))
+    history = "\n".join(history_entries) + "\n"
+
+    got = rewrite_runner_health_output(output, history)
+
+    # Other sections retained verbatim.
+    _assert("rewrite — Uptime header retained", _vigor_header("Uptime") in got)
+    _assert("rewrite — Uptime body retained", "\t25 min" in got)
+    _assert("rewrite — Workflows Version header retained", _vigor_header("Workflows Version") in got)
+
+    # Job History bullet still present (re-emitted by the local render).
+    _assert("rewrite — Job History header present after rewrite", "• Job History" in got)
+
+    # Buggy first-10 lines from Vigor are gone; last-10 are in.
+    _assert("rewrite — buggy job-0 line dropped", "#job-0 " not in got)
+    _assert("rewrite — buggy job-1 line dropped", "#job-1 " not in got)
+    _assert("rewrite — last entry job-11 present", "#job-11 " in got)
+
+    # Section ordering preserved: Job History must appear between Uptime
+    # and Workflows Version.
+    uptime_at = got.find(_vigor_header("Uptime"))
+    jh_at = got.find("• Job History")
+    wv_at = got.find(_vigor_header("Workflows Version"))
+    _assert("rewrite — ordering Uptime < Job History", uptime_at < jh_at)
+    _assert("rewrite — ordering Job History < Workflows Version", jh_at < wv_at)
+
+def _test_rewrite_idempotent_for_missing_section(ctx):
+    """If the Vigor output has no Job History section, the rewrite is a
+    no-op — we don't synthesize a section that wasn't part of the report."""
+    output = "\n".join([
+        _vigor_header("Uptime"),
+        "\t25 min",
+        "",
+        _vigor_header("Workflows Version"),
+        "\t\x1b[32m✓\x1b[0m workflows version check passed",
+        "",
+    ]) + "\n"
+    got = rewrite_runner_health_output(output, "anything\n")
+    _eq("rewrite missing-section is identity", got, output)
+    _assert("rewrite missing-section did NOT synthesize a Job History", "Job History" not in got)
+
+def _test_rewrite_only_replaces_first_match(ctx):
+    """Defensive: if the saved output somehow contained two Job History
+    sections (it shouldn't, but Vigor's structure doesn't forbid it), only
+    the first is replaced — keeps the rewrite deterministic and avoids
+    O(N²) bouncing through every match."""
+    section = "\n".join([
+        _vigor_header("Job History"),
+        "\tbogus body",
+    ])
+    output = "\n".join([
+        _vigor_header("Uptime"),
+        "\t25 min",
+        "",
+        section,
+        "",
+        section,
+        "",
+    ]) + "\n"
+    got = rewrite_runner_health_output(output, _entry("d", "u", "p", "k") + "\n")
+
+    # Second instance's `bogus body` must still be present.
+    _assert("rewrite — second match left intact", "bogus body" in got)
+
 def _test_impl(ctx):
     # `ctx.bazel.startup_flags` is shared mutable state across subtests
     # (no clear() method). The "missing" subtest must run BEFORE the
@@ -79,7 +238,13 @@ def _test_impl(ctx):
     _test_run_health_checks_no_trait_passes(ctx)
     _test_run_health_checks_all_pass(ctx)
     _test_run_health_checks_surfaces_first_error(ctx)
-    print("health_check_ready_test.axl: OK (6 sections)")
+    _test_render_local_job_history_zero(ctx)
+    _test_render_local_job_history_under_ten(ctx)
+    _test_render_local_job_history_over_ten_takes_last_ten(ctx)
+    _test_rewrite_replaces_job_history_section(ctx)
+    _test_rewrite_idempotent_for_missing_section(ctx)
+    _test_rewrite_only_replaces_first_match(ctx)
+    print("health_check_ready_test.axl: OK (12 sections)")
     return 0
 
 health_check_ready_tests = task(

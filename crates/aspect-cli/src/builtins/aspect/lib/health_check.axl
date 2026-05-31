@@ -173,11 +173,134 @@ def _display_bazel_health(health):
         print("\t" + _status_marker("warn") +
               " bazel health check inconclusive: " + (health.message or "unknown"))
 
+def _strip_ansi(s):
+    """Strip CSI escape sequences (`\\x1b[...m`) from `s`.
+
+    Used only for line-shape matching when redacting Vigor's pre-formatted
+    output — we don't try to be a complete terminal emulator, just enough
+    to recognize a `• <Section>` bullet header regardless of how Vigor
+    colored it. Non-CSI escapes pass through unchanged.
+    """
+    result = ""
+    i = 0
+    n = len(s)
+    for _ in range(n):
+        if i >= n:
+            break
+        if i + 1 < n and s[i] == "\x1b" and s[i + 1] == "[":
+            j = i + 2
+            for _ in range(n - j):
+                if j >= n:
+                    break
+                if s[j] == "m":
+                    j += 1
+                    break
+                j += 1
+            i = j
+        else:
+            result += s[i]
+            i += 1
+    return result
+
+def _is_bullet_header(line):
+    """True when `line`, after ANSI stripping, looks like a Vigor section
+    header `• <Section>`. Vigor emits headers as
+    `\\x1b[34m•\\x1b[0m \\x1b[34m<Section>\\x1b[0m`."""
+    stripped = _strip_ansi(line)
+    return stripped.startswith("• ")
+
+def _bullet_header_label(line):
+    """Return the post-`• ` label of a bullet header line, trimmed.
+    Caller is expected to have already verified `_is_bullet_header(line)`."""
+    return _strip_ansi(line)[2:].strip()
+
+def render_local_job_history(history):
+    """Render a `• Job History` section from the raw history file contents.
+
+    `history` is the verbatim text of `runner_job_history` — one line per
+    `[<date>] <url> <path> <key>` entry (see `lib/runner_job_history.axl`).
+    Matches Vigor's section format (`Number of builds on this runner: N`
+    + `Most recently:` + up to 10 lines) but takes the *last* 10 entries
+    instead of the first. Emits a trailing blank line so the
+    inter-section spacing matches Vigor's `println!()`-terminated
+    sections.
+
+    Bullet header is emitted directly here (rather than via
+    `_section_heading`) because this section replaces a Vigor section
+    inline — Vigor's preceding section already ends in a blank line, so
+    the leading `\\n` that `_section_heading` adds for *top-of-block*
+    use would produce a double-blank gap.
+
+    Returns the rendered section as a single string (with trailing
+    newline). Pure function for testability; the caller prints it.
+    """
+    lines = [line for line in history.split("\n") if line]
+    out = ["\x1b[34m• Job History\x1b[0m"]
+    out.append("\tNumber of builds on this runner: %d" % len(lines))
+    if lines:
+        out.append("\tMost recently:")
+        recent = lines[-10:] if len(lines) > 10 else lines
+        for line in recent:
+            out.append("\t" + line)
+    out.append("")
+    return "\n".join(out)
+
+def rewrite_runner_health_output(output, history):
+    """Rewrite Vigor's pre-formatted runner-health output, replacing its
+    `• Job History` section with a locally-rendered one.
+
+    Vigor (silo `workflows/vigor/src/checks/runner_job_history_check.rs`)
+    currently prints the *first* 10 entries from the runner job history
+    file instead of the most recent 10 — a bug being fixed runner-side,
+    but we redact + re-render here so customers get the fix without a
+    Terraform upgrade.
+
+    Walks the output line-by-line, swapping the Job History section
+    (header + body up to the next bullet header) for the local render.
+    Other sections pass through verbatim, preserving Vigor's section
+    ordering and spacing. ANSI codes on the header are stripped for
+    matching only; surviving lines are emitted unchanged.
+
+    If Vigor's output doesn't contain a Job History section (older or
+    future Vigor without that check), the output passes through verbatim
+    — we don't synthesize a section that wasn't part of the report,
+    since whoever owns that Vigor version owns the contract.
+
+    Pure function for testability; returns the rewritten string.
+    """
+    lines = output.split("\n")
+    n = len(lines)
+    i = 0
+    replaced = False
+    out = []
+    for _ in range(n):
+        if i >= n:
+            break
+        line = lines[i]
+        if not replaced and _is_bullet_header(line) and _bullet_header_label(line) == "Job History":
+            out.append(render_local_job_history(history))
+            replaced = True
+            i += 1
+            for _ in range(n - i):
+                if i >= n:
+                    break
+                if _is_bullet_header(lines[i]):
+                    break
+                i += 1
+            continue
+        out.append(line)
+        i += 1
+    return "\n".join(out)
+
 def _display_runner_health(environment):
     """
     Display the last runner health check results.
 
-    Reads the JSON file written by the fleet service between jobs.
+    Reads the JSON file written by the fleet service between jobs. The
+    `• Job History` section in the saved Vigor output is replaced inline
+    with a locally-rendered one so the "Most recently" list shows the
+    *last* 10 entries instead of the first — see
+    `_print_runner_health_output`.
     """
     print("\x1b[1;4;34mRunner Health\x1b[0m")
 
@@ -193,7 +316,7 @@ def _display_runner_health(environment):
     # data.timestamp is a unix epoch integer
     # data.output is a pre-formatted multi-line string
     print("Last run on " + str(data["timestamp"]) + "\n")
-    print(data["output"])
+    print(rewrite_runner_health_output(data["output"], environment.runner.runner_job_history))
 
 HealthCheckTrait = trait(
     health_check = attr(list[typing.Callable[[TaskContext], str | None]], default = [], description = "Hooks run during the task's setup phase to validate system health. Return a non-None error message to fail the task (e.g. an unhealthy Bazel server); return None when healthy."),
