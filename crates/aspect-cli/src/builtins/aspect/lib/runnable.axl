@@ -214,7 +214,7 @@ def _spawn(ctx: TaskContext, state: struct, ep: struct, args: list[str], capture
     """Spawn `ep.path` with `args` in the Bazel runfiles environment.
 
     Always sets BUILD_WORKSPACE_DIRECTORY / BUILD_WORKING_DIRECTORY so tool
-    wrappers can locate the workspace, and the four ASPECT_CLI_* variables for
+    wrappers can locate the workspace, and the four ASPECT_* variables for
     tools that prefer aspect-native conventions.
 
     When `ep.runfiles_dir` is set, also injects RUNFILES_DIR /
@@ -234,10 +234,10 @@ def _spawn(ctx: TaskContext, state: struct, ep: struct, args: list[str], capture
         .current_dir(effective_cwd) \
         .env("BUILD_WORKSPACE_DIRECTORY", ctx.std.env.bazel_root_dir()) \
         .env("BUILD_WORKING_DIRECTORY", ctx.std.env.current_dir()) \
-        .env("ASPECT_CLI_WORKING_DIRECTORY", ctx.std.env.current_dir()) \
-        .env("ASPECT_CLI_ASPECT_ROOT_DIRECTORY", ctx.std.env.aspect_root_dir()) \
-        .env("ASPECT_CLI_BAZEL_ROOT_DIRECTORY", ctx.std.env.bazel_root_dir()) \
-        .env("ASPECT_CLI_GIT_ROOT_DIRECTORY", ctx.std.env.git_root_dir() or "") \
+        .env("ASPECT_WORKING_DIRECTORY", ctx.std.env.current_dir()) \
+        .env("ASPECT_ROOT_DIRECTORY", ctx.std.env.aspect_root_dir()) \
+        .env("ASPECT_BAZEL_ROOT_DIRECTORY", ctx.std.env.bazel_root_dir()) \
+        .env("ASPECT_GIT_ROOT_DIRECTORY", ctx.std.env.git_root_dir() or "") \
         .args(args)
     if ep.runfiles_dir:
         cmd = cmd \
