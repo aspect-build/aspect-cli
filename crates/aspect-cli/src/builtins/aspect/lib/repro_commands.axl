@@ -413,12 +413,13 @@ def repro_prefix(ctx):
 # ── CLI rendering ─────────────────────────────────────────────────────
 
 def print_repro_and_fix(std, data, status):
-    """Print the `data["repro_commands"]` and `data["fix_commands"]`
+    """Print the `data["fix_commands"]` and `data["repro_commands"]`
     blocks to the CLI as a plain-text counterpart to the
-    `### 🔁 Reproduce` / `### 🛠️ Fix` Markdown sections that render on
-    status surfaces. Mirrors the same content so a developer reading
-    the raw CI log can copy the actionable command without opening
-    the status surface.
+    `### 🛠️ Fix` / `### 🔁 Reproduce` Markdown sections that render on
+    status surfaces. Fix leads, Reproduce follows (matching the
+    surfaces). Mirrors the same content so a developer reading the raw
+    CI log can copy the actionable command without opening the status
+    surface.
 
     Two independent gates, matching the status-surface behavior:
 
@@ -448,17 +449,19 @@ def print_repro_and_fix(std, data, status):
     if not fixes and (not on_ci or not repros):
         return
 
-    if on_ci and repros:
-        print("")
-        print(_repro_header(ansi, "🔁 Reproduce:"))
-        for i, entry in enumerate(repros):
-            if i > 0:
-                print("")
-            _print_repro_entry(ansi, entry)
+    # Fix before Reproduce: the actionable command (what to run to fix it)
+    # leads; the reproduce command (how CI ran it) follows.
     if fixes:
         print("")
         print(_repro_header(ansi, "🛠️ Fix:"))
         for i, entry in enumerate(fixes):
+            if i > 0:
+                print("")
+            _print_repro_entry(ansi, entry)
+    if on_ci and repros:
+        print("")
+        print(_repro_header(ansi, "🔁 Reproduce:"))
+        for i, entry in enumerate(repros):
             if i > 0:
                 print("")
             _print_repro_entry(ansi, entry)

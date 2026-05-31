@@ -3251,7 +3251,7 @@ BAZEL_TARGETS_TEMPLATE = """### 🎯 Bazel targets ({{ total_targets }})
 
 {% endif %}
 {% endif %}
-{% if render_repro_in_targets %}""" + REPRO_COMMANDS_BLOCK + FIX_COMMANDS_BLOCK + """{% endif %}
+{% if render_repro_in_targets %}""" + FIX_COMMANDS_BLOCK + REPRO_COMMANDS_BLOCK + """{% endif %}
 """
 
 # `SHARED_DETAILS_BODY_TEMPLATE` is the section block every task
