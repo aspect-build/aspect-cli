@@ -173,11 +173,124 @@ def _display_bazel_health(health):
         print("\t" + _status_marker("warn") +
               " bazel health check inconclusive: " + (health.message or "unknown"))
 
-def _display_runner_health(environment):
-    """
-    Display the last runner health check results.
+def _strip_ansi(s):
+    """Strip CSI escape sequences (`\\x1b[...m`) from `s`.
 
-    Reads the JSON file written by the fleet service between jobs.
+    Used only for line-shape matching when redacting Vigor's pre-formatted
+    output — we don't try to be a complete terminal emulator, just enough
+    to recognize a `• <Section>` bullet header regardless of how Vigor
+    colored it. Non-CSI escapes pass through unchanged.
+    """
+    result = ""
+    i = 0
+    n = len(s)
+    for _ in range(n):
+        if i >= n:
+            break
+        if i + 1 < n and s[i] == "\x1b" and s[i + 1] == "[":
+            j = i + 2
+            for _ in range(n - j):
+                if j >= n:
+                    break
+                if s[j] == "m":
+                    j += 1
+                    break
+                j += 1
+            i = j
+        else:
+            result += s[i]
+            i += 1
+    return result
+
+def _bullet_header_label(line):
+    """Return the section label of a Vigor bullet-header line
+    (`• <label>` after ANSI stripping), or None if `line` isn't a bullet
+    header. Vigor emits headers as
+    `\\x1b[34m•\\x1b[0m \\x1b[34m<label>\\x1b[0m`."""
+    stripped = _strip_ansi(line)
+    if not stripped.startswith("• "):
+        return None
+    return stripped[2:].strip()
+
+def render_local_job_history(history):
+    """Render a `• Job History` section from the raw history file contents.
+
+    `history` is the verbatim text of `runner_job_history` — one line
+    per `[<date>] <url> <path> <key>` entry, see
+    `lib/runner_job_history.axl`. Matches Vigor's section format
+    (`Number of builds on this runner: N` + `Most recently:` + up to
+    10 lines) but takes the *last* 10 entries instead of the first.
+
+    Emits the bullet header inline (no leading `\\n`) because the
+    surrounding rewrite drops it into a slot whose previous section
+    already ended with the inter-section blank line — using
+    `_section_heading` here would double-blank.
+
+    Returns the rendered section with a trailing newline.
+    """
+    lines = [line for line in history.split("\n") if line]
+    out = ["\x1b[34m• Job History\x1b[0m"]
+    out.append("\tNumber of builds on this runner: %d" % len(lines))
+    if lines:
+        out.append("\tMost recently:")
+        recent = lines[-10:] if len(lines) > 10 else lines
+        for line in recent:
+            out.append("\t" + line)
+    out.append("")
+    return "\n".join(out)
+
+def rewrite_runner_health_output(output, history):
+    """Rewrite Vigor's pre-formatted runner-health `output`, replacing
+    the `• Job History` section (which lists the first 10 entries
+    instead of the most recent — see `render_local_job_history`) with a
+    locally-rendered one built from `history`.
+
+    Walks `output` line by line. The first bullet header whose label is
+    `Job History` and everything up to the next bullet header is
+    replaced with `render_local_job_history(history)`; every other line
+    passes through verbatim. ANSI codes on the header are stripped for
+    matching only.
+
+    No-op if no Job History section is present — we don't synthesize a
+    section the upstream report didn't include.
+
+    Returns the rewritten string.
+    """
+    lines = output.split("\n")
+    n = len(lines)
+    i = 0
+    replaced = False
+    out = []
+    for _ in range(n):
+        if i >= n:
+            break
+        if not replaced and _bullet_header_label(lines[i]) == "Job History":
+            out.append(render_local_job_history(history))
+            replaced = True
+            i += 1
+            for _ in range(n - i):
+                if i >= n:
+                    break
+                if _bullet_header_label(lines[i]) != None:
+                    break
+                i += 1
+            continue
+        out.append(lines[i])
+        i += 1
+    return "\n".join(out)
+
+def _display_runner_health(environment, job_history):
+    """Display the last runner health check results.
+
+    Reads the JSON snapshot the fleet service writes between jobs. The
+    Vigor `• Job History` section in that snapshot is rewritten inline
+    against `job_history` so the "Most recently" list shows the last 10
+    entries instead of the buggy first 10 — see
+    `rewrite_runner_health_output`.
+
+    `job_history` must correspond to the same point in time as Vigor's
+    saved report (i.e. before this task's `append_runner_job_history`
+    call). The caller is responsible for snapshotting it.
     """
     print("\x1b[1;4;34mRunner Health\x1b[0m")
 
@@ -190,10 +303,8 @@ def _display_runner_health(environment):
         print("Health check data is unavailable (malformed JSON)")
         return
 
-    # data.timestamp is a unix epoch integer
-    # data.output is a pre-formatted multi-line string
     print("Last run on " + str(data["timestamp"]) + "\n")
-    print(data["output"])
+    print(rewrite_runner_health_output(data["output"], job_history))
 
 HealthCheckTrait = trait(
     health_check = attr(list[typing.Callable[[TaskContext], str | None]], default = [], description = "Hooks run during the task's setup phase to validate system health. Return a non-None error message to fail the task (e.g. an unhealthy Bazel server); return None when healthy."),
@@ -269,8 +380,18 @@ def agent_health_check(ctx, environment):
     if environment.ci and environment.ci.host == "buildkite":
         print("--- :thermometer: Workflows runner health check")
 
+    # Snapshot job-history before `_wait_for_warming` re-reads the
+    # environment. `setup_phase` runs `append_runner_job_history` ahead
+    # of this hook, so the file already contains the current task's
+    # entry — but Vigor's saved snapshot in `last_health_check` was
+    # written before this task ran. The feature-time `environment` was
+    # captured in phase 3 (before phase 4 ran setup_phase), so this
+    # field still reflects the pre-append state. Re-reading would
+    # desync the rewritten Job History count from Vigor's report.
+    job_history = environment.runner.runner_job_history
+
     environment = _wait_for_warming(ctx.std, environment)
-    _display_runner_health(environment)
+    _display_runner_health(environment, job_history)
     _display_warming(environment)
     assert_ctx_bazel_ready_for_health_check(ctx, environment)
     health = ctx.bazel.health_check()
