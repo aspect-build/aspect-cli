@@ -4,6 +4,7 @@ A default 'test' task that wraps a 'bazel test' command.
 
 load("./bazel.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
 load("./lib/artifacts.axl", "artifacts")
+load("./lib/bazel_flags.axl", "announce_bazel_args")
 load("./lib/bazel_runner.axl", "run_bazel_task")
 load("./lib/health_check.axl", "HealthCheckTrait")
 load("./lib/lifecycle.axl", "TaskLifecycleTrait")
@@ -124,10 +125,6 @@ test = task(
             long = "coverage-tool-arg",
             description = "Argument forwarded to --coverage-tool. Repeat the flag to pass multiple. The `{report}` (or `{lcov}`) placeholder is replaced with the absolute path of the merged LCOV report. Example: `--coverage-tool=codecov --coverage-tool-arg=-f --coverage-tool-arg={report}`.",
         ),
-        "announce_rc": args.boolean(
-            default = False,
-            description = "Print the resolved Bazel `.bazelrc` flags before running the test. Useful when debugging which config sections fired or what the final flag set looks like. ASPECT_DEBUG=1 logs the same disclosure regardless of this flag.",
-        ),
         "bazel_flags": args.string_list(
             long = "bazel-flag",
             description = "Additional Bazel flags forwarded to the test invocation (e.g. --bazel-flag=--config=ci --bazel-flag=--test_filter=foo). Repeat the flag to pass multiple.",
@@ -152,7 +149,7 @@ test = task(
             default = False,
             description = "Cancel any running Bazel invocation before starting the test.",
         ),
-    },
+    } | announce_bazel_args("the test"),
     traits = [
         BazelTrait,
         HealthCheckTrait,

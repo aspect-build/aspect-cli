@@ -623,6 +623,60 @@ fn payload_discriminant(p: &axl_proto::build_event_stream::build_event::Payload)
     }
 }
 
+/// Optionally print the detected Bazel version and/or the exact command being
+/// spawned, one `INFO:` line each, before a `bazel build`/`test`/`run`
+/// invocation. Gated by the `--announce-bazel-version` / `--announce-bazel-command`
+/// task flags, resolved in AXL and passed through as `announce`.
+///
+/// Plain (unstyled) to match Bazel's own `INFO:` output, which interleaves
+/// with these lines.
+fn announce_spawn(announce: AnnounceSpawn, version: Option<&semver::Version>, cmd: &Command) {
+    if announce.version {
+        eprintln!("INFO: {}", version_line(version));
+    }
+    if announce.command {
+        eprintln!("INFO: Spawning: {}", render_command(cmd));
+    }
+}
+
+/// The version `INFO:` text. `version` is `None` for a non-release build (see
+/// [`super::info::parse_release`]), which notes the assume-latest behavior.
+fn version_line(version: Option<&semver::Version>) -> String {
+    match version {
+        Some(v) => format!("Bazel {v}"),
+        None => "Bazel development version (version-conditional flags assume latest)".to_string(),
+    }
+}
+
+/// Render `cmd` as a space-joined `program arg…` line for display. Read back
+/// from the fully assembled `Command`, so it shows the full argument set
+/// aspect-cli passes Bazel (including the internal BES/execlog flags).
+///
+/// Secrets (env-var values, request headers, URL credentials) are redacted via
+/// [`super::stream::redaction::redact_command_args`] — the same rules the BES
+/// sink redaction uses — since this line is printed to CI logs by default.
+/// Args are space-joined for readability, not shell-quoted: a value with a
+/// space (or a `<REDACTED>` placeholder) is not guaranteed copy-paste-safe.
+fn render_command(cmd: &Command) -> String {
+    let args: Vec<String> = cmd
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    let redacted = super::stream::redaction::redact_command_args(args.iter().map(String::as_str));
+    std::iter::once(cmd.get_program().to_string_lossy().into_owned())
+        .chain(redacted)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Which pre-spawn `INFO:` lines to emit. Resolved from task flags in AXL
+/// (`auto` → on under CI) and threaded down through `ctx.bazel.build` / `.test`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AnnounceSpawn {
+    pub version: bool,
+    pub command: bool,
+}
+
 #[derive(Debug, Display, ProvidesStaticType, Trace, NoSerialize, Allocative)]
 #[display("<bazel.build.Build>")]
 pub struct Build {
@@ -673,9 +727,10 @@ impl Build {
         stdout: Stdio,
         stderr: Stdio,
         current_dir: Option<String>,
+        announce: AnnounceSpawn,
         rt: AsyncRuntime,
     ) -> Result<Build, std::io::Error> {
-        let (pid, _) = super::info::server_info()?;
+        let (pid, version) = super::info::server_info()?;
 
         let span = tracing::info_span!(
             "ctx.bazel.build",
@@ -769,6 +824,7 @@ impl Build {
         cmd.args(targets);
 
         crate::trace!("exec: {:?}", cmd.get_args());
+        announce_spawn(announce, version.as_ref(), &cmd);
 
         cmd.stdout(stdout);
         cmd.stderr(stderr);
@@ -1371,5 +1427,43 @@ Test = task(implementation = _impl)
             err.to_string().contains("still Live"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn version_line_text() {
+        use super::version_line;
+        assert_eq!(
+            version_line(Some(&semver::Version::new(9, 0, 1))),
+            "Bazel 9.0.1"
+        );
+        assert_eq!(
+            version_line(None),
+            "Bazel development version (version-conditional flags assume latest)"
+        );
+    }
+
+    #[test]
+    fn render_command_joins_program_and_args() {
+        use super::render_command;
+        let mut cmd = std::process::Command::new("bazel");
+        cmd.args(["--bazelrc=/dev/null", "build", "--", "//foo:bar"]);
+        assert_eq!(
+            render_command(&cmd),
+            "bazel --bazelrc=/dev/null build -- //foo:bar"
+        );
+    }
+
+    #[test]
+    fn render_command_redacts_env_secrets() {
+        // Delegates to stream::redaction; this asserts the wiring (secret env
+        // values are hidden, the command shape is preserved). The redaction
+        // rules themselves are covered in stream::redaction's own tests.
+        use super::render_command;
+        let mut cmd = std::process::Command::new("bazel");
+        cmd.args(["build", "--action_env=DB_PASSWORD=hunter2", "//foo"]);
+        let rendered = render_command(&cmd);
+        assert!(rendered.starts_with("bazel build --action_env=DB_PASSWORD="));
+        assert!(rendered.ends_with(" //foo"));
+        assert!(!rendered.contains("hunter2"), "secret leaked: {rendered}");
     }
 }

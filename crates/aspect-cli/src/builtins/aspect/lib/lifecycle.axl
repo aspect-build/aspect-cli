@@ -49,13 +49,13 @@ the verdict.
 # ---------------------------------------------------------------------------
 # TaskUpdate record + TaskLifecycleTrait
 #
-# Moved here from `traits.axl` so the record + trait + canonical emitter
-# (`task_update()`) sit together. `traits.axl` now re-exports these for
-# user `config.axl` files.
+# The record, trait, and canonical emitter (`task_update()`) sit together
+# here; `traits.axl` re-exports them for user `config.axl` files.
 # ---------------------------------------------------------------------------
 
+load("./bazel_flags.axl", "setup_bazel_command")
 load("./environment.axl", "color_enabled", "detect_ci")
-load("./github.axl", "detect_github_repo", "github")
+load("./health_check.axl", "run_health_checks")
 load("./runner_job_history.axl", "append_runner_job_history")
 
 # Structured update passed to task_update hooks.
@@ -120,6 +120,14 @@ TaskUpdate = record(
     status = field(str, default = "running"),
     kind = field(str, default = ""),
     priority = field(bool, default = False),
+    # The task's subject — its target patterns / formatter target / etc.,
+    # rendered in the status-surface title. `setup_phase` sets it on the first
+    # update (the Setup phase mark) so a handler has it at init time, but a
+    # later update may carry a refined subject (e.g. a query task that only
+    # knows its resolved targets after the resolve phase). Empty means "no
+    # change" — handlers latch the last non-empty value, so consumers must
+    # check it on EVERY update, not only the first.
+    subject = field(str, default = ""),
     # True iff this update crossed a phase boundary — set by
     # `task_update(...)` when `phase.name` differs from the previous
     # `ctx.task.current_phase().name`. Surfaces with a cold-start
@@ -127,11 +135,10 @@ TaskUpdate = record(
     # it to gate phase emits on a debounce separate from the heartbeat
     # throttle. Same condition that triggers the BK section header.
     phase_change = field(bool, default = False),
-    # True iff this is the final TaskUpdate the producer will emit before
-    # `task_complete` fires. Used by surfaces that distinguish live from
-    # terminal renders even when status alone wouldn't (e.g. `warning`
-    # being both live and terminal). Producers pass `final = True` on
-    # their final emit; everywhere else defaults to False.
+    # True iff this is the final TaskUpdate the producer will emit. Used by
+    # surfaces that distinguish live from terminal renders even when status
+    # alone wouldn't (e.g. `warning` being both live and terminal). Producers
+    # pass `final = True` on their final emit; everywhere else defaults to False.
     final = field(bool, default = False),
     # Short, plain-text, one-line terminal summary (`"58/58 passed"`,
     # `"Reformatted 12 files"`, `"3 errors in 2 files"`). Only meaningful
@@ -151,7 +158,7 @@ TaskUpdate = record(
 # Phase is intentionally input-only; TaskPhase is intentionally
 # output-only.
 Phase = record(
-    # Phase id — lowercase identifier (`build`, `test`, `preflight`,
+    # Phase id — lowercase identifier (`setup`, `build`, `test`,
     # `detect`, …). Used as the key for same-name no-op detection in
     # `ctx.task.phase()` and as the input to titlecase for the
     # display label when `display_name` is unset.
@@ -170,26 +177,25 @@ Phase = record(
 
     # Display-label override. Non-empty wins over titlecase(name);
     # empty falls back to `<name>[0].upper() + <name>[1:].replace("_",
-    # " ")`. Use when naive titlecase reads oddly (`preflight` →
-    # `Pre-flight`).
+    # " ")`. Use when naive titlecase reads oddly.
     display_name = field(str, default = ""),
 )
 
 # Lifecycle hooks that any task can fire, allowing features like GithubStatusChecks
 # to observe task progress without coupling to Bazel-specific hooks.
 TaskLifecycleTrait = trait(
-    # Called once at the start of the task. Features should create their status
-    # check here. Receives (ctx, subject: str) where subject is a human-readable
-    # description of what the task is operating on (e.g. "//app/..." for a build,
-    # "production" for a deploy). Pass "" if unused.
-    # Features close over their own state dict rather than receiving one.
-    task_started = attr(list[typing.Callable[[TaskContext, str], None]], default = []),
-
-    # Called to push a structured update during the task. Receives (ctx, update: TaskUpdate).
+    # The single lifecycle hook. Called for every structured update during the
+    # task; receives (ctx, update: TaskUpdate). Features close over their own
+    # state dict rather than receiving one.
+    #
+    # The FIRST update a handler sees is its cue to initialize — create the
+    # status surface (GHSC check run / BK annotation), authenticate, read
+    # `update.subject` for the title. `setup_phase` emits that first update (the
+    # Setup phase mark, carrying `subject`) at the very start of every task, so
+    # init lands inside the Setup phase. The update carrying `final = True` is
+    # the LAST one — handlers conclude the surface there. There is no separate
+    # started/complete hook: the first and last `task_update` carry that intent.
     task_update = attr(list[typing.Callable[[TaskContext, TaskUpdate], None]], default = []),
-
-    # Called once when the task finishes. Receives (ctx, exit_code: int).
-    task_complete = attr(list[typing.Callable[[TaskContext, int], None]], default = []),
 )
 
 # ---------------------------------------------------------------------------
@@ -301,9 +307,9 @@ def _emit_bk_phase_section(ctx, phase, progress_styles = None):
 
 def _titlecase_phase(phase):
     """Title-case a phase id for display. Underscores → spaces; first
-    char upper-cased. Callers that need a non-naive display label
-    (e.g. `preflight` → `Pre-flight`) set `Phase.display_name`; this
-    helper is the fallback when that field is empty.
+    char upper-cased. Callers that need a non-naive display label set
+    `Phase.display_name`; this helper is the fallback when that field
+    is empty.
     """
     if not phase:
         return ""
@@ -333,7 +339,7 @@ def _resolve_progress_styles(progress):
     # of context to fix the call.
     return progress
 
-def task_update(ctx, lifecycle, status, progress, kind = "", data = None, priority = True, phase = None, final = False, conclusion = "", exit_code = 0):
+def task_update(ctx, lifecycle, status, progress, kind = "", data = None, priority = True, phase = None, final = False, conclusion = "", exit_code = 0, subject = ""):
     """Emit a TaskUpdate to all `lifecycle.task_update` handlers and
     print a `→ <progress>` line to stderr. When `final = True`,
     returns a `TaskConclusion` carrying `exit_code`, `conclusion`, and
@@ -376,8 +382,8 @@ def task_update(ctx, lifecycle, status, progress, kind = "", data = None, priori
                    on every surface (BK section header / CLI `→` line
                    / Task-timing strip). `phase.display_name` wins
                    over `titlecase(phase.name)` when non-empty.
-        final:     `True` on the producer's last `task_update` before
-                   `task_complete`. Causes `task_update` to return a
+        final:     `True` on the producer's last `task_update` — the
+                   terminal emit. Causes `task_update` to return a
                    `TaskConclusion(exit_code=exit_code, text=conclusion,
                    flagged=(status == "warning"))` that the task should
                    return from `_impl` — the runtime reads it to render
@@ -394,6 +400,12 @@ def task_update(ctx, lifecycle, status, progress, kind = "", data = None, priori
                    check-run titles.
         exit_code: The task's exit code. Threaded onto the returned
                    `TaskConclusion` when `final=True`; ignored otherwise.
+        subject:   The task's subject — its target patterns / formatter
+                   target / etc., rendered in the status-surface title.
+                   `setup_phase` sets it on the first emit so handlers have
+                   it at init; a later emit may carry a refined subject.
+                   Empty means "no change" — handlers latch the last
+                   non-empty value (see `TaskUpdate.subject`).
     """
 
     # Validate the status against the `Status` enum — typos raise here
@@ -472,6 +484,7 @@ def task_update(ctx, lifecycle, status, progress, kind = "", data = None, priori
         final = final,
         conclusion = conclusion,
         data = data if data != None else {},
+        subject = subject,
     )
     for handler in lifecycle.task_update:
         handler(ctx, update)
@@ -483,16 +496,6 @@ def task_update(ctx, lifecycle, status, progress, kind = "", data = None, priori
             flagged = status == "warning",
         )
     return None
-
-def _on_ci(ctx):
-    """True when running on a recognized CI host."""
-    return bool(
-        ctx.std.env.var("CI") or
-        ctx.std.env.var("BUILDKITE") or
-        ctx.std.env.var("GITHUB_ACTIONS") or
-        ctx.std.env.var("CIRCLECI") or
-        ctx.std.env.var("GITLAB_CI"),
-    )
 
 # ---------------------------------------------------------------------------
 # --severity policy: shared resolver + lifecycle-status helper
@@ -548,137 +551,124 @@ def pick_task_status(data, kind_key, had_failure, terminal):
             return "failed" if terminal else "failing"
     return "passed" if terminal else "running"
 
-def setup_phase(ctx, lifecycle):
-    """Open the `setup` phase covering CI-platform task setup.
+def setup_phase(ctx, lifecycle, subject, kind, data, hc_trait = None, bazel_trait = None, bazel_command = "build", bazel_base_flags = []):
+    """Run the `setup` phase — all pre-task work — and return the resolved
+    Bazel command flags (or `None` for a task that doesn't build).
 
-    `lifecycle.task_started` handlers do non-trivial work on CI:
-      - GitHub status check: 3-4 network round-trips (App auth, optional
-        job-URL resolve, create check run, initial PATCH update).
-        Typically 500ms-2s end-to-end depending on cold-cache + latency.
-      - Buildkite annotation: spawns `buildkite-agent annotate` with a
-        ~1.7KB body via stdin. Typically 100-300ms.
+    Every built-in task opens with this single phase, locally and on CI, as
+    the first thing in its `_impl`. It is the one place pre-task work lives,
+    in execution order:
 
-    Without an explicit phase mark, that 600ms-2.3s gets swallowed into
-    the synthetic `init` phase — the breakdown line shows
-    `🌱 Init 1.5s · ✈ Pre-flight 245ms` and users wonder where the
-    1.5s went. Opening a `setup` phase here makes it explicit:
-    `⚙ Setup 1.5s — Authenticating and creating CI status checks · ✈ Pre-flight 245ms`.
+      1. `append_runner_job_history` — self-gates on the Workflows
+         runner-job-history env var; a no-op elsewhere.
+      2. Open the `🔧 Setup` phase mark (the timing-table row + `→ Setup`
+         line / BK section), carrying `kind`, `data`, and the initial
+         `subject`. Always emitted, so the phase is uniform across tasks and
+         environments. This is the first `task_update` of the task: each
+         status-surface handler runs its one-time init (creating the GHSC
+         check run / BK annotation) and, because the update carries `kind`,
+         renders the task's first surface body from `data`. See `task_update`.
+         It runs before the steps that can fail (rc parse, health check) so a
+         failure surfaces on an already-created check run.
+      3. Bazel setup, only when `bazel_trait` is given: `setup_bazel_command`
+         resolves startup + command flags, parses the workspace `.bazelrc`,
+         populates `ctx.bazel.startup_flags`, emits the parsed-rc disclosure,
+         and its flag list is returned. Skipped (returns `None`) for tasks
+         that never invoke Bazel.
+      4. `hc_trait.health_check` hooks, when `hc_trait` is given —
+         Workflows runner env table and Bazel server health check. The health
+         check reads the startup flags step 3 populated, so it must run after;
+         an empty hook list (the local case) is fine. If a hook reports the
+         environment unhealthy, `setup_phase` concludes the surface
+         ("Health check failed") and `fail()`s the task — it never returns.
 
-    Locally those handlers are no-ops (no GitHub App auth, no
-    `buildkite-agent`), so the time is negligible (~10ms) and the
-    mark is skipped — it folds into init like before.
+    Args:
+      ctx:         TaskContext.
+      lifecycle:   TaskLifecycleTrait — dispatch target for the phase-boundary
+                   TaskUpdate (whose handlers self-initialize on first sight).
+      subject:     Short task subject (the target patterns / formatter target /
+                   etc. the task acts on) carried on this first `task_update`
+                   so surface handlers can latch it for the title. A later
+                   `task_update` may refine it — see `TaskUpdate.subject`.
+      kind:        The task's result-library kind (e.g. `"bazel_results"`,
+                   `"lint_results"`) so the first surface render dispatches to
+                   the right renderer.
+      data:        The task's results dict (from `init_data()`), typically just
+                   the seed fields at this point. Rendered on the first surface
+                   body and on the health-failure terminal.
+      hc_trait:    HealthCheckTrait, or `None`. When given, its
+                   `health_check` hooks run inside the open phase.
+      bazel_trait:      BazelTrait, or `None`. When given, Bazel flags are
+                        resolved and the workspace `.bazelrc` is parsed; the
+                        flag list is returned. `None` for non-Bazel tasks.
+      bazel_command:    Bazel subcommand whose rc sections to expand
+                        ("build"/"test"). Ignored when `bazel_trait` is `None`.
+      bazel_base_flags: Task-injected default flags forwarded to
+                        `setup_bazel_command`. Ignored when `bazel_trait`
+                        is `None`.
 
-    Call this from each task's `_impl` immediately *before* iterating
-    `lifecycle.task_started` handlers. No-op when:
-      - the trait has no started handlers, or
-      - we're not running on a recognized CI host.
-
-    `append_runner_job_history` fires up top — it self-gates on
-    `ASPECT_WORKFLOWS_RUNNER_JOB_HISTORY_FILE`, so every task on a
-    Workflows runner records an entry independent of CI detection.
+    Returns:
+      list[str] | None: the resolved command flags when `bazel_trait` is given,
+      otherwise `None`. Does not return when a `health_check` hook fails (see
+      step 4) — the task is `fail()`ed after its surface is concluded.
     """
     append_runner_job_history(ctx)
-    if not lifecycle.task_started:
-        return
-    if not _on_ci(ctx):
-        return
-    _probe_rate_limit_quota(ctx)
+
+    # Open the Setup phase — the task's first `task_update`. Carrying `kind` +
+    # `data` makes it both init the status surfaces and render their first
+    # body (see the docstring).
     task_update(
         ctx,
         lifecycle,
         "running",
         ProgressStyles(
-            body = "Authenticating and creating CI status checks...",
-            stream = "Authenticating and creating CI status checks",
+            body = "Running setup...",
+            stream = "Running setup",
         ),
+        kind = kind,
+        data = data,
         phase = Phase(
             name = "setup",
-            description = "Authenticate and create CI status checks",
-            emoji = "⚙",
+            description = "Prepare the task environment",
+            emoji = "🔧",
         ),
+        subject = subject,
     )
 
-def _probe_rate_limit_quota(ctx):
-    """Seed lib/rate_limit.axl's per-task state with a fresh `GET /rate_limit` snapshot
-    before the task starts spending tokens. The probe is free
-    (doesn't count against the primary quota) and lets `throttle_factor`
-    fall back to threshold-based rather than no-data behavior for
-    early API calls.
+    # Bazel flag resolution + rc parse, only for tasks that build. Must run
+    # before the health-check hooks, which read the startup flags it sets.
+    flags = None
+    if bazel_trait != None:
+        flags = setup_bazel_command(ctx, bazel_command, bazel_trait, base_flags = bazel_base_flags)
 
-    Silent on any failure: missing owner/repo, no Aspect credential,
-    transport error — none of these should hold up `setup_phase`."""
-    owner, repo = detect_github_repo(ctx.std)
-    if not owner or not repo:
-        return
-    github.probe_rate_limit(ctx, owner = owner, repo = repo)
+    # Health checks last (they read the startup flags above). A non-None result
+    # is fatal: conclude the surface and fail the task — never returns.
+    health_error = run_health_checks(ctx, hc_trait)
+    if health_error != None:
+        _fail_health_check(ctx, lifecycle, kind, data, health_error)
 
-def preflight_phase(ctx, lifecycle, hc_trait):
-    """Mark the `preflight` phase and run the pre-health-check hooks.
+    return flags
 
-    ⚠️  Contract: when the calling task composes `BazelTrait` alongside
-    `HealthCheckTrait`, `ctx.bazel.startup_flags` MUST be populated
-    before this function is called so the Bazel health check
-    (`agent_health_check`, registered as a `pre_health_check`) targets
-    the project-specific server. Use `setup_bazel_command` from
-    `lib/bazel_flags.axl` — it handles startup-flag resolution, rc
-    parsing, and populating `ctx.bazel.startup_flags`. The
-    `assert_ctx_bazel_ready_for_health_check` guard fails loudly if
-    the contract is violated on a Workflows runner.
+# Surface progress body + conclusion shown when a `health_check` hook fails the
+# task. Uniform across tasks; the detailed reason goes to the CLI/log instead.
+_HEALTH_CHECK_FAILED = "Health check failed"
 
-    On CI hosts (BK / GHA / CircleCI / GitLab / generic CI), the
-    pre-health-check hooks Workflows registers print substantial
-    structural output: the `--- :computer: Workflows runner environment`
-    section table, the `--- :thermometer: Workflows runner health check`
-    section, and the bazel server health check result. The phase
-    boundary is marked BEFORE the hooks run so their time is
-    attributed to Pre-flight in the timing table; the surface
-    `→ Running pre-flight...` line lands AFTER the hooks so on BK
-    the section markers open the chronologically-first content for
-    the phase.
+def _fail_health_check(ctx, lifecycle, kind, data, reason):
+    """Conclude the status surface for a failed `setup_phase` health check,
+    then `fail(reason)`. Internal to `setup_phase`.
 
-    Locally, the same hooks collapse to a couple of terminal prints
-    that aren't worth a separate phase. They fold into the synthetic
-    `init` phase instead — no phase mark, no `→` print, but the
-    hooks still run so the env table + health check info show up.
-
-    Call this from each task's `_impl` instead of iterating
-    `hc_trait.pre_health_check` directly. No-op when the trait has
-    no hooks registered.
-
-    Args:
-      ctx:       TaskContext.
-      lifecycle: TaskLifecycleTrait — dispatch target for the phase-
-                 boundary TaskUpdate so status surfaces see the
-                 transition.
-      hc_trait:  HealthCheckTrait. Skipped when its pre_health_check
-                 hook list is empty (no work to bracket).
-    """
-    if not hc_trait.pre_health_check:
-        return
-
-    if _on_ci(ctx):
-        # task_update marks the phase, emits the BK section header
-        # (`--- :airplane: Pre-flight · …`), prints the styled `→`
-        # phase entry on the CLI, and dispatches the surface update —
-        # all leading the hook content below so the phase entry
-        # consistently introduces the phase work.
-        task_update(
-            ctx,
-            lifecycle,
-            "running",
-            ProgressStyles(
-                body = "Running pre-flight...",
-                stream = "Running pre-flight",
-            ),
-            phase = Phase(
-                name = "preflight",
-                description = "Run pre-flight checks",
-                emoji = "✈",
-                # `preflight` titlecases naively to `Preflight`;
-                # override to the hyphenated form that reads better.
-                display_name = "Pre-flight",
-            ),
-        )
-
-    for hook in hc_trait.pre_health_check:
-        hook(ctx)
+    Emits a terminal `task_update` (so the GHSC check run / BK annotation flips
+    to failed with a "Health check failed" body instead of sticking at
+    "running"), then aborts the task with the hook's detailed `reason` as the
+    CLI/log message. `kind` is the task's result kind so the surface renders;
+    `data` is its results dict (typically still just seed fields here)."""
+    for handler in lifecycle.task_update:
+        handler(ctx, TaskUpdate(
+            kind = kind,
+            status = "failed",
+            final = True,
+            conclusion = _HEALTH_CHECK_FAILED,
+            data = data,
+            progress = ProgressStyles(body = _HEALTH_CHECK_FAILED),
+        ))
+    fail(reason)

@@ -203,7 +203,7 @@ def _make_failing_with_drift():
 def _render_ctx(task_name = "format"):
     return {
         "triggered_by": "Greg Magolan (pull_request)",
-        "targets": "",
+        "subject": "",
         "started_ms": 1744630000000,
         "ended_ms": 1744630003200,
         "progress": "",

@@ -32,10 +32,8 @@ This guide explains *why* the existing tasks look the way they do and how to kee
               │ trait hook lists                                 │
               │   bazel_trait.build_start / build_event /        │
               │     build_end / build_event_sinks / task_flags   │
-              │   hc_trait.pre_health_check /                    │
-              │     hc_trait.post_health_check                   │
-              │   lifecycle.task_started / task_update /         │
-              │     task_complete                                │
+              │   hc_trait.health_check                          │
+              │   lifecycle.task_update                          │
               └────────────┬─────────────────┬──────────────────┘
                            │                 │
               registered by │                 │ consumed by
@@ -68,29 +66,31 @@ Tasks own the *flow* (which Bazel command runs when, what extra processing happe
 
 ## The per-task lifecycle
 
-`TaskLifecycleTrait` (defined in [`traits.axl`](traits.axl)) defines three slots that every task fires in order:
+`TaskLifecycleTrait` (defined in [`lib/lifecycle.axl`](lib/lifecycle.axl)) has a **single** slot, **`task_update(ctx, TaskUpdate)`**, fired zero or more times during the task. The *first* and *last* updates carry extra meaning, so one hook covers the whole lifecycle:
 
-1. **`task_started(ctx, subject)`** — fires once at the start of the task, before any health check or build. The `subject` is whatever the task wants to display in the rendered title (e.g. the target pattern for build/test/lint, the formatter target for format, the gazelle target for gazelle, the delivery targets for delivery).
+- **First update → init.** A handler's first `task_update` is its cue to initialize: authenticate, create the GitHub check run / first BK annotation, and read `update.subject` for the rendered title. `setup_phase` (see below) emits this first update — the `🔧 Setup` phase mark — at the very start of every task, so init always lands inside the Setup phase. Each handler guards init with a private `_state["_initialized"]` flag.
 
-   Features that subscribe here typically post the *initial* "running" surface (a creating GitHub check run, a first BK annotation in `--style info`).
+- **Middle updates → progress.** Tasks emit running updates as they make progress (lint emits one per SARIF report; build/test emit on every BES event that updates the failure / test-summary state). The per-surface throttle in `lib/check_dispatch` collapses chatty updates.
 
-2. **`task_update(ctx, TaskUpdate)`** — fires zero or more times during the task. Each `TaskUpdate` carries:
-   - `kind` — the result-library identifier (e.g. `"lint_results"`). Drives renderer dispatch.
-   - `status` — `"running"`, `"failing"`, `"passed"`, or `"failed"`.
-   - `data` — kind-specific data dict (the `init_data()` accumulator, see [Results dict shape](#results-dict-shape)).
+- **Last update → terminal.** The producer's final emit carries `final = True` with a terminal `status` (`"passed"`, `"failed"`, `"warning"`, `"aborted"`). Features take that as the cue to complete the check run / finalise the annotation, and the throttle always lets `final` through. `task_update` returns a `TaskConclusion` on the `final` emit for `_impl` to return.
 
-   Tasks emit running updates as they make progress (e.g. lint emits one per SARIF report; build/test emit on every BES event that updates the failure / test-summary state). The two final values `"passed"` / `"failed"` are *terminal*: features take that as the cue to complete the check run / finalise the annotation, and the throttle in `lib/check_dispatch.should_emit_update` always lets terminals through.
+Each `TaskUpdate` carries:
+- `kind` — the result-library identifier (e.g. `"lint_results"`). Drives renderer dispatch.
+- `status` — `"running"`, `"failing"`, `"passed"`, `"failed"`, `"warning"`, or `"aborted"`.
+- `data` — kind-specific data dict (the `init_data()` accumulator, see [Results dict shape](#results-dict-shape)).
+- `subject` — the task's target patterns / formatter target / etc. `setup_phase` sets it on the first emit so handlers can read it during init; a later emit may carry a refined subject (handlers latch the last non-empty value and refresh the surface title).
+- `final` — `True` on the terminal emit.
 
-3. **`task_complete(ctx, exit_code)`** — fires once with the integer exit code the task is about to return. Features subscribe here for cleanup that needs the exit code rather than the rendered status (e.g. updating telemetry counters, posting to follow-up systems).
+There is **no** separate `task_started` / `task_complete` hook — the first and last `task_update` carry that intent. The `subject` rides on the first update so init has what it needs without a dedicated start signal.
 
 The order at runtime, end-to-end:
 
 ```
-lifecycle.task_started("//...")
-  └─ GithubStatusChecks creates the check run
-  └─ BuildkiteAnnotations posts the first "info" annotation
-hc_trait.pre_health_check
-  └─ Workflows prints `--- :computer: Workflows runner environment` / health check
+setup_phase(ctx, lifecycle, subject, …)          # FIRST thing in every _impl
+  └─ lifecycle.task_update(🔧 Setup, subject=…)   # the first update
+       └─ GithubStatusChecks inits → creates the check run
+       └─ BuildkiteAnnotations inits → posts the first "info" annotation
+  └─ hc_trait.health_check                        # Workflows env table / server health check
 bazel_trait.build_start
   └─ Workflows prints `--- :bazel: Running bazel <task> [<task-key>] <targets>`
 events = bazel.build_events.iterator()           # create handle BEFORE the spawn
@@ -104,10 +104,8 @@ for event in events:
 build_status = build.wait()
 bazel_trait.build_end(ctx, build_status.code)    # ArtifactUpload uploads
 ... task-specific work (run formatter, parse SARIF, etc.) ...
-lifecycle.task_update(passed | failed)           # terminal — final body
-lifecycle.task_complete(exit_code)
-hc_trait.post_health_check
-return exit_code
+lifecycle.task_update(passed | failed, final=True)  # terminal — final body
+return <TaskConclusion>
 ```
 
 ---
@@ -119,8 +117,8 @@ return exit_code
 | Trait                        | Defined in                                                                | Slots                                                                                                       | Status / Purpose |
 |------------------------------|---------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------|------------------|
 | **`BazelTrait`**             | [bazel.axl](bazel.axl)                                                    | `build_start`, `build_event`, `build_end`, `build_retry`, `build_event_sinks`, `task_flags`, `flags`, `startup_flags`, `extra_flags`, `extra_startup_flags`, `execution_log_sinks` | ✅ Clean. Shape every Bazel invocation in the task: extra flags, BES sinks, per-event hooks, build-end cleanup. All fields are callables / hook lists / declarative config the task reads. |
-| **`HealthCheckTrait`**       | [lib/health_check.axl](lib/health_check.axl)                              | `pre_health_check`, `post_health_check`                                                                     | ✅ Clean. Hook lists only. |
-| **`TaskLifecycleTrait`**     | [lib/lifecycle.axl](lib/lifecycle.axl)                                    | `task_started`, `task_update`, `task_complete`                                                              | ✅ Clean. Hook lists only. The three lifecycle slots above. |
+| **`HealthCheckTrait`**       | [lib/health_check.axl](lib/health_check.axl)                              | `health_check`                                                                                              | ✅ Clean. Hook lists only. |
+| **`TaskLifecycleTrait`**     | [lib/lifecycle.axl](lib/lifecycle.axl)                                    | `task_update`                                                                                               | ✅ Clean. Single hook list. First update inits, `final=True` update concludes — see the lifecycle section above. |
 | **`DeliveryTrait`**          | [delivery.axl](delivery.axl)                                              | `delivery_start`, `deliver_target`, `delivery_end`                                                          | ✅ Clean. Hook lists only. |
 | **`ArtifactsTrait`**         | [lib/artifacts.axl](lib/artifacts.axl)                                    | `artifacts_browse_url`, `artifact_urls`, `testlogs_label_urls`                                              | ⚠️ **Legacy** — data fields used as cross-feature state. Migrating to Pattern 2 (feature-owned + Callable trait). See [Artifact uploads](#artifact-uploads). |
 | **`GitHubStatusChecksTrait`**| [feature/github_status_checks.axl](feature/github_status_checks.axl)      | `templates`, `metadata_keys`                                                                                | ⚠️ **Legacy** — user-facing config on a trait. Migrating to feature `args`. |
@@ -680,131 +678,77 @@ The check-run / annotation features consume artifact URLs via the wrapper's deri
 The canonical flow, with annotations. Use it as a checklist when reading or writing a task:
 
 ```python
-def _impl(ctx: TaskContext) -> int:
+def _impl(ctx: TaskContext) -> int | TaskConclusion:
     bazel_trait = ctx.traits[BazelTrait]
     hc_trait    = ctx.traits[HealthCheckTrait]
     lifecycle   = ctx.traits[TaskLifecycleTrait]
 
-    # 1. Build the data dict and fire task_started FIRST so any later
-    #    failure (a pre-build hook, a config error) still produces a
-    #    visible status check / annotation.
     data = init_data()
     data["start_time_ms"]  = now_ms(ctx)
     data["target_pattern"] = " ".join(ctx.args.targets)
-    ... task-specific bookkeeping ...
-    for handler in lifecycle.task_started:
-        handler(ctx, data["target_pattern"])   # subject (str) shown in the title
 
-    # 2. Pre-health checks. The `Workflows` feature registers
-    #    `print_environment_info` + `agent_health_check` here, which print
-    #    the `--- :computer: Workflows runner environment` and health check
-    #    BK section markers when running on an Aspect Workflows runner.
-    for hook in hc_trait.pre_health_check:
-        hook(ctx)
+    # 1. The single pre-task setup phase — FIRST thing in every _impl. It emits
+    #    the `🔧 Setup` phase mark (the task's first task_update): inits every
+    #    status surface AND renders their first body from `kind` + `data`.
+    #    `subject` rides along for the surface title. It also resolves Bazel
+    #    flags + parses the workspace .bazelrc and runs the health_check hooks —
+    #    a failed health check concludes the surface and fail()s the task inside
+    #    setup_phase (it does not return). Returns the resolved command flags
+    #    (None for a non-Bazel task). See `setup_phase` in lib/lifecycle.axl.
+    flags = setup_phase(ctx, lifecycle, data["target_pattern"], "<task>_results", data, hc_trait, bazel_trait, "build")
 
-    # 3. Compose flags. Trait `extra_flags` first, then `task_flags`
-    #    callbacks (which need ctx.task.{name,key} so they have to run at
-    #    invocation time), then user-supplied --bazel-flag values.
-    flags = list(ctx.args.bazel_flags)
-    flags.extend(bazel_trait.extra_flags)
-    for hook in bazel_trait.task_flags:
-        flags.extend(hook(ctx))
-    if bazel_trait.flags:
-        flags = bazel_trait.flags(flags)
-    startup_flags = list(ctx.args.bazel_startup_flags)
-    startup_flags.extend(bazel_trait.extra_startup_flags)
-    if bazel_trait.startup_flags:
-        startup_flags = bazel_trait.startup_flags(startup_flags)
-    ctx.bazel.startup_flags.extend(startup_flags)
-
-    # 4. Pass build_event_sinks (gRPC sinks the runtime registers BEFORE
-    #    `Build::spawn` returns) so BES events reach the Aspect backend
-    #    and the "Aspect Workflows" link resolves to a real invocation.
-    #    The iter handle subscribes pre-spawn — no late-subscribe race.
+    # 2. Pass build_event_sinks (gRPC sinks the runtime registers BEFORE
+    #    `Build::spawn` returns) so BES events reach the Aspect backend and
+    #    the "Aspect Workflows" link resolves to a real invocation. The iter
+    #    handle subscribes pre-spawn — no late-subscribe race.
     events = bazel.build_events.iterator()
     build_events = [events] + list(bazel_trait.build_event_sinks)
 
-    # 5. Fire build_start hooks BEFORE spawning Bazel. The `Workflows`
+    # 3. Fire build_start hooks BEFORE spawning Bazel. The `Workflows`
     #    feature registers the `--- :bazel: Running bazel <task> [<key>]
     #    <targets>` BK section marker here.
     for hook in bazel_trait.build_start:
         hook(ctx)
 
-    build = ctx.bazel.build(
-        flags = flags,
-        build_events = build_events,
-        *ctx.args.targets,
-    )
+    build = ctx.bazel.build(flags = flags, build_events = build_events, *ctx.args.targets)
 
-    # 7. Capture sink_invocation_id (the runtime mints it inside
-    #    Build::spawn before returning, so it's available now without
-    #    waiting for build.wait()). Emit a running task_update so the
-    #    "Aspect Workflows" link surfaces in the live annotation as
-    #    soon as the build is spawned.
+    # 4. Capture sink_invocation_id (the runtime mints it inside Build::spawn
+    #    before returning) and emit a running update so the "Aspect Workflows"
+    #    link surfaces in the live annotation as soon as the build is spawned.
     data["sink_invocation_id"] = build.sink_invocation_id
-    for handler in lifecycle.task_update:
-        handler(ctx, TaskUpdate(
-            kind   = "<task>_results",
-            status = "running",
-            data   = data,
-        ))
+    task_update(ctx, lifecycle, "running", "Building...", kind = "<task>_results", data = data,
+                phase = Phase(name = "build", description = "Build targets", emoji = "🔨"))
 
-    # 8. Drain the event iterator. Two things per event:
-    #    - bazel_trait.build_event hooks (ArtifactUpload records testlog
-    #      paths; user features can hook here too)
-    #    - process_event(data, event) to populate the bazel state +
-    #      stream metadata into the live annotation
+    # 5. Drain the event iterator. Per event: bazel_trait.build_event hooks
+    #    (ArtifactUpload records testlog paths) + process_event to populate the
+    #    bazel state and stream metadata into the live annotation.
     for event in events:
         for handler in bazel_trait.build_event:
             handler(ctx, event)
         if process_event(data, event):
-            for handler in lifecycle.task_update:
-                handler(ctx, TaskUpdate(
-                    kind   = "<task>_results",
-                    status = "running",
-                    data   = data,
-                ))
+            task_update(ctx, lifecycle, "running", "Building...", kind = "<task>_results", data = data)
 
-    # 9. Wait for bazel, then fire build_end hooks. ArtifactUpload's
-    #    `_on_build_end` runs the actual upload step here.
+    # 6. Wait for bazel, then fire build_end hooks (ArtifactUpload uploads).
     build_status = build.wait()
     for hook in bazel_trait.build_end:
         hook(ctx, build_status.code)
 
     if not build_status.success:
-        # Emit terminal task_update + task_complete BEFORE returning.
         data["<kind>"]["build_failed"] = True   # kind-specific failure flag
-        for handler in lifecycle.task_update:
-            handler(ctx, TaskUpdate(
-                kind   = "<task>_results",
-                status = "failed",
-                data   = data,
-            ))
-        for handler in lifecycle.task_complete:
-            handler(ctx, 1)
-        return 1
+        return task_update(ctx, lifecycle, "failed", "Build failed", kind = "<task>_results",
+                           data = data, final = True, exit_code = 1, conclusion = conclusion("failed", data))
 
-    # 10. ... task-specific post-build work (run binary, parse output, etc.)
+    # 7. ... task-specific post-build work (run binary, parse output, etc.)
 
-    # 11. Terminal task_update + task_complete + post_health_check.
+    # 8. Terminal task_update (final=True returns a TaskConclusion)
     status = "passed" if exit_code == 0 else "failed"
     if not data.get("finish_time_ms"):
         data["finish_time_ms"] = now_ms(ctx)
     if data.get("start_time_ms") and not data["bazel"].get("wall_time_ms"):
         data["bazel"]["wall_time_ms"] = data["finish_time_ms"] - data["start_time_ms"]
-    for handler in lifecycle.task_update:
-        handler(ctx, TaskUpdate(
-            kind   = "<task>_results",
-            status = status,
-            data   = data,
-        ))
-    for handler in lifecycle.task_complete:
-        handler(ctx, exit_code)
-    for hook in hc_trait.post_health_check:
-        result = hook(ctx)
-        if result != None:
-            fail(result)
-    return exit_code
+    result = task_update(ctx, lifecycle, status, "Done", kind = "<task>_results",
+                         data = data, final = True, exit_code = exit_code, conclusion = conclusion(status, data))
+    return result
 ```
 
 The `lint.axl` impl is the closest to this template; `format.axl` and `gazelle.axl` are similar but pass a single target instead of a list and build the entrypoint in step 10. `delivery.axl` does multiple Bazel invocations (one per phase) — the same pattern just runs once per phase.
@@ -897,9 +841,9 @@ When writing a new task, feature, or library, sanity-check:
 
 - [ ] If the task iterates BES events, create the iterator handle with `bazel.build_events.iterator()` *before* calling `ctx.bazel.build(...)`, and include it in the `build_events=[...]` list. The runtime subscribes it pre-spawn; the race is closed by construction.
 - [ ] Capture `data["sink_invocation_id"] = build.sink_invocation_id` after `ctx.bazel.build` returns, then emit a running `task_update` so the Aspect Workflows link surfaces live.
+- [ ] Call `setup_phase(ctx, lifecycle, subject, kind, data, hc_trait, bazel_trait, ...)` as the FIRST thing in `_impl` — it emits the Setup phase mark (the first `task_update`, which inits the status surfaces and renders their first body from `kind` + `data`), resolves Bazel flags, and runs `health_check` (a failed check concludes the surface and fails the task).
 - [ ] Iterate `bazel_trait.build_start` / `build_event` / `build_end` so features fire (BK section markers, artifact upload).
-- [ ] Iterate `hc_trait.pre_health_check` / `post_health_check` so the runner-env sections render and post-failures surface.
-- [ ] Emit terminal `task_update` (`status="passed"` or `"failed"`) and `task_complete(exit_code)` *before* every `return`.
+- [ ] Emit a terminal `task_update` with `final=True` and a terminal `status` (`"passed"` / `"failed"` / `"warning"` / `"aborted"`) on every `return` path, and return the `TaskConclusion` it hands back. There is no separate `task_complete` hook.
 - [ ] If a feature subscribes to `bazel_trait.build_event`, your BES loop must call those hooks per event — otherwise `_on_build_event` callbacks never run.
 - [ ] For tasks that retry the bazel invocation, create a fresh `iterator()` handle per attempt — handles are single-use.
 

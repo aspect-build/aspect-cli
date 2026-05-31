@@ -1,12 +1,15 @@
-"""Tests for `ctx_bazel_ready_for_health_check` — the predicate
-underlying the runtime guard that enforces the
-`ctx.bazel.startup_flags` ordering contract on Workflows runners.
+"""Tests for `health_check.axl`:
+  - `ctx_bazel_ready_for_health_check` — the predicate underlying the runtime
+    guard that enforces the `ctx.bazel.startup_flags` ordering contract on
+    Workflows runners.
+  - `run_health_checks` — runs the `health_check` hooks and surfaces the first
+    error, the signal that fails a task on an unhealthy environment.
 
 Run with:
   aspect dev test-health-check-ready
 """
 
-load("./health_check.axl", "ctx_bazel_ready_for_health_check")
+load("./health_check.axl", "ctx_bazel_ready_for_health_check", "run_health_checks")
 
 def _eq(label, got, want):
     if got != want:
@@ -43,6 +46,29 @@ def _test_on_runner_with_output_base_passes(ctx):
         True,
     )
 
+def _test_run_health_checks_no_trait_passes(ctx):
+    """No HealthCheckTrait (hc_trait=None) → no error."""
+    _eq("no trait → None", run_health_checks(ctx, None), None)
+
+def _test_run_health_checks_all_pass(ctx):
+    """All hooks return None (healthy) → no error."""
+    trait = struct(health_check = [lambda ctx: None, lambda ctx: None])
+    _eq("all healthy → None", run_health_checks(ctx, trait), None)
+
+def _test_run_health_checks_surfaces_first_error(ctx):
+    """A hook returning a message → that message; the FIRST error wins, and
+    later hooks still run (no short-circuit). This is the latent-bug fix: a
+    non-None result must fail the task, not be discarded."""
+    ran = []
+    trait = struct(health_check = [
+        lambda ctx: ran.append("a"),  # append() → None: healthy
+        lambda ctx: "server unhealthy",
+        lambda ctx: "second error (ignored)",
+        lambda ctx: ran.append("d"),  # still runs despite the earlier error
+    ])
+    _eq("first error wins", run_health_checks(ctx, trait), "server unhealthy")
+    _eq("all hooks ran (no short-circuit)", ran, ["a", "d"])
+
 def _test_impl(ctx):
     # `ctx.bazel.startup_flags` is shared mutable state across subtests
     # (no clear() method). The "missing" subtest must run BEFORE the
@@ -50,7 +76,10 @@ def _test_impl(ctx):
     _test_off_runner_passes(ctx)
     _test_on_runner_missing_output_base_returns_false(ctx)
     _test_on_runner_with_output_base_passes(ctx)
-    print("health_check_ready_test.axl: OK (3 sections)")
+    _test_run_health_checks_no_trait_passes(ctx)
+    _test_run_health_checks_all_pass(ctx)
+    _test_run_health_checks_surfaces_first_error(ctx)
+    print("health_check_ready_test.axl: OK (6 sections)")
     return 0
 
 health_check_ready_tests = task(

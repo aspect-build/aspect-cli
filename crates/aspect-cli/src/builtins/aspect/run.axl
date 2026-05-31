@@ -2,11 +2,11 @@
 
 load("@std//time.axl", "sleep_iter")
 load("./bazel.axl", "BazelTrait")
-load("./lib/bazel_flags.axl", "setup_bazel_command")
+load("./lib/bazel_flags.axl", "announce_bazel_args", "resolve_bazel_announce")
 load("./lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "init_data", "process_event", bazel_conclusion = "conclusion")
 load("./lib/environment.axl", "error")
 load("./lib/health_check.axl", "HealthCheckTrait")
-load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "preflight_phase", "setup_phase", "task_update")
+load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "setup_phase", "task_update")
 load("./lib/runnable.axl", "LOCAL_SPAWN_FLAGS", "runnable")
 load("./lib/tips.axl", "tips")
 
@@ -23,15 +23,15 @@ def _terminal_status(data, exit_code):
     return "passed" if exit_code == 0 else "failed"
 
 def _emit_terminal(ctx, lifecycle, data, exit_code, conclusion_text = None):
-    """Fire the terminal `task_update(final=True)` + `task_complete` hooks
-    and return a `TaskConclusion` for `_impl` to return.
+    """Fire the terminal `task_update(final=True)` and return a
+    `TaskConclusion` for `_impl` to return.
 
     Mirrors `bazel_runner._emit_terminal` so the run task concludes its
     status surfaces (GitHub check runs, Buildkite annotations) the same
     way `build`/`test` do — without this the surfaces stay stuck at
-    "running" because nothing ever delivers a final update or fires
-    `task_complete`. Called from every exit path (build failure,
-    run-setup failure, and the spawned binary's exit).
+    "running" because nothing ever delivers a final update. Called from
+    every exit path (build failure, run-setup failure, and the spawned
+    binary's exit).
 
     `conclusion_text` overrides the bookend summary for cases the bazel
     bucket logic can't describe (e.g. a built target whose binary exits
@@ -50,8 +50,6 @@ def _emit_terminal(ctx, lifecycle, data, exit_code, conclusion_text = None):
             data = data,
             progress = ProgressStyles(body = bookend),
         ))
-    for handler in lifecycle.task_complete:
-        handler(ctx, exit_code)
 
     return TaskConclusion(
         exit_code = exit_code,
@@ -68,23 +66,15 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     forward_args = list(ctx.args.run_args)
 
     data = init_data()
-    setup_phase(ctx, lifecycle)
-    for handler in lifecycle.task_started:
-        handler(ctx, target)
 
-    # Expand the "build" rc section, not "run": this task ultimately
-    # invokes `ctx.bazel.build`, which spawns a literal `bazel build`.
-    # The `run:` rc section can contain options Bazel's `build` command
+    # The single pre-task setup phase (status surface, rc parse, health
+    # checks); returns the resolved flags (a failed health check fails the task
+    # inside setup_phase). Expand the "build" rc section, not "run": this task
+    # ultimately invokes `ctx.bazel.build`, which spawns a literal `bazel
+    # build`. The `run:` rc section can contain options Bazel's `build` command
     # rejects as unrecognized (e.g. `--script_path`).
-    flags = setup_bazel_command(ctx, "build", bazel_trait)
-
-    preflight_phase(ctx, lifecycle, hc_trait)
-
-    for hook in hc_trait.post_health_check:
-        result = hook(ctx)
-        if result != None:
-            _emit_terminal(ctx, lifecycle, data, 1)
-            fail(result)
+    flags = setup_phase(ctx, lifecycle, target, "bazel_results", data, hc_trait, bazel_trait, "build")
+    announce_version, announce_command = resolve_bazel_announce(ctx)
 
     flags.extend(LOCAL_SPAWN_FLAGS)
 
@@ -108,7 +98,13 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         phase = Phase(name = "build", description = "Build run target", emoji = "🔨"),
     )
 
-    build = ctx.bazel.build(target, build_events = build_events, flags = flags)
+    build = ctx.bazel.build(
+        target,
+        build_events = build_events,
+        flags = flags,
+        announce_version = announce_version,
+        announce_command = announce_command,
+    )
 
     for _tick in sleep_iter(BES_DRAIN_TICK_MS):
         for _ in range(10000):
@@ -162,10 +158,6 @@ run = task(
         "run_args": args.trailing_var_args(
             description = "Arguments forwarded to the target binary. Separate from `aspect run`'s own flags with `--`, e.g. `aspect run //foo:bar -- --binary-arg value`.",
         ),
-        "announce_rc": args.boolean(
-            default = False,
-            description = "Print the resolved Bazel `.bazelrc` flags before running the build. Useful when debugging which config sections fired or what the final flag set looks like. ASPECT_DEBUG=1 logs the same disclosure regardless of this flag.",
-        ),
         "bazel_flags": args.string_list(
             description = "Additional Bazel flags forwarded to the build (e.g. --bazel-flag=--config=ci --bazel-flag=--keep_going). Repeat the flag to pass multiple.",
             long = "bazel-flag",
@@ -174,7 +166,7 @@ run = task(
             description = "Additional Bazel startup flags (e.g. --bazel-startup-flag=--host_jvm_args=-Xmx2g). Repeat the flag to pass multiple. Note: changing startup flags restarts the Bazel server.",
             long = "bazel-startup-flag",
         ),
-    },
+    } | announce_bazel_args("the build"),
     traits = [
         BazelTrait,
         HealthCheckTrait,

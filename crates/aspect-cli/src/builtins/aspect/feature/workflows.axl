@@ -12,7 +12,7 @@ load("../lib/health_check.axl", "HealthCheckTrait", "agent_health_check")
 def _workflows_impl(ctx: FeatureContext):
     environment = get_workflows_environment(ctx.std)
 
-    health_check = ctx.traits[HealthCheckTrait]
+    hc_trait = ctx.traits[HealthCheckTrait]
     bazel_trait = ctx.traits[BazelTrait]
 
     # Register task-identity --build_metadata as a task_flags hook. Runs
@@ -39,13 +39,11 @@ def _workflows_impl(ctx: FeatureContext):
         bazel_trait.extra_flags.append("--color=yes")
 
     if environment.runner != None:
-        # BK section markers per-phase are emitted by lifecycle.task_update
-        # when `phase=` is set (see `_emit_bk_phase_section`). The
-        # pre_health_check hooks below print their own intra-phase BK
-        # section markers (Workflows runner environment, health check),
-        # so the preflight phase mark itself skips the auto-emit.
-        health_check.pre_health_check.append(lambda ctx: print_environment_info(ctx.std, environment))
-        health_check.pre_health_check.append(lambda ctx: agent_health_check(ctx, environment))
+        # On a Workflows runner, register the runner-environment table and the
+        # Bazel server health check as `health_check` hooks. `setup_phase` runs
+        # them inside the Setup phase; each prints its own BK section marker.
+        hc_trait.health_check.append(lambda ctx: print_environment_info(ctx.std, environment))
+        hc_trait.health_check.append(lambda ctx: agent_health_check(ctx, environment))
 
         # Flags to optimize build & test
         (startup_flags, build_flags) = get_bazelrc_flags(

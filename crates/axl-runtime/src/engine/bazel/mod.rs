@@ -246,6 +246,11 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///   `Stdio` bundle (typically `ctx.std.io`). Cannot be combined with
     ///   `stdout`/`stderr`.
     /// * `current_dir` - Working directory for the Bazel invocation.
+    /// * `announce_version` - Print an `INFO: Bazel <version>` line before
+    ///   spawning. Resolved from the `--announce-bazel-version` task flag.
+    /// * `announce_command` - Print an `INFO: Spawning: <command>` line (the
+    ///   exact bazel command line) before spawning. Resolved from the
+    ///   `--announce-bazel-command` task flag.
     ///
     /// # Arguments
     /// * `execution_log`: Enable Bazel execution log collection. Pass `True` to
@@ -294,6 +299,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named)] stderr: Option<NoneOr<Writable>>,
         #[starlark(require = named, default = NoneOr::None)] stdio: NoneOr<StdStdio>,
         #[starlark(require = named, default = NoneOr::None)] current_dir: NoneOr<String>,
+        #[starlark(require = named, default = false)] announce_version: bool,
+        #[starlark(require = named, default = false)] announce_command: bool,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<build::Build> {
         let build_events = partition_build_events(build_events);
@@ -326,6 +333,10 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             stdout,
             stderr,
             current_dir.into_option(),
+            build::AnnounceSpawn {
+                version: announce_version,
+                command: announce_command,
+            },
             env.rt.clone(),
         )?;
         Ok(build)
@@ -358,6 +369,11 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///   `Stdio` bundle (typically `ctx.std.io`). Cannot be combined with
     ///   `stdout`/`stderr`.
     /// * `current_dir` - Working directory for the Bazel invocation.
+    /// * `announce_version` - Print an `INFO: Bazel <version>` line before
+    ///   spawning. Resolved from the `--announce-bazel-version` task flag.
+    /// * `announce_command` - Print an `INFO: Spawning: <command>` line (the
+    ///   exact bazel command line) before spawning. Resolved from the
+    ///   `--announce-bazel-command` task flag.
     ///
     /// # Arguments
     /// * `execution_log`: Enable Bazel execution log collection. Pass `True` to
@@ -404,6 +420,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named)] stderr: Option<NoneOr<Writable>>,
         #[starlark(require = named, default = NoneOr::None)] stdio: NoneOr<StdStdio>,
         #[starlark(require = named, default = NoneOr::None)] current_dir: NoneOr<String>,
+        #[starlark(require = named, default = false)] announce_version: bool,
+        #[starlark(require = named, default = false)] announce_command: bool,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<build::Build> {
         let build_events = partition_build_events(build_events);
@@ -436,6 +454,10 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             stdout,
             stderr,
             current_dir.into_option(),
+            build::AnnounceSpawn {
+                version: announce_version,
+                command: announce_command,
+            },
             env.rt.clone(),
         )?;
         Ok(test)

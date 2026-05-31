@@ -22,6 +22,13 @@
 //! event we're redacting — command-line events carry the flag in their own
 //! args list, so there's no ordering dependency on BuildMetadata arrival.
 //! Glob patterns (`*`, `?`) are supported, matching the AXL semantics.
+//!
+//! Limitation: redaction matches only the single-token `--name=value` form. A
+//! space-separated `--remote_header Authorization: Bearer <token>` (two argv
+//! tokens) is not scrubbed. BEP canonicalizes flags to the `=`-joined form, so
+//! the BES path is covered; the per-spawn command line (`render_command`) and
+//! the `.bazelrc` disclosure (`bazelrc::announce`) reuse these helpers and
+//! inherit the same assumption — a space-separated secret there would leak.
 
 use axl_proto::build_event_stream::BuildEvent;
 use axl_proto::build_event_stream::build_event::Payload;
@@ -426,6 +433,36 @@ fn redact_option(opt: &mut CmdOption, allow_env: &[&str]) -> bool {
     modified
 }
 
+/// Redact a whole command-line arg list for safe display, returning each arg
+/// scrubbed by [`redact_flag`]. The `ALLOW_ENV` allowlist is collected from the
+/// same args (`--build_metadata=ALLOW_ENV=…`), so callers needn't thread it.
+///
+/// Use when echoing a bazel command to a log (e.g. `--announce-bazel-command`)
+/// — it applies the same header / env-var / URL-credential rules the BES sink
+/// redaction uses, from one source of truth.
+pub fn redact_command_args<'a>(args: impl IntoIterator<Item = &'a str> + Clone) -> Vec<String> {
+    let user_patterns = collect_allow_env(args.clone());
+    let allow_env = effective_allow_env(&user_patterns);
+    args.into_iter()
+        .map(|a| redact_flag(a, &allow_env).into_owned())
+        .collect()
+}
+
+/// Build a redactor closure that scrubs a single flag string via [`redact_flag`].
+///
+/// The `ALLOW_ENV` allowlist is collected once from `flags` (which should be
+/// the full set the closure will be applied across, so inline
+/// `--build_metadata=ALLOW_ENV=…` is honored). Use when flags are redacted
+/// one at a time rather than as a list — e.g. the `--announce-bazel-rc`
+/// disclosure, which renders each rc option individually.
+pub fn redactor<'a>(flags: impl IntoIterator<Item = &'a str>) -> impl Fn(&str) -> String {
+    let user_patterns = collect_allow_env(flags);
+    move |flag: &str| {
+        let allow_env = effective_allow_env(&user_patterns);
+        redact_flag(flag, &allow_env).into_owned()
+    }
+}
+
 /// Scrub a single flag string (`--name=value` / `--name value` / positional).
 ///
 /// - Name-only flags (no `=`): leave untouched.
@@ -446,7 +483,7 @@ pub fn redact_flag<'a>(arg: &'a str, allow_env: &[&str]) -> Cow<'a, str> {
     let value = &arg[eq + 1..];
 
     if HEADER_OPTION_NAMES.contains(&name) {
-        return Cow::Owned(format!("--{}={}", name, REDACTED));
+        return Cow::Owned(format!("--{}={}", name, redact_header_value(value)));
     }
     if ENV_VAR_OPTION_NAMES.contains(&name) {
         let new_value = redact_env_value(value, allow_env);
@@ -467,7 +504,7 @@ pub fn redact_flag<'a>(arg: &'a str, allow_env: &[&str]) -> Cow<'a, str> {
 /// we don't have to reconstruct `--name=value`.
 fn redact_option_value<'a>(name: &str, value: &'a str, allow_env: &[&str]) -> Cow<'a, str> {
     if HEADER_OPTION_NAMES.contains(&name) {
-        return Cow::Owned(REDACTED.to_string());
+        return Cow::Owned(redact_header_value(value));
     }
     if ENV_VAR_OPTION_NAMES.contains(&name) {
         return redact_env_value(value, allow_env);
@@ -503,6 +540,23 @@ fn redact_env_value<'a>(value: &'a str, allow_env: &[&str]) -> Cow<'a, str> {
         };
     }
     Cow::Owned(format!("{}={}", key, REDACTED))
+}
+
+/// Redact a request-header flag value, keeping the header name and hiding only
+/// the value. Bazel accepts both `Name=Value` and `Name: Value` forms, so we
+/// split on the first `=` or `:` (whichever comes first) and replace the rest:
+///   `X-Aspect=tok`            → `X-Aspect=<REDACTED>`
+///   `Authorization: Bearer t` → `Authorization:<REDACTED>`
+/// A value with no separator has nothing to keep and is fully redacted.
+fn redact_header_value(value: &str) -> String {
+    let sep = [value.find('='), value.find(':')]
+        .into_iter()
+        .flatten()
+        .min();
+    match sep {
+        Some(i) => format!("{}{}{}", &value[..i], &value[i..=i], REDACTED),
+        None => REDACTED.to_string(),
+    }
 }
 
 /// Replace `scheme://user:password@host/...` with `scheme://<REDACTED>@host/...`.
@@ -560,7 +614,7 @@ mod tests {
         assert_eq!(
             ucl.args,
             vec![
-                "--remote_header=<REDACTED>".to_string(),
+                "--remote_header=Authorization:<REDACTED>".to_string(),
                 "--config=ci".to_string(),
                 "--bes_backend=grpcs://<REDACTED>@bes.example.com:443".to_string(),
             ]
@@ -631,7 +685,7 @@ mod tests {
             redacted,
             vec![
                 "--config=ci".to_string(),
-                "--remote_header=<REDACTED>".to_string(),
+                "--remote_header=Authorization:<REDACTED>".to_string(),
                 "--action_env=API_TOKEN=<REDACTED>".to_string(),
                 "--action_env=GITHUB_SHA=abc".to_string(), // allowlisted
             ]
@@ -731,12 +785,23 @@ mod tests {
     }
 
     #[test]
-    fn redacts_header_flag() {
+    fn redacts_header_flag_keeping_name() {
+        // `Name: Value` form — split on the colon, keep the header name.
         assert_eq!(
             redact_flag(
                 "--remote_header=Authorization: Bearer abc",
                 &default_allow()
             ),
+            "--remote_header=Authorization:<REDACTED>"
+        );
+        // `Name=Value` form — split on the equals.
+        assert_eq!(
+            redact_flag("--bes_header=X-Aspect=tok123", &default_allow()),
+            "--bes_header=X-Aspect=<REDACTED>"
+        );
+        // No separator — nothing to keep, redact whole value.
+        assert_eq!(
+            redact_flag("--remote_header=opaque", &default_allow()),
             "--remote_header=<REDACTED>"
         );
     }
@@ -874,5 +939,51 @@ mod tests {
         };
         assert_eq!(ucl.args[1], "--action_env=DEPLOY_ENV=prod"); // kept via user allowlist
         assert_eq!(ucl.args[2], "--action_env=MY_SECRET=<REDACTED>"); // redacted
+    }
+
+    #[test]
+    fn redact_command_args_scrubs_and_honors_inline_allowlist() {
+        let args = [
+            "build",
+            "--action_env=DB_PASSWORD=hunter2", // redacted (value hidden)
+            "--action_env=USER=alice",          // kept (default allowlist)
+            "--build_metadata=ALLOW_ENV=MY_*",  // extends allowlist from the args themselves
+            "--action_env=MY_TOKEN=abc",        // kept (matches inline MY_*)
+            "--remote_header=Authorization: Bearer t0ken", // value redacted, name kept
+            "//foo:bar",
+        ];
+        let out = redact_command_args(args.iter().copied());
+        assert_eq!(
+            out,
+            vec![
+                "build".to_string(),
+                format!("--action_env=DB_PASSWORD={REDACTED}"),
+                "--action_env=USER=alice".to_string(),
+                "--build_metadata=ALLOW_ENV=MY_*".to_string(),
+                "--action_env=MY_TOKEN=abc".to_string(),
+                format!("--remote_header=Authorization:{REDACTED}"),
+                "//foo:bar".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn redactor_scrubs_per_flag_and_honors_inline_allowlist() {
+        // The closure seeds its allowlist from all flags it's told about, then
+        // scrubs one flag at a time (the shape `--announce-bazel-rc` needs).
+        let redact = redactor(["--build_metadata=ALLOW_ENV=MY_*"]);
+        assert_eq!(
+            redact("--remote_header=Authorization: Bearer t"),
+            "--remote_header=Authorization:<REDACTED>"
+        );
+        assert_eq!(
+            redact("--action_env=DB_PASSWORD=hunter2"),
+            "--action_env=DB_PASSWORD=<REDACTED>"
+        );
+        // Honors the inline ALLOW_ENV pattern collected above.
+        assert_eq!(
+            redact("--action_env=MY_TOKEN=abc"),
+            "--action_env=MY_TOKEN=abc"
+        );
     }
 }

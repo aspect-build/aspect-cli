@@ -154,15 +154,29 @@ fn bazelrc_methods(registry: &mut MethodsBuilder) {
     /// print(rc.announce(command = "build"))
     /// print(rc.announce(command = "build", ansi = True))
     /// ```
-    fn announce(
+    fn announce<'v>(
         this: &StarlarkBazelRC,
         #[starlark(require = named)] command: String,
         #[starlark(require = named, default = false)] ansi: bool,
         #[starlark(require = named, default = 120)] max_width: i64,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<String> {
-        Ok(this
-            .inner
-            .announce(&command, ansi, max_width.max(0) as usize))
+        // Display rc paths relative to the workspace root / home dir, and
+        // scrub secrets out of flag values (the rc disclosure prints to CI
+        // logs). Both use the same anchors / redaction as the rest of the CLI.
+        let root = crate::engine::store::Env::from_eval(eval)?
+            .bazel_root_dir
+            .clone();
+        let home = std::env::home_dir();
+        let redact = super::stream::redaction::redactor(this.inner.all_option_values());
+        Ok(this.inner.announce(
+            &command,
+            ansi,
+            max_width.max(0) as usize,
+            &root,
+            home.as_deref(),
+            redact,
+        ))
     }
 
     /// Return the list of source file paths that were loaded.

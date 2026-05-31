@@ -29,11 +29,11 @@ response.headers)` after every response. The trait keeps:
   - `threshold_warned_tier[bucket]` — highest WARN tier already fired
     (0 / LOW / IMPORTANT).
 
-A free `GET /rate_limit` probe in `lifecycle.setup_phase` seeds the
-App bucket before the task starts spending tokens — see
-`github.probe_rate_limit` and `seed_from_rate_limit_body` here. The
-env bucket self-announces on first observation (typically a
-4xx-auth fallback).
+Both buckets self-announce on their first observation: the App bucket
+on the first status-check API response (`record_from_headers` parses
+its `X-RateLimit-*` headers), the env bucket on its first 4xx-auth
+fallback call. Until then the buffer is empty and the cold-start
+heartbeat factor governs throttling.
 
 # Swarm-shared observations
 
@@ -72,11 +72,11 @@ the cadence.
 # Cold-start window (swarm defensive floor)
 
 When a matrix swarm of tasks all start at once (rules_js' ~100-job
-matrix is the motivating case), each task's merged buffer initially
-holds only the setup-phase probe — burn-rate inference can't fire,
-the threshold ladder reads 100% remaining and returns 1×, and the
-swarm-size multiplier is 1 because no sibling has propagated an
-observation through the artifact-share cycle yet. Every task runs
+matrix is the motivating case), each task's merged buffer is initially
+empty (or holds one observation from its first API response) — burn-rate
+inference can't fire, the threshold ladder reads 100% remaining and
+returns 1×, and the swarm-size multiplier is 1 because no sibling has
+propagated an observation through the artifact-share cycle yet. Every task runs
 at full cadence for ~30–60s and the shared App-bucket can be largely
 spent in that window.
 
@@ -110,8 +110,7 @@ footer rendered by `usage_footer` is enough surface for reviewers.
 
 A rate-limit observation must NEVER fail a task. Every code path
 here is best-effort: malformed headers are silently skipped; an
-absent trait or empty buffer returns `1.0`. The probe at `setup_phase`
-catches all errors and returns silently. There are no `fail()` calls.
+absent trait or empty buffer returns `1.0`. There are no `fail()` calls.
 """
 
 load("./environment.axl", "detect_ci", "info", "warn")
@@ -407,9 +406,9 @@ def record_observation(ctx, bucket, remaining, limit, reset_epoch, epoch_s = Non
     _save(ctx, state)
 
     # Log the starting-quota line on the first observation per bucket
-    # (for App: the setup-phase probe; for env: first 4xx-auth
-    # fallback). Reset-crossing flushes count as "first" so the new
-    # window's quota is re-logged on long-running tasks. Logged after
+    # (for App: the first status-check API response; for env: first
+    # 4xx-auth fallback). Reset-crossing flushes count as "first" so the
+    # new window's quota is re-logged on long-running tasks. Logged after
     # save so the I/O doesn't sit between observation and the next op.
     if is_first:
         _log_rate_limit_quota(ctx, bucket, remaining, limit, reset_epoch)
@@ -954,23 +953,6 @@ def _format_factor(factor):
         return "terminal-only"
     return "%d×" % int(factor + 0.5)
 
-# ── Seeding from `/rate_limit` JSON ──────────────────────────────────
-
-def _parse_rate_limit_body(body):
-    """Extract `(remaining, limit, reset_epoch)` from the JSON body
-    returned by `GET /rate_limit`. Returns `None` on a malformed body
-    so callers can short-circuit without further branching."""
-    if type(body) != "dict":
-        return None
-    resources = body.get("resources", {}) or {}
-    core = resources.get("core", {}) or {}
-    remaining = core.get("remaining", -1)
-    limit = core.get("limit", 0)
-    reset_epoch = core.get("reset", 0)
-    if remaining < 0 or limit <= 0:
-        return None
-    return (remaining, limit, reset_epoch)
-
 def _log_rate_limit_quota(ctx, bucket, remaining, limit, reset_epoch):
     """Emit an `INFO: GitHub API quota — <label>: …` line on the
     first observation per bucket. Unlike `usage_footer` (App-only,
@@ -998,24 +980,6 @@ def _resets_in_clause(std, reset_epoch):
     if now_epoch <= 0:
         return ""
     return ", resets in " + _format_duration(max(0, reset_epoch - now_epoch))
-
-def seed_from_rate_limit_body(ctx, bucket, body):
-    """Parse the JSON body returned by `GET /rate_limit` and record
-    its `resources.core` sub-object as a fresh observation for
-    `bucket`. Used by `github.probe_rate_limit` at task init for the
-    App bucket (the bucket aspect-cli actively manages).
-
-    The starting-quota `INFO` line is emitted by `record_observation`
-    on the first observation, so the probe doesn't need to log
-    separately. Env-bucket observations come from real fallback calls
-    later in the task — the probe doesn't seed them, so env is silent
-    at startup and self-announces on first use. Silent no-op on a
-    malformed body."""
-    parsed = _parse_rate_limit_body(body)
-    if parsed == None:
-        return
-    remaining, limit, reset_epoch = parsed
-    record_observation(ctx, bucket, remaining, limit, reset_epoch)
 
 # ── Surface rendering ────────────────────────────────────────────────
 

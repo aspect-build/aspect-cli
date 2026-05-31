@@ -14,8 +14,7 @@ Split here, not in the features:
   kind_for_task(task_name)   Initial kind to use before the first
                              task_update has fired.
   to_display_name(name)      snake_case → CamelCase task display name.
-  make_render_ctx(state, default_targets="")
-                             Build the render_ctx dict the per-kind
+  make_render_ctx(state)     Build the render_ctx dict the per-kind
                              renderers consume from a feature's
                              closure-state dict.
   apply_artifact_links(ctx, links)
@@ -118,18 +117,17 @@ def to_display_name(name):
     """
     return "".join([w[0].upper() + w[1:] for w in name.split("_") if w])
 
-def make_render_ctx(state, default_targets = "", tips = None, api_usage = "", last_updated_at = ""):
+def make_render_ctx(state, tips = None, api_usage = "", last_updated_at = ""):
     """Build the render_ctx dict the per-kind renderers consume.
 
     Reads from `state` — the feature-private dict the caller maintains
     across hook calls. Expected slots: `_triggered_by`, `_subject`,
     `_started_ms`, `_ended_ms`, `_progress`, `_task_name`.
 
-    `default_targets` is the placeholder for the `targets` field when
-    `_subject` hasn't been set yet (an early render before
-    task_started). GitHubStatusChecks uses `"//..."` so the initial
-    "running" check-run has *something* readable in the title;
-    BuildkiteAnnotations leaves it empty.
+    `subject` is the task's target patterns / formatter target / etc.,
+    rendered in the title. Empty when the task hasn't supplied one (e.g. a
+    query-driven delivery before its targets resolve) — the title simply
+    omits it; there is no synthetic placeholder.
 
     `tips` is the caller-supplied list of tips (typically
     `collect_tips_sorted(ctx)`); each entry is rendered as a
@@ -149,7 +147,7 @@ def make_render_ctx(state, default_targets = "", tips = None, api_usage = "", la
     """
     return {
         "triggered_by": state.get("_triggered_by", ""),
-        "targets": state.get("_subject") or default_targets,
+        "subject": state.get("_subject", ""),
         "started_ms": state.get("_started_ms", 0),
         "ended_ms": state.get("_ended_ms", 0),
         "progress": state.get("_progress", ""),

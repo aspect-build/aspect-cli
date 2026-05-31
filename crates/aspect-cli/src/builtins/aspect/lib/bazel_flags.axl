@@ -1,27 +1,35 @@
 """Helpers for resolving and applying Bazel flags in tasks that compose
 `BazelTrait` and `HealthCheckTrait`.
 
-Tasks that use these helpers MUST declare three CLI args (the helpers
+Tasks that use these helpers MUST declare these CLI args (the helpers
 enforce this with a clear error if a task forgets):
 
-  - `bazel_flags`         (read by `resolve_flags`)
-  - `bazel_startup_flags` (read by `resolve_startup_flags`)
-  - `announce_rc`         (read by `setup_bazel_command`)
+  - `bazel_flags`             (read by `resolve_flags`)
+  - `bazel_startup_flags`     (read by `resolve_startup_flags`)
+  - `announce_bazel_rc`       (read by `setup_bazel_command`)
+  - `announce_bazel_version`  (read by `resolve_bazel_announce`)
+  - `announce_bazel_command`  (read by `resolve_bazel_announce`)
 
-Ordering contract: startup flags must be on `ctx.bazel.startup_flags`
-BEFORE `preflight_phase` runs, so the Bazel health check inside
-preflight targets the correct server. The contract is enforced at
-runtime by `assert_ctx_bazel_ready_for_health_check` (see
+The three `announce_bazel_*` args are `"auto" | "true" | "false"`
+enums; `resolve_announce` maps `"auto"` to on-under-CI. `_rc` gates the
+parsed-rc disclosure here; `_version` / `_command` gate the per-spawn
+`INFO:` lines and are passed to `ctx.bazel.build` / `.test` by the task
+(see `resolve_bazel_announce`).
+
+Ordering contract: `ctx.bazel.startup_flags` must be populated before the
+Bazel health check runs, so the check targets the correct server. The
+`setup_phase` helper in `lib/lifecycle.axl` enforces this by calling
+`setup_bazel_command` ahead of the `health_check` hooks; the invariant is
+also checked at runtime by `assert_ctx_bazel_ready_for_health_check` (see
 `lib/health_check.axl`).
 
-  - `setup_bazel_command` — the one-stop entry point. Resolves startup
-    flags + command flags, parses `.bazelrc`, populates
-    `ctx.bazel.startup_flags` with the full startup-flag set
-    (including any rc-derived `startup …` lines), emits the parsed-rc
-    disclosure, and returns the command flag list ready for
-    `ctx.bazel.build` / `ctx.bazel.test`. Use this from every
-    Bazel-calling task; the smaller building blocks below exist mostly
-    for testing and unusual layering needs.
+  - `setup_bazel_command` — resolves startup flags + command flags,
+    parses `.bazelrc`, populates `ctx.bazel.startup_flags` with the full
+    startup-flag set (including any rc-derived `startup …` lines), emits
+    the parsed-rc disclosure, and returns the command flag list ready for
+    `ctx.bazel.build` / `ctx.bazel.test`. Built-in tasks reach this via
+    `lib/lifecycle.axl::setup_phase`; call it directly only for unusual
+    layering. The smaller building blocks below exist mostly for testing.
 
   - `resolve_startup_flags` — combine `ctx.args.bazel_startup_flags`
     with `BazelTrait.extra_startup_flags` + transform. Returns the list
@@ -29,9 +37,14 @@ runtime by `assert_ctx_bazel_ready_for_health_check` (see
 
   - `resolve_flags` — combine CLI bazel-flags + `BazelTrait` additions
     + task-time hooks + transform into a single command flag list.
+
+  - `resolve_announce` / `resolve_bazel_announce` — resolve the
+    `announce_bazel_*` flag values (`"auto"|"true"|"false"`) to bools;
+    `auto` is on under CI. `resolve_bazel_announce` returns the
+    `(version, command)` pair tasks pass to `ctx.bazel.build` / `.test`.
 """
 
-load("./environment.axl", "color_enabled")
+load("./environment.axl", "color_enabled", "detect_ci")
 
 def _require_arg(ctx, name):
     """Fail with a clear contract error when a helper's required CLI
@@ -40,9 +53,68 @@ def _require_arg(ctx, name):
         fail(
             ("Task is missing required `%s` arg. Tasks that use " +
              "lib/bazel_flags.axl helpers must declare " +
-             "bazel_flags, bazel_startup_flags, and announce_rc on " +
+             "bazel_flags, bazel_startup_flags, announce_bazel_rc, " +
+             "announce_bazel_version, and announce_bazel_command on " +
              "the task definition.") % name,
         )
+
+def resolve_announce(ctx, value):
+    """Resolve an `"auto" | "true" | "false"` announce-flag value to a bool.
+
+    `"auto"` is on under CI and off locally — CI logs are where the bazel
+    disclosure is useful, while a local run stays quiet. `"true"` / `"false"`
+    force the choice regardless of environment.
+    """
+    if value == "auto":
+        return bool(detect_ci(ctx.std.env))
+    return value == "true"
+
+def resolve_bazel_announce(ctx):
+    """Resolve the per-spawn announce flags to `(version, command)` bools.
+
+    Tasks pass these to `ctx.bazel.build` / `.test` as `announce_version=` /
+    `announce_command=` so the runtime can print the `INFO:` lines just before
+    spawning bazel. See `resolve_announce` for the `auto` semantics.
+    """
+    _require_arg(ctx, "announce_bazel_version")
+    _require_arg(ctx, "announce_bazel_command")
+    return (
+        resolve_announce(ctx, ctx.args.announce_bazel_version),
+        resolve_announce(ctx, ctx.args.announce_bazel_command),
+    )
+
+_ANNOUNCE_AUTO = "'auto' (default) prints on a recognized CI host and is quiet locally."
+
+def announce_bazel_args(rc_phrase):
+    """The three `announce_bazel_*` CLI args every Bazel-spawning task declares.
+
+    Returns a dict to splat into a task's `args = {...}`. Identical across
+    tasks except for the rc disclosure's noun — pass `rc_phrase` as the thing
+    being run, e.g. `"the build"`, `"the lint build"`, `"the delivery build
+    phases"`. The resolved values are read back by `resolve_announce` /
+    `resolve_bazel_announce` / `setup_bazel_command`.
+    """
+    enum = ["auto", "true", "false"]
+    return {
+        "announce_bazel_rc": args.string(
+            default = "auto",
+            values = enum,
+            long = "announce-bazel-rc",
+            description = "Print the resolved Bazel `.bazelrc` flags before running %s. %s ASPECT_DEBUG=1 logs the same disclosure regardless." % (rc_phrase, _ANNOUNCE_AUTO),
+        ),
+        "announce_bazel_version": args.string(
+            default = "auto",
+            values = enum,
+            long = "announce-bazel-version",
+            description = "Print the detected Bazel version before each bazel spawn. %s" % _ANNOUNCE_AUTO,
+        ),
+        "announce_bazel_command": args.string(
+            default = "auto",
+            values = enum,
+            long = "announce-bazel-command",
+            description = "Print the exact bazel command line before each bazel spawn. %s" % _ANNOUNCE_AUTO,
+        ),
+    }
 
 def resolve_startup_flags(ctx, bazel_trait):
     """Build the startup flag list:
@@ -100,13 +172,14 @@ def setup_bazel_command(ctx, command, bazel_trait, base_flags = []):
             then bazel_trait.flags(flags) transform
             then rc expansion for `--config=…` keys.
 
-    MUST be called before `preflight_phase` so the Bazel health check
-    inside preflight sees the same startup flags every other Bazel
-    call sees, including any rc-derived `startup --output_base=...`.
+    Built-in tasks reach this through `lib/lifecycle.axl::setup_phase`,
+    which calls it before the Bazel health-check hooks so the check sees the
+    same startup flags every other Bazel call does (including any rc-derived
+    `startup --output_base=...`). Call it directly only for unusual layering.
 
     The parsed-rc disclosure is emitted via `trace.log` unconditionally
     (visible under `ASPECT_DEBUG`); the user-facing terminal print fires
-    only when `--announce-rc` is set.
+    when `--announce-bazel-rc` resolves on (on under CI by default).
 
     Args:
       ctx: TaskContext.
@@ -121,7 +194,7 @@ def setup_bazel_command(ctx, command, bazel_trait, base_flags = []):
         delivery's `--remote_download_outputs=minimal`.
 
     Requires the task to declare `bazel_startup_flags`, `bazel_flags`,
-    and `announce_rc` CLI args.
+    and `announce_bazel_rc` CLI args.
 
     Returns:
       list[str]: command flags after `:config` expansion.
@@ -133,8 +206,8 @@ def setup_bazel_command(ctx, command, bazel_trait, base_flags = []):
     rc_startup_flags, expanded_flags = rc.expand_all(command = command)
     ctx.bazel.startup_flags.extend(startup_flags + rc_startup_flags + ["--ignore_all_rc_files"])
 
-    _require_arg(ctx, "announce_rc")
-    if ctx.args.announce_rc:
+    _require_arg(ctx, "announce_bazel_rc")
+    if resolve_announce(ctx, ctx.args.announce_bazel_rc):
         print(rc.announce(command = command, ansi = color_enabled(ctx.std)))
     trace.log(rc.announce(command = command, ansi = False))
 

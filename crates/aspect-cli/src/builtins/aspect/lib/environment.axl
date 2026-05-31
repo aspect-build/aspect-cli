@@ -222,7 +222,7 @@ def color_enabled(std):
 #     an `info()`.
 #
 #     The narrow exception: features may register **display hooks**
-#     that fire at deterministic task phases (preflight, terminal)
+#     that fire at deterministic task phases (setup, terminal)
 #     and render structured multi-line blocks (section headers,
 #     status tables) where per-line `INFO:` prefixes would be
 #     visually wrong. The discipline that keeps this clean: factor
@@ -686,7 +686,7 @@ def print_environment_info(std: std.Std, env: WorkflowsEnvironment) -> None:
     title = "Workflows runner metadata"
     if color:
         # Bold + underline + blue, mirrors `_display_runner_health` in
-        # health_check.axl so the two preflight CLI sections share a look.
+        # health_check.axl so the two setup-phase CLI sections share a look.
         print("\x1b[1;4;34m" + title + "\x1b[0m")
     else:
         print(title)

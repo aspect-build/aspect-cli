@@ -10,8 +10,6 @@ Covers:
                             crossings fire. The WARN line itself is a
                             side effect on the CLI log; tests pin the
                             tier-state machine.
-  - `seed_from_rate_limit_body`     — JSON body parses into a fresh
-                                      observation + INFO line.
 
 Run with:
   aspect dev test-rate-limit
@@ -32,7 +30,6 @@ load(
     "record_from_headers",
     "record_observation",
     "reset_for_test",
-    "seed_from_rate_limit_body",
     "set_state_for_test",
     "should_emit_phase_change",
     "throttle_factor",
@@ -441,37 +438,6 @@ def _test_effective_throttle_factor_picks_larger(ctx):
         50.0,
     )
 
-def _test_seed_from_rate_limit_body(ctx):
-    """`/rate_limit` JSON parses into the App bucket and seeds the
-    ring buffer with the embedded `resources.core` values."""
-    _reset(ctx)
-    body = {
-        "resources": {
-            "core": {
-                "limit": 5000,
-                "used": 100,
-                "remaining": 4900,
-                "reset": _FAR_FUTURE,
-            },
-        },
-    }
-    seed_from_rate_limit_body(ctx, BUCKET_APP, body)
-    obs = inspect_for_test(ctx)["observations"][BUCKET_APP]
-    _eq("seed — single entry", len(obs), 1)
-    _eq("seed — remaining recorded", obs[0][1], 4900)
-    _eq("seed — limit recorded", obs[0][2], 5000)
-    _eq("seed — watermark seeded", inspect_for_test(ctx)["watermark"][BUCKET_APP], 4900)
-
-    # Malformed body — silent no-op.
-    _reset(ctx)
-    seed_from_rate_limit_body(ctx, BUCKET_APP, "not a dict")
-    _eq("seed — non-dict body no-ops", len(inspect_for_test(ctx)["observations"][BUCKET_APP]), 0)
-
-    # Missing resources.core — silent no-op.
-    _reset(ctx)
-    seed_from_rate_limit_body(ctx, BUCKET_APP, {"resources": {}})
-    _eq("seed — missing core no-ops", len(inspect_for_test(ctx)["observations"][BUCKET_APP]), 0)
-
 def _test_record_from_headers(ctx):
     """Header-list parsing path: case-insensitive name lookup, lenient
     integer parsing, silent no-op when `X-RateLimit-Remaining` isn't
@@ -578,29 +544,6 @@ def _test_burn_rate_falls_back_on_degenerate_inputs(ctx):
 
     # 12% remaining on the threshold ladder → 20×.
     _eq("no reset_epoch — falls back to threshold (12% → 20×)", throttle_factor(ctx, BUCKET_APP, now_epoch_s = 0), 20.0)
-
-def _test_seed_from_rate_limit_body_edge_cases(ctx):
-    """`seed_from_rate_limit_body` ignores partially-missing bodies
-    without polluting the buffer or watermark."""
-
-    # Missing `resources` key entirely.
-    _reset(ctx)
-    seed_from_rate_limit_body(ctx, BUCKET_APP, {})
-    _eq("seed edge — missing resources no-ops", len(inspect_for_test(ctx)["observations"][BUCKET_APP]), 0)
-
-    # `resources.core.remaining = -1` (sentinel for unset in our parser).
-    _reset(ctx)
-    seed_from_rate_limit_body(ctx, BUCKET_APP, {
-        "resources": {"core": {"limit": 5000, "remaining": -1, "reset": _FAR_FUTURE}},
-    })
-    _eq("seed edge — negative remaining no-ops", len(inspect_for_test(ctx)["observations"][BUCKET_APP]), 0)
-
-    # `resources.core.limit = 0` (invalid; can't compute fraction).
-    _reset(ctx)
-    seed_from_rate_limit_body(ctx, BUCKET_APP, {
-        "resources": {"core": {"limit": 0, "remaining": 100, "reset": _FAR_FUTURE}},
-    })
-    _eq("seed edge — zero limit no-ops", len(inspect_for_test(ctx)["observations"][BUCKET_APP]), 0)
 
 def _test_usage_footer(ctx):
     """`usage_footer` is App-bucket-only — env-bucket pressure is
@@ -1194,8 +1137,6 @@ def _test_impl(ctx):
     _test_reset_crossing_exact_boundary(ctx)
     _test_reset_crossing_rebaselines_watermark(ctx)
     _test_burn_rate_replenishment_returns_floor(ctx)
-    _test_seed_from_rate_limit_body(ctx)
-    _test_seed_from_rate_limit_body_edge_cases(ctx)
     _test_usage_footer(ctx)
     _test_time_throttle_factor_sliding_scale(ctx)
     _test_effective_throttle_factor_picks_larger(ctx)

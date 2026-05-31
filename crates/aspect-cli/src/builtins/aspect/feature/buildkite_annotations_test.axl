@@ -45,6 +45,7 @@ load(
     "../lib/bazel_results.axl",
     bazel_render_check_output = "render_check_output",
 )
+load("../lib/check_dispatch.axl", "make_render_ctx")
 load(
     "../lib/delivery_results.axl",
     delivery_render_check_output = "render_check_output",
@@ -93,15 +94,21 @@ def _bk_links():
         "testlogs_label_urls": {},
     }
 
-def _render_ctx(targets, task_name):
-    return {
-        "triggered_by": "Greg Magolan (BUILDKITE_BUILD_CREATOR)",
-        "targets": targets,
-        "started_ms": 1744630000000,
-        "ended_ms": 1744630004500,
-        "progress": "",
-        "task_name": task_name,
+def _render_ctx(subject, task_name):
+    """Build the render_ctx via the real `make_render_ctx` (not hand-rolled)
+    so the test exercises the same wiring as the live BK feature. `subject`
+    is the task subject (target pattern); pass "" for the empty-subject case,
+    which renders with no subject in the title.
+    """
+    state = {
+        "_triggered_by": "Greg Magolan (BUILDKITE_BUILD_CREATOR)",
+        "_subject": subject,
+        "_started_ms": 1744630000000,
+        "_ended_ms": 1744630004500,
+        "_progress": "",
+        "_task_name": task_name,
     }
+    return make_render_ctx(state)
 
 _RENDERERS = {
     "bazel_results": bazel_render_check_output,
@@ -113,7 +120,7 @@ _RENDERERS = {
 
 def _test_impl(ctx):
     scenarios = [
-        # (label,                                       kind,                data,                               status,    final, targets,      task_name)
+        # (label,                                       kind,                data,                               status,    final, subject,      task_name)
         ("1. build-passed", "bazel_results", _make_build_passed(), "passed", True, "//...", "build"),
         ("2. test-failed", "bazel_results", _make_test_failed(), "failed", True, "//...", "test"),
         ("3. lint-passed-clean", "lint_results", _make_lint_passed_clean(), "passed", True, "//...", "lint"),
@@ -140,13 +147,16 @@ def _test_impl(ctx):
         ("20. test-warning-terminal-flaky-only", "bazel_results", _make_test_passed_flaky_only(), "warning", True, "//...", "test"),
         # Mixed — real failure plus flakes. Failures dominate; stripe stays red.
         ("21. test-failing-with-flaky", "bazel_results", _make_test_failing_with_flaky(), "failing", False, "//...", "test"),
+        # Empty subject (query-driven task with no explicit target list): the
+        # title omits the subject entirely — there is no synthetic placeholder.
+        ("22. build-passed (empty subject)", "bazel_results", _make_build_passed(), "passed", True, "", "build"),
     ]
 
     sep = "=" * 70
 
-    for (label, kind, data, status, final, targets, task_name) in scenarios:
+    for (label, kind, data, status, final, subject, task_name) in scenarios:
         renderer = _RENDERERS[kind]
-        rc = _render_ctx(targets, task_name)
+        rc = _render_ctx(subject, task_name)
         out = renderer(ctx, data, status, rc, _bk_links(), None, None)
 
         # Mirror the live wiring: include a `:aspect: task <code>key</code>`

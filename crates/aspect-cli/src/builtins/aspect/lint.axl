@@ -21,13 +21,13 @@ Usage:
 load("@std//time.axl", "sleep", "sleep_iter")
 load("./bazel.axl", "BazelTrait")
 load("./lib/artifacts.axl", "artifacts")
-load("./lib/bazel_flags.axl", "setup_bazel_command")
+load("./lib/bazel_flags.axl", "announce_bazel_args", "resolve_bazel_announce")
 load("./lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event")
 load("./lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
 load("./lib/environment.axl", "color_enabled", "detect_ci", "error", "warn")
 load("./lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_changed_files_listing")
 load("./lib/health_check.axl", "HealthCheckTrait")
-load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "preflight_phase", "setup_phase", "task_update")
+load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "setup_phase", "task_update")
 load("./lib/lint_results.axl", "detect_lint_tool", lint_accumulate = "accumulate", lint_conclusion = "conclusion", lint_init_data = "init_data")
 load("./lib/repro_commands.axl", "build_aspect_command", "explicit_flags", "print_repro_and_fix", "repro_prefix", "task_cli_path")
 load("./lib/sarif.axl", "get_sarif_summary", "parse_sarif", "parse_sarif_diagnostics")
@@ -644,7 +644,7 @@ def _pick_status(data, had_failure, terminal):
     """Decide a lint task's lifecycle status from accumulated data.
 
     `had_failure` — hard-fail signal (build failed, fail_on_severity hit).
-    `terminal`    — True iff this is the final emit before task_complete.
+    `terminal`    — True iff this is the task's final `task_update` emit.
 
     Aborted check rides on `data["bazel"]["aborted"]` since lint's build
     phase shares the BES counter shape — when bazel aborts (timeout,
@@ -831,19 +831,14 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # (after the build has already run).
     validate_findings_destination(lint_trait.findings_destination)
 
-    # Initialize lint data for status-check emission. Fire task_started
-    # FIRST so any subsequent hook failure still produces a visible check run.
+    # Initialize lint data for status-check emission.
     data = lint_init_data()
     data["start_time_ms"] = now_ms(ctx)
     data["lint"]["strategy"] = _strategy_name(strategy)
     data["target_pattern"] = " ".join(list(ctx.args.targets)) if ctx.args.targets else ""
-    setup_phase(ctx, lifecycle)
-    for handler in lifecycle.task_started:
-        handler(ctx, data["target_pattern"])
 
-    # Lint-specific base flags. Flag computation happens here (not after
-    # detect_changed_files) so parse_rc + ctx.bazel.startup_flags are ready
-    # before preflight.
+    # Lint-specific base flags, computed before setup_phase since it forwards
+    # them to setup_bazel_command.
     base_flags = ["--remote_download_regex='.*AspectRulesLint.*'"]
     for aspect in ctx.args.aspects:
         base_flags.append("--aspects=" + aspect)
@@ -869,12 +864,13 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     if lint_trait.lint_report or not is_interactive:
         base_flags.append("--output_groups=rules_lint_machine")
 
-    flags = setup_bazel_command(ctx, "build", bazel_trait, base_flags = base_flags)
+    # The single pre-task setup phase (status surface, rc parse, health
+    # checks); returns the resolved flags (a failed health check fails the task
+    # inside setup_phase).
+    flags = setup_phase(ctx, lifecycle, data["target_pattern"], "lint_results", data, hc_trait, bazel_trait, "build", bazel_base_flags = base_flags)
+    announce_version, announce_command = resolve_bazel_announce(ctx)
 
-    # 1. Pre-flight (env table, health checks).
-    preflight_phase(ctx, lifecycle, hc_trait)
-
-    # 2. Detect changed files BEFORE lint_start hooks so features can read
+    # Detect changed files BEFORE lint_start hooks so features can read
     # lint_trait.changed_files as the canonical set. Prefers the GitHub
     # PR Files API when authenticated and in a PR context (works on any
     # CI host), falling back to local `git diff <base> --unified=0`.
@@ -952,6 +948,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     build = ctx.bazel.build(
         flags = flags,
         build_events = build_events,
+        announce_version = announce_version,
+        announce_command = announce_command,
         *ctx.args.targets
     )
 
@@ -960,7 +958,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # here — well before `build.wait()`. Emitting a running task_update at
     # this point lets the BK annotation / status check pick up the Aspect
     # Workflows link as soon as the build is spawned, instead of waiting for
-    # the first SARIF report (or task_complete) to surface it.
+    # the first SARIF report (or terminal task_update) to surface it.
     data["sink_invocation_id"] = build.sink_invocation_id
 
     # Re-emit (now that the sink_invocation_id is known so we can show
@@ -1292,13 +1290,6 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             ),
         ))
     print_repro_and_fix(ctx.std, data, final_status)
-    for handler in lifecycle.task_complete:
-        handler(ctx, exit_code)
-
-    for hook in hc_trait.post_health_check:
-        result = hook(ctx)
-        if result != None:
-            fail(result)
 
     return TaskConclusion(
         exit_code = exit_code,
@@ -1311,10 +1302,6 @@ lint = task(
         "aspects": args.string_list(
             long = "aspect",
             description = "Bazel aspect label(s) to apply for linting (e.g. //tools/lint:linters.bzl%eslint). Repeat the flag to run multiple aspects in a single invocation. Aspects may also be supplied via `--bazel-flag=--aspects=…` or a bazelrc `--config`; at least one rules_lint aspect must reach Bazel one way or another.",
-        ),
-        "announce_rc": args.boolean(
-            default = False,
-            description = "Print the resolved Bazel `.bazelrc` flags before running the lint build. Useful when debugging which config sections fired or what the final flag set looks like.",
         ),
         "bazel_flags": args.string_list(
             description = "Additional Bazel flags forwarded to the build (e.g. --bazel-flag=--config=ci --bazel-flag=--keep_going). Repeat the flag to pass multiple.",
@@ -1365,7 +1352,7 @@ lint = task(
             default = ["..."],
             description = "Bazel target patterns to lint. Defaults to '...' which expands to all rule targets in the package at and beneath the current directory. Pass multiple patterns to combine includes and excludes; when any pattern is hyphen-led, separate them from flags with `--` (e.g. `aspect lint -- //... -//experimental/...`).",
         ),
-    },
+    } | announce_bazel_args("the lint build"),
     traits = [
         BazelTrait,
         HealthCheckTrait,

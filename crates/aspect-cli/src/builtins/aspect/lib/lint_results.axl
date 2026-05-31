@@ -1072,7 +1072,7 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
         details_data["groups"] = []
         details_text = ctx.template.jinja2(details_tmpl, data = details_data)
 
-    target_pattern = render_ctx.get("targets", "") if render_ctx else ""
+    target_pattern = render_ctx.get("subject", "") if render_ctx else ""
     task_name = render_ctx.get("task_name", "") if render_ctx else ""
     if not target_pattern:
         target_pattern = data.get("target_pattern", "")

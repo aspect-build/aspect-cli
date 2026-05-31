@@ -56,7 +56,7 @@ load(
 load("./path_glob.axl", "match_path")
 load("./repro_commands.axl", "ASPECT_CLI_INSTALL_HINT_MARKDOWN")
 load("./result_text.axl", "emoji_for_status")
-load("./text.axl", "format_int_comma", "pluralize")
+load("./text.axl", "SUBJECT_TITLE_MAX", "format_int_comma", "pluralize", "truncate_for_title")
 load("./tips.axl", "decorate_tip")
 
 # Max number of unique failed build target labels to track detail for. Entries
@@ -1232,18 +1232,10 @@ def compute_reproducer_command(data, task_name, max_chars = MAX_REPRO_CHARS):
     cmd, _ = _repro_with_prefix("aspect " + task_name, labels, max_chars)
     return (cmd, len(labels))
 
+# GitHub caps a check-run title at 160 chars; the whole composed title is
+# truncated to this. The subject within it is capped tighter at
+# `SUBJECT_TITLE_MAX` (shared with the other surfaces).
 _TITLE_MAX_LEN = 160
-_TITLE_SUBJECT_MAX = 60
-
-def _truncate_for_title(text, max_len):
-    """Truncate text for a GitHub check title, preserving word boundaries where possible."""
-    if len(text) <= max_len:
-        return text
-    window = text[:max_len - 1]
-    last_space = window.rfind(" ")
-    if last_space > max_len // 2:
-        return window[:last_space] + "…"
-    return window + "…"
 
 def summary_title(data, status, target_pattern = "", task_name = ""):
     """Build the check run title in the form '<status_emoji> <task_name> <subject> · <state>'.
@@ -1267,7 +1259,7 @@ def summary_title(data, status, target_pattern = "", task_name = ""):
     Returns:
         str — max 160 chars (GitHub check title limit)
     """
-    subject = _truncate_for_title(target_pattern, _TITLE_SUBJECT_MAX) if target_pattern else ""
+    subject = truncate_for_title(target_pattern, SUBJECT_TITLE_MAX) if target_pattern else ""
     state = compute_invocation_state(data, status)
     icon = emoji_for_status(status)
 
@@ -1288,7 +1280,7 @@ def summary_title(data, status, target_pattern = "", task_name = ""):
         title = front
     else:
         title = state
-    return _truncate_for_title(title, _TITLE_MAX_LEN)
+    return truncate_for_title(title, _TITLE_MAX_LEN)
 
 def conclusion(status, data):
     """Bazel build/test task's terminal bookend conclusion. Delegates
@@ -2371,11 +2363,27 @@ def _redact_env_value(value, allow_env):
         return var_name + "=" + _strip_url_creds(var_value)
     return var_name + "=" + _REDACTED
 
+def _redact_header_value(value):
+    """Redact a request-header flag value, keeping the header name and hiding
+    only the value. Bazel accepts both `Name=Value` and `Name: Value` forms,
+    so split on the first `=` or `:` (whichever comes first):
+      `X-Aspect=tok`            -> `X-Aspect=<REDACTED>`
+      `Authorization: Bearer t` -> `Authorization:<REDACTED>`
+    A value with no separator has nothing to keep and is fully redacted.
+    """
+    eq = value.find("=")
+    colon = value.find(":")
+    seps = [i for i in [eq, colon] if i >= 0]
+    if not seps:
+        return _REDACTED
+    i = min(seps)
+    return value[:i + 1] + _REDACTED
+
 def _redact_arg(arg, allow_env):
     """Redact one command-line token:
 
       1. Header flags (`--remote_header=...`, `--bes_header=...`, etc.) —
-         value wholly replaced with <REDACTED>.
+         header name kept, value replaced with <REDACTED> (see `_redact_header_value`).
       2. Env-passthrough flags (`--client_env=KEY=VALUE`, ...) — value handled
          per allowlist / safe-values / known-git-URL rules (see `_redact_env_value`).
       3. Any other flag value — URL credentials stripped (`scheme://user:pass@`
@@ -2390,7 +2398,7 @@ def _redact_arg(arg, allow_env):
     # Bare flag name: strip leading dashes, stop at `=` (already stripped).
     bare = name[2:] if name.startswith("--") else name
     if _is_header_option(bare):
-        return name + "=" + _REDACTED
+        return name + "=" + _redact_header_value(value)
     if _is_env_option(bare):
         return name + "=" + _redact_env_value(value, allow_env)
 
@@ -2635,9 +2643,8 @@ def _titlecase(s):
     `Bazel query` for display. Subsequent words stay lowercase — the
     input is an identifier, not a sentence, so leading-cap-only
     matches how renderers and CLIs typically format programmatic
-    names. Callers that need a non-naive display label (e.g.
-    `preflight` → `Pre-flight`) set `Phase.display_name`; the
-    renderer prefers that over this helper.
+    names. Callers that need a non-naive display label set
+    `Phase.display_name`; the renderer prefers that over this helper.
     """
     if not s:
         return s
@@ -2668,9 +2675,9 @@ def format_elapsed_with_phases(ctx, status):
 
     Shapes:
       No phases used:                    "12.4s"
-      Phases, running:                   "4m13s · 🔨 Build 4m11s | ⚙ Setup 1.7s · 🔍 Detect 1.2s"
-      Phases, failing:                   "4m13s · 🔨 Build (failing 4m11s) | ⚙ Setup 1.7s · 🔍 Detect 1.2s"
-      Phases, passed (terminal):         "46.8s — ⚙ Setup 1.7s · 🔍 Detect 1.2s · 🔨 Build 45.3s"
+      Phases, running:                   "4m13s · 🔨 Build 4m11s | 🔧 Setup 1.7s · 🔍 Detect 1.2s"
+      Phases, failing:                   "4m13s · 🔨 Build (failing 4m11s) | 🔧 Setup 1.7s · 🔍 Detect 1.2s"
+      Phases, passed (terminal):         "46.8s — 🔧 Setup 1.7s · 🔍 Detect 1.2s · 🔨 Build 45.3s"
       Phases, failed-during-phase:       "1m 15s · 🔨 Build (failed after 1m 12s) | 🌱 Init 2.3s"
       Phases, failed-after-phase-bound:  "1m 15s — 🌱 Init 2.3s · 🔨 Build 1m 12s"
 
@@ -2755,8 +2762,8 @@ def _phase_label(phase, emoji, display_name):
     `display_name` is the producer-supplied label override via
     `Phase(display_name=...)`. When non-empty it's used verbatim;
     when empty, fall back to `_titlecase(phase)` (so `bazel_query` →
-    `Bazel query` works out of the box and only the irregulars need
-    an explicit override — currently just `preflight` → `Pre-flight`).
+    `Bazel query` works out of the box and only irregular names need
+    an explicit override).
     """
     name_t = display_name or _titlecase(phase)
     if emoji:
@@ -3569,7 +3576,7 @@ def build_summary_data(ctx, data, status, render_ctx, links, metadata_keys, run_
     return {
         "last_update": last_update,
         "config_items": config_items or [],
-        "target_pattern": render_ctx.get("targets", "") if render_ctx else "",
+        "target_pattern": render_ctx.get("subject", "") if render_ctx else "",
         "branch": html_escape(meta.get("BRANCH_NAME", "")),
         "tag": html_escape(meta.get("TAG", "")),
         "short_sha": sha[:7] if sha else "",
@@ -3924,7 +3931,7 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
     # applied when not set). See _redact_arg for the redaction rules.
     allow_env = _allow_env_patterns(data["bazel"].get("metadata", {}))
     opts_parsed = data["bazel"].get("options_parsed", {}) or {}
-    target_pattern_for_cmd = (render_ctx or {}).get("targets", "") if render_ctx else ""
+    target_pattern_for_cmd = (render_ctx or {}).get("subject", "") if render_ctx else ""
     _explicit_cmd = _assemble_explicit_command(
         data["bazel"].get("build_command", ""),
         target_pattern_for_cmd,
@@ -4445,7 +4452,7 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
         ctx:           TaskContext
         data:       dict from init_data(), updated by process_event
         status:        "running" | "failing" | "passed" | "failed"
-        render_ctx:    display context from the feature (triggered_by, targets,
+        render_ctx:    display context from the feature (triggered_by, subject,
                        started_ms, ended_ms, progress) — see build_summary_data
         links:         dict with ci_label, ci_url, aspect_url
         templates:     optional override dict — keys "summary" and/or "details"
@@ -4657,7 +4664,7 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
         trace.log("debug [render_check_output] --- details (first 5000 chars) ---")
         trace.log(details_text[:5000])
 
-    target_pattern = render_ctx.get("targets", "") if render_ctx else ""
+    target_pattern = render_ctx.get("subject", "") if render_ctx else ""
     task_name = render_ctx.get("task_name", "") if render_ctx else ""
     return {
         "title": summary_title(
