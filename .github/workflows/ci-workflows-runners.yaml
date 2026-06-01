@@ -24,7 +24,6 @@ concurrency:
 # Both are no-ops if a secret isn't configured (unset env var = empty string,
 # config.axl skips registration).
 env:
-  ASPECT_API_TOKEN: ${{ secrets.ASPECT_API_TOKEN }}
   DASH0_ENDPOINT: ${{ secrets.DASH0_ENDPOINT }}
   DASH0_TOKEN: ${{ secrets.DASH0_TOKEN }}
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -35,6 +34,14 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
+      # launcher-install: false — bootstrap.sh below builds the CLI from
+      # source. aspect-api-token also omitted (see ci-github-runners.yaml's
+      # pre-build for rationale). On Workflows runners launcher-install
+      # is a no-op since the runner image already ships `aspect`; setting
+      # it explicitly keeps both workflow files aligned.
+      - uses: aspect-build/setup-aspect@c22a8f64fb38f82f59ce809cd7eb9f8ae096da44 # v2026.23.2
+        with:
+          launcher-install: false
       - name: Pre-build CLI
         run: |
           echo "Build and upload CLI to remote cache"
@@ -46,6 +53,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
+      - uses: aspect-build/setup-aspect@c22a8f64fb38f82f59ce809cd7eb9f8ae096da44 # v2026.23.2
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Bootstrap
         run: .aspect/bootstrap.sh
       - name: Build Task (ASPECT_DEBUG=1)
@@ -59,6 +69,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
+      - uses: aspect-build/setup-aspect@c22a8f64fb38f82f59ce809cd7eb9f8ae096da44 # v2026.23.2
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Bootstrap
         run: .aspect/bootstrap.sh
       - name: Test Task (ASPECT_DEBUG=1)
@@ -72,6 +85,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
+      - uses: aspect-build/setup-aspect@c22a8f64fb38f82f59ce809cd7eb9f8ae096da44 # v2026.23.2
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Bootstrap
         run: .aspect/bootstrap.sh
       - name: Lint Task (ASPECT_DEBUG=1)
@@ -95,6 +111,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
+      - uses: aspect-build/setup-aspect@c22a8f64fb38f82f59ce809cd7eb9f8ae096da44 # v2026.23.2
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Bootstrap
         run: .aspect/bootstrap.sh
       - name: Buildifier Task (ASPECT_DEBUG=1)
@@ -108,6 +127,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
+      - uses: aspect-build/setup-aspect@c22a8f64fb38f82f59ce809cd7eb9f8ae096da44 # v2026.23.2
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Bootstrap
         run: .aspect/bootstrap.sh
       # Starlark patterns are handled by buildifier-task; ignore them here so
@@ -125,6 +147,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
+      - uses: aspect-build/setup-aspect@c22a8f64fb38f82f59ce809cd7eb9f8ae096da44 # v2026.23.2
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Bootstrap
         run: .aspect/bootstrap.sh
       - name: Gazelle Task (ASPECT_DEBUG=1)
@@ -138,6 +163,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
+      - uses: aspect-build/setup-aspect@c22a8f64fb38f82f59ce809cd7eb9f8ae096da44 # v2026.23.2
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Bootstrap
         run: .aspect/bootstrap.sh
       # Regression test for the build-from-source gazelle path —
@@ -158,6 +186,9 @@ jobs:
       ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS: ${{ inputs.force_targets }}
     steps:
       - uses: actions/checkout@v6
+      - uses: aspect-build/setup-aspect@c22a8f64fb38f82f59ce809cd7eb9f8ae096da44 # v2026.23.2
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Bootstrap
         run: .aspect/bootstrap.sh
       - name: Delivery Task (ASPECT_DEBUG=1)
