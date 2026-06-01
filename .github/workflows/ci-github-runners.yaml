@@ -54,8 +54,6 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
-        with:
-          fetch-depth: 2
       - uses: ./.github/actions/install-prebuilt-aspect-cli
       - name: Buildifier Task
         run: aspect buildifier --task-key buildifier-gha-ephemeral
@@ -66,8 +64,6 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
-        with:
-          fetch-depth: 2
       - uses: ./.github/actions/install-prebuilt-aspect-cli
       # Starlark patterns are handled by buildifier-task; ignore them here so
       # the two steps don't do duplicate work.
@@ -81,8 +77,6 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
-        with:
-          fetch-depth: 2
       - uses: ./.github/actions/install-prebuilt-aspect-cli
       - name: Gazelle Task
         run: aspect gazelle --task-key gazelle-gha-ephemeral

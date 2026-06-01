@@ -72,8 +72,6 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
-        with:
-          fetch-depth: 2
       - name: Bootstrap
         run: .aspect/bootstrap.sh
       - name: Lint Task (ASPECT_DEBUG=1)
@@ -97,8 +95,6 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
-        with:
-          fetch-depth: 2
       - name: Bootstrap
         run: .aspect/bootstrap.sh
       - name: Buildifier Task (ASPECT_DEBUG=1)
@@ -112,8 +108,6 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
-        with:
-          fetch-depth: 2
       - name: Bootstrap
         run: .aspect/bootstrap.sh
       # Starlark patterns are handled by buildifier-task; ignore them here so
@@ -131,8 +125,6 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
-        with:
-          fetch-depth: 2
       - name: Bootstrap
         run: .aspect/bootstrap.sh
       - name: Gazelle Task (ASPECT_DEBUG=1)
@@ -146,8 +138,6 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
-        with:
-          fetch-depth: 2
       - name: Bootstrap
         run: .aspect/bootstrap.sh
       # Regression test for the build-from-source gazelle path —
