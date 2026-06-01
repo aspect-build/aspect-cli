@@ -229,9 +229,18 @@ def _classify_missing_credentials(ctx):
     """Return `(kind, msg)` for `ctx.aspect.auth.credentials()` returning
     None. The kind discriminates the CI case (where setting
     `ASPECT_API_TOKEN` is the fix) from the local case (`aspect auth login`).
+
+    On GitHub Actions the recommended fix is the aspect-build/setup-aspect
+    action, which passes the token via stdin into `aspect auth login` so
+    the long-lived secret never lands in `GITHUB_ENV`. On Buildkite /
+    CircleCI / generic CI there's no equivalent action yet, so the fix
+    is still raw `ASPECT_API_TOKEN` in the job env.
     """
     setup_url = "https://docs.aspect.build/cli/authentication"
-    if ctx.std.env.var("BUILDKITE_AGENT_ACCESS_TOKEN"):
+    if ctx.std.env.var("GITHUB_ACTIONS"):
+        msg = "no Aspect credentials — use the aspect-build/setup-aspect action with aspect-api-token (https://github.com/aspect-build/setup-aspect)"
+        kind = _AUTH_KIND_NO_CREDENTIALS
+    elif ctx.std.env.var("BUILDKITE_AGENT_ACCESS_TOKEN"):
         msg = "no Aspect credentials — set ASPECT_API_TOKEN in the job env or provision it as a Buildkite secret (https://buildkite.com/docs/pipelines/security/secrets/buildkite-secrets)"
         kind = _AUTH_KIND_NO_CREDENTIALS
     elif ctx.std.env.var("CI"):
