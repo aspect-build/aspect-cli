@@ -154,12 +154,95 @@ def _test_impl(ctx):
     if "invalid status" not in (res.get("error") or ""):
         fail("external_status_checks.respond error message changed: %r" % res)
 
-    # Struct shape sanity — every documented attribute is present.
+    # ----- authenticate() smoke -----
+    #
+    # Mirrors the GH `_authenticate` test pattern: stub `ctx` where
+    # `aspect.auth.credentials(...)` returns None so the function
+    # short-circuits before any HTTP call is attempted, then assert
+    # the populated `_reason["kind"]`. Each test asserts a distinct
+    # failure shape using only env-var classification + arg
+    # validation. HTTP-status paths (401/403/404/5xx) are out of
+    # scope here — they're covered by the feature-level tests once
+    # they wire `gitlab.authenticate` for real.
+    def _ctx_no_creds(env_vars):
+        return struct(
+            std = struct(env = struct(var = lambda name: env_vars.get(name, ""))),
+            aspect = struct(auth = struct(credentials = lambda profile = None: None)),
+        )
+
+    # Missing project_path short-circuits before touching creds.
+    reason = {}
+    tok = gitlab.authenticate(_ctx_no_creds({}), project_path = "", _reason = reason)
+    _eq("authenticate / empty project_path returns None", tok, None)
+    _eq("authenticate / empty project_path kind", reason.get("kind"), "no-project-path")
+
+    # GitHub Actions + missing creds → kind="no-credentials".
+    reason = {}
+    tok = gitlab.authenticate(
+        _ctx_no_creds({"CI": "true", "GITHUB_ACTIONS": "true"}),
+        project_path = "group/project",
+        _reason = reason,
+    )
+    _eq("authenticate / GHA no-creds returns None", tok, None)
+    _eq("authenticate / GHA no-creds kind", reason.get("kind"), "no-credentials")
+    if "setup-aspect" not in (reason.get("reason") or ""):
+        fail("authenticate / GHA reason should mention setup-aspect action: %r" % reason.get("reason"))
+
+    # Buildkite + missing creds → kind="no-credentials" via BK branch.
+    reason = {}
+    gitlab.authenticate(
+        _ctx_no_creds({"CI": "true", "BUILDKITE_AGENT_ACCESS_TOKEN": "bk-tok"}),
+        project_path = "group/project",
+        _reason = reason,
+    )
+    _eq("authenticate / Buildkite no-creds kind", reason.get("kind"), "no-credentials")
+    if "Buildkite secret" not in (reason.get("reason") or ""):
+        fail("authenticate / Buildkite reason should mention Buildkite secrets: %r" % reason.get("reason"))
+
+    # Generic CI (e.g. CircleCI / GitLab CI) + missing creds →
+    # kind="no-credentials" via the generic-CI branch.
+    reason = {}
+    gitlab.authenticate(
+        _ctx_no_creds({"CI": "true"}),
+        project_path = "group/project",
+        _reason = reason,
+    )
+    _eq("authenticate / generic CI no-creds kind", reason.get("kind"), "no-credentials")
+
+    # Local (no CI env vars) + missing creds → kind="not-logged-in".
+    reason = {}
+    gitlab.authenticate(
+        _ctx_no_creds({}),
+        project_path = "group/project",
+        _reason = reason,
+    )
+    _eq("authenticate / local no-creds kind", reason.get("kind"), "not-logged-in")
+    if "aspect auth login" not in (reason.get("reason") or ""):
+        fail("authenticate / local reason should mention `aspect auth login`: %r" % reason.get("reason"))
+
+    # _reason=None should still short-circuit gracefully (no crash on
+    # the missing-creds branch when caller doesn't care about reason).
+    tok = gitlab.authenticate(_ctx_no_creds({}), project_path = "group/project")
+    _eq("authenticate / no _reason dict still returns None", tok, None)
+
+    # Role validation — happy path.
+    if not gitlab.validate_role("api"):
+        fail("validate_role('api') should be True")
+    if gitlab.validate_role("checks.write"):
+        fail("validate_role('checks.write') should be False — GitHub-only role")
+    if gitlab.validate_role("garbage"):
+        fail("validate_role('garbage') should be False")
+
+    # ----- struct shape sanity -----
+
     for name in (
         "DEFAULT_API",
         "encode_project_path",
         "extract_host",
         "extract_project_path",
+        "authenticate",
+        "validate_role",
+        "VALID_ROLES",
         "commit_status",
         "external_status_checks",
         "notes",

@@ -320,6 +320,179 @@ def _extract_project_path_from_url(url):
         tail = tail[:-len(".git")]
     return tail
 
+# Authentication
+#
+# Mirrors the shape of `lib/github.axl::_authenticate`. Exchanges the
+# locally-persisted Aspect credentials (set by `aspect auth login` or
+# `ASPECT_API_TOKEN`) for a short-lived GitLab token minted by the
+# Aspect GitLab App through the Marvin v2 `/gitlab/token` endpoint.
+#
+# Returns the token string on success, or None on failure with an
+# optional `_reason` dict populated with both a stable `kind` (one of
+# the `_AUTH_KIND_*` constants) and a human-readable `reason` string.
+# Designed for feature lifecycle hooks: transport errors are caught
+# and translated to None + `_reason`, never raised, so a parent
+# `aspect build` / `aspect test` task is never failed by the auth
+# layer alone.
+#
+# Some kinds + classification helpers are duplicated verbatim from
+# `lib/github.axl` rather than imported. This is deliberate while the
+# GH and GL code paths are stabilizing; the cancelled ENG-1647 VCS
+# trait would have unified them, and a future refactor (likely when a
+# third SCM lands) can lift the common pieces into a shared helper.
+
+# Token roles the server is willing to honor on the `?roles=` query
+# parameter. The server validates again — this is a client-side
+# fail-fast for typos. GitLab's OAuth scope model is coarser than
+# GitHub's check/PR/issue split, so the role surface is shorter.
+VALID_ROLES = [
+    "api",  # Broad GitLab API access — needed for External Status Checks + MR notes write
+    "external_status_checks.write",  # Premium/Ultimate: respond to External Status Checks
+    "mr_notes.write",  # Create/update MR notes (the rolling status comment)
+    "mr.read",  # Read MR metadata + diffs
+]
+
+def validate_role(role):
+    """True when `role` is a known client-side GitLab role name."""
+    return role in VALID_ROLES
+
+# Stable identifiers populated into `_reason["kind"]` on auth failure.
+# Downstream code (feature error handlers, tip emitters) discriminates
+# on these rather than the human-readable `reason` string.
+_AUTH_KIND_NO_PROJECT_PATH = "no-project-path"
+_AUTH_KIND_NO_CREDENTIALS = "no-credentials"  # CI without ASPECT_API_TOKEN
+_AUTH_KIND_NOT_LOGGED_IN = "not-logged-in"  # local without `aspect auth login`
+_AUTH_KIND_TRANSPORT_ERROR = "aspect-api-transport-error"
+_AUTH_KIND_BAD_RESPONSE = "aspect-api-bad-response"
+_AUTH_KIND_EXPIRED = "credentials-expired"
+_AUTH_KIND_DENIED = "access-denied"
+_AUTH_KIND_APP_NOT_INSTALLED = "app-not-installed"
+_AUTH_KIND_API_ERROR = "aspect-api-error"
+
+def _set_auth_reason(_reason, kind, msg):
+    """Populate `_reason` with both the structured `kind` and the
+    human-readable `reason`. No-op when the caller didn't pass a dict."""
+    if _reason != None:
+        _reason["kind"] = kind
+        _reason["reason"] = msg
+
+def _classify_missing_credentials(ctx):
+    """Return `(kind, msg)` for `ctx.aspect.auth.credentials()` returning
+    None. The kind discriminates the CI case (where setting
+    `ASPECT_API_TOKEN` is the fix) from the local case (`aspect auth login`)."""
+    setup_url = "https://docs.aspect.build/cli/authentication"
+    if ctx.std.env.var("GITHUB_ACTIONS"):
+        msg = "no Aspect credentials — use the aspect-build/setup-aspect action with aspect-api-token (https://github.com/aspect-build/setup-aspect)"
+        kind = _AUTH_KIND_NO_CREDENTIALS
+    elif ctx.std.env.var("BUILDKITE_AGENT_ACCESS_TOKEN"):
+        msg = "no Aspect credentials — set ASPECT_API_TOKEN in the job env or provision it as a Buildkite secret (https://buildkite.com/docs/pipelines/security/secrets/buildkite-secrets)"
+        kind = _AUTH_KIND_NO_CREDENTIALS
+    elif ctx.std.env.var("CI"):
+        msg = "no Aspect credentials — set ASPECT_API_TOKEN (client_id:secret) in the job env"
+        kind = _AUTH_KIND_NO_CREDENTIALS
+    else:
+        msg = "not logged in — run `aspect auth login`"
+        kind = _AUTH_KIND_NOT_LOGGED_IN
+    return kind, msg + ". Setup guide: " + setup_url
+
+def _missing_credentials_reason(ctx):
+    """Human-readable explanation for `ctx.aspect.auth.credentials()`
+    returning None, tailored to the environment the CLI is running in."""
+    _, msg = _classify_missing_credentials(ctx)
+    return msg
+
+def _authenticate(ctx, project_path, project_id = None, profile = None, roles = None, _reason = None):
+    """Resolve a GitLab token by exchanging Aspect credentials via the
+    Aspect GitLab App (requires `project_path` to be provided; optional
+    `project_id` is forwarded as a numeric hint when available).
+
+    Returns the token string, or None if authentication is not possible.
+    If `_reason` is a dict, it is populated on failure with both a
+    stable `kind` (one of the `_AUTH_KIND_*` identifiers) and a
+    human-readable `reason` describing why auth failed.
+
+    GitLab projects are addressed by their full slash-separated path
+    (e.g. `group/subgroup/project`) — see `encode_project_path` for
+    why subgroups round-trip through the API as part of `:id`. The
+    optional `project_id` lets callers that already have the numeric
+    ID skip a lookup on the server side; the server treats it as a
+    hint only — `project_path` remains authoritative.
+    """
+    if not project_path:
+        _set_auth_reason(_reason, _AUTH_KIND_NO_PROJECT_PATH, "project_path not provided")
+        return None
+
+    creds = ctx.aspect.auth.credentials(profile = profile)
+    if not creds:
+        kind, msg = _classify_missing_credentials(ctx)
+        _set_auth_reason(_reason, kind, msg)
+        return None
+
+    if roles:
+        for role in roles:
+            if not validate_role(role):
+                msg = "unknown role %r, valid roles: %s" % (role, ", ".join(VALID_ROLES))
+                fail(msg)
+
+    url = ctx.aspect.auth.api_url + "/gitlab/token"
+    if roles:
+        url = url + "?roles=" + ",".join(roles)
+
+    payload = {"project_path": project_path}
+    if project_id != None:
+        payload["project_id"] = project_id
+
+    # Transport errors are converted to a string here so they don't
+    # bubble up as exceptions and fail the parent task (e.g. when this
+    # is called from a lifecycle hook in a feature like
+    # GitlabExternalStatusChecks).
+    resp = ctx.http().post(
+        url = url,
+        headers = {
+            "Authorization": "Bearer " + creds.access_token,
+            "Content-Type": "application/json",
+        },
+        data = json.encode(payload),
+    ).map_err(lambda e: str(e)).block()
+
+    if type(resp) == "string":
+        _set_auth_reason(
+            _reason,
+            _AUTH_KIND_TRANSPORT_ERROR,
+            "Aspect API request failed (transport error): %s" % resp,
+        )
+        return None
+
+    if resp.status >= 200 and resp.status < 300:
+        # Aspect's auth endpoint returns JSON on success. try_decode
+        # so a malformed/empty 2xx body (rare, but possible during
+        # partial outages) doesn't crash the parent task — falls
+        # through to the `_reason` error path instead.
+        parsed = json.try_decode(resp.body, None)
+        if parsed != None and "token" in parsed:
+            return parsed["token"]
+        snippet = (resp.body or "")[:200].replace("\n", " ")
+        _set_auth_reason(
+            _reason,
+            _AUTH_KIND_BAD_RESPONSE,
+            "Aspect API returned 2xx but body was unusable: %s" % snippet,
+        )
+        return None
+
+    if resp.status == 401:
+        _set_auth_reason(_reason, _AUTH_KIND_EXPIRED, "credentials expired (run `aspect auth login`)")
+    elif resp.status == 403:
+        _set_auth_reason(_reason, _AUTH_KIND_DENIED, "access denied: %s" % resp.body)
+    elif resp.status == 404:
+        _set_auth_reason(
+            _reason,
+            _AUTH_KIND_APP_NOT_INSTALLED,
+            "GitLab App not installed for this project (see https://docs.aspect.build/cli/authentication)",
+        )
+    else:
+        _set_auth_reason(_reason, _AUTH_KIND_API_ERROR, "API request failed (HTTP %d): %s" % (resp.status, resp.body))
+    return None
+
 # Public facade
 
 gitlab = struct(
@@ -327,6 +500,9 @@ gitlab = struct(
     encode_project_path = encode_project_path,
     extract_host = _extract_host,
     extract_project_path = _extract_project_path_from_url,
+    authenticate = _authenticate,
+    validate_role = validate_role,
+    VALID_ROLES = VALID_ROLES,
     commit_status = struct(
         STATES = _COMMIT_STATUS_STATES,
         post = _commit_status_post,
