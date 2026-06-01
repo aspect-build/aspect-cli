@@ -38,10 +38,6 @@ _user_task = task(
 buildifier = format.alias(
     defaults = {
         "formatter_target": "@buildifier_prebuilt//buildifier",
-        # buildifier_binary is a symlink to the raw Go binary; it does not
-        # switch to $BUILD_WORKING_DIRECTORY on its own, so we run it in
-        # the user's cwd to make relative paths resolve.
-        "run_in_cwd": True,
         # Fires only when the format task would otherwise pass zero files
         # to the formatter (e.g. `--scope=all`, or a `--scope=changed` run
         # that degraded because no changed files matched). The bare
@@ -58,6 +54,10 @@ buildifier = format.alias(
         # https://docs.aspect.build/cli/tasks/buildifier#run-it-locally for
         # the user-facing reference.
         "formatter_args_for_tree_walk": ["-r", "."],
+        # buildifier_binary is a symlink to the raw Go binary; it does not
+        # switch to $BUILD_WORKING_DIRECTORY on its own, so we run it in
+        # the user's cwd to make relative paths resolve.
+        "run_in_cwd": True,
         "include_patterns": [
             "**/BUCK",
             "**/BUILD",
