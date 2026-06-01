@@ -429,12 +429,23 @@ def _test_builtin_templates_shape(ctx):
     )
 
     # Body specialization sanity-check — wire-up advice differs per host.
-    if "workflow" not in TIP_ADD_ASPECT_API_TOKEN_GHA["body"]:
-        fail("GHA tip body missing GHA-specific advice")
+    # The GHA tip recommends the aspect-build/setup-aspect action (which
+    # passes the token via stdin into `aspect auth login`, so the
+    # long-lived secret never lands in GITHUB_ENV); there's no equivalent
+    # for Buildkite / CircleCI yet, so those still advise raw env wiring.
+    if "setup-aspect" not in TIP_ADD_ASPECT_API_TOKEN_GHA["body"]:
+        fail("GHA tip body should recommend aspect-build/setup-aspect")
     if "Buildkite's secrets docs" not in TIP_ADD_ASPECT_API_TOKEN_BUILDKITE["body"]:
         fail("Buildkite tip body missing Buildkite-specific advice")
     if "context" not in TIP_ADD_ASPECT_API_TOKEN_CIRCLECI["body"]:
         fail("CircleCI tip body missing CircleCI-specific advice")
+
+    # The GHA tip must NOT recommend the deprecated workflow-level env
+    # pattern (`env: ASPECT_API_TOKEN: ${{ secrets.ASPECT_API_TOKEN }}`)
+    # that leaks the long-lived token to every step in the job. Catch
+    # accidental regressions to that pattern.
+    if "env:\n  ASPECT_API_TOKEN" in TIP_ADD_ASPECT_API_TOKEN_GHA["body"]:
+        fail("GHA tip body should not recommend exposing ASPECT_API_TOKEN as a workflow-level env var (use setup-aspect instead)")
 
     # PR-summary-comment aggregation is GHA-only today, so only the GHA
     # tip should mention it. BK / CircleCI tips listing a feature that

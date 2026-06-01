@@ -241,8 +241,16 @@ def _aspect_api_token_tip(host_id, degraded_features, host_advice):
 TIP_ADD_ASPECT_API_TOKEN_GHA = _aspect_api_token_tip(
     "github-actions",
     "PR check-run creation and updates, and PR summary comment aggregation",
-    "On GitHub Actions, expose the secret to your workflow:\n\n" +
-    "```yaml\nenv:\n  ASPECT_API_TOKEN: ${{ secrets.ASPECT_API_TOKEN }}\n```",
+    "On GitHub Actions, pass the token to the " +
+    "[aspect-build/setup-aspect]" +
+    "(https://github.com/aspect-build/setup-aspect) action:\n\n" +
+    "```yaml\n" +
+    "- uses: aspect-build/setup-aspect@<commit-sha>\n" +
+    "  with:\n" +
+    "    aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}\n" +
+    "```\n\n" +
+    "Find the latest release's commit SHA at " +
+    "https://github.com/aspect-build/setup-aspect/releases.",
 )
 
 TIP_ADD_ASPECT_API_TOKEN_BUILDKITE = _aspect_api_token_tip(
