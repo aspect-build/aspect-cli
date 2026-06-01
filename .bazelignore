@@ -4,3 +4,4 @@ bazel/proto/
 examples/deliverable
 examples/large_bes
 examples/slow_build
+.claude/
