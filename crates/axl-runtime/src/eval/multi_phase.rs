@@ -8,6 +8,7 @@ use starlark::values::list::AllocList;
 use starlark::values::{Heap, Value, ValueLike};
 use uuid::Uuid;
 
+use crate::ci::on_recognized_ci;
 use crate::engine::arguments::Arguments;
 use crate::engine::bazel::Bazel;
 use crate::engine::config_context::ConfigContext;
@@ -44,18 +45,6 @@ const SGR_RESET: &str = "\x1b[0m";
 /// `38;5;75` (256-color sky blue), or empty to disable.
 const DEFAULT_HIGHLIGHT_COLOR: &str = "1;36";
 const HIGHLIGHT_COLOR_ENV: &str = "ASPECT_CLI_HIGHLIGHT_COLOR";
-
-/// True on any recognized CI host (Buildkite / GitHub Actions / CircleCI /
-/// GitLab CI / generic `CI=...`). Used to gate task-key suffix on the
-/// running-task header and to force-enable color when stderr is piped to
-/// a CI log viewer that renders ANSI.
-fn on_recognized_ci() -> bool {
-    std::env::var_os("BUILDKITE").is_some()
-        || std::env::var_os("CI").is_some()
-        || std::env::var_os("GITHUB_ACTIONS").is_some()
-        || std::env::var_os("CIRCLECI").is_some()
-        || std::env::var_os("GITLAB_CI").is_some()
-}
 
 /// Return `(verb_color_prefix, reset)` for the "Running" verb on the
 /// task-starting line. `verb_color_prefix` is empty when color is

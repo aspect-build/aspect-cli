@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use aspect_telemetry::{cargo_pkg_short_version, do_not_track, send_telemetry};
 use axl_runtime::bazel_live;
+use axl_runtime::ci::on_recognized_ci;
 use axl_runtime::eval::{Loader, ModuleEnv, MultiPhaseEval};
 use axl_runtime::module::{AXL_ROOT_MODULE_NAME, Mod};
 use axl_runtime::module::{DiskStore, ModEvaluator};
@@ -220,13 +221,14 @@ fn main() -> ExitCode {
 /// signal delivered; it does its own dispatching from there.
 const SIGINT_TICK: Duration = Duration::from_millis(150);
 
-/// Time we wait for bazel clients to exit after the 3-SIGINT burst
-/// before escalating to SIGKILL. 5s matches `FORCE_KILL_TIMEOUT_MS`
-/// in `axl-runtime/src/engine/bazel/cancel.rs`, which is the timeout
-/// AXL's own programmatic 3-SIGINT path uses to wait for the client
-/// to exit before SIGKILL'ing. Reusing the same number here keeps
-/// the two cancellation paths consistent.
-const SIGINT_GRACE: Duration = Duration::from_secs(5);
+/// Time we wait for bazel clients to exit after the SIGINT burst before
+/// escalating to SIGKILL.
+///
+/// Only used off-CI: on CI we never self-SIGKILL (see `run_shutdown_sequence`),
+/// so this grace window only governs the interactive/local path, where SIGKILL
+/// is the backstop for a hung client. 12s gives bazel's graceful cancel ample
+/// room to finish on a developer's machine.
+const SIGINT_GRACE: Duration = Duration::from_secs(12);
 
 /// Time we wait after SIGKILL for the kernel to deliver the signal
 /// and the process accounting to settle before we exit. SIGKILL
@@ -236,34 +238,44 @@ const SIGINT_GRACE: Duration = Duration::from_secs(5);
 const POST_KILL_GRACE: Duration = Duration::from_secs(1);
 
 /// Total wall time between receiving the OS signal and `exit()`:
-///   3 × SIGINT_TICK    (≈ 0.45s)  — emit the 3-SIGINT burst
-///   + SIGINT_GRACE     (5s)        — wait for graceful exit
-///   + POST_KILL_GRACE  (1s)        — let SIGKILL land if needed
-///   ≈ 6.5s
-/// Well under typical CI cancel grace periods (GHA gives ~7.5s
-/// between SIGTERM and SIGKILL on cancel; Buildkite is configurable
-/// but defaults higher), and well over what bazel needs for a clean
-/// graceful cancel.
+///   - **On CI:** 1 × SIGINT_TICK (≈ 0.15s) — two graceful SIGINTs, then exit.
+///   - **Off CI:** 2 × SIGINT_TICK (≈ 0.3s) + SIGINT_GRACE (12s) +
+///     POST_KILL_GRACE (1s) ≈ 13.3s.
+/// Both well under typical CI cancel grace periods; the long off-CI window is
+/// just developer-machine headroom and never runs on a CI runner.
 
-/// Watch for SIGINT / SIGTERM. On first signal:
-///
-///   1. Send SIGINT to every live bazel subprocess (registered in
-///      `bazel_live`).
-///   2. Sleep `SIGINT_TICK`, send 2nd SIGINT to the same set.
-///   3. Sleep `SIGINT_TICK`, send 3rd SIGINT.
-///
-/// Bazel responds to those three SIGINTs the same way it would to
-/// three Ctrl-Cs from a terminal:
+/// Watch for SIGINT / SIGTERM. On first signal we send bazel a SIGINT burst.
+/// Bazel responds the same way it would to repeated Ctrl-Cs from a terminal
+/// (see https://bazel.build/run/cancellation):
 ///
 ///   1st  →  graceful cancel of the running command.
 ///   2nd  →  still graceful (bazel allows a short cleanup window).
 ///   3rd  →  bazel calls `KillServerProcess` and hard-exits the client.
 ///
-/// (See https://bazel.build/run/cancellation)
+/// The burst, and what follows it, differ by environment:
 ///
-/// We then sleep `SIGINT_GRACE` to let bazel's hard exit complete,
-/// SIGKILL anything still alive, sleep `POST_KILL_GRACE`, and finally
-/// `std::process::exit(N)` — 130 for SIGINT, 143 for SIGTERM (the
+///   - **On CI** we send only the 1st and 2nd SIGINTs — both graceful — and
+///     then exit. We deliberately skip the 3rd SIGINT (which would trigger
+///     `KillServerProcess`) and never self-SIGKILL. CI runners don't reap our
+///     process tree on job cancellation (GHA's `cleanProcessTable` /
+///     `KILL_PROCESSES` defaults off, and the runner systemd unit is
+///     `KillMode=process`), so the only thing that would hard-kill bazel
+///     mid-cleanup is *us* — and a `KillServerProcess` or SIGKILL landing
+///     during `beforeCommand` sandbox setup is what strands a
+///     `<output_base>/sandbox/linux-sandbox/…` tree on disk (the
+///     bazelbuild/bazel#23880 wreckage) and poisons the next command. Leaving
+///     bazel on the graceful-cancel path lets `afterCommand` finish cleanup on
+///     its own clock; if a poisoned base survives anyway, the next job on this
+///     runner hits the build-start health check (PR #1185) that detects and
+///     repairs it.
+///
+///   - **Off CI** (interactive/local) there is no next-job health check and no
+///     external reaper, so we keep the full escalation: all three SIGINTs,
+///     then sleep `SIGINT_GRACE`, SIGKILL anything still alive, sleep
+///     `POST_KILL_GRACE`. This matches a developer hammering Ctrl-C and
+///     expecting bazel to actually die.
+///
+/// Then `std::process::exit(N)` — 130 for SIGINT, 143 for SIGTERM (the
 /// "killed by signal N" shell convention is 128 + N).
 ///
 /// **Why force-exit instead of letting Drop and unwind do their thing:**
@@ -280,8 +292,7 @@ const POST_KILL_GRACE: Duration = Duration::from_secs(1);
 /// a specific in-flight build cooperatively; this one is invoked by
 /// the *operating system* signal to aspect-cli itself. They can fire
 /// independently — if both happen, bazel just sees a flurry of SIGINTs,
-/// which it handles per its own cancellation state machine. The shared
-/// `SIGINT_GRACE` constant keeps the timeouts aligned.
+/// which it handles per its own cancellation state machine.
 ///
 /// Runs as a detached tokio task; never returns (either it terminates
 /// the process or its host runtime dies first).
@@ -342,18 +353,25 @@ fn install_shutdown_handler() {
 async fn run_shutdown_sequence(signal_name: &str, exit_code: i32) {
     eprintln!("aspect-cli: received {signal_name}, cancelling bazel subprocesses…");
 
-    // 3-SIGINT burst — mirrors bazel's expected interactive cancel
-    // sequence, escalating to KillServerProcess on the third SIGINT.
-    bazel_live::signal_all_for_shutdown();
-    tokio::time::sleep(SIGINT_TICK).await;
+    // Two graceful SIGINTs; the CI/off-CI split below decides what follows.
+    // See `install_shutdown_handler` for the full rationale.
     bazel_live::signal_all_for_shutdown();
     tokio::time::sleep(SIGINT_TICK).await;
     bazel_live::signal_all_for_shutdown();
 
-    // Wait for bazel clients to wind down on their own.
+    if on_recognized_ci() {
+        // Stop short of KillServerProcess and SIGKILL — let bazel finish its
+        // own cleanup so a cancellation can't strand a poisoned sandbox.
+        eprintln!("aspect-cli: on CI, leaving bazel to wind down; exiting with code {exit_code}");
+        std::process::exit(exit_code);
+    }
+
+    // Off CI: 3rd SIGINT (→ KillServerProcess), then SIGKILL the stragglers.
+    tokio::time::sleep(SIGINT_TICK).await;
+    bazel_live::signal_all_for_shutdown();
+
     tokio::time::sleep(SIGINT_GRACE).await;
 
-    // Anything still alive after the grace window gets SIGKILL.
     let killed = bazel_live::force_kill_all_remaining();
     if killed > 0 {
         eprintln!("aspect-cli: SIGKILL'd {killed} bazel subprocess(es) that didn't exit");
