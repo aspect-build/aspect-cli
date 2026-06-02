@@ -2,6 +2,7 @@
 
 load("@std//time.axl", "sleep_iter")
 load("./bazel.axl", "BazelTrait")
+load("./lib/artifacts.axl", "artifacts")
 load("./lib/bazel_flags.axl", "announce_bazel_args", "resolve_bazel_announce")
 load("./lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "init_data", "process_event", bazel_conclusion = "conclusion")
 load("./lib/environment.axl", "error")
@@ -171,6 +172,6 @@ run = task(
         BazelTrait,
         HealthCheckTrait,
         TaskLifecycleTrait,
-    ] + tips.TRAITS,
+    ] + artifacts.TRAITS + tips.TRAITS,
     implementation = _impl,
 )
