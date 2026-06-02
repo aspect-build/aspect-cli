@@ -41,6 +41,7 @@ pub mod live;
 mod process;
 mod query;
 mod rc;
+mod sandbox_recovery;
 mod sink;
 mod stream;
 
@@ -563,6 +564,65 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         Ok(health_check::run(&startup_flags))
     }
 
+    /// Detect and best-effort repair runner-poisoning sandbox state
+    /// described by bazelbuild/bazel#23880.
+    ///
+    /// Inspects `<output_base>/sandbox/` for entries outside Bazel's
+    /// `SANDBOX_BASE_PERSISTENT_DIRS` whitelist
+    /// (`{.DS_Store, sandbox_stash, sandbox_stash_temp, _moved_trash_dir}`).
+    /// Anything else present after a bazel command exited is the
+    /// poisoning signature: Bazel's own `afterCommand` cleanup left
+    /// state behind because its spawn-runner registry didn't include
+    /// the strategy that owned that subtree (see `LinuxSandboxedStrategy.
+    /// create` IOException path; fixed upstream by `abe8d6090` in 9.0+).
+    ///
+    /// When poisoning is detected, every offending entry is
+    /// `rm -rf`'d. The result distinguishes three cases:
+    ///
+    /// - `"clean"`: nothing to remove. Either the sandbox dir didn't
+    ///   exist or contained only whitelisted entries.
+    /// - `"repaired"`: at least one non-whitelisted entry was found
+    ///   and all of them were successfully removed. The runner is
+    ///   safe to keep serving jobs.
+    /// - `"still_poisoned"`: at least one entry survived the removal
+    ///   attempt (e.g. EPERM on the underlying filesystem). The runner
+    ///   will keep crashing every bazel command on the same output
+    ///   base — the caller should mark it unhealthy.
+    ///
+    /// Reads `--output_base=` from `ctx.bazel.startup_flags`. When
+    /// `--output_base` is not present (e.g. local dev), returns `"clean"`
+    /// — there's no way to know which output_base to inspect, and the
+    /// failure mode is a Workflows-runner-only concern in practice.
+    ///
+    /// Safe to call only AFTER the most recent bazel client invocation
+    /// has fully exited — a live `bazel build/test` against the same
+    /// output_base would race the removal.
+    ///
+    /// **Examples**
+    ///
+    /// ```python
+    /// def _post_bazel_hook(ctx, exit_code):
+    ///     if exit_code == 0:
+    ///         return
+    ///     r = ctx.bazel.recover_poisoned_sandbox()
+    ///     if r.outcome == "repaired":
+    ///         print("Recovered from bazel#23880 poisoning: " + ", ".join(r.removed))
+    ///     elif r.outcome == "still_poisoned":
+    ///         signal_instance_unhealthy()
+    /// ```
+    fn recover_poisoned_sandbox<'v>(
+        this: values::Value<'v>,
+    ) -> anyhow::Result<sandbox_recovery::SandboxRecoveryResult> {
+        let startup_flags = read_startup_flags(this)?;
+        let Some(output_base) = sandbox_recovery::output_base_from_flags(&startup_flags) else {
+            return Ok(sandbox_recovery::SandboxRecoveryResult::skipped());
+        };
+        let outcome = sandbox_recovery::recover(&output_base);
+        Ok(sandbox_recovery::SandboxRecoveryResult::from_outcome(
+            outcome,
+        ))
+    }
+
     /// Parse `.bazelrc` files rooted at `root` and return a `BazelRC` object.
     ///
     /// # Arguments
@@ -857,6 +917,8 @@ fn register_types(globals: &mut GlobalsBuilder) {
     const Bazel: StarlarkValueAsType<FrozenBazel> = StarlarkValueAsType::new();
     const BazelRC: StarlarkValueAsType<rc::StarlarkBazelRC> = StarlarkValueAsType::new();
     const HealthCheckResult: StarlarkValueAsType<health_check::HealthCheckResult> =
+        StarlarkValueAsType::new();
+    const SandboxRecoveryResult: StarlarkValueAsType<sandbox_recovery::SandboxRecoveryResult> =
         StarlarkValueAsType::new();
 }
 
