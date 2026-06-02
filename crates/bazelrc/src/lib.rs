@@ -315,10 +315,26 @@ impl BazelRC {
             result
         };
 
-        // Collect all config keys relevant to this command, sorted for deterministic output.
-        // Ancestor bases count too (e.g. `build:ci` applies to `test --config=ci`),
-        // matching the direct-section inheritance below and what Bazel applies.
+        // Collect all config keys relevant to this command. Ancestor bases
+        // count too (e.g. `build:ci` applies to `test --config=ci`), matching
+        // the direct-section inheritance below and what Bazel applies.
+        //
+        // Base expansion order, per `expand::expand_args`:
+        //   always → common → ancestors(general→specific) → command
+        // `base_rank` maps each base to that position so two sections setting
+        // the same flag (e.g. `common:ci` then `build:ci`) are announced in the
+        // override order Bazel actually applies — not alphabetically, which
+        // would invert `build:ci` ahead of `common:ci`. Keys are then grouped
+        // by config name (alphabetical) for deterministic output.
         let ancestors = command_ancestors(command);
+        let base_rank = |base: &str| -> usize {
+            match base {
+                "always" => 0,
+                "common" => 1,
+                _ if base == command => 2 + ancestors.len(),
+                _ => 2 + ancestors.iter().position(|a| *a == base).unwrap_or(0),
+            }
+        };
         let mut config_keys: Vec<&String> = self
             .options
             .keys()
@@ -334,7 +350,13 @@ impl BazelRC {
                 }
             })
             .collect();
-        config_keys.sort();
+        config_keys.sort_by(|a, b| {
+            let (a_base, a_cfg) = a.split_once(':').unwrap_or(("", a.as_str()));
+            let (b_base, b_cfg) = b.split_once(':').unwrap_or(("", b.as_str()));
+            a_cfg
+                .cmp(b_cfg)
+                .then(base_rank(a_base).cmp(&base_rank(b_base)))
+        });
 
         let mut out = String::new();
         let mut first_block = true;
@@ -721,6 +743,31 @@ import {}
         assert!(
             out.contains("--flaky_test_attempts=2"),
             "test:<config> flag missing: {out}"
+        );
+    }
+
+    #[test]
+    fn announce_config_sections_follow_expansion_order() {
+        // For `test --config=ci` Bazel expands always:ci → common:ci →
+        // build:ci → test:ci (last wins). The announce must list the same-named
+        // config sections in that order, not alphabetically (which would put
+        // build:ci before common:ci and misrepresent the override order).
+        let root = Path::new("/work/repo");
+        let rc = rc_with(
+            &[&root.join(".bazelrc")],
+            &[
+                ("common:ci", 0, "--remote_cache=A"),
+                ("build:ci", 0, "--remote_cache=B"),
+                ("test:ci", 0, "--remote_cache=C"),
+            ],
+        );
+        let out = rc.announce("test", false, 200, root, None, |s| s.to_string());
+        let common_at = out.find("common:ci").expect("common:ci shown");
+        let build_at = out.find("build:ci").expect("build:ci shown");
+        let test_at = out.find("test:ci").expect("test:ci shown");
+        assert!(
+            common_at < build_at && build_at < test_at,
+            "config sections must follow expansion order common→build→test: {out}"
         );
     }
 
