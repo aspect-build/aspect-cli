@@ -973,9 +973,11 @@ test --config=opt
         let root = dir.path();
         fs::write(root.join(".bazelrc"), "build --jobs=4\n").unwrap();
 
+        // ISOLATE so the runner's own ~/.bazelrc / /etc/bazel.bazelrc don't
+        // leak into options_for and break the exact-equality assertion below.
         let rc = BazelRC::new(
             root,
-            &[] as &[&str],
+            ISOLATE,
             &flags(&["--config=foo", "--verbose_failures"]),
         )
         .unwrap();
