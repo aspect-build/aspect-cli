@@ -8,7 +8,7 @@ Two task implementations live here:
     `compute_invocation_state`, `conclusion`, and skipped-bucket plumbing.
 """
 
-load("./bazel_results.axl", "MAX_TEST_TARGETS", "bes_get", "build_details_data", "common_label_root", "compute_invocation_state", "conclusion", "init_data", "process_event", "render_check_output", "repro_targets")
+load("./bazel_results.axl", "MAX_TEST_TARGETS", "STATUS_ICONS", "STATUS_LABELS", "bes_get", "build_details_data", "common_label_root", "compute_invocation_state", "conclusion", "init_data", "process_event", "render_check_output", "repro_targets")
 
 # ---------------------------------------------------------------------------
 # Fake data builders
@@ -1054,7 +1054,22 @@ def _test_repro_targets_dedups_fallback_input(ctx):
         ["//pkg/..."],
     )
 
+def _test_status_maps_cover_every_terminal_status(ctx):
+    """Every status `_pick_status` / the lifecycle can emit at terminal must
+    have an explicit icon AND label. A missing key falls back to 🔄/"Running"
+    in `build_invocation_rows`, which strands a finished task's status row on
+    "Running" (the delivery-ends-with-warning bug)."""
+    for status in ["passed", "failed", "failing", "warning", "aborted", "running"]:
+        _eq("STATUS_ICONS has %r" % status, status in STATUS_ICONS, True)
+        _eq("STATUS_LABELS has %r" % status, status in STATUS_LABELS, True)
+
+    # The terminal statuses specifically must not render as the live default.
+    for status in ["warning", "aborted"]:
+        _eq("%r icon is not the running default" % status, STATUS_ICONS[status] != "🔄", True)
+        _eq("%r label is not 'Running...'" % status, STATUS_LABELS[status] != "Running...", True)
+
 _UNIT_TESTS = [
+    _test_status_maps_cover_every_terminal_status,
     _test_failed_status_without_failure_bucket,
     _test_failed_status_with_explicit_action_failure,
     _test_passed_status_returns_successful_build,
