@@ -1,5 +1,6 @@
 #![allow(clippy::new_without_default)]
 pub mod builtins;
+pub mod ci;
 pub mod docs;
 pub mod engine;
 pub mod eval;
