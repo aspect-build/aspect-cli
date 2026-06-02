@@ -164,7 +164,7 @@ impl<'v> Feature<'v> {
         let frozen = frozen_value
             .downcast_ref::<FrozenFeature>()
             .expect("from_frozen called with non-FrozenFeature value");
-        let overrides = heap.alloc(Arguments::new());
+        let overrides = heap.alloc(Arguments::with_schema(frozen.args.keys().cloned()));
         Feature {
             r#impl: frozen.r#impl.to_value(),
             args: frozen.args.clone(),
@@ -480,7 +480,6 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         eval: &mut starlark::eval::Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Feature<'v>> {
         let path = Env::current_script_path(eval)?;
-        let overrides = eval.heap().alloc(Arguments::new());
         if !name.is_empty() {
             validate_command_name(&name, "feature name").map_err(|e| anyhow::anyhow!(e))?;
         }
@@ -537,6 +536,9 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
             args_.insert(arg_name, cli_arg.clone());
         }
 
+        let overrides = eval
+            .heap()
+            .alloc(Arguments::with_schema(args_.keys().cloned()));
         Ok(Feature {
             r#impl: implementation.0,
             args: args_,

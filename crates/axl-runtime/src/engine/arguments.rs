@@ -37,6 +37,17 @@ use starlark::values::starlark_value;
 /// alias-overridden defaults and config.axl overrides). Empty for the
 /// config-time override store role — nothing is "explicit on the CLI"
 /// there.
+///
+/// `valid_keys` constrains which attribute names `set_attr` will accept:
+///
+/// - `Some(set)` — config-time override store. Assigning `.args.<name> = ...`
+///   in config.axl is rejected unless `<name>` is one of the task's / feature's
+///   declared args. This turns a typo (`warm_not_runnable` for
+///   `warn_not_runnable`) into a script error instead of a silent no-op that
+///   writes a junk key the runtime never reads.
+/// - `None` — runtime-args store (`ctx.args`), built by merging CLI + config +
+///   defaults. Stays permissive: callers insert resolved values directly and
+///   the key set is already known-good, so there's nothing to validate against.
 #[derive(Debug, Clone, ProvidesStaticType, Display, NoSerialize, Allocative)]
 #[display("<Arguments>")]
 pub struct Arguments<'v> {
@@ -44,13 +55,28 @@ pub struct Arguments<'v> {
     args: RefCell<SmallMap<String, Value<'v>>>,
     #[allocative(skip)]
     explicit_cli_keys: RefCell<SmallMap<String, ()>>,
+    #[allocative(skip)]
+    valid_keys: Option<SmallMap<String, ()>>,
 }
 
 impl<'v> Arguments<'v> {
+    /// Permissive store (runtime-args role) — `set_attr` accepts any name.
     pub fn new() -> Self {
         Self {
             args: RefCell::new(SmallMap::new()),
             explicit_cli_keys: RefCell::new(SmallMap::new()),
+            valid_keys: None,
+        }
+    }
+
+    /// Schema-checked override store (config-time role). `set_attr` rejects
+    /// any attribute name not in `valid_keys`. Pass the task's / feature's
+    /// declared arg names (e.g. `task.args().keys()`).
+    pub fn with_schema(valid_keys: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            args: RefCell::new(SmallMap::new()),
+            explicit_cli_keys: RefCell::new(SmallMap::new()),
+            valid_keys: Some(valid_keys.into_iter().map(|k| (k, ())).collect()),
         }
     }
 
@@ -107,6 +133,20 @@ impl<'v> StarlarkValue<'v> for Arguments<'v> {
     }
 
     fn set_attr(&self, attribute: &str, value: Value<'v>) -> starlark::Result<()> {
+        if let Some(valid) = &self.valid_keys {
+            if !valid.contains_key(attribute) {
+                let mut names: Vec<&str> = valid.keys().map(String::as_str).collect();
+                names.sort_unstable();
+                let known = if names.is_empty() {
+                    "(none)".to_owned()
+                } else {
+                    names.join(", ")
+                };
+                return Err(starlark::Error::new_other(anyhow::anyhow!(
+                    "no such arg `{attribute}`; valid args are: {known}"
+                )));
+            }
+        }
         self.args.borrow_mut().insert(attribute.to_owned(), value);
         Ok(())
     }
@@ -210,6 +250,7 @@ fn arguments_methods(builder: &mut MethodsBuilder) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use starlark::environment::Module;
 
     #[test]
     fn explicit_keys_default_to_unset() {
@@ -234,5 +275,54 @@ mod tests {
         args.mark_explicit("scope".to_string());
         args.mark_explicit("scope".to_string());
         assert!(args.is_explicit_key("scope"));
+    }
+
+    /// A permissive (runtime-args) store accepts any attribute name — this is
+    /// how `merge_args` populates `ctx.args` with resolved values.
+    #[test]
+    fn set_attr_permissive_accepts_unknown() {
+        Module::with_temp_heap(|module| {
+            let v = module.heap().alloc(true);
+            let args = Arguments::new();
+            args.set_attr("anything_at_all", v)
+                .expect("permissive store should accept any name");
+            assert!(args.contains_key("anything_at_all"));
+        });
+    }
+
+    /// A schema-checked (config-time override) store accepts a declared arg…
+    #[test]
+    fn set_attr_schema_accepts_known() {
+        Module::with_temp_heap(|module| {
+            let v = module.heap().alloc(true);
+            let args = Arguments::with_schema(["warn_not_runnable".to_owned(), "query".to_owned()]);
+            args.set_attr("warn_not_runnable", v)
+                .expect("declared arg should be accepted");
+            assert!(args.contains_key("warn_not_runnable"));
+        });
+    }
+
+    /// …and rejects a typo, naming the valid args. This is the regression test
+    /// for the silent `ctx.tasks["delivery"].args.warm_not_runnable = True`
+    /// no-op: an undeclared arg name must error rather than write a junk key.
+    #[test]
+    fn set_attr_schema_rejects_unknown() {
+        Module::with_temp_heap(|module| {
+            let v = module.heap().alloc(true);
+            let args = Arguments::with_schema(["warn_not_runnable".to_owned(), "query".to_owned()]);
+            let err = args
+                .set_attr("warm_not_runnable", v)
+                .expect_err("typo'd arg name must be rejected");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("warm_not_runnable"),
+                "names the bad key: {msg}"
+            );
+            assert!(msg.contains("warn_not_runnable"), "lists valid args: {msg}");
+            assert!(
+                !args.contains_key("warm_not_runnable"),
+                "junk key not written"
+            );
+        });
     }
 }
