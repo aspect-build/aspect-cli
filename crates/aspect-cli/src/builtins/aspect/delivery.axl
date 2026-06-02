@@ -103,6 +103,7 @@ load("@aspect//bazel.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DE
 load("@aspect//lib/artifacts.axl", "artifacts")
 load("@aspect//lib/bazel_flags.axl", "announce_bazel_args", "resolve_bazel_announce")
 load("@aspect//lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "now_ms", "process_event", bazel_init_data = "init_data")
+load("@aspect//lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
 load("@aspect//lib/ci.axl", "detect_build_url")
 load("@aspect//lib/delivery_results.axl", delivery_add_result = "add_result", delivery_conclusion = "conclusion", delivery_init_data = "init_data")
 load(
@@ -340,6 +341,9 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
         # re-binding a Live sink errors.
         for sink in build_events:
             sink.wait()
+
+        dispatch_bazel_attempt_end(ctx, bazel_trait, status.code)
+
         if status.code == 0 or not bazel_trait.build_retry(status.code):
             break
 
@@ -381,7 +385,7 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
     # delivery are noisy-but-expected, and the actionable signal lives in
     # the gRPC log we parse below. The log file is the escape hatch.
     phase2_log_path = _PHASE2_LOG_PATH.format(ctx.task.key)
-    ctx.bazel.build(
+    phase2_status = ctx.bazel.build(
         flags = phase2_flags,
         stdout = None,
         stderr = ctx.std.fs.create(phase2_log_path),
@@ -389,6 +393,10 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
         announce_command = announce_command,
         *targets
     ).wait()
+
+    # `build_end` deliberately not fired here — the outer caller dispatches
+    # it once with the aggregate build_code after `_get_output_shas` returns.
+    dispatch_bazel_attempt_end(ctx, bazel_trait, phase2_status.code)
 
     # Normalize user-supplied targets to apparent form so they match however
     # the gRPC log records the label (canonical @@module+// or apparent @module//).
@@ -918,11 +926,13 @@ def _delivery_impl(ctx):
             run_tracker.event(event)
         status = build.wait()
 
-        # When phase 1/2 was skipped, phase 3 is the only build that ran
-        # — dispatch build_end hooks here with its status.
+        dispatch_bazel_attempt_end(ctx, bazel_trait, status.code)
+
+        # When phase 1/2 was skipped, phase 3 is the only build that ran;
+        # otherwise the outer caller already fired `build_end` with the
+        # aggregate phase-1 build_code.
         if not phase_1_2_runs:
-            for handler in bazel_trait.build_end:
-                handler(ctx, status.code)
+            dispatch_bazel_build_end(ctx, bazel_trait, status.code)
         if status.code != 0:
             error(ctx.std, "Build failed with exit code {}. Phase-3 raw log: {}".format(status.code, phase3_log_path))
             for label in delivery_targets:

@@ -23,6 +23,7 @@ load("./bazel.axl", "BazelTrait")
 load("./lib/artifacts.axl", "artifacts")
 load("./lib/bazel_flags.axl", "announce_bazel_args", "resolve_bazel_announce")
 load("./lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event")
+load("./lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
 load("./lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
 load("./lib/environment.axl", "color_enabled", "detect_ci", "error", "warn")
 load("./lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_changed_files_listing")
@@ -1052,6 +1053,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     for sink in bazel_trait.build_event_sinks:
         sink.wait()
 
+    dispatch_bazel_attempt_end(ctx, bazel_trait, build_status.code)
+
     # Final drain: build is complete; poll until all pending downloads land
     # or the timeout expires. Bazel schedules --remote_download_regex
     # transfers asynchronously, so files can still be in flight here even
@@ -1096,8 +1099,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         data["bazel"]["wall_time_ms"] = data["finish_time_ms"] - data["start_time_ms"]
 
     # 8. BazelTrait.build_end hooks
-    for hook in bazel_trait.build_end:
-        hook(ctx, build_status.code)
+    dispatch_bazel_build_end(ctx, bazel_trait, build_status.code)
 
     # Scope the patch set to the strategy: hold-the-line / hold-the-
     # file drop patches whose hunks don't overlap the user's PR diff,

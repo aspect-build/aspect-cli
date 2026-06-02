@@ -1,0 +1,121 @@
+"""Runner-side mitigations for Bazel server states that poison a
+Workflows runner for subsequent jobs.
+
+Two failure modes, addressed by two trait hooks the Workflows feature
+registers when `environment.runner != None`:
+
+1. **Stranded sandbox subtree** (bazelbuild/bazel#23880). When a Bazel
+   8.x server hits an `IOException` during sandbox setup (typically
+   `fchmod (...) (Operation not permitted)` from a kernel/FS hiccup),
+   the offending spawn runner never gets registered. Bazel's
+   `afterCommand` cleanup loop iterates only registered runners, so
+   `<output_base>/sandbox/<strategy>/` is left behind on disk. Every
+   subsequent `bazel build/test` against the same output_base crashes
+   in `checkSandboxBaseTopOnlyContainsPersistentDirs`. Fixed upstream
+   by abe8d6090 (Bazel 9.0+). We detect via
+   `ctx.bazel.recover_poisoned_sandbox()` (lists entries under
+   `<output_base>/sandbox/` against Bazel's
+   `SANDBOX_BASE_PERSISTENT_DIRS` whitelist) and `rm -rf` the offending
+   entries. If repair fails (`still_poisoned`), we signal the instance
+   unhealthy immediately. Wired as `bazel_attempt_end` so retries get
+   a clean sandbox to try again on.
+
+2. **Persistent server-internal failure across all retries**. When
+   the FINAL attempt exits with `BLAZE_INTERNAL_ERROR (37)` or
+   `LOCAL_ENVIRONMENTAL_ERROR (36)`, the Bazel server is persistently
+   sick (could be #23880 the disk-scan missed, JVM OOM, native crash,
+   corrupt lock file, etc.). The retry loop in `bazel_runner.axl` only
+   continues retrying on these two codes — `bazel_trait.build_retry`
+   keys off `default_retry`. So a final exit code that is itself
+   retryable-class means *every* prior attempt was also retryable-class
+   (otherwise the loop would have broken on a non-retryable exit). The
+   final code alone is therefore sufficient to detect "all attempts
+   hit server-internal trouble" without tracking per-attempt history.
+   Wired as `build_end` so it fires once per task.
+
+Critical: a sequence like 37 → repair → real-build-failure (exit 1)
+does NOT signal unhealthy. The retry loop breaks on the non-retryable
+exit; the final code is 1 (build failure), not retryable; the build_end
+hook returns early. The runner is healthy enough to produce a verdict.
+"""
+
+load("../bazel.axl", "default_retry")
+
+def _signal_unhealthy(ctx, environment):
+    """Best-effort invoke the Workflows agent's `signal_instance_unhealthy`
+    binary. No-op when the binary isn't present (e.g. older agent versions
+    that pre-date the script). Caller is responsible for surfacing the
+    *reason* in a warning before calling — this helper only does the
+    side-effect."""
+    signal_bin = environment.runner.bin_dir + "/signal_instance_unhealthy"
+    if ctx.std.fs.exists(signal_bin):
+        ctx.std.process.command(signal_bin).spawn().wait()
+
+def make_attempt_end_hook(environment):
+    """Build a `bazel_attempt_end` hook closed over the resolved
+    Workflows runner environment.
+
+    The hook calls `ctx.bazel.recover_poisoned_sandbox()` and branches
+    on its outcome:
+
+      - `clean`: no-op (the common case).
+      - `repaired`: print a warning so CI logs show the recovery; the
+        retry (or the next job on this runner) can then proceed.
+      - `still_poisoned` (rm -rf failed for at least one entry): print a
+        warning and signal the instance unhealthy. Further bazel commands
+        on this runner will keep crashing the same way, so we accept the
+        current task's failure and ensure the next job lands on a fresh
+        instance.
+
+    Ignores `exit_code` — the recovery decision is purely on-disk.
+    """
+
+    def _hook(ctx, _exit_code):
+        result = ctx.bazel.recover_poisoned_sandbox()
+        if result.outcome == "clean":
+            return
+        if result.outcome == "repaired":
+            print(
+                "\x1b[33mWARNING\x1b[0m: cleaned up bazel#23880-poisoning " +
+                "sandbox entries: " + ", ".join(result.removed) + ". " +
+                "Retries (and future jobs on this runner) should now " +
+                "succeed. See bazelbuild/bazel#23880; fixed upstream in " +
+                "Bazel 9.0 via commit abe8d6090.",
+            )
+            return
+
+        remaining = ", ".join(result.remaining) if result.remaining else "(unknown)"
+        print(
+            "\x1b[31mWARNING\x1b[0m: bazel#23880-style sandbox poisoning " +
+            "detected and could not be cleaned (entries that survived " +
+            "removal: " + remaining + "). Marking this runner unhealthy " +
+            "so the next job lands on a fresh instance.",
+        )
+        _signal_unhealthy(ctx, environment)
+
+    return _hook
+
+def make_final_status_hook(environment):
+    """Build a `build_end` hook that marks the runner unhealthy when
+    the FINAL Bazel exit code is server-internal-error class.
+
+    The retry loop only continues on `default_retry`-matching codes, so
+    a final exit that is itself retryable-class implies every prior
+    attempt was also retryable-class — the server is persistently sick.
+    A final non-retryable code (success, build failure, test failure,
+    user error, …) means the server produced a verdict, so the runner
+    is fine; we no-op.
+    """
+
+    def _hook(ctx, exit_code):
+        if not default_retry(exit_code):
+            return
+        print(
+            "\x1b[31mWARNING\x1b[0m: Bazel exited " + str(exit_code) +
+            " after all retries (server-internal-error class). Marking " +
+            "this runner unhealthy so the next job lands on a fresh " +
+            "instance.",
+        )
+        _signal_unhealthy(ctx, environment)
+
+    return _hook

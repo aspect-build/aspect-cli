@@ -81,5 +81,6 @@ BazelTrait = trait(
     build_start = attr(list[typing.Callable[[TaskContext], None]], default = [], description = "Hooks called once before the Bazel invocation starts"),
     build_event = attr(list[typing.Callable[[TaskContext, dict], None]], default = [], description = "Hooks called for each Build Event Protocol event received during the build"),
     build_retry = attr(typing.Callable[[int], bool], default = default_retry, description = "Predicate called with the exit code; return True to retry the build"),
-    build_end = attr(list[typing.Callable[[TaskContext, int], None]], default = [], description = "Hooks called once after the Bazel invocation completes, with the exit code"),
+    bazel_attempt_end = attr(list[typing.Callable[[TaskContext, int], None]], default = [], description = "Hooks called once after EACH Bazel invocation attempt (including retries), with that attempt's exit code. Runs after the wait() returns and before the retry decision, so a hook can take corrective action (e.g. clean stranded sandbox state) that might let the next retry succeed. Distinct from `build_end`, which fires once after the final attempt."),
+    build_end = attr(list[typing.Callable[[TaskContext, int], None]], default = [], description = "Hooks called once after the Bazel invocation completes (after all retries), with the final exit code"),
 )

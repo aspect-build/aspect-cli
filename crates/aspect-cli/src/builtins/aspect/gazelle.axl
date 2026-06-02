@@ -189,6 +189,7 @@ load("./bazel.axl", "BazelTrait")
 load("./lib/artifacts.axl", "artifacts")
 load("./lib/bazel_flags.axl", "announce_bazel_args", "resolve_bazel_announce")
 load("./lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event")
+load("./lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
 load("./lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
 load("./lib/environment.axl", "color_enabled", "detect_ci", "error", "info", "warn")
 load("./lib/gazelle_results.axl", "dedupe_subtrees", "dir_at_or_below", "extract_changed_dirs", gaz_init_data = "init_data", gazelle_conclusion = "conclusion")
@@ -668,11 +669,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     build_status = build.wait()
     for sink in bazel_trait.build_event_sinks:
         sink.wait()
-
-    # Fire `bazel_trait.build_end` hooks. The ArtifactUpload feature's
-    # `_on_build_end` runs the actual artifact upload step here.
-    for hook in bazel_trait.build_end:
-        hook(ctx, build_status.code)
+    dispatch_bazel_attempt_end(ctx, bazel_trait, build_status.code)
+    dispatch_bazel_build_end(ctx, bazel_trait, build_status.code)
 
     if not build_status.success:
         _emit_final(ctx, lifecycle, data, build_status.code or 1)

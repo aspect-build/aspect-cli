@@ -5,6 +5,7 @@ load("./bazel.axl", "BazelTrait")
 load("./lib/artifacts.axl", "artifacts")
 load("./lib/bazel_flags.axl", "announce_bazel_args", "resolve_bazel_announce")
 load("./lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "init_data", "process_event", bazel_conclusion = "conclusion")
+load("./lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
 load("./lib/environment.axl", "error")
 load("./lib/health_check.axl", "HealthCheckTrait")
 load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "setup_phase", "task_update")
@@ -122,8 +123,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     build_status = build.wait()
     for sink in bazel_trait.build_event_sinks:
         sink.wait()
-    for hook in bazel_trait.build_end:
-        hook(ctx, build_status.code)
+    dispatch_bazel_attempt_end(ctx, bazel_trait, build_status.code)
+    dispatch_bazel_build_end(ctx, bazel_trait, build_status.code)
 
     if not build_status.success:
         return _emit_terminal(ctx, lifecycle, data, build_status.code or 1)
