@@ -2,6 +2,7 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
+use aspect_telemetry::cargo_pkg_short_version;
 use starlark::environment::{FrozenModule, Module};
 use starlark::eval::Evaluator;
 use starlark::values::list::AllocList;
@@ -379,6 +380,26 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         } else {
             String::new()
         };
+        // Grey "Aspect CLI v… — docs URL" announce line above the task
+        // header. Helps users who arrived via a `tools/bazel` wrapper (or
+        // a custom org CLI alias) recognize what tool is actually running
+        // and where to learn more, without dominating the headline below.
+        // Same TTY/CI gating as the header itself; suppressed under
+        // `ASPECT_CLI_NO_BANNER=1` for users who want quieter output.
+        if std::env::var_os("ASPECT_CLI_NO_BANNER").is_none() {
+            let color = std::io::stderr().is_terminal() || on_recognized_ci();
+            let (grey, grey_reset) = if color {
+                ("\x1b[38;5;244m", SGR_RESET)
+            } else {
+                ("", "")
+            };
+            eprintln!(
+                "{}Aspect CLI v{} — https://docs.aspect.build/cli{}\n",
+                grey,
+                cargo_pkg_short_version(),
+                grey_reset,
+            );
+        }
         if std::env::var_os("BUILDKITE").is_some() {
             // The BK section header replaces the `→` line on BK (avoids
             // duplicating the same text in the BK log viewer).

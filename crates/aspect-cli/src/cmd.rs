@@ -70,15 +70,16 @@ impl<'a, 'v> Cmd<'a, 'v> {
             .filter_map(|f| feature_block(*f, self.aspect_root, self.modules))
             .collect();
 
+        let cli_header = cli_header(version);
+
         let mut tree = Tree::default();
         for (idx, task) in self.tasks.iter().enumerate() {
             let label = defined_in_label(task.path(), self.aspect_root, self.modules);
-            let task_cmd = task_command(idx, *task, &label, &feature_blocks);
+            let task_cmd = task_command(idx, *task, &label, &feature_blocks, &cli_header);
             tree.insert(*task, &label, task_cmd)?;
         }
 
         let group_section = group_section(&tree.group_names());
-
         let root = Command::new("aspect")
             .bin_name("aspect")
             .about("Aspect's programmable task runner built on top of Bazel\n{ Correct, Fast, Usable } -- Choose three")
@@ -125,7 +126,7 @@ impl<'a, 'v> Cmd<'a, 'v> {
                     .hide(true),
             )
             .help_template(format!(
-                "{{about-with-newline}}\n{{usage-heading}} {{usage}}\n\n\x1b[1;4mTasks:\x1b[0m\n{{subcommands}}{group_section}\n\x1b[1;4mCommands:\x1b[0m\n  \x1b[1mversion\x1b[0m  Print version\n  \x1b[1mhelp\x1b[0m     Print this message or the help of the given subcommand(s)\n\n\x1b[1;4mOptions:\x1b[0m\n{{options}}"
+                "{cli_header}\n\n{{about-with-newline}}\n{{usage-heading}} {{usage}}\n\n\x1b[1;4mTasks:\x1b[0m\n{{subcommands}}{group_section}\n\x1b[1;4mCommands:\x1b[0m\n  \x1b[1mversion\x1b[0m  Print version\n  \x1b[1mhelp\x1b[0m     Print this message or the help of the given subcommand(s)\n\n\x1b[1;4mOptions:\x1b[0m\n{{options}}"
             ));
 
         tree.attach(root)
@@ -634,6 +635,27 @@ fn feature_block(
     })
 }
 
+/// Grey "Aspect CLI v… — docs URL" line shown at the top of every `--help`
+/// screen. Mirrors the line printed above each `→ 🎬 Running …` task header
+/// at runtime — same string, same color — so users always know which CLI
+/// they're holding and where to find docs.
+///
+/// `version` should be the resolved CLI version (passed through from
+/// `Cmd::build`). Callers that don't have a handle on it (deep in the
+/// subgroup template builder) can use `cli_header_from_pkg()` instead.
+fn cli_header(version: &str) -> String {
+    format!(
+        "\x1b[38;5;244mAspect CLI v{} — https://docs.aspect.build/cli\x1b[0m",
+        version,
+    )
+}
+
+/// Like `cli_header()` but pulls the version from the workspace crate
+/// metadata. Used by call sites that don't have the resolved version handy.
+fn cli_header_from_pkg() -> String {
+    cli_header(&aspect_telemetry::cargo_pkg_short_version())
+}
+
 // ── Per-task subcommand assembly ───────────────────────────────────────────
 
 fn task_command(
@@ -641,6 +663,7 @@ fn task_command(
     task: &dyn TaskLike<'_>,
     label: &str,
     feature_blocks: &[FeatureBlock],
+    cli_header: &str,
 ) -> Command {
     let name = task.name();
     let display_name = task.display_name();
@@ -708,11 +731,17 @@ fn task_command(
         }
     }
 
-    if let Some(header) = help_header {
-        cmd = cmd.help_template(format!(
-            "{header}\n\n{{usage-heading}} {{usage}}\n\n{{all-args}}\n"
-        ));
-    }
+    // Always use a custom template so the grey "Aspect CLI v… — docs URL"
+    // header lands at the top. When the task supplies its own help_header
+    // body (summary/description), use that as the about block; otherwise
+    // fall back to clap's `{about-with-newline}`.
+    let about_block = match help_header {
+        Some(h) => format!("{h}\n"),
+        None => "{about-with-newline}".to_string(),
+    };
+    cmd = cmd.help_template(format!(
+        "{cli_header}\n\n{about_block}\n{{usage-heading}} {{usage}}\n\n{{all-args}}"
+    ));
     cmd
 }
 
@@ -779,9 +808,11 @@ impl Tree {
 
     fn attach(self, mut root: Command) -> Result<Command, CmdError> {
         // Subgroups (rendered hidden, with their own help template).
+        let header = cli_header_from_pkg();
         for (name, sub) in self.subgroups {
             let sub_groups = sub.group_names();
-            let mut template = String::from("{about-with-newline}\n{usage-heading} {usage}");
+            let mut template =
+                format!("{header}\n\n{{about-with-newline}}\n{{usage-heading}} {{usage}}",);
             if !sub.tasks.is_empty() {
                 template.push_str("\n\n\x1b[1;4mTasks:\x1b[0m\n{subcommands}");
             }

@@ -743,7 +743,7 @@ impl Build {
 
         let targets: Vec<String> = targets.into_iter().collect();
 
-        let mut cmd = Command::new(super::bazel_binary());
+        let mut cmd = super::bazel_command();
         cmd.args(startup_flags);
         cmd.arg(verb);
         cmd.args(flags);
