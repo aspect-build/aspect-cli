@@ -49,8 +49,6 @@ template's variable contract.
   entries stays empty for now.
 """
 
-load("../lib/ci.axl", "detect_build_url", "detect_ci_host")
-load("../lib/environment.axl", "feature_logger", "workflows_results_url")
 load(
     "../feature/github_status_comments.axl",
     "DEFAULT_BODY_TEMPLATE",
@@ -65,6 +63,8 @@ load(
     "results_subset",
 )
 load("../lib/bazel_results.axl", "format_run_date", "now_ms")
+load("../lib/ci.axl", "detect_build_url", "detect_ci_host")
+load("../lib/environment.axl", "feature_logger", "workflows_results_url")
 load("../lib/gitlab.axl", "gitlab")
 load("../lib/gitlab_detect.axl", "detect_gitlab_mr")
 load("../lib/gitlab_token_cache.axl", "gitlab_token_cache")
@@ -96,6 +96,7 @@ def _own_entry(ctx, _state, run_id, run_attempt, job_name):
     base = _state.get("_own_base", {})
     snapshot = dict(base)
     snapshot.update(_state.get("_own_live", {}))
+
     # `workflow_run_id` is the pipeline id; mirrors the GH state-block
     # key so `merge_state` works unchanged. Stringified for byte-stable
     # serialization (matches GH path).
@@ -206,6 +207,7 @@ def _gitlab_status_comments(ctx: FeatureContext):
             for n in listed["notes"]:
                 if n.get("id") == note_id:
                     return n.get("body", "") or ""
+
             # Note vanished — fall through to re-discovery.
             _state.pop("_note_id", None)
 

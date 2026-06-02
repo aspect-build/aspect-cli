@@ -162,6 +162,7 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
         return
     if mode == "local-only" and is_ci:
         return
+
     # "always" falls through.
 
     mr, reason = detect_gitlab_mr(ctx.std)
@@ -179,6 +180,7 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
     # higher (no reviewer waiting on push-to-default for a GL CI ping
     # to land). Matches GHSC policy.
     min_update_interval_s = max(1, ctx.args.min_update_interval_seconds)
+
     # GitLab equivalent of GH branch-vs-PR distinction: detect_gitlab_mr
     # already requires an MR context, so this feature only runs on
     # MR-scoped pipelines. No branch-pipeline arm needed.
@@ -194,6 +196,7 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
         links = dict(_state.get("_ci_links") or _ci_links_base)
         links["aspect_url"] = resolve_aspect_url(links, data)
         links["bes_url"] = render_bes_url(data)
+
         # GitLab has no per-status "check-run page" URL — target_url on
         # the status itself becomes the "View details" link. Use the
         # CI job URL as the deep link.
@@ -215,6 +218,7 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
         token = _state.get("_gitlab_token")
         if not token:
             return
+
         # Idempotency on state: GitLab updates the existing row when
         # the same (name, sha, ref) triple POSTs. We still track our
         # last-posted state so live-refresh callers can decide whether
@@ -258,6 +262,7 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
             ))
             return False
         _state["_gitlab_token"] = token
+
         # Re-resolve CI URL with the token in scope (mirrors GH path —
         # safe no-op when the CI URL is env-derived rather than
         # API-derived for the active CI host).
@@ -271,6 +276,7 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
         subject_str = (" " + subject) if subject else ""
         _LOG.trace("aspect/%s (%s)%s" % (ctx.task.name, ctx.task.key, subject_str))
         _state["_task_name"] = ctx.task.name
+
         # Per-task name shown in the MR's status badge column. Matches
         # the CLI invocation shape so the row reads as a command.
         _state["_status_name"] = "aspect / %s (%s)" % (ctx.task.name, ctx.task.key)
@@ -310,6 +316,7 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
         if not _state.get("_initialized"):
             _state["_initialized"] = True
             _init(ctx)
+
             # `_init` already POSTed the initial pending status. Don't
             # double-POST on the same setup-phase update.
             return
