@@ -100,7 +100,7 @@ steps:
       # rather than its own; the relative/bare label-form coverage lives in
       # the apparent_label unit tests (runnable_test.axl).
       $$LAUNCHER run //examples/deliverable:py_deliverable
-      $$LAUNCHER run //examples/deliverable:deliverable -- forwarded-arg
+      $$LAUNCHER run //examples/deliverable:sh_deliverable -- forwarded-arg
       echo "--- :aspect: aspect help"
       $$LAUNCHER help
       echo "--- :aspect: aspect-launcher --version"
