@@ -1,0 +1,440 @@
+"""GitLab Commit Status feature for Aspect tasks.
+
+Posts a live per-task commit status to the SHA under review on a GitLab MR
+pipeline. Mirrors the design of the `GithubStatusChecks` feature but uses
+the GitLab Commit Status API (`POST /projects/:id/statuses/:sha`) instead
+of GitHub's check-runs API.
+
+Only runs when a GitLab MR context is detected via `detect_gitlab_mr()` —
+skips silently outside MR pipelines (branch pipelines, scheduled jobs,
+local developer workflows).
+
+## Why commit_status (not External Status Checks)?
+
+GitLab has two related surfaces:
+
+* **Commit Status** (free tier) — informational per-SHA status with a
+  free-form `name`, six states (pending/running/success/failed/canceled/
+  skipped), no admin setup, no merge gating. Closest semantic parallel
+  to GitHub's check-runs / statuses API.
+* **External Status Checks** (Premium/Ultimate only) — merge-blocking
+  approval gate. Requires admin pre-registration of each named check.
+  Three states only (passed/failed/pending).
+
+This feature uses Commit Status because it's informational signal, works
+on every GitLab plan, and matches the per-task lifecycle of `GithubStatusChecks`.
+ESC plumbing lives in `lib/gitlab.axl::external_status_checks` for a
+future feature that wants merge-blocking semantics.
+
+## State mapping (Aspect task status → GitLab commit_status state)
+
+| Aspect `update.status` (final?)   | GitLab state |
+|-----------------------------------|--------------|
+| (initial, before any update)      | `pending`    |
+| `running` (live)                  | `running`    |
+| `failing` (live, early-fail)      | `failed`     |
+| `passed` + final                  | `success`    |
+| `warning` + final                 | `skipped`    |
+| `failed` + final                  | `failed`     |
+| `aborted` + final                 | `canceled`   |
+
+`skipped` is the GitLab-blessed mapping for "ran with non-fatal findings"
+— see `lib/gitlab.axl::_commit_status_skipped`. Renders without a red ✗.
+
+## Templates and metadata
+
+Rendering goes through the shared `check_dispatch.RENDERERS` table —
+templates and `metadata_keys` configure exactly as they do for
+`GithubStatusChecks`:
+
+    def config(ctx: ConfigContext):
+        ctx.features[GitlabCommitStatuses].args.templates = {
+            "summary": "my custom {{ status_label }} template",
+        }
+        ctx.features[GitlabCommitStatuses].args.metadata_keys = ["DEPLOY_ENV"]
+
+The rendered `title` is truncated to GitLab's 255-char `description` cap
+and posted to the commit status; the full summary lives in the
+`GitlabStatusComments` rolling MR note (the sibling feature).
+"""
+
+load(
+    "../lib/bazel_results.axl",
+    "format_run_date",
+    "now_ms",
+    "render_bes_url",
+    "resolve_aspect_url",
+)
+load(
+    "../lib/check_dispatch.axl",
+    "apply_artifact_links",
+    "kind_for_task",
+    "make_render_ctx",
+    "renderer_for_kind",
+    "should_emit_update",
+)
+load("../lib/ci.axl", "detect_build_url", "detect_ci_host")
+load("../lib/environment.axl", "feature_logger", "workflows_results_url")
+load("../lib/gitlab.axl", "gitlab")
+load("../lib/gitlab_detect.axl", "detect_gitlab_mr")
+load("../lib/gitlab_token_cache.axl", "gitlab_token_cache")
+load("../lib/lifecycle.axl", "TaskLifecycleTrait", "TaskUpdate")
+load(
+    "../lib/rate_limit.axl",
+    "BUCKET_APP",
+    "PHASE_FALL_THROUGH",
+    "PHASE_SUPPRESS",
+    "effective_throttle_factor",
+    "should_emit_phase_change",
+)
+load("../lib/tips.axl", "collect_tips_sorted")
+
+_LOG = feature_logger("GitLab commit statuses")
+
+# Hard cap from GitLab's API on the `description` field. Longer values
+# get 422'd, so we truncate client-side with an ellipsis.
+_DESCRIPTION_MAX = 255
+
+def _truncate_description(text):
+    if not text:
+        return ""
+    s = text.replace("\n", " ").strip()
+    if len(s) <= _DESCRIPTION_MAX:
+        return s
+    return s[:_DESCRIPTION_MAX - 1] + "…"
+
+def _collect_ci_links(ctx, results_base_url):
+    host = detect_ci_host(ctx.std.env)
+    return {
+        "ci_label": host["label"] if host else "",
+        "ci_url": detect_build_url(ctx),
+        "aspect_url": "",
+        "bes_url": "",
+        "results_base_url": results_base_url,
+    }
+
+def _detect_triggered_by(env):
+    if env.var("GITLAB_CI"):
+        return env.var("GITLAB_USER_LOGIN") or env.var("GITLAB_USER_NAME") or "GitLab CI"
+    if env.var("GITHUB_ACTIONS"):
+        actor = env.var("GITHUB_ACTOR") or ""
+        event = env.var("GITHUB_EVENT_NAME") or ""
+        if actor and event:
+            return actor + " (" + event + ")"
+        return actor or "GitHub Actions"
+    if env.var("BUILDKITE"):
+        return (env.var("BUILDKITE_BUILD_CREATOR") or
+                env.var("BUILDKITE_PIPELINE_NAME") or
+                "Buildkite")
+    if env.var("CIRCLECI"):
+        return env.var("CIRCLE_USERNAME") or "CircleCI"
+    return ""
+
+def _state_for(status, final):
+    """Map Aspect `(status, final)` to a GitLab commit_status state, or
+    None when no state change should be posted for this update.
+    """
+    if status == "failing":
+        return "failed"  # early-fail before terminal
+    if not final:
+        if status == "running":
+            return "running"
+        return None  # other live states don't have a meaningful GL transition
+    if status == "passed":
+        return "success"
+    if status == "warning":
+        return "skipped"
+    if status == "failed":
+        return "failed"
+    if status == "aborted":
+        return "canceled"
+    return None
+
+def _gitlab_commit_statuses(ctx: FeatureContext):
+    lifecycle = ctx.traits[TaskLifecycleTrait]
+
+    templates = ctx.args.templates or {}
+    metadata_keys = list(ctx.args.metadata_keys or [])
+
+    mode = ctx.args.mode
+    is_ci = bool(ctx.std.env.var("CI"))
+    if mode == "ci-only" and not is_ci:
+        return
+    if mode == "local-only" and is_ci:
+        return
+    # "always" falls through.
+
+    mr, reason = detect_gitlab_mr(ctx.std)
+    if mr == None:
+        _LOG.trace("No GitLab MR context — skipping. (%s)" % reason)
+        return
+
+    project_path = mr["project_path"]
+    sha = mr["sha"]
+    mr_iid = mr["mr_iid"]
+
+    _ci_links_base = _collect_ci_links(ctx, workflows_results_url(ctx.std))
+
+    # Floor at 1s for live-cadence sanity; clamp branch-only builds
+    # higher (no reviewer waiting on push-to-default for a GL CI ping
+    # to land). Matches GHSC policy.
+    min_update_interval_s = max(1, ctx.args.min_update_interval_seconds)
+    # GitLab equivalent of GH branch-vs-PR distinction: detect_gitlab_mr
+    # already requires an MR context, so this feature only runs on
+    # MR-scoped pipelines. No branch-pipeline arm needed.
+    min_update_interval_ms = min_update_interval_s * 1000
+
+    # Feature-private state closed over by the hook functions.
+    # Per-task name (status_name) is computed in `_init` once the
+    # TaskContext is in scope — `ctx` here is FeatureContext and has
+    # no `.task`.
+    _state = {}
+
+    def _make_links(data):
+        links = dict(_state.get("_ci_links") or _ci_links_base)
+        links["aspect_url"] = resolve_aspect_url(links, data)
+        links["bes_url"] = render_bes_url(data)
+        # GitLab has no per-status "check-run page" URL — target_url on
+        # the status itself becomes the "View details" link. Use the
+        # CI job URL as the deep link.
+        links["check_run_url"] = ""
+        apply_artifact_links(ctx, links)
+        return links
+
+    def _resolve_target_url(links):
+        # Prefer the artifacts browse URL when present (deep-links the
+        # reviewer into the per-task artifact bundle), else the CI job
+        # URL, else the Aspect Web UI URL.
+        return (
+            (links.get("artifacts_browse_url") or "") or
+            (links.get("ci_url") or "") or
+            (links.get("aspect_url") or "")
+        )
+
+    def _post_status(ctx, state, output, links):
+        token = _state.get("_gitlab_token")
+        if not token:
+            return
+        # Idempotency on state: GitLab updates the existing row when
+        # the same (name, sha, ref) triple POSTs. We still track our
+        # last-posted state so live-refresh callers can decide whether
+        # to re-POST.
+        description = _truncate_description((output or {}).get("title", "") or (output or {}).get("summary", ""))
+        target_url = _resolve_target_url(links)
+        result = gitlab.commit_status.post(
+            ctx,
+            token = token,
+            project = project_path,
+            sha = sha,
+            state = state,
+            name = _state["_status_name"],
+            target_url = target_url or None,
+            description = description or None,
+            auth_kind = "bearer",
+        )
+        if not result["success"]:
+            _LOG.warn(ctx.std, "commit_status POST failed (state=%s): %s" % (
+                state,
+                result.get("error", "unknown"),
+            ))
+            return
+        _state["_last_state"] = state
+
+    def _authenticate(ctx):
+        if _state.get("_gitlab_token"):
+            return True
+        auth_reason = {}
+        token = gitlab_token_cache.get_or_mint(
+            ctx,
+            project_path = project_path,
+            project_id = mr.get("project_id"),
+            roles = ["api"],
+            _reason = auth_reason,
+        )
+        if not token:
+            _LOG.warn(ctx.std, "Authentication failed for %s — %s" % (
+                project_path,
+                auth_reason.get("reason", "unknown"),
+            ))
+            return False
+        _state["_gitlab_token"] = token
+        # Re-resolve CI URL with the token in scope (mirrors GH path —
+        # safe no-op when the CI URL is env-derived rather than
+        # API-derived for the active CI host).
+        _ci_links_base["ci_url"] = detect_build_url(ctx, existing_app_token = token) or _ci_links_base["ci_url"]
+        _state["_ci_links"] = _ci_links_base
+        return True
+
+    def _init(ctx):
+        # `ctx` is a TaskContext here, so `ctx.task` is in scope.
+        subject = _state.get("_subject", "")
+        subject_str = (" " + subject) if subject else ""
+        _LOG.trace("aspect/%s (%s)%s" % (ctx.task.name, ctx.task.key, subject_str))
+        _state["_task_name"] = ctx.task.name
+        # Per-task name shown in the MR's status badge column. Matches
+        # the CLI invocation shape so the row reads as a command.
+        _state["_status_name"] = "aspect / %s (%s)" % (ctx.task.name, ctx.task.key)
+        _state["_status"] = "running"
+        _state["_started_ms"] = now_ms(ctx)
+        _state["_triggered_by"] = _detect_triggered_by(ctx.std.env)
+        _state["_ci_links"] = _ci_links_base
+
+        if not _authenticate(ctx):
+            return
+
+        # Initial "pending" — the task hasn't started producing data
+        # yet, so we surface a placeholder rather than waiting for the
+        # first BES tick. Reviewers see the row appear immediately.
+        initial_kind = kind_for_task(ctx.task.name)
+        initial_renderer = renderer_for_kind(initial_kind) or renderer_for_kind("bazel_results")
+        initial_links = dict(_ci_links_base)
+        apply_artifact_links(ctx, initial_links)
+        initial_output = initial_renderer.render(
+            ctx,
+            initial_renderer.init(),
+            "running",
+            make_render_ctx(_state, tips = collect_tips_sorted(ctx), last_updated_at = format_run_date(ctx, now_ms(ctx))),
+            initial_links,
+            templates,
+            metadata_keys,
+        )
+        _post_status(ctx, "pending", initial_output, initial_links)
+
+    def _task_update(ctx, update):
+        # Latch the subject (raw) before init/render: setup_phase sets
+        # it on the first update, but a later update may refine it.
+        # Empty means "no change", keep prior.
+        if update.subject:
+            _state["_subject"] = update.subject
+
+        if not _state.get("_initialized"):
+            _state["_initialized"] = True
+            _init(ctx)
+            # `_init` already POSTed the initial pending status. Don't
+            # double-POST on the same setup-phase update.
+            return
+
+        if not _state.get("_gitlab_token"):
+            return
+
+        status = update.status
+        final = update.final
+
+        progress_text = update.progress.body
+        if progress_text:
+            _state["_progress"] = progress_text
+
+        renderer = renderer_for_kind(update.kind)
+        if renderer == None:
+            return
+        data = update.data if update.data else renderer.init()
+
+        desired_state = _state_for(status, final)
+        is_state_transition = (
+            desired_state != None and
+            desired_state != _state.get("_last_state")
+        )
+
+        # Bypass throttle on state-flipping updates AND on the first
+        # `update.priority` event per task (the spawn-label flip).
+        is_initial = update.priority and not _state.get("_saw_priority", False)
+        if update.priority:
+            _state["_saw_priority"] = True
+        if not (is_state_transition or is_initial):
+            now = now_ms(ctx)
+            phase_result = should_emit_phase_change(
+                ctx,
+                BUCKET_APP,
+                update,
+                _state,
+                now,
+                "_last_phase_change_ms",
+                "_last_update_ms",
+            )
+            if phase_result == PHASE_SUPPRESS:
+                return
+            if phase_result == PHASE_FALL_THROUGH:
+                elapsed_s = float(now - _state.get("_started_ms", now)) / 1000.0
+                factor = effective_throttle_factor(ctx, BUCKET_APP, elapsed_s, min_update_interval_s)
+                if not should_emit_update(_state, now, int(min_update_interval_ms * factor), final):
+                    return
+        elif final:
+            _state["_ended_ms"] = now_ms(ctx)
+
+        links = _make_links(data)
+        output = renderer.render(
+            ctx,
+            data,
+            status,
+            make_render_ctx(_state, tips = collect_tips_sorted(ctx), last_updated_at = format_run_date(ctx, now_ms(ctx))),
+            links,
+            templates,
+            metadata_keys,
+        )
+
+        # GitLab's commit_status API rejects same-state re-POSTs with
+        # HTTP 400 ("Status cannot transition via :run from :running").
+        # Unlike GitHub's check_runs PATCH, there's no way to update an
+        # existing status's description without changing state. So we
+        # only POST on actual state transitions. Live phase / progress
+        # info still surfaces in the rolling MR note via the sibling
+        # GitlabStatusComments feature.
+        if desired_state == None:
+            return
+        if desired_state == _state.get("_last_state"):
+            return
+
+        _post_status(ctx, desired_state, output, links)
+
+    lifecycle.task_update.append(_task_update)
+
+# ─── Public test hooks ────────────────────────────────────────────────────────
+#
+# Re-exports of internals so `lib/gitlab_commit_statuses_test.axl` can
+# exercise pure logic without standing up the whole feature machinery.
+
+def state_for(status, final):
+    """Public test hook; see `_state_for`."""
+    return _state_for(status, final)
+
+def truncate_description(text):
+    """Public test hook; see `_truncate_description`."""
+    return _truncate_description(text)
+
+DESCRIPTION_MAX = _DESCRIPTION_MAX
+
+GitlabCommitStatuses = feature(
+    implementation = _gitlab_commit_statuses,
+    enabled = True,
+    args = {
+        "mode": args.string(
+            default = "ci-only",
+            values = ["ci-only", "local-only", "always"],
+            description = "When to post GitLab commit statuses: ci-only (default), local-only, or always",
+        ),
+        "min_update_interval_seconds": args.int(
+            default = 20,
+            description = "Minimum seconds between live commit-status refreshes during a task. " +
+                          "Default 20s. Minimum 1s (smaller values are silently raised to 1). Each " +
+                          "refresh counts against the GitLab API rate limit; on busy projects this " +
+                          "interval will automatically stretch further as the remaining quota shrinks " +
+                          "or the task runs longer. The task's terminal result always lands immediately " +
+                          "so the final state shows up without delay.",
+        ),
+        "templates": args.custom(
+            dict,
+            default = {},
+            description = "Map of template overrides for the rendered status output. " +
+                          "Keys: \"summary\", \"details\". Each value is a Jinja2 template " +
+                          "string. Empty dict (default) uses the feature's built-in templates. " +
+                          "Note: only the rendered `title` lands on the commit status (in " +
+                          "`description`, truncated to 255 chars) — the full body is rendered " +
+                          "into the GitlabStatusComments rolling note.",
+        ),
+        "metadata_keys": args.string_list(
+            default = [],
+            description = "Additional BES build_metadata keys to surface in the render-context (used " +
+                          "by sibling features like GitlabStatusComments). Use [\"*\"] for all keys.",
+        ),
+    },
+)

@@ -1,0 +1,97 @@
+"""Targeted tests for GitLab-specific logic in the two GL features.
+
+The render path (state-block serialization, body templates, entry
+preparation) is reused verbatim from `feature/github_status_comments.axl`
+via public re-exports — exhaustive snapshot coverage already lives in
+`feature/github_status_comments_test.axl`. We don't duplicate it here.
+
+What's GL-specific and tested below:
+
+  * `state_for(status, final)` — Aspect task status → GitLab
+    commit_status state mapping (warning→skipped, aborted→canceled,
+    etc). This mapping is the only place where GL semantics diverge
+    from GH's check-runs conclusion model.
+  * `truncate_description(text)` — GitLab's 255-char cap on the
+    `description` field. Must collapse newlines, ellipsize, and pass
+    short input through unchanged.
+  * `MARKER_FMT` — the rolling note's marker format. `mr-<iid>` not
+    `pr-<n>` (the GH marker shape) so notes from the two features
+    can't conflict on a repo mirrored to both.
+
+Run with:
+  aspect dev test-gitlab-features
+"""
+
+load("../feature/gitlab_commit_statuses.axl", "DESCRIPTION_MAX", "state_for", "truncate_description")
+load("../feature/gitlab_status_comments.axl", _MARKER_FMT = "MARKER_FMT")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _test_impl(ctx):
+    # ── state_for ──────────────────────────────────────────────────
+
+    # Early-fail surfaces immediately as `failed` even before terminal.
+    _eq("state_for / live failing", state_for("failing", False), "failed")
+
+    # Live `running` is the only non-final state that maps to a GL
+    # state. Other live values (e.g. transient setup) return None so
+    # the caller skips the POST.
+    _eq("state_for / live running", state_for("running", False), "running")
+    _eq("state_for / live passed (non-final)", state_for("passed", False), None)
+    _eq("state_for / live warning (non-final)", state_for("warning", False), None)
+
+    # Terminal verdicts.
+    _eq("state_for / terminal passed", state_for("passed", True), "success")
+    _eq("state_for / terminal warning", state_for("warning", True), "skipped")
+    _eq("state_for / terminal failed", state_for("failed", True), "failed")
+    _eq("state_for / terminal aborted", state_for("aborted", True), "canceled")
+
+    # Unknown status returns None (caller skips); covers any future
+    # status string we haven't mapped yet.
+    _eq("state_for / unknown status final", state_for("brand-new", True), None)
+    _eq("state_for / unknown status live", state_for("brand-new", False), None)
+
+    # ── truncate_description ───────────────────────────────────────
+
+    _eq("truncate / empty", truncate_description(""), "")
+    _eq("truncate / None becomes empty", truncate_description(None), "")
+    _eq("truncate / short passthrough", truncate_description("hello"), "hello")
+
+    # Newlines collapse to spaces — GitLab renders the description on a
+    # single line and literal `\n` looks broken.
+    _eq("truncate / newline -> space", truncate_description("a\nb"), "a b")
+    _eq("truncate / leading/trailing whitespace stripped", truncate_description("  hi  "), "hi")
+
+    # Boundary: exactly DESCRIPTION_MAX chars round-trips unchanged.
+    boundary = "x" * DESCRIPTION_MAX
+    _eq("truncate / at boundary", truncate_description(boundary), boundary)
+
+    # One over: truncate + ellipsis. Result length must be exactly
+    # DESCRIPTION_MAX so we never exceed GitLab's 255-char cap.
+    over = "x" * (DESCRIPTION_MAX + 50)
+    truncated = truncate_description(over)
+    _eq("truncate / over-length output length", len(truncated), DESCRIPTION_MAX)
+    if not truncated.endswith("…"):
+        fail("truncate / over-length should end with ellipsis: %r" % truncated[-10:])
+
+    # ── MARKER_FMT ─────────────────────────────────────────────────
+
+    # MR-keyed marker so a project mirrored to both GH and GL doesn't
+    # have its rolling notes/comments collide.
+    _eq("marker / formatted", _MARKER_FMT % 42, "<!-- aspect-ci-status:mr-42 -->")
+    if "pr-" in _MARKER_FMT:
+        fail("marker should not contain 'pr-' (GH convention): %r" % _MARKER_FMT)
+    if "mr-" not in _MARKER_FMT:
+        fail("marker should contain 'mr-' (GL convention): %r" % _MARKER_FMT)
+
+    print("gitlab features test: OK")
+    return 0
+
+gitlab_features_tests = task(
+    name = "test-gitlab-features",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

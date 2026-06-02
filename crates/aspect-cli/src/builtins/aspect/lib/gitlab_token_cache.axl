@@ -1,0 +1,107 @@
+"""Per-process GitLab OAuth access token cache.
+
+## Why this exists
+
+GitLab OAuth refresh-grant tokens have one-time-use refresh semantics:
+each `/oauth/token` round-trip rotates the refresh token AND revokes
+all prior access tokens issued from the chain. The Aspect GitLab App
+auth flow goes through `/gitlab/token` on the Marvin Lambda, which
+relays the refresh-grant — so two callers in the same aspect-cli
+process that both call `gitlab.authenticate(...)` end up with mutually
+revoking tokens: the first caller's token is invalidated the moment
+the second caller mints.
+
+Today there are two callers per process: `GitlabCommitStatuses` and
+`GitlabStatusComments`. Both call `authenticate()` at feature init,
+and the second mint silently revokes the first feature's token —
+every API call from the first feature after that point 401s with
+`{"error":"invalid_token","error_description":"Token was revoked..."}`.
+
+The fix is process-wide caching: mint at most once per `(project_path,
+roles)` tuple, share the token across callers. This module owns that
+cache.
+
+## Mechanism
+
+State lives in a per-task file under tmpdir, scoped by
+`ctx.std.process.id()` — same pattern as `lib/checkrun.axl`. Each
+aspect-cli process is one task, so the process id is naturally a
+per-task identifier. The file is keyed by a hash of
+`(project_path, sorted roles list)` so callers requesting different
+roles get separate cache slots.
+
+## Cache invariants
+
+* **Process-scoped, not global.** Tokens have a TTL (~2 hours typical)
+  and the cache is intentionally tied to the process lifetime; no
+  cross-process leakage. The file gets cleaned up by the OS/runner
+  when tmpdir is wiped.
+* **Tokens are sensitive.** The file is written with default
+  permissions to a per-process subdir under tmpdir; not a shared
+  location. We log only token length / mask, never the full string.
+* **No invalidation on 401.** If the cached token gets revoked
+  externally (rare — would require concurrent authenticate calls
+  from another process for the same install), the caller will 401
+  and surface a feature-level warning. Re-running the task picks up
+  a fresh mint. We don't try to auto-refresh because the failure mode
+  is a process-wide condition, not a transient one.
+"""
+
+load("./gitlab.axl", "gitlab")
+
+def _cache_dir(ctx):
+    """Per-process subdir under tmpdir holding token-cache files."""
+    base = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_JOB_TMPDIR") or ctx.std.env.temp_dir()
+    return base + "/gitlab-tokens/" + str(ctx.std.process.id())
+
+def _slot_key(project_path, roles):
+    """Stable filename for a (project, roles) cache slot.
+
+    Roles are normalized (sort + dedup) so callers passing the same
+    roles in different orders share the slot. Project path is filename-
+    safe-encoded (slashes only) since no other GitLab path char needs
+    escaping for use as a filename component.
+    """
+    sorted_roles = ",".join(sorted({r: True for r in (roles or [])}.keys())) or "_all"
+    return project_path.replace("/", "__") + "@" + sorted_roles + ".tok"
+
+def _slot_path(ctx, project_path, roles):
+    return _cache_dir(ctx) + "/" + _slot_key(project_path, roles)
+
+def get_or_mint(ctx, project_path, project_id = None, profile = None, roles = None, _reason = None):
+    """Return a GitLab OAuth access token for `(project_path, roles)`,
+    reusing a cached value when present.
+
+    Cache hit: O(1) file read, no API round-trip — and critically, no
+    refresh-token rotation, so any sibling caller's token stays valid.
+
+    Cache miss: delegates to `gitlab.authenticate(...)` and writes the
+    result to the slot file. Mint failures populate `_reason` (when
+    provided) and return None, exactly like `gitlab.authenticate`.
+
+    Callers should treat the returned token as opaque — never log it
+    or persist it beyond the current operation. The cache itself is
+    the only authorized persistence boundary.
+    """
+    path = _slot_path(ctx, project_path, roles)
+    if ctx.std.fs.exists(path):
+        return ctx.std.fs.read_to_string(path).strip() or None
+
+    tok = gitlab.authenticate(
+        ctx,
+        project_path = project_path,
+        project_id = project_id,
+        profile = profile,
+        roles = roles,
+        _reason = _reason,
+    )
+    if tok == None:
+        return None
+
+    ctx.std.fs.create_dir_all(_cache_dir(ctx))
+    ctx.std.fs.write(path, tok)
+    return tok
+
+gitlab_token_cache = struct(
+    get_or_mint = get_or_mint,
+)
