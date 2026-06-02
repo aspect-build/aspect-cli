@@ -1,4 +1,5 @@
 #![allow(clippy::new_without_default)]
+pub mod banner;
 pub mod builtins;
 pub mod ci;
 pub mod docs;
