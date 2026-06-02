@@ -9,7 +9,7 @@ genrule(
 )
 
 sh_binary(
-    name = "deliverable",
+    name = "sh_deliverable",
     srcs = ["deliver.sh"],
     data = [":delivery_payload"],
     tags = ["deliverable"],

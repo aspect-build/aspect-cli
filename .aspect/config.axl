@@ -102,6 +102,15 @@ def config(ctx: ConfigContext):
             },
         )
 
+    ctx.tasks["lint"].args.aspects = ["//tools/lint:linters.bzl%shellcheck"]
+    ctx.tasks["lint"].args.targets = ["//examples/lint/..."]
+
+    ctx.tasks["delivery"].args.query = "attr(tags, deliverable, //...)"
+    ctx.tasks["delivery"].args.warn_not_runnable = True
+
+    ctx.tasks["build"].args.targets = ["//...", "-//exclude/..."]
+    ctx.tasks["test"].args.targets = ["//...", "-//exclude/..."]
+
     # Enable artifact uploads for testlogs, profile, and BEP. All four channels
     # default to off so operators opt in per repo. The compact execution log stays
     # off because on-disk redaction isn't implemented yet — re-enable once Bazel's

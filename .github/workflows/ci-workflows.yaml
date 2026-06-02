@@ -1,0 +1,300 @@
+name: CI - Workflows
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  id-token: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+# The Dash0 OTLP endpoint and bearer token feed `.aspect/config.axl`'s `ctx.telemetry.exporters.add(...)`
+# call, which dogfoods the trace.event/trace.log pipeline against a real backend.
+# Both are no-ops if a secret isn't configured (unset env var = empty string,
+# config.axl skips registration).
+env:
+  DASH0_ENDPOINT: ${{ secrets.DASH0_ENDPOINT }}
+  DASH0_TOKEN: ${{ secrets.DASH0_TOKEN }}
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  pre-build:
+    runs-on: [self-hosted, aspect-workflows, aspect-default]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      # launcher-install: false — we're about to build the CLI from source
+      # via bootstrap.sh; no point installing a launcher we'd immediately
+      # shadow. aspect-api-token is also omitted: auth login would run
+      # before any `aspect` binary exists.
+      - uses: aspect-build/setup-aspect@c22a8f64fb38f82f59ce809cd7eb9f8ae096da44 # v2026.23.2
+        with:
+          launcher-install: false
+      - name: Pre-build CLI
+        run: |
+          echo "Build and upload CLI to remote cache"
+          .aspect/bootstrap.sh
+      # Surface the just-built binary to the ephemeral (GitHub-hosted) jobs
+      # below. Those runners are small and don't have remote-cache access yet,
+      # so we re-use the binary that the self-hosted runner already built rather
+      # than rebuilding from source per ephemeral job.
+      - name: Upload aspect-cli binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: aspect-cli
+          path: target/ci/aspect-cli
+          retention-days: 1
+          if-no-files-found: error
+
+  # Kick off ci-workflows-delivery.yaml as its OWN workflow run, immediately
+  # after pre-build. We dispatch via the API (rather than a reusable
+  # `uses:` call) on purpose: a reusable workflow nests its jobs inside this
+  # run, whereas a dispatch produces a separate workflow run in the GitHub UI.
+  # That separation is the point — it gives the Aspect PR-summary comment a
+  # genuine cross-workflow case to merge tasks from.
+  #
+  # We dispatch on the PR head ref (or branch for push) so the dispatched run
+  # executes *this* commit's delivery workflow, and we hand it `prebuild_run_id`
+  # so the delivery jobs reuse the binary pre-build just uploaded instead of
+  # rebuilding from source.
+  #
+  # A workflow_dispatch run carries NO PR context (event_name is
+  # workflow_dispatch, not pull_request) — so without help the delivery run is
+  # orphaned: it shows no status check on the PR and the Aspect PR-summary
+  # comment can't merge its tasks. We pass the triggering PR's number and head
+  # SHA through so the delivery run can reconstruct that context:
+  #   pr_number -> ASPECT_GITHUB_PR_NUMBER (github.axl detect_pr override)
+  #   head_sha  -> GITHUB_SHA              (so the check-run attaches to the PR
+  #                                         head commit, not the merge commit)
+  # On push (no PR) both resolve to empty and delivery behaves as a branch run.
+  dispatch-delivery:
+    runs-on: ubuntu-latest
+    needs: [pre-build]
+    timeout-minutes: 5
+    permissions:
+      actions: write # required to dispatch another workflow
+      contents: read
+    steps:
+      - name: Dispatch CI - Delivery
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REF: ${{ github.head_ref || github.ref_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          gh workflow run ci-workflows-delivery.yaml \
+            --repo "${{ github.repository }}" \
+            --ref "$REF" \
+            --field "force_targets=" \
+            --field "prebuild_run_id=${{ github.run_id }}" \
+            --field "pr_number=${PR_NUMBER}" \
+            --field "head_sha=${HEAD_SHA}"
+
+  # Dedicated buildifier-only step that runs in parallel with format-task.
+  # Models the legacy Rosetta `buildifier` task using a Starlark-only
+  # `format_multirun` target — see https://docs.aspect.build/cli/migration/buildifier.
+  buildifier-task:
+    runs-on: ubuntu-latest
+    needs: [pre-build]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      # install-prebuilt-aspect-cli only downloads an artifact and puts a
+      # binary on PATH — it doesn't need any environment setup, so it can
+      # run before setup-aspect. That order also lets setup-aspect's
+      # built-in `aspect auth login` find the prebuilt `aspect` on PATH.
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+      - uses: aspect-build/setup-aspect@c22a8f64fb38f82f59ce809cd7eb9f8ae096da44 # v2026.23.2
+        with:
+          launcher-install: false
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+      - name: Buildifier Task
+        run: aspect buildifier --task-key buildifier-gha
+
+  buildifier-debug-task:
+    runs-on: ubuntu-latest
+    needs: [pre-build]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+      - uses: aspect-build/setup-aspect@c22a8f64fb38f82f59ce809cd7eb9f8ae096da44 # v2026.23.2
+        with:
+          launcher-install: false
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+      - name: Buildifier Task (ASPECT_DEBUG=1)
+        run: ASPECT_DEBUG=1 aspect buildifier --task-key buildifier-gha-debug
+
+  format-task:
+    runs-on: ubuntu-latest
+    needs: [pre-build]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+      - uses: aspect-build/setup-aspect@c22a8f64fb38f82f59ce809cd7eb9f8ae096da44 # v2026.23.2
+        with:
+          launcher-install: false
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+      - name: Format Task
+        run: aspect format --task-key format-gha
+
+  format-debug-task:
+    runs-on: ubuntu-latest
+    needs: [pre-build]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+      - uses: aspect-build/setup-aspect@c22a8f64fb38f82f59ce809cd7eb9f8ae096da44 # v2026.23.2
+        with:
+          launcher-install: false
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+      - name: Format Task (ASPECT_DEBUG=1)
+        run: ASPECT_DEBUG=1 aspect format --task-key format-gha-debug
+
+  gazelle-task:
+    runs-on: ubuntu-latest
+    needs: [pre-build]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+      - uses: aspect-build/setup-aspect@c22a8f64fb38f82f59ce809cd7eb9f8ae096da44 # v2026.23.2
+        with:
+          launcher-install: false
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+      - name: Gazelle Task
+        run: aspect gazelle --task-key gazelle-gha
+
+  gazelle-debug-task:
+    runs-on: ubuntu-latest
+    needs: [pre-build]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+      - uses: aspect-build/setup-aspect@c22a8f64fb38f82f59ce809cd7eb9f8ae096da44 # v2026.23.2
+        with:
+          launcher-install: false
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+      - name: Gazelle Task (ASPECT_DEBUG=1)
+        run: ASPECT_DEBUG=1 aspect gazelle --task-key gazelle-gha-debug
+
+  gazelle-from-source-task:
+    runs-on: ubuntu-latest
+    needs: [pre-build]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+      - uses: aspect-build/setup-aspect@c22a8f64fb38f82f59ce809cd7eb9f8ae096da44 # v2026.23.2
+        with:
+          launcher-install: false
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+      # Regression test for the build-from-source gazelle path —
+      # upstream `gazelle()` macro + rules_go toolchain compiling a
+      # bespoke gazelle binary, instead of the prebuilt artifact.
+      # `--config=pure_go` is required on Linux: toolchains_llvm_bootstrapped's
+      # lld can't accept Go's non-PIC relocations on x86_64.
+      - name: Gazelle Task — from-source
+        run: aspect gazelle --gazelle-target=//tools/gazelle:gazelle_from_source --bazel-flag=--config=pure_go --task-key gazelle-from-source-gha
+
+  gazelle-from-source-debug-task:
+    runs-on: ubuntu-latest
+    needs: [pre-build]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+      - uses: aspect-build/setup-aspect@c22a8f64fb38f82f59ce809cd7eb9f8ae096da44 # v2026.23.2
+        with:
+          launcher-install: false
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+      - name: Gazelle Task — from-source (ASPECT_DEBUG=1)
+        run: ASPECT_DEBUG=1 aspect gazelle --gazelle-target=//tools/gazelle:gazelle_from_source --bazel-flag=--config=pure_go --task-key gazelle-from-source-gha-debug
+
+  lint-task:
+    runs-on: ubuntu-latest
+    needs: [pre-build]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+      - uses: aspect-build/setup-aspect@c22a8f64fb38f82f59ce809cd7eb9f8ae096da44 # v2026.23.2
+        with:
+          launcher-install: false
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+      - name: Lint Task
+        run: aspect lint --task-key lint-gha
+
+  lint-debug-task:
+    runs-on: ubuntu-latest
+    needs: [pre-build]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+      - uses: aspect-build/setup-aspect@c22a8f64fb38f82f59ce809cd7eb9f8ae096da44 # v2026.23.2
+        with:
+          launcher-install: false
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+      - name: Lint Task (ASPECT_DEBUG=1)
+        run: ASPECT_DEBUG=1 aspect lint --task-key lint-gha-debug
+
+  build-task:
+    runs-on: [self-hosted, aspect-workflows, aspect-default]
+    needs: [pre-build]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+      - uses: aspect-build/setup-aspect@c22a8f64fb38f82f59ce809cd7eb9f8ae096da44 # v2026.23.2
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+      - name: Build Task
+        run: aspect build --task-key build-gha
+
+  build-debug-task:
+    runs-on: [self-hosted, aspect-workflows, aspect-default]
+    needs: [pre-build]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+      - uses: aspect-build/setup-aspect@c22a8f64fb38f82f59ce809cd7eb9f8ae096da44 # v2026.23.2
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+      - name: Build Task (ASPECT_DEBUG=1)
+        run: ASPECT_DEBUG=1 aspect build --task-key build-gha-debug
+
+  test-task:
+    runs-on: [self-hosted, aspect-workflows, aspect-default]
+    needs: [pre-build]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+      - uses: aspect-build/setup-aspect@c22a8f64fb38f82f59ce809cd7eb9f8ae096da44 # v2026.23.2
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+      - name: Test Task
+        run: aspect test --task-key test-gha
+
+  test-debug-task:
+    runs-on: [self-hosted, aspect-workflows, aspect-default]
+    needs: [pre-build]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+      - uses: aspect-build/setup-aspect@c22a8f64fb38f82f59ce809cd7eb9f8ae096da44 # v2026.23.2
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+      - name: Test Task (ASPECT_DEBUG=1)
+        run: ASPECT_DEBUG=1 aspect test --task-key test-gha-debug

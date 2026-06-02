@@ -36,8 +36,8 @@ build-task:
     - aspect-default
   script:
     - .aspect/bootstrap.sh
-    - ASPECT_DEBUG=1 aspect build --task-key build-gl-debug -- //... -//exclude/...
-    - aspect build --task-key build-gl -- //... -//exclude/...
+    - ASPECT_DEBUG=1 aspect build --task-key build-gl-debug
+    - aspect build --task-key build-gl
 
 test-task:
   stage: CI
@@ -47,8 +47,8 @@ test-task:
     - aspect-default
   script:
     - .aspect/bootstrap.sh
-    - ASPECT_DEBUG=1 aspect test --task-key test-gl-debug -- //... -//exclude/...
-    - aspect test --task-key test-gl -- //... -//exclude/...
+    - ASPECT_DEBUG=1 aspect test --task-key test-gl-debug
+    - aspect test --task-key test-gl
 
 lint-task:
   stage: CI
@@ -129,6 +129,5 @@ delivery-task:
     ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS: $FORCE_TARGETS
   script:
     - .aspect/bootstrap.sh
-    - cd examples/deliverable
-    - ASPECT_DEBUG=1 aspect delivery --task-key delivery-gl-debug --warn-not-runnable --query 'attr(tags, deliverable, //...)'
-    - aspect delivery --task-key delivery-gl --warn-not-runnable --query 'attr(tags, deliverable, //...)'
+    - ASPECT_DEBUG=1 aspect delivery --task-key delivery-gl-debug
+    - aspect delivery --task-key delivery-gl
