@@ -66,6 +66,17 @@ fn running_verb_color() -> (String, &'static str) {
     (verb_seq, reset)
 }
 
+/// Whether to print the grey "Aspect CLI v…" runtime banner above a task
+/// header.
+///
+/// Shown only on an interactive TTY or a recognized CI host — never when
+/// stderr is piped to a non-CI consumer (e.g. a script parsing task output) —
+/// and suppressible everywhere via `ASPECT_CLI_NO_BANNER`. Pure over its
+/// inputs so the gating is testable without a real TTY or process env.
+fn show_runtime_banner(stderr_is_tty: bool, on_ci: bool, no_banner_set: bool) -> bool {
+    (stderr_is_tty || on_ci) && !no_banner_set
+}
+
 /// Wrapper around a live Starlark Module heap.
 ///
 /// All three evaluation phases share this heap so `Value<'v>` references
@@ -373,20 +384,17 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         // header. Helps users who arrived via a `tools/bazel` wrapper (or
         // a custom org CLI alias) recognize what tool is actually running
         // and where to learn more, without dominating the headline below.
-        // Same TTY/CI gating as the header itself; suppressed under
-        // `ASPECT_CLI_NO_BANNER=1` for users who want quieter output.
-        if std::env::var_os("ASPECT_CLI_NO_BANNER").is_none() {
-            let color = std::io::stderr().is_terminal() || on_recognized_ci();
-            let (grey, grey_reset) = if color {
-                ("\x1b[38;5;244m", SGR_RESET)
-            } else {
-                ("", "")
-            };
+        // When shown it's always on a surface that renders ANSI, so it's
+        // always grey.
+        if show_runtime_banner(
+            std::io::stderr().is_terminal(),
+            on_recognized_ci(),
+            std::env::var_os("ASPECT_CLI_NO_BANNER").is_some(),
+        ) {
             eprintln!(
-                "{}Aspect CLI v{} — https://docs.aspect.build/cli{}\n",
-                grey,
+                "\x1b[38;5;244mAspect CLI v{} — https://docs.aspect.build/cli{}\n",
                 cargo_pkg_short_version(),
-                grey_reset,
+                SGR_RESET,
             );
         }
         if std::env::var_os("BUILDKITE").is_some() {
@@ -940,7 +948,7 @@ fn display_width(s: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{TimingMode, display_width, render_phase_breakdown};
+    use super::{TimingMode, display_width, render_phase_breakdown, show_runtime_banner};
     use crate::engine::task_info::PhaseRecord;
     use std::time::Duration;
 
@@ -953,6 +961,23 @@ mod tests {
             emoji: emoji.to_string(),
             display_name: String::new(),
         }
+    }
+
+    #[test]
+    fn runtime_banner_shows_on_tty_or_ci_unless_suppressed() {
+        // Shown on an interactive TTY or a recognized CI host…
+        assert!(show_runtime_banner(true, false, false));
+        assert!(show_runtime_banner(false, true, false));
+        assert!(show_runtime_banner(true, true, false));
+
+        // …but NOT when stderr is piped to a non-CI consumer (the bug this
+        // gating fixes — a scripted/piped run must not get an extra line).
+        assert!(!show_runtime_banner(false, false, false));
+
+        // ASPECT_CLI_NO_BANNER suppresses it on every surface.
+        assert!(!show_runtime_banner(true, false, true));
+        assert!(!show_runtime_banner(false, true, true));
+        assert!(!show_runtime_banner(false, false, true));
     }
 
     #[test]
