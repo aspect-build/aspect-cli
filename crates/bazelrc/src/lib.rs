@@ -316,12 +316,19 @@ impl BazelRC {
         };
 
         // Collect all config keys relevant to this command, sorted for deterministic output.
+        // Ancestor bases count too (e.g. `build:ci` applies to `test --config=ci`),
+        // matching the direct-section inheritance below and what Bazel applies.
+        let ancestors = command_ancestors(command);
         let mut config_keys: Vec<&String> = self
             .options
             .keys()
             .filter(|k| {
                 if let Some(base) = k.split(':').next() {
-                    k.contains(':') && (base == "always" || base == "common" || base == command)
+                    k.contains(':')
+                        && (base == "always"
+                            || base == "common"
+                            || base == command
+                            || ancestors.contains(&base))
                 } else {
                     false
                 }
@@ -333,7 +340,15 @@ impl BazelRC {
         let mut first_block = true;
 
         // Single pass per source file: emit direct sections then config sections together.
-        let direct_keys = ["startup", "always", "common", command];
+        //
+        // Include the command's ancestors (e.g. `build` for `test`) so the
+        // announce reflects what Bazel actually applies — `options_for` already
+        // pulls ancestor flags into the spawn via `command_ancestors`, and
+        // omitting them here made the announce understate the effective config
+        // (e.g. a `build --disk_cache=…` flag missing from a `test` announce).
+        let mut direct_keys = vec!["startup", "always", "common"];
+        direct_keys.extend(command_ancestors(command));
+        direct_keys.push(command);
         for (source_idx, source_path) in self.sources.iter().enumerate() {
             let is_client = source_path == Path::new("<command line>");
             let short = shorten(source_path);
@@ -673,6 +688,63 @@ import {}
         let out = rc.announce("build", false, 200, root, None, redact);
         assert!(out.contains("--remote_header=<REDACTED>"), "{out}");
         assert!(!out.contains("s3cr3t"), "secret leaked: {out}");
+    }
+
+    #[test]
+    fn announce_test_includes_inherited_build_flags() {
+        // Bazel applies `build` (and `build:<config>`) flags to `test`, so the
+        // announce for `test` must show them — not just the `test` sections.
+        let root = Path::new("/work/repo");
+        let rc = rc_with(
+            &[&root.join(".bazelrc")],
+            &[
+                ("common", 0, "--curses=no"),
+                ("build", 0, "--disk_cache=/cache"),
+                ("test", 0, "--test_output=errors"),
+                ("build:ci", 0, "--remote_cache=grpc://cache"),
+                ("test:ci", 0, "--flaky_test_attempts=2"),
+            ],
+        );
+        let out = rc.announce("test", false, 200, root, None, |s| s.to_string());
+        assert!(
+            out.contains("--disk_cache=/cache"),
+            "inherited build flag missing: {out}"
+        );
+        assert!(
+            out.contains("--test_output=errors"),
+            "test flag missing: {out}"
+        );
+        assert!(
+            out.contains("--remote_cache=grpc://cache"),
+            "inherited build:<config> flag missing: {out}"
+        );
+        assert!(
+            out.contains("--flaky_test_attempts=2"),
+            "test:<config> flag missing: {out}"
+        );
+    }
+
+    #[test]
+    fn announce_build_omits_test_only_flags() {
+        // The inheritance is one-directional: `build` must NOT show `test`
+        // flags (test is a descendant of build, not an ancestor).
+        let root = Path::new("/work/repo");
+        let rc = rc_with(
+            &[&root.join(".bazelrc")],
+            &[
+                ("build", 0, "--disk_cache=/cache"),
+                ("test", 0, "--test_output=errors"),
+            ],
+        );
+        let out = rc.announce("build", false, 200, root, None, |s| s.to_string());
+        assert!(
+            out.contains("--disk_cache=/cache"),
+            "build flag missing: {out}"
+        );
+        assert!(
+            !out.contains("--test_output=errors"),
+            "build must not inherit test-only flags: {out}"
+        );
     }
 
     // ── Config expansion ─────────────────────────────────────────────────────
