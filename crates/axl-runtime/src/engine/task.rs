@@ -188,7 +188,7 @@ impl<'v> Task<'v> {
         let frozen = frozen_value
             .downcast_ref::<FrozenTask>()
             .expect("from_frozen called with non-FrozenTask value");
-        let overrides = heap.alloc(Arguments::new());
+        let overrides = heap.alloc(Arguments::with_schema(frozen.args.keys().cloned()));
         let traits: Vec<Value<'v>> = frozen.traits.iter().map(|fv| fv.to_value()).collect();
         Task {
             r#impl: frozen.r#impl.to_value(),
@@ -496,6 +496,9 @@ fn build_alias<'v>(
         (false, _) => format!("{}\n\n{}", description, alias_hint),
     };
 
+    let overrides = eval
+        .heap()
+        .alloc(Arguments::with_schema(overlaid.keys().cloned()));
     Ok(Task {
         args: overlaid,
         r#impl: base.implementation(),
@@ -506,7 +509,7 @@ fn build_alias<'v>(
         name: RefCell::new(name),
         traits: base.trait_values(),
         path: Env::current_script_path(eval)?,
-        overrides: eval.heap().alloc(Arguments::new()),
+        overrides,
     })
 }
 
@@ -688,6 +691,9 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
             }
         }
 
+        let overrides = eval
+            .heap()
+            .alloc(Arguments::with_schema(args_.keys().cloned()));
         Ok(Task {
             args: args_,
             r#impl: implementation.0,
@@ -698,7 +704,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
             name: RefCell::new(name),
             traits: all_traits,
             path: Env::current_script_path(eval)?,
-            overrides: eval.heap().alloc(Arguments::new()),
+            overrides,
         })
     }
 }
