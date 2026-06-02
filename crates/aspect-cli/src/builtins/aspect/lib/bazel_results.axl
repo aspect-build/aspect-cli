@@ -2605,10 +2605,16 @@ def format_run_date(ctx, epoch_ms):
             return val
     return ""
 
+# Terminal and live statuses. Must cover every value `_pick_status` / the
+# task lifecycle can emit — a missing key falls back to the 🔄/"Running"
+# default below, which leaves a finished task's status row stuck on "Running"
+# (e.g. a delivery that ends with `warning`). Icons mirror lib/result_text.axl.
 STATUS_ICONS = {
     "passed": "✅",
     "failed": "❌",
     "failing": "⚠️",
+    "warning": "⚠️",
+    "aborted": "🔥",
     "running": "🔄",
 }
 
@@ -2616,6 +2622,8 @@ STATUS_LABELS = {
     "passed": "Succeeded",
     "failed": "Failed",
     "failing": "Failing...",
+    "warning": "Flagged",
+    "aborted": "Aborted",
     "running": "Running...",
 }
 
