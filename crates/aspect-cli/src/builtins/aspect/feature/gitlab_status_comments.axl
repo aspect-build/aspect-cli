@@ -1,0 +1,460 @@
+"""GitLab Status Comments feature for Aspect tasks.
+
+Posts a single rolling MR note aggregating live status for every Aspect
+task in this MR's pipelines. Mirrors the design of `GithubStatusComments`
+but uses GitLab Merge Request Notes instead of GitHub Issue Comments.
+
+## Cross-task coordination
+
+The GH feature coordinates cross-task state via GitHub Actions artifacts
+(each task uploads its payload; sibling tasks download). GitLab CI's
+artifact API isn't conveniently reachable from runner code, so this
+feature uses a simpler design: **the MR note itself is the shared state
+store**. Each task on each `task_update`:
+
+  1. Fetches the marker note from the MR.
+  2. Parses the state block from the note's footer.
+  3. Merges this task's entry into the state's `entries` list (replacing
+     any prior entry with the same `(workflow_run_id, job, key, name)`).
+  4. Renders + upserts the note.
+
+This keeps the feature stateless across aspect-cli processes — every
+task writes the same view by reading + merging + writing. Lease
+coordination throttles concurrent writers so the App API quota stays
+flat regardless of how many tasks run in parallel.
+
+## Marker
+
+`<!-- aspect-ci-status:mr-<iid> -->` — formatted at feature setup,
+embedded in the rendered body, and used to locate the existing note
+across concurrent writers.
+
+## Rendering
+
+Reuses every render helper from `GithubStatusComments` (loaded via
+public re-exports). The body template, status badges, and state
+serialization are VCS-agnostic — only the create/update/list/delete API
+surface differs. See `feature/github_status_comments.axl` for the
+template's variable contract.
+
+## Out of scope vs GH counterpart
+
+* No GitLab CI artifact upload/download — uses the note's own state block
+  as the cross-task source of truth instead.
+* No terminal-settle delay — the artifact eventual-consistency window
+  doesn't apply since we don't depend on a listing API.
+* No per-task check-run deep link — the GitlabCommitStatuses feature
+  doesn't publish a per-task page URL (commit_status `target_url` points
+  at the CI job, not a per-status page). The `check_run_url` field on
+  entries stays empty for now.
+"""
+
+load(
+    "../feature/github_status_comments.axl",
+    "DEFAULT_BODY_TEMPLATE",
+    "DEFAULT_STATUS_BADGES",
+    "bucket_entries",
+    "lease_held",
+    "max_recent_upsert_epoch",
+    "merge_state",
+    "parse_state",
+    "prepare_for_render",
+    "render_body",
+    "results_subset",
+)
+load("../lib/bazel_results.axl", "format_run_date", "now_ms")
+load("../lib/ci.axl", "detect_build_url", "detect_ci_host")
+load("../lib/environment.axl", "feature_logger", "workflows_results_url")
+load("../lib/gitlab.axl", "gitlab")
+load("../lib/gitlab_detect.axl", "detect_gitlab_mr")
+load("../lib/gitlab_token_cache.axl", "gitlab_token_cache")
+load("../lib/lifecycle.axl", "TaskLifecycleTrait", "TaskUpdate")
+load(
+    "../lib/rate_limit.axl",
+    "BUCKET_APP",
+    "effective_throttle_factor",
+    "epoch_now_s",
+    "usage_footer",
+)
+
+_LOG = feature_logger("GitLab status comments")
+
+_MARKER_FMT = "<!-- aspect-ci-status:mr-%d -->"
+
+def _ci_run_url(env):
+    """Resolve the per-job CI run URL. GitLab populates CI_JOB_URL on
+    every job; fallbacks cover Aspect Workflows on non-GitLab runners
+    posting back to a GitLab MR via explicit env vars."""
+    return env.var("CI_JOB_URL") or ""
+
+def _own_entry(ctx, _state, run_id, run_attempt, job_name):
+    """Snapshot this task's current state as an entry dict shaped for
+    `merge_state` / `render_body`. Caller refreshes on each publish so
+    `check_run_url` (published asynchronously by GitlabCommitStatuses)
+    and live phase info flow through.
+    """
+    base = _state.get("_own_base", {})
+    snapshot = dict(base)
+    snapshot.update(_state.get("_own_live", {}))
+
+    # `workflow_run_id` is the pipeline id; mirrors the GH state-block
+    # key so `merge_state` works unchanged. Stringified for byte-stable
+    # serialization (matches GH path).
+    snapshot["workflow_run_id"] = str(run_id)
+    snapshot["workflow_name"] = _state.get("_workflow_name", "")
+    snapshot["job"] = job_name
+    snapshot["run_attempt"] = run_attempt
+    return snapshot
+
+def _gitlab_status_comments(ctx: FeatureContext):
+    lifecycle = ctx.traits[TaskLifecycleTrait]
+
+    mode = ctx.args.mode
+    is_ci = bool(ctx.std.env.var("CI"))
+    if mode == "ci-only" and not is_ci:
+        return
+    if mode == "local-only" and is_ci:
+        return
+
+    mr, reason = detect_gitlab_mr(ctx.std)
+    if mr == None:
+        _LOG.trace("No GitLab MR context — skipping. (%s)" % reason)
+        return
+
+    project_path = mr["project_path"]
+    project_id = mr.get("project_id")
+    mr_iid = mr["mr_iid"]
+    head_sha = mr["sha"]
+    marker = _MARKER_FMT % mr_iid
+
+    # GitLab CI pipeline + job identity. CI_PIPELINE_ID is the unique
+    # per-pipeline run id; CI_JOB_NAME is the job's name in the
+    # pipeline YAML; CI_JOB_RETRY_INDEX bumps when a job is retried
+    # (default "0" for the first attempt).
+    #
+    # ASPECT_GITLAB_PIPELINE_ID + ASPECT_GITLAB_JOB_NAME are escape
+    # hatches that mirror the override pattern in `detect_gitlab_mr`:
+    # let Aspect-Workflows-managed runners on non-GitLab CI hosts post
+    # status back to a GitLab MR without all the native CI vars set.
+    env = ctx.std.env
+    run_id = env.var("ASPECT_GITLAB_PIPELINE_ID") or env.var("CI_PIPELINE_ID") or ""
+    job_name = env.var("ASPECT_GITLAB_JOB_NAME") or env.var("CI_JOB_NAME") or "aspect-cli"
+    run_attempt = env.var("CI_JOB_RETRY_INDEX") or "0"
+    workflow_name = env.var("CI_PIPELINE_NAME") or env.var("CI_PROJECT_NAME") or ""
+    if not run_id:
+        # Fall back to the MR IID so single-pipeline coordination still
+        # works in the local-sim case where no real pipeline exists. A
+        # synthetic run_id is fine — `merge_state` only uses it as a
+        # slot key, not as something it dereferences against GL.
+        run_id = "local-mr-%d" % mr_iid
+        _LOG.trace("No CI_PIPELINE_ID; using synthetic run_id=%s for local-sim coordination" % run_id)
+
+    ci_run_url = _ci_run_url(env)
+    min_poll_interval_seconds = max(1, ctx.args.min_poll_interval_seconds)
+
+    templates = ctx.args.templates or {}
+    body_template = templates.get("body") or DEFAULT_BODY_TEMPLATE
+    status_badges = dict(DEFAULT_STATUS_BADGES)
+    status_badges.update(ctx.args.status_badges or {})
+
+    _state = {}
+    _state["_workflow_name"] = workflow_name
+
+    def _authenticate(ctx):
+        if _state.get("_gitlab_token"):
+            return True
+        auth_reason = {}
+        token = gitlab_token_cache.get_or_mint(
+            ctx,
+            project_path = project_path,
+            project_id = project_id,
+            # `api` gives us both note write + read; the finer-grained
+            # `mr_notes.write` / `mr.read` roles in roles.ts declare
+            # `gitlabScope: null` and `read_api`, which together resolve
+            # to scope `read_api` only — and GitLab's notes API requires
+            # `api` scope. Until roles.ts marks `mr_notes.write` as
+            # `api`-scoped, request `api` here directly.
+            roles = ["api"],
+            _reason = auth_reason,
+        )
+        if not token:
+            _LOG.warn(ctx.std, "Authentication failed for %s — %s" % (
+                project_path,
+                auth_reason.get("reason", "unknown"),
+            ))
+            return False
+        _state["_gitlab_token"] = token
+        return True
+
+    def _fetch_existing_note_body(ctx, token):
+        """Read the marker note's body. Returns the string (empty when no
+        marker note exists), or `None` on transient API failure so the
+        caller can skip this cycle.
+
+        Caches the note id in `_state["_note_id"]` so subsequent reads
+        skip the list call. On 404 (note deleted out from under us) the
+        cache is cleared and we re-list.
+        """
+        note_id = _state.get("_note_id")
+        if note_id != None:
+            # The notes API doesn't expose a single-note GET that filters by id
+            # uniquely without `list`; we approximate by listing and matching id.
+            # Cheap on a small page; expensive only when the MR has many notes.
+            listed = gitlab.notes.list(ctx, token = token, project = project_path, mr_iid = mr_iid, auth_kind = "bearer")
+            if not listed["success"]:
+                _LOG.warn(ctx.std, "List notes failed: %s" % listed.get("error", "unknown"))
+                return None
+            for n in listed["notes"]:
+                if n.get("id") == note_id:
+                    return n.get("body", "") or ""
+
+            # Note vanished — fall through to re-discovery.
+            _state.pop("_note_id", None)
+
+        listed = gitlab.notes.list(ctx, token = token, project = project_path, mr_iid = mr_iid, auth_kind = "bearer")
+        if not listed["success"]:
+            _LOG.warn(ctx.std, "List notes failed: %s" % listed.get("error", "unknown"))
+            return None
+        for n in listed["notes"]:
+            body = n.get("body") or ""
+            if marker in body:
+                _state["_note_id"] = n["id"]
+                return body
+        return ""
+
+    def _upsert_note(ctx, token, body):
+        """PUT the existing note when its id is known, else POST a fresh
+        one. After a POST, re-list and dedup by marker so concurrent
+        writers converge on the lowest-id survivor."""
+        if _state.get("_note_id") != None:
+            res = gitlab.notes.update(
+                ctx,
+                token = token,
+                project = project_path,
+                mr_iid = mr_iid,
+                note_id = _state["_note_id"],
+                body = body,
+                auth_kind = "bearer",
+            )
+            if not res["success"]:
+                _LOG.warn(ctx.std, "Update note failed: %s" % res.get("error", "unknown"))
+                return False
+            return True
+
+        res = gitlab.notes.create(
+            ctx,
+            token = token,
+            project = project_path,
+            mr_iid = mr_iid,
+            body = body,
+            auth_kind = "bearer",
+        )
+        if not res["success"]:
+            _LOG.warn(ctx.std, "Create note failed: %s" % res.get("error", "unknown"))
+            return False
+        _state["_note_id"] = res["note_id"]
+
+        # Race mitigation: if two tasks both POSTed within the same
+        # window, keep the lowest note id and delete the rest. Stable
+        # choice across writers so they converge on the same survivor.
+        listed2 = gitlab.notes.list(ctx, token = token, project = project_path, mr_iid = mr_iid, auth_kind = "bearer")
+        if not listed2["success"]:
+            return True
+        dupes = [n for n in listed2["notes"] if marker in (n.get("body") or "")]
+        if len(dupes) <= 1:
+            return True
+        dupes_sorted = sorted(dupes, key = lambda n: n["id"])
+        survivor = dupes_sorted[0]["id"]
+        _state["_note_id"] = survivor
+        for d in dupes_sorted[1:]:
+            del_res = gitlab.notes.delete(
+                ctx,
+                token = token,
+                project = project_path,
+                mr_iid = mr_iid,
+                note_id = d["id"],
+                auth_kind = "bearer",
+            )
+            if not del_res["success"]:
+                _LOG.trace("Cleanup of duplicate note %s failed; will retry next cycle" % d["id"])
+        return True
+
+    def _publish(ctx, final = False):
+        token = _state.get("_gitlab_token")
+        if not token:
+            return
+
+        own_entry = _own_entry(ctx, _state, run_id, run_attempt, job_name)
+
+        existing_body = _fetch_existing_note_body(ctx, token)
+        if existing_body == None:
+            return
+        parsed = parse_state(existing_body)
+        cross_workflow_lease_epoch = parsed["last_upsert_epoch_s"] if parsed else 0
+
+        now_epoch = epoch_now_s(ctx.std)
+        elapsed_s = max(0, now_epoch - _state.get("_task_started_at_s", now_epoch))
+        factor = effective_throttle_factor(ctx, BUCKET_APP, elapsed_s, min_poll_interval_seconds)
+        lease_window_s = min_poll_interval_seconds * factor
+
+        # Terminal updates bypass the lease — the verdict has to land
+        # even if a sibling published seconds ago. The body-diff
+        # short-circuit below still gates the redundant PATCH.
+        if not final and lease_held(now_epoch, cross_workflow_lease_epoch, lease_window_s):
+            return
+
+        # Merge: my entry + every other entry the comment knows about.
+        # `merge_state` is the GH-feature helper; it slot-overlays
+        # by workflow_run_id (pipeline id) and dedups per-task by
+        # `(name, key)`. Single-pipeline case: only the local pipeline
+        # has a slot; multi-pipeline case: every pipeline contributes.
+        new_state = merge_state(parsed, head_sha, run_id, workflow_name, [own_entry], {})
+        prepared = prepare_for_render(new_state["entries"])
+        sections = bucket_entries(prepared)
+
+        # Earliest start across all entries — pinned to the run's
+        # wall-clock start so the body's headline timestamp doesn't
+        # wobble across PATCHes.
+        earliest_ms = _earliest_start_ms(prepared)
+        started_at = format_run_date(ctx, earliest_ms or now_ms(ctx))
+
+        # Two renders mirroring the GH path: `stable_body` zeros out
+        # the live-only fields so the unchanged-content short-circuit
+        # fires when no task state changed. `final_body` carries the
+        # live timestamp + quota footer + lease-stamped state block.
+        stable_state = dict(new_state)
+        stable_state["last_upsert_epoch_s"] = 0
+        stable_body = render_body(
+            ctx,
+            marker,
+            prepared,
+            started_at,
+            body_template,
+            status_badges,
+            sections,
+            state = stable_state,
+        )
+        if _state.get("_last_stable_body") == stable_body:
+            return
+
+        final_state = dict(new_state)
+        final_state["last_upsert_epoch_s"] = now_epoch
+        final_body = render_body(
+            ctx,
+            marker,
+            prepared,
+            started_at,
+            body_template,
+            status_badges,
+            sections,
+            state = final_state,
+        )
+
+        if not _upsert_note(ctx, token, final_body):
+            return
+        _state["_last_stable_body"] = stable_body
+        _state["_last_upsert_epoch_s"] = now_epoch
+
+    def _earliest_start_ms(entries):
+        ms_values = [e.get("start_time_ms", 0) for e in entries if e.get("start_time_ms", 0) > 0]
+        return min(ms_values) if ms_values else 0
+
+    def _refresh_own_base(ctx, status, update, elapsed_ms):
+        """Recompute the static fields of `own_entry` after each
+        task_update. `aspect_url` / `bes_url` flow in via `update.data`;
+        live phase info comes from `update.progress`."""
+        data = update.data if update.data else {}
+
+        # Reuse `results_subset` (GH path) to slice `data` to the
+        # comment-relevant fields. `check_run_url` stays empty — see
+        # the module docstring.
+        subset = results_subset(
+            data,
+            elapsed_ms,
+            aspect_url = (data.get("aspect_url") if type(data) == "dict" else "") or "",
+            bes_url = (data.get("bes_url") if type(data) == "dict" else "") or "",
+            check_run_url = "",
+            current_phase = (update.progress.body or _state.get("_current_phase", "")),
+            current_phase_elapsed_ms = 0,
+            progress_styles = update.progress.styles if hasattr(update.progress, "styles") else None,
+            failed_in_phase = _state.get("_failed_in_phase", ""),
+            start_time_ms = _state.get("_task_started_at_ms", 0),
+        )
+        if update.progress.body:
+            _state["_current_phase"] = update.progress.body
+
+        base = dict(subset)
+        base["name"] = ctx.task.name
+        base["key"] = ctx.task.key
+        base["status"] = status
+        base["kind"] = update.kind or ""
+        base["ci_run_url"] = ci_run_url
+        _state["_own_base"] = base
+
+    def _task_update(ctx, update):
+        if not _state.get("_initialized"):
+            _state["_initialized"] = True
+            _state["_task_started_at_ms"] = now_ms(ctx)
+            _state["_task_started_at_s"] = epoch_now_s(ctx.std)
+            if not _authenticate(ctx):
+                return
+
+        token = _state.get("_gitlab_token")
+        if not token:
+            return
+
+        status = update.status
+        final = update.final
+
+        elapsed_ms = now_ms(ctx) - _state.get("_task_started_at_ms", now_ms(ctx))
+        if final and status == "failed":
+            # Capture which phase the failure happened in so the
+            # rendered row can carry the prefix on terminal.
+            _state["_failed_in_phase"] = _state.get("_current_phase", "")
+
+        _refresh_own_base(ctx, status, update, elapsed_ms)
+
+        _publish(ctx, final = final)
+
+    lifecycle.task_update.append(_task_update)
+
+# ─── Public test hooks ────────────────────────────────────────────────────────
+
+MARKER_FMT = _MARKER_FMT
+
+GitlabStatusComments = feature(
+    implementation = _gitlab_status_comments,
+    enabled = True,
+    args = {
+        "mode": args.string(
+            default = "ci-only",
+            values = ["ci-only", "local-only", "always"],
+            description = "When to post MR comments: ci-only (default), local-only, or always.",
+        ),
+        "min_poll_interval_seconds": args.int(
+            default = 20,
+            description = "Minimum seconds between MR-note refreshes. Default 20s. Each refresh counts " +
+                          "against the GitLab API rate limit; on busy projects this interval will " +
+                          "automatically stretch further as the remaining quota shrinks or the run goes " +
+                          "on longer. When multiple tasks in the same pipeline write to the same MR note, " +
+                          "they coordinate via a lease so only one task refreshes the note per interval — " +
+                          "the cost stays flat regardless of how many run in parallel. Terminal task " +
+                          "verdicts always land immediately.",
+        ),
+        "templates": args.custom(
+            dict,
+            default = {},
+            description = "Per-section Jinja2 template overrides. Keys: 'body'. " +
+                          "Vars available match the GithubStatusComments template contract " +
+                          "(see feature/github_status_comments.axl). Empty dict → built-in default. " +
+                          "config.axl only.",
+        ),
+        "status_badges": args.custom(
+            dict,
+            default = {},
+            description = "Override badge_key -> label mapping merged over defaults " +
+                          "(failed='❌ failed', warning='⚠️ warning', running='🔄 running', " +
+                          "passed='✅ passed', aborted='🔥 aborted'). config.axl only.",
+        ),
+    },
+)
