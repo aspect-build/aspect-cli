@@ -1,0 +1,16 @@
+name: CI - Delivery
+
+# Placeholder so GitHub registers this workflow on the default branch.
+#
+# `gh workflow run` / the workflow_dispatch REST API resolve a workflow by its
+# path on the default branch, so a file that only ever lived on a feature
+# branch 404s. This stub exists purely to register the `CI - Delivery` name;
+# a follow-up branch replaces it with the real delivery jobs.
+on:
+  workflow_dispatch:
+
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "CI - Delivery placeholder; real jobs land in a follow-up."
