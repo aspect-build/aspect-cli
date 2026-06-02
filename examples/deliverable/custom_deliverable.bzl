@@ -25,7 +25,8 @@ rlocation() {
   fi
 }
 
-payload="$(rlocation "_main/delivery_payload.txt")"
+echo "custom_deliverable..."
+payload="$(rlocation "_main/examples/deliverable/delivery_payload.txt")"
 echo "custom_deliverable ran; payload contents: $(cat "$payload")"
 """,
     )

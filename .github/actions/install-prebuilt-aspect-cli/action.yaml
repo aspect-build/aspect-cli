@@ -2,12 +2,42 @@ name: Install prebuilt aspect-cli (from in-run artifact)
 description: |
   Internal-only — NOT a general-purpose aspect-cli installer.
 
-  Downloads the `aspect-cli` artifact uploaded earlier in this workflow
-  run by the `pre-build` job and installs it on PATH as `aspect`. Used
-  by GitHub-hosted ephemeral runners that don't have remote-cache
-  access to rebuild the CLI from source efficiently.
+  Downloads the `aspect-cli` artifact uploaded by a `pre-build` job and
+  installs it where this runner type expects to find the CLI:
+
+    * GitHub-hosted ephemeral runner — installed on PATH as `aspect`
+      (`$HOME/.local/bin`, prepended via `$GITHUB_PATH`). These small runners
+      have no remote-cache access to rebuild the CLI from source efficiently.
+
+    * Self-hosted Aspect Workflows runner (`ASPECT_WORKFLOWS_RUNNER` set) —
+      written to the repo-relative `target/ci/aspect-cli`, the same path
+      `.aspect/bootstrap.sh` produces and that `.aspect/version.axl` resolves
+      via `local("target/ci/aspect-cli")`. The runner's stable `aspect`
+      launcher then runs our prebuilt binary, so no PATH manipulation is
+      needed (and none would reliably shadow the system launcher anyway).
+
+  By default it pulls the artifact from the *current* workflow run (the
+  common case: `pre-build` and the consumer are jobs in the same run). To
+  pull from a *different* run — e.g. `ci-workflows-delivery.yaml`, which is
+  dispatched as its own workflow run by `ci-workflows.yaml` after pre-build —
+  pass `run-id` (the upstream run that holds the artifact) and `github-token`.
+  `actions/download-artifact` requires both to reach across runs.
 
   To install aspect-cli normally, see https://docs.aspect.build/cli.
+
+inputs:
+  run-id:
+    description: |
+      Workflow run id that produced the `aspect-cli` artifact. Omit for the
+      same-run case; set it to download the artifact from another run.
+    required: false
+    default: ""
+  github-token:
+    description: |
+      Token used to download a cross-run artifact. Required only when
+      `run-id` is set (the same-run download path needs no token).
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -17,10 +47,26 @@ runs:
       with:
         name: aspect-cli
         path: ${{ runner.temp }}/aspect-bin
-    - name: Install on PATH
+        # When run-id/github-token are empty these are no-ops and the action
+        # downloads from the current run; when set it reaches into that run.
+        run-id: ${{ inputs.run-id }}
+        github-token: ${{ inputs.github-token }}
+    - name: Install for this runner type
       shell: bash
       run: |
-        chmod +x "${RUNNER_TEMP}/aspect-bin/aspect-cli"
-        mkdir -p "$HOME/.local/bin"
-        mv "${RUNNER_TEMP}/aspect-bin/aspect-cli" "$HOME/.local/bin/aspect"
-        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+        set -euo pipefail
+        src="${RUNNER_TEMP}/aspect-bin/aspect-cli"
+        chmod +x "$src"
+        if [ -n "${ASPECT_WORKFLOWS_RUNNER:-}" ]; then
+          # Self-hosted Workflows runner: place the binary where the stable
+          # launcher resolves it via .aspect/version.axl's local() source.
+          mkdir -p target/ci
+          mv "$src" target/ci/aspect-cli
+          echo "Installed prebuilt aspect-cli to target/ci/aspect-cli (Workflows runner)"
+        else
+          # GitHub-hosted ephemeral runner: put `aspect` on PATH.
+          mkdir -p "$HOME/.local/bin"
+          mv "$src" "$HOME/.local/bin/aspect"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "Installed prebuilt aspect on PATH at \$HOME/.local/bin/aspect (ephemeral runner)"
+        fi

@@ -1,16 +1,97 @@
 name: CI - Delivery
 
-# Placeholder so GitHub registers this workflow on the default branch.
-#
-# `gh workflow run` / the workflow_dispatch REST API resolve a workflow by its
-# path on the default branch, so a file that only ever lived on a feature
-# branch 404s. This stub exists purely to register the `CI - Delivery` name;
-# a follow-up branch replaces it with the real delivery jobs.
+# Runs as its own workflow run so the Aspect PR-summary comment exercises
+# merging tasks across separate workflows. Normally dispatched by
+# ci-workflows.yaml's `dispatch-delivery` job right after `pre-build`
+# completes (passing `prebuild_run_id` so we reuse the just-built CLI), but
+# also independently runnable via the GitHub UI / `gh workflow run`.
 on:
   workflow_dispatch:
+    inputs:
+      force_targets:
+        description: "Bazel targets to force-deliver (space-separated). Example: //examples/deliverable. Leave empty for normal selective delivery."
+        required: false
+        default: ""
+      prebuild_run_id:
+        description: "Workflow run id holding the prebuilt `aspect-cli` artifact (set by ci-workflows.yaml). Leave empty to build the CLI from source via bootstrap.sh."
+        required: false
+        default: ""
+      pr_number:
+        description: "Triggering PR number (set by ci-workflows.yaml). Restores PR association lost across the workflow_dispatch boundary — surfaced as ASPECT_GITHUB_PR_NUMBER. Empty for a non-PR (push) trigger."
+        required: false
+        default: ""
+      head_sha:
+        description: "Triggering PR head commit SHA (set by ci-workflows.yaml). Exported as GITHUB_SHA so the check-run attaches to the PR head commit. Empty for a non-PR (push) trigger."
+        required: false
+        default: ""
+
+permissions:
+  id-token: write
+  actions: read # download-artifact needs this to read another run's artifact
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+# The Dash0 OTLP endpoint and bearer token feed `.aspect/config.axl`'s `ctx.telemetry.exporters.add(...)`
+# call, which dogfoods the trace.event/trace.log pipeline against a real backend.
+# Both are no-ops if a secret isn't configured (unset env var = empty string,
+# config.axl skips registration).
+env:
+  DASH0_ENDPOINT: ${{ secrets.DASH0_ENDPOINT }}
+  DASH0_TOKEN: ${{ secrets.DASH0_TOKEN }}
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  # Reconstruct the PR context that the workflow_dispatch boundary dropped, so
+  # `aspect delivery`'s GithubStatusChecks posts a check-run on the PR head and
+  # the Aspect PR-summary comment can associate (and merge) delivery's tasks.
+  # `ASPECT_GITHUB_PR_NUMBER` is github.axl's documented detect_pr override.
+  # When dispatched on a push (no PR), pr_number is empty and GITHUB_SHA falls
+  # back to the runner-provided value so branch runs are unaffected.
+  ASPECT_GITHUB_PR_NUMBER: ${{ inputs.pr_number }}
+  GITHUB_SHA: ${{ inputs.head_sha != '' && inputs.head_sha || github.sha }}
 
 jobs:
-  noop:
-    runs-on: ubuntu-latest
+  delivery-task:
+    runs-on: [self-hosted, aspect-workflows, aspect-default]
+    timeout-minutes: 10
+    env:
+      ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS: ${{ inputs.force_targets }}
     steps:
-      - run: echo "CI - Delivery placeholder; real jobs land in a follow-up."
+      - uses: actions/checkout@v6
+      # When dispatched by ci-workflows.yaml, reuse the CLI that run's
+      # pre-build already built (cross-run artifact download). On a bare
+      # manual dispatch there's no upstream run, so build from source.
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+        if: inputs.prebuild_run_id != ''
+        with:
+          run-id: ${{ inputs.prebuild_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Bootstrap
+        if: inputs.prebuild_run_id == ''
+        run: .aspect/bootstrap.sh
+      - uses: aspect-build/setup-aspect@c22a8f64fb38f82f59ce809cd7eb9f8ae096da44 # v2026.23.2
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+      - name: Delivery Task
+        run: aspect delivery --task-key delivery-gha --warn-not-runnable
+
+  delivery-debug-task:
+    runs-on: [self-hosted, aspect-workflows, aspect-default]
+    timeout-minutes: 10
+    env:
+      ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS: ${{ inputs.force_targets }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+        if: inputs.prebuild_run_id != ''
+        with:
+          run-id: ${{ inputs.prebuild_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Bootstrap
+        if: inputs.prebuild_run_id == ''
+        run: .aspect/bootstrap.sh
+      - uses: aspect-build/setup-aspect@c22a8f64fb38f82f59ce809cd7eb9f8ae096da44 # v2026.23.2
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+      - name: Delivery Task (ASPECT_DEBUG=1)
+        run: ASPECT_DEBUG=1 aspect delivery --task-key delivery-gha-debug

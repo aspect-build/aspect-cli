@@ -54,10 +54,10 @@ jobs:
           command: .aspect/bootstrap.sh
       - run:
           name: Build Task (ASPECT_DEBUG=1)
-          command: ASPECT_DEBUG=1 aspect build --task-key build-cci-debug -- //... -//exclude/...
+          command: ASPECT_DEBUG=1 aspect build --task-key build-cci-debug
       - run:
           name: Build Task
-          command: aspect build --task-key build-cci -- //... -//exclude/...
+          command: aspect build --task-key build-cci
 
   test-task:
     machine: true
@@ -70,10 +70,10 @@ jobs:
           command: .aspect/bootstrap.sh
       - run:
           name: Test Task (ASPECT_DEBUG=1)
-          command: ASPECT_DEBUG=1 aspect test --task-key test-cci-debug -- //... -//exclude/...
+          command: ASPECT_DEBUG=1 aspect test --task-key test-cci-debug
       - run:
           name: Test Task
-          command: aspect test --task-key test-cci -- //... -//exclude/...
+          command: aspect test --task-key test-cci
 
   lint-task:
     machine: true
@@ -185,9 +185,7 @@ jobs:
           command: .aspect/bootstrap.sh
       - run:
           name: Delivery Task (ASPECT_DEBUG=1)
-          working_directory: /mnt/ephemeral/workdir/examples/deliverable
-          command: ASPECT_DEBUG=1 aspect delivery --task-key delivery-cci-debug --warn-not-runnable --query 'attr(tags, deliverable, //...)'
+          command: ASPECT_DEBUG=1 aspect delivery --task-key delivery-cci-debug
       - run:
           name: Delivery Task
-          working_directory: /mnt/ephemeral/workdir/examples/deliverable
-          command: aspect delivery --task-key delivery-cci --warn-not-runnable --query 'attr(tags, deliverable, //...)'
+          command: aspect delivery --task-key delivery-cci

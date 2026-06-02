@@ -51,7 +51,7 @@ steps:
   - key: pre-build
     label: ":aspect: Pre-build CLI"
     agents:
-      queue: aspect-huge
+      queue: aspect-default
     timeout_in_minutes: 10
     retry:
       automatic:
@@ -64,7 +64,7 @@ steps:
       - pre-build
     label: ":aspect: AXL Tests"
     agents:
-      queue: aspect-huge
+      queue: aspect-default
     timeout_in_minutes: 10
     retry:
       automatic:
@@ -93,17 +93,14 @@ steps:
         cd crates/aspect-cli
         $$LAUNCHER user user-task-subdir
       )
-      echo "--- :aspect: aspect run smoke (in examples/deliverable)"
-      # Exercises the run task end-to-end across the three label forms
-      # apparent_label resolves (:name, //:name, bare name) and verifies
-      # trailing args are forwarded to the spawned binary.
-      (
-        cd examples/deliverable
-        $$LAUNCHER run :py_deliverable
-        $$LAUNCHER run //:py_deliverable
-        $$LAUNCHER run py_deliverable
-        $$LAUNCHER run :deliverable -- forwarded-arg
-      )
+      echo "--- :aspect: aspect run smoke (//examples/deliverable)"
+      # Exercises the run task end-to-end and verifies trailing args are
+      # forwarded to the spawned binary. Run from the repo root with absolute
+      # labels now that examples/deliverable is a package in this workspace
+      # rather than its own; the relative/bare label-form coverage lives in
+      # the apparent_label unit tests (runnable_test.axl).
+      $$LAUNCHER run //examples/deliverable:py_deliverable
+      $$LAUNCHER run //examples/deliverable:deliverable -- forwarded-arg
       echo "--- :aspect: aspect help"
       $$LAUNCHER help
       echo "--- :aspect: aspect-launcher --version"
@@ -276,8 +273,8 @@ steps:
         - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
           limit: 1
     command: |
-      ASPECT_DEBUG=1 aspect build --task-key build-bk-debug -- //... -//exclude/...
-      aspect build --task-key build-bk -- //... -//exclude/...
+      ASPECT_DEBUG=1 aspect build --task-key build-bk-debug
+      aspect build --task-key build-bk
 
   - key: test-task
     depends_on:
@@ -291,8 +288,8 @@ steps:
         - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
           limit: 1
     command: |
-      ASPECT_DEBUG=1 aspect test --task-key test-bk-debug -- //... -//exclude/...
-      aspect test --task-key test-bk -- //... -//exclude/...
+      ASPECT_DEBUG=1 aspect test --task-key test-bk-debug
+      aspect test --task-key test-bk
 
   # Smoke-tests the new test-task flags. `--target-pattern-file` is forwarded
   # to Bazel verbatim, so the assertion is just that aspect resolves the file
@@ -390,6 +387,5 @@ steps:
           limit: 1
     command: |
       export ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS=$$(buildkite-agent meta-data get force_targets --default '')
-      cd examples/deliverable
-      ASPECT_DEBUG=1 aspect delivery --task-key delivery-bk-debug --warn-not-runnable --query 'attr(tags, deliverable, //...)'
-      aspect delivery --task-key delivery-bk --warn-not-runnable --query 'attr(tags, deliverable, //...)'
+      ASPECT_DEBUG=1 aspect delivery --task-key delivery-bk-debug
+      aspect delivery --task-key delivery-bk
