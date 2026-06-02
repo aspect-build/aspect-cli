@@ -315,25 +315,62 @@ impl BazelRC {
             result
         };
 
-        // Collect all config keys relevant to this command, sorted for deterministic output.
+        // Collect all config keys relevant to this command. Ancestor bases
+        // count too (e.g. `build:ci` applies to `test --config=ci`), matching
+        // the direct-section inheritance below and what Bazel applies.
+        //
+        // Base expansion order, per `expand::expand_args`:
+        //   always → common → ancestors(general→specific) → command
+        // `base_rank` maps each base to that position so two sections setting
+        // the same flag (e.g. `common:ci` then `build:ci`) are announced in the
+        // override order Bazel actually applies — not alphabetically, which
+        // would invert `build:ci` ahead of `common:ci`. Keys are then grouped
+        // by config name (alphabetical) for deterministic output.
+        let ancestors = command_ancestors(command);
+        let base_rank = |base: &str| -> usize {
+            match base {
+                "always" => 0,
+                "common" => 1,
+                _ if base == command => 2 + ancestors.len(),
+                _ => 2 + ancestors.iter().position(|a| *a == base).unwrap_or(0),
+            }
+        };
         let mut config_keys: Vec<&String> = self
             .options
             .keys()
             .filter(|k| {
                 if let Some(base) = k.split(':').next() {
-                    k.contains(':') && (base == "always" || base == "common" || base == command)
+                    k.contains(':')
+                        && (base == "always"
+                            || base == "common"
+                            || base == command
+                            || ancestors.contains(&base))
                 } else {
                     false
                 }
             })
             .collect();
-        config_keys.sort();
+        config_keys.sort_by(|a, b| {
+            let (a_base, a_cfg) = a.split_once(':').unwrap_or(("", a.as_str()));
+            let (b_base, b_cfg) = b.split_once(':').unwrap_or(("", b.as_str()));
+            a_cfg
+                .cmp(b_cfg)
+                .then(base_rank(a_base).cmp(&base_rank(b_base)))
+        });
 
         let mut out = String::new();
         let mut first_block = true;
 
         // Single pass per source file: emit direct sections then config sections together.
-        let direct_keys = ["startup", "always", "common", command];
+        //
+        // Include the command's ancestors (e.g. `build` for `test`) so the
+        // announce reflects what Bazel actually applies — `options_for` already
+        // pulls ancestor flags into the spawn via `command_ancestors`, and
+        // omitting them here made the announce understate the effective config
+        // (e.g. a `build --disk_cache=…` flag missing from a `test` announce).
+        let mut direct_keys = vec!["startup", "always", "common"];
+        direct_keys.extend(command_ancestors(command));
+        direct_keys.push(command);
         for (source_idx, source_path) in self.sources.iter().enumerate() {
             let is_client = source_path == Path::new("<command line>");
             let short = shorten(source_path);
@@ -675,6 +712,88 @@ import {}
         assert!(!out.contains("s3cr3t"), "secret leaked: {out}");
     }
 
+    #[test]
+    fn announce_test_includes_inherited_build_flags() {
+        // Bazel applies `build` (and `build:<config>`) flags to `test`, so the
+        // announce for `test` must show them — not just the `test` sections.
+        let root = Path::new("/work/repo");
+        let rc = rc_with(
+            &[&root.join(".bazelrc")],
+            &[
+                ("common", 0, "--curses=no"),
+                ("build", 0, "--disk_cache=/cache"),
+                ("test", 0, "--test_output=errors"),
+                ("build:ci", 0, "--remote_cache=grpc://cache"),
+                ("test:ci", 0, "--flaky_test_attempts=2"),
+            ],
+        );
+        let out = rc.announce("test", false, 200, root, None, |s| s.to_string());
+        assert!(
+            out.contains("--disk_cache=/cache"),
+            "inherited build flag missing: {out}"
+        );
+        assert!(
+            out.contains("--test_output=errors"),
+            "test flag missing: {out}"
+        );
+        assert!(
+            out.contains("--remote_cache=grpc://cache"),
+            "inherited build:<config> flag missing: {out}"
+        );
+        assert!(
+            out.contains("--flaky_test_attempts=2"),
+            "test:<config> flag missing: {out}"
+        );
+    }
+
+    #[test]
+    fn announce_config_sections_follow_expansion_order() {
+        // For `test --config=ci` Bazel expands always:ci → common:ci →
+        // build:ci → test:ci (last wins). The announce must list the same-named
+        // config sections in that order, not alphabetically (which would put
+        // build:ci before common:ci and misrepresent the override order).
+        let root = Path::new("/work/repo");
+        let rc = rc_with(
+            &[&root.join(".bazelrc")],
+            &[
+                ("common:ci", 0, "--remote_cache=A"),
+                ("build:ci", 0, "--remote_cache=B"),
+                ("test:ci", 0, "--remote_cache=C"),
+            ],
+        );
+        let out = rc.announce("test", false, 200, root, None, |s| s.to_string());
+        let common_at = out.find("common:ci").expect("common:ci shown");
+        let build_at = out.find("build:ci").expect("build:ci shown");
+        let test_at = out.find("test:ci").expect("test:ci shown");
+        assert!(
+            common_at < build_at && build_at < test_at,
+            "config sections must follow expansion order common→build→test: {out}"
+        );
+    }
+
+    #[test]
+    fn announce_build_omits_test_only_flags() {
+        // The inheritance is one-directional: `build` must NOT show `test`
+        // flags (test is a descendant of build, not an ancestor).
+        let root = Path::new("/work/repo");
+        let rc = rc_with(
+            &[&root.join(".bazelrc")],
+            &[
+                ("build", 0, "--disk_cache=/cache"),
+                ("test", 0, "--test_output=errors"),
+            ],
+        );
+        let out = rc.announce("build", false, 200, root, None, |s| s.to_string());
+        assert!(
+            out.contains("--disk_cache=/cache"),
+            "build flag missing: {out}"
+        );
+        assert!(
+            !out.contains("--test_output=errors"),
+            "build must not inherit test-only flags: {out}"
+        );
+    }
+
     // ── Config expansion ─────────────────────────────────────────────────────
 
     #[test]
@@ -854,9 +973,11 @@ test --config=opt
         let root = dir.path();
         fs::write(root.join(".bazelrc"), "build --jobs=4\n").unwrap();
 
+        // ISOLATE so the runner's own ~/.bazelrc / /etc/bazel.bazelrc don't
+        // leak into options_for and break the exact-equality assertion below.
         let rc = BazelRC::new(
             root,
-            &[] as &[&str],
+            ISOLATE,
             &flags(&["--config=foo", "--verbose_failures"]),
         )
         .unwrap();
