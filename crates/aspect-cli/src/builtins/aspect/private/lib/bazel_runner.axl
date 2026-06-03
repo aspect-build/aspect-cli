@@ -276,7 +276,23 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
     # forwarded as a flag rather than expanded to argv (the flag exists
     # to bypass OS command-line length limits). These are defaults the
     # user can still override via --bazel-flag=...
-    base_flags = ["--isatty=" + str(int(ctx.std.io.stdout.is_tty))]
+    #
+    # With output capture on, the child's stderr goes to a runtime-owned
+    # pipe/PTY (see `output_processor` below), so `--isatty` must match that
+    # captured fd rather than the parent's stdout: a PTY (TTY stderr) renders
+    # the curses UI (--isatty=1); a plain pipe gets clean lines
+    # (--isatty=0 --curses=no). With capture off, derive --isatty from the
+    # parent's stdout as before — the child inherits the terminal directly.
+    output_processor = None
+    if bazel_trait.capture_output:
+        capture_is_tty = ctx.std.io.stderr.is_tty
+        output_processor = bazel.output.processor(tty = capture_is_tty)
+        if capture_is_tty:
+            base_flags = ["--isatty=1"]
+        else:
+            base_flags = ["--isatty=0", "--curses=no"]
+    else:
+        base_flags = ["--isatty=" + str(int(ctx.std.io.stdout.is_tty))]
 
     # `--deployment <name>` wires the deployment's advertised endpoints:
     # --remote_cache / --remote_executor as base flags (user --bazel-flag still
@@ -402,6 +418,7 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
             invocation = ctx.bazel.test(
                 build_events = build_events,
                 execution_log = bazel_trait.execution_log_sinks or False,
+                output = output_processor,
                 announce_version = announce_version,
                 announce_command = announce_command,
                 flags = invocation_flags,
@@ -411,6 +428,7 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
             invocation = ctx.bazel.build(
                 build_events = build_events,
                 execution_log = bazel_trait.execution_log_sinks or False,
+                output = output_processor,
                 announce_version = announce_version,
                 announce_command = announce_command,
                 flags = invocation_flags,

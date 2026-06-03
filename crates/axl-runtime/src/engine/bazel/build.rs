@@ -34,6 +34,7 @@ use axl_proto::build_event_stream::BuildEvent;
 use crate::engine::r#async::rt::AsyncRuntime;
 
 use super::iter::ExecutionLogIterator;
+use super::iter::OutputEventIterator;
 use super::iter::WorkspaceEventIterator;
 use super::sink::execlog::ExecLogSink;
 use super::sink::grpc;
@@ -43,6 +44,10 @@ use super::stream::BuildEventStream;
 use super::stream::ExecLogStream;
 use super::stream::Subscriber;
 use super::stream::WorkspaceEventStream;
+use super::stream::output::LineProcessor;
+use super::stream::processors::{
+    CollapseRepeats, LineMatcher, MatchResponder, OutputSignals, PendingMatch,
+};
 
 /// Convert a Starlark `Writable` handle to a `std::process::Stdio` for use
 /// as a child's stdio slot.
@@ -616,6 +621,140 @@ pub(crate) fn build_event_iter_methods(registry: &mut MethodsBuilder) {
     }
 }
 
+/// How the captured stderr fd is allocated for a build.
+///
+/// `Pipe` is a plain anonymous pipe for non-TTY contexts (CI, redirected
+/// output): Bazel emits clean newline-terminated lines. `Pty` allocates a
+/// pseudo-terminal so Bazel keeps its live curses UI, forwarded near-verbatim.
+/// The mode is chosen when the processor is constructed (see
+/// `bazel.output.processor`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureMode {
+    Pipe,
+    Pty,
+}
+
+/// Starlark handle passed as `ctx.bazel.build(output = ...)` to enable stderr
+/// capture + forwarding. Created via `bazel.output.processor(...)`; carries
+/// only configuration (patterns are pre-compiled regexes), so one handle can
+/// be reused across retry attempts — each `Build::spawn` builds a fresh
+/// pipeline and signal state from it.
+///
+/// `Build::spawn` reads the capture mode to allocate the child's stderr and
+/// assembles the processing chain from the remaining fields (see
+/// `super::stream::processors`): observer `LineMatcher` stages first (so they
+/// see every record as Bazel wrote it), then the `MatchResponder` (which may
+/// rewrite records), then `CollapseRepeats`.
+#[derive(Clone, Debug, ProvidesStaticType, Display, Trace, NoSerialize, Allocative)]
+#[display("<bazel.output.OutputProcessor>")]
+pub struct OutputProcessor {
+    #[allocative(skip)]
+    mode: CaptureMode,
+    /// Fold runs of identical lines into one + a repeat-count annotation.
+    collapse_repeats: bool,
+    /// `(id, regex)` observer patterns; hits are recorded on `OutputSignals`
+    /// and exposed via `build.output_matches()`.
+    #[allocative(skip)]
+    match_patterns: Vec<(String, regex::Regex)>,
+    /// Regexes that latch `OutputSignals::fatal` (exposed via
+    /// `build.output_fatal` / `output_fatal_line`).
+    #[allocative(skip)]
+    fatal_patterns: Vec<(String, regex::Regex)>,
+    /// `(id, regex)` interactive patterns: a matching line is held until the
+    /// consumer of `build.output_events()` answers keep/replace/drop, or
+    /// `respond_timeout` fires (fail-open: original line forwards).
+    #[allocative(skip)]
+    respond_patterns: Vec<(String, regex::Regex)>,
+    #[allocative(skip)]
+    respond_timeout: std::time::Duration,
+}
+
+impl OutputProcessor {
+    pub fn new(
+        mode: CaptureMode,
+        collapse_repeats: bool,
+        match_patterns: Vec<(String, regex::Regex)>,
+        fatal_patterns: Vec<(String, regex::Regex)>,
+        respond_patterns: Vec<(String, regex::Regex)>,
+        respond_timeout: std::time::Duration,
+    ) -> Self {
+        Self {
+            mode,
+            collapse_repeats,
+            match_patterns,
+            fatal_patterns,
+            respond_patterns,
+            respond_timeout,
+        }
+    }
+
+    pub fn mode(&self) -> CaptureMode {
+        self.mode
+    }
+
+    /// Assemble the per-invocation pipeline, its shared signal state, and —
+    /// when `respond_patterns` are configured — the receiver
+    /// `build.output_events()` hands to the consumer.
+    fn build_pipeline(
+        &self,
+    ) -> (
+        Vec<Box<dyn LineProcessor>>,
+        Arc<OutputSignals>,
+        Option<std::sync::mpsc::Receiver<PendingMatch>>,
+    ) {
+        let signals = Arc::new(OutputSignals::default());
+        let mut chain: Vec<Box<dyn LineProcessor>> = vec![];
+        if !self.fatal_patterns.is_empty() {
+            let s = signals.clone();
+            chain.push(Box::new(LineMatcher::new(
+                self.fatal_patterns.clone(),
+                Box::new(move |_id, line| s.set_fatal(line)),
+            )));
+        }
+        if !self.match_patterns.is_empty() {
+            let s = signals.clone();
+            chain.push(Box::new(LineMatcher::new(
+                self.match_patterns.clone(),
+                Box::new(move |id, line| s.record_match(id, line)),
+            )));
+        }
+        let events = if self.respond_patterns.is_empty() {
+            None
+        } else {
+            let (tx, rx) = std::sync::mpsc::channel();
+            chain.push(Box::new(MatchResponder::new(
+                self.respond_patterns.clone(),
+                tx,
+                self.respond_timeout,
+            )));
+            Some(rx)
+        };
+        if self.collapse_repeats {
+            chain.push(Box::new(CollapseRepeats::new()));
+        }
+        (chain, signals, events)
+    }
+}
+
+impl<'v> AllocValue<'v> for OutputProcessor {
+    fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
+        heap.alloc_complex_no_freeze(self)
+    }
+}
+
+impl<'v> UnpackValue<'v> for OutputProcessor {
+    type Error = anyhow::Error;
+    fn unpack_value_impl(value: Value<'v>) -> Result<Option<Self>, Self::Error> {
+        let v = value
+            .downcast_ref_err::<OutputProcessor>()
+            .into_anyhow_result()?;
+        Ok(Some(v.clone()))
+    }
+}
+
+#[starlark_value(type = "bazel.output.OutputProcessor")]
+impl<'v> values::StarlarkValue<'v> for OutputProcessor {}
+
 fn matches_kinds(event: &BuildEvent, kinds: Option<&Arc<HashSet<i32>>>) -> bool {
     let Some(kinds) = kinds else {
         return true;
@@ -753,6 +892,26 @@ pub struct Build {
     #[allocative(skip)]
     execlog_stream: RefCell<Option<ExecLogStream>>,
 
+    /// Captured-stderr forwarder, present only when the build was spawned with
+    /// `output = bazel.output.processor(...)`. Joined in `wait()` after the
+    /// child is reaped so all forwarded stderr is flushed before the task
+    /// prints its terminal summary.
+    #[allocative(skip)]
+    output_stream: RefCell<Option<super::stream::OutputStream>>,
+
+    /// Shared state the capture pipeline's matcher stages feed (fatal flag,
+    /// match hits); backs the `output_fatal` / `output_fatal_line` attributes
+    /// and `output_matches()`. `None` when capture is off.
+    #[allocative(skip)]
+    output_signals: Option<Arc<OutputSignals>>,
+
+    /// Held-line events from the pipeline's `MatchResponder`, present only
+    /// when `respond_patterns` were configured. Taken (single-use) by
+    /// `output_events()`; a matched line stays held until the consumer
+    /// responds or the responder's fail-open timeout fires.
+    #[allocative(skip)]
+    output_events: RefCell<Option<std::sync::mpsc::Receiver<PendingMatch>>>,
+
     /// Shared UUID every gRPC sink indexes this invocation under. Minted
     /// before bazel emits `build_started` so forwarders can start
     /// immediately; distinct from Bazel's `build_started.uuid`.
@@ -792,6 +951,7 @@ impl Build {
         startup_flags: Vec<String>,
         stdout: Stdio,
         stderr: Stdio,
+        output: Option<OutputProcessor>,
         directory: Option<String>,
         announce: AnnounceSpawn,
         rt: AsyncRuntime,
@@ -893,12 +1053,49 @@ impl Build {
         announce_spawn(announce, version.as_ref(), &cmd);
 
         cmd.stdout(stdout);
-        cmd.stderr(stderr);
+        // When capturing, the child's stderr goes to a runtime-owned pipe/PTY
+        // instead of the resolved `stderr` Stdio; the `OutputStream` started
+        // after spawn reads, processes, and forwards it to the real stderr.
+        let mut capture = match &output {
+            Some(p) => {
+                let (child_stderr, capture) = super::capture::Capture::open(p.mode())?;
+                cmd.stderr(child_stderr);
+                Some(capture)
+            }
+            None => {
+                cmd.stderr(stderr);
+                None
+            }
+        };
         cmd.stdin(Stdio::null());
 
         let child = cmd
             .spawn()
             .map_err(|e| io::Error::other(format!("failed to spawn bazel: {e}")))?;
+
+        // Start forwarding captured stderr now that the child holds the write
+        // end. Drop the parent's PTY-slave copy first (release_after_spawn) so
+        // the master read can observe EOF when the child exits — otherwise the
+        // forwarder thread would hang forever in `wait()`.
+        //
+        // The forwarder writes to the real stderr on its own thread. Any
+        // aspect-cli stderr written on the main thread while the build runs
+        // (e.g. status lines) races it on a separate handle, so callers that
+        // capture output should route their own stderr elsewhere for the
+        // build's duration.
+        let (output_stream, output_signals, output_events) = match capture.take() {
+            Some(mut c) => {
+                c.release_after_spawn();
+                let (chain, signals, events) = output
+                    .as_ref()
+                    .expect("capture is only allocated when output is set")
+                    .build_pipeline();
+                let stream =
+                    super::stream::OutputStream::spawn(c.reader, Box::new(std::io::stderr()), chain);
+                (Some(stream), Some(signals), events)
+            }
+            None => (None, None, None),
+        };
 
         // Register the bazel client with the live-subprocess registry so
         // aspect-cli's OS-signal handler can forward SIGINT to it on
@@ -989,6 +1186,9 @@ impl Build {
             build_event_stream: RefCell::new(build_event_stream),
             workspace_event_stream: RefCell::new(workspace_event_stream),
             execlog_stream: RefCell::new(execlog_stream),
+            output_stream: RefCell::new(output_stream),
+            output_signals,
+            output_events: RefCell::new(output_events),
             sink_invocation_id: RefCell::new(sink_invocation_id),
             live_guard: RefCell::new(Some(live_guard)),
             span: RefCell::new(span),
@@ -1018,12 +1218,43 @@ impl<'v> values::StarlarkValue<'v> for Build {
                 let id = self.sink_invocation_id.borrow();
                 Some(heap.alloc_str(id.as_deref().unwrap_or("")).to_value())
             }
+            // Whether a fatal_pattern from `bazel.output.processor(...)`
+            // matched a captured stderr line. False when capture is off.
+            "output_fatal" => Some(heap.alloc(
+                self.output_signals
+                    .as_ref()
+                    .is_some_and(|s| s.fatal()),
+            )),
+            // The first fatal line matched, or None.
+            "output_fatal_line" => {
+                let line = self.output_signals.as_ref().and_then(|s| s.fatal_line());
+                Some(match line {
+                    Some(l) => heap.alloc_str(&l).to_value(),
+                    None => values::Value::new_none(),
+                })
+            }
+            // Millis of captured-stderr silence (since the last byte, or since
+            // spawn if none arrived). 0 when capture is off or after `wait()`
+            // has drained the stream — poll it mid-build, alongside child
+            // liveness, to detect a hung invocation.
+            "output_idle_ms" => {
+                let idle = self
+                    .output_stream
+                    .borrow()
+                    .as_ref()
+                    .map(|s| s.idle_ms())
+                    .unwrap_or(0);
+                Some(heap.alloc(idle.min(i32::MAX as u64) as i32))
+            }
             _ => None,
         }
     }
 
     fn has_attr(&self, attribute: &str, _heap: values::Heap<'v>) -> bool {
-        matches!(attribute, "sink_invocation_id")
+        matches!(
+            attribute,
+            "sink_invocation_id" | "output_fatal" | "output_fatal_line" | "output_idle_ms"
+        )
     }
 }
 
@@ -1051,6 +1282,37 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
         ))?;
 
         Ok(WorkspaceEventIterator::new(event_stream.receiver()))
+    }
+
+    /// The held-line event stream for this build's `respond_patterns`
+    /// (see `bazel.output.processor`). Single-use: the first call takes the
+    /// stream; drain it with `try_pop()` during the build and answer each
+    /// event with `keep()` / `replace(text)` / `drop()`. A matched line is
+    /// not forwarded to the terminal until answered (or the fail-open
+    /// timeout forwards the original), so drain promptly.
+    fn output_events<'v>(this: values::Value<'v>) -> anyhow::Result<OutputEventIterator> {
+        let build = this.downcast_ref_err::<Build>().into_anyhow_result()?;
+        let recv = build.output_events.borrow_mut().take().ok_or_else(|| {
+            anyhow::anyhow!(
+                "output_events() is single-use and requires `output = \
+                 bazel.output.processor(respond_patterns = {{...}})` on the build"
+            )
+        })?;
+        Ok(OutputEventIterator::new(recv))
+    }
+
+    /// Snapshot of `(id, line)` hits for the `match_patterns` configured on
+    /// this build's `bazel.output.processor(...)`. Safe to call during the
+    /// build (hits so far) or after `wait()` (all hits). Empty when capture
+    /// is off or nothing matched. At most 1024 hits are recorded per
+    /// invocation; lines are truncated to 2048 bytes.
+    fn output_matches<'v>(this: values::Value<'v>) -> anyhow::Result<Vec<(String, String)>> {
+        let build = this.downcast_ref_err::<Build>().into_anyhow_result()?;
+        Ok(build
+            .output_signals
+            .as_ref()
+            .map(|s| s.matches())
+            .unwrap_or_default())
     }
 
     fn try_wait<'v>(this: values::Value<'v>) -> anyhow::Result<NoneOr<BuildStatus>> {
@@ -1124,6 +1386,18 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
             }
         };
 
+        // Drain the captured-stderr forwarder. The child has exited (reaped
+        // above), so its stderr write end is closed and the reader reaches
+        // EOF; joining here guarantees all forwarded stderr is flushed before
+        // the caller (`_emit_terminal`) prints the task's terminal summary.
+        let output_stream = build.output_stream.take();
+        if let Some(mut output_stream) = output_stream {
+            match output_stream.join() {
+                Ok(_) => {}
+                Err(err) => anyhow::bail!("output stream thread error: {}", err),
+            }
+        };
+
         // Drop the span to end the trace
         drop(build.span.replace(tracing::Span::none()));
 
@@ -1138,6 +1412,83 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
 mod tests {
     //! End-to-end coverage of `ctx.bazel.build` via the `basil` fake-bazel
     //! binary, selected per-test via `--scenario=<name>`.
+
+    /// `OutputProcessor::build_pipeline` assembles matcher stages before the
+    /// collapser, so matchers see every record — including the repeats the
+    /// collapser folds away.
+    #[test]
+    fn output_pipeline_matchers_see_collapsed_repeats() {
+        use crate::engine::bazel::stream::OutputStream;
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct SharedSink(Arc<Mutex<Vec<u8>>>);
+        impl Write for SharedSink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let rx = |p: &str| regex::Regex::new(p).unwrap();
+        let processor = super::OutputProcessor::new(
+            super::CaptureMode::Pipe,
+            true,
+            vec![("warn".to_string(), rx("^WARNING:"))],
+            vec![(
+                "Server terminated abruptly".to_string(),
+                rx("Server terminated abruptly"),
+            )],
+            vec![("secret".to_string(), rx("password"))],
+            std::time::Duration::from_secs(5),
+        );
+        let (chain, signals, events) = processor.build_pipeline();
+
+        // Consumer thread standing in for AXL: rewrite the matched line.
+        let events = events.expect("respond_patterns configured");
+        let consumer = std::thread::spawn(move || {
+            for ev in events {
+                let reply = ev.reply.clone();
+                let _ = reply.send(super::super::stream::processors::Verdict::Replace(
+                    b"(password elided)".to_vec(),
+                ));
+            }
+        });
+
+        let input = b"WARNING: flaky\nWARNING: flaky\nWARNING: flaky\npassword=hunter2\nServer terminated abruptly\n";
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        let mut stream = OutputStream::spawn(
+            Box::new(std::io::Cursor::new(input.to_vec())),
+            Box::new(SharedSink(sink.clone())),
+            chain,
+        );
+        stream.join().unwrap();
+        consumer.join().unwrap();
+
+        // Forwarded output: repeats collapsed, matched line replaced by the
+        // consumer's verdict before display.
+        let out = String::from_utf8(sink.lock().unwrap().clone()).unwrap();
+        assert_eq!(
+            out,
+            "WARNING: flaky\n(last line repeated 2 more times)\n(password elided)\nServer terminated abruptly\n"
+        );
+
+        // Matchers ran before the collapser: every repeat was a hit.
+        let hits = signals.matches();
+        assert_eq!(hits.len(), 3);
+        assert!(hits.iter().all(|(id, _)| id == "warn"));
+
+        // The fatal pattern latched with its line.
+        assert!(signals.fatal());
+        assert_eq!(
+            signals.fatal_line().as_deref(),
+            Some("Server terminated abruptly")
+        );
+    }
 
     /// Iter handle subscribed pre-spawn receives every event from a clean
     /// build, even on the warm-daemon path that drops late subscribers.
@@ -1168,6 +1519,94 @@ def _impl(ctx):
     if started != 1: return 2
     if finished != 1: return 3
     if other != 0: return 4
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+        )
+        .with_fake_bazel()
+        .run_task(0)
+        .expect("run_task");
+
+        assert_eq!(exit, Some(0));
+    }
+
+    /// The captured-output Starlark surface end-to-end against a real spawn:
+    /// `bazel.output.processor(...)` arg unpacking, `output=` on
+    /// `ctx.bazel.build`, and the `output_*` attributes / `output_matches()`.
+    /// basil emits nothing on stderr in the success scenario, so signals stay
+    /// at their defaults — the point is the plumbing, not the matching (the
+    /// pipeline itself is covered by `output_pipeline_matchers_see_collapsed_repeats`).
+    #[test]
+    fn output_processor_starlark_surface() {
+        let exit = crate::test::eval(
+            r#"
+def _impl(ctx):
+    processor = bazel.output.processor(
+        tty = False,
+        collapse_repeats = True,
+        match_patterns = {"warn": "WARNING:"},
+        fatal_patterns = ["Server terminated abruptly"],
+    )
+    build = ctx.bazel.build(
+        flags = ["--scenario=success"],
+        output = processor,
+    )
+    status = build.wait()
+    if not status.success: return 1
+    if build.output_fatal: return 2
+    if build.output_fatal_line != None: return 3
+    if build.output_matches() != []: return 4
+    if build.output_idle_ms < 0: return 5
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+        )
+        .with_fake_bazel()
+        .run_task(0)
+        .expect("run_task");
+
+        assert_eq!(exit, Some(0));
+    }
+
+    /// The interactive respond/replace flow end-to-end from Starlark: basil
+    /// emits console lines on stderr; AXL drains `output_events()`, replaces
+    /// the credential line and keeps the rest; observer patterns record hits.
+    /// The blocking `for` over the iterator also proves the stream closes
+    /// (and the loop exits) when the capture pipeline ends.
+    #[test]
+    fn output_events_respond_and_replace() {
+        let exit = crate::test::eval(
+            r#"
+def _impl(ctx):
+    processor = bazel.output.processor(
+        tty = False,
+        match_patterns = {"warn": "^WARNING:"},
+        respond_patterns = {"secret": "password"},
+    )
+    build = ctx.bazel.build(
+        flags = ["--scenario=stderr_chatter"],
+        output = processor,
+    )
+    events = build.output_events()
+    replaced = 0
+    kept = 0
+    for ev in events:
+        if ev.id == "secret":
+            ev.replace("(password elided)")
+            replaced += 1
+        else:
+            ev.keep()
+            kept += 1
+    status = build.wait()
+    if not status.success: return 1
+    if replaced != 1: return 2
+    if kept != 0: return 3
+    matches = build.output_matches()
+    if len(matches) != 1: return 4
+    if matches[0][0] != "warn": return 5
+    if build.output_fatal: return 6
     return 0
 
 Test = task(implementation = _impl)
