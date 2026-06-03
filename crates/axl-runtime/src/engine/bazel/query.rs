@@ -4,7 +4,6 @@ use std::fs::File;
 
 use std::cell::RefCell;
 use std::io::Read;
-use std::process::Command;
 use std::process::Stdio;
 
 use anyhow::Context;
@@ -159,7 +158,7 @@ impl Query {
     }
 
     pub fn query(expr: &str, startup_flags: &[String]) -> anyhow::Result<TargetSet> {
-        let mut cmd = Command::new(super::bazel_binary());
+        let mut cmd = super::bazel_command();
         cmd.args(startup_flags);
         cmd.arg("query");
         cmd.arg(expr);

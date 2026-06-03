@@ -5,6 +5,15 @@
 # Exports: BAZEL_STARTUP_OPTS, BAZEL_BUILD_OPTS, DISABLE_PLUGINS_FLAG
 set -eu
 
+# Pre-build CI must use vanilla bazel — see the long comment around the
+# `bazel build //:cli` invocation below for the bootstrapping rationale.
+# This repo's tools/bazel wrapper routes `bazel build|test|run` through
+# `aspect`, which would either fail (no aspect binary built yet on a fresh
+# checkout) or hide the bootstrap failure mode we explicitly want to
+# surface on PRs. Eject from the wrapper for every bazel invocation in
+# this script and any pipeline step that inherits this shell.
+export ASPECT_WRAPPER_SKIP=1
+
 # Build remote cache/BES flags from ASPECT_WORKFLOWS_* env vars injected by the runner.
 BAZEL_REMOTE_FLAGS=""
 [ -n "${ASPECT_WORKFLOWS_BES_BACKEND:-}" ]                  && BAZEL_REMOTE_FLAGS="${BAZEL_REMOTE_FLAGS} --bes_backend=${ASPECT_WORKFLOWS_BES_BACKEND}"

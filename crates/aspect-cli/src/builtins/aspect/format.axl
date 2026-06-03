@@ -283,7 +283,7 @@ def _append_fix_commands(ctx, data):
             flags = bazel_flags,
             max_chars = _BAZEL_ALT_MAX_CHARS,
         ),
-        "description": "without Aspect CLI",
+        "description": "vanilla bazel",
     })
 
 def _emit_final(ctx, lifecycle, data, exit_code):

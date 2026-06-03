@@ -25,6 +25,13 @@ jobs:
     runs-on: ubuntu-22.04-32core
     outputs:
       artifact: ${{steps.upload.outputs.artifact-url}}
+    env:
+      # Eject from this repo's tools/bazel wrapper. The wrapper routes
+      # `bazel build|test|run` through `aspect`, but the release build IS
+      # the aspect binary — using aspect to build itself defeats the
+      # `bazel`-only bootstrap (and would fail outright on a clean
+      # runner where aspect isn't installed yet).
+      ASPECT_WRAPPER_SKIP: "1"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6

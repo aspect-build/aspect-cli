@@ -391,7 +391,7 @@ def _append_fix_commands(ctx, data):
 
     data["fix_commands"].append({
         "command": prefix + build_bazel_command("run", [ctx.args.gazelle_target]),
-        "description": "without Aspect CLI",
+        "description": "vanilla bazel",
     })
 
 def _resolve_check_only(ctx):

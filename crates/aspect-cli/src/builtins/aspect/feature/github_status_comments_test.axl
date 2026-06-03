@@ -974,7 +974,7 @@ def _check_repro_dedup_consecutive_headings(ctx):
             ],
             "fix_commands": [
                 {"command": "aspect buildifier --severity=info BUILD.bazel", "description": ""},
-                {"command": "bazel run --run_in_cwd @buildifier_prebuilt//buildifier -- -r .", "description": "without Aspect CLI"},
+                {"command": "bazel run --run_in_cwd @buildifier_prebuilt//buildifier -- -r .", "description": "vanilla bazel"},
             ],
         },
     ]
@@ -1001,7 +1001,7 @@ def _check_repro_dedup_consecutive_headings(ctx):
         fail("repro dedup: aspect fix command missing from body")
     if "bazel run --run_in_cwd @buildifier_prebuilt//buildifier -- -r ." not in body:
         fail("repro dedup: bazel alt fix command missing from body")
-    if "# without Aspect CLI" not in body:
+    if "# vanilla bazel" not in body:
         fail("repro dedup: description-as-comment missing from body")
     if "Install `aspect`" not in body:
         fail("repro dedup: install hint missing from body")
