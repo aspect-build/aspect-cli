@@ -1,9 +1,26 @@
 """CircleCI artifact upload library.
 
 Uses the CircleCI runner API (Unix socket + HTTP) to upload artifacts to S3.
+
+Credential lifetime: the runner mints the temporary S3 (STS) credentials
+returned by `/api/v2/output/credentials` with a short TTL (≈10 min) and
+hands back those same job-scoped credentials on every call. A task that
+runs longer than that TTL before its first upload — or that uploads in
+batches spread across the run — will hit an S3 `400` once the credentials
+expire. `_upload_artifact` therefore re-acquires a fresh session and
+retries on failure (see `_UPLOAD_MAX_ATTEMPTS`), and surfaces the real
+HTTP status + S3 error code so an expiry is diagnosable rather than an
+opaque "curl exit 22".
 """
 
+load("@std//time.axl", "time")
 load("./environment.axl", "warn")
+
+# Re-acquire credentials + retry the S3 PUT this many times before giving
+# up. Each attempt fetches a *fresh* session (socket token + AWS creds), so
+# a credential that expired mid-run self-heals once the runner rotates it.
+_UPLOAD_MAX_ATTEMPTS = 3
+_UPLOAD_BACKOFF_BASE_MS = 500
 
 def _get_token(ctx):
     """Read auth credentials from the CircleCI runner Unix socket.
@@ -49,36 +66,94 @@ def _runner_api(ctx, token, runner_host, method, path, body = None):
     # the parent task on a malformed runner-API response.
     return json.try_decode(resp.body, None) if resp.body else None
 
-def _upload_artifact(ctx, path, name):
-    """Upload a file to CircleCI via the runner API and S3.
+def _fetch_upload_session(ctx):
+    """Acquire a fresh upload session from the CircleCI runner.
 
-    Flow:
-    1. Get token from Unix socket
-    2. GET /api/v2/output/config  -> {bucket, region}
-    3. GET /api/v2/output/credentials -> {s3: {AccessKeyID, SecretAccessKey, SessionToken}}
-    4. POST /api/v2/output/artifact -> {prefix}
-    5. curl --aws-sigv4 PUT to https://<bucket>.s3.<region>.amazonaws.com/<prefix>/<name>
+    Bundles the three handshake calls that mint short-lived state:
+      1. bearer token       (Unix socket)
+      2. GET /output/config       -> {bucket, region}
+      3. GET /output/credentials  -> {s3: {AccessKeyID, SecretAccessKey, SessionToken}}
+
+    Returns a session dict (token/runner_host/bucket/region/aws_creds) on
+    success, or `{"error": "..."}` on failure. Re-called on every upload
+    attempt so a retry runs against freshly-minted credentials rather than
+    a handle captured before the runner's last rotation.
     """
-    if not ctx.std.fs.exists(path):
-        return {"success": False, "artifact_ref": None, "download_url": "", "errors": ["file not found: " + path]}
-
     creds = _get_token(ctx)
     if not creds:
-        return {"success": False, "artifact_ref": None, "download_url": "", "errors": ["failed to get CircleCI token from socket"]}
+        return {"error": "failed to get CircleCI token from socket"}
 
     token = creds["token"]
     runner_host = creds.get("runner_host", "https://runner.circleci.com")
 
     config = _runner_api(ctx, token, runner_host, "GET", "/api/v2/output/config")
     if not config:
-        return {"success": False, "artifact_ref": None, "download_url": "", "errors": ["failed to get S3 config from runner API"]}
-    bucket = config["bucket"]
-    region = config["region"]
+        return {"error": "failed to get S3 config from runner API"}
 
     aws_creds_resp = _runner_api(ctx, token, runner_host, "GET", "/api/v2/output/credentials")
     if not aws_creds_resp:
-        return {"success": False, "artifact_ref": None, "download_url": "", "errors": ["failed to get S3 credentials from runner API"]}
-    aws_creds = aws_creds_resp["s3"]
+        return {"error": "failed to get S3 credentials from runner API"}
+
+    return {
+        "token": token,
+        "runner_host": runner_host,
+        "bucket": config["bucket"],
+        "region": config["region"],
+        "aws_creds": aws_creds_resp["s3"],
+    }
+
+def s3_extract_error_code(body):
+    """Pull the `<Code>…</Code>` value out of an S3 error response body.
+
+    S3 returns an XML `<Error>` document on a failed PUT; the `<Code>`
+    element (e.g. `ExpiredToken`, `RequestTimeTooSkewed`,
+    `SignatureDoesNotMatch`) is the single most useful diagnostic. Returns
+    "" when the body isn't an S3 error document.
+
+    Public (not `_`-prefixed) so `circleci_test.axl` can load it; Starlark
+    forbids loading underscore-private symbols.
+    """
+    start = body.find("<Code>")
+    if start == -1:
+        return ""
+    start += len("<Code>")
+    end = body.find("</Code>", start)
+    if end == -1:
+        return ""
+    return body[start:end]
+
+def s3_upload_error_detail(http_code, curl_err, body):
+    """Build a one-line failure reason from a curl/S3 upload attempt.
+
+    Prefers the HTTP status + parsed S3 `<Code>` ("S3 upload HTTP 400
+    (ExpiredToken)") so an expired credential reads as exactly that. Falls
+    back to curl's stderr for transport-level failures (no HTTP response,
+    `http_code == "000"`).
+
+    Public (not `_`-prefixed) so `circleci_test.axl` can load it.
+    """
+    code = s3_extract_error_code(body)
+    if http_code and http_code != "000":
+        detail = "S3 upload HTTP " + http_code
+        if code:
+            detail = detail + " (" + code + ")"
+        return detail
+    if curl_err:
+        return "curl transport error: " + curl_err.replace("\n", " ")
+    return "curl s3 upload failed"
+
+def _s3_put(ctx, session, path, name):
+    """Register the artifact with the runner and PUT it to S3.
+
+    Returns `(success, detail, download_url)`. `detail` is a human-readable
+    failure reason on `success == False`. Uses the credentials in
+    `session`; callers re-fetch the session between attempts.
+    """
+    token = session["token"]
+    runner_host = session["runner_host"]
+    region = session["region"]
+    bucket = session["bucket"]
+    aws_creds = session["aws_creds"]
 
     artifact_resp = _runner_api(ctx, token, runner_host, "POST", "/api/v2/output/artifact", {
         "path": path,
@@ -86,17 +161,19 @@ def _upload_artifact(ctx, path, name):
         "artifactType": "application/octet-stream",
     })
     if not artifact_resp:
-        return {"success": False, "artifact_ref": None, "download_url": "", "errors": ["failed to register artifact with runner API"]}
+        return (False, "failed to register artifact with runner API", "")
     prefix = artifact_resp["prefix"]
     tags = artifact_resp.get("key", {}).get("tags", {})
 
     s3_key = prefix + "/" + name
     s3_url = "https://" + bucket + ".s3." + region + ".amazonaws.com/" + s3_key
 
+    # No `--fail`: let curl exit 0 on a 4xx so the S3 `<Error>` body lands
+    # on stdout for diagnosis. `-w "\n%{http_code}"` appends the status as
+    # the final line; everything before it is the response body.
     curl_args = [
         "--silent",
         "--show-error",
-        "--fail",
         "--aws-sigv4",
         "aws:amz:" + region + ":s3",
         "--user",
@@ -107,6 +184,8 @@ def _upload_artifact(ctx, path, name):
         path,
         "-X",
         "PUT",
+        "-w",
+        "\n%{http_code}",
     ]
     if tags:
         tag_str = "&".join([k + "=" + v for k, v in tags.items()])
@@ -115,23 +194,66 @@ def _upload_artifact(ctx, path, name):
 
     child = ctx.std.process.command("curl") \
         .args(curl_args) \
-        .stdout("inherit") \
-        .stderr("inherit") \
+        .stdout("piped") \
+        .stderr("piped") \
         .spawn()
 
+    out = child.stdout().read_to_string()
+    curl_err = child.stderr().read_to_string().strip()
     status = child.wait()
-    if status.code != 0:
-        return {"success": False, "artifact_ref": None, "download_url": "", "errors": ["curl s3 upload exit " + str(status.code)]}
 
-    # Surface the stable public CircleCI artifact URL as download_url so callers
-    # can link to individual files. CIRCLE_WORKFLOW_JOB_ID is always set by the
-    # CircleCI runner; fall back to the signed S3 URL if it's ever absent.
-    job_id = ctx.std.env.var("CIRCLE_WORKFLOW_JOB_ID") or ""
-    if job_id:
-        download_url = "https://output.circle-artifacts.com/output/job/" + job_id + "/artifacts/0/" + name
+    # Final line is the `-w` status code; the rest is the S3 response body.
+    parts = out.rsplit("\n", 1)
+    if len(parts) == 2:
+        body = parts[0]
+        http_code = parts[1].strip()
     else:
-        download_url = s3_url
-    return {"success": True, "artifact_ref": name, "download_url": download_url, "errors": []}
+        body = ""
+        http_code = parts[0].strip()
+
+    if status.code == 0 and http_code.startswith("2"):
+        # Stable public CircleCI artifact URL so callers can link to
+        # individual files. CIRCLE_WORKFLOW_JOB_ID is always set by the
+        # runner; fall back to the signed S3 URL if it's ever absent.
+        job_id = ctx.std.env.var("CIRCLE_WORKFLOW_JOB_ID") or ""
+        if job_id:
+            download_url = "https://output.circle-artifacts.com/output/job/" + job_id + "/artifacts/0/" + name
+        else:
+            download_url = s3_url
+        return (True, "", download_url)
+
+    return (False, s3_upload_error_detail(http_code, curl_err, body), "")
+
+def _upload_artifact(ctx, path, name):
+    """Upload a file to CircleCI via the runner API and S3.
+
+    Each attempt re-acquires a fresh session (socket token + S3 config +
+    AWS credentials) before PUTting to S3, so a credential that expired
+    mid-run — the runner mints them job-scoped with a short TTL — is
+    recovered once the runner rotates it. Retries up to
+    `_UPLOAD_MAX_ATTEMPTS` with exponential backoff; the returned `errors`
+    carry the real HTTP status / S3 error code from the last attempt.
+    """
+    if not ctx.std.fs.exists(path):
+        return {"success": False, "artifact_ref": None, "download_url": "", "errors": ["file not found: " + path]}
+
+    last_detail = "unknown error"
+    backoff_ms = _UPLOAD_BACKOFF_BASE_MS
+    for attempt in range(_UPLOAD_MAX_ATTEMPTS):
+        session = _fetch_upload_session(ctx)
+        if "error" in session:
+            last_detail = session["error"]
+        else:
+            ok, detail, download_url = _s3_put(ctx, session, path, name)
+            if ok:
+                return {"success": True, "artifact_ref": name, "download_url": download_url, "errors": []}
+            last_detail = detail
+
+        if attempt < _UPLOAD_MAX_ATTEMPTS - 1:
+            time.sleep(backoff_ms)
+            backoff_ms = backoff_ms * 2
+
+    return {"success": False, "artifact_ref": None, "download_url": "", "errors": [last_detail]}
 
 def _delete_artifact(ctx, name):
     """CircleCI has no artifact deletion API — no-op."""

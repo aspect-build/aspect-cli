@@ -1,0 +1,97 @@
+"""Unit tests for lib/circleci.axl S3 error parsing.
+
+The upload flow itself (socket token, runner API, curl PUT) needs live
+runner infrastructure, so these tests cover the pure helpers that turn an
+S3 error response into a diagnosable failure reason — the part that makes
+an expired-credential `400` legible instead of an opaque "curl exit 22".
+"""
+
+load("./circleci.axl", "s3_upload_error_detail", "s3_extract_error_code")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+# ---------------------------------------------------------------------------
+# s3_extract_error_code — pull <Code>…</Code> out of an S3 error body
+# ---------------------------------------------------------------------------
+
+def _test_extract_expired_token(_ctx):
+    body = "<?xml version=\"1.0\"?><Error><Code>ExpiredToken</Code>" + \
+           "<Message>The provided token has expired.</Message></Error>"
+    _eq("ExpiredToken extracted", s3_extract_error_code(body), "ExpiredToken")
+
+def _test_extract_signature_mismatch(_ctx):
+    body = "<Error><Code>SignatureDoesNotMatch</Code><Message>...</Message></Error>"
+    _eq("SignatureDoesNotMatch extracted", s3_extract_error_code(body), "SignatureDoesNotMatch")
+
+def _test_extract_no_code_element(_ctx):
+    _eq("no <Code> → empty", s3_extract_error_code("<Error><Message>nope</Message></Error>"), "")
+
+def _test_extract_empty_body(_ctx):
+    _eq("empty body → empty", s3_extract_error_code(""), "")
+
+def _test_extract_unterminated_code(_ctx):
+    """Open tag without a closing tag → empty, no crash."""
+    _eq("unterminated <Code> → empty", s3_extract_error_code("<Code>ExpiredToken"), "")
+
+# ---------------------------------------------------------------------------
+# s3_upload_error_detail — build the one-line failure reason
+# ---------------------------------------------------------------------------
+
+def _test_detail_expired_token(_ctx):
+    body = "<Error><Code>ExpiredToken</Code></Error>"
+    _eq(
+        "HTTP 400 + ExpiredToken",
+        s3_upload_error_detail("400", "", body),
+        "S3 upload HTTP 400 (ExpiredToken)",
+    )
+
+def _test_detail_http_no_code(_ctx):
+    """Non-error status (or a body without <Code>) → just the HTTP status."""
+    _eq("HTTP 403 no code", s3_upload_error_detail("403", "", ""), "S3 upload HTTP 403")
+
+def _test_detail_transport_error(_ctx):
+    """http_code "000" means no HTTP response — surface curl's stderr."""
+    _eq(
+        "transport error surfaced",
+        s3_upload_error_detail("000", "Could not resolve host: bucket.s3.amazonaws.com", ""),
+        "curl transport error: Could not resolve host: bucket.s3.amazonaws.com",
+    )
+
+def _test_detail_transport_error_newlines_collapsed(_ctx):
+    _eq(
+        "newlines collapsed to spaces",
+        s3_upload_error_detail("000", "line1\nline2", ""),
+        "curl transport error: line1 line2",
+    )
+
+def _test_detail_no_signal(_ctx):
+    """No HTTP status and no stderr → generic fallback, never empty."""
+    _eq("generic fallback", s3_upload_error_detail("000", "", ""), "curl s3 upload failed")
+
+_UNIT_TESTS = [
+    _test_extract_expired_token,
+    _test_extract_signature_mismatch,
+    _test_extract_no_code_element,
+    _test_extract_empty_body,
+    _test_extract_unterminated_code,
+    _test_detail_expired_token,
+    _test_detail_http_no_code,
+    _test_detail_transport_error,
+    _test_detail_transport_error_newlines_collapsed,
+    _test_detail_no_signal,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("circleci.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+circleci_tests = task(
+    name = "test-circleci",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)
