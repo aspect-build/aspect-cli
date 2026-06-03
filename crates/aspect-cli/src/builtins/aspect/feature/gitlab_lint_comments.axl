@@ -354,9 +354,15 @@ def _cleanup_and_resolve(ctx, gl, relevant_diagnostics, run_id, task_key, sugges
     plan = compute_cleanup(listed["discussions"], desired, run_id, task_key)
     for e in plan["delete"]:
         gitlab.discussions.delete(ctx, token = gl["token"], project = gl["project_path"], mr_iid = gl["mr_iid"], discussion_id = e["discussion_id"], note_id = e["note_id"], auth_kind = "bearer")
-    # Clean pass: no desired findings means everything we previously
-    # posted is now fixed → resolve the task's own open threads.
-    if not desired:
+    # Auto-resolve only on a genuinely clean pass: the lint task reported
+    # no relevant diagnostics AND emitted no suggestions, so anything we
+    # flagged on a prior run is now fixed. We deliberately do NOT key this
+    # on `desired` being empty — `desired` is also empty in
+    # `findings_destination = "annotations"` mode and when findings exist
+    # but all fall outside the changed-line window, neither of which means
+    # "nothing to flag".
+    genuinely_clean = not relevant_diagnostics and not suggestion_markers
+    if genuinely_clean:
         for did in plan["resolve"]:
             gitlab.discussions.resolve(ctx, token = gl["token"], project = gl["project_path"], mr_iid = gl["mr_iid"], discussion_id = did, resolved = True, auth_kind = "bearer")
 

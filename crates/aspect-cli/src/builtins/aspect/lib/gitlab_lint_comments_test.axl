@@ -72,6 +72,7 @@ def _test_impl(ctx):
     plan = compute_cleanup(ds, desired = {mk_keep: True}, run_id = "gl-2", task_key = "lint")
     del_ids = sorted([e["discussion_id"] for e in plan["delete"]])
     _eq("cleanup deletes", del_ids, ["prior", "stale"])
+    _eq("cleanup resolves kept", plan["resolve"], ["keep"])
 
     print("gitlab_lint_comments.axl: OK")
     return 0
