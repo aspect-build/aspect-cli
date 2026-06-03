@@ -302,6 +302,9 @@ def _emit_final(ctx, lifecycle, data, exit_code):
 
     bookend = format_conclusion(status, data)
 
+    # Pre-hook with rich `ReproFixInfo` (exit_code / extras) the
+    # safety-net call inside `dispatch_task_update` can't supply.
+    # Entries hooked here are skipped on dispatch via the `_hooked` flag.
     apply_repro_fix_hooks(
         ctx,
         lifecycle,

@@ -38,12 +38,13 @@ the per-task lists into a single rolled-up view across tasks: two
 contributions of the same `(command, description)` collapse into one
 row that lists every contributing task_key.
 
-`apply_repro_fix_hooks(ctx, lifecycle, data, ...)` is the single
-choke point for the `lifecycle.repro_fix_suggestion` user hook. Every
-task calls it after populating its repro/fix lists and BEFORE the
-terminal `task_update` emit, so the same filtered list reaches every
-downstream surface (CLI printer + GHSC body + BK annotation + PR
-comment rollup).
+`apply_repro_fix_hooks` and `dispatch_task_update` live in
+`lib/lifecycle.axl` next to `TaskLifecycleTrait`. The framework runs
+hooks automatically on every surface emit via `dispatch_task_update`;
+producers MAY call `apply_repro_fix_hooks` explicitly at terminal
+emit to supply rich `info` (exit_code, bazel_subcommand, targets,
+failed_targets, extras). The `_hooked` flag on each `ReproFixCommand`
+makes both paths idempotent.
 
 `print_repro_and_fix(std, data, status)` prints the same blocks to
 the CLI so a developer reading the raw CI log sees the actionable
@@ -51,8 +52,6 @@ commands without opening the status surface.
 
 `build_aspect_command`, `repro_prefix`, `subdir_prefix`,
 `explicit_flags`, and `dedup_and_attribute` are pure (no I/O).
-`apply_repro_fix_hooks` mutates `data` in place; any side effects
-beyond that are whatever the user hooks introduce.
 """
 
 load("./environment.axl", "color_enabled")
@@ -511,8 +510,6 @@ def _print_repro_entry(ansi, entry):
         print(line)
     print("```")
 
-# `apply_repro_fix_hooks` lives in `./lifecycle.axl` (where the
-# `TaskLifecycleTrait` and `task_update()` emitter are defined). It is
-# called inside every surface emit so no consumer ever reads an
-# un-hooked entry; the `_hooked` flag on `ReproFixCommand` makes
-# repeated calls a no-op.
+# `apply_repro_fix_hooks` and `dispatch_task_update` are defined in
+# `./lifecycle.axl`, next to `TaskLifecycleTrait`. See the module
+# docstring above for the contract.

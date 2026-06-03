@@ -1,13 +1,14 @@
-"""Task lifecycle: TaskUpdate record, TaskLifecycleTrait, and the
-canonical `task_update()` emitter.
+"""Task lifecycle: TaskUpdate record, TaskLifecycleTrait, the
+canonical `task_update()` emitter, and the repro/fix suggestion
+records + helpers (`ReproFixCommand`, `ReproFixInfo`,
+`ReproFixSuggestion`, `apply_repro_fix_hooks`, `dispatch_task_update`).
 
 `TaskLifecycleTrait` has two hooks: `task_update`, fired on every
 structured update during a task (features surface live progress
-through it), and `repro_fix_suggestion`, called once per repro/fix
-suggestion just before the terminal `task_update` so a user's
-`config.axl` can accept/reject/modify each one. See the
-`ReproFixInfo` / `ReproFixSuggestion` records below and
-`apply_repro_fix_hooks` in `lib/repro_commands.axl`.
+through it), and `repro_fix_suggestion`, called by the framework on
+each surface emit so a user's `config.axl` can accept/reject/modify
+each repro/fix suggestion. See `apply_repro_fix_hooks` and
+`dispatch_task_update` below.
 
 `task_update(ctx, lifecycle, status, progress, ...)` prints a phase
 label to stderr (as `→ <progress>`) *and* emits a `TaskUpdate` to every
@@ -209,15 +210,15 @@ ReproFixCommand = record(
     slug = field(str),
     # Idempotence flag flipped by `apply_repro_fix_hooks` after the
     # entry has passed through `lifecycle.repro_fix_suggestion`.
-    # Producers leave this `False`; the helper skips already-hooked
-    # entries on re-call so the same suggestion never runs through the
-    # user hook chain twice (even if a producer / surface emits before
-    # the terminal `task_update`). Internal — hooks shouldn't read it.
+    # `dispatch_task_update` calls the helper on every emit; this flag
+    # ensures the same suggestion runs through the user hook chain
+    # at most once. Producers leave it `False`; user hooks must not
+    # read it.
     _hooked = field(bool, default = False),
 )
 
-# Which suggestion list a `ReproFixInfo` is from. Hooks doing different
-# things to repro vs fix commands branch on this.
+# `repro` for entries in `data["repro_commands"]`, `fix` for entries
+# in `data["fix_commands"]`. Surfaced on `ReproFixInfo.command_kind`.
 ReproFixCommandKind = enum("repro", "fix")
 
 # Verdict returned by a `repro_fix_suggestion` hook. `accept` keeps the
@@ -231,9 +232,9 @@ ReproFixAction = enum("accept", "reject", "replace")
 # cover most decisions; `extras` and `data` are escape hatches for
 # hooks that need kind-specific detail.
 ReproFixInfo = record(
-    # Identity — same shape `task_cli_path` (in lib/repro_commands.axl) would
-    # render, plus the constituent parts for hooks that want to scope by
-    # task name or group.
+    # Task identity. `task_path` is the joined `<group...> <name>`
+    # CLI invocation path (e.g. "aspect lint"); `task_name` and
+    # `task_group` are the constituents for hooks that scope by either.
     task_path = field(str),
     task_name = field(str),
     task_group = field(list[str]),
@@ -254,9 +255,11 @@ ReproFixInfo = record(
     description = field(str),
     slug = field(str),
 
-    # Outcome — the lifecycle status the task is about to emit (passed |
-    # warning | failed | aborted) and its exit code.
+    # Lifecycle status the task is about to emit. `running` | `failing`
+    # mid-task, `passed` | `warning` | `failed` | `aborted` at terminal.
+    # Hooks fire on every emit, so mid-task statuses are observable.
     status = field(str),
+    # Task exit code. Only meaningful on the terminal emit; `0` mid-task.
     exit_code = field(int),
 
     # Bazel-only fields. Empty / 0-length on non-Bazel tasks.
@@ -307,9 +310,8 @@ REPRO_FIX_ACCEPT = ReproFixSuggestion(action = ReproFixAction("accept"))
 REPRO_FIX_REJECT = ReproFixSuggestion(action = ReproFixAction("reject"))
 
 def repro_fix_replace(command: str | None = None, description: str | None = None) -> ReproFixSuggestion:
-    """Build a `replace` `ReproFixSuggestion`. Either or both fields may
-    be omitted to keep the prior value; a replace with both omitted is
-    a no-op equivalent to `REPRO_FIX_ACCEPT`."""
+    """Build a `replace` `ReproFixSuggestion`. See `ReproFixSuggestion`
+    for `command` / `description` semantics."""
     return ReproFixSuggestion(
         action = ReproFixAction("replace"),
         command = command,
@@ -334,20 +336,15 @@ TaskLifecycleTrait = trait(
 
     # User-customization hook for repro / fix command suggestions. Called
     # once per suggestion in `data["repro_commands"]` /
-    # `data["fix_commands"]`, via `apply_repro_fix_hooks`. The framework
-    # invokes it on every surface emit (`task_update()` and every direct
-    # dispatch via `dispatch_task_update`), so no consumer ever sees an
-    # un-hooked entry; the `_hooked` flag on each `ReproFixCommand`
-    # guarantees the chain runs at most once per entry.
+    # `data["fix_commands"]` — `dispatch_task_update` runs it on every
+    # surface emit, and the `_hooked` flag on each `ReproFixCommand`
+    # makes the call idempotent. Multiple handlers chain in
+    # registration order; a `reject` short-circuits.
     #
     # Signature: `(ctx: TaskContext, info: ReproFixInfo) -> ReproFixSuggestion`
     #
-    # Multiple handlers chain in registration order — handler N sees handler
-    # N-1's post-verdict entry on `info.command` / `info.description`. A
-    # `reject` short-circuits the chain for that entry.
-    #
-    # See `apply_repro_fix_hooks` below for the apply site, and
-    # `ReproFixInfo` / `ReproFixSuggestion` above for the records.
+    # See `apply_repro_fix_hooks` below and `ReproFixInfo` /
+    # `ReproFixSuggestion` above.
     repro_fix_suggestion = attr(list[typing.Callable[[TaskContext, ReproFixInfo], ReproFixSuggestion]], default = []),
 )
 

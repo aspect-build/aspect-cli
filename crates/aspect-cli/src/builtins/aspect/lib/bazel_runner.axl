@@ -189,6 +189,10 @@ def _emit_terminal(ctx, lifecycle, command, data, exit_code, targets = []):
     final_status = _pick_status(command, data, had_failure = exit_code != 0, terminal = True)
     bookend = bazel_conclusion(final_status, data)
 
+    # Pre-hook with rich `ReproFixInfo` (exit_code / bazel_subcommand /
+    # targets / failed_targets) the safety-net call inside
+    # `dispatch_task_update` can't supply. Entries hooked here are
+    # skipped on dispatch via the `_hooked` flag.
     apply_repro_fix_hooks(
         ctx,
         lifecycle,

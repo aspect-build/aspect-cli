@@ -586,6 +586,9 @@ def _emit_final(ctx, lifecycle, data, exit_code):
     final_status = _pick_status(data, had_failure = exit_code != 0, terminal = True)
     bookend = delivery_conclusion(final_status, data)
 
+    # Pre-hook with rich `ReproFixInfo` (exit_code / targets / extras)
+    # the safety-net call inside `dispatch_task_update` can't supply.
+    # Entries hooked here are skipped on dispatch via the `_hooked` flag.
     apply_repro_fix_hooks(
         ctx,
         lifecycle,

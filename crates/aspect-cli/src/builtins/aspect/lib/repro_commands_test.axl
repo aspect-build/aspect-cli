@@ -6,7 +6,7 @@ through clap's `ValueSource::CommandLine` is covered by the Rust unit
 tests on `Arguments`.
 """
 
-load("./lifecycle.axl", "REPRO_FIX_ACCEPT", "REPRO_FIX_REJECT", "ReproFixCommand", "apply_repro_fix_hooks", "repro_fix_replace")
+load("./lifecycle.axl", "REPRO_FIX_ACCEPT", "REPRO_FIX_REJECT", "ReproFixCommand", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "repro_fix_replace")
 load("./repro_commands.axl", "build_bazel_command", "explicit_flags", "repro_prefix", "subdir_prefix")
 
 def _eq(label, got, want):
@@ -700,6 +700,84 @@ def _test_mixed_new_and_hooked_entries(_ctx):
     _eq("second pass saw only the new entry", seen[len(seen_first):], ["added-later"])
     _eq("new entry now marked hooked", data["repro_commands"][-1]._hooked, True)
 
+# ---------------------------------------------------------------------------
+# dispatch_task_update — framework choke point
+# ---------------------------------------------------------------------------
+
+def _test_dispatch_hooks_then_fans_out(_ctx):
+    """`dispatch_task_update` runs un-hooked repro/fix entries through
+    `lifecycle.repro_fix_suggestion` then invokes every `task_update`
+    handler exactly once. Surfaces never see an un-hooked entry."""
+    data = {
+        "repro_commands": [ReproFixCommand(command = "x", slug = "lint-repro")],
+        "fix_commands": [],
+    }
+    hook_saw = []
+    handler_saw = []
+
+    def repro_fix_hook(ctx, info):
+        hook_saw.append(info.command)
+        return repro_fix_replace(command = info.command + "-rewritten")
+
+    def task_update_handler(ctx, update):
+        # Surface reads the post-hook entry; never sees the original.
+        handler_saw.append(update.data["repro_commands"][0].command)
+
+    lifecycle = struct(
+        repro_fix_suggestion = [repro_fix_hook],
+        task_update = [task_update_handler],
+    )
+    update = TaskUpdate(kind = "lint_results", status = "failed", data = data)
+    dispatch_task_update(_fake_apply_ctx(), lifecycle, update)
+
+    _eq("hook saw original command", hook_saw, ["x"])
+    _eq("handler saw post-hook command", handler_saw, ["x-rewritten"])
+    _eq("entry marked hooked", data["repro_commands"][0]._hooked, True)
+
+def _test_dispatch_idempotent_across_emits(_ctx):
+    """Two `dispatch_task_update` calls in a row only run the user hook
+    on each entry once."""
+    data = {
+        "repro_commands": [ReproFixCommand(command = "x", slug = "lint-repro")],
+        "fix_commands": [],
+    }
+    hook_calls = [0]
+
+    def counting_hook(ctx, info):
+        hook_calls[0] += 1
+        return REPRO_FIX_ACCEPT
+
+    lifecycle = struct(
+        repro_fix_suggestion = [counting_hook],
+        task_update = [],
+    )
+    update = TaskUpdate(kind = "lint_results", status = "running", data = data)
+    dispatch_task_update(_fake_apply_ctx(), lifecycle, update)
+    dispatch_task_update(_fake_apply_ctx(), lifecycle, update)
+    _eq("hook invoked exactly once across two dispatches", hook_calls[0], 1)
+
+def _test_dispatch_skips_hook_when_lists_empty(_ctx):
+    """No repro/fix entries → the safety-net call short-circuits;
+    `task_update` handlers still receive the update."""
+    handler_count = [0]
+    hook_count = [0]
+
+    def hook(ctx, info):
+        hook_count[0] += 1
+        return REPRO_FIX_ACCEPT
+
+    def handler(ctx, update):
+        handler_count[0] += 1
+
+    lifecycle = struct(
+        repro_fix_suggestion = [hook],
+        task_update = [handler],
+    )
+    update = TaskUpdate(kind = "lint_results", status = "running", data = {})
+    dispatch_task_update(_fake_apply_ctx(), lifecycle, update)
+    _eq("hook not called when lists are empty", hook_count[0], 0)
+    _eq("handler still called", handler_count[0], 1)
+
 _UNIT_TESTS = [
     _test_returns_empty_when_no_explicit,
     _test_includes_only_explicit_pairs,
@@ -750,6 +828,9 @@ _UNIT_TESTS = [
     _test_post_hook_entries_carry_hooked_flag,
     _test_second_apply_skips_already_hooked,
     _test_mixed_new_and_hooked_entries,
+    _test_dispatch_hooks_then_fans_out,
+    _test_dispatch_idempotent_across_emits,
+    _test_dispatch_skips_hook_when_lists_empty,
 ]
 
 def _test_impl(ctx):
