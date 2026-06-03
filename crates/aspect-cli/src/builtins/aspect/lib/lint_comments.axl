@@ -1,0 +1,96 @@
+"""VCS-agnostic helpers shared by the GitHub and GitLab lint-comment
+features.
+
+Two pieces are genuinely pure (string in, string out) and worth sharing
+so both features stay byte-identical and a single test covers them:
+
+  * Marker build/parse — the hidden HTML comment that uniquely
+    identifies an Aspect lint comment so later runs dedupe + clean up.
+  * Suggestion-block rendering — GitHub uses a bare ```suggestion fence
+    (replaces the commented-on line); GitLab uses ```suggestion:-X+Y
+    (replaces `current-X` through `current+Y`).
+
+The orchestration (discovery, dedup state machine, API calls) stays in
+each feature file — it's API-coupled and not shareable as-is.
+"""
+
+_MARKER_PREFIX = "<!-- aspect-lint:"
+_MARKER_SUFFIX = " -->"
+
+def build_marker(run_id, task_key, tool, file, line, rule_id):
+    """Build the hidden marker identifying a lint comment.
+
+    Shape: `<!-- aspect-lint:<run_id>:<task_key>:<tool>:<file>:<line>:<rule_id> -->`
+    """
+    return "{}{}:{}:{}:{}:{}:{}{}".format(
+        _MARKER_PREFIX,
+        run_id,
+        task_key,
+        tool,
+        file,
+        line,
+        rule_id,
+        _MARKER_SUFFIX,
+    )
+
+def extract_marker(body, task_key = None):
+    """Extract the first aspect-lint marker from `body`, or None.
+
+    When `task_key` is given, only returns a marker belonging to that
+    task (used by dedup).
+    """
+    if not body:
+        return None
+    idx = body.find(_MARKER_PREFIX)
+    if idx < 0:
+        return None
+    end = body.find(_MARKER_SUFFIX, idx)
+    if end < 0:
+        return None
+    marker = body[idx:end + len(_MARKER_SUFFIX)]
+    if task_key:
+        fields = parse_marker(marker)
+        if fields == None or fields["task_key"] != task_key:
+            return None
+    return marker
+
+def parse_marker(marker):
+    """Parse a marker into its fields dict, or None when malformed.
+
+    Current format: 6 fields. Legacy (pre-run_id) format: 5 fields,
+    reported with run_id == "". Extra trailing colons are joined back
+    into rule_id (forwards-compat).
+    """
+    if not marker.startswith(_MARKER_PREFIX) or not marker.endswith(_MARKER_SUFFIX):
+        return None
+    inner = marker[len(_MARKER_PREFIX):-len(_MARKER_SUFFIX)]
+    fields = inner.split(":")
+    if len(fields) == 6:
+        return {"run_id": fields[0], "task_key": fields[1], "tool": fields[2], "file": fields[3], "line": fields[4], "rule_id": fields[5]}
+    if len(fields) > 6:
+        return {"run_id": fields[0], "task_key": fields[1], "tool": fields[2], "file": fields[3], "line": fields[4], "rule_id": ":".join(fields[5:])}
+    if len(fields) == 5:
+        return {"run_id": "", "task_key": fields[0], "tool": fields[1], "file": fields[2], "line": fields[3], "rule_id": fields[4]}
+    return None
+
+def suggestion_block(replacement, current, start_line, end_line, vcs):
+    """Render a fenced suggestion block.
+
+    GitHub: a bare ```suggestion fence — GitHub always replaces exactly
+    the commented-on line (the range is implicit in the comment anchor),
+    so start/end/current are ignored.
+
+    GitLab: ```suggestion:-X+Y where the comment is anchored on
+    `current` (the new-side line the discussion sits on), and the block
+    replaces lines `current-X` through `current+Y`. For a lint
+    suggestion anchored on `end_line` covering `[start_line, end_line]`:
+      X = current - start_line
+      Y = end_line - current
+    """
+    if vcs == "gitlab":
+        x = current - start_line
+        y = end_line - current
+        fence = "```suggestion:-%d+%d" % (x, y)
+    else:
+        fence = "```suggestion"
+    return "%s\n%s\n```" % (fence, replacement)

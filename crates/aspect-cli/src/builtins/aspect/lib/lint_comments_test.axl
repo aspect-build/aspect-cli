@@ -1,0 +1,43 @@
+"""Unit tests for `lib/lint_comments.axl` shared lint-comment helpers.
+
+Run with:
+  aspect dev test-lint-comments
+"""
+
+load("./lint_comments.axl", "build_marker", "parse_marker", "suggestion_block")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _test_impl(ctx):
+    m = build_marker("gl-123", "lint-bk", "ShellCheck", "a/b.sh", 42, "SC2164")
+    _eq("marker shape", m, "<!-- aspect-lint:gl-123:lint-bk:ShellCheck:a/b.sh:42:SC2164 -->")
+    fields = parse_marker(m)
+    _eq("parse run_id", fields["run_id"], "gl-123")
+    _eq("parse task_key", fields["task_key"], "lint-bk")
+    _eq("parse tool", fields["tool"], "ShellCheck")
+    _eq("parse file", fields["file"], "a/b.sh")
+    _eq("parse line", fields["line"], "42")
+    _eq("parse rule_id", fields["rule_id"], "SC2164")
+
+    legacy = "<!-- aspect-lint:lint-bk:ShellCheck:a/b.sh:42:SC2164 -->"
+    lf = parse_marker(legacy)
+    _eq("legacy run_id", lf["run_id"], "")
+    _eq("legacy task_key", lf["task_key"], "lint-bk")
+
+    _eq("malformed", parse_marker("not a marker"), None)
+
+    _eq("github suggestion", suggestion_block("foo", current = 10, start_line = 10, end_line = 10, vcs = "github"), "```suggestion\nfoo\n```")
+    _eq("gitlab suggestion single", suggestion_block("foo", current = 10, start_line = 10, end_line = 10, vcs = "gitlab"), "```suggestion:-0+0\nfoo\n```")
+    _eq("gitlab suggestion multi", suggestion_block("foo\nbar\nbaz", current = 12, start_line = 10, end_line = 12, vcs = "gitlab"), "```suggestion:-2+0\nfoo\nbar\nbaz\n```")
+
+    print("lint_comments.axl: OK")
+    return 0
+
+lint_comments_tests = task(
+    name = "test-lint-comments",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)
