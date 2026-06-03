@@ -111,7 +111,6 @@ if [[ -n "${ASPECT_CLI_RUNNING:-}" ]]; then
     exit 127
 fi
 
-
 # ============================================================================
 # Configuration — EDIT THESE in your own repo copy
 # ============================================================================
@@ -548,7 +547,8 @@ BAZEL_VERBS_STR=" ${BAZEL_VERBS[*]} "
 # logs stay clean), unless ASPECT_WRAPPER_TRACE=1. Always suppressed when
 # ASPECT_WRAPPER_QUIET is set.
 trace_exec() {
-    local category="$1"; shift
+    local category="$1"
+    shift
     [[ -n "${ASPECT_WRAPPER_QUIET:-}" ]] && return 0
     local force="${ASPECT_WRAPPER_TRACE:-}"
     # Pure bazel forwarding: silent unless explicitly forced.
@@ -682,11 +682,13 @@ classify_flags() {
 
         # Passthrough mode (after `--`) and non-flags emit verbatim.
         if [[ $passthrough -eq 1 || "$t" != -* ]]; then
-            array_push "$out_name" "$t"; continue
+            array_push "$out_name" "$t"
+            continue
         fi
         if [[ "$t" == "--" ]]; then
             passthrough=1
-            array_push "$out_name" "$t"; continue
+            array_push "$out_name" "$t"
+            continue
         fi
 
         # `bare` is the flag name without leading dashes or =value (keeping the
@@ -703,10 +705,16 @@ classify_flags() {
         # `=value` form already carries its value and falls through to the wrap.
         if [[ "$body" != *=* && $i -lt $n ]]; then
             case "$BAZEL_VALUE_FLAGS_STR" in *" $bare "*)
-                array_push "$out_name" "${prefix}--${bare}=${tokens[$i]}"; i=$((i + 1)); continue ;;
+                array_push "$out_name" "${prefix}--${bare}=${tokens[$i]}"
+                i=$((i + 1))
+                continue
+                ;;
             esac
             case "$BAZEL_SHORT_VALUE_FLAGS_STR" in *" $bare "*)
-                array_push "$out_name" "${prefix}${bare}=${tokens[$i]}"; i=$((i + 1)); continue ;;
+                array_push "$out_name" "${prefix}${bare}=${tokens[$i]}"
+                i=$((i + 1))
+                continue
+                ;;
             esac
         fi
 
@@ -714,10 +722,14 @@ classify_flags() {
         # no value left to consume), boolean (or its `no` negation), or short
         # flag — wraps as a single token.
         case "$BAZEL_VALUE_FLAGS_STR$BAZEL_SHORT_VALUE_FLAGS_STR$BAZEL_SHORT_BOOL_FLAGS_STR" in *" $bare "*)
-            array_push "$out_name" "${prefix}${t}"; continue ;;
+            array_push "$out_name" "${prefix}${t}"
+            continue
+            ;;
         esac
         case "$BAZEL_BOOL_FLAGS_STR" in *" $bare "* | *" $neg "*)
-            array_push "$out_name" "${prefix}${t}"; continue ;;
+            array_push "$out_name" "${prefix}${t}"
+            continue
+            ;;
         esac
 
         # Unrecognized flag: pass through to aspect unchanged.
@@ -774,8 +786,8 @@ while [[ $i -lt $n_args ]]; do
             prev_was_value_taking=0
         else
             case "$BAZEL_VALUE_FLAGS_STR$BAZEL_SHORT_VALUE_FLAGS_STR" in
-                *" $name "*) prev_was_value_taking=1 ;;
-                *) prev_was_value_taking=0 ;;
+            *" $name "*) prev_was_value_taking=1 ;;
+            *) prev_was_value_taking=0 ;;
             esac
         fi
         i=$((i + 1))
@@ -786,7 +798,7 @@ while [[ $i -lt $n_args ]]; do
     # previous flag's value and keep walking.
     is_known_verb=0
     case "$KNOWN_VERBS_STR" in
-        *" $arg "*) is_known_verb=1 ;;
+    *" $arg "*) is_known_verb=1 ;;
     esac
     if [[ $is_known_verb -eq 1 || $prev_was_value_taking -eq 0 ]]; then
         verb="$arg"
