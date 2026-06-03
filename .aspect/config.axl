@@ -119,6 +119,23 @@ def _drop_vanilla_bazel_except_build(ctx, info, entry):
         return {"action": "accept"}
     return {"action": "reject"}
 
+def _shorten_delivery_local_preview(ctx, info, entry):
+    """Shorten the delivery local-preview description.
+
+    The built-in description for `delivery-repro-local-preview` switches
+    between two sentences depending on `--mode`; the longer "CI ran
+    --mode=<X>; ..." form fires on every aspect-cli CI run and adds
+    little value over the canonical short form. Force the short form
+    everywhere so the suggestion renders identically across runs.
+    """
+    if entry["slug"] != "delivery-repro-local-preview":
+        return {"action": "accept"}
+    return {
+        "action": "replace",
+        "command": entry["command"],
+        "description": "--mode=always --track-state=false for off-runner with no state backend.",
+    }
+
 def _customize_message(s: str, a: str) -> str:
     return s + a
 
@@ -184,6 +201,7 @@ def config(ctx: ConfigContext):
     lifecycle = ctx.traits[TaskLifecycleTrait]
     lifecycle.repro_fix_suggestion.append(_buildifier_repro_fix)
     lifecycle.repro_fix_suggestion.append(_drop_vanilla_bazel_except_build)
+    lifecycle.repro_fix_suggestion.append(_shorten_delivery_local_preview)
 
     # Template snapshot tests — renders bazel_results templates across failure modes.
     # Run with: aspect test-template-snapshots
