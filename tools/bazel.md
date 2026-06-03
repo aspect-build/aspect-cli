@@ -4,6 +4,18 @@ A drop-in `tools/bazel` shell script that lets developers keep typing `bazel` wh
 
 This is the **source of truth** for customers who want to adopt Aspect CLI features without forcing their teams to learn a new command name. Copy `tools/bazel` from this repo into your own workspace, adjust the verb lists at the top, commit it, and you're done.
 
+## About the Aspect CLI
+
+The [Aspect CLI](https://github.com/aspect-build/aspect-cli) (`aspect`) is a free, open-source, Apache-2.0-licensed task runner that extends Bazel with first-class developer workflows — built-in tasks for `build`, `test`, `run`, `format`, `lint`, `gazelle`, and `delivery`, plus custom tasks defined in [AXL](https://docs.aspect.build/cli/overview#aspect-extension-language) (Aspect Extension Language, typed Starlark). Same command locally and in every CI provider; native integration with GitHub Status Checks, Buildkite Annotations, and the equivalents on GitLab and CircleCI.
+
+- **Docs:** <https://docs.aspect.build/cli/overview>
+- **Source / releases:** <https://github.com/aspect-build/aspect-cli>
+- **Install:** `curl -fsSL https://install.aspect.build | bash`
+
+### Minimum Aspect CLI version
+
+**This wrapper requires Aspect CLI v2026.23.18 or newer.** That release adds the `ASPECT_CLI_RUNNING` re-entry signal the wrapper relies on to avoid infinite recursion when `aspect` shells back out to `bazel` (see [How it avoids infinite recursion](#how-it-avoids-infinite-recursion) below). Older versions don't set `ASPECT_CLI_RUNNING`, and the wrapper would route every internal `bazel` child invocation back through `aspect` indefinitely.
+
 ## What it does
 
 The `tools/bazel` hook is a [Bazelisk](https://github.com/bazelbuild/bazelisk) feature — the real `bazel` binary does not look for it. When Bazelisk finds `tools/bazel` in your workspace it execs that script instead of the bazel version it resolved, passing the resolved path as `$BAZEL_REAL`. (So this only works if the `bazel` on your `PATH` is Bazelisk — the standard setup.) This wrapper uses that hook to dispatch each command to the right tool:
