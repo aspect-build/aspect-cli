@@ -171,8 +171,8 @@ ARG:test
 ARG://..." \
 "$(run test //...)"
 
-check "common: run with target → aspect run" \
-"INVOKED:aspect
+check "common: run with target → bazel run (not yet wrapped by aspect)" \
+"INVOKED:bazel
 ARG:run
 ARG://foo:bin" \
 "$(run run //foo:bin)"
@@ -470,8 +470,8 @@ ARG://...
 ARG:-//experimental/..." \
 "$(run build --keep_going -- //... -//experimental/...)"
 
-check "edge: -- with run args (aspect flags after -- still pass through verbatim)" \
-"INVOKED:aspect
+check "edge: -- with run args (run forwards verbatim to bazel)" \
+"INVOKED:bazel
 ARG:run
 ARG://foo:bin
 ARG:--
