@@ -29,21 +29,80 @@ _LOG = feature_logger("GitLab lint comments")
 
 _REQUIRED_DIFF_REFS = ("base_sha", "start_sha", "head_sha")
 
-def build_position(path, line, diff_refs, prefix = ""):
+def _parse_hunk_starts(core):
+    """Extract `(old_start, new_start)` from the `-a,b +c,d` core of a
+    unified-diff hunk header. Counts are ignored. Defaults to 0 when a
+    side is absent."""
+    old_start = 0
+    new_start = 0
+    for tok in core.split():
+        if tok.startswith("-"):
+            old_start = int(tok[1:].split(",")[0])
+        elif tok.startswith("+"):
+            new_start = int(tok[1:].split(",")[0])
+    return (old_start, new_start)
+
+def build_diff_line_map(diff_text):
+    """Classify the lines of one file's unified diff (GitLab
+    `changes[].diff`, which is headerless — it starts at the first `@@`).
+
+    Returns `{"added": {new_line: True, ...}, "context": {new_line: old_line, ...}}`:
+      * `added`   — lines present only on the new side (`+`).
+      * `context` — unchanged-but-visible lines, mapping new-side line to
+                    its old-side line.
+    Removed (`-`) lines aren't represented — lint findings anchor on the
+    new side. Drives the GitLab position form: added lines carry only
+    `new_line`; context lines must carry both `new_line` and `old_line`.
+    """
+    added = {}
+    context = {}
+    old_ln = 0
+    new_ln = 0
+    for raw in diff_text.split("\n"):
+        if raw.startswith("@@"):
+            core = raw[2:]
+            close = core.find("@@")
+            if close >= 0:
+                core = core[:close]
+            old_ln, new_ln = _parse_hunk_starts(core)
+            continue
+        if not raw:
+            continue
+        head = raw[0]
+        if head == "+":
+            added[new_ln] = True
+            new_ln += 1
+        elif head == "-":
+            old_ln += 1
+        elif head == "\\":
+            continue  # "\ No newline at end of file"
+        else:
+            # Context line (leading space, or any other content).
+            context[new_ln] = old_ln
+            old_ln += 1
+            new_ln += 1
+    return {"added": added, "context": context}
+
+def build_position(path, line, diff_refs, prefix = "", line_map = None):
     """Translate a finding `(path, line)` + MR `diff_refs` into a GitLab
     Discussions `position` payload. Returns None when `diff_refs` is
-    missing any of the three SHAs (caller skips posting that finding).
-
-    Anchors on the new side only: `new_line` is set, `old_line` omitted,
-    `new_path == old_path == prefix + path`.
+    missing any of the three SHAs, or (when `line_map` is given) when the
+    line isn't anchorable in the diff.
 
     `prefix` is the Bazel-workspace-root path relative to the git repo
     root (from `git rev-parse --show-prefix`). SARIF/patch paths are
     workspace-relative; GitLab MR diff paths are repo-relative, so when
     the workspace sits in a subdirectory the prefix must be prepended or
-    GitLab rejects the position as off-diff. Empty (the common case:
-    workspace == repo root) leaves the path unchanged. Mirrors the GH
-    path's `prefix + c["path"]` at its API boundary.
+    GitLab rejects the position. Empty (workspace == repo root) is a
+    no-op. `new_path == old_path == prefix + path`.
+
+    `line_map` is this file's `build_diff_line_map` result. When present:
+      * added line  → carry only `new_line` (the new side).
+      * context line → carry both `new_line` and `old_line` (GitLab
+        rejects a context-line thread that omits `old_line`).
+      * line not in the diff → return None (off-diff; caller skips).
+    When None (file not in the MR changes), falls back to the added-line
+    form — best-effort, may 400 if the line is actually context.
     """
     if type(diff_refs) != "dict":
         return None
@@ -51,15 +110,25 @@ def build_position(path, line, diff_refs, prefix = ""):
         if not diff_refs.get(k):
             return None
     repo_path = prefix + path
-    return {
+    position = {
         "base_sha": diff_refs["base_sha"],
         "start_sha": diff_refs["start_sha"],
         "head_sha": diff_refs["head_sha"],
         "position_type": "text",
         "new_path": repo_path,
         "old_path": repo_path,
-        "new_line": line,
     }
+    if line_map != None:
+        if line_map["added"].get(line):
+            position["new_line"] = line
+        elif line in line_map["context"]:
+            position["new_line"] = line
+            position["old_line"] = line_map["context"][line]
+        else:
+            return None
+    else:
+        position["new_line"] = line
+    return position
 
 def dedup_discussions_by_marker(discussions, task_key):
     """Find duplicate Aspect-owned lint discussions sharing a marker.
@@ -153,9 +222,13 @@ def _post_comments(ctx, gl, comments, existing_markers, task_key):
         lines = changed.get(path)
         if lines != None and (line - 1) not in lines:
             continue
-        position = build_position(path, line, diff_refs, prefix = gl.get("prefix", ""))
+        prefix = gl.get("prefix", "")
+        # line_maps are keyed by the repo-relative (prefixed) path, matching
+        # the position's new_path.
+        line_map = gl.get("line_maps", {}).get(prefix + path)
+        position = build_position(path, line, diff_refs, prefix = prefix, line_map = line_map)
         if position == None:
-            errors.append("[%s:%s] could not build position (missing diff_refs)" % (path, line))
+            errors.append("[%s:%s] not anchorable in MR diff (off-diff or missing diff_refs)" % (path, line))
             continue
         res = gitlab.discussions.create(
             ctx,
@@ -304,17 +377,30 @@ def _ci_host_from_run_id(run_id):
         return ""
     return run_id[:dash]
 
-def compute_cleanup(discussions, desired, run_id, task_key):
-    """Decide which Aspect-owned lint discussions to delete (stale) and
-    which open ones to resolve. Pure — mirrors the GH 4-bucket reaper:
+def compute_cleanup(discussions, desired, run_id, task_key, genuinely_clean = False):
+    """Decide which Aspect-owned lint discussions to delete and which to
+    resolve. Pure. Host-scoped (the `gl`/`gha`/… run_id prefix) so one CI
+    host never touches another's threads.
 
-      0. different CI host       → skip
-      1. same host, prior run    → delete
-      2. same run, other task    → skip
-      3. same run, same task     → delete iff marker not in `desired`
+    Classification (after the host gate):
 
-    `resolve` lists same-run/same-task discussions that ARE desired and
-    still open — used only on a clean pass (caller decides whether to act).
+      * **This task, genuinely-clean pass** → resolve (if still open),
+        any run. The task ran and found nothing, so every thread it ever
+        opened is now fixed; resolving preserves the review history
+        (GitLab-only — the GH path can't resolve, so it deletes). This
+        wins over the prior-run reaper below for our own threads.
+      * **Prior run (any task)** → delete. Cross-run reaper: a newer run
+        supersedes older threads. Every active task helps reap so a
+        renamed/removed task's stale threads still get cleaned up.
+      * **Same run, other task** → skip. A sibling task in this run still
+        owns its threads.
+      * **Same run, this task, marker not in `desired`** → delete (stale:
+        the finding disappeared since we posted earlier this run).
+      * **Same run, this task, marker in `desired`** → keep (still active).
+
+    `genuinely_clean` is the caller's "this run reported no findings at
+    all" signal — NOT `desired` being empty, which is also empty in
+    `annotations` mode and when findings fall outside the diff window.
     """
     current_host = _ci_host_from_run_id(run_id)
     delete = []
@@ -332,17 +418,23 @@ def compute_cleanup(discussions, desired, run_id, task_key):
             continue
         marker_host = _ci_host_from_run_id(fields["run_id"])
         if current_host and marker_host and marker_host != current_host:
-            continue  # bucket 0
+            continue  # other CI host — leave alone
         entry = {"discussion_id": d.get("id"), "note_id": note.get("id")}
-        if run_id and fields["run_id"] != run_id:
-            delete.append(entry)  # bucket 1
+        same_task = fields["task_key"] == task_key
+        prior_run = bool(run_id) and fields["run_id"] != run_id
+
+        # Our own threads on a clean pass: resolve (any run), never delete.
+        if same_task and genuinely_clean:
+            if not note.get("resolved", False):
+                resolve.append(d.get("id"))
             continue
-        if fields["task_key"] != task_key:
-            continue  # bucket 2
+        if prior_run:
+            delete.append(entry)  # cross-run reaper (any task)
+            continue
+        if not same_task:
+            continue  # sibling task, same run — leave alone
         if marker not in desired:
-            delete.append(entry)  # bucket 3, stale
-        elif not note.get("resolved", False):
-            resolve.append(d.get("id"))
+            delete.append(entry)  # this task, same run, stale
     return {"delete": delete, "resolve": resolve}
 
 def _cleanup_and_resolve(ctx, gl, relevant_diagnostics, run_id, task_key, suggestion_markers, destination):
@@ -369,21 +461,20 @@ def _cleanup_and_resolve(ctx, gl, relevant_diagnostics, run_id, task_key, sugges
     listed = gitlab.discussions.list(ctx, token = gl["token"], project = gl["project_path"], mr_iid = gl["mr_iid"], auth_kind = "bearer")
     if not listed["success"]:
         return
-    plan = compute_cleanup(listed["discussions"], desired, run_id, task_key)
+
+    # A genuinely-clean pass means the lint task reported no relevant
+    # diagnostics AND emitted no suggestions, so anything we flagged on a
+    # prior run is now fixed → resolve (not delete) our own threads. NOT
+    # keyed on `desired` being empty — that's also empty in `annotations`
+    # mode and when findings fall outside the diff window, neither of which
+    # means "nothing to flag". `compute_cleanup` routes the resolve/delete
+    # split off this flag; here we just execute the plan.
+    genuinely_clean = not relevant_diagnostics and not suggestion_markers
+    plan = compute_cleanup(listed["discussions"], desired, run_id, task_key, genuinely_clean = genuinely_clean)
     for e in plan["delete"]:
         gitlab.discussions.delete(ctx, token = gl["token"], project = gl["project_path"], mr_iid = gl["mr_iid"], discussion_id = e["discussion_id"], note_id = e["note_id"], auth_kind = "bearer")
-
-    # Auto-resolve only on a genuinely clean pass: the lint task reported
-    # no relevant diagnostics AND emitted no suggestions, so anything we
-    # flagged on a prior run is now fixed. We deliberately do NOT key this
-    # on `desired` being empty — `desired` is also empty in
-    # `findings_destination = "annotations"` mode and when findings exist
-    # but all fall outside the changed-line window, neither of which means
-    # "nothing to flag".
-    genuinely_clean = not relevant_diagnostics and not suggestion_markers
-    if genuinely_clean:
-        for did in plan["resolve"]:
-            gitlab.discussions.resolve(ctx, token = gl["token"], project = gl["project_path"], mr_iid = gl["mr_iid"], discussion_id = did, resolved = True, auth_kind = "bearer")
+    for did in plan["resolve"]:
+        gitlab.discussions.resolve(ctx, token = gl["token"], project = gl["project_path"], mr_iid = gl["mr_iid"], discussion_id = did, resolved = True, auth_kind = "bearer")
 
 def _gitlab_lint_impl(ctx: FeatureContext):
     lint_trait = ctx.traits[LintTrait]
@@ -411,14 +502,28 @@ def _gitlab_lint_impl(ctx: FeatureContext):
         _LOG.warn(ctx.std, "Authentication failed for %s — %s" % (mr["project_path"], auth_reason.get("reason", "unknown")))
         return
 
-    mr_res = gitlab.merge_requests.get(ctx, token = token, project = mr["project_path"], mr_iid = mr["mr_iid"], auth_kind = "bearer")
+    # One call gets both the `diff_refs` SHA triple (for positions) and the
+    # per-file diffs (for the new_line→old_line classification below).
+    mr_res = gitlab.merge_requests.list_changes(ctx, token = token, project = mr["project_path"], mr_iid = mr["mr_iid"], auth_kind = "bearer")
     if not mr_res["success"]:
-        _LOG.warn(ctx.std, "Could not fetch MR %d: %s" % (mr["mr_iid"], mr_res.get("error", "unknown")))
+        _LOG.warn(ctx.std, "Could not fetch MR %d changes: %s" % (mr["mr_iid"], mr_res.get("error", "unknown")))
         return
     diff_refs = (mr_res["merge_request"] or {}).get("diff_refs")
     if not diff_refs:
         _LOG.warn(ctx.std, "MR %d has no diff_refs — cannot anchor discussions" % mr["mr_iid"])
         return
+
+    # Per-file line classification (added vs context, with the new→old line
+    # mapping) keyed by repo-relative new_path. A finding on an added line
+    # carries only `new_line`; one on a context (unchanged-but-visible) line
+    # must carry both `new_line` and `old_line` or GitLab rejects the
+    # position as off-diff.
+    line_maps = {}
+    for change in mr_res["changes"]:
+        np = change.get("new_path")
+        diff = change.get("diff")
+        if np and diff:
+            line_maps[np] = build_diff_line_map(diff)
 
     gl = {
         "token": token,
@@ -427,6 +532,7 @@ def _gitlab_lint_impl(ctx: FeatureContext):
         "diff_refs": diff_refs,
         "changed_lines": {},
         "prefix": "",
+        "line_maps": line_maps,
     }
 
     # Bazel-workspace-root path relative to the git repo root. SARIF/patch
