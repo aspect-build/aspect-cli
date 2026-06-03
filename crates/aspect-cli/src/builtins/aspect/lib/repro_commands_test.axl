@@ -6,6 +6,7 @@ through clap's `ValueSource::CommandLine` is covered by the Rust unit
 tests on `Arguments`.
 """
 
+load("./lifecycle.axl", "REPRO_FIX_ACCEPT", "REPRO_FIX_REJECT", "ReproFixCommand", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "repro_fix_replace")
 load("./repro_commands.axl", "build_bazel_command", "explicit_flags", "repro_prefix", "subdir_prefix")
 
 def _eq(label, got, want):
@@ -260,6 +261,523 @@ def _test_bazel_run_truncates_long_arg_list(_ctx):
     if included_count == 0 or included_count >= 20:
         fail("bazel run truncation: expected partial inclusion (some included, some omitted); included %d/20" % included_count)
 
+# ---------------------------------------------------------------------------
+# apply_repro_fix_hooks — user customization hook
+# ---------------------------------------------------------------------------
+
+def _fake_apply_ctx():
+    """Build a fake `ctx` with the fields `apply_repro_fix_hooks` reads —
+    just `ctx.task.name` and `ctx.task.group`. Std/env are not touched."""
+    return struct(task = struct(name = "lint", group = ["aspect"]))
+
+def _fake_lifecycle(handlers):
+    """Build a fake `lifecycle` with the single attribute the helper
+    reads. The Rust trait runtime exposes attrs as fields; a struct fake
+    is interchangeable for the test."""
+    return struct(repro_fix_suggestion = handlers)
+
+def _seed_data():
+    """Repro + fix lists shaped like a real terminal-emit-time `data`
+    dict. Two entries each so chain/reject behavior is observable.
+    Mixed slugs so slug-based scoping tests can exercise selective
+    reject / accept."""
+    return {
+        "repro_commands": [
+            ReproFixCommand(command = "aspect lint -- //a:a", slug = "lint-repro"),
+            ReproFixCommand(command = "aspect lint -- //b:b", description = "alt", slug = "lint-repro"),
+        ],
+        "fix_commands": [
+            ReproFixCommand(command = "aspect lint --fix -- //a:a", slug = "lint-fix"),
+            ReproFixCommand(command = "aspect lint --fix -- //b:b", description = "alt", slug = "lint-fix"),
+        ],
+    }
+
+def _test_no_handlers_is_noop(_ctx):
+    data = _seed_data()
+    apply_repro_fix_hooks(
+        _fake_apply_ctx(),
+        _fake_lifecycle([]),
+        data,
+        kind = "lint_results",
+        status = "failed",
+        exit_code = 1,
+    )
+    _eq("no handlers: repro untouched", len(data["repro_commands"]), 2)
+    _eq("no handlers: fix untouched", len(data["fix_commands"]), 2)
+
+def _test_accept_keeps_entry(_ctx):
+    data = _seed_data()
+    apply_repro_fix_hooks(
+        _fake_apply_ctx(),
+        _fake_lifecycle([lambda ctx, info: REPRO_FIX_ACCEPT]),
+        data,
+        kind = "lint_results",
+        status = "failed",
+        exit_code = 1,
+    )
+    _eq("accept: repro kept", len(data["repro_commands"]), 2)
+    _eq("accept: fix kept", len(data["fix_commands"]), 2)
+    _eq("accept: command unchanged", data["repro_commands"][0].command, "aspect lint -- //a:a")
+
+def _test_reject_drops_entry(_ctx):
+    data = _seed_data()
+
+    def reject_fix(ctx, info):
+        return REPRO_FIX_REJECT if info.command_kind.value == "fix" else REPRO_FIX_ACCEPT
+
+    apply_repro_fix_hooks(
+        _fake_apply_ctx(),
+        _fake_lifecycle([reject_fix]),
+        data,
+        kind = "lint_results",
+        status = "failed",
+        exit_code = 1,
+    )
+    _eq("reject: repro kept", len(data["repro_commands"]), 2)
+    _eq("reject: fix dropped", len(data["fix_commands"]), 0)
+
+def _test_replace_rewrites_entry(_ctx):
+    data = _seed_data()
+
+    def rewrite(ctx, info):
+        return repro_fix_replace(command = info.command.replace("aspect ", "wrapper "))
+
+    apply_repro_fix_hooks(
+        _fake_apply_ctx(),
+        _fake_lifecycle([rewrite]),
+        data,
+        kind = "lint_results",
+        status = "failed",
+        exit_code = 1,
+    )
+    _eq(
+        "replace: repro rewritten",
+        data["repro_commands"][0].command,
+        "wrapper lint -- //a:a",
+    )
+    _eq(
+        "replace: fix rewritten",
+        data["fix_commands"][1].command,
+        "wrapper lint --fix -- //b:b",
+    )
+    _eq(
+        "replace omitting description: prior value preserved",
+        data["fix_commands"][1].description,
+        "alt",
+    )
+
+def _test_replace_description_only(_ctx):
+    """A replace that supplies only `description` leaves the command
+    untouched — useful for hooks that just want to retag a label."""
+    data = {
+        "repro_commands": [ReproFixCommand(command = "x", description = "old", slug = "lint-repro")],
+        "fix_commands": [],
+    }
+    apply_repro_fix_hooks(
+        _fake_apply_ctx(),
+        _fake_lifecycle([lambda ctx, info: repro_fix_replace(description = "new")]),
+        data,
+        kind = "lint_results",
+        status = "failed",
+        exit_code = 1,
+    )
+    _eq("description rewritten", data["repro_commands"][0].description, "new")
+    _eq("command preserved", data["repro_commands"][0].command, "x")
+
+def _test_replace_both_none_is_noop(_ctx):
+    """Replace with neither field supplied is a no-op."""
+    data = {
+        "repro_commands": [ReproFixCommand(command = "x", description = "y", slug = "lint-repro")],
+        "fix_commands": [],
+    }
+    apply_repro_fix_hooks(
+        _fake_apply_ctx(),
+        _fake_lifecycle([lambda ctx, info: repro_fix_replace()]),
+        data,
+        kind = "lint_results",
+        status = "failed",
+        exit_code = 1,
+    )
+    _eq("noop replace: command unchanged", data["repro_commands"][0].command, "x")
+    _eq("noop replace: description unchanged", data["repro_commands"][0].description, "y")
+
+def _test_chain_passes_through_replacements(_ctx):
+    """Handler 2 sees handler 1's post-replace state on info.command."""
+    data = {
+        "repro_commands": [ReproFixCommand(command = "x", slug = "lint-repro")],
+        "fix_commands": [],
+    }
+
+    def step1(ctx, info):
+        return repro_fix_replace(command = info.command + "1")
+
+    def step2(ctx, info):
+        return repro_fix_replace(command = info.command + "2")
+
+    apply_repro_fix_hooks(
+        _fake_apply_ctx(),
+        _fake_lifecycle([step1, step2]),
+        data,
+        kind = "lint_results",
+        status = "failed",
+        exit_code = 1,
+    )
+    _eq("chain: both handlers applied in order", data["repro_commands"][0].command, "x12")
+
+def _test_chain_short_circuits_on_reject(_ctx):
+    """Once handler N returns reject, later handlers are not called for
+    that entry — guarded by tracking call counts."""
+    data = {
+        "repro_commands": [ReproFixCommand(command = "x", slug = "lint-repro")],
+        "fix_commands": [],
+    }
+    calls = []
+
+    def step1(ctx, info):
+        calls.append("step1")
+        return REPRO_FIX_REJECT
+
+    def step2(ctx, info):
+        calls.append("step2")
+        return REPRO_FIX_ACCEPT
+
+    apply_repro_fix_hooks(
+        _fake_apply_ctx(),
+        _fake_lifecycle([step1, step2]),
+        data,
+        kind = "lint_results",
+        status = "failed",
+        exit_code = 1,
+    )
+    _eq("reject short-circuit: entry dropped", len(data["repro_commands"]), 0)
+    _eq("reject short-circuit: step2 not called", calls, ["step1"])
+
+def _test_info_exposes_typed_fields(_ctx):
+    """Hooks receive a populated `ReproFixInfo` — verify the typed
+    fields the call site fills in are reachable."""
+    data = {
+        "repro_commands": [ReproFixCommand(command = "x", slug = "lint-repro")],
+        "fix_commands": [ReproFixCommand(command = "y", slug = "lint-fix")],
+    }
+    seen = []
+
+    def capture(ctx, info):
+        seen.append({
+            "task_path": info.task_path,
+            "task_name": info.task_name,
+            "kind": info.kind,
+            "command_kind": info.command_kind.value,
+            "status": info.status,
+            "exit_code": info.exit_code,
+            "bazel_subcommand": info.bazel_subcommand,
+            "targets": list(info.targets),
+            "failed_targets": list(info.failed_targets),
+            "extras_key": info.extras.get("aspects", []),
+            "command": info.command,
+            "slug": info.slug,
+        })
+        return REPRO_FIX_ACCEPT
+
+    apply_repro_fix_hooks(
+        _fake_apply_ctx(),
+        _fake_lifecycle([capture]),
+        data,
+        kind = "lint_results",
+        status = "failed",
+        exit_code = 1,
+        bazel_subcommand = "build",
+        targets = ["//a:a"],
+        failed_targets = ["//b:b"],
+        extras = {"aspects": ["//tools/lint:eslint"]},
+    )
+    _eq("info: 2 entries seen (1 repro + 1 fix)", len(seen), 2)
+    _eq("info: task_path composed from group+name", seen[0]["task_path"], "aspect lint")
+    _eq("info: task_name", seen[0]["task_name"], "lint")
+    _eq("info: kind", seen[0]["kind"], "lint_results")
+    _eq("info: command_kind for repro", seen[0]["command_kind"], "repro")
+    _eq("info: command_kind for fix", seen[1]["command_kind"], "fix")
+    _eq("info: status", seen[0]["status"], "failed")
+    _eq("info: exit_code", seen[0]["exit_code"], 1)
+    _eq("info: bazel_subcommand", seen[0]["bazel_subcommand"], "build")
+    _eq("info: targets", seen[0]["targets"], ["//a:a"])
+    _eq("info: failed_targets", seen[0]["failed_targets"], ["//b:b"])
+    _eq("info: extras passthrough", seen[0]["extras_key"], ["//tools/lint:eslint"])
+    _eq("info: command (repro)", seen[0]["command"], "x")
+    _eq("info: slug (repro)", seen[0]["slug"], "lint-repro")
+    _eq("info: slug (fix)", seen[1]["slug"], "lint-fix")
+
+def _test_empty_lists_skip_chain(_ctx):
+    """When a list is empty, no handler call is made for it — saves
+    work on tasks that don't populate one side (e.g. passed lint with
+    no fixes)."""
+    data = {
+        "repro_commands": [ReproFixCommand(command = "x", slug = "lint-repro")],
+        "fix_commands": [],
+    }
+    seen = []
+
+    def capture(ctx, info):
+        seen.append(info.command_kind.value)
+        return REPRO_FIX_ACCEPT
+
+    apply_repro_fix_hooks(
+        _fake_apply_ctx(),
+        _fake_lifecycle([capture]),
+        data,
+        kind = "lint_results",
+        status = "passed",
+        exit_code = 0,
+    )
+    _eq("empty fix list skipped", seen, ["repro"])
+
+def _test_slug_visible_to_hook(_ctx):
+    """Hooks read `info.slug` to scope by suggestion type without
+    parsing the command string."""
+    data = {
+        "repro_commands": [
+            ReproFixCommand(command = "aspect build -- //a:a", slug = "bazel-repro-aspect"),
+            ReproFixCommand(command = "bazel build -- //a:a", description = "vanilla bazel", slug = "bazel-repro-vanilla-bazel"),
+        ],
+        "fix_commands": [],
+    }
+
+    def reject_vanilla(ctx, info):
+        return REPRO_FIX_REJECT if info.slug == "bazel-repro-vanilla-bazel" else REPRO_FIX_ACCEPT
+
+    apply_repro_fix_hooks(
+        _fake_apply_ctx(),
+        _fake_lifecycle([reject_vanilla]),
+        data,
+        kind = "bazel_results",
+        status = "failed",
+        exit_code = 1,
+    )
+    _eq("slug-based reject: vanilla dropped", len(data["repro_commands"]), 1)
+    _eq("slug-based reject: aspect kept", data["repro_commands"][0].slug, "bazel-repro-aspect")
+
+def _test_slug_preserved_through_replace(_ctx):
+    """A `replace` verdict rewrites the command/description but
+    inherits the prior entry's slug — hooks rewrite commands, not
+    suggestion identity."""
+    data = {
+        "repro_commands": [ReproFixCommand(command = "aspect buildifier", slug = "format-repro")],
+        "fix_commands": [],
+    }
+    apply_repro_fix_hooks(
+        _fake_apply_ctx(),
+        _fake_lifecycle([lambda ctx, info: repro_fix_replace(command = info.command.replace("aspect ", "bazel "))]),
+        data,
+        kind = "format_results",
+        status = "failed",
+        exit_code = 1,
+    )
+    _eq("replace preserves slug", data["repro_commands"][0].slug, "format-repro")
+    _eq("replace rewrites command", data["repro_commands"][0].command, "bazel buildifier")
+
+def _test_slug_visible_after_replace_in_chain(_ctx):
+    """A later handler in the chain sees the (unchanged) slug on the
+    post-replace entry from the prior handler."""
+    data = {
+        "repro_commands": [ReproFixCommand(command = "x", slug = "lint-repro")],
+        "fix_commands": [],
+    }
+    later_saw = []
+
+    def first(ctx, info):
+        return repro_fix_replace(command = "y")
+
+    def second(ctx, info):
+        later_saw.append(info.slug)
+        return REPRO_FIX_ACCEPT
+
+    apply_repro_fix_hooks(
+        _fake_apply_ctx(),
+        _fake_lifecycle([first, second]),
+        data,
+        kind = "lint_results",
+        status = "failed",
+        exit_code = 1,
+    )
+    _eq("downstream hook sees inherited slug", later_saw, ["lint-repro"])
+
+# ---------------------------------------------------------------------------
+# ReproFixCommand record + verdict helpers
+# ---------------------------------------------------------------------------
+
+def _test_repro_fix_command_description_defaults_to_empty(_ctx):
+    """`description` is optional on `ReproFixCommand` and defaults to ""."""
+    c = ReproFixCommand(command = "x", slug = "lint-repro")
+    _eq("default description is empty string", c.description, "")
+    _eq("command preserved", c.command, "x")
+    _eq("slug preserved", c.slug, "lint-repro")
+
+def _test_repro_fix_accept_reject_are_singletons(_ctx):
+    """`REPRO_FIX_ACCEPT` / `REPRO_FIX_REJECT` are shared singletons
+    so hooks can return them directly instead of constructing a fresh
+    record at every return site."""
+    _eq("accept singleton has accept action", REPRO_FIX_ACCEPT.action.value, "accept")
+    _eq("reject singleton has reject action", REPRO_FIX_REJECT.action.value, "reject")
+    _eq("accept singleton command is None", REPRO_FIX_ACCEPT.command, None)
+    _eq("reject singleton description is None", REPRO_FIX_REJECT.description, None)
+
+def _test_repro_fix_replace_factory(_ctx):
+    """`repro_fix_replace(...)` returns a replace verdict; each field
+    is optional and defaults to None (= keep prior)."""
+    v1 = repro_fix_replace()
+    _eq("no-args: action is replace", v1.action.value, "replace")
+    _eq("no-args: command None", v1.command, None)
+    _eq("no-args: description None", v1.description, None)
+
+    v2 = repro_fix_replace(command = "x")
+    _eq("command-only: command set", v2.command, "x")
+    _eq("command-only: description None", v2.description, None)
+
+    v3 = repro_fix_replace(command = "x", description = "y")
+    _eq("both: command set", v3.command, "x")
+    _eq("both: description set", v3.description, "y")
+
+# ---------------------------------------------------------------------------
+# Idempotence — apply_repro_fix_hooks is safe to call repeatedly
+# ---------------------------------------------------------------------------
+
+def _test_post_hook_entries_carry_hooked_flag(_ctx):
+    """After `apply_repro_fix_hooks` runs, surviving entries have
+    `_hooked = True` so re-calls (e.g. from `dispatch_task_update`)
+    short-circuit."""
+    data = _seed_data()
+    apply_repro_fix_hooks(
+        _fake_apply_ctx(),
+        _fake_lifecycle([lambda ctx, info: REPRO_FIX_ACCEPT]),
+        data,
+        kind = "lint_results",
+        status = "failed",
+        exit_code = 1,
+    )
+    for entry in data["repro_commands"]:
+        _eq("repro entry marked hooked", entry._hooked, True)
+    for entry in data["fix_commands"]:
+        _eq("fix entry marked hooked", entry._hooked, True)
+
+def _test_second_apply_skips_already_hooked(_ctx):
+    """A second `apply_repro_fix_hooks` call doesn't re-run the chain
+    on entries already marked `_hooked`."""
+    data = _seed_data()
+    call_count = [0]
+
+    def counting_hook(ctx, info):
+        call_count[0] += 1
+        return REPRO_FIX_ACCEPT
+
+    handlers = [counting_hook]
+    apply_repro_fix_hooks(_fake_apply_ctx(), _fake_lifecycle(handlers), data, kind = "lint_results", status = "failed", exit_code = 1)
+    first = call_count[0]
+    apply_repro_fix_hooks(_fake_apply_ctx(), _fake_lifecycle(handlers), data, kind = "lint_results", status = "failed", exit_code = 1)
+    _eq("first pass invoked hook once per entry (4 entries)", first, 4)
+    _eq("second pass invoked hook zero additional times", call_count[0], first)
+
+def _test_mixed_new_and_hooked_entries(_ctx):
+    """If a producer appends new entries after a prior `apply_repro_fix_hooks`
+    pass, the next pass hooks only the new entries."""
+    data = _seed_data()
+    seen = []
+
+    def capture(ctx, info):
+        seen.append(info.command)
+        return REPRO_FIX_ACCEPT
+
+    apply_repro_fix_hooks(_fake_apply_ctx(), _fake_lifecycle([capture]), data, kind = "lint_results", status = "failed", exit_code = 1)
+    seen_first = list(seen)
+
+    data["repro_commands"].append(ReproFixCommand(command = "added-later", slug = "lint-repro"))
+    apply_repro_fix_hooks(_fake_apply_ctx(), _fake_lifecycle([capture]), data, kind = "lint_results", status = "failed", exit_code = 1)
+
+    _eq("first pass saw seed entries", seen_first, [
+        "aspect lint -- //a:a",
+        "aspect lint -- //b:b",
+        "aspect lint --fix -- //a:a",
+        "aspect lint --fix -- //b:b",
+    ])
+    _eq("second pass saw only the new entry", seen[len(seen_first):], ["added-later"])
+    _eq("new entry now marked hooked", data["repro_commands"][-1]._hooked, True)
+
+# ---------------------------------------------------------------------------
+# dispatch_task_update — framework choke point
+# ---------------------------------------------------------------------------
+
+def _test_dispatch_hooks_then_fans_out(_ctx):
+    """`dispatch_task_update` runs un-hooked repro/fix entries through
+    `lifecycle.repro_fix_suggestion` then invokes every `task_update`
+    handler exactly once. Surfaces never see an un-hooked entry."""
+    data = {
+        "repro_commands": [ReproFixCommand(command = "x", slug = "lint-repro")],
+        "fix_commands": [],
+    }
+    hook_saw = []
+    handler_saw = []
+
+    def repro_fix_hook(ctx, info):
+        hook_saw.append(info.command)
+        return repro_fix_replace(command = info.command + "-rewritten")
+
+    def task_update_handler(ctx, update):
+        # Surface reads the post-hook entry; never sees the original.
+        handler_saw.append(update.data["repro_commands"][0].command)
+
+    lifecycle = struct(
+        repro_fix_suggestion = [repro_fix_hook],
+        task_update = [task_update_handler],
+    )
+    update = TaskUpdate(kind = "lint_results", status = "failed", data = data)
+    dispatch_task_update(_fake_apply_ctx(), lifecycle, update)
+
+    _eq("hook saw original command", hook_saw, ["x"])
+    _eq("handler saw post-hook command", handler_saw, ["x-rewritten"])
+    _eq("entry marked hooked", data["repro_commands"][0]._hooked, True)
+
+def _test_dispatch_idempotent_across_emits(_ctx):
+    """Two `dispatch_task_update` calls in a row only run the user hook
+    on each entry once."""
+    data = {
+        "repro_commands": [ReproFixCommand(command = "x", slug = "lint-repro")],
+        "fix_commands": [],
+    }
+    hook_calls = [0]
+
+    def counting_hook(ctx, info):
+        hook_calls[0] += 1
+        return REPRO_FIX_ACCEPT
+
+    lifecycle = struct(
+        repro_fix_suggestion = [counting_hook],
+        task_update = [],
+    )
+    update = TaskUpdate(kind = "lint_results", status = "running", data = data)
+    dispatch_task_update(_fake_apply_ctx(), lifecycle, update)
+    dispatch_task_update(_fake_apply_ctx(), lifecycle, update)
+    _eq("hook invoked exactly once across two dispatches", hook_calls[0], 1)
+
+def _test_dispatch_skips_hook_when_lists_empty(_ctx):
+    """No repro/fix entries → the safety-net call short-circuits;
+    `task_update` handlers still receive the update."""
+    handler_count = [0]
+    hook_count = [0]
+
+    def hook(ctx, info):
+        hook_count[0] += 1
+        return REPRO_FIX_ACCEPT
+
+    def handler(ctx, update):
+        handler_count[0] += 1
+
+    lifecycle = struct(
+        repro_fix_suggestion = [hook],
+        task_update = [handler],
+    )
+    update = TaskUpdate(kind = "lint_results", status = "running", data = {})
+    dispatch_task_update(_fake_apply_ctx(), lifecycle, update)
+    _eq("hook not called when lists are empty", hook_count[0], 0)
+    _eq("handler still called", handler_count[0], 1)
+
 _UNIT_TESTS = [
     _test_returns_empty_when_no_explicit,
     _test_includes_only_explicit_pairs,
@@ -291,6 +809,28 @@ _UNIT_TESTS = [
     _test_bazel_run_no_targets,
     _test_bazel_run_multiline_continuation_form,
     _test_bazel_run_truncates_long_arg_list,
+    _test_no_handlers_is_noop,
+    _test_accept_keeps_entry,
+    _test_reject_drops_entry,
+    _test_replace_rewrites_entry,
+    _test_replace_description_only,
+    _test_replace_both_none_is_noop,
+    _test_chain_passes_through_replacements,
+    _test_chain_short_circuits_on_reject,
+    _test_info_exposes_typed_fields,
+    _test_empty_lists_skip_chain,
+    _test_slug_visible_to_hook,
+    _test_slug_preserved_through_replace,
+    _test_slug_visible_after_replace_in_chain,
+    _test_repro_fix_command_description_defaults_to_empty,
+    _test_repro_fix_accept_reject_are_singletons,
+    _test_repro_fix_replace_factory,
+    _test_post_hook_entries_carry_hooked_flag,
+    _test_second_apply_skips_already_hooked,
+    _test_mixed_new_and_hooked_entries,
+    _test_dispatch_hooks_then_fans_out,
+    _test_dispatch_idempotent_across_emits,
+    _test_dispatch_skips_hook_when_lists_empty,
 ]
 
 def _test_impl(ctx):

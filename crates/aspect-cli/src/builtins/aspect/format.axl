@@ -27,7 +27,7 @@ load("./lib/format_results.axl", fmt_init_data = "init_data", format_conclusion 
 load("./lib/format_spawn.axl", "compute_spawn_args")
 load("./lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_changed_files_listing")
 load("./lib/health_check.axl", "HealthCheckTrait")
-load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "pick_task_status", "resolve_severity", "setup_phase", "task_update")
+load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "pick_task_status", "resolve_severity", "setup_phase", "task_update")
 load("./lib/path_glob.axl", "match_any")
 load("./lib/path_normalize.axl", "normalize_files_for_cwd")
 load("./lib/repro_commands.axl", "build_aspect_command", "build_bazel_command", "explicit_flags", "print_repro_and_fix", "repro_prefix", "task_cli_path")
@@ -212,10 +212,10 @@ def _append_repro_command(ctx, data):
              explicit_flags(ctx, _DETECTION_PAIRS) +
              _surfaced_base_ref_flag(ctx))
     prefix = repro_prefix(ctx)
-    data["repro_commands"].append({
-        "command": prefix + build_aspect_command(task_cli_path(ctx.task), flags, []),
-        "description": "",
-    })
+    data["repro_commands"].append(ReproFixCommand(
+        command = prefix + build_aspect_command(task_cli_path(ctx.task), flags, []),
+        slug = "format-repro",
+    ))
 
 def _append_fix_commands(ctx, data):
     """Append fix-command entries to `data["fix_commands"]`.
@@ -249,42 +249,45 @@ def _append_fix_commands(ctx, data):
     positional_flags = ([("--severity", "info")] +
                         explicit_flags(ctx, [("formatter_target", "--formatter-target")]))
     if len(affected) <= _FIX_FILES_LIMIT:
-        data["fix_commands"].append({
-            "command": prefix + build_aspect_command(task_path, positional_flags, affected, max_chars = 4096),
-            "description": "",
-        })
+        data["fix_commands"].append(ReproFixCommand(
+            command = prefix + build_aspect_command(task_path, positional_flags, affected, max_chars = 4096),
+            slug = "format-fix",
+        ))
     else:
         shown = affected[:_FIX_FILES_LIMIT]
         remaining = len(affected) - _FIX_FILES_LIMIT
-        data["fix_commands"].append({
-            "command": prefix + build_aspect_command(task_path, positional_flags, shown, max_chars = 4096),
-            "description": "First %d of %d affected files (plus %d other%s)" % (
+        data["fix_commands"].append(ReproFixCommand(
+            command = prefix + build_aspect_command(task_path, positional_flags, shown, max_chars = 4096),
+            description = "First %d of %d affected files (plus %d other%s)" % (
                 _FIX_FILES_LIMIT,
                 len(affected),
                 remaining,
                 "" if remaining == 1 else "s",
             ),
-        })
+            slug = "format-fix-truncated",
+        ))
 
         detection = ([("--severity", "info")] +
                      explicit_flags(ctx, _DETECTION_PAIRS) +
                      _surfaced_base_ref_flag(ctx))
-        data["fix_commands"].append({
-            "command": prefix + build_aspect_command(task_path, detection, []),
-            "description": "Or re-discover and format all %d affected files" % len(affected),
-        })
+        data["fix_commands"].append(ReproFixCommand(
+            command = prefix + build_aspect_command(task_path, detection, []),
+            description = "Or re-discover and format all %d affected files" % len(affected),
+            slug = "format-fix-rediscover",
+        ))
 
     bazel_flags = ["--run_in_cwd"] if ctx.args.run_in_cwd else []
     bazel_run_args = [ctx.args.formatter_target] + list(ctx.args.formatter_args) + affected
-    data["fix_commands"].append({
-        "command": prefix + build_bazel_command(
+    data["fix_commands"].append(ReproFixCommand(
+        command = prefix + build_bazel_command(
             "run",
             bazel_run_args,
             flags = bazel_flags,
             max_chars = _BAZEL_ALT_MAX_CHARS,
         ),
-        "description": "vanilla bazel",
-    })
+        description = "vanilla bazel",
+        slug = "format-fix-vanilla-bazel",
+    ))
 
 def _emit_final(ctx, lifecycle, data, exit_code):
     """Emit the terminal task_update for status-check consumers."""
@@ -299,17 +302,31 @@ def _emit_final(ctx, lifecycle, data, exit_code):
 
     bookend = format_conclusion(status, data)
 
-    for handler in lifecycle.task_update:
-        handler(ctx, TaskUpdate(
-            kind = "format_results",
-            status = status,
-            final = True,
-            conclusion = bookend,
-            data = data,
-            progress = ProgressStyles(
-                body = _body_text(status, data),
-            ),
-        ))
+    # Pre-hook with rich `ReproFixInfo` (exit_code / extras) the
+    # safety-net call inside `dispatch_task_update` can't supply.
+    # Entries hooked here are skipped on dispatch via the `_hooked` flag.
+    apply_repro_fix_hooks(
+        ctx,
+        lifecycle,
+        data,
+        kind = "format_results",
+        status = status,
+        exit_code = exit_code,
+        extras = {
+            "affected_files": (data.get("format", {}) or {}).get("affected_files", []) or [],
+        },
+    )
+
+    dispatch_task_update(ctx, lifecycle, TaskUpdate(
+        kind = "format_results",
+        status = status,
+        final = True,
+        conclusion = bookend,
+        data = data,
+        progress = ProgressStyles(
+            body = _body_text(status, data),
+        ),
+    ))
     print_repro_and_fix(ctx.std, data, status)
 
     return TaskConclusion(
@@ -420,13 +437,12 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                 interesting = True
         if interesting or now_ms(ctx) - last_emit_ms >= MIN_HEARTBEAT_INTERVAL_MS:
             heartbeat_status = _pick_status(data, had_failure = False, terminal = False)
-            for handler in lifecycle.task_update:
-                handler(ctx, TaskUpdate(
-                    kind = "format_results",
-                    status = heartbeat_status,
-                    data = data,
-                    progress = ProgressStyles(),
-                ))
+            dispatch_task_update(ctx, lifecycle, TaskUpdate(
+                kind = "format_results",
+                status = heartbeat_status,
+                data = data,
+                progress = ProgressStyles(),
+            ))
             last_emit_ms = now_ms(ctx)
         if events.done:
             break

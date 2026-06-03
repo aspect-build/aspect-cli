@@ -1,5 +1,14 @@
-"""Task lifecycle: TaskUpdate record, TaskLifecycleTrait, and the
-canonical `task_update()` emitter.
+"""Task lifecycle: TaskUpdate record, TaskLifecycleTrait, the
+canonical `task_update()` emitter, and the repro/fix suggestion
+records + helpers (`ReproFixCommand`, `ReproFixInfo`,
+`ReproFixSuggestion`, `apply_repro_fix_hooks`, `dispatch_task_update`).
+
+`TaskLifecycleTrait` has two hooks: `task_update`, fired on every
+structured update during a task (features surface live progress
+through it), and `repro_fix_suggestion`, called by the framework on
+each surface emit so a user's `config.axl` can accept/reject/modify
+each repro/fix suggestion. See `apply_repro_fix_hooks` and
+`dispatch_task_update` below.
 
 `task_update(ctx, lifecycle, status, progress, ...)` prints a phase
 label to stderr (as `→ <progress>`) *and* emits a `TaskUpdate` to every
@@ -181,10 +190,138 @@ Phase = record(
     display_name = field(str, default = ""),
 )
 
+# A single repro / fix command suggestion. Stored in
+# `data["repro_commands"]` / `data["fix_commands"]` by built-in tasks
+# and surfaced to every downstream consumer (CLI printer, GHSC body,
+# BK annotation, GitHub PR-comment rollup). See `lib/repro_commands.axl`
+# for the producer helpers (`build_aspect_command`, `repro_prefix`, …)
+# and the catalogue of `slug` values.
+ReproFixCommand = record(
+    # Shell-ready line (with optional `cd` prefix). Required.
+    command = field(str),
+    # Optional short label rendered as a `# <description>` comment line
+    # above the command. Disambiguates multiple suggestions of the same
+    # type from the same task (e.g. "Update snapshot 1" vs "Update
+    # snapshot 2"). Empty when there's only one of its type per task.
+    description = field(str, default = ""),
+    # Stable kebab-case identifier ("lint-repro", "format-fix-vanilla-bazel",
+    # …). Lets `repro_fix_suggestion` hooks scope by suggestion type
+    # without parsing the command string. Required.
+    slug = field(str),
+    # Idempotence flag flipped by `apply_repro_fix_hooks` after the
+    # entry has passed through `lifecycle.repro_fix_suggestion`.
+    # `dispatch_task_update` calls the helper on every emit; this flag
+    # ensures the same suggestion runs through the user hook chain
+    # at most once. Producers leave it `False`; user hooks must not
+    # read it.
+    _hooked = field(bool, default = False),
+)
+
+# `repro` for entries in `data["repro_commands"]`, `fix` for entries
+# in `data["fix_commands"]`. Surfaced on `ReproFixInfo.command_kind`.
+ReproFixCommandKind = enum("repro", "fix")
+
+# Verdict returned by a `repro_fix_suggestion` hook. `accept` keeps the
+# suggestion as-is, `reject` drops it, `replace` swaps in new command
+# and/or description fields on the returned `ReproFixSuggestion`.
+ReproFixAction = enum("accept", "reject", "replace")
+
+# Metadata + per-suggestion fields passed to `repro_fix_suggestion`
+# hooks. The hook receives this single record (alongside `ctx`) and
+# returns a `ReproFixSuggestion` verdict. Typed common-case fields
+# cover most decisions; `extras` and `data` are escape hatches for
+# hooks that need kind-specific detail.
+ReproFixInfo = record(
+    # Task identity. `task_path` is the joined `<group...> <name>`
+    # CLI invocation path (e.g. "aspect lint"); `task_name` and
+    # `task_group` are the constituents for hooks that scope by either.
+    task_path = field(str),
+    task_name = field(str),
+    task_group = field(list[str]),
+    # Task result kind: "lint_results" | "bazel_results" | "format_results"
+    # | "gazelle_results" | "delivery_results". Matches `TaskUpdate.kind`
+    # so hooks can route by the same key the surface templates use.
+    kind = field(str),
+    # Which suggestion list this entry belongs to (`repro` | `fix`).
+    command_kind = field(ReproFixCommandKind),
+
+    # Per-suggestion fields — the entry the hook is about to decide on.
+    # `command` is the shell-ready line, `description` is the optional
+    # short label rendered as a `# <description>` comment above the
+    # command, and `slug` is the stable kebab-case identifier
+    # (catalogued in `apply_repro_fix_hooks`). Hooks scope by `slug`
+    # rather than parsing the command string.
+    command = field(str),
+    description = field(str),
+    slug = field(str),
+
+    # Lifecycle status the task is about to emit. `running` | `failing`
+    # mid-task, `passed` | `warning` | `failed` | `aborted` at terminal.
+    # Hooks fire on every emit, so mid-task statuses are observable.
+    status = field(str),
+    # Task exit code. Only meaningful on the terminal emit; `0` mid-task.
+    exit_code = field(int),
+
+    # Bazel-only fields. Empty / 0-length on non-Bazel tasks.
+    # `bazel_subcommand` is "build" | "test" | "run" when the task wrapped
+    # Bazel; "" otherwise. `targets` is the resolved patterns the task ran
+    # on. `failed_targets` is the deduplicated list of Bazel labels that
+    # failed (the union of failed actions, failed targets, and failed
+    # tests — see `failed_labels` in `lib/bazel_results.axl`).
+    bazel_subcommand = field(str, default = ""),
+    targets = field(list[str], default = []),
+    failed_targets = field(list[str], default = []),
+
+    # Open-ended, task-stamped, curated keys. Documented and stable across
+    # releases on a per-task basis — see `apply_repro_fix_hooks` call sites
+    # for the keys each task contributes. Examples:
+    #   lint:     {"aspects": [...], "suggestion_count": N}
+    #   format:   {"affected_files": [...]}
+    #   gazelle:  {"affected_files": [...]}
+    #   delivery: {"mode": str, "targets_total": N}
+    extras = field(dict, default = {}),
+
+    # Full task `data` dict — escape hatch for hooks that need fields not
+    # surfaced by the typed fields or `extras`. Couples user hooks to
+    # internal data shape; treat as UNSTABLE and prefer the typed/curated
+    # surfaces above.
+    data = field(dict, default = {}),
+)
+
+# Verdict returned by every `repro_fix_suggestion` hook. `action` is
+# required; `command` and `description` are only consulted when
+# `action == ReproFixAction("replace")`. Either or both replace fields
+# may be omitted to keep the prior value — useful when a hook only
+# wants to retag the description without touching the command (or vice
+# versa). A replace with both `command` and `description` left as
+# `None` is a no-op (equivalent to accept).
+ReproFixSuggestion = record(
+    action = field(ReproFixAction),
+    command = field(str | None, default = None),
+    description = field(str | None, default = None),
+)
+
+# Shared singletons for the two no-argument verdicts so hooks read as
+# `return REPRO_FIX_ACCEPT` rather than re-constructing the record at
+# every return site. Use `repro_fix_replace(...)` for the replace
+# verdict — record literals require keyword args, so the factory
+# spares hook authors the boilerplate.
+REPRO_FIX_ACCEPT = ReproFixSuggestion(action = ReproFixAction("accept"))
+REPRO_FIX_REJECT = ReproFixSuggestion(action = ReproFixAction("reject"))
+
+def repro_fix_replace(command: str | None = None, description: str | None = None) -> ReproFixSuggestion:
+    """Build a `replace` `ReproFixSuggestion`. See `ReproFixSuggestion`
+    for `command` / `description` semantics."""
+    return ReproFixSuggestion(
+        action = ReproFixAction("replace"),
+        command = command,
+        description = description,
+    )
+
 # Lifecycle hooks that any task can fire, allowing features like GithubStatusChecks
 # to observe task progress without coupling to Bazel-specific hooks.
 TaskLifecycleTrait = trait(
-    # The single lifecycle hook. Called for every structured update during the
+    # The primary lifecycle hook. Called for every structured update during the
     # task; receives (ctx, update: TaskUpdate). Features close over their own
     # state dict rather than receiving one.
     #
@@ -196,7 +333,202 @@ TaskLifecycleTrait = trait(
     # the LAST one — handlers conclude the surface there. There is no separate
     # started/complete hook: the first and last `task_update` carry that intent.
     task_update = attr(list[typing.Callable[[TaskContext, TaskUpdate], None]], default = []),
+
+    # User-customization hook for repro / fix command suggestions. Called
+    # once per suggestion in `data["repro_commands"]` /
+    # `data["fix_commands"]` — `dispatch_task_update` runs it on every
+    # surface emit, and the `_hooked` flag on each `ReproFixCommand`
+    # makes the call idempotent. Multiple handlers chain in
+    # registration order; a `reject` short-circuits.
+    #
+    # Signature: `(ctx: TaskContext, info: ReproFixInfo) -> ReproFixSuggestion`
+    #
+    # See `apply_repro_fix_hooks` below and `ReproFixInfo` /
+    # `ReproFixSuggestion` above.
+    repro_fix_suggestion = attr(list[typing.Callable[[TaskContext, ReproFixInfo], ReproFixSuggestion]], default = []),
 )
+
+# ---------------------------------------------------------------------------
+# apply_repro_fix_hooks + dispatch_task_update
+#
+# Lives next to `task_update()` (below) so every surface emit can route
+# through `dispatch_task_update`, which runs un-hooked repro/fix
+# entries through the user hook chain before invoking surface handlers.
+# Idempotent via the `_hooked` flag on `ReproFixCommand` — repeated
+# calls only process new entries.
+# ---------------------------------------------------------------------------
+
+def apply_repro_fix_hooks(
+        ctx,
+        lifecycle,
+        data,
+        kind,
+        status,
+        exit_code = 0,
+        bazel_subcommand = "",
+        targets = [],
+        failed_targets = [],
+        extras = {}):
+    """Filter / rewrite `data["repro_commands"]` and `data["fix_commands"]`
+    through every handler on `lifecycle.repro_fix_suggestion`.
+
+    Called automatically on every surface emit via
+    `dispatch_task_update`, so producers don't need to invoke this
+    themselves. Producers MAY call it explicitly before a terminal
+    emit to supply rich `info` (exit_code, bazel_subcommand, targets,
+    failed_targets, extras) — entries hooked there are skipped by the
+    automatic call, so each entry runs through the hook chain at most
+    once. The `_hooked` flag on `ReproFixCommand` carries the
+    idempotence: surviving entries come back with `_hooked = True`.
+
+    For each entry, every handler is invoked in registration order with
+    `(ctx, info)` where `info` is a `ReproFixInfo` carrying both
+    task-level metadata and the per-suggestion `command` / `description`
+    / `slug`. Use `info.slug` to scope by suggestion type without
+    parsing the command string. The handler returns a
+    `ReproFixSuggestion`; on `replace`, omitted fields keep the prior
+    value, and a `reject` short-circuits the chain for that entry.
+
+    No-op when `lifecycle.repro_fix_suggestion` is empty (the common
+    case) or every entry is already hooked. Mutates
+    `data["repro_commands"]` and `data["fix_commands"]` in place.
+
+    Stable suggestion slugs by built-in task:
+
+      lint:     lint-repro
+                lint-fix
+      format:   format-repro
+                format-fix
+                format-fix-truncated, format-fix-rediscover
+                format-fix-vanilla-bazel
+      gazelle:  gazelle-repro
+                gazelle-fix
+                gazelle-fix-truncated, gazelle-fix-rediscover
+                gazelle-fix-vanilla-bazel
+      delivery: delivery-repro-local-preview
+      bazel
+       (build /
+        test):  bazel-repro-aspect
+                bazel-repro-vanilla-bazel
+
+    Slug conventions hooks can rely on: every "vanilla `bazel run` for
+    users without the Aspect CLI" suggestion ends in `-vanilla-bazel`,
+    so a hook can suffix-match to scope across all producers without
+    listing each slug.
+
+    Args:
+        ctx:              TaskContext, passed through to each handler.
+        lifecycle:        TaskLifecycleTrait — source of the hook list.
+        data:             The task's `data` dict. Mutated in place.
+        kind:             Task result kind ("lint_results" |
+                          "bazel_results" | "format_results" |
+                          "gazelle_results" | "delivery_results").
+                          Matches `TaskUpdate.kind`.
+        status:           Lifecycle status the task is about to emit
+                          ("running" | "failing" | "warning" |
+                          "passed" | "failed" | "aborted").
+        exit_code:        Task exit code; only meaningful on the terminal
+                          emit. Defaults to 0 (mid-task callers leave
+                          unset).
+        bazel_subcommand: "build" | "test" | "run" for Bazel-wrapping
+                          tasks; "" otherwise.
+        targets:          Resolved target patterns the task ran on.
+        failed_targets:   Deduplicated list of Bazel labels that failed
+                          (union of failed actions / targets / tests —
+                          see `failed_labels` in `bazel_results.axl`).
+                          Empty on non-Bazel tasks.
+        extras:           Open-ended, task-stamped, curated keys
+                          surfaced verbatim on `ReproFixInfo.extras`.
+                          See call sites for the per-task contract.
+    """
+    handlers = lifecycle.repro_fix_suggestion
+    if not handlers:
+        return
+
+    info_base = {
+        "task_path": " ".join(list(ctx.task.group) + [ctx.task.name]),
+        "task_name": ctx.task.name,
+        "task_group": list(ctx.task.group),
+        "kind": kind,
+        "status": status,
+        "exit_code": exit_code,
+        "bazel_subcommand": bazel_subcommand,
+        "targets": list(targets),
+        "failed_targets": list(failed_targets),
+        "extras": extras,
+        "data": data,
+    }
+
+    for list_key, command_kind in (
+        ("repro_commands", ReproFixCommandKind("repro")),
+        ("fix_commands", ReproFixCommandKind("fix")),
+    ):
+        entries = data.get(list_key, []) or []
+        if not entries:
+            continue
+        kept = []
+        for entry in entries:
+            if entry._hooked:
+                kept.append(entry)
+                continue
+            survived = _apply_chain(ctx, info_base, command_kind, entry, handlers)
+            if survived != None:
+                kept.append(survived)
+        data[list_key] = kept
+
+def _apply_chain(ctx, info_base, command_kind, entry, handlers):
+    """Run a `ReproFixCommand` entry through every handler in order.
+
+    Returns the post-chain `ReproFixCommand` with `_hooked = True`, or
+    `None` when any handler rejected. The slug is carried through
+    `replace` verdicts unchanged — hooks rewrite commands, not
+    suggestion identity. A fresh `ReproFixInfo` is built per handler so
+    each one sees the prior handler's post-verdict state.
+    """
+    command = entry.command
+    description = entry.description
+    slug = entry.slug
+    for handler in handlers:
+        info = ReproFixInfo(
+            command_kind = command_kind,
+            command = command,
+            description = description,
+            slug = slug,
+            **info_base
+        )
+        verdict = handler(ctx, info)
+        action = verdict.action.value
+        if action == "reject":
+            return None
+        if action == "replace":
+            if verdict.command != None:
+                command = verdict.command
+            if verdict.description != None:
+                description = verdict.description
+    return ReproFixCommand(command = command, description = description, slug = slug, _hooked = True)
+
+def dispatch_task_update(ctx, lifecycle, update):
+    """Run any un-hooked repro/fix entries through `lifecycle.repro_fix_suggestion`,
+    then deliver `update` to every `lifecycle.task_update` handler.
+
+    Single dispatch point used by both the canonical `task_update()`
+    emitter and the direct-emit paths in `_emit_terminal` / `_emit_final`
+    so surfaces never see an un-hooked entry. Producers that want to
+    supply rich `ReproFixInfo` (exit_code, bazel_subcommand, …) can
+    still call `apply_repro_fix_hooks(...)` explicitly before the
+    emit; entries hooked there are skipped here (idempotent).
+    """
+    data = update.data
+    if data and (data.get("repro_commands") or data.get("fix_commands")):
+        apply_repro_fix_hooks(
+            ctx,
+            lifecycle,
+            data,
+            kind = update.kind,
+            status = update.status,
+        )
+    for handler in lifecycle.task_update:
+        handler(ctx, update)
 
 # ---------------------------------------------------------------------------
 # Highlight: ANSI verb styling
@@ -486,8 +818,7 @@ def task_update(ctx, lifecycle, status, progress, kind = "", data = None, priori
         data = data if data != None else {},
         subject = subject,
     )
-    for handler in lifecycle.task_update:
-        handler(ctx, update)
+    dispatch_task_update(ctx, lifecycle, update)
 
     if final:
         return TaskConclusion(
@@ -662,13 +993,12 @@ def _fail_health_check(ctx, lifecycle, kind, data, reason):
     "running"), then aborts the task with the hook's detailed `reason` as the
     CLI/log message. `kind` is the task's result kind so the surface renders;
     `data` is its results dict (typically still just seed fields here)."""
-    for handler in lifecycle.task_update:
-        handler(ctx, TaskUpdate(
-            kind = kind,
-            status = "failed",
-            final = True,
-            conclusion = _HEALTH_CHECK_FAILED,
-            data = data,
-            progress = ProgressStyles(body = _HEALTH_CHECK_FAILED),
-        ))
+    dispatch_task_update(ctx, lifecycle, TaskUpdate(
+        kind = kind,
+        status = "failed",
+        final = True,
+        conclusion = _HEALTH_CHECK_FAILED,
+        data = data,
+        progress = ProgressStyles(body = _HEALTH_CHECK_FAILED),
+    ))
     fail(reason)

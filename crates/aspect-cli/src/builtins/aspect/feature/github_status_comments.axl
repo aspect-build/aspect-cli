@@ -638,14 +638,13 @@ def _collect_repro_fix_rows(sections):
                 kind = e.get("name", "") or ""
                 task_key = e.get("key", "") or kind
                 for c in e.get(command_field, []) or []:
-                    command = c.get("command", "") or ""
-                    if not command:
+                    if not c.command:
                         continue
                     entries.append({
                         "kind": kind,
                         "task_key": task_key,
-                        "command": command,
-                        "description": c.get("description", "") or "",
+                        "command": c.command,
+                        "description": c.description,
                     })
         rows = dedup_and_attribute(entries)
         for r in rows:

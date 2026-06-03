@@ -1,27 +1,29 @@
 """Generic repro & fix command framework.
 
-Every built-in task contributes one or more "command suggestions" to its
-data dict at terminal-emit time:
+Every built-in task contributes one or more `ReproFixCommand`
+suggestions (defined in `lib/lifecycle.axl`) to its data dict at
+terminal-emit time:
 
-    data["repro_commands"] = [
-        {"command": "aspect lint --strategy=hold-the-line --aspect=... -- //...", "description": ""},
-        ...
-    ]
-    data["fix_commands"] = [
-        {"command": "aspect lint --fix --strategy=hold-the-line --aspect=... -- //...", "description": ""},
-        ...
-    ]
+    data["repro_commands"].append(ReproFixCommand(
+        command = "aspect lint --strategy=hold-the-line --aspect=... -- //...",
+        slug = "lint-repro",
+    ))
+    data["fix_commands"].append(ReproFixCommand(
+        command = "aspect lint --fix --strategy=hold-the-line --aspect=... -- //...",
+        slug = "lint-fix",
+    ))
 
-Each entry is a `{command, description}` dict — the command is the
-shell-ready line, the description is an optional short label that
-disambiguates multiple commands of the same type from the same task
-(e.g., "Update snapshot 1" vs "Update snapshot 2"). The description
-stays empty when there's only one of its type per task.
+`ReproFixCommand` carries `command` (the shell-ready line),
+`description` (optional, rendered as a `# <description>` comment above
+the command), and `slug` (a stable kebab-case identifier — catalogued
+in `apply_repro_fix_hooks` below — that lets
+`lifecycle.repro_fix_suggestion` hooks scope decisions without
+parsing the command string).
 
 `build_aspect_command(subcommand, flags, targets)` is the canonical
-way producers compose these strings — handling flag normalization,
-target joining, the `--` separator before targets, and length-bounded
-truncation when the target list is large.
+way producers compose the `command` string — handling flag
+normalization, target joining, the `--` separator before targets, and
+length-bounded truncation when the target list is large.
 
 `repro_prefix(ctx)` / `subdir_prefix(cwd, root)` prepend `cd <rel>\n`
 to commands when aspect was called from a subdirectory, so CI failures
@@ -36,6 +38,14 @@ the per-task lists into a single rolled-up view across tasks: two
 contributions of the same `(command, description)` collapse into one
 row that lists every contributing task_key.
 
+`apply_repro_fix_hooks` and `dispatch_task_update` live in
+`lib/lifecycle.axl` next to `TaskLifecycleTrait`. The framework runs
+hooks automatically on every surface emit via `dispatch_task_update`;
+producers MAY call `apply_repro_fix_hooks` explicitly at terminal
+emit to supply rich `info` (exit_code, bazel_subcommand, targets,
+failed_targets, extras). The `_hooked` flag on each `ReproFixCommand`
+makes both paths idempotent.
+
 `print_repro_and_fix(std, data, status)` prints the same blocks to
 the CLI so a developer reading the raw CI log sees the actionable
 commands without opening the status surface.
@@ -45,6 +55,7 @@ commands without opening the status surface.
 """
 
 load("./environment.axl", "color_enabled")
+load("./lifecycle.axl", "ReproFixCommand")
 
 # Install docs URL surfaced in the small-text hint at the bottom of each
 # repro/fix section — developers who don't yet have `aspect` on their PATH
@@ -478,7 +489,7 @@ def _install_hint_line(ansi):
     return ("\x1b[2m" + ASPECT_CLI_INSTALL_HINT + "\x1b[0m") if ansi else ASPECT_CLI_INSTALL_HINT
 
 def _print_repro_entry(ansi, entry):
-    """Print one `{command, description}` entry as a fenced code block.
+    """Print one `ReproFixCommand` entry as a fenced code block.
 
     The comment and command lines are wrapped in ``` … ``` fences and
     printed flush-left, so the copy-paste region is unambiguous and can
@@ -489,14 +500,16 @@ def _print_repro_entry(ansi, entry):
     `#` lines), and the comment reads as a header explaining what's
     coming.
     """
-    command = entry.get("command", "") or ""
-    description = entry.get("description", "") or ""
-    if not command:
+    if not entry.command:
         return
     print("```")
-    if description:
-        comment = "# " + description
+    if entry.description:
+        comment = "# " + entry.description
         print(("\x1b[2m" + comment + "\x1b[0m") if ansi else comment)
-    for line in command.split("\n"):
+    for line in entry.command.split("\n"):
         print(line)
     print("```")
+
+# `apply_repro_fix_hooks` and `dispatch_task_update` are defined in
+# `./lifecycle.axl`, next to `TaskLifecycleTrait`. See the module
+# docstring above for the contract.

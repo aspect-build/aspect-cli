@@ -14,9 +14,9 @@ applies uniformly to both tasks.
 
 load("@std//time.axl", "sleep_iter")
 load("./bazel_flags.axl", "resolve_bazel_announce")
-load("./bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "init_data", "now_ms", "process_event", "repro_targets", bazel_conclusion = "conclusion")
+load("./bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "failed_labels", "init_data", "now_ms", "process_event", "repro_targets", bazel_conclusion = "conclusion")
 load("./health_check.axl", "HealthCheckTrait")
-load("./lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "setup_phase", "task_update")
+load("./lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "setup_phase", "task_update")
 load("./repro_commands.axl", "build_aspect_command", "build_bazel_command", "print_repro_and_fix", "task_cli_path")
 load("./text.axl", "pluralize")
 load("../bazel.axl", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
@@ -177,24 +177,42 @@ def _collect_bes_from_args(ctx):
         )
     return sinks
 
-def _emit_terminal(ctx, lifecycle, command, data, exit_code):
+def _emit_terminal(ctx, lifecycle, command, data, exit_code, targets = []):
     """Fire the terminal `task_update(final=True)` and return a
     `TaskConclusion` for `run_bazel_task` to return, so status surfaces
     conclude rather than stick at "running". (A failed setup health check
     concludes the surface separately, inside `setup_phase`.)
+
+    `targets` is the resolved Bazel target patterns; forwarded to
+    `apply_repro_fix_hooks` for `repro_fix_suggestion` hooks to scope by.
     """
     final_status = _pick_status(command, data, had_failure = exit_code != 0, terminal = True)
     bookend = bazel_conclusion(final_status, data)
 
-    for handler in lifecycle.task_update:
-        handler(ctx, TaskUpdate(
-            kind = "bazel_results",
-            status = final_status,
-            final = True,
-            conclusion = bookend,
-            data = data,
-            progress = _live_progress(data, command, final_status),
-        ))
+    # Pre-hook with rich `ReproFixInfo` (exit_code / bazel_subcommand /
+    # targets / failed_targets) the safety-net call inside
+    # `dispatch_task_update` can't supply. Entries hooked here are
+    # skipped on dispatch via the `_hooked` flag.
+    apply_repro_fix_hooks(
+        ctx,
+        lifecycle,
+        data,
+        kind = "bazel_results",
+        status = final_status,
+        exit_code = exit_code,
+        bazel_subcommand = command,
+        targets = targets,
+        failed_targets = failed_labels(data),
+    )
+
+    dispatch_task_update(ctx, lifecycle, TaskUpdate(
+        kind = "bazel_results",
+        status = final_status,
+        final = True,
+        conclusion = bookend,
+        data = data,
+        progress = _live_progress(data, command, final_status),
+    ))
     print_repro_and_fix(ctx.std, data, final_status)
 
     return TaskConclusion(
@@ -442,8 +460,7 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
                         priority = is_first,
                         data = data,
                     )
-                    for handler in lifecycle.task_update:
-                        handler(ctx, update)
+                    dispatch_task_update(ctx, lifecycle, update)
                     last_emit_ms = now_ms(ctx)
                 if events.done:
                     break
@@ -471,13 +488,17 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
     _repro_targets = repro_targets(data, targets)
     _repro_cmd = build_aspect_command(task_cli_path(ctx.task), [], _repro_targets)
     if _repro_cmd:
-        data["repro_commands"].append({"command": _repro_cmd, "description": ""})
+        data["repro_commands"].append(ReproFixCommand(
+            command = _repro_cmd,
+            slug = "bazel-repro-aspect",
+        ))
 
         # Alternate vanilla-bazel repro for users who don't have the Aspect CLI
         # installed. Flags are intentionally omitted — best-effort, not faithful.
-        data["repro_commands"].append({
-            "command": build_bazel_command(command, _repro_targets),
-            "description": "vanilla bazel",
-        })
+        data["repro_commands"].append(ReproFixCommand(
+            command = build_bazel_command(command, _repro_targets),
+            description = "vanilla bazel",
+            slug = "bazel-repro-vanilla-bazel",
+        ))
 
-    return _emit_terminal(ctx, lifecycle, command, data, invocation_status.code)
+    return _emit_terminal(ctx, lifecycle, command, data, invocation_status.code, targets = _repro_targets)

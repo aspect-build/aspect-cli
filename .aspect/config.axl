@@ -24,7 +24,7 @@ load("@aspect//lib/runner_job_history_test.axl", "runner_job_history_tests")
 load("@aspect//lib/sandbox_recovery_test.axl", "sandbox_recovery_tests")
 load("@aspect//lib/tar_test.axl", "tar_tests")
 load("@aspect//lib/tips_test.axl", "tips_tests")
-load("@aspect//traits.axl", "BazelTrait", "LintTrait")
+load("@aspect//traits.axl", "BazelTrait", "LintTrait", "REPRO_FIX_ACCEPT", "REPRO_FIX_REJECT", "ReproFixInfo", "ReproFixSuggestion", "TaskLifecycleTrait", "repro_fix_replace")
 load("./lambda.axl", "lambda_with_global_bind")
 
 def _user_task_impl(ctx: TaskContext) -> int:
@@ -77,6 +77,51 @@ buildifier = format.alias(
     },
     summary = "Format Starlark files using buildifier.",
 )
+
+def _buildifier_repro_fix(ctx: TaskContext, info: ReproFixInfo) -> ReproFixSuggestion:
+    """Rewrite buildifier `aspect ...` suggestions to `bazel ...`.
+
+    Our `tools/bazel` wrapper routes verbs to the Aspect CLI, so
+    `bazel buildifier ...` and `aspect buildifier ...` are
+    interchangeable in this workspace. Suggest the wrapper form so
+    new contributors copy-paste a command that uses the checked-in
+    Bazel version. Buildifier-only — leaves other tasks untouched.
+    """
+    if info.task_name != "buildifier":
+        return REPRO_FIX_ACCEPT
+    return repro_fix_replace(
+        command = info.command.replace("aspect buildifier", "bazel buildifier", 1),
+    )
+
+def _drop_vanilla_bazel_except_build(ctx: TaskContext, info: ReproFixInfo) -> ReproFixSuggestion:
+    """Drop every vanilla-bazel alternate except `build`'s.
+
+    Built-in tasks tack on a vanilla `bazel run <target> ...` next to
+    their `aspect ...` repros/fixes for users without the Aspect CLI on
+    PATH. In this workspace contributors always have either `aspect` or
+    the `tools/bazel` wrapper, so the alternate is noise. Keeping the
+    `build` task's variant lets us continue to dogfood the rendering of
+    that alternate end-to-end. Matches by suggestion-slug suffix so any
+    new vanilla-bazel alternates added later are covered automatically.
+    """
+    if not info.slug.endswith("-vanilla-bazel") or info.task_name == "build":
+        return REPRO_FIX_ACCEPT
+    return REPRO_FIX_REJECT
+
+def _shorten_delivery_local_preview(ctx: TaskContext, info: ReproFixInfo) -> ReproFixSuggestion:
+    """Shorten the delivery local-preview description.
+
+    The built-in description for `delivery-repro-local-preview` switches
+    between two sentences depending on `--mode`; the longer "CI ran
+    --mode=<X>; ..." form fires on every aspect-cli CI run and adds
+    little value over the canonical short form. Force the short form
+    everywhere so the suggestion renders identically across runs.
+    """
+    if info.slug != "delivery-repro-local-preview":
+        return REPRO_FIX_ACCEPT
+    return repro_fix_replace(
+        description = "--mode=always --track-state=false for off-runner with no state backend.",
+    )
 
 def _customize_message(s: str, a: str) -> str:
     return s + a
@@ -135,6 +180,15 @@ def config(ctx: ConfigContext):
 
     # Register the buildifier alias as a real CLI command.
     ctx.tasks.add(buildifier)
+
+    # Customize repro/fix suggestions; see the hook docstrings for the
+    # rationale. Order matters: rewrite first (turns `aspect buildifier`
+    # into `bazel buildifier`), then drop vanilla-bazel alternates so the
+    # buildifier rewrite has nothing to undo on already-renamed entries.
+    lifecycle = ctx.traits[TaskLifecycleTrait]
+    lifecycle.repro_fix_suggestion.append(_buildifier_repro_fix)
+    lifecycle.repro_fix_suggestion.append(_drop_vanilla_bazel_except_build)
+    lifecycle.repro_fix_suggestion.append(_shorten_delivery_local_preview)
 
     # Template snapshot tests — renders bazel_results templates across failure modes.
     # Run with: aspect test-template-snapshots

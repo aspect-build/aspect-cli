@@ -110,6 +110,68 @@ return <TaskConclusion>
 
 ---
 
+## Customizing repro & fix suggestions
+
+`TaskLifecycleTrait` has a second slot, `repro_fix_suggestion`, that lets a user `config.axl` accept, reject, or modify the `aspect …` / `bazel …` repro and fix commands tasks emit at terminal-emit time. Common uses: rewrite `aspect …` to an internal wrapper command, strip flags the user wants kept private, suppress fix suggestions deemed unsafe in their CI environment.
+
+Built-in tasks populate `data["repro_commands"]` / `data["fix_commands"]` with `ReproFixCommand` records (defined in [`lib/lifecycle.axl`](lib/lifecycle.axl)). The framework runs every registered handler over un-hooked entries on each surface emit via `dispatch_task_update`, so no downstream consumer — CLI printer, GHSC check-run body, BK annotation, GitHub PR-comment rollup — ever sees an un-hooked entry. The `_hooked` flag on each record guarantees the hook chain runs at most once per entry, so producers and surfaces can emit freely.
+
+Hook signature:
+
+```python
+def my_hook(ctx: TaskContext, info: ReproFixInfo) -> ReproFixSuggestion:
+    # info carries typed task metadata + per-suggestion fields:
+    #   info.command, info.description, info.slug,
+    #   info.task_name, info.command_kind, ...
+    # See lib/lifecycle.axl.
+
+    return REPRO_FIX_ACCEPT                                            # keep as-is
+    return REPRO_FIX_REJECT                                            # drop
+    return repro_fix_replace(command = ...)                            # rewrite command
+    return repro_fix_replace(description = ...)                        # retag description
+    return repro_fix_replace(command = ..., description = ...)         # rewrite both
+```
+
+On `repro_fix_replace`, omitting `command` or `description` keeps the prior value, so hooks only need to set the fields they actually want to change. Scope decisions by `info.slug` (stable, kebab-case identifier per producer) rather than parsing the command string — see the catalogue in `apply_repro_fix_hooks`'s docstring. Replace verdicts inherit the prior slug automatically; suggestion identity stays stable across rewrites.
+
+Register from `config.axl`:
+
+```python
+load("@aspect//:traits.axl",
+     "REPRO_FIX_ACCEPT",
+     "REPRO_FIX_REJECT",
+     "ReproFixInfo",
+     "ReproFixSuggestion",
+     "TaskLifecycleTrait",
+     "repro_fix_replace")
+
+# Suggestion slugs you want to drop globally.
+_DROPPED = ("format-fix-vanilla-bazel", "gazelle-fix-vanilla-bazel")
+
+def _reject_dropped_slugs(ctx: TaskContext, info: ReproFixInfo) -> ReproFixSuggestion:
+    if info.slug in _DROPPED:
+        return REPRO_FIX_REJECT
+    return REPRO_FIX_ACCEPT
+
+def _rewrite_aspect_for_lint(ctx: TaskContext, info: ReproFixInfo) -> ReproFixSuggestion:
+    if info.task_name != "lint":
+        return REPRO_FIX_ACCEPT
+    return repro_fix_replace(
+        command = info.command.replace("aspect ", "mywrapper "),
+    )
+
+def config(ctx: ConfigContext):
+    lifecycle = ctx.traits[TaskLifecycleTrait]
+    lifecycle.repro_fix_suggestion.append(_reject_dropped_slugs)
+    lifecycle.repro_fix_suggestion.append(_rewrite_aspect_for_lint)
+```
+
+Multiple handlers chain in registration order — handler N sees handler N-1's post-verdict values on `info.command` / `info.description`. A `REPRO_FIX_REJECT` short-circuits the chain for that entry.
+
+`ReproFixInfo` (defined in [`lib/lifecycle.axl`](lib/lifecycle.axl)) carries typed common-case fields — `task_path`, `task_name`, `task_group`, `kind`, `command_kind`, `command`, `description`, `slug`, `status`, `exit_code`, `bazel_subcommand`, `targets`, `failed_targets` — plus an open-ended `extras` dict each task stamps with kind-specific keys, and a `data` escape hatch with the full task data dict. Prefer typed fields and `extras`; `data` is unstable across releases.
+
+---
+
 ## Traits the framework exposes
 
 > **Legacy violations.** Several entries below predate the [state management rules](#state-management-patterns-and-rules) and carry **data fields** (strings, dicts, lists) used as cross-feature communication channels. These are abuse-pattern fields scheduled for migration to the patterns in the next section. They're listed here because they exist in the current code; do NOT use them as a template for new traits. The "Status" column flags which fields are legitimate event/contract surfaces and which are pending migration.
@@ -118,7 +180,7 @@ return <TaskConclusion>
 |------------------------------|---------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------|------------------|
 | **`BazelTrait`**             | [bazel.axl](bazel.axl)                                                    | `build_start`, `build_event`, `build_end`, `build_retry`, `build_event_sinks`, `task_flags`, `flags`, `startup_flags`, `extra_flags`, `extra_startup_flags`, `execution_log_sinks` | ✅ Clean. Shape every Bazel invocation in the task: extra flags, BES sinks, per-event hooks, build-end cleanup. All fields are callables / hook lists / declarative config the task reads. |
 | **`HealthCheckTrait`**       | [lib/health_check.axl](lib/health_check.axl)                              | `health_check`                                                                                              | ✅ Clean. Hook lists only. |
-| **`TaskLifecycleTrait`**     | [lib/lifecycle.axl](lib/lifecycle.axl)                                    | `task_update`                                                                                               | ✅ Clean. Single hook list. First update inits, `final=True` update concludes — see the lifecycle section above. |
+| **`TaskLifecycleTrait`**     | [lib/lifecycle.axl](lib/lifecycle.axl)                                    | `task_update`, `repro_fix_suggestion`                                                                       | ✅ Clean. Hook lists only. `task_update` drives status surfaces (first update inits, `final=True` concludes — see lifecycle section above). `repro_fix_suggestion` lets a user `config.axl` accept / reject / modify repro & fix command suggestions — see [Customizing repro & fix suggestions](#customizing-repro--fix-suggestions). |
 | **`DeliveryTrait`**          | [delivery.axl](delivery.axl)                                              | `delivery_start`, `deliver_target`, `delivery_end`                                                          | ✅ Clean. Hook lists only. |
 | **`ArtifactsTrait`**         | [lib/artifacts.axl](lib/artifacts.axl)                                    | `artifacts_browse_url`, `artifact_urls`, `testlogs_label_urls`                                              | ⚠️ **Legacy** — data fields used as cross-feature state. Migrating to Pattern 2 (feature-owned + Callable trait). See [Artifact uploads](#artifact-uploads). |
 | **`GitHubStatusChecksTrait`**| [feature/github_status_checks.axl](feature/github_status_checks.axl)      | `templates`, `metadata_keys`                                                                                | ⚠️ **Legacy** — user-facing config on a trait. Migrating to feature `args`. |
