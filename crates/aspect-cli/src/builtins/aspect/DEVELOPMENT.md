@@ -114,7 +114,7 @@ return <TaskConclusion>
 
 `TaskLifecycleTrait` has a second slot, `repro_fix_suggestion`, that lets a user `config.axl` accept, reject, or modify the `aspect …` / `bazel …` repro and fix commands tasks emit at terminal-emit time. Common uses: rewrite `aspect …` to an internal wrapper command, strip flags the user wants kept private, suppress fix suggestions deemed unsafe in their CI environment.
 
-Built-in tasks populate `data["repro_commands"]` / `data["fix_commands"]` with `ReproFixCommand` records (defined in [`lib/lifecycle.axl`](lib/lifecycle.axl)) just before their terminal `task_update`. The `apply_repro_fix_hooks` helper in [`lib/repro_commands.axl`](lib/repro_commands.axl) runs every registered handler over those lists once, in place, BEFORE the terminal emit. Every downstream surface — the CLI printer, the GHSC check-run body, the BK annotation, the GitHub PR-comment rollup — reads the post-hook list, so they all see the same filtered set.
+Built-in tasks populate `data["repro_commands"]` / `data["fix_commands"]` with `ReproFixCommand` records (defined in [`lib/lifecycle.axl`](lib/lifecycle.axl)). The framework runs every registered handler over un-hooked entries on each surface emit via `dispatch_task_update`, so no downstream consumer — CLI printer, GHSC check-run body, BK annotation, GitHub PR-comment rollup — ever sees an un-hooked entry. The `_hooked` flag on each record guarantees the hook chain runs at most once per entry, so producers and surfaces can emit freely.
 
 Hook signature:
 

@@ -195,9 +195,9 @@ load("./lib/environment.axl", "color_enabled", "detect_ci", "error", "info", "wa
 load("./lib/gazelle_results.axl", "dedupe_subtrees", "dir_at_or_below", "extract_changed_dirs", gaz_init_data = "init_data", gazelle_conclusion = "conclusion")
 load("./lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_changed_files_listing")
 load("./lib/health_check.axl", "HealthCheckTrait")
-load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "pick_task_status", "resolve_severity", "setup_phase", "task_update")
+load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "pick_task_status", "resolve_severity", "setup_phase", "task_update")
 load("./lib/path_glob.axl", "match_any")
-load("./lib/repro_commands.axl", "apply_repro_fix_hooks", "build_aspect_command", "build_bazel_command", "explicit_flags", "print_repro_and_fix", "repro_prefix", "task_cli_path")
+load("./lib/repro_commands.axl", "build_aspect_command", "build_bazel_command", "explicit_flags", "print_repro_and_fix", "repro_prefix", "task_cli_path")
 load("./lib/runnable.axl", "LOCAL_SPAWN_FLAGS", "runnable")
 load("./lib/text.axl", "pluralize")
 load("./lib/tips.axl", "tips")
@@ -536,17 +536,16 @@ def _emit_final(ctx, lifecycle, data, exit_code):
         },
     )
 
-    for handler in lifecycle.task_update:
-        handler(ctx, TaskUpdate(
-            kind = "gazelle_results",
-            status = status,
-            final = True,
-            conclusion = bookend,
-            data = data,
-            progress = ProgressStyles(
-                body = _body_text(status, data),
-            ),
-        ))
+    dispatch_task_update(ctx, lifecycle, TaskUpdate(
+        kind = "gazelle_results",
+        status = status,
+        final = True,
+        conclusion = bookend,
+        data = data,
+        progress = ProgressStyles(
+            body = _body_text(status, data),
+        ),
+    ))
     print_repro_and_fix(ctx.std, data, status)
 
     return TaskConclusion(
@@ -670,13 +669,12 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                 interesting = True
         if interesting or now_ms(ctx) - last_emit_ms >= MIN_HEARTBEAT_INTERVAL_MS:
             heartbeat_status = _pick_status(data, had_failure = False, terminal = False)
-            for handler in lifecycle.task_update:
-                handler(ctx, TaskUpdate(
-                    kind = "gazelle_results",
-                    status = heartbeat_status,
-                    data = data,
-                    progress = ProgressStyles(),
-                ))
+            dispatch_task_update(ctx, lifecycle, TaskUpdate(
+                kind = "gazelle_results",
+                status = heartbeat_status,
+                data = data,
+                progress = ProgressStyles(),
+            ))
             last_emit_ms = now_ms(ctx)
         if events.done:
             break

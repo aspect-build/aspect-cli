@@ -8,7 +8,7 @@ load("./lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "init_data", "process_event
 load("./lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
 load("./lib/environment.axl", "error")
 load("./lib/health_check.axl", "HealthCheckTrait")
-load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "setup_phase", "task_update")
+load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "dispatch_task_update", "setup_phase", "task_update")
 load("./lib/runnable.axl", "LOCAL_SPAWN_FLAGS", "runnable")
 load("./lib/tips.axl", "tips")
 
@@ -43,15 +43,14 @@ def _emit_terminal(ctx, lifecycle, data, exit_code, conclusion_text = None):
     status = _terminal_status(data, exit_code)
     bookend = conclusion_text if conclusion_text != None else bazel_conclusion(status, data)
 
-    for handler in lifecycle.task_update:
-        handler(ctx, TaskUpdate(
-            kind = "bazel_results",
-            status = status,
-            final = True,
-            conclusion = bookend,
-            data = data,
-            progress = ProgressStyles(body = bookend),
-        ))
+    dispatch_task_update(ctx, lifecycle, TaskUpdate(
+        kind = "bazel_results",
+        status = status,
+        final = True,
+        conclusion = bookend,
+        data = data,
+        progress = ProgressStyles(body = bookend),
+    ))
 
     return TaskConclusion(
         exit_code = exit_code,

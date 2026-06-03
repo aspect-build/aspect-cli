@@ -28,9 +28,9 @@ load("./lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
 load("./lib/environment.axl", "color_enabled", "detect_ci", "error", "warn")
 load("./lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_changed_files_listing")
 load("./lib/health_check.axl", "HealthCheckTrait")
-load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "setup_phase", "task_update")
+load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "setup_phase", "task_update")
 load("./lib/lint_results.axl", "detect_lint_tool", lint_accumulate = "accumulate", lint_conclusion = "conclusion", lint_init_data = "init_data")
-load("./lib/repro_commands.axl", "apply_repro_fix_hooks", "build_aspect_command", "explicit_flags", "print_repro_and_fix", "repro_prefix", "task_cli_path")
+load("./lib/repro_commands.axl", "build_aspect_command", "explicit_flags", "print_repro_and_fix", "repro_prefix", "task_cli_path")
 load("./lib/sarif.axl", "get_sarif_summary", "parse_sarif", "parse_sarif_diagnostics")
 load("./lib/tar.axl", "tar_create")
 load("./lib/text.axl", "pluralize")
@@ -1037,13 +1037,12 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             # tags Lint (not the downstream Filter phase) as the failure point.
             had_action_failure = data["bazel"].get("failed_actions_total", 0) > 0
             heartbeat_status = _pick_status(data, had_failure = had_action_failure, terminal = False)
-            for handler in lifecycle.task_update:
-                handler(ctx, TaskUpdate(
-                    kind = "lint_results",
-                    status = heartbeat_status,
-                    data = data,
-                    progress = ProgressStyles(),
-                ))
+            dispatch_task_update(ctx, lifecycle, TaskUpdate(
+                kind = "lint_results",
+                status = heartbeat_status,
+                data = data,
+                progress = ProgressStyles(),
+            ))
             last_emit_ms = now_ms(ctx)
         if events.done:
             break
@@ -1294,17 +1293,16 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         },
     )
 
-    for handler in lifecycle.task_update:
-        handler(ctx, TaskUpdate(
-            kind = "lint_results",
-            status = final_status,
-            final = True,
-            conclusion = bookend,
-            data = data,
-            progress = ProgressStyles(
-                body = _body_text(final_status, data),
-            ),
-        ))
+    dispatch_task_update(ctx, lifecycle, TaskUpdate(
+        kind = "lint_results",
+        status = final_status,
+        final = True,
+        conclusion = bookend,
+        data = data,
+        progress = ProgressStyles(
+            body = _body_text(final_status, data),
+        ),
+    ))
     print_repro_and_fix(ctx.std, data, final_status)
 
     return TaskConclusion(

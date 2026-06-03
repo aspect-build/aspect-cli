@@ -116,8 +116,8 @@ load(
 load("@aspect//lib/environment.axl", "color_enabled", "error", "info", "warn")
 load("@aspect//lib/github.axl", "detect_commit_sha")
 load("@aspect//lib/health_check.axl", "HealthCheckTrait")
-load("@aspect//lib/lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "setup_phase", "task_update")
-load("@aspect//lib/repro_commands.axl", "apply_repro_fix_hooks", "build_aspect_command", "print_repro_and_fix", "repro_prefix", "task_cli_path")
+load("@aspect//lib/lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "setup_phase", "task_update")
+load("@aspect//lib/repro_commands.axl", "build_aspect_command", "print_repro_and_fix", "repro_prefix", "task_cli_path")
 load("@aspect//lib/runnable.axl", "LOCAL_SPAWN_FLAGS", "apparent_label", "runnable")
 load("@aspect//lib/text.axl", "pluralize")
 load("@aspect//lib/tips.axl", "tips")
@@ -541,13 +541,12 @@ def _emit_update(ctx, lifecycle, data, had_failure = False):
     transitions go through `task_update()` instead.
     """
     status = _pick_status(data, had_failure = had_failure, terminal = False)
-    for handler in lifecycle.task_update:
-        handler(ctx, TaskUpdate(
-            kind = "delivery_results",
-            status = status,
-            data = data,
-            progress = ProgressStyles(),
-        ))
+    dispatch_task_update(ctx, lifecycle, TaskUpdate(
+        kind = "delivery_results",
+        status = status,
+        data = data,
+        progress = ProgressStyles(),
+    ))
 
 def _emit_final(ctx, lifecycle, data, exit_code):
     """Emit the terminal `task_update(final=True)` for delivery.
@@ -601,17 +600,16 @@ def _emit_final(ctx, lifecycle, data, exit_code):
         },
     )
 
-    for handler in lifecycle.task_update:
-        handler(ctx, TaskUpdate(
-            kind = "delivery_results",
-            status = final_status,
-            final = True,
-            conclusion = bookend,
-            data = data,
-            progress = ProgressStyles(
-                body = _body_text(final_status, data),
-            ),
-        ))
+    dispatch_task_update(ctx, lifecycle, TaskUpdate(
+        kind = "delivery_results",
+        status = final_status,
+        final = True,
+        conclusion = bookend,
+        data = data,
+        progress = ProgressStyles(
+            body = _body_text(final_status, data),
+        ),
+    ))
     print_repro_and_fix(ctx.std, data, final_status)
 
     return TaskConclusion(

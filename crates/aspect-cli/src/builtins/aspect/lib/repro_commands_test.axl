@@ -6,8 +6,8 @@ through clap's `ValueSource::CommandLine` is covered by the Rust unit
 tests on `Arguments`.
 """
 
-load("./lifecycle.axl", "REPRO_FIX_ACCEPT", "REPRO_FIX_REJECT", "ReproFixCommand", "repro_fix_replace")
-load("./repro_commands.axl", "apply_repro_fix_hooks", "build_bazel_command", "explicit_flags", "repro_prefix", "subdir_prefix")
+load("./lifecycle.axl", "REPRO_FIX_ACCEPT", "REPRO_FIX_REJECT", "ReproFixCommand", "apply_repro_fix_hooks", "repro_fix_replace")
+load("./repro_commands.axl", "build_bazel_command", "explicit_flags", "repro_prefix", "subdir_prefix")
 
 def _eq(label, got, want):
     if got != want:
@@ -636,6 +636,70 @@ def _test_repro_fix_replace_factory(_ctx):
     _eq("both: command set", v3.command, "x")
     _eq("both: description set", v3.description, "y")
 
+# ---------------------------------------------------------------------------
+# Idempotence — apply_repro_fix_hooks is safe to call repeatedly
+# ---------------------------------------------------------------------------
+
+def _test_post_hook_entries_carry_hooked_flag(_ctx):
+    """After `apply_repro_fix_hooks` runs, surviving entries have
+    `_hooked = True` so re-calls (e.g. from `dispatch_task_update`)
+    short-circuit."""
+    data = _seed_data()
+    apply_repro_fix_hooks(
+        _fake_apply_ctx(),
+        _fake_lifecycle([lambda ctx, info: REPRO_FIX_ACCEPT]),
+        data,
+        kind = "lint_results",
+        status = "failed",
+        exit_code = 1,
+    )
+    for entry in data["repro_commands"]:
+        _eq("repro entry marked hooked", entry._hooked, True)
+    for entry in data["fix_commands"]:
+        _eq("fix entry marked hooked", entry._hooked, True)
+
+def _test_second_apply_skips_already_hooked(_ctx):
+    """A second `apply_repro_fix_hooks` call doesn't re-run the chain
+    on entries already marked `_hooked`."""
+    data = _seed_data()
+    call_count = [0]
+
+    def counting_hook(ctx, info):
+        call_count[0] += 1
+        return REPRO_FIX_ACCEPT
+
+    handlers = [counting_hook]
+    apply_repro_fix_hooks(_fake_apply_ctx(), _fake_lifecycle(handlers), data, kind = "lint_results", status = "failed", exit_code = 1)
+    first = call_count[0]
+    apply_repro_fix_hooks(_fake_apply_ctx(), _fake_lifecycle(handlers), data, kind = "lint_results", status = "failed", exit_code = 1)
+    _eq("first pass invoked hook once per entry (4 entries)", first, 4)
+    _eq("second pass invoked hook zero additional times", call_count[0], first)
+
+def _test_mixed_new_and_hooked_entries(_ctx):
+    """If a producer appends new entries after a prior `apply_repro_fix_hooks`
+    pass, the next pass hooks only the new entries."""
+    data = _seed_data()
+    seen = []
+
+    def capture(ctx, info):
+        seen.append(info.command)
+        return REPRO_FIX_ACCEPT
+
+    apply_repro_fix_hooks(_fake_apply_ctx(), _fake_lifecycle([capture]), data, kind = "lint_results", status = "failed", exit_code = 1)
+    seen_first = list(seen)
+
+    data["repro_commands"].append(ReproFixCommand(command = "added-later", slug = "lint-repro"))
+    apply_repro_fix_hooks(_fake_apply_ctx(), _fake_lifecycle([capture]), data, kind = "lint_results", status = "failed", exit_code = 1)
+
+    _eq("first pass saw seed entries", seen_first, [
+        "aspect lint -- //a:a",
+        "aspect lint -- //b:b",
+        "aspect lint --fix -- //a:a",
+        "aspect lint --fix -- //b:b",
+    ])
+    _eq("second pass saw only the new entry", seen[len(seen_first):], ["added-later"])
+    _eq("new entry now marked hooked", data["repro_commands"][-1]._hooked, True)
+
 _UNIT_TESTS = [
     _test_returns_empty_when_no_explicit,
     _test_includes_only_explicit_pairs,
@@ -683,6 +747,9 @@ _UNIT_TESTS = [
     _test_repro_fix_command_description_defaults_to_empty,
     _test_repro_fix_accept_reject_are_singletons,
     _test_repro_fix_replace_factory,
+    _test_post_hook_entries_carry_hooked_flag,
+    _test_second_apply_skips_already_hooked,
+    _test_mixed_new_and_hooked_entries,
 ]
 
 def _test_impl(ctx):

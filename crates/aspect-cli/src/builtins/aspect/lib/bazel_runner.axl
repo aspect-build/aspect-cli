@@ -16,8 +16,8 @@ load("@std//time.axl", "sleep_iter")
 load("./bazel_flags.axl", "resolve_bazel_announce")
 load("./bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "failed_labels", "init_data", "now_ms", "process_event", "repro_targets", bazel_conclusion = "conclusion")
 load("./health_check.axl", "HealthCheckTrait")
-load("./lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "setup_phase", "task_update")
-load("./repro_commands.axl", "apply_repro_fix_hooks", "build_aspect_command", "build_bazel_command", "print_repro_and_fix", "task_cli_path")
+load("./lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "setup_phase", "task_update")
+load("./repro_commands.axl", "build_aspect_command", "build_bazel_command", "print_repro_and_fix", "task_cli_path")
 load("./text.axl", "pluralize")
 load("../bazel.axl", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
 
@@ -201,15 +201,14 @@ def _emit_terminal(ctx, lifecycle, command, data, exit_code, targets = []):
         failed_targets = failed_labels(data),
     )
 
-    for handler in lifecycle.task_update:
-        handler(ctx, TaskUpdate(
-            kind = "bazel_results",
-            status = final_status,
-            final = True,
-            conclusion = bookend,
-            data = data,
-            progress = _live_progress(data, command, final_status),
-        ))
+    dispatch_task_update(ctx, lifecycle, TaskUpdate(
+        kind = "bazel_results",
+        status = final_status,
+        final = True,
+        conclusion = bookend,
+        data = data,
+        progress = _live_progress(data, command, final_status),
+    ))
     print_repro_and_fix(ctx.std, data, final_status)
 
     return TaskConclusion(
@@ -457,8 +456,7 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
                         priority = is_first,
                         data = data,
                     )
-                    for handler in lifecycle.task_update:
-                        handler(ctx, update)
+                    dispatch_task_update(ctx, lifecycle, update)
                     last_emit_ms = now_ms(ctx)
                 if events.done:
                     break
