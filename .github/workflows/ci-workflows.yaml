@@ -23,6 +23,17 @@ env:
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
+  # Pure-bash unit tests for the tools/bazel wrapper. No aspect, no bazel, no
+  # pre-build — runs on a stock ephemeral runner in seconds and guards the
+  # wrapper's routing/flag-classification logic against regressions.
+  wrapper-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - name: tools/bazel wrapper tests
+        run: ./tools/bazel-test.sh
+
   pre-build:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     timeout-minutes: 10

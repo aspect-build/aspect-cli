@@ -477,7 +477,7 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
         # installed. Flags are intentionally omitted — best-effort, not faithful.
         data["repro_commands"].append({
             "command": build_bazel_command(command, _repro_targets),
-            "description": "without Aspect CLI",
+            "description": "vanilla bazel",
         })
 
     return _emit_terminal(ctx, lifecycle, command, data, invocation_status.code)

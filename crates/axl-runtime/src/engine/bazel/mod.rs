@@ -53,6 +53,24 @@ pub(crate) fn bazel_binary() -> String {
     std::env::var("BAZEL_REAL").unwrap_or_else(|_| "bazel".to_string())
 }
 
+/// Build a `Command` for spawning bazel, with the anti-inception env var set.
+///
+/// When `tools/bazel` wrapper scripts forward to `aspect` for build/test/run,
+/// aspect then needs to spawn its OWN child bazel. If `PATH` still has
+/// `tools/bazel` first, that child re-enters the wrapper and bounces right
+/// back into aspect — inception, repeated forever.
+///
+/// `ASPECT_CLI_RUNNING=1` breaks the cycle: cooperating wrapper scripts
+/// check for it on entry and short-circuit straight to the real bazel
+/// (matching the spirit of bazelisk's `BAZELISK_SKIP_WRAPPER`). All bazel
+/// spawns from inside aspect go through this helper so the env var is
+/// always set, regardless of which call site fired.
+pub(crate) fn bazel_command() -> std::process::Command {
+    let mut cmd = std::process::Command::new(bazel_binary());
+    cmd.env("ASPECT_CLI_RUNNING", "1");
+    cmd
+}
+
 /// Resolve the `(stdout, stderr)` `Stdio` slots from the Starlark args.
 ///
 /// Tri-state for each per-fd arg: not passed → inherit, Starlark `None` →
@@ -509,7 +527,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     fn info<'v>(this: values::Value<'v>) -> anyhow::Result<SmallMap<String, String>> {
         let startup_flags = read_startup_flags(this)?;
 
-        let mut cmd = std::process::Command::new(bazel_binary());
+        let mut cmd = bazel_command();
         cmd.args(&startup_flags);
         cmd.arg("info");
         cmd.stdout(Stdio::piped());

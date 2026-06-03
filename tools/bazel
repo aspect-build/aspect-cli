@@ -1,0 +1,869 @@
+#!/usr/bin/env bash
+# aspect-build/tools-bazel-wrapper
+#
+# tools/bazel — Bazel wrapper that transparently routes Aspect-specific
+# functionality through the `aspect` CLI without forcing developers to learn
+# a new command name.
+#
+# The marker comment above (`# aspect-build/tools-bazel-wrapper`) and the
+# ASPECT_BAZEL_WRAPPER_VERSION variable below identify this file as the
+# canonical Aspect-shipped wrapper. Aspect detects them to know that in
+# this workspace `bazel <verb>` is equivalent to `aspect <verb>` for
+# reproduce/fix commands and tooling that suggests "vanilla bazel"
+# alternatives. Do NOT remove these markers if you fork the script.
+#
+# Behavior (verb routing):
+#   - verb in ASPECT_VERBS_WITH_BAZEL_FLAGS  → exec aspect <verb> [rewritten]
+#       (the verbs aspect wraps plus the aspect verbs that drive bazel —
+#        bazel-native flags become --bazel-flag=<flag>; everything else
+#        passes through to aspect.)
+#   - verb in BAZEL_VERBS (not above)        → exec $BAZEL_REAL <args...>
+#       (query, info, clean, mod, version, … — vanilla bazel, untouched.)
+#   - any other verb (custom .axl task)      → exec aspect <verb> [args...]
+#       (forwarded verbatim — we don't assume an unknown verb is bazel's.)
+#   - no verb / ASPECT_CLI_RUNNING / SKIP    → exec $BAZEL_REAL <args...>
+#
+# When `aspect` is NOT on PATH but a command would route to it, the wrapper
+# prints install instructions. If the verb is also a real bazel command
+# (build/test/run/coverage) it then falls back to vanilla bazel so the command
+# still runs; otherwise (lint/format/custom .axl tasks, which bazel can't run)
+# it exits. Plain bazel verbs never need aspect and run regardless.
+#
+# Flag handling (for verbs routed to aspect with rewriting):
+#   Bazel is the closed set. A flag whose name is in one of the embedded
+#   BAZEL_*_FLAGS lists is wrapped as `--bazel-flag=<flag>` (post-verb) or
+#   `--bazel-startup-flag=<flag>` (pre-verb). Value-taking flags written
+#   space-separated (`--config ci`, `-c opt`) consume the next token and glue
+#   with `=` (`--bazel-flag=--config=ci`, `--bazel-flag=-c=opt`). Every other
+#   flag — aspect's own flags, and anything we don't recognize — passes
+#   through to aspect unchanged.
+#
+# Maintaining the lists (edit in your own repo copy):
+#   ASPECT_VERBS_WITH_BAZEL_FLAGS and the BAZEL_*_FLAGS lists at the top of
+#   this file are the source of truth. If Bazel adds a flag we don't know, or
+#   you add an aspect command that accepts bazel flags (e.g. a custom task
+#   that shells out to bazel), add it to the relevant list. An unknown bazel
+#   flag simply passes through to aspect until you add it.
+#
+# Drop this script at `tools/bazel` in your workspace and make it executable
+# (`chmod +x tools/bazel`). The `tools/bazel` hook is a Bazelisk feature (the
+# real bazel binary does not look for it; see
+# https://github.com/bazelbuild/bazelisk): Bazelisk execs this script and
+# passes the resolved real-bazel path in BAZEL_REAL. When BAZEL_REAL is unset
+# — the wrapper was invoked directly, or by an aspect child — we fall back to
+# finding the next `bazel` on PATH that isn't this wrapper.
+#
+# Environment variables:
+#   ASPECT_WRAPPER_SKIP=1    Forward EVERYTHING straight to bazel, untouched —
+#                            no verb parsing, no list checks, no flag rewriting.
+#                            A total escape hatch for a 1:1 vanilla-bazel
+#                            experience; reach for `aspect <verb>` directly when
+#                            you want the wrapped behavior.
+#   ASPECT_WRAPPER_TRACE=1   Always print the resolved command (in grey, on
+#                            stderr), even when forwarding straight to bazel.
+#                            By default the trace prints only when routing
+#                            to aspect, since plain bazel forwarding is
+#                            uninteresting.
+#   ASPECT_WRAPPER_QUIET=1   Suppress the trace line entirely.
+#
+# Implicit env var (set by aspect, not by users):
+#   ASPECT_CLI_RUNNING=1     Aspect sets this on every child bazel it spawns.
+#                            When the wrapper sees it, it bypasses ALL routing
+#                            and forwards straight to the real bazel,
+#                            preventing aspect → tools/bazel → aspect → …
+#                            recursion. Customers should never set this
+#                            manually. See bazelisk's BAZELISK_SKIP_WRAPPER
+#                            for the same pattern.
+#
+# Source of truth: https://github.com/aspect-build/aspect-cli/blob/main/tools/bazel
+
+set -euo pipefail
+
+# Wrapper schema version. Bumped when the routing rules or env-var contract
+# change in a way that downstream detection might care about. See the
+# `aspect-build/tools-bazel-wrapper` marker comment at the top of the file.
+ASPECT_BAZEL_WRAPPER_VERSION="1"
+export ASPECT_BAZEL_WRAPPER_VERSION
+
+# --- Anti-inception bypass ------------------------------------------------
+#
+# If aspect set ASPECT_CLI_RUNNING, we're being invoked as a CHILD of aspect.
+# Skip every code path that would re-enter aspect and forward to the real
+# bazel directly. Done before everything else so it costs nothing in the
+# common case and can't be defeated by later config.
+if [[ -n "${ASPECT_CLI_RUNNING:-}" ]]; then
+    if [[ -n "${BAZEL_REAL:-}" && -x "$BAZEL_REAL" ]]; then
+        exec "$BAZEL_REAL" "$@"
+    fi
+    # No BAZEL_REAL (aspect was invoked directly, not through Bazelisk).
+    # Find the next bazel on PATH that isn't us.
+    self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+    while IFS= read -r candidate; do
+        if [[ "$(cd "$(dirname "$candidate")" && pwd)/$(basename "$candidate")" != "$self" ]]; then
+            exec "$candidate" "$@"
+        fi
+    done < <(type -aP bazel 2>/dev/null || true)
+    echo "ERROR: tools/bazel: ASPECT_CLI_RUNNING is set but no real bazel found on PATH" >&2
+    exit 127
+fi
+
+
+# ============================================================================
+# Configuration — EDIT THESE in your own repo copy
+# ============================================================================
+#
+# Two kinds of list drive every routing decision; both are meant to be edited
+# by whoever owns the workspace copy of this script:
+#
+#   1. ASPECT_VERBS_WITH_BAZEL_FLAGS — which verbs go to `aspect` AND accept
+#      forwarded bazel flags.
+#   2. BAZEL_VERBS + the BAZEL_*_FLAGS lists — the closed set of "what Bazel
+#      understands". Anything outside it is treated as aspect's.
+#
+# If Bazel adds a command or flag we don't list, or you add an aspect command
+# that should accept bazel flags (e.g. a custom task that shells out to
+# bazel), add it to the relevant list below.
+
+# Verbs routed to `aspect` with bazel-flag rewriting: bazel-native flags after
+# the verb become `--bazel-flag=<flag>`, everything else passes through to
+# aspect. Includes the Bazel verbs aspect wraps (`build`/`test`/`run`) and the
+# aspect verbs that drive bazel internally (`lint`, `format`, …). Add your own
+# bazel-flag-aware aspect commands here.
+ASPECT_VERBS_WITH_BAZEL_FLAGS=(
+    build
+    buildifier
+    delivery
+    format
+    gazelle
+    lint
+    run
+    test
+)
+
+# The closed set of Bazel commands (Bazel 9). A verb here that is NOT in
+# ASPECT_VERBS_WITH_BAZEL_FLAGS forwards to vanilla bazel untouched (query,
+# info, clean, mod, …). Generated by: `bazel help` (the "Available commands"
+# list).
+BAZEL_VERBS=(
+    aquery build canonicalize-flags clean coverage cquery dump fetch help
+    info license mobile-install mod print_action query run shutdown test
+    vendor version
+)
+
+# Bazel flags that take a SPACE-separated value (e.g. `--config foo` rather
+# than `--config=foo`). Required so the wrapper consumes the following argv
+# element and rewrites the pair as one `--bazel-flag=--name=value` token.
+# Generated from `bazel help build|test|run|startup_options --long` at
+# Bazel 9.x. Booleans (--[no]name) live in BAZEL_BOOL_FLAGS, not here.
+BAZEL_VALUE_FLAGS=(
+    action_env allow_yanked_versions allowed_cpu_values
+    allowed_strategies_by_exec_platform analysis_testing_deps_limit
+    android_compiler android_dynamic_mode android_manifest_merger
+    android_manifest_merger_order android_platforms apk_signing_method
+    aspects aspects_parameters auto_output_filter bazelrc
+    bep_maximum_open_remote_upload_files bes_backend bes_header
+    bes_instance_name bes_keywords bes_oom_finish_upload_timeout
+    bes_outerr_buffer_size bes_outerr_chunk_size bes_proxy bes_results_url
+    bes_system_keywords bes_timeout bes_upload_mode
+    build_event_binary_file build_event_binary_file_upload_mode
+    build_event_json_file build_event_json_file_upload_mode
+    build_event_max_named_set_of_file_entries build_event_text_file
+    build_event_text_file_upload_mode build_event_upload_max_retries
+    build_metadata build_tag_filters cache_computed_file_digests
+    catalyst_cpus cc_output_directory_tag cc_proto_library_header_suffixes
+    cc_proto_library_source_suffixes check_bazel_compatibility
+    check_direct_dependencies color combined_report compilation_mode
+    compiler config conlyopt connect_timeout_secs copt
+    coverage_output_generator coverage_report_generator coverage_support
+    cpu credential_helper credential_helper_cache_duration
+    credential_helper_timeout cs_fdo_absolute_path cs_fdo_instrument
+    cs_fdo_profile curses custom_malloc cxxopt default_test_resources
+    define deleted_packages digest_function disk_cache distdir
+    downloader_config dynamic_local_execution_delay dynamic_local_strategy
+    dynamic_mode dynamic_remote_strategy embed_label exec_aspects
+    execution_log_binary_file execution_log_compact_file
+    execution_log_json_file experimental_action_cache_gc_idle_delay
+    experimental_action_cache_gc_max_age
+    experimental_action_cache_gc_threshold experimental_action_listener
+    experimental_active_directories
+    experimental_async_execution_max_concurrent_actions
+    experimental_build_event_output_group_mode
+    experimental_build_event_upload_retry_minimum_delay
+    experimental_build_event_upload_strategy experimental_cgroup_parent
+    experimental_circuit_breaker_strategy experimental_command_profile
+    experimental_disk_cache_gc_idle_delay
+    experimental_disk_cache_gc_max_age experimental_disk_cache_gc_max_size
+    experimental_docker_image experimental_dynamic_ignore_local_signals
+    experimental_dynamic_local_load_factor
+    experimental_dynamic_slow_remote_time experimental_extra_action_filter
+    experimental_frontier_violation_check
+    experimental_install_base_gc_max_age experimental_java_classpath
+    experimental_objc_fastbuild_options
+    experimental_one_version_enforcement experimental_output_paths
+    experimental_override_platform_cpu_name
+    experimental_profile_additional_tasks
+    experimental_remote_cache_compression_threshold
+    experimental_remote_cache_eviction_retries
+    experimental_remote_cache_ttl
+    experimental_remote_capture_corrupted_outputs
+    experimental_remote_downloader
+    experimental_remote_failure_rate_threshold
+    experimental_remote_failure_window_interval
+    experimental_remote_output_service
+    experimental_remote_output_service_output_path_prefix
+    experimental_remote_scrubbing_config
+    experimental_repository_downloader_retries
+    experimental_sandbox_async_tree_delete_idle_threads
+    experimental_sandbox_enforce_resources_regexp
+    experimental_sandbox_limits experimental_sandbox_memory_limit_mb
+    experimental_scale_timeouts experimental_skyfocus_dump_keys
+    experimental_spawn_scheduler experimental_starlark_types_allowed_paths
+    experimental_strict_java_deps
+    experimental_thread_dump_action_execution_inactivity_duration
+    experimental_thread_dump_interval
+    experimental_total_worker_memory_limit_mb
+    experimental_ui_max_stdouterr_bytes experimental_windows_sandbox_path
+    experimental_worker_allowlist experimental_worker_memory_limit_mb
+    experimental_worker_metrics_poll_interval
+    experimental_worker_sandbox_inmemory_tracking
+    experimental_workspace_rules_log_file explain extra_classpath
+    extra_execution_platforms extra_toolchains failure_detail_out
+    fdo_instrument fdo_optimize fdo_prefetch_hints fdo_profile features
+    fission flag_alias flaky_test_attempts gc_churning_threshold
+    gc_churning_threshold_if_multiple_top_level_targets
+    gc_thrashing_limits gc_thrashing_threshold genrule_strategy
+    google_auth_scopes google_credentials grpc_keepalive_time
+    grpc_keepalive_timeout grte_top host_action_env host_compilation_mode
+    host_compiler host_conlyopt host_copt host_cpu host_cxxopt
+    host_features host_grte_top host_java_launcher host_javacopt
+    host_jvm_args host_jvm_debug host_jvmopt host_linkopt
+    host_macos_minimum_os host_per_file_copt host_platform
+    http_connector_attempts http_connector_retry_max_timeout
+    http_max_parallel_downloads http_timeout_scaling
+    incompatible_autoload_externally incompatible_disable_select_on
+    incompatible_disable_transitions_on inject_repository
+    instrumentation_filter invocation_id io_nice_level ios_minimum_os
+    ios_multi_cpus ios_sdk_version ios_signing_cert_name
+    ios_simulator_device ios_simulator_version j2objc_translation_flags
+    java_debug java_language_version java_launcher java_runtime_version
+    javacopt jobs jvm_heap_histogram_internal_object_pattern jvmopt
+    legacy_main_dex_list_generator linkopt loading_phase_threads
+    local_resources local_startup_timeout_secs
+    local_termination_grace_seconds local_test_jobs lockfile_mode logging
+    ltobackendopt ltoindexopt macos_cpus macos_minimum_os macos_qos_class
+    macos_sdk_version max_computation_steps max_config_changes_to_show
+    max_idle_secs max_test_output_bytes memory_profile
+    memory_profile_stable_heap_parameters memprof_profile
+    minimum_os_version modify_execution_info module_mirrors
+    nested_set_depth_limit objccopt optimizing_dexer output_base
+    output_filter output_groups output_user_root override_module
+    override_repository package_path per_file_copt per_file_ltobackendopt
+    persistent_android_dex_desugar persistent_android_resource_processor
+    persistent_multiplex_android_dex_desugar
+    persistent_multiplex_android_resource_processor
+    persistent_multiplex_android_tools platform_mappings platform_suffix
+    platforms plugin profile profiles_to_retain progress_report_interval
+    proguard_top propeller_optimize propeller_optimize_absolute_cc_profile
+    propeller_optimize_absolute_ld_profile proto_compiler
+    proto_profile_path proto_toolchain_for_cc proto_toolchain_for_j2objc
+    proto_toolchain_for_java proto_toolchain_for_javalite protocopt
+    python_native_rules_allowlist python_path registry
+    remote_analysis_json_log remote_build_event_upload
+    remote_bytestream_uri_prefix remote_cache remote_cache_header
+    remote_default_exec_properties remote_download_all
+    remote_download_minimal remote_download_outputs remote_download_regex
+    remote_download_symlink_template remote_download_toplevel
+    remote_downloader_header remote_exec_header remote_execution_priority
+    remote_executor remote_grpc_log remote_header remote_instance_name
+    remote_local_fallback_strategy remote_max_concurrency_per_connection
+    remote_max_connections remote_print_execution_messages remote_proxy
+    remote_result_cache_priority remote_retries remote_retry_max_delay
+    remote_timeout repo_contents_cache repo_contents_cache_gc_idle_delay
+    repo_contents_cache_gc_max_age repo_env repositories_without_autoloads
+    repository_cache run_env run_under runs_per_test
+    sandbox_add_mount_pair sandbox_base sandbox_block_path
+    sandbox_tmpfs_path sandbox_writable_path script_path
+    serialized_frontier_profile server_javabase server_jvm_out
+    shell_executable show_progress_rate_limit show_result
+    skyframe_high_water_mark_full_gc_drops_per_invocation
+    skyframe_high_water_mark_minor_gc_drops_per_invocation
+    skyframe_high_water_mark_threshold spawn_strategy starlark_cpu_profile
+    strategy strategy_regexp strict_proto_deps strict_public_imports strip
+    stripopt symlink_prefix target_environment target_pattern_file
+    test_arg test_env test_filter test_lang_filters test_output
+    test_result_expiration test_sharding_strategy test_size_filters
+    test_strategy test_summary test_tag_filters test_timeout
+    test_timeout_filters test_tmpdir tls_certificate
+    tls_client_certificate tls_client_key tool_java_language_version
+    tool_java_runtime_version tool_tag toolchain_resolution_debug
+    tvos_cpus tvos_minimum_os tvos_sdk_version ui_actions_shown
+    ui_event_filters vendor_dir visionos_cpus watchos_cpus
+    watchos_minimum_os watchos_sdk_version worker_extra_flag
+    worker_max_instances worker_max_multiplex_instances
+    workspace_status_command xbinary_fdo xcode_version
+    xcode_version_config
+)
+
+# Bazel boolean (no-value) flags, in their bare name form (the wrapper also
+# matches the `--[no]` / `--no` negations). These wrap as a single
+# `--bazel-flag=<flag>` token — they never consume the next argv element.
+# Generated from `bazel help build|test|run|startup_options --long` (the
+# `--[no]name` annotations) at Bazel 9.x.
+BAZEL_BOOL_FLAGS=(
+    allow_analysis_cache_discard allow_analysis_failures
+    allow_experimental_loads allow_one_action_on_resource_unavailable
+    android_databinding_use_androidx android_databinding_use_v3_4_args
+    android_resource_shrinking announce_rc apple_generate_dsym
+    attempt_to_print_relative_paths autodetect_server_javabase batch
+    batch_cpu_scheduling bes_check_preceding_lifecycle_events
+    bes_lifecycle_events block_for_lock
+    break_build_on_parallel_dex2oat_failure build
+    build_event_binary_file_path_conversion
+    build_event_json_file_path_conversion build_event_publish_all_actions
+    build_event_text_file_path_conversion build_manual_tests
+    build_runfile_links build_runfile_manifests build_test_dwp
+    build_tests_only cache_test_results cc_dotd_files cc_include_scanning
+    check_bzl_visibility check_tests_up_to_date check_up_to_date
+    check_visibility client_debug collect_code_coverage
+    compile_one_dependency debug_spawn_scheduler desugar_for_android
+    desugar_java8_libs device_debug_entitlements discard_analysis_cache
+    enable_platform_specific_config
+    enable_propeller_optimize_absolute_paths
+    enable_remaining_fdo_absolute_paths enable_runfiles enforce_constraints
+    execution_log_sort expand_test_suites
+    experimental_android_compress_java_resources
+    experimental_android_databinding_v2
+    experimental_android_resource_shrinking
+    experimental_android_rewrite_dexes_with_rex
+    experimental_android_use_parallel_dex2oat experimental_async_execution
+    experimental_bep_target_summary
+    experimental_build_event_expand_filesets experimental_bzl_visibility
+    experimental_cancel_concurrent_tests experimental_cc_shared_library
+    experimental_check_desugar_deps
+    experimental_collect_code_coverage_for_generated_files
+    experimental_collect_load_average_in_profiler
+    experimental_collect_pressure_stall_indicators
+    experimental_collect_resource_estimation
+    experimental_collect_skyframe_counts_in_profiler
+    experimental_collect_system_network_usage
+    experimental_collect_worker_data_in_profiler
+    experimental_convenience_symlinks
+    experimental_convenience_symlinks_bep_event
+    experimental_cpu_load_scheduling experimental_disable_external_package
+    experimental_docker_privileged
+    experimental_docker_use_customized_images experimental_docker_verbose
+    experimental_dormant_deps experimental_dynamic_exclude_tools
+    experimental_enable_android_migration_apis
+    experimental_enable_docker_sandbox
+    experimental_enable_first_class_macros experimental_enable_scl_dialect
+    experimental_enable_skyfocus experimental_enable_starlark_set
+    experimental_enable_thread_dump
+    experimental_enforce_transitive_visibility
+    experimental_extra_action_top_level_only
+    experimental_fetch_all_coverage_outputs
+    experimental_filter_library_jar_with_program_jar
+    experimental_frontier_violation_verbose experimental_generate_llvm_lcov
+    experimental_google_legacy_api
+    experimental_include_xcode_execution_requirements
+    experimental_inmemory_dotd_files experimental_inmemory_jdeps_files
+    experimental_inmemory_sandbox_stashes
+    experimental_isolated_extension_usages
+    experimental_materialize_param_files_directly experimental_omitfp
+    experimental_persistent_aar_extractor
+    experimental_platform_in_output_dir experimental_platforms_api
+    experimental_prefer_mutual_xcode
+    experimental_profile_include_primary_output
+    experimental_profile_include_target_configuration
+    experimental_profile_include_target_label
+    experimental_proto_descriptor_sets_include_source_info
+    experimental_py_binaries_include_label
+    experimental_record_metrics_for_all_mnemonics
+    experimental_record_skyframe_metrics
+    experimental_remotable_source_manifests
+    experimental_remote_cache_lease_extension
+    experimental_remote_discard_merkle_trees
+    experimental_remote_downloader_local_fallback
+    experimental_remote_downloader_propagate_credentials
+    experimental_remote_mark_tool_inputs
+    experimental_remote_repo_contents_cache
+    experimental_remote_require_cached experimental_repo_remote_exec
+    experimental_repository_cache_hardlinks
+    experimental_repository_ctx_execute_wasm
+    experimental_retain_test_configuration_across_testonly
+    experimental_rule_extension_api
+    experimental_run_android_lint_on_java_rules
+    experimental_run_bep_event_include_residue
+    experimental_run_in_user_cgroup
+    experimental_sandboxfs_map_symlink_targets
+    experimental_save_feature_state experimental_shrink_worker_pool
+    experimental_sibling_repository_layout
+    experimental_single_package_toolchain_binding
+    experimental_skyfocus_dump_post_gc_stats
+    experimental_split_coverage_postprocessing
+    experimental_starlark_type_checking experimental_starlark_type_syntax
+    experimental_stream_log_file_uploads experimental_strict_fileset_output
+    experimental_strict_repo_env
+    experimental_unsupported_and_brittle_include_scanning
+    experimental_use_hermetic_linux_sandbox experimental_use_llvm_covmap
+    experimental_use_platforms_in_output_dir_legacy_heuristic
+    experimental_use_validation_aspect experimental_use_windows_sandbox
+    experimental_windows_watchfs experimental_worker_cancellation
+    experimental_worker_multiplex_sandboxing
+    experimental_worker_sandbox_hardening
+    experimental_worker_strict_flagfiles explicit_java_test_deps
+    fat_apk_hwasan fetch force_pic force_starlark_stack_trace
+    generate_json_trace_profile google_default_credentials
+    guard_against_concurrent_changes heap_dump_on_oom
+    heuristically_drop_nodes home_rc idle_server_tasks ignore_all_rc_files
+    ignore_dev_dependency incompatible_allow_tags_propagation
+    incompatible_always_check_depset_elements
+    incompatible_always_include_files_in_data incompatible_auto_exec_groups
+    incompatible_bazel_test_exec_run_under
+    incompatible_builtin_objc_strip_action
+    incompatible_check_sharding_support
+    incompatible_check_testonly_for_output_files
+    incompatible_compact_repo_mapping_manifest
+    incompatible_config_setting_private_default_visibility
+    incompatible_default_to_explicit_init_py
+    incompatible_disable_autoloads_in_main_repo
+    incompatible_disable_native_android_rules
+    incompatible_disable_native_apple_binary_rule
+    incompatible_disable_non_executable_java_binary
+    incompatible_disable_objc_library_transition
+    incompatible_disable_starlark_host_transitions
+    incompatible_disable_target_default_provider_fields
+    incompatible_disallow_ctx_resolve_tools
+    incompatible_disallow_empty_glob
+    incompatible_disallow_sdk_frameworks_attributes
+    incompatible_do_not_split_linking_cmdline
+    incompatible_dont_enable_host_nonhost_crosstool_features
+    incompatible_enable_apple_toolchain_resolution
+    incompatible_enable_deprecated_label_apis
+    incompatible_enable_proto_toolchain_resolution
+    incompatible_enforce_config_setting_visibility
+    incompatible_enforce_starlark_utf8
+    incompatible_exclusive_test_sandboxed
+    incompatible_fail_on_unknown_attributes
+    incompatible_filegroup_runfiles_for_data
+    incompatible_fix_package_group_reporoot_syntax
+    incompatible_locations_prefers_executable
+    incompatible_make_thinlto_command_lines_standalone
+    incompatible_merge_genfiles_directory
+    incompatible_modify_execution_info_additive
+    incompatible_no_attr_license incompatible_no_implicit_file_export
+    incompatible_no_implicit_watch_label incompatible_no_rule_outputs_param
+    incompatible_objc_alwayslink_by_default
+    incompatible_package_group_has_public_syntax
+    incompatible_python_disallow_native_rules
+    incompatible_remote_local_fallback_for_remote_cache
+    incompatible_remove_legacy_whole_archive
+    incompatible_repo_env_ignores_action_env
+    incompatible_require_ctx_in_configure_features
+    incompatible_resolve_select_keys_eagerly
+    incompatible_run_shell_command_string
+    incompatible_simplify_unconditional_selects_in_rule_attrs
+    incompatible_stop_exporting_build_file_path
+    incompatible_stop_exporting_language_modules
+    incompatible_strict_action_env incompatible_strip_executable_safely
+    incompatible_target_cpu_from_platform
+    incompatible_unambiguous_label_stringification
+    incompatible_use_cc_configure_from_rules_cc
+    incompatible_use_new_cgroup_implementation
+    incompatible_validate_top_level_header_inclusions incremental_dexing
+    instrument_test_targets interface_shared_objects
+    internal_spawn_scheduler ios_memleaks java_deps java_header_compilation
+    keep_going keep_state_after_build legacy_important_outputs
+    legacy_whole_archive materialize_param_files objc_debug_with_
+    objc_enable_binary_stripping objc_generate_linkmap
+    objc_use_dotd_pruning omit_run_args
+    one_version_enforcement_on_java_tests portable_paths preemptible
+    print_relative_test_log_paths process_headers_in_dependencies
+    progress_in_terminal_title proto_profile quiet
+    record_full_profiler_data redirect_local_instrumentation_output_writes
+    remote_accept_cached remote_cache_async remote_cache_compression
+    remote_local_fallback remote_upload_local_results
+    remote_verify_downloads repository_disable_download
+    reuse_sandbox_directories run run_in_cwd run_validations
+    runs_per_test_detects_flakes sandbox_debug
+    sandbox_default_allow_network sandbox_enable_loopback_device
+    sandbox_explicit_pseudoterminal sandbox_fake_hostname
+    sandbox_fake_username save_temps share_native_deps
+    show_loading_progress show_progress show_timestamps
+    shutdown_on_low_sys_mem skip_incompatible_explicit_targets slim_profile
+    stamp strict_filesets strict_system_includes subcommands system_rc
+    test_keep_going test_runner_fail_fast test_verbose_timeout_warnings
+    track_incremental_state trim_test_configuration unlimit_coredumps
+    use_ijars use_platforms_in_apple_crosstool_transition
+    use_target_platform_for_tests verbose_failures verbose_test_summary
+    verbose_visibility_errors watchfs windows_enable_symlinks
+    worker_multiplex worker_quit_after_build worker_sandboxing
+    worker_verbose workspace_rc write_command_log
+    zip_undeclared_test_outputs
+)
+
+# Bazel short-flag abbreviations that take a value, in their bare `-x` form
+# (e.g. `-c opt` → `--compilation_mode=opt`, `-j 8` → `--jobs=8`). Like their
+# long counterparts these consume the following argv element. `-x=value`
+# carries its value in one token already and needs no entry here.
+BAZEL_SHORT_VALUE_FLAGS=(
+    -c -j
+)
+
+# Bazel boolean short-flag abbreviations (`-k` keep_going, `-s` subcommands,
+# `-t` cache_test_results). These wrap as a single token, never consuming the
+# next arg.
+BAZEL_SHORT_BOOL_FLAGS=(
+    -k -s -t
+)
+
+# Lookup tables for the membership checks below. We use space-padded strings
+# rather than associative arrays so the wrapper runs on the bash 3.2 that
+# macOS still ships at /bin/bash. The check is O(n) but n is small and bash's
+# `case` pattern match is fast enough that it doesn't show up in any profile.
+#
+# Membership test: `case " $TABLE " in *" $needle "*) hit ;; esac`
+BAZEL_VALUE_FLAGS_STR=" ${BAZEL_VALUE_FLAGS[*]} "
+BAZEL_BOOL_FLAGS_STR=" ${BAZEL_BOOL_FLAGS[*]} "
+BAZEL_SHORT_VALUE_FLAGS_STR=" ${BAZEL_SHORT_VALUE_FLAGS[*]} "
+BAZEL_SHORT_BOOL_FLAGS_STR=" ${BAZEL_SHORT_BOOL_FLAGS[*]} "
+ASPECT_VERBS_WITH_BAZEL_FLAGS_STR=" ${ASPECT_VERBS_WITH_BAZEL_FLAGS[*]} "
+BAZEL_VERBS_STR=" ${BAZEL_VERBS[*]} "
+
+# --- Helpers --------------------------------------------------------------
+
+# Print a grey trace line on stderr showing what the wrapper is about to exec.
+#
+# Usage: trace_exec <category> <argv...>
+#
+# <category> is "aspect" when routing to aspect (the interesting case — the
+# wrapper rewrote something) or "bazel" when forwarding straight to bazel
+# (uninteresting; would be visually noisy on `bazel info`, `bazel query`,
+# etc.). The trace prints by default for the "aspect" category and is
+# suppressed for "bazel" unless ASPECT_WRAPPER_TRACE=1 forces it on.
+#
+# Suppressed entirely when stderr is not a TTY (so $(...) capture and CI
+# logs stay clean), unless ASPECT_WRAPPER_TRACE=1. Always suppressed when
+# ASPECT_WRAPPER_QUIET is set.
+trace_exec() {
+    local category="$1"; shift
+    [[ -n "${ASPECT_WRAPPER_QUIET:-}" ]] && return 0
+    local force="${ASPECT_WRAPPER_TRACE:-}"
+    # Pure bazel forwarding: silent unless explicitly forced.
+    if [[ "$category" == "bazel" && -z "$force" ]]; then
+        return 0
+    fi
+    # Aspect routing: silent under non-TTY stderr unless forced.
+    if [[ -z "$force" && ! -t 2 ]]; then
+        return 0
+    fi
+    local grey="" reset=""
+    if [[ -t 2 || -n "$force" ]]; then
+        grey=$'\033[38;5;244m'
+        reset=$'\033[0m'
+    fi
+    # Quote each arg if it contains anything outside the shell-safe character
+    # set, so the trace line could be copy-pasted back into a terminal.
+    local quoted=""
+    local a stripped
+    for a in "$@"; do
+        # Remove every safe character; whatever remains is "needs quoting".
+        stripped="${a//[A-Za-z0-9._\/=:@,+-]/}"
+        if [[ -z "$a" || -n "$stripped" ]]; then
+            # shellcheck disable=SC2001
+            quoted+=" '$(echo "$a" | sed "s/'/'\\\\''/g")'"
+        else
+            quoted+=" $a"
+        fi
+    done
+    printf '%s[tools/bazel]%s%s\n' "$grey" "$quoted" "$reset" >&2
+}
+
+# Locate the real bazel binary. Bazelisk sets BAZEL_REAL when it execs this
+# wrapper; a direct or aspect-child invocation has no BAZEL_REAL. So prefer
+# BAZEL_REAL, else scan PATH for the next `bazel` that isn't this wrapper.
+resolve_bazel_real() {
+    if [[ -n "${BAZEL_REAL:-}" && -x "$BAZEL_REAL" ]]; then
+        echo "$BAZEL_REAL"
+        return
+    fi
+    local self
+    self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+    local candidate
+    while IFS= read -r candidate; do
+        if [[ "$(cd "$(dirname "$candidate")" && pwd)/$(basename "$candidate")" != "$self" ]]; then
+            echo "$candidate"
+            return
+        fi
+    done < <(type -aP bazel 2>/dev/null || true)
+    echo "ERROR: tools/bazel: cannot find a real bazel binary on PATH (and BAZEL_REAL is unset)" >&2
+    exit 127
+}
+
+contains() {
+    local needle="$1"
+    shift
+    local item
+    for item in "$@"; do
+        [[ "$item" == "$needle" ]] && return 0
+    done
+    return 1
+}
+
+# True when the `aspect` CLI is on PATH. Routing to aspect only matters when
+# it's actually installed; see aspect_missing_hint.
+aspect_on_path() {
+    command -v aspect >/dev/null 2>&1
+}
+
+# Explain that the given command needs the (missing) `aspect` CLI and print
+# install instructions. Leads with *why* so the message isn't a mystery: the
+# presence of this wrapper means `bazel <verb>` is wired to run through aspect.
+#
+# Usage: aspect_missing_hint <verb> [fallback_note]
+aspect_missing_hint() {
+    local verb="$1" fallback_note="${2:-}"
+    cat >&2 <<EOF
+[tools/bazel] \`bazel ${verb}\` runs through the Aspect CLI (\`aspect\`), which is not on your PATH.
+
+  Install it with:
+
+    curl -fsSL https://install.aspect.build | bash
+
+  or see https://docs.aspect.build/cli/install
+EOF
+    [[ -n "$fallback_note" ]] && echo "  $fallback_note" >&2
+    return 0
+}
+
+# Walk a flag list and classify each token into the OUT array. Bazel-native
+# flags (recognized by name in the embedded BAZEL_*_FLAGS lists) are wrapped
+# with WRAPPER_PREFIX (--bazel-flag= or --bazel-startup-flag=); everything
+# else — aspect's own flags, and anything we don't recognize — passes through
+# to aspect unchanged.
+#
+# Usage:  classify_flags <wrapper_prefix> <out_array_name> <args...>
+#
+# Writes the rewritten tokens to the global array named by <out_array_name>
+# (the caller declares it; we append via `eval` because bash 3.2 has no
+# nameref support — see https://wiki.bash-hackers.org/scripting/bashchanges).
+#
+# Behavior per token:
+#   --                                → stop classifying; remainder passes through
+#   non-flag (target, etc.)           → pass through
+#   --name=value / -x=value where name
+#     is a known bazel flag           → push "<prefix><token>"
+#   --name / -x where name is a known
+#     bazel value-taking flag         → consume next token N, push
+#                                       "<prefix>--name=N" (or "<prefix>-x=N")
+#   --name / -x where name is a known
+#     bazel boolean flag (incl. no-)  → push "<prefix><token>"
+#   anything else (aspect/unknown)    → pass through unchanged
+#
+# Append one element to the array named by $1. Bash 3.2 has no namerefs, so
+# the append goes through `eval`; this helper keeps that idiom in one place.
+array_push() {
+    eval "$1+=(\"\$2\")"
+}
+
+classify_flags() {
+    local prefix="$1"
+    local out_name="$2"
+    shift 2
+    local tokens=("$@")
+    local n=${#tokens[@]}
+    local i=0 passthrough=0
+    local t body bare neg
+    while [[ $i -lt $n ]]; do
+        t="${tokens[$i]}"
+        i=$((i + 1))
+
+        # Passthrough mode (after `--`) and non-flags emit verbatim.
+        if [[ $passthrough -eq 1 || "$t" != -* ]]; then
+            array_push "$out_name" "$t"; continue
+        fi
+        if [[ "$t" == "--" ]]; then
+            passthrough=1
+            array_push "$out_name" "$t"; continue
+        fi
+
+        # `bare` is the flag name without leading dashes or =value (keeping the
+        # short `-x` form so short flags match separately). `neg` is the bare
+        # name with a `no` boolean-negation prefix stripped, so `--nokeep_going`
+        # matches the boolean `keep_going`. No bazel flag name starts with `no`,
+        # so stripping never produces a false match.
+        body="${t#--}"
+        bare="${body%%=*}"
+        neg="${bare#no}"
+
+        # Space-form value flag (long or short): consume the next token and glue
+        # with `=` (`--config ci` → `--config=ci`, `-c opt` → `-c=opt`). The
+        # `=value` form already carries its value and falls through to the wrap.
+        if [[ "$body" != *=* && $i -lt $n ]]; then
+            case "$BAZEL_VALUE_FLAGS_STR" in *" $bare "*)
+                array_push "$out_name" "${prefix}--${bare}=${tokens[$i]}"; i=$((i + 1)); continue ;;
+            esac
+            case "$BAZEL_SHORT_VALUE_FLAGS_STR" in *" $bare "*)
+                array_push "$out_name" "${prefix}${bare}=${tokens[$i]}"; i=$((i + 1)); continue ;;
+            esac
+        fi
+
+        # Any other recognized bazel flag — value flag in `=value` form (or with
+        # no value left to consume), boolean (or its `no` negation), or short
+        # flag — wraps as a single token.
+        case "$BAZEL_VALUE_FLAGS_STR$BAZEL_SHORT_VALUE_FLAGS_STR$BAZEL_SHORT_BOOL_FLAGS_STR" in *" $bare "*)
+            array_push "$out_name" "${prefix}${t}"; continue ;;
+        esac
+        case "$BAZEL_BOOL_FLAGS_STR" in *" $bare "* | *" $neg "*)
+            array_push "$out_name" "${prefix}${t}"; continue ;;
+        esac
+
+        # Unrecognized flag: pass through to aspect unchanged.
+        array_push "$out_name" "$t"
+    done
+}
+
+# --- Dispatch -------------------------------------------------------------
+
+BAZEL_REAL_BIN="$(resolve_bazel_real)"
+
+# Skip mode: forward everything straight to vanilla bazel, untouched — no verb
+# parsing, no list checks, no flag rewriting. A total escape hatch for
+# developers who want a 1:1 bazel experience locally; reach for `aspect <verb>`
+# directly when you want the wrapped behavior.
+if [[ -n "${ASPECT_WRAPPER_SKIP:-}" ]]; then
+    trace_exec bazel "$BAZEL_REAL_BIN" "$@"
+    exec "$BAZEL_REAL_BIN" "$@"
+fi
+
+# Verb-disambiguation set: "is this bare token the verb, or the value of a
+# preceding space-separated flag?" Derived from the config lists — bazel
+# verbs plus the aspect verbs we route with rewriting. Best-effort: custom
+# aspect verbs (arbitrary .axl task names) won't appear here, but they don't
+# need to — the fallback below treats any bare token NOT preceded by a
+# value-taking flag as the verb, which covers `bazel mytask …`. The set only
+# breaks the ambiguous `bazel --some_value_flag mytask` case in mytask's
+# favor; without it that custom verb would be mistaken for the flag's value.
+KNOWN_VERBS_STR="${BAZEL_VERBS_STR}${ASPECT_VERBS_WITH_BAZEL_FLAGS_STR}"
+
+# Pre-verb walk. Anything flag-shaped is collected. Bare tokens (no leading
+# `-`) are either the verb or the value of a preceding space-separated flag;
+# we disambiguate by checking KNOWN_VERBS_STR. `--` before any verb is
+# treated as "no verb" — forward the whole thing to bazel verbatim.
+pre_verb=()
+verb=""
+verb_idx=-1
+args=("$@")
+n_args=${#args[@]}
+prev_was_value_taking=0
+i=0
+while [[ $i -lt $n_args ]]; do
+    arg="${args[$i]}"
+    if [[ "$arg" == "--" ]]; then
+        break
+    fi
+    if [[ "$arg" == -* ]]; then
+        pre_verb+=("$arg")
+        # Could this flag consume the next bare token as its value? Only
+        # space-form bazel value flags (long or short) do.
+        body="${arg#--}"
+        name="${body%%=*}"
+        if [[ "$body" == *=* ]]; then
+            prev_was_value_taking=0
+        else
+            case "$BAZEL_VALUE_FLAGS_STR$BAZEL_SHORT_VALUE_FLAGS_STR" in
+                *" $name "*) prev_was_value_taking=1 ;;
+                *) prev_was_value_taking=0 ;;
+            esac
+        fi
+        i=$((i + 1))
+        continue
+    fi
+    # Bare token. If it's a known verb, OR if the previous arg wasn't a
+    # value-taker, treat it as the verb. Otherwise consume it as the
+    # previous flag's value and keep walking.
+    is_known_verb=0
+    case "$KNOWN_VERBS_STR" in
+        *" $arg "*) is_known_verb=1 ;;
+    esac
+    if [[ $is_known_verb -eq 1 || $prev_was_value_taking -eq 0 ]]; then
+        verb="$arg"
+        verb_idx=$i
+        break
+    fi
+    pre_verb+=("$arg")
+    prev_was_value_taking=0
+    i=$((i + 1))
+done
+
+# No verb: forward verbatim to bazel.
+if [[ -z "$verb" ]]; then
+    trace_exec bazel "$BAZEL_REAL_BIN" "$@"
+    exec "$BAZEL_REAL_BIN" "$@"
+fi
+
+# Verb routed to aspect WITH bazel-flag rewriting (the verbs aspect wraps plus
+# the aspect verbs that drive bazel — see ASPECT_VERBS_WITH_BAZEL_FLAGS).
+# Pre-verb bazel flags become --bazel-startup-flag=; post-verb bazel flags
+# become --bazel-flag=.
+if contains "$verb" "${ASPECT_VERBS_WITH_BAZEL_FLAGS[@]}"; then
+    # No aspect on PATH: nudge toward installing it. If the verb is also a real
+    # bazel command (build/test/run/coverage) fall back to vanilla bazel so the
+    # command still runs; otherwise (lint/format/…) bazel can't run it, so stop.
+    if ! aspect_on_path; then
+        if contains "$verb" "${BAZEL_VERBS[@]}"; then
+            aspect_missing_hint "$verb" "Running it through vanilla bazel for now."
+            trace_exec bazel "$BAZEL_REAL_BIN" "$@"
+            exec "$BAZEL_REAL_BIN" "$@"
+        fi
+        aspect_missing_hint "$verb"
+        exit 127
+    fi
+    pre_for_aspect=()
+    if [[ ${#pre_verb[@]} -gt 0 ]]; then
+        classify_flags "--bazel-startup-flag=" pre_for_aspect "${pre_verb[@]}"
+    fi
+    post=("${@:$((verb_idx + 2))}")
+    post_rewritten=()
+    if [[ ${#post[@]} -gt 0 ]]; then
+        classify_flags "--bazel-flag=" post_rewritten "${post[@]}"
+    fi
+    # Aspect accepts --bazel-startup-flag as a POST-verb flag. Move pre-verb
+    # startup-flag forwards into the post-verb position; aspect global flags
+    # (--task-key, --timing, …) stay in front of the verb.
+    #
+    # The `${arr[@]+"${arr[@]}"}` form expands to nothing when the array is
+    # empty without tripping `set -u` on the bash 3.2 that macOS ships.
+    pre_globals=()
+    pre_bazel_starts=()
+    for arg in ${pre_for_aspect[@]+"${pre_for_aspect[@]}"}; do
+        if [[ "$arg" == --bazel-startup-flag=* ]]; then
+            pre_bazel_starts+=("$arg")
+        else
+            pre_globals+=("$arg")
+        fi
+    done
+    export BAZEL_REAL="$BAZEL_REAL_BIN"
+    set -- ${pre_globals[@]+"${pre_globals[@]}"} "$verb" \
+        ${pre_bazel_starts[@]+"${pre_bazel_starts[@]}"} \
+        ${post_rewritten[@]+"${post_rewritten[@]}"}
+    trace_exec aspect aspect "$@"
+    exec aspect "$@"
+fi
+
+# Other bazel verb (query, info, clean, mod, …): vanilla bazel, untouched.
+if contains "$verb" "${BAZEL_VERBS[@]}"; then
+    trace_exec bazel "$BAZEL_REAL_BIN" "$@"
+    exec "$BAZEL_REAL_BIN" "$@"
+fi
+
+# Unknown verb: a custom aspect task (.axl) with an arbitrary name. Route to
+# aspect and forward args verbatim — we don't rewrite bazel flags because the
+# task may define its own flags, and it isn't in ASPECT_VERBS_WITH_BAZEL_FLAGS.
+# Bazel has no such command, so if aspect is missing there's no fallback.
+if ! aspect_on_path; then
+    aspect_missing_hint "$verb"
+    exit 127
+fi
+export BAZEL_REAL="$BAZEL_REAL_BIN"
+trace_exec aspect aspect "$@"
+exec aspect "$@"
