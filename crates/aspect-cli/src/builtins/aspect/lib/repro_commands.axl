@@ -469,6 +469,49 @@ def has_tools_bazel_wrapper(ctx) -> bool:
         return False
     return _TOOLS_BAZEL_WRAPPER_MARKER in ctx.std.fs.try_read_to_string(path)
 
+def rehydrate_commands(commands):
+    """Normalize a `repro_commands` / `fix_commands` list to
+    `[ReproFixCommand, ...]`.
+
+    Producers write `ReproFixCommand` records into the lists, but the
+    GitHub PR-comment publisher round-trips those lists through JSON
+    (per-task artifacts + the in-comment state block). After
+    `json.decode` each entry is a plain dict, which then fails
+    record-attribute access (`c.command`) downstream. Call this at the
+    deserialization boundary to convert the dicts back to records.
+
+    Idempotent: entries that are already records pass through
+    unchanged, so it's safe to apply this on every read without
+    knowing whether a particular list has been round-tripped.
+
+    Schema-tolerant: drops entries that aren't dicts or records, and
+    falls back to `""` for missing optional fields (`description`,
+    `slug`) so a state block written by an older aspect-cli release
+    (predating the `slug` field) still round-trips cleanly. Entries
+    that lack the required `command` field are also dropped.
+
+    `None` / empty input → `[]`.
+    """
+    if not commands:
+        return []
+    out = []
+    for c in commands:
+        if type(c) == "record":
+            out.append(c)
+            continue
+        if type(c) != "dict":
+            continue
+        cmd = c.get("command")
+        if type(cmd) != "string" or not cmd:
+            continue
+        out.append(ReproFixCommand(
+            command = cmd,
+            description = c.get("description") or "",
+            slug = c.get("slug") or "",
+            _hooked = bool(c.get("_hooked", False)),
+        ))
+    return out
+
 # ── CLI rendering ─────────────────────────────────────────────────────
 
 def print_repro_and_fix(std, data, status):

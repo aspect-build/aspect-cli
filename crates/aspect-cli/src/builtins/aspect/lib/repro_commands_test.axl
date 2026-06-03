@@ -7,7 +7,7 @@ tests on `Arguments`.
 """
 
 load("./lifecycle.axl", "REPRO_FIX_ACCEPT", "REPRO_FIX_REJECT", "ReproFixCommand", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "repro_fix_replace")
-load("./repro_commands.axl", "build_bazel_command", "explicit_flags", "has_tools_bazel_wrapper", "repro_prefix", "subdir_prefix")
+load("./repro_commands.axl", "build_bazel_command", "explicit_flags", "has_tools_bazel_wrapper", "rehydrate_commands", "repro_prefix", "subdir_prefix")
 
 def _eq(label, got, want):
     if got != want:
@@ -171,7 +171,6 @@ def _test_repro_prefix_no_git_root_at_aspect_root(_ctx):
     fake = _fake_env("/project", None, aspect_root = "/project")
     _eq("at aspect_root, no git → empty", repro_prefix(fake), "")
 
-# ---------------------------------------------------------------------------
 # has_tools_bazel_wrapper — env-first, file-marker fallback
 # ---------------------------------------------------------------------------
 
@@ -261,6 +260,75 @@ def _test_wrapper_empty_file(_ctx):
         files = {"/repo/tools/bazel": (0, "")},
     )
     _eq("empty file → False", has_tools_bazel_wrapper(fake), False)
+
+# ---------------------------------------------------------------------------
+# rehydrate_commands — JSON round-trip recovery for repro/fix lists
+# ---------------------------------------------------------------------------
+
+def _test_rehydrate_dicts_become_records(_ctx):
+    out = rehydrate_commands([
+        {"command": "aspect lint", "description": "", "slug": "lint-repro"},
+        {"command": "aspect lint --fix", "description": "vanilla bazel", "slug": "lint-fix"},
+    ])
+    _eq("two entries rehydrated", len(out), 2)
+    _eq("type[0]", type(out[0]), "record")
+    _eq("command[0]", out[0].command, "aspect lint")
+    _eq("slug[1]", out[1].slug, "lint-fix")
+    _eq("description[1]", out[1].description, "vanilla bazel")
+
+def _test_rehydrate_passthrough_records(_ctx):
+    """Already-record entries pass through unchanged (idempotence)."""
+    rec = ReproFixCommand(command = "aspect build", slug = "build-repro")
+    out = rehydrate_commands([rec])
+    _eq("record passthrough preserves identity", out[0], rec)
+
+def _test_rehydrate_mixed_dicts_and_records(_ctx):
+    rec = ReproFixCommand(command = "aspect run //x", slug = "x-fix")
+    out = rehydrate_commands([rec, {"command": "aspect run //y", "slug": "y-fix"}])
+    _eq("mixed input length", len(out), 2)
+    _eq("mixed[0] is the record", out[0].command, "aspect run //x")
+    _eq("mixed[1] rehydrated", out[1].command, "aspect run //y")
+
+def _test_rehydrate_empty_inputs(_ctx):
+    _eq("None → []", rehydrate_commands(None), [])
+    _eq("empty list → []", rehydrate_commands([]), [])
+
+def _test_rehydrate_drops_non_dict_non_record(_ctx):
+    """Garbage entries (string, int, None) are dropped, valid ones kept."""
+    out = rehydrate_commands([
+        None,
+        "not-a-command",
+        42,
+        {"command": "aspect lint", "slug": "lint-fix"},
+    ])
+    _eq("only the valid dict survives", len(out), 1)
+    _eq("survivor command", out[0].command, "aspect lint")
+
+def _test_rehydrate_drops_missing_command(_ctx):
+    """Dicts without a usable `command` field are dropped."""
+    out = rehydrate_commands([
+        {"command": "", "slug": "lint-fix"},
+        {"slug": "lint-fix"},
+        {"command": None, "slug": "lint-fix"},
+        {"command": "aspect lint --fix", "slug": "lint-fix"},
+    ])
+    _eq("only the well-formed dict survives", len(out), 1)
+    _eq("survivor command", out[0].command, "aspect lint --fix")
+
+def _test_rehydrate_defaults_missing_optional_fields(_ctx):
+    """Legacy state-block entries (predating the slug field) still round-trip."""
+    out = rehydrate_commands([{"command": "aspect lint"}])
+    _eq("legacy entry survives", len(out), 1)
+    _eq("missing description defaults to ''", out[0].description, "")
+    _eq("missing slug defaults to ''", out[0].slug, "")
+    _eq("missing _hooked defaults to False", out[0]._hooked, False)
+
+def _test_rehydrate_preserves_hooked_flag(_ctx):
+    """`_hooked = True` from a serialized state block must survive
+    rehydration so dispatch_task_update doesn't re-run user hooks on
+    already-hooked entries."""
+    out = rehydrate_commands([{"command": "aspect lint", "slug": "lint-fix", "_hooked": True}])
+    _eq("_hooked carried through", out[0]._hooked, True)
 
 def _test_bazel_build_with_targets(_ctx):
     _eq(
@@ -897,6 +965,14 @@ _UNIT_TESTS = [
     _test_wrapper_oversized_file_skipped,
     _test_wrapper_no_bazel_root,
     _test_wrapper_empty_file,
+    _test_rehydrate_dicts_become_records,
+    _test_rehydrate_passthrough_records,
+    _test_rehydrate_mixed_dicts_and_records,
+    _test_rehydrate_empty_inputs,
+    _test_rehydrate_drops_non_dict_non_record,
+    _test_rehydrate_drops_missing_command,
+    _test_rehydrate_defaults_missing_optional_fields,
+    _test_rehydrate_preserves_hooked_flag,
     _test_bazel_build_with_targets,
     _test_bazel_test_with_targets,
     _test_bazel_run_single_target,
