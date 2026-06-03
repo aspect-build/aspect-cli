@@ -60,7 +60,7 @@ buildifier = format.alias(
         # buildifier_binary is a symlink to the raw Go binary; it does not
         # switch to $BUILD_WORKING_DIRECTORY on its own, so we run it in
         # the user's cwd to make relative paths resolve.
-        "run_in_cwd": True,
+        "run_in": "cwd",
         "include_patterns": [
             "**/BUCK",
             "**/BUILD",
@@ -92,21 +92,6 @@ def _buildifier_repro_fix(ctx: TaskContext, info: ReproFixInfo) -> ReproFixSugge
     return repro_fix_replace(
         command = info.command.replace("aspect buildifier", "bazel buildifier", 1),
     )
-
-def _drop_vanilla_bazel_except_build(ctx: TaskContext, info: ReproFixInfo) -> ReproFixSuggestion:
-    """Drop every vanilla-bazel alternate except `build`'s.
-
-    Built-in tasks tack on a vanilla `bazel run <target> ...` next to
-    their `aspect ...` repros/fixes for users without the Aspect CLI on
-    PATH. In this workspace contributors always have either `aspect` or
-    the `tools/bazel` wrapper, so the alternate is noise. Keeping the
-    `build` task's variant lets us continue to dogfood the rendering of
-    that alternate end-to-end. Matches by suggestion-slug suffix so any
-    new vanilla-bazel alternates added later are covered automatically.
-    """
-    if not info.slug.endswith("-vanilla-bazel") or info.task_name == "build":
-        return REPRO_FIX_ACCEPT
-    return REPRO_FIX_REJECT
 
 def _shorten_delivery_local_preview(ctx: TaskContext, info: ReproFixInfo) -> ReproFixSuggestion:
     """Shorten the delivery local-preview description.
@@ -187,7 +172,6 @@ def config(ctx: ConfigContext):
     # buildifier rewrite has nothing to undo on already-renamed entries.
     lifecycle = ctx.traits[TaskLifecycleTrait]
     lifecycle.repro_fix_suggestion.append(_buildifier_repro_fix)
-    lifecycle.repro_fix_suggestion.append(_drop_vanilla_bazel_except_build)
     lifecycle.repro_fix_suggestion.append(_shorten_delivery_local_preview)
 
     # Template snapshot tests — renders bazel_results templates across failure modes.

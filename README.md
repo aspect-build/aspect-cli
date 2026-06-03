@@ -43,7 +43,7 @@ buildifier = format.alias(
     defaults = {
         "formatter_target": "@buildifier_prebuilt//buildifier",
         "formatter_args_for_tree_walk": ["-r", "."],
-        "run_in_cwd": True,
+        "run_in": "cwd",
         "include_patterns": [
             "**/BUILD",
             "**/BUILD.bazel",

@@ -7,7 +7,7 @@ tests on `Arguments`.
 """
 
 load("./lifecycle.axl", "REPRO_FIX_ACCEPT", "REPRO_FIX_REJECT", "ReproFixCommand", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "repro_fix_replace")
-load("./repro_commands.axl", "build_bazel_command", "explicit_flags", "repro_prefix", "subdir_prefix")
+load("./repro_commands.axl", "build_bazel_command", "explicit_flags", "has_tools_bazel_wrapper", "repro_prefix", "subdir_prefix")
 
 def _eq(label, got, want):
     if got != want:
@@ -170,6 +170,97 @@ def _test_repro_prefix_no_git_root_falls_back_to_aspect_root(_ctx):
 def _test_repro_prefix_no_git_root_at_aspect_root(_ctx):
     fake = _fake_env("/project", None, aspect_root = "/project")
     _eq("at aspect_root, no git → empty", repro_prefix(fake), "")
+
+# ---------------------------------------------------------------------------
+# has_tools_bazel_wrapper — env-first, file-marker fallback
+# ---------------------------------------------------------------------------
+
+def _fake_wrapper_ctx(env_var = None, bazel_root = "/repo", files = None):
+    """Build a minimal ctx for has_tools_bazel_wrapper tests.
+
+    `env_var` simulates `ctx.std.env.var("ASPECT_BAZEL_WRAPPER_VERSION")`.
+    `bazel_root` simulates `ctx.std.env.bazel_root_dir()`.
+    `files` is a dict path → (size, contents). A missing path → exists()
+    returns False; size > _TOOLS_BAZEL_MAX_PROBE_SIZE skips the read.
+    `try_read_to_string` mirrors the real API: returns "" on missing
+    rather than raising.
+    """
+    files = files or {}
+    return struct(std = struct(
+        env = struct(
+            var = lambda name: env_var if name == "ASPECT_BAZEL_WRAPPER_VERSION" else None,
+            bazel_root_dir = lambda: bazel_root,
+        ),
+        fs = struct(
+            exists = lambda p: p in files,
+            metadata = lambda p: struct(size = files[p][0]),
+            try_read_to_string = lambda p: files[p][1] if p in files else "",
+        ),
+    ))
+
+_WRAPPER_HEAD = """\
+#!/usr/bin/env bash
+# aspect-build/tools-bazel-wrapper
+#
+# tools/bazel — Bazel wrapper.
+ASPECT_BAZEL_WRAPPER_VERSION="1"
+"""
+
+def _test_wrapper_env_var_short_circuits(_ctx):
+    """When ASPECT_BAZEL_WRAPPER_VERSION is set, no disk I/O needed."""
+    fake = _fake_wrapper_ctx(env_var = "1", bazel_root = "/nonexistent", files = {})
+    _eq("env var set → True (no file probe)", has_tools_bazel_wrapper(fake), True)
+
+def _test_wrapper_file_marker_found(_ctx):
+    """No env var, but the file at <bazel_root>/tools/bazel carries the marker."""
+    fake = _fake_wrapper_ctx(
+        env_var = None,
+        bazel_root = "/repo",
+        files = {"/repo/tools/bazel": (len(_WRAPPER_HEAD), _WRAPPER_HEAD)},
+    )
+    _eq("marker in file → True", has_tools_bazel_wrapper(fake), True)
+
+def _test_wrapper_file_missing(_ctx):
+    """No env var and no tools/bazel → False."""
+    fake = _fake_wrapper_ctx(env_var = None, bazel_root = "/repo", files = {})
+    _eq("no file → False", has_tools_bazel_wrapper(fake), False)
+
+def _test_wrapper_file_without_marker(_ctx):
+    """A homegrown tools/bazel that doesn't carry the Aspect marker → False."""
+    homegrown = "#!/bin/sh\nexec /usr/bin/bazel \"$@\"\n"
+    fake = _fake_wrapper_ctx(
+        env_var = None,
+        bazel_root = "/repo",
+        files = {"/repo/tools/bazel": (len(homegrown), homegrown)},
+    )
+    _eq("homegrown file → False", has_tools_bazel_wrapper(fake), False)
+
+def _test_wrapper_oversized_file_skipped(_ctx):
+    """A megabyte-scale `tools/bazel` is treated as not-our-wrapper without reading it."""
+
+    # We DON'T put valid contents in the dict — read_to_string would have to
+    # be called for this assertion to fail, and it would KeyError. The size
+    # check should short-circuit before that.
+    fake = _fake_wrapper_ctx(
+        env_var = None,
+        bazel_root = "/repo",
+        files = {"/repo/tools/bazel": (10 * 1024 * 1024, None)},
+    )
+    _eq("oversized → False (no read)", has_tools_bazel_wrapper(fake), False)
+
+def _test_wrapper_no_bazel_root(_ctx):
+    """When bazel_root_dir() returns empty (outside a bazel workspace), → False."""
+    fake = _fake_wrapper_ctx(env_var = None, bazel_root = "", files = {})
+    _eq("no bazel root → False", has_tools_bazel_wrapper(fake), False)
+
+def _test_wrapper_empty_file(_ctx):
+    """An empty file (or one that try_read_to_string degraded to '') → False."""
+    fake = _fake_wrapper_ctx(
+        env_var = None,
+        bazel_root = "/repo",
+        files = {"/repo/tools/bazel": (0, "")},
+    )
+    _eq("empty file → False", has_tools_bazel_wrapper(fake), False)
 
 def _test_bazel_build_with_targets(_ctx):
     _eq(
@@ -799,6 +890,13 @@ _UNIT_TESTS = [
     _test_repro_prefix_nested_subdir,
     _test_repro_prefix_no_git_root_falls_back_to_aspect_root,
     _test_repro_prefix_no_git_root_at_aspect_root,
+    _test_wrapper_env_var_short_circuits,
+    _test_wrapper_file_marker_found,
+    _test_wrapper_file_missing,
+    _test_wrapper_file_without_marker,
+    _test_wrapper_oversized_file_skipped,
+    _test_wrapper_no_bazel_root,
+    _test_wrapper_empty_file,
     _test_bazel_build_with_targets,
     _test_bazel_test_with_targets,
     _test_bazel_run_single_target,

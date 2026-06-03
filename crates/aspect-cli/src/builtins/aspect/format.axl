@@ -30,8 +30,8 @@ load("./lib/health_check.axl", "HealthCheckTrait")
 load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "pick_task_status", "resolve_severity", "setup_phase", "task_update")
 load("./lib/path_glob.axl", "match_any")
 load("./lib/path_normalize.axl", "normalize_files_for_cwd")
-load("./lib/repro_commands.axl", "build_aspect_command", "build_bazel_command", "explicit_flags", "print_repro_and_fix", "repro_prefix", "task_cli_path")
-load("./lib/runnable.axl", "LOCAL_SPAWN_FLAGS", "runnable")
+load("./lib/repro_commands.axl", "build_aspect_command", "build_bazel_command", "explicit_flags", "has_tools_bazel_wrapper", "print_repro_and_fix", "repro_prefix", "task_cli_path")
+load("./lib/runnable.axl", "LOCAL_SPAWN_FLAGS", "RUN_IN_DESCRIPTION", "resolve_run_in", "runnable")
 load("./lib/text.axl", "pluralize")
 load("./lib/tips.axl", "tips")
 
@@ -232,8 +232,8 @@ def _append_fix_commands(ctx, data):
          `bazel run <formatter_target> -- <formatter_args> <files>`. Bounded
          at `_BAZEL_ALT_MAX_CHARS`; when the command exceeds that budget,
          `build_bazel_command` wraps it onto multiple lines and truncates the
-         trailing args with a `# +N more` shell-comment marker. `--run_in_cwd`
-         is forwarded when the task ran with it.
+         trailing args with a `# +N more` shell-comment marker. Skipped
+         entirely when the Aspect `tools/bazel` wrapper is in play.
 
     No-op when there are no affected files: nothing to fix, no commands.
     """
@@ -276,18 +276,26 @@ def _append_fix_commands(ctx, data):
             slug = "format-fix-rediscover",
         ))
 
-    bazel_flags = ["--run_in_cwd"] if ctx.args.run_in_cwd else []
-    bazel_run_args = [ctx.args.formatter_target] + list(ctx.args.formatter_args) + affected
-    data["fix_commands"].append(ReproFixCommand(
-        command = prefix + build_bazel_command(
-            "run",
-            bazel_run_args,
-            flags = bazel_flags,
-            max_chars = _BAZEL_ALT_MAX_CHARS,
-        ),
-        description = "vanilla bazel",
-        slug = "format-fix-vanilla-bazel",
-    ))
+    # Vanilla-bazel alternate. Skipped under the Aspect `tools/bazel`
+    # wrapper — there, `bazel run` re-routes through `aspect run`, so
+    # the "vanilla" framing would be misleading.
+    #
+    # Only `--run-in=cwd` maps to a Bazel flag (`--run_in_cwd`); other
+    # modes have no direct Bazel equivalent and are dropped from the
+    # alternate.
+    if not has_tools_bazel_wrapper(ctx):
+        bazel_flags = ["--run_in_cwd"] if ctx.args.run_in == "cwd" else []
+        bazel_run_args = [ctx.args.formatter_target] + list(ctx.args.formatter_args) + affected
+        data["fix_commands"].append(ReproFixCommand(
+            command = prefix + build_bazel_command(
+                "run",
+                bazel_run_args,
+                flags = bazel_flags,
+                max_chars = _BAZEL_ALT_MAX_CHARS,
+            ),
+            description = "vanilla bazel",
+            slug = "format-fix-vanilla-bazel",
+        ))
 
 def _emit_final(ctx, lifecycle, data, exit_code):
     """Emit the terminal task_update for status-check consumers."""
@@ -341,6 +349,11 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     hc_trait = ctx.traits[HealthCheckTrait]
     lifecycle = ctx.traits[TaskLifecycleTrait]
     ansi = color_enabled(ctx.std)
+
+    # Resolve --run-in up front: a bad value (typo, `git-root` outside
+    # a git repo) must fail before setup_phase opens status surfaces
+    # and before the formatter build spends time.
+    spawn_cwd = resolve_run_in(ctx, ctx.args.run_in)
 
     # Initialize data for status-check emission.
     data = fmt_init_data()
@@ -583,8 +596,6 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             phase = Phase(name = "format", description = "Format files", emoji = "✨"),
         )
 
-    spawn_cwd = ctx.std.env.current_dir() if ctx.args.run_in_cwd else None
-
     spawn_args = compute_spawn_args(
         ctx.args.formatter_args,
         format_args,
@@ -758,9 +769,18 @@ format = task(
             default = "//tools/format",
             description = "Bazel label of the format_multirun target (or any runnable target) to invoke as the formatter. The target is built first, then run with the changed-file list passed as positional arguments.",
         ),
-        "run_in_cwd": args.boolean(
-            default = False,
-            description = "Spawn the formatter with the current working directory as cwd, rather than the `bazel run` default of `<runfiles_dir>/<workspace>`. Mirrors Bazel's `--run_in_cwd` flag. Set this for formatter targets that do not switch to `$BUILD_WORKSPACE_DIRECTORY` on their own and instead resolve workspace-relative file arguments against the process cwd — for example, `@buildifier_prebuilt//buildifier`, which is a `buildifier_binary` rule (symlink to the raw Go binary, no shell wrapper). Wrapper-based formatters such as `format_multirun` from rules_lint already `cd $BUILD_WORKSPACE_DIRECTORY` on entry, so this flag is a no-op for them. (A truly bare binary — one with no runfiles tree at all — already spawns in cwd because there is no `runfiles_dir/<workspace>` to fall back to.)",
+        "run_in": args.string(
+            default = "",
+            description = RUN_IN_DESCRIPTION + (
+                " Set this for formatter targets that resolve workspace-" +
+                "relative file arguments against the process cwd rather " +
+                "than reading `$BUILD_WORKSPACE_DIRECTORY` — e.g. " +
+                "`@buildifier_prebuilt//buildifier`, a symlink to the raw " +
+                "Go binary with no shell wrapper. Wrapper-based formatters " +
+                "such as `format_multirun` from rules_lint already " +
+                "`cd $BUILD_WORKSPACE_DIRECTORY` on entry and see this as " +
+                "a no-op."
+            ),
         ),
         "formatter_args": args.string_list(
             long = "formatter-arg",

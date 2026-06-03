@@ -421,6 +421,54 @@ def repro_prefix(ctx):
         ctx.std.env.git_root_dir() or ctx.std.env.aspect_root_dir(),
     )
 
+_TOOLS_BAZEL_WRAPPER_MARKER = "aspect-build/tools-bazel-wrapper"
+
+# Hard cap on `tools/bazel`'s on-disk size before we bother reading it.
+# The Aspect wrapper is ~28 KiB; any reasonable fork stays well under
+# 64 KiB. Above this we assume the file isn't an Aspect-shaped wrapper
+# (could be a vendored binary or a megabyte-scale custom script) and
+# skip the read.
+_TOOLS_BAZEL_MAX_PROBE_SIZE = 65536
+
+def has_tools_bazel_wrapper(ctx) -> bool:
+    """True when this workspace ships the Aspect `tools/bazel` wrapper.
+
+    The wrapper routes `bazel <verb>` through `aspect <verb>`, so
+    `bazel run`-flavored vanilla-bazel suggestions are misleading when
+    it's installed (they'd re-enter aspect, not produce a vanilla
+    `bazel run`).
+
+    Two-step detection:
+
+      1. Env var — `ASPECT_BAZEL_WRAPPER_VERSION` is exported by the
+         wrapper itself, so it's already set when aspect was invoked
+         via `bazel <verb>`. Cheap, no I/O.
+      2. File probe — fall back to looking for the marker comment in
+         `<bazel_root>/tools/bazel`. Covers the "CI runs aspect directly
+         but the workspace has the wrapper installed" case: the
+         developer who copies the suggested fix command will be running
+         through the wrapper.
+
+    Stat-capped at `_TOOLS_BAZEL_MAX_PROBE_SIZE` to avoid pulling a
+    vendored binary or megabyte-scale fork into memory just to probe
+    for a header comment.
+
+    Returns False on any failure path (no bazel root, missing file,
+    oversized file, unreadable file, marker absent) — wrapper detection
+    is advisory, not load-bearing, and must never fail the task.
+    """
+    if ctx.std.env.var("ASPECT_BAZEL_WRAPPER_VERSION"):
+        return True
+    bazel_root = ctx.std.env.bazel_root_dir()
+    if not bazel_root:
+        return False
+    path = bazel_root + "/tools/bazel"
+    if not ctx.std.fs.exists(path):
+        return False
+    if ctx.std.fs.metadata(path).size > _TOOLS_BAZEL_MAX_PROBE_SIZE:
+        return False
+    return _TOOLS_BAZEL_WRAPPER_MARKER in ctx.std.fs.try_read_to_string(path)
+
 # ── CLI rendering ─────────────────────────────────────────────────────
 
 def print_repro_and_fix(std, data, status):

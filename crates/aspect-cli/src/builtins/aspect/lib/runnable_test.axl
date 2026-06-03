@@ -1,7 +1,7 @@
 """Unit tests for lib/runnable.axl: apparent_label normalization, BES matching,
 entrypoint selection (passes 1–3), and runfiles directory detection."""
 
-load("./runnable.axl", "apparent_label", "runnable")
+load("./runnable.axl", "apparent_label", "resolve_run_in", "runnable")
 
 def _eq(label, got, want):
     if got != want:
@@ -390,6 +390,54 @@ def _test_filesystem_no_runfiles(ctx):
     if ep.runfiles_dir != None:
         fail("fs/no-runfiles: expected runfiles_dir=None (no .runfiles on disk), got %r" % ep.runfiles_dir)
 
+# ---------------------------------------------------------------------------
+# resolve_run_in — `--run-in=<choice>` cwd resolution
+# ---------------------------------------------------------------------------
+
+def _make_env_ctx(cwd = "/user/cwd", bazel_root = "/repo", aspect_root = "/repo", git_root = "/repo"):
+    """Minimal ctx with `std.env.*` dirs for resolve_run_in tests."""
+    return struct(std = struct(env = struct(
+        current_dir = lambda: cwd,
+        bazel_root_dir = lambda: bazel_root,
+        aspect_root_dir = lambda: aspect_root,
+        git_root_dir = lambda: git_root,
+    )))
+
+def _test_run_in_empty_is_none(_ctx):
+    _eq("empty → None (runfiles default)", resolve_run_in(_make_env_ctx(), ""), None)
+
+def _test_run_in_runfiles_is_none(_ctx):
+    _eq("runfiles → None (default)", resolve_run_in(_make_env_ctx(), "runfiles"), None)
+
+def _test_run_in_cwd(_ctx):
+    _eq("cwd → user's cwd", resolve_run_in(_make_env_ctx(cwd = "/here"), "cwd"), "/here")
+
+def _test_run_in_bazel_root(_ctx):
+    _eq("bazel-root", resolve_run_in(_make_env_ctx(bazel_root = "/ws"), "bazel-root"), "/ws")
+
+def _test_run_in_aspect_root(_ctx):
+    _eq("aspect-root", resolve_run_in(_make_env_ctx(aspect_root = "/asp"), "aspect-root"), "/asp")
+
+def _test_run_in_git_root(_ctx):
+    _eq("git-root", resolve_run_in(_make_env_ctx(git_root = "/git"), "git-root"), "/git")
+
+def _test_run_in_absolute_path(_ctx):
+    _eq("/abs/path passthrough", resolve_run_in(_make_env_ctx(), "/abs/path"), "/abs/path")
+
+def _test_run_in_relative_dot(_ctx):
+    _eq(
+        "./sub → resolves against cwd",
+        resolve_run_in(_make_env_ctx(cwd = "/here"), "./sub"),
+        "/here/./sub",
+    )
+
+def _test_run_in_relative_dotdot(_ctx):
+    _eq(
+        "../sub → resolves against cwd",
+        resolve_run_in(_make_env_ctx(cwd = "/here"), "../sub"),
+        "/here/../sub",
+    )
+
 _UNIT_TESTS = [
     _test_local_label_with_colon,
     _test_local_label_without_colon,
@@ -431,6 +479,15 @@ _UNIT_TESTS = [
     _test_filesystem_sh_extension,
     _test_filesystem_bash_extension,
     _test_filesystem_no_runfiles,
+    _test_run_in_empty_is_none,
+    _test_run_in_runfiles_is_none,
+    _test_run_in_cwd,
+    _test_run_in_bazel_root,
+    _test_run_in_aspect_root,
+    _test_run_in_git_root,
+    _test_run_in_absolute_path,
+    _test_run_in_relative_dot,
+    _test_run_in_relative_dotdot,
 ]
 
 def _test_impl(ctx):
