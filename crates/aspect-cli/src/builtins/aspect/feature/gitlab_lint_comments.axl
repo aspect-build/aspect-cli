@@ -196,6 +196,8 @@ def _dedup_by_marker(comments, task_key):
 _SUGGESTION_SEVERITY_ICONS = {"error": "🚨", "warning": "⚠️", "info": "ℹ️"}
 
 def _tool_name_from_patch_path(filepath):
+    """Recover the linter display name from a rules_lint
+    `<target>.AspectRulesLint<Tool>.patch` filename; "Linter" fallback."""
     name = filepath.rsplit("/", 1)[-1]
     if name.endswith(".patch"):
         name = name[:-len(".patch")]
@@ -268,6 +270,11 @@ def _build_suggestion_comments(ctx, run_id, task_key, relevant_diagnostics, pend
                         body_lines = [marker, "🔧 **%s**" % display_tool, "", suggestion_fence]
                     body = "\n".join(body_lines) + _task_attribution_footer(task_key)
                     cap_severity = severity if correlated and severity else "warning"
+                    # Unlike the GitHub path we don't set start_line/start_side:
+                    # GitLab anchors the discussion via position.new_line (set in
+                    # build_position) and the `suggestion:-X+Y` fence encodes the
+                    # multi-line replacement range itself, so no separate range
+                    # fields are needed on the comment dict.
                     comments.append({
                         "path": file_path,
                         "line": end_line,
