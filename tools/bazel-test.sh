@@ -31,6 +31,13 @@ chmod +x "$STUB_DIR/aspect" "$STUB_DIR/bazel"
 export BAZEL_REAL="$STUB_DIR/bazel"
 export PATH="$STUB_DIR:$PATH"
 
+# Clear every CI marker the wrapper detects, so the default test run sees
+# the documented "no TTY, no CI" environment. Section 9 sets them back per
+# case to exercise the CI-detection branch explicitly. Without this, the
+# whole suite would behave differently when run on GHA (CI=true) than
+# locally — every $(run …) assertion would have the trace line bleed in.
+unset CI BUILDKITE GITHUB_ACTIONS CIRCLECI GITLAB_CI
+
 PASS=0
 FAIL=0
 FAILED_NAMES=()
@@ -621,10 +628,51 @@ INVOKED:aspect
 ARG:mytask" \
     "$actual"
 
+# Recognized CI host: the aspect-route trace fires WITHOUT
+# ASPECT_WRAPPER_TRACE=1, so the SKIP nudge / docs link is discoverable in
+# CI logs (where surprised developers most often see the routing).
+for marker in CI BUILDKITE GITHUB_ACTIONS CIRCLECI GITLAB_CI; do
+    actual="$(env "$marker=1" "$WRAPPER" build //... 2>&1 | strip_ansi)"
+    check "trace: aspect route prints on CI (marker=$marker, no TRACE)" \
+        "[tools/bazel] aspect build //... — set ASPECT_WRAPPER_SKIP=1 to skip the forward to \`aspect\` — docs: https://github.com/aspect-build/aspect-cli/blob/main/tools/bazel.md
+INVOKED:aspect
+ARG:build
+ARG://..." \
+        "$actual"
+done
+
+# Presence — not truthiness — is what counts: GHA sometimes exports empty
+# CI markers and the wrapper must still detect them.
+actual="$(env CI= "$WRAPPER" build //... 2>&1 | strip_ansi)"
+check "trace: aspect route prints on CI even when marker is empty (CI=)" \
+    "[tools/bazel] aspect build //... — set ASPECT_WRAPPER_SKIP=1 to skip the forward to \`aspect\` — docs: https://github.com/aspect-build/aspect-cli/blob/main/tools/bazel.md
+INVOKED:aspect
+ARG:build
+ARG://..." \
+    "$actual"
+
+# Bazel-only verb forwarding stays silent on CI by default — the trace
+# only kicks in for aspect-routed verbs. Pure bazel forwarding still
+# requires ASPECT_WRAPPER_TRACE=1.
+actual="$(env CI=1 "$WRAPPER" query 'deps(//foo)' 2>&1 | strip_ansi)"
+check "trace: bazel-only verb stays silent on CI without TRACE" \
+    "INVOKED:bazel
+ARG:query
+ARG:deps(//foo)" \
+    "$actual"
+
 actual="$(ASPECT_WRAPPER_QUIET=1 ASPECT_WRAPPER_TRACE=1 "$WRAPPER" lint 2>&1 | strip_ansi)"
 check "trace: ASPECT_WRAPPER_QUIET=1 wins over TRACE=1" \
     "INVOKED:aspect
 ARG:lint" \
+    "$actual"
+
+# QUIET also wins over CI detection.
+actual="$(env CI=1 ASPECT_WRAPPER_QUIET=1 "$WRAPPER" build //... 2>&1 | strip_ansi)"
+check "trace: ASPECT_WRAPPER_QUIET=1 wins over CI detection" \
+    "INVOKED:aspect
+ARG:build
+ARG://..." \
     "$actual"
 
 # =====================================================================

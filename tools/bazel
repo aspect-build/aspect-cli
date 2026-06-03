@@ -81,12 +81,13 @@
 #                            A total escape hatch for a 1:1 vanilla-bazel
 #                            experience; reach for `aspect <verb>` directly when
 #                            you want the wrapped behavior.
-#   ASPECT_WRAPPER_TRACE=1   Always print the resolved command (in grey, on
-#                            stderr), even when forwarding straight to bazel.
-#                            By default the trace prints only when routing
-#                            to aspect, since plain bazel forwarding is
-#                            uninteresting.
-#   ASPECT_WRAPPER_QUIET=1   Suppress the trace line entirely.
+#   ASPECT_WRAPPER_TRACE=1   Also print the resolved command when forwarding
+#                            straight to bazel. The aspect-route trace already
+#                            prints unconditionally (in grey on a TTY, plain
+#                            text otherwise, always on stderr); plain bazel
+#                            forwarding stays silent unless TRACE forces it on.
+#   ASPECT_WRAPPER_QUIET=1   Suppress the trace line entirely (wins over
+#                            ASPECT_WRAPPER_TRACE).
 #
 # Implicit env var (set by aspect, not by users):
 #   ASPECT_CLI_RUNNING=1     Aspect sets this on every child bazel it spawns.
@@ -553,6 +554,19 @@ BAZEL_VERBS_STR=" ${BAZEL_VERBS[*]} "
 # user can read about the routing rules without grepping the wrapper.
 ASPECT_WRAPPER_DOCS_URL="https://github.com/aspect-build/aspect-cli/blob/main/tools/bazel.md"
 
+# True on any recognized CI host. Mirrors the runtime's `on_recognized_ci`
+# (crates/axl-runtime/src/ci.rs) so the wrapper and aspect-cli agree on
+# what "on CI" means. Presence — not truthiness — is what counts: GHA
+# sometimes exports `CI=` (empty), and that still marks a CI host.
+on_recognized_ci() {
+    [[ -n "${CI+x}" ]] && return 0
+    [[ -n "${BUILDKITE+x}" ]] && return 0
+    [[ -n "${GITHUB_ACTIONS+x}" ]] && return 0
+    [[ -n "${CIRCLECI+x}" ]] && return 0
+    [[ -n "${GITLAB_CI+x}" ]] && return 0
+    return 1
+}
+
 # Print a grey trace line on stderr showing what the wrapper is about to exec.
 #
 # Usage: trace_exec <category> <shadow> <argv...>
@@ -560,8 +574,8 @@ ASPECT_WRAPPER_DOCS_URL="https://github.com/aspect-build/aspect-cli/blob/main/to
 # <category> is "aspect" when routing to aspect (the interesting case — the
 # wrapper rewrote something) or "bazel" when forwarding straight to bazel
 # (uninteresting; would be visually noisy on `bazel info`, `bazel query`,
-# etc.). The trace prints by default for the "aspect" category and is
-# suppressed for "bazel" unless ASPECT_WRAPPER_TRACE=1 forces it on.
+# etc.). The "aspect" category always prints (unless ASPECT_WRAPPER_QUIET);
+# the "bazel" category is silent unless ASPECT_WRAPPER_TRACE=1 forces it on.
 #
 # <shadow> is "shadow" when this invocation is shadowing a real bazel verb
 # (e.g. `build`/`test` — verbs in both ASPECT_VERBS_WITH_BAZEL_FLAGS and
@@ -575,9 +589,21 @@ ASPECT_WRAPPER_DOCS_URL="https://github.com/aspect-build/aspect-cli/blob/main/to
 # Every aspect-route trace ends with `— docs: <url>` so the routing rules
 # are one click away regardless of whether the verb shadows bazel.
 #
-# Suppressed entirely when stderr is not a TTY (so $(...) capture and CI
-# logs stay clean), unless ASPECT_WRAPPER_TRACE=1. Always suppressed when
-# ASPECT_WRAPPER_QUIET is set.
+# Visibility rules:
+#
+#   aspect category (routing to / shadowing aspect — the interesting case):
+#     - always print, exclusively to stderr, regardless of TTY or CI. The
+#       wrapper rewrote/shadowed a command and the user should see it.
+#     - ASPECT_WRAPPER_QUIET → silent (the only mute).
+#
+#   bazel category (plain forwarding — uninteresting, would be noisy on
+#   `bazel info`, `bazel query`, …):
+#     - silent unless ASPECT_WRAPPER_TRACE=1 forces it on.
+#     - ASPECT_WRAPPER_QUIET → silent (wins over TRACE).
+#
+# ANSI grey wraps the line only on a TTY (or when forced / on CI, where logs
+# render color); a non-TTY stderr gets plain text, so a script capturing
+# stderr never sees escape bytes.
 trace_exec() {
     local category="$1" shadow="$2"
     shift 2
@@ -587,12 +613,17 @@ trace_exec() {
     if [[ "$category" == "bazel" && -z "$force" ]]; then
         return 0
     fi
-    # Aspect routing: silent under non-TTY stderr unless forced.
-    if [[ -z "$force" && ! -t 2 ]]; then
-        return 0
-    fi
+    # Aspect routing always prints (we're shadowing/rewriting a command, which
+    # the user should see). The only mute is ASPECT_WRAPPER_QUIET, handled
+    # above. The trace goes exclusively to stderr, so capturing the command's
+    # stdout never picks it up.
+    local on_ci=0
+    on_recognized_ci && on_ci=1
+    # ANSI grey only when stderr is a TTY (or forced / on CI, where logs render
+    # color). A non-TTY stderr gets plain text — no escape bytes — so a script
+    # that captures stderr sees clean output.
     local grey="" reset=""
-    if [[ -t 2 || -n "$force" ]]; then
+    if [[ -t 2 || -n "$force" || $on_ci -eq 1 ]]; then
         grey=$'\033[38;5;244m'
         reset=$'\033[0m'
     fi
