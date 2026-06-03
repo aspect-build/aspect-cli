@@ -247,6 +247,7 @@ def _test_impl(ctx):
         "external_status_checks",
         "notes",
         "merge_requests",
+        "discussions",
     ):
         if not hasattr(gitlab, name):
             fail("gitlab struct missing %r" % name)
@@ -262,6 +263,9 @@ def _test_impl(ctx):
     for name in ("get", "list_changes"):
         if not hasattr(gitlab.merge_requests, name):
             fail("gitlab.merge_requests missing %r" % name)
+    for name in ("list", "create", "delete", "resolve"):
+        if not hasattr(gitlab.discussions, name):
+            fail("gitlab.discussions missing %r" % name)
 
     print("gitlab.axl smoke: OK")
     return 0
