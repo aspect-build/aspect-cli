@@ -6,7 +6,7 @@ S3 error response into a diagnosable failure reason — the part that makes
 an expired-credential `400` legible instead of an opaque "curl exit 22".
 """
 
-load("./circleci.axl", "s3_extract_error_code", "s3_upload_error_detail")
+load("./circleci.axl", "s3_extract_error_code", "s3_upload_error_detail", "session_cache_clear", "session_cache_get", "session_cache_put")
 
 def _eq(label, got, want):
     if got != want:
@@ -69,6 +69,39 @@ def _test_detail_no_signal(_ctx):
     """No HTTP status and no stderr → generic fallback, never empty."""
     _eq("generic fallback", s3_upload_error_detail("000", "", ""), "curl s3 upload failed")
 
+# ---------------------------------------------------------------------------
+# session_cache_* — reuse one runner session across a batch of uploads
+# ---------------------------------------------------------------------------
+
+def _test_cache_get_none_cache(_ctx):
+    """No cache dict (standalone upload) → always a miss, never crashes."""
+    _eq("None cache → None", session_cache_get(None), None)
+
+def _test_cache_get_empty(_ctx):
+    _eq("empty cache → None", session_cache_get({}), None)
+
+def _test_cache_put_then_get(_ctx):
+    cache = {}
+    sess = {"token": "t", "bucket": "b"}
+    session_cache_put(cache, sess)
+    _eq("put then get returns the stored session", session_cache_get(cache), sess)
+
+def _test_cache_put_none_cache_noop(_ctx):
+    """Storing into a None cache is a no-op, not an error."""
+    session_cache_put(None, {"token": "t"})
+    _eq("put with None cache stays a miss", session_cache_get(None), None)
+
+def _test_cache_clear(_ctx):
+    cache = {"session": {"token": "t"}}
+    session_cache_clear(cache)
+    _eq("clear drops the session", session_cache_get(cache), None)
+
+def _test_cache_clear_empty_noop(_ctx):
+    """Clearing an absent session must not raise."""
+    cache = {}
+    session_cache_clear(cache)
+    _eq("clear on empty cache stays a miss", session_cache_get(cache), None)
+
 _UNIT_TESTS = [
     _test_extract_expired_token,
     _test_extract_signature_mismatch,
@@ -80,6 +113,12 @@ _UNIT_TESTS = [
     _test_detail_transport_error,
     _test_detail_transport_error_newlines_collapsed,
     _test_detail_no_signal,
+    _test_cache_get_none_cache,
+    _test_cache_get_empty,
+    _test_cache_put_then_get,
+    _test_cache_put_none_cache_noop,
+    _test_cache_clear,
+    _test_cache_clear_empty_noop,
 ]
 
 def _test_impl(ctx):

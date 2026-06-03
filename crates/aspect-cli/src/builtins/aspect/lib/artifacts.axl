@@ -402,8 +402,16 @@ def _upload_testlogs_per_file(ctx, provider, group, entries, name):
     new_entries = entries[group["last_count"]:]
     any_success = False
     label_urls = group.setdefault("label_urls", {})
+
+    # One runner session shared across every file in this group (and across
+    # the incremental snapshots that reuse the same `group`): the CircleCI
+    # runner returns the same job-scoped creds each call, so minting once
+    # and reusing avoids a socket + 2 runner-API round-trips per file. A
+    # failed PUT clears it inside upload_artifact, so an expired credential
+    # re-mints on retry.
+    session_cache = group.setdefault("circleci_session", {})
     for entry in new_entries:
-        result = provider.upload_artifact(ctx, entry["src"], name + "/" + entry["dest"])
+        result = provider.upload_artifact(ctx, entry["src"], name + "/" + entry["dest"], cache = session_cache)
         if result["success"]:
             url = result.get("download_url", "")
             if url and url.startswith("http"):

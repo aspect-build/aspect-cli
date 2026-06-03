@@ -7,17 +7,23 @@ returned by `/api/v2/output/credentials` with a short TTL (≈10 min) and
 hands back those same job-scoped credentials on every call. A task that
 runs longer than that TTL before its first upload — or that uploads in
 batches spread across the run — will hit an S3 `400` once the credentials
-expire. `_upload_artifact` therefore re-acquires a fresh session and
-retries on failure (see `_UPLOAD_MAX_ATTEMPTS`), and surfaces the real
-HTTP status + S3 error code so an expiry is diagnosable rather than an
-opaque "curl exit 22".
+expire. `_upload_artifact` therefore retries on failure (see
+`_UPLOAD_MAX_ATTEMPTS`) and surfaces the real HTTP status + S3 error
+code so an expiry is diagnosable rather than an opaque "curl exit 22".
+
+The runner hands back the *same* job-scoped credentials on every call,
+so re-fetching them before each upload is wasted work. A batch of
+per-file uploads can therefore pass a shared `cache` dict: the session
+is minted once and reused across files, and re-minted only when a PUT
+fails (see `session_cache_get` / `session_cache_clear`). A standalone
+call (`cache = None`) keeps the original fetch-per-call behavior.
 """
 
 load("@std//time.axl", "time")
 load("./environment.axl", "warn")
 
-# Re-acquire credentials + retry the S3 PUT this many times before giving
-# up. Each attempt fetches a *fresh* session (socket token + AWS creds), so
+# Retry the S3 PUT this many times before giving up. A failed attempt
+# clears any cached session, so the next attempt re-mints fresh creds —
 # a credential that expired mid-run self-heals once the runner rotates it.
 _UPLOAD_MAX_ATTEMPTS = 3
 _UPLOAD_BACKOFF_BASE_MS = 500
@@ -101,6 +107,39 @@ def _fetch_upload_session(ctx):
         "region": config["region"],
         "aws_creds": aws_creds_resp["s3"],
     }
+
+def session_cache_get(cache):
+    """Return the session held in `cache`, or None when there isn't one.
+
+    `cache` is an optional caller-owned dict that lets a batch of uploads
+    reuse one runner session instead of re-minting credentials per file
+    (see the module docstring). None means "no caching" — the standalone
+    call path. Public (not `_`-prefixed) so `circleci_test.axl` can load
+    it; Starlark forbids loading underscore-private symbols.
+    """
+    if cache == None:
+        return None
+    return cache.get("session")
+
+def session_cache_put(cache, session):
+    """Store `session` in `cache` for reuse by later uploads. No-op when
+    `cache` is None (the un-cached, standalone call path).
+
+    Public (not `_`-prefixed) so `circleci_test.axl` can load it.
+    """
+    if cache != None:
+        cache["session"] = session
+
+def session_cache_clear(cache):
+    """Drop any cached session so the next acquire re-mints fresh runner
+    credentials. Called after a failed PUT, so an expired job-scoped
+    credential self-heals on the retry. No-op when `cache` is None or
+    already empty.
+
+    Public (not `_`-prefixed) so `circleci_test.axl` can load it.
+    """
+    if cache != None and "session" in cache:
+        cache.pop("session")
 
 def s3_extract_error_code(body):
     """Pull the `<Code>…</Code>` value out of an S3 error response body.
@@ -224,13 +263,16 @@ def _s3_put(ctx, session, path, name):
 
     return (False, s3_upload_error_detail(http_code, curl_err, body), "")
 
-def _upload_artifact(ctx, path, name):
+def _upload_artifact(ctx, path, name, cache = None):
     """Upload a file to CircleCI via the runner API and S3.
 
-    Each attempt re-acquires a fresh session (socket token + S3 config +
-    AWS credentials) before PUTting to S3, so a credential that expired
-    mid-run — the runner mints them job-scoped with a short TTL — is
-    recovered once the runner rotates it. Retries up to
+    Reuses the runner session in `cache` when present, minting a new one
+    only on a cache miss — the runner returns the same job-scoped creds
+    every call, so re-fetching per file is wasted work. A failed PUT
+    clears the cache so the next attempt re-mints, recovering a credential
+    that expired mid-run (the runner mints them with a short TTL). Pass a
+    shared `cache` dict across a batch of uploads to amortize the fetch;
+    omit it (`cache = None`) for a one-off, un-cached upload. Retries up to
     `_UPLOAD_MAX_ATTEMPTS` with exponential backoff; the returned `errors`
     carry the real HTTP status / S3 error code from the last attempt.
     """
@@ -240,14 +282,25 @@ def _upload_artifact(ctx, path, name):
     last_detail = "unknown error"
     backoff_ms = _UPLOAD_BACKOFF_BASE_MS
     for attempt in range(_UPLOAD_MAX_ATTEMPTS):
-        session = _fetch_upload_session(ctx)
+        session = session_cache_get(cache)
+        if session == None:
+            session = _fetch_upload_session(ctx)
+            if "error" not in session:
+                session_cache_put(cache, session)
+
         if "error" in session:
             last_detail = session["error"]
+            session_cache_clear(cache)
         else:
             ok, detail, download_url = _s3_put(ctx, session, path, name)
             if ok:
                 return {"success": True, "artifact_ref": name, "download_url": download_url, "errors": []}
             last_detail = detail
+
+            # The cached creds may have expired — drop them so the next
+            # attempt (and the next file) re-mints rather than reusing a
+            # session we just saw fail.
+            session_cache_clear(cache)
 
         if attempt < _UPLOAD_MAX_ATTEMPTS - 1:
             time.sleep(backoff_ms)
