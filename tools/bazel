@@ -136,7 +136,6 @@ ASPECT_VERBS_WITH_BAZEL_FLAGS=(
     format
     gazelle
     lint
-    run
     test
 )
 
