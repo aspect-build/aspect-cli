@@ -7,6 +7,7 @@ load("@aspect//format.axl", "format")
 load("@aspect//lib/bazel_flags_test.axl", "bazel_flags_tests")
 load("@aspect//lib/bazel_results_test.axl", "bazel_results_unit_tests", "template_snapshot_tests")
 load("@aspect//lib/bazel_runner_test.axl", "bazel_runner_tests")
+load("@aspect//lib/circleci_test.axl", "circleci_tests")
 load("@aspect//lib/delivery_results_test.axl", "delivery_template_snapshot_tests")
 load("@aspect//lib/format_results_test.axl", "format_template_snapshot_tests")
 load("@aspect//lib/format_spawn_test.axl", "format_spawn_tests")
@@ -235,6 +236,11 @@ def config(ctx: ConfigContext):
     # and unsupported host inputs.
     # Run with: aspect dev test-tar
     ctx.tasks.add(tar_tests)
+
+    # CircleCI artifact-upload S3 error parsing — turns an expired-credential
+    # 400 into a legible reason instead of an opaque "curl exit 22".
+    # Run with: aspect dev test-circleci
+    ctx.tasks.add(circleci_tests)
 
     # Runner-side mitigations for bazelbuild/bazel#23880 and persistent
     # server-internal failures — detect-and-repair + signal-instance-unhealthy
