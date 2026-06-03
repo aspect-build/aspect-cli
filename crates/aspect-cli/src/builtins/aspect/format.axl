@@ -31,7 +31,7 @@ load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskL
 load("./lib/path_glob.axl", "match_any")
 load("./lib/path_normalize.axl", "normalize_files_for_cwd")
 load("./lib/repro_commands.axl", "build_aspect_command", "build_bazel_command", "explicit_flags", "has_tools_bazel_wrapper", "print_repro_and_fix", "repro_prefix", "task_cli_path")
-load("./lib/runnable.axl", "LOCAL_SPAWN_FLAGS", "RUN_IN_DESCRIPTION", "resolve_run_in", "runnable")
+load("./lib/runnable.axl", "LOCAL_SPAWN_BASE_FLAGS", "LOCAL_SPAWN_FLAGS", "RUN_IN_DESCRIPTION", "resolve_run_in", "runnable")
 load("./lib/text.axl", "pluralize")
 load("./lib/tips.axl", "tips")
 
@@ -366,7 +366,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # The single pre-task setup phase (status surface, rc parse, health
     # checks); returns the resolved flags (a failed health check fails the task
     # inside setup_phase).
-    flags = setup_phase(ctx, lifecycle, ctx.args.formatter_target, "format_results", data, hc_trait, bazel_trait)
+    flags = setup_phase(ctx, lifecycle, ctx.args.formatter_target, "format_results", data, hc_trait, bazel_trait, bazel_base_flags = LOCAL_SPAWN_BASE_FLAGS)
     announce_version, announce_command = resolve_bazel_announce(ctx)
 
     flags.extend(LOCAL_SPAWN_FLAGS)
