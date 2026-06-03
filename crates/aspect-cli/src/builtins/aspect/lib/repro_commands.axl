@@ -4,19 +4,32 @@ Every built-in task contributes one or more "command suggestions" to its
 data dict at terminal-emit time:
 
     data["repro_commands"] = [
-        {"command": "aspect lint --strategy=hold-the-line --aspect=... -- //...", "description": ""},
+        {"command": "aspect lint --strategy=hold-the-line --aspect=... -- //...",
+         "description": "", "slug": "lint-repro"},
         ...
     ]
     data["fix_commands"] = [
-        {"command": "aspect lint --fix --strategy=hold-the-line --aspect=... -- //...", "description": ""},
+        {"command": "aspect lint --fix --strategy=hold-the-line --aspect=... -- //...",
+         "description": "", "slug": "lint-fix"},
         ...
     ]
 
-Each entry is a `{command, description}` dict — the command is the
-shell-ready line, the description is an optional short label that
-disambiguates multiple commands of the same type from the same task
-(e.g., "Update snapshot 1" vs "Update snapshot 2"). The description
-stays empty when there's only one of its type per task.
+Each entry is a `{command, description, slug}` dict:
+
+  - `command`     — the shell-ready line (with optional `cd` prefix).
+  - `description` — an optional short label that disambiguates
+                    multiple commands of the same type from the same
+                    task (e.g. "Update snapshot 1" vs
+                    "Update snapshot 2"). Empty when there's only one
+                    of its type per task. Surfaces render this as a
+                    `# <description>` comment line above the command.
+  - `slug`        — stable, kebab-case identifier for the suggestion
+                    type ("lint-repro", "format-fix-vanilla-bazel",
+                    "gazelle-fix-rediscover"). Stays stable across
+                    releases so `lifecycle.repro_fix_suggestion`
+                    hooks can scope by suggestion type without
+                    parsing the command string. See
+                    `apply_repro_fix_hooks` below for the catalogue.
 
 `build_aspect_command(subcommand, flags, targets)` is the canonical
 way producers compose these strings — handling flag normalization,
@@ -36,15 +49,26 @@ the per-task lists into a single rolled-up view across tasks: two
 contributions of the same `(command, description)` collapse into one
 row that lists every contributing task_key.
 
+`apply_repro_fix_hooks(ctx, lifecycle, data, ...)` is the single
+choke point for the `lifecycle.repro_fix_suggestion` user hook. Every
+task calls it after populating its repro/fix lists and BEFORE the
+terminal `task_update` emit, so the same filtered list reaches every
+downstream surface (CLI printer + GHSC body + BK annotation + PR
+comment rollup). See `apply_repro_fix_hooks` below for the full
+contract and the per-task metadata each call site supplies.
+
 `print_repro_and_fix(std, data, status)` prints the same blocks to
 the CLI so a developer reading the raw CI log sees the actionable
 commands without opening the status surface.
 
 `build_aspect_command`, `repro_prefix`, `subdir_prefix`,
 `explicit_flags`, and `dedup_and_attribute` are pure (no I/O).
+`apply_repro_fix_hooks` is pure when the user hook list is empty;
+otherwise its purity is whatever the user hooks make of it.
 """
 
 load("./environment.axl", "color_enabled")
+load("./lifecycle.axl", "ReproFixInfo")
 
 # Install docs URL surfaced in the small-text hint at the bottom of each
 # repro/fix section — developers who don't yet have `aspect` on their PATH
@@ -500,3 +524,178 @@ def _print_repro_entry(ansi, entry):
     for line in command.split("\n"):
         print(line)
     print("```")
+
+# ── User customization: lifecycle.repro_fix_suggestion ────────────────
+
+_VERDICT_ACCEPT = "accept"
+_VERDICT_REJECT = "reject"
+_VERDICT_REPLACE = "replace"
+_VERDICT_ACTIONS = (_VERDICT_ACCEPT, _VERDICT_REJECT, _VERDICT_REPLACE)
+
+def apply_repro_fix_hooks(
+        ctx,
+        lifecycle,
+        data,
+        kind,
+        status,
+        exit_code,
+        bazel_subcommand = "",
+        targets = [],
+        failed_targets = [],
+        extras = {}):
+    """Filter / rewrite `data["repro_commands"]` and `data["fix_commands"]`
+    through every handler on `lifecycle.repro_fix_suggestion`.
+
+    Built-in tasks call this exactly once, after populating the two
+    lists and BEFORE the terminal `task_update` emit. Every downstream
+    consumer of the lists — `print_repro_and_fix`, the GHSC check-run /
+    BK annotation Jinja templates, and the GitHub PR-comment rollup —
+    reads the lists after this transform, so they all see the same
+    filtered set.
+
+    For each entry, every handler is invoked in registration order with
+    `(ctx, info, entry)`. `entry` is `{command, description, slug}` —
+    use `entry["slug"]` to scope by suggestion type without parsing
+    the command string. The handler returns a verdict dict:
+
+      {"action": "accept"}                                       keep as-is
+      {"action": "reject"}                                       drop
+      {"action": "replace", "command": str, "description": str}  swap
+
+    Handlers chain — handler N sees handler N-1's post-verdict entry.
+    A `reject` short-circuits the chain for that entry. A malformed
+    verdict (missing/unknown action, replace without `command`) fails
+    the task with a message that names `task_path` and `command_kind`
+    so the user can find the bad hook in their `config.axl`.
+
+    No-op when `lifecycle.repro_fix_suggestion` is empty (the common
+    case). Mutates `data["repro_commands"]` and `data["fix_commands"]`
+    in place.
+
+    Stable suggestion slugs by built-in task:
+
+      lint:     lint-repro
+                lint-fix
+      format:   format-repro
+                format-fix
+                format-fix-truncated, format-fix-rediscover
+                format-fix-vanilla-bazel
+      gazelle:  gazelle-repro
+                gazelle-fix
+                gazelle-fix-truncated, gazelle-fix-rediscover
+                gazelle-fix-vanilla-bazel
+      delivery: delivery-repro-local-preview
+      bazel
+       (build /
+        test):  bazel-repro-aspect
+                bazel-repro-vanilla-bazel
+
+    Args:
+        ctx:              TaskContext, passed through to each handler.
+        lifecycle:        TaskLifecycleTrait — source of the hook list.
+        data:             The task's `data` dict. Mutated in place.
+        kind:             Task result kind ("lint_results" |
+                          "bazel_results" | "format_results" |
+                          "gazelle_results" | "delivery_results").
+                          Matches `TaskUpdate.kind`.
+        status:           Lifecycle status the task is about to emit
+                          ("passed" | "warning" | "failed" | "aborted").
+        exit_code:        Task exit code.
+        bazel_subcommand: "build" | "test" | "run" for Bazel-wrapping
+                          tasks; "" otherwise.
+        targets:          Resolved target patterns the task ran on.
+        failed_targets:   Deduplicated list of Bazel labels that failed
+                          (union of failed actions / targets / tests —
+                          see `failed_labels` in `bazel_results.axl`).
+                          Empty on non-Bazel tasks.
+        extras:           Open-ended, task-stamped, curated keys
+                          surfaced verbatim on `ReproFixInfo.extras`.
+                          See call sites for the per-task contract.
+    """
+    handlers = lifecycle.repro_fix_suggestion
+    if not handlers:
+        return
+
+    info_base = {
+        "task_path": task_cli_path(ctx.task),
+        "task_name": ctx.task.name,
+        "task_group": list(ctx.task.group),
+        "kind": kind,
+        "status": status,
+        "exit_code": exit_code,
+        "bazel_subcommand": bazel_subcommand,
+        "targets": list(targets),
+        "failed_targets": list(failed_targets),
+        "extras": extras,
+        "data": data,
+    }
+
+    for list_key, command_kind in (
+        ("repro_commands", "repro"),
+        ("fix_commands", "fix"),
+    ):
+        entries = data.get(list_key, []) or []
+        if not entries:
+            continue
+        info = ReproFixInfo(command_kind = command_kind, **info_base)
+        kept = []
+        for entry in entries:
+            survived = _apply_chain(ctx, info, entry, handlers)
+            if survived != None:
+                kept.append(survived)
+        data[list_key] = kept
+
+def _apply_chain(ctx, info, entry, handlers):
+    """Run `entry` through every handler in `handlers` in order.
+
+    Returns the post-chain `{command, description, slug}` dict, or
+    `None` when any handler rejected the entry. The slug is carried
+    through `replace` verdicts unchanged — hooks rewrite commands,
+    not suggestion identity. Each handler's verdict is validated
+    before applying via `_verdict_action`; an invalid verdict aborts
+    the task with a descriptive `fail()`.
+    """
+    current = entry
+    for handler in handlers:
+        verdict = handler(ctx, info, current)
+        action = _verdict_action(verdict, info)
+        if action == _VERDICT_REJECT:
+            return None
+        if action == _VERDICT_REPLACE:
+            current = {
+                "command": verdict["command"],
+                "description": verdict.get("description", "") or "",
+                "slug": current.get("slug", "") or "",
+            }
+    return current
+
+def _verdict_action(verdict, info):
+    """Validate a hook return value and return its canonical action
+    string, or abort the task with a descriptive `fail()`.
+
+    Accepts a dict with `action` ∈ {accept, reject, replace}; replace
+    additionally requires a non-empty `command` string and (optionally)
+    a `description` string.
+    """
+    if type(verdict) != "dict":
+        _bad_verdict(info, "expected a dict, got " + type(verdict))
+    action = verdict.get("action", "")
+    if action not in _VERDICT_ACTIONS:
+        _bad_verdict(info, "unknown action %r; expected accept|reject|replace" % action)
+    if action == _VERDICT_REPLACE:
+        command = verdict.get("command", "")
+        if type(command) != "string" or not command:
+            _bad_verdict(info, "replace verdict requires a non-empty `command` string")
+        if type(verdict.get("description", "")) != "string":
+            _bad_verdict(info, "replace verdict `description` must be a string")
+    return action
+
+def _bad_verdict(info, detail):
+    """Abort the task with a hook-validation message that names the
+    `task_path` and `command_kind` so the user can find the offending
+    hook in their `config.axl`."""
+    fail("repro_fix_suggestion hook for task %s (%s command) returned an invalid verdict: %s" % (
+        info.task_path,
+        info.command_kind,
+        detail,
+    ))

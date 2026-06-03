@@ -1,6 +1,23 @@
 """Task lifecycle: TaskUpdate record, TaskLifecycleTrait, and the
 canonical `task_update()` emitter.
 
+`TaskLifecycleTrait` has two hooks:
+
+  task_update           — fires on every structured update during the
+                          task. Used by features (GHSC, BK annotations,
+                          PR comments) to surface live progress.
+  repro_fix_suggestion  — user-customization hook applied once per
+                          `{command, description}` entry in
+                          `data["repro_commands"]` / `data["fix_commands"]`
+                          just before the terminal `task_update`. Lets
+                          a user's `config.axl` accept, reject, or
+                          modify each suggestion (e.g. rewrite `aspect …`
+                          to an internal wrapper, suppress fixes that
+                          are unsafe in their environment). See the
+                          `ReproFixInfo` record and `apply_repro_fix_hooks`
+                          in `lib/repro_commands.axl` for the contract
+                          and apply site.
+
 `task_update(ctx, lifecycle, status, progress, ...)` prints a phase
 label to stderr (as `→ <progress>`) *and* emits a `TaskUpdate` to every
 handler on `lifecycle.task_update`. The two side effects are paired so
@@ -181,10 +198,59 @@ Phase = record(
     display_name = field(str, default = ""),
 )
 
+# Metadata passed to `repro_fix_suggestion` hooks (see `TaskLifecycleTrait`
+# below) alongside each `{command, description}` entry. Typed common-case
+# fields cover most decisions; `extras` and `data` are escape hatches for
+# hooks that need kind-specific detail.
+ReproFixInfo = record(
+    # Identity — same shape `task_cli_path` (in lib/repro_commands.axl) would
+    # render, plus the constituent parts for hooks that want to scope by
+    # task name or group.
+    task_path = field(str),
+    task_name = field(str),
+    task_group = field(list[str]),
+    # Task result kind: "lint_results" | "bazel_results" | "format_results"
+    # | "gazelle_results" | "delivery_results". Matches `TaskUpdate.kind`
+    # so hooks can route by the same key the surface templates use.
+    kind = field(str),
+    # "repro" | "fix" — which list this entry belongs to. Hooks doing
+    # different things to repro vs fix commands branch on this.
+    command_kind = field(str),
+
+    # Outcome — the lifecycle status the task is about to emit (passed |
+    # warning | failed | aborted) and its exit code.
+    status = field(str),
+    exit_code = field(int),
+
+    # Bazel-only fields. Empty / 0-length on non-Bazel tasks.
+    # `bazel_subcommand` is "build" | "test" | "run" when the task wrapped
+    # Bazel; "" otherwise. `targets` is the resolved patterns the task ran
+    # on. `failed_targets` is the deduplicated list of Bazel labels that
+    # failed (the union of failed actions, failed targets, and failed
+    # tests — see `failed_labels` in `lib/bazel_results.axl`).
+    bazel_subcommand = field(str, default = ""),
+    targets = field(list[str], default = []),
+    failed_targets = field(list[str], default = []),
+
+    # Open-ended, task-stamped, curated keys. Documented and stable across
+    # releases on a per-task basis — see `apply_repro_fix_hooks` call sites
+    # for the keys each task contributes. Examples:
+    #   lint:    {"aspects": [...], "suggestion_count": N}
+    #   format:  {"affected_files": [...], "languages": [...]}
+    #   gazelle: {"affected_files": [...]}
+    extras = field(dict, default = {}),
+
+    # Full task `data` dict — escape hatch for hooks that need fields not
+    # surfaced by the typed fields or `extras`. Couples user hooks to
+    # internal data shape; treat as UNSTABLE and prefer the typed/curated
+    # surfaces above.
+    data = field(dict, default = {}),
+)
+
 # Lifecycle hooks that any task can fire, allowing features like GithubStatusChecks
 # to observe task progress without coupling to Bazel-specific hooks.
 TaskLifecycleTrait = trait(
-    # The single lifecycle hook. Called for every structured update during the
+    # The primary lifecycle hook. Called for every structured update during the
     # task; receives (ctx, update: TaskUpdate). Features close over their own
     # state dict rather than receiving one.
     #
@@ -196,6 +262,30 @@ TaskLifecycleTrait = trait(
     # the LAST one — handlers conclude the surface there. There is no separate
     # started/complete hook: the first and last `task_update` carry that intent.
     task_update = attr(list[typing.Callable[[TaskContext, TaskUpdate], None]], default = []),
+
+    # User-customization hook for repro / fix command suggestions. Called once
+    # per `{command, description}` entry in `data["repro_commands"]` /
+    # `data["fix_commands"]` just before the terminal `task_update` emit, via
+    # the central `apply_repro_fix_hooks` helper in `repro_commands.axl`. After
+    # that single transform every downstream consumer — the CLI printer, the
+    # GHSC check-run body, the BK annotation, the GitHub PR-comment rollup —
+    # sees the same filtered list.
+    #
+    # Signature: `(ctx: TaskContext, info: ReproFixInfo, entry: dict) -> dict`
+    # where the returned dict is one of:
+    #   {"action": "accept"}                                    keep as-is
+    #   {"action": "reject"}                                    drop
+    #   {"action": "replace", "command": str, "description": str}  swap
+    #
+    # Multiple handlers chain in registration order — handler N sees handler
+    # N-1's post-verdict entry. `reject` short-circuits the chain for that
+    # entry. A malformed verdict (missing/unknown action, replace without
+    # `command`) raises with a descriptive error so the user fixes their
+    # config.axl rather than getting silent drift.
+    #
+    # See `apply_repro_fix_hooks` in `lib/repro_commands.axl` for the apply
+    # site, and `ReproFixInfo` above for the metadata record.
+    repro_fix_suggestion = attr(list[typing.Callable[[TaskContext, ReproFixInfo, dict], dict]], default = []),
 )
 
 # ---------------------------------------------------------------------------

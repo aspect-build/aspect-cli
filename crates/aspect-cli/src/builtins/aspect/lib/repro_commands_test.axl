@@ -6,7 +6,7 @@ through clap's `ValueSource::CommandLine` is covered by the Rust unit
 tests on `Arguments`.
 """
 
-load("./repro_commands.axl", "build_bazel_command", "explicit_flags", "repro_prefix", "subdir_prefix")
+load("./repro_commands.axl", "apply_repro_fix_hooks", "build_bazel_command", "explicit_flags", "repro_prefix", "subdir_prefix")
 
 def _eq(label, got, want):
     if got != want:
@@ -260,6 +260,292 @@ def _test_bazel_run_truncates_long_arg_list(_ctx):
     if included_count == 0 or included_count >= 20:
         fail("bazel run truncation: expected partial inclusion (some included, some omitted); included %d/20" % included_count)
 
+# ---------------------------------------------------------------------------
+# apply_repro_fix_hooks — user customization hook
+# ---------------------------------------------------------------------------
+
+def _fake_apply_ctx():
+    """Build a fake `ctx` with the fields `apply_repro_fix_hooks` reads —
+    just `ctx.task.name` and `ctx.task.group`. Std/env are not touched."""
+    return struct(task = struct(name = "lint", group = ["aspect"]))
+
+def _fake_lifecycle(handlers):
+    """Build a fake `lifecycle` with the single attribute the helper
+    reads. The Rust trait runtime exposes attrs as fields; a struct fake
+    is interchangeable for the test."""
+    return struct(repro_fix_suggestion = handlers)
+
+def _seed_data():
+    """Repro + fix lists shaped like a real terminal-emit-time `data`
+    dict. Two entries each so chain/reject behavior is observable.
+    Mixed slugs so slug-based scoping tests can exercise selective
+    reject / accept."""
+    return {
+        "repro_commands": [
+            {"command": "aspect lint -- //a:a", "description": "", "slug": "lint-repro"},
+            {"command": "aspect lint -- //b:b", "description": "alt", "slug": "lint-repro"},
+        ],
+        "fix_commands": [
+            {"command": "aspect lint --fix -- //a:a", "description": "", "slug": "lint-fix"},
+            {"command": "aspect lint --fix -- //b:b", "description": "alt", "slug": "lint-fix"},
+        ],
+    }
+
+def _test_no_handlers_is_noop(_ctx):
+    data = _seed_data()
+    apply_repro_fix_hooks(
+        _fake_apply_ctx(),
+        _fake_lifecycle([]),
+        data,
+        kind = "lint_results",
+        status = "failed",
+        exit_code = 1,
+    )
+    _eq("no handlers: repro untouched", len(data["repro_commands"]), 2)
+    _eq("no handlers: fix untouched", len(data["fix_commands"]), 2)
+
+def _test_accept_keeps_entry(_ctx):
+    data = _seed_data()
+    apply_repro_fix_hooks(
+        _fake_apply_ctx(),
+        _fake_lifecycle([lambda ctx, info, entry: {"action": "accept"}]),
+        data,
+        kind = "lint_results",
+        status = "failed",
+        exit_code = 1,
+    )
+    _eq("accept: repro kept", len(data["repro_commands"]), 2)
+    _eq("accept: fix kept", len(data["fix_commands"]), 2)
+    _eq("accept: command unchanged", data["repro_commands"][0]["command"], "aspect lint -- //a:a")
+
+def _test_reject_drops_entry(_ctx):
+    data = _seed_data()
+    def reject_fix(ctx, info, entry):
+        if info.command_kind == "fix":
+            return {"action": "reject"}
+        return {"action": "accept"}
+    apply_repro_fix_hooks(
+        _fake_apply_ctx(),
+        _fake_lifecycle([reject_fix]),
+        data,
+        kind = "lint_results",
+        status = "failed",
+        exit_code = 1,
+    )
+    _eq("reject: repro kept", len(data["repro_commands"]), 2)
+    _eq("reject: fix dropped", len(data["fix_commands"]), 0)
+
+def _test_replace_rewrites_entry(_ctx):
+    data = _seed_data()
+    def rewrite(ctx, info, entry):
+        return {
+            "action": "replace",
+            "command": entry["command"].replace("aspect ", "wrapper "),
+            "description": entry["description"],
+        }
+    apply_repro_fix_hooks(
+        _fake_apply_ctx(),
+        _fake_lifecycle([rewrite]),
+        data,
+        kind = "lint_results",
+        status = "failed",
+        exit_code = 1,
+    )
+    _eq(
+        "replace: repro rewritten",
+        data["repro_commands"][0]["command"],
+        "wrapper lint -- //a:a",
+    )
+    _eq(
+        "replace: fix rewritten",
+        data["fix_commands"][1]["command"],
+        "wrapper lint --fix -- //b:b",
+    )
+    _eq(
+        "replace: description preserved",
+        data["fix_commands"][1]["description"],
+        "alt",
+    )
+
+def _test_chain_passes_through_replacements(_ctx):
+    """Handler 2 sees handler 1's post-replace entry — the chain feeds
+    each verdict's output as the next handler's input."""
+    data = {"repro_commands": [{"command": "x", "description": "", "slug": "lint-repro"}], "fix_commands": []}
+    def step1(ctx, info, entry):
+        return {"action": "replace", "command": entry["command"] + "1", "description": ""}
+    def step2(ctx, info, entry):
+        return {"action": "replace", "command": entry["command"] + "2", "description": ""}
+    apply_repro_fix_hooks(
+        _fake_apply_ctx(),
+        _fake_lifecycle([step1, step2]),
+        data,
+        kind = "lint_results",
+        status = "failed",
+        exit_code = 1,
+    )
+    _eq("chain: both handlers applied in order", data["repro_commands"][0]["command"], "x12")
+
+def _test_chain_short_circuits_on_reject(_ctx):
+    """Once handler N returns reject, later handlers are not called for
+    that entry — guarded by tracking call counts."""
+    data = {"repro_commands": [{"command": "x", "description": "", "slug": "lint-repro"}], "fix_commands": []}
+    calls = []
+    def step1(ctx, info, entry):
+        calls.append("step1")
+        return {"action": "reject"}
+    def step2(ctx, info, entry):
+        calls.append("step2")
+        return {"action": "accept"}
+    apply_repro_fix_hooks(
+        _fake_apply_ctx(),
+        _fake_lifecycle([step1, step2]),
+        data,
+        kind = "lint_results",
+        status = "failed",
+        exit_code = 1,
+    )
+    _eq("reject short-circuit: entry dropped", len(data["repro_commands"]), 0)
+    _eq("reject short-circuit: step2 not called", calls, ["step1"])
+
+def _test_info_exposes_typed_fields(_ctx):
+    """Hooks receive a populated `ReproFixInfo` — verify the typed
+    fields the call site fills in are reachable."""
+    data = {
+        "repro_commands": [{"command": "x", "description": "", "slug": "lint-repro"}],
+        "fix_commands": [{"command": "y", "description": "", "slug": "lint-fix"}],
+    }
+    seen = []
+    def capture(ctx, info, entry):
+        seen.append({
+            "task_path": info.task_path,
+            "task_name": info.task_name,
+            "kind": info.kind,
+            "command_kind": info.command_kind,
+            "status": info.status,
+            "exit_code": info.exit_code,
+            "bazel_subcommand": info.bazel_subcommand,
+            "targets": list(info.targets),
+            "failed_targets": list(info.failed_targets),
+            "extras_key": info.extras.get("aspects", []),
+            "slug": entry["slug"],
+        })
+        return {"action": "accept"}
+    apply_repro_fix_hooks(
+        _fake_apply_ctx(),
+        _fake_lifecycle([capture]),
+        data,
+        kind = "lint_results",
+        status = "failed",
+        exit_code = 1,
+        bazel_subcommand = "build",
+        targets = ["//a:a"],
+        failed_targets = ["//b:b"],
+        extras = {"aspects": ["//tools/lint:eslint"]},
+    )
+    _eq("info: 2 entries seen (1 repro + 1 fix)", len(seen), 2)
+    _eq("info: task_path composed from group+name", seen[0]["task_path"], "aspect lint")
+    _eq("info: task_name", seen[0]["task_name"], "lint")
+    _eq("info: kind", seen[0]["kind"], "lint_results")
+    _eq("info: command_kind for repro", seen[0]["command_kind"], "repro")
+    _eq("info: command_kind for fix", seen[1]["command_kind"], "fix")
+    _eq("info: status", seen[0]["status"], "failed")
+    _eq("info: exit_code", seen[0]["exit_code"], 1)
+    _eq("info: bazel_subcommand", seen[0]["bazel_subcommand"], "build")
+    _eq("info: targets", seen[0]["targets"], ["//a:a"])
+    _eq("info: failed_targets", seen[0]["failed_targets"], ["//b:b"])
+    _eq("info: extras passthrough", seen[0]["extras_key"], ["//tools/lint:eslint"])
+    _eq("entry slug visible: repro", seen[0]["slug"], "lint-repro")
+    _eq("entry slug visible: fix", seen[1]["slug"], "lint-fix")
+
+def _test_empty_lists_skip_chain(_ctx):
+    """When a list is empty, no handler call is made for it — saves
+    work on tasks that don't populate one side (e.g. passed lint with
+    no fixes)."""
+    data = {"repro_commands": [{"command": "x", "description": "", "slug": "lint-repro"}], "fix_commands": []}
+    seen = []
+    def capture(ctx, info, entry):
+        seen.append(info.command_kind)
+        return {"action": "accept"}
+    apply_repro_fix_hooks(
+        _fake_apply_ctx(),
+        _fake_lifecycle([capture]),
+        data,
+        kind = "lint_results",
+        status = "passed",
+        exit_code = 0,
+    )
+    _eq("empty fix list skipped", seen, ["repro"])
+
+def _test_slug_visible_to_hook(_ctx):
+    """Hooks read `entry["slug"]` to scope by suggestion type without
+    parsing the command string."""
+    data = {
+        "repro_commands": [
+            {"command": "aspect build -- //a:a", "description": "", "slug": "bazel-repro-aspect"},
+            {"command": "bazel build -- //a:a", "description": "vanilla bazel", "slug": "bazel-repro-vanilla-bazel"},
+        ],
+        "fix_commands": [],
+    }
+    def reject_vanilla(ctx, info, entry):
+        if entry["slug"] == "bazel-repro-vanilla-bazel":
+            return {"action": "reject"}
+        return {"action": "accept"}
+    apply_repro_fix_hooks(
+        _fake_apply_ctx(),
+        _fake_lifecycle([reject_vanilla]),
+        data,
+        kind = "bazel_results",
+        status = "failed",
+        exit_code = 1,
+    )
+    _eq("slug-based reject: vanilla dropped", len(data["repro_commands"]), 1)
+    _eq("slug-based reject: aspect kept", data["repro_commands"][0]["slug"], "bazel-repro-aspect")
+
+def _test_slug_preserved_through_replace(_ctx):
+    """A `replace` verdict rewrites the command/description but
+    inherits the prior entry's slug — hooks rewrite commands, not
+    suggestion identity."""
+    data = {
+        "repro_commands": [{"command": "aspect buildifier", "description": "", "slug": "format-repro"}],
+        "fix_commands": [],
+    }
+    def rewrite(ctx, info, entry):
+        return {
+            "action": "replace",
+            "command": entry["command"].replace("aspect ", "bazel "),
+            "description": entry["description"],
+        }
+    apply_repro_fix_hooks(
+        _fake_apply_ctx(),
+        _fake_lifecycle([rewrite]),
+        data,
+        kind = "format_results",
+        status = "failed",
+        exit_code = 1,
+    )
+    _eq("replace preserves slug", data["repro_commands"][0]["slug"], "format-repro")
+    _eq("replace rewrites command", data["repro_commands"][0]["command"], "bazel buildifier")
+
+def _test_slug_visible_after_replace_in_chain(_ctx):
+    """A later handler in the chain sees the (unchanged) slug on the
+    post-replace entry from the prior handler."""
+    data = {"repro_commands": [{"command": "x", "description": "", "slug": "lint-repro"}], "fix_commands": []}
+    later_saw = []
+    def first(ctx, info, entry):
+        return {"action": "replace", "command": "y", "description": ""}
+    def second(ctx, info, entry):
+        later_saw.append(entry["slug"])
+        return {"action": "accept"}
+    apply_repro_fix_hooks(
+        _fake_apply_ctx(),
+        _fake_lifecycle([first, second]),
+        data,
+        kind = "lint_results",
+        status = "failed",
+        exit_code = 1,
+    )
+    _eq("downstream hook sees inherited slug", later_saw, ["lint-repro"])
+
 _UNIT_TESTS = [
     _test_returns_empty_when_no_explicit,
     _test_includes_only_explicit_pairs,
@@ -291,6 +577,17 @@ _UNIT_TESTS = [
     _test_bazel_run_no_targets,
     _test_bazel_run_multiline_continuation_form,
     _test_bazel_run_truncates_long_arg_list,
+    _test_no_handlers_is_noop,
+    _test_accept_keeps_entry,
+    _test_reject_drops_entry,
+    _test_replace_rewrites_entry,
+    _test_chain_passes_through_replacements,
+    _test_chain_short_circuits_on_reject,
+    _test_info_exposes_typed_fields,
+    _test_empty_lists_skip_chain,
+    _test_slug_visible_to_hook,
+    _test_slug_preserved_through_replace,
+    _test_slug_visible_after_replace_in_chain,
 ]
 
 def _test_impl(ctx):

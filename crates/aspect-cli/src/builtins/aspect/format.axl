@@ -30,7 +30,7 @@ load("./lib/health_check.axl", "HealthCheckTrait")
 load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "pick_task_status", "resolve_severity", "setup_phase", "task_update")
 load("./lib/path_glob.axl", "match_any")
 load("./lib/path_normalize.axl", "normalize_files_for_cwd")
-load("./lib/repro_commands.axl", "build_aspect_command", "build_bazel_command", "explicit_flags", "print_repro_and_fix", "repro_prefix", "task_cli_path")
+load("./lib/repro_commands.axl", "apply_repro_fix_hooks", "build_aspect_command", "build_bazel_command", "explicit_flags", "print_repro_and_fix", "repro_prefix", "task_cli_path")
 load("./lib/runnable.axl", "LOCAL_SPAWN_FLAGS", "runnable")
 load("./lib/text.axl", "pluralize")
 load("./lib/tips.axl", "tips")
@@ -215,6 +215,7 @@ def _append_repro_command(ctx, data):
     data["repro_commands"].append({
         "command": prefix + build_aspect_command(task_cli_path(ctx.task), flags, []),
         "description": "",
+        "slug": "format-repro",
     })
 
 def _append_fix_commands(ctx, data):
@@ -252,6 +253,7 @@ def _append_fix_commands(ctx, data):
         data["fix_commands"].append({
             "command": prefix + build_aspect_command(task_path, positional_flags, affected, max_chars = 4096),
             "description": "",
+            "slug": "format-fix",
         })
     else:
         shown = affected[:_FIX_FILES_LIMIT]
@@ -264,6 +266,7 @@ def _append_fix_commands(ctx, data):
                 remaining,
                 "" if remaining == 1 else "s",
             ),
+            "slug": "format-fix-truncated",
         })
 
         detection = ([("--severity", "info")] +
@@ -272,6 +275,7 @@ def _append_fix_commands(ctx, data):
         data["fix_commands"].append({
             "command": prefix + build_aspect_command(task_path, detection, []),
             "description": "Or re-discover and format all %d affected files" % len(affected),
+            "slug": "format-fix-rediscover",
         })
 
     bazel_flags = ["--run_in_cwd"] if ctx.args.run_in_cwd else []
@@ -284,6 +288,7 @@ def _append_fix_commands(ctx, data):
             max_chars = _BAZEL_ALT_MAX_CHARS,
         ),
         "description": "vanilla bazel",
+        "slug": "format-fix-vanilla-bazel",
     })
 
 def _emit_final(ctx, lifecycle, data, exit_code):
@@ -298,6 +303,18 @@ def _emit_final(ctx, lifecycle, data, exit_code):
     _append_fix_commands(ctx, data)
 
     bookend = format_conclusion(status, data)
+
+    apply_repro_fix_hooks(
+        ctx,
+        lifecycle,
+        data,
+        kind = "format_results",
+        status = status,
+        exit_code = exit_code,
+        extras = {
+            "affected_files": (data.get("format", {}) or {}).get("affected_files", []) or [],
+        },
+    )
 
     for handler in lifecycle.task_update:
         handler(ctx, TaskUpdate(

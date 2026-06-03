@@ -9,6 +9,7 @@ files can load the full trait set with a single import:
          "TaskLifecycleTrait",
          "DeliveryTrait",
          "HealthCheckTrait",
+         "ReproFixInfo",
          "TaskUpdate")
 
 Internal modules should load directly from the owning module — this
@@ -26,6 +27,7 @@ load("./delivery.axl", _DeliveryTrait = "DeliveryTrait")
 load("./lib/health_check.axl", _HealthCheckTrait = "HealthCheckTrait")
 load(
     "./lib/lifecycle.axl",
+    _ReproFixInfo = "ReproFixInfo",
     _TaskLifecycleTrait = "TaskLifecycleTrait",
     _TaskUpdate = "TaskUpdate",
 )
@@ -35,5 +37,6 @@ BazelTrait = _BazelTrait
 DeliveryTrait = _DeliveryTrait
 HealthCheckTrait = _HealthCheckTrait
 LintTrait = _LintTrait
+ReproFixInfo = _ReproFixInfo
 TaskLifecycleTrait = _TaskLifecycleTrait
 TaskUpdate = _TaskUpdate
