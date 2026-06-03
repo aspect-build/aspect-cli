@@ -628,14 +628,39 @@ fn payload_discriminant(p: &axl_proto::build_event_stream::build_event::Payload)
 /// invocation. Gated by the `--announce-bazel-version` / `--announce-bazel-command`
 /// task flags, resolved in AXL and passed through as `announce`.
 ///
-/// Plain (unstyled) to match Bazel's own `INFO:` output, which interleaves
-/// with these lines.
+/// Styled in grey so the long `INFO: Spawning:` line reads as background
+/// context next to bazel's own (undimmed) `INFO:` output. Falls back to
+/// plain text when stderr isn't a TTY and we're not on a recognized CI host
+/// — matching the gate used elsewhere in the runtime (see
+/// `multi_phase::running_verb_color`).
 fn announce_spawn(announce: AnnounceSpawn, version: Option<&semver::Version>, cmd: &Command) {
+    let (grey, reset) = grey_style();
     if announce.version {
-        eprintln!("INFO: {}", version_line(version));
+        eprintln!("{grey}INFO: {}{reset}", version_line(version));
     }
     if announce.command {
-        eprintln!("INFO: Spawning: {}", render_command(cmd));
+        eprintln!("{grey}INFO: Spawning: {}{reset}", render_command(cmd));
+    }
+}
+
+/// Return `(grey_prefix, reset)` ANSI escape pair for the announce lines.
+///
+/// Empty strings when stderr isn't a TTY and we're not on a recognized CI
+/// host, so file-captured / piped output stays plain. CI hosts (GitHub
+/// Actions, Buildkite, …) render ANSI in their log viewers even though
+/// stderr is a non-TTY pipe — same heuristic as `running_verb_color`.
+///
+/// Uses 256-color grey (`38;5;244`) rather than SGR 2 (faint): GitHub
+/// Actions' log viewer silently drops SGR 2, which is the bug the original
+/// implementation hit. 256-color escapes are rendered by GHA, Buildkite,
+/// and every TTY we ship to, and match the grey `tools/bazel` itself uses
+/// for its `[tools/bazel]` trace line.
+fn grey_style() -> (&'static str, &'static str) {
+    use std::io::IsTerminal;
+    if std::io::stderr().is_terminal() || crate::ci::on_recognized_ci() {
+        ("\x1b[38;5;244m", "\x1b[0m")
+    } else {
+        ("", "")
     }
 }
 

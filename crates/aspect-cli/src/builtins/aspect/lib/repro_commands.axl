@@ -576,8 +576,14 @@ def _repro_header(ansi, label):
     return "\x1b[1m" + label + "\x1b[0m" if ansi else label
 
 def _install_hint_line(ansi):
-    """Dim-formatted install hint printed under each repro/fix block."""
-    return ("\x1b[2m" + ASPECT_CLI_INSTALL_HINT + "\x1b[0m") if ansi else ASPECT_CLI_INSTALL_HINT
+    """Grey-formatted install hint printed under each repro/fix block.
+
+    Uses 256-color grey (`38;5;244`) rather than SGR 2 (faint): GitHub
+    Actions' log viewer silently drops SGR 2, and `color_enabled` is
+    true under GHA, so the hint would render at full weight on CI even
+    though the styling was applied.
+    """
+    return ("\x1b[38;5;244m" + ASPECT_CLI_INSTALL_HINT + "\x1b[0m") if ansi else ASPECT_CLI_INSTALL_HINT
 
 def _print_repro_entry(ansi, entry):
     """Print one `ReproFixCommand` entry as a fenced code block.
@@ -586,17 +592,18 @@ def _print_repro_entry(ansi, entry):
     printed flush-left, so the copy-paste region is unambiguous and can
     be selected without stripping leading whitespace.
 
-    Description renders as a dim `# <description>` shell-comment line
+    Description renders as a grey `# <description>` shell-comment line
     ABOVE the command — copy-paste still runs the command (bash ignores
     `#` lines), and the comment reads as a header explaining what's
-    coming.
+    coming. See `_install_hint_line` for why we use 256-color grey
+    instead of SGR 2 (faint).
     """
     if not entry.command:
         return
     print("```")
     if entry.description:
         comment = "# " + entry.description
-        print(("\x1b[2m" + comment + "\x1b[0m") if ansi else comment)
+        print(("\x1b[38;5;244m" + comment + "\x1b[0m") if ansi else comment)
     for line in entry.command.split("\n"):
         print(line)
     print("```")
