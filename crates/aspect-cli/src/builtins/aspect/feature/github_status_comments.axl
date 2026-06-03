@@ -60,7 +60,7 @@ load(
     "should_emit_phase_change",
     "usage_footer",
 )
-load("../lib/repro_commands.axl", "ASPECT_CLI_INSTALL_HINT_MARKDOWN", "dedup_and_attribute")
+load("../lib/repro_commands.axl", "ASPECT_CLI_INSTALL_HINT_MARKDOWN", "dedup_and_attribute", "rehydrate_commands")
 load("../lib/result_text.axl", "severity_for_status")
 load("../lib/tar.axl", "bsdtar")
 load(
@@ -878,11 +878,24 @@ def _parse_state(body):
     epoch = decoded.get("last_upsert_epoch_s")
     workflow_runs = decoded.get("workflow_runs")
     entries = decoded.get("entries")
+    parsed_entries = [e for e in entries if type(e) == "dict"] if type(entries) == "list" else []
+
+    # JSON round-trip turns ReproFixCommand records into plain dicts;
+    # rehydrate per-entry so downstream `_collect_repro_fix_rows` can
+    # do record-attribute access (`c.command`, `c.description`). Only
+    # touch keys that are already present so entries written by older
+    # aspect-cli releases (predating the command lists) round-trip
+    # unchanged.
+    for e in parsed_entries:
+        if "repro_commands" in e:
+            e["repro_commands"] = rehydrate_commands(e["repro_commands"])
+        if "fix_commands" in e:
+            e["fix_commands"] = rehydrate_commands(e["fix_commands"])
     return {
         "head_sha": head_sha if type(head_sha) == "string" else "",
         "last_upsert_epoch_s": epoch if type(epoch) == "int" else 0,
         "workflow_runs": [r for r in workflow_runs if type(r) == "dict"] if type(workflow_runs) == "list" else [],
-        "entries": [e for e in entries if type(e) == "dict"] if type(entries) == "list" else [],
+        "entries": parsed_entries,
     }
 
 def _merge_state(existing_state, head_sha, my_run_id, my_workflow_name, my_entries, refreshed_other_entries):
@@ -1207,6 +1220,16 @@ def _github_status_comments(ctx: FeatureContext):
             entry = json.try_decode(ctx.std.fs.read_to_string(json_path), None)
             if not entry:
                 continue
+
+            # JSON round-trip turns ReproFixCommand records into plain
+            # dicts; rehydrate them so downstream `_collect_repro_fix_rows`
+            # can do record-attribute access (`c.command`, `c.description`).
+            # Only touch keys that are present so entries from older
+            # aspect-cli releases pass through unchanged.
+            if "repro_commands" in entry:
+                entry["repro_commands"] = rehydrate_commands(entry["repro_commands"])
+            if "fix_commands" in entry:
+                entry["fix_commands"] = rehydrate_commands(entry["fix_commands"])
             cache[aid] = entry
             seen[aname] = entry
 

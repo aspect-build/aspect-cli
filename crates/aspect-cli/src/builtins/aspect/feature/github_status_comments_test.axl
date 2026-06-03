@@ -64,6 +64,7 @@ load(
 )
 load("../lib/bazel_results.axl", "compute_reproducer_command")
 load("../lib/github.axl", "github")
+load("../lib/repro_commands.axl", "rehydrate_commands")
 load("../lib/tips.axl", "tips")
 
 def _eq(label, got, want):
@@ -90,10 +91,21 @@ def _with_commands(data, repro = [], fix = []):
     in scenarios that need to assert the aggregator's repro / fix
     rendering — the producers normally append these at terminal-emit
     time, but the snapshot tests fabricate the artifact-payload
-    shape directly so the inputs are spelled out here."""
+    shape directly so the inputs are spelled out here.
+
+    Runs the dicts through `rehydrate_commands` so the fixture matches
+    what `_list_and_download_workflow_artifacts` hands the renderer
+    after the JSON round-trip — `ReproFixCommand` records, not raw
+    dicts. Without this the renderer would trip on `c.command`
+    record-attribute access.
+    """
     out = dict(data)
-    out["repro_commands"] = [{"command": c, "description": d} for (c, d) in repro]
-    out["fix_commands"] = [{"command": c, "description": d} for (c, d) in fix]
+    out["repro_commands"] = rehydrate_commands(
+        [{"command": c, "description": d, "slug": ""} for (c, d) in repro],
+    )
+    out["fix_commands"] = rehydrate_commands(
+        [{"command": c, "description": d, "slug": ""} for (c, d) in fix],
+    )
     return out
 
 def _body_for(kind, status, data):
@@ -307,12 +319,16 @@ def _entry(
     # Mirror the producer side: if the fixture's `data` doesn't carry
     # repro_commands, synthesize one the way bazel_runner does. Lets
     # existing fixtures exercise the "🔁 Reproduce" section without
-    # spelling out the list shape.
+    # spelling out the list shape. Run the dict through
+    # `rehydrate_commands` so the fixture matches what the production
+    # read path would deliver to the renderer (records, not raw dicts).
     if not data.get("repro_commands"):
         repro, _ = compute_reproducer_command(data, name)
         if repro:
             data = dict(data)
-            data["repro_commands"] = [{"command": repro, "description": ""}]
+            data["repro_commands"] = rehydrate_commands([
+                {"command": repro, "description": "", "slug": ""},
+            ])
     payload = results_subset(
         data,
         elapsed_ms,
@@ -961,6 +977,11 @@ def _check_repro_dedup_consecutive_headings(ctx):
     rendered body should carry the `#### ❌ buildifier (…)` heading
     exactly once under the Fix section, not twice.
     """
+
+    # Entries are shaped like what comes back from `_list_and_download_workflow_artifacts`
+    # after `json.try_decode`: plain dicts (records lost their type on JSON
+    # encode). The real read path rehydrates the command lists at the
+    # boundary; do the same here so we exercise the production code path.
     entries = [
         {
             "name": "buildifier",
@@ -969,13 +990,13 @@ def _check_repro_dedup_consecutive_headings(ctx):
             "kind": "format",
             "status": "failed",
             "elapsed_ms": 1000,
-            "repro_commands": [
-                {"command": "aspect buildifier --severity=fail", "description": ""},
-            ],
-            "fix_commands": [
-                {"command": "aspect buildifier --severity=info BUILD.bazel", "description": ""},
-                {"command": "bazel run --run_in_cwd @buildifier_prebuilt//buildifier -- -r .", "description": "vanilla bazel"},
-            ],
+            "repro_commands": rehydrate_commands([
+                {"command": "aspect buildifier --severity=fail", "description": "", "slug": "format-repro"},
+            ]),
+            "fix_commands": rehydrate_commands([
+                {"command": "aspect buildifier --severity=info BUILD.bazel", "description": "", "slug": "format-fix"},
+                {"command": "bazel run --run_in_cwd @buildifier_prebuilt//buildifier -- -r .", "description": "vanilla bazel", "slug": "format-fix-vanilla-bazel"},
+            ]),
         },
     ]
     prepared = prepare_for_render(entries)
