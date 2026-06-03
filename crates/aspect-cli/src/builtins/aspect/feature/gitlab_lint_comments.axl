@@ -58,7 +58,7 @@ def dedup_discussions_by_marker(discussions, task_key):
     Walks `discussions` (GitLab Discussions API shape: each has `id` and
     a `notes` list). For each marker belonging to `task_key`, keeps the
     LAST occurrence (newest — the list is created-asc) and returns the
-    earlier ones as `{discussion_id, note_id}` dicts the caller deletes.
+    earlier ones as `{"discussion_id": ..., "note_id": ...}` dicts the caller deletes.
     Discussions whose first note has no matching marker are ignored.
     """
     seen = {}

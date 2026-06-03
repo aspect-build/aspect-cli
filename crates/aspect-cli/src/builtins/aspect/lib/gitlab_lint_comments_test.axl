@@ -27,6 +27,8 @@ def _test_impl(ctx):
     _eq("position no old_line", "old_line" in pos, False)
 
     _eq("position missing refs", build_position("x", 1, {"base_sha": "B", "head_sha": "H"}), None)
+    _eq("position None refs", build_position("x", 1, None), None)
+    _eq("position non-dict refs", build_position("x", 1, "bad"), None)
 
     # ── Suggestion rendering (GL form via shared helper) ────────────
     _eq("gl suggestion single", suggestion_block("fixed", current = 5, start_line = 5, end_line = 5, vcs = "gitlab"), "```suggestion:-0+0\nfixed\n```")
@@ -42,6 +44,15 @@ def _test_impl(ctx):
     _eq("dedup drops one", len(stale), 1)
     _eq("dedup drops oldest", stale[0]["discussion_id"], "d1")
     _eq("dedup note id", stale[0]["note_id"], 11)
+
+    triple = [
+        {"id": "t1", "notes": [{"id": 1, "body": mk + "\na"}]},
+        {"id": "t2", "notes": [{"id": 2, "body": mk + "\nb"}]},
+        {"id": "t3", "notes": [{"id": 3, "body": mk + "\nc"}]},
+    ]
+    stale3 = dedup_discussions_by_marker(triple, task_key = "lint")
+    _eq("dedup triple drops two", len(stale3), 2)
+    _eq("dedup triple keeps newest", sorted([e["discussion_id"] for e in stale3]), ["t1", "t2"])
 
     print("gitlab_lint_comments.axl: OK")
     return 0
