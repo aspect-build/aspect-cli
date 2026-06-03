@@ -76,3 +76,218 @@ def dedup_discussions_by_marker(discussions, task_key):
             stale.append(seen[marker])
         seen[marker] = entry
     return stale
+
+def _gl_run_id(env):
+    """`gl-<pipeline_id>` for cross-run cleanup scoping; "" off CI.
+
+    Mirrors the `gl-` branch of the GH feature's `_ci_run_id`. The
+    ASPECT_GITLAB_PIPELINE_ID escape hatch matches `gitlab_status_comments`
+    (Aspect-Workflows runners on non-GitLab hosts posting to a GL MR).
+    """
+    pid = env.var("ASPECT_GITLAB_PIPELINE_ID") or env.var("CI_PIPELINE_ID") or ""
+    if pid:
+        return "gl-%s" % pid
+    return ""
+
+def _filter_for_destination(comments, destination):
+    """Same selection contract as the GH feature: "comments" keeps all,
+    "annotations" drops all, "auto"/"both" keep only fix-bearing (empty
+    for current rules_lint linters — see the GH anchor)."""
+    if destination == "comments":
+        return comments
+    if destination == "annotations":
+        return []
+    return [c for c in comments if c.get("_fixes")]
+
+def _task_attribution_footer(task_key):
+    return "\n\n<sub>posted by `%s` lint task</sub>" % task_key
+
+def _build_comments(ctx, filepath, run_id, task_key, destination):
+    """Parse a SARIF report into MR-discussion comment dicts with markers.
+
+    Returns dicts with keys: path, line, body, _severity (internal).
+    Marker is prepended to the body; attribution footer appended.
+    """
+    content = ctx.std.fs.read_to_string(filepath)
+    comments = sarif_to_review_comments(content)
+    comments = _filter_for_destination(comments, destination)
+
+    diags_by_anchor = {}
+    for d in parse_sarif_diagnostics(content):
+        diags_by_anchor[(d["file"], d["line"])] = d
+    for comment in comments:
+        d = diags_by_anchor.get((comment.get("path", ""), comment.get("line", 0)))
+        if d:
+            comment["body"] = build_marker(run_id, task_key, d["tool"], d["file"], d["line"], d["rule_id"]) + "\n" + comment["body"] + _task_attribution_footer(task_key)
+    return comments
+
+def _post_comments(ctx, gl, comments, existing_markers, task_key):
+    """Post each comment as a position-bound discussion. Skips comments
+    whose marker already exists (dedup vs prior run), findings on lines
+    outside the changed-line set, and findings whose position can't be
+    built. Returns a list of human-readable error strings. Mutates
+    `existing_markers` so the caller's cap accounting sees new markers.
+    """
+    errors = []
+    diff_refs = gl["diff_refs"]
+    changed = gl["changed_lines"]
+    for c in comments:
+        c.pop("_severity", None)
+        marker = extract_marker(c.get("body", ""), task_key = task_key)
+        if marker and marker in existing_markers:
+            continue
+        path = c.get("path", "")
+        line = c.get("line", 0)
+        lines = changed.get(path)
+        if lines != None and (line - 1) not in lines:
+            continue
+        position = build_position(path, line, diff_refs)
+        if position == None:
+            errors.append("[%s:%s] could not build position (missing diff_refs)" % (path, line))
+            continue
+        res = gitlab.discussions.create(
+            ctx,
+            token = gl["token"],
+            project = gl["project_path"],
+            mr_iid = gl["mr_iid"],
+            body = c["body"],
+            position = position,
+            auth_kind = "bearer",
+        )
+        if res["success"]:
+            if marker:
+                existing_markers[marker] = res.get("discussion_id", "") or ""
+        else:
+            errors.append("[%s:%s] %s" % (path, line, res.get("error", "unknown error")))
+    return errors
+
+def _get_existing_markers(ctx, gl, task_key):
+    """Return `{marker: discussion_id}` for THIS task's existing lint
+    discussions on the MR (dedup against prior runs)."""
+    listed = gitlab.discussions.list(ctx, token = gl["token"], project = gl["project_path"], mr_iid = gl["mr_iid"], auth_kind = "bearer")
+    if not listed["success"]:
+        return {}
+    markers = {}
+    for d in listed["discussions"]:
+        notes = d.get("notes", [])
+        if not notes:
+            continue
+        marker = extract_marker(notes[0].get("body", ""), task_key = task_key)
+        if marker:
+            markers[marker] = d.get("id", "") or ""
+    return markers
+
+def _build_suggestion_comments(ctx, run_id, task_key, relevant_diagnostics, pending_patches):
+    # TEMPORARY stub — implemented in Task 5.
+    return []
+
+def _cleanup_and_resolve(ctx, gl, relevant_diagnostics, run_id, task_key, suggestion_markers, destination):
+    # TEMPORARY stub — implemented in Task 6.
+    pass
+
+def _gitlab_lint_impl(ctx: FeatureContext):
+    lint_trait = ctx.traits[LintTrait]
+    destination = lint_trait.findings_destination
+
+    mr, reason = detect_gitlab_mr(ctx.std)
+    if mr == None:
+        _LOG.trace("No GitLab MR context — skipping. (%s)" % reason)
+        return
+
+    run_id = _gl_run_id(ctx.std.env)
+    max_pr_comments = ctx.args.max_pr_comments
+
+    auth_reason = {}
+    token = gitlab_token_cache.get_or_mint(
+        ctx,
+        project_path = mr["project_path"],
+        project_id = mr.get("project_id"),
+        # See gitlab_status_comments.axl: request `api` directly until the
+        # roles.ts mr_notes.write scope mapping is fixed (ENG-1652 follow-up).
+        roles = ["api"],
+        _reason = auth_reason,
+    )
+    if not token:
+        _LOG.warn(ctx.std, "Authentication failed for %s — %s" % (mr["project_path"], auth_reason.get("reason", "unknown")))
+        return
+
+    mr_res = gitlab.merge_requests.get(ctx, token = token, project = mr["project_path"], mr_iid = mr["mr_iid"], auth_kind = "bearer")
+    if not mr_res["success"]:
+        _LOG.warn(ctx.std, "Could not fetch MR %d: %s" % (mr["mr_iid"], mr_res.get("error", "unknown")))
+        return
+    diff_refs = (mr_res["merge_request"] or {}).get("diff_refs")
+    if not diff_refs:
+        _LOG.warn(ctx.std, "MR %d has no diff_refs — cannot anchor discussions" % mr["mr_iid"])
+        return
+
+    gl = {
+        "token": token,
+        "project_path": mr["project_path"],
+        "mr_iid": mr["mr_iid"],
+        "diff_refs": diff_refs,
+        "changed_lines": {},
+    }
+    state = {"all_comments": [], "posted": 0, "errors": [], "pending_patches": []}
+
+    def _lint_start(ctx):
+        gl["changed_lines"] = {f["file"]: f.get("hunk_lines") or f["lines"] for f in lint_trait.changed_files}
+
+    def _lint_report(ctx, filepath):
+        comments = _build_comments(ctx, filepath, run_id, ctx.task.key, destination = destination)
+        state["all_comments"].extend(comments)
+        if "existing_markers" not in gl:
+            gl["existing_markers"] = _get_existing_markers(ctx, gl, ctx.task.key)
+        errors_in_batch = [c for c in comments if c.get("_severity") == "error"]
+        if not errors_in_batch:
+            return
+        remaining = max_pr_comments - state["posted"]
+        if remaining <= 0:
+            return
+        new_only = [c for c in errors_in_batch if not (extract_marker(c.get("body", ""), task_key = ctx.task.key) in gl["existing_markers"])]
+        new_only = new_only[:remaining]
+        before = len(gl["existing_markers"])
+        errs = _post_comments(ctx, gl, new_only, gl["existing_markers"], ctx.task.key)
+        state["posted"] += len(gl["existing_markers"]) - before
+        state["errors"].extend(errs)
+
+    def _lint_patch(ctx, filepath, name):
+        state["pending_patches"].append({"path": filepath, "name": name})
+
+    def _lint_end(ctx, relevant_diagnostics):
+        suggestion_comments = [] if destination == "annotations" else _build_suggestion_comments(ctx, run_id, ctx.task.key, relevant_diagnostics, state["pending_patches"])
+        non_errors = [c for c in state["all_comments"] if c.get("_severity") != "error"] + suggestion_comments
+        new_only = []
+        for c in non_errors:
+            marker = extract_marker(c.get("body", ""), task_key = ctx.task.key)
+            if marker and marker in gl["existing_markers"]:
+                continue
+            new_only.append(c)
+        remaining = max_pr_comments - state["posted"]
+        if remaining > 0:
+            before = len(gl["existing_markers"])
+            errs = _post_comments(ctx, gl, new_only[:remaining], gl["existing_markers"], ctx.task.key)
+            state["posted"] += len(gl["existing_markers"]) - before
+            state["errors"].extend(errs)
+        suggestion_markers = [m for m in [extract_marker(c.get("body", ""), task_key = ctx.task.key) for c in suggestion_comments] if m]
+        _cleanup_and_resolve(ctx, gl, relevant_diagnostics, run_id, ctx.task.key, suggestion_markers, destination)
+        if trace.enabled:
+            trace.log("gitlab lint comment summary:")
+            trace.log("posted comments:  %s" % state["posted"])
+            for e in state["errors"]:
+                trace.log("  post error: %s" % e)
+
+    lint_trait.lint_start.append(_lint_start)
+    lint_trait.lint_report.append(_lint_report)
+    lint_trait.lint_patch.append(_lint_patch)
+    lint_trait.lint_end.append(_lint_end)
+
+GitlabLintComments = feature(
+    implementation = _gitlab_lint_impl,
+    enabled = True,
+    args = {
+        "max_pr_comments": args.int(
+            default = 25,
+            description = "Maximum number of MR discussions to post in a single lint run. Errors are prioritized over warnings, then notes; remaining diagnostics are dropped from the MR but still drive the lint task's exit code. Set to 0 to disable posting while keeping exit-code behavior intact.",
+        ),
+    },
+)
