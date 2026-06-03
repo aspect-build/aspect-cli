@@ -11,6 +11,22 @@
 # functionality through the `aspect` CLI without forcing developers to learn
 # a new command name.
 #
+# Docs: https://github.com/aspect-build/aspect-cli/blob/main/tools/bazel.md
+#
+# Surprised that `bazel build` / `bazel test` runs through `aspect`?
+# Two ways to opt out, in increasing permanence:
+#
+#   1. Per-invocation:  ASPECT_WRAPPER_SKIP=1 bazel <verb> …
+#      Forwards everything straight to vanilla bazel, this run only. The
+#      same hint appears on the grey `[tools/bazel] …` trace line when the
+#      wrapper is about to shadow a real bazel verb.
+#
+#   2. Workspace-wide:  remove the verb (e.g. `build`, `test`) from
+#      ASPECT_VERBS_WITH_BAZEL_FLAGS below in your vendored copy of this
+#      script. Aspect-only verbs (lint/format/custom .axl tasks) keep
+#      routing through aspect; the listed bazel verbs go straight to
+#      vanilla bazel. No env var needed.
+#
 # The marker comment above (`# aspect-build/tools-bazel-wrapper`) and the
 # ASPECT_BAZEL_WRAPPER_VERSION variable below identify this file as the
 # canonical Aspect-shipped wrapper. Aspect detects them to know that in
@@ -533,9 +549,13 @@ BAZEL_VERBS_STR=" ${BAZEL_VERBS[*]} "
 
 # --- Helpers --------------------------------------------------------------
 
+# Source-of-truth docs link, appended to every aspect-route trace so the
+# user can read about the routing rules without grepping the wrapper.
+ASPECT_WRAPPER_DOCS_URL="https://github.com/aspect-build/aspect-cli/blob/main/tools/bazel.md"
+
 # Print a grey trace line on stderr showing what the wrapper is about to exec.
 #
-# Usage: trace_exec <category> <argv...>
+# Usage: trace_exec <category> <shadow> <argv...>
 #
 # <category> is "aspect" when routing to aspect (the interesting case — the
 # wrapper rewrote something) or "bazel" when forwarding straight to bazel
@@ -543,12 +563,24 @@ BAZEL_VERBS_STR=" ${BAZEL_VERBS[*]} "
 # etc.). The trace prints by default for the "aspect" category and is
 # suppressed for "bazel" unless ASPECT_WRAPPER_TRACE=1 forces it on.
 #
+# <shadow> is "shadow" when this invocation is shadowing a real bazel verb
+# (e.g. `build`/`test` — verbs in both ASPECT_VERBS_WITH_BAZEL_FLAGS and
+# BAZEL_VERBS), and "" otherwise. Shadowing is the surprising case — the
+# user typed something bazel could run, and we routed it through aspect.
+# When set, the trace line gets a suffix nudging the user toward
+# `ASPECT_WRAPPER_SKIP=1` (one-shot bypass) so they know how to opt out;
+# the docs link covers the longer-lived alternative of editing
+# ASPECT_VERBS_WITH_BAZEL_FLAGS in their copy of the wrapper.
+#
+# Every aspect-route trace ends with `— docs: <url>` so the routing rules
+# are one click away regardless of whether the verb shadows bazel.
+#
 # Suppressed entirely when stderr is not a TTY (so $(...) capture and CI
 # logs stay clean), unless ASPECT_WRAPPER_TRACE=1. Always suppressed when
 # ASPECT_WRAPPER_QUIET is set.
 trace_exec() {
-    local category="$1"
-    shift
+    local category="$1" shadow="$2"
+    shift 2
     [[ -n "${ASPECT_WRAPPER_QUIET:-}" ]] && return 0
     local force="${ASPECT_WRAPPER_TRACE:-}"
     # Pure bazel forwarding: silent unless explicitly forced.
@@ -578,7 +610,17 @@ trace_exec() {
             quoted+=" $a"
         fi
     done
-    printf '%s[tools/bazel]%s%s\n' "$grey" "$quoted" "$reset" >&2
+    # Suffix only on aspect routing: bazel forwards are already vanilla and
+    # don't need an opt-out hint. Shadow nudges go first (most actionable);
+    # the docs link is always last.
+    local suffix=""
+    if [[ "$category" == "aspect" ]]; then
+        if [[ "$shadow" == "shadow" ]]; then
+            suffix+=" — set ASPECT_WRAPPER_SKIP=1 to skip the forward to \`aspect\`"
+        fi
+        suffix+=" — docs: $ASPECT_WRAPPER_DOCS_URL"
+    fi
+    printf '%s[tools/bazel]%s%s%s\n' "$grey" "$quoted" "$suffix" "$reset" >&2
 }
 
 # Locate the real bazel binary. Bazelisk sets BAZEL_REAL when it execs this
@@ -746,7 +788,7 @@ BAZEL_REAL_BIN="$(resolve_bazel_real)"
 # developers who want a 1:1 bazel experience locally; reach for `aspect <verb>`
 # directly when you want the wrapped behavior.
 if [[ -n "${ASPECT_WRAPPER_SKIP:-}" ]]; then
-    trace_exec bazel "$BAZEL_REAL_BIN" "$@"
+    trace_exec bazel "" "$BAZEL_REAL_BIN" "$@"
     exec "$BAZEL_REAL_BIN" "$@"
 fi
 
@@ -812,7 +854,7 @@ done
 
 # No verb: forward verbatim to bazel.
 if [[ -z "$verb" ]]; then
-    trace_exec bazel "$BAZEL_REAL_BIN" "$@"
+    trace_exec bazel "" "$BAZEL_REAL_BIN" "$@"
     exec "$BAZEL_REAL_BIN" "$@"
 fi
 
@@ -827,7 +869,7 @@ if contains "$verb" "${ASPECT_VERBS_WITH_BAZEL_FLAGS[@]}"; then
     if ! aspect_on_path; then
         if contains "$verb" "${BAZEL_VERBS[@]}"; then
             aspect_missing_hint "$verb" "Running it through vanilla bazel for now."
-            trace_exec bazel "$BAZEL_REAL_BIN" "$@"
+            trace_exec bazel "" "$BAZEL_REAL_BIN" "$@"
             exec "$BAZEL_REAL_BIN" "$@"
         fi
         aspect_missing_hint "$verb"
@@ -861,13 +903,20 @@ if contains "$verb" "${ASPECT_VERBS_WITH_BAZEL_FLAGS[@]}"; then
     set -- ${pre_globals[@]+"${pre_globals[@]}"} "$verb" \
         ${pre_bazel_starts[@]+"${pre_bazel_starts[@]}"} \
         ${post_rewritten[@]+"${post_rewritten[@]}"}
-    trace_exec aspect aspect "$@"
+    # A verb in both lists (build/test/…) shadows bazel — what the user typed
+    # is a real bazel command and we're routing it through aspect anyway. The
+    # trace nudges toward ASPECT_WRAPPER_SKIP=1 in that case.
+    shadow=""
+    if contains "$verb" "${BAZEL_VERBS[@]}"; then
+        shadow="shadow"
+    fi
+    trace_exec aspect "$shadow" aspect "$@"
     exec aspect "$@"
 fi
 
 # Other bazel verb (query, info, clean, mod, …): vanilla bazel, untouched.
 if contains "$verb" "${BAZEL_VERBS[@]}"; then
-    trace_exec bazel "$BAZEL_REAL_BIN" "$@"
+    trace_exec bazel "" "$BAZEL_REAL_BIN" "$@"
     exec "$BAZEL_REAL_BIN" "$@"
 fi
 
@@ -880,5 +929,6 @@ if ! aspect_on_path; then
     exit 127
 fi
 export BAZEL_REAL="$BAZEL_REAL_BIN"
-trace_exec aspect aspect "$@"
+# Custom .axl tasks never shadow bazel: bazel has no such command.
+trace_exec aspect "" aspect "$@"
 exec aspect "$@"
