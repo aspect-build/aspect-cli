@@ -17,8 +17,7 @@ def _eq(label, got, want):
 # ---------------------------------------------------------------------------
 
 def _test_extract_expired_token(_ctx):
-    body = "<?xml version=\"1.0\"?><Error><Code>ExpiredToken</Code>" + \
-           "<Message>The provided token has expired.</Message></Error>"
+    body = "<?xml version=\"1.0\"?><Error><Code>ExpiredToken</Code><Message>The provided token has expired.</Message></Error>"
     _eq("ExpiredToken extracted", s3_extract_error_code(body), "ExpiredToken")
 
 def _test_extract_signature_mismatch(_ctx):
