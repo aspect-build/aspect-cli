@@ -177,6 +177,22 @@ def _get_existing_markers(ctx, gl, task_key):
             markers[marker] = d.get("id", "") or ""
     return markers
 
+def _dedup_by_marker(comments, task_key):
+    """Drop within-run duplicates: keep the first comment per marker.
+    Comments without a recognizable marker pass through untouched."""
+    seen = {}
+    out = []
+    for c in comments:
+        marker = extract_marker(c.get("body", ""), task_key = task_key)
+        if not marker:
+            out.append(c)
+            continue
+        if marker in seen:
+            continue
+        seen[marker] = True
+        out.append(c)
+    return out
+
 def _build_suggestion_comments(ctx, run_id, task_key, relevant_diagnostics, pending_patches):
     # TEMPORARY stub — implemented in Task 5.
     return []
@@ -254,8 +270,11 @@ def _gitlab_lint_impl(ctx: FeatureContext):
         state["pending_patches"].append({"path": filepath, "name": name})
 
     def _lint_end(ctx, relevant_diagnostics):
+        if "existing_markers" not in gl:
+            gl["existing_markers"] = _get_existing_markers(ctx, gl, ctx.task.key)
         suggestion_comments = [] if destination == "annotations" else _build_suggestion_comments(ctx, run_id, ctx.task.key, relevant_diagnostics, state["pending_patches"])
         non_errors = [c for c in state["all_comments"] if c.get("_severity") != "error"] + suggestion_comments
+        non_errors = _dedup_by_marker(non_errors, ctx.task.key)
         new_only = []
         for c in non_errors:
             marker = extract_marker(c.get("body", ""), task_key = ctx.task.key)
