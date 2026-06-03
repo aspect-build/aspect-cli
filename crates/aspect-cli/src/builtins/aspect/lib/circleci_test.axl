@@ -6,7 +6,7 @@ S3 error response into a diagnosable failure reason — the part that makes
 an expired-credential `400` legible instead of an opaque "curl exit 22".
 """
 
-load("./circleci.axl", "s3_upload_error_detail", "s3_extract_error_code")
+load("./circleci.axl", "s3_extract_error_code", "s3_upload_error_detail")
 
 def _eq(label, got, want):
     if got != want:
