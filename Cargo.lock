@@ -361,6 +361,7 @@ dependencies = [
  "hyper-util",
  "hyperlocal",
  "include_dir",
+ "libc",
  "liquid",
  "liquid-core",
  "md-5",
