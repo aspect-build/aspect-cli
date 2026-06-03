@@ -590,6 +590,11 @@ def apply_repro_fix_hooks(
         test):  bazel-repro-aspect
                 bazel-repro-vanilla-bazel
 
+    Slug conventions hooks can rely on: every "vanilla `bazel run` for
+    users without the Aspect CLI" suggestion ends in `-vanilla-bazel`,
+    so a hook can suffix-match to scope across all producers without
+    listing each slug.
+
     Args:
         ctx:              TaskContext, passed through to each handler.
         lifecycle:        TaskLifecycleTrait — source of the hook list.

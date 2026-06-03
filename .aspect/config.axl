@@ -95,14 +95,6 @@ def _buildifier_repro_fix(ctx, info, entry):
         "description": entry["description"],
     }
 
-# Slugs of every vanilla-bazel alternate produced by the built-in tasks.
-# When the suggestion catalogue grows, add the new slug here.
-_VANILLA_BAZEL_SLUGS = (
-    "bazel-repro-vanilla-bazel",
-    "format-fix-vanilla-bazel",
-    "gazelle-fix-vanilla-bazel",
-)
-
 def _drop_vanilla_bazel_except_build(ctx, info, entry):
     """Drop every vanilla-bazel alternate except `build`'s.
 
@@ -111,9 +103,10 @@ def _drop_vanilla_bazel_except_build(ctx, info, entry):
     PATH. In this workspace contributors always have either `aspect` or
     the `tools/bazel` wrapper, so the alternate is noise. Keeping the
     `build` task's variant lets us continue to dogfood the rendering of
-    that alternate end-to-end.
+    that alternate end-to-end. Matches by suggestion-slug suffix so any
+    new vanilla-bazel alternates added later are covered automatically.
     """
-    if entry["slug"] not in _VANILLA_BAZEL_SLUGS:
+    if not entry["slug"].endswith("-vanilla-bazel"):
         return {"action": "accept"}
     if info.task_name == "build":
         return {"action": "accept"}
