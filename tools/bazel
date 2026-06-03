@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # aspect-build/tools-bazel-wrapper
 #
+# Source of truth: https://github.com/aspect-build/aspect-cli/blob/main/tools/bazel
+# This file is *vendored* into your workspace via the install instructions
+# (see tools/bazel.md): your copy is a snapshot of the upstream script. When
+# upstream changes (new Bazel flags, routing tweaks), re-run the vendor step
+# to pull the latest.
+#
 # tools/bazel — Bazel wrapper that transparently routes Aspect-specific
 # functionality through the `aspect` CLI without forcing developers to learn
 # a new command name.
@@ -25,7 +31,7 @@
 #
 # When `aspect` is NOT on PATH but a command would route to it, the wrapper
 # prints install instructions. If the verb is also a real bazel command
-# (build/test/run/coverage) it then falls back to vanilla bazel so the command
+# (build/test/coverage) it then falls back to vanilla bazel so the command
 # still runs; otherwise (lint/format/custom .axl tasks, which bazel can't run)
 # it exits. Plain bazel verbs never need aspect and run regardless.
 #
@@ -74,8 +80,6 @@
 #                            recursion. Customers should never set this
 #                            manually. See bazelisk's BAZELISK_SKIP_WRAPPER
 #                            for the same pattern.
-#
-# Source of truth: https://github.com/aspect-build/aspect-cli/blob/main/tools/bazel
 
 set -euo pipefail
 
@@ -126,7 +130,7 @@ fi
 
 # Verbs routed to `aspect` with bazel-flag rewriting: bazel-native flags after
 # the verb become `--bazel-flag=<flag>`, everything else passes through to
-# aspect. Includes the Bazel verbs aspect wraps (`build`/`test`/`run`) and the
+# aspect. Includes the Bazel verbs aspect wraps (`build`/`test`) and the
 # aspect verbs that drive bazel internally (`lint`, `format`, …). Add your own
 # bazel-flag-aware aspect commands here.
 ASPECT_VERBS_WITH_BAZEL_FLAGS=(
@@ -806,7 +810,7 @@ fi
 # become --bazel-flag=.
 if contains "$verb" "${ASPECT_VERBS_WITH_BAZEL_FLAGS[@]}"; then
     # No aspect on PATH: nudge toward installing it. If the verb is also a real
-    # bazel command (build/test/run/coverage) fall back to vanilla bazel so the
+    # bazel command (build/test/coverage) fall back to vanilla bazel so the
     # command still runs; otherwise (lint/format/…) bazel can't run it, so stop.
     if ! aspect_on_path; then
         if contains "$verb" "${BAZEL_VERBS[@]}"; then

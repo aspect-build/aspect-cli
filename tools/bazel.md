@@ -1,8 +1,10 @@
 # `tools/bazel` wrapper — transparent Aspect routing
 
-A drop-in `tools/bazel` shell script that lets developers keep typing `bazel` while still reaching Aspect-specific functionality (`lint`, `format`, `delivery`, …) and Aspect's value-added wrappers around `build` / `test` / `run`.
+> **Source of truth:** <https://github.com/aspect-build/aspect-cli/blob/main/tools/bazel> (and this doc at `tools/bazel.md` alongside it). Both files are designed to be **vendored** into your workspace via the install instructions below — your `tools/bazel` and `tools/bazel.md` are copies of the upstream files. When upstream changes (new Bazel flags, routing tweaks, doc updates), re-run the vendor step to pull the latest.
 
-This is the **source of truth** for customers who want to adopt Aspect CLI features without forcing their teams to learn a new command name. Copy `tools/bazel` from this repo into your own workspace, adjust the verb lists at the top, commit it, and you're done.
+A drop-in `tools/bazel` shell script that lets developers keep typing `bazel` while still reaching Aspect-specific functionality (`lint`, `format`, `delivery`, …) and Aspect's value-added wrappers around `build` / `test`.
+
+Copy `tools/bazel` from this repo into your own workspace, adjust the verb lists at the top, commit it, and you're done.
 
 ## About the Aspect CLI
 
@@ -32,13 +34,15 @@ The `tools/bazel` hook is a [Bazelisk](https://github.com/bazelbuild/bazelisk) f
 | `bazel info workspace` | `$BAZEL_REAL info workspace` |
 | `bazel my-custom-task //...` | `aspect my-custom-task //...` (unknown verb → aspect verbatim) |
 
-The interesting case is the verbs aspect wraps (`build` / `test` / `run`) and the aspect verbs that drive Bazel internally (`lint`, `format`, `delivery`, …). The wrapper routes those through `aspect` so you pick up its DX improvements (artifact upload, GitHub PR comments, BES streaming, …), but **bazel-native flags keep working** — they're transparently rewritten as `--bazel-flag=<flag>` so aspect forwards them verbatim to Bazel.
+The interesting case is the verbs aspect wraps (`build` / `test`) and the aspect verbs that drive Bazel internally (`lint`, `format`, `delivery`, …). The wrapper routes those through `aspect` so you pick up its DX improvements (artifact upload, GitHub PR comments, BES streaming, …), but **bazel-native flags keep working** — they're transparently rewritten as `--bazel-flag=<flag>` so aspect forwards them verbatim to Bazel.
+
+> **Why `run` isn't wrapped by default:** `aspect run` exists, but its semantics don't yet line up closely enough with `bazel run` to shadow it transparently. Until that's resolved, `bazel run` goes to vanilla bazel (via `BAZEL_VERBS`). Reach for `aspect run` directly when you want the aspect behavior, or add `run` to `ASPECT_VERBS_WITH_BAZEL_FLAGS` in your repo copy once you've validated it for your workflows.
 
 ## How verb routing works
 
 The wrapper decides where a command goes from two lists at the top of the script:
 
-- `ASPECT_VERBS_WITH_BAZEL_FLAGS` — verbs routed to `aspect` **with** bazel-flag rewriting (default `build buildifier delivery format gazelle lint run test`).
+- `ASPECT_VERBS_WITH_BAZEL_FLAGS` — verbs routed to `aspect` **with** bazel-flag rewriting (default `build buildifier delivery format gazelle lint test`).
 - `BAZEL_VERBS` — the closed set of Bazel commands. A verb here that's *not* in the list above (`query`, `info`, `clean`, `mod`, `coverage`, …) goes to vanilla bazel.
 
 The rules, in order (`ASPECT_WRAPPER_SKIP=1` short-circuits all of them — see below):
@@ -55,7 +59,7 @@ The wrapper's presence means the org wants devs on aspect, so if a command would
 curl -fsSL https://install.aspect.build | bash
 ```
 
-…or see <https://docs.aspect.build/cli/install>. If the verb is also a real Bazel command (`build`/`test`/`run`/`coverage`) the wrapper then falls back to vanilla bazel so the command still runs; for aspect-only verbs (`lint`, `format`, custom tasks) Bazel has nothing to run, so it exits. Plain bazel verbs (rule 2) never need aspect and run regardless.
+…or see <https://docs.aspect.build/cli/install>. If the verb is also a real Bazel command (`build`/`test`) the wrapper then falls back to vanilla bazel so the command still runs; for aspect-only verbs (`lint`, `format`, custom tasks) Bazel has nothing to run, so it exits. Plain bazel verbs (rule 2) never need aspect and run regardless.
 
 ## How flag rewriting works
 
@@ -146,7 +150,7 @@ The fix: aspect sets `ASPECT_CLI_RUNNING=1` on every child `bazel` it spawns. `t
 
 Two lists at the top of the script drive every routing decision; edit them in your repo copy:
 
-- `ASPECT_VERBS_WITH_BAZEL_FLAGS` — verbs routed to `aspect` with bazel-flag rewriting. Default: `build buildifier delivery format gazelle lint run test`. Add your own bazel-flag-aware aspect commands (e.g. a custom task that shells out to bazel). (`ASPECT_WRAPPER_SKIP=1` bypasses this entirely — everything goes to vanilla bazel.)
+- `ASPECT_VERBS_WITH_BAZEL_FLAGS` — verbs routed to `aspect` with bazel-flag rewriting. Default: `build buildifier delivery format gazelle lint test`. Add your own bazel-flag-aware aspect commands (e.g. a custom task that shells out to bazel) — including `run`, once you're ready for `aspect run` to shadow `bazel run` in your workspace. (`ASPECT_WRAPPER_SKIP=1` bypasses this entirely — everything goes to vanilla bazel.)
 - `BAZEL_VERBS` — the closed set of Bazel commands. A verb here that's *not* in the list above forwards to vanilla bazel. A verb in *neither* list is treated as a custom aspect task and routed to aspect verbatim. Update this only if Bazel adds a command.
 
 Plus the embedded Bazel flag lists (`BAZEL_VALUE_FLAGS`, `BAZEL_BOOL_FLAGS`, `BAZEL_SHORT_VALUE_FLAGS`, `BAZEL_SHORT_BOOL_FLAGS`) covered above. There is no aspect-flag list — anything not recognized as a Bazel flag passes through to aspect.
@@ -156,7 +160,3 @@ Plus the embedded Bazel flag lists (`BAZEL_VALUE_FLAGS`, `BAZEL_BOOL_FLAGS`, `BA
 - **It doesn't fetch or pin Bazel.** That's Bazelisk's job. The wrapper just decides which tool to exec.
 - **It doesn't second-guess unknown flags.** A flag not in the embedded Bazel lists passes through to aspect unchanged (rather than being force-wrapped), so a typo or a not-yet-listed flag surfaces wherever it actually belongs.
 - **It doesn't replace `bazel`.** You still install Bazel through Bazelisk (which is what execs this script). The wrapper is purely an in-workspace dispatcher.
-
-## Testing
-
-Run `./tools/bazel-test.sh` (from the repo root) to exercise the wrapper against stubbed `aspect` and `bazel` binaries. Coverage: verb dispatch (aspect-wrapped, plain bazel, custom/unknown verbs), bazel flag wrapping (boolean, boolean `--no` negation, `=value`, space-value, short `-c`/`-j`/`-k`/`-s`), passthrough of aspect and unrecognized flags, aspect-verb bazel-flag forwarding (`format`/`lint`), pre-verb startup-flag classification, edge cases (`--`, hyphen-led targets, empty values, values with spaces), trace behavior, `ASPECT_WRAPPER_SKIP` mode, the `ASPECT_CLI_RUNNING` anti-inception bypass, `BAZEL_REAL` PATH fallback, and the aspect-not-installed install hint + fallback. Add a `check` call when you change behavior. Run `WRAPPER_BASH=/bin/bash ./tools/bazel-test.sh` to exercise the wrapper under macOS's bash 3.2 (its compatibility floor).
