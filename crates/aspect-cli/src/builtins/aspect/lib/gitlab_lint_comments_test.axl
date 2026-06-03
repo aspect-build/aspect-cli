@@ -48,6 +48,7 @@ def _test_impl(ctx):
     _eq("linemap context 1->1", lm["context"][1], 1)
     _eq("linemap context 3->3", lm["context"][3], 3)
     _eq("linemap context not added", 1 in lm["added"], False)
+
     # Offset hunk: starts map through correctly.
     lm2 = build_diff_line_map("@@ -10,2 +20,3 @@\n ctx\n+new\n ctx2")
     _eq("linemap offset added", sorted(lm2["added"].keys()), [21])
@@ -63,9 +64,11 @@ def _test_impl(ctx):
     _eq("context new_line", pc["new_line"], 7)
     _eq("context old_line", pc["old_line"], 6)
     _eq("off-diff line → None", build_position("a.sh", 99, _DIFF_REFS, line_map = _lm), None)
+
     # No line_map → added-line fallback (backward compatible).
     _eq("no-map fallback new_line", build_position("a.sh", 5, _DIFF_REFS)["new_line"], 5)
     _eq("no-map fallback omits old_line", "old_line" in build_position("a.sh", 5, _DIFF_REFS), False)
+
     # Prefix composes with the line_map path.
     _eq("prefixed context new_path", build_position("a.sh", 7, _DIFF_REFS, prefix = "sub/", line_map = _lm)["new_path"], "sub/a.sh")
 

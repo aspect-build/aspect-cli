@@ -223,6 +223,7 @@ def _post_comments(ctx, gl, comments, existing_markers, task_key):
         if lines != None and (line - 1) not in lines:
             continue
         prefix = gl.get("prefix", "")
+
         # line_maps are keyed by the repo-relative (prefixed) path, matching
         # the position's new_path.
         line_map = gl.get("line_maps", {}).get(prefix + path)
