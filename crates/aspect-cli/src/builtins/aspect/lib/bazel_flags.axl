@@ -190,8 +190,7 @@ def setup_bazel_command(ctx, command, bazel_trait, base_flags = []):
       bazel_trait: `BazelTrait` instance from `ctx.traits`.
       base_flags: task-injected defaults the user can override via
         `--bazel-flag=...` (last-wins after rc expansion). Examples:
-        build/test's `--isatty=...`, lint's `--aspects=...`,
-        delivery's `--remote_download_outputs=minimal`.
+        lint's `--aspects=...`, spawn tasks' `--remote_download_outputs=toplevel`.
 
     Requires the task to declare `bazel_startup_flags`, `bazel_flags`,
     and `announce_bazel_rc` CLI args.
