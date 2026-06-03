@@ -1,23 +1,30 @@
 _DEFAULT_WORKSPACE_NAME = "_main"
 
-# Bazel flags required for a task that immediately spawns the built binary
+# Mandatory Bazel flags for a task that immediately spawns the built binary
 # (format, gazelle, run, delivery phase 3). Append these LAST so they win
-# over any rc or trait flag that would flip them — user .bazelrc can carry
-# `common:-ci --remote_download_outputs=minimal --nobuild_runfile_links`
-# which would otherwise ENOENT the spawn.
+# over any user rc / `--bazel-flag` value that would flip them: the spawn
+# cannot work without them.
 #
-#   --experimental_build_event_upload_strategy=local: have BES report
-#       artifacts as local file:// paths so we can locate the binary
-#       on disk to spawn it. With the remote strategy, BES reports
-#       bytestream:// URIs, which aren't on-disk paths.
-#   --remote_download_outputs=toplevel: materialize the binary itself on
-#       disk so we can spawn it.
-#   --build_runfile_links: lay down the runfiles tree so the binary's
+#   --experimental_build_event_upload_strategy=local: BES reports artifacts
+#       as local file:// paths so we can locate the binary on disk;
+#       the remote strategy yields bytestream:// URIs, which aren't paths.
+#   --build_runfile_links: materializes the runfiles tree so the binary's
 #       wrappers and data deps resolve at runtime.
 LOCAL_SPAWN_FLAGS = [
     "--experimental_build_event_upload_strategy=local",
-    "--remote_download_outputs=toplevel",
     "--build_runfile_links",
+]
+
+# Default `--remote_download_outputs` value for a task that immediately
+# spawns the built binary. Inject these via the `bazel_base_flags` path
+# (i.e. BEFORE user flags / rc expansion) so a user who needs `=all` —
+# e.g. an older Bazel version or a misbehaving rule set that won't run
+# without dependency outputs materialized — can override via the command
+# line or `.bazelrc`. `=toplevel` is the minimum that puts the binary
+# itself on disk so we can spawn it; `=minimal` would leave it remote
+# and break the spawn.
+LOCAL_SPAWN_BASE_FLAGS = [
+    "--remote_download_outputs=toplevel",
 ]
 
 # Named modes accepted by `--run-in=<choice>` on tasks that spawn a

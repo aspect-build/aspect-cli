@@ -198,7 +198,7 @@ load("./lib/health_check.axl", "HealthCheckTrait")
 load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "pick_task_status", "resolve_severity", "setup_phase", "task_update")
 load("./lib/path_glob.axl", "match_any")
 load("./lib/repro_commands.axl", "build_aspect_command", "build_bazel_command", "explicit_flags", "has_tools_bazel_wrapper", "print_repro_and_fix", "repro_prefix", "task_cli_path")
-load("./lib/runnable.axl", "LOCAL_SPAWN_FLAGS", "runnable")
+load("./lib/runnable.axl", "LOCAL_SPAWN_BASE_FLAGS", "LOCAL_SPAWN_FLAGS", "runnable")
 load("./lib/text.axl", "pluralize")
 load("./lib/tips.axl", "tips")
 
@@ -585,7 +585,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # The single pre-task setup phase (status surface, rc parse, health
     # checks); returns the resolved flags (a failed health check fails the task
     # inside setup_phase).
-    flags = setup_phase(ctx, lifecycle, ctx.args.gazelle_target, "gazelle_results", data, hc_trait, bazel_trait)
+    flags = setup_phase(ctx, lifecycle, ctx.args.gazelle_target, "gazelle_results", data, hc_trait, bazel_trait, bazel_base_flags = LOCAL_SPAWN_BASE_FLAGS)
     announce_version, announce_command = resolve_bazel_announce(ctx)
 
     # Resolve effective dirs before the bazel build phase: gazelle

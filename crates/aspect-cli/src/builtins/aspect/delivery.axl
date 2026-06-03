@@ -118,7 +118,7 @@ load("@aspect//lib/github.axl", "detect_commit_sha")
 load("@aspect//lib/health_check.axl", "HealthCheckTrait")
 load("@aspect//lib/lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "setup_phase", "task_update")
 load("@aspect//lib/repro_commands.axl", "build_aspect_command", "print_repro_and_fix", "repro_prefix", "task_cli_path")
-load("@aspect//lib/runnable.axl", "LOCAL_SPAWN_FLAGS", "apparent_label", "runnable")
+load("@aspect//lib/runnable.axl", "LOCAL_SPAWN_BASE_FLAGS", "LOCAL_SPAWN_FLAGS", "apparent_label", "runnable")
 load("@aspect//lib/text.axl", "pluralize")
 load("@aspect//lib/tips.axl", "tips")
 load("@std//time.axl", "sleep_iter", "time")
@@ -232,7 +232,8 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
         "--inject_repository=aspect_delivery=" + repo_dir,
     ]
 
-    phase1_flags = bazel_flags + ["--nokeep_state_after_build"]
+    # Force `=minimal`: phase 1 reads outputs via BES, never from disk.
+    phase1_flags = bazel_flags + ["--nokeep_state_after_build", "--remote_download_outputs=minimal"]
     _t_phase1 = time.monotonic()
     announce_version, announce_command = resolve_bazel_announce(ctx)
 
@@ -374,11 +375,14 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
     )
     _t_phase2 = time.monotonic()
     log_path = _GRPC_LOG_PATH.format(ctx.task.key)
+
+    # Force `=minimal`: phase 2 reads digests from the gRPC log, not disk.
     phase2_flags = bazel_flags + aspect_flags + [
         "--remote_executor=" + remote_executor_uri,
         "--experimental_remote_require_cached",
         "--remote_grpc_log=" + log_path,
         "--keep_going",
+        "--remote_download_outputs=minimal",
     ]
 
     # Redirect stderr to a log file: require-cached failures on first
@@ -652,9 +656,6 @@ def _delivery_impl(ctx):
     # The single pre-task setup phase (status surface, rc parse, health
     # checks); returns expanded_flags (a failed health check fails the task
     # inside setup_phase). phase1/2/3_flags layer on top later.
-    # --remote_download_outputs=minimal is mandatory for phases 1/2 (we never
-    # download outputs while computing shas); phase 3 appends
-    # ctx.args.release_bazel_flags for release-only flags like --stamp.
     expanded_flags = setup_phase(
         ctx,
         lifecycle,
@@ -664,7 +665,6 @@ def _delivery_impl(ctx):
         hc_trait,
         bazel_trait,
         "build",
-        bazel_base_flags = ["--remote_download_outputs=minimal"],
     )
     announce_version, announce_command = resolve_bazel_announce(ctx)
 
@@ -914,14 +914,16 @@ def _delivery_impl(ctx):
             phase = Phase(name = "download", description = "Download runfiles", emoji = "📥"),
         )
 
-        # release_bazel_flags sit between expanded_flags and the trailing
-        # spawn-required flags so release-only values (e.g. --stamp) win
-        # over --config=X expansion. The trailing block is appended LAST
-        # and overrides everything — must take effect for the delivery
-        # spawn to succeed.
-        # --noremote_upload_local_results: release artifacts shouldn't
-        #     pollute the shared remote cache (delivery-specific).
-        phase3_flags = list(expanded_flags) + list(ctx.args.release_bazel_flags) + LOCAL_SPAWN_FLAGS + [
+        # Phase 3 flag order (last-wins):
+        #   LOCAL_SPAWN_BASE_FLAGS  — default `--remote_download_outputs=toplevel`;
+        #                             first so user/rc overrides win.
+        #   expanded_flags          — user `--bazel-flag` / rc settings.
+        #   release_bazel_flags     — release-only flags via `--release-bazel-flag`
+        #                             (e.g. `--stamp`).
+        #   LOCAL_SPAWN_FLAGS       — mandatory; last so nothing can flip them.
+        #   --noremote_upload_local_results — release artifacts shouldn't pollute
+        #                             the shared remote cache (delivery-specific).
+        phase3_flags = LOCAL_SPAWN_BASE_FLAGS + list(expanded_flags) + list(ctx.args.release_bazel_flags) + LOCAL_SPAWN_FLAGS + [
             "--noremote_upload_local_results",
         ]
         _t_download = time.monotonic()
