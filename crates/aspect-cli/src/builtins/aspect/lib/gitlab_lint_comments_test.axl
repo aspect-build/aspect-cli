@@ -32,6 +32,11 @@ def _test_impl(ctx):
 
     # ── Suggestion rendering (GL form via shared helper) ────────────
     _eq("gl suggestion single", suggestion_block("fixed", current = 5, start_line = 5, end_line = 5, vcs = "gitlab"), "```suggestion:-0+0\nfixed\n```")
+    _eq(
+        "gl suggestion multi range",
+        suggestion_block("a\nb", current = 8, start_line = 7, end_line = 8, vcs = "gitlab"),
+        "```suggestion:-1+0\na\nb\n```",
+    )
 
     # ── Marker dedup over discussions ───────────────────────────────
     mk = build_marker("gl-1", "lint", "ShellCheck", "a.sh", 3, "SC2164")

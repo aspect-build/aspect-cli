@@ -193,9 +193,88 @@ def _dedup_by_marker(comments, task_key):
         out.append(c)
     return out
 
+_SUGGESTION_SEVERITY_ICONS = {"error": "🚨", "warning": "⚠️", "info": "ℹ️"}
+
+def _tool_name_from_patch_path(filepath):
+    name = filepath.rsplit("/", 1)[-1]
+    if name.endswith(".patch"):
+        name = name[:-len(".patch")]
+    idx = name.rfind(".AspectRulesLint")
+    if idx >= 0:
+        tail = name[idx + len(".AspectRulesLint"):]
+        if tail:
+            return tail
+    return "Linter"
+
 def _build_suggestion_comments(ctx, run_id, task_key, relevant_diagnostics, pending_patches):
-    # TEMPORARY stub — implemented in Task 5.
-    return []
+    """Parse buffered `.patch` files into GitLab suggestion-block discussion
+    comments — one per unified-diff edit block. Mirrors the GH feature's
+    correlation logic (same (file, line, tool) anchoring) but renders the
+    GitLab `suggestion:-X+Y` fence via the shared helper.
+
+    Returns comment dicts {path, line, body, _severity}.
+    """
+    comments = []
+    diag_by_anchor = {}
+    for d in relevant_diagnostics:
+        f = d.get("file", "")
+        ln = d.get("line", 0) or 0
+        t = (d.get("tool", "") or "").lower()
+        if f and ln:
+            diag_by_anchor[(f, ln, t)] = d
+    for entry in pending_patches:
+        content = ctx.std.fs.read_to_string(entry["path"])
+        if not content:
+            continue
+        tool = _tool_name_from_patch_path(entry["name"])
+        tool_key = tool.lower()
+        for f in patch_parse(content):
+            file_path = f["file"]
+            for h in f["hunks"]:
+                for block in patch_hunk_edit_blocks(h):
+                    if block["adds"] == 0 and block["removes"] == 0:
+                        continue
+                    start_line = block["start_line"]
+                    end_line = block["end_line"]
+                    replacement = block["replacement"]
+                    diag = None
+                    for ln in range(start_line, end_line + 1):
+                        d = diag_by_anchor.get((file_path, ln, tool_key))
+                        if d:
+                            diag = d
+                            break
+                    correlated = diag != None
+                    severity = diag.get("severity", "") if diag else ""
+                    sarif_rule_id = diag.get("rule_id", "") if diag else ""
+                    sarif_tool = diag.get("tool", "") if diag else ""
+                    sarif_message = diag.get("message", "") if diag else ""
+                    display_tool = sarif_tool if correlated and sarif_tool else tool
+                    rule_id = "patch_%d_%d" % (start_line, end_line)
+                    marker = build_marker(run_id, task_key, display_tool, file_path, end_line, rule_id)
+                    suggestion_fence = suggestion_block(replacement, current = end_line, start_line = start_line, end_line = end_line, vcs = "gitlab")
+                    if correlated:
+                        sev_icon = _SUGGESTION_SEVERITY_ICONS.get(severity, "🔧")
+                        header_bits = ["**%s**" % display_tool]
+                        if sarif_rule_id:
+                            header_bits.append("`%s`" % sarif_rule_id)
+                        header = "%s %s" % (sev_icon, " · ".join(header_bits))
+                        body_lines = [marker, header]
+                        if sarif_message:
+                            body_lines.append("")
+                            body_lines.append(sarif_message)
+                        body_lines.append("")
+                        body_lines.append(suggestion_fence)
+                    else:
+                        body_lines = [marker, "🔧 **%s**" % display_tool, "", suggestion_fence]
+                    body = "\n".join(body_lines) + _task_attribution_footer(task_key)
+                    cap_severity = severity if correlated and severity else "warning"
+                    comments.append({
+                        "path": file_path,
+                        "line": end_line,
+                        "body": body,
+                        "_severity": cap_severity,
+                    })
+    return comments
 
 def _cleanup_and_resolve(ctx, gl, relevant_diagnostics, run_id, task_key, suggestion_markers, destination):
     # TEMPORARY stub — implemented in Task 6.
