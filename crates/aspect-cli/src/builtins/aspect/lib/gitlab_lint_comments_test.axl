@@ -5,7 +5,7 @@ Run with:
   aspect dev test-gitlab-lint-comments
 """
 
-load("../feature/gitlab_lint_comments.axl", "build_position", "dedup_discussions_by_marker")
+load("../feature/gitlab_lint_comments.axl", "build_position", "compute_cleanup", "dedup_discussions_by_marker")
 load("../lib/lint_comments.axl", "build_marker", "suggestion_block")
 
 def _eq(label, got, want):
@@ -58,6 +58,20 @@ def _test_impl(ctx):
     stale3 = dedup_discussions_by_marker(triple, task_key = "lint")
     _eq("dedup triple drops two", len(stale3), 2)
     _eq("dedup triple keeps newest", sorted([e["discussion_id"] for e in stale3]), ["t1", "t2"])
+
+    mk_keep = build_marker("gl-2", "lint", "ShellCheck", "a.sh", 3, "SC2164")
+    mk_stale = build_marker("gl-2", "lint", "ShellCheck", "a.sh", 9, "SC2086")
+    mk_prior = build_marker("gl-1", "lint", "ShellCheck", "a.sh", 3, "SC2164")
+    mk_sibling = build_marker("gl-2", "other", "ShellCheck", "a.sh", 3, "SC2164")
+    ds = [
+        {"id": "keep", "notes": [{"id": 1, "body": mk_keep, "resolved": False}]},
+        {"id": "stale", "notes": [{"id": 2, "body": mk_stale, "resolved": False}]},
+        {"id": "prior", "notes": [{"id": 3, "body": mk_prior, "resolved": False}]},
+        {"id": "sibling", "notes": [{"id": 4, "body": mk_sibling, "resolved": False}]},
+    ]
+    plan = compute_cleanup(ds, desired = {mk_keep: True}, run_id = "gl-2", task_key = "lint")
+    del_ids = sorted([e["discussion_id"] for e in plan["delete"]])
+    _eq("cleanup deletes", del_ids, ["prior", "stale"])
 
     print("gitlab_lint_comments.axl: OK")
     return 0

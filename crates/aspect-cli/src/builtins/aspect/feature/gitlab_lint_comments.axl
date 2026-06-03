@@ -283,9 +283,82 @@ def _build_suggestion_comments(ctx, run_id, task_key, relevant_diagnostics, pend
                     })
     return comments
 
+def _ci_host_from_run_id(run_id):
+    if not run_id:
+        return ""
+    dash = run_id.find("-")
+    if dash <= 0:
+        return ""
+    return run_id[:dash]
+
+def compute_cleanup(discussions, desired, run_id, task_key):
+    """Decide which Aspect-owned lint discussions to delete (stale) and
+    which open ones to resolve. Pure — mirrors the GH 4-bucket reaper:
+
+      0. different CI host       → skip
+      1. same host, prior run    → delete
+      2. same run, other task    → skip
+      3. same run, same task     → delete iff marker not in `desired`
+
+    `resolve` lists same-run/same-task discussions that ARE desired and
+    still open — used only on a clean pass (caller decides whether to act).
+    """
+    current_host = _ci_host_from_run_id(run_id)
+    delete = []
+    resolve = []
+    for d in discussions:
+        notes = d.get("notes", [])
+        if not notes:
+            continue
+        note = notes[0]
+        marker = extract_marker(note.get("body", ""))
+        if not marker:
+            continue
+        fields = parse_marker(marker)
+        if fields == None:
+            continue
+        marker_host = _ci_host_from_run_id(fields["run_id"])
+        if current_host and marker_host and marker_host != current_host:
+            continue  # bucket 0
+        entry = {"discussion_id": d.get("id"), "note_id": note.get("id")}
+        if run_id and fields["run_id"] != run_id:
+            delete.append(entry)  # bucket 1
+            continue
+        if fields["task_key"] != task_key:
+            continue  # bucket 2
+        if marker not in desired:
+            delete.append(entry)  # bucket 3, stale
+        elif not note.get("resolved", False):
+            resolve.append(d.get("id"))
+    return {"delete": delete, "resolve": resolve}
+
 def _cleanup_and_resolve(ctx, gl, relevant_diagnostics, run_id, task_key, suggestion_markers, destination):
-    # TEMPORARY stub — implemented in Task 6.
-    pass
+    """List discussions, compute the cleanup plan, delete stale threads,
+    and — when this run found nothing relevant to post — resolve the
+    task's own still-open lint threads (GL-only; the GH path can't)."""
+    desired = {}
+    for diag in relevant_diagnostics:
+        if destination == "annotations":
+            continue
+        if destination in ("auto", "both") and not diag.get("has_fix"):
+            continue
+        lines = gl["changed_lines"].get(diag["file"])
+        if lines and (diag["line"] - 1) in lines:
+            desired[build_marker(run_id, task_key, diag["tool"], diag["file"], diag["line"], diag["rule_id"])] = True
+    for m in suggestion_markers:
+        desired[m] = True
+
+    listed = gitlab.discussions.list(ctx, token = gl["token"], project = gl["project_path"], mr_iid = gl["mr_iid"], auth_kind = "bearer")
+    if not listed["success"]:
+        return
+    plan = compute_cleanup(listed["discussions"], desired, run_id, task_key)
+    for e in plan["delete"]:
+        gitlab.discussions.delete(ctx, token = gl["token"], project = gl["project_path"], mr_iid = gl["mr_iid"], discussion_id = e["discussion_id"], note_id = e["note_id"], auth_kind = "bearer")
+    # Clean pass: no desired findings means everything we previously
+    # posted is now fixed → resolve the task's own open threads.
+    if not desired:
+        for did in plan["resolve"]:
+            gitlab.discussions.resolve(ctx, token = gl["token"], project = gl["project_path"], mr_iid = gl["mr_iid"], discussion_id = did, resolved = True, auth_kind = "bearer")
 
 def _gitlab_lint_impl(ctx: FeatureContext):
     lint_trait = ctx.traits[LintTrait]
