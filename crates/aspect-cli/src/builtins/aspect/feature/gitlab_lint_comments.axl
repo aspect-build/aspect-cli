@@ -132,7 +132,6 @@ def _post_comments(ctx, gl, comments, existing_markers, task_key):
     diff_refs = gl["diff_refs"]
     changed = gl["changed_lines"]
     for c in comments:
-        c.pop("_severity", None)
         marker = extract_marker(c.get("body", ""), task_key = task_key)
         if marker and marker in existing_markers:
             continue
@@ -343,7 +342,11 @@ def _cleanup_and_resolve(ctx, gl, relevant_diagnostics, run_id, task_key, sugges
         if destination in ("auto", "both") and not diag.get("has_fix"):
             continue
         lines = gl["changed_lines"].get(diag["file"])
-        if lines and (diag["line"] - 1) in lines:
+        # Match _post_comments' gate: it posts when the file is absent from
+        # changed_lines (lines == None) OR the line is within the window. The
+        # desired set must keep those same findings so cleanup doesn't reap a
+        # comment this very run just posted.
+        if lines == None or (diag["line"] - 1) in lines:
             desired[build_marker(run_id, task_key, diag["tool"], diag["file"], diag["line"], diag["rule_id"])] = True
     for m in suggestion_markers:
         desired[m] = True
