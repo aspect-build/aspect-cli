@@ -4,7 +4,7 @@ Run with:
   aspect dev test-lint-comments
 """
 
-load("./lint_comments.axl", "build_marker", "parse_marker", "suggestion_block")
+load("./lint_comments.axl", "build_marker", "extract_marker", "parse_marker", "suggestion_block")
 
 def _eq(label, got, want):
     if got != want:
@@ -27,6 +27,11 @@ def _test_impl(ctx):
     _eq("legacy task_key", lf["task_key"], "lint-bk")
 
     _eq("malformed", parse_marker("not a marker"), None)
+
+    _eq("extract no filter", extract_marker(m), m)
+    _eq("extract matching key", extract_marker(m, task_key = "lint-bk"), m)
+    _eq("extract wrong key", extract_marker(m, task_key = "other"), None)
+    _eq("extract no marker", extract_marker("hello world"), None)
 
     _eq("github suggestion", suggestion_block("foo", current = 10, start_line = 10, end_line = 10, vcs = "github"), "```suggestion\nfoo\n```")
     _eq("gitlab suggestion single", suggestion_block("foo", current = 10, start_line = 10, end_line = 10, vcs = "gitlab"), "```suggestion:-0+0\nfoo\n```")

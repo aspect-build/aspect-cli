@@ -1027,7 +1027,7 @@ def _github_lint_impl(ctx: FeatureContext):
                         # 🔧 and whether a SARIF message paragraph
                         # appears between the header and the
                         # suggestion block.
-                        block = lc_suggestion_block(replacement, current = end_line, start_line = start_line, end_line = end_line, vcs = "github")
+                        suggestion_fence = lc_suggestion_block(replacement, current = end_line, start_line = start_line, end_line = end_line, vcs = "github")
                         if correlated:
                             sev_icon = _SUGGESTION_SEVERITY_ICONS.get(severity, "🔧")
                             header_bits = ["**%s**" % display_tool]
@@ -1040,14 +1040,14 @@ def _github_lint_impl(ctx: FeatureContext):
                                 body_lines.append(sarif_message)
                             body_lines.extend([
                                 "",
-                                block,
+                                suggestion_fence,
                             ])
                         else:
                             body_lines = [
                                 marker,
                                 "🔧 **%s**" % display_tool,
                                 "",
-                                block,
+                                suggestion_fence,
                             ]
                         body = "\n".join(body_lines) + _task_attribution_footer(task_key)
 

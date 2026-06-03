@@ -88,6 +88,9 @@ def suggestion_block(replacement, current, start_line, end_line, vcs):
       Y = end_line - current
     """
     if vcs == "gitlab":
+        # Precondition: start_line <= current <= end_line, so x,y >= 0.
+        # For lint suggestions current == end_line (the comment anchor),
+        # making y == 0 in all current call sites.
         x = current - start_line
         y = end_line - current
         fence = "```suggestion:-%d+%d" % (x, y)
