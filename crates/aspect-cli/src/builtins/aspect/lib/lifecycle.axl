@@ -198,9 +198,21 @@ Phase = record(
     display_name = field(str, default = ""),
 )
 
-# Metadata passed to `repro_fix_suggestion` hooks (see `TaskLifecycleTrait`
-# below) alongside each `{command, description}` entry. Typed common-case
-# fields cover most decisions; `extras` and `data` are escape hatches for
+# Which suggestion list a `ReproFixInfo` is from. Hooks doing different
+# things to repro vs fix commands branch on this.
+ReproFixCommandKind = enum("repro", "fix")
+
+# Verdict returned by a `repro_fix_suggestion` hook. `accept` keeps the
+# suggestion as-is, `reject` drops it, `replace` swaps in new command
+# and/or description fields. The enum validates inputs so typos raise
+# with a clear error. Matches the lowercase convention of the `Status`
+# enum above.
+ReproFixAction = enum("accept", "reject", "replace")
+
+# Metadata + per-suggestion fields passed to `repro_fix_suggestion`
+# hooks. The hook receives this single record (alongside `ctx`) and
+# returns a `ReproFixSuggestion` verdict. Typed common-case fields
+# cover most decisions; `extras` and `data` are escape hatches for
 # hooks that need kind-specific detail.
 ReproFixInfo = record(
     # Identity — same shape `task_cli_path` (in lib/repro_commands.axl) would
@@ -213,9 +225,18 @@ ReproFixInfo = record(
     # | "gazelle_results" | "delivery_results". Matches `TaskUpdate.kind`
     # so hooks can route by the same key the surface templates use.
     kind = field(str),
-    # "repro" | "fix" — which list this entry belongs to. Hooks doing
-    # different things to repro vs fix commands branch on this.
-    command_kind = field(str),
+    # Which suggestion list this entry belongs to (`repro` | `fix`).
+    command_kind = field(ReproFixCommandKind),
+
+    # Per-suggestion fields — the entry the hook is about to decide on.
+    # `command` is the shell-ready line, `description` is the optional
+    # short label rendered as a `# <description>` comment above the
+    # command, and `slug` is the stable kebab-case identifier
+    # (catalogued in `apply_repro_fix_hooks`). Hooks scope by `slug`
+    # rather than parsing the command string.
+    command = field(str),
+    description = field(str),
+    slug = field(str),
 
     # Outcome — the lifecycle status the task is about to emit (passed |
     # warning | failed | aborted) and its exit code.
@@ -247,6 +268,19 @@ ReproFixInfo = record(
     data = field(dict, default = {}),
 )
 
+# Verdict returned by every `repro_fix_suggestion` hook. `action` is
+# required; `command` and `description` are only consulted when
+# `action == ReproFixAction("replace")`. Either or both replace fields
+# may be omitted to keep the prior value — useful when a hook only
+# wants to retag the description without touching the command (or vice
+# versa). A replace with both `command` and `description` left as
+# `None` is a no-op (equivalent to accept).
+ReproFixSuggestion = record(
+    action = field(ReproFixAction),
+    command = field(str | None, default = None),
+    description = field(str | None, default = None),
+)
+
 # Lifecycle hooks that any task can fire, allowing features like GithubStatusChecks
 # to observe task progress without coupling to Bazel-specific hooks.
 TaskLifecycleTrait = trait(
@@ -263,29 +297,23 @@ TaskLifecycleTrait = trait(
     # started/complete hook: the first and last `task_update` carry that intent.
     task_update = attr(list[typing.Callable[[TaskContext, TaskUpdate], None]], default = []),
 
-    # User-customization hook for repro / fix command suggestions. Called once
-    # per `{command, description}` entry in `data["repro_commands"]` /
-    # `data["fix_commands"]` just before the terminal `task_update` emit, via
-    # the central `apply_repro_fix_hooks` helper in `repro_commands.axl`. After
-    # that single transform every downstream consumer — the CLI printer, the
-    # GHSC check-run body, the BK annotation, the GitHub PR-comment rollup —
-    # sees the same filtered list.
+    # User-customization hook for repro / fix command suggestions. Called
+    # once per suggestion in `data["repro_commands"]` /
+    # `data["fix_commands"]` just before the terminal `task_update` emit,
+    # via `apply_repro_fix_hooks` in `lib/repro_commands.axl`. After that
+    # single transform every downstream consumer — the CLI printer, the
+    # GHSC check-run body, the BK annotation, the GitHub PR-comment
+    # rollup — sees the same filtered list.
     #
-    # Signature: `(ctx: TaskContext, info: ReproFixInfo, entry: dict) -> dict`
-    # where the returned dict is one of:
-    #   {"action": "accept"}                                    keep as-is
-    #   {"action": "reject"}                                    drop
-    #   {"action": "replace", "command": str, "description": str}  swap
+    # Signature: `(ctx: TaskContext, info: ReproFixInfo) -> ReproFixSuggestion`
     #
     # Multiple handlers chain in registration order — handler N sees handler
-    # N-1's post-verdict entry. `reject` short-circuits the chain for that
-    # entry. A malformed verdict (missing/unknown action, replace without
-    # `command`) raises with a descriptive error so the user fixes their
-    # config.axl rather than getting silent drift.
+    # N-1's post-verdict entry on `info.command` / `info.description`. A
+    # `reject` short-circuits the chain for that entry.
     #
     # See `apply_repro_fix_hooks` in `lib/repro_commands.axl` for the apply
-    # site, and `ReproFixInfo` above for the metadata record.
-    repro_fix_suggestion = attr(list[typing.Callable[[TaskContext, ReproFixInfo, dict], dict]], default = []),
+    # site, and `ReproFixInfo` / `ReproFixSuggestion` above for the records.
+    repro_fix_suggestion = attr(list[typing.Callable[[TaskContext, ReproFixInfo], ReproFixSuggestion]], default = []),
 )
 
 # ---------------------------------------------------------------------------

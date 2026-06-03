@@ -68,7 +68,7 @@ otherwise its purity is whatever the user hooks make of it.
 """
 
 load("./environment.axl", "color_enabled")
-load("./lifecycle.axl", "ReproFixInfo")
+load("./lifecycle.axl", "ReproFixAction", "ReproFixCommandKind", "ReproFixInfo")
 
 # Install docs URL surfaced in the small-text hint at the bottom of each
 # repro/fix section — developers who don't yet have `aspect` on their PATH
@@ -527,11 +527,6 @@ def _print_repro_entry(ansi, entry):
 
 # ── User customization: lifecycle.repro_fix_suggestion ────────────────
 
-_VERDICT_ACCEPT = "accept"
-_VERDICT_REJECT = "reject"
-_VERDICT_REPLACE = "replace"
-_VERDICT_ACTIONS = (_VERDICT_ACCEPT, _VERDICT_REJECT, _VERDICT_REPLACE)
-
 def apply_repro_fix_hooks(
         ctx,
         lifecycle,
@@ -554,19 +549,23 @@ def apply_repro_fix_hooks(
     filtered set.
 
     For each entry, every handler is invoked in registration order with
-    `(ctx, info, entry)`. `entry` is `{command, description, slug}` —
-    use `entry["slug"]` to scope by suggestion type without parsing
-    the command string. The handler returns a verdict dict:
+    `(ctx, info)` where `info` is a `ReproFixInfo` carrying both
+    task-level metadata and the per-suggestion `command` / `description`
+    / `slug`. Use `info.slug` to scope by suggestion type without
+    parsing the command string. The handler returns a
+    `ReproFixSuggestion`:
 
-      {"action": "accept"}                                       keep as-is
-      {"action": "reject"}                                       drop
-      {"action": "replace", "command": str, "description": str}  swap
+      ReproFixSuggestion(action = ReproFixAction("accept"))                                          keep as-is
+      ReproFixSuggestion(action = ReproFixAction("reject"))                                          drop
+      ReproFixSuggestion(action = ReproFixAction("replace"), command = ..., description = ...)      swap
 
-    Handlers chain — handler N sees handler N-1's post-verdict entry.
-    A `reject` short-circuits the chain for that entry. A malformed
-    verdict (missing/unknown action, replace without `command`) fails
-    the task with a message that names `task_path` and `command_kind`
-    so the user can find the bad hook in their `config.axl`.
+    On `replace`, `command` and `description` are each optional;
+    `None` keeps the prior value. A `replace` with both `None` is a
+    no-op (equivalent to `accept`).
+
+    Handlers chain — handler N sees handler N-1's post-verdict values
+    on `info.command` / `info.description`. A `reject` short-circuits
+    the chain for that entry.
 
     No-op when `lifecycle.repro_fix_suggestion` is empty (the common
     case). Mutates `data["repro_commands"]` and `data["fix_commands"]`
@@ -636,71 +635,46 @@ def apply_repro_fix_hooks(
     }
 
     for list_key, command_kind in (
-        ("repro_commands", "repro"),
-        ("fix_commands", "fix"),
+        ("repro_commands", ReproFixCommandKind("repro")),
+        ("fix_commands", ReproFixCommandKind("fix")),
     ):
         entries = data.get(list_key, []) or []
         if not entries:
             continue
-        info = ReproFixInfo(command_kind = command_kind, **info_base)
         kept = []
         for entry in entries:
-            survived = _apply_chain(ctx, info, entry, handlers)
+            survived = _apply_chain(ctx, info_base, command_kind, entry, handlers)
             if survived != None:
                 kept.append(survived)
         data[list_key] = kept
 
-def _apply_chain(ctx, info, entry, handlers):
+def _apply_chain(ctx, info_base, command_kind, entry, handlers):
     """Run `entry` through every handler in `handlers` in order.
 
     Returns the post-chain `{command, description, slug}` dict, or
     `None` when any handler rejected the entry. The slug is carried
     through `replace` verdicts unchanged — hooks rewrite commands,
-    not suggestion identity. Each handler's verdict is validated
-    before applying via `_verdict_action`; an invalid verdict aborts
-    the task with a descriptive `fail()`.
+    not suggestion identity. A fresh `ReproFixInfo` is built per
+    handler so each one sees the prior handler's post-verdict state.
     """
-    current = entry
+    command = entry.get("command", "") or ""
+    description = entry.get("description", "") or ""
+    slug = entry.get("slug", "") or ""
     for handler in handlers:
-        verdict = handler(ctx, info, current)
-        action = _verdict_action(verdict, info)
-        if action == _VERDICT_REJECT:
+        info = ReproFixInfo(
+            command_kind = command_kind,
+            command = command,
+            description = description,
+            slug = slug,
+            **info_base
+        )
+        verdict = handler(ctx, info)
+        action = verdict.action.value
+        if action == "reject":
             return None
-        if action == _VERDICT_REPLACE:
-            current = {
-                "command": verdict["command"],
-                "description": verdict.get("description", "") or "",
-                "slug": current.get("slug", "") or "",
-            }
-    return current
-
-def _verdict_action(verdict, info):
-    """Validate a hook return value and return its canonical action
-    string, or abort the task with a descriptive `fail()`.
-
-    Accepts a dict with `action` ∈ {accept, reject, replace}; replace
-    additionally requires a non-empty `command` string and (optionally)
-    a `description` string.
-    """
-    if type(verdict) != "dict":
-        _bad_verdict(info, "expected a dict, got " + type(verdict))
-    action = verdict.get("action", "")
-    if action not in _VERDICT_ACTIONS:
-        _bad_verdict(info, "unknown action %r; expected accept|reject|replace" % action)
-    if action == _VERDICT_REPLACE:
-        command = verdict.get("command", "")
-        if type(command) != "string" or not command:
-            _bad_verdict(info, "replace verdict requires a non-empty `command` string")
-        if type(verdict.get("description", "")) != "string":
-            _bad_verdict(info, "replace verdict `description` must be a string")
-    return action
-
-def _bad_verdict(info, detail):
-    """Abort the task with a hook-validation message that names the
-    `task_path` and `command_kind` so the user can find the offending
-    hook in their `config.axl`."""
-    fail("repro_fix_suggestion hook for task %s (%s command) returned an invalid verdict: %s" % (
-        info.task_path,
-        info.command_kind,
-        detail,
-    ))
+        if action == "replace":
+            if verdict.command != None:
+                command = verdict.command
+            if verdict.description != None:
+                description = verdict.description
+    return {"command": command, "description": description, "slug": slug}

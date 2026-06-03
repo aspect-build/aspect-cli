@@ -119,53 +119,57 @@ Built-in tasks populate `data["repro_commands"]` / `data["fix_commands"]` (lists
 Hook signature:
 
 ```python
-def my_hook(ctx, info, entry):
+def my_hook(ctx, info):
     """
-    ctx:   TaskContext (std/env/args/task — same shape `task_update` gets)
-    info:  ReproFixInfo (typed task metadata; see lib/lifecycle.axl)
-    entry: {"command": str, "description": str, "slug": str}
+    ctx:  TaskContext (std/env/args/task — same shape `task_update` gets)
+    info: ReproFixInfo — typed task metadata + per-suggestion fields
+          (info.command, info.description, info.slug, info.task_name,
+          info.command_kind, …). See lib/lifecycle.axl.
     """
-    # Return one of:
-    #   {"action": "accept"}                                       keep as-is
-    #   {"action": "reject"}                                       drop
-    #   {"action": "replace", "command": str, "description": str}  swap
+    # Return a ReproFixSuggestion:
+    return ReproFixSuggestion(action = ReproFixAction("accept"))                                # keep as-is
+    return ReproFixSuggestion(action = ReproFixAction("reject"))                                # drop
+    return ReproFixSuggestion(action = ReproFixAction("replace"), command = ...)                # rewrite command
+    return ReproFixSuggestion(action = ReproFixAction("replace"), description = ...)            # retag description
+    return ReproFixSuggestion(action = ReproFixAction("replace"), command = ..., description = ...)  # rewrite both
 ```
 
-Scope decisions by `entry["slug"]` (stable, kebab-case identifier per producer) rather than by parsing the command string — see the catalogue in `apply_repro_fix_hooks`'s docstring. Replace verdicts inherit the prior entry's slug automatically; suggestion identity stays stable across rewrites.
+On a `replace`, omitting `command` or `description` keeps the prior value, so hooks only need to set the fields they actually want to change. Scope decisions by `info.slug` (stable, kebab-case identifier per producer) rather than parsing the command string — see the catalogue in `apply_repro_fix_hooks`'s docstring. Replace verdicts inherit the prior slug automatically; suggestion identity stays stable across rewrites.
 
 Register from `config.axl`:
 
 ```python
-load("@aspect//:traits.axl", "TaskLifecycleTrait")
+load("@aspect//:traits.axl",
+     "ReproFixAction",
+     "ReproFixInfo",
+     "ReproFixSuggestion",
+     "TaskLifecycleTrait")
 
 # Suggestion slugs you want to drop globally.
 _DROPPED = ("format-fix-vanilla-bazel", "gazelle-fix-vanilla-bazel")
 
+def _reject_dropped_slugs(ctx: TaskContext, info: ReproFixInfo) -> ReproFixSuggestion:
+    if info.slug in _DROPPED:
+        return ReproFixSuggestion(action = ReproFixAction("reject"))
+    return ReproFixSuggestion(action = ReproFixAction("accept"))
+
+def _rewrite_aspect_for_lint(ctx: TaskContext, info: ReproFixInfo) -> ReproFixSuggestion:
+    if info.task_name != "lint":
+        return ReproFixSuggestion(action = ReproFixAction("accept"))
+    return ReproFixSuggestion(
+        action = ReproFixAction("replace"),
+        command = info.command.replace("aspect ", "mywrapper "),
+    )
+
 def config(ctx: ConfigContext):
-    def reject_dropped_slugs(ctx, info, entry):
-        # Drop specific suggestion types regardless of task.
-        if entry["slug"] in _DROPPED:
-            return {"action": "reject"}
-        return {"action": "accept"}
-
-    def rewrite_aspect_for_lint(ctx, info, entry):
-        # Route lint repros through an internal wrapper script.
-        if info.task_name != "lint":
-            return {"action": "accept"}
-        return {
-            "action": "replace",
-            "command": entry["command"].replace("aspect ", "mywrapper "),
-            "description": entry["description"],
-        }
-
     lifecycle = ctx.traits[TaskLifecycleTrait]
-    lifecycle.repro_fix_suggestion.append(reject_dropped_slugs)
-    lifecycle.repro_fix_suggestion.append(rewrite_aspect_for_lint)
+    lifecycle.repro_fix_suggestion.append(_reject_dropped_slugs)
+    lifecycle.repro_fix_suggestion.append(_rewrite_aspect_for_lint)
 ```
 
-Multiple handlers chain in registration order — handler N sees handler N-1's post-verdict entry. A `reject` short-circuits the chain for that entry. A malformed verdict (missing/unknown action, replace without `command`) fails the task with a descriptive error pointing at the offending hook.
+Multiple handlers chain in registration order — handler N sees handler N-1's post-verdict values on `info.command` / `info.description`. A `reject` short-circuits the chain for that entry.
 
-`ReproFixInfo` (defined in [`lib/lifecycle.axl`](lib/lifecycle.axl)) carries typed common-case fields — `task_path`, `task_name`, `task_group`, `kind`, `command_kind`, `status`, `exit_code`, `bazel_subcommand`, `targets`, `failed_targets` — plus an open-ended `extras` dict each task stamps with kind-specific keys, and a `data` escape hatch with the full task data dict. Prefer typed fields and `extras`; `data` is unstable across releases.
+`ReproFixInfo` (defined in [`lib/lifecycle.axl`](lib/lifecycle.axl)) carries typed common-case fields — `task_path`, `task_name`, `task_group`, `kind`, `command_kind`, `command`, `description`, `slug`, `status`, `exit_code`, `bazel_subcommand`, `targets`, `failed_targets` — plus an open-ended `extras` dict each task stamps with kind-specific keys, and a `data` escape hatch with the full task data dict. Prefer typed fields and `extras`; `data` is unstable across releases.
 
 ---
 

@@ -24,7 +24,7 @@ load("@aspect//lib/runner_job_history_test.axl", "runner_job_history_tests")
 load("@aspect//lib/sandbox_recovery_test.axl", "sandbox_recovery_tests")
 load("@aspect//lib/tar_test.axl", "tar_tests")
 load("@aspect//lib/tips_test.axl", "tips_tests")
-load("@aspect//traits.axl", "BazelTrait", "LintTrait", "TaskLifecycleTrait")
+load("@aspect//traits.axl", "BazelTrait", "LintTrait", "ReproFixAction", "ReproFixInfo", "ReproFixSuggestion", "TaskLifecycleTrait")
 load("./lambda.axl", "lambda_with_global_bind")
 
 def _user_task_impl(ctx: TaskContext) -> int:
@@ -78,7 +78,7 @@ buildifier = format.alias(
     summary = "Format Starlark files using buildifier.",
 )
 
-def _buildifier_repro_fix(ctx, info, entry):
+def _buildifier_repro_fix(ctx: TaskContext, info: ReproFixInfo) -> ReproFixSuggestion:
     """Rewrite buildifier `aspect ...` suggestions to `bazel ...`.
 
     Our `tools/bazel` wrapper routes verbs to the Aspect CLI, so
@@ -88,14 +88,13 @@ def _buildifier_repro_fix(ctx, info, entry):
     Bazel version. Buildifier-only — leaves other tasks untouched.
     """
     if info.task_name != "buildifier":
-        return {"action": "accept"}
-    return {
-        "action": "replace",
-        "command": entry["command"].replace("aspect buildifier", "bazel buildifier", 1),
-        "description": entry["description"],
-    }
+        return ReproFixSuggestion(action = ReproFixAction("accept"))
+    return ReproFixSuggestion(
+        action = ReproFixAction("replace"),
+        command = info.command.replace("aspect buildifier", "bazel buildifier", 1),
+    )
 
-def _drop_vanilla_bazel_except_build(ctx, info, entry):
+def _drop_vanilla_bazel_except_build(ctx: TaskContext, info: ReproFixInfo) -> ReproFixSuggestion:
     """Drop every vanilla-bazel alternate except `build`'s.
 
     Built-in tasks tack on a vanilla `bazel run <target> ...` next to
@@ -106,13 +105,11 @@ def _drop_vanilla_bazel_except_build(ctx, info, entry):
     that alternate end-to-end. Matches by suggestion-slug suffix so any
     new vanilla-bazel alternates added later are covered automatically.
     """
-    if not entry["slug"].endswith("-vanilla-bazel"):
-        return {"action": "accept"}
-    if info.task_name == "build":
-        return {"action": "accept"}
-    return {"action": "reject"}
+    if not info.slug.endswith("-vanilla-bazel") or info.task_name == "build":
+        return ReproFixSuggestion(action = ReproFixAction("accept"))
+    return ReproFixSuggestion(action = ReproFixAction("reject"))
 
-def _shorten_delivery_local_preview(ctx, info, entry):
+def _shorten_delivery_local_preview(ctx: TaskContext, info: ReproFixInfo) -> ReproFixSuggestion:
     """Shorten the delivery local-preview description.
 
     The built-in description for `delivery-repro-local-preview` switches
@@ -121,13 +118,12 @@ def _shorten_delivery_local_preview(ctx, info, entry):
     little value over the canonical short form. Force the short form
     everywhere so the suggestion renders identically across runs.
     """
-    if entry["slug"] != "delivery-repro-local-preview":
-        return {"action": "accept"}
-    return {
-        "action": "replace",
-        "command": entry["command"],
-        "description": "--mode=always --track-state=false for off-runner with no state backend.",
-    }
+    if info.slug != "delivery-repro-local-preview":
+        return ReproFixSuggestion(action = ReproFixAction("accept"))
+    return ReproFixSuggestion(
+        action = ReproFixAction("replace"),
+        description = "--mode=always --track-state=false for off-runner with no state backend.",
+    )
 
 def _customize_message(s: str, a: str) -> str:
     return s + a
