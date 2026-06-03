@@ -9,7 +9,7 @@ load("./lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_bui
 load("./lib/environment.axl", "error")
 load("./lib/health_check.axl", "HealthCheckTrait")
 load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "dispatch_task_update", "setup_phase", "task_update")
-load("./lib/runnable.axl", "LOCAL_SPAWN_FLAGS", "runnable")
+load("./lib/runnable.axl", "LOCAL_SPAWN_FLAGS", "RUN_IN_DESCRIPTION", "resolve_run_in", "runnable")
 load("./lib/tips.axl", "tips")
 
 def _terminal_status(data, exit_code):
@@ -65,6 +65,11 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
     target = ctx.args.target[0]
     forward_args = list(ctx.args.run_args)
+
+    # Resolve --run-in up front: a bad value (typo, `git-root` outside
+    # a git repo) must fail before setup_phase opens status surfaces
+    # and before the build spends time.
+    spawn_cwd = resolve_run_in(ctx, ctx.args.run_in)
 
     data = init_data()
 
@@ -144,7 +149,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         phase = Phase(name = "run", description = "Run target", emoji = "🚀"),
     )
 
-    code = r.spawn(entrypoint, forward_args).wait().code
+    code = r.spawn(entrypoint, forward_args, cwd = spawn_cwd).wait().code
     bookend = "Ran %s" % target if code == 0 else "%s exited with code %d" % (target, code)
     return _emit_terminal(ctx, lifecycle, data, code, conclusion_text = bookend)
 
@@ -166,6 +171,18 @@ run = task(
         "bazel_startup_flags": args.string_list(
             description = "Additional Bazel startup flags (e.g. --bazel-startup-flag=--host_jvm_args=-Xmx2g). Repeat the flag to pass multiple. Note: changing startup flags restarts the Bazel server.",
             long = "bazel-startup-flag",
+        ),
+        "run_in": args.string(
+            default = "",
+            description = RUN_IN_DESCRIPTION + (
+                " Set this for binaries that resolve workspace-relative " +
+                "file arguments against the process cwd rather than reading " +
+                "`$BUILD_WORKSPACE_DIRECTORY` — e.g. " +
+                "`@buildifier_prebuilt//buildifier`, a symlink to the raw " +
+                "Go binary with no shell wrapper. Wrapper-based binaries " +
+                "that already `cd $BUILD_WORKSPACE_DIRECTORY` on entry see " +
+                "this flag as a no-op."
+            ),
         ),
     } | announce_bazel_args("the build"),
     traits = [

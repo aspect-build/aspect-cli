@@ -20,6 +20,66 @@ LOCAL_SPAWN_FLAGS = [
     "--build_runfile_links",
 ]
 
+# Named modes accepted by `--run-in=<choice>` on tasks that spawn a
+# built binary.
+_RUN_IN_NAMED_MODES = ["runfiles", "cwd", "bazel-root", "aspect-root", "git-root"]
+
+# Shared `description=` body for `--run-in`'s task-arg definition. Tasks
+# may concatenate task-specific guidance (e.g. which formatter targets
+# care about cwd) onto the end. Single source of truth so the named-mode
+# set, the path-resolution rules, and `resolve_run_in`'s error message
+# can't drift apart.
+RUN_IN_DESCRIPTION = (
+    "Cwd for the spawned binary. Default (`runfiles` / empty) matches " +
+    "`bazel run`: `<runfiles_dir>/<workspace>`. Named modes: `cwd` " +
+    "(the user's current working directory), `bazel-root` (the dir " +
+    "containing MODULE.bazel), `aspect-root` (the nearest `.aspect/` " +
+    "dir), `git-root` (the nearest `.git/` dir). Paths starting with " +
+    "`/` are taken as absolute; paths starting with `./` or `../` " +
+    "resolve against the user's cwd."
+)
+
+def resolve_run_in(ctx, choice: str) -> str | None:
+    """Resolve `--run-in=<choice>` to an absolute cwd for the spawn.
+
+    Accepts:
+      - "" or "runfiles"  → None (cwd defaults to `<runfiles_dir>/<workspace>`)
+      - "cwd"             → user's current working directory
+      - "bazel-root"      → workspace root (the dir containing MODULE.bazel)
+      - "aspect-root"     → nearest `.aspect/` dir (usually == bazel-root)
+      - "git-root"        → nearest `.git/` dir
+      - "/abs/path"       → absolute path, passed through verbatim
+      - "./rel" or "../rel" → resolved against the user's cwd
+      - anything else     → fail() with the full list of valid choices
+
+    Path resolution is intentionally simple (no `..` collapsing, no `~`
+    expansion); the OS resolves the spawn cwd, and the shell already
+    expands `~` / `$VAR` before the value reaches us.
+
+    Callers should resolve `--run-in` BEFORE opening status surfaces so
+    that a bad value fails fast without orphaning a partially-emitted
+    task lifecycle.
+    """
+    if choice == "" or choice == "runfiles":
+        return None
+    if choice == "cwd":
+        return ctx.std.env.current_dir()
+    if choice == "bazel-root":
+        return ctx.std.env.bazel_root_dir()
+    if choice == "aspect-root":
+        return ctx.std.env.aspect_root_dir()
+    if choice == "git-root":
+        path = ctx.std.env.git_root_dir()
+        if not path:
+            fail("--run-in=git-root: not inside a git repository.")
+        return path
+    if choice.startswith("/"):
+        return choice
+    if choice.startswith("./") or choice.startswith("../"):
+        return ctx.std.env.current_dir() + "/" + choice
+    fail("--run-in: expected one of %s, an absolute path, or a ./relative path; got %r" %
+         (_RUN_IN_NAMED_MODES, choice))
+
 # Pass-2 entrypoint selection: rules that declare
 # ctx.actions.declare_file(ctx.label.name + EXT) produce no no-extension
 # wrapper, so the extensioned file itself is the entrypoint.
@@ -223,11 +283,11 @@ def _spawn(ctx: TaskContext, state: struct, ep: struct, args: list[str], capture
 
     Working directory defaults to `runfiles_dir/<workspace>` (matching `bazel run`)
     when a runfiles tree is present, falling back to the aspect invocation directory
-    when the target has no runfiles tree. Pass `cwd` explicitly to override — e.g.
-    `format.axl` passes the invocation directory under `--run-in-cwd` so targets
-    that don't switch to `$BUILD_WORKSPACE_DIRECTORY` on their own (such as
-    `@buildifier_prebuilt//buildifier`) resolve workspace-relative arguments
-    against the user's cwd.
+    when the target has no runfiles tree. Pass `cwd` explicitly to override — both
+    `run.axl` and `format.axl` resolve `--run-in=<choice>` via `resolve_run_in()` and
+    forward the result here so targets that don't switch to `$BUILD_WORKSPACE_DIRECTORY`
+    on their own (such as `@buildifier_prebuilt//buildifier`) resolve workspace-relative
+    arguments against the user's cwd.
     """
     effective_cwd = cwd or _runfiles_cwd(state, ep) or ctx.std.env.current_dir()
     cmd = ctx.std.process.command(ep.path) \
@@ -265,7 +325,7 @@ def runnable(ctx, targets: list[str]) -> struct:
           `cwd` defaults to `ep.runfiles_dir/<workspace>` when a runfiles tree
           is present (matching `bazel run`), falling back to the aspect
           invocation directory when there is no runfiles tree. Pass an
-          explicit `cwd` to override — e.g. for `--run-in-cwd` semantics.
+          explicit `cwd` to override — e.g. the resolved value from `--run-in=<choice>`.
     """
     current_package = _current_package(ctx) if ctx else ""
     state = struct(

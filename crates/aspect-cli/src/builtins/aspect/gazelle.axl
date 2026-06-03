@@ -197,7 +197,7 @@ load("./lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_ch
 load("./lib/health_check.axl", "HealthCheckTrait")
 load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "pick_task_status", "resolve_severity", "setup_phase", "task_update")
 load("./lib/path_glob.axl", "match_any")
-load("./lib/repro_commands.axl", "build_aspect_command", "build_bazel_command", "explicit_flags", "print_repro_and_fix", "repro_prefix", "task_cli_path")
+load("./lib/repro_commands.axl", "build_aspect_command", "build_bazel_command", "explicit_flags", "has_tools_bazel_wrapper", "print_repro_and_fix", "repro_prefix", "task_cli_path")
 load("./lib/runnable.axl", "LOCAL_SPAWN_FLAGS", "runnable")
 load("./lib/text.axl", "pluralize")
 load("./lib/tips.axl", "tips")
@@ -351,7 +351,8 @@ def _append_fix_commands(ctx, data):
       2. Re-discover fallback (only when the dir list was truncated).
       3. Vanilla-bazel alternate — `bazel run <gazelle_target>`. The
          standard gazelle binary runs in fix/update mode by default
-         when invoked via `bazel run`.
+         when invoked via `bazel run`. Skipped entirely when the
+         Aspect `tools/bazel` wrapper is in play.
 
     The primary fix flips to `--severity=info --check-only=false` and
     carries the parent dirs of the affected BUILD files as positionals —
@@ -391,11 +392,15 @@ def _append_fix_commands(ctx, data):
             slug = "gazelle-fix-rediscover",
         ))
 
-    data["fix_commands"].append(ReproFixCommand(
-        command = prefix + build_bazel_command("run", [ctx.args.gazelle_target]),
-        description = "vanilla bazel",
-        slug = "gazelle-fix-vanilla-bazel",
-    ))
+    # Vanilla-bazel alternate. Skipped under the Aspect `tools/bazel`
+    # wrapper — there, `bazel run` re-routes through `aspect run`, so
+    # the "vanilla" framing would be misleading.
+    if not has_tools_bazel_wrapper(ctx):
+        data["fix_commands"].append(ReproFixCommand(
+            command = prefix + build_bazel_command("run", [ctx.args.gazelle_target]),
+            description = "vanilla bazel",
+            slug = "gazelle-fix-vanilla-bazel",
+        ))
 
 def _resolve_check_only(ctx):
     """Resolve `--check-only=auto|true|false` to a bool.
