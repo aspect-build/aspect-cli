@@ -320,10 +320,12 @@ def _test_accept_keeps_entry(_ctx):
 
 def _test_reject_drops_entry(_ctx):
     data = _seed_data()
+
     def reject_fix(ctx, info, entry):
         if info.command_kind == "fix":
             return {"action": "reject"}
         return {"action": "accept"}
+
     apply_repro_fix_hooks(
         _fake_apply_ctx(),
         _fake_lifecycle([reject_fix]),
@@ -337,12 +339,14 @@ def _test_reject_drops_entry(_ctx):
 
 def _test_replace_rewrites_entry(_ctx):
     data = _seed_data()
+
     def rewrite(ctx, info, entry):
         return {
             "action": "replace",
             "command": entry["command"].replace("aspect ", "wrapper "),
             "description": entry["description"],
         }
+
     apply_repro_fix_hooks(
         _fake_apply_ctx(),
         _fake_lifecycle([rewrite]),
@@ -371,10 +375,13 @@ def _test_chain_passes_through_replacements(_ctx):
     """Handler 2 sees handler 1's post-replace entry — the chain feeds
     each verdict's output as the next handler's input."""
     data = {"repro_commands": [{"command": "x", "description": "", "slug": "lint-repro"}], "fix_commands": []}
+
     def step1(ctx, info, entry):
         return {"action": "replace", "command": entry["command"] + "1", "description": ""}
+
     def step2(ctx, info, entry):
         return {"action": "replace", "command": entry["command"] + "2", "description": ""}
+
     apply_repro_fix_hooks(
         _fake_apply_ctx(),
         _fake_lifecycle([step1, step2]),
@@ -390,12 +397,15 @@ def _test_chain_short_circuits_on_reject(_ctx):
     that entry — guarded by tracking call counts."""
     data = {"repro_commands": [{"command": "x", "description": "", "slug": "lint-repro"}], "fix_commands": []}
     calls = []
+
     def step1(ctx, info, entry):
         calls.append("step1")
         return {"action": "reject"}
+
     def step2(ctx, info, entry):
         calls.append("step2")
         return {"action": "accept"}
+
     apply_repro_fix_hooks(
         _fake_apply_ctx(),
         _fake_lifecycle([step1, step2]),
@@ -415,6 +425,7 @@ def _test_info_exposes_typed_fields(_ctx):
         "fix_commands": [{"command": "y", "description": "", "slug": "lint-fix"}],
     }
     seen = []
+
     def capture(ctx, info, entry):
         seen.append({
             "task_path": info.task_path,
@@ -430,6 +441,7 @@ def _test_info_exposes_typed_fields(_ctx):
             "slug": entry["slug"],
         })
         return {"action": "accept"}
+
     apply_repro_fix_hooks(
         _fake_apply_ctx(),
         _fake_lifecycle([capture]),
@@ -463,9 +475,11 @@ def _test_empty_lists_skip_chain(_ctx):
     no fixes)."""
     data = {"repro_commands": [{"command": "x", "description": "", "slug": "lint-repro"}], "fix_commands": []}
     seen = []
+
     def capture(ctx, info, entry):
         seen.append(info.command_kind)
         return {"action": "accept"}
+
     apply_repro_fix_hooks(
         _fake_apply_ctx(),
         _fake_lifecycle([capture]),
@@ -486,10 +500,12 @@ def _test_slug_visible_to_hook(_ctx):
         ],
         "fix_commands": [],
     }
+
     def reject_vanilla(ctx, info, entry):
         if entry["slug"] == "bazel-repro-vanilla-bazel":
             return {"action": "reject"}
         return {"action": "accept"}
+
     apply_repro_fix_hooks(
         _fake_apply_ctx(),
         _fake_lifecycle([reject_vanilla]),
@@ -509,12 +525,14 @@ def _test_slug_preserved_through_replace(_ctx):
         "repro_commands": [{"command": "aspect buildifier", "description": "", "slug": "format-repro"}],
         "fix_commands": [],
     }
+
     def rewrite(ctx, info, entry):
         return {
             "action": "replace",
             "command": entry["command"].replace("aspect ", "bazel "),
             "description": entry["description"],
         }
+
     apply_repro_fix_hooks(
         _fake_apply_ctx(),
         _fake_lifecycle([rewrite]),
@@ -531,11 +549,14 @@ def _test_slug_visible_after_replace_in_chain(_ctx):
     post-replace entry from the prior handler."""
     data = {"repro_commands": [{"command": "x", "description": "", "slug": "lint-repro"}], "fix_commands": []}
     later_saw = []
+
     def first(ctx, info, entry):
         return {"action": "replace", "command": "y", "description": ""}
+
     def second(ctx, info, entry):
         later_saw.append(entry["slug"])
         return {"action": "accept"}
+
     apply_repro_fix_hooks(
         _fake_apply_ctx(),
         _fake_lifecycle([first, second]),
