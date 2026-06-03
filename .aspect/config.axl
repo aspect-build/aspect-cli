@@ -24,7 +24,7 @@ load("@aspect//lib/runner_job_history_test.axl", "runner_job_history_tests")
 load("@aspect//lib/sandbox_recovery_test.axl", "sandbox_recovery_tests")
 load("@aspect//lib/tar_test.axl", "tar_tests")
 load("@aspect//lib/tips_test.axl", "tips_tests")
-load("@aspect//traits.axl", "BazelTrait", "LintTrait", "ReproFixAction", "ReproFixInfo", "ReproFixSuggestion", "TaskLifecycleTrait")
+load("@aspect//traits.axl", "BazelTrait", "LintTrait", "REPRO_FIX_ACCEPT", "REPRO_FIX_REJECT", "ReproFixInfo", "ReproFixSuggestion", "TaskLifecycleTrait", "repro_fix_replace")
 load("./lambda.axl", "lambda_with_global_bind")
 
 def _user_task_impl(ctx: TaskContext) -> int:
@@ -88,9 +88,8 @@ def _buildifier_repro_fix(ctx: TaskContext, info: ReproFixInfo) -> ReproFixSugge
     Bazel version. Buildifier-only — leaves other tasks untouched.
     """
     if info.task_name != "buildifier":
-        return ReproFixSuggestion(action = ReproFixAction("accept"))
-    return ReproFixSuggestion(
-        action = ReproFixAction("replace"),
+        return REPRO_FIX_ACCEPT
+    return repro_fix_replace(
         command = info.command.replace("aspect buildifier", "bazel buildifier", 1),
     )
 
@@ -106,8 +105,8 @@ def _drop_vanilla_bazel_except_build(ctx: TaskContext, info: ReproFixInfo) -> Re
     new vanilla-bazel alternates added later are covered automatically.
     """
     if not info.slug.endswith("-vanilla-bazel") or info.task_name == "build":
-        return ReproFixSuggestion(action = ReproFixAction("accept"))
-    return ReproFixSuggestion(action = ReproFixAction("reject"))
+        return REPRO_FIX_ACCEPT
+    return REPRO_FIX_REJECT
 
 def _shorten_delivery_local_preview(ctx: TaskContext, info: ReproFixInfo) -> ReproFixSuggestion:
     """Shorten the delivery local-preview description.
@@ -119,9 +118,8 @@ def _shorten_delivery_local_preview(ctx: TaskContext, info: ReproFixInfo) -> Rep
     everywhere so the suggestion renders identically across runs.
     """
     if info.slug != "delivery-repro-local-preview":
-        return ReproFixSuggestion(action = ReproFixAction("accept"))
-    return ReproFixSuggestion(
-        action = ReproFixAction("replace"),
+        return REPRO_FIX_ACCEPT
+    return repro_fix_replace(
         description = "--mode=always --track-state=false for off-runner with no state backend.",
     )
 

@@ -114,50 +114,49 @@ return <TaskConclusion>
 
 `TaskLifecycleTrait` has a second slot, `repro_fix_suggestion`, that lets a user `config.axl` accept, reject, or modify the `aspect …` / `bazel …` repro and fix commands tasks emit at terminal-emit time. Common uses: rewrite `aspect …` to an internal wrapper command, strip flags the user wants kept private, suppress fix suggestions deemed unsafe in their CI environment.
 
-Built-in tasks populate `data["repro_commands"]` / `data["fix_commands"]` (lists of `{command, description, slug}` dicts) just before their terminal `task_update`. The `apply_repro_fix_hooks` helper in [`lib/repro_commands.axl`](lib/repro_commands.axl) runs every registered handler over those lists once, in place, BEFORE the terminal emit. Every downstream surface — the CLI printer, the GHSC check-run body, the BK annotation, the GitHub PR-comment rollup — reads the post-hook list, so they all see the same filtered set.
+Built-in tasks populate `data["repro_commands"]` / `data["fix_commands"]` with `ReproFixCommand` records (defined in [`lib/lifecycle.axl`](lib/lifecycle.axl)) just before their terminal `task_update`. The `apply_repro_fix_hooks` helper in [`lib/repro_commands.axl`](lib/repro_commands.axl) runs every registered handler over those lists once, in place, BEFORE the terminal emit. Every downstream surface — the CLI printer, the GHSC check-run body, the BK annotation, the GitHub PR-comment rollup — reads the post-hook list, so they all see the same filtered set.
 
 Hook signature:
 
 ```python
-def my_hook(ctx, info):
-    """
-    ctx:  TaskContext (std/env/args/task — same shape `task_update` gets)
-    info: ReproFixInfo — typed task metadata + per-suggestion fields
-          (info.command, info.description, info.slug, info.task_name,
-          info.command_kind, …). See lib/lifecycle.axl.
-    """
-    # Return a ReproFixSuggestion:
-    return ReproFixSuggestion(action = ReproFixAction("accept"))                                # keep as-is
-    return ReproFixSuggestion(action = ReproFixAction("reject"))                                # drop
-    return ReproFixSuggestion(action = ReproFixAction("replace"), command = ...)                # rewrite command
-    return ReproFixSuggestion(action = ReproFixAction("replace"), description = ...)            # retag description
-    return ReproFixSuggestion(action = ReproFixAction("replace"), command = ..., description = ...)  # rewrite both
+def my_hook(ctx: TaskContext, info: ReproFixInfo) -> ReproFixSuggestion:
+    # info carries typed task metadata + per-suggestion fields:
+    #   info.command, info.description, info.slug,
+    #   info.task_name, info.command_kind, ...
+    # See lib/lifecycle.axl.
+
+    return REPRO_FIX_ACCEPT                                            # keep as-is
+    return REPRO_FIX_REJECT                                            # drop
+    return repro_fix_replace(command = ...)                            # rewrite command
+    return repro_fix_replace(description = ...)                        # retag description
+    return repro_fix_replace(command = ..., description = ...)         # rewrite both
 ```
 
-On a `replace`, omitting `command` or `description` keeps the prior value, so hooks only need to set the fields they actually want to change. Scope decisions by `info.slug` (stable, kebab-case identifier per producer) rather than parsing the command string — see the catalogue in `apply_repro_fix_hooks`'s docstring. Replace verdicts inherit the prior slug automatically; suggestion identity stays stable across rewrites.
+On `repro_fix_replace`, omitting `command` or `description` keeps the prior value, so hooks only need to set the fields they actually want to change. Scope decisions by `info.slug` (stable, kebab-case identifier per producer) rather than parsing the command string — see the catalogue in `apply_repro_fix_hooks`'s docstring. Replace verdicts inherit the prior slug automatically; suggestion identity stays stable across rewrites.
 
 Register from `config.axl`:
 
 ```python
 load("@aspect//:traits.axl",
-     "ReproFixAction",
+     "REPRO_FIX_ACCEPT",
+     "REPRO_FIX_REJECT",
      "ReproFixInfo",
      "ReproFixSuggestion",
-     "TaskLifecycleTrait")
+     "TaskLifecycleTrait",
+     "repro_fix_replace")
 
 # Suggestion slugs you want to drop globally.
 _DROPPED = ("format-fix-vanilla-bazel", "gazelle-fix-vanilla-bazel")
 
 def _reject_dropped_slugs(ctx: TaskContext, info: ReproFixInfo) -> ReproFixSuggestion:
     if info.slug in _DROPPED:
-        return ReproFixSuggestion(action = ReproFixAction("reject"))
-    return ReproFixSuggestion(action = ReproFixAction("accept"))
+        return REPRO_FIX_REJECT
+    return REPRO_FIX_ACCEPT
 
 def _rewrite_aspect_for_lint(ctx: TaskContext, info: ReproFixInfo) -> ReproFixSuggestion:
     if info.task_name != "lint":
-        return ReproFixSuggestion(action = ReproFixAction("accept"))
-    return ReproFixSuggestion(
-        action = ReproFixAction("replace"),
+        return REPRO_FIX_ACCEPT
+    return repro_fix_replace(
         command = info.command.replace("aspect ", "mywrapper "),
     )
 
@@ -167,7 +166,7 @@ def config(ctx: ConfigContext):
     lifecycle.repro_fix_suggestion.append(_rewrite_aspect_for_lint)
 ```
 
-Multiple handlers chain in registration order — handler N sees handler N-1's post-verdict values on `info.command` / `info.description`. A `reject` short-circuits the chain for that entry.
+Multiple handlers chain in registration order — handler N sees handler N-1's post-verdict values on `info.command` / `info.description`. A `REPRO_FIX_REJECT` short-circuits the chain for that entry.
 
 `ReproFixInfo` (defined in [`lib/lifecycle.axl`](lib/lifecycle.axl)) carries typed common-case fields — `task_path`, `task_name`, `task_group`, `kind`, `command_kind`, `command`, `description`, `slug`, `status`, `exit_code`, `bazel_subcommand`, `targets`, `failed_targets` — plus an open-ended `extras` dict each task stamps with kind-specific keys, and a `data` escape hatch with the full task data dict. Prefer typed fields and `extras`; `data` is unstable across releases.
 

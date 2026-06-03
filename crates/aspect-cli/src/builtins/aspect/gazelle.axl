@@ -195,7 +195,7 @@ load("./lib/environment.axl", "color_enabled", "detect_ci", "error", "info", "wa
 load("./lib/gazelle_results.axl", "dedupe_subtrees", "dir_at_or_below", "extract_changed_dirs", gaz_init_data = "init_data", gazelle_conclusion = "conclusion")
 load("./lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_changed_files_listing")
 load("./lib/health_check.axl", "HealthCheckTrait")
-load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "pick_task_status", "resolve_severity", "setup_phase", "task_update")
+load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "pick_task_status", "resolve_severity", "setup_phase", "task_update")
 load("./lib/path_glob.axl", "match_any")
 load("./lib/repro_commands.axl", "apply_repro_fix_hooks", "build_aspect_command", "build_bazel_command", "explicit_flags", "print_repro_and_fix", "repro_prefix", "task_cli_path")
 load("./lib/runnable.axl", "LOCAL_SPAWN_FLAGS", "runnable")
@@ -331,15 +331,14 @@ def _append_repro_command(ctx, data):
     """
     effective_dirs = (data.get("gazelle", {}) or {}).get("dirs", []) or []
     prefix = repro_prefix(ctx)
-    data["repro_commands"].append({
-        "command": prefix + build_aspect_command(
+    data["repro_commands"].append(ReproFixCommand(
+        command = prefix + build_aspect_command(
             task_cli_path(ctx.task),
             _detection_flags(ctx, "check"),
             list(effective_dirs),
         ),
-        "description": "",
-        "slug": "gazelle-repro",
-    })
+        slug = "gazelle-repro",
+    ))
 
 def _append_fix_commands(ctx, data):
     """Append fix-command entries to `data["fix_commands"]`. Emitted
@@ -369,35 +368,34 @@ def _append_fix_commands(ctx, data):
     prefix = repro_prefix(ctx)
 
     if len(fix_dirs) <= _FIX_DIRS_LIMIT:
-        data["fix_commands"].append({
-            "command": prefix + build_aspect_command(task_path, explicit_flags, fix_dirs, max_chars = 4096),
-            "description": "",
-            "slug": "gazelle-fix",
-        })
+        data["fix_commands"].append(ReproFixCommand(
+            command = prefix + build_aspect_command(task_path, explicit_flags, fix_dirs, max_chars = 4096),
+            slug = "gazelle-fix",
+        ))
     else:
         shown = fix_dirs[:_FIX_DIRS_LIMIT]
         remaining = len(fix_dirs) - _FIX_DIRS_LIMIT
-        data["fix_commands"].append({
-            "command": prefix + build_aspect_command(task_path, explicit_flags, shown, max_chars = 4096),
-            "description": "First %d of %d affected dirs (plus %d other%s)" % (
+        data["fix_commands"].append(ReproFixCommand(
+            command = prefix + build_aspect_command(task_path, explicit_flags, shown, max_chars = 4096),
+            description = "First %d of %d affected dirs (plus %d other%s)" % (
                 _FIX_DIRS_LIMIT,
                 len(fix_dirs),
                 remaining,
                 "" if remaining == 1 else "s",
             ),
-            "slug": "gazelle-fix-truncated",
-        })
-        data["fix_commands"].append({
-            "command": prefix + build_aspect_command(task_path, _detection_flags(ctx, "apply"), []),
-            "description": "Or re-discover and update all %d affected dirs" % len(fix_dirs),
-            "slug": "gazelle-fix-rediscover",
-        })
+            slug = "gazelle-fix-truncated",
+        ))
+        data["fix_commands"].append(ReproFixCommand(
+            command = prefix + build_aspect_command(task_path, _detection_flags(ctx, "apply"), []),
+            description = "Or re-discover and update all %d affected dirs" % len(fix_dirs),
+            slug = "gazelle-fix-rediscover",
+        ))
 
-    data["fix_commands"].append({
-        "command": prefix + build_bazel_command("run", [ctx.args.gazelle_target]),
-        "description": "vanilla bazel",
-        "slug": "gazelle-fix-vanilla-bazel",
-    })
+    data["fix_commands"].append(ReproFixCommand(
+        command = prefix + build_bazel_command("run", [ctx.args.gazelle_target]),
+        description = "vanilla bazel",
+        slug = "gazelle-fix-vanilla-bazel",
+    ))
 
 def _resolve_check_only(ctx):
     """Resolve `--check-only=auto|true|false` to a bool.

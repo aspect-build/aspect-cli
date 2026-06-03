@@ -6,7 +6,7 @@ through clap's `ValueSource::CommandLine` is covered by the Rust unit
 tests on `Arguments`.
 """
 
-load("./lifecycle.axl", "ReproFixAction", "ReproFixSuggestion")
+load("./lifecycle.axl", "REPRO_FIX_ACCEPT", "REPRO_FIX_REJECT", "ReproFixCommand", "repro_fix_replace")
 load("./repro_commands.axl", "apply_repro_fix_hooks", "build_bazel_command", "explicit_flags", "repro_prefix", "subdir_prefix")
 
 def _eq(label, got, want):
@@ -283,27 +283,14 @@ def _seed_data():
     reject / accept."""
     return {
         "repro_commands": [
-            {"command": "aspect lint -- //a:a", "description": "", "slug": "lint-repro"},
-            {"command": "aspect lint -- //b:b", "description": "alt", "slug": "lint-repro"},
+            ReproFixCommand(command = "aspect lint -- //a:a", slug = "lint-repro"),
+            ReproFixCommand(command = "aspect lint -- //b:b", description = "alt", slug = "lint-repro"),
         ],
         "fix_commands": [
-            {"command": "aspect lint --fix -- //a:a", "description": "", "slug": "lint-fix"},
-            {"command": "aspect lint --fix -- //b:b", "description": "alt", "slug": "lint-fix"},
+            ReproFixCommand(command = "aspect lint --fix -- //a:a", slug = "lint-fix"),
+            ReproFixCommand(command = "aspect lint --fix -- //b:b", description = "alt", slug = "lint-fix"),
         ],
     }
-
-def _accept():
-    return ReproFixSuggestion(action = ReproFixAction("accept"))
-
-def _reject():
-    return ReproFixSuggestion(action = ReproFixAction("reject"))
-
-def _replace(command = None, description = None):
-    return ReproFixSuggestion(
-        action = ReproFixAction("replace"),
-        command = command,
-        description = description,
-    )
 
 def _test_no_handlers_is_noop(_ctx):
     data = _seed_data()
@@ -322,7 +309,7 @@ def _test_accept_keeps_entry(_ctx):
     data = _seed_data()
     apply_repro_fix_hooks(
         _fake_apply_ctx(),
-        _fake_lifecycle([lambda ctx, info: _accept()]),
+        _fake_lifecycle([lambda ctx, info: REPRO_FIX_ACCEPT]),
         data,
         kind = "lint_results",
         status = "failed",
@@ -330,13 +317,13 @@ def _test_accept_keeps_entry(_ctx):
     )
     _eq("accept: repro kept", len(data["repro_commands"]), 2)
     _eq("accept: fix kept", len(data["fix_commands"]), 2)
-    _eq("accept: command unchanged", data["repro_commands"][0]["command"], "aspect lint -- //a:a")
+    _eq("accept: command unchanged", data["repro_commands"][0].command, "aspect lint -- //a:a")
 
 def _test_reject_drops_entry(_ctx):
     data = _seed_data()
 
     def reject_fix(ctx, info):
-        return _reject() if info.command_kind.value == "fix" else _accept()
+        return REPRO_FIX_REJECT if info.command_kind.value == "fix" else REPRO_FIX_ACCEPT
 
     apply_repro_fix_hooks(
         _fake_apply_ctx(),
@@ -353,7 +340,7 @@ def _test_replace_rewrites_entry(_ctx):
     data = _seed_data()
 
     def rewrite(ctx, info):
-        return _replace(command = info.command.replace("aspect ", "wrapper "))
+        return repro_fix_replace(command = info.command.replace("aspect ", "wrapper "))
 
     apply_repro_fix_hooks(
         _fake_apply_ctx(),
@@ -365,58 +352,67 @@ def _test_replace_rewrites_entry(_ctx):
     )
     _eq(
         "replace: repro rewritten",
-        data["repro_commands"][0]["command"],
+        data["repro_commands"][0].command,
         "wrapper lint -- //a:a",
     )
     _eq(
         "replace: fix rewritten",
-        data["fix_commands"][1]["command"],
+        data["fix_commands"][1].command,
         "wrapper lint --fix -- //b:b",
     )
     _eq(
         "replace omitting description: prior value preserved",
-        data["fix_commands"][1]["description"],
+        data["fix_commands"][1].description,
         "alt",
     )
 
 def _test_replace_description_only(_ctx):
     """A replace that supplies only `description` leaves the command
     untouched — useful for hooks that just want to retag a label."""
-    data = {"repro_commands": [{"command": "x", "description": "old", "slug": "lint-repro"}], "fix_commands": []}
+    data = {
+        "repro_commands": [ReproFixCommand(command = "x", description = "old", slug = "lint-repro")],
+        "fix_commands": [],
+    }
     apply_repro_fix_hooks(
         _fake_apply_ctx(),
-        _fake_lifecycle([lambda ctx, info: _replace(description = "new")]),
+        _fake_lifecycle([lambda ctx, info: repro_fix_replace(description = "new")]),
         data,
         kind = "lint_results",
         status = "failed",
         exit_code = 1,
     )
-    _eq("description rewritten", data["repro_commands"][0]["description"], "new")
-    _eq("command preserved", data["repro_commands"][0]["command"], "x")
+    _eq("description rewritten", data["repro_commands"][0].description, "new")
+    _eq("command preserved", data["repro_commands"][0].command, "x")
 
 def _test_replace_both_none_is_noop(_ctx):
     """Replace with neither field supplied is a no-op."""
-    data = {"repro_commands": [{"command": "x", "description": "y", "slug": "lint-repro"}], "fix_commands": []}
+    data = {
+        "repro_commands": [ReproFixCommand(command = "x", description = "y", slug = "lint-repro")],
+        "fix_commands": [],
+    }
     apply_repro_fix_hooks(
         _fake_apply_ctx(),
-        _fake_lifecycle([lambda ctx, info: _replace()]),
+        _fake_lifecycle([lambda ctx, info: repro_fix_replace()]),
         data,
         kind = "lint_results",
         status = "failed",
         exit_code = 1,
     )
-    _eq("noop replace: command unchanged", data["repro_commands"][0]["command"], "x")
-    _eq("noop replace: description unchanged", data["repro_commands"][0]["description"], "y")
+    _eq("noop replace: command unchanged", data["repro_commands"][0].command, "x")
+    _eq("noop replace: description unchanged", data["repro_commands"][0].description, "y")
 
 def _test_chain_passes_through_replacements(_ctx):
     """Handler 2 sees handler 1's post-replace state on info.command."""
-    data = {"repro_commands": [{"command": "x", "description": "", "slug": "lint-repro"}], "fix_commands": []}
+    data = {
+        "repro_commands": [ReproFixCommand(command = "x", slug = "lint-repro")],
+        "fix_commands": [],
+    }
 
     def step1(ctx, info):
-        return _replace(command = info.command + "1")
+        return repro_fix_replace(command = info.command + "1")
 
     def step2(ctx, info):
-        return _replace(command = info.command + "2")
+        return repro_fix_replace(command = info.command + "2")
 
     apply_repro_fix_hooks(
         _fake_apply_ctx(),
@@ -426,21 +422,24 @@ def _test_chain_passes_through_replacements(_ctx):
         status = "failed",
         exit_code = 1,
     )
-    _eq("chain: both handlers applied in order", data["repro_commands"][0]["command"], "x12")
+    _eq("chain: both handlers applied in order", data["repro_commands"][0].command, "x12")
 
 def _test_chain_short_circuits_on_reject(_ctx):
     """Once handler N returns reject, later handlers are not called for
     that entry — guarded by tracking call counts."""
-    data = {"repro_commands": [{"command": "x", "description": "", "slug": "lint-repro"}], "fix_commands": []}
+    data = {
+        "repro_commands": [ReproFixCommand(command = "x", slug = "lint-repro")],
+        "fix_commands": [],
+    }
     calls = []
 
     def step1(ctx, info):
         calls.append("step1")
-        return _reject()
+        return REPRO_FIX_REJECT
 
     def step2(ctx, info):
         calls.append("step2")
-        return _accept()
+        return REPRO_FIX_ACCEPT
 
     apply_repro_fix_hooks(
         _fake_apply_ctx(),
@@ -457,8 +456,8 @@ def _test_info_exposes_typed_fields(_ctx):
     """Hooks receive a populated `ReproFixInfo` — verify the typed
     fields the call site fills in are reachable."""
     data = {
-        "repro_commands": [{"command": "x", "description": "", "slug": "lint-repro"}],
-        "fix_commands": [{"command": "y", "description": "", "slug": "lint-fix"}],
+        "repro_commands": [ReproFixCommand(command = "x", slug = "lint-repro")],
+        "fix_commands": [ReproFixCommand(command = "y", slug = "lint-fix")],
     }
     seen = []
 
@@ -477,7 +476,7 @@ def _test_info_exposes_typed_fields(_ctx):
             "command": info.command,
             "slug": info.slug,
         })
-        return _accept()
+        return REPRO_FIX_ACCEPT
 
     apply_repro_fix_hooks(
         _fake_apply_ctx(),
@@ -511,12 +510,15 @@ def _test_empty_lists_skip_chain(_ctx):
     """When a list is empty, no handler call is made for it — saves
     work on tasks that don't populate one side (e.g. passed lint with
     no fixes)."""
-    data = {"repro_commands": [{"command": "x", "description": "", "slug": "lint-repro"}], "fix_commands": []}
+    data = {
+        "repro_commands": [ReproFixCommand(command = "x", slug = "lint-repro")],
+        "fix_commands": [],
+    }
     seen = []
 
     def capture(ctx, info):
         seen.append(info.command_kind.value)
-        return _accept()
+        return REPRO_FIX_ACCEPT
 
     apply_repro_fix_hooks(
         _fake_apply_ctx(),
@@ -533,14 +535,14 @@ def _test_slug_visible_to_hook(_ctx):
     parsing the command string."""
     data = {
         "repro_commands": [
-            {"command": "aspect build -- //a:a", "description": "", "slug": "bazel-repro-aspect"},
-            {"command": "bazel build -- //a:a", "description": "vanilla bazel", "slug": "bazel-repro-vanilla-bazel"},
+            ReproFixCommand(command = "aspect build -- //a:a", slug = "bazel-repro-aspect"),
+            ReproFixCommand(command = "bazel build -- //a:a", description = "vanilla bazel", slug = "bazel-repro-vanilla-bazel"),
         ],
         "fix_commands": [],
     }
 
     def reject_vanilla(ctx, info):
-        return _reject() if info.slug == "bazel-repro-vanilla-bazel" else _accept()
+        return REPRO_FIX_REJECT if info.slug == "bazel-repro-vanilla-bazel" else REPRO_FIX_ACCEPT
 
     apply_repro_fix_hooks(
         _fake_apply_ctx(),
@@ -551,39 +553,42 @@ def _test_slug_visible_to_hook(_ctx):
         exit_code = 1,
     )
     _eq("slug-based reject: vanilla dropped", len(data["repro_commands"]), 1)
-    _eq("slug-based reject: aspect kept", data["repro_commands"][0]["slug"], "bazel-repro-aspect")
+    _eq("slug-based reject: aspect kept", data["repro_commands"][0].slug, "bazel-repro-aspect")
 
 def _test_slug_preserved_through_replace(_ctx):
     """A `replace` verdict rewrites the command/description but
     inherits the prior entry's slug — hooks rewrite commands, not
     suggestion identity."""
     data = {
-        "repro_commands": [{"command": "aspect buildifier", "description": "", "slug": "format-repro"}],
+        "repro_commands": [ReproFixCommand(command = "aspect buildifier", slug = "format-repro")],
         "fix_commands": [],
     }
     apply_repro_fix_hooks(
         _fake_apply_ctx(),
-        _fake_lifecycle([lambda ctx, info: _replace(command = info.command.replace("aspect ", "bazel "))]),
+        _fake_lifecycle([lambda ctx, info: repro_fix_replace(command = info.command.replace("aspect ", "bazel "))]),
         data,
         kind = "format_results",
         status = "failed",
         exit_code = 1,
     )
-    _eq("replace preserves slug", data["repro_commands"][0]["slug"], "format-repro")
-    _eq("replace rewrites command", data["repro_commands"][0]["command"], "bazel buildifier")
+    _eq("replace preserves slug", data["repro_commands"][0].slug, "format-repro")
+    _eq("replace rewrites command", data["repro_commands"][0].command, "bazel buildifier")
 
 def _test_slug_visible_after_replace_in_chain(_ctx):
     """A later handler in the chain sees the (unchanged) slug on the
     post-replace entry from the prior handler."""
-    data = {"repro_commands": [{"command": "x", "description": "", "slug": "lint-repro"}], "fix_commands": []}
+    data = {
+        "repro_commands": [ReproFixCommand(command = "x", slug = "lint-repro")],
+        "fix_commands": [],
+    }
     later_saw = []
 
     def first(ctx, info):
-        return _replace(command = "y")
+        return repro_fix_replace(command = "y")
 
     def second(ctx, info):
         later_saw.append(info.slug)
-        return _accept()
+        return REPRO_FIX_ACCEPT
 
     apply_repro_fix_hooks(
         _fake_apply_ctx(),
@@ -594,6 +599,42 @@ def _test_slug_visible_after_replace_in_chain(_ctx):
         exit_code = 1,
     )
     _eq("downstream hook sees inherited slug", later_saw, ["lint-repro"])
+
+# ---------------------------------------------------------------------------
+# ReproFixCommand record + verdict helpers
+# ---------------------------------------------------------------------------
+
+def _test_repro_fix_command_description_defaults_to_empty(_ctx):
+    """`description` is optional on `ReproFixCommand` and defaults to ""."""
+    c = ReproFixCommand(command = "x", slug = "lint-repro")
+    _eq("default description is empty string", c.description, "")
+    _eq("command preserved", c.command, "x")
+    _eq("slug preserved", c.slug, "lint-repro")
+
+def _test_repro_fix_accept_reject_are_singletons(_ctx):
+    """`REPRO_FIX_ACCEPT` / `REPRO_FIX_REJECT` are shared singletons
+    so hooks can return them directly instead of constructing a fresh
+    record at every return site."""
+    _eq("accept singleton has accept action", REPRO_FIX_ACCEPT.action.value, "accept")
+    _eq("reject singleton has reject action", REPRO_FIX_REJECT.action.value, "reject")
+    _eq("accept singleton command is None", REPRO_FIX_ACCEPT.command, None)
+    _eq("reject singleton description is None", REPRO_FIX_REJECT.description, None)
+
+def _test_repro_fix_replace_factory(_ctx):
+    """`repro_fix_replace(...)` returns a replace verdict; each field
+    is optional and defaults to None (= keep prior)."""
+    v1 = repro_fix_replace()
+    _eq("no-args: action is replace", v1.action.value, "replace")
+    _eq("no-args: command None", v1.command, None)
+    _eq("no-args: description None", v1.description, None)
+
+    v2 = repro_fix_replace(command = "x")
+    _eq("command-only: command set", v2.command, "x")
+    _eq("command-only: description None", v2.description, None)
+
+    v3 = repro_fix_replace(command = "x", description = "y")
+    _eq("both: command set", v3.command, "x")
+    _eq("both: description set", v3.description, "y")
 
 _UNIT_TESTS = [
     _test_returns_empty_when_no_explicit,
@@ -639,6 +680,9 @@ _UNIT_TESTS = [
     _test_slug_visible_to_hook,
     _test_slug_preserved_through_replace,
     _test_slug_visible_after_replace_in_chain,
+    _test_repro_fix_command_description_defaults_to_empty,
+    _test_repro_fix_accept_reject_are_singletons,
+    _test_repro_fix_replace_factory,
 ]
 
 def _test_impl(ctx):

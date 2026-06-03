@@ -1,40 +1,29 @@
 """Generic repro & fix command framework.
 
-Every built-in task contributes one or more "command suggestions" to its
-data dict at terminal-emit time:
+Every built-in task contributes one or more `ReproFixCommand`
+suggestions (defined in `lib/lifecycle.axl`) to its data dict at
+terminal-emit time:
 
-    data["repro_commands"] = [
-        {"command": "aspect lint --strategy=hold-the-line --aspect=... -- //...",
-         "description": "", "slug": "lint-repro"},
-        ...
-    ]
-    data["fix_commands"] = [
-        {"command": "aspect lint --fix --strategy=hold-the-line --aspect=... -- //...",
-         "description": "", "slug": "lint-fix"},
-        ...
-    ]
+    data["repro_commands"].append(ReproFixCommand(
+        command = "aspect lint --strategy=hold-the-line --aspect=... -- //...",
+        slug = "lint-repro",
+    ))
+    data["fix_commands"].append(ReproFixCommand(
+        command = "aspect lint --fix --strategy=hold-the-line --aspect=... -- //...",
+        slug = "lint-fix",
+    ))
 
-Each entry is a `{command, description, slug}` dict:
-
-  - `command`     — the shell-ready line (with optional `cd` prefix).
-  - `description` — an optional short label that disambiguates
-                    multiple commands of the same type from the same
-                    task (e.g. "Update snapshot 1" vs
-                    "Update snapshot 2"). Empty when there's only one
-                    of its type per task. Surfaces render this as a
-                    `# <description>` comment line above the command.
-  - `slug`        — stable, kebab-case identifier for the suggestion
-                    type ("lint-repro", "format-fix-vanilla-bazel",
-                    "gazelle-fix-rediscover"). Stays stable across
-                    releases so `lifecycle.repro_fix_suggestion`
-                    hooks can scope by suggestion type without
-                    parsing the command string. See
-                    `apply_repro_fix_hooks` below for the catalogue.
+`ReproFixCommand` carries `command` (the shell-ready line),
+`description` (optional, rendered as a `# <description>` comment above
+the command), and `slug` (a stable kebab-case identifier — catalogued
+in `apply_repro_fix_hooks` below — that lets
+`lifecycle.repro_fix_suggestion` hooks scope decisions without
+parsing the command string).
 
 `build_aspect_command(subcommand, flags, targets)` is the canonical
-way producers compose these strings — handling flag normalization,
-target joining, the `--` separator before targets, and length-bounded
-truncation when the target list is large.
+way producers compose the `command` string — handling flag
+normalization, target joining, the `--` separator before targets, and
+length-bounded truncation when the target list is large.
 
 `repro_prefix(ctx)` / `subdir_prefix(cwd, root)` prepend `cd <rel>\n`
 to commands when aspect was called from a subdirectory, so CI failures
@@ -54,8 +43,7 @@ choke point for the `lifecycle.repro_fix_suggestion` user hook. Every
 task calls it after populating its repro/fix lists and BEFORE the
 terminal `task_update` emit, so the same filtered list reaches every
 downstream surface (CLI printer + GHSC body + BK annotation + PR
-comment rollup). See `apply_repro_fix_hooks` below for the full
-contract and the per-task metadata each call site supplies.
+comment rollup).
 
 `print_repro_and_fix(std, data, status)` prints the same blocks to
 the CLI so a developer reading the raw CI log sees the actionable
@@ -63,12 +51,12 @@ commands without opening the status surface.
 
 `build_aspect_command`, `repro_prefix`, `subdir_prefix`,
 `explicit_flags`, and `dedup_and_attribute` are pure (no I/O).
-`apply_repro_fix_hooks` is pure when the user hook list is empty;
-otherwise its purity is whatever the user hooks make of it.
+`apply_repro_fix_hooks` mutates `data` in place; any side effects
+beyond that are whatever the user hooks introduce.
 """
 
 load("./environment.axl", "color_enabled")
-load("./lifecycle.axl", "ReproFixAction", "ReproFixCommandKind", "ReproFixInfo")
+load("./lifecycle.axl", "ReproFixCommand", "ReproFixCommandKind", "ReproFixInfo")
 
 # Install docs URL surfaced in the small-text hint at the bottom of each
 # repro/fix section — developers who don't yet have `aspect` on their PATH
@@ -502,7 +490,7 @@ def _install_hint_line(ansi):
     return ("\x1b[2m" + ASPECT_CLI_INSTALL_HINT + "\x1b[0m") if ansi else ASPECT_CLI_INSTALL_HINT
 
 def _print_repro_entry(ansi, entry):
-    """Print one `{command, description}` entry as a fenced code block.
+    """Print one `ReproFixCommand` entry as a fenced code block.
 
     The comment and command lines are wrapped in ``` … ``` fences and
     printed flush-left, so the copy-paste region is unambiguous and can
@@ -513,15 +501,13 @@ def _print_repro_entry(ansi, entry):
     `#` lines), and the comment reads as a header explaining what's
     coming.
     """
-    command = entry.get("command", "") or ""
-    description = entry.get("description", "") or ""
-    if not command:
+    if not entry.command:
         return
     print("```")
-    if description:
-        comment = "# " + description
+    if entry.description:
+        comment = "# " + entry.description
         print(("\x1b[2m" + comment + "\x1b[0m") if ansi else comment)
-    for line in command.split("\n"):
+    for line in entry.command.split("\n"):
         print(line)
     print("```")
 
@@ -649,17 +635,17 @@ def apply_repro_fix_hooks(
         data[list_key] = kept
 
 def _apply_chain(ctx, info_base, command_kind, entry, handlers):
-    """Run `entry` through every handler in `handlers` in order.
+    """Run a `ReproFixCommand` entry through every handler in order.
 
-    Returns the post-chain `{command, description, slug}` dict, or
-    `None` when any handler rejected the entry. The slug is carried
-    through `replace` verdicts unchanged — hooks rewrite commands,
-    not suggestion identity. A fresh `ReproFixInfo` is built per
-    handler so each one sees the prior handler's post-verdict state.
+    Returns the post-chain `ReproFixCommand`, or `None` when any
+    handler rejected. The slug is carried through `replace` verdicts
+    unchanged — hooks rewrite commands, not suggestion identity. A
+    fresh `ReproFixInfo` is built per handler so each one sees the
+    prior handler's post-verdict state.
     """
-    command = entry.get("command", "") or ""
-    description = entry.get("description", "") or ""
-    slug = entry.get("slug", "") or ""
+    command = entry.command
+    description = entry.description
+    slug = entry.slug
     for handler in handlers:
         info = ReproFixInfo(
             command_kind = command_kind,
@@ -677,4 +663,4 @@ def _apply_chain(ctx, info_base, command_kind, entry, handlers):
                 command = verdict.command
             if verdict.description != None:
                 description = verdict.description
-    return {"command": command, "description": description, "slug": slug}
+    return ReproFixCommand(command = command, description = description, slug = slug)

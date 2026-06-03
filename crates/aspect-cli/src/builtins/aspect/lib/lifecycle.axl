@@ -1,22 +1,13 @@
 """Task lifecycle: TaskUpdate record, TaskLifecycleTrait, and the
 canonical `task_update()` emitter.
 
-`TaskLifecycleTrait` has two hooks:
-
-  task_update           — fires on every structured update during the
-                          task. Used by features (GHSC, BK annotations,
-                          PR comments) to surface live progress.
-  repro_fix_suggestion  — user-customization hook applied once per
-                          `{command, description}` entry in
-                          `data["repro_commands"]` / `data["fix_commands"]`
-                          just before the terminal `task_update`. Lets
-                          a user's `config.axl` accept, reject, or
-                          modify each suggestion (e.g. rewrite `aspect …`
-                          to an internal wrapper, suppress fixes that
-                          are unsafe in their environment). See the
-                          `ReproFixInfo` record and `apply_repro_fix_hooks`
-                          in `lib/repro_commands.axl` for the contract
-                          and apply site.
+`TaskLifecycleTrait` has two hooks: `task_update`, fired on every
+structured update during a task (features surface live progress
+through it), and `repro_fix_suggestion`, called once per repro/fix
+suggestion just before the terminal `task_update` so a user's
+`config.axl` can accept/reject/modify each one. See the
+`ReproFixInfo` / `ReproFixSuggestion` records below and
+`apply_repro_fix_hooks` in `lib/repro_commands.axl`.
 
 `task_update(ctx, lifecycle, status, progress, ...)` prints a phase
 label to stderr (as `→ <progress>`) *and* emits a `TaskUpdate` to every
@@ -198,15 +189,33 @@ Phase = record(
     display_name = field(str, default = ""),
 )
 
+# A single repro / fix command suggestion. Stored in
+# `data["repro_commands"]` / `data["fix_commands"]` by built-in tasks
+# and surfaced to every downstream consumer (CLI printer, GHSC body,
+# BK annotation, GitHub PR-comment rollup). See `lib/repro_commands.axl`
+# for the producer helpers (`build_aspect_command`, `repro_prefix`, …)
+# and the catalogue of `slug` values.
+ReproFixCommand = record(
+    # Shell-ready line (with optional `cd` prefix). Required.
+    command = field(str),
+    # Optional short label rendered as a `# <description>` comment line
+    # above the command. Disambiguates multiple suggestions of the same
+    # type from the same task (e.g. "Update snapshot 1" vs "Update
+    # snapshot 2"). Empty when there's only one of its type per task.
+    description = field(str, default = ""),
+    # Stable kebab-case identifier ("lint-repro", "format-fix-vanilla-bazel",
+    # …). Lets `repro_fix_suggestion` hooks scope by suggestion type
+    # without parsing the command string. Required.
+    slug = field(str),
+)
+
 # Which suggestion list a `ReproFixInfo` is from. Hooks doing different
 # things to repro vs fix commands branch on this.
 ReproFixCommandKind = enum("repro", "fix")
 
 # Verdict returned by a `repro_fix_suggestion` hook. `accept` keeps the
 # suggestion as-is, `reject` drops it, `replace` swaps in new command
-# and/or description fields. The enum validates inputs so typos raise
-# with a clear error. Matches the lowercase convention of the `Status`
-# enum above.
+# and/or description fields on the returned `ReproFixSuggestion`.
 ReproFixAction = enum("accept", "reject", "replace")
 
 # Metadata + per-suggestion fields passed to `repro_fix_suggestion`
@@ -256,9 +265,10 @@ ReproFixInfo = record(
     # Open-ended, task-stamped, curated keys. Documented and stable across
     # releases on a per-task basis — see `apply_repro_fix_hooks` call sites
     # for the keys each task contributes. Examples:
-    #   lint:    {"aspects": [...], "suggestion_count": N}
-    #   format:  {"affected_files": [...], "languages": [...]}
-    #   gazelle: {"affected_files": [...]}
+    #   lint:     {"aspects": [...], "suggestion_count": N}
+    #   format:   {"affected_files": [...]}
+    #   gazelle:  {"affected_files": [...]}
+    #   delivery: {"mode": str, "targets_total": N}
     extras = field(dict, default = {}),
 
     # Full task `data` dict — escape hatch for hooks that need fields not
@@ -280,6 +290,24 @@ ReproFixSuggestion = record(
     command = field(str | None, default = None),
     description = field(str | None, default = None),
 )
+
+# Shared singletons for the two no-argument verdicts so hooks read as
+# `return REPRO_FIX_ACCEPT` rather than re-constructing the record at
+# every return site. Use `repro_fix_replace(...)` for the replace
+# verdict — record literals require keyword args, so the factory
+# spares hook authors the boilerplate.
+REPRO_FIX_ACCEPT = ReproFixSuggestion(action = ReproFixAction("accept"))
+REPRO_FIX_REJECT = ReproFixSuggestion(action = ReproFixAction("reject"))
+
+def repro_fix_replace(command: str | None = None, description: str | None = None) -> ReproFixSuggestion:
+    """Build a `replace` `ReproFixSuggestion`. Either or both fields may
+    be omitted to keep the prior value; a replace with both omitted is
+    a no-op equivalent to `REPRO_FIX_ACCEPT`."""
+    return ReproFixSuggestion(
+        action = ReproFixAction("replace"),
+        command = command,
+        description = description,
+    )
 
 # Lifecycle hooks that any task can fire, allowing features like GithubStatusChecks
 # to observe task progress without coupling to Bazel-specific hooks.
