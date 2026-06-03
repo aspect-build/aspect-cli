@@ -14,6 +14,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use axl_runtime::banner;
 use axl_runtime::engine::arg::Arg;
 use axl_runtime::engine::arguments::Arguments;
 use axl_runtime::engine::feature::FeatureLike;
@@ -70,15 +71,16 @@ impl<'a, 'v> Cmd<'a, 'v> {
             .filter_map(|f| feature_block(*f, self.aspect_root, self.modules))
             .collect();
 
+        let cli_header = banner::line(version);
+
         let mut tree = Tree::default();
         for (idx, task) in self.tasks.iter().enumerate() {
             let label = defined_in_label(task.path(), self.aspect_root, self.modules);
-            let task_cmd = task_command(idx, *task, &label, &feature_blocks);
+            let task_cmd = task_command(idx, *task, &label, &feature_blocks, &cli_header);
             tree.insert(*task, &label, task_cmd)?;
         }
 
         let group_section = group_section(&tree.group_names());
-
         let root = Command::new("aspect")
             .bin_name("aspect")
             .about("Aspect's programmable task runner built on top of Bazel\n{ Correct, Fast, Usable } -- Choose three")
@@ -125,10 +127,10 @@ impl<'a, 'v> Cmd<'a, 'v> {
                     .hide(true),
             )
             .help_template(format!(
-                "{{about-with-newline}}\n{{usage-heading}} {{usage}}\n\n\x1b[1;4mTasks:\x1b[0m\n{{subcommands}}{group_section}\n\x1b[1;4mCommands:\x1b[0m\n  \x1b[1mversion\x1b[0m  Print version\n  \x1b[1mhelp\x1b[0m     Print this message or the help of the given subcommand(s)\n\n\x1b[1;4mOptions:\x1b[0m\n{{options}}"
+                "{cli_header}\n\n{{about-with-newline}}\n{{usage-heading}} {{usage}}\n\n\x1b[1;4mTasks:\x1b[0m\n{{subcommands}}{group_section}\n\x1b[1;4mCommands:\x1b[0m\n  \x1b[1mversion\x1b[0m  Print version\n  \x1b[1mhelp\x1b[0m     Print this message or the help of the given subcommand(s)\n\n\x1b[1;4mOptions:\x1b[0m\n{{options}}"
             ));
 
-        tree.attach(root)
+        tree.attach(root, version)
     }
 
     /// Walk the parsed matches to the deepest subcommand and extract task ids + uuids.
@@ -641,6 +643,7 @@ fn task_command(
     task: &dyn TaskLike<'_>,
     label: &str,
     feature_blocks: &[FeatureBlock],
+    cli_header: &str,
 ) -> Command {
     let name = task.name();
     let display_name = task.display_name();
@@ -708,11 +711,17 @@ fn task_command(
         }
     }
 
-    if let Some(header) = help_header {
-        cmd = cmd.help_template(format!(
-            "{header}\n\n{{usage-heading}} {{usage}}\n\n{{all-args}}\n"
-        ));
-    }
+    // Always use a custom template so the grey "Aspect CLI v… — docs URL"
+    // header lands at the top. When the task supplies its own help_header
+    // body (summary/description), use that as the about block; otherwise
+    // fall back to clap's `{about-with-newline}`.
+    let about_block = match help_header {
+        Some(h) => format!("{h}\n"),
+        None => "{about-with-newline}".to_string(),
+    };
+    cmd = cmd.help_template(format!(
+        "{cli_header}\n\n{about_block}\n{{usage-heading}} {{usage}}\n\n{{all-args}}"
+    ));
     cmd
 }
 
@@ -777,11 +786,13 @@ impl Tree {
         self.subgroups.keys().cloned().collect()
     }
 
-    fn attach(self, mut root: Command) -> Result<Command, CmdError> {
+    fn attach(self, mut root: Command, version: &str) -> Result<Command, CmdError> {
         // Subgroups (rendered hidden, with their own help template).
+        let header = banner::line(version);
         for (name, sub) in self.subgroups {
             let sub_groups = sub.group_names();
-            let mut template = String::from("{about-with-newline}\n{usage-heading} {usage}");
+            let mut template =
+                format!("{header}\n\n{{about-with-newline}}\n{{usage-heading}} {{usage}}");
             if !sub.tasks.is_empty() {
                 template.push_str("\n\n\x1b[1;4mTasks:\x1b[0m\n{subcommands}");
             }
@@ -803,7 +814,7 @@ impl Tree {
                 .display_order(TASK_GROUP_DISPLAY_ORDER)
                 .hide(true)
                 .help_template(template);
-            subcmd = sub.attach(subcmd)?;
+            subcmd = sub.attach(subcmd, version)?;
             if root.find_subcommand(&name).is_some() {
                 return Err(CmdError::NameConflict(name, vec![], String::new()));
             }
@@ -1017,6 +1028,37 @@ mod tests {
         let dev = root.find_subcommand("dev").expect("dev group present");
         assert!(dev.find_subcommand("a").is_some());
         assert!(dev.find_subcommand("b").is_some());
+    }
+
+    /// The identity banner (version + docs URL) is woven into the help
+    /// template of the root command, each task subcommand, and each task
+    /// group — so it shows on every `--help` screen.
+    #[test]
+    fn build_puts_identity_banner_on_every_help_screen() {
+        let t = stub_task("greet", &["dev"], SmallMap::new());
+        let cmd = Cmd {
+            tasks: vec![&t],
+            features: vec![],
+            aspect_root: Path::new("/repo"),
+            modules: &[],
+        };
+        let mut root = cmd.build("1.2.3").expect("build ok");
+
+        let banner = "Aspect CLI v1.2.3 — https://docs.aspect.build/cli";
+        let rendered = |c: &mut Command| c.render_help().to_string();
+
+        assert!(
+            rendered(&mut root).contains(banner),
+            "root help missing banner"
+        );
+
+        let dev = root.find_subcommand_mut("dev").expect("dev group present");
+        assert!(rendered(dev).contains(banner), "group help missing banner");
+
+        let greet = dev
+            .find_subcommand_mut("greet")
+            .expect("greet task present");
+        assert!(rendered(greet).contains(banner), "task help missing banner");
     }
 
     #[test]

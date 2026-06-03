@@ -8,6 +8,7 @@ use starlark::values::list::AllocList;
 use starlark::values::{Heap, Value, ValueLike};
 use uuid::Uuid;
 
+use crate::banner;
 use crate::ci::on_recognized_ci;
 use crate::engine::arguments::Arguments;
 use crate::engine::bazel::Bazel;
@@ -368,6 +369,10 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         } else {
             String::new()
         };
+        // Identity banner above the task header — see `crate::banner`.
+        if banner::show_runtime_banner() {
+            eprintln!("{}\n", banner::line_from_pkg());
+        }
         if std::env::var_os("BUILDKITE").is_some() {
             // The BK section header replaces the `→` line on BK (avoids
             // duplicating the same text in the BK log viewer).

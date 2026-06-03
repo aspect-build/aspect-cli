@@ -15,6 +15,7 @@ rust_library(
         "//crates/axl-lsp:__pkg__",
     ],
     deps = [
+        "//crates/aspect-telemetry",
         "//crates/axl-proto",
         "//crates/axl-types",
         "//crates/bazelrc",
