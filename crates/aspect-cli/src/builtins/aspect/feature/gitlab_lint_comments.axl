@@ -29,26 +29,35 @@ _LOG = feature_logger("GitLab lint comments")
 
 _REQUIRED_DIFF_REFS = ("base_sha", "start_sha", "head_sha")
 
-def build_position(path, line, diff_refs):
+def build_position(path, line, diff_refs, prefix = ""):
     """Translate a finding `(path, line)` + MR `diff_refs` into a GitLab
     Discussions `position` payload. Returns None when `diff_refs` is
     missing any of the three SHAs (caller skips posting that finding).
 
     Anchors on the new side only: `new_line` is set, `old_line` omitted,
-    `new_path == old_path == path`.
+    `new_path == old_path == prefix + path`.
+
+    `prefix` is the Bazel-workspace-root path relative to the git repo
+    root (from `git rev-parse --show-prefix`). SARIF/patch paths are
+    workspace-relative; GitLab MR diff paths are repo-relative, so when
+    the workspace sits in a subdirectory the prefix must be prepended or
+    GitLab rejects the position as off-diff. Empty (the common case:
+    workspace == repo root) leaves the path unchanged. Mirrors the GH
+    path's `prefix + c["path"]` at its API boundary.
     """
     if type(diff_refs) != "dict":
         return None
     for k in _REQUIRED_DIFF_REFS:
         if not diff_refs.get(k):
             return None
+    repo_path = prefix + path
     return {
         "base_sha": diff_refs["base_sha"],
         "start_sha": diff_refs["start_sha"],
         "head_sha": diff_refs["head_sha"],
         "position_type": "text",
-        "new_path": path,
-        "old_path": path,
+        "new_path": repo_path,
+        "old_path": repo_path,
         "new_line": line,
     }
 
@@ -137,10 +146,13 @@ def _post_comments(ctx, gl, comments, existing_markers, task_key):
             continue
         path = c.get("path", "")
         line = c.get("line", 0)
+        # Gate on the unprefixed (workspace-relative) path — `changed_lines`
+        # is keyed by the same SARIF/changed-files convention. The repo
+        # prefix is applied only when building the GitLab position below.
         lines = changed.get(path)
         if lines != None and (line - 1) not in lines:
             continue
-        position = build_position(path, line, diff_refs)
+        position = build_position(path, line, diff_refs, prefix = gl.get("prefix", ""))
         if position == None:
             errors.append("[%s:%s] could not build position (missing diff_refs)" % (path, line))
             continue
@@ -410,7 +422,18 @@ def _gitlab_lint_impl(ctx: FeatureContext):
         "mr_iid": mr["mr_iid"],
         "diff_refs": diff_refs,
         "changed_lines": {},
+        "prefix": "",
     }
+
+    # Bazel-workspace-root path relative to the git repo root. SARIF/patch
+    # paths are workspace-relative but GitLab MR diff paths are repo-relative;
+    # when the workspace is a subdirectory of the repo, this prefix must be
+    # prepended to the position path or GitLab rejects it as off-diff. Empty
+    # when workspace == repo root. Mirrors github_lint_comments.axl.
+    git_out = ctx.std.process.command("git").arg("rev-parse").arg("--show-prefix").current_dir(ctx.std.env.aspect_root_dir()).stdout("piped").stderr("null").spawn().wait_with_output()
+    if git_out.status.success:
+        gl["prefix"] = git_out.stdout.strip()
+
     state = {"all_comments": [], "posted": 0, "errors": [], "pending_patches": []}
 
     def _lint_start(ctx):
