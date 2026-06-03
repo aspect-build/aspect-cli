@@ -321,10 +321,11 @@ def _discussions_delete(ctx, token, project, mr_iid, discussion_id, note_id, api
     return {"success": success, "status": status_code}
 
 def _discussions_resolve(ctx, token, project, mr_iid, discussion_id, resolved = True, api_base = DEFAULT_GITLAB_API, auth_kind = "private_token"):
-    """Resolve (or unresolve) a discussion thread."""
-    url = _project_url(api_base, project, "/merge_requests/" + str(mr_iid) + "/discussions/" + str(discussion_id))
-    payload = {"resolved": resolved}
-    success, status_code, resp = _do_request(ctx, "PUT", url, token, auth_kind = auth_kind, payload = payload)
+    """Resolve (or unresolve) a discussion thread. GitLab takes `resolved`
+    as a query parameter, not a body field."""
+    resolved_str = "true" if resolved else "false"
+    url = _project_url(api_base, project, "/merge_requests/" + str(mr_iid) + "/discussions/" + str(discussion_id)) + "?resolved=" + resolved_str
+    success, status_code, resp = _do_request(ctx, "PUT", url, token, auth_kind = auth_kind)
     if success:
         return {"success": True, "discussion": resp if type(resp) == "dict" else None}
     return {"success": False, "error": "request failed: %d" % status_code, "status": status_code, "body": resp}
