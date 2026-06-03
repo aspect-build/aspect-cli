@@ -36,6 +36,7 @@ def _test_impl(ctx):
     _eq("position prefixed new_path", pre["new_path"], "sub/dir/src/app.ts")
     _eq("position prefixed old_path", pre["old_path"], "sub/dir/src/app.ts")
     _eq("position prefixed new_line", pre["new_line"], 42)
+
     # Empty prefix is a no-op (workspace == repo root, the common case).
     _eq("position empty prefix", build_position("a.sh", 3, _DIFF_REFS, prefix = "")["new_path"], "a.sh")
 

@@ -146,6 +146,7 @@ def _post_comments(ctx, gl, comments, existing_markers, task_key):
             continue
         path = c.get("path", "")
         line = c.get("line", 0)
+
         # Gate on the unprefixed (workspace-relative) path — `changed_lines`
         # is keyed by the same SARIF/changed-files convention. The repo
         # prefix is applied only when building the GitLab position below.
@@ -281,6 +282,7 @@ def _build_suggestion_comments(ctx, run_id, task_key, relevant_diagnostics, pend
                         body_lines = [marker, "🔧 **%s**" % display_tool, "", suggestion_fence]
                     body = "\n".join(body_lines) + _task_attribution_footer(task_key)
                     cap_severity = severity if correlated and severity else "warning"
+
                     # Unlike the GitHub path we don't set start_line/start_side:
                     # GitLab anchors the discussion via position.new_line (set in
                     # build_position) and the `suggestion:-X+Y` fence encodes the
@@ -354,6 +356,7 @@ def _cleanup_and_resolve(ctx, gl, relevant_diagnostics, run_id, task_key, sugges
         if destination in ("auto", "both") and not diag.get("has_fix"):
             continue
         lines = gl["changed_lines"].get(diag["file"])
+
         # Match _post_comments' gate: it posts when the file is absent from
         # changed_lines (lines == None) OR the line is within the window. The
         # desired set must keep those same findings so cleanup doesn't reap a
@@ -369,6 +372,7 @@ def _cleanup_and_resolve(ctx, gl, relevant_diagnostics, run_id, task_key, sugges
     plan = compute_cleanup(listed["discussions"], desired, run_id, task_key)
     for e in plan["delete"]:
         gitlab.discussions.delete(ctx, token = gl["token"], project = gl["project_path"], mr_iid = gl["mr_iid"], discussion_id = e["discussion_id"], note_id = e["note_id"], auth_kind = "bearer")
+
     # Auto-resolve only on a genuinely clean pass: the lint task reported
     # no relevant diagnostics AND emitted no suggestions, so anything we
     # flagged on a prior run is now fixed. We deliberately do NOT key this
