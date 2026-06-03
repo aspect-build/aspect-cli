@@ -1,0 +1,78 @@
+"""GitLab MR inline lint-comment reporter for the lint task.
+
+Mirrors `feature/github_lint_comments.axl` for GitLab. Posts SARIF-derived
+diagnostics + patch-derived suggestion-block comments as position-bound MR
+diff discussions, with marker-based dedup across runs, stale-cleanup, and
+thread auto-resolve on a clean pass.
+
+Marker shape (shared with the GH path, MR-keyed run_id prefix `gl-`):
+  <!-- aspect-lint:<run_id>:<task_key>:<tool>:<file>:<line>:<rule_id> -->
+
+GitLab position translation: a finding's `(new_path, new_line)` plus the
+MR's `diff_refs.{base_sha, start_sha, head_sha}` (read once from
+`gitlab.merge_requests.get`) form the `position` payload the Discussions
+API requires. Lint findings sit on the new (added/changed) side, so
+`new_path == old_path == path`, `new_line` is set, and `old_line` is
+omitted.
+"""
+
+load("../lib/environment.axl", "feature_logger")
+load("../lib/gitlab.axl", "gitlab")
+load("../lib/gitlab_detect.axl", "detect_gitlab_mr")
+load("../lib/gitlab_token_cache.axl", "gitlab_token_cache")
+load("../lib/lint_comments.axl", "build_marker", "extract_marker", "parse_marker", "suggestion_block")
+load("../lib/patch.axl", patch_hunk_edit_blocks = "hunk_edit_blocks", patch_parse = "parse")
+load("../lib/sarif.axl", "parse_sarif_diagnostics", "sarif_to_review_comments")
+load("../lint.axl", "LintTrait")
+
+_LOG = feature_logger("GitLab lint comments")
+
+_REQUIRED_DIFF_REFS = ("base_sha", "start_sha", "head_sha")
+
+def build_position(path, line, diff_refs):
+    """Translate a finding `(path, line)` + MR `diff_refs` into a GitLab
+    Discussions `position` payload. Returns None when `diff_refs` is
+    missing any of the three SHAs (caller skips posting that finding).
+
+    Anchors on the new side only: `new_line` is set, `old_line` omitted,
+    `new_path == old_path == path`.
+    """
+    if type(diff_refs) != "dict":
+        return None
+    for k in _REQUIRED_DIFF_REFS:
+        if not diff_refs.get(k):
+            return None
+    return {
+        "base_sha": diff_refs["base_sha"],
+        "start_sha": diff_refs["start_sha"],
+        "head_sha": diff_refs["head_sha"],
+        "position_type": "text",
+        "new_path": path,
+        "old_path": path,
+        "new_line": line,
+    }
+
+def dedup_discussions_by_marker(discussions, task_key):
+    """Find duplicate Aspect-owned lint discussions sharing a marker.
+
+    Walks `discussions` (GitLab Discussions API shape: each has `id` and
+    a `notes` list). For each marker belonging to `task_key`, keeps the
+    LAST occurrence (newest — the list is created-asc) and returns the
+    earlier ones as `{discussion_id, note_id}` dicts the caller deletes.
+    Discussions whose first note has no matching marker are ignored.
+    """
+    seen = {}
+    stale = []
+    for d in discussions:
+        notes = d.get("notes", [])
+        if not notes:
+            continue
+        note = notes[0]
+        marker = extract_marker(note.get("body", ""), task_key = task_key)
+        if not marker:
+            continue
+        entry = {"discussion_id": d.get("id"), "note_id": note.get("id")}
+        if marker in seen:
+            stale.append(seen[marker])
+        seen[marker] = entry
+    return stale

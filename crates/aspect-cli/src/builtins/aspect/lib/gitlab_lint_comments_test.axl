@@ -1,0 +1,54 @@
+"""GitLab-specific lint-comment tests: position translation, suggestion
+rendering, marker dedup.
+
+Run with:
+  aspect dev test-gitlab-lint-comments
+"""
+
+load("../feature/gitlab_lint_comments.axl", "build_position", "dedup_discussions_by_marker")
+load("../lib/lint_comments.axl", "build_marker", "suggestion_block")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+_DIFF_REFS = {"base_sha": "BASE", "start_sha": "START", "head_sha": "HEAD"}
+
+def _test_impl(ctx):
+    # ── Position translation ────────────────────────────────────────
+    pos = build_position("src/app.ts", 42, _DIFF_REFS)
+    _eq("position base_sha", pos["base_sha"], "BASE")
+    _eq("position start_sha", pos["start_sha"], "START")
+    _eq("position head_sha", pos["head_sha"], "HEAD")
+    _eq("position type", pos["position_type"], "text")
+    _eq("position new_path", pos["new_path"], "src/app.ts")
+    _eq("position old_path", pos["old_path"], "src/app.ts")
+    _eq("position new_line", pos["new_line"], 42)
+    _eq("position no old_line", "old_line" in pos, False)
+
+    _eq("position missing refs", build_position("x", 1, {"base_sha": "B", "head_sha": "H"}), None)
+
+    # ── Suggestion rendering (GL form via shared helper) ────────────
+    _eq("gl suggestion single", suggestion_block("fixed", current = 5, start_line = 5, end_line = 5, vcs = "gitlab"), "```suggestion:-0+0\nfixed\n```")
+
+    # ── Marker dedup over discussions ───────────────────────────────
+    mk = build_marker("gl-1", "lint", "ShellCheck", "a.sh", 3, "SC2164")
+    discussions = [
+        {"id": "d1", "notes": [{"id": 11, "body": mk + "\nold"}]},
+        {"id": "d2", "notes": [{"id": 22, "body": mk + "\nnewer"}]},
+        {"id": "d3", "notes": [{"id": 33, "body": "unrelated note"}]},
+    ]
+    stale = dedup_discussions_by_marker(discussions, task_key = "lint")
+    _eq("dedup drops one", len(stale), 1)
+    _eq("dedup drops oldest", stale[0]["discussion_id"], "d1")
+    _eq("dedup note id", stale[0]["note_id"], 11)
+
+    print("gitlab_lint_comments.axl: OK")
+    return 0
+
+gitlab_lint_comments_tests = task(
+    name = "test-gitlab-lint-comments",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)
