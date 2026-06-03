@@ -95,6 +95,7 @@ as "different runs" and incorrectly reap each other.
 
 load("../lib/environment.axl", "color_enabled", "feature_logger")
 load("../lib/github.axl", "github")
+load("../lib/lint_comments.axl", lc_build_marker = "build_marker", lc_extract_marker = "extract_marker", lc_parse_marker = "parse_marker", lc_suggestion_block = "suggestion_block")
 load("../lib/patch.axl", patch_hunk_edit_blocks = "hunk_edit_blocks", patch_parse = "parse")
 load("../lib/sarif.axl", "parse_sarif", "parse_sarif_diagnostics", "sarif_to_review_comments")
 load("../lint.axl", "LintTrait")
@@ -170,11 +171,8 @@ def _enrich_with_suggestions(ctx, comments):
         for f in applicable:
             fixed = fixed[:f["start"]] + f["replacement"] + fixed[f["end"]:]
         if fixed != original_line:
-            comment["body"] += "\n\n```suggestion\n" + fixed + "\n```"
+            comment["body"] += "\n\n" + lc_suggestion_block(fixed, current = line_num, start_line = line_num, end_line = line_num, vcs = "github")
         comment.pop("_fixes", None)
-
-_MARKER_PREFIX = "<!-- aspect-lint:"
-_MARKER_SUFFIX = " -->"
 
 # Severity → leading-emoji map for suggestion-comment body headers.
 # Mirrors the icons used by the lint-results "Auto fixes"
@@ -246,39 +244,6 @@ def _ci_host_from_run_id(run_id):
         return ""
     return run_id[:dash]
 
-def _build_comment_marker(run_id, task_key, tool, file, line, rule_id):
-    """Build a hidden HTML comment that uniquely identifies a lint
-    review-comment so subsequent runs can dedupe (skip re-posting)
-    and stale-cleanup (delete on findings that disappeared).
-
-    Marker shape:
-      `<!-- aspect-lint:<run_id>:<task_key>:<tool>:<file>:<line>:<rule_id> -->`
-
-    Run identity scopes cross-task cleanup, gated by CI host: any
-    aspect-lint comment whose `<run_id>` was posted on the *same CI
-    host* (matching `gha`/`bk`/`cci`/`gl` prefix) but doesn't match
-    the current run is fair game for *any* lint task in the current
-    run to reap — regardless of which task posted it. Comments
-    posted by a different CI host on the same PR are left
-    untouched. Sibling-task comments from the *current* run (same
-    run_id, different task_key) are left untouched, since those
-    tasks are still posting alongside this one.
-
-    Task identity scopes within-run dedup and the per-task desired
-    set: only this task's own current-run markers participate in
-    "is this finding still active?" decisions.
-    """
-    return "{}{}:{}:{}:{}:{}:{}{}".format(
-        _MARKER_PREFIX,
-        run_id,
-        task_key,
-        tool,
-        file,
-        line,
-        rule_id,
-        _MARKER_SUFFIX,
-    )
-
 def _files_changed_url(html_url):
     """Rewrite a PR review comment's GitHub `html_url` from the
     conversation-tab form to the Files-Changed-tab form.
@@ -305,80 +270,6 @@ def _files_changed_url(html_url):
         return html_url
     return html_url[:idx] + "/files#r" + html_url[idx + len(marker):]
 
-def _extract_comment_marker(body, task_key = None):
-    """Extract this feature's hidden marker from a PR review comment body.
-
-    When `task_key` is supplied, only returns markers belonging to
-    that task — used by dedup ("did THIS task already post this?").
-    When `None`, any `aspect-lint:` marker matches; cleanup uses
-    this form and parses the marker fields itself to reason about
-    sibling tasks and prior runs.
-    """
-    if not body:
-        return None
-    idx = body.find(_MARKER_PREFIX)
-    if idx < 0:
-        return None
-    end = body.find(_MARKER_SUFFIX, idx)
-    if end < 0:
-        return None
-    marker = body[idx:end + len(_MARKER_SUFFIX)]
-    if task_key:
-        fields = _parse_marker_fields(marker)
-        if fields == None or fields["task_key"] != task_key:
-            return None
-    return marker
-
-def _parse_marker_fields(marker):
-    """Parse a marker string into a dict of field values.
-
-    Returns `{"run_id", "task_key", "tool", "file", "line",
-    "rule_id"}` for current-format markers, or a legacy-format shape
-    (run_id == "") for pre-run-id markers. None for malformed input.
-
-    Tolerates extra trailing fields by joining them back into
-    `rule_id` — forwards-compat with future field additions.
-    """
-    if not marker.startswith(_MARKER_PREFIX) or not marker.endswith(_MARKER_SUFFIX):
-        return None
-    inner = marker[len(_MARKER_PREFIX):-len(_MARKER_SUFFIX)]
-    fields = inner.split(":")
-
-    # Current format: 6 fields. Legacy (pre-run_id) format: 5 fields.
-    if len(fields) == 6:
-        return {
-            "run_id": fields[0],
-            "task_key": fields[1],
-            "tool": fields[2],
-            "file": fields[3],
-            "line": fields[4],
-            "rule_id": fields[5],
-        }
-    if len(fields) > 6:
-        # Extra colons (rare — file paths usually don't contain them
-        # on POSIX, but defensively join the tail back into rule_id).
-        return {
-            "run_id": fields[0],
-            "task_key": fields[1],
-            "tool": fields[2],
-            "file": fields[3],
-            "line": fields[4],
-            "rule_id": ":".join(fields[5:]),
-        }
-    if len(fields) == 5:
-        # Legacy pre-run_id format — fields are
-        # task_key:tool:file:line:rule_id. Treat run_id as "" so
-        # cross-run cleanup reaps these on the next run.
-        return {
-            "run_id": "",
-            "task_key": fields[0],
-            "tool": fields[1],
-            "file": fields[2],
-            "line": fields[3],
-            "rule_id": fields[4],
-        }
-    return None
-
 def _dedup_by_marker(comments, task_key):
     """Drop duplicates: keep the first comment carrying each marker,
     discard subsequent ones with the same marker.
@@ -396,7 +287,7 @@ def _dedup_by_marker(comments, task_key):
     seen = {}
     out = []
     for c in comments:
-        marker = _extract_comment_marker(c.get("body", ""), task_key = task_key)
+        marker = lc_extract_marker(c.get("body", ""), task_key = task_key)
         if not marker:
             out.append(c)
             continue
@@ -480,8 +371,8 @@ def _build_comments(ctx, filepath, run_id, task_key, destination):
 
     `run_id` and `task_key` are both woven into the marker so cleanup
     can identify comments from prior CI runs (across all tasks) and
-    from this task in the current run separately. See
-    `_build_comment_marker` for the full scoping rationale.
+    from this task in the current run separately. See the module
+    docstring's "Marker scheme" section for the full scoping rationale.
 
     `destination` matches `LintTrait.findings_destination` and drives
     the per-comment filter via `_filter_for_destination`.
@@ -506,7 +397,7 @@ def _build_comments(ctx, filepath, run_id, task_key, destination):
     for comment in comments:
         d = diags_by_anchor.get((comment.get("path", ""), comment.get("line", 0)))
         if d:
-            comment["body"] = _build_comment_marker(
+            comment["body"] = lc_build_marker(
                 run_id,
                 task_key,
                 d["tool"],
@@ -555,7 +446,7 @@ def _get_existing_markers(ctx, gh, task_key):
         return {}
     markers = {}
     for c in result["comments"]:
-        marker = _extract_comment_marker(c.get("body", ""), task_key = task_key)
+        marker = lc_extract_marker(c.get("body", ""), task_key = task_key)
         if marker:
             markers[marker] = c.get("html_url", "") or ""
     return markers
@@ -576,7 +467,7 @@ def _post_individually(ctx, gh, comments, existing_markers, task_key):
     for c in comments:
         # _severity is internal — drop it before sending to GitHub.
         c.pop("_severity", None)
-        marker = _extract_comment_marker(c.get("body", ""), task_key = task_key)
+        marker = lc_extract_marker(c.get("body", ""), task_key = task_key)
         if marker and marker in existing_markers:
             # Already posted on this PR (current task, prior run) —
             # don't repost, but DO surface the existing URL so the
@@ -691,7 +582,7 @@ def _cleanup_comments(ctx, gh, relevant_diagnostics, run_id, task_key, suggestio
             continue
         lines = gh["changed_lines"].get(diag["file"])
         if lines and (diag["line"] - 1) in lines:
-            marker = _build_comment_marker(run_id, task_key, diag["tool"], diag["file"], diag["line"], diag["rule_id"])
+            marker = lc_build_marker(run_id, task_key, diag["tool"], diag["file"], diag["line"], diag["rule_id"])
             desired[marker] = True
 
     # Patch-derived suggestion markers come from the run, not from
@@ -717,10 +608,10 @@ def _cleanup_comments(ctx, gh, relevant_diagnostics, run_id, task_key, suggestio
     prior_run_comments = []
     current_ci_host = _ci_host_from_run_id(run_id)
     for c in result["comments"]:
-        marker = _extract_comment_marker(c.get("body", ""))
+        marker = lc_extract_marker(c.get("body", ""))
         if not marker:
             continue
-        fields = _parse_marker_fields(marker)
+        fields = lc_parse_marker(marker)
         if fields == None:
             continue
         marker_ci_host = _ci_host_from_run_id(fields["run_id"])
@@ -951,7 +842,7 @@ def _github_lint_impl(ctx: FeatureContext):
         # cap budget — slice only counts new postable comments.
         new_only = []
         for c in ready:
-            marker = _extract_comment_marker(c.get("body", ""), task_key = ctx.task.key)
+            marker = lc_extract_marker(c.get("body", ""), task_key = ctx.task.key)
             if marker and marker in gh["existing_markers"]:
                 continue
             new_only.append(c)
@@ -1102,7 +993,7 @@ def _github_lint_impl(ctx: FeatureContext):
                         # that rule_id — distinct markers keep them
                         # from deduping into each other.
                         rule_id = "patch_%d_%d" % (start_line, end_line)
-                        marker = _build_comment_marker(
+                        marker = lc_build_marker(
                             run_id,
                             task_key,
                             display_tool,
@@ -1136,6 +1027,7 @@ def _github_lint_impl(ctx: FeatureContext):
                         # 🔧 and whether a SARIF message paragraph
                         # appears between the header and the
                         # suggestion block.
+                        suggestion_fence = lc_suggestion_block(replacement, current = end_line, start_line = start_line, end_line = end_line, vcs = "github")
                         if correlated:
                             sev_icon = _SUGGESTION_SEVERITY_ICONS.get(severity, "🔧")
                             header_bits = ["**%s**" % display_tool]
@@ -1148,18 +1040,14 @@ def _github_lint_impl(ctx: FeatureContext):
                                 body_lines.append(sarif_message)
                             body_lines.extend([
                                 "",
-                                "```suggestion",
-                                replacement,
-                                "```",
+                                suggestion_fence,
                             ])
                         else:
                             body_lines = [
                                 marker,
                                 "🔧 **%s**" % display_tool,
                                 "",
-                                "```suggestion",
-                                replacement,
-                                "```",
+                                suggestion_fence,
                             ]
                         body = "\n".join(body_lines) + _task_attribution_footer(task_key)
 
@@ -1248,7 +1136,7 @@ def _github_lint_impl(ctx: FeatureContext):
                 deduped_skipped = 0
                 new_only = []
                 for c in non_errors:
-                    marker = _extract_comment_marker(c.get("body", ""), task_key = ctx.task.key)
+                    marker = lc_extract_marker(c.get("body", ""), task_key = ctx.task.key)
                     if marker and marker in gh["existing_markers"]:
                         deduped_skipped += 1
                         continue
@@ -1285,7 +1173,7 @@ def _github_lint_impl(ctx: FeatureContext):
                 # don't appear in `relevant_diagnostics`).
                 suggestion_markers = []
                 for c in suggestion_comments:
-                    m = _extract_comment_marker(c.get("body", ""), task_key = ctx.task.key)
+                    m = lc_extract_marker(c.get("body", ""), task_key = ctx.task.key)
                     if m:
                         suggestion_markers.append(m)
 

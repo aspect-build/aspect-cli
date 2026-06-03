@@ -14,8 +14,10 @@ load("@aspect//lib/gazelle_results_test.axl", "gazelle_template_snapshot_tests")
 load("@aspect//lib/github_detect_test.axl", "github_detect_tests")
 load("@aspect//lib/gitlab_detect_test.axl", "gitlab_detect_tests")
 load("@aspect//lib/gitlab_features_test.axl", "gitlab_features_tests")
+load("@aspect//lib/gitlab_lint_comments_test.axl", "gitlab_lint_comments_tests")
 load("@aspect//lib/gitlab_test.axl", "gitlab_client_tests")
 load("@aspect//lib/health_check_ready_test.axl", "health_check_ready_tests")
+load("@aspect//lib/lint_comments_test.axl", "lint_comments_tests")
 load("@aspect//lib/lint_results_test.axl", "detect_lint_tool_tests", "lint_annotation_plan_tests", "lint_template_snapshot_tests", "linter_rows_tests")
 load("@aspect//lib/rate_limit_test.axl", "rate_limit_tests")
 load("@aspect//lib/repro_commands_test.axl", "repro_commands_tests")
@@ -324,6 +326,14 @@ def config(ctx: ConfigContext):
     # unrelated outputs can't bypass the "no lint aspect ran" check.
     # Run with: aspect dev test-lint-detect-tool
     ctx.tasks.add(detect_lint_tool_tests)
+
+    # Run with: aspect dev test-lint-comments
+    ctx.tasks.add(lint_comments_tests)
+
+    # GitLab-specific lint-comment helpers: position translation, suggestion
+    # rendering, and marker-based discussion dedup.
+    # Run with: aspect dev test-gitlab-lint-comments
+    ctx.tasks.add(gitlab_lint_comments_tests)
 
     # Inject a mix of secret-ish and safe Bazel flags on every task so the
     # status-check redaction path is exercised live against a real BES stream.

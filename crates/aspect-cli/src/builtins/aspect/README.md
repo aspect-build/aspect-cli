@@ -184,11 +184,29 @@ Renderer: `delivery_results`. The body shows counts-by-outcome, per-outcome tabl
 | `GithubStatusChecks`     | [feature/github_status_checks.axl](feature/github_status_checks.axl)       | `enabled = True` (default); skips silently outside CI / non-github.com host | Creates / updates a GitHub check run via the Aspect GitHub App token. |
 | `GithubStatusComments`   | [feature/github_status_comments.axl](feature/github_status_comments.axl)   | `enabled = True` (default); GitHub Actions + PR only    | PR-level *aggregated* sticky comment that rolls every sibling task into one body. Polled and PATCHed in place. |
 | `GithubLintComments`     | [feature/github_lint_comments.axl](feature/github_lint_comments.axl)       | Opt-in via `LintTrait.findings_destination` ∋ `comments` | Posts SARIF findings as PR review comments (channel 2) and rules_lint patches as suggestion-block comments (channel 3). |
+| `GitlabLintComments`     | [feature/gitlab_lint_comments.axl](feature/gitlab_lint_comments.axl)       | `enabled = True` (default); fires on `aspect lint` task updates when a GitLab MR context is detected (`CI_MERGE_REQUEST_IID` on GitLab CI, or the `ASPECT_GITLAB_*` overrides on Aspect Workflows runners on other hosts) | Posts `aspect lint` findings as inline GitLab MR diff discussions, with one-click suggestion blocks where a fix patch is available — the GitLab counterpart to `GithubLintComments`. Auth via the Aspect GitLab App token (`api` scope), same flow as `GitlabStatusComments`. |
 | `BuildkiteAnnotations`   | [feature/buildkite_annotations.axl](feature/buildkite_annotations.axl)     | `enabled = True` (default); requires `BUILDKITE` env    | Posts `buildkite-agent annotate --scope=job` annotations with a leading task pill. |
 | `ArtifactUpload`         | [feature/artifacts.axl](feature/artifacts.axl)                             | `args.upload_*` flags per-task                          | Uploads testlogs / profile / BEP / execlog to the host CI; populates `ArtifactsTrait`. |
 | `Telemetry`              | [feature/telemetry.axl](feature/telemetry.axl)                             | `ctx.telemetry.exporters.add(...)` in config            | OTLP traces / logs / metrics export. |
 
 `GithubStatusChecks` and `BuildkiteAnnotations` delegate per-kind rendering through [`lib/check_dispatch.axl`](lib/check_dispatch.axl) so adding a new task kind is a single dispatch-table entry rather than an N×2 update. `GithubStatusComments` aggregates *across* tasks (one PR comment per run); `GithubLintComments` posts at the diagnostic-anchor level inside the PR's Files Changed view.
+
+### GitLab lint comments
+
+`GitlabLintComments` is the GitLab counterpart to `GithubLintComments`: it posts `aspect lint` findings as inline GitLab Merge Request diff discussions, rendering a one-click suggestion block on any finding that carries a `rules_lint` fix patch. It fires on `aspect lint` task updates whenever a GitLab MR context is detected — the same detection the other GitLab features use (`CI_MERGE_REQUEST_IID` on GitLab CI, or the `ASPECT_GITLAB_*` overrides for Aspect Workflows runners on other hosts) — and authenticates with the Aspect GitLab App token (requesting the `api` scope) through the same token flow as `GitlabStatusComments`.
+
+Config knobs:
+
+| Knob | Default | Notes |
+|------|---------|-------|
+| `max_pr_comments` | `25` | Maximum MR discussions posted per run. Errors are prioritized over warnings, then notes; excess findings are dropped from the MR but still drive the lint task's exit code. Set to `0` to disable posting while keeping exit-code behavior intact. |
+| `findings_destination` | `auto` | Shared `LintTrait` knob (`auto` / `comments` / `annotations` / `both`) controlling whether findings post to inline discussions, annotations, or both — see [`lint`](#lint) for the full per-value breakdown. |
+| `only_annotate_changed_regions` | — | Shared knob; findings outside the displayed MR diff hunk are not posted. |
+
+Behavior notes:
+
+- **De-duplicates across reruns.** Re-running the lint task replaces stale annotations at the same position rather than stacking duplicate discussions.
+- **Auto-resolves on a clean pass.** On a genuinely clean lint pass (no findings), prior Aspect-owned lint threads are auto-resolved — a GitLab-only affordance the GitHub path lacks (GitHub PR review comments have no native resolve).
 
 ## Per-kind result libraries
 

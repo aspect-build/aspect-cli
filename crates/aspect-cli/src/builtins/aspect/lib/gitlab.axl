@@ -264,6 +264,72 @@ def _mr_list_changes(ctx, token, project, mr_iid, api_base = DEFAULT_GITLAB_API,
         return {"success": True, "merge_request": None, "changes": []}
     return {"success": False, "error": "request failed: %d" % status_code, "status": status_code, "body": body}
 
+# Merge Request Discussions (position-bound diff threads — the GitLab
+# equivalent of a GitHub PR review comment). Used by GitlabLintComments
+# to post inline lint findings on MR diff lines.
+#
+# Reference: https://docs.gitlab.com/ee/api/discussions.html#merge-requests
+
+def _discussions_list(ctx, token, project, mr_iid, api_base = DEFAULT_GITLAB_API, auth_kind = "private_token"):
+    """List discussions on an MR, paginated. Mirrors `_notes_list`.
+
+    Each discussion dict carries an `id` (string hash) and a `notes`
+    list; each note has `id`, `body`, `resolvable`, `resolved`, and
+    (for diff threads) a `position` object.
+    """
+    base = _project_url(api_base, project, "/merge_requests/" + str(mr_iid) + "/discussions")
+    per_page = 100
+    max_pages = 30
+    all_discussions = []
+    for page in range(1, max_pages + 1):
+        url = base + "?per_page=" + str(per_page) + "&page=" + str(page)
+        success, status_code, body = _do_request(ctx, "GET", url, token, auth_kind = auth_kind)
+        if not success:
+            return {"success": False, "error": "request failed (page %d): %d" % (page, status_code)}
+        if type(body) != "list":
+            break
+        all_discussions.extend(body)
+        if len(body) < per_page:
+            break
+    return {"success": True, "discussions": all_discussions}
+
+def _discussions_create(ctx, token, project, mr_iid, body, position, api_base = DEFAULT_GITLAB_API, auth_kind = "private_token"):
+    """Create a position-bound discussion on an MR diff line.
+
+    `position` must be a dict shaped:
+      {base_sha, start_sha, head_sha, position_type: "text",
+       new_path, old_path, new_line?, old_line?}
+    GitLab rejects (400) a position on a line not present in the diff —
+    callers gate on the changed-line set first (same as the GH 422 path).
+    """
+    url = _project_url(api_base, project, "/merge_requests/" + str(mr_iid) + "/discussions")
+    payload = {"body": body, "position": position}
+    success, status_code, resp = _do_request(ctx, "POST", url, token, auth_kind = auth_kind, payload = payload)
+    if success:
+        return {"success": True, "discussion_id": resp.get("id") if type(resp) == "dict" else None, "discussion": resp}
+    return {"success": False, "error": "request failed: %d" % status_code, "status": status_code, "body": resp}
+
+def _discussions_delete(ctx, token, project, mr_iid, discussion_id, note_id, api_base = DEFAULT_GITLAB_API, auth_kind = "private_token"):
+    """Delete a single note from a discussion. Removes stale annotations.
+
+    GitLab has no delete-whole-discussion endpoint; a position-bound
+    lint discussion is a single note, so deleting that note removes the
+    thread.
+    """
+    url = _project_url(api_base, project, "/merge_requests/" + str(mr_iid) + "/discussions/" + str(discussion_id) + "/notes/" + str(note_id))
+    success, status_code, _ = _do_request(ctx, "DELETE", url, token, auth_kind = auth_kind)
+    return {"success": success, "status": status_code}
+
+def _discussions_resolve(ctx, token, project, mr_iid, discussion_id, resolved = True, api_base = DEFAULT_GITLAB_API, auth_kind = "private_token"):
+    """Resolve (or unresolve) a discussion thread. GitLab takes `resolved`
+    as a query parameter, not a body field."""
+    resolved_str = "true" if resolved else "false"
+    url = _project_url(api_base, project, "/merge_requests/" + str(mr_iid) + "/discussions/" + str(discussion_id)) + "?resolved=" + resolved_str
+    success, status_code, resp = _do_request(ctx, "PUT", url, token, auth_kind = auth_kind)
+    if success:
+        return {"success": True, "discussion": resp if type(resp) == "dict" else None}
+    return {"success": False, "error": "request failed: %d" % status_code, "status": status_code, "body": resp}
+
 # URL helpers
 
 def _extract_host(url):
@@ -526,5 +592,11 @@ gitlab = struct(
     merge_requests = struct(
         get = _mr_get,
         list_changes = _mr_list_changes,
+    ),
+    discussions = struct(
+        list = _discussions_list,
+        create = _discussions_create,
+        delete = _discussions_delete,
+        resolve = _discussions_resolve,
     ),
 )

@@ -1,0 +1,614 @@
+"""GitLab MR inline lint-comment reporter for the lint task.
+
+Mirrors `feature/github_lint_comments.axl` for GitLab. Posts SARIF-derived
+diagnostics + patch-derived suggestion-block comments as position-bound MR
+diff discussions, with marker-based dedup across runs, stale-cleanup, and
+thread auto-resolve on a clean pass.
+
+Marker shape (shared with the GH path, MR-keyed run_id prefix `gl-`):
+  <!-- aspect-lint:<run_id>:<task_key>:<tool>:<file>:<line>:<rule_id> -->
+
+GitLab position translation: a finding's `(new_path, new_line)` plus the
+MR's `diff_refs.{base_sha, start_sha, head_sha}` (read once from
+`gitlab.merge_requests.get`) form the `position` payload the Discussions
+API requires. Lint findings sit on the new (added/changed) side, so
+`new_path == old_path == path`, `new_line` is set, and `old_line` is
+omitted.
+"""
+
+load("../lib/environment.axl", "feature_logger")
+load("../lib/gitlab.axl", "gitlab")
+load("../lib/gitlab_detect.axl", "detect_gitlab_mr")
+load("../lib/gitlab_token_cache.axl", "gitlab_token_cache")
+load("../lib/lint_comments.axl", "build_marker", "extract_marker", "parse_marker", "suggestion_block")
+load("../lib/patch.axl", patch_hunk_edit_blocks = "hunk_edit_blocks", patch_parse = "parse")
+load("../lib/sarif.axl", "parse_sarif_diagnostics", "sarif_to_review_comments")
+load("../lint.axl", "LintTrait")
+
+_LOG = feature_logger("GitLab lint comments")
+
+_REQUIRED_DIFF_REFS = ("base_sha", "start_sha", "head_sha")
+
+def _parse_hunk_starts(core):
+    """Extract `(old_start, new_start)` from the `-a,b +c,d` core of a
+    unified-diff hunk header. Counts are ignored. Defaults to 0 when a
+    side is absent."""
+    old_start = 0
+    new_start = 0
+    for tok in core.split():
+        if tok.startswith("-"):
+            old_start = int(tok[1:].split(",")[0])
+        elif tok.startswith("+"):
+            new_start = int(tok[1:].split(",")[0])
+    return (old_start, new_start)
+
+def build_diff_line_map(diff_text):
+    """Classify the lines of one file's unified diff (GitLab
+    `changes[].diff`, which is headerless — it starts at the first `@@`).
+
+    Returns `{"added": {new_line: True, ...}, "context": {new_line: old_line, ...}}`:
+      * `added`   — lines present only on the new side (`+`).
+      * `context` — unchanged-but-visible lines, mapping new-side line to
+                    its old-side line.
+    Removed (`-`) lines aren't represented — lint findings anchor on the
+    new side. Drives the GitLab position form: added lines carry only
+    `new_line`; context lines must carry both `new_line` and `old_line`.
+    """
+    added = {}
+    context = {}
+    old_ln = 0
+    new_ln = 0
+    for raw in diff_text.split("\n"):
+        if raw.startswith("@@"):
+            core = raw[2:]
+            close = core.find("@@")
+            if close >= 0:
+                core = core[:close]
+            old_ln, new_ln = _parse_hunk_starts(core)
+            continue
+        if not raw:
+            continue
+        head = raw[0]
+        if head == "+":
+            added[new_ln] = True
+            new_ln += 1
+        elif head == "-":
+            old_ln += 1
+        elif head == "\\":
+            continue  # "\ No newline at end of file"
+        else:
+            # Context line (leading space, or any other content).
+            context[new_ln] = old_ln
+            old_ln += 1
+            new_ln += 1
+    return {"added": added, "context": context}
+
+def build_position(path, line, diff_refs, prefix = "", line_map = None):
+    """Translate a finding `(path, line)` + MR `diff_refs` into a GitLab
+    Discussions `position` payload. Returns None when `diff_refs` is
+    missing any of the three SHAs, or (when `line_map` is given) when the
+    line isn't anchorable in the diff.
+
+    `prefix` is the Bazel-workspace-root path relative to the git repo
+    root (from `git rev-parse --show-prefix`). SARIF/patch paths are
+    workspace-relative; GitLab MR diff paths are repo-relative, so when
+    the workspace sits in a subdirectory the prefix must be prepended or
+    GitLab rejects the position. Empty (workspace == repo root) is a
+    no-op. `new_path == old_path == prefix + path`.
+
+    `line_map` is this file's `build_diff_line_map` result. When present:
+      * added line  → carry only `new_line` (the new side).
+      * context line → carry both `new_line` and `old_line` (GitLab
+        rejects a context-line thread that omits `old_line`).
+      * line not in the diff → return None (off-diff; caller skips).
+    When None (file not in the MR changes), falls back to the added-line
+    form — best-effort, may 400 if the line is actually context.
+    """
+    if type(diff_refs) != "dict":
+        return None
+    for k in _REQUIRED_DIFF_REFS:
+        if not diff_refs.get(k):
+            return None
+    repo_path = prefix + path
+    position = {
+        "base_sha": diff_refs["base_sha"],
+        "start_sha": diff_refs["start_sha"],
+        "head_sha": diff_refs["head_sha"],
+        "position_type": "text",
+        "new_path": repo_path,
+        "old_path": repo_path,
+    }
+    if line_map != None:
+        if line_map["added"].get(line):
+            position["new_line"] = line
+        elif line in line_map["context"]:
+            position["new_line"] = line
+            position["old_line"] = line_map["context"][line]
+        else:
+            return None
+    else:
+        position["new_line"] = line
+    return position
+
+def dedup_discussions_by_marker(discussions, task_key):
+    """Find duplicate Aspect-owned lint discussions sharing a marker.
+
+    Walks `discussions` (GitLab Discussions API shape: each has `id` and
+    a `notes` list). For each marker belonging to `task_key`, keeps the
+    LAST occurrence (newest — the list is created-asc) and returns the
+    earlier ones as `{"discussion_id": ..., "note_id": ...}` dicts the caller deletes.
+    Discussions whose first note has no matching marker are ignored.
+    """
+    seen = {}
+    stale = []
+    for d in discussions:
+        notes = d.get("notes", [])
+        if not notes:
+            continue
+        note = notes[0]
+        marker = extract_marker(note.get("body", ""), task_key = task_key)
+        if not marker:
+            continue
+        entry = {"discussion_id": d.get("id"), "note_id": note.get("id")}
+        if marker in seen:
+            stale.append(seen[marker])
+        seen[marker] = entry
+    return stale
+
+def _gl_run_id(env):
+    """`gl-<pipeline_id>` for cross-run cleanup scoping; "" off CI.
+
+    Mirrors the `gl-` branch of the GH feature's `_ci_run_id`. The
+    ASPECT_GITLAB_PIPELINE_ID escape hatch matches `gitlab_status_comments`
+    (Aspect-Workflows runners on non-GitLab hosts posting to a GL MR).
+    """
+    pid = env.var("ASPECT_GITLAB_PIPELINE_ID") or env.var("CI_PIPELINE_ID") or ""
+    if pid:
+        return "gl-%s" % pid
+    return ""
+
+def _filter_for_destination(comments, destination):
+    """Same selection contract as the GH feature: "comments" keeps all,
+    "annotations" drops all, "auto"/"both" keep only fix-bearing (empty
+    for current rules_lint linters — see the GH anchor)."""
+    if destination == "comments":
+        return comments
+    if destination == "annotations":
+        return []
+    return [c for c in comments if c.get("_fixes")]
+
+def _task_attribution_footer(task_key):
+    return "\n\n<sub>posted by `%s` lint task</sub>" % task_key
+
+def _build_comments(ctx, filepath, run_id, task_key, destination):
+    """Parse a SARIF report into MR-discussion comment dicts with markers.
+
+    Returns dicts with keys: path, line, body, _severity (internal).
+    Marker is prepended to the body; attribution footer appended.
+    """
+    content = ctx.std.fs.read_to_string(filepath)
+    comments = sarif_to_review_comments(content)
+    comments = _filter_for_destination(comments, destination)
+
+    diags_by_anchor = {}
+    for d in parse_sarif_diagnostics(content):
+        diags_by_anchor[(d["file"], d["line"])] = d
+    for comment in comments:
+        d = diags_by_anchor.get((comment.get("path", ""), comment.get("line", 0)))
+        if d:
+            comment["body"] = build_marker(run_id, task_key, d["tool"], d["file"], d["line"], d["rule_id"]) + "\n" + comment["body"] + _task_attribution_footer(task_key)
+    return comments
+
+def _post_comments(ctx, gl, comments, existing_markers, task_key):
+    """Post each comment as a position-bound discussion. Skips comments
+    whose marker already exists (dedup vs prior run), findings on lines
+    outside the changed-line set, and findings whose position can't be
+    built. Returns a list of human-readable error strings. Mutates
+    `existing_markers` so the caller's cap accounting sees new markers.
+    """
+    errors = []
+    diff_refs = gl["diff_refs"]
+    changed = gl["changed_lines"]
+    for c in comments:
+        marker = extract_marker(c.get("body", ""), task_key = task_key)
+        if marker and marker in existing_markers:
+            continue
+        path = c.get("path", "")
+        line = c.get("line", 0)
+
+        # Gate on the unprefixed (workspace-relative) path — `changed_lines`
+        # is keyed by the same SARIF/changed-files convention. The repo
+        # prefix is applied only when building the GitLab position below.
+        lines = changed.get(path)
+        if lines != None and (line - 1) not in lines:
+            continue
+        prefix = gl.get("prefix", "")
+
+        # line_maps are keyed by the repo-relative (prefixed) path, matching
+        # the position's new_path.
+        line_map = gl.get("line_maps", {}).get(prefix + path)
+        position = build_position(path, line, diff_refs, prefix = prefix, line_map = line_map)
+        if position == None:
+            errors.append("[%s:%s] not anchorable in MR diff (off-diff or missing diff_refs)" % (path, line))
+            continue
+        res = gitlab.discussions.create(
+            ctx,
+            token = gl["token"],
+            project = gl["project_path"],
+            mr_iid = gl["mr_iid"],
+            body = c["body"],
+            position = position,
+            auth_kind = "bearer",
+        )
+        if res["success"]:
+            if marker:
+                existing_markers[marker] = res.get("discussion_id", "") or ""
+        else:
+            errors.append("[%s:%s] %s" % (path, line, res.get("error", "unknown error")))
+    return errors
+
+def _get_existing_markers(ctx, gl, task_key):
+    """Return `{marker: discussion_id}` for THIS task's existing lint
+    discussions on the MR (dedup against prior runs)."""
+    listed = gitlab.discussions.list(ctx, token = gl["token"], project = gl["project_path"], mr_iid = gl["mr_iid"], auth_kind = "bearer")
+    if not listed["success"]:
+        return {}
+    markers = {}
+    for d in listed["discussions"]:
+        notes = d.get("notes", [])
+        if not notes:
+            continue
+        marker = extract_marker(notes[0].get("body", ""), task_key = task_key)
+        if marker:
+            markers[marker] = d.get("id", "") or ""
+    return markers
+
+def _dedup_by_marker(comments, task_key):
+    """Drop within-run duplicates: keep the first comment per marker.
+    Comments without a recognizable marker pass through untouched."""
+    seen = {}
+    out = []
+    for c in comments:
+        marker = extract_marker(c.get("body", ""), task_key = task_key)
+        if not marker:
+            out.append(c)
+            continue
+        if marker in seen:
+            continue
+        seen[marker] = True
+        out.append(c)
+    return out
+
+_SUGGESTION_SEVERITY_ICONS = {"error": "🚨", "warning": "⚠️", "info": "ℹ️"}
+
+def _tool_name_from_patch_path(filepath):
+    """Recover the linter display name from a rules_lint
+    `<target>.AspectRulesLint<Tool>.patch` filename; "Linter" fallback."""
+    name = filepath.rsplit("/", 1)[-1]
+    if name.endswith(".patch"):
+        name = name[:-len(".patch")]
+    idx = name.rfind(".AspectRulesLint")
+    if idx >= 0:
+        tail = name[idx + len(".AspectRulesLint"):]
+        if tail:
+            return tail
+    return "Linter"
+
+def _build_suggestion_comments(ctx, run_id, task_key, relevant_diagnostics, pending_patches):
+    """Parse buffered `.patch` files into GitLab suggestion-block discussion
+    comments — one per unified-diff edit block. Mirrors the GH feature's
+    correlation logic (same (file, line, tool) anchoring) but renders the
+    GitLab `suggestion:-X+Y` fence via the shared helper.
+
+    Returns comment dicts {path, line, body, _severity}.
+    """
+    comments = []
+    diag_by_anchor = {}
+    for d in relevant_diagnostics:
+        f = d.get("file", "")
+        ln = d.get("line", 0) or 0
+        t = (d.get("tool", "") or "").lower()
+        if f and ln:
+            diag_by_anchor[(f, ln, t)] = d
+    for entry in pending_patches:
+        content = ctx.std.fs.read_to_string(entry["path"])
+        if not content:
+            continue
+        tool = _tool_name_from_patch_path(entry["name"])
+        tool_key = tool.lower()
+        for f in patch_parse(content):
+            file_path = f["file"]
+            for h in f["hunks"]:
+                for block in patch_hunk_edit_blocks(h):
+                    if block["adds"] == 0 and block["removes"] == 0:
+                        continue
+                    start_line = block["start_line"]
+                    end_line = block["end_line"]
+                    replacement = block["replacement"]
+                    diag = None
+                    for ln in range(start_line, end_line + 1):
+                        d = diag_by_anchor.get((file_path, ln, tool_key))
+                        if d:
+                            diag = d
+                            break
+                    correlated = diag != None
+                    severity = diag.get("severity", "") if diag else ""
+                    sarif_rule_id = diag.get("rule_id", "") if diag else ""
+                    sarif_tool = diag.get("tool", "") if diag else ""
+                    sarif_message = diag.get("message", "") if diag else ""
+                    display_tool = sarif_tool if correlated and sarif_tool else tool
+                    rule_id = "patch_%d_%d" % (start_line, end_line)
+                    marker = build_marker(run_id, task_key, display_tool, file_path, end_line, rule_id)
+                    suggestion_fence = suggestion_block(replacement, current = end_line, start_line = start_line, end_line = end_line, vcs = "gitlab")
+                    if correlated:
+                        sev_icon = _SUGGESTION_SEVERITY_ICONS.get(severity, "🔧")
+                        header_bits = ["**%s**" % display_tool]
+                        if sarif_rule_id:
+                            header_bits.append("`%s`" % sarif_rule_id)
+                        header = "%s %s" % (sev_icon, " · ".join(header_bits))
+                        body_lines = [marker, header]
+                        if sarif_message:
+                            body_lines.append("")
+                            body_lines.append(sarif_message)
+                        body_lines.append("")
+                        body_lines.append(suggestion_fence)
+                    else:
+                        body_lines = [marker, "🔧 **%s**" % display_tool, "", suggestion_fence]
+                    body = "\n".join(body_lines) + _task_attribution_footer(task_key)
+                    cap_severity = severity if correlated and severity else "warning"
+
+                    # Unlike the GitHub path we don't set start_line/start_side:
+                    # GitLab anchors the discussion via position.new_line (set in
+                    # build_position) and the `suggestion:-X+Y` fence encodes the
+                    # multi-line replacement range itself, so no separate range
+                    # fields are needed on the comment dict.
+                    comments.append({
+                        "path": file_path,
+                        "line": end_line,
+                        "body": body,
+                        "_severity": cap_severity,
+                    })
+    return comments
+
+def _ci_host_from_run_id(run_id):
+    if not run_id:
+        return ""
+    dash = run_id.find("-")
+    if dash <= 0:
+        return ""
+    return run_id[:dash]
+
+def compute_cleanup(discussions, desired, run_id, task_key, genuinely_clean = False):
+    """Decide which Aspect-owned lint discussions to delete and which to
+    resolve. Pure. Host-scoped (the `gl`/`gha`/… run_id prefix) so one CI
+    host never touches another's threads.
+
+    Classification (after the host gate):
+
+      * **This task, genuinely-clean pass** → resolve (if still open),
+        any run. The task ran and found nothing, so every thread it ever
+        opened is now fixed; resolving preserves the review history
+        (GitLab-only — the GH path can't resolve, so it deletes). This
+        wins over the prior-run reaper below for our own threads.
+      * **Prior run (any task)** → delete. Cross-run reaper: a newer run
+        supersedes older threads. Every active task helps reap so a
+        renamed/removed task's stale threads still get cleaned up.
+      * **Same run, other task** → skip. A sibling task in this run still
+        owns its threads.
+      * **Same run, this task, marker not in `desired`** → delete (stale:
+        the finding disappeared since we posted earlier this run).
+      * **Same run, this task, marker in `desired`** → keep (still active).
+
+    `genuinely_clean` is the caller's "this run reported no findings at
+    all" signal — NOT `desired` being empty, which is also empty in
+    `annotations` mode and when findings fall outside the diff window.
+    """
+    current_host = _ci_host_from_run_id(run_id)
+    delete = []
+    resolve = []
+    for d in discussions:
+        notes = d.get("notes", [])
+        if not notes:
+            continue
+        note = notes[0]
+        marker = extract_marker(note.get("body", ""))
+        if not marker:
+            continue
+        fields = parse_marker(marker)
+        if fields == None:
+            continue
+        marker_host = _ci_host_from_run_id(fields["run_id"])
+        if current_host and marker_host and marker_host != current_host:
+            continue  # other CI host — leave alone
+        entry = {"discussion_id": d.get("id"), "note_id": note.get("id")}
+        same_task = fields["task_key"] == task_key
+        prior_run = bool(run_id) and fields["run_id"] != run_id
+
+        # Our own threads on a clean pass: resolve (any run), never delete.
+        if same_task and genuinely_clean:
+            if not note.get("resolved", False):
+                resolve.append(d.get("id"))
+            continue
+        if prior_run:
+            delete.append(entry)  # cross-run reaper (any task)
+            continue
+        if not same_task:
+            continue  # sibling task, same run — leave alone
+        if marker not in desired:
+            delete.append(entry)  # this task, same run, stale
+    return {"delete": delete, "resolve": resolve}
+
+def _cleanup_and_resolve(ctx, gl, relevant_diagnostics, run_id, task_key, suggestion_markers, destination):
+    """List discussions, compute the cleanup plan, delete stale threads,
+    and — when this run found nothing relevant to post — resolve the
+    task's own still-open lint threads (GL-only; the GH path can't)."""
+    desired = {}
+    for diag in relevant_diagnostics:
+        if destination == "annotations":
+            continue
+        if destination in ("auto", "both") and not diag.get("has_fix"):
+            continue
+        lines = gl["changed_lines"].get(diag["file"])
+
+        # Match _post_comments' gate: it posts when the file is absent from
+        # changed_lines (lines == None) OR the line is within the window. The
+        # desired set must keep those same findings so cleanup doesn't reap a
+        # comment this very run just posted.
+        if lines == None or (diag["line"] - 1) in lines:
+            desired[build_marker(run_id, task_key, diag["tool"], diag["file"], diag["line"], diag["rule_id"])] = True
+    for m in suggestion_markers:
+        desired[m] = True
+
+    listed = gitlab.discussions.list(ctx, token = gl["token"], project = gl["project_path"], mr_iid = gl["mr_iid"], auth_kind = "bearer")
+    if not listed["success"]:
+        return
+
+    # A genuinely-clean pass means the lint task reported no relevant
+    # diagnostics AND emitted no suggestions, so anything we flagged on a
+    # prior run is now fixed → resolve (not delete) our own threads. NOT
+    # keyed on `desired` being empty — that's also empty in `annotations`
+    # mode and when findings fall outside the diff window, neither of which
+    # means "nothing to flag". `compute_cleanup` routes the resolve/delete
+    # split off this flag; here we just execute the plan.
+    genuinely_clean = not relevant_diagnostics and not suggestion_markers
+    plan = compute_cleanup(listed["discussions"], desired, run_id, task_key, genuinely_clean = genuinely_clean)
+    for e in plan["delete"]:
+        gitlab.discussions.delete(ctx, token = gl["token"], project = gl["project_path"], mr_iid = gl["mr_iid"], discussion_id = e["discussion_id"], note_id = e["note_id"], auth_kind = "bearer")
+    for did in plan["resolve"]:
+        gitlab.discussions.resolve(ctx, token = gl["token"], project = gl["project_path"], mr_iid = gl["mr_iid"], discussion_id = did, resolved = True, auth_kind = "bearer")
+
+def _gitlab_lint_impl(ctx: FeatureContext):
+    lint_trait = ctx.traits[LintTrait]
+    destination = lint_trait.findings_destination
+
+    mr, reason = detect_gitlab_mr(ctx.std)
+    if mr == None:
+        _LOG.trace("No GitLab MR context — skipping. (%s)" % reason)
+        return
+
+    run_id = _gl_run_id(ctx.std.env)
+    max_pr_comments = ctx.args.max_pr_comments
+
+    auth_reason = {}
+    token = gitlab_token_cache.get_or_mint(
+        ctx,
+        project_path = mr["project_path"],
+        project_id = mr.get("project_id"),
+        # See gitlab_status_comments.axl: request `api` directly until the
+        # roles.ts mr_notes.write scope mapping is fixed (ENG-1652 follow-up).
+        roles = ["api"],
+        _reason = auth_reason,
+    )
+    if not token:
+        _LOG.warn(ctx.std, "Authentication failed for %s — %s" % (mr["project_path"], auth_reason.get("reason", "unknown")))
+        return
+
+    # One call gets both the `diff_refs` SHA triple (for positions) and the
+    # per-file diffs (for the new_line→old_line classification below).
+    mr_res = gitlab.merge_requests.list_changes(ctx, token = token, project = mr["project_path"], mr_iid = mr["mr_iid"], auth_kind = "bearer")
+    if not mr_res["success"]:
+        _LOG.warn(ctx.std, "Could not fetch MR %d changes: %s" % (mr["mr_iid"], mr_res.get("error", "unknown")))
+        return
+    diff_refs = (mr_res["merge_request"] or {}).get("diff_refs")
+    if not diff_refs:
+        _LOG.warn(ctx.std, "MR %d has no diff_refs — cannot anchor discussions" % mr["mr_iid"])
+        return
+
+    # Per-file line classification (added vs context, with the new→old line
+    # mapping) keyed by repo-relative new_path. A finding on an added line
+    # carries only `new_line`; one on a context (unchanged-but-visible) line
+    # must carry both `new_line` and `old_line` or GitLab rejects the
+    # position as off-diff.
+    line_maps = {}
+    for change in mr_res["changes"]:
+        np = change.get("new_path")
+        diff = change.get("diff")
+        if np and diff:
+            line_maps[np] = build_diff_line_map(diff)
+
+    gl = {
+        "token": token,
+        "project_path": mr["project_path"],
+        "mr_iid": mr["mr_iid"],
+        "diff_refs": diff_refs,
+        "changed_lines": {},
+        "prefix": "",
+        "line_maps": line_maps,
+    }
+
+    # Bazel-workspace-root path relative to the git repo root. SARIF/patch
+    # paths are workspace-relative but GitLab MR diff paths are repo-relative;
+    # when the workspace is a subdirectory of the repo, this prefix must be
+    # prepended to the position path or GitLab rejects it as off-diff. Empty
+    # when workspace == repo root. Mirrors github_lint_comments.axl.
+    git_out = ctx.std.process.command("git").arg("rev-parse").arg("--show-prefix").current_dir(ctx.std.env.aspect_root_dir()).stdout("piped").stderr("null").spawn().wait_with_output()
+    if git_out.status.success:
+        gl["prefix"] = git_out.stdout.strip()
+
+    state = {"all_comments": [], "posted": 0, "errors": [], "pending_patches": []}
+
+    def _lint_start(ctx):
+        gl["changed_lines"] = {f["file"]: f.get("hunk_lines") or f["lines"] for f in lint_trait.changed_files}
+
+    def _lint_report(ctx, filepath):
+        comments = _build_comments(ctx, filepath, run_id, ctx.task.key, destination = destination)
+        state["all_comments"].extend(comments)
+        if "existing_markers" not in gl:
+            gl["existing_markers"] = _get_existing_markers(ctx, gl, ctx.task.key)
+        errors_in_batch = [c for c in comments if c.get("_severity") == "error"]
+        if not errors_in_batch:
+            return
+        remaining = max_pr_comments - state["posted"]
+        if remaining <= 0:
+            return
+        new_only = [c for c in errors_in_batch if not (extract_marker(c.get("body", ""), task_key = ctx.task.key) in gl["existing_markers"])]
+        new_only = new_only[:remaining]
+        before = len(gl["existing_markers"])
+        errs = _post_comments(ctx, gl, new_only, gl["existing_markers"], ctx.task.key)
+        state["posted"] += len(gl["existing_markers"]) - before
+        state["errors"].extend(errs)
+
+    def _lint_patch(ctx, filepath, name):
+        state["pending_patches"].append({"path": filepath, "name": name})
+
+    def _lint_end(ctx, relevant_diagnostics):
+        if "existing_markers" not in gl:
+            gl["existing_markers"] = _get_existing_markers(ctx, gl, ctx.task.key)
+        suggestion_comments = [] if destination == "annotations" else _build_suggestion_comments(ctx, run_id, ctx.task.key, relevant_diagnostics, state["pending_patches"])
+        non_errors = [c for c in state["all_comments"] if c.get("_severity") != "error"] + suggestion_comments
+        non_errors = _dedup_by_marker(non_errors, ctx.task.key)
+        new_only = []
+        for c in non_errors:
+            marker = extract_marker(c.get("body", ""), task_key = ctx.task.key)
+            if marker and marker in gl["existing_markers"]:
+                continue
+            new_only.append(c)
+        remaining = max_pr_comments - state["posted"]
+        if remaining > 0:
+            before = len(gl["existing_markers"])
+            errs = _post_comments(ctx, gl, new_only[:remaining], gl["existing_markers"], ctx.task.key)
+            state["posted"] += len(gl["existing_markers"]) - before
+            state["errors"].extend(errs)
+        suggestion_markers = [m for m in [extract_marker(c.get("body", ""), task_key = ctx.task.key) for c in suggestion_comments] if m]
+        _cleanup_and_resolve(ctx, gl, relevant_diagnostics, run_id, ctx.task.key, suggestion_markers, destination)
+        if trace.enabled:
+            trace.log("gitlab lint comment summary:")
+            trace.log("posted comments:  %s" % state["posted"])
+            for e in state["errors"]:
+                trace.log("  post error: %s" % e)
+
+    lint_trait.lint_start.append(_lint_start)
+    lint_trait.lint_report.append(_lint_report)
+    lint_trait.lint_patch.append(_lint_patch)
+    lint_trait.lint_end.append(_lint_end)
+
+GitlabLintComments = feature(
+    implementation = _gitlab_lint_impl,
+    enabled = True,
+    args = {
+        "max_pr_comments": args.int(
+            default = 25,
+            description = "Maximum number of MR discussions to post in a single lint run. Errors are prioritized over warnings, then notes; remaining diagnostics are dropped from the MR but still drive the lint task's exit code. Set to 0 to disable posting while keeping exit-code behavior intact.",
+        ),
+    },
+)

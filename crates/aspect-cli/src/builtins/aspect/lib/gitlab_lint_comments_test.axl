@@ -1,0 +1,144 @@
+"""GitLab-specific lint-comment tests: position translation, suggestion
+rendering, marker dedup.
+
+Run with:
+  aspect dev test-gitlab-lint-comments
+"""
+
+load("../feature/gitlab_lint_comments.axl", "build_diff_line_map", "build_position", "compute_cleanup", "dedup_discussions_by_marker")
+load("../lib/lint_comments.axl", "build_marker", "suggestion_block")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+_DIFF_REFS = {"base_sha": "BASE", "start_sha": "START", "head_sha": "HEAD"}
+
+def _test_impl(ctx):
+    # ── Position translation ────────────────────────────────────────
+    pos = build_position("src/app.ts", 42, _DIFF_REFS)
+    _eq("position base_sha", pos["base_sha"], "BASE")
+    _eq("position start_sha", pos["start_sha"], "START")
+    _eq("position head_sha", pos["head_sha"], "HEAD")
+    _eq("position type", pos["position_type"], "text")
+    _eq("position new_path", pos["new_path"], "src/app.ts")
+    _eq("position old_path", pos["old_path"], "src/app.ts")
+    _eq("position new_line", pos["new_line"], 42)
+    _eq("position no old_line", "old_line" in pos, False)
+
+    _eq("position missing refs", build_position("x", 1, {"base_sha": "B", "head_sha": "H"}), None)
+    _eq("position None refs", build_position("x", 1, None), None)
+    _eq("position non-dict refs", build_position("x", 1, "bad"), None)
+
+    # Workspace-in-subdir: the repo prefix is prepended to new_path/old_path
+    # (so the position matches the repo-relative MR diff), while line is kept.
+    pre = build_position("src/app.ts", 42, _DIFF_REFS, prefix = "sub/dir/")
+    _eq("position prefixed new_path", pre["new_path"], "sub/dir/src/app.ts")
+    _eq("position prefixed old_path", pre["old_path"], "sub/dir/src/app.ts")
+    _eq("position prefixed new_line", pre["new_line"], 42)
+
+    # Empty prefix is a no-op (workspace == repo root, the common case).
+    _eq("position empty prefix", build_position("a.sh", 3, _DIFF_REFS, prefix = "")["new_path"], "a.sh")
+
+    # ── Diff line-map classification ────────────────────────────────
+    # Headerless GitLab per-file diff: one hunk with context, remove, adds.
+    diff = "@@ -1,3 +1,4 @@\n line1\n-removed\n+addednew\n line3\n+added2"
+    lm = build_diff_line_map(diff)
+    _eq("linemap added set", sorted(lm["added"].keys()), [2, 4])
+    _eq("linemap context 1->1", lm["context"][1], 1)
+    _eq("linemap context 3->3", lm["context"][3], 3)
+    _eq("linemap context not added", 1 in lm["added"], False)
+
+    # Offset hunk: starts map through correctly.
+    lm2 = build_diff_line_map("@@ -10,2 +20,3 @@\n ctx\n+new\n ctx2")
+    _eq("linemap offset added", sorted(lm2["added"].keys()), [21])
+    _eq("linemap offset context 20->10", lm2["context"][20], 10)
+    _eq("linemap offset context 22->11", lm2["context"][22], 11)
+
+    # ── build_position with a line_map ──────────────────────────────
+    _lm = {"added": {5: True}, "context": {7: 6}}
+    pa = build_position("a.sh", 5, _DIFF_REFS, line_map = _lm)
+    _eq("added new_line", pa["new_line"], 5)
+    _eq("added omits old_line", "old_line" in pa, False)
+    pc = build_position("a.sh", 7, _DIFF_REFS, line_map = _lm)
+    _eq("context new_line", pc["new_line"], 7)
+    _eq("context old_line", pc["old_line"], 6)
+    _eq("off-diff line → None", build_position("a.sh", 99, _DIFF_REFS, line_map = _lm), None)
+
+    # No line_map → added-line fallback (backward compatible).
+    _eq("no-map fallback new_line", build_position("a.sh", 5, _DIFF_REFS)["new_line"], 5)
+    _eq("no-map fallback omits old_line", "old_line" in build_position("a.sh", 5, _DIFF_REFS), False)
+
+    # Prefix composes with the line_map path.
+    _eq("prefixed context new_path", build_position("a.sh", 7, _DIFF_REFS, prefix = "sub/", line_map = _lm)["new_path"], "sub/a.sh")
+
+    # ── Suggestion rendering (GL form via shared helper) ────────────
+    _eq("gl suggestion single", suggestion_block("fixed", current = 5, start_line = 5, end_line = 5, vcs = "gitlab"), "```suggestion:-0+0\nfixed\n```")
+    _eq(
+        "gl suggestion multi range",
+        suggestion_block("a\nb", current = 8, start_line = 7, end_line = 8, vcs = "gitlab"),
+        "```suggestion:-1+0\na\nb\n```",
+    )
+
+    # ── Marker dedup over discussions ───────────────────────────────
+    mk = build_marker("gl-1", "lint", "ShellCheck", "a.sh", 3, "SC2164")
+    discussions = [
+        {"id": "d1", "notes": [{"id": 11, "body": mk + "\nold"}]},
+        {"id": "d2", "notes": [{"id": 22, "body": mk + "\nnewer"}]},
+        {"id": "d3", "notes": [{"id": 33, "body": "unrelated note"}]},
+    ]
+    stale = dedup_discussions_by_marker(discussions, task_key = "lint")
+    _eq("dedup drops one", len(stale), 1)
+    _eq("dedup drops oldest", stale[0]["discussion_id"], "d1")
+    _eq("dedup note id", stale[0]["note_id"], 11)
+
+    triple = [
+        {"id": "t1", "notes": [{"id": 1, "body": mk + "\na"}]},
+        {"id": "t2", "notes": [{"id": 2, "body": mk + "\nb"}]},
+        {"id": "t3", "notes": [{"id": 3, "body": mk + "\nc"}]},
+    ]
+    stale3 = dedup_discussions_by_marker(triple, task_key = "lint")
+    _eq("dedup triple drops two", len(stale3), 2)
+    _eq("dedup triple keeps newest", sorted([e["discussion_id"] for e in stale3]), ["t1", "t2"])
+
+    mk_keep = build_marker("gl-2", "lint", "ShellCheck", "a.sh", 3, "SC2164")
+    mk_stale = build_marker("gl-2", "lint", "ShellCheck", "a.sh", 9, "SC2086")
+    mk_prior = build_marker("gl-1", "lint", "ShellCheck", "a.sh", 3, "SC2164")
+    mk_sibling = build_marker("gl-2", "other", "ShellCheck", "a.sh", 3, "SC2164")
+    mk_other_prior = build_marker("gl-1", "other", "ShellCheck", "a.sh", 3, "SC2164")
+    ds = [
+        {"id": "keep", "notes": [{"id": 1, "body": mk_keep, "resolved": False}]},
+        {"id": "stale", "notes": [{"id": 2, "body": mk_stale, "resolved": False}]},
+        {"id": "prior", "notes": [{"id": 3, "body": mk_prior, "resolved": False}]},
+        {"id": "sibling", "notes": [{"id": 4, "body": mk_sibling, "resolved": False}]},
+        {"id": "other_prior", "notes": [{"id": 5, "body": mk_other_prior, "resolved": False}]},
+    ]
+
+    # Dirty pass (findings this run): reap stale same-run + prior-run threads
+    # (cross-run reaper, any task). The still-desired thread is kept; nothing
+    # is resolved on a dirty pass.
+    plan = compute_cleanup(ds, desired = {mk_keep: True}, run_id = "gl-2", task_key = "lint")
+    del_ids = sorted([e["discussion_id"] for e in plan["delete"]])
+    _eq("dirty deletes", del_ids, ["other_prior", "prior", "stale"])
+    _eq("dirty resolves nothing", plan["resolve"], [])
+
+    # Genuinely-clean pass: this task's own open threads (any run) are
+    # RESOLVED, not deleted (preserving history); other-task prior-run
+    # threads are still reaped; a same-run sibling-task thread is left alone.
+    plan_clean = compute_cleanup(ds, desired = {}, run_id = "gl-2", task_key = "lint", genuinely_clean = True)
+    _eq("clean resolves own (any run)", sorted(plan_clean["resolve"]), ["keep", "prior", "stale"])
+    _eq("clean deletes only other-task prior", sorted([e["discussion_id"] for e in plan_clean["delete"]]), ["other_prior"])
+
+    # Clean pass must not re-resolve an already-resolved thread.
+    ds_resolved = [{"id": "done", "notes": [{"id": 9, "body": mk_keep, "resolved": True}]}]
+    _eq("clean skips already-resolved", compute_cleanup(ds_resolved, desired = {}, run_id = "gl-2", task_key = "lint", genuinely_clean = True)["resolve"], [])
+
+    print("gitlab_lint_comments.axl: OK")
+    return 0
+
+gitlab_lint_comments_tests = task(
+    name = "test-gitlab-lint-comments",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)
