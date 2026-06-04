@@ -167,8 +167,10 @@ def config(ctx: ConfigContext):
     # Upload JUnit test results to CircleCI's Tests tab + Test Insights.
     # Separate from ArtifactUpload above so it toggles independently. "all"
     # (rather than "failed") so passing runs still populate Insights with the
-    # per-test timing/identity history flaky-detection needs.
+    # per-test timing/identity history flaky-detection needs; cached_as_skipped
+    # buckets cached tests under "Skipped" instead of "Passed".
     ctx.features[CircleCITestResults].args.upload_test_results = "all"
+    ctx.features[CircleCITestResults].args.cached_as_skipped = True
 
     # Silence tips — was `ctx.traits[TipsTrait].silenced_tips = [...]`
     # before the tips refactor; now done via the Tips feature's args.
