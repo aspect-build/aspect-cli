@@ -1002,6 +1002,7 @@ def _check_merge_state_evicts_superseded_workflow_run():
             {"name": "lint", "key": "lint", "job": "lint", "workflow_run_id": "500", "status": "passed"},
         ],
     }
+
     # We are a newer run (run_id 999) of "ci-gha".
     my_entries = [{"name": "test", "key": "cpu", "job": "test (cpu)", "workflow_run_id": "999", "status": "running"}]
     new = merge_state(existing, "abc", "999", "ci-gha", my_entries, {})
