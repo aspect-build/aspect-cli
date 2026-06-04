@@ -70,6 +70,8 @@ def _workflows_impl(ctx: FeatureContext):
         # On older runners, `bazel` on the PATH is the legacy CLI so we disable
         # the plugin feature on all calls
         bazel_version_output = ctx.std.process.command("bazel").arg("--version").stdout("piped").spawn().wait_with_output()
+        print("HERE I AM", bazel_version_output.stdout)
+        print("ASPECT_REENTRANT", ctx.std.env.var("ASPECT_REENTRANT"))
         if "aspect" in bazel_version_output.stdout:
             bazel_trait.extra_startup_flags.append("--aspect:disable_plugins")
 
