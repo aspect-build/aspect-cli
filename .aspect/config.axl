@@ -4,6 +4,7 @@ load("@aspect//feature/buildkite_annotations_test.axl", "bk_annotation_snapshot_
 load("@aspect//feature/github_status_checks.axl", "GithubStatusChecks")
 load("@aspect//feature/github_status_comments_test.axl", "pr_comment_snapshot_tests")
 load("@aspect//format.axl", "format")
+load("@aspect//helpers.axl", "aspect_web_ui_url", "detect_build_url", "detect_ci_host", "render_bes_url")
 load("@aspect//helpers_test.axl", "helpers_facade_tests")
 load("@aspect//lib/bazel_flags_test.axl", "bazel_flags_tests")
 load("@aspect//lib/bazel_results_test.axl", "bazel_results_unit_tests", "template_snapshot_tests")
@@ -29,7 +30,8 @@ load("@aspect//lib/runner_job_history_test.axl", "runner_job_history_tests")
 load("@aspect//lib/sandbox_recovery_test.axl", "sandbox_recovery_tests")
 load("@aspect//lib/tar_test.axl", "tar_tests")
 load("@aspect//lib/tips_test.axl", "tips_tests")
-load("@aspect//traits.axl", "BazelTrait", "LintTrait", "REPRO_FIX_ACCEPT", "REPRO_FIX_REJECT", "ReproFixInfo", "ReproFixSuggestion", "TaskLifecycleTrait", "repro_fix_replace")
+load("@aspect//tips.axl", "TASK_SCREENS", "TIP_SUGGESTION", "TIP_TEMPLATE_RAW", "add_tip")
+load("@aspect//traits.axl", "BazelTrait", "LintTrait", "REPRO_FIX_ACCEPT", "REPRO_FIX_REJECT", "ReproFixInfo", "ReproFixSuggestion", "TaskLifecycleTrait", "TaskUpdate", "repro_fix_replace")
 load("./lambda.axl", "lambda_with_global_bind")
 
 def _user_task_impl(ctx: TaskContext) -> int:
@@ -116,6 +118,43 @@ def _shorten_delivery_local_preview(ctx: TaskContext, info: ReproFixInfo) -> Rep
 def _customize_message(s: str, a: str) -> str:
     return s + a
 
+# Example: a custom `suggestion` tip that points at the CI build page, plus
+# the Aspect Web UI invocation page and BES results when the task ran Bazel
+# on an Aspect Workflows runner. Registered in `config(ctx)` below via
+# `lifecycle.task_update.append(_links_task_update)`, it reads the links off
+# each `TaskUpdate` the way the built-in surfaces do and surfaces whichever
+# it knows, one link per line. Every task has a CI link; the Web UI / BES
+# links appear for any task that invokes Bazel. Links can resolve across
+# separate updates; each emit rebuilds the full body and re-adds the tip
+# under the same id, so last-emit-wins overwrites in place and it grows as
+# links appear. No tip when none are known — there's nothing to click
+# through to. `surfaces = TASK_SCREENS` keeps it off the cross-task PR
+# summary, where per-invocation links don't belong.
+def _links_task_update(ctx: TaskContext, update: TaskUpdate) -> None:
+    lines = []
+    aspect_url = aspect_web_ui_url(ctx.std.env, update.data)
+    if aspect_url:
+        lines.append("✨ [Aspect Web UI](%s) — invocation details, test logs, build logs, and timing" % aspect_url)
+    if update.data.get("bazel"):  # render_bes_url reads data["bazel"]; only Bazel tasks have it
+        bes_url = render_bes_url(update.data)
+        if bes_url:
+            lines.append("🔗 [BES results](%s)" % bes_url)
+    host = detect_ci_host(ctx.std.env)
+    ci_url = detect_build_url(ctx.std.env)
+    if host and ci_url:
+        lines.append("%s [%s](%s) — raw CI logs for this job" % (host["icon"], host["label"], ci_url))
+    if not lines:
+        return
+    add_tip(
+        ctx,
+        id = "click-through-links",
+        severity = TIP_SUGGESTION,
+        type = TIP_TEMPLATE_RAW,
+        surfaces = TASK_SCREENS,
+        title = "Click through for invocation details and logs",
+        body = "\n".join(lines),
+    )
+
 def config(ctx: ConfigContext):
     # assert we can call a lambda with a global bind from another module in a config script
     lambda_with_global_bind()("assert")
@@ -178,6 +217,10 @@ def config(ctx: ConfigContext):
     lifecycle = ctx.traits[TaskLifecycleTrait]
     lifecycle.repro_fix_suggestion.append(_buildifier_repro_fix)
     lifecycle.repro_fix_suggestion.append(_shorten_delivery_local_preview)
+
+    # Subscribe to task_update so the click-through-links tip is offered on
+    # whatever task ends up running. See `_links_task_update` above.
+    lifecycle.task_update.append(_links_task_update)
 
     # Announce the resolved Bazel version on every task that supports it.
     ctx.tasks["build"].args.announce_bazel_version = "true"
