@@ -508,9 +508,44 @@ def _store_test_results(ctx, archive_path, step_id = None, cache = None) -> Test
         problems = [str(p) for p in (summary.get("problems") or [])],
     )
 
+def mark_testcases_skipped(xml: str, reason: str) -> str:
+    """Rewrite a JUnit XML so every `<testcase>` is reported as skipped.
+
+    CircleCI buckets a testcase as skipped when it carries a `<skipped>`
+    child element. Bazel writes a cached test's `test.xml` identically to a
+    fresh pass, so to move cached results into the "skipped" column we inject
+    a `<skipped>` element into each testcase: self-closing tags are expanded,
+    tags that already have a body get the element inserted right after the
+    opening tag.
+
+    Pure string surgery (AXL has no XML parser): it only edits `<testcase>`
+    tag boundaries and never rewrites attribute text, so the one shape it
+    can't handle is an attribute value literally containing ">" — which JUnit
+    emitters don't produce. Public so circleci_test.axl can exercise it.
+    """
+    marker = "<skipped message=\"" + reason + "\"/>"
+    parts = xml.split("<testcase")
+    out = [parts[0]]
+    for chunk in parts[1:]:
+        gt = chunk.find(">")
+        if gt == -1:
+            # Malformed fragment — leave it exactly as-is.
+            out.append("<testcase" + chunk)
+            continue
+        attrs = chunk[:gt]
+        body = chunk[gt + 1:]
+        if attrs.endswith("/"):
+            # <testcase ... />  →  <testcase ...><skipped/></testcase>
+            out.append("<testcase" + attrs[:-1].rstrip() + ">" + marker + "</testcase>" + body)
+        else:
+            # <testcase ...>…</testcase>  →  inject right after the opening tag
+            out.append("<testcase" + attrs + ">" + marker + body)
+    return "".join(out)
+
 circleci = struct(
     upload_artifact = _upload_artifact,
     delete_artifact = _delete_artifact,
     store_test_results = _store_test_results,
+    mark_testcases_skipped = mark_testcases_skipped,
     TestResultsUploadResult = TestResultsUploadResult,
 )

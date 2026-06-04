@@ -146,7 +146,12 @@ def config(ctx: ConfigContext):
     ctx.tasks["delivery"].args.warn_not_runnable = True
 
     ctx.tasks["build"].args.targets = ["//...", "-//exclude/..."]
-    ctx.tasks["test"].args.targets = ["//...", "-//exclude/..."]
+
+    # Explicitly include the manual-tagged always_fail target so the CircleCI
+    # Tests tab exercises the "failed" bucket (it is `tags=["manual"]`, so the
+    # //... wildcard skips it). This intentionally makes the test task red —
+    # it's a demo of the test-results upload path, remove before merging.
+    ctx.tasks["test"].args.targets = ["//...", "-//exclude/...", "//examples/test_states:always_fail"]
 
     # Enable artifact uploads for testlogs, profile, and BEP. All four channels
     # default to off so operators opt in per repo. The compact execution log stays
