@@ -29,8 +29,26 @@ workflows:
           requires: [pre-build]
       - delivery-task:
           requires: [pre-build]
+      # Isolated, non-gating experiment: verify the direct (agent-free)
+      # test-results output API reverse-engineered from circleci-agent.
+      # Depends on nothing and is required by nothing, so it cannot affect
+      # the rest of the pipeline.
+      - output-api-probe
 
 jobs:
+  # Hits the real CircleCI runner output API the same way lib/circleci.axl
+  # already uploads artifacts (token from /tmp/circleci-ts.sock), but for the
+  # test-results endpoints. See .circleci/output_api_probe.sh for the protocol.
+  output-api-probe:
+    machine: true
+    resource_class: aspect-build/aspect-default
+    working_directory: /mnt/ephemeral/workdir
+    steps:
+      - checkout
+      - run:
+          name: Probe runner output API (test-results, direct/no-agent)
+          command: bash .circleci/output_api_probe.sh
+
   pre-build:
     machine: true
     resource_class: aspect-build/aspect-default
