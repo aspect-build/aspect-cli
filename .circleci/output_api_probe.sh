@@ -9,12 +9,24 @@
 # reverse-engineered from the circleci-agent binary, WITHOUT invoking the
 # agent:
 #
-#   POST /api/v2/output/test-result          body=<int index>  -> presigned Key
-#   PUT  <raw junit xml> to Key.location     (using Key.method + Key.headers)
-#   POST /api/v2/output/test-result/process  body=<int count>  -> TestProcessSummary
-#   GET  /api/v2/output/prev-test-result/find                  -> BestPreviousJob | 404
-#   GET  /api/v2/output/prev-test-result/job/{id}              -> {tasks:[{keys:[Key]}]}
-#   GET  <Key.location> (presigned)                            -> processed Case JSONL
+#   POST /api/v2/output/test-result          body=<int N>  -> presigned Key
+#   PUT  <tar of junit xml> to Key.location  (using Key.method + Key.headers)
+#   POST /api/v2/output/test-result/process  body=<int N>  -> TestProcessSummary
+#   GET  /api/v2/output/prev-test-result/find              -> BestPreviousJob | 404
+#   GET  /api/v2/output/prev-test-result/job/{id}          -> {tasks:[{keys:[Key]}]}
+#   GET  <Key.location> (presigned)                        -> processed Case JSONL
+#
+# Protocol details recovered from build-agent's StoreTestResultsStep.Run ->
+# output/storage.(*Store).UploadTestResult:
+#   * N is the *number of test-result files* being uploaded (len(testFiles)),
+#     NOT a 0-based index. The agent JSON-encodes that same int N as the body
+#     of BOTH the test-result POST and the test-result/process POST. A count of
+#     0 is rejected by the server with an empty-body HTTP 400.
+#   * The bytes PUT to the presigned URL are a single *plain (uncompressed) tar*
+#     built by pkg/tar.CreateArchiveFromPaths (no gzip in the chain) containing
+#     the JUnit files at their relative paths — not the raw XML.
+#   * The runner-API POSTs use Content-Type "application/json" (no charset
+#     suffix), matching the artifact-upload path in lib/circleci.axl.
 #
 # It is intentionally self-contained (curl + python3, same tools the runner
 # image already has) and isolated in its own CI job so it cannot affect the
@@ -95,7 +107,7 @@ else
 fi
 
 AUTH=(-H "Authorization: Bearer ${TOKEN}")
-JSONH=(-H "Content-Type: application/json; charset=utf-8")
+JSONH=(-H "Content-Type: application/json")
 api() { printf '%s%s' "$HOST" "$1"; }
 
 # curl helper: prints "<http_code>\n<body>"; never fails the script itself.
@@ -119,7 +131,12 @@ if [ "$C" = "200" ]; then ok "config 200: $(split_body "$R" | head -c 160)"; els
 # ---------------------------------------------------------------------------
 # 3. STORE: upload a synthetic JUnit file via the reverse-engineered trio.
 # ---------------------------------------------------------------------------
-JUNIT="$(mktemp /tmp/probe-junit-XXXX.xml)"
+# Build one synthetic JUnit file, then tar it the way the agent does
+# (pkg/tar.CreateArchiveFromPaths: a plain, uncompressed tar of the files at
+# their relative paths). N = number of test-result files = 1 here, and is the
+# integer the agent JSON-encodes as the body of both POSTs below.
+WORK="$(mktemp -d /tmp/probe-tr-XXXX)"
+JUNIT="$WORK/probe-junit.xml"
 cat >"$JUNIT" <<'XML'
 <testsuites>
   <testsuite name="aspect.output_api_probe" tests="2">
@@ -128,9 +145,14 @@ cat >"$JUNIT" <<'XML'
   </testsuite>
 </testsuites>
 XML
+N=1
+TARBALL="$WORK/test-results.tar"
+# -C so the entry is stored at its relative path (probe-junit.xml), matching
+# pkg/tar.toRelativePaths; no -z, the agent uploads an uncompressed tar.
+tar -cf "$TARBALL" -C "$WORK" "$(basename "$JUNIT")"
 
-note "POST /api/v2/output/test-result  (body = bare int index 0)"
-R="$(req POST "$(api /api/v2/output/test-result)" "${AUTH[@]}" "${JSONH[@]}" -d '0')"
+note "POST /api/v2/output/test-result  (body = int N=$N file count)"
+R="$(req POST "$(api /api/v2/output/test-result)" "${AUTH[@]}" "${JSONH[@]}" -d "$N")"
 C="$(split_code "$R")"
 B="$(split_body "$R")"
 if [ "$C" = "200" ] || [ "$C" = "201" ]; then
@@ -143,8 +165,8 @@ if [ "$C" = "200" ] || [ "$C" = "201" ]; then
         printf '%s' "$B" | python3 -c 'import sys,json;d=json.load(sys.stdin);[print("%s\t%s"%(k,v)) for k,v in (d.get("headers") or {}).items()]' 2>/dev/null || true
     )
     if [ -n "$LOC" ]; then
-        note "presigned $PMETHOD raw JUnit -> object store"
-        R2="$(req "$PMETHOD" "$LOC" "${HDR_ARGS[@]}" --data-binary "@$JUNIT")"
+        note "presigned $PMETHOD tar(JUnit) -> object store"
+        R2="$(req "$PMETHOD" "$LOC" "${HDR_ARGS[@]}" --data-binary "@$TARBALL")"
         C2="$(split_code "$R2")"
         if [[ "$C2" =~ ^2 ]]; then ok "presigned upload HTTP $C2"; else bad "presigned upload HTTP $C2: $(split_body "$R2" | head -c 200)"; fi
     else
@@ -154,8 +176,8 @@ else
     bad "test-result HTTP $C: $(printf '%s' "$B" | head -c 300)"
 fi
 
-note "POST /api/v2/output/test-result/process  (body = bare int count 1)"
-R="$(req POST "$(api /api/v2/output/test-result/process)" "${AUTH[@]}" "${JSONH[@]}" -d '1')"
+note "POST /api/v2/output/test-result/process  (body = int N=$N file count)"
+R="$(req POST "$(api /api/v2/output/test-result/process)" "${AUTH[@]}" "${JSONH[@]}" -d "$N")"
 C="$(split_code "$R")"
 B="$(split_body "$R")"
 if [ "$C" = "200" ]; then ok "process 200 -> $(printf '%s' "$B" | head -c 240)"; else bad "process HTTP $C: $(printf '%s' "$B" | head -c 300)"; fi
@@ -184,7 +206,7 @@ else
     bad "find HTTP $C: $(printf '%s' "$B" | head -c 200)"
 fi
 
-rm -f "$JUNIT"
+rm -rf "$WORK"
 note "summary"
 if [ "$fail" = "0" ]; then
     echo "  ALL CORE CHECKS PASSED — direct (agent-free) test-results protocol works against real CircleCI."
