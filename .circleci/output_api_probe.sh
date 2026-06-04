@@ -130,7 +130,16 @@ split_body() { sed '$d' <<<"$1"; }
 note "baseline GET /api/v2/output/config"
 R="$(req GET "$(api /api/v2/output/config)" "${AUTH[@]}")"
 C="$(split_code "$R")"
-if [ "$C" = "200" ]; then ok "config 200: $(split_body "$R" | head -c 160)"; else bad "config HTTP $C: $(split_body "$R" | head -c 200)"; fi
+B="$(split_body "$R")"
+BUCKET=""
+REGION=""
+if [ "$C" = "200" ]; then
+    ok "config 200: $(printf '%s' "$B" | head -c 160)"
+    BUCKET="$(printf '%s' "$B" | jget 'd.get("bucket","")' 2>/dev/null || true)"
+    REGION="$(printf '%s' "$B" | jget 'd.get("region","")' 2>/dev/null || true)"
+else
+    bad "config HTTP $C: $(printf '%s' "$B" | head -c 200)"
+fi
 
 # ---------------------------------------------------------------------------
 # 3. STORE: upload a synthetic JUnit file via the reverse-engineered trio.
@@ -148,10 +157,12 @@ cat >"$JUNIT" <<'XML'
   </testsuite>
 </testsuites>
 XML
-TARBALL="$WORK/test-results.tar"
+TARBALL="$WORK/test-results.tar.gz"
 # -C so the entry is stored at its relative path (probe-junit.xml), matching
-# pkg/tar.toRelativePaths; no -z, the agent uploads an uncompressed tar.
-tar -cf "$TARBALL" -C "$WORK" "$(basename "$JUNIT")"
+# pkg/tar.toRelativePaths. The Key the server hands back names the object
+# "<n>.tar.gz" and the agent logs "compressing test results", so the stored
+# bytes are a gzipped tar.
+tar -czf "$TARBALL" -C "$WORK" "$(basename "$JUNIT")"
 
 # The body of BOTH test-result POSTs is a JSON object {"step_id": <int>} (the
 # field tag recovered from the boxed body type in the agent:
@@ -183,13 +194,53 @@ for k in $CANDIDATES; do
     fi
 done
 
+# Upload the gzipped tar to the location from the Key. Unlike artifacts (full
+# presigned URL), the test-result Key.location is a *relative S3 object key*
+# (e.g. "storage/test-raw/<uuid>/<uuid>/0/0.tar.gz"). The agent uploads it
+# through its S3 object-store backend, i.e. a sigv4 PUT to the config bucket
+# using the short-lived STS creds from /api/v2/output/credentials — the same
+# signing path lib/circleci.axl already uses for artifacts. If a location ever
+# comes back as a full URL we PUT to it directly with the Key headers instead.
+s3_put() { # s3_put <url>
+    note "S3 sigv4 PUT gz(tar) -> $1"
+    local creds ak sk st
+    creds="$(req GET "$(api /api/v2/output/credentials)" "${AUTH[@]}")"
+    if [ "$(split_code "$creds")" != "200" ]; then
+        bad "credentials HTTP $(split_code "$creds"): $(split_body "$creds" | head -c 160)"
+        return
+    fi
+    creds="$(split_body "$creds")"
+    ak="$(printf '%s' "$creds" | jget 'd["s3"]["AccessKeyID"]' 2>/dev/null || true)"
+    sk="$(printf '%s' "$creds" | jget 'd["s3"]["SecretAccessKey"]' 2>/dev/null || true)"
+    st="$(printf '%s' "$creds" | jget 'd["s3"]["SessionToken"]' 2>/dev/null || true)"
+    if [ -z "$ak" ] || [ -z "$sk" ]; then
+        bad "no S3 credentials in /output/credentials response"
+        return
+    fi
+    local R2 C2
+    R2="$(req "$PMETHOD" "$1" \
+        --aws-sigv4 "aws:amz:${REGION}:s3" \
+        --user "${ak}:${sk}" \
+        -H "x-amz-security-token: ${st}" \
+        "${HDR_ARGS[@]}" \
+        --data-binary "@$TARBALL")"
+    C2="$(split_code "$R2")"
+    if [[ "$C2" =~ ^2 ]]; then ok "S3 upload HTTP $C2"; else bad "S3 upload HTTP $C2: $(split_body "$R2" | head -c 200)"; fi
+}
+
 if [ -z "$STEP_ID" ]; then
     bad "no step_id in [$CANDIDATES] accepted by test-result (last HTTP $C: $(printf '%s' "$B" | head -c 200))"
 elif [ -n "$LOC" ]; then
-    note "presigned $PMETHOD tar(JUnit) -> object store"
-    R2="$(req "$PMETHOD" "$LOC" "${HDR_ARGS[@]}" --data-binary "@$TARBALL")"
-    C2="$(split_code "$R2")"
-    if [[ "$C2" =~ ^2 ]]; then ok "presigned upload HTTP $C2"; else bad "presigned upload HTTP $C2: $(split_body "$R2" | head -c 200)"; fi
+    if [[ "$LOC" =~ ^https?:// ]]; then
+        note "presigned $PMETHOD gz(tar) -> object store"
+        R2="$(req "$PMETHOD" "$LOC" "${HDR_ARGS[@]}" --data-binary "@$TARBALL")"
+        C2="$(split_code "$R2")"
+        if [[ "$C2" =~ ^2 ]]; then ok "presigned upload HTTP $C2"; else bad "presigned upload HTTP $C2: $(split_body "$R2" | head -c 200)"; fi
+    elif [ -n "$BUCKET" ] && [ -n "$REGION" ]; then
+        s3_put "https://${BUCKET}.s3.${REGION}.amazonaws.com/${LOC}"
+    else
+        bad "relative location '$LOC' but no bucket/region from /output/config"
+    fi
 
     note "POST /api/v2/output/test-result/process  (body {\"step_id\":$STEP_ID})"
     R="$(req POST "$(api /api/v2/output/test-result/process)" "${AUTH[@]}" "${JSONH[@]}" -d "$(step_body "$STEP_ID")")"
