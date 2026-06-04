@@ -19,21 +19,21 @@ their content baked in, exposing only what varies as named params:
     tip_add_github_token_scope(ctx, scopes = "actions: read", endpoints = "GET …")
 
 `add_tip`'s full keyword surface (all but `id` / `severity` / `title` /
-`body` optional):
+`body` optional) — see `add_tip` itself for the per-argument contract:
 
     add_tip(
         ctx,
-        id,                          # stable kind + silence key — see "Tip identity"
-        severity,                    # TIP_IMPORTANT / TIP_WARNING / TIP_SUGGESTION / TIP_INFO
-        title,                       # short headline; interpreted per `type`
-        body,                        # markdown body; interpreted per `type`
-        type = TIP_TEMPLATE_RAW,     # RAW (default) / TIP_TEMPLATE_FORMAT / TIP_TEMPLATE_JINJA2
-        key = "",                    # optional (id, key) discriminator — see "Tip identity"
-        task_keys = None,            # optional glob list — see "Task-key scoping" below
-        vars = None,                 # fixed scalars for FORMAT / JINJA2
-        accumulate = None,           # list-valued JINJA2 fields, unioned on re-emit
-        surfaces = None,             # optional surface allowlist — see "Surface allowlist" below
-        combine_across_tasks = False,  # cross-task PR-summary union — see "Cross-task accumulation"
+        id: str,                       # stable kind + silence key — see "Tip identity"
+        severity: str,                 # TIP_IMPORTANT / TIP_WARNING / TIP_SUGGESTION / TIP_INFO
+        title: str,                    # short headline; interpreted per `type`
+        body: str,                     # markdown body; interpreted per `type`
+        type: str = TIP_TEMPLATE_RAW,  # RAW (default) / TIP_TEMPLATE_FORMAT / TIP_TEMPLATE_JINJA2
+        key: str = "",                 # optional (id, key) discriminator — see "Tip identity"
+        task_keys: list = [],          # optional glob list — see "Task-key scoping" below
+        vars: dict = {},               # fixed scalars for FORMAT / JINJA2
+        accumulate: dict = {},         # list-valued JINJA2 fields, unioned on re-emit
+        surfaces: list = [],           # optional surface allowlist — see "Surface allowlist" below
+        combine_across_tasks: bool = False,  # cross-task PR-summary union — see "Cross-task accumulation"
     )
 
 # Template types
@@ -572,17 +572,17 @@ def _merge_accumulators(existing, incoming):
 
 def add_tip(
         ctx,
-        id,
-        severity,
-        title,
-        body,
-        type = TIP_TEMPLATE_RAW,
-        key = "",
-        task_keys = None,
-        vars = None,
-        accumulate = None,
-        surfaces = None,
-        combine_across_tasks = False):
+        id: str,
+        severity: str,
+        title: str,
+        body: str,
+        type: str = TIP_TEMPLATE_RAW,
+        key: str = "",
+        task_keys: list = [],
+        vars: dict = {},
+        accumulate: dict = {},
+        surfaces: list = [],
+        combine_across_tasks: bool = False):
     """Add a tip to the task's tip storage and print a `TIP:` block to
     the terminal (subject to the owner feature's `auto_print` arg).
 
@@ -590,46 +590,59 @@ def add_tip(
     functions that wrap this with their content baked in (e.g.
     `tip_add_github_token(ctx)`); call `add_tip` directly for custom tips.
 
-    `title` / `body` are interpreted per `type`:
-
-      - `TIP_TEMPLATE_RAW`    — literal text, surfaced as-is.
-      - `TIP_TEMPLATE_FORMAT` — Starlark `str.format(**vars)` applied here.
-      - `TIP_TEMPLATE_JINJA2` — Jinja2 source, rendered against `vars`
-        (fixed scalars) + `accumulate` (deduped + sorted lists). Kept as
-        source so a re-emit (within-task accumulate) or cross-task union
-        can re-render; the rendered strings are what surfaces read.
-
-    `vars` are fixed scalars; `accumulate` fields are list-valued (a
-    JINJA2 template sees `{{ name }}` as a list) and union on re-emit and,
-    when `combine_across_tasks`, across tasks. A name in both is an error.
-
     A tip is identified by `(id, key)` — see the "Tip identity" section.
     Re-emitting the same `(id, key)` within a task replaces the stored
     content (accumulate fields ride along); a different `key` is a
     distinct tip. Silencing is always by `id`: no-op if `id` is in the
     silence list AND `severity != TIP_IMPORTANT`.
 
-    `task_keys` is an optional list of glob patterns; when set, the
-    renderer only shows the tip on tasks whose key matches one of the
-    patterns. When unset / empty, the tip shows on the task it was
-    emitted into. The terminal print fires regardless of `task_keys`.
-
-    `surfaces` is an optional allowlist of surface identifiers
-    (`SURFACE_CLI` / `SURFACE_GITHUB_STATUS_CHECKS` /
-    `SURFACE_BUILDKITE_ANNOTATIONS` / `SURFACE_GITLAB_COMMIT_STATUSES` /
-    `SURFACE_GITHUB_PR_SUMMARY`, or the `TASK_SCREENS` / `AGGREGATE_SCREENS`
-    shorthands) controlling which status screens may render the tip. When
-    unset / empty the tip shows everywhere (`SURFACE_ALL`). See the
-    "Surface allowlist" section. The terminal print is gated on
-    `SURFACE_CLI`; omit `SURFACE_GITHUB_PR_SUMMARY` to keep the tip off the
-    cross-task rollup.
-
-    `combine_across_tasks` governs how same-`(id, key)` tips from
-    sibling tasks combine in the PR summary — see the "Cross-task
-    accumulation" section.
-
     No-op overall when the `Tips` feature is disabled — the trait's
     `add` callable falls back to its null-object default.
+
+    Args:
+      ctx: The task context the tip is added to. Unannotated because the
+        built-in `tip_*` wrappers are driven with a stub context by
+        `github.axl`'s detection tests; only `ctx.traits` is used here.
+      id: Stable identifier — the kind of tip and its silence key. Tips
+        with the same `(id, key)` are the same tip (re-emit replaces);
+        `id` alone is what `--tips:silence=<id>` and the silence list
+        match. See the "Tip identity" section.
+      severity: One of `TIP_IMPORTANT` / `TIP_WARNING` / `TIP_SUGGESTION` /
+        `TIP_INFO` — drives ordering, the emoji/label, and (for
+        `TIP_IMPORTANT`) immunity from silencing. See "Severity ordering".
+      title: Short headline, interpreted per `type`.
+      body: Markdown body, interpreted per `type`.
+      type: The interpolation engine for `title` / `body`:
+        `TIP_TEMPLATE_RAW` (default) surfaces them as-is;
+        `TIP_TEMPLATE_FORMAT` applies Starlark `str.format(**vars)`;
+        `TIP_TEMPLATE_JINJA2` renders them as Jinja2 against `vars` +
+        `accumulate`, keeping the source so a re-emit or cross-task union
+        can re-render. See the "Template types" section.
+      key: Optional discriminator distinguishing same-`id` tips about
+        different subjects (e.g. one flaky-test tip per label). Empty
+        means a single tip per `id`. See the "Tip identity" section.
+      task_keys: Glob patterns matched against `ctx.task.key`; when
+        non-empty the tip renders only on matching tasks. Empty (the
+        default) scopes the tip to the task it was emitted into. The
+        terminal print fires regardless. See "Task-key scoping".
+      vars: Fixed scalar values for `TIP_TEMPLATE_FORMAT` /
+        `TIP_TEMPLATE_JINJA2` interpolation. Ignored for
+        `TIP_TEMPLATE_RAW`. A name set in both `vars` and `accumulate`
+        is an error.
+      accumulate: List-valued Jinja2 fields (a `{{ name }}` reference
+        sees a list). Each re-emit unions in new values (deduped +
+        sorted); with `combine_across_tasks` the union also spans tasks.
+        `TIP_TEMPLATE_JINJA2` only.
+      surfaces: Allowlist of surface identifiers (`SURFACE_CLI` /
+        `SURFACE_GITHUB_STATUS_CHECKS` / `SURFACE_BUILDKITE_ANNOTATIONS` /
+        `SURFACE_GITLAB_COMMIT_STATUSES` / `SURFACE_GITHUB_PR_SUMMARY`, or
+        the `TASK_SCREENS` / `AGGREGATE_SCREENS` shorthands) that may
+        render the tip. Empty (the default) shows it everywhere
+        (`SURFACE_ALL`). The terminal print is gated on `SURFACE_CLI`;
+        omit `SURFACE_GITHUB_PR_SUMMARY` to keep the tip off the cross-task
+        rollup. See "Surface allowlist".
+      combine_across_tasks: How same-`(id, key)` tips from sibling tasks
+        combine in the PR summary. See "Cross-task accumulation".
     """
     if severity not in _SEVERITY_ORDER:
         fail("unknown tip severity %r; valid: %s" % (severity, ", ".join(_SEVERITY_ORDER.keys())))
