@@ -319,8 +319,7 @@ def _delete_artifact(ctx, name):
     """CircleCI has no artifact deletion API — no-op."""
     return {"success": True}
 
-# ============================================================================
-# Test results — upload Bazel JUnit XML to CircleCI's runner output API.
+# Upload Bazel JUnit XML to CircleCI's runner output test-results API.
 #
 # Reverse-engineered from circleci-agent's StoreTestResultsStep -> runner
 # output API and verified end-to-end against real CircleCI. The agent-free
@@ -340,7 +339,6 @@ def _delete_artifact(ctx, name):
 # step shell, so when the caller doesn't know it we discover it by probing
 # which small integer the output service accepts for this task (a wrong
 # step_id is rejected with an empty-body HTTP 400).
-# ============================================================================
 
 _TEST_RESULT_PATH = "/api/v2/output/test-result"
 _TEST_RESULT_PROCESS_PATH = "/api/v2/output/test-result/process"
