@@ -27,7 +27,7 @@ load(
     "renderer_for_kind",
     "should_emit_update",
 )
-load("../lib/ci.axl", "detect_build_url")
+load("../lib/ci.axl", "resolve_build_url")
 load("../lib/environment.axl", "feature_logger", "workflows_results_url")
 load("../lib/lifecycle.axl", "TaskLifecycleTrait", "TaskUpdate")
 load("../lib/rate_limit.axl", "usage_footer")
@@ -237,7 +237,7 @@ def _buildkite_annotations(ctx: FeatureContext):
         # the rendered summary's CI link.
         links = {
             "ci_label": "Buildkite",
-            "ci_url": detect_build_url(ctx),
+            "ci_url": resolve_build_url(ctx),
             "aspect_url": "",
             "bes_url": "",
             "results_base_url": workflows_results_url(ctx.std),

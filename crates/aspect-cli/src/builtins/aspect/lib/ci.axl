@@ -26,11 +26,11 @@ Shapes by host:
                         Packages API, which has no clean per-job page.
 """
 
-load("./github.axl", "detect_github_actions_build_url")
+load("./github.axl", "detect_github_actions_build_url", "github_actions_run_url")
 
 # Per-process env var holding the once-resolved build URL. Populated by
-# the first `detect_build_url` caller in the task; subsequent callers
-# (sibling features, per-render lookups) short-circuit to this value.
+# `detect_build_url` (env-derived) or `resolve_build_url` (the GHA per-job
+# upgrade); subsequent callers short-circuit to it.
 _JOB_URL_CACHE_ENV = "ASPECT_JOB_URL_CACHE"
 
 # Per-CI-host metadata. Order is the detection precedence: `detect_ci_host`
@@ -70,33 +70,26 @@ def detect_buildkite_build_url(env):
         return build_url + "#" + job_id
     return build_url
 
-def detect_build_url(ctx, existing_app_token: str | None = None) -> str:
-    """Detect the job-scoped CI build URL from the environment.
+def detect_build_url(env: std.Env) -> str:
+    """Detect the CI build URL from the environment.
 
-    `ctx` is left unannotated because callers pass either a `TaskContext`
-    or a `FeatureContext` (status-check features resolve the link from
-    feature context); only `ctx.std.env` and the GHA upgrade path's `ctx`
-    plumbing are used.
+    The env-only public helper, for callers that have an `env` but no
+    full context. Returns the running CI build URL (the page a developer
+    would visit to see logs/status), or "" off a recognized host. See the
+    module docstring for the per-host shape.
 
-    Returns the URL of the running CI build (the page a developer would
-    visit to see logs/status), or "" if no recognized CI host is detected
-    or the env vars aren't populated. See the module docstring for the
-    per-host shape.
-
-    Caches the resolved URL in `ASPECT_JOB_URL_CACHE` so sibling callers
-    in the same task share the result without re-resolving. Only GHA's
-    job URL requires an API call; the cache makes subsequent renders /
-    sibling features free.
-
-    `existing_app_token` is forwarded to the GHA upgrade path so a caller
-    with a freshly-minted App token in hand can skip a redundant mint.
+    Reads the `ASPECT_JOB_URL_CACHE` cache first, so the per-job GitHub
+    Actions URL `resolve_build_url` resolves (with a context) is returned
+    here too once cached. Without a cache hit, GitHub Actions yields the
+    run-level URL; Buildkite / CircleCI / GitLab are job-scoped from env
+    alone. Use `resolve_build_url(ctx)` to obtain (and cache) the GHA
+    per-job URL.
     """
-    env = ctx.std.env
     cached = env.var(_JOB_URL_CACHE_ENV) or ""
     if cached:
         return cached
     if env.var("GITHUB_ACTIONS"):
-        url = detect_github_actions_build_url(ctx, existing_app_token = existing_app_token)
+        url = github_actions_run_url(env)
     elif env.var("BUILDKITE"):
         url = detect_buildkite_build_url(env)
     elif env.var("CIRCLECI"):
@@ -107,6 +100,28 @@ def detect_build_url(ctx, existing_app_token: str | None = None) -> str:
         return ""
     if url:
         env.set_var(_JOB_URL_CACHE_ENV, url)
+    return url
+
+def resolve_build_url(ctx, existing_app_token: str | None = None) -> str:
+    """Resolve the richest available CI build URL, given a full context.
+
+    The internal counterpart to the public `detect_build_url(env)`: on
+    GitHub Actions it upgrades the run-level URL to the per-job URL
+    `/actions/runs/<run_id>/job/<job_id>` via an authenticated `actions:read`
+    API call and caches it in `ASPECT_JOB_URL_CACHE`, so every later
+    `detect_build_url(env)` caller in the task gets the per-job URL for free.
+    Off GitHub Actions (or when the API call can't authenticate) it returns
+    the env-derived URL.
+
+    `existing_app_token` lets a caller that just minted an App token skip a
+    redundant mint. `ctx` is left unannotated because callers pass either a
+    `TaskContext` or a `FeatureContext`.
+    """
+    if not ctx.std.env.var("GITHUB_ACTIONS"):
+        return detect_build_url(ctx.std.env)
+    url = detect_github_actions_build_url(ctx, existing_app_token = existing_app_token)
+    if url:
+        ctx.std.env.set_var(_JOB_URL_CACHE_ENV, url)
     return url
 
 def _circleci_vcs(env):

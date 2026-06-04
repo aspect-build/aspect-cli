@@ -44,7 +44,7 @@ load(
     "resolve_aspect_url",
 )
 load("../lib/checkrun.axl", "checkrun")
-load("../lib/ci.axl", "detect_build_url")
+load("../lib/ci.axl", "resolve_build_url")
 load("../lib/environment.axl", "feature_logger", "workflows_results_url")
 load("../lib/github.axl", "github")
 load("../lib/lifecycle.axl", "TaskLifecycleTrait")
@@ -1585,7 +1585,7 @@ def _github_status_comments(ctx: FeatureContext):
 
         # Re-resolve with the just-minted App token; cache-hits if a
         # sibling feature already resolved.
-        upgraded = detect_build_url(ctx, existing_app_token = token)
+        upgraded = resolve_build_url(ctx, existing_app_token = token)
         if upgraded:
             _state["_ci_link_url"] = upgraded
 

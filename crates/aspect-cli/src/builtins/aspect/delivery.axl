@@ -104,7 +104,7 @@ load("@aspect//lib/artifacts.axl", "artifacts")
 load("@aspect//lib/bazel_flags.axl", "announce_bazel_args", "resolve_bazel_announce")
 load("@aspect//lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "now_ms", "process_event", bazel_init_data = "init_data")
 load("@aspect//lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
-load("@aspect//lib/ci.axl", "detect_build_url")
+load("@aspect//lib/ci.axl", "resolve_build_url")
 load("@aspect//lib/delivery_results.axl", delivery_add_result = "add_result", delivery_conclusion = "conclusion", delivery_init_data = "init_data")
 load(
     "@aspect//lib/deliveryd.axl",
@@ -705,7 +705,7 @@ def _delivery_impl(ctx):
         fail(msg)
     if not commit_sha:
         commit_sha = "-"
-    build_url = ctx.args.build_url or detect_build_url(ctx) or "-"
+    build_url = ctx.args.build_url or resolve_build_url(ctx) or "-"
 
     # Change-detection prefix: always anchored to --task-key, optionally extended by --salt
     if ctx.args.salt:

@@ -434,7 +434,7 @@ AspectApiTokenHost = enum("github-actions", "buildkite", "circleci")
 
 # Per-host wire-up advice + the set of features that degrade without
 # `ASPECT_API_TOKEN`. Both differ by host (PR-summary-comment
-# aggregation is GHA-only today). Keyed by `AspectApiTokenHost.value`.
+# aggregation is GHA-only today). Keyed by each host's enum `.value`.
 _ASPECT_API_TOKEN_HOST_DETAIL = {
     AspectApiTokenHost("github-actions").value: struct(
         degraded_features = "PR check-run creation and updates, and PR summary comment aggregation",
@@ -481,19 +481,19 @@ def tip_add_github_token(ctx):
         body = "aspect-cli authenticates supporting GitHub API calls (job URL lookup, PR file diff, etc.) via the Aspect Workflows GitHub App. When the App can't authenticate — typically because `ASPECT_API_TOKEN` is missing or invalid — there's currently no fallback, and supporting calls fail.\n\nExporting `GITHUB_TOKEN` to the job env gives aspect-cli a last-resort token to fall back to. `GITHUB_TOKEN` is shared across every workflow step in the repo and has [a low default rate limit](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api), so it's not a permanent solution — fix the Aspect Workflows GitHub App authentication path when possible.\n\nGitHub Actions grants `GITHUB_TOKEN` implicit read access to the workflow's own run metadata and the PR that triggered it, so no extra `permissions:` block scopes are required for the supporting calls aspect-cli makes today. Add at the top level of the workflow (so every job inherits) or scope it to the specific job(s) that need it:\n\n```yaml\n" + GITHUB_TOKEN_ENV_YAML + "```",
     )
 
-def tip_add_aspect_api_token(ctx, host: str):
+def tip_add_aspect_api_token(ctx, host: AspectApiTokenHost):
     """Tell the user to set `ASPECT_API_TOKEN` so the Aspect Workflows
     GitHub App can authenticate. IMPORTANT severity — every feature that
     calls the GitHub API as the App depends on it, and silently degrades
     without it.
 
-    `host` is an `AspectApiTokenHost` value; it selects the wire-up advice
-    and a host-suffixed id (`add-aspect-api-token-<host>`) so users running
+    `host` is an `AspectApiTokenHost`; it selects the wire-up advice and a
+    host-suffixed id (`add-aspect-api-token-<host>`) so users running
     multiple CI hosts off one repo can silence each independently."""
-    detail = _ASPECT_API_TOKEN_HOST_DETAIL[AspectApiTokenHost(host).value]
+    detail = _ASPECT_API_TOKEN_HOST_DETAIL[host.value]
     add_tip(
         ctx,
-        id = "add-aspect-api-token-" + host,
+        id = "add-aspect-api-token-" + host.value,
         severity = TIP_IMPORTANT,
         title = "Set ASPECT_API_TOKEN to authenticate the Aspect Workflows GitHub App",
         body = (

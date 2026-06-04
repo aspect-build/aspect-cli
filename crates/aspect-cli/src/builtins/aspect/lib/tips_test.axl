@@ -35,6 +35,7 @@ Run with:
 
 load(
     "./tips.axl",
+    "AspectApiTokenHost",
     "SURFACE_BUILDKITE_ANNOTATIONS",
     "SURFACE_CLI",
     "SURFACE_GITHUB_PR_SUMMARY",
@@ -421,9 +422,9 @@ def _test_builtin_tips_shape(ctx):
     Also pins severity + per-host id stability — distinct ids per CI host
     let users silence one variant without silencing the others."""
     aspect_token_variants = [
-        ("github-actions", "add-aspect-api-token-github-actions"),
-        ("buildkite", "add-aspect-api-token-buildkite"),
-        ("circleci", "add-aspect-api-token-circleci"),
+        (AspectApiTokenHost("github-actions"), "add-aspect-api-token-github-actions"),
+        (AspectApiTokenHost("buildkite"), "add-aspect-api-token-buildkite"),
+        (AspectApiTokenHost("circleci"), "add-aspect-api-token-circleci"),
     ]
     for host, expected_id in aspect_token_variants:
         _reset(ctx)
@@ -431,9 +432,9 @@ def _test_builtin_tips_shape(ctx):
         tip = _stored_one(ctx)
         for key in ("id", "severity", "title", "body", "type"):
             if key not in tip:
-                fail("aspect-api-token tip (%s) missing required key %r" % (host, key))
-        _eq("aspect-api-token tip (%s) id" % host, tip["id"], expected_id)
-        _eq("aspect-api-token tip (%s) severity is IMPORTANT" % host, tip["severity"], TIP_IMPORTANT)
+                fail("aspect-api-token tip (%s) missing required key %r" % (host.value, key))
+        _eq("aspect-api-token tip (%s) id" % host.value, tip["id"], expected_id)
+        _eq("aspect-api-token tip (%s) severity is IMPORTANT" % host.value, tip["severity"], TIP_IMPORTANT)
 
     for emit in (tip_add_github_token, tip_add_id_token_permission):
         _reset(ctx)
@@ -456,9 +457,9 @@ def _test_builtin_tips_shape(ctx):
         tip_add_aspect_api_token(ctx, host = host)
         return _stored_one(ctx)["body"]
 
-    gha_body = _body("github-actions")
-    bk_body = _body("buildkite")
-    cc_body = _body("circleci")
+    gha_body = _body(AspectApiTokenHost("github-actions"))
+    bk_body = _body(AspectApiTokenHost("buildkite"))
+    cc_body = _body(AspectApiTokenHost("circleci"))
 
     # Body specialization sanity-check — wire-up advice differs per host.
     # The GHA tip recommends the aspect-build/setup-aspect action (which

@@ -46,7 +46,7 @@ isn't worth it for a check run display. We show the failing target label plus
 the list of failing action mnemonics; users follow the CI link for the raw log.
 """
 
-load("./ci.axl", "detect_build_url", "detect_ci_host")
+load("./ci.axl", "detect_ci_host", "resolve_build_url")
 load(
     "./environment.axl",
     "build_aspect_runner_rows",
@@ -1026,6 +1026,12 @@ def process_event(data, event):
 
     return False
 
+def _join_url(base, id):
+    """Join a results-base URL with an invocation id, tolerant of a
+    trailing slash on `base` — both `https://host` and `https://host/`
+    yield `https://host/<id>` with exactly one separating slash."""
+    return (base if base.endswith("/") else base + "/") + id
+
 def resolve_aspect_url(links, data):
     """Return the Aspect Web UI URL for an invocation, or "" if unavailable.
 
@@ -1055,10 +1061,6 @@ def resolve_aspect_url(links, data):
     the bare host. Typical value:
 
         ASPECT_WORKFLOWS_BES_RESULTS_URL=https://app.oss.aspect.build
-
-    The join below is `endswith("/")`-tolerant — both the typical
-    no-trailing-slash form and the with-trailing-slash variant produce
-    the same `{base}/{id}` URL with exactly one `/` between them.
     """
     base = links.get("results_base_url", "") if links else ""
     if not base:
@@ -1066,7 +1068,7 @@ def resolve_aspect_url(links, data):
     inv_id = data.get("sink_invocation_id", "") or ""
     if not inv_id:
         return ""
-    return (base if base.endswith("/") else base + "/") + inv_id
+    return _join_url(base, inv_id)
 
 def aspect_web_ui_url(env: std.Env, data: dict) -> str:
     """Aspect Web UI invocation URL for a task, or "" when unavailable.
@@ -2569,7 +2571,7 @@ def render_bes_url(data: dict) -> str:
     inv = data["bazel"].get("invocation_id", "")
     if not base or not inv:
         return ""
-    return (base if base.endswith("/") else base + "/") + inv
+    return _join_url(base, inv)
 
 def format_run_date(ctx, epoch_ms):
     """Format an epoch timestamp (milliseconds) as a human-readable date string.
@@ -2637,13 +2639,13 @@ def ci_link_item(ctx, links):
 
     Prefers the feature-supplied `links["ci_url"]` (which may be a
     job-scoped deep link resolved against the GitHub API); falls back to
-    `detect_build_url` so the link works even when the feature doesn't
+    `resolve_build_url` so the link works even when the feature doesn't
     pass one through.
     """
     host = detect_ci_host(ctx.std.env)
     if not host:
         return None
-    url = (links or {}).get("ci_url", "") or detect_build_url(ctx)
+    url = (links or {}).get("ci_url", "") or resolve_build_url(ctx)
     if not url:
         return None
     return {"icon": host["icon"], "value": "[%s](%s)" % (host["label"], url)}
@@ -3755,10 +3757,7 @@ def _build_retry_attempt_rows(data, links):
     rows = []
     for a in attempts:
         sink_id = a.get("sink_invocation_id", "") or ""
-        if base and sink_id:
-            url = (base if base.endswith("/") else base + "/") + sink_id
-        else:
-            url = ""
+        url = _join_url(base, sink_id) if (base and sink_id) else ""
         rows.append({
             "attempt": a.get("attempt", 0),
             "outcome": "passed" if a.get("exit_code", 1) == 0 else "failed",

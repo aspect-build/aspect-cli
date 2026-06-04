@@ -4,9 +4,11 @@ load("@aspect//feature/buildkite_annotations_test.axl", "bk_annotation_snapshot_
 load("@aspect//feature/github_status_checks.axl", "GithubStatusChecks")
 load("@aspect//feature/github_status_comments_test.axl", "pr_comment_snapshot_tests")
 load("@aspect//format.axl", "format")
+load("@aspect//helpers_test.axl", "helpers_facade_tests")
 load("@aspect//lib/bazel_flags_test.axl", "bazel_flags_tests")
 load("@aspect//lib/bazel_results_test.axl", "bazel_results_unit_tests", "template_snapshot_tests")
 load("@aspect//lib/bazel_runner_test.axl", "bazel_runner_tests")
+load("@aspect//lib/ci_test.axl", "ci_tests")
 load("@aspect//lib/circleci_test.axl", "circleci_tests")
 load("@aspect//lib/delivery_results_test.axl", "delivery_template_snapshot_tests")
 load("@aspect//lib/format_results_test.axl", "format_template_snapshot_tests")
@@ -226,9 +228,9 @@ def config(ctx: ConfigContext):
     # Run with: aspect dev test-lint-template-snapshots
     ctx.tasks.add(lint_template_snapshot_tests)
 
-    # Tips framework primitives — add_tip / emit_tip / collect_tips_sorted,
+    # Tips framework primitives — add_tip / collect_tips_sorted,
     # severity helpers, blockquote_body, task_keys glob filtering,
-    # silenced_tips short-circuit, and built-in template shape.
+    # silenced_tips short-circuit, and built-in tip shape.
     # Run with: aspect dev test-tips
     ctx.tasks.add(tips_tests)
 
@@ -241,6 +243,17 @@ def config(ctx: ConfigContext):
     # 400 into a legible reason instead of an opaque "curl exit 22".
     # Run with: aspect dev test-circleci
     ctx.tasks.add(circleci_tests)
+
+    # Cross-CI URL helpers (lib/ci.axl) — host detection, env-only build
+    # URL resolution, the per-job cache short-circuit, and the off-GHA
+    # resolve_build_url delegation.
+    # Run with: aspect dev test-ci
+    ctx.tasks.add(ci_tests)
+
+    # `@aspect//helpers.axl` public facade — re-exports resolve to the
+    # real helpers a config.axl hook loads.
+    # Run with: aspect dev test-helpers
+    ctx.tasks.add(helpers_facade_tests)
 
     # Runner-side mitigations for bazelbuild/bazel#23880 and persistent
     # server-internal failures — detect-and-repair + signal-instance-unhealthy

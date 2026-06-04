@@ -1079,6 +1079,15 @@ def _test_aspect_web_ui_url(ctx):
         "https://app.oss.aspect.build/abc-123",
     )
     _eq("aspect_web_ui_url empty without sink id", aspect_web_ui_url(env, {}), "")
+
+    # A trailing slash on the base must not double up in the join.
+    env.set_var("ASPECT_WORKFLOWS_BES_RESULTS_URL", "https://app.oss.aspect.build/")
+    _eq(
+        "aspect_web_ui_url tolerates a trailing slash on the base",
+        aspect_web_ui_url(env, {"sink_invocation_id": "abc-123"}),
+        "https://app.oss.aspect.build/abc-123",
+    )
+
     env.set_var("ASPECT_WORKFLOWS_BES_RESULTS_URL", "")
     _eq("aspect_web_ui_url empty without base", aspect_web_ui_url(env, {"sink_invocation_id": "abc-123"}), "")
 

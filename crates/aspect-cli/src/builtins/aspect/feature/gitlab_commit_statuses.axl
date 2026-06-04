@@ -73,7 +73,7 @@ load(
     "renderer_for_kind",
     "should_emit_update",
 )
-load("../lib/ci.axl", "detect_build_url", "detect_ci_host")
+load("../lib/ci.axl", "detect_ci_host", "resolve_build_url")
 load("../lib/environment.axl", "feature_logger", "workflows_results_url")
 load("../lib/gitlab.axl", "gitlab")
 load("../lib/gitlab_detect.axl", "detect_gitlab_mr")
@@ -107,7 +107,7 @@ def _collect_ci_links(ctx, results_base_url):
     host = detect_ci_host(ctx.std.env)
     return {
         "ci_label": host["label"] if host else "",
-        "ci_url": detect_build_url(ctx),
+        "ci_url": resolve_build_url(ctx),
         "aspect_url": "",
         "bes_url": "",
         "results_base_url": results_base_url,
@@ -266,7 +266,7 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
         # Re-resolve CI URL with the token in scope (mirrors GH path —
         # safe no-op when the CI URL is env-derived rather than
         # API-derived for the active CI host).
-        _ci_links_base["ci_url"] = detect_build_url(ctx, existing_app_token = token) or _ci_links_base["ci_url"]
+        _ci_links_base["ci_url"] = resolve_build_url(ctx, existing_app_token = token) or _ci_links_base["ci_url"]
         _state["_ci_links"] = _ci_links_base
         return True
 

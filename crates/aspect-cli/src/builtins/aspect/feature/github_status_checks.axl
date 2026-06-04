@@ -45,7 +45,7 @@ load(
     "should_emit_update",
 )
 load("../lib/checkrun.axl", "checkrun")
-load("../lib/ci.axl", "detect_build_url", "detect_ci_host")
+load("../lib/ci.axl", "detect_ci_host", "resolve_build_url")
 load("../lib/environment.axl", "feature_logger", "workflows_results_url")
 load("../lib/github.axl", "detect_commit_sha", "detect_github_repo", "github")
 load("../lib/lifecycle.axl", "TaskLifecycleTrait", "TaskUpdate")
@@ -104,7 +104,7 @@ def _collect_ci_links(ctx, results_base_url):
     host = detect_ci_host(ctx.std.env)
     return {
         "ci_label": host["label"] if host else "",
-        "ci_url": detect_build_url(ctx),
+        "ci_url": resolve_build_url(ctx),
         "aspect_url": "",
         "bes_url": "",
         "results_base_url": results_base_url,
@@ -220,7 +220,7 @@ def _github_status_checks(ctx: FeatureContext):
         # Re-resolve with the just-minted App token: upgrades the GHA
         # run URL to the per-job URL if `_collect_ci_links` couldn't
         # auth at feature setup. Hits the cache on the typical path.
-        _ci_links_base["ci_url"] = detect_build_url(ctx, existing_app_token = token) or _ci_links_base["ci_url"]
+        _ci_links_base["ci_url"] = resolve_build_url(ctx, existing_app_token = token) or _ci_links_base["ci_url"]
         _state["_ci_links"] = _ci_links_base
 
         # No `task_update.kind` yet — pick by task name, falling

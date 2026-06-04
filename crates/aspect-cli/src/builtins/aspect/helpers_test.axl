@@ -1,0 +1,44 @@
+"""Smoke test for the `@aspect//helpers.axl` public facade.
+
+The facade is a thin re-export of helpers a user `config.axl` hook needs
+to rebuild the built-in click-through links. This test loads every
+re-exported symbol *through the facade* (not the implementation modules)
+and exercises each enough to prove the re-export resolves to the real
+function — guarding against a re-export that silently drops or renames a
+symbol. The per-host URL logic itself is covered in `lib/ci_test.axl` and
+`lib/bazel_results_test.axl`.
+
+Run with:
+  aspect dev test-helpers
+"""
+
+load("./helpers.axl", "aspect_web_ui_url", "detect_build_url", "detect_ci_host", "render_bes_url")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _test_impl(ctx):
+    env = ctx.std.env
+
+    # detect_ci_host / detect_build_url resolve to the real env-only
+    # helpers (return a value without raising; full behavior in ci_test).
+    host = detect_ci_host(env)
+    if host != None and "label" not in host:
+        fail("helpers: detect_ci_host returned a malformed host: %r" % host)
+    detect_build_url(env)  # must not raise
+
+    # aspect_web_ui_url / render_bes_url resolve and return "" when their
+    # inputs are absent (full behavior in bazel_results_test).
+    _eq("helpers: aspect_web_ui_url empty without inputs", aspect_web_ui_url(env, {}), "")
+    _eq("helpers: render_bes_url empty without inputs", render_bes_url({"bazel": {}}), "")
+
+    print("helpers.axl facade: OK")
+    return 0
+
+helpers_facade_tests = task(
+    name = "test-helpers",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

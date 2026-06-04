@@ -295,7 +295,7 @@ def _emit_aspect_api_token_tip(ctx):
         host = AspectApiTokenHost("circleci")
     else:
         return
-    _emit_tip_if_ready(ctx, tip_add_aspect_api_token, host = host.value)
+    _emit_tip_if_ready(ctx, tip_add_aspect_api_token, host = host)
 
 def _preferred_token_pair(ctx, owner, repo, profile = None, roles = None, existing_app_token = None, _reason = None):
     """Resolve `(primary_token, fallback_token)` for supporting GitHub
@@ -649,6 +649,20 @@ def detect_default_branch_ref(ctx):
 
     return ""
 
+def github_actions_run_url(env):
+    """GitHub Actions run-level URL `<server>/<repo>/actions/runs/<run_id>`,
+    or "" off GitHub Actions or when the env vars aren't populated. The
+    per-job upgrade (an authenticated API call) lives in
+    `detect_github_actions_build_url`."""
+    if not env.var("GITHUB_ACTIONS"):
+        return ""
+    server = env.var("GITHUB_SERVER_URL") or "https://github.com"
+    repository = env.var("GITHUB_REPOSITORY") or ""
+    run_id = env.var("GITHUB_RUN_ID") or ""
+    if not (repository and run_id):
+        return ""
+    return server + "/" + repository + "/actions/runs/" + run_id
+
 def detect_github_actions_build_url(ctx, existing_app_token = None):
     """GitHub Actions build URL — job-scoped when the App is authenticated.
 
@@ -664,18 +678,13 @@ def detect_github_actions_build_url(ctx, existing_app_token = None):
     `existing_app_token` lets a caller that already minted an App token in
     the same handler skip a redundant mint.
 
-    The caller (`lib/ci.axl::detect_build_url`) is responsible for caching
+    The caller (`lib/ci.axl::resolve_build_url`) is responsible for caching
     so the `_resolve_current_job_url` HTTP call only happens once per task.
     """
-    env = ctx.std.env
-    if not env.var("GITHUB_ACTIONS"):
+    run_url = github_actions_run_url(ctx.std.env)
+    if not run_url:
         return ""
-    server = env.var("GITHUB_SERVER_URL") or "https://github.com"
-    repository = env.var("GITHUB_REPOSITORY") or ""
-    run_id = env.var("GITHUB_RUN_ID") or ""
-    if not (repository and run_id):
-        return ""
-    run_url = server + "/" + repository + "/actions/runs/" + run_id
+    run_id = ctx.std.env.var("GITHUB_RUN_ID") or ""
     owner, repo = detect_github_repo(ctx.std)
     if owner and repo:
         token, fallback, token_class = _preferred_token_pair(ctx, owner, repo, roles = ["actions.read"], existing_app_token = existing_app_token)

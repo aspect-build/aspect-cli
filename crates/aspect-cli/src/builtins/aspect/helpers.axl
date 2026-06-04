@@ -8,9 +8,8 @@ lives in its owning module (see there for full semantics):
   - `detect_ci_host(env) -> {marker, label, icon} | None`
         the running CI host (GitHub Actions / Buildkite / CircleCI /
         GitLab), or None off a recognized host. From `lib/ci.axl`.
-  - `detect_build_url(ctx) -> str`
-        the job-scoped CI build URL, or "" off a recognized host. From
-        `lib/ci.axl`.
+  - `detect_build_url(env) -> str`
+        the CI build URL, or "" off a recognized host. From `lib/ci.axl`.
   - `aspect_web_ui_url(env, data) -> str`
         the Aspect Web UI invocation URL, or "" when unavailable. From
         `lib/bazel_results.axl`.
