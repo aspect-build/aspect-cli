@@ -149,11 +149,22 @@ fi
 # their relative paths; no gzip).
 WORK="$(mktemp -d /tmp/probe-tr-XXXX)"
 JUNIT="$WORK/probe-junit.xml"
+# Mix of outcomes so we can confirm failed/errored/skipped cases render in the
+# job's "Tests" tab, not just passing ones: 1 pass, 1 <failure>, 1 <error>,
+# 1 <skipped>. The testsuite counts must match or some parsers complain.
 cat >"$JUNIT" <<'XML'
 <testsuites>
-  <testsuite name="aspect.output_api_probe" tests="2">
+  <testsuite name="aspect.output_api_probe" tests="4" failures="1" errors="1" skipped="1" time="0.178">
     <testcase classname="probe.Direct" file="probe_test.sh" name="upload_roundtrip" time="0.123"/>
-    <testcase classname="probe.Direct" file="probe_test.sh" name="presigned_put" time="0.045"/>
+    <testcase classname="probe.Direct" file="probe_test.sh" name="presigned_put_should_fail" time="0.045">
+      <failure message="synthetic failure: expected 200 but got 500" type="AssertionError">probe-induced failure to verify failed tests render in the CircleCI Tests tab</failure>
+    </testcase>
+    <testcase classname="probe.Direct" file="probe_test.sh" name="process_raises" time="0.010">
+      <error message="synthetic error: unexpected exception" type="RuntimeError">probe-induced error to verify errored tests render in the CircleCI Tests tab</error>
+    </testcase>
+    <testcase classname="probe.Direct" file="probe_test.sh" name="split_unsupported" time="0.000">
+      <skipped message="probe-induced skip"/>
+    </testcase>
   </testsuite>
 </testsuites>
 XML
