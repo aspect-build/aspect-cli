@@ -87,7 +87,7 @@ load(
     "effective_throttle_factor",
     "should_emit_phase_change",
 )
-load("../lib/tips.axl", "collect_tips_sorted")
+load("../lib/tips.axl", "SURFACE_GITLAB_COMMIT_STATUSES", "collect_tips_sorted")
 
 _LOG = feature_logger("GitLab commit statuses")
 
@@ -299,7 +299,7 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
             ctx,
             initial_renderer.init(),
             "running",
-            make_render_ctx(_state, tips = collect_tips_sorted(ctx), last_updated_at = format_run_date(ctx, now_ms(ctx))),
+            make_render_ctx(_state, tips = collect_tips_sorted(ctx, surface = SURFACE_GITLAB_COMMIT_STATUSES), last_updated_at = format_run_date(ctx, now_ms(ctx))),
             initial_links,
             templates,
             metadata_keys,
@@ -373,7 +373,7 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
             ctx,
             data,
             status,
-            make_render_ctx(_state, tips = collect_tips_sorted(ctx), last_updated_at = format_run_date(ctx, now_ms(ctx))),
+            make_render_ctx(_state, tips = collect_tips_sorted(ctx, surface = SURFACE_GITLAB_COMMIT_STATUSES), last_updated_at = format_run_date(ctx, now_ms(ctx))),
             links,
             templates,
             metadata_keys,

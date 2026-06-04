@@ -65,12 +65,14 @@ load("../lib/result_text.axl", "severity_for_status")
 load("../lib/tar.axl", "bsdtar")
 load(
     "../lib/tips.axl",
+    "SURFACE_GITHUB_PR_SUMMARY",
     "TIP_IMPORTANT",
     "TIP_TEMPLATE_JINJA2",
     "TIP_WARNING",
     "collect_tips_sorted",
     "decorate_tip",
     "severity_rank",
+    "tip_shows_on",
     "tip_to_payload",
 )
 
@@ -682,15 +684,78 @@ def _is_must_show(severity):
     and warning signals degraded behavior."""
     return severity == TIP_IMPORTANT or severity == TIP_WARNING
 
-def _collect_tip_rows(ctx, entries):
-    """Walk every entry's `tips` list, dedup by id, attribute by task
-    key, sort by severity, then apply the rendering caps.
+def _ordered_unique(values):
+    """First-seen-order dedup of a list (no set; preserves order)."""
+    out = []
+    for v in values:
+        if v and v not in out:
+            out.append(v)
+    return out
 
-    Dedup is by `id`. Pre-rendered tips (RAW/FORMAT) take the first
-    seen `title` / `body`. JINJA2 tips union each accumulator's values
-    across tasks (preserving first-seen order) and re-render so the
-    comment surfaces the full cross-task picture (e.g. every scope +
-    endpoint contributed by every task that hit the path).
+def _combine_across(ctx, contributors):
+    """Collapse a same-`(id, key)` group into one row, unioning across tasks.
+
+    `contributors` is a list of `(tip, task_key)`. JINJA2 `accumulate`
+    fields are unioned across tasks (first-seen order) and re-rendered
+    against `vars` + the merged lists, so the row surfaces the full
+    cross-task set. Pre-rendered title/body follow newest-wins: the row
+    starts from the last contributor. Attribution is every contributing
+    task."""
+    tips_ = [t for t, _ in contributors]
+    row = dict(tips_[-1])
+    merged = {}
+    for t in tips_:
+        for name, values in (t.get("accumulate") or {}).items():
+            merged[name] = _ordered_unique(merged.get(name, []) + list(values or []))
+    if row.get("type") == TIP_TEMPLATE_JINJA2 and merged:
+        row["accumulate"] = merged
+        data = dict(row.get("vars") or {})
+        data.update(merged)
+        if row.get("title_template"):
+            row["title"] = ctx.template.jinja2(row["title_template"], data = data)
+        if row.get("body_template"):
+            row["body"] = ctx.template.jinja2(row["body_template"], data = data)
+    row["_task_keys"] = _ordered_unique([k for _, k in contributors])
+    return row
+
+def _latest(contributors):
+    """Collapse a same-`(id, key)` group into one row, no cross-task
+    accumulation. `contributors` is `(tip, task_key)` in task order.
+
+    When every task rendered identical `(title, body)`, the row keeps that
+    content attributed to all of them — so N tasks emitting the same tip
+    read as one row crediting all N. When content diverges, the latest
+    task's content wins, attributed to that task."""
+    distinct = _ordered_unique([(t.get("title", ""), t.get("body", "")) for t, _ in contributors])
+    if len(distinct) == 1:
+        row = dict(contributors[0][0])
+        row["_task_keys"] = _ordered_unique([k for _, k in contributors])
+        return row
+    tip, task_key = contributors[-1]
+    row = dict(tip)
+    row["_task_keys"] = [task_key] if task_key else []
+    return row
+
+def _collect_tip_rows(ctx, entries):
+    """Group every entry's `tips` by `(id, key)`, combine each group into
+    a PR-summary row, attribute by task key, sort by severity, then apply
+    the rendering caps.
+
+    Eligibility: a tip is a rollup candidate only when its `surfaces`
+    allowlist is empty (all surfaces) or contains `SURFACE_GITHUB_PR_SUMMARY`.
+    The per-task producer already filtered with
+    `collect_tips_sorted(ctx, surface = SURFACE_GITHUB_PR_SUMMARY)`, so this is a
+    defensive re-assertion.
+
+    Each `(id, key)` group combines per `combine_across_tasks` (True if
+    any contributor sets it):
+
+      - True  — one row unioning the `accumulate` fields across every
+        task (`_combine_across`), attributed to all of them.
+      - False — one row (`_latest`): identical content across tasks is
+        attributed to all of them; divergent content takes the latest
+        task's. Distinct subjects belong under distinct `key`s, which
+        group separately here.
 
     Render caps:
       - `TIP_IMPORTANT` and `TIP_WARNING` always surface.
@@ -700,45 +765,28 @@ def _collect_tip_rows(ctx, entries):
 
     Returns rows in `decorate_tip` shape plus `task_keys` (sorted) for
     the attribution footer."""
-    by_id = {}
+    groups = {}
     insertion_order = []
     for e in entries:
         task_key = e.get("key", "") or e.get("name", "")
         for tip in e.get("tips", []) or []:
-            id_ = tip.get("id", "")
-            if not id_:
+            if not tip.get("id"):
                 continue
-            if id_ not in by_id:
-                row = dict(tip)
-                row["accumulators"] = {
-                    name: list(values or [])
-                    for name, values in (tip.get("accumulators") or {}).items()
-                }
-                row["_task_keys"] = []
-                by_id[id_] = row
-                insertion_order.append(id_)
-            else:
-                row = by_id[id_]
-                for name, values in (tip.get("accumulators") or {}).items():
-                    current = row["accumulators"].get(name, [])
-                    for v in values or []:
-                        if v not in current:
-                            current = current + [v]
-                    row["accumulators"][name] = current
-            if task_key and task_key not in by_id[id_]["_task_keys"]:
-                by_id[id_]["_task_keys"].append(task_key)
+            if not tip_shows_on(tip, SURFACE_GITHUB_PR_SUMMARY):
+                continue
+            identity = (tip["id"], tip.get("key", ""))
+            if identity not in groups:
+                groups[identity] = []
+                insertion_order.append(identity)
+            groups[identity].append((tip, task_key))
 
-    for row in by_id.values():
-        if row.get("type") == TIP_TEMPLATE_JINJA2 and row["accumulators"]:
-            if row.get("title_template"):
-                row["title"] = ctx.template.jinja2(row["title_template"], data = row["accumulators"])
-            if row.get("body_template"):
-                row["body"] = ctx.template.jinja2(row["body_template"], data = row["accumulators"])
+    rows = []
+    for identity in insertion_order:
+        contributors = groups[identity]
+        combine = any([t.get("combine_across_tasks") for t, _ in contributors])
+        rows.append(_combine_across(ctx, contributors) if combine else _latest(contributors))
 
-    rows = sorted(
-        [by_id[id_] for id_ in insertion_order],
-        key = lambda r: severity_rank(r.get("severity")),
-    )
+    rows = sorted(rows, key = lambda r: severity_rank(r.get("severity")))
     must_show, subordinate = [], []
     for r in rows:
         (must_show if _is_must_show(r.get("severity")) else subordinate).append(r)
@@ -1082,7 +1130,7 @@ def _github_status_comments(ctx: FeatureContext):
             "run_attempt": run_attempt,
             "status": _state.get("_status", "running"),
             "ci_run_url": link_url,
-            "tips": [tip_to_payload(t) for t in collect_tips_sorted(ctx)],
+            "tips": [tip_to_payload(t) for t in collect_tips_sorted(ctx, surface = SURFACE_GITHUB_PR_SUMMARY)],
             "rate_limit_observations": export_observations(ctx),
             "last_pr_comment_upsert_epoch_s": _state.get("_last_pr_comment_upsert_epoch_s", 0),
             # Cross-workflow merge tags. `head_sha` lets `_merge_state`
