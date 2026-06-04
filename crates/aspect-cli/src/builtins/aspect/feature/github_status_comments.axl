@@ -355,6 +355,30 @@ def _run_attempt_int(entry):
         return 1
     return int(raw)
 
+def _run_id_sort_key(run_id):
+    """Order GitHub Actions run_ids oldest-to-newest. Run_ids are
+    monotonically increasing integers per repo, so a larger value is the
+    more recent run. `(0, int)` for numeric ids; `(1, str)` for anything
+    non-numeric (defensive — a hand-edited slot sorts after all numeric
+    ids and compares by string)."""
+    s = str(run_id or "")
+    if s.isdigit():
+        return (0, int(s))
+    return (1, s)
+
+def _collapse_by(entries, key_of, rank_of):
+    """Collapse entries sharing a `key_of(entry)` identity to the single
+    entry with the greatest `rank_of(entry)`. Ties keep the first seen,
+    so callers that pre-sort can rely on stable first-wins behavior.
+    Returns the survivors in arbitrary order."""
+    best = {}
+    for e in entries:
+        k = key_of(e)
+        cur = best.get(k)
+        if cur == None or rank_of(e) > rank_of(cur):
+            best[k] = e
+    return list(best.values())
+
 def _dedup_by_run_attempt(entries):
     """Collapse entries that share a `(name, key, job)` identity to the
     one with the highest `run_attempt`.
@@ -371,50 +395,39 @@ def _dedup_by_run_attempt(entries):
     because they're legitimately distinct entries — `job` is part of
     the dedup key.
 
-    Tiebreak on equal `run_attempt`: the first entry to land in
-    `by_logical` wins. Callers feeding entries newest-first (e.g.
-    `_collect_sibling_entries`'s newest-id-first artifact sort) get
-    the newest-by-upstream-ordering as the tiebreaker — sufficient
-    for the only realistic tie scenario (two same-name artifacts on
-    the same attempt left over from a delete-race)."""
-    by_logical = {}
-    for e in entries:
-        key = (e.get("name", ""), e.get("key", ""), e.get("job", ""))
-        existing = by_logical.get(key)
-        if existing == None or _run_attempt_int(e) > _run_attempt_int(existing):
-            by_logical[key] = e
-    return list(by_logical.values())
+    Tiebreak on equal `run_attempt`: the first entry seen wins. Callers
+    feeding entries newest-first (e.g. `_collect_sibling_entries`'s
+    newest-id-first artifact sort) get the newest-by-upstream-ordering
+    as the tiebreaker — sufficient for the only realistic tie (two
+    same-name artifacts on the same attempt left over from a
+    delete-race)."""
+    return _collapse_by(
+        entries,
+        lambda e: (e.get("name", ""), e.get("key", ""), e.get("job", "")),
+        _run_attempt_int,
+    )
 
 def _dedup_for_display(entries):
     """Collapse entries that share a `(job, name, key)` identity across
-    DIFFERENT `workflow_run_id`s down to the one from the newest run.
+    different `workflow_run_id`s to the one from the newest run (by
+    `workflow_run_id`, then `run_attempt`).
 
-    Defense-in-depth against stale cross-workflow slots: `_merge_state`
-    evicts superseded slots (`_newest_run_per_workflow`), so in steady
-    state each logical task appears once. This guards the render path
-    so any future slot leak — or a snapshot row that outlived its
-    eviction by one cycle — can't visibly duplicate a row. Operates on
-    the display copy only; the persisted state block keeps per-run_id
-    granularity for the snapshot-fallback merge.
+    Defense-in-depth on the render path: `_merge_state` already evicts
+    superseded slots (`_live_sibling_runs`), so in steady state each
+    logical task appears once. This guards against a future slot
+    leak — or a snapshot row outliving its eviction by one cycle —
+    visibly duplicating a row. Operates on the display copy only; the
+    persisted state block keeps per-run_id granularity for the
+    snapshot-fallback merge.
 
-    Newest wins by `workflow_run_id` (monotonic per repo), then by
-    `run_attempt`. Distinct concurrent workflows produce distinct
-    `(job, ...)` only when their job names differ; same-named jobs in
-    genuinely-parallel workflows would collapse here, but that's the
-    intended one-row-per-task contract — the row reflects the most
-    recent run."""
-    by_logical = {}
-    for e in entries:
-        key = (e.get("job", ""), e.get("name", ""), e.get("key", ""))
-        existing = by_logical.get(key)
-        if existing == None:
-            by_logical[key] = e
-            continue
-        rank_new = (_run_id_sort_key(e.get("workflow_run_id", "")), _run_attempt_int(e))
-        rank_old = (_run_id_sort_key(existing.get("workflow_run_id", "")), _run_attempt_int(existing))
-        if rank_new > rank_old:
-            by_logical[key] = e
-    return list(by_logical.values())
+    Same-named jobs across genuinely-parallel workflows collapse here,
+    but that matches the one-row-per-task contract — the row reflects
+    the most recent run."""
+    return _collapse_by(
+        entries,
+        lambda e: (e.get("job", ""), e.get("name", ""), e.get("key", "")),
+        lambda e: (_run_id_sort_key(e.get("workflow_run_id", "")), _run_attempt_int(e)),
+    )
 
 def _should_quiet_delete_log(last_upload_at, now):
     """Decide whether a `DeleteArtifact` failure on a pre-upload cleanup
@@ -977,53 +990,39 @@ def _parse_state(body):
         "entries": parsed_entries,
     }
 
-def _run_id_sort_key(run_id):
-    """Sort key that orders GitHub Actions run_ids newest-last.
-
-    Run_ids are monotonically increasing integers per repo, so a larger
-    value is the more recent run. Returns `(0, int)` for numeric ids and
-    `(1, str)` for anything non-numeric (defensive — a hand-edited or
-    malformed slot sorts after all numeric ids and compares by string)."""
-    s = str(run_id or "")
-    if s.isdigit():
-        return (0, int(s))
-    return (1, s)
-
-def _newest_run_per_workflow(workflow_runs, my_run_id, my_workflow_name):
-    """Collapse `workflow_runs` slots to the newest `run_id` per
-    `workflow_name`, evicting slots superseded by a more recent run of
-    the same workflow on the same PR head.
+def _live_sibling_runs(workflow_runs, my_run_id, my_workflow_name):
+    """Filter `workflow_runs` (the comment's existing slots) down to the
+    live run per sibling workflow, dropping this writer's own slot and
+    any run a newer run of the same workflow has superseded.
 
     A workflow re-triggered on the same head SHA keeps its
-    `GITHUB_WORKFLOW` name but gets a fresh `GITHUB_RUN_ID`. Without
-    eviction the stale slot lingers (artifacts expire → frozen snapshot
-    fallback), duplicating every task in that workflow on the rendered
-    comment. Our own run (`my_run_id` / `my_workflow_name`) participates
-    in the contest so a stale prior run of our OWN workflow is dropped
-    too — the caller re-appends our slot afterward.
+    `GITHUB_WORKFLOW` name but gets a fresh `GITHUB_RUN_ID`. Left in
+    place, the stale slot lingers (its artifacts expire → frozen
+    snapshot fallback), duplicating every task in that workflow on the
+    rendered comment. For each named workflow only the newest `run_id`
+    survives. This writer's slot — matched on either `my_run_id` (so an
+    out-of-band-renamed slot at our run_id doesn't double up) or
+    `my_workflow_name` (a prior run of our own workflow) — is dropped so
+    the caller can re-add it as the live run.
 
     Slots with an empty `workflow_name` are passed through untouched
-    (can't be matched to a newer run reliably); each keeps its own
-    identity. Within a name, ties on `run_id` keep the first seen."""
-    contenders = list(workflow_runs)
-    contenders.append({"run_id": str(my_run_id), "workflow_name": my_workflow_name})
-
+    (unless they match `my_run_id`) — they can't be matched to a newer
+    run reliably, so each keeps its own identity."""
     newest_by_name = {}
     passthrough = []
-    for r in contenders:
+    for r in workflow_runs:
+        if str(r.get("run_id", "")) == str(my_run_id):
+            continue
         name = r.get("workflow_name", "") or ""
         if not name:
             passthrough.append(r)
             continue
+        if name == my_workflow_name:
+            continue
         cur = newest_by_name.get(name)
         if cur == None or _run_id_sort_key(r.get("run_id", "")) > _run_id_sort_key(cur.get("run_id", "")):
             newest_by_name[name] = r
-
-    # Exclude the synthetic self-slot we appended; the caller owns
-    # re-appending it (with the authoritative workflow_name).
-    kept = [r for r in (list(newest_by_name.values()) + passthrough)
-            if str(r.get("run_id", "")) != str(my_run_id)]
-    return kept
+    return list(newest_by_name.values()) + passthrough
 
 def _merge_state(existing_state, head_sha, my_run_id, my_workflow_name, my_entries, refreshed_other_entries):
     """Build the new state block to write to the comment.
@@ -1034,7 +1033,7 @@ def _merge_state(existing_state, head_sha, my_run_id, my_workflow_name, my_entri
         writer overlays its own slot, preserving sibling-workflow slots
         unchanged. Writes are slot-independent → no cross-workflow data
         race. A workflow re-triggered on the same head SHA supersedes
-        its prior slot (`_newest_run_per_workflow`) so stale runs don't
+        its prior slot (`_live_sibling_runs`) so stale runs don't
         accumulate as duplicate task rows.
       * `entries` is the full per-task snapshot, kept for two reasons:
         (a) fallback when a sibling workflow's artifacts are unreachable
@@ -1063,20 +1062,10 @@ def _merge_state(existing_state, head_sha, my_run_id, my_workflow_name, my_entri
 
     existing_runs = (existing_state or {}).get("workflow_runs", []) or []
 
-    # Evict superseded slots. A workflow re-triggered on the same PR head
-    # SHA (re-run, repeated `synchronize` that lands on the same commit,
-    # etc.) gets a fresh `GITHUB_RUN_ID` but the same `GITHUB_WORKFLOW`
-    # name. The old run's slot would otherwise persist in the comment
-    # state forever (its artifacts expire, so it falls back to a frozen
-    # snapshot), rendering a phantom duplicate of every task in that
-    # workflow. Keep only the newest `run_id` per `workflow_name` —
-    # run_ids are monotonically increasing per repo, so the lexically/
-    # numerically largest is the live run. Slots feeding into this from
-    # the comment exclude our own (`my_run_id`); our slot is appended
-    # after, so a stale prior run of OUR OWN workflow is dropped too.
-    existing_runs = _newest_run_per_workflow(existing_runs, my_run_id, my_workflow_name)
-
-    other_runs = [r for r in existing_runs if str(r.get("run_id", "")) != str(my_run_id)]
+    # Keep one live slot per sibling workflow (evicting runs superseded
+    # by a re-trigger on the same head SHA), then add our own slot back
+    # as the live run for our name. See `_live_sibling_runs`.
+    other_runs = _live_sibling_runs(existing_runs, my_run_id, my_workflow_name)
     workflow_runs = other_runs + [{"run_id": str(my_run_id), "workflow_name": my_workflow_name}]
 
     # Per-task union of refreshed entries with the comment's prior
