@@ -29,7 +29,6 @@ their content baked in, exposing only what varies as named params:
         body,                        # markdown body; interpreted per `type`
         type = TIP_TEMPLATE_RAW,     # RAW (default) / TIP_TEMPLATE_FORMAT / TIP_TEMPLATE_JINJA2
         key = "",                    # optional (id, key) discriminator — see "Tip identity"
-        id_suffix = "",              # appended to id (`<id>-<suffix>`) to parameterize a shared kind
         task_keys = None,            # optional glob list — see "Task-key scoping" below
         vars = None,                 # fixed scalars for FORMAT / JINJA2
         accumulate = None,           # list-valued JINJA2 fields, unioned on re-emit
@@ -579,7 +578,6 @@ def add_tip(
         body,
         type = TIP_TEMPLATE_RAW,
         key = "",
-        id_suffix = "",
         task_keys = None,
         vars = None,
         accumulate = None,
@@ -608,10 +606,8 @@ def add_tip(
     A tip is identified by `(id, key)` — see the "Tip identity" section.
     Re-emitting the same `(id, key)` within a task replaces the stored
     content (accumulate fields ride along); a different `key` is a
-    distinct tip. `id_suffix`, when set, is appended to `id` (`<id>-<suffix>`)
-    — handy for parameterizing a shared template into distinct ids.
-    Silencing is always by `id`: no-op if `id` is in the silence list AND
-    `severity != TIP_IMPORTANT`.
+    distinct tip. Silencing is always by `id`: no-op if `id` is in the
+    silence list AND `severity != TIP_IMPORTANT`.
 
     `task_keys` is an optional list of glob patterns; when set, the
     renderer only shows the tip on tasks whose key matches one of the
@@ -653,7 +649,7 @@ def add_tip(
         fail("TIP_TEMPLATE_JINJA2 tip %r requires at least one non-empty `vars` or `accumulate` value" % id)
 
     common = {
-        "id": id + "-" + id_suffix if id_suffix else id,
+        "id": id,
         "key": key,
         "severity": severity,
         "task_keys": list(task_keys) if task_keys else [],

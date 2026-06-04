@@ -4,7 +4,7 @@ Covers the tip framework primitives directly:
   - `add_tip` — the single entry point: `(id, key)` identity (re-emit
                 replaces; distinct `key` coexists), `type`-driven
                 title/body (RAW / FORMAT `vars` / JINJA2 `vars` +
-                `accumulate`), within-task `accumulate` union, `id_suffix`,
+                `accumulate`), within-task `accumulate` union,
                 severity guard, and `silenced_tips` short-circuit (by
                 `id`, across keys).
   - `collect_tips_sorted` — severity ordering, insertion-order stability,
@@ -208,17 +208,10 @@ def _test_add_tip_default_type_is_raw(ctx):
     add_tip(ctx, id = "default-type", severity = TIP_INFO, title = "Hello {name}", body = "B", vars = {"name": "world"})
     _eq("default type — RAW leaves braces verbatim", tips._inspect_for_test(ctx)[0]["title"], "Hello {name}")
 
-def _test_add_tip_id_suffix(ctx):
-    _reset(ctx)
-    add_tip(ctx, id = "base", severity = TIP_INFO, type = TIP_TEMPLATE_RAW, title = "T", body = "B")
-    add_tip(ctx, id = "base", severity = TIP_INFO, type = TIP_TEMPLATE_RAW, title = "T", body = "B", id_suffix = "variant-a")
-    add_tip(ctx, id = "base", severity = TIP_INFO, type = TIP_TEMPLATE_RAW, title = "T", body = "B", id_suffix = "variant-b")
-    _eq("id_suffix — distinct ids", _ids(tips._inspect_for_test(ctx)), ["base", "base-variant-a", "base-variant-b"])
-
-def _test_add_tip_task_keys_override(ctx):
+def _test_add_tip_task_keys_independent(ctx):
     _reset(ctx)
     add_tip(ctx, id = "tmpl-1", severity = TIP_INFO, type = TIP_TEMPLATE_RAW, title = "T", body = "B", task_keys = ["lint-*"])
-    add_tip(ctx, id = "tmpl-1", severity = TIP_INFO, type = TIP_TEMPLATE_RAW, title = "T", body = "B", id_suffix = "override", task_keys = ["format-*", "gazelle-*"])
+    add_tip(ctx, id = "tmpl-2", severity = TIP_INFO, type = TIP_TEMPLATE_RAW, title = "T", body = "B", task_keys = ["format-*", "gazelle-*"])
     stored = tips._inspect_for_test(ctx)
     _eq("add_tip — first task_keys honored", stored[0]["task_keys"], ["lint-*"])
     _eq("add_tip — second tip's task_keys independent", stored[1]["task_keys"], ["format-*", "gazelle-*"])
@@ -818,8 +811,7 @@ def _test_impl(ctx):
     _test_add_tip_format(ctx)
     _test_add_tip_raw_skips_interpolation(ctx)
     _test_add_tip_default_type_is_raw(ctx)
-    _test_add_tip_id_suffix(ctx)
-    _test_add_tip_task_keys_override(ctx)
+    _test_add_tip_task_keys_independent(ctx)
     _test_jinja2_first_emit_seeds_accumulate(ctx)
     _test_jinja2_reemit_merges_new_values(ctx)
     _test_jinja2_reemit_skips_duplicate_values(ctx)
