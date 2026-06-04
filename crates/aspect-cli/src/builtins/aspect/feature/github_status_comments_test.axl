@@ -1114,6 +1114,45 @@ def _check_dedup_for_display_keeps_distinct_workflows():
     ])
     _eq("dedup_for_display — distinct workflows both kept", len(out), 2)
 
+def _check_rerun_renders_each_task_once(ctx):
+    """End-to-end regression for the reported duplication: a comment
+    whose state block still carries a stale prior run of our workflow
+    must render each task exactly once after merge + display dedup.
+
+    Drives the full publish-side pipeline a writer uses: merge_state →
+    dedup_for_display → bucket_entries → render_body."""
+    existing = {
+        "head_sha": "abc",
+        "workflow_runs": [{"run_id": "100", "workflow_name": "ci-gha"}],
+        "entries": [
+            {"name": "test", "key": "cpu-test", "job": "test (cpu-test)", "workflow_run_id": "100", "status": "passed"},
+            {"name": "lint", "key": "lint", "job": "lint", "workflow_run_id": "100", "status": "passed"},
+        ],
+    }
+
+    # We are a newer run (999) of the same workflow with the same tasks.
+    my_entries = [
+        {"name": "test", "key": "cpu-test", "job": "test (cpu-test)", "workflow_run_id": "999", "status": "passed"},
+        {"name": "lint", "key": "lint", "job": "lint", "workflow_run_id": "999", "status": "passed"},
+    ]
+    new = merge_state(existing, "abc", "999", "ci-gha", my_entries, {})
+
+    prepared = prepare_for_render(dedup_for_display(new["entries"]))
+    sections = bucket_entries(prepared)
+    body = render_body(
+        ctx,
+        MARKER_FMT % 7,
+        prepared,
+        "2026-01-01 00:00:00 UTC",
+        DEFAULT_BODY_TEMPLATE,
+        DEFAULT_STATUS_BADGES,
+        sections,
+        state = new,
+    )
+    _eq("rerun render — 'test (cpu-test)' appears once", body.count("test (cpu-test)"), 1)
+    _eq("rerun render — 'lint' row appears once", body.count("✅ lint"), 1)
+    _eq("rerun render — two task rows total", body.count("<br>💬"), 2)
+
 def _check_render_body_emits_state_block(ctx):
     """When `state` is set, the rendered body carries an HTML-comment
     state block whose payload parses back to the state we passed."""
@@ -1269,6 +1308,7 @@ def _test_impl(ctx):
     _check_dedup_for_display_collapses_exact_duplicates()
     _check_dedup_for_display_keeps_distinct_jobs()
     _check_dedup_for_display_keeps_distinct_workflows()
+    _check_rerun_renders_each_task_once(ctx)
     _check_merge_state_workflow_runs_sorted()
     _check_merge_state_entries_sorted()
     _check_render_body_emits_state_block(ctx)

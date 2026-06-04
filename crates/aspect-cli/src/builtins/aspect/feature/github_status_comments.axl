@@ -379,6 +379,18 @@ def _collapse_by(entries, key_of, rank_of):
             best[k] = e
     return list(best.values())
 
+def _union_entries_by_name_key(primary, fallback):
+    """Concatenate `primary` with the `fallback` entries whose
+    `(name, key)` isn't already in `primary`. Primary wins per task;
+    fallback fills the gaps. Order: all of `primary`, then the surviving
+    fallback rows in their original order."""
+    primary_keys = {(e.get("name", ""), e.get("key", "")): True for e in primary}
+    return list(primary) + [
+        e
+        for e in fallback
+        if (e.get("name", ""), e.get("key", "")) not in primary_keys
+    ]
+
 def _dedup_by_run_attempt(entries):
     """Collapse entries that share a `(name, key, job)` identity to the
     one with the highest `run_attempt`.
@@ -1072,13 +1084,11 @@ def _merge_state(existing_state, head_sha, my_run_id, my_workflow_name, my_entri
     # contribute nothing this cycle. See `_live_runs`.
     workflow_runs = _live_runs(existing_runs, my_run_id, my_workflow_name)
 
-    # Per-task union of refreshed entries with the comment's prior
-    # snapshot. Refresh wins per `(name, key)`; snapshot fills any
-    # tasks the refresh didn't return. Mitigates artifact-listing
-    # eventual consistency: a partial refresh that's briefly missing
-    # some task's artifact would otherwise drop that row this cycle
-    # and re-add it next cycle when the listing converges, causing
-    # visible "entry count flips" thrashing on the comment.
+    # Index the comment's prior per-task snapshot by run_id. It backfills
+    # tasks a sibling-workflow refresh didn't return this cycle (see the
+    # union below) — a partial refresh under artifact-listing eventual
+    # consistency would otherwise drop a row this cycle and re-add it the
+    # next, thrashing the visible entry count.
     snapshot_by_run = {}
     for e in ((existing_state or {}).get("entries", []) or []):
         rid = str(e.get("workflow_run_id", ""))
@@ -1088,19 +1098,15 @@ def _merge_state(existing_state, head_sha, my_run_id, my_workflow_name, my_entri
     for r in workflow_runs:
         rid = str(r.get("run_id", ""))
         if rid == str(my_run_id):
-            # Our own authoritative entries — only if we won our slot.
+            # Our own authoritative entries (only present when we won our slot).
             entries.extend(my_entries)
             continue
         snapshot = snapshot_by_run.get(rid, [])
         refreshed = refreshed_other_entries.get(rid)
         if refreshed == None:
             entries.extend(snapshot)
-            continue
-        entries.extend(refreshed)
-        refreshed_keys = {(e.get("name", ""), e.get("key", "")): True for e in refreshed}
-        for e in snapshot:
-            if (e.get("name", ""), e.get("key", "")) not in refreshed_keys:
-                entries.append(e)
+        else:
+            entries.extend(_union_entries_by_name_key(refreshed, snapshot))
 
     # Deterministic ordering so the serialized state block is byte-stable
     # across writers. Without this, publish ownership alternating between
