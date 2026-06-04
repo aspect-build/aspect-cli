@@ -711,10 +711,10 @@ def _combine_across(ctx, contributors):
         row["accumulate"] = merged
         data = dict(row.get("vars") or {})
         data.update(merged)
-        if row.get("title_template"):
-            row["title"] = ctx.template.jinja2(row["title_template"], data = data)
-        if row.get("body_template"):
-            row["body"] = ctx.template.jinja2(row["body_template"], data = data)
+        if row.get("_title_src"):
+            row["title"] = ctx.template.jinja2(row["_title_src"], data = data)
+        if row.get("_body_src"):
+            row["body"] = ctx.template.jinja2(row["_body_src"], data = data)
     row["_task_keys"] = _ordered_unique([k for _, k in contributors])
     return row
 

@@ -70,8 +70,13 @@ def detect_buildkite_build_url(env):
         return build_url + "#" + job_id
     return build_url
 
-def detect_build_url(ctx: TaskContext, existing_app_token: str | None = None) -> str:
+def detect_build_url(ctx, existing_app_token: str | None = None) -> str:
     """Detect the job-scoped CI build URL from the environment.
+
+    `ctx` is left unannotated because callers pass either a `TaskContext`
+    or a `FeatureContext` (status-check features resolve the link from
+    feature context); only `ctx.std.env` and the GHA upgrade path's `ctx`
+    plumbing are used.
 
     Returns the URL of the running CI build (the page a developer would
     visit to see logs/status), or "" if no recognized CI host is detected

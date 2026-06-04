@@ -6,7 +6,6 @@ and customize tips with a single import:
 
     load("@aspect//tips.axl",
          "add_tip",
-         "emit_tip",
          "tips",
          "TIP_IMPORTANT",
          "TIP_WARNING",
@@ -31,13 +30,14 @@ and customize tips with a single import:
          "tip_replace")
 
 This is the customer-facing surface; internal modules load directly from
-`lib/tips.axl`. The built-in tip templates (`TIP_ADD_GITHUB_TOKEN`, …) are
-re-exported too so a config can preempt or silence them by id.
+`lib/tips.axl`. The built-in tips (`tip_add_github_token`, …) are
+re-exported too so a config can call them or preempt / silence them by id.
 """
 
 load(
     "./lib/tips.axl",
     _AGGREGATE_SCREENS = "AGGREGATE_SCREENS",
+    _AspectApiTokenHost = "AspectApiTokenHost",
     _SURFACE_ALL = "SURFACE_ALL",
     _SURFACE_BUILDKITE_ANNOTATIONS = "SURFACE_BUILDKITE_ANNOTATIONS",
     _SURFACE_CLI = "SURFACE_CLI",
@@ -46,12 +46,6 @@ load(
     _SURFACE_GITLAB_COMMIT_STATUSES = "SURFACE_GITLAB_COMMIT_STATUSES",
     _TASK_SCREENS = "TASK_SCREENS",
     _TIP_ACCEPT = "TIP_ACCEPT",
-    _TIP_ADD_ASPECT_API_TOKEN_BUILDKITE = "TIP_ADD_ASPECT_API_TOKEN_BUILDKITE",
-    _TIP_ADD_ASPECT_API_TOKEN_CIRCLECI = "TIP_ADD_ASPECT_API_TOKEN_CIRCLECI",
-    _TIP_ADD_ASPECT_API_TOKEN_GHA = "TIP_ADD_ASPECT_API_TOKEN_GHA",
-    _TIP_ADD_GITHUB_TOKEN = "TIP_ADD_GITHUB_TOKEN",
-    _TIP_ADD_GITHUB_TOKEN_SCOPE = "TIP_ADD_GITHUB_TOKEN_SCOPE",
-    _TIP_ADD_ID_TOKEN_PERMISSION = "TIP_ADD_ID_TOKEN_PERMISSION",
     _TIP_IMPORTANT = "TIP_IMPORTANT",
     _TIP_INFO = "TIP_INFO",
     _TIP_REJECT = "TIP_REJECT",
@@ -65,7 +59,10 @@ load(
     _TipSuggestion = "TipSuggestion",
     _TipsTrait = "TipsTrait",
     _add_tip = "add_tip",
-    _emit_tip = "emit_tip",
+    _tip_add_aspect_api_token = "tip_add_aspect_api_token",
+    _tip_add_github_token = "tip_add_github_token",
+    _tip_add_github_token_scope = "tip_add_github_token_scope",
+    _tip_add_id_token_permission = "tip_add_id_token_permission",
     _tip_replace = "tip_replace",
     _tips = "tips",
 )
@@ -93,7 +90,6 @@ SURFACE_ALL = _SURFACE_ALL
 
 # Producer API.
 add_tip = _add_tip
-emit_tip = _emit_tip
 tips = _tips
 
 # tip_suggestion hook.
@@ -105,10 +101,10 @@ TIP_ACCEPT = _TIP_ACCEPT
 TIP_REJECT = _TIP_REJECT
 tip_replace = _tip_replace
 
-# Built-in tip templates (re-exported so a config can preempt / silence them).
-TIP_ADD_GITHUB_TOKEN = _TIP_ADD_GITHUB_TOKEN
-TIP_ADD_ASPECT_API_TOKEN_GHA = _TIP_ADD_ASPECT_API_TOKEN_GHA
-TIP_ADD_ASPECT_API_TOKEN_BUILDKITE = _TIP_ADD_ASPECT_API_TOKEN_BUILDKITE
-TIP_ADD_ASPECT_API_TOKEN_CIRCLECI = _TIP_ADD_ASPECT_API_TOKEN_CIRCLECI
-TIP_ADD_GITHUB_TOKEN_SCOPE = _TIP_ADD_GITHUB_TOKEN_SCOPE
-TIP_ADD_ID_TOKEN_PERMISSION = _TIP_ADD_ID_TOKEN_PERMISSION
+# Built-in tips (re-exported so a config can call or preempt them; silence
+# by the id each one emits, e.g. `add-github-token`).
+tip_add_github_token = _tip_add_github_token
+tip_add_aspect_api_token = _tip_add_aspect_api_token
+tip_add_github_token_scope = _tip_add_github_token_scope
+tip_add_id_token_permission = _tip_add_id_token_permission
+AspectApiTokenHost = _AspectApiTokenHost

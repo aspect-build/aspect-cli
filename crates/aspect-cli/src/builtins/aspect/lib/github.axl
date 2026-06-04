@@ -30,13 +30,11 @@ load("./tar.axl", "zip_create")
 load("./text.axl", "pluralize")
 load(
     "./tips.axl",
-    "TIP_ADD_ASPECT_API_TOKEN_BUILDKITE",
-    "TIP_ADD_ASPECT_API_TOKEN_CIRCLECI",
-    "TIP_ADD_ASPECT_API_TOKEN_GHA",
-    "TIP_ADD_GITHUB_TOKEN",
-    "TIP_ADD_GITHUB_TOKEN_SCOPE",
-    "TIP_ADD_ID_TOKEN_PERMISSION",
-    "emit_tip",
+    "AspectApiTokenHost",
+    "tip_add_aspect_api_token",
+    "tip_add_github_token",
+    "tip_add_github_token_scope",
+    "tip_add_id_token_permission",
 )
 
 DEFAULT_GITHUB_API = "https://api.github.com"
@@ -264,15 +262,16 @@ def _is_4xx_auth(status_code):
     can't see the resource)."""
     return status_code in (401, 403, 404)
 
-def _emit_tip_if_ready(ctx, template, **kwargs):
-    """Emit a tip when `ctx.traits` is available. Defensive against
+def _emit_tip_if_ready(ctx, tip_fn, **kwargs):
+    """Call `tip_fn(ctx, **kwargs)` (a built-in `tip_*` function from
+    `lib/tips.axl`) when `ctx.traits` is available. Defensive against
     test stubs that don't carry a traits map. Use for tips whose
     recommendation applies on every CI host."""
     if not hasattr(ctx, "traits"):
         return
-    emit_tip(ctx, template, **kwargs)
+    tip_fn(ctx, **kwargs)
 
-def _emit_gha_tip(ctx, template, **kwargs):
+def _emit_gha_tip(ctx, tip_fn, **kwargs):
     """Emit a tip whose recommendation is GitHub-Actions-specific
     (workflow YAML, `permissions:` block, `${{ secrets.* }}`). Wraps
     `_emit_tip_if_ready` with an additional `GITHUB_ACTIONS` env gate
@@ -280,7 +279,7 @@ def _emit_gha_tip(ctx, template, **kwargs):
     its example syntax would be wrong."""
     if not ctx.std.env.var("GITHUB_ACTIONS"):
         return
-    _emit_tip_if_ready(ctx, template, **kwargs)
+    _emit_tip_if_ready(ctx, tip_fn, **kwargs)
 
 def _emit_aspect_api_token_tip(ctx):
     """Emit the host-specific `add-aspect-api-token-<host>` tip on CI
@@ -289,14 +288,14 @@ def _emit_aspect_api_token_tip(ctx):
     CIs where there's no documented use case yet."""
     env = ctx.std.env
     if env.var("GITHUB_ACTIONS"):
-        template = TIP_ADD_ASPECT_API_TOKEN_GHA
+        host = AspectApiTokenHost("github-actions")
     elif env.var("BUILDKITE"):
-        template = TIP_ADD_ASPECT_API_TOKEN_BUILDKITE
+        host = AspectApiTokenHost("buildkite")
     elif env.var("CIRCLECI"):
-        template = TIP_ADD_ASPECT_API_TOKEN_CIRCLECI
+        host = AspectApiTokenHost("circleci")
     else:
         return
-    _emit_tip_if_ready(ctx, template)
+    _emit_tip_if_ready(ctx, tip_add_aspect_api_token, host = host.value)
 
 def _preferred_token_pair(ctx, owner, repo, profile = None, roles = None, existing_app_token = None, _reason = None):
     """Resolve `(primary_token, fallback_token)` for supporting GitHub
@@ -339,9 +338,9 @@ def _preferred_token_pair(ctx, owner, repo, profile = None, roles = None, existi
     both a structured `kind` and a human-readable `reason` from
     `_authenticate`.
 
-    `_authenticate` emits `TIP_ADD_ASPECT_API_TOKEN` (kind + host gated)
+    `_authenticate` emits `tip_add_aspect_api_token` (kind + host gated)
     on the missing-credentials path. `_preferred_token_pair` additionally
-    emits `TIP_ADD_GITHUB_TOKEN` on GitHub Actions when neither App nor
+    emits `tip_add_github_token` on GitHub Actions when neither App nor
     env produces a token, since exporting `GITHUB_TOKEN` is the
     GHA-specific path to an immediate fallback.
 
@@ -373,7 +372,7 @@ def _preferred_token_pair(ctx, owner, repo, profile = None, roles = None, existi
     if env_token:
         return env_token, None, BUCKET_ENV
 
-    _emit_gha_tip(ctx, TIP_ADD_GITHUB_TOKEN)
+    _emit_gha_tip(ctx, tip_add_github_token)
     return None, None, BUCKET_APP
 
 def _authenticate(ctx, owner, repo, profile = None, roles = None, _reason = None):
@@ -1754,7 +1753,7 @@ def _decode_backend_ids(ctx, token):
 # Short error string returned from artifact-upload paths when neither
 # `ACTIONS_RUNTIME_TOKEN` nor `ACTIONS_ID_TOKEN_REQUEST_TOKEN` is
 # available. The full actionable guidance (workflow snippet, why this
-# happens, how to fix) lives in `TIP_ADD_ID_TOKEN_PERMISSION` so the
+# happens, how to fix) lives in `tip_add_id_token_permission` so the
 # tip framework can surface it on the terminal + check-run summary +
 # PR comment — we don't need to repeat it inline on every failure
 # log line. The tip is auto-fired from the same use sites.
@@ -1799,7 +1798,7 @@ def _github_twirp(ctx, method, payload, quiet_failure_log = False):
     results_url = (ctx.std.env.var("ACTIONS_RESULTS_URL") or
                    "https://results-receiver.actions.githubusercontent.com/")
     if not token:
-        _emit_gha_tip(ctx, TIP_ADD_ID_TOKEN_PERMISSION)
+        _emit_gha_tip(ctx, tip_add_id_token_permission)
         return (False, None, _MISSING_TOKEN_MSG)
 
     if results_url.endswith("/"):
@@ -1854,7 +1853,7 @@ def _upload_artifact(ctx, path, name, expires_at = ""):
     token = (ctx.std.env.var("ACTIONS_RUNTIME_TOKEN") or
              ctx.std.env.var("ACTIONS_ID_TOKEN_REQUEST_TOKEN"))
     if not token:
-        _emit_gha_tip(ctx, TIP_ADD_ID_TOKEN_PERMISSION)
+        _emit_gha_tip(ctx, tip_add_id_token_permission)
         return {"success": False, "artifact_ref": None, "download_url": "", "errors": [_MISSING_TOKEN_MSG]}
 
     run_id, job_id = _decode_backend_ids(ctx, token)
@@ -1981,13 +1980,13 @@ def _delete_artifact(ctx, name, quiet_failure_log = False):
 
 def _check_token(ctx):
     """Return a short info message if the artifact token is unavailable,
-    else None. Fires `TIP_ADD_ID_TOKEN_PERMISSION` on the missing-token
+    else None. Fires `tip_add_id_token_permission` on the missing-token
     branch — the tip carries the actionable workflow snippet, so the
     return value just needs to identify the failure mode."""
     env = ctx.std.env
     token = env.var("ACTIONS_RUNTIME_TOKEN") or env.var("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
     if not token:
-        _emit_gha_tip(ctx, TIP_ADD_ID_TOKEN_PERMISSION)
+        _emit_gha_tip(ctx, tip_add_id_token_permission)
         return _MISSING_TOKEN_MSG
     return None
 
@@ -2030,10 +2029,12 @@ def _resolve_current_job_url(ctx, token, owner, repo, run_id, fallback_token = N
     fallback_class = BUCKET_ENV if token_class == BUCKET_APP else BUCKET_APP
     success, status_code, body = _do_request(ctx, "GET", url, token, quiet_4xx_auth = has_fallback, token_class = token_class)
     if (not success) and has_fallback and _is_4xx_auth(status_code):
-        _emit_gha_tip(ctx, TIP_ADD_GITHUB_TOKEN_SCOPE, accumulate = {
-            "scopes": "actions: read",
-            "endpoints": "GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs",
-        })
+        _emit_gha_tip(
+            ctx,
+            tip_add_github_token_scope,
+            scopes = "actions: read",
+            endpoints = "GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs",
+        )
         success, status_code, body = _do_request(ctx, "GET", url, fallback_token, token_class = fallback_class)
     if not success or type(body) != "dict":
         return ""
@@ -2091,10 +2092,12 @@ def list_pull_request_files(ctx, token, owner, repo, pull_number, fallback_token
         has_fallback = page == 1 and fallback_token and fallback_token != token
         success, status_code, body = _do_request(ctx, "GET", url, active_token, quiet_4xx_auth = has_fallback, token_class = active_class)
         if (not success) and has_fallback and _is_4xx_auth(status_code):
-            _emit_gha_tip(ctx, TIP_ADD_GITHUB_TOKEN_SCOPE, accumulate = {
-                "scopes": "pull-requests: read",
-                "endpoints": "GET /repos/{owner}/{repo}/pulls/{pull_number}/files",
-            })
+            _emit_gha_tip(
+                ctx,
+                tip_add_github_token_scope,
+                scopes = "pull-requests: read",
+                endpoints = "GET /repos/{owner}/{repo}/pulls/{pull_number}/files",
+            )
             active_token = fallback_token
             active_class = fallback_class
             success, status_code, body = _do_request(ctx, "GET", url, active_token, token_class = active_class)

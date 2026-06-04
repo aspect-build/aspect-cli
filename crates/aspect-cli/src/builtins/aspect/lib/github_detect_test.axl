@@ -417,7 +417,7 @@ def _test_impl(ctx):
         ("gha-fallback", None, "env"),
     )
 
-    # ── Failure-kind gate for TIP_ADD_ASPECT_API_TOKEN ────────────────
+    # ── Failure-kind gate for tip_add_aspect_api_token ────────────────
     # `_authenticate` classifies failures via a stable `kind` field;
     # `_preferred_token_pair` keys the missing-credentials tip off
     # that field (not the human-readable message) and further restricts
@@ -555,7 +555,7 @@ def _stub_ctx(ctx, env_vars, http_client):
 
 def _test_aspect_api_token_tip_gate(ctx):
     """Verify `_authenticate` populates `_reason["kind"]` with the right
-    discriminator and emits `TIP_ADD_ASPECT_API_TOKEN` only when (1) the
+    discriminator and emits `tip_add_aspect_api_token` only when (1) the
     kind is `no-credentials` AND (2) the CI host is in the
     documented-Aspect-integration set (GHA / Buildkite / CircleCI).
     Covers both call paths: features calling `authenticate` directly
@@ -713,12 +713,12 @@ def _test_pr_files_4xx_auth_fallback(ctx):
     _eq("pr-files fallback: tip id", tip["id"], "add-github-token-scope")
     _eq(
         "pr-files fallback: scope accumulated",
-        tip["accumulators"]["scopes"],
+        tip["accumulate"]["scopes"],
         ["pull-requests: read"],
     )
     _eq(
         "pr-files fallback: endpoint accumulated",
-        tip["accumulators"]["endpoints"],
+        tip["accumulate"]["endpoints"],
         ["GET /repos/{owner}/{repo}/pulls/{pull_number}/files"],
     )
 

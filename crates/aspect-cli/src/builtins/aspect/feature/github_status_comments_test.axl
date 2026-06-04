@@ -438,8 +438,8 @@ def _check_collect_tip_rows(ctx):
             "body": "...",
             "type": "jinja2",
             "combine_across_tasks": True,
-            "title_template": title_tmpl,
-            "body_template": body_tmpl,
+            "_title_src": title_tmpl,
+            "_body_src": body_tmpl,
             "accumulate": {"scopes": ["actions: read"], "endpoints": ["/a/jobs"]},
         }]},
         {"key": "test-task", "tips": [{
@@ -449,8 +449,8 @@ def _check_collect_tip_rows(ctx):
             "body": "...",
             "type": "jinja2",
             "combine_across_tasks": True,
-            "title_template": title_tmpl,
-            "body_template": body_tmpl,
+            "_title_src": title_tmpl,
+            "_body_src": body_tmpl,
             "accumulate": {"scopes": ["pull-requests: read"], "endpoints": ["/b/files", "/c/files"]},
         }]},
     ])
@@ -537,8 +537,8 @@ def _check_collect_tip_rows(ctx):
     # combine=True if ANY contributor opts in: the group merges into one
     # row even when another contributor left it False.
     rows = collect_tip_rows(ctx, [
-        {"key": "build-task", "tips": [{"id": "scope", "severity": "info", "title": "T", "body": "b", "type": "jinja2", "title_template": "T", "body_template": "{% for s in scopes %}{{ s }} {% endfor %}", "accumulate": {"scopes": ["a"]}}]},
-        {"key": "test-task", "tips": [{"id": "scope", "severity": "info", "title": "T", "body": "b", "type": "jinja2", "combine_across_tasks": True, "title_template": "T", "body_template": "{% for s in scopes %}{{ s }} {% endfor %}", "accumulate": {"scopes": ["b"]}}]},
+        {"key": "build-task", "tips": [{"id": "scope", "severity": "info", "title": "T", "body": "b", "type": "jinja2", "_title_src": "T", "_body_src": "{% for s in scopes %}{{ s }} {% endfor %}", "accumulate": {"scopes": ["a"]}}]},
+        {"key": "test-task", "tips": [{"id": "scope", "severity": "info", "title": "T", "body": "b", "type": "jinja2", "combine_across_tasks": True, "_title_src": "T", "_body_src": "{% for s in scopes %}{{ s }} {% endfor %}", "accumulate": {"scopes": ["b"]}}]},
     ])
     if len(rows) != 1 or rows[0]["task_keys"] != ["build-task", "test-task"]:
         fail("combine-any: a single combine_across_tasks contributor must merge the group, got %r" % rows)
