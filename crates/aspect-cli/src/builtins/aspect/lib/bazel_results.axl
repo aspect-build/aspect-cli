@@ -1068,6 +1068,15 @@ def resolve_aspect_url(links, data):
         return ""
     return (base if base.endswith("/") else base + "/") + inv_id
 
+def aspect_web_ui_url(env: std.Env, data: dict) -> str:
+    """Aspect Web UI invocation URL for a task, or "" when unavailable.
+
+    Joins `ASPECT_WORKFLOWS_BES_RESULTS_URL` (`env` = `ctx.std.env`) with
+    the sink-minted `data["sink_invocation_id"]` (the UUID the Aspect
+    backend indexes invocations by). "" if either is missing."""
+    base = env.var("ASPECT_WORKFLOWS_BES_RESULTS_URL") or ""
+    return resolve_aspect_url({"results_base_url": base}, data)
+
 def failed_labels(data):
     """Collect the deduplicated list of failed target labels from `data["bazel"]`.
 
@@ -2547,18 +2556,14 @@ def _sorted_dedup(args, allow_env):
     unique = sorted(set(redacted))
     return [_quote_flag(a) for a in unique]
 
-def render_bes_url(data):
-    """Construct the full BES invocation URL from bes_results_url + invocation_id.
+def render_bes_url(data: dict) -> str:
+    """Full BES results URL from a Bazel task's `data["bazel"]`, or ""
+    when unavailable.
 
-    Uses Bazel's `invocation_id` (the UUID Bazel mints for its own
-    BEP stream — captured from the `BuildStarted` BEP event), not the
-    Aspect-side `sink_invocation_id`. The two are distinct: the
-    `--bes_results_url` consumer only sees Bazel's UUID, so the link
-    must key on that. `resolve_aspect_url` is the parallel helper for
-    the Aspect Web UI which is keyed on `sink_invocation_id`.
-
-    Returns "" when either piece is unavailable (caller suppresses
-    the link rather than rendering a broken URL).
+    Keyed on Bazel's own `invocation_id` (the UUID from the `BuildStarted`
+    BEP event) — the `--bes_results_url` backend only sees that UUID. This
+    is the BES counterpart to `aspect_web_ui_url`, which keys the Aspect
+    Web UI on the sink-minted `sink_invocation_id`.
     """
     base = data["bazel"].get("bes_results_url", "")
     inv = data["bazel"].get("invocation_id", "")

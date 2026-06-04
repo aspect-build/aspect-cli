@@ -17,16 +17,12 @@ files can load the full trait set with a single import:
          "ReproFixInfo",
          "ReproFixSuggestion",
          "TaskUpdate",
-         "TipInfo",
-         "TipSuggestion",
-         "TipsTrait",
-         "TIP_ACCEPT",
-         "TIP_REJECT",
-         "repro_fix_replace",
-         "tip_replace")
+         "repro_fix_replace")
 
 Internal modules should load directly from the owning module — this
-facade is purely a user-facing convenience.
+facade is purely a user-facing convenience. The tip authoring API
+(`TipsTrait`, `tip_suggestion` records, severities, surfaces, …) lives
+in its own facade: `@aspect//tips.axl`.
 
 Note: artifact URLs are no longer exposed via a trait. Use the
 `artifacts` struct from `@aspect//lib/artifacts.axl` instead — it
@@ -51,16 +47,6 @@ load(
     _TaskUpdate = "TaskUpdate",
     _repro_fix_replace = "repro_fix_replace",
 )
-load(
-    "./lib/tips.axl",
-    _TIP_ACCEPT = "TIP_ACCEPT",
-    _TIP_REJECT = "TIP_REJECT",
-    _TipAction = "TipAction",
-    _TipInfo = "TipInfo",
-    _TipSuggestion = "TipSuggestion",
-    _TipsTrait = "TipsTrait",
-    _tip_replace = "tip_replace",
-)
 load("./lint.axl", _LintTrait = "LintTrait")
 
 BazelTrait = _BazelTrait
@@ -74,13 +60,6 @@ ReproFixCommand = _ReproFixCommand
 ReproFixCommandKind = _ReproFixCommandKind
 ReproFixInfo = _ReproFixInfo
 ReproFixSuggestion = _ReproFixSuggestion
-TIP_ACCEPT = _TIP_ACCEPT
-TIP_REJECT = _TIP_REJECT
 TaskLifecycleTrait = _TaskLifecycleTrait
 TaskUpdate = _TaskUpdate
-TipAction = _TipAction
-TipInfo = _TipInfo
-TipSuggestion = _TipSuggestion
-TipsTrait = _TipsTrait
 repro_fix_replace = _repro_fix_replace
-tip_replace = _tip_replace

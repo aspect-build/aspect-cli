@@ -42,12 +42,13 @@ _CI_HOSTS = [
     {"marker": "GITLAB_CI", "label": "GitLab CI", "icon": "🦊"},
 ]
 
-def detect_ci_host(env):
-    """Return the matching `_CI_HOSTS` entry for the current env, or `None`.
+def detect_ci_host(env: std.Env) -> dict | None:
+    """Return the running CI host, or `None` off a recognized host.
 
-    Entry shape: `{"marker": str, "label": str, "icon": str}`. Used by
-    status surfaces that need a human-readable CI label and/or icon
-    alongside the URL `detect_build_url` returns.
+    The entry is `{"marker": str, "label": str, "icon": str}` — a
+    human-readable label and icon for the host (GitHub Actions /
+    Buildkite / CircleCI / GitLab), to pair with the URL
+    `detect_build_url` returns.
     """
     for host in _CI_HOSTS:
         if env.var(host["marker"]):
@@ -69,7 +70,7 @@ def detect_buildkite_build_url(env):
         return build_url + "#" + job_id
     return build_url
 
-def detect_build_url(ctx, existing_app_token = None):
+def detect_build_url(ctx: TaskContext, existing_app_token: str | None = None) -> str:
     """Detect the job-scoped CI build URL from the environment.
 
     Returns the URL of the running CI build (the page a developer would

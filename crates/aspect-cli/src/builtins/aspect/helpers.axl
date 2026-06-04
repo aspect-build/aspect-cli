@@ -1,0 +1,28 @@
+"""Public facade re-exporting helpers for `config.axl` task hooks.
+
+These let a user `task_update` / `tip_suggestion` hook reconstruct the
+same click-through links the built-in status surfaces render, without
+loading the implementation modules directly. Each helper's definition
+lives in its owning module (see there for full semantics):
+
+  - `detect_ci_host(env) -> {marker, label, icon} | None`
+        the running CI host (GitHub Actions / Buildkite / CircleCI /
+        GitLab), or None off a recognized host. From `lib/ci.axl`.
+  - `detect_build_url(ctx) -> str`
+        the job-scoped CI build URL, or "" off a recognized host. From
+        `lib/ci.axl`.
+  - `aspect_web_ui_url(env, data) -> str`
+        the Aspect Web UI invocation URL, or "" when unavailable. From
+        `lib/bazel_results.axl`.
+  - `render_bes_url(data) -> str`
+        the BES results URL from a Bazel task's `data["bazel"]`, or ""
+        when unavailable. From `lib/bazel_results.axl`.
+"""
+
+load("./lib/bazel_results.axl", _aspect_web_ui_url = "aspect_web_ui_url", _render_bes_url = "render_bes_url")
+load("./lib/ci.axl", _detect_build_url = "detect_build_url", _detect_ci_host = "detect_ci_host")
+
+detect_ci_host = _detect_ci_host
+detect_build_url = _detect_build_url
+aspect_web_ui_url = _aspect_web_ui_url
+render_bes_url = _render_bes_url

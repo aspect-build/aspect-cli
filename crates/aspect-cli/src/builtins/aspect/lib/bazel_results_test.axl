@@ -8,7 +8,7 @@ Two task implementations live here:
     `compute_invocation_state`, `conclusion`, and skipped-bucket plumbing.
 """
 
-load("./bazel_results.axl", "MAX_TEST_TARGETS", "STATUS_ICONS", "STATUS_LABELS", "bes_get", "build_details_data", "common_label_root", "compute_invocation_state", "conclusion", "init_data", "process_event", "render_check_output", "repro_targets")
+load("./bazel_results.axl", "MAX_TEST_TARGETS", "STATUS_ICONS", "STATUS_LABELS", "aspect_web_ui_url", "bes_get", "build_details_data", "common_label_root", "compute_invocation_state", "conclusion", "init_data", "process_event", "render_bes_url", "render_check_output", "repro_targets")
 
 # ---------------------------------------------------------------------------
 # Fake data builders
@@ -1068,8 +1068,43 @@ def _test_status_maps_cover_every_terminal_status(ctx):
         _eq("%r icon is not the running default" % status, STATUS_ICONS[status] != "🔄", True)
         _eq("%r label is not 'Running...'" % status, STATUS_LABELS[status] != "Running...", True)
 
+def _test_aspect_web_ui_url(ctx):
+    """`aspect_web_ui_url` joins the env base URL with sink_invocation_id,
+    and returns "" when either half is missing."""
+    env = ctx.std.env
+    env.set_var("ASPECT_WORKFLOWS_BES_RESULTS_URL", "https://app.oss.aspect.build")
+    _eq(
+        "aspect_web_ui_url joins base + sink id",
+        aspect_web_ui_url(env, {"sink_invocation_id": "abc-123"}),
+        "https://app.oss.aspect.build/abc-123",
+    )
+    _eq("aspect_web_ui_url empty without sink id", aspect_web_ui_url(env, {}), "")
+    env.set_var("ASPECT_WORKFLOWS_BES_RESULTS_URL", "")
+    _eq("aspect_web_ui_url empty without base", aspect_web_ui_url(env, {"sink_invocation_id": "abc-123"}), "")
+
+def _test_render_bes_url(ctx):
+    """`render_bes_url` joins data['bazel'] bes_results_url + invocation_id,
+    and returns "" when either half is missing."""
+    _eq(
+        "render_bes_url joins base + invocation id",
+        render_bes_url({"bazel": {"bes_results_url": "https://bes.example", "invocation_id": "uuid-1"}}),
+        "https://bes.example/uuid-1",
+    )
+    _eq(
+        "render_bes_url empty without invocation id",
+        render_bes_url({"bazel": {"bes_results_url": "https://bes.example", "invocation_id": ""}}),
+        "",
+    )
+    _eq(
+        "render_bes_url empty without base",
+        render_bes_url({"bazel": {"bes_results_url": "", "invocation_id": "uuid-1"}}),
+        "",
+    )
+
 _UNIT_TESTS = [
     _test_status_maps_cover_every_terminal_status,
+    _test_aspect_web_ui_url,
+    _test_render_bes_url,
     _test_failed_status_without_failure_bucket,
     _test_failed_status_with_explicit_action_failure,
     _test_passed_status_returns_successful_build,

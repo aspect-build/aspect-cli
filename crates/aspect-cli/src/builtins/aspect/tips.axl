@@ -1,0 +1,114 @@
+"""Public facade re-exporting the tips authoring API.
+
+The implementation lives in `lib/tips.axl` (see it for docstrings and
+field semantics). This file exists so user `config.axl` files can author
+and customize tips with a single import:
+
+    load("@aspect//tips.axl",
+         "add_tip",
+         "emit_tip",
+         "tips",
+         "TIP_IMPORTANT",
+         "TIP_WARNING",
+         "TIP_SUGGESTION",
+         "TIP_INFO",
+         "TIP_TEMPLATE_RAW",
+         "TIP_TEMPLATE_FORMAT",
+         "TIP_TEMPLATE_JINJA2",
+         "SURFACE_CLI",
+         "SURFACE_GITHUB_STATUS_CHECKS",
+         "SURFACE_BUILDKITE_ANNOTATIONS",
+         "SURFACE_GITLAB_COMMIT_STATUSES",
+         "SURFACE_GITHUB_PR_SUMMARY",
+         "TASK_SCREENS",
+         "AGGREGATE_SCREENS",
+         "SURFACE_ALL",
+         "TipsTrait",
+         "TipInfo",
+         "TipSuggestion",
+         "TIP_ACCEPT",
+         "TIP_REJECT",
+         "tip_replace")
+
+This is the customer-facing surface; internal modules load directly from
+`lib/tips.axl`. The built-in tip templates (`TIP_ADD_GITHUB_TOKEN`, …) are
+re-exported too so a config can preempt or silence them by id.
+"""
+
+load(
+    "./lib/tips.axl",
+    _AGGREGATE_SCREENS = "AGGREGATE_SCREENS",
+    _SURFACE_ALL = "SURFACE_ALL",
+    _SURFACE_BUILDKITE_ANNOTATIONS = "SURFACE_BUILDKITE_ANNOTATIONS",
+    _SURFACE_CLI = "SURFACE_CLI",
+    _SURFACE_GITHUB_PR_SUMMARY = "SURFACE_GITHUB_PR_SUMMARY",
+    _SURFACE_GITHUB_STATUS_CHECKS = "SURFACE_GITHUB_STATUS_CHECKS",
+    _SURFACE_GITLAB_COMMIT_STATUSES = "SURFACE_GITLAB_COMMIT_STATUSES",
+    _TASK_SCREENS = "TASK_SCREENS",
+    _TIP_ACCEPT = "TIP_ACCEPT",
+    _TIP_ADD_ASPECT_API_TOKEN_BUILDKITE = "TIP_ADD_ASPECT_API_TOKEN_BUILDKITE",
+    _TIP_ADD_ASPECT_API_TOKEN_CIRCLECI = "TIP_ADD_ASPECT_API_TOKEN_CIRCLECI",
+    _TIP_ADD_ASPECT_API_TOKEN_GHA = "TIP_ADD_ASPECT_API_TOKEN_GHA",
+    _TIP_ADD_GITHUB_TOKEN = "TIP_ADD_GITHUB_TOKEN",
+    _TIP_ADD_GITHUB_TOKEN_SCOPE = "TIP_ADD_GITHUB_TOKEN_SCOPE",
+    _TIP_ADD_ID_TOKEN_PERMISSION = "TIP_ADD_ID_TOKEN_PERMISSION",
+    _TIP_IMPORTANT = "TIP_IMPORTANT",
+    _TIP_INFO = "TIP_INFO",
+    _TIP_REJECT = "TIP_REJECT",
+    _TIP_SUGGESTION = "TIP_SUGGESTION",
+    _TIP_TEMPLATE_FORMAT = "TIP_TEMPLATE_FORMAT",
+    _TIP_TEMPLATE_JINJA2 = "TIP_TEMPLATE_JINJA2",
+    _TIP_TEMPLATE_RAW = "TIP_TEMPLATE_RAW",
+    _TIP_WARNING = "TIP_WARNING",
+    _TipAction = "TipAction",
+    _TipInfo = "TipInfo",
+    _TipSuggestion = "TipSuggestion",
+    _TipsTrait = "TipsTrait",
+    _add_tip = "add_tip",
+    _emit_tip = "emit_tip",
+    _tip_replace = "tip_replace",
+    _tips = "tips",
+)
+
+# Severities.
+TIP_IMPORTANT = _TIP_IMPORTANT
+TIP_WARNING = _TIP_WARNING
+TIP_SUGGESTION = _TIP_SUGGESTION
+TIP_INFO = _TIP_INFO
+
+# Template types.
+TIP_TEMPLATE_RAW = _TIP_TEMPLATE_RAW
+TIP_TEMPLATE_FORMAT = _TIP_TEMPLATE_FORMAT
+TIP_TEMPLATE_JINJA2 = _TIP_TEMPLATE_JINJA2
+
+# Surfaces + shorthands.
+SURFACE_CLI = _SURFACE_CLI
+SURFACE_GITHUB_STATUS_CHECKS = _SURFACE_GITHUB_STATUS_CHECKS
+SURFACE_BUILDKITE_ANNOTATIONS = _SURFACE_BUILDKITE_ANNOTATIONS
+SURFACE_GITLAB_COMMIT_STATUSES = _SURFACE_GITLAB_COMMIT_STATUSES
+SURFACE_GITHUB_PR_SUMMARY = _SURFACE_GITHUB_PR_SUMMARY
+TASK_SCREENS = _TASK_SCREENS
+AGGREGATE_SCREENS = _AGGREGATE_SCREENS
+SURFACE_ALL = _SURFACE_ALL
+
+# Producer API.
+add_tip = _add_tip
+emit_tip = _emit_tip
+tips = _tips
+
+# tip_suggestion hook.
+TipsTrait = _TipsTrait
+TipAction = _TipAction
+TipInfo = _TipInfo
+TipSuggestion = _TipSuggestion
+TIP_ACCEPT = _TIP_ACCEPT
+TIP_REJECT = _TIP_REJECT
+tip_replace = _tip_replace
+
+# Built-in tip templates (re-exported so a config can preempt / silence them).
+TIP_ADD_GITHUB_TOKEN = _TIP_ADD_GITHUB_TOKEN
+TIP_ADD_ASPECT_API_TOKEN_GHA = _TIP_ADD_ASPECT_API_TOKEN_GHA
+TIP_ADD_ASPECT_API_TOKEN_BUILDKITE = _TIP_ADD_ASPECT_API_TOKEN_BUILDKITE
+TIP_ADD_ASPECT_API_TOKEN_CIRCLECI = _TIP_ADD_ASPECT_API_TOKEN_CIRCLECI
+TIP_ADD_GITHUB_TOKEN_SCOPE = _TIP_ADD_GITHUB_TOKEN_SCOPE
+TIP_ADD_ID_TOKEN_PERMISSION = _TIP_ADD_ID_TOKEN_PERMISSION
