@@ -8,9 +8,17 @@ parameters:
     type: string
     default: ""
     description: "Bazel targets to force-deliver (space-separated). Example: //examples/deliverable. Leave empty for normal selective delivery."
+  run_output_api_probe:
+    type: boolean
+    default: false
+    description: "Experimental: when true, run ONLY the output-api-probe workflow (direct/no-agent test-results API check). Leave false for normal CI."
 
 workflows:
   ci:
+    # Normal CI. Skipped when a pipeline is triggered solely to run the
+    # experimental probe (see the output-api-probe workflow below).
+    when:
+      not: << pipeline.parameters.run_output_api_probe >>
     jobs:
       - pre-build
       - build-task:
@@ -29,10 +37,15 @@ workflows:
           requires: [pre-build]
       - delivery-task:
           requires: [pre-build]
-      # Isolated, non-gating experiment: verify the direct (agent-free)
-      # test-results output API reverse-engineered from circleci-agent.
-      # Depends on nothing and is required by nothing, so it cannot affect
-      # the rest of the pipeline.
+
+  # On-demand only: trigger a pipeline with run_output_api_probe=true
+  # (CircleCI "Trigger Pipeline" UI/API) to run just this probe. It never
+  # runs on — or reddens — normal CI. Verifies the direct (agent-free)
+  # test-results output API reverse-engineered from circleci-agent. See
+  # .circleci/output_api_probe.sh.
+  output-api-probe:
+    when: << pipeline.parameters.run_output_api_probe >>
+    jobs:
       - output-api-probe
 
 jobs:
