@@ -31,8 +31,11 @@ DEFAULT_HOST="https://runner.circleci.com"
 
 fail=0
 note() { printf '\n=== %s ===\n' "$*"; }
-ok()   { printf '  PASS  %s\n' "$*"; }
-bad()  { printf '  FAIL  %s\n' "$*"; fail=1; }
+ok() { printf '  PASS  %s\n' "$*"; }
+bad() {
+    printf '  FAIL  %s\n' "$*"
+    fail=1
+}
 
 # ---------------------------------------------------------------------------
 # 1. Read {token, runner_host} from the runner socket.
@@ -43,8 +46,8 @@ bad()  { printf '  FAIL  %s\n' "$*"; fail=1; }
 # python3 (preferred) or socat (fallback).
 # ---------------------------------------------------------------------------
 read_socket() {
-  if command -v python3 >/dev/null 2>&1; then
-    python3 - "$SOCK" <<'PY'
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "$SOCK" <<'PY'
 import socket, sys
 p = sys.argv[1]
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -62,33 +65,33 @@ except OSError as e:
     sys.stderr.write("socket error: %s\n" % e)
     sys.exit(3)
 PY
-  elif command -v socat >/dev/null 2>&1; then
-    socat -t5 - "UNIX-CONNECT:${SOCK}" </dev/null
-  else
-    echo "no python3 or socat to read unix socket" >&2
-    return 3
-  fi
+    elif command -v socat >/dev/null 2>&1; then
+        socat -t5 - "UNIX-CONNECT:${SOCK}" </dev/null
+    else
+        echo "no python3 or socat to read unix socket" >&2
+        return 3
+    fi
 }
 
 jget() { # jget <json-on-stdin> <python-expr over `d`>
-  python3 -c 'import sys,json;d=json.load(sys.stdin);print(eval(sys.argv[1]))' "$1"
+    python3 -c 'import sys,json;d=json.load(sys.stdin);print(eval(sys.argv[1]))' "$1"
 }
 
 note "runner socket token ($SOCK)"
 TOKEN_JSON="$(read_socket || true)"
 if [ -z "${TOKEN_JSON:-}" ]; then
-  bad "no response from runner socket — cannot authenticate; aborting"
-  echo "(this probe must run inside a CircleCI runner job)"
-  exit 1
+    bad "no response from runner socket — cannot authenticate; aborting"
+    echo "(this probe must run inside a CircleCI runner job)"
+    exit 1
 fi
 TOKEN="$(printf '%s' "$TOKEN_JSON" | jget 'd.get("token","")' 2>/dev/null || true)"
 HOST="$(printf '%s' "$TOKEN_JSON" | jget 'd.get("runner_host","")' 2>/dev/null || true)"
 [ -z "$HOST" ] && HOST="$DEFAULT_HOST"
 if [ -n "$TOKEN" ]; then
-  ok "got token (len=${#TOKEN}), runner_host=$HOST"
+    ok "got token (len=${#TOKEN}), runner_host=$HOST"
 else
-  bad "socket replied but no token field; raw: ${TOKEN_JSON:0:120}"
-  exit 1
+    bad "socket replied but no token field; raw: ${TOKEN_JSON:0:120}"
+    exit 1
 fi
 
 AUTH=(-H "Authorization: Bearer ${TOKEN}")
@@ -97,8 +100,9 @@ api() { printf '%s%s' "$HOST" "$1"; }
 
 # curl helper: prints "<http_code>\n<body>"; never fails the script itself.
 req() { # req METHOD URL [curl-args...]
-  local m="$1" url="$2"; shift 2
-  curl -sS -X "$m" -w $'\n%{http_code}' "$@" "$url" 2>&1
+    local m="$1" url="$2"
+    shift 2
+    curl -sS -X "$m" -w $'\n%{http_code}' "$@" "$url" 2>&1
 }
 split_code() { tail -n1 <<<"$1"; }
 split_body() { sed '$d' <<<"$1"; }
@@ -116,7 +120,7 @@ if [ "$C" = "200" ]; then ok "config 200: $(split_body "$R" | head -c 160)"; els
 # 3. STORE: upload a synthetic JUnit file via the reverse-engineered trio.
 # ---------------------------------------------------------------------------
 JUNIT="$(mktemp /tmp/probe-junit-XXXX.xml)"
-cat > "$JUNIT" <<'XML'
+cat >"$JUNIT" <<'XML'
 <testsuites>
   <testsuite name="aspect.output_api_probe" tests="2">
     <testcase classname="probe.Direct" file="probe_test.sh" name="upload_roundtrip" time="0.123"/>
@@ -127,30 +131,33 @@ XML
 
 note "POST /api/v2/output/test-result  (body = bare int index 0)"
 R="$(req POST "$(api /api/v2/output/test-result)" "${AUTH[@]}" "${JSONH[@]}" -d '0')"
-C="$(split_code "$R")"; B="$(split_body "$R")"
+C="$(split_code "$R")"
+B="$(split_body "$R")"
 if [ "$C" = "200" ] || [ "$C" = "201" ]; then
-  ok "test-result $C -> $(printf '%s' "$B" | head -c 200)"
-  LOC="$(printf '%s' "$B" | jget 'd.get("location","")' 2>/dev/null || true)"
-  PMETHOD="$(printf '%s' "$B" | jget 'd.get("method","PUT")' 2>/dev/null || echo PUT)"
-  # Build -H args from Key.headers
-  HDR_ARGS=()
-  while IFS=$'\t' read -r k v; do [ -n "$k" ] && HDR_ARGS+=(-H "$k: $v"); done < <(
-    printf '%s' "$B" | python3 -c 'import sys,json;d=json.load(sys.stdin);[print("%s\t%s"%(k,v)) for k,v in (d.get("headers") or {}).items()]' 2>/dev/null || true)
-  if [ -n "$LOC" ]; then
-    note "presigned $PMETHOD raw JUnit -> object store"
-    R2="$(req "$PMETHOD" "$LOC" "${HDR_ARGS[@]}" --data-binary "@$JUNIT")"
-    C2="$(split_code "$R2")"
-    if [[ "$C2" =~ ^2 ]]; then ok "presigned upload HTTP $C2"; else bad "presigned upload HTTP $C2: $(split_body "$R2" | head -c 200)"; fi
-  else
-    bad "no presigned 'location' in Key response"
-  fi
+    ok "test-result $C -> $(printf '%s' "$B" | head -c 200)"
+    LOC="$(printf '%s' "$B" | jget 'd.get("location","")' 2>/dev/null || true)"
+    PMETHOD="$(printf '%s' "$B" | jget 'd.get("method","PUT")' 2>/dev/null || echo PUT)"
+    # Build -H args from Key.headers
+    HDR_ARGS=()
+    while IFS=$'\t' read -r k v; do [ -n "$k" ] && HDR_ARGS+=(-H "$k: $v"); done < <(
+        printf '%s' "$B" | python3 -c 'import sys,json;d=json.load(sys.stdin);[print("%s\t%s"%(k,v)) for k,v in (d.get("headers") or {}).items()]' 2>/dev/null || true
+    )
+    if [ -n "$LOC" ]; then
+        note "presigned $PMETHOD raw JUnit -> object store"
+        R2="$(req "$PMETHOD" "$LOC" "${HDR_ARGS[@]}" --data-binary "@$JUNIT")"
+        C2="$(split_code "$R2")"
+        if [[ "$C2" =~ ^2 ]]; then ok "presigned upload HTTP $C2"; else bad "presigned upload HTTP $C2: $(split_body "$R2" | head -c 200)"; fi
+    else
+        bad "no presigned 'location' in Key response"
+    fi
 else
-  bad "test-result HTTP $C: $(printf '%s' "$B" | head -c 300)"
+    bad "test-result HTTP $C: $(printf '%s' "$B" | head -c 300)"
 fi
 
 note "POST /api/v2/output/test-result/process  (body = bare int count 1)"
 R="$(req POST "$(api /api/v2/output/test-result/process)" "${AUTH[@]}" "${JSONH[@]}" -d '1')"
-C="$(split_code "$R")"; B="$(split_body "$R")"
+C="$(split_code "$R")"
+B="$(split_body "$R")"
 if [ "$C" = "200" ]; then ok "process 200 -> $(printf '%s' "$B" | head -c 240)"; else bad "process HTTP $C: $(printf '%s' "$B" | head -c 300)"; fi
 
 # ---------------------------------------------------------------------------
@@ -160,27 +167,28 @@ if [ "$C" = "200" ]; then ok "process 200 -> $(printf '%s' "$B" | head -c 240)";
 # ---------------------------------------------------------------------------
 note "GET /api/v2/output/prev-test-result/find"
 R="$(req GET "$(api /api/v2/output/prev-test-result/find)" "${AUTH[@]}")"
-C="$(split_code "$R")"; B="$(split_body "$R")"
+C="$(split_code "$R")"
+B="$(split_body "$R")"
 if [ "$C" = "200" ]; then
-  ok "find 200 -> $(printf '%s' "$B" | head -c 200)"
-  JID="$(printf '%s' "$B" | jget 'd.get("id","")' 2>/dev/null || true)"
-  if [ -n "$JID" ]; then
-    note "GET /api/v2/output/prev-test-result/job/$JID"
-    R="$(req GET "$(api "/api/v2/output/prev-test-result/job/$JID")" "${AUTH[@]}")"
-    C="$(split_code "$R")"
-    if [ "$C" = "200" ]; then ok "job 200 -> $(split_body "$R" | head -c 240)"; else bad "job HTTP $C: $(split_body "$R" | head -c 200)"; fi
-  fi
+    ok "find 200 -> $(printf '%s' "$B" | head -c 200)"
+    JID="$(printf '%s' "$B" | jget 'd.get("id","")' 2>/dev/null || true)"
+    if [ -n "$JID" ]; then
+        note "GET /api/v2/output/prev-test-result/job/$JID"
+        R="$(req GET "$(api "/api/v2/output/prev-test-result/job/$JID")" "${AUTH[@]}")"
+        C="$(split_code "$R")"
+        if [ "$C" = "200" ]; then ok "job 200 -> $(split_body "$R" | head -c 240)"; else bad "job HTTP $C: $(split_body "$R" | head -c 200)"; fi
+    fi
 elif [ "$C" = "404" ]; then
-  ok "find 404 — no prior job yet (expected on a fresh branch)"
+    ok "find 404 — no prior job yet (expected on a fresh branch)"
 else
-  bad "find HTTP $C: $(printf '%s' "$B" | head -c 200)"
+    bad "find HTTP $C: $(printf '%s' "$B" | head -c 200)"
 fi
 
 rm -f "$JUNIT"
 note "summary"
 if [ "$fail" = "0" ]; then
-  echo "  ALL CORE CHECKS PASSED — direct (agent-free) test-results protocol works against real CircleCI."
+    echo "  ALL CORE CHECKS PASSED — direct (agent-free) test-results protocol works against real CircleCI."
 else
-  echo "  SOME CHECKS FAILED — see FAIL lines above."
+    echo "  SOME CHECKS FAILED — see FAIL lines above."
 fi
 exit "$fail"
