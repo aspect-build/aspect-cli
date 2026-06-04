@@ -71,7 +71,7 @@ def _workflows_impl(ctx: FeatureContext):
         # the plugin feature on all calls
         bazel_version_output = ctx.std.process.command("bazel").arg("--version").stdout("piped").spawn().wait_with_output()
         if "aspect" in bazel_version_output.stdout:
-            bazel_trait.extra_startup_flags.append("--aspect:disable_plugins")
+            bazel_trait.extra_startup_flags.extend(["--aspect:disable_plugins", "--aspect:lock_version"])
 
     if environment.build_events != None:
         metadata_flags = get_build_metadata_flags(ctx.std)
