@@ -43,8 +43,13 @@ def _get_token(ctx):
     # None to mean "couldn't auth", same as the no-output case above.
     return json.try_decode(output, None)
 
-def _runner_api(ctx, token, runner_host, method, path, body = None):
-    """Make an HTTP request to the CircleCI runner API."""
+def _runner_api(ctx, token, runner_host, method, path, body = None, quiet = False):
+    """Make an HTTP request to the CircleCI runner API.
+
+    `quiet` suppresses the non-2xx / transport warnings — used by the
+    test-result step-id probe, where a rejected candidate (HTTP 400) is an
+    expected part of discovery rather than a failure worth logging.
+    """
     url = runner_host + path
     headers = {
         "Authorization": "Bearer " + token,
@@ -61,10 +66,12 @@ def _runner_api(ctx, token, runner_host, method, path, body = None):
     # a soft auth failure, not a task abort.
     resp = fut.map_err(lambda e: str(e)).block()
     if type(resp) == "string":
-        warn(ctx.std, "CircleCI runner API %s %s failed: transport error: %s" % (method, path, resp))
+        if not quiet:
+            warn(ctx.std, "CircleCI runner API %s %s failed: transport error: %s" % (method, path, resp))
         return None
     if resp.status < 200 or resp.status >= 300:
-        warn(ctx.std, "CircleCI runner API %s %s failed: HTTP %d" % (method, path, resp.status))
+        if not quiet:
+            warn(ctx.std, "CircleCI runner API %s %s failed: HTTP %d" % (method, path, resp.status))
         return None
 
     # try_decode → None on parse failure mirrors the "no body" branch
@@ -312,7 +319,198 @@ def _delete_artifact(ctx, name):
     """CircleCI has no artifact deletion API — no-op."""
     return {"success": True}
 
+# ============================================================================
+# Test results — upload Bazel JUnit XML to CircleCI's runner output API.
+#
+# Reverse-engineered from circleci-agent's StoreTestResultsStep -> runner
+# output API and verified end-to-end against real CircleCI. The agent-free
+# protocol is:
+#
+#   1. POST /api/v2/output/test-result          body {"step_id": N}
+#        -> Key {method, location, headers}; `location` is a *relative* S3
+#           object key in the config bucket (not a presigned URL).
+#   2. <method> the gzipped tar of JUnit XML to
+#        https://{bucket}.s3.{region}.amazonaws.com/{location}, signed with
+#        the runner's STS creds (the same sigv4 path artifacts use), applying
+#        Key.headers (Content-Type).
+#   3. POST /api/v2/output/test-result/process  body {"step_id": N}
+#        -> TestProcessSummary {file_count, total_bytes, problems}.
+#
+# step_id is the agent's task-config step index. It is not exposed to the
+# step shell, so when the caller doesn't know it we discover it by probing
+# which small integer the output service accepts for this task (a wrong
+# step_id is rejected with an empty-body HTTP 400).
+# ============================================================================
+
+_TEST_RESULT_PATH = "/api/v2/output/test-result"
+_TEST_RESULT_PROCESS_PATH = "/api/v2/output/test-result/process"
+
+# Highest step index probed when the caller doesn't supply one. A CircleCI
+# job has only a handful of steps; 0..this covers any realistic test step.
+_STEP_ID_PROBE_MAX = 20
+
+TestResultsUploadResult = record(
+    success = field(bool),
+
+    # The step_id the output service accepted (discovered or supplied), or
+    # None when no upload happened.
+    step_id = field(int | None, default = None),
+
+    # From the `process` summary: how many JUnit files the service parsed
+    # and their total decoded size in bytes.
+    file_count = field(int, default = 0),
+    total_bytes = field(int, default = 0),
+
+    # Per-file parse problems reported by `process` (malformed XML etc.) —
+    # NOT test failures. Empty when every file parsed cleanly.
+    problems = field(list[str], default = []),
+
+    # Human-readable failure reasons; empty on success.
+    errors = field(list[str], default = []),
+)
+
+def test_results_object_url(bucket: str, region: str, location: str) -> str:
+    """Resolve a test-result Key.location to an absolute upload URL.
+
+    The Key hands back a *relative* S3 object key
+    (`storage/test-raw/<uuid>/<uuid>/<step>/<n>.tar.gz`); combine it with the
+    config bucket/region into a virtual-hosted S3 URL. A location that is
+    already absolute (http/https) is returned unchanged so a future presigned
+    response keeps working. Public so circleci_test.axl can exercise it.
+    """
+    if location.startswith("http://") or location.startswith("https://"):
+        return location
+    return "https://" + bucket + ".s3." + region + ".amazonaws.com/" + location
+
+def _post_test_result(ctx, session, step_id):
+    """Register a test-result upload for `step_id`. Returns the Key dict on
+    success, or None when the output service rejects this step_id (so the
+    caller can fall through to the next candidate)."""
+    return _runner_api(
+        ctx,
+        session["token"],
+        session["runner_host"],
+        "POST",
+        _TEST_RESULT_PATH,
+        {"step_id": step_id},
+        quiet = True,
+    )
+
+def _resolve_step_id(ctx, session, step_id):
+    """Return `(step_id, key)` for the first accepted step_id. When `step_id`
+    is supplied only that one is tried; otherwise probe 0.._STEP_ID_PROBE_MAX.
+    `(None, None)` when nothing is accepted."""
+    candidates = [step_id] if step_id != None else list(range(0, _STEP_ID_PROBE_MAX + 1))
+    for k in candidates:
+        key = _post_test_result(ctx, session, k)
+        if key != None:
+            return k, key
+    return None, None
+
+def _s3_put_object(ctx, session, method, url, headers, path):
+    """sigv4 PUT `path` to `url` with the runner's STS creds, applying the
+    Key's headers. Returns `(ok, detail)` where `detail` is a diagnosable
+    reason on failure (reusing the artifact path's S3 error parsing)."""
+    aws_creds = session["aws_creds"]
+    region = session["region"]
+    curl_args = [
+        "--silent",
+        "--show-error",
+        "--aws-sigv4",
+        "aws:amz:" + region + ":s3",
+        "--user",
+        aws_creds["AccessKeyID"] + ":" + aws_creds["SecretAccessKey"],
+        "-H",
+        "x-amz-security-token: " + aws_creds["SessionToken"],
+        "-T",
+        path,
+        "-X",
+        method,
+        "-w",
+        "\n%{http_code}",
+    ]
+    for k, v in (headers or {}).items():
+        curl_args = curl_args + ["-H", k + ": " + v]
+    curl_args = curl_args + [url]
+
+    child = ctx.std.process.command("curl") \
+        .args(curl_args) \
+        .stdout("piped") \
+        .stderr("piped") \
+        .spawn()
+    out = child.stdout().read_to_string()
+    curl_err = child.stderr().read_to_string().strip()
+    status = child.wait()
+
+    # Final line is the `-w` status code; the rest is the S3 response body.
+    parts = out.rsplit("\n", 1)
+    if len(parts) == 2:
+        body = parts[0]
+        http_code = parts[1].strip()
+    else:
+        body = ""
+        http_code = parts[0].strip()
+
+    if status.code == 0 and http_code.startswith("2"):
+        return (True, "")
+    return (False, s3_upload_error_detail(http_code, curl_err, body))
+
+def _store_test_results(ctx, archive_path, step_id = None, cache = None) -> TestResultsUploadResult:
+    """Upload a gzipped tar of JUnit XML to CircleCI and trigger processing.
+
+    `archive_path` is a `.tar.gz` whose entries are the JUnit `test.xml`
+    files at their relative paths (what `process` untars and parses).
+    `step_id`, when None, is discovered by probing. `cache` (optional) reuses
+    one runner session across calls, like `_upload_artifact`.
+
+    Returns a `TestResultsUploadResult`.
+    """
+    if not ctx.std.fs.exists(archive_path):
+        return TestResultsUploadResult(success = False, errors = ["archive not found: " + archive_path])
+
+    session = session_cache_get(cache)
+    if session == None:
+        session = _fetch_upload_session(ctx)
+        if "error" not in session:
+            session_cache_put(cache, session)
+    if "error" in session:
+        return TestResultsUploadResult(success = False, errors = [session["error"]])
+
+    sid, key = _resolve_step_id(ctx, session, step_id)
+    if key == None:
+        if step_id != None:
+            reason = "output service rejected step_id=%d for test-result upload" % step_id
+        else:
+            reason = "no step_id in 0..%d accepted by the test-result API" % _STEP_ID_PROBE_MAX
+        return TestResultsUploadResult(success = False, errors = [reason])
+
+    location = key.get("location", "")
+    if not location:
+        return TestResultsUploadResult(success = False, step_id = sid, errors = ["test-result Key had no 'location'"])
+
+    url = test_results_object_url(session["bucket"], session["region"], location)
+    ok, detail = _s3_put_object(ctx, session, key.get("method", "PUT"), url, key.get("headers") or {}, archive_path)
+    if not ok:
+        # A stale STS credential self-heals on a later call: drop the cached
+        # session so the next upload re-mints (mirrors _upload_artifact).
+        session_cache_clear(cache)
+        return TestResultsUploadResult(success = False, step_id = sid, errors = [detail])
+
+    summary = _runner_api(ctx, session["token"], session["runner_host"], "POST", _TEST_RESULT_PROCESS_PATH, {"step_id": sid})
+    if summary == None:
+        return TestResultsUploadResult(success = False, step_id = sid, errors = ["test-result/process call failed"])
+
+    return TestResultsUploadResult(
+        success = True,
+        step_id = sid,
+        file_count = summary.get("file_count", 0),
+        total_bytes = summary.get("total_bytes", 0),
+        problems = [str(p) for p in (summary.get("problems") or [])],
+    )
+
 circleci = struct(
     upload_artifact = _upload_artifact,
     delete_artifact = _delete_artifact,
+    store_test_results = _store_test_results,
+    TestResultsUploadResult = TestResultsUploadResult,
 )

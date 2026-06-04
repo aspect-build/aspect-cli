@@ -6,7 +6,7 @@ S3 error response into a diagnosable failure reason — the part that makes
 an expired-credential `400` legible instead of an opaque "curl exit 22".
 """
 
-load("./circleci.axl", "s3_extract_error_code", "s3_upload_error_detail", "session_cache_clear", "session_cache_get", "session_cache_put")
+load("./circleci.axl", "s3_extract_error_code", "s3_upload_error_detail", "session_cache_clear", "session_cache_get", "session_cache_put", "test_results_object_url")
 
 def _eq(label, got, want):
     if got != want:
@@ -102,7 +102,32 @@ def _test_cache_clear_empty_noop(_ctx):
     session_cache_clear(cache)
     _eq("clear on empty cache stays a miss", session_cache_get(cache), None)
 
+# ---------------------------------------------------------------------------
+# test_results_object_url — resolve a test-result Key.location to a PUT URL
+# ---------------------------------------------------------------------------
+
+def _test_object_url_relative_key(_ctx):
+    """The common case: a relative S3 object key → virtual-hosted bucket URL."""
+    _eq(
+        "relative key → virtual-hosted S3 URL",
+        test_results_object_url("circleci-tasks-prod", "us-east-1", "storage/test-raw/a/b/0/0.tar.gz"),
+        "https://circleci-tasks-prod.s3.us-east-1.amazonaws.com/storage/test-raw/a/b/0/0.tar.gz",
+    )
+
+def _test_object_url_absolute_https_passthrough(_ctx):
+    """An already-absolute https location is returned unchanged (future
+    presigned-URL responses keep working without a code change)."""
+    url = "https://example.s3.amazonaws.com/key?X-Amz-Signature=abc"
+    _eq("https location passthrough", test_results_object_url("b", "r", url), url)
+
+def _test_object_url_absolute_http_passthrough(_ctx):
+    url = "http://localhost:9000/bucket/key"
+    _eq("http location passthrough", test_results_object_url("b", "r", url), url)
+
 _UNIT_TESTS = [
+    _test_object_url_relative_key,
+    _test_object_url_absolute_https_passthrough,
+    _test_object_url_absolute_http_passthrough,
     _test_extract_expired_token,
     _test_extract_signature_mismatch,
     _test_extract_no_code_element,

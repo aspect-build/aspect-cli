@@ -1,5 +1,6 @@
 load("@aspect//feature/artifacts.axl", "ArtifactUpload")
 load("@aspect//feature/buildkite_annotations.axl", "BuildkiteAnnotations")
+load("@aspect//feature/circleci_test_results.axl", "CircleCITestResults")
 load("@aspect//feature/buildkite_annotations_test.axl", "bk_annotation_snapshot_tests")
 load("@aspect//feature/github_status_checks.axl", "GithubStatusChecks")
 load("@aspect//feature/github_status_comments_test.axl", "pr_comment_snapshot_tests")
@@ -157,6 +158,12 @@ def config(ctx: ConfigContext):
     ctx.features[ArtifactUpload].args.upload_test_logs = "failed"
     ctx.features[ArtifactUpload].args.upload_profile = True
     ctx.features[ArtifactUpload].args.upload_bep = True
+
+    # Upload JUnit test results to CircleCI's Tests tab + Test Insights.
+    # Separate from ArtifactUpload above so it toggles independently. "all"
+    # (rather than "failed") so passing runs still populate Insights with the
+    # per-test timing/identity history flaky-detection needs.
+    ctx.features[CircleCITestResults].args.upload_test_results = "all"
 
     # Silence tips — was `ctx.traits[TipsTrait].silenced_tips = [...]`
     # before the tips refactor; now done via the Tips feature's args.

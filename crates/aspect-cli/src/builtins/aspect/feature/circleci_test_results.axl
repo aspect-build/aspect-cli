@@ -1,0 +1,11 @@
+"""Re-export of the CircleCI test-results upload feature.
+
+The owner feature lives co-located with the protocol it drives in
+`lib/circleci_test_results.axl` (which loads `lib/circleci.axl`). This thin
+re-export gives user `config.axl` the conventional `@aspect//feature/...`
+load path, matching the other features in this directory.
+"""
+
+load("../lib/circleci_test_results.axl", _CircleCITestResults = "CircleCITestResults")
+
+CircleCITestResults = _CircleCITestResults
