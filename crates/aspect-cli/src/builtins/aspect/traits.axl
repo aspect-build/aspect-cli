@@ -17,7 +17,13 @@ files can load the full trait set with a single import:
          "ReproFixInfo",
          "ReproFixSuggestion",
          "TaskUpdate",
-         "repro_fix_replace")
+         "TipInfo",
+         "TipSuggestion",
+         "TipsTrait",
+         "TIP_ACCEPT",
+         "TIP_REJECT",
+         "repro_fix_replace",
+         "tip_replace")
 
 Internal modules should load directly from the owning module — this
 facade is purely a user-facing convenience.
@@ -45,6 +51,16 @@ load(
     _TaskUpdate = "TaskUpdate",
     _repro_fix_replace = "repro_fix_replace",
 )
+load(
+    "./lib/tips.axl",
+    _TIP_ACCEPT = "TIP_ACCEPT",
+    _TIP_REJECT = "TIP_REJECT",
+    _TipAction = "TipAction",
+    _TipInfo = "TipInfo",
+    _TipSuggestion = "TipSuggestion",
+    _TipsTrait = "TipsTrait",
+    _tip_replace = "tip_replace",
+)
 load("./lint.axl", _LintTrait = "LintTrait")
 
 BazelTrait = _BazelTrait
@@ -58,6 +74,13 @@ ReproFixCommand = _ReproFixCommand
 ReproFixCommandKind = _ReproFixCommandKind
 ReproFixInfo = _ReproFixInfo
 ReproFixSuggestion = _ReproFixSuggestion
+TIP_ACCEPT = _TIP_ACCEPT
+TIP_REJECT = _TIP_REJECT
 TaskLifecycleTrait = _TaskLifecycleTrait
 TaskUpdate = _TaskUpdate
+TipAction = _TipAction
+TipInfo = _TipInfo
+TipSuggestion = _TipSuggestion
+TipsTrait = _TipsTrait
 repro_fix_replace = _repro_fix_replace
+tip_replace = _tip_replace

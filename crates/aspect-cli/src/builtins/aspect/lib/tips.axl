@@ -9,12 +9,13 @@ logs for WARNs or read docs to discover improvements.
 
 `add_tip(ctx, id, severity, ...)` — adds a tip to the trait. Accepts
 either pre-rendered `title` + `body` (for `TIP_TEMPLATE_RAW` /
-`TIP_TEMPLATE_FORMAT` tips) or `title_template` + `body_template` +
-`accumulators` (for `TIP_TEMPLATE_JINJA2` tips, see below). Dedup
-by `id`: first add wins for pre-rendered tips; JINJA2 tips merge new
-accumulator values into the stored tip and re-render.
+`TIP_TEMPLATE_FORMAT` tips) or `title_template` + `body_template`
+(for `TIP_TEMPLATE_JINJA2` tips) rendered against `vars` (fixed scalars)
+and `accumulate` (list-valued fields). A tip is identified by `(id, key)`
+— see "Tip identity".
 
-`emit_tip(ctx, template, vars=None, accumulators=None, id_suffix="", task_keys=None)`
+`emit_tip(ctx, template, key=None, vars=None, accumulate=None,
+id_suffix="", task_keys=None, surfaces=None, combine_across_tasks=None)`
 — renders a tip template, then calls `add_tip`. Used by built-in
 producers (so their templates are overridable; see "Customization"
 below) and by user task code wanting parameterised tips.
@@ -22,38 +23,50 @@ below) and by user task code wanting parameterised tips.
 Tip templates are dicts of the shape:
 
     {
-        "id":        str,         # stable dedup key; vars are NOT interpolated here
+        "id":        str,         # stable kind + silence key — see "Tip identity"
+        "key":       str?,        # optional (id, key) discriminator — see "Tip identity"
         "severity":  str,         # TIP_IMPORTANT / TIP_WARNING / TIP_SUGGESTION / TIP_INFO
         "title":     str,         # short headline; interpolated per `type`
         "body":      str,         # markdown body; interpolated per `type`
         "type":      str,         # TIP_TEMPLATE_RAW / TIP_TEMPLATE_FORMAT (default) / TIP_TEMPLATE_JINJA2
         "task_keys": list[str]?,  # optional glob list — see "Task-key scoping" below
+        "surfaces":  list[str]?,  # optional surface allowlist — see "Surface allowlist" below
+        "combine_across_tasks": bool?,  # cross-task PR-summary union — see "Cross-task accumulation"
     }
 
 # Template types
 
 The `type` field selects the interpolation engine for `title` / `body`:
 
-  - `TIP_TEMPLATE_RAW`    — no interpolation; `vars` ignored.
+  - `TIP_TEMPLATE_RAW`    — no interpolation; `vars` / `accumulate` ignored.
   - `TIP_TEMPLATE_FORMAT` — Starlark `str.format(**vars)` — `{name}`
                             placeholders replaced from `vars`. Default.
-  - `TIP_TEMPLATE_JINJA2` — Jinja2 source rendered against the tip's
-                            `accumulators` dict (each name maps to a
-                            list). Re-rendered every time `accumulators`
-                            change so the surfaced strings always
-                            reflect the merged state.
+  - `TIP_TEMPLATE_JINJA2` — Jinja2 source rendered against `vars`
+                            (scalars) plus `accumulate` (each name a
+                            deduped + sorted list). Re-rendered whenever
+                            `accumulate` grows, so the surfaced strings
+                            always reflect the merged state.
 
 # Customization
 
 Built-in tip templates are exported as module-level constants
 (e.g. `TIP_ADD_GITHUB_TOKEN`). User task / config code can:
 
-  a) Add custom tips via `add_tip` or `emit_tip` with arbitrary
-     templates of their own.
-  b) Preempt a built-in tip by calling `add_tip` with that built-in
-     tip's id BEFORE the framework emits — dedup-by-id makes the
-     user's version win.
-  c) Silence any non-important tip (built-in or custom) by appending
+  a) Add custom tips via `add_tip` or `emit_tip` from any code with a
+     `TaskContext`. To add a tip at task start from `.aspect/config.axl`,
+     register a `task_update` handler and emit on the first update (the
+     Setup-phase emit) — see the example below.
+  b) Override a built-in tip's content by calling `add_tip` with that
+     built-in tip's `(id, key)` — a re-emit replaces the stored tip, so
+     a user emit AFTER the framework's wins.
+  c) Accept / reject / rewrite any tip (built-in or custom) by
+     registering a `tip_suggestion` hook on `TipsTrait`. It fires on
+     every `add_tip`, receives a `TipInfo`, and returns a `TipSuggestion`
+     (`TIP_ACCEPT` / `TIP_REJECT` / `tip_replace(...)`). Use it to veto a
+     tip id, downgrade a severity, or re-scope `surfaces` — the same
+     accept/reject/replace shape as the `repro_fix_suggestion` hook. See
+     `apply_tip_suggestion_hooks`.
+  d) Silence any non-important tip (built-in or custom) by appending
      its id to the `Tips` feature's `silence` arg from
      `.aspect/config.axl`, or by passing `--tips:silence=<id>` on the
      command line. `add_tip` short-circuits on a match so the tip
@@ -63,19 +76,25 @@ Built-in tip templates are exported as module-level constants
      that breaks key features, so a silence entry for an important id
      is a no-op.
 
-The tip subsystem is owned by the `Tips` feature (co-located below in
-this file). Configure it from `.aspect/config.axl`:
+Example — add a tip at task start and veto another, from `.aspect/config.axl`:
 
-    # In .aspect/config.axl
+    _seen = {}  # per-id once-flag so the tip is added on the first update only
+
+    def _add_docs_tip(ctx, update):
+        if not _seen.get(ctx.task.key):
+            _seen[ctx.task.key] = True
+            add_tip(ctx, id = "internal-docs", severity = TIP_INFO,
+                    title = "Lint docs", body = "See https://wiki/lint",
+                    task_keys = ["lint-*"])
+
+    def _veto_tip(ctx, info):
+        return TIP_REJECT if info.id == "add-github-token" else TIP_ACCEPT
+
     def config(ctx):
+        ctx.traits[TaskLifecycleTrait].task_update.append(_add_docs_tip)
+        ctx.traits[TipsTrait].tip_suggestion.append(_veto_tip)
+        # or just silence by id:
         ctx.features["tips"].args.silence.append("add-github-token")
-        ctx.features["tips"].args.seed.append({
-            "id": "internal-docs-reminder",
-            "severity": TIP_INFO,
-            "title": "Internal docs link for lint failures",
-            "body": "See https://wiki.example/lint for triage notes.",
-            "task_keys": ["lint-*"],
-        })
 
 Or on the command line: `--tips:silence=add-github-token`.
 
@@ -87,10 +106,11 @@ don't need to probe for the feature — the data flow just goes quiet.
 
 # Surface rendering
 
-`collect_tips_sorted(ctx)` returns tips sorted by severity (most
-urgent first), stable within a bucket by insertion order. Renderers
-(check-run summary template, PR comment aggregator) call it and
-display the result.
+`collect_tips_sorted(ctx, surface = ...)` returns tips sorted by
+severity (most urgent first), stable within a bucket by insertion
+order, filtered to those allowed on `surface` (see "Surface
+allowlist"). Renderers (check-run summary template, PR comment
+aggregator) call it with their own surface id and display the result.
 
 # Severity ordering (highest → lowest urgency)
 
@@ -154,13 +174,193 @@ TIP_TEMPLATE_JINJA2 = "jinja2"
 
 _VALID_TEMPLATE_TYPES = [TIP_TEMPLATE_RAW, TIP_TEMPLATE_FORMAT, TIP_TEMPLATE_JINJA2]
 
+# ── Surface allowlist ────────────────────────────────────────────────
+#
+# Each tip carries a `surfaces` list naming the status surfaces it is
+# allowed to render on. The surface identifiers below name every place a
+# tip can appear today. A tip with an empty / unset `surfaces` list shows
+# everywhere (`SURFACE_ALL`) — the back-compatible default, so existing
+# producers need no change.
+#
+# Each rendering surface filters by passing its own identifier to
+# `collect_tips_sorted(ctx, surface = ...)` (and the CLI print path checks
+# `SURFACE_CLI` inside `add_tip`); a tip whose `surfaces` list omits that
+# identifier is skipped for that surface only.
+#
+# Names are intentionally verbose and host-qualified — they're
+# customer-facing (set in `.aspect/config.axl`), and leave room for
+# sibling surfaces on the same host (e.g. a future GitLab MR note or
+# Buildkite PR comment) without ambiguity.
+#
+#   SURFACE_CLI                    the terminal `TIP:` block printed on emit
+#   SURFACE_GITHUB_STATUS_CHECKS   GitHub check-run summary (GithubStatusChecks)
+#   SURFACE_BUILDKITE_ANNOTATIONS  Buildkite annotation (BuildkiteAnnotations)
+#   SURFACE_GITLAB_COMMIT_STATUSES GitLab commit-status description (GitlabCommitStatuses)
+#   SURFACE_GITHUB_PR_SUMMARY      the cross-task GitHub PR summary comment
+#                                  (GithubStatusComments) — the only
+#                                  *aggregate* surface, where same-`(id, key)`
+#                                  tips from sibling tasks combine. See
+#                                  "Cross-task accumulation".
+SURFACE_CLI = "cli"
+SURFACE_GITHUB_STATUS_CHECKS = "github-status-checks"
+SURFACE_BUILDKITE_ANNOTATIONS = "buildkite-annotations"
+SURFACE_GITLAB_COMMIT_STATUSES = "gitlab-commit-statuses"
+SURFACE_GITHUB_PR_SUMMARY = "github-pr-summary"
+
+# Per-task status screens — every surface bound to a single task's own
+# render. Excludes the aggregate PR summary. A tip that's only meaningful
+# in the context of the one task that emitted it (dynamic, per-invocation
+# detail) should set `surfaces = TASK_SCREENS` so it never lands in the
+# cross-task rollup.
+TASK_SCREENS = [SURFACE_CLI, SURFACE_GITHUB_STATUS_CHECKS, SURFACE_BUILDKITE_ANNOTATIONS, SURFACE_GITLAB_COMMIT_STATUSES]
+
+# The aggregate screen(s) — just the PR summary today, named as a list so
+# `surfaces = AGGREGATE_SCREENS` reads symmetrically with `TASK_SCREENS`
+# for a tip that should ONLY appear in the rollup.
+AGGREGATE_SCREENS = [SURFACE_GITHUB_PR_SUMMARY]
+
+# Every surface. The default for a tip that doesn't restrict itself.
+SURFACE_ALL = TASK_SCREENS + AGGREGATE_SCREENS
+
+_VALID_SURFACES = SURFACE_ALL
+
+def tip_shows_on(tip, surface):
+    """True iff `tip` is allowed to render on `surface`.
+
+    Empty / missing `surfaces` means "all surfaces" (back-compat). A
+    non-empty list is an allowlist: the tip renders on `surface` only when
+    the list contains it. `surface = None` (the unfiltered collect) always
+    passes — callers that don't name a surface get every tip, as before.
+    """
+    if surface == None:
+        return True
+    allowed = tip.get("surfaces") or []
+    if not allowed:
+        return True
+    return surface in allowed
+
+# ── Tip identity: (id, key) ──────────────────────────────────────────
+#
+# A tip is identified by the pair `(id, key)`:
+#
+#   id  — the tip kind + silence key. `--tips:silence=<id>` (and the
+#         `silence` feature arg) match on `id`, so silencing one id
+#         covers every `key` under it.
+#   key — optional discriminator (default ""). Two tips with the same
+#         `id` but different `key` are DISTINCT: they coexist on a task's
+#         surface and as separate rows in the PR summary. Use it for "same
+#         tip kind, different subject" — e.g. one `flaky-test` tip per
+#         failing target, all silenceable with `--tips:silence=flaky-test`.
+#
+# Within a task, re-emitting the same `(id, key)` REPLACES the stored tip
+# (last content wins); `accumulate` fields ride along, unioned (deduped +
+# sorted) onto the prior. Across tasks in the PR summary, same-`(id, key)`
+# tips combine per `combine_across_tasks` (below).
+
+# ── Cross-task accumulation ──────────────────────────────────────────
+#
+# `combine_across_tasks` (bool, default False) controls how same-(id,
+# key) tips from different tasks combine in the PR summary rollup:
+#
+#   False (default) — each task stands alone; if several share an
+#                     (id, key), the latest task's rendered content wins
+#                     (one row). `accumulate` fields are NOT unioned
+#                     across tasks.
+#   True            — `accumulate` fields are unioned across every
+#                     contributing task (deduped + sorted) and the tip is
+#                     re-rendered, surfacing the full cross-task set (e.g.
+#                     every scope every task was missing). One row.
+#
+# Eligibility for the rollup at all is governed by `surfaces` — a tip
+# whose `surfaces` omits `SURFACE_GITHUB_PR_SUMMARY` (e.g. `TASK_SCREENS`) never
+# enters the rollup regardless of this flag.
+
+# ── tip_suggestion hook records ──────────────────────────────────────
+#
+# A `tip_suggestion` hook (registered on the public `TipsTrait` below)
+# fires on every `add_tip` / `emit_tip`, letting `config.axl` accept /
+# reject / rewrite any tip — the same accept/reject/replace shape as the
+# `repro_fix_suggestion` hook on `TaskLifecycleTrait`.
+
+# Verdict action: `accept` keeps the tip, `reject` drops it (never enters
+# storage / surfaces), `replace` overrides the fields set on the returned
+# `TipSuggestion`.
+TipAction = enum("accept", "reject", "replace")
+
+# Metadata passed to each `tip_suggestion` hook alongside `ctx`. Carries
+# the tip's identity + content + policy fields so the hook can scope by
+# `id` / `key` / `severity` / `type` and rewrite any of them. Fires on
+# every `add_tip`, including each accumulate re-emit.
+TipInfo = record(
+    # Task identity — joined `<group...> <name>` path plus its parts, for
+    # hooks that scope by task (e.g. only adjust tips on `aspect lint`).
+    task_path = field(str),
+    task_name = field(str),
+    task_group = field(list[str]),
+
+    # The tip about to be stored. `id` / `key` are the identity (see "Tip
+    # identity"); `severity` is a TIP_* value; `type` is the template
+    # kind; `surfaces` / `combine_across_tasks` are the policy fields.
+    #
+    # `title` / `body` are the pre-rendered strings for RAW / FORMAT tips.
+    # For a JINJA2 tip they are EMPTY — the templates aren't rendered
+    # until the tip is stored, after this hook runs — so scope JINJA2
+    # tips by `id` / `key` / `type`, not by rendered text.
+    id = field(str),
+    key = field(str),
+    severity = field(str),
+    title = field(str),
+    body = field(str),
+    type = field(str),
+    surfaces = field(list[str], default = []),
+    combine_across_tasks = field(bool),
+)
+
+# Verdict returned by every `tip_suggestion` hook. `action` is required.
+# The remaining fields are consulted only on `action == "replace"`; each
+# left `None` keeps the tip's current value, so a hook can retag just the
+# `severity` (or just the `surfaces`) without restating the rest. A
+# `replace` with every field `None` is a no-op (equivalent to accept).
+TipSuggestion = record(
+    action = field(TipAction),
+    severity = field(str | None, default = None),
+    title = field(str | None, default = None),
+    body = field(str | None, default = None),
+    surfaces = field(list[str] | None, default = None),
+    combine_across_tasks = field(bool | None, default = None),
+)
+
+# Shared singletons for the no-argument verdicts so hooks read as
+# `return TIP_ACCEPT`. Use `tip_replace(...)` for the replace verdict.
+TIP_ACCEPT = TipSuggestion(action = TipAction("accept"))
+TIP_REJECT = TipSuggestion(action = TipAction("reject"))
+
+def tip_replace(
+        severity: str | None = None,
+        title: str | None = None,
+        body: str | None = None,
+        surfaces: list[str] | None = None,
+        combine_across_tasks: bool | None = None) -> TipSuggestion:
+    """Build a `replace` `TipSuggestion`. Omitted fields keep the tip's
+    current value. See `TipSuggestion` for field semantics."""
+    return TipSuggestion(
+        action = TipAction("replace"),
+        severity = severity,
+        title = title,
+        body = body,
+        surfaces = surfaces,
+        combine_across_tasks = combine_across_tasks,
+    )
+
 # ── Private trait — owner-feature implementation detail ────────────
 #
-# Pre-rendered tips carry `{id, severity, title, body, type, task_keys}`;
-# JINJA2 tips additionally carry `title_template`, `body_template`, and
-# `accumulators` (dict<name, list<value>>) so `add_tip` can re-render
-# on each accumulation event. Dedup by `id`; ids in the silence list
-# are dropped on `add_tip` (unless severity is TIP_IMPORTANT).
+# Every stored tip carries `{id, key, severity, title, body, type,
+# task_keys, surfaces, combine_across_tasks}`; JINJA2 tips additionally
+# carry `title_template`, `body_template`, `vars`, and `accumulate`
+# (dict<name, list<value>>) so `add_tip` can re-render on accumulation.
+# A same-`(id, key)` re-emit replaces the stored tip (accumulate fields
+# union onto the prior); ids in the silence list are dropped on `add_tip`
+# (unless severity is TIP_IMPORTANT).
 #
 # When the `Tips` feature isn't loaded (user set `enabled = False` or
 # the framework didn't enable it), the trait callable defaults are
@@ -169,10 +369,11 @@ _VALID_TEMPLATE_TYPES = [TIP_TEMPLATE_RAW, TIP_TEMPLATE_FORMAT, TIP_TEMPLATE_JIN
 # and the disabled state propagates as zero output.
 
 _TipsTrait = trait(
-    # Add a constructed tip dict. The owner's closure handles dedup,
-    # jinja2 accumulator merge / re-render, silence-list checks, and
-    # the terminal-print side effect. Takes ctx for jinja2 rendering
-    # (`ctx.template.jinja2`) and the print path (`ctx.std`).
+    # Add a constructed tip dict. The owner's closure handles the
+    # silence-list check, the `tip_suggestion` hook chain, the
+    # (id, key) replace-with-accumulate dedup, and the terminal-print side
+    # effect. Takes ctx for jinja2 rendering (`ctx.template.jinja2`) and
+    # the print path (`ctx.std`).
     add = attr(typing.Callable[[TaskContext, dict], None], default = lambda ctx, t: None),
 
     # Return the raw, insertion-ordered list of stored tip dicts.
@@ -184,6 +385,20 @@ _TipsTrait = trait(
     _reset = attr(typing.Callable[[], None], default = lambda: None),
     _set_silenced = attr(typing.Callable[[list], None], default = lambda ids: None),
     _set_auto_print = attr(typing.Callable[[bool], None], default = lambda v: None),
+)
+
+# Public trait carrying the user `tip_suggestion` hook list. Separate
+# from `_TipsTrait` (whose `add` / `collect` callables are internal) so
+# users only see the hook surface. Tasks include it via `tips.TRAITS`;
+# users register from `.aspect/config.axl`:
+#
+#     ctx.traits[TipsTrait].tip_suggestion.append(my_hook)
+#
+# Each hook is `(ctx: TaskContext, info: TipInfo) -> TipSuggestion`, run
+# on every `add_tip` by `apply_tip_suggestion_hooks`. See that helper and
+# the "tip_suggestion hook records" section above.
+TipsTrait = trait(
+    tip_suggestion = attr(list[typing.Callable[[TaskContext, TipInfo], TipSuggestion]], default = []),
 )
 
 # ── Built-in tip templates ───────────────────────────────────────────
@@ -269,12 +484,16 @@ TIP_ADD_ASPECT_API_TOKEN_CIRCLECI = _aspect_api_token_tip(
     "job env.",
 )
 
-# One tip per task accumulating both the missing scopes and the API
-# endpoints that fell back. Pluralization + per-scope snippet lines
-# are driven by Jinja2 on the merged accumulator state.
+# One tip accumulating both the missing scopes and the API endpoints
+# that fell back. Pluralization + per-scope snippet lines are driven by
+# Jinja2 on the merged `accumulate` state. Each fallback event re-emits
+# with new scopes/endpoints that union into the running total within a
+# task; `combine_across_tasks` unions the combined set across every task
+# into one PR-summary row.
 TIP_ADD_GITHUB_TOKEN_SCOPE = {
     "id": "add-github-token-scope",
     "severity": TIP_WARNING,
+    "combine_across_tasks": True,
     "title": "Grant {% if scopes|length == 1 %}`{{ scopes[0] }}`{% else %}{{ scopes|length }} scopes{% endif %} to the job-scoped `GITHUB_TOKEN`",
     "body": """aspect-cli made {{ endpoints|length }} supporting API {{ "call" if endpoints|length == 1 else "calls" }} that needed {{ "a scope" if scopes|length == 1 else "scopes" }} the job-scoped `GITHUB_TOKEN` lacks; {{ "the call" if endpoints|length == 1 else "the calls" }} fell back to the Aspect Workflows GitHub App token. Granting {{ "this scope" if scopes|length == 1 else "these scopes" }} keeps the {{ "call" if endpoints|length == 1 else "calls" }} on the job-scoped token and reduces App quota usage.
 
@@ -327,99 +546,124 @@ def add_tip(
         ctx,
         id,
         severity,
+        key = "",
         task_keys = None,
         title = "",
         body = "",
         type_ = TIP_TEMPLATE_RAW,
         title_template = "",
         body_template = "",
-        accumulators = None):
+        vars = None,
+        accumulate = None,
+        surfaces = None,
+        combine_across_tasks = False):
     """Add a tip to the task's tip storage and print a `TIP:` block to
     the terminal (subject to the owner feature's `auto_print` arg).
 
-    No-op if `id` is in the silence list AND `severity != TIP_IMPORTANT`
-    (important tips can't be silenced — see "Severity ordering" in the
-    module docstring). Users seed the silence list via the `Tips`
-    feature's `silence` arg in `.aspect/config.axl`:
-
-        def config(ctx):
-            ctx.features["tips"].args.silence.append("add-github-token")
+    A tip is identified by `(id, key)` — see the "Tip identity" section
+    in the module docstring. Re-emitting the same `(id, key)` within a
+    task replaces the stored content; `accumulate` fields ride along,
+    unioned (deduped + sorted) onto the prior. A different `key` is a
+    distinct tip. Silencing is always by `id`: no-op if `id` is in the
+    silence list AND `severity != TIP_IMPORTANT`.
 
     Two storage shapes:
 
       - Pre-rendered tips (`type_ == TIP_TEMPLATE_RAW` / `_FORMAT`):
-        `title` and `body` are the final strings to surface. No
-        accumulators. Dedup-by-id is silent (first add wins).
+        `title` / `body` are the final strings to surface.
 
-      - Jinja2 tips (`type_ == TIP_TEMPLATE_JINJA2`):
-        `title_template` and `body_template` are stored as Jinja2
-        source. `accumulators` is a dict<name, value> for the initial
-        emit. The framework converts each value to a single-entry list
-        and re-renders title + body with the accumulators as
-        `dict<name, list<value>>`. On every subsequent emit with the
-        same id, the new accumulator values get unioned into the
-        stored lists (skipping duplicates), the title and body are
-        re-rendered, and the terminal re-prints so each accumulation
-        event surfaces in the log. Plain dedups (no accumulator
-        change) stay silent.
+      - Jinja2 tips (`type_ == TIP_TEMPLATE_JINJA2`): `title_template` /
+        `body_template` are rendered against `vars` (fixed scalars) plus
+        `accumulate` (each a deduped + sorted list). The rendered strings
+        are stored alongside the inputs so a re-emit (within-task
+        accumulate) or cross-task union can re-render.
+
+    `vars` are fixed scalars: interpolated via `str.format` for
+    `TIP_TEMPLATE_FORMAT`, exposed as scalars to `TIP_TEMPLATE_JINJA2`
+    templates, ignored for `TIP_TEMPLATE_RAW`. `accumulate` fields are
+    list-valued (a template sees `{{ name }}` as a list) and union on
+    re-emit and, when `combine_across_tasks`, across tasks. A name
+    appearing in both `vars` and `accumulate` is an error.
 
     `task_keys` is an optional list of glob patterns; when set, the
     renderer only shows the tip on tasks whose key matches one of the
     patterns. When unset / empty, the tip shows on the task it was
     emitted into. The terminal print fires regardless of `task_keys`.
 
+    `surfaces` is an optional allowlist of surface identifiers
+    (`SURFACE_CLI` / `SURFACE_GITHUB_STATUS_CHECKS` /
+    `SURFACE_BUILDKITE_ANNOTATIONS` / `SURFACE_GITLAB_COMMIT_STATUSES` /
+    `SURFACE_GITHUB_PR_SUMMARY`, or the `TASK_SCREENS` / `AGGREGATE_SCREENS`
+    shorthands) controlling which status screens may render the tip. When
+    unset / empty the tip shows everywhere (`SURFACE_ALL`). See the
+    "Surface allowlist" section. The terminal print is gated on
+    `SURFACE_CLI`; omit `SURFACE_GITHUB_PR_SUMMARY` to keep the tip off the
+    cross-task rollup.
+
+    `combine_across_tasks` governs how same-`(id, key)` tips from
+    sibling tasks combine in the PR summary — see the "Cross-task
+    accumulation" section.
+
     No-op overall when the `Tips` feature is disabled — the trait's
     `add` callable falls back to its null-object default.
     """
     if severity not in _SEVERITY_ORDER:
         fail("unknown tip severity %r; valid: %s" % (severity, ", ".join(_SEVERITY_ORDER.keys())))
+    surfaces_list = list(surfaces) if surfaces else []
+    for s in surfaces_list:
+        if s not in _VALID_SURFACES:
+            fail("unknown tip surface %r; valid: %s" % (s, ", ".join(_VALID_SURFACES)))
+    vars = dict(vars or {})
+    accumulate = dict(accumulate or {})
+    collision = [name for name in accumulate if name in vars]
+    if collision:
+        fail("tip %r: %r set in both vars and accumulate" % (id, collision))
     is_jinja2 = type_ == TIP_TEMPLATE_JINJA2
-    if is_jinja2 and not [v for v in (accumulators or {}).values() if v]:
-        fail("TIP_TEMPLATE_JINJA2 tip %r requires at least one non-empty accumulator value" % id)
+    if is_jinja2 and not ([v for v in accumulate.values() if v] or [v for v in vars.values() if v]):
+        fail("TIP_TEMPLATE_JINJA2 tip %r requires at least one non-empty `vars` or `accumulate` value" % id)
 
+    common = {
+        "id": id,
+        "key": key,
+        "severity": severity,
+        "task_keys": list(task_keys) if task_keys else [],
+        "type": type_,
+        "surfaces": surfaces_list,
+        "combine_across_tasks": combine_across_tasks,
+    }
     if is_jinja2:
-        tip = {
-            "id": id,
-            "severity": severity,
-            "task_keys": list(task_keys) if task_keys else [],
-            "type": TIP_TEMPLATE_JINJA2,
-            "title_template": title_template,
-            "body_template": body_template,
-            "accumulators": dict(accumulators or {}),
-        }
+        tip = dict(common, title_template = title_template, body_template = body_template, vars = vars, accumulate = accumulate)
     else:
-        tip = {
-            "id": id,
-            "severity": severity,
-            "title": title,
-            "body": body,
-            "task_keys": list(task_keys) if task_keys else [],
-            "type": type_,
-        }
+        tip = dict(common, title = title, body = body)
     ctx.traits[_TipsTrait].add(ctx, tip)
 
-def emit_tip(ctx, template, vars = None, accumulators = None, id_suffix = "", task_keys = None):
+def emit_tip(ctx, template, key = None, vars = None, accumulate = None, id_suffix = "", task_keys = None, surfaces = None, combine_across_tasks = None):
     """Render a tip template and add it via `add_tip`.
 
     Args:
-      template:      dict — see module docstring for shape.
-      vars:          dict — `{name: value}` interpolated into title /
-                     body when `template.type == TIP_TEMPLATE_FORMAT`.
-                     Ignored for `TIP_TEMPLATE_RAW` and
-                     `TIP_TEMPLATE_JINJA2` (the latter takes its
-                     data from `accumulators` instead).
-      accumulators:  dict — `{name: value}` for
-                     `TIP_TEMPLATE_JINJA2` tips. Each value becomes
-                     the first entry of a per-name accumulator list
-                     on first emit; subsequent emits union new
-                     values into the existing lists. The body /
-                     title templates see each accumulator as a list
-                     and can iterate / pluralize on it.
+      template:      dict — see module docstring for shape. May carry
+                     optional `key`, `surfaces`, and
+                     `combine_across_tasks` keys, used as defaults
+                     when the same-named args below are unset.
+      key:           optional `(id, key)` discriminator overriding the
+                     template's `key`. See the "Tip identity" section.
+      vars:          dict — fixed scalars. `str.format`-interpolated into
+                     title / body for `TIP_TEMPLATE_FORMAT`; exposed as
+                     scalars to `TIP_TEMPLATE_JINJA2` templates; ignored
+                     for `TIP_TEMPLATE_RAW`.
+      accumulate:    dict — list-valued fields for `TIP_TEMPLATE_JINJA2`
+                     tips. A template sees `{{ name }}` as a deduped +
+                     sorted list; values union on re-emit and, when
+                     `combine_across_tasks`, across tasks.
       id_suffix:     optional kebab-case suffix appended to
                      `template.id`.
       task_keys:     optional list of glob patterns overriding the
-                     template's `task_keys` (or supplying it if
-                     absent).
+                     template's `task_keys` (or supplying it if absent).
+      surfaces:      optional surface allowlist overriding the template's
+                     `surfaces`. See the "Surface allowlist" section.
+      combine_across_tasks: optional bool overriding the template's
+                     value (default False). See the "Cross-task
+                     accumulation" section.
     """
     type_ = template.get("type", TIP_TEMPLATE_FORMAT)
     if type_ not in _VALID_TEMPLATE_TYPES:
@@ -427,17 +671,24 @@ def emit_tip(ctx, template, vars = None, accumulators = None, id_suffix = "", ta
     id = template["id"]
     if id_suffix:
         id = id + "-" + id_suffix
+    resolved_key = key if key != None else template.get("key", "")
     resolved_task_keys = task_keys if task_keys != None else template.get("task_keys")
+    resolved_surfaces = surfaces if surfaces != None else template.get("surfaces")
+    resolved_across = combine_across_tasks if combine_across_tasks != None else template.get("combine_across_tasks", False)
     if type_ == TIP_TEMPLATE_JINJA2:
         add_tip(
             ctx,
             id = id,
+            key = resolved_key,
             severity = template["severity"],
             task_keys = resolved_task_keys,
             type_ = TIP_TEMPLATE_JINJA2,
             title_template = template["title"],
             body_template = template["body"],
-            accumulators = accumulators or {},
+            vars = vars,
+            accumulate = accumulate,
+            surfaces = resolved_surfaces,
+            combine_across_tasks = resolved_across,
         )
         return
     title = template["title"]
@@ -448,16 +699,20 @@ def emit_tip(ctx, template, vars = None, accumulators = None, id_suffix = "", ta
     add_tip(
         ctx,
         id = id,
+        key = resolved_key,
         severity = template["severity"],
         task_keys = resolved_task_keys,
         title = title,
         body = body,
         type_ = type_,
+        surfaces = resolved_surfaces,
+        combine_across_tasks = resolved_across,
     )
 
-def collect_tips_sorted(ctx, limit = None):
+def collect_tips_sorted(ctx, limit = None, surface = None):
     """Return the current tips list filtered by `task_keys` (when set)
-    against `ctx.task.key`, then sorted by severity (highest urgency
+    against `ctx.task.key` and by `surface` (when set) against each tip's
+    `surfaces` allowlist, then sorted by severity (highest urgency
     first); the sort is stable, so insertion order is preserved
     within a severity bucket.
 
@@ -465,6 +720,13 @@ def collect_tips_sorted(ctx, limit = None):
     scoped to the task they were emitted into. Tips with `task_keys`
     apply only on tasks whose key matches one of the glob patterns
     (e.g. `["lint-*"]`, `["*"]`).
+
+    `surface` is the calling surface's identifier (e.g.
+    `SURFACE_GITHUB_STATUS_CHECKS`, `SURFACE_GITHUB_PR_SUMMARY`). When set, a tip
+    is dropped unless its `surfaces` allowlist is empty (all surfaces) or
+    contains `surface`. When `None` (the default), no surface filtering is
+    applied — every tip passes, preserving the pre-surface behavior for
+    callers that don't name a surface. See `tip_shows_on`.
 
     Pass `limit` to cap the result for space-constrained surfaces
     (e.g. PR comment summary).
@@ -474,6 +736,8 @@ def collect_tips_sorted(ctx, limit = None):
     for t in ctx.traits[_TipsTrait].collect():
         patterns = t.get("task_keys") or []
         if patterns and not match_any(patterns, task_key):
+            continue
+        if not tip_shows_on(t, surface):
             continue
         filtered.append(t)
     out = sorted(filtered, key = lambda t: severity_rank(t.get("severity")))
@@ -514,18 +778,28 @@ def silence_hint_line(id, severity):
 def tip_to_payload(t):
     """Project a stored tip dict into the render-only field subset
     that crosses the per-task artifact boundary (PR-comment
-    aggregation pipeline). JINJA2 fields are preserved so the
-    cross-task merge in `_collect_tip_rows` can re-render against
-    the unioned accumulator state."""
+    aggregation pipeline). JINJA2 fields (`vars`, `accumulate`, the
+    templates) are preserved so the cross-task merge in
+    `_collect_tip_rows` can re-render against the unioned state.
+
+    `key` is carried so the aggregator groups by `(id, key)`;
+    `combine_across_tasks` so it knows whether to union accumulators
+    across tasks; `surfaces` so it can re-assert the `SURFACE_GITHUB_PR_SUMMARY`
+    gate defensively even though the producer already filtered with
+    `collect_tips_sorted(ctx, surface = SURFACE_GITHUB_PR_SUMMARY)`."""
     return {
         "id": t.get("id", ""),
+        "key": t.get("key", ""),
         "severity": t.get("severity", ""),
         "title": t.get("title", ""),
         "body": t.get("body", ""),
         "type": t.get("type", ""),
         "title_template": t.get("title_template", ""),
         "body_template": t.get("body_template", ""),
-        "accumulators": t.get("accumulators", {}) or {},
+        "vars": dict(t.get("vars") or {}),
+        "accumulate": t.get("accumulate", {}) or {},
+        "surfaces": list(t.get("surfaces") or []),
+        "combine_across_tasks": t.get("combine_across_tasks", False),
     }
 
 def decorate_tip(t):
@@ -568,9 +842,9 @@ _TERMINAL_TIP_COLOR = {
 }
 
 def _print_tip(std, id, severity, title, body):
-    """Print a tip block to the terminal — called from `add_tip` on each
-    first add and (for `TIP_TEMPLATE_JINJA2` tips) on each accumulator
-    change.
+    """Print a tip block to the terminal — called from `add_tip` whenever
+    a tip's stored content changes (first add, a re-emit replace, or an
+    accumulate re-render).
 
     Header line is `<emoji> <LABEL>: <title>`, rendered bold throughout.
     The `<emoji> <LABEL>:` segment is colored by severity (red / yellow
@@ -627,73 +901,140 @@ def blockquote_body(body):
             out.append("> " + line)
     return "\n".join(out)
 
+# ── tip_suggestion hook application ──────────────────────────────────
+
+def apply_tip_suggestion_hooks(ctx: TaskContext, tip: dict) -> dict | None:
+    """Run `tip` through every `TipsTrait.tip_suggestion` handler.
+
+    Returns the post-chain tip dict (with any `replace` overrides
+    applied), or `None` when a handler rejected it. Handlers run in
+    registration order; a `reject` short-circuits. No-op pass-through
+    when no handlers are registered (the common case).
+
+    Called by `_tips_impl._add` on every `add_tip`, including each
+    accumulate re-emit. For a JINJA2 tip the hook runs before the
+    templates are rendered, so `info.title` / `info.body` are empty and a
+    `replace` of `title` / `body` has no effect (the stored values come
+    from rendering the templates); scope JINJA2 tips by `id` / `key` /
+    `type` and rewrite policy fields (`severity` / `surfaces` /
+    `combine_across_tasks`) instead.
+    """
+    handlers = ctx.traits[TipsTrait].tip_suggestion
+    if not handlers:
+        return tip
+
+    out = dict(tip)
+    info_base = {
+        "task_path": " ".join(list(ctx.task.group) + [ctx.task.name]),
+        "task_name": ctx.task.name,
+        "task_group": list(ctx.task.group),
+    }
+    for handler in handlers:
+        info = TipInfo(
+            id = out["id"],
+            key = out.get("key", ""),
+            severity = out["severity"],
+            title = out.get("title", ""),
+            body = out.get("body", ""),
+            type = out.get("type", ""),
+            surfaces = list(out.get("surfaces") or []),
+            combine_across_tasks = out.get("combine_across_tasks", False),
+            **info_base
+        )
+        verdict = handler(ctx, info)
+        action = verdict.action.value
+        if action == "reject":
+            return None
+        if action == "replace":
+            if verdict.severity != None:
+                out["severity"] = verdict.severity
+            if verdict.title != None:
+                out["title"] = verdict.title
+            if verdict.body != None:
+                out["body"] = verdict.body
+            if verdict.surfaces != None:
+                out["surfaces"] = list(verdict.surfaces)
+            if verdict.combine_across_tasks != None:
+                out["combine_across_tasks"] = verdict.combine_across_tasks
+    return out
+
 # ── Owner feature — co-located with the trait so it can bind closures ─
 
 def _tips_impl(ctx):
     """Owner feature impl. Holds the per-task tip list and silence list
-    in closure state; reads `silence` / `seed` / `auto_print` from
-    feature args at bind time so user configuration in .aspect/config.axl
-    or via `--tips:*` command-line flags propagates."""
+    in closure state; reads `silence` / `auto_print` from feature args at
+    bind time so user configuration in .aspect/config.axl or via
+    `--tips:*` command-line flags propagates."""
     state = []
 
     # `args.custom(...)` returns None at runtime when unset, even when
     # the declaration has `default = []` (same quirk used elsewhere with
     # `args.custom(dict, ...)`). Coalesce defensively.
     silenced = list(ctx.args.silence or [])
-    seed_list = list(ctx.args.seed or [])
     auto_print = [ctx.args.auto_print]  # boxed so test seam can mutate
 
-    # Pre-seed from feature args. Idempotent dedup-by-id with framework
-    # `add_tip` calls — first add wins (or accumulator-merge for jinja2).
-    for t in seed_list:
-        if not any([existing.get("id") == t.get("id") for existing in state]):
-            state.append(dict(t))
+    def _render_jinja2(call_ctx, tip, accumulate):
+        """Render `tip`'s templates against `vars` (scalars) + `accumulate`
+        (dict<name, list>) and return the stored tip with the rendered
+        title/body and the merged `accumulate` recorded."""
+        data = dict(tip.get("vars") or {})
+        data.update(accumulate)
+        stored = dict(tip)
+        stored["accumulate"] = accumulate
+        stored["title"] = call_ctx.template.jinja2(tip["title_template"], data = data)
+        stored["body"] = call_ctx.template.jinja2(tip["body_template"], data = data)
+        return stored
+
+    def _store(call_ctx, tip):
+        """Materialize a freshly-emitted `tip` into its stored form. For
+        JINJA2 tips this seeds each `accumulate` value into a single-entry
+        list and renders; pre-rendered tips store as-is."""
+        if tip.get("type") == TIP_TEMPLATE_JINJA2:
+            seeded = {name: [value] for name, value in tip["accumulate"].items() if value}
+            return _render_jinja2(call_ctx, tip, seeded)
+        return dict(tip)
+
+    def _emit_print(call_ctx, stored):
+        """Print the stored tip to the terminal, gated on auto_print and
+        the tip's SURFACE_CLI allowlist."""
+        if auto_print[0] and tip_shows_on(stored, SURFACE_CLI):
+            _print_tip(call_ctx.std, stored["id"], stored["severity"], stored["title"], stored["body"])
 
     def _add(call_ctx, tip):
-        id = tip["id"]
-        severity = tip["severity"]
-        if severity != TIP_IMPORTANT and id in silenced:
+        if tip["severity"] != TIP_IMPORTANT and tip["id"] in silenced:
             return
-        is_jinja2 = tip.get("type") == TIP_TEMPLATE_JINJA2
 
+        # Run the tip through the user `tip_suggestion` hook chain. A
+        # reject drops it; a replace returns the rewritten dict.
+        tip = apply_tip_suggestion_hooks(call_ctx, tip)
+        if tip == None:
+            return
+
+        identity = (tip["id"], tip.get("key", ""))
         for i, existing in enumerate(state):
-            if existing.get("id") != id:
+            if (existing["id"], existing.get("key", "")) != identity:
                 continue
-            if not is_jinja2:
-                return
-            merged, changed = _merge_accumulators(existing.get("accumulators", {}), tip.get("accumulators"))
-            if not changed:
-                return
-            stored_severity = existing.get("severity", severity)
-            rendered_title = call_ctx.template.jinja2(existing["title_template"], data = merged)
-            rendered_body = call_ctx.template.jinja2(existing["body_template"], data = merged)
-            updated = dict(existing)
-            updated["title"] = rendered_title
-            updated["body"] = rendered_body
-            updated["accumulators"] = merged
-            state[i] = updated
-            if auto_print[0]:
-                _print_tip(call_ctx.std, id, stored_severity, rendered_title, rendered_body)
+
+            # Re-emit of the same (id, key): replace the stored tip, but
+            # union any `accumulate` fields onto the prior so the running
+            # total carries across emits.
+            if tip.get("type") == TIP_TEMPLATE_JINJA2:
+                merged, _ = _merge_accumulators(existing.get("accumulate", {}), tip["accumulate"])
+                refreshed = _render_jinja2(call_ctx, tip, merged)
+            else:
+                refreshed = _store(call_ctx, tip)
+
+            # Re-print only when the rendered content actually changed, so
+            # a no-op re-emit (e.g. a streaming progress loop) stays quiet.
+            changed = (refreshed["title"], refreshed["body"]) != (existing.get("title"), existing.get("body"))
+            state[i] = refreshed
+            if changed:
+                _emit_print(call_ctx, refreshed)
             return
 
-        if is_jinja2:
-            seeded = {name: [value] for name, value in tip["accumulators"].items() if value}
-            stored = {
-                "id": id,
-                "severity": severity,
-                "title": call_ctx.template.jinja2(tip["title_template"], data = seeded),
-                "body": call_ctx.template.jinja2(tip["body_template"], data = seeded),
-                "task_keys": list(tip.get("task_keys") or []),
-                "type": TIP_TEMPLATE_JINJA2,
-                "title_template": tip["title_template"],
-                "body_template": tip["body_template"],
-                "accumulators": seeded,
-            }
-        else:
-            stored = dict(tip)
+        stored = _store(call_ctx, tip)
         state.append(stored)
-        if auto_print[0]:
-            _print_tip(call_ctx.std, id, severity, stored["title"], stored["body"])
+        _emit_print(call_ctx, stored)
 
     def _collect():
         return list(state)
@@ -732,11 +1073,6 @@ Tips = feature(
             default = [],
             description = "Tip ids to suppress for this task. Important tips (severity=important) ignore this list — they signal key-feature breakages. Append from config: `ctx.features[\"tips\"].args.silence.append(\"<id>\")`. Pass on CLI: `--tips:silence=<id>` (repeat for multiple).",
         ),
-        "seed": args.custom(
-            list,
-            default = [],
-            description = "Pre-seed list of tip dicts to register at task start. Each entry must have {id, severity, title, body, type?, task_keys?}. Useful for user-defined tips scoped to specific tasks via `task_keys` globs. Append from config: `ctx.features[\"tips\"].args.seed.append({...})`.",
-        ),
         "auto_print": args.boolean(
             default = True,
             description = "Print tips to the terminal on emit. Set False to suppress the `TIP:` blocks (tips still surface on rendered check-runs / PR comments).",
@@ -759,5 +1095,5 @@ tips = struct(
     _inspect_for_test = lambda ctx: ctx.traits[_TipsTrait].collect(),
     _set_silenced_for_test = lambda ctx, ids: ctx.traits[_TipsTrait]._set_silenced(ids),
     _set_auto_print_for_test = lambda ctx, v: ctx.traits[_TipsTrait]._set_auto_print(v),
-    TRAITS = [_TipsTrait],
+    TRAITS = [_TipsTrait, TipsTrait],
 )

@@ -367,8 +367,8 @@ def _check_collect_tip_rows(ctx):
     and the multi-accumulator JINJA2 re-render logic without going
     through the full snapshot pipeline."""
 
-    # Dedup + attribution: same id surfaced by two tasks merges into
-    # one row with both task keys in alphabetical order.
+    # Dedup + attribution: same (id, key) with identical content from two
+    # tasks merges into one row with both task keys in alphabetical order.
     rows = collect_tip_rows(ctx, [
         {"key": "lint-task", "tips": [
             {"id": "x", "severity": "suggestion", "title": "T", "body": "B"},
@@ -424,13 +424,10 @@ def _check_collect_tip_rows(ctx):
     if "tips" not in by_id["s"]["silence_hint"] or "silence" not in by_id["s"]["silence_hint"]:
         fail("collect_tip_rows: suggestion row must reference the tips silence knob in silence_hint")
 
-    # Multi-accumulator cross-task merge: two tasks each emit the
-    # `add-github-token-scope` JINJA2 tip with distinct scopes and
-    # endpoints. The merged row carries the union of each
-    # accumulator (preserving first-seen order across tasks), and
-    # the title + body are re-rendered via Jinja2 so the surfaced
-    # text reflects the merged accumulator state (pluralized title,
-    # full endpoint list in the body).
+    # combine_across_tasks: two tasks emit the `add-github-token-scope`
+    # JINJA2 tip with distinct scopes/endpoints. The combined row unions
+    # each `accumulate` field across tasks (first-seen order) and
+    # re-renders title + body (pluralized title, full endpoint list).
     title_tmpl = "Grant {% if scopes|length == 1 %}`{{ scopes[0] }}`{% else %}{{ scopes|length }} scopes{% endif %}"
     body_tmpl = "{{ endpoints|length }} calls fell back:\n{% for e in endpoints %}- {{ e }}\n{% endfor %}"
     rows = collect_tip_rows(ctx, [
@@ -440,9 +437,10 @@ def _check_collect_tip_rows(ctx):
             "title": "Grant `actions: read`",
             "body": "...",
             "type": "jinja2",
+            "combine_across_tasks": True,
             "title_template": title_tmpl,
             "body_template": body_tmpl,
-            "accumulators": {"scopes": ["actions: read"], "endpoints": ["/a/jobs"]},
+            "accumulate": {"scopes": ["actions: read"], "endpoints": ["/a/jobs"]},
         }]},
         {"key": "test-task", "tips": [{
             "id": "add-github-token-scope",
@@ -450,21 +448,102 @@ def _check_collect_tip_rows(ctx):
             "title": "Grant `pull-requests: read`",
             "body": "...",
             "type": "jinja2",
+            "combine_across_tasks": True,
             "title_template": title_tmpl,
             "body_template": body_tmpl,
-            "accumulators": {"scopes": ["pull-requests: read"], "endpoints": ["/b/files", "/c/files"]},
+            "accumulate": {"scopes": ["pull-requests: read"], "endpoints": ["/b/files", "/c/files"]},
         }]},
     ])
     if len(rows) != 1:
-        fail("multi-accumulator merge: expected 1 row, got %d" % len(rows))
+        fail("combine: expected 1 row, got %d" % len(rows))
     if "2 scopes" not in rows[0]["title"]:
-        fail("multi-accumulator merge: title not re-rendered with plural form: %r" % rows[0]["title"])
+        fail("combine: title not re-rendered with plural form: %r" % rows[0]["title"])
     if "/a/jobs" not in rows[0]["body_quoted"] or "/b/files" not in rows[0]["body_quoted"] or "/c/files" not in rows[0]["body_quoted"]:
-        fail("multi-accumulator merge: body missing an endpoint: %r" % rows[0]["body_quoted"])
+        fail("combine: body missing an endpoint: %r" % rows[0]["body_quoted"])
     if "3 calls" not in rows[0]["body_quoted"]:
-        fail("multi-accumulator merge: body not re-rendered with merged count: %r" % rows[0]["body_quoted"])
+        fail("combine: body not re-rendered with merged count: %r" % rows[0]["body_quoted"])
     if rows[0]["task_keys"] != ["build-task", "test-task"]:
-        fail("multi-accumulator merge: task_keys merge wrong: %r" % rows[0]["task_keys"])
+        fail("combine: task_keys merge wrong: %r" % rows[0]["task_keys"])
+
+    # ── Surface gate + (id, key) grouping + combine vs latest ─────────
+
+    # Surface gate: a tip whose `surfaces` omits the PR summary is
+    # dropped from the rollup even though it reached the aggregator.
+    rows = collect_tip_rows(ctx, [
+        {"key": "build-task", "tips": [{
+            "id": "task-only-tip",
+            "severity": "info",
+            "title": "Only on task screens",
+            "body": "...",
+            "type": "raw",
+            "surfaces": ["cli", "github-status-checks"],
+        }]},
+    ])
+    if len(rows) != 0:
+        fail("surface gate: tip excluding github-pr-summary must be dropped, got %d rows" % len(rows))
+
+    # An empty `surfaces` list means all surfaces — eligible for the rollup.
+    rows = collect_tip_rows(ctx, [
+        {"key": "build-task", "tips": [{"id": "everywhere-tip", "severity": "info", "title": "Everywhere", "body": "b", "type": "raw", "surfaces": []}]},
+    ])
+    if len(rows) != 1:
+        fail("surface gate: empty surfaces must be eligible, got %d rows" % len(rows))
+
+    # combine=False (default), identical content across tasks → one row
+    # attributed to both.
+    rows = collect_tip_rows(ctx, [
+        {"key": "build-task", "tips": [{"id": "static", "severity": "info", "title": "Same", "body": "Same body", "type": "raw"}]},
+        {"key": "test-task", "tips": [{"id": "static", "severity": "info", "title": "Same", "body": "Same body", "type": "raw"}]},
+    ])
+    if len(rows) != 1:
+        fail("latest-identical: expected 1 row, got %d" % len(rows))
+    if rows[0]["task_keys"] != ["build-task", "test-task"]:
+        fail("latest-identical: expected both task keys, got %r" % rows[0]["task_keys"])
+
+    # combine=False, divergent content across tasks → latest task's
+    # content wins, attributed to that task.
+    rows = collect_tip_rows(ctx, [
+        {"key": "build-task", "tips": [{"id": "dyn", "severity": "info", "title": "Built //a", "body": "b1", "type": "raw"}]},
+        {"key": "test-task", "tips": [{"id": "dyn", "severity": "info", "title": "Built //b", "body": "b2", "type": "raw"}]},
+    ])
+    if len(rows) != 1:
+        fail("latest-divergent: expected 1 row, got %d" % len(rows))
+    if rows[0]["title"] != "Built //b" or rows[0]["task_keys"] != ["test-task"]:
+        fail("latest-divergent: expected latest task to win, got title=%r keys=%r" % (rows[0]["title"], rows[0]["task_keys"]))
+
+    # Distinct `key` under the same `id` → separate rows, each attributed
+    # to its own task. (The "same tip, different subjects" use case.)
+    rows = collect_tip_rows(ctx, [
+        {"key": "build-task", "tips": [{"id": "flaky", "key": "//a", "severity": "warning", "title": "Flaky //a", "body": "b", "type": "raw"}]},
+        {"key": "test-task", "tips": [{"id": "flaky", "key": "//b", "severity": "warning", "title": "Flaky //b", "body": "b", "type": "raw"}]},
+    ])
+    if len(rows) != 2:
+        fail("distinct-key: expected 2 rows, got %d" % len(rows))
+    by_title = {r["title"]: r for r in rows}
+    if by_title["Flaky //a"]["task_keys"] != ["build-task"]:
+        fail("distinct-key: //a mis-attributed: %r" % by_title["Flaky //a"]["task_keys"])
+    if by_title["Flaky //b"]["task_keys"] != ["test-task"]:
+        fail("distinct-key: //b mis-attributed: %r" % by_title["Flaky //b"]["task_keys"])
+
+    # combine=False: same id, same key, different content from two tasks
+    # collapses to ONE row (latest), not two — distinctness needs a key.
+    rows = collect_tip_rows(ctx, [
+        {"key": "build-task", "tips": [{"id": "nokey", "severity": "info", "title": "Built //a", "body": "b1", "type": "raw"}]},
+        {"key": "test-task", "tips": [{"id": "nokey", "severity": "info", "title": "Built //b", "body": "b2", "type": "raw"}]},
+    ])
+    if len(rows) != 1:
+        fail("no-key-collapse: same (id, '') must be one row, got %d" % len(rows))
+
+    # combine=True if ANY contributor opts in: the group merges into one
+    # row even when another contributor left it False.
+    rows = collect_tip_rows(ctx, [
+        {"key": "build-task", "tips": [{"id": "scope", "severity": "info", "title": "T", "body": "b", "type": "jinja2", "title_template": "T", "body_template": "{% for s in scopes %}{{ s }} {% endfor %}", "accumulate": {"scopes": ["a"]}}]},
+        {"key": "test-task", "tips": [{"id": "scope", "severity": "info", "title": "T", "body": "b", "type": "jinja2", "combine_across_tasks": True, "title_template": "T", "body_template": "{% for s in scopes %}{{ s }} {% endfor %}", "accumulate": {"scopes": ["b"]}}]},
+    ])
+    if len(rows) != 1 or rows[0]["task_keys"] != ["build-task", "test-task"]:
+        fail("combine-any: a single combine_across_tasks contributor must merge the group, got %r" % rows)
+    if "a" not in rows[0]["body_quoted"] or "b" not in rows[0]["body_quoted"]:
+        fail("combine-any: scopes not unioned across tasks: %r" % rows[0]["body_quoted"])
 
 def _check_dedup_by_run_attempt():
     """Functional assertions for `_dedup_by_run_attempt` — collapse

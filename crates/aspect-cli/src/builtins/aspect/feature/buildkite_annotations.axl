@@ -32,7 +32,7 @@ load("../lib/environment.axl", "feature_logger", "workflows_results_url")
 load("../lib/lifecycle.axl", "TaskLifecycleTrait", "TaskUpdate")
 load("../lib/rate_limit.axl", "usage_footer")
 load("../lib/result_text.axl", "severity_for_status")
-load("../lib/tips.axl", "collect_tips_sorted")
+load("../lib/tips.axl", "SURFACE_BUILDKITE_ANNOTATIONS", "collect_tips_sorted")
 
 # ─── Style selection ──────────────────────────────────────────────────────────
 
@@ -317,7 +317,7 @@ def _buildkite_annotations(ctx: FeatureContext):
             ctx,
             data,
             status,
-            make_render_ctx(_state, tips = collect_tips_sorted(ctx), api_usage = usage_footer(ctx), last_updated_at = format_run_date(ctx, now_ms(ctx))),
+            make_render_ctx(_state, tips = collect_tips_sorted(ctx, surface = SURFACE_BUILDKITE_ANNOTATIONS), api_usage = usage_footer(ctx), last_updated_at = format_run_date(ctx, now_ms(ctx))),
             _make_links(data),
             None,
             None,
