@@ -31,6 +31,7 @@ load(
     "bucket_entries",
     "collect_tip_rows",
     "dedup_by_run_attempt",
+    "dedup_for_display",
     "lease_held",
     "max_recent_upsert_epoch",
     "merge_state",
@@ -982,6 +983,78 @@ def _check_merge_state_drops_stale_push():
     _eq("merge — stale-push drops slots", new["workflow_runs"], [{"run_id": "100", "workflow_name": "ci-gha"}])
     _eq("merge — stale-push drops entries", new["entries"], my_entries)
 
+def _check_merge_state_evicts_superseded_workflow_run():
+    """A workflow re-triggered on the same PR head SHA gets a fresh
+    `run_id` but the same `workflow_name`. The stale slot (and its
+    snapshot entries) must be evicted in favor of the newest run, or
+    every task in that workflow renders as a phantom duplicate. This is
+    the root cause of the reported cross-comment task duplication."""
+    existing = {
+        "head_sha": "abc",
+        "workflow_runs": [
+            # An older run of the SAME workflow we're now running as.
+            {"run_id": "100", "workflow_name": "ci-gha"},
+            # A genuinely-distinct concurrent workflow — must survive.
+            {"run_id": "500", "workflow_name": "ci-workflows"},
+        ],
+        "entries": [
+            {"name": "test", "key": "cpu", "job": "test (cpu)", "workflow_run_id": "100", "status": "passed"},
+            {"name": "lint", "key": "lint", "job": "lint", "workflow_run_id": "500", "status": "passed"},
+        ],
+    }
+    # We are a newer run (run_id 999) of "ci-gha".
+    my_entries = [{"name": "test", "key": "cpu", "job": "test (cpu)", "workflow_run_id": "999", "status": "running"}]
+    new = merge_state(existing, "abc", "999", "ci-gha", my_entries, {})
+
+    rids = sorted([r["run_id"] for r in new["workflow_runs"]])
+    _eq("merge — superseded slot evicted, sibling kept", rids, ["500", "999"])
+
+    # The stale run_id=100 snapshot entry must not survive — only our
+    # live row + the distinct sibling workflow's row.
+    keyed = {(e["name"], e["key"], e.get("workflow_run_id", "")): e for e in new["entries"]}
+    if ("test", "cpu", "100") in keyed:
+        fail("merge — stale superseded entry should be dropped, got %r" % new["entries"])
+    _eq("merge — our live row survives", keyed[("test", "cpu", "999")]["status"], "running")
+    _eq("merge — distinct sibling workflow row survives", keyed[("lint", "lint", "500")]["status"], "passed")
+
+def _check_merge_state_keeps_empty_workflow_name_slots():
+    """Slots with an empty `workflow_name` (e.g. older aspect-cli
+    writers that didn't stamp it) can't be matched to a newer run, so
+    they're passed through untouched rather than collapsed together."""
+    existing = {
+        "head_sha": "abc",
+        "workflow_runs": [
+            {"run_id": "100", "workflow_name": ""},
+            {"run_id": "200", "workflow_name": ""},
+        ],
+        "entries": [],
+    }
+    new = merge_state(existing, "abc", "999", "ci-gha", [], {})
+    rids = sorted([r["run_id"] for r in new["workflow_runs"]])
+    _eq("merge — empty-name slots both kept", rids, ["100", "200", "999"])
+
+def _check_dedup_for_display_collapses_stale_duplicates():
+    """`_dedup_for_display` collapses a `(job, name, key)` that appears
+    under two `workflow_run_id`s to the newest run's row — the render
+    path's defense against a leaked/one-cycle-stale duplicate slot."""
+    out = dedup_for_display([
+        {"name": "test", "key": "cpu", "job": "test (cpu)", "workflow_run_id": "100", "status": "passed"},
+        {"name": "test", "key": "cpu", "job": "test (cpu)", "workflow_run_id": "999", "status": "running"},
+    ])
+    if len(out) != 1:
+        fail("dedup_for_display: expected 1 row, got %d: %r" % (len(out), out))
+    _eq("dedup_for_display — newest run_id wins", out[0]["status"], "running")
+
+def _check_dedup_for_display_keeps_distinct_jobs():
+    """Distinct `job` values are legitimately separate rows (matrix
+    jobs / distinct workflows with different job names) and must not
+    collapse."""
+    out = dedup_for_display([
+        {"name": "test", "key": "t", "job": "test (cpu)", "workflow_run_id": "100"},
+        {"name": "test", "key": "t", "job": "test (gpu)", "workflow_run_id": "100"},
+    ])
+    _eq("dedup_for_display — distinct jobs kept", len(out), 2)
+
 def _check_render_body_emits_state_block(ctx):
     """When `state` is set, the rendered body carries an HTML-comment
     state block whose payload parses back to the state we passed."""
@@ -1130,6 +1203,10 @@ def _test_impl(ctx):
     _check_merge_state_replaces_own_slot()
     _check_merge_state_drops_stale_push()
     _check_merge_state_drops_orphan_snapshot_entries()
+    _check_merge_state_evicts_superseded_workflow_run()
+    _check_merge_state_keeps_empty_workflow_name_slots()
+    _check_dedup_for_display_collapses_stale_duplicates()
+    _check_dedup_for_display_keeps_distinct_jobs()
     _check_merge_state_workflow_runs_sorted()
     _check_merge_state_entries_sorted()
     _check_render_body_emits_state_block(ctx)
