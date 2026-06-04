@@ -1039,6 +1039,31 @@ def _check_merge_state_evicts_superseded_sibling_run():
     run_ids_with_lint = [e["workflow_run_id"] for e in new["entries"] if e["name"] == "lint"]
     _eq("merge — only newest sibling lint row kept", run_ids_with_lint, ["700"])
 
+def _check_merge_state_losing_rerun_does_not_resurrect():
+    """Rerun race: a newer run (999) of our workflow already published
+    its slot, and we are the OLDER run (100) still executing. We must
+    NOT evict the newer slot and reinstate our own — that would
+    resurrect stale rows. We lose the contest, contribute nothing, and
+    the newer run's slot + rows survive."""
+    existing = {
+        "head_sha": "abc",
+        "workflow_runs": [
+            {"run_id": "999", "workflow_name": "ci-gha"},
+        ],
+        "entries": [
+            {"name": "test", "key": "cpu", "job": "test (cpu)", "workflow_run_id": "999", "status": "running"},
+        ],
+    }
+
+    # We are the older run 100; our entries are stale.
+    my_entries = [{"name": "test", "key": "cpu", "job": "test (cpu)", "workflow_run_id": "100", "status": "passed"}]
+    new = merge_state(existing, "abc", "100", "ci-gha", my_entries, {})
+
+    rids = [r["run_id"] for r in new["workflow_runs"]]
+    _eq("merge — losing rerun keeps only the newer slot", rids, ["999"])
+    run_ids = sorted([e["workflow_run_id"] for e in new["entries"]])
+    _eq("merge — losing rerun contributes no rows of its own", run_ids, ["999"])
+
 def _check_merge_state_keeps_empty_workflow_name_slots():
     """Slots with an empty `workflow_name` (e.g. older aspect-cli
     writers that didn't stamp it) can't be matched to a newer run, so
@@ -1055,17 +1080,18 @@ def _check_merge_state_keeps_empty_workflow_name_slots():
     rids = sorted([r["run_id"] for r in new["workflow_runs"]])
     _eq("merge — empty-name slots both kept", rids, ["100", "200", "999"])
 
-def _check_dedup_for_display_collapses_stale_duplicates():
-    """`_dedup_for_display` collapses a `(job, name, key)` that appears
-    under two `workflow_run_id`s to the newest run's row — the render
-    path's defense against a leaked/one-cycle-stale duplicate slot."""
+def _check_dedup_for_display_collapses_exact_duplicates():
+    """`_dedup_for_display` collapses an exact-duplicate row — same
+    `(workflow_run_id, job, name, key)` — to the higher `run_attempt`,
+    guarding against a snapshot that briefly carries two rows for one
+    task within a single run_id."""
     out = dedup_for_display([
-        {"name": "test", "key": "cpu", "job": "test (cpu)", "workflow_run_id": "100", "status": "passed"},
-        {"name": "test", "key": "cpu", "job": "test (cpu)", "workflow_run_id": "999", "status": "running"},
+        {"name": "test", "key": "cpu", "job": "test (cpu)", "workflow_run_id": "100", "run_attempt": "1", "status": "running"},
+        {"name": "test", "key": "cpu", "job": "test (cpu)", "workflow_run_id": "100", "run_attempt": "2", "status": "passed"},
     ])
     if len(out) != 1:
         fail("dedup_for_display: expected 1 row, got %d: %r" % (len(out), out))
-    _eq("dedup_for_display — newest run_id wins", out[0]["status"], "running")
+    _eq("dedup_for_display — higher run_attempt wins", out[0]["status"], "passed")
 
 def _check_dedup_for_display_keeps_distinct_jobs():
     """Distinct `job` values are legitimately separate rows (matrix
@@ -1077,17 +1103,16 @@ def _check_dedup_for_display_keeps_distinct_jobs():
     ])
     _eq("dedup_for_display — distinct jobs kept", len(out), 2)
 
-def _check_dedup_for_display_run_attempt_tiebreak():
-    """Within a single `workflow_run_id`, the higher `run_attempt` wins
-    — same precedence as `_dedup_by_run_attempt`, applied after the
-    run_id comparison."""
+def _check_dedup_for_display_keeps_distinct_workflows():
+    """Two genuinely-concurrent workflows that share a `(job, name,
+    key)` (e.g. a common `test` job in two workflow files) must BOTH
+    render — `workflow_run_id` is part of the display identity, so they
+    are not collapsed into one row."""
     out = dedup_for_display([
-        {"name": "test", "key": "t", "job": "test", "workflow_run_id": "100", "run_attempt": "1", "status": "running"},
-        {"name": "test", "key": "t", "job": "test", "workflow_run_id": "100", "run_attempt": "2", "status": "passed"},
+        {"name": "test", "key": "test", "job": "test", "workflow_run_id": "100", "status": "passed"},
+        {"name": "test", "key": "test", "job": "test", "workflow_run_id": "200", "status": "running"},
     ])
-    if len(out) != 1:
-        fail("dedup_for_display tiebreak: expected 1 row, got %d: %r" % (len(out), out))
-    _eq("dedup_for_display — higher run_attempt wins on equal run_id", out[0]["status"], "passed")
+    _eq("dedup_for_display — distinct workflows both kept", len(out), 2)
 
 def _check_render_body_emits_state_block(ctx):
     """When `state` is set, the rendered body carries an HTML-comment
@@ -1239,10 +1264,11 @@ def _test_impl(ctx):
     _check_merge_state_drops_orphan_snapshot_entries()
     _check_merge_state_evicts_superseded_workflow_run()
     _check_merge_state_evicts_superseded_sibling_run()
+    _check_merge_state_losing_rerun_does_not_resurrect()
     _check_merge_state_keeps_empty_workflow_name_slots()
-    _check_dedup_for_display_collapses_stale_duplicates()
+    _check_dedup_for_display_collapses_exact_duplicates()
     _check_dedup_for_display_keeps_distinct_jobs()
-    _check_dedup_for_display_run_attempt_tiebreak()
+    _check_dedup_for_display_keeps_distinct_workflows()
     _check_merge_state_workflow_runs_sorted()
     _check_merge_state_entries_sorted()
     _check_render_body_emits_state_block(ctx)

@@ -408,25 +408,23 @@ def _dedup_by_run_attempt(entries):
     )
 
 def _dedup_for_display(entries):
-    """Collapse entries that share a `(job, name, key)` identity across
-    different `workflow_run_id`s to the one from the newest run (by
-    `workflow_run_id`, then `run_attempt`).
+    """Collapse exact-duplicate rows — same `(workflow_run_id, job,
+    name, key)` — to the highest `run_attempt`, for the render path.
 
-    Defense-in-depth on the render path: `_merge_state` already evicts
-    superseded slots (`_live_sibling_runs`), so in steady state each
-    logical task appears once. This guards against a future slot
-    leak — or a snapshot row outliving its eviction by one cycle —
-    visibly duplicating a row. Operates on the display copy only; the
-    persisted state block keeps per-run_id granularity for the
-    snapshot-fallback merge.
-
-    Same-named jobs across genuinely-parallel workflows collapse here,
-    but that matches the one-row-per-task contract — the row reflects
-    the most recent run."""
+    Defense-in-depth: `_merge_state` keeps one live run per
+    `workflow_name` (`_live_runs`) and sources each run's entries from a
+    single place, so in steady state every row is already unique. This
+    guards against a snapshot that briefly carries two rows for the same
+    task within one run_id (e.g. an artifact-listing eventual-
+    consistency blip). `workflow_run_id` is part of the identity so rows
+    from genuinely-distinct concurrent workflows that happen to share a
+    `(job, name, key)` are preserved — collapsing those would drop a
+    real workflow's row. Operates on the display copy only; the
+    persisted state block is untouched."""
     return _collapse_by(
         entries,
-        lambda e: (e.get("job", ""), e.get("name", ""), e.get("key", "")),
-        lambda e: (_run_id_sort_key(e.get("workflow_run_id", "")), _run_attempt_int(e)),
+        lambda e: (e.get("workflow_run_id", ""), e.get("job", ""), e.get("name", ""), e.get("key", "")),
+        _run_attempt_int,
     )
 
 def _should_quiet_delete_log(last_upload_at, now):
@@ -990,34 +988,38 @@ def _parse_state(body):
         "entries": parsed_entries,
     }
 
-def _live_sibling_runs(workflow_runs, my_run_id, my_workflow_name):
-    """Filter `workflow_runs` (the comment's existing slots) down to the
-    live run per sibling workflow, dropping this writer's own slot and
-    any run a newer run of the same workflow has superseded.
+def _live_runs(workflow_runs, my_run_id, my_workflow_name):
+    """Reduce the comment's `workflow_runs` slots — plus this writer's
+    own run as a candidate — to the live run per `workflow_name`.
 
     A workflow re-triggered on the same head SHA keeps its
     `GITHUB_WORKFLOW` name but gets a fresh `GITHUB_RUN_ID`. Left in
     place, the stale slot lingers (its artifacts expire → frozen
     snapshot fallback), duplicating every task in that workflow on the
     rendered comment. For each named workflow only the newest `run_id`
-    survives. This writer's slot — matched on either `my_run_id` (so an
-    out-of-band-renamed slot at our run_id doesn't double up) or
-    `my_workflow_name` (a prior run of our own workflow) — is dropped so
-    the caller can re-add it as the live run.
+    survives.
 
-    Slots with an empty `workflow_name` are passed through untouched
-    (unless they match `my_run_id`) — they can't be matched to a newer
-    run reliably, so each keeps its own identity."""
+    This writer's own run competes in the contest like any other slot.
+    It does NOT win by fiat: in a re-run race the older run is still
+    executing and publishing, so if a newer run of our name already
+    holds the slot, that newer slot wins and ours is dropped (it would
+    otherwise resurrect stale rows over the newer run's). Any existing
+    slot at `my_run_id` (e.g. one whose `workflow_name` was renamed
+    out of band) is replaced by our current identity.
+
+    Slots with an empty `workflow_name` are passed through untouched —
+    they can't be matched to a newer run reliably, so each keeps its
+    own identity. If our own run has no name (GITHUB_WORKFLOW unset),
+    our candidate is one of these and is always kept."""
+    candidates = [r for r in workflow_runs if str(r.get("run_id", "")) != str(my_run_id)]
+    candidates.append({"run_id": str(my_run_id), "workflow_name": my_workflow_name})
+
     newest_by_name = {}
     passthrough = []
-    for r in workflow_runs:
-        if str(r.get("run_id", "")) == str(my_run_id):
-            continue
+    for r in candidates:
         name = r.get("workflow_name", "") or ""
         if not name:
             passthrough.append(r)
-            continue
-        if name == my_workflow_name:
             continue
         cur = newest_by_name.get(name)
         if cur == None or _run_id_sort_key(r.get("run_id", "")) > _run_id_sort_key(cur.get("run_id", "")):
@@ -1033,8 +1035,9 @@ def _merge_state(existing_state, head_sha, my_run_id, my_workflow_name, my_entri
         writer overlays its own slot, preserving sibling-workflow slots
         unchanged. Writes are slot-independent → no cross-workflow data
         race. A workflow re-triggered on the same head SHA supersedes
-        its prior slot (`_live_sibling_runs`) so stale runs don't
-        accumulate as duplicate task rows.
+        its prior slot (`_live_runs`) so stale runs don't accumulate as
+        duplicate task rows; a still-running older run that lost the
+        contest contributes nothing rather than resurrecting its rows.
       * `entries` is the full per-task snapshot, kept for two reasons:
         (a) fallback when a sibling workflow's artifacts are unreachable
         (TTL expiry, transient API error); (b) terminal-state
@@ -1062,11 +1065,12 @@ def _merge_state(existing_state, head_sha, my_run_id, my_workflow_name, my_entri
 
     existing_runs = (existing_state or {}).get("workflow_runs", []) or []
 
-    # Keep one live slot per sibling workflow (evicting runs superseded
-    # by a re-trigger on the same head SHA), then add our own slot back
-    # as the live run for our name. See `_live_sibling_runs`.
-    other_runs = _live_sibling_runs(existing_runs, my_run_id, my_workflow_name)
-    workflow_runs = other_runs + [{"run_id": str(my_run_id), "workflow_name": my_workflow_name}]
+    # Reduce to the live run per workflow_name (evicting runs superseded
+    # by a re-trigger on the same head SHA), with our own run competing
+    # as a candidate. We only own the slot for our name if we won the
+    # contest; in a re-run race a newer run of our name wins and we
+    # contribute nothing this cycle. See `_live_runs`.
+    workflow_runs = _live_runs(existing_runs, my_run_id, my_workflow_name)
 
     # Per-task union of refreshed entries with the comment's prior
     # snapshot. Refresh wins per `(name, key)`; snapshot fills any
@@ -1080,9 +1084,13 @@ def _merge_state(existing_state, head_sha, my_run_id, my_workflow_name, my_entri
         rid = str(e.get("workflow_run_id", ""))
         snapshot_by_run.setdefault(rid, []).append(e)
 
-    entries = list(my_entries)
-    for r in other_runs:
+    entries = []
+    for r in workflow_runs:
         rid = str(r.get("run_id", ""))
+        if rid == str(my_run_id):
+            # Our own authoritative entries — only if we won our slot.
+            entries.extend(my_entries)
+            continue
         snapshot = snapshot_by_run.get(rid, [])
         refreshed = refreshed_other_entries.get(rid)
         if refreshed == None:
@@ -1096,9 +1104,10 @@ def _merge_state(existing_state, head_sha, my_run_id, my_workflow_name, my_entri
 
     # Deterministic ordering so the serialized state block is byte-stable
     # across writers. Without this, publish ownership alternating between
-    # workflows would flip the order on each cycle (`others + [mine]`
-    # depends on which writer "mine" is), and `stable_body`'s
-    # unchanged-content short-circuit in `_publish` would never fire.
+    # workflows would flip the slot/row order on each cycle (`_live_runs`
+    # iteration order depends on which writer "mine" is), and
+    # `stable_body`'s unchanged-content short-circuit in `_publish` would
+    # never fire.
     workflow_runs = sorted(workflow_runs, key = lambda r: str(r.get("run_id", "")))
     entries = sorted(entries, key = lambda e: (
         str(e.get("workflow_run_id", "")),
@@ -1584,11 +1593,9 @@ def _github_status_comments(ctx: FeatureContext):
 
         new_state = _merge_state(parsed, head_sha, run_id, workflow_name, raw_entries, refreshed_others)
 
-        # Render from a logical-identity-deduped view so a leaked or
-        # one-cycle-stale duplicate slot can't surface the same task
-        # twice. The persisted `new_state["entries"]` keeps per-run_id
-        # granularity for the snapshot-fallback merge — only the display
-        # copy collapses.
+        # Drop exact-duplicate rows before rendering (defense-in-depth;
+        # `_merge_state` already produces unique rows). The persisted
+        # `new_state["entries"]` is untouched.
         prepared = _prepare_for_render(_dedup_for_display(new_state["entries"]))
         sections = _bucket_entries(prepared)
 
