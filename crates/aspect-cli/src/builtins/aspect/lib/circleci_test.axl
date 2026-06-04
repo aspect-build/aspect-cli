@@ -6,7 +6,7 @@ S3 error response into a diagnosable failure reason — the part that makes
 an expired-credential `400` legible instead of an opaque "curl exit 22".
 """
 
-load("./circleci.axl", "s3_extract_error_code", "s3_upload_error_detail", "session_cache_clear", "session_cache_get", "session_cache_put")
+load("./circleci.axl", "mark_testcases_skipped", "s3_extract_error_code", "s3_upload_error_detail", "session_cache_clear", "session_cache_get", "session_cache_put", "test_results_object_url")
 
 def _eq(label, got, want):
     if got != want:
@@ -102,7 +102,68 @@ def _test_cache_clear_empty_noop(_ctx):
     session_cache_clear(cache)
     _eq("clear on empty cache stays a miss", session_cache_get(cache), None)
 
+# ---------------------------------------------------------------------------
+# test_results_object_url — resolve a test-result Key.location to a PUT URL
+# ---------------------------------------------------------------------------
+
+def _test_object_url_relative_key(_ctx):
+    """The common case: a relative S3 object key → virtual-hosted bucket URL."""
+    _eq(
+        "relative key → virtual-hosted S3 URL",
+        test_results_object_url("circleci-tasks-prod", "us-east-1", "storage/test-raw/a/b/0/0.tar.gz"),
+        "https://circleci-tasks-prod.s3.us-east-1.amazonaws.com/storage/test-raw/a/b/0/0.tar.gz",
+    )
+
+def _test_object_url_absolute_https_passthrough(_ctx):
+    """An already-absolute https location is returned unchanged (future
+    presigned-URL responses keep working without a code change)."""
+    url = "https://example.s3.amazonaws.com/key?X-Amz-Signature=abc"
+    _eq("https location passthrough", test_results_object_url("b", "r", url), url)
+
+def _test_object_url_absolute_http_passthrough(_ctx):
+    url = "http://localhost:9000/bucket/key"
+    _eq("http location passthrough", test_results_object_url("b", "r", url), url)
+
+# ---------------------------------------------------------------------------
+# mark_testcases_skipped — move cached tests into the "skipped" bucket
+# ---------------------------------------------------------------------------
+
+def _test_skip_self_closing(_ctx):
+    """A self-closing <testcase/> is expanded with a <skipped> child."""
+    _eq(
+        "self-closing testcase → skipped",
+        mark_testcases_skipped('<testsuite><testcase name="a" time="1.0"/></testsuite>', "cached"),
+        '<testsuite><testcase name="a" time="1.0"><skipped message="cached"/></testcase></testsuite>',
+    )
+
+def _test_skip_with_body(_ctx):
+    """A testcase with a body keeps it; <skipped> is injected right after the
+    opening tag (valid JUnit ordering)."""
+    _eq(
+        "body testcase → skipped injected first",
+        mark_testcases_skipped('<testcase name="a"><system-out>hi</system-out></testcase>', "cached"),
+        '<testcase name="a"><skipped message="cached"/><system-out>hi</system-out></testcase>',
+    )
+
+def _test_skip_multiple(_ctx):
+    _eq(
+        "every testcase marked",
+        mark_testcases_skipped('<s><testcase name="a"/><testcase name="b"/></s>', "c"),
+        '<s><testcase name="a"><skipped message="c"/></testcase><testcase name="b"><skipped message="c"/></testcase></s>',
+    )
+
+def _test_skip_no_testcases(_ctx):
+    """No <testcase> → returned unchanged (no spurious edits)."""
+    _eq("no testcase → unchanged", mark_testcases_skipped('<testsuite tests="0"></testsuite>', "cached"), '<testsuite tests="0"></testsuite>')
+
 _UNIT_TESTS = [
+    _test_object_url_relative_key,
+    _test_object_url_absolute_https_passthrough,
+    _test_object_url_absolute_http_passthrough,
+    _test_skip_self_closing,
+    _test_skip_with_body,
+    _test_skip_multiple,
+    _test_skip_no_testcases,
     _test_extract_expired_token,
     _test_extract_signature_mismatch,
     _test_extract_no_code_element,

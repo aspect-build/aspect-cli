@@ -1,0 +1,179 @@
+"""CircleCI test-results upload feature.
+
+Collects Bazel JUnit `test.xml` from BES `test_result` events and uploads
+them to CircleCI's runner output test-results API (Tests tab + Insights) via
+`circleci.store_test_results`. Separate from `ArtifactUpload` so it toggles
+independently. Opt-in (`upload_test_results = "none"` by default); only acts
+on CircleCI.
+"""
+
+load("../bazel.axl", "BazelTrait")
+load("../lib/bazel_results.axl", "bes_get")
+load("../lib/circleci.axl", "circleci")
+load("../lib/environment.axl", "detect_ci", "info", "warn")
+load("../lib/tar.axl", "tar_create")
+
+# bb_clientd FUSE mount root for bytestream:// URIs (see lib/artifacts.axl).
+_BB_CLIENTD_ROOT = "/mnt/ephemeral/buildbarn/bb_clientd"
+
+# Non-passing statuses for upload_test_results="failed" (mirrors lib/artifacts.axl).
+_NOT_PASSED_STATUSES = [
+    "failed",
+    "timeout",
+    "failed_to_build",
+    "remote_failure",
+    "blaze_halted_before_testing",
+    "flaky",
+    "incomplete",
+    "no_status",
+]
+
+def _file_uri_to_path(uri: str) -> str:
+    """file:// or bytestream:// URI -> local path (bytestream via bb_clientd)."""
+    if not uri:
+        return uri
+    if uri.startswith("file://"):
+        return uri[len("file://"):]
+    if uri.startswith("bytestream://"):
+        rest = uri[len("bytestream://"):]
+        parts = rest.split("/")
+        host = parts[0].split(":")[0]
+        blob_hash = parts[2]
+        blob_size = parts[3]
+        return _BB_CLIENTD_ROOT + "/cas/" + host + "/blobs/sha256/file/" + blob_hash + "-" + blob_size
+    return uri
+
+def _should_collect(strategy: str, status: str, cached: bool) -> bool:
+    """all=every test, executed=ran this build, failed=non-passing only."""
+    if strategy == "all":
+        return True
+    if strategy == "executed":
+        return not cached
+    if strategy == "failed":
+        return status in _NOT_PASSED_STATUSES
+    return False
+
+def _collect_test_xml(ctx, event, strategy: str, entries: dict) -> None:
+    """Record `{dest: {"src", "cached"}}` for each test.xml in a test_result event.
+
+    Keyed by dest so repeated events for one target (shards/attempts) keep the
+    last. `cached` covers local and remote cache hits. `bes_get` everywhere so
+    an `aborted` payload variant no-ops instead of raising.
+    """
+    if event.kind != "test_result":
+        return
+
+    payload = event.payload
+    status = bes_get(payload, "status", "") or ""
+    cached_locally = bool(bes_get(payload, "cached_locally", False))
+    cached_remotely = bool(bes_get(bes_get(payload, "execution_info", None), "cached_remotely", False))
+    cached = cached_locally or cached_remotely
+    if not _should_collect(strategy, status, cached):
+        return
+
+    label = event.id.label
+    label_path = label.lstrip("/").replace(":", "/")
+
+    for file in (bes_get(payload, "test_action_output", None) or []):
+        name = bes_get(file, "name", "") or ""
+        if not name.endswith(".xml"):
+            continue
+        src = _file_uri_to_path(bes_get(file, "file", "") or "")
+        if not src or not ctx.std.fs.exists(src):
+            continue
+        entries[label_path + "/" + name] = {"src": src, "cached": cached}
+
+def _staged_archive_sources(ctx, entries: dict, staging: str, cached_as_skipped: bool) -> dict:
+    """`{dest: src}` for the archive; cached XML is rewritten to skipped under
+    `staging` when `cached_as_skipped`, leaving the bazel-out originals alone."""
+    sources = {}
+    for dest, info in entries.items():
+        src = info["src"]
+        if cached_as_skipped and info["cached"]:
+            xml = ctx.std.fs.try_read_to_string(src)
+            if xml:
+                staged = staging + "/" + dest
+                ctx.std.fs.create_dir_all(staged.rsplit("/", 1)[0])
+                ctx.std.fs.write(staged, circleci.mark_testcases_skipped(xml, "cached"))
+                src = staged
+        sources[dest] = src
+    return sources
+
+def _build_mtree(sources: dict) -> str:
+    """Mtree spec for `tar_create`: one file per entry, dest <- src."""
+    lines = ["#mtree"]
+    for dest, src in sources.items():
+        lines.append("./" + dest + " type=file contents=" + src)
+    return "\n".join(lines) + "\n"
+
+def _circleci_test_results_impl(ctx: FeatureContext) -> None:
+    """Collect test.xml on build_event; tar.gz + upload on build_end."""
+    strategy = ctx.args.upload_test_results
+    if strategy == "none" or detect_ci(ctx.std.env) != "circleci":
+        return
+
+    cached_as_skipped = ctx.args.cached_as_skipped
+    bazel_trait = ctx.traits[BazelTrait]
+    entries = {}
+
+    def _on_build_event(ctx, event):
+        _collect_test_xml(ctx, event, strategy, entries)
+
+    def _on_build_end(ctx, exit_code):
+        if not entries:
+            return
+
+        tmpdir = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_JOB_TMPDIR") or ctx.std.env.temp_dir()
+        staging = ctx.std.fs.mkdtemp(prefix = "aspect-circleci-tr-", parent = tmpdir)
+        sources = _staged_archive_sources(ctx, entries, staging, cached_as_skipped)
+
+        archive = tmpdir + "/" + ctx.task.key + "-circleci-test-results.tar.gz"
+        if not tar_create(ctx, archive, _build_mtree(sources)):
+            warn(ctx.std, "CircleCI test results: failed to build the JUnit archive; skipping upload.")
+            ctx.std.fs.remove_dir_all(staging)
+            return
+
+        override = ctx.std.env.var("CIRCLECI_TEST_RESULTS_STEP_ID")
+        step_id = int(override) if override else None
+
+        result = circleci.store_test_results(ctx, archive, step_id = step_id)
+        if ctx.std.fs.exists(archive):
+            ctx.std.fs.remove_file(archive)
+        ctx.std.fs.remove_dir_all(staging)
+
+        if result.success:
+            info(ctx.std, "Uploaded %d JUnit file(s) to CircleCI test results (step_id=%s, %d bytes)." % (
+                result.file_count,
+                str(result.step_id),
+                result.total_bytes,
+            ))
+            for problem in result.problems:
+                warn(ctx.std, "CircleCI test results parse problem: " + problem)
+        else:
+            for err in result.errors:
+                warn(ctx.std, "CircleCI test results upload failed: " + err)
+
+    bazel_trait.build_event.append(_on_build_event)
+    bazel_trait.build_end.append(_on_build_end)
+
+CircleCITestResults = feature(
+    display_name = "CircleCI Test Results",
+    summary = "Upload Bazel JUnit test results to CircleCI's Tests tab and Test Insights. " +
+              "Separate from artifact upload so it can be toggled independently.",
+    implementation = _circleci_test_results_impl,
+    args = {
+        "upload_test_results": args.string(
+            default = "none",
+            values = ["none", "failed", "executed", "all"],
+            description = "Which tests' JUnit results to upload to CircleCI: " +
+                          "'none' (default), 'failed' (non-passing/flaky only), " +
+                          "'executed' (skips cached results), or 'all'.",
+        ),
+        "cached_as_skipped": args.boolean(
+            default = False,
+            description = "Report cached tests under 'Skipped' instead of 'Passed' by " +
+                          "rewriting each cached testcase with a <skipped> element. Off by " +
+                          "default; only meaningful when upload_test_results is 'all'.",
+        ),
+    },
+)
