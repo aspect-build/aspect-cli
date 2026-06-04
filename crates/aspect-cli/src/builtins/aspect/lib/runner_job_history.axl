@@ -41,7 +41,7 @@ distinct rows — an improvement over Rosetta's URL-only dedup, which
 collapsed all tasks in one job to a single entry.
 """
 
-load("./ci.axl", "detect_build_url")
+load("./ci.axl", "resolve_build_url")
 
 # Env var the agent populates with the path. Mirrors
 # `PlatformConfigurationFiles.RUNNER_JOB_HISTORY()` on the Rosetta /
@@ -131,7 +131,7 @@ def append_runner_job_history(ctx):
     if not path:
         return False
 
-    task_url = detect_build_url(ctx)
+    task_url = resolve_build_url(ctx)
     if not task_url:
         return False
 

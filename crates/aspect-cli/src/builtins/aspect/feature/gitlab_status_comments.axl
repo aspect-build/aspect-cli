@@ -63,7 +63,7 @@ load(
     "results_subset",
 )
 load("../lib/bazel_results.axl", "format_run_date", "now_ms")
-load("../lib/ci.axl", "detect_build_url", "detect_ci_host")
+load("../lib/ci.axl", "detect_ci_host")
 load("../lib/environment.axl", "feature_logger", "workflows_results_url")
 load("../lib/gitlab.axl", "gitlab")
 load("../lib/gitlab_detect.axl", "detect_gitlab_mr")

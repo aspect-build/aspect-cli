@@ -1,0 +1,222 @@
+"""Tests for `lib/ci.axl` (the cross-CI URL helpers).
+
+Covers the env-only surface — the part that resolves from environment
+variables alone, without an authenticated API call:
+
+  - `detect_ci_host` — per-host detection + precedence order, and the
+                       `None` result off a recognized host.
+  - `detect_buildkite_build_url` — job-anchored URL, bare-build-URL
+                       fallback, and the empty case.
+  - `github_actions_run_url` — run-level URL shape, custom server,
+                       off-GHA / missing-var empties.
+  - `detect_build_url` — per-host resolution, the catch-all empty, and
+                       the `ASPECT_JOB_URL_CACHE` cache-first short-circuit
+                       (so the per-job URL `resolve_build_url` caches is
+                       returned here too).
+  - `resolve_build_url` — the off-GitHub-Actions path delegates to
+                       `detect_build_url(env)`. (The GitHub Actions per-job
+                       API upgrade is exercised in `github_detect_test.axl`,
+                       which has the HTTP stubs.)
+
+These exercise real `ctx.std.env` — there's no env-mocking layer in AXL —
+so each subtest snapshots and restores the CI env vars it touches.
+
+Run with:
+  aspect dev test-ci
+"""
+
+load("./ci.axl", "detect_build_url", "detect_buildkite_build_url", "detect_ci_host", "github_actions_run_url", "resolve_build_url")
+
+# Every CI-host marker + the per-job cache, snapshotted/restored around
+# each subtest so the harness's own CI environment can't leak in.
+_ENV_KEYS = [
+    "ASPECT_JOB_URL_CACHE",
+    "GITHUB_ACTIONS",
+    "GITHUB_SERVER_URL",
+    "GITHUB_REPOSITORY",
+    "GITHUB_RUN_ID",
+    "BUILDKITE",
+    "BUILDKITE_BUILD_URL",
+    "BUILDKITE_JOB_ID",
+    "CIRCLECI",
+    "CIRCLE_BUILD_URL",
+    "GITLAB_CI",
+    "CI_JOB_URL",
+]
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _snapshot_env(ctx):
+    return {k: ctx.std.env.var(k) for k in _ENV_KEYS}
+
+def _restore_env(ctx, snapshot):
+    for k, v in snapshot.items():
+        if v == None:
+            ctx.std.env.remove_var(k)
+        else:
+            ctx.std.env.set_var(k, v)
+
+def _clear_env(ctx):
+    for k in _ENV_KEYS:
+        ctx.std.env.remove_var(k)
+
+def _test_detect_ci_host(ctx):
+    snapshot = _snapshot_env(ctx)
+
+    _clear_env(ctx)
+    _eq("ci_host — none off a recognized host", detect_ci_host(ctx.std.env), None)
+
+    for marker, label in [
+        ("GITHUB_ACTIONS", "GitHub Actions"),
+        ("BUILDKITE", "Buildkite"),
+        ("CIRCLECI", "CircleCI"),
+        ("GITLAB_CI", "GitLab CI"),
+    ]:
+        _clear_env(ctx)
+        ctx.std.env.set_var(marker, "true")
+        host = detect_ci_host(ctx.std.env)
+        _eq("ci_host — %s marker → label" % marker, host["label"], label)
+        _eq("ci_host — %s marker → marker field" % marker, host["marker"], marker)
+
+    # Precedence: GitHub Actions wins when several markers are set.
+    _clear_env(ctx)
+    ctx.std.env.set_var("GITHUB_ACTIONS", "true")
+    ctx.std.env.set_var("BUILDKITE", "true")
+    _eq("ci_host — precedence is GitHub Actions first", detect_ci_host(ctx.std.env)["marker"], "GITHUB_ACTIONS")
+
+    _restore_env(ctx, snapshot)
+
+def _test_detect_buildkite_build_url(ctx):
+    snapshot = _snapshot_env(ctx)
+    _clear_env(ctx)
+
+    _eq("bk url — empty when no build url", detect_buildkite_build_url(ctx.std.env), "")
+
+    ctx.std.env.set_var("BUILDKITE_BUILD_URL", "https://buildkite.com/o/p/builds/9")
+    _eq("bk url — bare build url when no job id", detect_buildkite_build_url(ctx.std.env), "https://buildkite.com/o/p/builds/9")
+
+    ctx.std.env.set_var("BUILDKITE_JOB_ID", "job-7")
+    _eq("bk url — job-anchored when both set", detect_buildkite_build_url(ctx.std.env), "https://buildkite.com/o/p/builds/9#job-7")
+
+    _restore_env(ctx, snapshot)
+
+def _test_github_actions_run_url(ctx):
+    snapshot = _snapshot_env(ctx)
+
+    _clear_env(ctx)
+    _eq("gha run url — empty off GitHub Actions", github_actions_run_url(ctx.std.env), "")
+
+    ctx.std.env.set_var("GITHUB_ACTIONS", "true")
+    _eq("gha run url — empty without repo/run_id", github_actions_run_url(ctx.std.env), "")
+
+    ctx.std.env.set_var("GITHUB_REPOSITORY", "acme/web")
+    ctx.std.env.set_var("GITHUB_RUN_ID", "1234")
+    _eq(
+        "gha run url — default server",
+        github_actions_run_url(ctx.std.env),
+        "https://github.com/acme/web/actions/runs/1234",
+    )
+
+    ctx.std.env.set_var("GITHUB_SERVER_URL", "https://ghe.acme.com")
+    _eq(
+        "gha run url — custom (GHE) server",
+        github_actions_run_url(ctx.std.env),
+        "https://ghe.acme.com/acme/web/actions/runs/1234",
+    )
+
+    _restore_env(ctx, snapshot)
+
+def _test_detect_build_url_per_host(ctx):
+    snapshot = _snapshot_env(ctx)
+
+    _clear_env(ctx)
+    _eq("build url — empty off a recognized host", detect_build_url(ctx.std.env), "")
+
+    # GitHub Actions resolves to the run-level URL (the per-job upgrade
+    # needs a context; see `resolve_build_url`).
+    _clear_env(ctx)
+    ctx.std.env.set_var("GITHUB_ACTIONS", "true")
+    ctx.std.env.set_var("GITHUB_REPOSITORY", "acme/web")
+    ctx.std.env.set_var("GITHUB_RUN_ID", "1234")
+    _eq(
+        "build url — GitHub Actions run-level",
+        detect_build_url(ctx.std.env),
+        "https://github.com/acme/web/actions/runs/1234",
+    )
+
+    _clear_env(ctx)
+    ctx.std.env.set_var("CIRCLECI", "true")
+    ctx.std.env.set_var("CIRCLE_BUILD_URL", "https://circleci.com/gh/acme/web/9")
+    _eq("build url — CircleCI from CIRCLE_BUILD_URL", detect_build_url(ctx.std.env), "https://circleci.com/gh/acme/web/9")
+
+    _clear_env(ctx)
+    ctx.std.env.set_var("GITLAB_CI", "true")
+    ctx.std.env.set_var("CI_JOB_URL", "https://gitlab.com/acme/web/-/jobs/9")
+    _eq("build url — GitLab from CI_JOB_URL", detect_build_url(ctx.std.env), "https://gitlab.com/acme/web/-/jobs/9")
+
+    _restore_env(ctx, snapshot)
+
+def _test_detect_build_url_cache_first(ctx):
+    """A populated `ASPECT_JOB_URL_CACHE` short-circuits resolution, so the
+    per-job URL a status feature resolved (with a context) is returned to
+    every later env-only caller."""
+    snapshot = _snapshot_env(ctx)
+
+    # Cache hit wins even over a live GitHub Actions env that would
+    # otherwise resolve to the run-level URL.
+    _clear_env(ctx)
+    ctx.std.env.set_var("GITHUB_ACTIONS", "true")
+    ctx.std.env.set_var("GITHUB_REPOSITORY", "acme/web")
+    ctx.std.env.set_var("GITHUB_RUN_ID", "1234")
+    ctx.std.env.set_var("ASPECT_JOB_URL_CACHE", "https://github.com/acme/web/actions/runs/1234/job/567")
+    _eq(
+        "build url — cache hit returns the per-job URL",
+        detect_build_url(ctx.std.env),
+        "https://github.com/acme/web/actions/runs/1234/job/567",
+    )
+
+    # A cache miss on a job-scoped host populates the cache as a side effect.
+    _clear_env(ctx)
+    ctx.std.env.set_var("CIRCLECI", "true")
+    ctx.std.env.set_var("CIRCLE_BUILD_URL", "https://circleci.com/gh/acme/web/9")
+    detect_build_url(ctx.std.env)
+    _eq("build url — resolved URL cached", ctx.std.env.var("ASPECT_JOB_URL_CACHE"), "https://circleci.com/gh/acme/web/9")
+
+    _restore_env(ctx, snapshot)
+
+def _test_resolve_build_url_off_gha(ctx):
+    """Off GitHub Actions, `resolve_build_url(ctx)` delegates to the
+    env-only `detect_build_url(env)` — no API call. (The GitHub Actions
+    per-job upgrade is covered in `github_detect_test.axl`.)"""
+    snapshot = _snapshot_env(ctx)
+
+    _clear_env(ctx)
+    ctx.std.env.set_var("BUILDKITE", "true")
+    ctx.std.env.set_var("BUILDKITE_BUILD_URL", "https://buildkite.com/o/p/builds/9")
+    ctx.std.env.set_var("BUILDKITE_JOB_ID", "job-7")
+    _eq(
+        "resolve — off-GHA delegates to env-only build URL",
+        resolve_build_url(ctx),
+        "https://buildkite.com/o/p/builds/9#job-7",
+    )
+
+    _restore_env(ctx, snapshot)
+
+def _test_impl(ctx):
+    _test_detect_ci_host(ctx)
+    _test_detect_buildkite_build_url(ctx)
+    _test_github_actions_run_url(ctx)
+    _test_detect_build_url_per_host(ctx)
+    _test_detect_build_url_cache_first(ctx)
+    _test_resolve_build_url_off_gha(ctx)
+    print("ci.axl: OK (6 sections)")
+    return 0
+
+ci_tests = task(
+    name = "test-ci",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

@@ -7,40 +7,44 @@ logs for WARNs or read docs to discover improvements.
 
 # Producer API
 
-`add_tip(ctx, id, severity, ...)` — adds a tip to the trait. Accepts
-either pre-rendered `title` + `body` (for `TIP_TEMPLATE_RAW` /
-`TIP_TEMPLATE_FORMAT` tips) or `title_template` + `body_template`
-(for `TIP_TEMPLATE_JINJA2` tips) rendered against `vars` (fixed scalars)
-and `accumulate` (list-valued fields). A tip is identified by `(id, key)`
-— see "Tip identity".
+`add_tip(ctx, id, severity, title, body, type=…, …)` is the single entry
+point. `title` / `body` are interpreted per `type` (literal / `str.format`
+/ Jinja2); `vars` are fixed scalars and `accumulate` are list-valued
+JINJA2 fields. A tip is identified by `(id, key)` — see "Tip identity".
 
-`emit_tip(ctx, template, key=None, vars=None, accumulate=None,
-id_suffix="", task_keys=None, surfaces=None, combine_across_tasks=None)`
-— renders a tip template, then calls `add_tip`. Used by built-in
-producers (so their templates are overridable; see "Customization"
-below) and by user task code wanting parameterised tips.
+The built-in tips are `tip_*(ctx, …)` functions that wrap `add_tip` with
+their content baked in, exposing only what varies as named params:
 
-Tip templates are dicts of the shape:
+    tip_add_github_token(ctx)
+    tip_add_github_token_scope(ctx, scopes = "actions: read", endpoints = "GET …")
 
-    {
-        "id":        str,         # stable kind + silence key — see "Tip identity"
-        "key":       str?,        # optional (id, key) discriminator — see "Tip identity"
-        "severity":  str,         # TIP_IMPORTANT / TIP_WARNING / TIP_SUGGESTION / TIP_INFO
-        "title":     str,         # short headline; interpolated per `type`
-        "body":      str,         # markdown body; interpolated per `type`
-        "type":      str,         # TIP_TEMPLATE_RAW / TIP_TEMPLATE_FORMAT (default) / TIP_TEMPLATE_JINJA2
-        "task_keys": list[str]?,  # optional glob list — see "Task-key scoping" below
-        "surfaces":  list[str]?,  # optional surface allowlist — see "Surface allowlist" below
-        "combine_across_tasks": bool?,  # cross-task PR-summary union — see "Cross-task accumulation"
-    }
+`add_tip`'s full keyword surface (all but `id` / `severity` / `title` /
+`body` optional) — see `add_tip` itself for the per-argument contract:
+
+    add_tip(
+        ctx,
+        id: str,                       # stable kind + silence key — see "Tip identity"
+        severity: str,                 # TIP_IMPORTANT / TIP_WARNING / TIP_SUGGESTION / TIP_INFO
+        title: str,                    # short headline; interpreted per `type`
+        body: str,                     # markdown body; interpreted per `type`
+        type: str = TIP_TEMPLATE_RAW,  # RAW (default) / TIP_TEMPLATE_FORMAT / TIP_TEMPLATE_JINJA2
+        key: str = "",                 # optional (id, key) discriminator — see "Tip identity"
+        task_keys: list = [],          # optional glob list — see "Task-key scoping" below
+        vars: dict = {},               # fixed scalars for FORMAT / JINJA2
+        accumulate: dict = {},         # list-valued JINJA2 fields, unioned on re-emit
+        surfaces: list = [],           # optional surface allowlist — see "Surface allowlist" below
+        combine_across_tasks: bool = False,  # cross-task PR-summary union — see "Cross-task accumulation"
+    )
 
 # Template types
 
 The `type` field selects the interpolation engine for `title` / `body`:
 
   - `TIP_TEMPLATE_RAW`    — no interpolation; `vars` / `accumulate` ignored.
+                            The default — most tip bodies are literal
+                            markdown with `{}` that must survive verbatim.
   - `TIP_TEMPLATE_FORMAT` — Starlark `str.format(**vars)` — `{name}`
-                            placeholders replaced from `vars`. Default.
+                            placeholders replaced from `vars`.
   - `TIP_TEMPLATE_JINJA2` — Jinja2 source rendered against `vars`
                             (scalars) plus `accumulate` (each name a
                             deduped + sorted list). Re-rendered whenever
@@ -49,13 +53,13 @@ The `type` field selects the interpolation engine for `title` / `body`:
 
 # Customization
 
-Built-in tip templates are exported as module-level constants
-(e.g. `TIP_ADD_GITHUB_TOKEN`). User task / config code can:
+Built-in tips are exported as `tip_*(ctx, …)` functions
+(e.g. `tip_add_github_token`). User task / config code can:
 
-  a) Add custom tips via `add_tip` or `emit_tip` from any code with a
-     `TaskContext`. To add a tip at task start from `.aspect/config.axl`,
-     register a `task_update` handler and emit on the first update (the
-     Setup-phase emit) — see the example below.
+  a) Add custom tips via `add_tip` from any code with a `TaskContext`.
+     To add a tip at task start from `.aspect/config.axl`, register a
+     `task_update` handler and add on the first update (the Setup-phase
+     emit) — see the example below.
   b) Override a built-in tip's content by calling `add_tip` with that
      built-in tip's `(id, key)` — a re-emit replaces the stored tip, so
      a user emit AFTER the framework's wins.
@@ -278,7 +282,7 @@ def tip_shows_on(tip, surface):
 # ── tip_suggestion hook records ──────────────────────────────────────
 #
 # A `tip_suggestion` hook (registered on the public `TipsTrait` below)
-# fires on every `add_tip` / `emit_tip`, letting `config.axl` accept /
+# fires on every `add_tip`, letting `config.axl` accept /
 # reject / rewrite any tip — the same accept/reject/replace shape as the
 # `repro_fix_suggestion` hook on `TaskLifecycleTrait`.
 
@@ -356,16 +360,17 @@ def tip_replace(
 #
 # Every stored tip carries `{id, key, severity, title, body, type,
 # task_keys, surfaces, combine_across_tasks}`; JINJA2 tips additionally
-# carry `title_template`, `body_template`, `vars`, and `accumulate`
-# (dict<name, list<value>>) so `add_tip` can re-render on accumulation.
-# A same-`(id, key)` re-emit replaces the stored tip (accumulate fields
-# union onto the prior); ids in the silence list are dropped on `add_tip`
+# carry `_title_src`, `_body_src` (the Jinja2 source), `vars`, and
+# `accumulate` (dict<name, list<value>>) so the owner can re-render on
+# accumulation. A same-`(id, key)` re-emit replaces the stored tip
+# (accumulate fields union onto the prior); ids in the silence list are
+# dropped on `add_tip`
 # (unless severity is TIP_IMPORTANT).
 #
 # When the `Tips` feature isn't loaded (user set `enabled = False` or
 # the framework didn't enable it), the trait callable defaults are
 # null-objects: `add` is a silent no-op, `collect` returns []. Emit
-# sites don't need to probe — they just call `add_tip` / `emit_tip`
+# sites don't need to probe — they just call `add_tip`
 # and the disabled state propagates as zero output.
 
 _TipsTrait = trait(
@@ -401,13 +406,18 @@ TipsTrait = trait(
     tip_suggestion = attr(list[typing.Callable[[TaskContext, TipInfo], TipSuggestion]], default = []),
 )
 
-# ── Built-in tip templates ───────────────────────────────────────────
+# ── Built-in tips ────────────────────────────────────────────────────
 #
-# Each constant is a tip-template dict consumed by `emit_tip`. The
-# YAML constants below are shared snippets the bodies splice in;
-# both are rendered at workflow-top-level indentation so users can
-# paste them verbatim above `jobs:` or re-indent under a specific
-# `jobs.<name>:` for per-job scoping.
+# Each built-in is a `tip_*(ctx, ...)` function wrapping `add_tip` with
+# its content baked in, exposing only the parts that vary as named
+# params. The wire-up that decides *when* to fire them (host detection,
+# `ctx.traits` availability) lives in `lib/github.axl`; these functions
+# own only the tip *content*.
+#
+# The YAML constants below are shared snippets the bodies splice in;
+# both render at workflow-top-level indentation so users can paste them
+# verbatim above `jobs:` or re-indent under a specific `jobs.<name>:`
+# for per-job scoping.
 
 GITHUB_TOKEN_ENV_YAML = """env:
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -417,85 +427,102 @@ ID_TOKEN_PERMISSIONS_YAML = """permissions:
   id-token: write    # artifact uploads + PR summary comment aggregation
 """
 
-TIP_ADD_GITHUB_TOKEN = {
-    "id": "add-github-token",
-    "severity": TIP_SUGGESTION,
-    "title": "Export `GITHUB_TOKEN` as a fallback for supporting API calls",
-    "body": "aspect-cli authenticates supporting GitHub API calls (job URL lookup, PR file diff, etc.) via the Aspect Workflows GitHub App. When the App can't authenticate — typically because `ASPECT_API_TOKEN` is missing or invalid — there's currently no fallback, and supporting calls fail.\n\nExporting `GITHUB_TOKEN` to the job env gives aspect-cli a last-resort token to fall back to. `GITHUB_TOKEN` is shared across every workflow step in the repo and has [a low default rate limit](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api), so it's not a permanent solution — fix the Aspect Workflows GitHub App authentication path when possible.\n\nGitHub Actions grants `GITHUB_TOKEN` implicit read access to the workflow's own run metadata and the PR that triggered it, so no extra `permissions:` block scopes are required for the supporting calls aspect-cli makes today. Add at the top level of the workflow (so every job inherits) or scope it to the specific job(s) that need it:\n\n```yaml\n" + GITHUB_TOKEN_ENV_YAML + "```",
-    "type": TIP_TEMPLATE_RAW,
+# CI hosts on which `ASPECT_API_TOKEN` is a documented Aspect
+# integration — selects the host-specific wire-up advice and silence id.
+AspectApiTokenHost = enum("github-actions", "buildkite", "circleci")
+
+# Per-host wire-up advice + the set of features that degrade without
+# `ASPECT_API_TOKEN`. Both differ by host (PR-summary-comment
+# aggregation is GHA-only today). Keyed by each host's enum `.value`.
+_ASPECT_API_TOKEN_HOST_DETAIL = {
+    AspectApiTokenHost("github-actions").value: struct(
+        degraded_features = "PR check-run creation and updates, and PR summary comment aggregation",
+        host_advice = (
+            "On GitHub Actions, pass the token to the " +
+            "[aspect-build/setup-aspect]" +
+            "(https://github.com/aspect-build/setup-aspect) action:\n\n" +
+            "```yaml\n" +
+            "- uses: aspect-build/setup-aspect@<commit-sha>\n" +
+            "  with:\n" +
+            "    aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}\n" +
+            "```\n\n" +
+            "Find the latest release's commit SHA at " +
+            "https://github.com/aspect-build/setup-aspect/releases."
+        ),
+    ),
+    AspectApiTokenHost("buildkite").value: struct(
+        degraded_features = "PR check-run creation and updates",
+        host_advice = (
+            "On Buildkite, provision `ASPECT_API_TOKEN` using any of the approaches in " +
+            "[Buildkite's secrets docs](https://buildkite.com/docs/pipelines/security/secrets) " +
+            "— aspect-cli reads it from the agent's secret store automatically."
+        ),
+    ),
+    AspectApiTokenHost("circleci").value: struct(
+        degraded_features = "PR check-run creation and updates",
+        host_advice = (
+            "On CircleCI, add `ASPECT_API_TOKEN` as a project environment variable or via a " +
+            "[context](https://circleci.com/docs/contexts/); aspect-cli picks it up from the " +
+            "job env."
+        ),
+    ),
 }
 
-# IMPORTANT because every aspect-cli feature that calls the GitHub API
-# as the Aspect Workflows GitHub App depends on `ASPECT_API_TOKEN`:
-# without it those surfaces silently degrade.
-#
-# Three per-CI variants because both the wire-up *and* the list of
-# features that degrade differ per host (PR-summary-comment aggregation
-# is GHA-only today). The emit helper in `lib/github.axl` picks one
-# based on detected env. Each carries a host-suffixed id so users who
-# run multiple CI hosts off the same repo can silence them independently.
+def tip_add_github_token(ctx):
+    """Suggest exporting `GITHUB_TOKEN` as a fallback for supporting
+    GitHub API calls (job URL lookup, PR file diff, etc.) when the
+    Aspect Workflows GitHub App can't authenticate."""
+    add_tip(
+        ctx,
+        id = "add-github-token",
+        severity = TIP_SUGGESTION,
+        title = "Export `GITHUB_TOKEN` as a fallback for supporting API calls",
+        body = "aspect-cli authenticates supporting GitHub API calls (job URL lookup, PR file diff, etc.) via the Aspect Workflows GitHub App. When the App can't authenticate — typically because `ASPECT_API_TOKEN` is missing or invalid — there's currently no fallback, and supporting calls fail.\n\nExporting `GITHUB_TOKEN` to the job env gives aspect-cli a last-resort token to fall back to. `GITHUB_TOKEN` is shared across every workflow step in the repo and has [a low default rate limit](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api), so it's not a permanent solution — fix the Aspect Workflows GitHub App authentication path when possible.\n\nGitHub Actions grants `GITHUB_TOKEN` implicit read access to the workflow's own run metadata and the PR that triggered it, so no extra `permissions:` block scopes are required for the supporting calls aspect-cli makes today. Add at the top level of the workflow (so every job inherits) or scope it to the specific job(s) that need it:\n\n```yaml\n" + GITHUB_TOKEN_ENV_YAML + "```",
+    )
 
-def _aspect_api_token_tip(host_id, degraded_features, host_advice):
-    return {
-        "id": "add-aspect-api-token-" + host_id,
-        "severity": TIP_IMPORTANT,
-        "title": "Set ASPECT_API_TOKEN to authenticate the Aspect Workflows GitHub App",
-        "body": (
+def tip_add_aspect_api_token(ctx, host: AspectApiTokenHost):
+    """Tell the user to set `ASPECT_API_TOKEN` so the Aspect Workflows
+    GitHub App can authenticate. IMPORTANT severity — every feature that
+    calls the GitHub API as the App depends on it, and silently degrades
+    without it.
+
+    `host` is an `AspectApiTokenHost`; it selects the wire-up advice and a
+    host-suffixed id (`add-aspect-api-token-<host>`) so users running
+    multiple CI hosts off one repo can silence each independently."""
+    detail = _ASPECT_API_TOKEN_HOST_DETAIL[host.value]
+    add_tip(
+        ctx,
+        id = "add-aspect-api-token-" + host.value,
+        severity = TIP_IMPORTANT,
+        title = "Set ASPECT_API_TOKEN to authenticate the Aspect Workflows GitHub App",
+        body = (
             "aspect-cli authenticates GitHub API calls via the Aspect Workflows " +
             "GitHub App, which needs `ASPECT_API_TOKEN` (a `client_id:client_secret` " +
             "pair from your Aspect organization) provided to the CI job.\n\n" +
-            "Without it, " + degraded_features + " degrade. The task itself " +
+            "Without it, " + detail.degraded_features + " degrade. The task itself " +
             "completes regardless — only the GitHub-side surfaces are affected.\n\n" +
             "Issue an `ASPECT_API_TOKEN` from the Aspect Web UI " +
             "(see https://docs.aspect.build/cli/authentication). " +
-            host_advice
+            detail.host_advice
         ),
-        "type": TIP_TEMPLATE_RAW,
-    }
+    )
 
-TIP_ADD_ASPECT_API_TOKEN_GHA = _aspect_api_token_tip(
-    "github-actions",
-    "PR check-run creation and updates, and PR summary comment aggregation",
-    "On GitHub Actions, pass the token to the " +
-    "[aspect-build/setup-aspect]" +
-    "(https://github.com/aspect-build/setup-aspect) action:\n\n" +
-    "```yaml\n" +
-    "- uses: aspect-build/setup-aspect@<commit-sha>\n" +
-    "  with:\n" +
-    "    aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}\n" +
-    "```\n\n" +
-    "Find the latest release's commit SHA at " +
-    "https://github.com/aspect-build/setup-aspect/releases.",
-)
-
-TIP_ADD_ASPECT_API_TOKEN_BUILDKITE = _aspect_api_token_tip(
-    "buildkite",
-    "PR check-run creation and updates",
-    "On Buildkite, provision `ASPECT_API_TOKEN` using any of the approaches in " +
-    "[Buildkite's secrets docs](https://buildkite.com/docs/pipelines/security/secrets) " +
-    "— aspect-cli reads it from the agent's secret store automatically.",
-)
-
-TIP_ADD_ASPECT_API_TOKEN_CIRCLECI = _aspect_api_token_tip(
-    "circleci",
-    "PR check-run creation and updates",
-    "On CircleCI, add `ASPECT_API_TOKEN` as a project environment variable or via a " +
-    "[context](https://circleci.com/docs/contexts/); aspect-cli picks it up from the " +
-    "job env.",
-)
-
-# One tip accumulating both the missing scopes and the API endpoints
-# that fell back. Pluralization + per-scope snippet lines are driven by
-# Jinja2 on the merged `accumulate` state. Each fallback event re-emits
-# with new scopes/endpoints that union into the running total within a
-# task; `combine_across_tasks` unions the combined set across every task
-# into one PR-summary row.
-TIP_ADD_GITHUB_TOKEN_SCOPE = {
-    "id": "add-github-token-scope",
-    "severity": TIP_WARNING,
-    "combine_across_tasks": True,
-    "title": "Grant {% if scopes|length == 1 %}`{{ scopes[0] }}`{% else %}{{ scopes|length }} scopes{% endif %} to the job-scoped `GITHUB_TOKEN`",
-    "body": """aspect-cli made {{ endpoints|length }} supporting API {{ "call" if endpoints|length == 1 else "calls" }} that needed {{ "a scope" if scopes|length == 1 else "scopes" }} the job-scoped `GITHUB_TOKEN` lacks; {{ "the call" if endpoints|length == 1 else "the calls" }} fell back to the Aspect Workflows GitHub App token. Granting {{ "this scope" if scopes|length == 1 else "these scopes" }} keeps the {{ "call" if endpoints|length == 1 else "calls" }} on the job-scoped token and reduces App quota usage.
+def tip_add_github_token_scope(ctx, scopes: str, endpoints: str):
+    """Warn that the job-scoped `GITHUB_TOKEN` lacks scopes a supporting
+    API call needed, so the call fell back to the App token. Accumulating:
+    each call passes the single missing `scopes` / `endpoints` value it hit;
+    repeated emits union into one tip (deduped + sorted), and
+    `combine_across_tasks` unions the set across every task into one
+    PR-summary row. Pluralization + per-scope snippet lines are Jinja2
+    over the merged `accumulate` state."""
+    add_tip(
+        ctx,
+        id = "add-github-token-scope",
+        severity = TIP_WARNING,
+        type = TIP_TEMPLATE_JINJA2,
+        combine_across_tasks = True,
+        title = "Grant {% if scopes|length == 1 %}`{{ scopes[0] }}`{% else %}{{ scopes|length }} scopes{% endif %} to the job-scoped `GITHUB_TOKEN`",
+        body = """aspect-cli made {{ endpoints|length }} supporting API {{ "call" if endpoints|length == 1 else "calls" }} that needed {{ "a scope" if scopes|length == 1 else "scopes" }} the job-scoped `GITHUB_TOKEN` lacks; {{ "the call" if endpoints|length == 1 else "the calls" }} fell back to the Aspect Workflows GitHub App token. Granting {{ "this scope" if scopes|length == 1 else "these scopes" }} keeps the {{ "call" if endpoints|length == 1 else "calls" }} on the job-scoped token and reduces App quota usage.
 
 Add at the top level of the workflow (so every job inherits) or scope to the specific job(s) that need it:
 
@@ -507,21 +534,22 @@ permissions:
 API {{ "endpoint" if endpoints|length == 1 else "endpoints" }} that fell back ({{ endpoints|length }}):
 {% for e in endpoints %}- `{{ e }}`
 {% endfor %}""",
-    "type": TIP_TEMPLATE_JINJA2,
-}
+        accumulate = {"scopes": scopes, "endpoints": endpoints},
+    )
 
-# Severity is IMPORTANT because key features depend on this permission:
-# artifact uploads (status payloads, BEP files, test logs, profiles)
-# fail outright, and PR summary comment aggregation breaks because
-# per-task payloads ride on the same artifact upload path. Important
-# tips can't be silenced.
-TIP_ADD_ID_TOKEN_PERMISSION = {
-    "id": "add-id-token-permission",
-    "severity": TIP_IMPORTANT,
-    "title": "Grant `id-token: write` to enable GitHub Actions artifact uploads",
-    "body": "aspect-cli is trying to upload an artifact via GitHub Actions' ArtifactService but the API needs an OIDC token (`ACTIONS_ID_TOKEN_REQUEST_TOKEN`) that GitHub only exposes to the job when `id-token: write` is granted. Without it, the artifact upload fails.\n\nWhich features depend on this varies by configuration. When enabled, the PR summary comment aggregator and test-log / BEP / profile artifact uploads all ride on the ArtifactService — any of those features will be affected until the permission is granted. The task itself completes regardless.\n\nAdd at the top level of the workflow (so every job inherits) or scope it to the specific job(s) that upload artifacts:\n\n```yaml\n" + ID_TOKEN_PERMISSIONS_YAML + "```",
-    "type": TIP_TEMPLATE_RAW,
-}
+def tip_add_id_token_permission(ctx):
+    """Tell the user to grant `id-token: write` so GitHub Actions
+    artifact uploads (status payloads, BEP files, test logs, profiles —
+    and the PR summary aggregator that rides on them) can obtain the OIDC
+    token the ArtifactService needs. IMPORTANT — these features fail
+    outright without it, and important tips can't be silenced."""
+    add_tip(
+        ctx,
+        id = "add-id-token-permission",
+        severity = TIP_IMPORTANT,
+        title = "Grant `id-token: write` to enable GitHub Actions artifact uploads",
+        body = "aspect-cli is trying to upload an artifact via GitHub Actions' ArtifactService but the API needs an OIDC token (`ACTIONS_ID_TOKEN_REQUEST_TOKEN`) that GitHub only exposes to the job when `id-token: write` is granted. Without it, the artifact upload fails.\n\nWhich features depend on this varies by configuration. When enabled, the PR summary comment aggregator and test-log / BEP / profile artifact uploads all ride on the ArtifactService — any of those features will be affected until the permission is granted. The task itself completes regardless.\n\nAdd at the top level of the workflow (so every job inherits) or scope it to the specific job(s) that upload artifacts:\n\n```yaml\n" + ID_TOKEN_PERMISSIONS_YAML + "```",
+    )
 
 # ── API ──────────────────────────────────────────────────────────────
 
@@ -544,71 +572,82 @@ def _merge_accumulators(existing, incoming):
 
 def add_tip(
         ctx,
-        id,
-        severity,
-        key = "",
-        task_keys = None,
-        title = "",
-        body = "",
-        type_ = TIP_TEMPLATE_RAW,
-        title_template = "",
-        body_template = "",
-        vars = None,
-        accumulate = None,
-        surfaces = None,
-        combine_across_tasks = False):
+        id: str,
+        severity: str,
+        title: str,
+        body: str,
+        type: str = TIP_TEMPLATE_RAW,
+        key: str = "",
+        task_keys: list = [],
+        vars: dict = {},
+        accumulate: dict = {},
+        surfaces: list = [],
+        combine_across_tasks: bool = False):
     """Add a tip to the task's tip storage and print a `TIP:` block to
     the terminal (subject to the owner feature's `auto_print` arg).
 
-    A tip is identified by `(id, key)` — see the "Tip identity" section
-    in the module docstring. Re-emitting the same `(id, key)` within a
-    task replaces the stored content; `accumulate` fields ride along,
-    unioned (deduped + sorted) onto the prior. A different `key` is a
+    The single entry point for tips. Built-in tips are `tip_*(ctx, …)`
+    functions that wrap this with their content baked in (e.g.
+    `tip_add_github_token(ctx)`); call `add_tip` directly for custom tips.
+
+    A tip is identified by `(id, key)` — see the "Tip identity" section.
+    Re-emitting the same `(id, key)` within a task replaces the stored
+    content (accumulate fields ride along); a different `key` is a
     distinct tip. Silencing is always by `id`: no-op if `id` is in the
     silence list AND `severity != TIP_IMPORTANT`.
 
-    Two storage shapes:
-
-      - Pre-rendered tips (`type_ == TIP_TEMPLATE_RAW` / `_FORMAT`):
-        `title` / `body` are the final strings to surface.
-
-      - Jinja2 tips (`type_ == TIP_TEMPLATE_JINJA2`): `title_template` /
-        `body_template` are rendered against `vars` (fixed scalars) plus
-        `accumulate` (each a deduped + sorted list). The rendered strings
-        are stored alongside the inputs so a re-emit (within-task
-        accumulate) or cross-task union can re-render.
-
-    `vars` are fixed scalars: interpolated via `str.format` for
-    `TIP_TEMPLATE_FORMAT`, exposed as scalars to `TIP_TEMPLATE_JINJA2`
-    templates, ignored for `TIP_TEMPLATE_RAW`. `accumulate` fields are
-    list-valued (a template sees `{{ name }}` as a list) and union on
-    re-emit and, when `combine_across_tasks`, across tasks. A name
-    appearing in both `vars` and `accumulate` is an error.
-
-    `task_keys` is an optional list of glob patterns; when set, the
-    renderer only shows the tip on tasks whose key matches one of the
-    patterns. When unset / empty, the tip shows on the task it was
-    emitted into. The terminal print fires regardless of `task_keys`.
-
-    `surfaces` is an optional allowlist of surface identifiers
-    (`SURFACE_CLI` / `SURFACE_GITHUB_STATUS_CHECKS` /
-    `SURFACE_BUILDKITE_ANNOTATIONS` / `SURFACE_GITLAB_COMMIT_STATUSES` /
-    `SURFACE_GITHUB_PR_SUMMARY`, or the `TASK_SCREENS` / `AGGREGATE_SCREENS`
-    shorthands) controlling which status screens may render the tip. When
-    unset / empty the tip shows everywhere (`SURFACE_ALL`). See the
-    "Surface allowlist" section. The terminal print is gated on
-    `SURFACE_CLI`; omit `SURFACE_GITHUB_PR_SUMMARY` to keep the tip off the
-    cross-task rollup.
-
-    `combine_across_tasks` governs how same-`(id, key)` tips from
-    sibling tasks combine in the PR summary — see the "Cross-task
-    accumulation" section.
-
     No-op overall when the `Tips` feature is disabled — the trait's
     `add` callable falls back to its null-object default.
+
+    Args:
+      ctx: The task context the tip is added to. Unannotated because the
+        built-in `tip_*` wrappers are driven with a stub context by
+        `github.axl`'s detection tests; only `ctx.traits` is used here.
+      id: Stable identifier — the kind of tip and its silence key. Tips
+        with the same `(id, key)` are the same tip (re-emit replaces);
+        `id` alone is what `--tips:silence=<id>` and the silence list
+        match. See the "Tip identity" section.
+      severity: One of `TIP_IMPORTANT` / `TIP_WARNING` / `TIP_SUGGESTION` /
+        `TIP_INFO` — drives ordering, the emoji/label, and (for
+        `TIP_IMPORTANT`) immunity from silencing. See "Severity ordering".
+      title: Short headline, interpreted per `type`.
+      body: Markdown body, interpreted per `type`.
+      type: The interpolation engine for `title` / `body`:
+        `TIP_TEMPLATE_RAW` (default) surfaces them as-is;
+        `TIP_TEMPLATE_FORMAT` applies Starlark `str.format(**vars)`;
+        `TIP_TEMPLATE_JINJA2` renders them as Jinja2 against `vars` +
+        `accumulate`, keeping the source so a re-emit or cross-task union
+        can re-render. See the "Template types" section.
+      key: Optional discriminator distinguishing same-`id` tips about
+        different subjects (e.g. one flaky-test tip per label). Empty
+        means a single tip per `id`. See the "Tip identity" section.
+      task_keys: Glob patterns matched against `ctx.task.key`; when
+        non-empty the tip renders only on matching tasks. Empty (the
+        default) scopes the tip to the task it was emitted into. The
+        terminal print fires regardless. See "Task-key scoping".
+      vars: Fixed scalar values for `TIP_TEMPLATE_FORMAT` /
+        `TIP_TEMPLATE_JINJA2` interpolation. Ignored for
+        `TIP_TEMPLATE_RAW`. A name set in both `vars` and `accumulate`
+        is an error.
+      accumulate: List-valued Jinja2 fields (a `{{ name }}` reference
+        sees a list). Each re-emit unions in new values (deduped +
+        sorted); with `combine_across_tasks` the union also spans tasks.
+        `TIP_TEMPLATE_JINJA2` only.
+      surfaces: Allowlist of surface identifiers (`SURFACE_CLI` /
+        `SURFACE_GITHUB_STATUS_CHECKS` / `SURFACE_BUILDKITE_ANNOTATIONS` /
+        `SURFACE_GITLAB_COMMIT_STATUSES` / `SURFACE_GITHUB_PR_SUMMARY`, or
+        the `TASK_SCREENS` / `AGGREGATE_SCREENS` shorthands) that may
+        render the tip. Empty (the default) shows it everywhere
+        (`SURFACE_ALL`). The terminal print is gated on `SURFACE_CLI`;
+        omit `SURFACE_GITHUB_PR_SUMMARY` to keep the tip off the cross-task
+        rollup. See "Surface allowlist".
+      combine_across_tasks: How same-`(id, key)` tips from sibling tasks
+        combine in the PR summary. See "Cross-task accumulation".
     """
     if severity not in _SEVERITY_ORDER:
         fail("unknown tip severity %r; valid: %s" % (severity, ", ".join(_SEVERITY_ORDER.keys())))
+    if type not in _VALID_TEMPLATE_TYPES:
+        fail("unknown tip template type %r; valid: %s" % (type, ", ".join(_VALID_TEMPLATE_TYPES)))
     surfaces_list = list(surfaces) if surfaces else []
     for s in surfaces_list:
         if s not in _VALID_SURFACES:
@@ -618,7 +657,7 @@ def add_tip(
     collision = [name for name in accumulate if name in vars]
     if collision:
         fail("tip %r: %r set in both vars and accumulate" % (id, collision))
-    is_jinja2 = type_ == TIP_TEMPLATE_JINJA2
+    is_jinja2 = type == TIP_TEMPLATE_JINJA2
     if is_jinja2 and not ([v for v in accumulate.values() if v] or [v for v in vars.values() if v]):
         fail("TIP_TEMPLATE_JINJA2 tip %r requires at least one non-empty `vars` or `accumulate` value" % id)
 
@@ -627,87 +666,19 @@ def add_tip(
         "key": key,
         "severity": severity,
         "task_keys": list(task_keys) if task_keys else [],
-        "type": type_,
+        "type": type,
         "surfaces": surfaces_list,
         "combine_across_tasks": combine_across_tasks,
     }
     if is_jinja2:
-        tip = dict(common, title_template = title_template, body_template = body_template, vars = vars, accumulate = accumulate)
+        # Carry the JINJA2 source; the storage layer renders it into
+        # `title` / `body` and keeps the source for later re-render.
+        tip = dict(common, _title_src = title, _body_src = body, vars = vars, accumulate = accumulate)
+    elif type == TIP_TEMPLATE_FORMAT and vars:
+        tip = dict(common, title = title.format(**vars), body = body.format(**vars))
     else:
         tip = dict(common, title = title, body = body)
     ctx.traits[_TipsTrait].add(ctx, tip)
-
-def emit_tip(ctx, template, key = None, vars = None, accumulate = None, id_suffix = "", task_keys = None, surfaces = None, combine_across_tasks = None):
-    """Render a tip template and add it via `add_tip`.
-
-    Args:
-      template:      dict — see module docstring for shape. May carry
-                     optional `key`, `surfaces`, and
-                     `combine_across_tasks` keys, used as defaults
-                     when the same-named args below are unset.
-      key:           optional `(id, key)` discriminator overriding the
-                     template's `key`. See the "Tip identity" section.
-      vars:          dict — fixed scalars. `str.format`-interpolated into
-                     title / body for `TIP_TEMPLATE_FORMAT`; exposed as
-                     scalars to `TIP_TEMPLATE_JINJA2` templates; ignored
-                     for `TIP_TEMPLATE_RAW`.
-      accumulate:    dict — list-valued fields for `TIP_TEMPLATE_JINJA2`
-                     tips. A template sees `{{ name }}` as a deduped +
-                     sorted list; values union on re-emit and, when
-                     `combine_across_tasks`, across tasks.
-      id_suffix:     optional kebab-case suffix appended to
-                     `template.id`.
-      task_keys:     optional list of glob patterns overriding the
-                     template's `task_keys` (or supplying it if absent).
-      surfaces:      optional surface allowlist overriding the template's
-                     `surfaces`. See the "Surface allowlist" section.
-      combine_across_tasks: optional bool overriding the template's
-                     value (default False). See the "Cross-task
-                     accumulation" section.
-    """
-    type_ = template.get("type", TIP_TEMPLATE_FORMAT)
-    if type_ not in _VALID_TEMPLATE_TYPES:
-        fail("unknown tip template type %r; valid: %s" % (type_, ", ".join(_VALID_TEMPLATE_TYPES)))
-    id = template["id"]
-    if id_suffix:
-        id = id + "-" + id_suffix
-    resolved_key = key if key != None else template.get("key", "")
-    resolved_task_keys = task_keys if task_keys != None else template.get("task_keys")
-    resolved_surfaces = surfaces if surfaces != None else template.get("surfaces")
-    resolved_across = combine_across_tasks if combine_across_tasks != None else template.get("combine_across_tasks", False)
-    if type_ == TIP_TEMPLATE_JINJA2:
-        add_tip(
-            ctx,
-            id = id,
-            key = resolved_key,
-            severity = template["severity"],
-            task_keys = resolved_task_keys,
-            type_ = TIP_TEMPLATE_JINJA2,
-            title_template = template["title"],
-            body_template = template["body"],
-            vars = vars,
-            accumulate = accumulate,
-            surfaces = resolved_surfaces,
-            combine_across_tasks = resolved_across,
-        )
-        return
-    title = template["title"]
-    body = template["body"]
-    if type_ == TIP_TEMPLATE_FORMAT and vars:
-        title = title.format(**vars)
-        body = body.format(**vars)
-    add_tip(
-        ctx,
-        id = id,
-        key = resolved_key,
-        severity = template["severity"],
-        task_keys = resolved_task_keys,
-        title = title,
-        body = body,
-        type_ = type_,
-        surfaces = resolved_surfaces,
-        combine_across_tasks = resolved_across,
-    )
 
 def collect_tips_sorted(ctx, limit = None, surface = None):
     """Return the current tips list filtered by `task_keys` (when set)
@@ -794,8 +765,8 @@ def tip_to_payload(t):
         "title": t.get("title", ""),
         "body": t.get("body", ""),
         "type": t.get("type", ""),
-        "title_template": t.get("title_template", ""),
-        "body_template": t.get("body_template", ""),
+        "_title_src": t.get("_title_src", ""),
+        "_body_src": t.get("_body_src", ""),
         "vars": dict(t.get("vars") or {}),
         "accumulate": t.get("accumulate", {}) or {},
         "surfaces": list(t.get("surfaces") or []),
@@ -903,8 +874,14 @@ def blockquote_body(body):
 
 # ── tip_suggestion hook application ──────────────────────────────────
 
-def apply_tip_suggestion_hooks(ctx: TaskContext, tip: dict) -> dict | None:
+def apply_tip_suggestion_hooks(ctx, tip: dict) -> dict | None:
     """Run `tip` through every `TipsTrait.tip_suggestion` handler.
+
+    Internal (not re-exported from `@aspect//tips.axl`). `ctx` is left
+    unannotated because this runs inside the trait's `add` path, which
+    `github.axl`'s detection tests drive with a fake `ctx` struct rather
+    than a real `TaskContext`. Only `ctx.traits` and `ctx.task.{group,name}`
+    are read.
 
     Returns the post-chain tip dict (with any `replace` overrides
     applied), or `None` when a handler rejected it. Handlers run in
@@ -974,15 +951,16 @@ def _tips_impl(ctx):
     auto_print = [ctx.args.auto_print]  # boxed so test seam can mutate
 
     def _render_jinja2(call_ctx, tip, accumulate):
-        """Render `tip`'s templates against `vars` (scalars) + `accumulate`
-        (dict<name, list>) and return the stored tip with the rendered
-        title/body and the merged `accumulate` recorded."""
+        """Render `tip`'s `_title_src` / `_body_src` against `vars`
+        (scalars) + `accumulate` (dict<name, list>) and return the stored
+        tip with the rendered `title` / `body` and the merged `accumulate`
+        recorded."""
         data = dict(tip.get("vars") or {})
         data.update(accumulate)
         stored = dict(tip)
         stored["accumulate"] = accumulate
-        stored["title"] = call_ctx.template.jinja2(tip["title_template"], data = data)
-        stored["body"] = call_ctx.template.jinja2(tip["body_template"], data = data)
+        stored["title"] = call_ctx.template.jinja2(tip["_title_src"], data = data)
+        stored["body"] = call_ctx.template.jinja2(tip["_body_src"], data = data)
         return stored
 
     def _store(call_ctx, tip):
@@ -1084,10 +1062,9 @@ Tips = feature(
 #
 # Consumers go through this. Internal storage (the trait, the closure
 # state inside `_tips_impl`) stays hidden — emit sites only see
-# `tips.emit / .add / .collect`. Test seams are underscore-prefixed.
+# `tips.add / .collect`. Test seams are underscore-prefixed.
 
 tips = struct(
-    emit = emit_tip,
     add = add_tip,
     collect = collect_tips_sorted,
     # Test seams — production code should not call.

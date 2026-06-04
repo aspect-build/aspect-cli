@@ -1,17 +1,16 @@
 """Tests for `lib/tips.axl`.
 
 Covers the tip framework primitives directly:
-  - `add_tip` — fully-rendered emission + `(id, key)` identity (re-emit
-                replaces; distinct `key` coexists) + within-task
-                `accumulate` union + severity guard + `silenced_tips`
-                short-circuit (by `id`, across keys).
-  - `emit_tip` — template render + `vars` interpolation + id_suffix +
-                 type validation + task_keys propagation + silence.
+  - `add_tip` — the single entry point: `(id, key)` identity (re-emit
+                replaces; distinct `key` coexists), `type`-driven
+                title/body (RAW / FORMAT `vars` / JINJA2 `vars` +
+                `accumulate`), within-task `accumulate` union,
+                severity guard, and `silenced_tips` short-circuit (by
+                `id`, across keys).
   - `collect_tips_sorted` — severity ordering, insertion-order stability,
                             task_keys glob filter, limit, surface allowlist.
   - `surfaces` / `combine_across_tasks` — storage + defaults on `add_tip`,
-                            `emit_tip` template-vs-arg precedence, the
-                            `tip_shows_on` predicate, the per-surface
+                            the `tip_shows_on` predicate, the per-surface
                             collect filter, and `tip_to_payload` carrying
                             them across the artifact boundary. (Cross-task
                             combination itself is covered in
@@ -36,18 +35,13 @@ Run with:
 
 load(
     "./tips.axl",
+    "AspectApiTokenHost",
     "SURFACE_BUILDKITE_ANNOTATIONS",
     "SURFACE_CLI",
     "SURFACE_GITHUB_PR_SUMMARY",
     "SURFACE_GITHUB_STATUS_CHECKS",
     "TASK_SCREENS",
     "TIP_ACCEPT",
-    "TIP_ADD_ASPECT_API_TOKEN_BUILDKITE",
-    "TIP_ADD_ASPECT_API_TOKEN_CIRCLECI",
-    "TIP_ADD_ASPECT_API_TOKEN_GHA",
-    "TIP_ADD_GITHUB_TOKEN",
-    "TIP_ADD_GITHUB_TOKEN_SCOPE",
-    "TIP_ADD_ID_TOKEN_PERMISSION",
     "TIP_IMPORTANT",
     "TIP_INFO",
     "TIP_REJECT",
@@ -61,12 +55,15 @@ load(
     "blockquote_body",
     "collect_tips_sorted",
     "decorate_tip",
-    "emit_tip",
     "severity_emoji",
     "severity_label",
     "severity_rank",
     "silence_hint_line",
     "strip_code_fences",
+    "tip_add_aspect_api_token",
+    "tip_add_github_token",
+    "tip_add_github_token_scope",
+    "tip_add_id_token_permission",
     "tip_replace",
     "tip_shows_on",
     "tip_to_payload",
@@ -141,12 +138,12 @@ def _test_silenced_tips_short_circuits_add_tip(ctx):
         ["keep-me"],
     )
 
-def _test_silenced_tips_blocks_emit_tip(ctx):
+def _test_silenced_tips_blocks_add(ctx):
     _reset(ctx)
     tips._set_silenced_for_test(ctx, ["add-github-token"])
-    emit_tip(ctx, TIP_ADD_GITHUB_TOKEN)
+    tip_add_github_token(ctx)
     _eq(
-        "silenced — emit_tip respects silence list",
+        "silenced — add_tip respects silence list",
         tips._inspect_for_test(ctx),
         [],
     )
@@ -154,11 +151,11 @@ def _test_silenced_tips_blocks_emit_tip(ctx):
 def _test_important_tips_cannot_be_silenced(ctx):
     """Important tips ignore `silenced_tips` — they signal a key-feature
     breakage and must always reach the user. Verified both via direct
-    `add_tip` and via `emit_tip` against a built-in important template."""
+    `add_tip(...)` and via the `tip_add_id_token_permission` built-in."""
     _reset(ctx)
     tips._set_silenced_for_test(ctx, ["unsuppressable", "add-id-token-permission"])
     add_tip(ctx, id = "unsuppressable", severity = TIP_IMPORTANT, title = "T", body = "B")
-    emit_tip(ctx, TIP_ADD_ID_TOKEN_PERMISSION)
+    tip_add_id_token_permission(ctx)
     _eq(
         "important — silence list ignored",
         _ids(tips._inspect_for_test(ctx)),
@@ -173,90 +170,72 @@ def _test_add_tip_task_keys_stored(ctx):
     _eq("task_keys stored", stored[0]["task_keys"], ["lint-*", "format-*"])
     _eq("task_keys default — empty list when None", stored[1]["task_keys"], [])
 
-def _test_emit_tip_format(ctx):
+def _test_add_tip_format(ctx):
     _reset(ctx)
-    template = {
-        "id": "scope-missing",
-        "severity": TIP_WARNING,
-        "title": "Token lacks `{scope}` scope",
-        "body": "Endpoint {endpoint} returned 403.",
-        "type": TIP_TEMPLATE_FORMAT,
-    }
-    emit_tip(ctx, template, vars = {"scope": "actions: read", "endpoint": "/runs/jobs"})
+    add_tip(
+        ctx,
+        id = "scope-missing",
+        severity = TIP_WARNING,
+        type = TIP_TEMPLATE_FORMAT,
+        title = "Token lacks `{scope}` scope",
+        body = "Endpoint {endpoint} returned 403.",
+        vars = {"scope": "actions: read", "endpoint": "/runs/jobs"},
+    )
     tip = tips._inspect_for_test(ctx)[0]
     _eq("format — title interpolated", tip["title"], "Token lacks `actions: read` scope")
     _eq("format — body interpolated", tip["body"], "Endpoint /runs/jobs returned 403.")
 
-def _test_emit_tip_raw_skips_interpolation(ctx):
+def _test_add_tip_raw_skips_interpolation(ctx):
     _reset(ctx)
-    template = {
-        "id": "raw-tip",
-        "severity": TIP_INFO,
-        "title": "Title with {literal} braces",
-        "body": "Body with {curly} braces",
-        "type": TIP_TEMPLATE_RAW,
-    }
-    emit_tip(ctx, template, vars = {"literal": "shouldn't be touched"})
+    add_tip(
+        ctx,
+        id = "raw-tip",
+        severity = TIP_INFO,
+        type = TIP_TEMPLATE_RAW,
+        title = "Title with {literal} braces",
+        body = "Body with {curly} braces",
+        vars = {"literal": "shouldn't be touched"},
+    )
     tip = tips._inspect_for_test(ctx)[0]
     _eq("raw — title untouched", tip["title"], "Title with {literal} braces")
     _eq("raw — body untouched", tip["body"], "Body with {curly} braces")
 
-def _test_emit_tip_default_type_is_format(ctx):
+def _test_add_tip_default_type_is_raw(ctx):
     _reset(ctx)
-    template = {
-        "id": "default-type",
-        "severity": TIP_INFO,
-        "title": "Hello {name}",
-        "body": "B",
-        # no `type` field — should default to TIP_TEMPLATE_FORMAT.
-    }
-    emit_tip(ctx, template, vars = {"name": "world"})
-    _eq("default type — interpolated as FORMAT", tips._inspect_for_test(ctx)[0]["title"], "Hello world")
 
-def _test_emit_tip_id_suffix(ctx):
-    _reset(ctx)
-    template = {
-        "id": "base",
-        "severity": TIP_INFO,
-        "title": "T",
-        "body": "B",
-        "type": TIP_TEMPLATE_RAW,
-    }
-    emit_tip(ctx, template)
-    emit_tip(ctx, template, id_suffix = "variant-a")
-    emit_tip(ctx, template, id_suffix = "variant-b")
-    _eq("id_suffix — distinct ids", _ids(tips._inspect_for_test(ctx)), ["base", "base-variant-a", "base-variant-b"])
+    # No `type` arg — defaults to TIP_TEMPLATE_RAW, so `{name}` is left
+    # verbatim even when `vars` is supplied.
+    add_tip(ctx, id = "default-type", severity = TIP_INFO, title = "Hello {name}", body = "B", vars = {"name": "world"})
+    _eq("default type — RAW leaves braces verbatim", tips._inspect_for_test(ctx)[0]["title"], "Hello {name}")
 
-def _test_emit_tip_task_keys_override(ctx):
+def _test_add_tip_task_keys_independent(ctx):
     _reset(ctx)
-    template = {
-        "id": "tmpl-1",
-        "severity": TIP_INFO,
-        "title": "T",
-        "body": "B",
-        "type": TIP_TEMPLATE_RAW,
-        "task_keys": ["lint-*"],
-    }
-    emit_tip(ctx, template)
-    emit_tip(ctx, template, id_suffix = "override", task_keys = ["format-*", "gazelle-*"])
+    add_tip(ctx, id = "tmpl-1", severity = TIP_INFO, type = TIP_TEMPLATE_RAW, title = "T", body = "B", task_keys = ["lint-*"])
+    add_tip(ctx, id = "tmpl-2", severity = TIP_INFO, type = TIP_TEMPLATE_RAW, title = "T", body = "B", task_keys = ["format-*", "gazelle-*"])
     stored = tips._inspect_for_test(ctx)
-    _eq("emit_tip — template task_keys honored", stored[0]["task_keys"], ["lint-*"])
-    _eq("emit_tip — explicit task_keys override template", stored[1]["task_keys"], ["format-*", "gazelle-*"])
+    _eq("add_tip — first task_keys honored", stored[0]["task_keys"], ["lint-*"])
+    _eq("add_tip — second tip's task_keys independent", stored[1]["task_keys"], ["format-*", "gazelle-*"])
 
-_JINJA2_TEMPLATE = {
-    "id": "scope-fail",
-    "severity": TIP_WARNING,
-    "title": "Grant {% if scopes|length == 1 %}`{{ scopes[0] }}`{% else %}{{ scopes|length }} scopes{% endif %}",
-    "body": "{{ endpoints|length }} {{ \"call\" if endpoints|length == 1 else \"calls\" }} fell back:\n{% for e in endpoints %}- {{ e }}\n{% endfor %}",
-    "type": TIP_TEMPLATE_JINJA2,
-}
+# A JINJA2 tip with both `scopes` and `endpoints` accumulators, mirroring
+# the built-in `tip_add_github_token_scope` shape so the merge / re-render
+# mechanics get exercised against a stable local fixture.
+def _emit_scope_fail(ctx, scopes, endpoints):
+    add_tip(
+        ctx,
+        id = "scope-fail",
+        severity = TIP_WARNING,
+        type = TIP_TEMPLATE_JINJA2,
+        title = "Grant {% if scopes|length == 1 %}`{{ scopes[0] }}`{% else %}{{ scopes|length }} scopes{% endif %}",
+        body = "{{ endpoints|length }} {{ \"call\" if endpoints|length == 1 else \"calls\" }} fell back:\n{% for e in endpoints %}- {{ e }}\n{% endfor %}",
+        accumulate = {"scopes": scopes, "endpoints": endpoints},
+    )
 
 def _test_jinja2_first_emit_seeds_accumulate(ctx):
     """First emit of a JINJA2 tip seeds each `accumulate` field with the
     initial value as a single-entry list, renders title + body, and
     retains the templates for later re-render on merge."""
     _reset(ctx)
-    emit_tip(ctx, _JINJA2_TEMPLATE, accumulate = {"scopes": "actions: read", "endpoints": "/jobs"})
+    _emit_scope_fail(ctx, scopes = "actions: read", endpoints = "/jobs")
     stored = tips._inspect_for_test(ctx)
     _eq("jinja2 first-emit — single tip", len(stored), 1)
     _eq("jinja2 first-emit — type recorded", stored[0]["type"], TIP_TEMPLATE_JINJA2)
@@ -269,16 +248,16 @@ def _test_jinja2_first_emit_seeds_accumulate(ctx):
         fail("jinja2 first-emit — title missing scope: %r" % stored[0]["title"])
     if "/jobs" not in stored[0]["body"]:
         fail("jinja2 first-emit — body missing endpoint: %r" % stored[0]["body"])
-    if not stored[0].get("title_template") or not stored[0].get("body_template"):
-        fail("jinja2 first-emit — templates not retained")
+    if not stored[0].get("_title_src") or not stored[0].get("_body_src"):
+        fail("jinja2 first-emit — source not retained for re-render")
 
 def _test_jinja2_reemit_merges_new_values(ctx):
     """A same-`(id, key)` re-emit unions each `accumulate` field
     (preserving insertion order) and re-renders against the merged
     state."""
     _reset(ctx)
-    emit_tip(ctx, _JINJA2_TEMPLATE, accumulate = {"scopes": "actions: read", "endpoints": "/jobs"})
-    emit_tip(ctx, _JINJA2_TEMPLATE, accumulate = {"scopes": "pull-requests: read", "endpoints": "/files"})
+    _emit_scope_fail(ctx, scopes = "actions: read", endpoints = "/jobs")
+    _emit_scope_fail(ctx, scopes = "pull-requests: read", endpoints = "/files")
     stored = tips._inspect_for_test(ctx)
     _eq("jinja2 reemit — still single tip", len(stored), 1)
     _eq("jinja2 reemit — scopes unioned in order", stored[0]["accumulate"]["scopes"], ["actions: read", "pull-requests: read"])
@@ -292,8 +271,8 @@ def _test_jinja2_reemit_skips_duplicate_values(ctx):
     """Re-emitting the same `accumulate` values is a no-op — no duplicate
     list entries."""
     _reset(ctx)
-    emit_tip(ctx, _JINJA2_TEMPLATE, accumulate = {"scopes": "actions: read", "endpoints": "/jobs"})
-    emit_tip(ctx, _JINJA2_TEMPLATE, accumulate = {"scopes": "actions: read", "endpoints": "/jobs"})
+    _emit_scope_fail(ctx, scopes = "actions: read", endpoints = "/jobs")
+    _emit_scope_fail(ctx, scopes = "actions: read", endpoints = "/jobs")
     tip = tips._inspect_for_test(ctx)[0]
     _eq("jinja2 reemit — duplicate scope skipped", tip["accumulate"]["scopes"], ["actions: read"])
     _eq("jinja2 reemit — duplicate endpoint skipped", tip["accumulate"]["endpoints"], ["/jobs"])
@@ -302,8 +281,8 @@ def _test_jinja2_partial_overlap_appends_only_new(ctx):
     """A re-emit sharing one value only appends the new value to the
     differing field — per-name union is independent."""
     _reset(ctx)
-    emit_tip(ctx, _JINJA2_TEMPLATE, accumulate = {"scopes": "actions: read", "endpoints": "/jobs"})
-    emit_tip(ctx, _JINJA2_TEMPLATE, accumulate = {"scopes": "actions: read", "endpoints": "/runs"})
+    _emit_scope_fail(ctx, scopes = "actions: read", endpoints = "/jobs")
+    _emit_scope_fail(ctx, scopes = "actions: read", endpoints = "/runs")
     tip = tips._inspect_for_test(ctx)[0]
     _eq("jinja2 partial overlap — scopes deduped", tip["accumulate"]["scopes"], ["actions: read"])
     _eq("jinja2 partial overlap — endpoints both retained", tip["accumulate"]["endpoints"], ["/jobs", "/runs"])
@@ -312,16 +291,22 @@ def _test_jinja2_vars_and_accumulate(ctx):
     """`vars` are fixed scalars (template sees them un-listed, last-wins);
     `accumulate` fields are lists that union. A name in both is an error
     (not exercised here — `fail()` aborts the run)."""
-    template = {
-        "id": "mixed",
-        "severity": TIP_INFO,
-        "type": TIP_TEMPLATE_JINJA2,
-        "title": "{{ repo }}: {{ scopes|length }} scopes",
-        "body": "{% for s in scopes %}- {{ s }}\n{% endfor %}",
-    }
+
+    def _emit_mixed(scope):
+        add_tip(
+            ctx,
+            id = "mixed",
+            severity = TIP_INFO,
+            type = TIP_TEMPLATE_JINJA2,
+            title = "{{ repo }}: {{ scopes|length }} scopes",
+            body = "{% for s in scopes %}- {{ s }}\n{% endfor %}",
+            vars = {"repo": "acme/web"},
+            accumulate = {"scopes": scope},
+        )
+
     _reset(ctx)
-    emit_tip(ctx, template, vars = {"repo": "acme/web"}, accumulate = {"scopes": "actions: read"})
-    emit_tip(ctx, template, vars = {"repo": "acme/web"}, accumulate = {"scopes": "pulls: read"})
+    _emit_mixed("actions: read")
+    _emit_mixed("pulls: read")
     tip = tips._inspect_for_test(ctx)[0]
     _eq("jinja2 vars — fixed scalar stored un-listed", tip["vars"], {"repo": "acme/web"})
     _eq("jinja2 vars — accumulate unioned", tip["accumulate"]["scopes"], ["actions: read", "pulls: read"])
@@ -330,10 +315,12 @@ def _test_jinja2_vars_and_accumulate(ctx):
 
     # A JINJA2 tip driven only by `vars` (no accumulate) is valid, and a
     # re-emit with a changed var takes effect (last-wins).
-    vars_only = {"id": "vo", "severity": TIP_INFO, "type": TIP_TEMPLATE_JINJA2, "title": "{{ n }}", "body": "b"}
+    def _emit_vars_only(n):
+        add_tip(ctx, id = "vo", severity = TIP_INFO, type = TIP_TEMPLATE_JINJA2, title = "{{ n }}", body = "b", vars = {"n": n})
+
     _reset(ctx)
-    emit_tip(ctx, vars_only, vars = {"n": "first"})
-    emit_tip(ctx, vars_only, vars = {"n": "second"})
+    _emit_vars_only("first")
+    _emit_vars_only("second")
     tip = tips._inspect_for_test(ctx)[0]
     _eq("jinja2 vars-only — re-emit var change wins", tip["title"], "second")
 
@@ -415,88 +402,106 @@ def _test_blockquote_body(ctx):
         "> intro\n>\n> ```yaml\n> key: value\n> ```",
     )
 
-def _test_builtin_templates_shape(ctx):
-    """Smoke-test the built-in templates have the required keys so a
-    rename or restructure trips the test before users see a broken tip.
+def _stored_one(ctx):
+    """Return the single tip the built-in just added (asserting exactly
+    one landed), so the structural test can inspect rendered output."""
+    stored = tips._inspect_for_test(ctx)
+    _eq("built-in added exactly one tip", len(stored), 1)
+    return stored[0]
+
+def _test_builtin_tips_shape(ctx):
+    """Smoke-test the built-in `tip_*` functions add a well-formed tip so
+    a rename or restructure trips the test before users see a broken tip.
     Also pins severity + per-host id stability — distinct ids per CI host
     let users silence one variant without silencing the others."""
     aspect_token_variants = [
-        ("TIP_ADD_ASPECT_API_TOKEN_GHA", TIP_ADD_ASPECT_API_TOKEN_GHA, "add-aspect-api-token-github-actions"),
-        ("TIP_ADD_ASPECT_API_TOKEN_BUILDKITE", TIP_ADD_ASPECT_API_TOKEN_BUILDKITE, "add-aspect-api-token-buildkite"),
-        ("TIP_ADD_ASPECT_API_TOKEN_CIRCLECI", TIP_ADD_ASPECT_API_TOKEN_CIRCLECI, "add-aspect-api-token-circleci"),
+        (AspectApiTokenHost("github-actions"), "add-aspect-api-token-github-actions"),
+        (AspectApiTokenHost("buildkite"), "add-aspect-api-token-buildkite"),
+        (AspectApiTokenHost("circleci"), "add-aspect-api-token-circleci"),
     ]
-    other_templates = [
-        ("TIP_ADD_GITHUB_TOKEN", TIP_ADD_GITHUB_TOKEN),
-        ("TIP_ADD_GITHUB_TOKEN_SCOPE", TIP_ADD_GITHUB_TOKEN_SCOPE),
-        ("TIP_ADD_ID_TOKEN_PERMISSION", TIP_ADD_ID_TOKEN_PERMISSION),
-    ]
-    for name, tmpl, expected_id in aspect_token_variants:
+    for host, expected_id in aspect_token_variants:
+        _reset(ctx)
+        tip_add_aspect_api_token(ctx, host = host)
+        tip = _stored_one(ctx)
         for key in ("id", "severity", "title", "body", "type"):
-            if key not in tmpl:
-                fail("%s missing required key %r" % (name, key))
-        _eq("%s id" % name, tmpl["id"], expected_id)
-        _eq("%s severity is IMPORTANT" % name, tmpl["severity"], TIP_IMPORTANT)
-    for name, tmpl in other_templates:
+            if key not in tip:
+                fail("aspect-api-token tip (%s) missing required key %r" % (host.value, key))
+        _eq("aspect-api-token tip (%s) id" % host.value, tip["id"], expected_id)
+        _eq("aspect-api-token tip (%s) severity is IMPORTANT" % host.value, tip["severity"], TIP_IMPORTANT)
+
+    for emit in (tip_add_github_token, tip_add_id_token_permission):
+        _reset(ctx)
+        emit(ctx)
+        tip = _stored_one(ctx)
         for key in ("id", "severity", "title", "body", "type"):
-            if key not in tmpl:
-                fail("%s missing required key %r" % (name, key))
+            if key not in tip:
+                fail("built-in tip missing required key %r" % key)
+
+    _reset(ctx)
+    tip_add_github_token(ctx)
     _eq(
-        "TIP_ADD_GITHUB_TOKEN severity is SUGGESTION (fallback hint, not failure)",
-        TIP_ADD_GITHUB_TOKEN["severity"],
+        "tip_add_github_token severity is SUGGESTION (fallback hint, not failure)",
+        _stored_one(ctx)["severity"],
         TIP_SUGGESTION,
     )
+
+    def _body(host):
+        _reset(ctx)
+        tip_add_aspect_api_token(ctx, host = host)
+        return _stored_one(ctx)["body"]
+
+    gha_body = _body(AspectApiTokenHost("github-actions"))
+    bk_body = _body(AspectApiTokenHost("buildkite"))
+    cc_body = _body(AspectApiTokenHost("circleci"))
 
     # Body specialization sanity-check — wire-up advice differs per host.
     # The GHA tip recommends the aspect-build/setup-aspect action (which
     # passes the token via stdin into `aspect auth login`, so the
     # long-lived secret never lands in GITHUB_ENV); there's no equivalent
     # for Buildkite / CircleCI yet, so those still advise raw env wiring.
-    if "setup-aspect" not in TIP_ADD_ASPECT_API_TOKEN_GHA["body"]:
+    if "setup-aspect" not in gha_body:
         fail("GHA tip body should recommend aspect-build/setup-aspect")
-    if "Buildkite's secrets docs" not in TIP_ADD_ASPECT_API_TOKEN_BUILDKITE["body"]:
+    if "Buildkite's secrets docs" not in bk_body:
         fail("Buildkite tip body missing Buildkite-specific advice")
-    if "context" not in TIP_ADD_ASPECT_API_TOKEN_CIRCLECI["body"]:
+    if "context" not in cc_body:
         fail("CircleCI tip body missing CircleCI-specific advice")
 
     # The GHA tip must NOT recommend the deprecated workflow-level env
     # pattern (`env: ASPECT_API_TOKEN: ${{ secrets.ASPECT_API_TOKEN }}`)
     # that leaks the long-lived token to every step in the job. Catch
     # accidental regressions to that pattern.
-    if "env:\n  ASPECT_API_TOKEN" in TIP_ADD_ASPECT_API_TOKEN_GHA["body"]:
+    if "env:\n  ASPECT_API_TOKEN" in gha_body:
         fail("GHA tip body should not recommend exposing ASPECT_API_TOKEN as a workflow-level env var (use setup-aspect instead)")
 
     # PR-summary-comment aggregation is GHA-only today, so only the GHA
     # tip should mention it. BK / CircleCI tips listing a feature that
     # doesn't work there would mislead users into thinking the App
     # unlocks it.
-    if "PR summary comment" not in TIP_ADD_ASPECT_API_TOKEN_GHA["body"]:
+    if "PR summary comment" not in gha_body:
         fail("GHA tip should mention PR summary comment aggregation (GHA-only feature)")
-    if "PR summary comment" in TIP_ADD_ASPECT_API_TOKEN_BUILDKITE["body"]:
+    if "PR summary comment" in bk_body:
         fail("BK tip should not mention PR summary comment aggregation (not yet supported)")
-    if "PR summary comment" in TIP_ADD_ASPECT_API_TOKEN_CIRCLECI["body"]:
+    if "PR summary comment" in cc_body:
         fail("CircleCI tip should not mention PR summary comment aggregation (not yet supported)")
 
     # `--scope=changed` falls back to local git diff when the App is
     # unavailable, so listing it as a "degraded" feature would be
     # misleading — none of the variants should mention it.
-    for name, tmpl, _ in aspect_token_variants:
-        if "scope=changed" in tmpl["body"]:
-            fail("%s should not mention --scope=changed (App is only a fallback there)" % name)
+    for body in (gha_body, bk_body, cc_body):
+        if "scope=changed" in body:
+            fail("aspect-api-token tip should not mention --scope=changed (App is only a fallback there)")
 
 def _test_builtin_insufficient_scope_renders(ctx):
-    """`TIP_ADD_GITHUB_TOKEN_SCOPE` is the canonical multi-accumulator
-    JINJA2 template — both `scopes` and `endpoints` accumulate, the
+    """`tip_add_github_token_scope` is the canonical multi-accumulator
+    JINJA2 tip — both `scopes` and `endpoints` accumulate, the
     title pluralizes on `scopes`, and the body pluralizes on
     `endpoints` and renders one bullet per endpoint. One tip per task;
     distinct scopes union into the same tip's `scopes` accumulator."""
     _reset(ctx)
-    emit_tip(
+    tip_add_github_token_scope(
         ctx,
-        TIP_ADD_GITHUB_TOKEN_SCOPE,
-        accumulate = {
-            "scopes": "pull-requests: read",
-            "endpoints": "GET /repos/{owner}/{repo}/pulls/{pull_number}/files",
-        },
+        scopes = "pull-requests: read",
+        endpoints = "GET /repos/{owner}/{repo}/pulls/{pull_number}/files",
     )
     tip = tips._inspect_for_test(ctx)[0]
     _eq("scope tip — id is the canonical id (no suffix)", tip["id"], "add-github-token-scope")
@@ -514,13 +519,10 @@ def _test_builtin_insufficient_scope_renders(ctx):
     )
 
     # Second emit with a different scope + endpoint: merge.
-    emit_tip(
+    tip_add_github_token_scope(
         ctx,
-        TIP_ADD_GITHUB_TOKEN_SCOPE,
-        accumulate = {
-            "scopes": "actions: read",
-            "endpoints": "GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs",
-        },
+        scopes = "actions: read",
+        endpoints = "GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs",
     )
     _eq("scope tip — still single tip after merge", len(tips._inspect_for_test(ctx)), 1)
     merged = tips._inspect_for_test(ctx)[0]
@@ -567,7 +569,7 @@ def _test_severity_rank(ctx):
 def _test_tip_to_payload(ctx):
     """`tip_to_payload` projects a stored tip into the artifact-boundary
     shape consumed by the PR-comment aggregator. Test pins the field
-    set so a future drop (e.g. of `title_template`) trips here rather
+    set so a future drop (e.g. of `_title_src`) trips here rather
     than at the downstream JINJA2 re-render."""
     stored = {
         "id": "x",
@@ -576,8 +578,8 @@ def _test_tip_to_payload(ctx):
         "title": "Title",
         "body": "Body",
         "type": TIP_TEMPLATE_JINJA2,
-        "title_template": "T",
-        "body_template": "B",
+        "_title_src": "T",
+        "_body_src": "B",
         "vars": {"repo": "acme/web"},
         "accumulate": {"scopes": ["actions: read"]},
         "task_keys": ["lint-*"],  # producer-side filter; payload omits this
@@ -589,8 +591,8 @@ def _test_tip_to_payload(ctx):
     _eq("tip_to_payload — title", payload["title"], "Title")
     _eq("tip_to_payload — body", payload["body"], "Body")
     _eq("tip_to_payload — type", payload["type"], TIP_TEMPLATE_JINJA2)
-    _eq("tip_to_payload — title_template", payload["title_template"], "T")
-    _eq("tip_to_payload — body_template", payload["body_template"], "B")
+    _eq("tip_to_payload — _title_src", payload["_title_src"], "T")
+    _eq("tip_to_payload — _body_src", payload["_body_src"], "B")
     _eq("tip_to_payload — vars", payload["vars"], {"repo": "acme/web"})
     _eq("tip_to_payload — accumulate", payload["accumulate"], {"scopes": ["actions: read"]})
     if "task_keys" in payload:
@@ -659,33 +661,33 @@ def _test_tip_shows_on(ctx):
     _eq("shows_on — unlisted surface hidden", tip_shows_on({"surfaces": [SURFACE_GITHUB_STATUS_CHECKS]}, SURFACE_BUILDKITE_ANNOTATIONS), False)
     _eq("shows_on — surface=None always shows", tip_shows_on({"surfaces": [SURFACE_GITHUB_STATUS_CHECKS]}, None), True)
 
-def _test_emit_tip_key_surfaces_combine(ctx):
-    """`emit_tip` reads `key` / `surfaces` / `combine_across_tasks` from
-    the template, and the explicit args override the template's values."""
-    template = {
-        "id": "t",
-        "key": "tmpl-key",
-        "severity": TIP_INFO,
-        "title": "T",
-        "body": "B",
-        "type": TIP_TEMPLATE_RAW,
-        "surfaces": [SURFACE_GITHUB_STATUS_CHECKS],
-        "combine_across_tasks": True,
-    }
-
+def _test_add_tip_key_surfaces_combine(ctx):
+    """`add_tip` stores `key` / `surfaces` / `combine_across_tasks` as
+    passed, so a tip can pin its identity discriminator, surface
+    allowlist, and cross-task rollup behavior."""
     _reset(ctx)
-    emit_tip(ctx, template)
+    add_tip(
+        ctx,
+        id = "t",
+        key = "the-key",
+        severity = TIP_INFO,
+        title = "T",
+        body = "B",
+        surfaces = [SURFACE_GITHUB_STATUS_CHECKS],
+        combine_across_tasks = True,
+    )
     stored = tips._inspect_for_test(ctx)[0]
-    _eq("emit — key from template", stored["key"], "tmpl-key")
-    _eq("emit — surfaces from template", stored["surfaces"], [SURFACE_GITHUB_STATUS_CHECKS])
-    _eq("emit — combine from template", stored["combine_across_tasks"], True)
+    _eq("emit — key stored", stored["key"], "the-key")
+    _eq("emit — surfaces stored", stored["surfaces"], [SURFACE_GITHUB_STATUS_CHECKS])
+    _eq("emit — combine stored", stored["combine_across_tasks"], True)
 
+    # Defaults when omitted: empty key, all-surfaces, no cross-task combine.
     _reset(ctx)
-    emit_tip(ctx, template, key = "arg-key", surfaces = [SURFACE_BUILDKITE_ANNOTATIONS], combine_across_tasks = False)
+    add_tip(ctx, id = "t2", severity = TIP_INFO, title = "T", body = "B")
     stored = tips._inspect_for_test(ctx)[0]
-    _eq("emit — key arg overrides template", stored["key"], "arg-key")
-    _eq("emit — surfaces arg overrides template", stored["surfaces"], [SURFACE_BUILDKITE_ANNOTATIONS])
-    _eq("emit — combine arg overrides template", stored["combine_across_tasks"], False)
+    _eq("emit — key defaults empty", stored["key"], "")
+    _eq("emit — surfaces default empty (all)", stored["surfaces"], [])
+    _eq("emit — combine defaults False", stored["combine_across_tasks"], False)
 
 def _test_tip_suggestion_hook(ctx):
     """A `tip_suggestion` hook on `TipsTrait` fires per `add_tip` and can
@@ -803,14 +805,13 @@ def _test_impl(ctx):
     _test_add_tip_dedup(ctx)
     _test_key_distinct(ctx)
     _test_silenced_tips_short_circuits_add_tip(ctx)
-    _test_silenced_tips_blocks_emit_tip(ctx)
+    _test_silenced_tips_blocks_add(ctx)
     _test_important_tips_cannot_be_silenced(ctx)
     _test_add_tip_task_keys_stored(ctx)
-    _test_emit_tip_format(ctx)
-    _test_emit_tip_raw_skips_interpolation(ctx)
-    _test_emit_tip_default_type_is_format(ctx)
-    _test_emit_tip_id_suffix(ctx)
-    _test_emit_tip_task_keys_override(ctx)
+    _test_add_tip_format(ctx)
+    _test_add_tip_raw_skips_interpolation(ctx)
+    _test_add_tip_default_type_is_raw(ctx)
+    _test_add_tip_task_keys_independent(ctx)
     _test_jinja2_first_emit_seeds_accumulate(ctx)
     _test_jinja2_reemit_merges_new_values(ctx)
     _test_jinja2_reemit_skips_duplicate_values(ctx)
@@ -824,7 +825,7 @@ def _test_impl(ctx):
     _test_severity_label(ctx)
     _test_severity_rank(ctx)
     _test_blockquote_body(ctx)
-    _test_builtin_templates_shape(ctx)
+    _test_builtin_tips_shape(ctx)
     _test_builtin_insufficient_scope_renders(ctx)
     _test_silence_hint_line(ctx)
     _test_decorate_tip(ctx)
@@ -832,7 +833,7 @@ def _test_impl(ctx):
     _test_surfaces_and_combine_stored(ctx)
     _test_collect_filters_by_surface(ctx)
     _test_tip_shows_on(ctx)
-    _test_emit_tip_key_surfaces_combine(ctx)
+    _test_add_tip_key_surfaces_combine(ctx)
     _test_tip_suggestion_hook(ctx)
     _test_strip_code_fences(ctx)
     _test_auto_print_flag(ctx)

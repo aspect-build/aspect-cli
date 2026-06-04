@@ -44,7 +44,7 @@ load(
     "resolve_aspect_url",
 )
 load("../lib/checkrun.axl", "checkrun")
-load("../lib/ci.axl", "detect_build_url")
+load("../lib/ci.axl", "resolve_build_url")
 load("../lib/environment.axl", "feature_logger", "workflows_results_url")
 load("../lib/github.axl", "github")
 load("../lib/lifecycle.axl", "TaskLifecycleTrait")
@@ -711,10 +711,10 @@ def _combine_across(ctx, contributors):
         row["accumulate"] = merged
         data = dict(row.get("vars") or {})
         data.update(merged)
-        if row.get("title_template"):
-            row["title"] = ctx.template.jinja2(row["title_template"], data = data)
-        if row.get("body_template"):
-            row["body"] = ctx.template.jinja2(row["body_template"], data = data)
+        if row.get("_title_src"):
+            row["title"] = ctx.template.jinja2(row["_title_src"], data = data)
+        if row.get("_body_src"):
+            row["body"] = ctx.template.jinja2(row["_body_src"], data = data)
     row["_task_keys"] = _ordered_unique([k for _, k in contributors])
     return row
 
@@ -1585,7 +1585,7 @@ def _github_status_comments(ctx: FeatureContext):
 
         # Re-resolve with the just-minted App token; cache-hits if a
         # sibling feature already resolved.
-        upgraded = detect_build_url(ctx, existing_app_token = token)
+        upgraded = resolve_build_url(ctx, existing_app_token = token)
         if upgraded:
             _state["_ci_link_url"] = upgraded
 
