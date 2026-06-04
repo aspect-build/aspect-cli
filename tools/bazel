@@ -555,9 +555,9 @@ BAZEL_VERBS_STR=" ${BAZEL_VERBS[*]} "
 ASPECT_WRAPPER_DOCS_URL="https://github.com/aspect-build/aspect-cli/blob/main/tools/bazel.md"
 
 # True on any recognized CI host. Mirrors the runtime's `on_recognized_ci`
-# (crates/axl-runtime/src/ci.rs) so the wrapper and aspect-cli agree on
-# what "on CI" means. Presence — not truthiness — is what counts: GHA
-# sometimes exports `CI=` (empty), and that still marks a CI host.
+# (crates/axl-runtime/src/ci.rs). Used to grey the trace in CI logs, which
+# render ANSI color despite having no TTY. Presence — not truthiness — is
+# what counts: GHA sometimes exports `CI=` (empty), and that still counts.
 on_recognized_ci() {
     [[ -n "${CI+x}" ]] && return 0
     [[ -n "${BUILDKITE+x}" ]] && return 0
@@ -567,7 +567,8 @@ on_recognized_ci() {
     return 1
 }
 
-# Print a grey trace line on stderr showing what the wrapper is about to exec.
+# Print a trace line on stderr showing what the wrapper is about to exec
+# (grey on a color-capable destination, plain text otherwise).
 #
 # Usage: trace_exec <category> <shadow> <argv...>
 #
@@ -613,15 +614,10 @@ trace_exec() {
     if [[ "$category" == "bazel" && -z "$force" ]]; then
         return 0
     fi
-    # Aspect routing always prints (we're shadowing/rewriting a command, which
-    # the user should see). The only mute is ASPECT_WRAPPER_QUIET, handled
-    # above. The trace goes exclusively to stderr, so capturing the command's
-    # stdout never picks it up.
+    # Aspect routing always prints (handled by falling through to here). Grey
+    # only when the output renders color: a TTY, or forced / on CI.
     local on_ci=0
     on_recognized_ci && on_ci=1
-    # ANSI grey only when stderr is a TTY (or forced / on CI, where logs render
-    # color). A non-TTY stderr gets plain text — no escape bytes — so a script
-    # that captures stderr sees clean output.
     local grey="" reset=""
     if [[ -t 2 || -n "$force" || $on_ci -eq 1 ]]; then
         grey=$'\033[38;5;244m'
