@@ -9,19 +9,23 @@
 # reverse-engineered from the circleci-agent binary, WITHOUT invoking the
 # agent:
 #
-#   POST /api/v2/output/test-result          body=<int N>  -> presigned Key
+#   POST /api/v2/output/test-result          body={"step_id":N} -> presigned Key
 #   PUT  <tar of junit xml> to Key.location  (using Key.method + Key.headers)
-#   POST /api/v2/output/test-result/process  body=<int N>  -> TestProcessSummary
-#   GET  /api/v2/output/prev-test-result/find              -> BestPreviousJob | 404
-#   GET  /api/v2/output/prev-test-result/job/{id}          -> {tasks:[{keys:[Key]}]}
-#   GET  <Key.location> (presigned)                        -> processed Case JSONL
+#   POST /api/v2/output/test-result/process  body={"step_id":N} -> TestProcessSummary
+#   GET  /api/v2/output/prev-test-result/find                   -> BestPreviousJob | 404
+#   GET  /api/v2/output/prev-test-result/job/{id}               -> {tasks:[{keys:[Key]}]}
+#   GET  <Key.location> (presigned)                             -> processed Case JSONL
 #
 # Protocol details recovered from build-agent's StoreTestResultsStep.Run ->
 # output/storage.(*Store).UploadTestResult:
-#   * N is the *number of test-result files* being uploaded (len(testFiles)),
-#     NOT a 0-based index. The agent JSON-encodes that same int N as the body
-#     of BOTH the test-result POST and the test-result/process POST. A count of
-#     0 is rejected by the server with an empty-body HTTP 400.
+#   * The request body of BOTH the test-result POST and the test-result/process
+#     POST is a JSON object, not a bare int. The boxed body type in the agent
+#     is `struct { StepID int32 "json:\"step_id\"" }`, so the wire form is
+#     {"step_id": <N>}. The same step_id is sent to both endpoints. A bare int,
+#     or an unknown step_id, is rejected with an empty-body HTTP 400.
+#   * step_id is the agent's task-config step index (read from the step object,
+#     not an env var). This probe discovers it by trying small integers until
+#     the output service accepts one (override with CIRCLECI_PROBE_STEP_ID).
 #   * The bytes PUT to the presigned URL are a single *plain (uncompressed) tar*
 #     built by pkg/tar.CreateArchiveFromPaths (no gzip in the chain) containing
 #     the JUnit files at their relative paths — not the raw XML.
@@ -133,8 +137,7 @@ if [ "$C" = "200" ]; then ok "config 200: $(split_body "$R" | head -c 160)"; els
 # ---------------------------------------------------------------------------
 # Build one synthetic JUnit file, then tar it the way the agent does
 # (pkg/tar.CreateArchiveFromPaths: a plain, uncompressed tar of the files at
-# their relative paths). N = number of test-result files = 1 here, and is the
-# integer the agent JSON-encodes as the body of both POSTs below.
+# their relative paths; no gzip).
 WORK="$(mktemp -d /tmp/probe-tr-XXXX)"
 JUNIT="$WORK/probe-junit.xml"
 cat >"$JUNIT" <<'XML'
@@ -145,42 +148,57 @@ cat >"$JUNIT" <<'XML'
   </testsuite>
 </testsuites>
 XML
-N=1
 TARBALL="$WORK/test-results.tar"
 # -C so the entry is stored at its relative path (probe-junit.xml), matching
 # pkg/tar.toRelativePaths; no -z, the agent uploads an uncompressed tar.
 tar -cf "$TARBALL" -C "$WORK" "$(basename "$JUNIT")"
 
-note "POST /api/v2/output/test-result  (body = int N=$N file count)"
-R="$(req POST "$(api /api/v2/output/test-result)" "${AUTH[@]}" "${JSONH[@]}" -d "$N")"
-C="$(split_code "$R")"
-B="$(split_body "$R")"
-if [ "$C" = "200" ] || [ "$C" = "201" ]; then
-    ok "test-result $C -> $(printf '%s' "$B" | head -c 200)"
-    LOC="$(printf '%s' "$B" | jget 'd.get("location","")' 2>/dev/null || true)"
-    PMETHOD="$(printf '%s' "$B" | jget 'd.get("method","PUT")' 2>/dev/null || echo PUT)"
-    # Build -H args from Key.headers
-    HDR_ARGS=()
-    while IFS=$'\t' read -r k v; do [ -n "$k" ] && HDR_ARGS+=(-H "$k: $v"); done < <(
-        printf '%s' "$B" | python3 -c 'import sys,json;d=json.load(sys.stdin);[print("%s\t%s"%(k,v)) for k,v in (d.get("headers") or {}).items()]' 2>/dev/null || true
-    )
-    if [ -n "$LOC" ]; then
-        note "presigned $PMETHOD tar(JUnit) -> object store"
-        R2="$(req "$PMETHOD" "$LOC" "${HDR_ARGS[@]}" --data-binary "@$TARBALL")"
-        C2="$(split_code "$R2")"
-        if [[ "$C2" =~ ^2 ]]; then ok "presigned upload HTTP $C2"; else bad "presigned upload HTTP $C2: $(split_body "$R2" | head -c 200)"; fi
-    else
-        bad "no presigned 'location' in Key response"
-    fi
-else
-    bad "test-result HTTP $C: $(printf '%s' "$B" | head -c 300)"
-fi
+# The body of BOTH test-result POSTs is a JSON object {"step_id": <int>} (the
+# field tag recovered from the boxed body type in the agent:
+# `struct { StepID int32 "json:\"step_id\"" }`). step_id is the agent's own
+# task-config step index; it is not exposed as an env var, so a raw client must
+# either be told it (CIRCLECI_PROBE_STEP_ID) or discover it by probing which
+# small integer the output service accepts for this task. A wrong/unknown
+# step_id is rejected with an empty-body HTTP 400 — exactly what we first saw.
+step_body() { printf '{"step_id":%s}' "$1"; }
 
-note "POST /api/v2/output/test-result/process  (body = int N=$N file count)"
-R="$(req POST "$(api /api/v2/output/test-result/process)" "${AUTH[@]}" "${JSONH[@]}" -d "$N")"
-C="$(split_code "$R")"
-B="$(split_body "$R")"
-if [ "$C" = "200" ]; then ok "process 200 -> $(printf '%s' "$B" | head -c 240)"; else bad "process HTTP $C: $(printf '%s' "$B" | head -c 300)"; fi
+STEP_ID=""
+LOC=""
+HDR_ARGS=()
+CANDIDATES="${CIRCLECI_PROBE_STEP_ID:-$(seq 0 30)}"
+note "POST /api/v2/output/test-result  (discover step_id; body {\"step_id\":k})"
+for k in $CANDIDATES; do
+    R="$(req POST "$(api /api/v2/output/test-result)" "${AUTH[@]}" "${JSONH[@]}" -d "$(step_body "$k")")"
+    C="$(split_code "$R")"
+    B="$(split_body "$R")"
+    if [ "$C" = "200" ] || [ "$C" = "201" ]; then
+        STEP_ID="$k"
+        ok "step_id=$k accepted ($C) -> $(printf '%s' "$B" | head -c 160)"
+        LOC="$(printf '%s' "$B" | jget 'd.get("location","")' 2>/dev/null || true)"
+        PMETHOD="$(printf '%s' "$B" | jget 'd.get("method","PUT")' 2>/dev/null || echo PUT)"
+        while IFS=$'\t' read -r hk hv; do [ -n "$hk" ] && HDR_ARGS+=(-H "$hk: $hv"); done < <(
+            printf '%s' "$B" | python3 -c 'import sys,json;d=json.load(sys.stdin);[print("%s\t%s"%(k,v)) for k,v in (d.get("headers") or {}).items()]' 2>/dev/null || true
+        )
+        break
+    fi
+done
+
+if [ -z "$STEP_ID" ]; then
+    bad "no step_id in [$CANDIDATES] accepted by test-result (last HTTP $C: $(printf '%s' "$B" | head -c 200))"
+elif [ -n "$LOC" ]; then
+    note "presigned $PMETHOD tar(JUnit) -> object store"
+    R2="$(req "$PMETHOD" "$LOC" "${HDR_ARGS[@]}" --data-binary "@$TARBALL")"
+    C2="$(split_code "$R2")"
+    if [[ "$C2" =~ ^2 ]]; then ok "presigned upload HTTP $C2"; else bad "presigned upload HTTP $C2: $(split_body "$R2" | head -c 200)"; fi
+
+    note "POST /api/v2/output/test-result/process  (body {\"step_id\":$STEP_ID})"
+    R="$(req POST "$(api /api/v2/output/test-result/process)" "${AUTH[@]}" "${JSONH[@]}" -d "$(step_body "$STEP_ID")")"
+    C="$(split_code "$R")"
+    B="$(split_body "$R")"
+    if [ "$C" = "200" ]; then ok "process 200 -> $(printf '%s' "$B" | head -c 240)"; else bad "process HTTP $C: $(printf '%s' "$B" | head -c 300)"; fi
+else
+    bad "test-result accepted step_id=$STEP_ID but returned no presigned 'location'"
+fi
 
 # ---------------------------------------------------------------------------
 # 4. SPLIT-PREP: the read side a parallel run would use for timing data.
