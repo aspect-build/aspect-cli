@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 #
 # Tests for tools/bazel. Stubs both aspect and bazel so we can assert exactly
-# what the wrapper exec's. Each stub prints its argv (one arg per line) plus
-# the resolved BAZEL_REAL, which the test then compares against expected.
+# what the wrapper exec's: each stub prints its argv, one `ARG:<value>` per
+# line, prefixed with `INVOKED:<name>`. Dispatch/flag assertions capture the
+# stub's stdout (via run()); trace assertions capture stderr (Section 9).
 #
 # Run: ./tools/bazel-test.sh
 # Run under macOS's bash 3.2 (the wrapper's compatibility floor):
@@ -30,6 +31,12 @@ chmod +x "$STUB_DIR/aspect" "$STUB_DIR/bazel"
 
 export BAZEL_REAL="$STUB_DIR/bazel"
 export PATH="$STUB_DIR:$PATH"
+
+# Clear every CI marker the wrapper detects, so the suite has a known "no TTY,
+# no CI" baseline regardless of where it runs. Section 9 sets markers back per
+# case to exercise CI coloring. Without this, the trace's color tests would see
+# grey when the suite itself runs on GHA (CI=true) and fail.
+unset CI BUILDKITE GITHUB_ACTIONS CIRCLECI GITLAB_CI
 
 PASS=0
 FAIL=0
@@ -63,8 +70,14 @@ if [[ -n "${WRAPPER_BASH:-}" ]]; then
 else
     WRAPPER_CMD=("$WRAPPER")
 fi
+
+# Capture only the wrapper's stdout — i.e. the stub's report of what got
+# exec'd. The trace line goes to stderr (and the aspect route now always
+# traces), so dropping stderr both keeps these dispatch assertions trace-proof
+# AND verifies the wrapper never leaks anything but the exec to stdout. Trace
+# assertions live in their own section and capture stderr explicitly.
 run() {
-    "${WRAPPER_CMD[@]}" "$@" 2>&1
+    "${WRAPPER_CMD[@]}" "$@" 2>/dev/null
 }
 
 # A PATH dir holding only `bazel` (no `aspect`), to exercise the
@@ -74,7 +87,9 @@ NO_ASPECT_DIR="$(mktemp -d)"
 trap 'rm -rf "$STUB_DIR" "$NO_ASPECT_DIR"' EXIT
 cp "$STUB_DIR/bazel" "$NO_ASPECT_DIR/bazel"
 
-# Run the wrapper with `aspect` absent from PATH.
+# Run the wrapper with `aspect` absent from PATH. Merges stderr into stdout
+# (unlike run()) because these cases assert the stderr install hint and the
+# stdout bazel-fallback output together, in order.
 run_no_aspect() {
     PATH="$NO_ASPECT_DIR:/usr/bin:/bin" "${WRAPPER_CMD[@]}" "$@" 2>&1
 }
@@ -542,7 +557,7 @@ check "env: BAZEL_REAL resolved from PATH and forwarded when unset" \
 BAZEL_REAL=$STUB_DIR/bazel
 ARG:build
 ARG://..." \
-    "$(env -u BAZEL_REAL "${WRAPPER_CMD[@]}" build //... 2>&1)"
+    "$(env -u BAZEL_REAL "${WRAPPER_CMD[@]}" build //... 2>/dev/null)"
 
 # Restore the plain stub so subsequent assertions stay clean.
 cat >"$STUB_DIR/aspect" <<'EOF'
@@ -554,78 +569,100 @@ EOF
 # =====================================================================
 # Section 9: Trace output (ASPECT_WRAPPER_TRACE / ASPECT_WRAPPER_QUIET)
 # =====================================================================
+#
+# The trace goes to stderr; the sections above capture only stdout via run(),
+# so they're immune to it. Here we capture stderr explicitly to assert the
+# trace itself — content via trace() (ANSI stripped, so assertions don't pin
+# the escape encoding) and color via raw_trace() (escapes kept).
 
-# Under `$()` capture, stderr-is-not-a-TTY, so trace must be silent by
-# default. Earlier sections already implicitly assert this — if trace
-# bled through, every "$(run ...)" assertion would fail. Just sanity-check.
-check "trace: silent under non-TTY by default (aspect path)" \
-    "INVOKED:aspect
-ARG:lint" \
-    "$(run lint 2>&1)"
-
-check "trace: silent under non-TTY by default (bazel path)" \
-    "INVOKED:bazel
-ARG:query
-ARG:deps(//foo)" \
-    "$(run query 'deps(//foo)' 2>&1)"
-
-# Force trace on. Expect the [tools/bazel] line on stderr, then aspect's
-# normal output. Strip ANSI escape sequences so the assertion isn't tied
-# to the exact escape encoding.
 strip_ansi() { sed $'s/\033\\[[0-9;]*m//g'; }
 
-# Aspect-only verb (lint) — no shadowing of bazel, so the trace gets the
-# docs suffix but NOT the ASPECT_WRAPPER_SKIP nudge.
-actual="$(ASPECT_WRAPPER_TRACE=1 "$WRAPPER" lint 2>&1 | strip_ansi)"
-check "trace: ASPECT_WRAPPER_TRACE=1 prints '[tools/bazel] ...' for aspect route" \
-    "[tools/bazel] aspect lint — docs: https://github.com/aspect-build/aspect-cli/blob/main/tools/bazel.md
-INVOKED:aspect
-ARG:lint" \
-    "$actual"
+# Run the wrapper, returning its stderr only (the trace line). The
+# `2>&1 >/dev/null` order is deliberate: dup stderr onto the pipe's stdout,
+# THEN send the real stdout to /dev/null, so only stderr survives. raw_trace
+# keeps ANSI escapes for the color assertions; trace strips them for content.
+# shellcheck disable=SC2069  # order is intentional (stderr-only capture)
+raw_trace() { "${WRAPPER_CMD[@]}" "$@" 2>&1 >/dev/null; }
+trace() { raw_trace "$@" | strip_ansi; }
 
-# Shadowing verb (build) — `build` is also a real bazel command, so the
-# trace gets the ASPECT_WRAPPER_SKIP nudge AND the docs link.
-actual="$(ASPECT_WRAPPER_TRACE=1 "$WRAPPER" build --keep_going --config=ci //... 2>&1 | strip_ansi)"
-check "trace: shows rewritten flags + shadow nudge + docs" \
-    "[tools/bazel] aspect build --bazel-flag=--keep_going --bazel-flag=--config=ci //... — set ASPECT_WRAPPER_SKIP=1 to skip the forward to \`aspect\` — docs: https://github.com/aspect-build/aspect-cli/blob/main/tools/bazel.md
-INVOKED:aspect
-ARG:build
-ARG:--bazel-flag=--keep_going
-ARG:--bazel-flag=--config=ci
-ARG://..." \
-    "$actual"
+DOCS="docs: https://github.com/aspect-build/aspect-cli/blob/main/tools/bazel.md"
+SKIP_NUDGE="set ASPECT_WRAPPER_SKIP=1 to skip the forward to \`aspect\`"
 
-actual="$(ASPECT_WRAPPER_TRACE=1 "$WRAPPER" query 'deps(//foo)' 2>&1 | strip_ansi)"
-check "trace: ASPECT_WRAPPER_TRACE=1 also shows bazel-only verb forwarding" \
-    "[tools/bazel] $STUB_DIR/bazel query 'deps(//foo)'
-INVOKED:bazel
-ARG:query
-ARG:deps(//foo)" \
-    "$actual"
+# --- Aspect route: always traces, even under non-TTY with no CI / TRACE. ---
 
-# Shadowing test verb gets the same SKIP nudge as build.
-actual="$(ASPECT_WRAPPER_TRACE=1 "$WRAPPER" test //... 2>&1 | strip_ansi)"
+# Aspect-only verb (lint): docs suffix, but no SKIP nudge (bazel has no lint).
+check "trace: aspect-only verb traces by default (non-TTY), docs but no nudge" \
+    "[tools/bazel] aspect lint — $DOCS" \
+    "$(trace lint)"
+
+# Shadowing verb (build): also a real bazel command, so the SKIP nudge fires.
+# Also asserts bazel flags are shown rewritten in the trace.
+check "trace: shadowing verb shows rewritten flags + SKIP nudge + docs" \
+    "[tools/bazel] aspect build --bazel-flag=--keep_going --bazel-flag=--config=ci //... — $SKIP_NUDGE — $DOCS" \
+    "$(trace build --keep_going --config=ci //...)"
+
 check "trace: shadow nudge fires on 'test' too (verb in both lists)" \
-    "[tools/bazel] aspect test //... — set ASPECT_WRAPPER_SKIP=1 to skip the forward to \`aspect\` — docs: https://github.com/aspect-build/aspect-cli/blob/main/tools/bazel.md
-INVOKED:aspect
-ARG:test
-ARG://..." \
-    "$actual"
+    "[tools/bazel] aspect test //... — $SKIP_NUDGE — $DOCS" \
+    "$(trace test //...)"
 
-# Custom .axl task (unknown verb) routes to aspect but does NOT shadow bazel —
-# only the docs suffix, no SKIP nudge.
-actual="$(ASPECT_WRAPPER_TRACE=1 "$WRAPPER" mytask 2>&1 | strip_ansi)"
+# Custom .axl task (unknown verb): routes to aspect, no shadow (bazel has no
+# such command) → docs suffix, no SKIP nudge.
 check "trace: custom .axl verb gets docs link, no shadow nudge" \
-    "[tools/bazel] aspect mytask — docs: https://github.com/aspect-build/aspect-cli/blob/main/tools/bazel.md
-INVOKED:aspect
-ARG:mytask" \
-    "$actual"
+    "[tools/bazel] aspect mytask — $DOCS" \
+    "$(trace mytask)"
 
-actual="$(ASPECT_WRAPPER_QUIET=1 ASPECT_WRAPPER_TRACE=1 "$WRAPPER" lint 2>&1 | strip_ansi)"
-check "trace: ASPECT_WRAPPER_QUIET=1 wins over TRACE=1" \
-    "INVOKED:aspect
-ARG:lint" \
-    "$actual"
+# --- Bazel route: silent by default; ASPECT_WRAPPER_TRACE=1 forces it on. ---
+
+check "trace: bazel-only verb silent by default" \
+    "" \
+    "$(trace query 'deps(//foo)')"
+
+check "trace: ASPECT_WRAPPER_TRACE=1 surfaces bazel forwarding (no suffix)" \
+    "[tools/bazel] $STUB_DIR/bazel query 'deps(//foo)'" \
+    "$(ASPECT_WRAPPER_TRACE=1 trace query 'deps(//foo)')"
+
+# CI markers don't change bazel-route visibility — only TRACE does.
+check "trace: bazel-only verb stays silent on CI without TRACE" \
+    "" \
+    "$(CI=1 trace query 'deps(//foo)')"
+
+# --- ASPECT_WRAPPER_QUIET: the only mute, wins over everything. ---
+
+check "trace: ASPECT_WRAPPER_QUIET=1 silences aspect route" \
+    "" \
+    "$(ASPECT_WRAPPER_QUIET=1 trace lint)"
+
+check "trace: ASPECT_WRAPPER_QUIET=1 wins over TRACE=1 (bazel route)" \
+    "" \
+    "$(ASPECT_WRAPPER_QUIET=1 ASPECT_WRAPPER_TRACE=1 trace query 'deps(//foo)')"
+
+check "trace: ASPECT_WRAPPER_QUIET=1 wins over CI" \
+    "" \
+    "$(CI=1 ASPECT_WRAPPER_QUIET=1 trace build //...)"
+
+# --- Color: grey on a color-capable destination, plain text otherwise. ---
+#
+# Look for the SGR grey escape in raw_trace's output. Non-TTY with no CI /
+# TRACE → plain text; CI or TRACE → grey.
+GREY=$'\033[38;5;244m'
+
+case "$(raw_trace lint)" in
+*"$GREY"*) plain=0 ;;
+*) plain=1 ;;
+esac
+check "trace: aspect route is plain text (no ANSI) under non-TTY, no CI" "1" "$plain"
+
+case "$(CI=1 raw_trace build //...)" in
+*"$GREY"*) grey=1 ;;
+*) grey=0 ;;
+esac
+check "trace: aspect route is grey on CI" "1" "$grey"
+
+case "$(ASPECT_WRAPPER_TRACE=1 raw_trace query 'deps(//foo)')" in
+*"$GREY"*) grey=1 ;;
+*) grey=0 ;;
+esac
+check "trace: bazel route is grey when TRACE forces it on" "1" "$grey"
 
 # =====================================================================
 # Section 10: ASPECT_WRAPPER_SKIP — total bypass, everything → vanilla bazel
@@ -635,14 +672,14 @@ check "skip: build forwards straight to bazel" \
     "INVOKED:bazel
 ARG:build
 ARG://..." \
-    "$(ASPECT_WRAPPER_SKIP=1 "$WRAPPER" build //... 2>&1)"
+    "$(ASPECT_WRAPPER_SKIP=1 "$WRAPPER" build //... 2>/dev/null)"
 
 check "skip: test forwards straight to bazel" \
     "INVOKED:bazel
 ARG:test
 ARG:--keep_going
 ARG://..." \
-    "$(ASPECT_WRAPPER_SKIP=1 "$WRAPPER" test --keep_going //... 2>&1)"
+    "$(ASPECT_WRAPPER_SKIP=1 "$WRAPPER" test --keep_going //... 2>/dev/null)"
 
 check "skip: run forwards straight to bazel" \
     "INVOKED:bazel
@@ -650,7 +687,7 @@ ARG:run
 ARG://foo:bin
 ARG:--
 ARG:arg1" \
-    "$(ASPECT_WRAPPER_SKIP=1 "$WRAPPER" run //foo:bin -- arg1 2>&1)"
+    "$(ASPECT_WRAPPER_SKIP=1 "$WRAPPER" run //foo:bin -- arg1 2>/dev/null)"
 
 # Skip is a TOTAL bypass: even aspect verbs go straight to vanilla bazel,
 # untouched. (The user reaches for `aspect <verb>` directly when they want
@@ -658,25 +695,25 @@ ARG:arg1" \
 check "skip: aspect verb (lint) also forwards straight to bazel" \
     "INVOKED:bazel
 ARG:lint" \
-    "$(ASPECT_WRAPPER_SKIP=1 "$WRAPPER" lint 2>&1)"
+    "$(ASPECT_WRAPPER_SKIP=1 "$WRAPPER" lint 2>/dev/null)"
 
 check "skip: aspect verb (format) also forwards straight to bazel" \
     "INVOKED:bazel
 ARG:format
 ARG://..." \
-    "$(ASPECT_WRAPPER_SKIP=1 "$WRAPPER" format //... 2>&1)"
+    "$(ASPECT_WRAPPER_SKIP=1 "$WRAPPER" format //... 2>/dev/null)"
 
 # Custom/unknown verb also bypasses (no aspect routing under skip).
 check "skip: custom verb also forwards straight to bazel" \
     "INVOKED:bazel
 ARG:mytask" \
-    "$(ASPECT_WRAPPER_SKIP=1 "$WRAPPER" mytask 2>&1)"
+    "$(ASPECT_WRAPPER_SKIP=1 "$WRAPPER" mytask 2>/dev/null)"
 
 check "skip: query (bazel-only verb) still goes to bazel" \
     "INVOKED:bazel
 ARG:query
 ARG://..." \
-    "$(ASPECT_WRAPPER_SKIP=1 "$WRAPPER" query //... 2>&1)"
+    "$(ASPECT_WRAPPER_SKIP=1 "$WRAPPER" query //... 2>/dev/null)"
 
 # Skip + flag preservation: bazel sees the raw flags, no --bazel-flag= wrapping.
 check "skip: bazel-native flags pass through unwrapped" \
@@ -685,7 +722,7 @@ ARG:build
 ARG:--keep_going
 ARG:--config=ci
 ARG://..." \
-    "$(ASPECT_WRAPPER_SKIP=1 "$WRAPPER" build --keep_going --config=ci //... 2>&1)"
+    "$(ASPECT_WRAPPER_SKIP=1 "$WRAPPER" build --keep_going --config=ci //... 2>/dev/null)"
 
 # Skip + TRACE shows the bazel forward.
 actual="$(ASPECT_WRAPPER_SKIP=1 ASPECT_WRAPPER_TRACE=1 "$WRAPPER" build //... 2>&1 | strip_ansi)"
@@ -701,7 +738,7 @@ check "skip: empty string ASPECT_WRAPPER_SKIP='' is treated as unset" \
     "INVOKED:aspect
 ARG:build
 ARG://..." \
-    "$(ASPECT_WRAPPER_SKIP="" "$WRAPPER" build //... 2>&1)"
+    "$(ASPECT_WRAPPER_SKIP="" "$WRAPPER" build //... 2>/dev/null)"
 
 # =====================================================================
 # Section 11: Anti-inception (ASPECT_CLI_RUNNING bypass)
@@ -716,7 +753,7 @@ check "inception: ASPECT_CLI_RUNNING=1 + build → straight to bazel" \
     "INVOKED:bazel
 ARG:build
 ARG://..." \
-    "$(ASPECT_CLI_RUNNING=1 "$WRAPPER" build //... 2>&1)"
+    "$(ASPECT_CLI_RUNNING=1 "$WRAPPER" build //... 2>/dev/null)"
 
 check "inception: ASPECT_CLI_RUNNING=1 + bazel-native flags pass through unwrapped" \
     "INVOKED:bazel
@@ -724,7 +761,7 @@ ARG:build
 ARG:--keep_going
 ARG:--config=ci
 ARG://..." \
-    "$(ASPECT_CLI_RUNNING=1 "$WRAPPER" build --keep_going --config=ci //... 2>&1)"
+    "$(ASPECT_CLI_RUNNING=1 "$WRAPPER" build --keep_going --config=ci //... 2>/dev/null)"
 
 # Even aspect-only verbs forward to bazel under ASPECT_CLI_RUNNING. Aspect
 # would never spawn `bazel lint`, but if it somehow did we still want the
@@ -732,20 +769,20 @@ ARG://..." \
 check "inception: ASPECT_CLI_RUNNING=1 wins over aspect-only verbs too" \
     "INVOKED:bazel
 ARG:lint" \
-    "$(ASPECT_CLI_RUNNING=1 "$WRAPPER" lint 2>&1)"
+    "$(ASPECT_CLI_RUNNING=1 "$WRAPPER" lint 2>/dev/null)"
 
 check "inception: ASPECT_CLI_RUNNING=1 + info → straight to bazel" \
     "INVOKED:bazel
 ARG:info
 ARG:workspace" \
-    "$(ASPECT_CLI_RUNNING=1 "$WRAPPER" info workspace 2>&1)"
+    "$(ASPECT_CLI_RUNNING=1 "$WRAPPER" info workspace 2>/dev/null)"
 
 # Empty string means unset — wrapper must treat it the same as no env var.
 check "inception: empty ASPECT_CLI_RUNNING='' is treated as unset" \
     "INVOKED:aspect
 ARG:build
 ARG://..." \
-    "$(ASPECT_CLI_RUNNING="" "$WRAPPER" build //... 2>&1)"
+    "$(ASPECT_CLI_RUNNING="" "$WRAPPER" build //... 2>/dev/null)"
 
 # Bypass should fire BEFORE the trace logic. Even with TRACE=1, the bypass
 # runs and we get straight bazel — no aspect-route trace line.
@@ -862,13 +899,13 @@ ARG://..." \
 check "path: BAZEL_REAL unset → finds real bazel on PATH" \
     "INVOKED:bazel
 ARG:version" \
-    "$(env -u BAZEL_REAL "${WRAPPER_CMD[@]}" version 2>&1)"
+    "$(env -u BAZEL_REAL "${WRAPPER_CMD[@]}" version 2>/dev/null)"
 
 check "path: ASPECT_CLI_RUNNING + BAZEL_REAL unset → finds real bazel on PATH" \
     "INVOKED:bazel
 ARG:build
 ARG://..." \
-    "$(env -u BAZEL_REAL ASPECT_CLI_RUNNING=1 "${WRAPPER_CMD[@]}" build //... 2>&1)"
+    "$(env -u BAZEL_REAL ASPECT_CLI_RUNNING=1 "${WRAPPER_CMD[@]}" build //... 2>/dev/null)"
 
 # =====================================================================
 # Section 16: aspect not installed — install hint + graceful fallback
@@ -899,12 +936,12 @@ ARG://..." \
 # Aspect-only wrapped verb (lint): bazel can't run it, so hint and stop.
 check "no-aspect: lint (aspect-only) → install hint, no bazel fallback" \
     "$(hint lint)" \
-    "$(run_no_aspect lint 2>&1)"
+    "$(run_no_aspect lint)"
 
 # Custom/unknown verb: aspect-only, hint and stop.
 check "no-aspect: custom verb → install hint, no bazel fallback" \
     "$(hint mytask)" \
-    "$(run_no_aspect mytask //x 2>&1)"
+    "$(run_no_aspect mytask //x)"
 
 # Plain bazel verb: never needs aspect, runs vanilla with no hint.
 check "no-aspect: query (bazel verb) → vanilla bazel, no hint" \
