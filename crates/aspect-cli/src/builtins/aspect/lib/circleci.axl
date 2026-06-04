@@ -319,71 +319,41 @@ def _delete_artifact(ctx, name):
     """CircleCI has no artifact deletion API — no-op."""
     return {"success": True}
 
-# Upload Bazel JUnit XML to CircleCI's runner output test-results API.
-#
-# Reverse-engineered from circleci-agent's StoreTestResultsStep -> runner
-# output API and verified end-to-end against real CircleCI. The agent-free
-# protocol is:
-#
-#   1. POST /api/v2/output/test-result          body {"step_id": N}
-#        -> Key {method, location, headers}; `location` is a *relative* S3
-#           object key in the config bucket (not a presigned URL).
-#   2. <method> the gzipped tar of JUnit XML to
-#        https://{bucket}.s3.{region}.amazonaws.com/{location}, signed with
-#        the runner's STS creds (the same sigv4 path artifacts use), applying
-#        Key.headers (Content-Type).
-#   3. POST /api/v2/output/test-result/process  body {"step_id": N}
-#        -> TestProcessSummary {file_count, total_bytes, problems}.
-#
-# step_id is the agent's task-config step index. It is not exposed to the
-# step shell, so when the caller doesn't know it we discover it by probing
-# which small integer the output service accepts for this task (a wrong
-# step_id is rejected with an empty-body HTTP 400).
+# Upload Bazel JUnit XML to CircleCI's runner output test-results API
+# (reverse-engineered from circleci-agent, verified against real CircleCI):
+#   POST /api/v2/output/test-result          {"step_id": N}  -> Key
+#   <Key.method> the gzipped tar to the (relative) S3 Key.location, sigv4-signed
+#   POST /api/v2/output/test-result/process  {"step_id": N}  -> summary
+# step_id is the agent's internal step index; when unknown we probe for it.
 
 _TEST_RESULT_PATH = "/api/v2/output/test-result"
 _TEST_RESULT_PROCESS_PATH = "/api/v2/output/test-result/process"
 
-# Highest step index probed when the caller doesn't supply one. A CircleCI
-# job has only a handful of steps; 0..this covers any realistic test step.
+# Highest step index probed when the caller doesn't supply one.
 _STEP_ID_PROBE_MAX = 20
 
 TestResultsUploadResult = record(
     success = field(bool),
-
-    # The step_id the output service accepted (discovered or supplied), or
-    # None when no upload happened.
     step_id = field(int | None, default = None),
-
-    # From the `process` summary: how many JUnit files the service parsed
-    # and their total decoded size in bytes.
     file_count = field(int, default = 0),
     total_bytes = field(int, default = 0),
-
-    # Per-file parse problems reported by `process` (malformed XML etc.) —
-    # NOT test failures. Empty when every file parsed cleanly.
+    # Parse problems from `process` (malformed XML), not test failures.
     problems = field(list[str], default = []),
-
-    # Human-readable failure reasons; empty on success.
     errors = field(list[str], default = []),
 )
 
 def test_results_object_url(bucket: str, region: str, location: str) -> str:
-    """Resolve a test-result Key.location to an absolute upload URL.
+    """Resolve a test-result Key.location to a PUT URL.
 
-    The Key hands back a *relative* S3 object key
-    (`storage/test-raw/<uuid>/<uuid>/<step>/<n>.tar.gz`); combine it with the
-    config bucket/region into a virtual-hosted S3 URL. A location that is
-    already absolute (http/https) is returned unchanged so a future presigned
-    response keeps working. Public so circleci_test.axl can exercise it.
+    The Key returns a relative S3 object key; join it with the config
+    bucket/region. An already-absolute (http/https) location passes through.
     """
     if location.startswith("http://") or location.startswith("https://"):
         return location
     return "https://" + bucket + ".s3." + region + ".amazonaws.com/" + location
 
 def _post_test_result(ctx, session, step_id):
-    """Register a test-result upload for `step_id`. Returns the Key dict on
-    success, or None when the output service rejects this step_id (so the
-    caller can fall through to the next candidate)."""
+    """Register an upload for `step_id`; the Key dict, or None if rejected."""
     return _runner_api(
         ctx,
         session["token"],
@@ -395,9 +365,7 @@ def _post_test_result(ctx, session, step_id):
     )
 
 def _resolve_step_id(ctx, session, step_id):
-    """Return `(step_id, key)` for the first accepted step_id. When `step_id`
-    is supplied only that one is tried; otherwise probe 0.._STEP_ID_PROBE_MAX.
-    `(None, None)` when nothing is accepted."""
+    """First accepted `(step_id, key)`, or `(None, None)`. Probes when step_id is None."""
     candidates = [step_id] if step_id != None else list(range(0, _STEP_ID_PROBE_MAX + 1))
     for k in candidates:
         key = _post_test_result(ctx, session, k)
@@ -406,9 +374,8 @@ def _resolve_step_id(ctx, session, step_id):
     return None, None
 
 def _s3_put_object(ctx, session, method, url, headers, path):
-    """sigv4 PUT `path` to `url` with the runner's STS creds, applying the
-    Key's headers. Returns `(ok, detail)` where `detail` is a diagnosable
-    reason on failure (reusing the artifact path's S3 error parsing)."""
+    """sigv4 PUT `path` to `url` with the runner's STS creds + Key headers.
+    Returns `(ok, detail)`."""
     aws_creds = session["aws_creds"]
     region = session["region"]
     curl_args = [
@@ -440,7 +407,7 @@ def _s3_put_object(ctx, session, method, url, headers, path):
     curl_err = child.stderr().read_to_string().strip()
     status = child.wait()
 
-    # Final line is the `-w` status code; the rest is the S3 response body.
+    # Last line is the `-w` status code; the rest is the body.
     parts = out.rsplit("\n", 1)
     if len(parts) == 2:
         body = parts[0]
@@ -454,14 +421,10 @@ def _s3_put_object(ctx, session, method, url, headers, path):
     return (False, s3_upload_error_detail(http_code, curl_err, body))
 
 def _store_test_results(ctx, archive_path, step_id = None, cache = None) -> TestResultsUploadResult:
-    """Upload a gzipped tar of JUnit XML to CircleCI and trigger processing.
+    """Upload a `.tar.gz` of JUnit `test.xml` files to CircleCI and process it.
 
-    `archive_path` is a `.tar.gz` whose entries are the JUnit `test.xml`
-    files at their relative paths (what `process` untars and parses).
-    `step_id`, when None, is discovered by probing. `cache` (optional) reuses
-    one runner session across calls, like `_upload_artifact`.
-
-    Returns a `TestResultsUploadResult`.
+    `step_id` is discovered when None; `cache` reuses one runner session
+    across calls (like `_upload_artifact`).
     """
     if not ctx.std.fs.exists(archive_path):
         return TestResultsUploadResult(success = False, errors = ["archive not found: " + archive_path])
@@ -489,8 +452,7 @@ def _store_test_results(ctx, archive_path, step_id = None, cache = None) -> Test
     url = test_results_object_url(session["bucket"], session["region"], location)
     ok, detail = _s3_put_object(ctx, session, key.get("method", "PUT"), url, key.get("headers") or {}, archive_path)
     if not ok:
-        # A stale STS credential self-heals on a later call: drop the cached
-        # session so the next upload re-mints (mirrors _upload_artifact).
+        # Drop the session so a later call re-mints (handles expired creds).
         session_cache_clear(cache)
         return TestResultsUploadResult(success = False, step_id = sid, errors = [detail])
 
@@ -507,19 +469,12 @@ def _store_test_results(ctx, archive_path, step_id = None, cache = None) -> Test
     )
 
 def mark_testcases_skipped(xml: str, reason: str) -> str:
-    """Rewrite a JUnit XML so every `<testcase>` is reported as skipped.
+    """Inject a `<skipped>` child into every `<testcase>` of a JUnit XML.
 
-    CircleCI buckets a testcase as skipped when it carries a `<skipped>`
-    child element. Bazel writes a cached test's `test.xml` identically to a
-    fresh pass, so to move cached results into the "skipped" column we inject
-    a `<skipped>` element into each testcase: self-closing tags are expanded,
-    tags that already have a body get the element inserted right after the
-    opening tag.
-
-    Pure string surgery (AXL has no XML parser): it only edits `<testcase>`
-    tag boundaries and never rewrites attribute text, so the one shape it
-    can't handle is an attribute value literally containing ">" — which JUnit
-    emitters don't produce. Public so circleci_test.axl can exercise it.
+    CircleCI buckets a testcase as skipped when it has a `<skipped>` child, and
+    Bazel writes a cached pass identically to a fresh one. String-only (no XML
+    parser): self-closing tags are expanded, others get the element inserted
+    after the opening tag.
     """
     marker = "<skipped message=\"" + reason + "\"/>"
     parts = xml.split("<testcase")
@@ -527,16 +482,13 @@ def mark_testcases_skipped(xml: str, reason: str) -> str:
     for chunk in parts[1:]:
         gt = chunk.find(">")
         if gt == -1:
-            # Malformed fragment — leave it exactly as-is.
             out.append("<testcase" + chunk)
             continue
         attrs = chunk[:gt]
         body = chunk[gt + 1:]
         if attrs.endswith("/"):
-            # <testcase ... />  →  <testcase ...><skipped/></testcase>
             out.append("<testcase" + attrs[:-1].rstrip() + ">" + marker + "</testcase>" + body)
         else:
-            # <testcase ...>…</testcase>  →  inject right after the opening tag
             out.append("<testcase" + attrs + ">" + marker + body)
     return "".join(out)
 

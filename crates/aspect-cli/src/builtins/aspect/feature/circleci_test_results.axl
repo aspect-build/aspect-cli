@@ -1,20 +1,10 @@
 """CircleCI test-results upload feature.
 
-Collects Bazel JUnit `test.xml` files from BES `test_result` events and
-uploads them to CircleCI's runner output *test-results* API, which powers
-the job's "Tests" tab and Test Insights (slowest tests, flaky detection).
-The wire protocol lives in `lib/circleci.axl` (`circleci.store_test_results`)
-and was verified end-to-end against real CircleCI.
-
-This is deliberately a *separate* feature from `ArtifactUpload`
-(`lib/artifacts.axl`) so it can be toggled independently: artifact upload
-stores raw test *logs* as downloadable files, whereas this parses JUnit so
-results show as structured pass/fail data. An operator can want one without
-the other. Both default to off (`upload_test_results = "none"`) so uploading
-is always opt-in — JUnit `<failure>` bodies can echo test stdout/stderr.
-
-Registered as a built-in via `MODULE.aspect`; the feature only acts on
-CircleCI, and elsewhere it is a no-op.
+Collects Bazel JUnit `test.xml` from BES `test_result` events and uploads
+them to CircleCI's runner output test-results API (Tests tab + Insights) via
+`circleci.store_test_results`. Separate from `ArtifactUpload` so it toggles
+independently. Opt-in (`upload_test_results = "none"` by default); only acts
+on CircleCI.
 """
 
 load("../bazel.axl", "BazelTrait")
@@ -23,13 +13,10 @@ load("../lib/circleci.axl", "circleci")
 load("../lib/environment.axl", "detect_ci", "info", "warn")
 load("../lib/tar.axl", "tar_create")
 
-# bb_clientd FUSE mount root for resolving bytestream:// URIs — matches
-# `_BB_CLIENTD_ROOT` / `_file_uri_to_path` in lib/artifacts.axl.
+# bb_clientd FUSE mount root for bytestream:// URIs (see lib/artifacts.axl).
 _BB_CLIENTD_ROOT = "/mnt/ephemeral/buildbarn/bb_clientd"
 
-# Statuses that count as "not passed" for upload_test_results="failed".
-# Mirrors `_NOT_PASSED_STATUSES` in lib/artifacts.axl (failing + flaky are
-# the results anyone would actually open).
+# Non-passing statuses for upload_test_results="failed" (mirrors lib/artifacts.axl).
 _NOT_PASSED_STATUSES = [
     "failed",
     "timeout",
@@ -42,12 +29,7 @@ _NOT_PASSED_STATUSES = [
 ]
 
 def _file_uri_to_path(uri: str) -> str:
-    """Convert a file:// or bytestream:// URI to a local filesystem path.
-
-    bytestream:// URIs resolve via the bb_clientd FUSE mount:
-      `bytestream://host:port/blobs/<hash>/<size>`
-      → `{_BB_CLIENTD_ROOT}/cas/{host}/blobs/sha256/file/{hash}-{size}`
-    """
+    """file:// or bytestream:// URI -> local path (bytestream via bb_clientd)."""
     if not uri:
         return uri
     if uri.startswith("file://"):
@@ -62,15 +44,7 @@ def _file_uri_to_path(uri: str) -> str:
     return uri
 
 def _should_collect(strategy: str, status: str, cached: bool) -> bool:
-    """Decide whether a test's JUnit XML should be queued for upload.
-
-      none      — never (the feature short-circuits before this; here for
-                  completeness)
-      all       — every test, including cached passes
-      executed  — every test that actually ran (cached results skipped)
-      failed    — only non-passing statuses (see _NOT_PASSED_STATUSES)
-    Unknown strategy → fail closed.
-    """
+    """all=every test, executed=ran this build, failed=non-passing only."""
     if strategy == "all":
         return True
     if strategy == "executed":
@@ -80,18 +54,11 @@ def _should_collect(strategy: str, status: str, cached: bool) -> bool:
     return False
 
 def _collect_test_xml(ctx, event, strategy: str, entries: dict) -> None:
-    """Record `{dest: {"src": ..., "cached": ...}}` for each JUnit `test.xml`
-    in a `test_result` BES event, keyed by archive-relative dest so a re-run
-    of the same target (shard/attempt fires `test_result` repeatedly) keeps
-    only the last write rather than duplicating a tar entry.
+    """Record `{dest: {"src", "cached"}}` for each test.xml in a test_result event.
 
-    `cached` is true for both local disk-cache hits (`cached_locally`) and
-    remote-cache hits (`execution_info.cached_remotely`) — the latter is the
-    common case on CI, where a wholly-cached test never re-ran this build.
-
-    All payload field accesses go through `bes_get` because BES can deliver a
-    `test_result`-kinded event whose payload is the `aborted` variant (no
-    `status` / `test_action_output`); that no-ops instead of raising.
+    Keyed by dest so repeated events for one target (shards/attempts) keep the
+    last. `cached` covers local and remote cache hits. `bes_get` everywhere so
+    an `aborted` payload variant no-ops instead of raising.
     """
     if event.kind != "test_result":
         return
@@ -109,9 +76,6 @@ def _collect_test_xml(ctx, event, strategy: str, entries: dict) -> None:
 
     for file in (bes_get(payload, "test_action_output", None) or []):
         name = bes_get(file, "name", "") or ""
-
-        # Only JUnit XML feeds the Tests tab; test.log / undeclared outputs
-        # belong to the artifact-upload feature, not here.
         if not name.endswith(".xml"):
             continue
         src = _file_uri_to_path(bes_get(file, "file", "") or "")
@@ -120,14 +84,8 @@ def _collect_test_xml(ctx, event, strategy: str, entries: dict) -> None:
         entries[label_path + "/" + name] = {"src": src, "cached": cached}
 
 def _staged_archive_sources(ctx, entries: dict, staging: str, cached_as_skipped: bool) -> dict:
-    """Resolve `entries` to the `{dest: src}` map the archive is built from.
-
-    When `cached_as_skipped`, cached tests are rewritten so every testcase is
-    reported skipped (Bazel writes a cached pass identically to a fresh one);
-    the rewritten XML is staged under `staging` and that copy is archived.
-    Executed tests — and everything when the gate is off — keep their original
-    on-disk `test.xml` untouched.
-    """
+    """`{dest: src}` for the archive; cached XML is rewritten to skipped under
+    `staging` when `cached_as_skipped`, leaving the bazel-out originals alone."""
     sources = {}
     for dest, info in entries.items():
         src = info["src"]
@@ -142,30 +100,20 @@ def _staged_archive_sources(ctx, entries: dict, staging: str, cached_as_skipped:
     return sources
 
 def _build_mtree(sources: dict) -> str:
-    """Mtree spec for `tar_create`: one file per entry, dest ← src."""
+    """Mtree spec for `tar_create`: one file per entry, dest <- src."""
     lines = ["#mtree"]
     for dest, src in sources.items():
         lines.append("./" + dest + " type=file contents=" + src)
     return "\n".join(lines) + "\n"
 
 def _circleci_test_results_impl(ctx: FeatureContext) -> None:
-    """Wire JUnit test-results upload into BazelTrait lifecycle hooks.
-
-      build_event → collect `test.xml` entries from `test_result` events
-      build_end   → tar.gz the collected XML and POST it through the
-                    test-results API once Bazel has finished
-
-    No-op (binds nothing) unless the operator opted in *and* we're on
-    CircleCI, so non-CircleCI runs and the default config carry zero cost.
-    """
+    """Collect test.xml on build_event; tar.gz + upload on build_end."""
     strategy = ctx.args.upload_test_results
     if strategy == "none" or detect_ci(ctx.std.env) != "circleci":
         return
 
     cached_as_skipped = ctx.args.cached_as_skipped
     bazel_trait = ctx.traits[BazelTrait]
-
-    # Closure-private: dest → {"src": path, "cached": bool} per JUnit file.
     entries = {}
 
     def _on_build_event(ctx, event):
@@ -176,9 +124,6 @@ def _circleci_test_results_impl(ctx: FeatureContext) -> None:
             return
 
         tmpdir = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_JOB_TMPDIR") or ctx.std.env.temp_dir()
-
-        # Staging holds the skip-rewritten copies of cached tests' XML; the
-        # originals in bazel-out are never mutated.
         staging = ctx.std.fs.mkdtemp(prefix = "aspect-circleci-tr-", parent = tmpdir)
         sources = _staged_archive_sources(ctx, entries, staging, cached_as_skipped)
 
@@ -188,8 +133,6 @@ def _circleci_test_results_impl(ctx: FeatureContext) -> None:
             ctx.std.fs.remove_dir_all(staging)
             return
 
-        # An explicit step id (rarely needed) overrides discovery — handy if
-        # the output service ever scopes step_id more strictly than today.
         override = ctx.std.env.var("CIRCLECI_TEST_RESULTS_STEP_ID")
         step_id = int(override) if override else None
 
@@ -219,25 +162,18 @@ CircleCITestResults = feature(
               "Separate from artifact upload so it can be toggled independently.",
     implementation = _circleci_test_results_impl,
     args = {
-        # Opt-in, like ArtifactUpload's upload_test_logs: JUnit <failure> /
-        # <error> bodies can echo test stdout/stderr, so default to off and
-        # let the operator choose the scope for their threat model.
         "upload_test_results": args.string(
             default = "none",
             values = ["none", "failed", "executed", "all"],
-            description = "Which tests' JUnit results to upload to CircleCI. " +
-                          "'none' (default) uploads nothing. 'failed' uploads only " +
-                          "non-passing/flaky tests. 'executed' uploads every test that " +
-                          "ran (skips cached results). 'all' uploads everything.",
+            description = "Which tests' JUnit results to upload to CircleCI: " +
+                          "'none' (default), 'failed' (non-passing/flaky only), " +
+                          "'executed' (skips cached results), or 'all'.",
         ),
         "cached_as_skipped": args.boolean(
             default = False,
-            description = "Report cached tests under 'Skipped' rather than 'Passed'. " +
-                          "Bazel writes a cached test's XML identically to a fresh pass, " +
-                          "so this rewrites each cached testcase with a <skipped> element " +
-                          "before upload. Off by default (cached tests show as the pass " +
-                          "they were); only meaningful when upload_test_results includes " +
-                          "cached results (i.e. 'all').",
+            description = "Report cached tests under 'Skipped' instead of 'Passed' by " +
+                          "rewriting each cached testcase with a <skipped> element. Off by " +
+                          "default; only meaningful when upload_test_results is 'all'.",
         ),
     },
 )

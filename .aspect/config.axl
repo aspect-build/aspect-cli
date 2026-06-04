@@ -164,11 +164,8 @@ def config(ctx: ConfigContext):
     ctx.features[ArtifactUpload].args.upload_profile = True
     ctx.features[ArtifactUpload].args.upload_bep = True
 
-    # Upload JUnit test results to CircleCI's Tests tab + Test Insights.
-    # Separate from ArtifactUpload above so it toggles independently. "all"
-    # (rather than "failed") so passing runs still populate Insights with the
-    # per-test timing/identity history flaky-detection needs; cached_as_skipped
-    # buckets cached tests under "Skipped" instead of "Passed".
+    # Upload JUnit results to CircleCI's Tests tab. "all" so passing runs also
+    # feed Insights history; cached_as_skipped buckets cached tests as skipped.
     ctx.features[CircleCITestResults].args.upload_test_results = "all"
     ctx.features[CircleCITestResults].args.cached_as_skipped = True
 
