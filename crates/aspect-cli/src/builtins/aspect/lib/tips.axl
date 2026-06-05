@@ -5,36 +5,13 @@ surface the user is already looking at (check-run summary, PR comment)
 so the product is self-documenting — users shouldn't have to grep
 logs for WARNs or read docs to discover improvements.
 
-# Producer API
-
-`add_tip(ctx, id, severity, title, body, type=…, …)` is the single entry
-point. `title` / `body` are interpreted per `type` (literal / `str.format`
-/ Jinja2); `vars` are fixed scalars and `accumulate` are list-valued
-JINJA2 fields. A tip is identified by `(id, key)` — see "Tip identity".
-
-The built-in tips are `tip_*(ctx, …)` functions that wrap `add_tip` with
-their content baked in, exposing only what varies as named params:
-
-    tip_add_github_token(ctx)
-    tip_add_github_token_scope(ctx, scopes = "actions: read", endpoints = "GET …")
-
-`add_tip`'s full keyword surface (all but `id` / `severity` / `title` /
-`body` optional) — see `add_tip` itself for the per-argument contract:
-
-    add_tip(
-        ctx,
-        id: str,                       # stable kind + silence key — see "Tip identity"
-        severity: str,                 # TIP_IMPORTANT / TIP_WARNING / TIP_SUGGESTION / TIP_INFO
-        title: str,                    # short headline; interpreted per `type`
-        body: str,                     # markdown body; interpreted per `type`
-        type: str = TIP_TEMPLATE_RAW,  # RAW (default) / TIP_TEMPLATE_FORMAT / TIP_TEMPLATE_JINJA2
-        key: str = "",                 # optional (id, key) discriminator — see "Tip identity"
-        task_keys: list = [],          # optional glob list — see "Task-key scoping" below
-        vars: dict = {},               # fixed scalars for FORMAT / JINJA2
-        accumulate: dict = {},         # list-valued JINJA2 fields, unioned on re-emit
-        surfaces: list = [],           # optional surface allowlist — see "Surface allowlist" below
-        combine_across_tasks: bool = False,  # cross-task PR-summary union — see "Cross-task accumulation"
-    )
+This module is the implementation; the public authoring API
+(`add_tip`, the `tip_*` built-ins, severities, surfaces, the
+`tip_suggestion` hook) is documented on the facade `@aspect//tips.axl`.
+The producer functions here leave `ctx` untyped so internal callers and
+tests can drive them with a stub context; the facade re-wraps them with
+the typed signature and the full per-argument docstring. The sections
+below cover the implementation-level semantics those docs reference.
 
 # Template types
 
@@ -51,62 +28,13 @@ The `type` field selects the interpolation engine for `title` / `body`:
                             `accumulate` grows, so the surfaced strings
                             always reflect the merged state.
 
-# Customization
+# Feature-disabled behavior
 
-Built-in tips are exported as `tip_*(ctx, …)` functions
-(e.g. `tip_add_github_token`). User task / config code can:
-
-  a) Add custom tips via `add_tip` from any code with a `TaskContext`.
-     To add a tip at task start from `.aspect/config.axl`, register a
-     `task_update` handler and add on the first update (the Setup-phase
-     emit) — see the example below.
-  b) Override a built-in tip's content by calling `add_tip` with that
-     built-in tip's `(id, key)` — a re-emit replaces the stored tip, so
-     a user emit AFTER the framework's wins.
-  c) Accept / reject / rewrite any tip (built-in or custom) by
-     registering a `tip_suggestion` hook on `TipsTrait`. It fires on
-     every `add_tip`, receives a `TipInfo`, and returns a `TipSuggestion`
-     (`TIP_ACCEPT` / `TIP_REJECT` / `tip_replace(...)`). Use it to veto a
-     tip id, downgrade a severity, or re-scope `surfaces` — the same
-     accept/reject/replace shape as the `repro_fix_suggestion` hook. See
-     `apply_tip_suggestion_hooks`.
-  d) Silence any non-important tip (built-in or custom) by appending
-     its id to the `Tips` feature's `silence` arg from
-     `.aspect/config.axl`, or by passing `--tips:silence=<id>` on the
-     command line. `add_tip` short-circuits on a match so the tip
-     never enters the storage. Each rendered tip's footer names its
-     id and points users at this knob. Important tips (severity
-     `TIP_IMPORTANT`) ignore the silence list — they signal a problem
-     that breaks key features, so a silence entry for an important id
-     is a no-op.
-
-Example — add a tip at task start and veto another, from `.aspect/config.axl`:
-
-    _seen = {}  # per-id once-flag so the tip is added on the first update only
-
-    def _add_docs_tip(ctx, update):
-        if not _seen.get(ctx.task.key):
-            _seen[ctx.task.key] = True
-            add_tip(ctx, id = "internal-docs", severity = TIP_INFO,
-                    title = "Lint docs", body = "See https://wiki/lint",
-                    task_keys = ["lint-*"])
-
-    def _veto_tip(ctx, info):
-        return TIP_REJECT if info.id == "add-github-token" else TIP_ACCEPT
-
-    def config(ctx):
-        ctx.traits[TaskLifecycleTrait].task_update.append(_add_docs_tip)
-        ctx.traits[TipsTrait].tip_suggestion.append(_veto_tip)
-        # or just silence by id:
-        ctx.features["tips"].args.silence.append("add-github-token")
-
-Or on the command line: `--tips:silence=add-github-token`.
-
-The whole subsystem can be turned off with
-`ctx.features["tips"].enabled = False` (or `--tips:enabled=false`). When
-disabled, the trait's null-object defaults take over: `add_tip` is a
-silent no-op everywhere, `collect_tips_sorted` returns []. Emit sites
-don't need to probe for the feature — the data flow just goes quiet.
+When the `Tips` feature is off (`ctx.features["tips"].enabled = False` or
+`--tips:enabled=false`), the trait's null-object defaults take over:
+`add_tip` is a silent no-op everywhere and `collect_tips_sorted` returns
+[]. Emit sites don't need to probe for the feature — the data flow just
+goes quiet.
 
 # Surface rendering
 
@@ -469,9 +397,8 @@ _ASPECT_API_TOKEN_HOST_DETAIL = {
 }
 
 def tip_add_github_token(ctx):
-    """Suggest exporting `GITHUB_TOKEN` as a fallback for supporting
-    GitHub API calls (job URL lookup, PR file diff, etc.) when the
-    Aspect Workflows GitHub App can't authenticate."""
+    """Implementation of `tip_add_github_token`; see the public
+    `@aspect//tips.axl` for the contract."""
     add_tip(
         ctx,
         id = "add-github-token",
@@ -481,14 +408,8 @@ def tip_add_github_token(ctx):
     )
 
 def tip_add_aspect_api_token(ctx, host: AspectApiTokenHost):
-    """Tell the user to set `ASPECT_API_TOKEN` so the Aspect Workflows
-    GitHub App can authenticate. IMPORTANT severity — every feature that
-    calls the GitHub API as the App depends on it, and silently degrades
-    without it.
-
-    `host` is an `AspectApiTokenHost`; it selects the wire-up advice and a
-    host-suffixed id (`add-aspect-api-token-<host>`) so users running
-    multiple CI hosts off one repo can silence each independently."""
+    """Implementation of `tip_add_aspect_api_token`; see the public
+    `@aspect//tips.axl` for the contract."""
     detail = _ASPECT_API_TOKEN_HOST_DETAIL[host.value]
     add_tip(
         ctx,
@@ -508,13 +429,8 @@ def tip_add_aspect_api_token(ctx, host: AspectApiTokenHost):
     )
 
 def tip_add_github_token_scope(ctx, scopes: str, endpoints: str):
-    """Warn that the job-scoped `GITHUB_TOKEN` lacks scopes a supporting
-    API call needed, so the call fell back to the App token. Accumulating:
-    each call passes the single missing `scopes` / `endpoints` value it hit;
-    repeated emits union into one tip (deduped + sorted), and
-    `combine_across_tasks` unions the set across every task into one
-    PR-summary row. Pluralization + per-scope snippet lines are Jinja2
-    over the merged `accumulate` state."""
+    """Implementation of `tip_add_github_token_scope`; see the public
+    `@aspect//tips.axl` for the contract."""
     add_tip(
         ctx,
         id = "add-github-token-scope",
@@ -538,11 +454,8 @@ API {{ "endpoint" if endpoints|length == 1 else "endpoints" }} that fell back ({
     )
 
 def tip_add_id_token_permission(ctx):
-    """Tell the user to grant `id-token: write` so GitHub Actions
-    artifact uploads (status payloads, BEP files, test logs, profiles —
-    and the PR summary aggregator that rides on them) can obtain the OIDC
-    token the ArtifactService needs. IMPORTANT — these features fail
-    outright without it, and important tips can't be silenced."""
+    """Implementation of `tip_add_id_token_permission`; see the public
+    `@aspect//tips.axl` for the contract."""
     add_tip(
         ctx,
         id = "add-id-token-permission",
@@ -583,67 +496,9 @@ def add_tip(
         accumulate: dict = {},
         surfaces: list = [],
         combine_across_tasks: bool = False):
-    """Add a tip to the task's tip storage and print a `TIP:` block to
-    the terminal (subject to the owner feature's `auto_print` arg).
-
-    The single entry point for tips. Built-in tips are `tip_*(ctx, …)`
-    functions that wrap this with their content baked in (e.g.
-    `tip_add_github_token(ctx)`); call `add_tip` directly for custom tips.
-
-    A tip is identified by `(id, key)` — see the "Tip identity" section.
-    Re-emitting the same `(id, key)` within a task replaces the stored
-    content (accumulate fields ride along); a different `key` is a
-    distinct tip. Silencing is always by `id`: no-op if `id` is in the
-    silence list AND `severity != TIP_IMPORTANT`.
-
-    No-op overall when the `Tips` feature is disabled — the trait's
-    `add` callable falls back to its null-object default.
-
-    Args:
-      ctx: The task context the tip is added to. Unannotated because the
-        built-in `tip_*` wrappers are driven with a stub context by
-        `github.axl`'s detection tests; only `ctx.traits` is used here.
-      id: Stable identifier — the kind of tip and its silence key. Tips
-        with the same `(id, key)` are the same tip (re-emit replaces);
-        `id` alone is what `--tips:silence=<id>` and the silence list
-        match. See the "Tip identity" section.
-      severity: One of `TIP_IMPORTANT` / `TIP_WARNING` / `TIP_SUGGESTION` /
-        `TIP_INFO` — drives ordering, the emoji/label, and (for
-        `TIP_IMPORTANT`) immunity from silencing. See "Severity ordering".
-      title: Short headline, interpreted per `type`.
-      body: Markdown body, interpreted per `type`.
-      type: The interpolation engine for `title` / `body`:
-        `TIP_TEMPLATE_RAW` (default) surfaces them as-is;
-        `TIP_TEMPLATE_FORMAT` applies Starlark `str.format(**vars)`;
-        `TIP_TEMPLATE_JINJA2` renders them as Jinja2 against `vars` +
-        `accumulate`, keeping the source so a re-emit or cross-task union
-        can re-render. See the "Template types" section.
-      key: Optional discriminator distinguishing same-`id` tips about
-        different subjects (e.g. one flaky-test tip per label). Empty
-        means a single tip per `id`. See the "Tip identity" section.
-      task_keys: Glob patterns matched against `ctx.task.key`; when
-        non-empty the tip renders only on matching tasks. Empty (the
-        default) scopes the tip to the task it was emitted into. The
-        terminal print fires regardless. See "Task-key scoping".
-      vars: Fixed scalar values for `TIP_TEMPLATE_FORMAT` /
-        `TIP_TEMPLATE_JINJA2` interpolation. Ignored for
-        `TIP_TEMPLATE_RAW`. A name set in both `vars` and `accumulate`
-        is an error.
-      accumulate: List-valued Jinja2 fields (a `{{ name }}` reference
-        sees a list). Each re-emit unions in new values (deduped +
-        sorted); with `combine_across_tasks` the union also spans tasks.
-        `TIP_TEMPLATE_JINJA2` only.
-      surfaces: Allowlist of surface identifiers (`SURFACE_CLI` /
-        `SURFACE_GITHUB_STATUS_CHECKS` / `SURFACE_BUILDKITE_ANNOTATIONS` /
-        `SURFACE_GITLAB_COMMIT_STATUSES` / `SURFACE_GITHUB_PR_SUMMARY`, or
-        the `TASK_SCREENS` / `AGGREGATE_SCREENS` shorthands) that may
-        render the tip. Empty (the default) shows it everywhere
-        (`SURFACE_ALL`). The terminal print is gated on `SURFACE_CLI`;
-        omit `SURFACE_GITHUB_PR_SUMMARY` to keep the tip off the cross-task
-        rollup. See "Surface allowlist".
-      combine_across_tasks: How same-`(id, key)` tips from sibling tasks
-        combine in the PR summary. See "Cross-task accumulation".
-    """
+    """Implementation of `add_tip`; `ctx` untyped so internal callers and
+    tests can pass a stub context. See the public `@aspect//tips.axl`
+    `add_tip` for the full contract."""
     if severity not in _SEVERITY_ORDER:
         fail("unknown tip severity %r; valid: %s" % (severity, ", ".join(_SEVERITY_ORDER.keys())))
     if type not in _VALID_TEMPLATE_TYPES:
