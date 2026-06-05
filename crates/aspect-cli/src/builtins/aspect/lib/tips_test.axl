@@ -8,7 +8,7 @@ Covers the tip framework primitives directly:
                 severity guard, and `silenced_tips` short-circuit (by
                 `id`, across keys).
   - `collect_tips_sorted` — severity ordering, insertion-order stability,
-                            task_keys glob filter, limit, surface allowlist.
+                            limit, surface allowlist.
   - `surfaces` / `combine_across_tasks` — storage + defaults on `add_tip`,
                             the `tip_shows_on` predicate, the per-surface
                             collect filter, and `tip_to_payload` carrying
@@ -162,14 +162,6 @@ def _test_important_tips_cannot_be_silenced(ctx):
         ["unsuppressable", "add-id-token-permission"],
     )
 
-def _test_add_tip_task_keys_stored(ctx):
-    _reset(ctx)
-    add_tip(ctx, id = "a", severity = TIP_INFO, title = "T", body = "B", task_keys = ["lint-*", "format-*"])
-    add_tip(ctx, id = "b", severity = TIP_INFO, title = "T", body = "B")
-    stored = tips._inspect_for_test(ctx)
-    _eq("task_keys stored", stored[0]["task_keys"], ["lint-*", "format-*"])
-    _eq("task_keys default — empty list when None", stored[1]["task_keys"], [])
-
 def _test_add_tip_format(ctx):
     _reset(ctx)
     add_tip(
@@ -207,14 +199,6 @@ def _test_add_tip_default_type_is_raw(ctx):
     # verbatim even when `vars` is supplied.
     add_tip(ctx, id = "default-type", severity = TIP_INFO, title = "Hello {name}", body = "B", vars = {"name": "world"})
     _eq("default type — RAW leaves braces verbatim", tips._inspect_for_test(ctx)[0]["title"], "Hello {name}")
-
-def _test_add_tip_task_keys_independent(ctx):
-    _reset(ctx)
-    add_tip(ctx, id = "tmpl-1", severity = TIP_INFO, type = TIP_TEMPLATE_RAW, title = "T", body = "B", task_keys = ["lint-*"])
-    add_tip(ctx, id = "tmpl-2", severity = TIP_INFO, type = TIP_TEMPLATE_RAW, title = "T", body = "B", task_keys = ["format-*", "gazelle-*"])
-    stored = tips._inspect_for_test(ctx)
-    _eq("add_tip — first task_keys honored", stored[0]["task_keys"], ["lint-*"])
-    _eq("add_tip — second tip's task_keys independent", stored[1]["task_keys"], ["format-*", "gazelle-*"])
 
 # A JINJA2 tip with both `scopes` and `endpoints` accumulators, mirroring
 # the built-in `tip_add_github_token_scope` shape so the merge / re-render
@@ -345,24 +329,6 @@ def _test_collect_sorted_by_severity(ctx):
         "sorted — important → warning → suggestion → info; stable within bucket",
         sorted_ids,
         ["important-1", "important-2", "warning-1", "suggestion-1", "info-1"],
-    )
-
-def _test_collect_task_keys_filter(ctx):
-    # Task keys are auto-generated at task instantiation
-    # (`ctx.task.key` looks like a `truthful-ice`-style word pair). The
-    # test can't hardcode the value, so we exercise the filter with
-    # patterns that are deterministic regardless: empty list (current
-    # task), `["*"]` (match all), `["never-match-*"]` (no match), and
-    # one synthesized from the actual `ctx.task.key`.
-    _reset(ctx)
-    add_tip(ctx, id = "empty-keys", severity = TIP_INFO, title = "T", body = "B")
-    add_tip(ctx, id = "match-all", severity = TIP_INFO, title = "T", body = "B", task_keys = ["*"])
-    add_tip(ctx, id = "match-exact", severity = TIP_INFO, title = "T", body = "B", task_keys = [ctx.task.key])
-    add_tip(ctx, id = "never-match", severity = TIP_INFO, title = "T", body = "B", task_keys = ["zzzz-never-match-*"])
-    _eq(
-        "filter — empty + `*` + exact-key pass; mismatched glob skipped",
-        _ids(collect_tips_sorted(ctx)),
-        ["empty-keys", "match-all", "match-exact"],
     )
 
 def _test_collect_limit(ctx):
@@ -582,7 +548,6 @@ def _test_tip_to_payload(ctx):
         "_body_src": "B",
         "vars": {"repo": "acme/web"},
         "accumulate": {"scopes": ["actions: read"]},
-        "task_keys": ["lint-*"],  # producer-side filter; payload omits this
     }
     payload = tip_to_payload(stored)
     _eq("tip_to_payload — id", payload["id"], "x")
@@ -595,8 +560,6 @@ def _test_tip_to_payload(ctx):
     _eq("tip_to_payload — _body_src", payload["_body_src"], "B")
     _eq("tip_to_payload — vars", payload["vars"], {"repo": "acme/web"})
     _eq("tip_to_payload — accumulate", payload["accumulate"], {"scopes": ["actions: read"]})
-    if "task_keys" in payload:
-        fail("tip_to_payload — task_keys (producer-side filter) must NOT cross the artifact boundary")
 
     _eq("tip_to_payload — surfaces carried", payload.get("surfaces"), [])
     _eq("tip_to_payload — combine_across_tasks defaults False", payload.get("combine_across_tasks"), False)
@@ -807,11 +770,9 @@ def _test_impl(ctx):
     _test_silenced_tips_short_circuits_add_tip(ctx)
     _test_silenced_tips_blocks_add(ctx)
     _test_important_tips_cannot_be_silenced(ctx)
-    _test_add_tip_task_keys_stored(ctx)
     _test_add_tip_format(ctx)
     _test_add_tip_raw_skips_interpolation(ctx)
     _test_add_tip_default_type_is_raw(ctx)
-    _test_add_tip_task_keys_independent(ctx)
     _test_jinja2_first_emit_seeds_accumulate(ctx)
     _test_jinja2_reemit_merges_new_values(ctx)
     _test_jinja2_reemit_skips_duplicate_values(ctx)
@@ -819,7 +780,6 @@ def _test_impl(ctx):
     _test_jinja2_vars_and_accumulate(ctx)
     _test_combine_across_tasks_stored(ctx)
     _test_collect_sorted_by_severity(ctx)
-    _test_collect_task_keys_filter(ctx)
     _test_collect_limit(ctx)
     _test_severity_emoji(ctx)
     _test_severity_label(ctx)
@@ -837,7 +797,7 @@ def _test_impl(ctx):
     _test_tip_suggestion_hook(ctx)
     _test_strip_code_fences(ctx)
     _test_auto_print_flag(ctx)
-    print("tips.axl: OK (38 sections)")
+    print("tips.axl: OK (35 sections)")
     return 0
 
 tips_tests = task(
