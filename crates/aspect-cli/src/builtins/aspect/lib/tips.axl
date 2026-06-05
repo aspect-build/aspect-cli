@@ -53,18 +53,9 @@ aggregator) call it with their own surface id and display the result.
     TIP_WARNING     — degraded behavior; user should fix to restore full function.
     TIP_SUGGESTION  — improvement opportunity; product works fine without it.
     TIP_INFO        — FYI.
-
-# Task-key scoping
-
-Each tip optionally carries `task_keys` — a list of glob patterns matched
-against `ctx.task.key` at render time. When empty (the default), the tip
-shows on the task it was emitted into and no others. When non-empty,
-the tip shows only on tasks whose key matches one of the patterns.
-`["*"]` shows on every task, `["lint-*"]` on lint variants, etc.
 """
 
 load("./environment.axl", "color_enabled")
-load("./path_glob.axl", "match_any")
 
 # ── Severity constants ───────────────────────────────────────────────
 
@@ -288,7 +279,7 @@ def tip_replace(
 # ── Private trait — owner-feature implementation detail ────────────
 #
 # Every stored tip carries `{id, key, severity, title, body, type,
-# task_keys, surfaces, combine_across_tasks}`; JINJA2 tips additionally
+# surfaces, combine_across_tasks}`; JINJA2 tips additionally
 # carry `_title_src`, `_body_src` (the Jinja2 source), `vars`, and
 # `accumulate` (dict<name, list<value>>) so the owner can re-render on
 # accumulation. A same-`(id, key)` re-emit replaces the stored tip
@@ -311,7 +302,7 @@ _TipsTrait = trait(
     add = attr(typing.Callable[[TaskContext, dict], None], default = lambda ctx, t: None),
 
     # Return the raw, insertion-ordered list of stored tip dicts.
-    # `collect_tips_sorted` filters by task_keys and sorts on top.
+    # `collect_tips_sorted` filters by surface and sorts on top.
     collect = attr(typing.Callable[[], list], default = lambda: []),
 
     # Test seams. Owner feature binds these; production code should
@@ -492,7 +483,6 @@ def add_tip(
         body: str,
         type: str = TIP_TEMPLATE_RAW,
         key: str = "",
-        task_keys: list = [],
         vars: dict = {},
         accumulate: dict = {},
         surfaces: list = [],
@@ -521,7 +511,6 @@ def add_tip(
         "id": id,
         "key": key,
         "severity": severity,
-        "task_keys": list(task_keys) if task_keys else [],
         "type": type,
         "surfaces": surfaces_list,
         "combine_across_tasks": combine_across_tasks,
@@ -537,16 +526,10 @@ def add_tip(
     ctx.traits[_TipsTrait].add(ctx, tip)
 
 def collect_tips_sorted(ctx, limit = None, surface = None):
-    """Return the current tips list filtered by `task_keys` (when set)
-    against `ctx.task.key` and by `surface` (when set) against each tip's
-    `surfaces` allowlist, then sorted by severity (highest urgency
-    first); the sort is stable, so insertion order is preserved
-    within a severity bucket.
-
-    Tips without `task_keys` pass through unconditionally — they're
-    scoped to the task they were emitted into. Tips with `task_keys`
-    apply only on tasks whose key matches one of the glob patterns
-    (e.g. `["lint-*"]`, `["*"]`).
+    """Return the task's tips filtered by `surface` (when set) against each
+    tip's `surfaces` allowlist, then sorted by severity (highest urgency
+    first); the sort is stable, so insertion order is preserved within a
+    severity bucket.
 
     `surface` is the calling surface's identifier (e.g.
     `SURFACE_GITHUB_STATUS_CHECKS`, `SURFACE_GITHUB_PR_SUMMARY`). When set, a tip
@@ -558,15 +541,7 @@ def collect_tips_sorted(ctx, limit = None, surface = None):
     Pass `limit` to cap the result for space-constrained surfaces
     (e.g. PR comment summary).
     """
-    task_key = ctx.task.key
-    filtered = []
-    for t in ctx.traits[_TipsTrait].collect():
-        patterns = t.get("task_keys") or []
-        if patterns and not match_any(patterns, task_key):
-            continue
-        if not tip_shows_on(t, surface):
-            continue
-        filtered.append(t)
+    filtered = [t for t in ctx.traits[_TipsTrait].collect() if tip_shows_on(t, surface)]
     out = sorted(filtered, key = lambda t: severity_rank(t.get("severity")))
     if limit != None and limit >= 0:
         out = out[:limit]
