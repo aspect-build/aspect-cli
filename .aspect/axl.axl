@@ -2155,36 +2155,36 @@ def test_detect_build_url(ctx: TaskContext, tc: int) -> int:
     _clear_pr_env(env)
 
     # No CI env → empty.
-    tc = test_case(tc, detect_build_url(ctx) == "", "detect_build_url: no env → \"\"")
+    tc = test_case(tc, detect_build_url(env) == "", "detect_build_url: no env → \"\"")
 
     # Buildkite — bare build URL when no job id is set.
     _clear_pr_env(env)
     env.set_var("BUILDKITE", "true")
     env.set_var("BUILDKITE_BUILD_URL", "https://buildkite.com/acme/widgets/builds/42")
-    tc = test_case(tc, detect_build_url(ctx) == "https://buildkite.com/acme/widgets/builds/42", "detect_build_url: Buildkite (no job id)")
+    tc = test_case(tc, detect_build_url(env) == "https://buildkite.com/acme/widgets/builds/42", "detect_build_url: Buildkite (no job id)")
 
     # Buildkite — job-anchored URL when BUILDKITE_JOB_ID is also set.
     # Clear the URL cache so the prior bare-URL resolve isn't reused.
     env.remove_var("ASPECT_JOB_URL_CACHE")
     env.set_var("BUILDKITE_JOB_ID", "abc-123")
-    tc = test_case(tc, detect_build_url(ctx) == "https://buildkite.com/acme/widgets/builds/42#abc-123", "detect_build_url: Buildkite (with job id)")
+    tc = test_case(tc, detect_build_url(env) == "https://buildkite.com/acme/widgets/builds/42#abc-123", "detect_build_url: Buildkite (with job id)")
 
     # Buildkite without BUILDKITE_BUILD_URL set.
     env.remove_var("ASPECT_JOB_URL_CACHE")
     env.remove_var("BUILDKITE_BUILD_URL")
-    tc = test_case(tc, detect_build_url(ctx) == "", "detect_build_url: Buildkite without URL → \"\"")
+    tc = test_case(tc, detect_build_url(env) == "", "detect_build_url: Buildkite without URL → \"\"")
 
     # CircleCI
     _clear_pr_env(env)
     env.set_var("CIRCLECI", "true")
     env.set_var("CIRCLE_BUILD_URL", "https://circleci.com/gh/acme/widgets/9911")
-    tc = test_case(tc, detect_build_url(ctx) == "https://circleci.com/gh/acme/widgets/9911", "detect_build_url: CircleCI")
+    tc = test_case(tc, detect_build_url(env) == "https://circleci.com/gh/acme/widgets/9911", "detect_build_url: CircleCI")
 
     # GitLab
     _clear_pr_env(env)
     env.set_var("GITLAB_CI", "true")
     env.set_var("CI_JOB_URL", "https://gitlab.com/acme/widgets/-/jobs/12345")
-    tc = test_case(tc, detect_build_url(ctx) == "https://gitlab.com/acme/widgets/-/jobs/12345", "detect_build_url: GitLab")
+    tc = test_case(tc, detect_build_url(env) == "https://gitlab.com/acme/widgets/-/jobs/12345", "detect_build_url: GitLab")
 
     # GitHub Actions: when auth fails / not available, fall back to run URL.
     # This test relies on no ASPECT_API_TOKEN being set (or auth failing).
@@ -2197,13 +2197,13 @@ def test_detect_build_url(ctx: TaskContext, tc: int) -> int:
     env.set_var("GITHUB_REPOSITORY", "fake-owner-axl-test/fake-repo-axl-test")
     env.set_var("GITHUB_RUN_ID", "12345")
     expected = "https://github.com/fake-owner-axl-test/fake-repo-axl-test/actions/runs/12345"
-    got = detect_build_url(ctx)
+    got = detect_build_url(env)
     tc = test_case(tc, got == expected, "detect_build_url: GHA falls back to run URL when auth unavailable (got %r)" % got)
 
     # GHA without GITHUB_REPOSITORY → empty.
     env.remove_var("ASPECT_JOB_URL_CACHE")
     env.remove_var("GITHUB_REPOSITORY")
-    tc = test_case(tc, detect_build_url(ctx) == "", "detect_build_url: GHA without GITHUB_REPOSITORY → \"\"")
+    tc = test_case(tc, detect_build_url(env) == "", "detect_build_url: GHA without GITHUB_REPOSITORY → \"\"")
 
     # GHA cache hit: a previously-resolved job URL is reused as-is without
     # touching the GitHub API.
@@ -2214,7 +2214,7 @@ def test_detect_build_url(ctx: TaskContext, tc: int) -> int:
     env.set_var("GITHUB_RUN_ID", "12345")
     cached_job_url = "https://github.com/fake-owner-axl-test/fake-repo-axl-test/actions/runs/12345/job/99"
     env.set_var("ASPECT_JOB_URL_CACHE", cached_job_url)
-    tc = test_case(tc, detect_build_url(ctx) == cached_job_url, "detect_build_url: GHA cache hit returns cached job URL")
+    tc = test_case(tc, detect_build_url(env) == cached_job_url, "detect_build_url: GHA cache hit returns cached job URL")
     env.remove_var("ASPECT_JOB_URL_CACHE")
 
     _clear_pr_env(env)
