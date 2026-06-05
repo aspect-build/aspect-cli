@@ -1,18 +1,15 @@
-"""Smoke tests for `lib/github.axl` CI-event detection helpers.
+"""Tests for `lib/github.axl` CI change-detection helpers.
 
-Covers the three change-detection event shapes aspect-cli sees in
-GitHub Actions:
-
-  1. GitHub PR (`pull_request` / `pull_request_target`)
-     — `detect_github_pr` returns the PR context;
-       `detect_merge_group_base_sha` returns "".
-  2. Merge queue (`merge_group`)
-     — `detect_merge_group_base_sha` returns `merge_group.base_sha`
-       from the event payload;
-       `detect_github_pr` returns None (no PR ref).
-  3. Landed commit (`push`)
-     — both helpers return empty / None; downstream falls back to
-       local `git diff` against the base branch.
+Covers:
+  - The three CI-event shapes aspect-cli sees on GitHub Actions —
+    `pull_request` / `pull_request_target` (`detect_github_pr` returns
+    the PR context), `merge_group` (`detect_merge_group_base_sha`
+    returns the queue base SHA), and `push` (neither fires; downstream
+    falls back to local `git diff`).
+  - `head_is_synthesized_merge` — the per-source gate that decides
+    whether HEAD's first parent is a safe diff base, including the
+    PR-head-checkout and batched-merge_group cases.
+  - `list_pull_request_files` auth fallback + rate-limit bucketing.
 
 Most cases are env- and event-file-driven, so they stub `std` with a
 fake env (dict-backed) and a fake fs (path → content dict). The
@@ -106,7 +103,7 @@ def _expect_event(label, vars, files, expected):
     _eq(label, got, expected)
 
 def _test_impl(ctx):
-    # ── (1) GitHub PR — pull_request event ──────────────────────────
+    # ── GitHub PR — pull_request event ──────────────────────────────
     # actions/checkout v6 default: synthesized merge commit at
     # refs/pull/N/merge; pull_request.head.sha in event payload is the
     # PR's real head (used for status checks / annotations).
@@ -154,7 +151,7 @@ def _test_impl(ctx):
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     )
 
-    # ── (2) Merge queue — merge_group event ─────────────────────────
+    # ── Merge queue — merge_group event ─────────────────────────────
     # GitHub merges PRs through a queue branch
     # (`gh-readonly-queue/<target>/<sha>`); the event payload exposes
     # `merge_group.base_sha` directly so we don't have to resolve it
@@ -296,7 +293,7 @@ def _test_impl(ctx):
         False,
     )
 
-    # ── (3) Landed commit — push to main ────────────────────────────
+    # ── Landed commit — push to main ────────────────────────────────
     # No PR context, no merge_group payload. Downstream falls back to
     # local `git diff` against `origin/main`.
     push_event_path = "/tmp/event-push.json"
@@ -960,6 +957,7 @@ def _test_resolve_merge_base_integration(ctx):
     diff_base, source = resolve_merge_base_for_test(ctx, "main", repo)
     if "merge-base" not in source:
         fail("developer merge — expected merge-base source, got %r" % source)
+
     # The feature's own files are in scope; HEAD^1 (=c2) would have
     # dropped c1.txt and c2.txt, surfacing only the merged-in b1.txt.
     _eq(

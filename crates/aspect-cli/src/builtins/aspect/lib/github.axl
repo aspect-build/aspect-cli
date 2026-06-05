@@ -538,6 +538,14 @@ def read_github_event(std):
         return {}
     return json.try_decode(std.fs.read_to_string(event_path), {})
 
+def _pull_request_event_sha(std, side):
+    """`pull_request.<side>.sha` from the GitHub event payload (`side` is
+    "head" or "base"), or `""` when absent. The PR head is the real
+    branch tip; the base is the SHA GitHub merged it onto to synthesize
+    the `refs/pull/<n>/merge` checkout."""
+    pr = read_github_event(std).get("pull_request", {}) or {}
+    return (pr.get(side, {}) or {}).get("sha", "") or ""
+
 def detect_commit_sha(std):
     """Detect commit SHA from CI environment variables.
 
@@ -549,7 +557,7 @@ def detect_commit_sha(std):
     env = std.env
     event_name = env.var("GITHUB_EVENT_NAME") or ""
     if env.var("GITHUB_ACTIONS") and event_name in ("pull_request", "pull_request_target"):
-        head_sha = (read_github_event(std).get("pull_request", {}) or {}).get("head", {}).get("sha", "")
+        head_sha = _pull_request_event_sha(std, "head")
         if head_sha:
             return head_sha
     return (
@@ -614,7 +622,7 @@ def head_is_synthesized_merge(std, parents):
     if env.var("GITHUB_ACTIONS"):
         event_name = env.var("GITHUB_EVENT_NAME") or ""
         if event_name in ("pull_request", "pull_request_target"):
-            base = (read_github_event(std).get("pull_request", {}) or {}).get("base", {}).get("sha", "") or ""
+            base = _pull_request_event_sha(std, "base")
             return base != "" and parents[0] == base
         return event_name == "merge_group"
     return is_gitlab_synthesized_merge_pipeline(std)
