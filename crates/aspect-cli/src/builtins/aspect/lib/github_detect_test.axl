@@ -29,6 +29,7 @@ load(
     "detect_github_pr",
     "detect_merge_group_base_sha",
     "github",
+    "head_is_synthesized_merge",
     "read_github_event",
 )
 load(
@@ -86,6 +87,12 @@ def _expect_mg_sha(label, vars, files, expected):
 
 def _expect_commit_sha(label, vars, files, expected):
     got = detect_commit_sha(_fake_std(vars, files))
+    _eq(label, got, expected)
+
+# ── head_is_synthesized_merge ───────────────────────────────────────
+
+def _expect_head_synthesized(label, vars, files, parents, expected):
+    got = head_is_synthesized_merge(_fake_std(vars, files), parents)
     _eq(label, got, expected)
 
 # ── read_github_event ───────────────────────────────────────────────
@@ -177,6 +184,112 @@ def _test_impl(ctx):
         mg_vars,
         mg_files,
         "GITHUB_REF is not a PR merge ref",
+    )
+
+    # ── head_is_synthesized_merge — the gate on trusting parents[0] ──
+    base = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"  # pull_request.base.sha
+    head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"  # PR head / branch tip
+    prior_tip = "dddddddddddddddddddddddddddddddddddddddd"
+
+    # pull_request: the checked-out ref is developer-overridable, so the
+    # gate is `parents[0] == pull_request.base.sha`, NOT the event alone.
+    _expect_head_synthesized(
+        "pull_request: synthesized merge (parents[0] == base) is trusted",
+        pr_vars,
+        pr_files,
+        [base, head],
+        True,
+    )
+    _expect_head_synthesized(
+        "pull_request_target: synthesized merge is trusted",
+        {
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_EVENT_NAME": "pull_request_target",
+            "GITHUB_EVENT_PATH": pr_event_path,
+        },
+        pr_files,
+        [base, head],
+        True,
+    )
+
+    # The bug this fix targets: a workflow that overrides actions/checkout
+    # `ref:` to github.event.pull_request.head.sha runs the same
+    # pull_request event, but HEAD is the developer's own merge — its
+    # parents[0] is the prior branch tip. GITHUB_REF still says
+    # refs/pull/N/merge, so a ref-based gate would wrongly fire; matching
+    # parents[0] against base.sha correctly rejects it.
+    _expect_head_synthesized(
+        "pull_request: developer merge checked out (parents[0] != base) is rejected",
+        pr_vars,
+        pr_files,
+        [prior_tip, head],
+        False,
+    )
+    _expect_head_synthesized(
+        "single-parent HEAD is never a synthesized merge",
+        pr_vars,
+        pr_files,
+        [base],
+        False,
+    )
+
+    # merge_group: the gh-readonly-queue ref is GitHub-controlled (not
+    # overridable), so a 2-parent HEAD is always trusted — including the
+    # batched case where parents[0] (the prior group's HEAD) differs from
+    # merge_group.base_sha (the target-branch tip).
+    _expect_head_synthesized(
+        "merge_group: 2-parent HEAD is trusted",
+        mg_vars,
+        mg_files,
+        [base, head],
+        True,
+    )
+    _expect_head_synthesized(
+        "merge_group: batched group (parents[0] != base_sha) is still trusted",
+        mg_vars,
+        mg_files,
+        [prior_tip, head],
+        True,
+    )
+
+    # GitLab merged_result / merge_train: GitLab-controlled refs, trusted
+    # on topology; detached checks out the source head (step 3 handles it).
+    _expect_head_synthesized(
+        "GitLab merged_result: 2-parent HEAD is trusted",
+        {"GITLAB_CI": "true", "CI_MERGE_REQUEST_EVENT_TYPE": "merged_result"},
+        {},
+        [base, head],
+        True,
+    )
+    _expect_head_synthesized(
+        "GitLab merge_train: 2-parent HEAD is trusted",
+        {"GITLAB_CI": "true", "CI_MERGE_REQUEST_EVENT_TYPE": "merge_train"},
+        {},
+        [base, head],
+        True,
+    )
+    _expect_head_synthesized(
+        "GitLab detached: 2-parent HEAD is rejected",
+        {"GITLAB_CI": "true", "CI_MERGE_REQUEST_EVENT_TYPE": "detached"},
+        {},
+        [base, head],
+        False,
+    )
+
+    # Non-PR, non-merge contexts never trust a 2-parent HEAD.
+    _expect_head_synthesized(
+        "push build: 2-parent HEAD is rejected",
+        {"GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "push"},
+        {},
+        [base, head],
+        False,
+    )
+    _expect_head_synthesized(
+        "off-CI: 2-parent HEAD is rejected",
+        {},
+        {},
+        [base, head],
+        False,
     )
 
     # ── (3) Landed commit — push to main ────────────────────────────

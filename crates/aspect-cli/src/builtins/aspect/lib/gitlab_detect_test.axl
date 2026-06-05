@@ -8,7 +8,7 @@ Run with:
   aspect dev test-gitlab-detect
 """
 
-load("./gitlab_detect.axl", "detect_gitlab_mr")
+load("./gitlab_detect.axl", "detect_gitlab_mr", "is_gitlab_synthesized_merge_pipeline")
 
 def _fake_std(vars):
     """Stub std with an env that resolves `var(name)` against `vars`."""
@@ -191,7 +191,43 @@ def _test_impl(ctx):
         "must be numeric",
     )
 
-    print("gitlab_detect.axl smoke: OK (12 scenarios)")
+    # ── is_gitlab_synthesized_merge_pipeline ────────────────────────────
+    # merged_result / merge_train check out a GitLab-synthesized merge
+    # (HEAD^1 is the base); detached checks out the source-branch head,
+    # where a 2-parent HEAD would be the developer's own merge.
+    _eq(
+        "merged_result is synthesized",
+        is_gitlab_synthesized_merge_pipeline(_fake_std({
+            "GITLAB_CI": "true",
+            "CI_MERGE_REQUEST_EVENT_TYPE": "merged_result",
+        })),
+        True,
+    )
+    _eq(
+        "merge_train is synthesized",
+        is_gitlab_synthesized_merge_pipeline(_fake_std({
+            "GITLAB_CI": "true",
+            "CI_MERGE_REQUEST_EVENT_TYPE": "merge_train",
+        })),
+        True,
+    )
+    _eq(
+        "detached is not synthesized",
+        is_gitlab_synthesized_merge_pipeline(_fake_std({
+            "GITLAB_CI": "true",
+            "CI_MERGE_REQUEST_EVENT_TYPE": "detached",
+        })),
+        False,
+    )
+    _eq(
+        "not on GitLab CI is not synthesized",
+        is_gitlab_synthesized_merge_pipeline(_fake_std({
+            "CI_MERGE_REQUEST_EVENT_TYPE": "merged_result",
+        })),
+        False,
+    )
+
+    print("gitlab_detect.axl smoke: OK (16 scenarios)")
     return 0
 
 gitlab_detect_tests = task(
