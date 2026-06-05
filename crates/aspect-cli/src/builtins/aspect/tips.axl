@@ -17,7 +17,6 @@ and customize tips with a single import:
          "SURFACE_CLI",
          "SURFACE_GITHUB_STATUS_CHECKS",
          "SURFACE_BUILDKITE_ANNOTATIONS",
-         "SURFACE_GITLAB_COMMIT_STATUSES",
          "SURFACE_GITHUB_PR_SUMMARY",
          "TASK_SCREENS",
          "AGGREGATE_SCREENS",
@@ -30,20 +29,17 @@ and customize tips with a single import:
          "tip_replace")
 
 This is the customer-facing surface; internal modules load directly from
-`lib/tips.axl`. The built-in tips (`tip_add_github_token`, …) are
-re-exported too so a config can call them or preempt / silence them by id.
+`lib/tips.axl`.
 """
 
 load(
     "./lib/tips.axl",
     _AGGREGATE_SCREENS = "AGGREGATE_SCREENS",
-    _AspectApiTokenHost = "AspectApiTokenHost",
     _SURFACE_ALL = "SURFACE_ALL",
     _SURFACE_BUILDKITE_ANNOTATIONS = "SURFACE_BUILDKITE_ANNOTATIONS",
     _SURFACE_CLI = "SURFACE_CLI",
     _SURFACE_GITHUB_PR_SUMMARY = "SURFACE_GITHUB_PR_SUMMARY",
     _SURFACE_GITHUB_STATUS_CHECKS = "SURFACE_GITHUB_STATUS_CHECKS",
-    _SURFACE_GITLAB_COMMIT_STATUSES = "SURFACE_GITLAB_COMMIT_STATUSES",
     _TASK_SCREENS = "TASK_SCREENS",
     _TIP_ACCEPT = "TIP_ACCEPT",
     _TIP_IMPORTANT = "TIP_IMPORTANT",
@@ -59,10 +55,6 @@ load(
     _TipSuggestion = "TipSuggestion",
     _TipsTrait = "TipsTrait",
     _add_tip = "add_tip",
-    _tip_add_aspect_api_token = "tip_add_aspect_api_token",
-    _tip_add_github_token = "tip_add_github_token",
-    _tip_add_github_token_scope = "tip_add_github_token_scope",
-    _tip_add_id_token_permission = "tip_add_id_token_permission",
     _tip_replace = "tip_replace",
     _tips = "tips",
 )
@@ -82,7 +74,6 @@ TIP_TEMPLATE_JINJA2 = _TIP_TEMPLATE_JINJA2
 SURFACE_CLI = _SURFACE_CLI
 SURFACE_GITHUB_STATUS_CHECKS = _SURFACE_GITHUB_STATUS_CHECKS
 SURFACE_BUILDKITE_ANNOTATIONS = _SURFACE_BUILDKITE_ANNOTATIONS
-SURFACE_GITLAB_COMMIT_STATUSES = _SURFACE_GITLAB_COMMIT_STATUSES
 SURFACE_GITHUB_PR_SUMMARY = _SURFACE_GITHUB_PR_SUMMARY
 TASK_SCREENS = _TASK_SCREENS
 AGGREGATE_SCREENS = _AGGREGATE_SCREENS
@@ -113,9 +104,7 @@ def add_tip(
     """Add a tip to the task's tip storage and print a `TIP:` block to
     the terminal (subject to the owner feature's `auto_print` arg).
 
-    The single entry point for tips. Built-in tips are `tip_*(ctx, …)`
-    functions that wrap this with their content baked in (e.g.
-    `tip_add_github_token(ctx)`); call `add_tip` directly for custom tips.
+    The single entry point for tips.
 
     A tip is identified by `(id, key)`. Re-emitting the same `(id, key)`
     within a task replaces the stored content (accumulate fields ride
@@ -158,8 +147,8 @@ def add_tip(
         `TIP_TEMPLATE_JINJA2` only.
       surfaces: Allowlist of surface identifiers (`SURFACE_CLI` /
         `SURFACE_GITHUB_STATUS_CHECKS` / `SURFACE_BUILDKITE_ANNOTATIONS` /
-        `SURFACE_GITLAB_COMMIT_STATUSES` / `SURFACE_GITHUB_PR_SUMMARY`, or
-        the `TASK_SCREENS` / `AGGREGATE_SCREENS` shorthands) that may
+        `SURFACE_GITHUB_PR_SUMMARY`, or the `TASK_SCREENS` /
+        `AGGREGATE_SCREENS` shorthands) that may
         render the tip. Empty (the default) shows it everywhere
         (`SURFACE_ALL`). The terminal print is gated on `SURFACE_CLI`;
         omit `SURFACE_GITHUB_PR_SUMMARY` to keep the tip off the cross-task
@@ -192,42 +181,3 @@ TipSuggestion = _TipSuggestion
 TIP_ACCEPT = _TIP_ACCEPT
 TIP_REJECT = _TIP_REJECT
 tip_replace = _tip_replace
-
-# Built-in tips (typed pass-throughs to `lib/tips.axl`; a config can call
-# or preempt them, and silence by the id each emits, e.g. `add-github-token`).
-AspectApiTokenHost = _AspectApiTokenHost
-
-def tip_add_github_token(ctx: TaskContext):
-    """Suggest exporting `GITHUB_TOKEN` as a fallback for supporting
-    GitHub API calls (job URL lookup, PR file diff, etc.) when the
-    Aspect Workflows GitHub App can't authenticate."""
-    _tip_add_github_token(ctx)
-
-def tip_add_aspect_api_token(ctx: TaskContext, host: AspectApiTokenHost):
-    """Tell the user to set `ASPECT_API_TOKEN` so the Aspect Workflows
-    GitHub App can authenticate. IMPORTANT severity — every feature that
-    calls the GitHub API as the App depends on it, and silently degrades
-    without it.
-
-    `host` is an `AspectApiTokenHost`; it selects the wire-up advice and a
-    host-suffixed id (`add-aspect-api-token-<host>`) so users running
-    multiple CI hosts off one repo can silence each independently."""
-    _tip_add_aspect_api_token(ctx, host = host)
-
-def tip_add_github_token_scope(ctx: TaskContext, scopes: str, endpoints: str):
-    """Warn that the job-scoped `GITHUB_TOKEN` lacks scopes a supporting
-    API call needed, so the call fell back to the App token. Accumulating:
-    each call passes the single missing `scopes` / `endpoints` value it hit;
-    repeated emits union into one tip (deduped + sorted), and
-    `combine_across_tasks` unions the set across every task into one
-    PR-summary row. Pluralization + per-scope snippet lines are Jinja2
-    over the merged `accumulate` state."""
-    _tip_add_github_token_scope(ctx, scopes = scopes, endpoints = endpoints)
-
-def tip_add_id_token_permission(ctx: TaskContext):
-    """Tell the user to grant `id-token: write` so GitHub Actions
-    artifact uploads (status payloads, BEP files, test logs, profiles —
-    and the PR summary aggregator that rides on them) can obtain the OIDC
-    token the ArtifactService needs. IMPORTANT — these features fail
-    outright without it, and important tips can't be silenced."""
-    _tip_add_id_token_permission(ctx)
