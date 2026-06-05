@@ -1,3 +1,5 @@
+load("./bazel_results.axl", "bes_get")
+
 _DEFAULT_WORKSPACE_NAME = "_main"
 
 # Mandatory Bazel flags for a task that immediately spawns the built binary
@@ -174,7 +176,10 @@ def _process_bes(state: struct, event):
     elif event.kind == "target_completed":
         label_key = apparent_label(event.id.label)
         if label_key in state.targets:
-            for og in event.payload.output_group:
+            # A `target_completed` id can carry an `aborted` payload (e.g. the
+            # build was interrupted before the target finished), which has no
+            # `output_group`. Read defensively so an aborted target no-ops.
+            for og in (bes_get(event.payload, "output_group", None) or []):
                 if og.name == "default":
                     state.target_fileset[label_key] = og.file_sets
     elif event.kind == "workspace_config":
