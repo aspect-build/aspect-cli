@@ -1,25 +1,28 @@
-"""Snapshot tests for `lib/delivery_results.axl` template rendering.
+"""Tests for `lib/delivery_results.axl`.
 
-Run with:
-  aspect dev test-delivery-template-snapshots
+Two test tasks live in this file:
 
-Mirrors `lint_results_test.axl` and `bazel_results_test.axl`. Hand-crafted
-data dicts exercise every outcome bucket (ok / skip / warn / fail / pending)
-and the trim cascade.
+  test-delivery-template-snapshots — Jinja2 template snapshot tests.
+    Hand-crafted data dicts exercise every outcome bucket (ok / skip /
+    warn / fail / pending) and the trim cascade.
 
-Scenarios:
-  1. all-delivered    — every target freshly delivered
-  2. mixed-outcomes   — delivered + skipped + warned + failed
-  3. all-skipped      — same hash already delivered this commit
-  4. all-failed       — every delivery target exited non-zero
-  5. dry-run          — --dry-run marks everything pending
-  6. forced           — --force-target re-delivers a previously delivered target
-  7. large            — 200 data to exercise the trim cascade
-  8. no-targets       — empty target list → "No targets" title
-  9. build-failed     — delivery aborted before any targets ran (synthetic warns)
+    Scenarios:
+      1. all-delivered    — every target freshly delivered
+      2. mixed-outcomes   — delivered + skipped + warned + failed
+      3. all-skipped      — same hash already delivered this commit
+      4. all-failed       — every delivery target exited non-zero
+      5. dry-run          — --dry-run marks everything pending
+      6. forced           — --force-target re-delivers a previously delivered target
+      7. large            — 200 data to exercise the trim cascade
+      8. no-targets       — empty target list → "No targets" title
+      9. build-failed     — delivery aborted before any targets ran (synthetic warns)
+
+  test-delivery-results — focused unit tests for `init_data`, `add_result`,
+    and `build_manifest`. Locks the manifest schema so a future field rename
+    surfaces here instead of breaking customer manifests in the wild.
 """
 
-load("./delivery_results.axl", "add_result", "init_data", "render_check_output")
+load("./delivery_results.axl", "add_result", "build_manifest", "init_data", "render_check_output")
 load("./text.axl", "SUBJECT_TITLE_MAX")
 
 # A resolved subject far longer than the title's character budget (60),
@@ -261,7 +264,7 @@ def _render_ctx(subject = "//apps/...", task_name = "delivery", progress = ""):
         "task_name": task_name,
     }
 
-def _links(ci = "buildkite"):
+def _links(ci = "buildkite", with_manifest = False):
     if ci == "github":
         ci_label = "GitHub Actions"
         ci_url = "https://github.com/aspect-build/aspect-cli/actions/runs/24410554652/job/72239404829"
@@ -274,50 +277,74 @@ def _links(ci = "buildkite"):
     else:
         ci_label = "Buildkite"
         ci_url = "https://buildkite.com/aspect-build/silo-aws/builds/49508/steps/canvas?sid=s1"
+    artifact_urls = {}
+    artifacts_browse_url = ""
+    manifest_artifacts = []
+    if with_manifest:
+        artifacts_browse_url = "https://buildkite.com/aspect-build/silo-aws/builds/49508#artifacts"
+
+        # Two manifest uploads — the JSON (default) plus a YAML side-artifact
+        # from a customer `upload_manifest` hook — to exercise the per-file
+        # link rendering.
+        manifest_artifacts = [
+            {
+                "name": "delivery-manifest.json",
+                "url": "https://buildkite.com/aspect-build/silo-aws/builds/49508/artifacts/delivery-manifest.json",
+            },
+            {
+                "name": "delivery-images.yml",
+                "url": "https://buildkite.com/aspect-build/silo-aws/builds/49508/artifacts/delivery-images.yml",
+            },
+        ]
     return {
         "ci_label": ci_label,
         "ci_url": ci_url,
         "aspect_url": "https://app.aspect.build/invocations/sink-uuid-1234-5678-9abc",
         "results_base_url": "https://app.aspect.build/",
-        "artifacts_browse_url": "",
-        "artifact_urls": {},
+        "artifacts_browse_url": artifacts_browse_url,
+        "artifact_urls": artifact_urls,
+        "manifest_artifacts": manifest_artifacts,
         "testlogs_label_urls": {},
     }
 
 def _test_impl(ctx):
     scenarios = [
-        # (label,                            data,                     status,     subject,        ci,          metadata_keys, progress)
-        ("1. all-delivered · BK", _make_all_delivered(), "passed", "//apps/...", "buildkite", None, ""),
-        ("2. mixed-outcomes · BK", _make_mixed(), "failed", "//apps/...", "buildkite", None, ""),
-        ("3. all-skipped · GH", _make_all_skipped(), "passed", "//apps/...", "github", None, ""),
-        ("4. all-failed · BK", _make_all_failed(), "failed", "//apps/...", "buildkite", None, ""),
-        ("5. dry-run · BK", _make_dry_run(), "passed", "//apps/...", "buildkite", None, ""),
-        ("6. forced · GH", _make_forced(), "passed", "//apps/...", "github", None, ""),
-        ("7. large · BK", _make_large(), "failed", "//apps/...", "buildkite", None, ""),
-        ("8. no-targets · BK", _make_no_targets(), "passed", "", "buildkite", None, ""),
-        ("9. build-failed · BK", _make_build_failed(), "failed", "//apps/...", "buildkite", None, ""),
+        # (label,                            data,                     status,     subject,        ci,          metadata_keys, progress, with_manifest)
+        ("1. all-delivered · BK", _make_all_delivered(), "passed", "//apps/...", "buildkite", None, "", False),
+        ("2. mixed-outcomes · BK", _make_mixed(), "failed", "//apps/...", "buildkite", None, "", False),
+        ("3. all-skipped · GH", _make_all_skipped(), "passed", "//apps/...", "github", None, "", False),
+        ("4. all-failed · BK", _make_all_failed(), "failed", "//apps/...", "buildkite", None, "", False),
+        ("5. dry-run · BK", _make_dry_run(), "passed", "//apps/...", "buildkite", None, "", False),
+        ("6. forced · GH", _make_forced(), "passed", "//apps/...", "github", None, "", False),
+        ("7. large · BK", _make_large(), "failed", "//apps/...", "buildkite", None, "", False),
+        ("8. no-targets · BK", _make_no_targets(), "passed", "", "buildkite", None, "", False),
+        ("9. build-failed · BK", _make_build_failed(), "failed", "//apps/...", "buildkite", None, "", False),
         # Exercise GitHubStatusChecksTrait.metadata_keys through the shared summary renderer.
-        ("10. mixed · meta=*", _make_mixed(), "failed", "//apps/...", "buildkite", ["*"], ""),
+        ("10. mixed · meta=*", _make_mixed(), "failed", "//apps/...", "buildkite", ["*"], "", False),
         # Progress scenarios — confirm the "Last update" line surfaces the
         # phase label that delivery.axl threads into TaskUpdate.progress.
-        ("11. progress=building · running · BK", _make_mixed(), "running", "//apps/...", "buildkite", None, "Building 8 targets for delivery..."),
-        ("12. progress=delivering · running · BK", _make_mixed(), "running", "//apps/...", "buildkite", None, "Delivering 3 of 8 targets..."),
+        ("11. progress=building · running · BK", _make_mixed(), "running", "//apps/...", "buildkite", None, "Building 8 targets for delivery...", False),
+        ("12. progress=delivering · running · BK", _make_mixed(), "running", "//apps/...", "buildkite", None, "Delivering 3 of 8 targets...", False),
         # Mode line — exercises both the default-suppressed path (no
         # qualifiers when `selective` + tracked + non-dry-run) and the
         # all-modifiers path. The dry-run scenario above covers the
         # single-modifier case.
-        ("13. mode=always · dry-run · untracked", _make_always_dry_run_untracked(), "passed", "//apps/...", "buildkite", None, ""),
+        ("13. mode=always · dry-run · untracked", _make_always_dry_run_untracked(), "passed", "//apps/...", "buildkite", None, "", False),
         # Long resolved subject — a query-driven delivery resolves many
         # labels and emits them as a refined `subject`. The title must cap
         # it (asserted in `_check_long_subject_title_is_capped`).
-        ("14. long resolved subject (capped)", _make_all_delivered(), "passed", _LONG_SUBJECT, "buildkite", None, ""),
+        ("14. long resolved subject (capped)", _make_all_delivered(), "passed", _LONG_SUBJECT, "buildkite", None, "", False),
+        # Manifest artifact links — populates `manifest_artifacts` with two
+        # entries (JSON + YAML) so the rendered surface emits a per-file
+        # download link for each (plus the Artifacts browse link).
+        ("15. all-delivered + manifest artifact · BK", _make_all_delivered(), "passed", "//apps/...", "buildkite", None, "", True),
     ]
 
     sep = "=" * 70
 
-    for (label, data, status, subject, ci, metadata_keys, progress) in scenarios:
+    for (label, data, status, subject, ci, metadata_keys, progress, with_manifest) in scenarios:
         rc = _render_ctx(subject = subject, progress = progress)
-        lk = _links(ci = ci)
+        lk = _links(ci = ci, with_manifest = with_manifest)
         out = render_check_output(ctx, data, status, rc, lk, metadata_keys = metadata_keys)
         print(sep)
         print("SCENARIO: " + label)
@@ -359,5 +386,197 @@ delivery_template_snapshot_tests = task(
     name = "test-delivery-template-snapshots",
     group = ["dev"],
     implementation = _test_impl,
+    args = {},
+)
+
+# ─── Unit tests ──────────────────────────────────────────────────────────────
+
+def _test_init_data_shape(ctx):
+    r = init_data()
+    if "delivery" not in r:
+        fail("init_data: missing 'delivery' key")
+    d = r["delivery"]
+    for k in [
+        "ci_host",
+        "build_url",
+        "commit_sha",
+        "prefix",
+        "deliveries",
+        "mode",
+        "dry_run",
+        "track_state",
+        "counts",
+    ]:
+        if k not in d:
+            fail("init_data: missing 'delivery.%s'" % k)
+    if d["mode"] != "selective":
+        fail("init_data: default mode should be 'selective', got %r" % d["mode"])
+    if d["dry_run"] != False or d["track_state"] != True:
+        fail("init_data: default run-shape flags drifted")
+    if d["deliveries"] != [] or d["counts"] != {}:
+        fail("init_data: deliveries/counts should start empty")
+
+def _test_add_result_seeds_custom(ctx):
+    """add_result seeds an empty `custom` dict so the per-target hook can
+    enrich without re-checking existence on every key."""
+    r = init_data()
+    add_result(r, "//a:b", "ok", message = "msg", output_sha = "abc")
+    e = r["delivery"]["deliveries"][-1]
+    if e.get("custom") != {}:
+        fail("add_result: expected empty custom dict, got %r" % e.get("custom"))
+    if e["label"] != "//a:b" or e["outcome"] != "ok":
+        fail("add_result: scalar fields drifted: %r" % e)
+    if e["is_forced"] != False:
+        fail("add_result: is_forced default should be False, got %r" % e["is_forced"])
+
+def _test_add_result_bumps_counts(ctx):
+    r = init_data()
+    add_result(r, "//a:b", "ok")
+    add_result(r, "//c:d", "ok")
+    add_result(r, "//e:f", "fail")
+    add_result(r, "//g:h", "skip")
+    counts = r["delivery"]["counts"]
+    if counts != {"ok": 2, "fail": 1, "skip": 1}:
+        fail("add_result: counts drifted: %r" % counts)
+
+def _test_add_result_coerces_none_strings(ctx):
+    """add_result must not write None into string fields — JSON consumers
+    expect strings, and `message or ""` / `output_sha or ""` guarantees that."""
+    r = init_data()
+    add_result(r, "//a:b", "warn", message = None, output_sha = None)
+    e = r["delivery"]["deliveries"][-1]
+    if e["message"] != "" or e["output_sha"] != "":
+        fail("add_result: None should coerce to '': %r" % e)
+
+def _test_build_manifest_required_top_level_fields(ctx):
+    """The manifest schema is a customer-facing contract — every documented
+    top-level field must be present even when the source `data` is sparse."""
+    r = init_data()
+    m = build_manifest(r)
+    for k in [
+        "schema_version",
+        "ci_host",
+        "build_url",
+        "commit_sha",
+        "prefix",
+        "mode",
+        "dry_run",
+        "track_state",
+        "counts",
+        "deliveries",
+    ]:
+        if k not in m:
+            fail("build_manifest: missing top-level field %r" % k)
+    if m["schema_version"] != 1:
+        fail("build_manifest: schema_version drifted from 1: %r" % m["schema_version"])
+
+def _test_build_manifest_carries_metadata(ctx):
+    r = init_data()
+    r["delivery"]["ci_host"] = "bk"
+    r["delivery"]["build_url"] = "https://example/123"
+    r["delivery"]["commit_sha"] = "deadbeef"
+    r["delivery"]["prefix"] = "my-task"
+    r["delivery"]["mode"] = "always"
+    r["delivery"]["dry_run"] = True
+    r["delivery"]["track_state"] = False
+    m = build_manifest(r)
+    if m["ci_host"] != "bk" or m["build_url"] != "https://example/123":
+        fail("build_manifest: CI metadata drifted: %r" % m)
+    if m["commit_sha"] != "deadbeef" or m["prefix"] != "my-task":
+        fail("build_manifest: commit/prefix drifted: %r" % m)
+    if m["mode"] != "always" or m["dry_run"] != True or m["track_state"] != False:
+        fail("build_manifest: run-shape flags drifted: %r" % m)
+
+def _test_build_manifest_required_entry_fields(ctx):
+    """Every per-entry field documented in add_result()'s docstring must
+    appear on every manifest entry."""
+    r = init_data()
+    add_result(r, "//a:b", "ok", message = "msg", output_sha = "sha", is_forced = True)
+    m = build_manifest(r)
+    if len(m["deliveries"]) != 1:
+        fail("build_manifest: dropped entry: %r" % m["deliveries"])
+    e = m["deliveries"][0]
+    for k in ["label", "outcome", "message", "output_sha", "is_forced", "custom"]:
+        if k not in e:
+            fail("build_manifest: entry missing field %r in %r" % (k, e))
+
+def _test_build_manifest_preserves_custom_enrichment(ctx):
+    """Whatever the per-target hook wrote into `custom` flows through to
+    the manifest unchanged — this is the customer's escape hatch for
+    ruleset-specific data like image digests."""
+    r = init_data()
+    add_result(r, "//a:b", "ok")
+    r["delivery"]["deliveries"][0]["custom"]["image_digest"] = "sha256:cafef00d"
+    r["delivery"]["deliveries"][0]["custom"]["layer_path"] = "/tmp/layer.tar"
+    m = build_manifest(r)
+    custom = m["deliveries"][0]["custom"]
+    if custom.get("image_digest") != "sha256:cafef00d":
+        fail("build_manifest: dropped custom.image_digest")
+    if custom.get("layer_path") != "/tmp/layer.tar":
+        fail("build_manifest: dropped custom.layer_path")
+
+def _test_build_manifest_preserves_extra_entry_fields(ctx):
+    """Extra fields attached to an entry after add_result (e.g. on-disk
+    path fields delivery.axl layers on before firing the per-target hook)
+    flow through to the manifest unchanged."""
+    r = init_data()
+    add_result(r, "//a:b", "ok")
+    e = r["delivery"]["deliveries"][0]
+    e["entrypoint_path"] = "/abs/path/a"
+    e["runfiles_dir"] = "/abs/path/a.runfiles"
+    e["default_outputs"] = ["/abs/path/a", "/abs/path/a.digest"]
+    m = build_manifest(r)
+    me = m["deliveries"][0]
+    if me["entrypoint_path"] != "/abs/path/a":
+        fail("build_manifest: dropped entrypoint_path")
+    if me["runfiles_dir"] != "/abs/path/a.runfiles":
+        fail("build_manifest: dropped runfiles_dir")
+    if me["default_outputs"] != ["/abs/path/a", "/abs/path/a.digest"]:
+        fail("build_manifest: dropped default_outputs")
+
+def _test_build_manifest_entries_are_copies(ctx):
+    """`build_manifest` returns dict-copied entries so a customer mutating
+    the manifest can't corrupt the live source state."""
+    r = init_data()
+    add_result(r, "//a:b", "ok")
+    m = build_manifest(r)
+    m["deliveries"][0]["label"] = "MUTATED"
+    if r["delivery"]["deliveries"][0]["label"] != "//a:b":
+        fail("build_manifest: entries are not copies — mutation leaked back to source")
+
+def _test_build_manifest_counts_independent(ctx):
+    """The counts dict is also copied; bumping the manifest's count doesn't
+    bump the live one."""
+    r = init_data()
+    add_result(r, "//a:b", "ok")
+    m = build_manifest(r)
+    m["counts"]["ok"] = 999
+    if r["delivery"]["counts"]["ok"] != 1:
+        fail("build_manifest: counts dict not copied")
+
+_UNIT_TESTS = [
+    _test_init_data_shape,
+    _test_add_result_seeds_custom,
+    _test_add_result_bumps_counts,
+    _test_add_result_coerces_none_strings,
+    _test_build_manifest_required_top_level_fields,
+    _test_build_manifest_carries_metadata,
+    _test_build_manifest_required_entry_fields,
+    _test_build_manifest_preserves_custom_enrichment,
+    _test_build_manifest_preserves_extra_entry_fields,
+    _test_build_manifest_entries_are_copies,
+    _test_build_manifest_counts_independent,
+]
+
+def _unit_test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("delivery_results.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+delivery_results_unit_tests = task(
+    name = "test-delivery-results",
+    group = ["dev"],
+    implementation = _unit_test_impl,
     args = {},
 )

@@ -42,7 +42,7 @@ wasmi_wasi = "0.51.0"
 
 clap = "4.5.47"
 getargs = "0.5.0"
-serde_json = "1.0.145"
+serde_json = { version = "1.0.145", features = ["preserve_order"] }
 sha2 = "0.10"
 md5 = { package = "md-5", version = "0.10" }
 sha1 = "0.10"

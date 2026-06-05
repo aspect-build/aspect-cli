@@ -96,6 +96,29 @@ Failure modes
                                                     deliver" and returns 0
 
 
+Manifest
+--------
+
+Every invocation produces a structured delivery manifest at end-of-task
+that records every target's outcome (ok / skip / warn / fail / pending),
+the resolved CI metadata (host, build URL, commit), and any per-target
+enrichment a customer hook attached. Surfaces:
+
+  --manifest-file=<path>             write the rendered manifest to disk
+                                       (off by default)
+  DeliveryTrait.render_manifest_file rendered content for --manifest-file
+                                       (default: pretty-printed JSON)
+  DeliveryTrait.upload_manifest      list of CI artifacts to upload
+                                       (default: one JSON, named after
+                                       --manifest-file or delivery-manifest.json;
+                                       each uploaded file appears as a labeled
+                                       link on the GitHub status check +
+                                       Buildkite annotation)
+
+Customers wire `DeliveryTrait.delivery_target` (per-target enrichment)
+and `DeliveryTrait.delivery_manifest` (end-of-task) in `config.axl`.
+See https://docs.aspect.build/cli/guides/delivery-manifest.
+
 User-facing migration guide: https://docs.aspect.build/cli/migration/delivery
 """
 
@@ -105,7 +128,7 @@ load("@aspect//lib/bazel_flags.axl", "announce_bazel_args", "resolve_bazel_annou
 load("@aspect//lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "now_ms", "process_event", bazel_init_data = "init_data")
 load("@aspect//lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
 load("@aspect//lib/ci.axl", "resolve_build_url")
-load("@aspect//lib/delivery_results.axl", delivery_add_result = "add_result", delivery_conclusion = "conclusion", delivery_init_data = "init_data")
+load("@aspect//lib/delivery_results.axl", delivery_add_result = "add_result", delivery_build_manifest = "build_manifest", delivery_conclusion = "conclusion", delivery_init_data = "init_data")
 load(
     "@aspect//lib/deliveryd.axl",
     deliveryd_delete_artifact = "delete_artifact",
@@ -124,9 +147,76 @@ load("@aspect//lib/tips.axl", "tips")
 load("@std//time.axl", "sleep_iter", "time")
 
 DeliveryTrait = trait(
-    delivery_start = attr(typing.Callable[[], None], default = lambda: None, description = "Hook called once at the start of a delivery run, before any targets are delivered"),
-    delivery_end = attr(typing.Callable[[], None], default = lambda: None, description = "Hook called once at the end of a delivery run, after all targets are delivered"),
-    deliver_target = attr(typing.Callable[[str, bool], None], default = lambda label, is_forced: None, description = "Hook called for each target being delivered; receives the label and a forced-delivery flag"),
+    delivery_start = attr(
+        typing.Callable[[], None],
+        default = lambda: None,
+        description = "Hook called once at the start of a delivery run, before any targets are delivered.",
+    ),
+    delivery_end = attr(
+        typing.Callable[[], None],
+        default = lambda: None,
+        description = "Hook called once at the end of a delivery run, after all targets are delivered.",
+    ),
+    delivery_target = attr(
+        typing.Callable[[dict], dict],
+        default = lambda entry: None,
+        description = (
+            "Hook called once per delivery target with its terminal outcome " +
+            "(ok / skip / warn / fail / pending). Receives a dict with " +
+            "{label, outcome, message, output_sha, is_forced, custom, " +
+            "entrypoint_path, runfiles_dir, runfiles_workspace_dir, " +
+            "default_outputs}. The runfiles tree at `runfiles_dir` is " +
+            "materialized to disk before this hook fires, so files declared " +
+            "via `data =` are readable at `runfiles_workspace_dir/<package>/<filename>`. " +
+            "Return a dict to enrich entry['custom'] (e.g. " +
+            "{'image_digest': ctx.std.fs.read_to_string(path).strip()}), " +
+            "or None to skip enrichment."
+        ),
+    ),
+    delivery_manifest = attr(
+        typing.Callable[[dict], None],
+        default = lambda manifest: None,
+        description = (
+            "Hook called once at end-of-task with the full manifest dict " +
+            "(after the on-disk file has been written and the artifact " +
+            "uploaded, if enabled). Also fires on early-exit paths " +
+            "(validation failures, build failures) — inspect " +
+            "manifest['counts'] to distinguish a real delivery run from " +
+            "a startup error."
+        ),
+    ),
+    render_manifest_file = attr(
+        typing.Callable[[dict], str],
+        default = lambda manifest: None,
+        description = (
+            "Hook that renders the manifest dict to the string written to " +
+            "the path given by `--manifest-file`. Only fires when " +
+            "`--manifest-file` is set. Default (hook unset, or hook returns " +
+            "None) is pretty-printed JSON via `json.encode(manifest, indent = 2)`. " +
+            "Override to ship YAML / CSV / Mustache / a custom shape — the " +
+            "hook may call `ctx.template.jinja2(template, data = manifest)` " +
+            "or any other renderer. Must return a string or None. " +
+            "Independent of `upload_manifest`: the on-disk file and the CI " +
+            "artifact can ship different formats."
+        ),
+    ),
+    upload_manifest = attr(
+        typing.Callable[[dict], list],
+        default = lambda manifest: None,
+        description = (
+            "Hook that returns the list of CI artifacts to upload for the " +
+            "manifest. Each entry is a dict {'name': str, 'content': str}; " +
+            "`name` is the artifact basename (controls extension), `content` " +
+            "is the rendered bytes. Default (hook unset, or hook returns " +
+            "None) uploads one artifact: pretty-printed JSON named " +
+            "`delivery-manifest.json`, or the basename of `--manifest-file` " +
+            "when set. Return [] to disable uploads entirely. Return a " +
+            "multi-entry list to split the manifest into per-format / " +
+            "per-consumer files (e.g. JSON for tooling + YAML for humans). " +
+            "Status surfaces render one link per uploaded file, labeled by " +
+            "`name`, in the order the hook returned them."
+        ),
+    ),
 )
 
 # ANSI codes
@@ -535,6 +625,30 @@ def _body_text(status, data):
         return "Delivery aborted"
     return ""
 
+def _fire_target_hook(data, delivery_trait, run_tracker, label):
+    """Enrich the most-recent outcome entry with on-disk paths and fire
+    the per-target `delivery_target` hook, merging any returned dict
+    into `entry["custom"]`.
+
+    `run_tracker` is None for early-failure sites that record an outcome
+    before runfiles were materialized; the entry then carries None /
+    empty path fields and the hook can react accordingly.
+    """
+    entry = data["delivery"]["deliveries"][-1]
+    ep = run_tracker.determine_entrypoint(label) if run_tracker else None
+    entry["entrypoint_path"] = ep.path if ep else None
+    entry["runfiles_dir"] = ep.runfiles_dir if ep else None
+    entry["runfiles_workspace_dir"] = ep.runfiles_workspace_dir if ep else None
+    entry["default_outputs"] = run_tracker.get_default_outputs(label) if run_tracker else []
+
+    extras = delivery_trait.delivery_target(entry)
+    if extras == None:
+        return
+    if type(extras) != "dict":
+        fail("DeliveryTrait.delivery_target must return None or a dict, got {}".format(type(extras)))
+    for k, v in extras.items():
+        entry["custom"][k] = v
+
 def _emit_update(ctx, lifecycle, data, had_failure = False):
     """Emit a bare task_update carrying the accumulating delivery data.
 
@@ -553,10 +667,10 @@ def _emit_update(ctx, lifecycle, data, had_failure = False):
     ))
 
 def _emit_final(ctx, lifecycle, data, exit_code):
-    """Emit the terminal `task_update(final=True)` for delivery.
-
-    Called at every return path out of _delivery_impl so a check run is always
-    completed — even on early error exits before any per-target data exist.
+    """Emit the terminal `task_update(final=True)` for delivery, plus
+    the delivery manifest (see `_emit_manifest`). Called at every return
+    path out of _delivery_impl so a check run is always completed — even
+    on early error exits before any per-target data exist.
     """
     if not data.get("finish_time_ms"):
         data["finish_time_ms"] = now_ms(ctx)
@@ -607,6 +721,11 @@ def _emit_final(ctx, lifecycle, data, exit_code):
         },
     )
 
+    # Publish the manifest BEFORE the terminal dispatch so the "Delivery
+    # Manifest" artifact link is in the registry when the GitHub status
+    # check + Buildkite annotation snapshot their artifact_urls.
+    manifest = _publish_manifest(ctx, data)
+
     dispatch_task_update(ctx, lifecycle, TaskUpdate(
         kind = "delivery_results",
         status = final_status,
@@ -619,11 +738,92 @@ def _emit_final(ctx, lifecycle, data, exit_code):
     ))
     print_repro_and_fix(ctx.std, data, final_status)
 
+    # Fire the customer's announce hook last — a slow/failing hook
+    # mustn't block the on-disk file, the artifact upload, or the
+    # terminal status surfaces (all already committed above).
+    ctx.traits[DeliveryTrait].delivery_manifest(manifest)
+
     return TaskConclusion(
         exit_code = exit_code,
         text = bookend,
         flagged = final_status == "warning",
     )
+
+def _default_manifest_json(manifest):
+    """Default manifest renderer: pretty-printed JSON with
+    insertion-order-preserving dict serialization."""
+    return json.encode(manifest, indent = 2)
+
+def _resolve_render_manifest_file(hook, manifest):
+    """Invoke `render_manifest_file`; fall back to JSON when the hook
+    is unset or returns None. `fail()` on a non-string return."""
+    rendered = hook(manifest)
+    if rendered == None:
+        return _default_manifest_json(manifest)
+    if type(rendered) != "string":
+        fail("DeliveryTrait.render_manifest_file must return a string or None, got {}".format(type(rendered)))
+    return rendered
+
+def _resolve_upload_manifest(hook, manifest, manifest_file):
+    """Invoke `upload_manifest`; fall back to one JSON artifact named
+    after `--manifest-file`'s basename (or `delivery-manifest.json`
+    when unset). `fail()` on any return-shape violation.
+
+    Returns a list of `{"name": str, "content": str}` dicts.
+    """
+    entries = hook(manifest)
+    if entries == None:
+        name = manifest_file.rsplit("/", 1)[-1] if manifest_file else "delivery-manifest.json"
+        return [{"name": name, "content": _default_manifest_json(manifest)}]
+    if type(entries) != "list":
+        fail("DeliveryTrait.upload_manifest must return a list or None, got {}".format(type(entries)))
+    for i, e in enumerate(entries):
+        if type(e) != "dict":
+            fail("DeliveryTrait.upload_manifest[{}] must be a dict, got {}".format(i, type(e)))
+        if type(e.get("name")) != "string" or not e["name"]:
+            fail("DeliveryTrait.upload_manifest[{}] missing non-empty 'name' string".format(i))
+        if type(e.get("content")) != "string":
+            fail("DeliveryTrait.upload_manifest[{}] 'content' must be a string".format(i))
+    return entries
+
+def _publish_manifest(ctx, data):
+    """Render, persist, and upload the delivery manifest. Returns the
+    structured manifest dict so a caller can pass it to the
+    `delivery_manifest` announce hook AFTER the terminal task_update.
+
+    Must run BEFORE the terminal `dispatch_task_update` so uploaded
+    artifact URLs are in the artifacts registry when status surfaces
+    snapshot links — otherwise the manifest's download links are
+    missing from the GitHub status check and Buildkite annotation.
+
+    Persist: when `--manifest-file` is set, write the result of
+        `DeliveryTrait.render_manifest_file(manifest)` (default JSON)
+        to disk.
+    Upload: ask `DeliveryTrait.upload_manifest(manifest)` for the list
+        of artifacts; default is one JSON artifact named after
+        `--manifest-file`'s basename or `delivery-manifest.json`. Each
+        entry uploads under the canonical `delivery_manifest` kind so
+        `artifacts.list_kind` returns them all and the status-surface
+        renderer emits one labeled link per file.
+    """
+    manifest = delivery_build_manifest(data)
+    manifest_file = ctx.args.manifest_file
+    delivery_trait = ctx.traits[DeliveryTrait]
+
+    if manifest_file:
+        rendered = _resolve_render_manifest_file(delivery_trait.render_manifest_file, manifest)
+        ctx.std.fs.write(manifest_file, rendered)
+        info(ctx.std, "Delivery manifest written to {}".format(manifest_file))
+
+    # Every manifest upload registers under the canonical
+    # `delivery_manifest` kind. The status-surface renderer reads the
+    # full list via `artifacts.list_kind` and emits one labeled link per
+    # uploaded file, so a customer hook that splits the manifest across
+    # files / formats gets one link per file.
+    for entry in _resolve_upload_manifest(delivery_trait.upload_manifest, manifest, manifest_file):
+        artifacts.upload(ctx, "delivery_manifest", entry["name"], entry["content"])
+
+    return manifest
 
 def _delivery_impl(ctx):
     hc_trait = ctx.traits[HealthCheckTrait]
@@ -706,6 +906,11 @@ def _delivery_impl(ctx):
     if not commit_sha:
         commit_sha = "-"
     build_url = ctx.args.build_url or resolve_build_url(ctx) or "-"
+
+    # Persist the resolved values so the delivery manifest reflects what
+    # was actually used, not the raw (possibly empty) args.
+    data["delivery"]["commit_sha"] = commit_sha
+    data["delivery"]["build_url"] = build_url
 
     # Change-detection prefix: always anchored to --task-key, optionally extended by --salt
     if ctx.args.salt:
@@ -837,6 +1042,7 @@ def _delivery_impl(ctx):
                     "warn",
                     message = "build failed (exit {})".format(build_code),
                 )
+                _fire_target_hook(data, delivery_trait, None, label)
             return _emit_final(ctx, lifecycle, data, exit_code = build_code)
     else:
         output_shas = {}
@@ -964,6 +1170,7 @@ def _delivery_impl(ctx):
                     message = "download failed (exit {})".format(status.code),
                     output_sha = output_shas.get(label, ""),
                 )
+                _fire_target_hook(data, delivery_trait, None, label)
             return _emit_final(ctx, lifecycle, data, exit_code = status.code)
         print("  Download took {}.".format(fmt_elapsed(time.monotonic() - _t_download)))
 
@@ -1018,6 +1225,7 @@ def _delivery_impl(ctx):
                 message = msg,
                 is_forced = is_forced,
             )
+            _fire_target_hook(data, delivery_trait, run_tracker, label)
         elif not is_forced and target_state and target_state.get("delivered"):
             skipped_count += 1
             delivered_by = target_state.get("delivered_by") or "-"
@@ -1030,6 +1238,7 @@ def _delivery_impl(ctx):
                 output_sha = output_sha,
                 is_forced = is_forced,
             )
+            _fire_target_hook(data, delivery_trait, run_tracker, label)
         elif preview_only:
             # No entrypoint needed; dry_run=True skips the bazel run path.
             pending.append((label, None, is_forced, output_sha or "-"))
@@ -1040,6 +1249,7 @@ def _delivery_impl(ctx):
                 pending_count += 1
                 rows.append((label, "WARN", "warn", warn_msg, output_sha or "-", "-"))
                 delivery_add_result(data, label, "warn", message = warn_msg, output_sha = output_sha or "", is_forced = is_forced)
+                _fire_target_hook(data, delivery_trait, run_tracker, label)
             elif not ep.runfiles_dir:
                 not_runnable_msg = "tagged 'deliverable' but not runnable: no runfiles directory at {}.runfiles (target may not be an executable rule)".format(ep.path)
                 if ctx.args.warn_not_runnable:
@@ -1050,10 +1260,9 @@ def _delivery_impl(ctx):
                     failed_count += 1
                     rows.append((label, "FAIL", "fail", not_runnable_msg, output_sha or "-", "-"))
                     delivery_add_result(data, label, "fail", message = not_runnable_msg, output_sha = output_sha or "", is_forced = is_forced)
+                _fire_target_hook(data, delivery_trait, run_tracker, label)
             else:
                 pending.append((label, ep, is_forced, output_sha or "-"))
-
-        delivery_trait.deliver_target(label, is_forced)
 
     # Intermediate update so skip/warn state is visible in the check run
     # before the (potentially long) per-target loop starts.
@@ -1097,6 +1306,7 @@ def _delivery_impl(ctx):
                     output_sha = output_sha,
                     is_forced = is_forced,
                 )
+                _fire_target_hook(data, delivery_trait, run_tracker, label)
             continue
 
         children = []
@@ -1141,6 +1351,7 @@ def _delivery_impl(ctx):
                     output_sha = output_sha,
                     is_forced = is_forced,
                 )
+            _fire_target_hook(data, delivery_trait, run_tracker, label)
 
             # Per-completion progress update. priority=False throttles BK
             # / GHSC PATCHes; stream="" suppresses the CLI line since the
@@ -1299,6 +1510,10 @@ Currently \x1b[3monly\x1b[23m supported on Aspect Workflows CI runners. Support 
         "warn_not_runnable": args.boolean(
             default = False,
             description = "Downgrade a non-runnable deliverable from a hard failure (exit 1) to a warning. A target tagged 'deliverable' whose entrypoint has no runfiles tree fails by default. Set this flag if your repo intentionally tags non-executable targets as deliverable.",
+        ),
+        "manifest_file": args.string(
+            default = "",
+            description = "Path to write the rendered delivery manifest to. Empty (the default) means no file is written. The structured manifest dict is always passed to DeliveryTrait.delivery_manifest regardless of this flag. Default rendering is pretty-printed JSON; override per surface via DeliveryTrait.render_manifest_file (the on-disk file) and DeliveryTrait.upload_manifest (the CI artifact). When the default upload is in play, the basename of this path is used as the CI artifact name (default: `delivery-manifest.json`).",
         ),
         # TODO: Support a long --pattern_file like bazel does (@./targets)
         # TODO: Support - (list from stdin)

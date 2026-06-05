@@ -1,6 +1,6 @@
 load("@rules_python//python:py_binary.bzl", "py_binary")
 load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
-load(":custom_deliverable.bzl", "bash_deliverable", "custom_deliverable")
+load(":custom_deliverable.bzl", "bash_deliverable", "custom_deliverable", "oci_like_deliverable")
 
 genrule(
     name = "delivery_payload",
@@ -12,6 +12,16 @@ sh_binary(
     name = "sh_deliverable",
     srcs = ["deliver.sh"],
     data = [":delivery_payload"],
+    tags = ["deliverable"],
+)
+
+# Mirrors the shape of `rules_oci`'s push rules: an executable + a
+# sibling `.digest` (in runfiles) + a sibling `.layer` (in default
+# outputs only, NOT in runfiles). The dogfood hook in
+# `//.aspect/config.axl` reads `.digest` via `runfiles_workspace_dir`
+# and `.layer` via `default_outputs`.
+oci_like_deliverable(
+    name = "deliverable_with_digest",
     tags = ["deliverable"],
 )
 

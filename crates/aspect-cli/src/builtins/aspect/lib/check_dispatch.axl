@@ -172,6 +172,16 @@ def apply_artifact_links(ctx, links):
     links["artifact_urls"] = artifacts.by_kind(ctx)
     links["testlogs_label_urls"] = artifacts.by_label(ctx)
 
+    # Multi-entry list of `{name, url}` for kinds that can produce more
+    # than one artifact per task (currently only `delivery_manifest`, when
+    # a customer `upload_manifest` hook splits across files). The
+    # status-surface renderer iterates this to render one labeled link
+    # per uploaded file.
+    links["manifest_artifacts"] = [
+        {"name": a.name, "url": a.url}
+        for a in artifacts.list_kind(ctx, "delivery_manifest")
+    ]
+
 def should_emit_update(state, now_ms_val, min_interval_ms, final):
     """Decide whether a `task_update` should produce an outbound emit.
 

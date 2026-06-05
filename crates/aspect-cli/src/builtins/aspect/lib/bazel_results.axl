@@ -3980,7 +3980,7 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
     # appended by the artifact-upload feature in `lib/artifacts.axl`
     # ("testlogs"/"profile"/"execlog"/"bep") and the per-task patch
     # uploaders (`format.axl::_try_upload_format_diff` and the gazelle
-    # equivalent), which write `format_diff` / `gazelle_diff`.
+    # equivalent — `format_diff` / `gazelle_diff`).
     artifact_links = []
     for kind, alabel in [
         ("testlogs", "Test logs"),
@@ -3994,6 +3994,12 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
         u = artifact_urls.get(kind, "")
         if u:
             artifact_links.append({"label": alabel, "url": u})
+
+    # Delivery manifest uploads can be multi-file (the `upload_manifest`
+    # hook may split the manifest across formats / consumers). Label each
+    # by filename so a reader can tell which is which.
+    for a in links.get("manifest_artifacts", []) or []:
+        artifact_links.append({"label": a["name"], "url": a["url"]})
 
     def _with_duration(tests):
         """Add formatted duration, per-file artifact URLs, and kind to each test.

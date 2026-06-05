@@ -184,14 +184,65 @@ def _process_bes(state: struct, event):
         if local_exec_root:
             state.workspace_name[0] = local_exec_root.rstrip("/").split("/")[-1]
 
+def _collect_fileset_paths(state: struct, fs_refs: list) -> list[str]:
+    """BFS the named-fileset graph rooted at `fs_refs`, returning the
+    absolute local paths of every contained file.
+
+    The depth bound (`range(32)`) guards against pathological BES streams
+    with cyclic or unreasonably deep fileset references.
+    """
+    visited = {}
+    frontier = [fs_ref.id for fs_ref in fs_refs]
+
+    out = []
+    for _depth in range(32):
+        if not frontier:
+            break
+        next_frontier = []
+        for set_id in frontier:
+            if set_id in visited:
+                continue
+            visited[set_id] = True
+            payload = state.filesets.get(set_id)
+            if not payload:
+                continue
+            for file in payload.files:
+                if len(file.path_prefix):
+                    out.append(file.file.removeprefix("file://"))
+            for child in payload.file_sets:
+                if child.id not in visited:
+                    next_frontier.append(child.id)
+        frontier = next_frontier
+
+    return out
+
+def _get_default_outputs(state: struct, target: str) -> list[str]:
+    """Return the absolute paths of every file in `target`'s default output group.
+
+    Empty list when no BES `target_completed` event was received for the
+    target. Files on disk vs remote depend on `--remote_download_outputs`
+    — the caller decides what to materialize.
+    """
+    target = apparent_label(target, state.current_package)
+    if target not in state.target_fileset:
+        return []
+    return _collect_fileset_paths(state, state.target_fileset[target])
+
 def _determine_entrypoint(state: struct, target: str) -> struct | None:
     """Resolve `target` to an executable path and runfiles directory.
 
-    Returns `struct(path, runfiles_dir)` or `None` when the target produced
-    no BES `target_completed` event or its default output group has no
-    selectable executable. `runfiles_dir` is the resolved runfiles directory
-    path (e.g. `…/format.runfiles`), or `None` when no
-    `<entrypoint>.runfiles` directory exists on disk.
+    Returns `struct(path, runfiles_dir, runfiles_workspace_dir)` or
+    `None` when the target produced no BES `target_completed` event or
+    its default output group has no selectable executable.
+
+    `runfiles_dir` is the resolved runfiles directory path (e.g.
+    `…/format.runfiles`), or `None` when no `<entrypoint>.runfiles`
+    directory exists on disk.
+
+    `runfiles_workspace_dir` is `runfiles_dir + "/" + <workspace>` (the
+    cwd `bazel run` uses; usually `…/format.runfiles/_main` under bzlmod),
+    or `None` when `runfiles_dir` is `None`. Pre-joined here so consumers
+    don't have to know the canonical workspace name.
 
     Entrypoint selection — three passes over the default-output-group files:
       1. Exact match on `target_name`.
@@ -215,29 +266,7 @@ def _determine_entrypoint(state: struct, target: str) -> struct | None:
         return None
 
     target_name = target.rsplit(":", 1)[-1]
-
-    visited = {}
-    frontier = [fs_ref.id for fs_ref in state.target_fileset[target]]
-
-    candidates = []
-    for _depth in range(32):
-        if not frontier:
-            break
-        next_frontier = []
-        for set_id in frontier:
-            if set_id in visited:
-                continue
-            visited[set_id] = True
-            payload = state.filesets.get(set_id)
-            if not payload:
-                continue
-            for file in payload.files:
-                if len(file.path_prefix):
-                    candidates.append(file.file.removeprefix("file://"))
-            for child in payload.file_sets:
-                if child.id not in visited:
-                    next_frontier.append(child.id)
-        frontier = next_frontier
+    candidates = _collect_fileset_paths(state, state.target_fileset[target])
 
     if not candidates:
         return None
@@ -265,17 +294,17 @@ def _determine_entrypoint(state: struct, target: str) -> struct | None:
         return None
 
     runfiles_dir = None
+    runfiles_workspace_dir = None
     if state.ctx != None:
         if state.ctx.std.fs.exists(entrypoint + ".runfiles"):
             runfiles_dir = entrypoint + ".runfiles"
+            runfiles_workspace_dir = runfiles_dir + "/" + (state.workspace_name[0] or _DEFAULT_WORKSPACE_NAME)
 
-    return struct(path = entrypoint, runfiles_dir = runfiles_dir)
-
-def _runfiles_cwd(state: struct, ep: struct) -> str | None:
-    """`bazel run` default cwd: <runfiles_dir>/<workspace>, or None if no runfiles."""
-    if not ep.runfiles_dir:
-        return None
-    return ep.runfiles_dir + "/" + (state.workspace_name[0] or _DEFAULT_WORKSPACE_NAME)
+    return struct(
+        path = entrypoint,
+        runfiles_dir = runfiles_dir,
+        runfiles_workspace_dir = runfiles_workspace_dir,
+    )
 
 def _spawn(ctx: TaskContext, state: struct, ep: struct, args: list[str], capture: bool = False, cwd: str | None = None) -> std.process.Child:
     """Spawn `ep.path` with `args` in the Bazel runfiles environment.
@@ -286,7 +315,10 @@ def _spawn(ctx: TaskContext, state: struct, ep: struct, args: list[str], capture
 
     When `ep.runfiles_dir` is set, also injects RUNFILES_DIR /
     RUNFILES_MANIFEST_FILE / JAVA_RUNFILES so `rlocation` in sh_binary wrappers
-    and the bash runfiles library resolve data deps regardless of cwd.
+    and the bash runfiles library resolve data deps regardless of cwd, plus
+    RUNFILES_WORKSPACE_DIR (the cwd `bazel run` uses, `runfiles_dir/<workspace>`)
+    for tools that want the canonical workspace root inside runfiles without
+    re-deriving it from RUNFILES_DIR.
 
     Working directory defaults to `runfiles_dir/<workspace>` (matching `bazel run`)
     when a runfiles tree is present, falling back to the aspect invocation directory
@@ -296,7 +328,7 @@ def _spawn(ctx: TaskContext, state: struct, ep: struct, args: list[str], capture
     on their own (such as `@buildifier_prebuilt//buildifier`) resolve workspace-relative
     arguments against the user's cwd.
     """
-    effective_cwd = cwd or _runfiles_cwd(state, ep) or ctx.std.env.current_dir()
+    effective_cwd = cwd or ep.runfiles_workspace_dir or ctx.std.env.current_dir()
     cmd = ctx.std.process.command(ep.path) \
         .current_dir(effective_cwd) \
         .env("BUILD_WORKSPACE_DIRECTORY", ctx.std.env.bazel_root_dir()) \
@@ -310,7 +342,8 @@ def _spawn(ctx: TaskContext, state: struct, ep: struct, args: list[str], capture
         cmd = cmd \
             .env("RUNFILES_DIR", ep.runfiles_dir) \
             .env("JAVA_RUNFILES", ep.runfiles_dir) \
-            .env("RUNFILES_MANIFEST_FILE", ep.runfiles_dir + "_manifest")
+            .env("RUNFILES_MANIFEST_FILE", ep.runfiles_dir + "_manifest") \
+            .env("RUNFILES_WORKSPACE_DIR", ep.runfiles_workspace_dir)
     if capture:
         cmd = cmd.stdout("piped").stderr("piped")
     return cmd.spawn()
@@ -321,11 +354,22 @@ def runnable(ctx, targets: list[str]) -> struct:
     Feed BES events via `.event(event)` as they arrive from the build. Once the
     build completes, query results per target through the returned struct:
 
-      determine_entrypoint(target) → struct(path, runfiles_dir) | None
+      determine_entrypoint(target) → struct(path, runfiles_dir, runfiles_workspace_dir) | None
           Best executable output for `target` from its BES default output group,
           or None if no BES data was received for it. `runfiles_dir` is the
           resolved runfiles directory (e.g. `…/format.runfiles`), or `None`
           when no `<entrypoint>.runfiles` directory exists on disk.
+          `runfiles_workspace_dir` is `runfiles_dir + "/" + <workspace>` (the
+          cwd `bazel run` uses; usually `…/format.runfiles/_main`), or `None`
+          when `runfiles_dir` is `None`.
+
+      get_default_outputs(target) → list[str]
+          Absolute paths of every file in `target`'s default output group,
+          or an empty list if no BES `target_completed` event was received
+          for it. Includes the entrypoint binary plus every other default
+          output the rule declared. Whether a path is on disk depends on
+          the build's `--remote_download_outputs` setting; the caller is
+          responsible for materializing what it intends to read.
 
       spawn(ep, args, capture=False, cwd=None) → Child
           Spawn `ep.path` with Bazel runfiles environment variables set.
@@ -349,5 +393,6 @@ def runnable(ctx, targets: list[str]) -> struct:
     return struct(
         event = lambda event: _process_bes(state, event),
         determine_entrypoint = lambda target: _determine_entrypoint(state, target),
+        get_default_outputs = lambda target: _get_default_outputs(state, target),
         spawn = lambda ep, args, capture = False, cwd = None: _spawn(ctx, state, ep, args, capture, cwd),
     )

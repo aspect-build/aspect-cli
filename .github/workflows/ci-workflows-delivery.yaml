@@ -1,5 +1,4 @@
 name: CI - Delivery
-
 # Runs as its own workflow run so the Aspect PR-summary comment exercises
 # merging tasks across separate workflows. Normally dispatched by
 # ci-workflows.yaml's `dispatch-delivery` job right after `pre-build`
@@ -24,15 +23,12 @@ on:
         description: "Triggering PR head commit SHA (set by ci-workflows.yaml). Exported as GITHUB_SHA so the check-run attaches to the PR head commit. Empty for a non-PR (push) trigger."
         required: false
         default: ""
-
 permissions:
   id-token: write
   actions: read # download-artifact needs this to read another run's artifact
-
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
-
 # The Dash0 OTLP endpoint and bearer token feed `.aspect/config.axl`'s `ctx.telemetry.exporters.add(...)`
 # call, which dogfoods the trace.event/trace.log pipeline against a real backend.
 # Both are no-ops if a secret isn't configured (unset env var = empty string,
@@ -49,7 +45,6 @@ env:
   # back to the runner-provided value so branch runs are unaffected.
   ASPECT_GITHUB_PR_NUMBER: ${{ inputs.pr_number }}
   GITHUB_SHA: ${{ inputs.head_sha != '' && inputs.head_sha || github.sha }}
-
 jobs:
   delivery-task:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
@@ -73,8 +68,12 @@ jobs:
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Delivery Task
-        run: aspect delivery --task-key delivery-gha --warn-not-runnable
-
+        # --force-target re-delivers every run so the manifest always
+        # carries at least one `ok` outcome to exercise the per-target
+        # enrichment hook in //.aspect/config.axl. Additional force
+        # targets (via the workflow_dispatch input or the
+        # ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS env var) merge in.
+        run: aspect delivery --task-key delivery-gha --warn-not-runnable --force-target=//examples/deliverable:deliverable_with_digest
   delivery-debug-task:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     timeout-minutes: 10
@@ -94,4 +93,4 @@ jobs:
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Delivery Task (ASPECT_DEBUG=1)
-        run: ASPECT_DEBUG=1 aspect delivery --task-key delivery-gha-debug
+        run: ASPECT_DEBUG=1 aspect delivery --task-key delivery-gha-debug --force-target=//examples/deliverable:deliverable_with_digest

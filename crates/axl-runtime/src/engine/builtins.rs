@@ -536,9 +536,25 @@ pub fn register_json(globals: &mut GlobalsBuilder) {
     #[starlark_module]
     fn json_members(globals: &mut GlobalsBuilder) {
         /// Encode a value to a JSON string. Mirrors the Starlark stdlib's
-        /// `json.encode`.
-        fn encode(#[starlark(require = pos)] x: Value) -> anyhow::Result<String> {
-            x.to_json()
+        /// `json.encode`, with an additional optional `indent` parameter:
+        /// pass a non-negative integer to pretty-print the output with
+        /// that many spaces of indentation per nesting level (newlines
+        /// inserted between elements). Omitting `indent` produces the
+        /// stdlib's compact single-line form.
+        fn encode(
+            #[starlark(require = pos)] x: Value,
+            #[starlark(require = named)] indent: Option<u32>,
+        ) -> anyhow::Result<String> {
+            let Some(width) = indent else {
+                return x.to_json();
+            };
+            let value = x.to_json_value()?;
+            let spaces = vec![b' '; width as usize];
+            let mut buf = Vec::new();
+            let formatter = serde_json::ser::PrettyFormatter::with_indent(&spaces);
+            let mut ser = serde_json::Serializer::with_formatter(&mut buf, formatter);
+            serde::Serialize::serialize(&value, &mut ser)?;
+            Ok(String::from_utf8(buf)?)
         }
 
         /// Decode a JSON string. Raises on parse failure. Mirrors the
@@ -794,5 +810,43 @@ diff > -1000000000 and diff < 1000000000
         )
         .unwrap();
         assert_eq!(result, "True");
+    }
+
+    #[test]
+    fn json_encode_compact_by_default() {
+        // No indent argument → compact single-line output (stdlib parity).
+        let result = axl_eval!(r#"json.encode({"a": 1, "b": [2, 3]})"#,).unwrap();
+        assert_eq!(result, "\"{\\\"a\\\":1,\\\"b\\\":[2,3]}\"");
+    }
+
+    #[test]
+    fn json_encode_indent_pretty_prints() {
+        // indent=N pretty-prints with N spaces per nesting level.
+        let result = axl_eval!(r#"json.encode({"a": 1, "b": [2, 3]}, indent = 2)"#,).unwrap();
+        assert_eq!(
+            result,
+            "\"{\\n  \\\"a\\\": 1,\\n  \\\"b\\\": [\\n    2,\\n    3\\n  ]\\n}\""
+        );
+    }
+
+    #[test]
+    fn json_encode_preserves_dict_insertion_order() {
+        // serde_json's `preserve_order` feature is enabled so the pretty
+        // path matches the compact path's insertion-ordered keys; sorted
+        // output would silently reorganize customer-facing manifests.
+        let result = axl_eval!(r#"json.encode({"z": 1, "a": 2, "m": 3}, indent = 2)"#,).unwrap();
+        assert_eq!(
+            result,
+            "\"{\\n  \\\"z\\\": 1,\\n  \\\"a\\\": 2,\\n  \\\"m\\\": 3\\n}\""
+        );
+    }
+
+    #[test]
+    fn json_encode_indent_zero_no_indentation_but_newlines() {
+        // indent=0 still pretty-prints — newlines between elements but no
+        // leading spaces. Distinct from omitting indent, which suppresses
+        // newlines entirely.
+        let result = axl_eval!(r#"json.encode([1, 2, 3], indent = 0)"#,).unwrap();
+        assert_eq!(result, "\"[\\n1,\\n2,\\n3\\n]\"");
     }
 }

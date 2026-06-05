@@ -11,7 +11,7 @@ load("@aspect//lib/bazel_results_test.axl", "bazel_results_unit_tests", "templat
 load("@aspect//lib/bazel_runner_test.axl", "bazel_runner_tests")
 load("@aspect//lib/ci_test.axl", "ci_tests")
 load("@aspect//lib/circleci_test.axl", "circleci_tests")
-load("@aspect//lib/delivery_results_test.axl", "delivery_template_snapshot_tests")
+load("@aspect//lib/delivery_results_test.axl", "delivery_results_unit_tests", "delivery_template_snapshot_tests")
 load("@aspect//lib/format_results_test.axl", "format_template_snapshot_tests")
 load("@aspect//lib/format_spawn_test.axl", "format_spawn_tests")
 load("@aspect//lib/gazelle_results_test.axl", "gazelle_template_snapshot_tests")
@@ -31,7 +31,7 @@ load("@aspect//lib/sandbox_recovery_test.axl", "sandbox_recovery_tests")
 load("@aspect//lib/tar_test.axl", "tar_tests")
 load("@aspect//lib/tips_test.axl", "tips_tests")
 load("@aspect//tips.axl", "TASK_SCREENS", "TIP_SUGGESTION", "TIP_TEMPLATE_RAW", "add_tip")
-load("@aspect//traits.axl", "BazelTrait", "LintTrait", "REPRO_FIX_ACCEPT", "REPRO_FIX_REJECT", "ReproFixInfo", "ReproFixSuggestion", "TaskLifecycleTrait", "TaskUpdate", "repro_fix_replace")
+load("@aspect//traits.axl", "BazelTrait", "DeliveryTrait", "LintTrait", "REPRO_FIX_ACCEPT", "REPRO_FIX_REJECT", "ReproFixInfo", "ReproFixSuggestion", "TaskLifecycleTrait", "TaskUpdate", "repro_fix_replace")
 load("./lambda.axl", "lambda_with_global_bind")
 
 def _user_task_impl(ctx: TaskContext) -> int:
@@ -154,6 +154,43 @@ def _links_task_update(ctx: TaskContext, update: TaskUpdate) -> None:
         title = "Click through for invocation details and logs",
         body = "\n".join(lines),
     )
+
+def _runfiles_path(entry, suffix):
+    """Resolve `<runfiles_workspace_dir>/<package>/<target_name><suffix>`
+    for a local-label delivery target — the canonical path inside the
+    runfiles tree where files declared via `data = [...]` live.
+
+    Returns None when the entry has no runfiles tree (e.g. an early-exit
+    failure before runfiles materialized) or when the label isn't local.
+    `@repo//...` deliverables need a different workspace path derived
+    from the repo name and aren't handled here.
+    """
+    rwd = entry.get("runfiles_workspace_dir")
+    if not rwd:
+        return None
+    label = entry["label"]
+    if not label.startswith("//"):
+        return None
+    package, _, target_name = label.removeprefix("//").rpartition(":")
+    if package:
+        return "{}/{}/{}{}".format(rwd, package, target_name, suffix)
+    return "{}/{}{}".format(rwd, target_name, suffix)
+
+# Jinja2 template for the YAML side-artifact: just the images that
+# delivered successfully along with the digest + layer-path the
+# per-target enrichment attached. Entries without an `image_digest`
+# in `custom` (non-OCI deliverables, dry-run paths, failed deliveries)
+# are filtered out so the YAML stays focused on the OCI subset.
+# `is defined` guards keep minijinja's strict-undefined check happy
+# on entries whose `custom` lacks the optional fields.
+_DELIVERY_IMAGES_YAML = """\
+images:
+{% for d in deliveries %}{% if d.outcome == "ok" and d.custom.image_digest is defined %}
+  - label: {{ d.label }}
+    image_digest: {{ d.custom.image_digest }}
+    {% if d.custom.layer_path is defined %}layer_path: {{ d.custom.layer_path }}{% endif %}
+{% endif %}{% endfor %}
+"""
 
 def config(ctx: ConfigContext):
     # assert we can call a lambda with a global bind from another module in a config script
@@ -349,6 +386,11 @@ def config(ctx: ConfigContext):
     # Run with: aspect dev test-delivery-template-snapshots
     ctx.tasks.add(delivery_template_snapshot_tests)
 
+    # Delivery results unit tests — init_data / add_result / build_manifest
+    # schema-shape assertions.
+    # Run with: aspect dev test-delivery-results
+    ctx.tasks.add(delivery_results_unit_tests)
+
     # Format template snapshot tests — renders format_results templates.
     # Run with: aspect dev test-format-template-snapshots
     ctx.tasks.add(format_template_snapshot_tests)
@@ -427,6 +469,62 @@ def config(ctx: ConfigContext):
     t.args.message = "hello axl"
     t.args.run_count = 2
     t.args.customize_message = lambda s: _customize_message(s, "!")
+
+    # Dogfood the delivery manifest hooks so the live aspect-cli delivery
+    # runs exercise the enrichment + final-hook paths in CI. The example
+    # //examples/deliverable:deliverable_with_digest target mirrors the
+    # rules_oci push rule shape — an executable + a sibling `.digest`
+    # (reachable via runfiles) + a sibling `.layer` (in default outputs
+    # only). The hook below demonstrates both lookup styles.
+    def _on_delivery_target(entry):
+        if entry["outcome"] != "ok":
+            return None
+        extras = {}
+
+        # Pattern 1 — read a sibling default output that's also in runfiles.
+        # `runfiles_workspace_dir` is the cwd `bazel run` uses; files
+        # declared via `data =` live at `<rwd>/<package>/<filename>`.
+        # (Local labels only; `@repo//...` deliverables need a different
+        # workspace path derived from the repo name.)
+        digest_path = _runfiles_path(entry, suffix = ".digest")
+        if digest_path and ctx.std.fs.exists(digest_path):
+            extras["image_digest"] = ctx.std.fs.read_to_string(digest_path).strip()
+
+        # Pattern 2 — read a sibling default output that's NOT in runfiles.
+        # `default_outputs` lists every file BES reported in the target's
+        # default output group; scan it by suffix for the `.layer` blob.
+        for path in entry.get("default_outputs", []):
+            if path.endswith(".layer"):
+                extras["layer_path"] = path
+                break
+
+        return extras if extras else None
+
+    def _on_delivery_manifest(manifest):
+        print("[delivery_manifest] {} target(s), counts={}".format(
+            len(manifest["deliveries"]),
+            manifest["counts"],
+        ))
+
+    def _on_upload_manifest(manifest):
+        """Ship two artifacts: the full JSON manifest (default shape, for
+        tooling) and a focused YAML side-artifact listing just the OCI
+        images that delivered successfully and their digests (for humans
+        and the release-notes pipeline)."""
+        return [
+            {
+                "name": "delivery-manifest.json",
+                "content": json.encode(manifest, indent = 2),
+            },
+            {
+                "name": "delivery-images.yml",
+                "content": ctx.template.jinja2(_DELIVERY_IMAGES_YAML, data = manifest),
+            },
+        ]
+
+    ctx.traits[DeliveryTrait].delivery_target = _on_delivery_target
+    ctx.traits[DeliveryTrait].delivery_manifest = _on_delivery_manifest
+    ctx.traits[DeliveryTrait].upload_manifest = _on_upload_manifest
 
     testing = ctx.std.env.var("ASPECT_CLI_TESTING")
 

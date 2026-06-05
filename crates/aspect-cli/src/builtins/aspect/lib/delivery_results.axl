@@ -85,7 +85,7 @@ def init_data():
         "build_url": "",  # CI job URL the delivery was performed from
         "commit_sha": "",  # commit being delivered
         "prefix": "",  # task.key — delivery namespace
-        "deliveries": [],  # list of {label, outcome, message, output_sha, is_forced}
+        "deliveries": [],  # see add_result() for the per-entry schema.
 
         # Run-shape flags surfaced in the check-run / annotation summary so a
         # reader can tell at a glance which delivery model + safety knobs the
@@ -111,6 +111,21 @@ def add_result(data, label, outcome, message = "", output_sha = "", is_forced = 
                     message on fail, warn reason, dry-run marker on pending.
         output_sha: Artifact action digest hash (delivery dedup key).
         is_forced:  True when --force-target re-delivered despite prior delivery.
+
+    The appended entry has this shape:
+
+        {
+          "label":      str,
+          "outcome":    "ok" | "skip" | "warn" | "fail" | "pending",
+          "message":    str,
+          "output_sha": str,
+          "is_forced":  bool,
+          "custom":     dict,  # reserved for DeliveryTrait.delivery_target enrichment
+        }
+
+    Callers may also attach additional fields to the entry after appending
+    (e.g. on-disk paths for hook consumers); `build_manifest` flows any
+    such fields through unchanged.
     """
     data["delivery"]["deliveries"].append({
         "label": label,
@@ -118,9 +133,37 @@ def add_result(data, label, outcome, message = "", output_sha = "", is_forced = 
         "message": message or "",
         "output_sha": output_sha or "",
         "is_forced": bool(is_forced),
+        "custom": {},
     })
     counts = data["delivery"]["counts"]
     counts[outcome] = counts.get(outcome, 0) + 1
+
+def build_manifest(data):
+    """Project `data["delivery"]` into a customer-facing manifest dict.
+
+    Stable, documented shape; safe to serialize to JSON. Callers must
+    treat unknown fields as additive — Aspect may add new top-level or
+    per-entry fields in future releases without bumping `schema_version`
+    as long as the additions are non-breaking.
+
+    Entries' `custom` dict is reserved for hook-provided enrichment;
+    Aspect will never populate it. Other per-entry fields populated by
+    the delivery dispatch loop (e.g. `entrypoint_path`, `runfiles_dir`,
+    `default_outputs`) flow through unchanged.
+    """
+    d = data.get("delivery", {}) or {}
+    return {
+        "schema_version": 1,
+        "ci_host": d.get("ci_host", ""),
+        "build_url": d.get("build_url", ""),
+        "commit_sha": d.get("commit_sha", ""),
+        "prefix": d.get("prefix", ""),
+        "mode": d.get("mode", "selective"),
+        "dry_run": bool(d.get("dry_run", False)),
+        "track_state": bool(d.get("track_state", True)),
+        "counts": dict(d.get("counts", {}) or {}),
+        "deliveries": [dict(e) for e in (d.get("deliveries", []) or [])],
+    }
 
 # ─── Title ────────────────────────────────────────────────────────────────────
 
