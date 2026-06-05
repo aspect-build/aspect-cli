@@ -866,7 +866,15 @@ def _widen_lines(lines, radius):
     out = sorted(out)
     return out
 
-def _head_parents(ctx):
+def _git_cwd(ctx, cwd):
+    """The working directory for the local-git helpers: the caller's
+    explicit `cwd`, or the process current directory when `None`. The
+    explicit override exists so tests can point the helpers at a scratch
+    repo; production calls pass `None`.
+    """
+    return cwd or ctx.std.env.current_dir()
+
+def _head_parents(ctx, cwd = None):
     """Return HEAD's parent SHAs as a list, or `[]` when HEAD is
     unresolvable. `len(result) >= 2` ⇒ HEAD is a merge commit.
 
@@ -887,7 +895,7 @@ def _head_parents(ctx):
     callers treat parents[0] as the base.
     """
     process = ctx.std.process
-    cwd = ctx.std.env.current_dir()
+    cwd = _git_cwd(ctx, cwd)
     out = process.command("git").args(["cat-file", "-p", "HEAD"]).current_dir(cwd).stdout("piped").stderr("null").spawn().wait_with_output()
     if not out.status.success:
         return []
@@ -902,7 +910,7 @@ def _head_parents(ctx):
             break
     return parents
 
-def _ensure_local_sha(ctx, sha):
+def _ensure_local_sha(ctx, sha, cwd = None):
     """Ensure `sha` is present in the local object store, fetching it
     shallowly from `origin` on-demand. Returns True iff the object is
     available after this call.
@@ -914,7 +922,7 @@ def _ensure_local_sha(ctx, sha):
     accepts arbitrary reachable SHAs via `uploadpack.allowAnySHA1InWant`).
     """
     process = ctx.std.process
-    cwd = ctx.std.env.current_dir()
+    cwd = _git_cwd(ctx, cwd)
     have = process.command("git").args(["cat-file", "-e", sha]).current_dir(cwd).stdout("null").stderr("null").spawn().wait_with_output()
     if have.status.success:
         return True
@@ -924,7 +932,7 @@ def _ensure_local_sha(ctx, sha):
     recheck = process.command("git").args(["cat-file", "-e", sha]).current_dir(cwd).stdout("null").stderr("null").spawn().wait_with_output()
     return recheck.status.success
 
-def _resolve_merge_base(ctx, base_ref):
+def _resolve_merge_base(ctx, base_ref, cwd = None):
     """Resolve a diff base SHA for local-git change detection, with
     layered fallbacks. Returns `(sha, source_description)` on success,
     or `("", reason)` when no candidate succeeds.
@@ -962,7 +970,7 @@ def _resolve_merge_base(ctx, base_ref):
          (single-parent now safe because we've confirmed `head_on_base`).
     """
     process = ctx.std.process
-    cwd = ctx.std.env.current_dir()
+    cwd = _git_cwd(ctx, cwd)
 
     head_out = process.command("git").args(["rev-parse", "HEAD"]).current_dir(cwd).stdout("piped").stderr("null").spawn().wait_with_output()
     head_sha = head_out.stdout.strip() if head_out.status.success else ""
@@ -978,11 +986,11 @@ def _resolve_merge_base(ctx, base_ref):
 
     # HEAD^1 path (step 2 in the docstring): a CI-synthesized merge, or
     # a HEAD merge-base confirmed to be on the base.
-    parents = _head_parents(ctx)
+    parents = _head_parents(ctx, cwd = cwd)
     synthesized = head_is_synthesized_merge(ctx.std, parents)
     if synthesized or (len(parents) >= 1 and head_on_base):
         parent_sha = parents[0]
-        if _ensure_local_sha(ctx, parent_sha):
+        if _ensure_local_sha(ctx, parent_sha, cwd = cwd):
             if synthesized:
                 return parent_sha, "git rev-parse HEAD^1 (CI-synthesized merge commit first parent)"
             return parent_sha, "git rev-parse HEAD^1 (HEAD on %s)" % base_ref
@@ -1003,10 +1011,16 @@ def _resolve_merge_base(ctx, base_ref):
             # single-parent HEAD^1 branch is safe.
             if mb_sha == head_sha and len(parents) >= 1:
                 parent_sha = parents[0]
-                if _ensure_local_sha(ctx, parent_sha):
+                if _ensure_local_sha(ctx, parent_sha, cwd = cwd):
                     return parent_sha, "git rev-parse HEAD^1 (HEAD on %s, confirmed after `git fetch origin %s`)" % (base_ref, remote_ref)
 
     return "", "tried `git merge-base HEAD %s`, `git rev-parse HEAD^1`, and `git fetch --depth=1 origin %s`; none succeeded" % (base_ref, remote_ref)
+
+def resolve_merge_base_for_test(ctx, base_ref, cwd):
+    """Test seam for `_resolve_merge_base` against a scratch repo at
+    `cwd`. Not for production use — callers there go through
+    `detect_changed_files`, which runs in the process working dir."""
+    return _resolve_merge_base(ctx, base_ref, cwd = cwd)
 
 def _try_local_git_diff_from_base_sha(ctx, line_level, base_sha):
     """Run a local `git diff <base_sha>` and return the structured

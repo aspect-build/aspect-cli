@@ -14,9 +14,12 @@ GitHub Actions:
      — both helpers return empty / None; downstream falls back to
        local `git diff` against the base branch.
 
-These are env- and event-file-driven, so the tests stub `std` with a
-fake env (dict-backed) and a fake fs (path → content dict). No real
-filesystem, no real subprocesses.
+Most cases are env- and event-file-driven, so they stub `std` with a
+fake env (dict-backed) and a fake fs (path → content dict). The
+`_resolve_merge_base` integration section is the exception: it builds
+real scratch git repos with `git` subprocesses to exercise the
+merge-base / HEAD^1 diff-base resolution end to end (notably the
+developer-merge-commit case behind the reported under-scoping bug).
 
 Run with:
   aspect dev test-github-detect
@@ -31,6 +34,7 @@ load(
     "github",
     "head_is_synthesized_merge",
     "read_github_event",
+    "resolve_merge_base_for_test",
 )
 load(
     "./gitlab_detect.axl",
@@ -551,6 +555,9 @@ def _test_impl(ctx):
     # ── pr_file_is_skipped bucketing decision ─────────────────────────
     _test_pr_file_is_skipped()
 
+    # ── _resolve_merge_base end-to-end against real scratch repos ─────
+    _test_resolve_merge_base_integration(ctx)
+
     print("github_detect.axl smoke: OK")
     return 0
 
@@ -885,6 +892,117 @@ def _test_pr_files_bucket_class_routes_observations(ctx):
     _eq("bucket-class — App `Remaining` matches primary response", app_obs[0][1], 4800)
     _eq("bucket-class — env bucket has the fallback retry's observation", len(env_obs), 1)
     _eq("bucket-class — env `Remaining` matches fallback response", env_obs[0][1], 900)
+
+# ── _resolve_merge_base integration (real git scratch repos) ────────
+# The unit tests above drive the env gate (`head_is_synthesized_merge`)
+# with a fake std; these run `_resolve_merge_base` against repos built
+# with real `git` subprocesses so the merge-base / HEAD^1 topology
+# handling is exercised end to end. Fixed identity + dates keep commit
+# SHAs independent of the wall clock and the host's ~/.gitconfig.
+_GIT_ENV = {
+    "GIT_AUTHOR_NAME": "Test",
+    "GIT_AUTHOR_EMAIL": "test@example.com",
+    "GIT_AUTHOR_DATE": "2026-01-01T00:00:00",
+    "GIT_COMMITTER_NAME": "Test",
+    "GIT_COMMITTER_EMAIL": "test@example.com",
+    "GIT_COMMITTER_DATE": "2026-01-01T00:00:00",
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_CONFIG_SYSTEM": "/dev/null",
+}
+
+def _git_ok(ctx, repo, args):
+    cmd = ctx.std.process.command("git").args(args).current_dir(repo)
+    for k, v in _GIT_ENV.items():
+        cmd = cmd.env(k, v)
+    out = cmd.stdout("piped").stderr("piped").spawn().wait_with_output()
+    if not out.status.success:
+        fail("git %s failed in %s: %s" % (" ".join(args), repo, out.stderr.strip()))
+    return out.stdout.strip()
+
+def _commit_file(ctx, repo, name, content, message):
+    ctx.std.fs.write(repo + "/" + name, content)
+    _git_ok(ctx, repo, ["add", name])
+    _git_ok(ctx, repo, ["commit", "-m", message])
+    return _git_ok(ctx, repo, ["rev-parse", "HEAD"])
+
+def _changed_files(ctx, repo, diff_base):
+    """Files in `git diff --name-only <diff_base> HEAD`, sorted — the
+    set lint / format would actually operate on for this diff base."""
+    out = _git_ok(ctx, repo, ["diff", "--name-only", diff_base, "HEAD"])
+    return sorted([f for f in out.split("\n") if f])
+
+def _init_repo(ctx):
+    repo = ctx.std.fs.mkdtemp(prefix = "axl-github-detect-merge-base-test-")
+    _git_ok(ctx, repo, ["init", "-q", "--initial-branch=main"])
+    base_sha = _commit_file(ctx, repo, "base.txt", "base\n", "base")
+    return repo, base_sha
+
+def _test_resolve_merge_base_integration(ctx):
+    # (1) The reported bug: a developer's own merge of the base branch
+    # into a feature branch. main: B0 → B1 (advances after branching).
+    # feature off B0: C1 → C2, then `git merge main` brings B1 in as a
+    # merge commit M. HEAD=M with M^1=C2 (the prior feature tip), so
+    # trusting HEAD^1 diffs C2..M and reports only b1.txt — dropping the
+    # feature's own c1.txt + c2.txt (the bug). The resolved base instead
+    # scopes the whole feature.
+    repo, b0 = _init_repo(ctx)
+    _git_ok(ctx, repo, ["checkout", "-q", "-b", "feature"])
+    _commit_file(ctx, repo, "c1.txt", "c1\n", "c1")
+    c2 = _commit_file(ctx, repo, "c2.txt", "c2\n", "c2")
+    _git_ok(ctx, repo, ["checkout", "-q", "main"])
+    _commit_file(ctx, repo, "b1.txt", "b1\n", "b1")
+    _git_ok(ctx, repo, ["checkout", "-q", "feature"])
+    _git_ok(ctx, repo, ["merge", "-q", "--no-ff", "--no-edit", "main"])
+    parents = _git_ok(ctx, repo, ["rev-list", "--parents", "-n", "1", "HEAD"]).split(" ")
+    if len(parents) != 3:
+        fail("expected HEAD to be a 2-parent merge commit, got parents %r" % parents)
+    _eq("developer merge — HEAD^1 is the prior feature tip (the trap)", parents[1], c2)
+    diff_base, source = resolve_merge_base_for_test(ctx, "main", repo)
+    if "merge-base" not in source:
+        fail("developer merge — expected merge-base source, got %r" % source)
+    # The feature's own files are in scope; HEAD^1 (=c2) would have
+    # dropped c1.txt and c2.txt, surfacing only the merged-in b1.txt.
+    _eq(
+        "developer merge — whole feature in scope (not just merge payload)",
+        _changed_files(ctx, repo, diff_base),
+        ["c1.txt", "c2.txt"],
+    )
+    if diff_base == c2:
+        fail("developer merge — diff base must not be HEAD^1 (would drop pre-merge commits)")
+    ctx.std.fs.remove_dir_all(repo)
+
+    # (2) Linear feature branch (single-parent commits): the diff base is
+    # the fork point B0, so both feature commits are in scope.
+    repo, b0 = _init_repo(ctx)
+    _git_ok(ctx, repo, ["checkout", "-q", "-b", "feature"])
+    _commit_file(ctx, repo, "c1.txt", "c1\n", "c1")
+    _commit_file(ctx, repo, "c2.txt", "c2\n", "c2")
+    diff_base, source = resolve_merge_base_for_test(ctx, "main", repo)
+    _eq("linear branch — diff base is the fork point", diff_base, b0)
+    _eq(
+        "linear branch — both feature commits in scope",
+        _changed_files(ctx, repo, diff_base),
+        ["c1.txt", "c2.txt"],
+    )
+    ctx.std.fs.remove_dir_all(repo)
+
+    # (3) HEAD on the base branch (push-to-base): `git merge-base HEAD
+    # main` == HEAD, so the diff base is the previous commit (HEAD^1) and
+    # the just-landed commit stays in scope.
+    repo, b0 = _init_repo(ctx)
+    b1 = _commit_file(ctx, repo, "b1.txt", "b1\n", "b1")
+    diff_base, source = resolve_merge_base_for_test(ctx, "main", repo)
+    _eq("head-on-base — diff base is the previous commit (HEAD^1)", diff_base, b0)
+    if diff_base == b1:
+        fail("head-on-base — diff base must be HEAD^1, not HEAD itself")
+    if "HEAD on" not in source:
+        fail("head-on-base — expected HEAD-on-base source, got %r" % source)
+    _eq(
+        "head-on-base — landed commit in scope",
+        _changed_files(ctx, repo, diff_base),
+        ["b1.txt"],
+    )
+    ctx.std.fs.remove_dir_all(repo)
 
 github_detect_tests = task(
     name = "test-github-detect",
