@@ -89,7 +89,99 @@ AGGREGATE_SCREENS = _AGGREGATE_SCREENS
 SURFACE_ALL = _SURFACE_ALL
 
 # Producer API.
-add_tip = _add_tip
+#
+# `add_tip` and the built-in `tip_*` functions are typed pass-throughs to
+# the implementations in `lib/tips.axl` (loaded with a `_` prefix). The
+# public signature carries the `ctx: TaskContext` annotation and the
+# authoring docstring (this is the surface that rolls up into generated
+# docs); the `_`-prefixed impl leaves `ctx` untyped so internal callers
+# and tests can drive it with a stub context.
+
+def add_tip(
+        ctx: TaskContext,
+        id: str,
+        severity: str,
+        title: str,
+        body: str,
+        type: str = TIP_TEMPLATE_RAW,
+        key: str = "",
+        task_keys: list = [],
+        vars: dict = {},
+        accumulate: dict = {},
+        surfaces: list = [],
+        combine_across_tasks: bool = False):
+    """Add a tip to the task's tip storage and print a `TIP:` block to
+    the terminal (subject to the owner feature's `auto_print` arg).
+
+    The single entry point for tips. Built-in tips are `tip_*(ctx, …)`
+    functions that wrap this with their content baked in (e.g.
+    `tip_add_github_token(ctx)`); call `add_tip` directly for custom tips.
+
+    A tip is identified by `(id, key)`. Re-emitting the same `(id, key)`
+    within a task replaces the stored content (accumulate fields ride
+    along); a different `key` is a distinct tip. Silencing is always by
+    `id`: no-op if `id` is in the silence list AND `severity != TIP_IMPORTANT`.
+
+    No-op overall when the `Tips` feature is disabled — the trait's
+    `add` callable falls back to its null-object default.
+
+    Args:
+      ctx: The task context the tip is added to.
+      id: Stable identifier — the kind of tip and its silence key. Tips
+        with the same `(id, key)` are the same tip (re-emit replaces);
+        `id` alone is what `--tips:silence=<id>` and the silence list match.
+      severity: One of `TIP_IMPORTANT` / `TIP_WARNING` / `TIP_SUGGESTION` /
+        `TIP_INFO` — drives ordering, the emoji/label, and (for
+        `TIP_IMPORTANT`) immunity from silencing.
+      title: Short headline, interpreted per `type`.
+      body: Markdown body, interpreted per `type`.
+      type: The interpolation engine for `title` / `body`:
+        `TIP_TEMPLATE_RAW` (default) surfaces them as-is;
+        `TIP_TEMPLATE_FORMAT` applies Starlark `str.format(**vars)`;
+        `TIP_TEMPLATE_JINJA2` renders them as Jinja2 against `vars` +
+        `accumulate`, keeping the source so a re-emit or cross-task union
+        can re-render.
+      key: Optional discriminator distinguishing same-`id` tips about
+        different subjects (e.g. one flaky-test tip per label). Empty
+        means a single tip per `id`.
+      task_keys: Glob patterns matched against `ctx.task.key`; when
+        non-empty the tip renders only on matching tasks. Empty (the
+        default) scopes the tip to the task it was emitted into. The
+        terminal print fires regardless.
+      vars: Fixed scalar values for `TIP_TEMPLATE_FORMAT` /
+        `TIP_TEMPLATE_JINJA2` interpolation. Ignored for
+        `TIP_TEMPLATE_RAW`. A name set in both `vars` and `accumulate`
+        is an error.
+      accumulate: List-valued Jinja2 fields (a `{{ name }}` reference
+        sees a list). Each re-emit unions in new values (deduped +
+        sorted); with `combine_across_tasks` the union also spans tasks.
+        `TIP_TEMPLATE_JINJA2` only.
+      surfaces: Allowlist of surface identifiers (`SURFACE_CLI` /
+        `SURFACE_GITHUB_STATUS_CHECKS` / `SURFACE_BUILDKITE_ANNOTATIONS` /
+        `SURFACE_GITLAB_COMMIT_STATUSES` / `SURFACE_GITHUB_PR_SUMMARY`, or
+        the `TASK_SCREENS` / `AGGREGATE_SCREENS` shorthands) that may
+        render the tip. Empty (the default) shows it everywhere
+        (`SURFACE_ALL`). The terminal print is gated on `SURFACE_CLI`;
+        omit `SURFACE_GITHUB_PR_SUMMARY` to keep the tip off the cross-task
+        rollup.
+      combine_across_tasks: How same-`(id, key)` tips from sibling tasks
+        combine in the PR summary.
+    """
+    _add_tip(
+        ctx,
+        id = id,
+        severity = severity,
+        title = title,
+        body = body,
+        type = type,
+        key = key,
+        task_keys = task_keys,
+        vars = vars,
+        accumulate = accumulate,
+        surfaces = surfaces,
+        combine_across_tasks = combine_across_tasks,
+    )
+
 tips = _tips
 
 # tip_suggestion hook.
@@ -101,10 +193,41 @@ TIP_ACCEPT = _TIP_ACCEPT
 TIP_REJECT = _TIP_REJECT
 tip_replace = _tip_replace
 
-# Built-in tips (re-exported so a config can call or preempt them; silence
-# by the id each one emits, e.g. `add-github-token`).
-tip_add_github_token = _tip_add_github_token
-tip_add_aspect_api_token = _tip_add_aspect_api_token
-tip_add_github_token_scope = _tip_add_github_token_scope
-tip_add_id_token_permission = _tip_add_id_token_permission
+# Built-in tips (typed pass-throughs to `lib/tips.axl`; a config can call
+# or preempt them, and silence by the id each emits, e.g. `add-github-token`).
 AspectApiTokenHost = _AspectApiTokenHost
+
+def tip_add_github_token(ctx: TaskContext):
+    """Suggest exporting `GITHUB_TOKEN` as a fallback for supporting
+    GitHub API calls (job URL lookup, PR file diff, etc.) when the
+    Aspect Workflows GitHub App can't authenticate."""
+    _tip_add_github_token(ctx)
+
+def tip_add_aspect_api_token(ctx: TaskContext, host: AspectApiTokenHost):
+    """Tell the user to set `ASPECT_API_TOKEN` so the Aspect Workflows
+    GitHub App can authenticate. IMPORTANT severity — every feature that
+    calls the GitHub API as the App depends on it, and silently degrades
+    without it.
+
+    `host` is an `AspectApiTokenHost`; it selects the wire-up advice and a
+    host-suffixed id (`add-aspect-api-token-<host>`) so users running
+    multiple CI hosts off one repo can silence each independently."""
+    _tip_add_aspect_api_token(ctx, host = host)
+
+def tip_add_github_token_scope(ctx: TaskContext, scopes: str, endpoints: str):
+    """Warn that the job-scoped `GITHUB_TOKEN` lacks scopes a supporting
+    API call needed, so the call fell back to the App token. Accumulating:
+    each call passes the single missing `scopes` / `endpoints` value it hit;
+    repeated emits union into one tip (deduped + sorted), and
+    `combine_across_tasks` unions the set across every task into one
+    PR-summary row. Pluralization + per-scope snippet lines are Jinja2
+    over the merged `accumulate` state."""
+    _tip_add_github_token_scope(ctx, scopes = scopes, endpoints = endpoints)
+
+def tip_add_id_token_permission(ctx: TaskContext):
+    """Tell the user to grant `id-token: write` so GitHub Actions
+    artifact uploads (status payloads, BEP files, test logs, profiles —
+    and the PR summary aggregator that rides on them) can obtain the OIDC
+    token the ArtifactService needs. IMPORTANT — these features fail
+    outright without it, and important tips can't be silenced."""
+    _tip_add_id_token_permission(ctx)
