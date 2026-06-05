@@ -177,6 +177,24 @@ def _make_target_event(bes_label, set_id):
         ),
     )
 
+def _make_aborted_target_event(bes_label):
+    """A `target_completed`-kinded BES event whose payload is the `aborted`
+    union variant — it lacks `output_group`, matching what Bazel emits when a
+    target is aborted before completing."""
+    return struct(
+        kind = "target_completed",
+        id = struct(label = bes_label),
+        payload = struct(reason = "USER_INTERRUPTED", description = "build interrupted"),
+    )
+
+def _test_bes_aborted_target_no_ops(ctx):
+    """An aborted `target_completed` payload (no `output_group`) must no-op
+    instead of raising AttributeError in _process_bes."""
+    r = runnable(None, ["//tools/format:format"])
+    r.event(_make_aborted_target_event("//tools/format:format"))
+    if r.determine_entrypoint("//tools/format:format") != None:
+        fail("aborted target: expected None entrypoint")
+
 def _test_bes_bzlmod_no_version(ctx):
     """@@module+//pkg:tgt in BES matches @module//pkg:tgt registered target."""
     r = runnable(None, ["@buildifier_prebuilt//buildifier"])
@@ -601,6 +619,7 @@ _UNIT_TESTS = [
     _test_bes_bzlmod_extension_repo,
     _test_bes_local_target,
     _test_bes_unknown_target_returns_none,
+    _test_bes_aborted_target_no_ops,
     _test_no_runfiles_dir_when_ctx_none,
     _test_sh_pass2_selected,
     _test_bash_pass2_selected,
