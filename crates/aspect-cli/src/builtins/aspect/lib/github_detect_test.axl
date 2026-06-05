@@ -1,22 +1,22 @@
-"""Smoke tests for `lib/github.axl` CI-event detection helpers.
+"""Tests for `lib/github.axl` CI change-detection helpers.
 
-Covers the three change-detection event shapes aspect-cli sees in
-GitHub Actions:
+Covers:
+  - The three CI-event shapes aspect-cli sees on GitHub Actions —
+    `pull_request` / `pull_request_target` (`detect_github_pr` returns
+    the PR context), `merge_group` (`detect_merge_group_base_sha`
+    returns the queue base SHA), and `push` (neither fires; downstream
+    falls back to local `git diff`).
+  - `head_is_synthesized_merge` — the per-source gate that decides
+    whether HEAD's first parent is a safe diff base, including the
+    PR-head-checkout and batched-merge_group cases.
+  - `list_pull_request_files` auth fallback + rate-limit bucketing.
 
-  1. GitHub PR (`pull_request` / `pull_request_target`)
-     — `detect_github_pr` returns the PR context;
-       `detect_merge_group_base_sha` returns "".
-  2. Merge queue (`merge_group`)
-     — `detect_merge_group_base_sha` returns `merge_group.base_sha`
-       from the event payload;
-       `detect_github_pr` returns None (no PR ref).
-  3. Landed commit (`push`)
-     — both helpers return empty / None; downstream falls back to
-       local `git diff` against the base branch.
-
-These are env- and event-file-driven, so the tests stub `std` with a
-fake env (dict-backed) and a fake fs (path → content dict). No real
-filesystem, no real subprocesses.
+Most cases are env- and event-file-driven, so they stub `std` with a
+fake env (dict-backed) and a fake fs (path → content dict). The
+`_resolve_merge_base` integration section is the exception: it builds
+real scratch git repos with `git` subprocesses to exercise the
+merge-base / HEAD^1 diff-base resolution end to end (notably the
+developer-merge-commit case behind the reported under-scoping bug).
 
 Run with:
   aspect dev test-github-detect
@@ -29,7 +29,9 @@ load(
     "detect_github_pr",
     "detect_merge_group_base_sha",
     "github",
+    "head_is_synthesized_merge",
     "read_github_event",
+    "resolve_merge_base_for_test",
 )
 load(
     "./gitlab_detect.axl",
@@ -88,6 +90,12 @@ def _expect_commit_sha(label, vars, files, expected):
     got = detect_commit_sha(_fake_std(vars, files))
     _eq(label, got, expected)
 
+# ── head_is_synthesized_merge ───────────────────────────────────────
+
+def _expect_head_synthesized(label, vars, files, parents, expected):
+    got = head_is_synthesized_merge(_fake_std(vars, files), parents)
+    _eq(label, got, expected)
+
 # ── read_github_event ───────────────────────────────────────────────
 
 def _expect_event(label, vars, files, expected):
@@ -95,7 +103,7 @@ def _expect_event(label, vars, files, expected):
     _eq(label, got, expected)
 
 def _test_impl(ctx):
-    # ── (1) GitHub PR — pull_request event ──────────────────────────
+    # ── GitHub PR — pull_request event ──────────────────────────────
     # actions/checkout v6 default: synthesized merge commit at
     # refs/pull/N/merge; pull_request.head.sha in event payload is the
     # PR's real head (used for status checks / annotations).
@@ -143,7 +151,7 @@ def _test_impl(ctx):
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     )
 
-    # ── (2) Merge queue — merge_group event ─────────────────────────
+    # ── Merge queue — merge_group event ─────────────────────────────
     # GitHub merges PRs through a queue branch
     # (`gh-readonly-queue/<target>/<sha>`); the event payload exposes
     # `merge_group.base_sha` directly so we don't have to resolve it
@@ -179,7 +187,113 @@ def _test_impl(ctx):
         "GITHUB_REF is not a PR merge ref",
     )
 
-    # ── (3) Landed commit — push to main ────────────────────────────
+    # ── head_is_synthesized_merge — the gate on trusting parents[0] ──
+    base = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"  # pull_request.base.sha
+    head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"  # PR head / branch tip
+    prior_tip = "dddddddddddddddddddddddddddddddddddddddd"
+
+    # pull_request: the checked-out ref is developer-overridable, so the
+    # gate is `parents[0] == pull_request.base.sha`, NOT the event alone.
+    _expect_head_synthesized(
+        "pull_request: synthesized merge (parents[0] == base) is trusted",
+        pr_vars,
+        pr_files,
+        [base, head],
+        True,
+    )
+    _expect_head_synthesized(
+        "pull_request_target: synthesized merge is trusted",
+        {
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_EVENT_NAME": "pull_request_target",
+            "GITHUB_EVENT_PATH": pr_event_path,
+        },
+        pr_files,
+        [base, head],
+        True,
+    )
+
+    # The bug this fix targets: a workflow that overrides actions/checkout
+    # `ref:` to github.event.pull_request.head.sha runs the same
+    # pull_request event, but HEAD is the developer's own merge — its
+    # parents[0] is the prior branch tip. GITHUB_REF still says
+    # refs/pull/N/merge, so a ref-based gate would wrongly fire; matching
+    # parents[0] against base.sha correctly rejects it.
+    _expect_head_synthesized(
+        "pull_request: developer merge checked out (parents[0] != base) is rejected",
+        pr_vars,
+        pr_files,
+        [prior_tip, head],
+        False,
+    )
+    _expect_head_synthesized(
+        "single-parent HEAD is never a synthesized merge",
+        pr_vars,
+        pr_files,
+        [base],
+        False,
+    )
+
+    # merge_group: the gh-readonly-queue ref is GitHub-controlled (not
+    # overridable), so a 2-parent HEAD is always trusted — including the
+    # batched case where parents[0] (the prior group's HEAD) differs from
+    # merge_group.base_sha (the target-branch tip).
+    _expect_head_synthesized(
+        "merge_group: 2-parent HEAD is trusted",
+        mg_vars,
+        mg_files,
+        [base, head],
+        True,
+    )
+    _expect_head_synthesized(
+        "merge_group: batched group (parents[0] != base_sha) is still trusted",
+        mg_vars,
+        mg_files,
+        [prior_tip, head],
+        True,
+    )
+
+    # GitLab merged_result / merge_train: GitLab-controlled refs, trusted
+    # on topology; detached checks out the source head (step 3 handles it).
+    _expect_head_synthesized(
+        "GitLab merged_result: 2-parent HEAD is trusted",
+        {"GITLAB_CI": "true", "CI_MERGE_REQUEST_EVENT_TYPE": "merged_result"},
+        {},
+        [base, head],
+        True,
+    )
+    _expect_head_synthesized(
+        "GitLab merge_train: 2-parent HEAD is trusted",
+        {"GITLAB_CI": "true", "CI_MERGE_REQUEST_EVENT_TYPE": "merge_train"},
+        {},
+        [base, head],
+        True,
+    )
+    _expect_head_synthesized(
+        "GitLab detached: 2-parent HEAD is rejected",
+        {"GITLAB_CI": "true", "CI_MERGE_REQUEST_EVENT_TYPE": "detached"},
+        {},
+        [base, head],
+        False,
+    )
+
+    # Non-PR, non-merge contexts never trust a 2-parent HEAD.
+    _expect_head_synthesized(
+        "push build: 2-parent HEAD is rejected",
+        {"GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "push"},
+        {},
+        [base, head],
+        False,
+    )
+    _expect_head_synthesized(
+        "off-CI: 2-parent HEAD is rejected",
+        {},
+        {},
+        [base, head],
+        False,
+    )
+
+    # ── Landed commit — push to main ────────────────────────────────
     # No PR context, no merge_group payload. Downstream falls back to
     # local `git diff` against `origin/main`.
     push_event_path = "/tmp/event-push.json"
@@ -437,6 +551,9 @@ def _test_impl(ctx):
 
     # ── pr_file_is_skipped bucketing decision ─────────────────────────
     _test_pr_file_is_skipped()
+
+    # ── _resolve_merge_base end-to-end against real scratch repos ─────
+    _test_resolve_merge_base_integration(ctx)
 
     print("github_detect.axl smoke: OK")
     return 0
@@ -772,6 +889,118 @@ def _test_pr_files_bucket_class_routes_observations(ctx):
     _eq("bucket-class — App `Remaining` matches primary response", app_obs[0][1], 4800)
     _eq("bucket-class — env bucket has the fallback retry's observation", len(env_obs), 1)
     _eq("bucket-class — env `Remaining` matches fallback response", env_obs[0][1], 900)
+
+# ── _resolve_merge_base integration (real git scratch repos) ────────
+# The unit tests above drive the env gate (`head_is_synthesized_merge`)
+# with a fake std; these run `_resolve_merge_base` against repos built
+# with real `git` subprocesses so the merge-base / HEAD^1 topology
+# handling is exercised end to end. Fixed identity + dates keep commit
+# SHAs independent of the wall clock and the host's ~/.gitconfig.
+_GIT_ENV = {
+    "GIT_AUTHOR_NAME": "Test",
+    "GIT_AUTHOR_EMAIL": "test@example.com",
+    "GIT_AUTHOR_DATE": "2026-01-01T00:00:00",
+    "GIT_COMMITTER_NAME": "Test",
+    "GIT_COMMITTER_EMAIL": "test@example.com",
+    "GIT_COMMITTER_DATE": "2026-01-01T00:00:00",
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_CONFIG_SYSTEM": "/dev/null",
+}
+
+def _git_ok(ctx, repo, args):
+    cmd = ctx.std.process.command("git").args(args).current_dir(repo)
+    for k, v in _GIT_ENV.items():
+        cmd = cmd.env(k, v)
+    out = cmd.stdout("piped").stderr("piped").spawn().wait_with_output()
+    if not out.status.success:
+        fail("git %s failed in %s: %s" % (" ".join(args), repo, out.stderr.strip()))
+    return out.stdout.strip()
+
+def _commit_file(ctx, repo, name, content, message):
+    ctx.std.fs.write(repo + "/" + name, content)
+    _git_ok(ctx, repo, ["add", name])
+    _git_ok(ctx, repo, ["commit", "-m", message])
+    return _git_ok(ctx, repo, ["rev-parse", "HEAD"])
+
+def _changed_files(ctx, repo, diff_base):
+    """Files in `git diff --name-only <diff_base> HEAD`, sorted — the
+    set lint / format would actually operate on for this diff base."""
+    out = _git_ok(ctx, repo, ["diff", "--name-only", diff_base, "HEAD"])
+    return sorted([f for f in out.split("\n") if f])
+
+def _init_repo(ctx):
+    repo = ctx.std.fs.mkdtemp(prefix = "axl-github-detect-merge-base-test-")
+    _git_ok(ctx, repo, ["init", "-q", "--initial-branch=main"])
+    base_sha = _commit_file(ctx, repo, "base.txt", "base\n", "base")
+    return repo, base_sha
+
+def _test_resolve_merge_base_integration(ctx):
+    # (1) The reported bug: a developer's own merge of the base branch
+    # into a feature branch. main: B0 → B1 (advances after branching).
+    # feature off B0: C1 → C2, then `git merge main` brings B1 in as a
+    # merge commit M. HEAD=M with M^1=C2 (the prior feature tip), so
+    # trusting HEAD^1 diffs C2..M and reports only b1.txt — dropping the
+    # feature's own c1.txt + c2.txt (the bug). The resolved base instead
+    # scopes the whole feature.
+    repo, b0 = _init_repo(ctx)
+    _git_ok(ctx, repo, ["checkout", "-q", "-b", "feature"])
+    _commit_file(ctx, repo, "c1.txt", "c1\n", "c1")
+    c2 = _commit_file(ctx, repo, "c2.txt", "c2\n", "c2")
+    _git_ok(ctx, repo, ["checkout", "-q", "main"])
+    _commit_file(ctx, repo, "b1.txt", "b1\n", "b1")
+    _git_ok(ctx, repo, ["checkout", "-q", "feature"])
+    _git_ok(ctx, repo, ["merge", "-q", "--no-ff", "--no-edit", "main"])
+    parents = _git_ok(ctx, repo, ["rev-list", "--parents", "-n", "1", "HEAD"]).split(" ")
+    if len(parents) != 3:
+        fail("expected HEAD to be a 2-parent merge commit, got parents %r" % parents)
+    _eq("developer merge — HEAD^1 is the prior feature tip (the trap)", parents[1], c2)
+    diff_base, source = resolve_merge_base_for_test(ctx, "main", repo)
+    if "merge-base" not in source:
+        fail("developer merge — expected merge-base source, got %r" % source)
+
+    # The feature's own files are in scope; HEAD^1 (=c2) would have
+    # dropped c1.txt and c2.txt, surfacing only the merged-in b1.txt.
+    _eq(
+        "developer merge — whole feature in scope (not just merge payload)",
+        _changed_files(ctx, repo, diff_base),
+        ["c1.txt", "c2.txt"],
+    )
+    if diff_base == c2:
+        fail("developer merge — diff base must not be HEAD^1 (would drop pre-merge commits)")
+    ctx.std.fs.remove_dir_all(repo)
+
+    # (2) Linear feature branch (single-parent commits): the diff base is
+    # the fork point B0, so both feature commits are in scope.
+    repo, b0 = _init_repo(ctx)
+    _git_ok(ctx, repo, ["checkout", "-q", "-b", "feature"])
+    _commit_file(ctx, repo, "c1.txt", "c1\n", "c1")
+    _commit_file(ctx, repo, "c2.txt", "c2\n", "c2")
+    diff_base, source = resolve_merge_base_for_test(ctx, "main", repo)
+    _eq("linear branch — diff base is the fork point", diff_base, b0)
+    _eq(
+        "linear branch — both feature commits in scope",
+        _changed_files(ctx, repo, diff_base),
+        ["c1.txt", "c2.txt"],
+    )
+    ctx.std.fs.remove_dir_all(repo)
+
+    # (3) HEAD on the base branch (push-to-base): `git merge-base HEAD
+    # main` == HEAD, so the diff base is the previous commit (HEAD^1) and
+    # the just-landed commit stays in scope.
+    repo, b0 = _init_repo(ctx)
+    b1 = _commit_file(ctx, repo, "b1.txt", "b1\n", "b1")
+    diff_base, source = resolve_merge_base_for_test(ctx, "main", repo)
+    _eq("head-on-base — diff base is the previous commit (HEAD^1)", diff_base, b0)
+    if diff_base == b1:
+        fail("head-on-base — diff base must be HEAD^1, not HEAD itself")
+    if "HEAD on" not in source:
+        fail("head-on-base — expected HEAD-on-base source, got %r" % source)
+    _eq(
+        "head-on-base — landed commit in scope",
+        _changed_files(ctx, repo, diff_base),
+        ["b1.txt"],
+    )
+    ctx.std.fs.remove_dir_all(repo)
 
 github_detect_tests = task(
     name = "test-github-detect",

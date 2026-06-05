@@ -148,12 +148,31 @@ def detect_gitlab_mr_base_sha(std):
     target-branch updates beyond this SHA, so `DIFF_BASE_SHA..HEAD`
     over-scopes by those updates. `detect_changed_files` handles this
     by running the merge-commit-first path (HEAD^1) BEFORE consulting
-    this helper — on those pipelines HEAD has ≥2 parents and step 2
-    catches it. On `detached` pipelines (HEAD is the source-branch
-    head, no merge commit) the merge-commit-first path skips and this
-    helper supplies the correct diff base.
+    this helper — `is_gitlab_synthesized_merge_pipeline` flags those
+    pipelines so step 2 diffs against the synthesized merge's first
+    parent. On `detached` pipelines (HEAD is the source-branch head, no
+    synthesized merge) step 2 skips and this helper supplies the diff
+    base.
     """
     env = std.env
     if not env.var("GITLAB_CI"):
         return ""
     return env.var("CI_MERGE_REQUEST_DIFF_BASE_SHA") or ""
+
+def is_gitlab_synthesized_merge_pipeline(std):
+    """True on a GitLab `merged_result` / `merge_train` MR pipeline,
+    where GitLab checks out a synthesized merge commit whose first
+    parent is the base it was built on.
+
+    The GitLab arm of `head_is_synthesized_merge`: these refs are
+    GitLab-controlled (not developer-overridable), so a 2-parent HEAD is
+    GitLab-made and diffing against its first parent is correct.
+    `detached` pipelines check out the source-branch head instead —
+    there a 2-parent HEAD would be the developer's own merge commit
+    (first parent = prior branch tip, not the base), so they're excluded
+    and fall through to `CI_MERGE_REQUEST_DIFF_BASE_SHA`.
+    """
+    env = std.env
+    if not env.var("GITLAB_CI"):
+        return False
+    return (env.var("CI_MERGE_REQUEST_EVENT_TYPE") or "") in ("merged_result", "merge_train")
