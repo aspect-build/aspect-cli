@@ -127,16 +127,17 @@ _VALID_TEMPLATE_TYPES = [TIP_TEMPLATE_RAW, TIP_TEMPLATE_FORMAT, TIP_TEMPLATE_JIN
 #   SURFACE_CLI                    the terminal `TIP:` block printed on emit
 #   SURFACE_GITHUB_STATUS_CHECKS   GitHub check-run summary (GithubStatusChecks)
 #   SURFACE_BUILDKITE_ANNOTATIONS  Buildkite annotation (BuildkiteAnnotations)
-#   SURFACE_GITLAB_COMMIT_STATUSES GitLab commit-status description (GitlabCommitStatuses)
 #   SURFACE_GITHUB_PR_SUMMARY      the cross-task GitHub PR summary comment
 #                                  (GithubStatusComments) — the only
 #                                  *aggregate* surface, where same-`(id, key)`
 #                                  tips from sibling tasks combine. See
 #                                  "Cross-task accumulation".
+#
+# (GitLab commit statuses are a single short description string with no
+# room to render a tip, so there's no GitLab surface.)
 SURFACE_CLI = "cli"
 SURFACE_GITHUB_STATUS_CHECKS = "github-status-checks"
 SURFACE_BUILDKITE_ANNOTATIONS = "buildkite-annotations"
-SURFACE_GITLAB_COMMIT_STATUSES = "gitlab-commit-statuses"
 SURFACE_GITHUB_PR_SUMMARY = "github-pr-summary"
 
 # Per-task status screens — every surface bound to a single task's own
@@ -144,7 +145,7 @@ SURFACE_GITHUB_PR_SUMMARY = "github-pr-summary"
 # in the context of the one task that emitted it (dynamic, per-invocation
 # detail) should set `surfaces = TASK_SCREENS` so it never lands in the
 # cross-task rollup.
-TASK_SCREENS = [SURFACE_CLI, SURFACE_GITHUB_STATUS_CHECKS, SURFACE_BUILDKITE_ANNOTATIONS, SURFACE_GITLAB_COMMIT_STATUSES]
+TASK_SCREENS = [SURFACE_CLI, SURFACE_GITHUB_STATUS_CHECKS, SURFACE_BUILDKITE_ANNOTATIONS]
 
 # The aggregate screen(s) — just the PR summary today, named as a list so
 # `surfaces = AGGREGATE_SCREENS` reads symmetrically with `TASK_SCREENS`
