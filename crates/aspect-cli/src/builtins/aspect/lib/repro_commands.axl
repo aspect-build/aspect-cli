@@ -23,7 +23,11 @@ parsing the command string).
 `build_aspect_command(subcommand, flags, targets)` is the canonical
 way producers compose the `command` string — handling flag
 normalization, target joining, the `--` separator before targets, and
-length-bounded truncation when the target list is large.
+length-bounded truncation when either the target list or a list-valued
+flag (e.g. a `--gazelle-flag=-exclude=` per untracked file) is large.
+Behavior-changing scalar flags are always retained; only surplus
+list-flag values are dropped, behind a `# +N more <flag> values`
+shell-comment line.
 
 `repro_prefix(ctx)` / `subdir_prefix(cwd, root)` prepend `cd <rel>\n`
 to commands when aspect was called from a subdirectory, so CI failures
@@ -166,21 +170,27 @@ def _build_run_command(targets, flags, max_chars, wrap_at):
 
     Target args are truncated entry-wise (whole tokens, never mid-token) when
     `max_chars` would be exceeded; a `# +N more` shell-comment line indicates
-    the truncation so the command stays copy-paste-runnable.
+    the truncation so the command stays copy-paste-runnable. List-valued flags
+    are length-bounded the same way (see `_budget_flag_parts`); in practice
+    `bazel run` alternates pass a narrow scalar flag set, so flag truncation is
+    rare here, but the discipline matches `_build_command`.
     """
     if not targets:
         return "bazel run"
     label = targets[0]
     target_args = targets[1:]
-    flag_str = _format_flag_parts(flags)
+    flag_str, flag_overflow_notes = _budget_flag_parts(flags, max_chars)
+    overflow_lines = _overflow_comment_lines(flag_overflow_notes)
     head = " ".join(["bazel run"] + flag_str + [_shell_quote(label)])
     if not target_args:
-        return head
+        if not overflow_lines:
+            return head
+        return _join_continued([head] + ["  " + o for o in overflow_lines])
 
     separator = " -- "
     quoted_args = [_shell_quote(a) for a in target_args]
     single_line = head + separator + " ".join(quoted_args)
-    if len(single_line) <= max_chars and len(single_line) <= wrap_at:
+    if len(single_line) <= max_chars and len(single_line) <= wrap_at and not overflow_lines:
         return single_line
 
     used = len(head) + len(separator)
@@ -197,28 +207,122 @@ def _build_run_command(targets, flags, max_chars, wrap_at):
     # `_join_continued` is responsible for the trailing ` \` continuation
     # between lines — don't pre-add it to the head, or the rendered output
     # ends up with `-- \ \` (the literal backslash plus the join's separator).
-    lines = [head + " --"] + ["  " + q for q in included]
+    # Flag-overflow notes go above the `--` so they read as part of the head.
+    lines = [head + " --"] + ["  " + o for o in overflow_lines] + ["  " + q for q in included]
     if omitted > 0:
         lines.append("  # +%d more" % omitted)
     return _join_continued(lines)
 
-def _format_flag_parts(flags):
-    """Render a flag list into shell tokens. See `_build_command` for entry shape."""
-    parts = []
+def _budget_flag_parts(flags, max_chars):
+    """Render `flags` to shell tokens under a `max_chars` budget,
+    dropping list-flag overflow rather than emitting an unbounded wall.
+
+    Background: a list-valued flag entry (`("--gazelle-flag", [v0, v1,
+    …])`) expands to one `--name=v` token per element. When the list
+    is large — e.g. `aspect gazelle` invoked with a `-exclude=` per
+    untracked file — the rendered repro/fix command balloons to
+    hundreds of tokens. The target list has always been length-bounded
+    (see `_build_command`); flags were not. This applies the same
+    discipline to flags.
+
+    What's retained vs. truncated, and why:
+
+      - Single-token entries (bare flags, `("--name", "value")`, plain
+        strings) are ALWAYS retained, regardless of budget. These are
+        the behavior-changing scalars (`--severity`, `--scope`,
+        `--base-ref`, …) — dropping one would change what the command
+        does, defeating the point of a repro. They're few, so they
+        can't be the source of the blow-up.
+      - List-valued entries are the only thing subject to truncation,
+        since they're the only entries that can expand without bound.
+
+    Ordering: list flags are laid down ascending by element count
+    (stable on ties, preserving original relative order). A
+    well-behaved `--scope-all-on-change` with 8 entries thus fills
+    completely before a pathological `--gazelle-flag` with 300
+    entries starts getting clipped — truncation concentrates on the
+    actual offender instead of penalizing small flags that happened to
+    come later in the original order. Element order WITHIN a flag is
+    preserved.
+
+    Returns `(parts, overflow)`:
+      - `parts`: retained shell tokens, scalars first (original order)
+        then list-flag tokens (count-sorted).
+      - `overflow`: list of `(flag_name, dropped_count)` for list flags
+        that were partially or fully clipped, in the order they were
+        laid down. Callers render these as `# +N more <flag> values`
+        shell-comment lines. Empty when nothing was dropped.
+
+    The budget governs only list-flag tokens: scalars are emitted
+    first and their length is subtracted from the budget, so a
+    (pathological) scalar-heavy command still renders every scalar and
+    simply drops all list values. `max_chars` is a soft cap measured in
+    characters of joined token text; truncation is at token boundaries,
+    never mid-token (a single huge element counts as one indivisible
+    token, same as target truncation).
+    """
+    scalars = []
+    list_entries = []
     for f in flags:
         if type(f) == "string":
-            parts.append(f)
+            scalars.append(f)
             continue
         name = f[0]
         value = f[1] if len(f) > 1 else None
-        if value == None:
-            parts.append(name)
-        elif type(value) == "list":
-            for v in value:
-                parts.append("%s=%s" % (name, v))
+        if type(value) == "list":
+            list_entries.append((name, value))
+        elif value == None:
+            scalars.append(name)
         else:
-            parts.append("%s=%s" % (name, value))
-    return parts
+            scalars.append("%s=%s" % (name, value))
+
+    # Scalars are unconditional; charge their width to the budget so
+    # list tokens compete only for what's left.
+    parts = list(scalars)
+    used = 0
+    for s in scalars:
+        used += (1 if used else 0) + len(s)
+
+    # Stable sort ascending by element count: small, well-behaved list
+    # flags render in full before a large one starts getting clipped.
+    indexed = [(len(value), i, name, value) for i, (name, value) in enumerate(list_entries)]
+    ordered = sorted(indexed, key = lambda e: (e[0], e[1]))
+
+    # Lay down list-flag tokens until the budget is hit. Once any flag
+    # is clipped, every flag from that point on is fully dropped — they
+    # were sorted ascending by size, so a larger one can't fit where a
+    # smaller one didn't. `overflowing` flips True at the first clip.
+    overflow = []
+    overflowing = False
+    for _count, _i, name, value in ordered:
+        if overflowing:
+            overflow.append((name, len(value)))
+            continue
+        dropped = 0
+        for elem_idx in range(len(value)):
+            token = "%s=%s" % (name, value[elem_idx])
+            needed = (1 if parts else 0) + len(token)
+            if used + needed > max_chars and parts:
+                dropped = len(value) - elem_idx
+                break
+            parts.append(token)
+            used += needed
+        if dropped > 0:
+            overflow.append((name, dropped))
+            overflowing = True
+
+    return parts, overflow
+
+def _overflow_comment_lines(overflow):
+    """Render `[(flag_name, dropped_count), …]` to `# +N more <flag> values`
+    shell-comment strings. One line per flag so the attribution is exact —
+    a reviewer sees that the dropped tokens were e.g. `--gazelle-flag`
+    excludes, not behavior-changing flags. Empty input → no lines."""
+    lines = []
+    for name, count in overflow:
+        if count > 0:
+            lines.append("# +%d more %s value%s" % (count, name, "" if count == 1 else "s"))
+    return lines
 
 def _build_command(head, flags, targets, max_chars, wrap_at):
     """Compose `<head> <flags...> [-- <targets>]` with shell quoting + wrapping.
@@ -229,9 +333,18 @@ def _build_command(head, flags, targets, max_chars, wrap_at):
                        - `"--name"` — bare flag, no value
                        - `("--name", "value")` — single value
                        - `("--name", ["a", "b"])` — repeated; emits
-                         `--name=a --name=b` in order
-                     Order is preserved end-to-end. Pass an empty list
-                     when there are no flags.
+                         `--name=a --name=b`
+                     Single-token flags (bare + single-value) are
+                     always retained and keep their original relative
+                     order. List-valued flags are length-bounded the
+                     same way targets are: when they'd overflow
+                     `max_chars` the surplus values are dropped behind
+                     a `# +N more <flag> values` shell-comment line.
+                     To make truncation land on the offender rather
+                     than well-behaved flags, list flags are laid down
+                     ascending by element count (stable on ties) — so
+                     output flag order may differ from input order
+                     when truncation kicks in. See `_budget_flag_parts`.
         targets:     list of target patterns. Joined after a leading
                      `--` separator. Truncated entry-wise (whole
                      labels, never mid-label) to keep the total
@@ -240,9 +353,10 @@ def _build_command(head, flags, targets, max_chars, wrap_at):
                      can see the command is incomplete.
                      Pass an empty list for commands that don't take
                      positional targets.
-        max_chars:   soft length cap. When the head + flags already
-                     exceed it, the head still renders and `targets`
-                     collapses to `… +N more`.
+        max_chars:   soft length cap, applied independently to the
+                     flag block and the target block. List-flag values
+                     past the cap collapse to `# +N more <flag> values`;
+                     targets past it collapse to `… +N more`.
         wrap_at:     soft width target. When the composed single-line
                      command exceeds this, switch to a multi-line
                      form: head + flags + ` -- \\` on the first line,
@@ -254,16 +368,19 @@ def _build_command(head, flags, targets, max_chars, wrap_at):
     Returns:
         The composed command string.
     """
-    flag_parts = _format_flag_parts(flags)
+    flag_parts, flag_overflow_notes = _budget_flag_parts(flags, max_chars)
+    overflow_lines = _overflow_comment_lines(flag_overflow_notes)
     head_part = " ".join([head] + flag_parts)
 
     if not targets:
-        if len(head_part) <= wrap_at:
+        if len(head_part) <= wrap_at and not overflow_lines:
             return head_part
 
-        # Flag list alone exceeds wrap_at — wrap each flag onto its
-        # own line. Common on lint with many `--aspect=` entries.
-        return _join_continued([head] + ["  " + fp for fp in flag_parts])
+        # Flag list alone exceeds wrap_at (or some list-flag values
+        # were dropped) — wrap each flag onto its own line and append
+        # the `# +N more` notes. Common on lint with many `--aspect=`
+        # entries or gazelle with many `--gazelle-flag=-exclude=`.
+        return _join_continued([head] + ["  " + fp for fp in flag_parts] + ["  " + o for o in overflow_lines])
 
     separator = " -- "
     used = len(head_part) + len(separator)
@@ -279,23 +396,29 @@ def _build_command(head, flags, targets, max_chars, wrap_at):
         used += needed
 
     if not included:
-        return head_part + separator + "… +%d more" % omitted
+        single = head_part + separator + "… +%d more" % omitted
+        if not overflow_lines:
+            return single
+        return _join_continued([single] + ["  " + o for o in overflow_lines])
 
     single_line = head_part + separator + " ".join(included)
     if omitted > 0:
         single_line += " … +%d more" % omitted
-    if len(single_line) <= wrap_at:
+    if len(single_line) <= wrap_at and not overflow_lines:
         return single_line
 
     # Multi-line. Wrap flags individually too when head + flags
-    # alone overflow. `# … +N more` is a shell comment so the
-    # wrapped block stays copy-paste-runnable.
-    flag_overflow = len(head_part) + len(" -- \\") > wrap_at
+    # alone overflow, or whenever list-flag values were dropped (the
+    # `# +N more` notes need their own lines). `# … +N more` is a
+    # shell comment so the wrapped block stays copy-paste-runnable.
+    flag_overflow = len(head_part) + len(" -- \\") > wrap_at or bool(overflow_lines)
     lines = []
     if flag_overflow:
         lines.append(head)
         for fp in flag_parts:
             lines.append("  " + fp)
+        for o in overflow_lines:
+            lines.append("  " + o)
         lines.append("  --")
     else:
         lines.append(head_part + " --")
