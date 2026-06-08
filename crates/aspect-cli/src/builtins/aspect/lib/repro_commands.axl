@@ -207,10 +207,16 @@ def _build_run_command(targets, flags, max_chars, wrap_at):
     # `_join_continued` is responsible for the trailing ` \` continuation
     # between lines — don't pre-add it to the head, or the rendered output
     # ends up with `-- \ \` (the literal backslash plus the join's separator).
-    # Flag-overflow notes go above the `--` so they read as part of the head.
-    lines = [head + " --"] + ["  " + o for o in overflow_lines] + ["  " + q for q in included]
+    #
+    # All `# …` markers cluster at the end, after every runnable token: a
+    # comment line terminates the logical command in a pasted shell, so no
+    # target arg may follow one. (`_join_continued` also refuses to put a
+    # trailing `\` on a comment line as a backstop.)
+    lines = [head + " --"] + ["  " + q for q in included]
     if omitted > 0:
         lines.append("  # +%d more" % omitted)
+    for o in overflow_lines:
+        lines.append("  " + o)
     return _join_continued(lines)
 
 def _budget_flag_parts(flags, max_chars):
@@ -409,16 +415,20 @@ def _build_command(head, flags, targets, max_chars, wrap_at):
 
     # Multi-line. Wrap flags individually too when head + flags
     # alone overflow, or whenever list-flag values were dropped (the
-    # `# +N more` notes need their own lines). `# … +N more` is a
-    # shell comment so the wrapped block stays copy-paste-runnable.
+    # `# +N more` notes need their own lines).
+    #
+    # All `# …` markers (dropped flag values AND omitted targets) are
+    # clustered at the very end, after every runnable token. A comment
+    # line terminates the logical command in a pasted shell — anything
+    # after it would run as a separate command — so no `--` or target
+    # may follow a marker. `_join_continued` also refuses to put a
+    # trailing `\` on a comment line as a backstop.
     flag_overflow = len(head_part) + len(" -- \\") > wrap_at or bool(overflow_lines)
     lines = []
     if flag_overflow:
         lines.append(head)
         for fp in flag_parts:
             lines.append("  " + fp)
-        for o in overflow_lines:
-            lines.append("  " + o)
         lines.append("  --")
     else:
         lines.append(head_part + " --")
@@ -426,12 +436,31 @@ def _build_command(head, flags, targets, max_chars, wrap_at):
         lines.append("  " + t)
     if omitted > 0:
         lines.append("  # … +%d more" % omitted)
+    for o in overflow_lines:
+        lines.append("  " + o)
     return _join_continued(lines)
 
 def _join_continued(lines):
-    """Join multi-line shell continuations: all but the last line gain
-    a trailing ` \\`, then `\n` between lines."""
-    return " \\\n".join(lines)
+    """Join `lines` into a multi-line shell continuation: each line but
+    the last gains a trailing ` \\`, joined by `\n`.
+
+    A line whose first non-space character is `#` (a shell comment) is
+    NEVER given a trailing backslash — the `\\` would be swallowed by the
+    comment, silently terminating the logical line so anything after it
+    parses as a separate command. Callers cluster `# +N more …` markers
+    at the end for readability, but this guard makes the join correct
+    regardless of where a comment lands, so a comment can't break the
+    copy-paste repro path.
+    """
+    out = []
+    for i, line in enumerate(lines):
+        last = i == len(lines) - 1
+        is_comment = line.lstrip().startswith("#")
+        if last or is_comment:
+            out.append(line)
+        else:
+            out.append(line + " \\")
+    return "\n".join(out)
 
 def dedup_and_attribute(entries):
     """Collapse `{kind, task_key, command, description}` entries across tasks.

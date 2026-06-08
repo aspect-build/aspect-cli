@@ -454,13 +454,16 @@ def _test_scalars_always_retained_under_truncation(_ctx):
         max_chars = 200,
         wrap_at = 100,
     )
+
     # All three scalars present.
     for needle in ["--severity=info", "--check-only=false", "--scope=changed"]:
         if needle not in got:
             fail("scalar %r dropped under truncation:\n%s" % (needle, got))
+
     # The list flag was clipped, with an attributed comment.
     if "# +" not in got or "--gazelle-flag value" not in got:
         fail("expected `# +N more --gazelle-flag values` note, got:\n%s" % got)
+
     # Not all 60 excludes rendered (some were dropped).
     if got.count("-exclude=dir_") >= 60:
         fail("expected partial inclusion of excludes; all 60 rendered:\n%s" % got)
@@ -482,10 +485,12 @@ def _test_small_list_survives_large_list(_ctx):
         max_chars = 220,
         wrap_at = 100,
     )
+
     # Both small-list values present despite appearing after the big one.
     for needle in ["--scope-all-on-change=BUILD.bazel", "--scope-all-on-change=MODULE.bazel"]:
         if needle not in got:
             fail("small list flag value %r was starved by the large flag:\n%s" % (needle, got))
+
     # The big flag is the one that got clipped.
     if "--gazelle-flag value" not in got:
         fail("expected the large --gazelle-flag to be the clipped one:\n%s" % got)
@@ -535,6 +540,56 @@ def _test_single_value_flag_never_truncated(_ctx):
     )
     if ("--base-ref=" + long_val) not in got:
         fail("single-value flag was truncated (should be retained whole):\n%s" % got)
+
+def _test_overflow_comments_never_carry_continuation(_ctx):
+    """Regression: a command with BOTH overflowing forwarded flags AND
+    targets must keep every `# …` marker AFTER all runnable tokens and
+    must never end a comment line with a trailing ` \\`.
+
+    A `\\` on a comment line is swallowed by the `#`, terminating the
+    logical command — so a `--`/target rendered after the comment would
+    be parsed as a separate shell command, silently breaking the
+    copy-paste repro path. Both `aspect` and `bazel run` shapes."""
+    excludes = ["-exclude=dir_%d/sub/path" % i for i in range(60)]
+
+    for label, got in [
+        ("aspect", build_aspect_command(
+            "gazelle",
+            [("--severity", "info"), ("--gazelle-flag", excludes)],
+            ["tools/go", "services/api"],
+            max_chars = 150,
+            wrap_at = 100,
+        )),
+        ("bazel run", build_bazel_command(
+            "run",
+            ["//tools/gazelle:gazelle", "arg_one", "arg_two"],
+            flags = [("--gazelle-flag", excludes)],
+            max_chars = 150,
+            wrap_at = 100,
+        )),
+    ]:
+        lines = got.split("\n")
+
+        # No comment line ends with a continuation backslash.
+        for line in lines:
+            if line.lstrip().startswith("#") and line.rstrip().endswith("\\"):
+                fail("%s: comment line carries a trailing `\\` (breaks paste):\n%s" % (label, got))
+
+        # Once a comment line appears, no later line may be a runnable
+        # token (a `--` separator or an indented argument). Comments must
+        # be the trailing block.
+        seen_comment = False
+        for line in lines:
+            stripped = line.strip().rstrip("\\").strip()
+            if stripped.startswith("#"):
+                seen_comment = True
+                continue
+            if seen_comment and stripped:
+                fail("%s: runnable token %r appears after a comment marker:\n%s" % (label, stripped, got))
+
+        # Sanity: the test actually exercised the overflow path.
+        if "# +" not in got:
+            fail("%s: expected an overflow marker — test isn't exercising truncation:\n%s" % (label, got))
 
 # ---------------------------------------------------------------------------
 # apply_repro_fix_hooks — user customization hook
@@ -1105,6 +1160,7 @@ _UNIT_TESTS = [
     _test_overflow_note_counts_dropped_values,
     _test_truncation_keeps_command_copy_pasteable,
     _test_single_value_flag_never_truncated,
+    _test_overflow_comments_never_carry_continuation,
     _test_no_handlers_is_noop,
     _test_accept_keeps_entry,
     _test_reject_drops_entry,
