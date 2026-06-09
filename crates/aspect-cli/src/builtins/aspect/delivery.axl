@@ -513,6 +513,7 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
     if not ctx.std.fs.exists(log_path):
         error(ctx.std, "Phase-2 produced no gRPC log; could not checksum delivery digests. Phase-2 raw log: {}".format(phase2_log_path))
         _dump_bazel_stderr(ctx, phase2_log_path)
+        artifacts.upload_file(ctx, "delivery_phase2_log", "phase2-stderr.log", phase2_log_path)
         return {}, {}, phase2_status.code if phase2_status.code != 0 else 1
 
     log_file = ctx.std.fs.open(log_path)
@@ -533,9 +534,9 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
             if mnemonic not in existing:
                 existing.append(mnemonic)
                 misses_by_producer[entry_label] = existing
-    ctx.std.fs.remove_file(log_path)
     _unresolved = len(targets) - len(output_shas)
     if _unresolved == 0:
+        ctx.std.fs.remove_file(log_path)
         print("  Resolved digests for all {} in {}.".format(targets_label, fmt_elapsed(time.monotonic() - _t_phase2)))
     else:
         # Always point at the phase-2 log when anything went unresolved —
@@ -551,6 +552,20 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
             phase2_log_path,
         ))
         _dump_bazel_stderr(ctx, phase2_log_path)
+        # Upload the raw diagnostics so an unresolved digest is debuggable
+        # after the fact. The gRPC log is the ground truth (which
+        # GetActionResult missed); the stderr is the human-readable
+        # companion. No-op off-CI; the gRPC log is removed afterward.
+        #
+        # Unlike the exec-log, this phase runs with --remote_download_outputs
+        # =minimal + require-cached, so the log is GetActionResult/FindMissing
+        # Blobs lookups (digests + statuses) — no command lines or action env.
+        # The residual risk is the remote-cache auth token in RPC call
+        # metadata; uploaded unconditionally on failure as an accepted
+        # tradeoff for debuggability (job-artifact access already gates it).
+        artifacts.upload_file(ctx, "delivery_grpc_log", "phase2-grpc.binpb", log_path)
+        artifacts.upload_file(ctx, "delivery_phase2_log", "phase2-stderr.log", phase2_log_path)
+        ctx.std.fs.remove_file(log_path)
 
     # Filter to misses on actions that did NOT declare a remote-cache
     # opt-out — these are real key-drift symptoms (transient or
@@ -1178,6 +1193,7 @@ def _delivery_impl(ctx):
         if status.code != 0:
             error(ctx.std, "Build failed with exit code {}. Phase-3 raw log: {}".format(status.code, phase3_log_path))
             _dump_bazel_stderr(ctx, phase3_log_path)
+            artifacts.upload_file(ctx, "delivery_phase3_log", "phase3-stderr.log", phase3_log_path)
             for label in delivery_targets:
                 delivery_add_result(
                     data,
