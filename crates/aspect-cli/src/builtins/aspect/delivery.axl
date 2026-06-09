@@ -501,6 +501,16 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
     # the producing target (may be a transitive dep, not a deliverable).
     output_shas = {}
     misses_by_producer = {}
+
+    # Bazel only writes `--remote_grpc_log` once it issues remote RPCs; a
+    # phase-2 that fails before then leaves no log. Don't guess why — surface
+    # the captured phase-2 stderr verbatim, which holds Bazel's own reason.
+    if not ctx.std.fs.exists(log_path):
+        error(ctx.std, "Phase-2 produced no gRPC log ({}); could not checksum delivery digests. Bazel stderr follows:".format(log_path))
+        if ctx.std.fs.exists(phase2_log_path):
+            ctx.std.io.stderr.write(ctx.std.fs.read_to_string(phase2_log_path))
+        return {}, {}, phase2_status.code if phase2_status.code != 0 else 1
+
     log_file = ctx.std.fs.open(log_path)
     for entry in remote.logging.LogEntry().parse_from_delimited(log_file):
         if entry.method_name != "build.bazel.remote.execution.v2.ActionCache/GetActionResult":
