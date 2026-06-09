@@ -307,15 +307,10 @@ _EXECLOG_PATH = "/tmp/aspect-delivery-execlog-{}.bin"
 # `remote_cacheable` field tells us whether the rule declared the opt-out.
 _DELIVERY_HASH_MNEMONIC = "DeliveryHash"
 
-def _dump_phase2_stderr(ctx, phase2_log_path):
-    """Echo the captured phase-2 Bazel stderr to this process's stderr.
-
-    Phase 2 redirects Bazel's stderr to a file (require-cached misses are
-    noisy-but-expected). When digests go unresolved, that file holds Bazel's
-    own diagnosis — print it verbatim rather than guessing the cause. No-op
-    if the file is absent."""
-    if ctx.std.fs.exists(phase2_log_path):
-        ctx.std.io.stderr.write(ctx.std.fs.read_to_string(phase2_log_path))
+def _dump_bazel_stderr(ctx, log_path):
+    """Echo a phase's captured Bazel stderr to this process's stderr."""
+    if ctx.std.fs.exists(log_path):
+        ctx.std.io.stderr.write(ctx.std.fs.read_to_string(log_path))
 
 def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_flags, remote_executor_uri, ansi, data):
     """Run phase 1 (main build) + phase 2 (digest extraction) and return
@@ -517,7 +512,7 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
     # the captured phase-2 stderr verbatim, which holds Bazel's own reason.
     if not ctx.std.fs.exists(log_path):
         error(ctx.std, "Phase-2 produced no gRPC log; could not checksum delivery digests. Phase-2 raw log: {}".format(phase2_log_path))
-        _dump_phase2_stderr(ctx, phase2_log_path)
+        _dump_bazel_stderr(ctx, phase2_log_path)
         return {}, {}, phase2_status.code if phase2_status.code != 0 else 1
 
     log_file = ctx.std.fs.open(log_path)
@@ -555,7 +550,7 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
             _unresolved,
             phase2_log_path,
         ))
-        _dump_phase2_stderr(ctx, phase2_log_path)
+        _dump_bazel_stderr(ctx, phase2_log_path)
 
     # Filter to misses on actions that did NOT declare a remote-cache
     # opt-out — these are real key-drift symptoms (transient or
@@ -1182,6 +1177,7 @@ def _delivery_impl(ctx):
             dispatch_bazel_build_end(ctx, bazel_trait, status.code)
         if status.code != 0:
             error(ctx.std, "Build failed with exit code {}. Phase-3 raw log: {}".format(status.code, phase3_log_path))
+            _dump_bazel_stderr(ctx, phase3_log_path)
             for label in delivery_targets:
                 delivery_add_result(
                     data,
