@@ -307,11 +307,40 @@ _EXECLOG_PATH = "/tmp/aspect-delivery-execlog-{}.bin"
 # `remote_cacheable` field tells us whether the rule declared the opt-out.
 _DELIVERY_HASH_MNEMONIC = "DeliveryHash"
 
+def should_upload_grpc_log(setting: str, unresolved: int) -> bool:
+    """Resolve the --upload-grpc-log tristate against the phase-2 outcome.
+
+    "true" always uploads, "false" never, "auto" only when a digest went
+    unresolved (`unresolved > 0`). Exported for unit testing."""
+    if setting == "true":
+        return True
+    if setting == "false":
+        return False
+    return unresolved > 0
+
+def _surface_phase_stderr(ctx, phase, log_path):
+    """Echo a failing phase's captured Bazel stderr to the console and upload
+    it as a CI artifact (`delivery_phase{phase}_log`).
+
+    Phases 2 and 3 redirect Bazel's stderr to a file rather than the console
+    (phase-2 require-cached misses are noisy-but-expected). On failure that
+    file holds Bazel's own diagnosis, so echo it verbatim and preserve it as
+    a downloadable artifact. The stderr carries no env/command lines, so it
+    uploads unconditionally. No-op if the file is absent or off-CI."""
+    if not ctx.std.fs.exists(log_path):
+        return
+    ctx.std.io.stderr.write(ctx.std.fs.read_to_string(log_path))
+    artifacts.upload_file(ctx, "delivery_phase{}_log".format(phase), "phase{}-stderr.log".format(phase), log_path)
+
 def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_flags, remote_executor_uri, ansi, data):
     """Run phase 1 (main build) + phase 2 (digest extraction) and return
     `(output_shas, non_hermetic_misses, exit_code)`. Phase 1 BES events
     drive the `data` (delivery_results) metadata; phase 2's gRPC log yields
     the per-target action digests used for change detection.
+
+    On a phase-2 failure or any unresolved digest, the captured Bazel stderr
+    is echoed and uploaded as a CI artifact; the gRPC log is uploaded per
+    `ctx.args.upload_grpc_log` ("auto"/"true"/"false"). Uploads no-op off-CI.
     """
     repo_dir = "/tmp/aspect_delivery_" + ctx.task.key
     _write_aspect_repo(ctx, repo_dir)
@@ -501,6 +530,15 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
     # the producing target (may be a transitive dep, not a deliverable).
     output_shas = {}
     misses_by_producer = {}
+
+    # Bazel only writes `--remote_grpc_log` once it issues remote RPCs; a
+    # phase-2 that fails before then leaves no log, so there's nothing to
+    # parse — surface the captured stderr (Bazel's own reason) and bail.
+    if not ctx.std.fs.exists(log_path):
+        error(ctx.std, "Phase-2 produced no gRPC log; could not checksum delivery digests. Phase-2 raw log: {}".format(phase2_log_path))
+        _surface_phase_stderr(ctx, 2, phase2_log_path)
+        return {}, {}, (phase2_status.code if phase2_status.code != 0 else 1)
+
     log_file = ctx.std.fs.open(log_path)
     for entry in remote.logging.LogEntry().parse_from_delimited(log_file):
         if entry.method_name != "build.bazel.remote.execution.v2.ActionCache/GetActionResult":
@@ -519,16 +557,23 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
             if mnemonic not in existing:
                 existing.append(mnemonic)
                 misses_by_producer[entry_label] = existing
-    ctx.std.fs.remove_file(log_path)
     _unresolved = len(targets) - len(output_shas)
+
+    # Preserve the gRPC log (the ground truth for which GetActionResult
+    # missed) as a CI artifact per --upload-grpc-log; see the flag's
+    # description for the gating rationale. No-op off-CI.
+    upload_grpc = ctx.args.upload_grpc_log if hasattr(ctx.args, "upload_grpc_log") else "auto"
+    if should_upload_grpc_log(upload_grpc, _unresolved):
+        artifacts.upload_file(ctx, "delivery_grpc_log", "phase2-grpc.binpb", log_path)
+    ctx.std.fs.remove_file(log_path)
+
     if _unresolved == 0:
         print("  Resolved digests for all {} in {}.".format(targets_label, fmt_elapsed(time.monotonic() - _t_phase2)))
     else:
-        # Always point at the phase-2 log when anything went unresolved —
-        # the gRPC log may contain zero useful entries (auth/network/config
-        # error before any GetActionResult fired), in which case the
-        # per-target row's inline diagnosis can't fire and the log file is
-        # the only diagnostic surface left.
+        # Point at the phase-2 stderr when anything went unresolved: the
+        # gRPC log may hold zero useful entries (an auth/network/config error
+        # before any GetActionResult fired), so the per-target inline
+        # diagnosis can't fire and the stderr is the actionable surface.
         print("  Resolved {} of {} delivery digests in {}; {} could not be hashed. Phase-2 raw log: {}".format(
             len(output_shas),
             len(targets),
@@ -536,6 +581,7 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
             _unresolved,
             phase2_log_path,
         ))
+        _surface_phase_stderr(ctx, 2, phase2_log_path)
 
     # Filter to misses on actions that did NOT declare a remote-cache
     # opt-out — these are real key-drift symptoms (transient or
@@ -1162,6 +1208,7 @@ def _delivery_impl(ctx):
             dispatch_bazel_build_end(ctx, bazel_trait, status.code)
         if status.code != 0:
             error(ctx.std, "Build failed with exit code {}. Phase-3 raw log: {}".format(status.code, phase3_log_path))
+            _surface_phase_stderr(ctx, 3, phase3_log_path)
             for label in delivery_targets:
                 delivery_add_result(
                     data,
@@ -1510,6 +1557,12 @@ Currently \x1b[3monly\x1b[23m supported on Aspect Workflows CI runners. Support 
         "warn_not_runnable": args.boolean(
             default = False,
             description = "Downgrade a non-runnable deliverable from a hard failure (exit 1) to a warning. A target tagged 'deliverable' whose entrypoint has no runfiles tree fails by default. Set this flag if your repo intentionally tags non-executable targets as deliverable.",
+        ),
+        "upload_grpc_log": args.string(
+            default = "auto",
+            values = ["auto", "true", "false"],
+            long = "upload-grpc-log",
+            description = "Whether to upload the phase-2 Bazel gRPC log (--remote_grpc_log) as a CI artifact for debugging change-detection digests. 'auto' (default) uploads only when one or more digests could not be hashed. 'true' always uploads it; 'false' never does. (When phase 2 produces no gRPC log at all, there is nothing to upload regardless of this flag — the captured stderr is uploaded instead.) The require-cached phase logs only GetActionResult/FindMissingBlobs lookups (digests + statuses) — no command lines or action env — but the gRPC call metadata can carry the remote-cache auth token, so the artifact is gated. Requires the Artifact Upload feature and a recognized CI host; no-op otherwise. Per-phase stderr logs are always uploaded on failure regardless of this flag.",
         ),
         "manifest_file": args.string(
             default = "",

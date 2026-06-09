@@ -2,7 +2,7 @@
 Exercise axl
 """
 
-load("@aspect//delivery.axl", delivery_fmt_elapsed = "fmt_elapsed")
+load("@aspect//delivery.axl", delivery_fmt_elapsed = "fmt_elapsed", delivery_should_upload_grpc_log = "should_upload_grpc_log")
 load("@aspect//lib/artifacts.axl", "artifact_name")
 load("@aspect//lib/bazel_results.axl", "compute_reproducer_command", "init_data", "render_check_output", "resolve_aspect_url", "summary_title")
 load(
@@ -1774,6 +1774,23 @@ def test_deliveryd_parse_endpoint(tc: int) -> int:
 
     return tc
 
+def test_delivery_should_upload_grpc_log(tc: int) -> int:
+    """Coverage for the --upload-grpc-log tristate gating predicate."""
+
+    # "true" always uploads, regardless of outcome.
+    tc = test_case(tc, delivery_should_upload_grpc_log("true", 0), "upload-grpc-log: true + resolved → upload")
+    tc = test_case(tc, delivery_should_upload_grpc_log("true", 3), "upload-grpc-log: true + unresolved → upload")
+
+    # "false" never uploads.
+    tc = test_case(tc, not delivery_should_upload_grpc_log("false", 0), "upload-grpc-log: false + resolved → skip")
+    tc = test_case(tc, not delivery_should_upload_grpc_log("false", 3), "upload-grpc-log: false + unresolved → skip")
+
+    # "auto" uploads only when a digest went unresolved.
+    tc = test_case(tc, not delivery_should_upload_grpc_log("auto", 0), "upload-grpc-log: auto + resolved → skip")
+    tc = test_case(tc, delivery_should_upload_grpc_log("auto", 1), "upload-grpc-log: auto + unresolved → upload")
+
+    return tc
+
 def test_build_metadata_lib(tc: int) -> int:
     """Coverage for the pure helpers in lib/build_metadata.axl."""
 
@@ -3057,6 +3074,7 @@ def impl(ctx: TaskContext) -> int:
     tc = test_parse_git_url_name(tc)
     tc = test_sanitize_filename(tc)
     tc = test_deliveryd_parse_endpoint(tc)
+    tc = test_delivery_should_upload_grpc_log(tc)
     tc = test_build_metadata_lib(tc)
     tc = test_severity_for_status(tc)
     tc = test_gazelle_dir_helpers(tc)
