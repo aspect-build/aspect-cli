@@ -1555,7 +1555,7 @@ Currently \x1b[3monly\x1b[23m supported on Aspect Workflows CI runners. Support 
             default = "auto",
             values = ["auto", "true", "false"],
             long = "upload-grpc-log",
-            description = "Whether to upload the phase-2 Bazel gRPC log (--remote_grpc_log) as a CI artifact for debugging change-detection digests. 'auto' (default) uploads only when one or more digests could not be hashed (or phase 2 produced no log). 'true' always uploads it; 'false' never does. The require-cached phase logs only GetActionResult/FindMissingBlobs lookups (digests + statuses) — no command lines or action env — but the gRPC call metadata can carry the remote-cache auth token, so the artifact is gated. Requires the Artifact Upload feature and a recognized CI host; no-op otherwise. Per-phase stderr logs are always uploaded on failure regardless of this flag.",
+            description = "Whether to upload the phase-2 Bazel gRPC log (--remote_grpc_log) as a CI artifact for debugging change-detection digests. 'auto' (default) uploads only when one or more digests could not be hashed. 'true' always uploads it; 'false' never does. (When phase 2 produces no gRPC log at all, there is nothing to upload regardless of this flag — the captured stderr is uploaded instead.) The require-cached phase logs only GetActionResult/FindMissingBlobs lookups (digests + statuses) — no command lines or action env — but the gRPC call metadata can carry the remote-cache auth token, so the artifact is gated. Requires the Artifact Upload feature and a recognized CI host; no-op otherwise. Per-phase stderr logs are always uploaded on failure regardless of this flag.",
         ),
         "manifest_file": args.string(
             default = "",
