@@ -1776,6 +1776,7 @@ def test_deliveryd_parse_endpoint(tc: int) -> int:
 
 def test_delivery_should_upload_grpc_log(tc: int) -> int:
     """Coverage for the --upload-grpc-log tristate gating predicate."""
+
     # "true" always uploads, regardless of outcome.
     tc = test_case(tc, delivery_should_upload_grpc_log("true", 0), "upload-grpc-log: true + resolved → upload")
     tc = test_case(tc, delivery_should_upload_grpc_log("true", 3), "upload-grpc-log: true + unresolved → upload")

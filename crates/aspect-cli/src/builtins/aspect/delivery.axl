@@ -537,7 +537,7 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
     if not ctx.std.fs.exists(log_path):
         error(ctx.std, "Phase-2 produced no gRPC log; could not checksum delivery digests. Phase-2 raw log: {}".format(phase2_log_path))
         _surface_phase_stderr(ctx, 2, phase2_log_path)
-        return {}, {}, phase2_status.code if phase2_status.code != 0 else 1
+        return {}, {}, (phase2_status.code if phase2_status.code != 0 else 1)
 
     log_file = ctx.std.fs.open(log_path)
     for entry in remote.logging.LogEntry().parse_from_delimited(log_file):
