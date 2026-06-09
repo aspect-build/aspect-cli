@@ -317,6 +317,10 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
     `(output_shas, non_hermetic_misses, exit_code)`. Phase 1 BES events
     drive the `data` (delivery_results) metadata; phase 2's gRPC log yields
     the per-target action digests used for change detection.
+
+    On a phase-2 failure or any unresolved digest, the captured Bazel stderr
+    is echoed and uploaded as a CI artifact; the gRPC log is uploaded per
+    `ctx.args.upload_grpc_log` ("auto"/"true"/"false"). Uploads no-op off-CI.
     """
     repo_dir = "/tmp/aspect_delivery_" + ctx.task.key
     _write_aspect_repo(ctx, repo_dir)
@@ -535,6 +539,20 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
                 existing.append(mnemonic)
                 misses_by_producer[entry_label] = existing
     _unresolved = len(targets) - len(output_shas)
+
+    # Upload the phase-2 gRPC log per --upload-grpc-log: "true" always,
+    # "auto" only when a digest went unresolved, "false" never. The log is
+    # the ground truth for which GetActionResult missed. Unlike the
+    # exec-log, this phase runs --remote_download_outputs=minimal +
+    # require-cached, so the log holds only GetActionResult/FindMissingBlobs
+    # lookups (digests + statuses) — no command lines or action env. The
+    # residual risk is the remote-cache auth token in RPC call metadata, so
+    # the upload is gated behind the flag (job-artifact access also gates
+    # who can download it). No-op off-CI.
+    upload_grpc = ctx.args.upload_grpc_log if hasattr(ctx.args, "upload_grpc_log") else "auto"
+    if upload_grpc == "true" or (upload_grpc == "auto" and _unresolved > 0):
+        artifacts.upload_file(ctx, "delivery_grpc_log", "phase2-grpc.binpb", log_path)
+
     if _unresolved == 0:
         ctx.std.fs.remove_file(log_path)
         print("  Resolved digests for all {} in {}.".format(targets_label, fmt_elapsed(time.monotonic() - _t_phase2)))
@@ -552,18 +570,8 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
             phase2_log_path,
         ))
         _dump_bazel_stderr(ctx, phase2_log_path)
-        # Upload the raw diagnostics so an unresolved digest is debuggable
-        # after the fact. The gRPC log is the ground truth (which
-        # GetActionResult missed); the stderr is the human-readable
-        # companion. No-op off-CI; the gRPC log is removed afterward.
-        #
-        # Unlike the exec-log, this phase runs with --remote_download_outputs
-        # =minimal + require-cached, so the log is GetActionResult/FindMissing
-        # Blobs lookups (digests + statuses) — no command lines or action env.
-        # The residual risk is the remote-cache auth token in RPC call
-        # metadata; uploaded unconditionally on failure as an accepted
-        # tradeoff for debuggability (job-artifact access already gates it).
-        artifacts.upload_file(ctx, "delivery_grpc_log", "phase2-grpc.binpb", log_path)
+        # The stderr is the human-readable companion to the gRPC log;
+        # always upload it on failure (low-risk, no env/command lines).
         artifacts.upload_file(ctx, "delivery_phase2_log", "phase2-stderr.log", phase2_log_path)
         ctx.std.fs.remove_file(log_path)
 
@@ -1542,6 +1550,12 @@ Currently \x1b[3monly\x1b[23m supported on Aspect Workflows CI runners. Support 
         "warn_not_runnable": args.boolean(
             default = False,
             description = "Downgrade a non-runnable deliverable from a hard failure (exit 1) to a warning. A target tagged 'deliverable' whose entrypoint has no runfiles tree fails by default. Set this flag if your repo intentionally tags non-executable targets as deliverable.",
+        ),
+        "upload_grpc_log": args.string(
+            default = "auto",
+            values = ["auto", "true", "false"],
+            long = "upload-grpc-log",
+            description = "Whether to upload the phase-2 Bazel gRPC log (--remote_grpc_log) as a CI artifact for debugging change-detection digests. 'auto' (default) uploads only when one or more digests could not be hashed (or phase 2 produced no log). 'true' always uploads it; 'false' never does. The require-cached phase logs only GetActionResult/FindMissingBlobs lookups (digests + statuses) — no command lines or action env — but the gRPC call metadata can carry the remote-cache auth token, so the artifact is gated. Requires the Artifact Upload feature and a recognized CI host; no-op otherwise. Per-phase stderr logs are always uploaded on failure regardless of this flag.",
         ),
         "manifest_file": args.string(
             default = "",
