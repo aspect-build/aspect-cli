@@ -1011,27 +1011,29 @@ def _delivery_impl(ctx):
                            " (Use --mode=always --track-state=false to deliver every target without change detection.)")
             return _emit_final(ctx, lifecycle, data, exit_code = 1)
 
+    # Resolve the delivery set — via a `--query` or from positional
+    # targets — under a single `resolve` phase. The phase update is the
+    # phase's opening bookend, so it's emitted before the query runs (when
+    # there is one); the resolved set is then recorded into `data` within
+    # the same phase and surfaces on the next phase's update.
     query_expr = ctx.args.query
+    task_update(
+        ctx,
+        lifecycle,
+        _pick_status(data, had_failure = False, terminal = False),
+        ProgressStyles(
+            body = "Resolving targets to deliver...",
+            stream = "Resolving targets to deliver",
+        ),
+        kind = "delivery_results",
+        data = data,
+        phase = Phase(name = "resolve", description = "Resolve targets to deliver", emoji = "🎯"),
+        subject = query_expr,
+    )
     if query_expr:
-        # The Bazel query that selects candidates is its own phase, kept
-        # distinct from the `resolve` phase below (which finalizes the set
-        # and prints the summary) so the two don't collapse into one
-        # phase header. It brackets the query progress line and the bazel
-        # spawn disclosure (announce flags below). Echoing the query keeps
-        # the selected set — or a query failure — attributable to it.
-        task_update(
-            ctx,
-            lifecycle,
-            _pick_status(data, had_failure = False, terminal = False),
-            ProgressStyles(
-                body = "Selecting delivery targets via Bazel query...",
-                stream = "Selecting delivery targets via Bazel query",
-            ),
-            kind = "delivery_results",
-            data = data,
-            phase = Phase(name = "select", description = "Select delivery targets via Bazel query", emoji = "🔍"),
-            subject = query_expr,
-        )
+        # Echo the query so the resolved set — or a query failure — is
+        # attributable to it. The spawn disclosure (announce flags) and the
+        # query both fall within the resolve phase opened above.
         info(ctx.std, "Running bazel query: {}".format(query_expr))
         targets = [t.name for t in ctx.bazel.query().raw(query_expr).eval(
             announce_version = announce_version,
@@ -1060,23 +1062,16 @@ def _delivery_impl(ctx):
     # long target list, so the full pattern is fine to pass here.
     data["target_pattern"] = " ".join(list(targets)) if targets else ""
 
-    # Total target count for the "X/N delivered" running compact.
+    # Total target count for the "X/N delivered" running compact. Emit the
+    # resolved set (data + refined subject — the query/requested subject
+    # becomes the concrete label list) without opening a new phase, so it
+    # lands within the resolve phase rather than crossing a boundary.
     data["delivery"]["targets_total"] = len(targets)
-    targets_label = pluralize(len(targets), "target")
-    status = _pick_status(data, had_failure = False, terminal = False)
-    task_update(
-        ctx,
-        lifecycle,
-        status,
-        ProgressStyles(
-            body = "Resolving {} to deliver...".format(targets_label),
-            stream = "Resolving {} to deliver".format(targets_label),
-        ),
+    dispatch_task_update(ctx, lifecycle, TaskUpdate(
         kind = "delivery_results",
         data = data,
-        phase = Phase(name = "resolve", description = "Resolve targets to deliver", emoji = "🎯"),
         subject = data["target_pattern"],
-    )
+    ))
 
     if not targets:
         info(ctx.std, "No targets to deliver")
