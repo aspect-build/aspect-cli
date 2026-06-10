@@ -6,7 +6,7 @@ S3 error response into a diagnosable failure reason — the part that makes
 an expired-credential `400` legible instead of an opaque "curl exit 22".
 """
 
-load("./circleci.axl", "mark_testcases_skipped", "s3_extract_error_code", "s3_upload_error_detail", "session_cache_clear", "session_cache_get", "session_cache_put", "test_results_object_url")
+load("./circleci.axl", "mark_testcases_skipped", "s3_extract_error_code", "s3_extract_error_message", "s3_upload_error_detail", "session_cache_clear", "session_cache_get", "session_cache_put", "test_results_object_url")
 
 def _eq(label, got, want):
     if got != want:
@@ -35,6 +35,20 @@ def _test_extract_unterminated_code(_ctx):
     _eq("unterminated <Code> → empty", s3_extract_error_code("<Code>ExpiredToken"), "")
 
 # ---------------------------------------------------------------------------
+# s3_extract_error_message — pull <Message>…</Message> out of an S3 error body
+# ---------------------------------------------------------------------------
+
+def _test_extract_message(_ctx):
+    body = "<Error><Code>InvalidRequest</Code><Message>The provided header is not signed.</Message></Error>"
+    _eq("Message extracted", s3_extract_error_message(body), "The provided header is not signed.")
+
+def _test_extract_no_message_element(_ctx):
+    _eq("no <Message> → empty", s3_extract_error_message("<Error><Code>InvalidRequest</Code></Error>"), "")
+
+def _test_extract_unterminated_message(_ctx):
+    _eq("unterminated <Message> → empty", s3_extract_error_message("<Message>oops"), "")
+
+# ---------------------------------------------------------------------------
 # s3_upload_error_detail — build the one-line failure reason
 # ---------------------------------------------------------------------------
 
@@ -44,6 +58,16 @@ def _test_detail_expired_token(_ctx):
         "HTTP 400 + ExpiredToken",
         s3_upload_error_detail("400", "", body),
         "S3 upload HTTP 400 (ExpiredToken)",
+    )
+
+def _test_detail_invalid_request_with_message(_ctx):
+    """The customer case: a generic <Code> carries its <Message> so the
+    operator sees *why* the request was malformed, not just `InvalidRequest`."""
+    body = "<Error><Code>InvalidRequest</Code><Message>The Content-MD5 you specified was invalid.</Message></Error>"
+    _eq(
+        "HTTP 400 + InvalidRequest + message",
+        s3_upload_error_detail("400", "", body),
+        "S3 upload HTTP 400 (InvalidRequest): The Content-MD5 you specified was invalid.",
     )
 
 def _test_detail_http_no_code(_ctx):
@@ -169,7 +193,11 @@ _UNIT_TESTS = [
     _test_extract_no_code_element,
     _test_extract_empty_body,
     _test_extract_unterminated_code,
+    _test_extract_message,
+    _test_extract_no_message_element,
+    _test_extract_unterminated_message,
     _test_detail_expired_token,
+    _test_detail_invalid_request_with_message,
     _test_detail_http_no_code,
     _test_detail_transport_error,
     _test_detail_transport_error_newlines_collapsed,
