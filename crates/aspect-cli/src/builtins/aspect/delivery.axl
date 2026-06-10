@@ -1055,18 +1055,15 @@ def _delivery_impl(ctx):
             forced_targets.append(tok)
 
     # Setup opened the surface with the *requested* subject (often a query,
-    # so empty here); now that the target set is resolved, record it. It goes
-    # into the data (so the check-run table reflects the actual targets) and
-    # onto the task_update as a refined `subject` so the surface title updates
-    # from the requested subject to the resolved one. `summary_title` caps a
-    # long target list, so the full pattern is fine to pass here.
+    # so empty here); now that the target set is resolved, record it into
+    # `data` (so the check-run table reflects the actual targets) and refine
+    # the surface `subject` from the requested pattern to the resolved label
+    # list. `summary_title` caps a long list, so the full pattern is fine.
     data["target_pattern"] = " ".join(list(targets)) if targets else ""
-
-    # Total target count for the "X/N delivered" running compact. Emit the
-    # resolved set (data + refined subject — the query/requested subject
-    # becomes the concrete label list) without opening a new phase, so it
-    # lands within the resolve phase rather than crossing a boundary.
     data["delivery"]["targets_total"] = len(targets)
+
+    # Emit within the resolve phase (no `phase`, so no boundary or extra
+    # `→` line) — just latches the resolved data and refined subject.
     dispatch_task_update(ctx, lifecycle, TaskUpdate(
         kind = "delivery_results",
         data = data,
