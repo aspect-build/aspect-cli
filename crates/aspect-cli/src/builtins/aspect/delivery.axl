@@ -1010,10 +1010,8 @@ def _delivery_impl(ctx):
 
     query_expr = ctx.args.query
     if query_expr:
-        # Echo the query before running it: a long expression that hits a
-        # BUILD/syntax error now fails loudly (see bazel.query().eval),
-        # and printing it first makes clear which query produced the
-        # resolved set — or the error.
+        # Echo the query so the resolved set — or a query failure — is
+        # attributable to the expression that produced it.
         info(ctx.std, "Running bazel query: {}".format(query_expr))
         targets = [t.name for t in ctx.bazel.query().raw(query_expr).eval()]
         limit = ctx.args.limit

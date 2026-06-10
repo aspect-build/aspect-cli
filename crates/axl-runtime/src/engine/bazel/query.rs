@@ -140,6 +140,24 @@ impl<'v> values::StarlarkValue<'v> for TargetSet {
     }
 }
 
+/// Build the error for a `bazel query` that exited non-zero.
+///
+/// A failed query (bad expression, BUILD evaluation error, …) must not
+/// be mistaken for one that legitimately matched nothing, so the error
+/// carries Bazel's own `stderr` when it's available. `stderr` is
+/// best-effort: it's trimmed and appended only when non-empty, so a
+/// query that died without writing diagnostics still yields a usable
+/// exit-code message.
+fn query_failure_error(expr: &str, exit_code: Option<i32>, stderr: &str) -> anyhow::Error {
+    let stderr = stderr.trim();
+    let detail = if stderr.is_empty() {
+        String::new()
+    } else {
+        format!("\n{stderr}")
+    };
+    anyhow!("bazel query failed with exit code {exit_code:?}: {expr}{detail}")
+}
+
 #[derive(Debug, Display, ProvidesStaticType, Trace, NoSerialize, Allocative)]
 #[display("<bazel.query.Query>")]
 pub struct Query {
@@ -169,12 +187,9 @@ impl Query {
         let _ = fs::remove_file(&errfile_path);
 
         let outfile = File::create(&out)?;
-        // Capture stderr to a file rather than discarding it. A failed
-        // query (syntax error, BUILD evaluation error, etc.) writes its
-        // diagnostics here and exits non-zero; we surface them below so
-        // the failure isn't silently mistaken for an empty result set.
-        // A file (vs. a piped fd read after wait) sidesteps any
-        // pipe-buffer deadlock on a chatty query.
+        // Capture stderr to a file so a failed query's diagnostics can be
+        // surfaced below. A file (rather than a pipe read after wait)
+        // avoids a pipe-buffer deadlock on a chatty query.
         let errfile = File::create(&errfile_path)?;
 
         cmd.stderr(errfile);
@@ -188,26 +203,12 @@ impl Query {
             super::live::spawn_registered(&mut cmd).with_context(|| "failed to spawn bazel")?;
         let status = child.wait()?;
 
-        // A non-zero exit means the query never produced a valid result
-        // — returning an empty `TargetSet` here would make a failed
-        // query indistinguishable from one that legitimately matched
-        // nothing. Surface Bazel's own stderr so the caller sees the
-        // real cause (bad query expression, BUILD error, …).
         if !status.success() {
             let mut stderr = String::new();
             if let Ok(mut f) = File::open(&errfile_path) {
                 let _ = f.read_to_string(&mut stderr);
             }
-            let stderr = stderr.trim();
-            let detail = if stderr.is_empty() {
-                String::new()
-            } else {
-                format!("\n{stderr}")
-            };
-            return Err(anyhow!(
-                "bazel query failed with exit code {:?}: {expr}{detail}",
-                status.code()
-            ));
+            return Err(query_failure_error(expr, status.code(), &stderr));
         }
 
         let mut buf = vec![];
@@ -308,5 +309,34 @@ pub(crate) fn query_methods(registry: &mut MethodsBuilder) {
         let this = this.downcast_ref_err::<Query>().into_anyhow_result()?;
         let expr = this.expr.borrow();
         Query::query(&expr, &this.startup_flags)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn query_failure_error_includes_stderr_when_present() {
+        let err = query_failure_error("kind('x', //...)", Some(2), "ERROR: no such package\n");
+        let msg = format!("{err}");
+        assert!(msg.contains("exit code Some(2)"), "{msg}");
+        assert!(msg.contains("kind('x', //...)"), "{msg}");
+        assert!(msg.contains("ERROR: no such package"), "{msg}");
+    }
+
+    #[test]
+    fn query_failure_error_omits_empty_stderr() {
+        let err = query_failure_error("//...", Some(1), "   \n  ");
+        let msg = format!("{err}");
+        // No dangling separator/newline when there are no diagnostics.
+        assert!(msg.ends_with("//..."), "{msg}");
+    }
+
+    #[test]
+    fn query_failure_error_handles_unknown_exit_code() {
+        // A signal-killed child reports no exit code.
+        let err = query_failure_error("//...", None, "");
+        assert!(format!("{err}").contains("exit code None"));
     }
 }
