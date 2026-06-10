@@ -633,7 +633,11 @@ fn payload_discriminant(p: &axl_proto::build_event_stream::build_event::Payload)
 /// plain text when stderr isn't a TTY and we're not on a recognized CI host
 /// — matching the gate used elsewhere in the runtime (see
 /// `multi_phase::running_verb_color`).
-fn announce_spawn(announce: AnnounceSpawn, version: Option<&semver::Version>, cmd: &Command) {
+pub(super) fn announce_spawn(
+    announce: AnnounceSpawn,
+    version: Option<&semver::Version>,
+    cmd: &Command,
+) {
     let (grey, reset) = grey_style();
     if announce.version {
         eprintln!("{grey}INFO: {}{reset}", version_line(version));

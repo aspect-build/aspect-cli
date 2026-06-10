@@ -51,14 +51,14 @@ Combination matrix
 
 Each cell says whether each pipeline stage runs:
 
-  Combination                                       phase 1/2  phase 3  record  query  run  deliver
-  --mode=selective (default)                            ✓         ✓       ✓      ✓     ✓     ✓
-  --mode=selective --dry-run                            ✓         ✓       ✓      ✓     —     —
+  Combination                                       phase 1/2  phase 3  record  detect  run  deliver
+  --mode=selective (default)                            ✓         ✓       ✓       ✓     ✓     ✓
+  --mode=selective --dry-run                            ✓         ✓       ✓       ✓     —     —
   --mode=selective --track-state=false                  rejected at startup
-  --mode=always                                      ✓         ✓       ✓      —     ✓     ✓
-  --mode=always --dry-run                            ✓         ✓       ✓      —     —     —
-  --mode=always --track-state=false                  —         ✓       —      —     ✓     —
-  --mode=always --dry-run --track-state=false      optional¹   —       —      —     —     —
+  --mode=always                                      ✓         ✓       ✓        —     ✓     ✓
+  --mode=always --dry-run                            ✓         ✓       ✓        —     —     —
+  --mode=always --track-state=false                  —         ✓       —        —     ✓     —
+  --mode=always --dry-run --track-state=false      optional¹   —       —        —     —     —
 
 ¹ Best-effort preview — this is the only combination tolerant of a missing
   remote cache. If a remote cache is configured, action digests are computed
@@ -92,8 +92,11 @@ Failure modes
                                                     --track-state=true also
                                                     rolls back the recorded
                                                     artifact
-  --query resolves to no targets                  prints "No targets to
+  --query matches no targets                      prints "No targets to
                                                     deliver" and returns 0
+  --query fails (bad expr, BUILD error)           propagates Bazel's stderr
+                                                    and exit code (not a
+                                                    silent empty result)
 
 
 Manifest
@@ -388,22 +391,12 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
         phase1_execlog_path = _EXECLOG_PATH.format(ctx.task.key)
         phase1_execlog_sinks = list(bazel_trait.execution_log_sinks)
         phase1_execlog_sinks.append(bazel.execution_log.file(path = phase1_execlog_path))
-        build = ctx.bazel.build(
-            flags = phase1_flags,
-            build_events = [events] + build_events,
-            execution_log = phase1_execlog_sinks,
-            announce_version = announce_version,
-            announce_command = announce_command,
-            *targets
-        )
 
-        # Phase 1's sink UUID drives the "✨ Aspect Workflows" link in
-        # the BK annotation / status check. Retries overwrite it.
-        data["sink_invocation_id"] = build.sink_invocation_id
-
-        # Phase 1 inherits the CLI's stdout/stderr (unlike phase 2/3), so
-        # this announce is the only "we're working" signal during the
-        # potentially-minutes-long build.
+        # Advertise the build phase before spawning bazel so the phase
+        # header precedes the spawn disclosure (announce flags below) and
+        # the potentially-minutes-long build output. Phase 1 inherits the
+        # CLI's stdout/stderr (unlike phase 2/3), so this is the only
+        # "we're working" signal during the build.
         targets_label = pluralize(len(targets), "target")
         status = _pick_status(data, had_failure = False, terminal = False)
         if attempt == 0:
@@ -436,6 +429,19 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
                     emoji = "🔨",
                 ),
             )
+
+        build = ctx.bazel.build(
+            flags = phase1_flags,
+            build_events = [events] + build_events,
+            execution_log = phase1_execlog_sinks,
+            announce_version = announce_version,
+            announce_command = announce_command,
+            *targets
+        )
+
+        # Phase 1's sink UUID drives the "✨ Aspect Workflows" link in
+        # the BK annotation / status check. Retries overwrite it.
+        data["sink_invocation_id"] = build.sink_invocation_id
 
         # Tick-driven drain: fires a heartbeat refresh every
         # MIN_HEARTBEAT_INTERVAL_MS even when bazel is silent.
@@ -1005,9 +1011,34 @@ def _delivery_impl(ctx):
                            " (Use --mode=always --track-state=false to deliver every target without change detection.)")
             return _emit_final(ctx, lifecycle, data, exit_code = 1)
 
+    # Resolve the delivery set — via a `--query` or from positional
+    # targets — under a single `resolve` phase. The phase update is the
+    # phase's opening bookend, so it's emitted before the query runs (when
+    # there is one); the resolved set is then recorded into `data` within
+    # the same phase and surfaces on the next phase's update.
     query_expr = ctx.args.query
+    task_update(
+        ctx,
+        lifecycle,
+        _pick_status(data, had_failure = False, terminal = False),
+        ProgressStyles(
+            body = "Resolving targets to deliver...",
+            stream = "Resolving targets to deliver",
+        ),
+        kind = "delivery_results",
+        data = data,
+        phase = Phase(name = "resolve", description = "Resolve targets to deliver", emoji = "🎯"),
+        subject = query_expr,
+    )
     if query_expr:
-        targets = [t.name for t in ctx.bazel.query().raw(query_expr).eval()]
+        # Echo the query so the resolved set — or a query failure — is
+        # attributable to it. The spawn disclosure (announce flags) and the
+        # query both fall within the resolve phase opened above.
+        info(ctx.std, "Running bazel query: {}".format(query_expr))
+        targets = [t.name for t in ctx.bazel.query().raw(query_expr).eval(
+            announce_version = announce_version,
+            announce_command = announce_command,
+        )]
         limit = ctx.args.limit
         if limit > 0:
             targets = targets[:limit]
@@ -1024,30 +1055,20 @@ def _delivery_impl(ctx):
             forced_targets.append(tok)
 
     # Setup opened the surface with the *requested* subject (often a query,
-    # so empty here); now that the target set is resolved, record it. It goes
-    # into the data (so the check-run table reflects the actual targets) and
-    # onto the task_update as a refined `subject` so the surface title updates
-    # from the requested subject to the resolved one. `summary_title` caps a
-    # long target list, so the full pattern is fine to pass here.
+    # so empty here); now that the target set is resolved, record it into
+    # `data` (so the check-run table reflects the actual targets) and refine
+    # the surface `subject` from the requested pattern to the resolved label
+    # list. `summary_title` caps a long list, so the full pattern is fine.
     data["target_pattern"] = " ".join(list(targets)) if targets else ""
-
-    # Total target count for the "X/N delivered" running compact.
     data["delivery"]["targets_total"] = len(targets)
-    targets_label = pluralize(len(targets), "target")
-    status = _pick_status(data, had_failure = False, terminal = False)
-    task_update(
-        ctx,
-        lifecycle,
-        status,
-        ProgressStyles(
-            body = "Resolving {} to deliver...".format(targets_label),
-            stream = "Resolving {} to deliver".format(targets_label),
-        ),
+
+    # Emit within the resolve phase (no `phase`, so no boundary or extra
+    # `→` line) — just latches the resolved data and refined subject.
+    dispatch_task_update(ctx, lifecycle, TaskUpdate(
         kind = "delivery_results",
         data = data,
-        phase = Phase(name = "resolve", description = "Resolve targets to deliver", emoji = "🎯"),
         subject = data["target_pattern"],
-    )
+    ))
 
     if not targets:
         info(ctx.std, "No targets to deliver")
@@ -1113,8 +1134,10 @@ def _delivery_impl(ctx):
             if label in output_shas:
                 deliveryd_record(ctx, endpoint, ci_host, commit_sha, prefix, label, output_shas[label])
 
-    # Query deliveryd. Skipped when --track-state=false (no endpoint) or
-    # in --mode=always (every target is a candidate regardless of state).
+    # Change detection: query deliveryd for prior-delivery state, then
+    # filter below to the targets that actually changed. Skipped when
+    # --track-state=false (no endpoint) or --mode=always (every target is
+    # a candidate regardless of state).
     if track_state and mode != "always":
         status = _pick_status(data, had_failure = False, terminal = False)
         task_update(
@@ -1122,12 +1145,12 @@ def _delivery_impl(ctx):
             lifecycle,
             status,
             ProgressStyles(
-                body = "Checking which targets have already been delivered...",
-                stream = "Checking which targets have already been delivered",
+                body = "Detecting which targets have already been delivered...",
+                stream = "Detecting which targets have already been delivered",
             ),
             kind = "delivery_results",
             data = data,
-            phase = Phase(name = "query", description = "Query delivery state", emoji = "❓"),
+            phase = Phase(name = "detect", description = "Detect already-delivered targets", emoji = "🔬"),
         )
         delivery_state = deliveryd_query(ctx, endpoint, ci_host, commit_sha, prefix)
     else:

@@ -140,6 +140,24 @@ impl<'v> values::StarlarkValue<'v> for TargetSet {
     }
 }
 
+/// Build the error for a `bazel query` that exited non-zero.
+///
+/// A failed query (bad expression, BUILD evaluation error, …) must not
+/// be mistaken for one that legitimately matched nothing, so the error
+/// carries Bazel's own `stderr` when it's available. `stderr` is
+/// best-effort: it's trimmed and appended only when non-empty, so a
+/// query that died without writing diagnostics still yields a usable
+/// exit-code message.
+fn query_failure_error(expr: &str, exit_code: Option<i32>, stderr: &str) -> anyhow::Error {
+    let stderr = stderr.trim();
+    let detail = if stderr.is_empty() {
+        String::new()
+    } else {
+        format!("\n{stderr}")
+    };
+    anyhow!("bazel query failed with exit code {exit_code:?}: {expr}{detail}")
+}
+
 #[derive(Debug, Display, ProvidesStaticType, Trace, NoSerialize, Allocative)]
 #[display("<bazel.query.Query>")]
 pub struct Query {
@@ -157,7 +175,11 @@ impl Query {
         }
     }
 
-    pub fn query(expr: &str, startup_flags: &[String]) -> anyhow::Result<TargetSet> {
+    pub fn query(
+        expr: &str,
+        startup_flags: &[String],
+        announce: super::build::AnnounceSpawn,
+    ) -> anyhow::Result<TargetSet> {
         let mut cmd = super::bazel_command();
         cmd.args(startup_flags);
         cmd.arg("query");
@@ -165,19 +187,47 @@ impl Query {
         cmd.arg("--output=streamed_proto");
         let out = temp_dir().join("query.bin");
         let _ = fs::remove_file(&out);
+        let errfile_path = temp_dir().join("query.err");
+        let _ = fs::remove_file(&errfile_path);
 
         let outfile = File::create(&out)?;
+        // Capture stderr to a file so a failed query's diagnostics can be
+        // surfaced below. A file (rather than a pipe read after wait)
+        // avoids a pipe-buffer deadlock on a chatty query.
+        let errfile = File::create(&errfile_path)?;
 
-        cmd.stderr(Stdio::null());
+        cmd.stderr(errfile);
         cmd.stdout(outfile);
         cmd.stdin(Stdio::null());
+
+        // Mirror the build/test spawn disclosure: the version line costs an
+        // extra `bazel info`, so only pay for it when actually announcing.
+        if announce.version || announce.command {
+            let version = if announce.version {
+                super::info::server_info_with_startup_flags(startup_flags)
+                    .ok()
+                    .and_then(|(_pid, version)| version)
+            } else {
+                None
+            };
+            super::build::announce_spawn(announce, version.as_ref(), &cmd);
+        }
+
         // Register with the live-bazel registry so a CI cancel
         // (SIGINT/SIGTERM to aspect-cli) escalates to the bazel
         // client. Large queries can run for many seconds; without
         // registration they'd outlive an aborted aspect-cli.
         let (mut child, _guard) =
             super::live::spawn_registered(&mut cmd).with_context(|| "failed to spawn bazel")?;
-        child.wait()?;
+        let status = child.wait()?;
+
+        if !status.success() {
+            let mut stderr = String::new();
+            if let Ok(mut f) = File::open(&errfile_path) {
+                let _ = f.read_to_string(&mut stderr);
+            }
+            return Err(query_failure_error(expr, status.code(), &stderr));
+        }
 
         let mut buf = vec![];
         File::open(&out)?.read_to_end(&mut buf)?;
@@ -268,9 +318,58 @@ pub(crate) fn query_methods(registry: &mut MethodsBuilder) {
     ///     .kind("source file")
     ///     .eval()
     /// ```
-    fn eval<'v>(this: values::Value<'v>) -> anyhow::Result<TargetSet> {
+    ///
+    /// Fails with Bazel's own stderr if the query exits non-zero (bad
+    /// expression, BUILD evaluation error, …), rather than returning an
+    /// empty target set — a failed query is not the same as one that
+    /// matched nothing.
+    ///
+    /// # Arguments
+    /// * `announce_version` - Print an `INFO: Bazel <version>` line before
+    ///   spawning. Resolved from the `--announce-bazel-version` task flag.
+    /// * `announce_command` - Print an `INFO: Spawning: <command>` line
+    ///   before spawning. Resolved from the `--announce-bazel-command` task
+    ///   flag. Both mirror the `ctx.bazel.build` / `.test` disclosure.
+    fn eval<'v>(
+        this: values::Value<'v>,
+        #[starlark(require = named, default = false)] announce_version: bool,
+        #[starlark(require = named, default = false)] announce_command: bool,
+    ) -> anyhow::Result<TargetSet> {
         let this = this.downcast_ref_err::<Query>().into_anyhow_result()?;
         let expr = this.expr.borrow();
-        Query::query(&expr, &this.startup_flags)
+        let announce = super::build::AnnounceSpawn {
+            version: announce_version,
+            command: announce_command,
+        };
+        Query::query(&expr, &this.startup_flags, announce)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn query_failure_error_includes_stderr_when_present() {
+        let err = query_failure_error("kind('x', //...)", Some(2), "ERROR: no such package\n");
+        let msg = format!("{err}");
+        assert!(msg.contains("exit code Some(2)"), "{msg}");
+        assert!(msg.contains("kind('x', //...)"), "{msg}");
+        assert!(msg.contains("ERROR: no such package"), "{msg}");
+    }
+
+    #[test]
+    fn query_failure_error_omits_empty_stderr() {
+        let err = query_failure_error("//...", Some(1), "   \n  ");
+        let msg = format!("{err}");
+        // No dangling separator/newline when there are no diagnostics.
+        assert!(msg.ends_with("//..."), "{msg}");
+    }
+
+    #[test]
+    fn query_failure_error_handles_unknown_exit_code() {
+        // A signal-killed child reports no exit code.
+        let err = query_failure_error("//...", None, "");
+        assert!(format!("{err}").contains("exit code None"));
     }
 }
