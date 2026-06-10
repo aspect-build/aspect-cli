@@ -165,10 +165,19 @@ impl Query {
         cmd.arg("--output=streamed_proto");
         let out = temp_dir().join("query.bin");
         let _ = fs::remove_file(&out);
+        let errfile_path = temp_dir().join("query.err");
+        let _ = fs::remove_file(&errfile_path);
 
         let outfile = File::create(&out)?;
+        // Capture stderr to a file rather than discarding it. A failed
+        // query (syntax error, BUILD evaluation error, etc.) writes its
+        // diagnostics here and exits non-zero; we surface them below so
+        // the failure isn't silently mistaken for an empty result set.
+        // A file (vs. a piped fd read after wait) sidesteps any
+        // pipe-buffer deadlock on a chatty query.
+        let errfile = File::create(&errfile_path)?;
 
-        cmd.stderr(Stdio::null());
+        cmd.stderr(errfile);
         cmd.stdout(outfile);
         cmd.stdin(Stdio::null());
         // Register with the live-bazel registry so a CI cancel
@@ -177,7 +186,29 @@ impl Query {
         // registration they'd outlive an aborted aspect-cli.
         let (mut child, _guard) =
             super::live::spawn_registered(&mut cmd).with_context(|| "failed to spawn bazel")?;
-        child.wait()?;
+        let status = child.wait()?;
+
+        // A non-zero exit means the query never produced a valid result
+        // — returning an empty `TargetSet` here would make a failed
+        // query indistinguishable from one that legitimately matched
+        // nothing. Surface Bazel's own stderr so the caller sees the
+        // real cause (bad query expression, BUILD error, …).
+        if !status.success() {
+            let mut stderr = String::new();
+            if let Ok(mut f) = File::open(&errfile_path) {
+                let _ = f.read_to_string(&mut stderr);
+            }
+            let stderr = stderr.trim();
+            let detail = if stderr.is_empty() {
+                String::new()
+            } else {
+                format!("\n{stderr}")
+            };
+            return Err(anyhow!(
+                "bazel query failed with exit code {:?}: {expr}{detail}",
+                status.code()
+            ));
+        }
 
         let mut buf = vec![];
         File::open(&out)?.read_to_end(&mut buf)?;
@@ -268,6 +299,11 @@ pub(crate) fn query_methods(registry: &mut MethodsBuilder) {
     ///     .kind("source file")
     ///     .eval()
     /// ```
+    ///
+    /// Fails with Bazel's own stderr if the query exits non-zero (bad
+    /// expression, BUILD evaluation error, …), rather than returning an
+    /// empty target set — a failed query is not the same as one that
+    /// matched nothing.
     fn eval<'v>(this: values::Value<'v>) -> anyhow::Result<TargetSet> {
         let this = this.downcast_ref_err::<Query>().into_anyhow_result()?;
         let expr = this.expr.borrow();

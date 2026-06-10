@@ -92,8 +92,11 @@ Failure modes
                                                     --track-state=true also
                                                     rolls back the recorded
                                                     artifact
-  --query resolves to no targets                  prints "No targets to
+  --query matches no targets                      prints "No targets to
                                                     deliver" and returns 0
+  --query fails (bad expr, BUILD error)           propagates Bazel's stderr
+                                                    and exit code (not a
+                                                    silent empty result)
 
 
 Manifest
@@ -1007,6 +1010,11 @@ def _delivery_impl(ctx):
 
     query_expr = ctx.args.query
     if query_expr:
+        # Echo the query before running it: a long expression that hits a
+        # BUILD/syntax error now fails loudly (see bazel.query().eval),
+        # and printing it first makes clear which query produced the
+        # resolved set — or the error.
+        info(ctx.std, "Running bazel query: {}".format(query_expr))
         targets = [t.name for t in ctx.bazel.query().raw(query_expr).eval()]
         limit = ctx.args.limit
         if limit > 0:
