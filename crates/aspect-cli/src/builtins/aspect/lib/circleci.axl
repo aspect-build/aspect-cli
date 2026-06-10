@@ -148,6 +148,19 @@ def session_cache_clear(cache):
     if cache != None and "session" in cache:
         cache.pop("session")
 
+def _s3_extract_element(body, tag):
+    """Pull the text of the first `<tag>…</tag>` from an S3 error body, or ""."""
+    open_tag = "<" + tag + ">"
+    close_tag = "</" + tag + ">"
+    start = body.find(open_tag)
+    if start == -1:
+        return ""
+    start += len(open_tag)
+    end = body.find(close_tag, start)
+    if end == -1:
+        return ""
+    return body[start:end]
+
 def s3_extract_error_code(body):
     """Pull the `<Code>…</Code>` value out of an S3 error response body.
 
@@ -159,30 +172,39 @@ def s3_extract_error_code(body):
     Public (not `_`-prefixed) so `circleci_test.axl` can load it; Starlark
     forbids loading underscore-private symbols.
     """
-    start = body.find("<Code>")
-    if start == -1:
-        return ""
-    start += len("<Code>")
-    end = body.find("</Code>", start)
-    if end == -1:
-        return ""
-    return body[start:end]
+    return _s3_extract_element(body, "Code")
+
+def s3_extract_error_message(body):
+    """Pull the `<Message>…</Message>` value out of an S3 error response body.
+
+    The `<Message>` says *why* the request failed in prose — for a generic
+    `<Code>` like `InvalidRequest` it's the only thing that names the
+    offending header or element (e.g. "The provided 'x-amz-…' header is
+    not signed"). Returns "" when absent. Public so `circleci_test.axl`
+    can load it.
+    """
+    return _s3_extract_element(body, "Message")
 
 def s3_upload_error_detail(http_code, curl_err, body):
     """Build a one-line failure reason from a curl/S3 upload attempt.
 
-    Prefers the HTTP status + parsed S3 `<Code>` ("S3 upload HTTP 400
-    (ExpiredToken)") so an expired credential reads as exactly that. Falls
-    back to curl's stderr for transport-level failures (no HTTP response,
-    `http_code == "000"`).
+    Prefers the HTTP status + parsed S3 `<Code>` and `<Message>` ("S3
+    upload HTTP 400 (InvalidRequest): <message>") so a credential expiry
+    reads as `ExpiredToken` and a malformed request carries S3's prose
+    reason — the only thing that names the offending header/element behind
+    a generic `<Code>`. Falls back to curl's stderr for transport-level
+    failures (no HTTP response, `http_code == "000"`).
 
     Public (not `_`-prefixed) so `circleci_test.axl` can load it.
     """
     code = s3_extract_error_code(body)
+    message = s3_extract_error_message(body)
     if http_code and http_code != "000":
         detail = "S3 upload HTTP " + http_code
         if code:
             detail = detail + " (" + code + ")"
+        if message:
+            detail = detail + ": " + message
         return detail
     if curl_err:
         return "curl transport error: " + curl_err.replace("\n", " ")
