@@ -51,14 +51,14 @@ Combination matrix
 
 Each cell says whether each pipeline stage runs:
 
-  Combination                                       phase 1/2  phase 3  record  query  run  deliver
-  --mode=selective (default)                            ✓         ✓       ✓      ✓     ✓     ✓
-  --mode=selective --dry-run                            ✓         ✓       ✓      ✓     —     —
+  Combination                                       phase 1/2  phase 3  record  detect  run  deliver
+  --mode=selective (default)                            ✓         ✓       ✓       ✓     ✓     ✓
+  --mode=selective --dry-run                            ✓         ✓       ✓       ✓     —     —
   --mode=selective --track-state=false                  rejected at startup
-  --mode=always                                      ✓         ✓       ✓      —     ✓     ✓
-  --mode=always --dry-run                            ✓         ✓       ✓      —     —     —
-  --mode=always --track-state=false                  —         ✓       —      —     ✓     —
-  --mode=always --dry-run --track-state=false      optional¹   —       —      —     —     —
+  --mode=always                                      ✓         ✓       ✓        —     ✓     ✓
+  --mode=always --dry-run                            ✓         ✓       ✓        —     —     —
+  --mode=always --track-state=false                  —         ✓       —        —     ✓     —
+  --mode=always --dry-run --track-state=false      optional¹   —       —        —     —     —
 
 ¹ Best-effort preview — this is the only combination tolerant of a missing
   remote cache. If a remote cache is configured, action digests are computed
@@ -391,22 +391,12 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
         phase1_execlog_path = _EXECLOG_PATH.format(ctx.task.key)
         phase1_execlog_sinks = list(bazel_trait.execution_log_sinks)
         phase1_execlog_sinks.append(bazel.execution_log.file(path = phase1_execlog_path))
-        build = ctx.bazel.build(
-            flags = phase1_flags,
-            build_events = [events] + build_events,
-            execution_log = phase1_execlog_sinks,
-            announce_version = announce_version,
-            announce_command = announce_command,
-            *targets
-        )
 
-        # Phase 1's sink UUID drives the "✨ Aspect Workflows" link in
-        # the BK annotation / status check. Retries overwrite it.
-        data["sink_invocation_id"] = build.sink_invocation_id
-
-        # Phase 1 inherits the CLI's stdout/stderr (unlike phase 2/3), so
-        # this announce is the only "we're working" signal during the
-        # potentially-minutes-long build.
+        # Advertise the build phase before spawning bazel so the phase
+        # header precedes the spawn disclosure (announce flags below) and
+        # the potentially-minutes-long build output. Phase 1 inherits the
+        # CLI's stdout/stderr (unlike phase 2/3), so this is the only
+        # "we're working" signal during the build.
         targets_label = pluralize(len(targets), "target")
         status = _pick_status(data, had_failure = False, terminal = False)
         if attempt == 0:
@@ -439,6 +429,19 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
                     emoji = "🔨",
                 ),
             )
+
+        build = ctx.bazel.build(
+            flags = phase1_flags,
+            build_events = [events] + build_events,
+            execution_log = phase1_execlog_sinks,
+            announce_version = announce_version,
+            announce_command = announce_command,
+            *targets
+        )
+
+        # Phase 1's sink UUID drives the "✨ Aspect Workflows" link in
+        # the BK annotation / status check. Retries overwrite it.
+        data["sink_invocation_id"] = build.sink_invocation_id
 
         # Tick-driven drain: fires a heartbeat refresh every
         # MIN_HEARTBEAT_INTERVAL_MS even when bazel is silent.
@@ -1139,8 +1142,10 @@ def _delivery_impl(ctx):
             if label in output_shas:
                 deliveryd_record(ctx, endpoint, ci_host, commit_sha, prefix, label, output_shas[label])
 
-    # Query deliveryd. Skipped when --track-state=false (no endpoint) or
-    # in --mode=always (every target is a candidate regardless of state).
+    # Change detection: query deliveryd for prior-delivery state, then
+    # filter below to the targets that actually changed. Skipped when
+    # --track-state=false (no endpoint) or --mode=always (every target is
+    # a candidate regardless of state).
     if track_state and mode != "always":
         status = _pick_status(data, had_failure = False, terminal = False)
         task_update(
@@ -1148,12 +1153,12 @@ def _delivery_impl(ctx):
             lifecycle,
             status,
             ProgressStyles(
-                body = "Checking which targets have already been delivered...",
-                stream = "Checking which targets have already been delivered",
+                body = "Detecting which targets have already been delivered...",
+                stream = "Detecting which targets have already been delivered",
             ),
             kind = "delivery_results",
             data = data,
-            phase = Phase(name = "query", description = "Query delivery state", emoji = "❓"),
+            phase = Phase(name = "detect", description = "Detect already-delivered targets", emoji = "🔬"),
         )
         delivery_state = deliveryd_query(ctx, endpoint, ci_host, commit_sha, prefix)
     else:
