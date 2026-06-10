@@ -1010,10 +1010,28 @@ def _delivery_impl(ctx):
 
     query_expr = ctx.args.query
     if query_expr:
-        # Echo the query so the resolved set — or a query failure — is
-        # attributable to the expression that produced it.
+        # Open the resolve phase before the query spawns so its progress
+        # line and the bazel spawn disclosure (announce flags below) are
+        # bracketed by the phase. Echoing the query keeps the resolved set
+        # — or a query failure — attributable to the expression.
+        task_update(
+            ctx,
+            lifecycle,
+            _pick_status(data, had_failure = False, terminal = False),
+            ProgressStyles(
+                body = "Querying targets to deliver...",
+                stream = "Querying targets to deliver",
+            ),
+            kind = "delivery_results",
+            data = data,
+            phase = Phase(name = "resolve", description = "Resolve targets to deliver", emoji = "🎯"),
+            subject = query_expr,
+        )
         info(ctx.std, "Running bazel query: {}".format(query_expr))
-        targets = [t.name for t in ctx.bazel.query().raw(query_expr).eval()]
+        targets = [t.name for t in ctx.bazel.query().raw(query_expr).eval(
+            announce_version = announce_version,
+            announce_command = announce_command,
+        )]
         limit = ctx.args.limit
         if limit > 0:
             targets = targets[:limit]

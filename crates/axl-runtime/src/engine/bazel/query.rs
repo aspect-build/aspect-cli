@@ -175,7 +175,11 @@ impl Query {
         }
     }
 
-    pub fn query(expr: &str, startup_flags: &[String]) -> anyhow::Result<TargetSet> {
+    pub fn query(
+        expr: &str,
+        startup_flags: &[String],
+        announce: super::build::AnnounceSpawn,
+    ) -> anyhow::Result<TargetSet> {
         let mut cmd = super::bazel_command();
         cmd.args(startup_flags);
         cmd.arg("query");
@@ -195,6 +199,20 @@ impl Query {
         cmd.stderr(errfile);
         cmd.stdout(outfile);
         cmd.stdin(Stdio::null());
+
+        // Mirror the build/test spawn disclosure: the version line costs an
+        // extra `bazel info`, so only pay for it when actually announcing.
+        if announce.version || announce.command {
+            let version = if announce.version {
+                super::info::server_info_with_startup_flags(startup_flags)
+                    .ok()
+                    .and_then(|(_pid, version)| version)
+            } else {
+                None
+            };
+            super::build::announce_spawn(announce, version.as_ref(), &cmd);
+        }
+
         // Register with the live-bazel registry so a CI cancel
         // (SIGINT/SIGTERM to aspect-cli) escalates to the bazel
         // client. Large queries can run for many seconds; without
@@ -305,10 +323,25 @@ pub(crate) fn query_methods(registry: &mut MethodsBuilder) {
     /// expression, BUILD evaluation error, …), rather than returning an
     /// empty target set — a failed query is not the same as one that
     /// matched nothing.
-    fn eval<'v>(this: values::Value<'v>) -> anyhow::Result<TargetSet> {
+    ///
+    /// # Arguments
+    /// * `announce_version` - Print an `INFO: Bazel <version>` line before
+    ///   spawning. Resolved from the `--announce-bazel-version` task flag.
+    /// * `announce_command` - Print an `INFO: Spawning: <command>` line
+    ///   before spawning. Resolved from the `--announce-bazel-command` task
+    ///   flag. Both mirror the `ctx.bazel.build` / `.test` disclosure.
+    fn eval<'v>(
+        this: values::Value<'v>,
+        #[starlark(require = named, default = false)] announce_version: bool,
+        #[starlark(require = named, default = false)] announce_command: bool,
+    ) -> anyhow::Result<TargetSet> {
         let this = this.downcast_ref_err::<Query>().into_anyhow_result()?;
         let expr = this.expr.borrow();
-        Query::query(&expr, &this.startup_flags)
+        let announce = super::build::AnnounceSpawn {
+            version: announce_version,
+            command: announce_command,
+        };
+        Query::query(&expr, &this.startup_flags, announce)
     }
 }
 
