@@ -295,15 +295,19 @@ _gitlab = struct(
 #                  (rolling-replace; GitHub only — others ignore)
 #   download_url — direct download URL for the latest archive (when stable)
 #   label_urls   — {label: {filename: url}} for per-file strategies
-#   _printed_errors — set of error strings already printed (dedup noise)
 
-def _print_upload_error(ctx, group, err):
-    """Print an upload error at most once per group (dedup noisy repeats)."""
-    seen = group.get("_printed_errors") or {}
-    if err not in seen:
-        warn(ctx.std, "Artifact upload error: " + err)
-        seen[err] = True
-        group["_printed_errors"] = seen
+def _print_upload_error(ctx, what, err):
+    """Warn that uploading `what` failed with `err`.
+
+    `what` is the artifact — the archive name for the tar/zip strategies,
+    or the per-file destination for the per-file strategy — so an operator
+    can tell which channel and file hit the failure.
+
+    Emitted inline at each failure rather than summarized at build end: a
+    tail summary can be truncated or never reached when uploads (and the
+    build) are failing.
+    """
+    warn(ctx.std, "Artifact upload failed for %s: %s" % (what, err))
 
 def _build_mtree(entries):
     """Mtree spec for tar/zip create. One file per entry, src → dest."""
@@ -360,7 +364,7 @@ def _upload_archive(ctx, provider, group, entries, name, ext, build_archive, fin
     if not final:
         group["version"] -= 1
     for err in result["errors"]:
-        _print_upload_error(ctx, group, err)
+        _print_upload_error(ctx, artifact, err)
     return False
 
 def _upload_testlogs_tar(ctx, provider, group, entries, name, final = False):
@@ -430,7 +434,8 @@ def _upload_testlogs_per_file(ctx, provider, group, entries, name):
     # re-mints on retry.
     session_cache = group.setdefault("circleci_session", {})
     for entry in new_entries:
-        result = provider.upload_artifact(ctx, entry["src"], name + "/" + entry["dest"], cache = session_cache)
+        dest = name + "/" + entry["dest"]
+        result = provider.upload_artifact(ctx, entry["src"], dest, cache = session_cache)
         if result["success"]:
             url = result.get("download_url", "")
             if url and url.startswith("http"):
@@ -441,7 +446,7 @@ def _upload_testlogs_per_file(ctx, provider, group, entries, name):
             any_success = True
         else:
             for err in result["errors"]:
-                _print_upload_error(ctx, group, err)
+                _print_upload_error(ctx, dest, err)
             break
 
     return any_success
