@@ -32,8 +32,6 @@ load(
     "./tips.axl",
     "AspectApiTokenHost",
     "tip_add_aspect_api_token",
-    "tip_add_github_token",
-    "tip_add_github_token_scope",
     "tip_add_id_token_permission",
 )
 
@@ -339,10 +337,7 @@ def _preferred_token_pair(ctx, owner, repo, profile = None, roles = None, existi
     `_authenticate`.
 
     `_authenticate` emits `tip_add_aspect_api_token` (kind + host gated)
-    on the missing-credentials path. `_preferred_token_pair` additionally
-    emits `tip_add_github_token` on GitHub Actions when neither App nor
-    env produces a token, since exporting `GITHUB_TOKEN` is the
-    GHA-specific path to an immediate fallback.
+    on the missing-credentials path.
 
     Pass `existing_app_token` when the caller already minted an App
     token earlier in the same handler to avoid a redundant mint.
@@ -372,7 +367,6 @@ def _preferred_token_pair(ctx, owner, repo, profile = None, roles = None, existi
     if env_token:
         return env_token, None, BUCKET_ENV
 
-    _emit_gha_tip(ctx, tip_add_github_token)
     return None, None, BUCKET_APP
 
 def _authenticate(ctx, owner, repo, profile = None, roles = None, _reason = None):
@@ -2081,13 +2075,13 @@ def _resolve_current_job_url(ctx, token, owner, repo, run_id, fallback_token = N
     fallback retry below uses the flipped bucket.
 
     When `fallback_token` is supplied AND the primary `token` returns a
-    4xx-auth status (401 / 403 / 404), retries with the fallback and
-    accumulates `actions: read` into the `add-github-token-scope` tip.
-    GitHub's docs list `actions: read` as required for the underlying
-    `GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs` endpoint, but
-    in practice GitHub grants `GITHUB_TOKEN` implicit access to its own
-    workflow run's metadata regardless of the `permissions:` block, so
-    the fallback path is dormant on a normally-configured workflow.
+    4xx-auth status (401 / 403 / 404), retries silently with the
+    fallback. GitHub's docs list `actions: read` as required for the
+    underlying `GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs`
+    endpoint, but in practice GitHub grants `GITHUB_TOKEN` implicit
+    access to its own workflow run's metadata regardless of the
+    `permissions:` block, so the fallback path is dormant on a
+    normally-configured workflow.
     """
     if not token or not owner or not repo or not run_id:
         return ""
@@ -2103,12 +2097,6 @@ def _resolve_current_job_url(ctx, token, owner, repo, run_id, fallback_token = N
     fallback_class = BUCKET_ENV if token_class == BUCKET_APP else BUCKET_APP
     success, status_code, body = _do_request(ctx, "GET", url, token, quiet_4xx_auth = has_fallback, token_class = token_class)
     if (not success) and has_fallback and _is_4xx_auth(status_code):
-        _emit_gha_tip(
-            ctx,
-            tip_add_github_token_scope,
-            scopes = "actions: read",
-            endpoints = "GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs",
-        )
         success, status_code, body = _do_request(ctx, "GET", url, fallback_token, token_class = fallback_class)
     if not success or type(body) != "dict":
         return ""
@@ -2145,9 +2133,8 @@ def list_pull_request_files(ctx, token, owner, repo, pull_number, fallback_token
     bucket is the other one.
 
     When `fallback_token` is supplied AND the primary `token` returns a
-    4xx-auth status on the first page, retries with the fallback and
-    accumulates `pull-requests: read` into the `add-github-token-scope`
-    tip. The fallback only triggers on page 1; if pagination starts
+    4xx-auth status on the first page, retries silently with the
+    fallback. The fallback only triggers on page 1; if pagination starts
     succeeding and then 4xx-auths mid-stream the token is fine and
     something else broke. In practice GitHub grants `GITHUB_TOKEN`
     implicit access to the PR that triggered the workflow regardless
@@ -2166,12 +2153,6 @@ def list_pull_request_files(ctx, token, owner, repo, pull_number, fallback_token
         has_fallback = page == 1 and fallback_token and fallback_token != token
         success, status_code, body = _do_request(ctx, "GET", url, active_token, quiet_4xx_auth = has_fallback, token_class = active_class)
         if (not success) and has_fallback and _is_4xx_auth(status_code):
-            _emit_gha_tip(
-                ctx,
-                tip_add_github_token_scope,
-                scopes = "pull-requests: read",
-                endpoints = "GET /repos/{owner}/{repo}/pulls/{pull_number}/files",
-            )
             active_token = fallback_token
             active_class = fallback_class
             success, status_code, body = _do_request(ctx, "GET", url, active_token, token_class = active_class)
