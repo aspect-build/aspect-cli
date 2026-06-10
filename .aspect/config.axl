@@ -238,7 +238,7 @@ def config(ctx: ConfigContext):
 
     # Silence tips — was `ctx.traits[TipsTrait].silenced_tips = [...]`
     # before the tips refactor; now done via the Tips feature's args.
-    # Example: ctx.features["tips"].args.silence.append("add-github-token")
+    # Example: ctx.features["tips"].args.silence.append("some-tip-id")
     # (Left empty — append ids here to suppress specific tips.)
 
     # Add a new task

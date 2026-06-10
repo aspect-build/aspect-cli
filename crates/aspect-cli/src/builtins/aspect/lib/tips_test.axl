@@ -61,8 +61,6 @@ load(
     "silence_hint_line",
     "strip_code_fences",
     "tip_add_aspect_api_token",
-    "tip_add_github_token",
-    "tip_add_github_token_scope",
     "tip_add_id_token_permission",
     "tip_replace",
     "tip_shows_on",
@@ -139,9 +137,12 @@ def _test_silenced_tips_short_circuits_add_tip(ctx):
     )
 
 def _test_silenced_tips_blocks_add(ctx):
+    """A non-important tip whose `id` is on the silence list never lands.
+    Mirrors how the suggestion-severity built-ins are gated, without
+    depending on any one built-in."""
     _reset(ctx)
-    tips._set_silenced_for_test(ctx, ["add-github-token"])
-    tip_add_github_token(ctx)
+    tips._set_silenced_for_test(ctx, ["some-suggestion"])
+    add_tip(ctx, id = "some-suggestion", severity = TIP_SUGGESTION, title = "T", body = "B")
     _eq(
         "silenced — add_tip respects silence list",
         tips._inspect_for_test(ctx),
@@ -200,9 +201,10 @@ def _test_add_tip_default_type_is_raw(ctx):
     add_tip(ctx, id = "default-type", severity = TIP_INFO, title = "Hello {name}", body = "B", vars = {"name": "world"})
     _eq("default type — RAW leaves braces verbatim", tips._inspect_for_test(ctx)[0]["title"], "Hello {name}")
 
-# A JINJA2 tip with both `scopes` and `endpoints` accumulators, mirroring
-# the built-in `tip_add_github_token_scope` shape so the merge / re-render
-# mechanics get exercised against a stable local fixture.
+# A JINJA2 tip with both `scopes` and `endpoints` accumulators — a
+# multi-accumulator shape that exercises the merge / re-render mechanics
+# (per-name union, plural title/body rendering) against a stable local
+# fixture, independent of any built-in.
 def _emit_scope_fail(ctx, scopes, endpoints):
     add_tip(
         ctx,
@@ -395,21 +397,12 @@ def _test_builtin_tips_shape(ctx):
         _eq("aspect-api-token tip (%s) id" % host.value, tip["id"], expected_id)
         _eq("aspect-api-token tip (%s) severity is IMPORTANT" % host.value, tip["severity"], TIP_IMPORTANT)
 
-    for emit in (tip_add_github_token, tip_add_id_token_permission):
-        _reset(ctx)
-        emit(ctx)
-        tip = _stored_one(ctx)
-        for key in ("id", "severity", "title", "body", "type"):
-            if key not in tip:
-                fail("built-in tip missing required key %r" % key)
-
     _reset(ctx)
-    tip_add_github_token(ctx)
-    _eq(
-        "tip_add_github_token severity is SUGGESTION (fallback hint, not failure)",
-        _stored_one(ctx)["severity"],
-        TIP_SUGGESTION,
-    )
+    tip_add_id_token_permission(ctx)
+    tip = _stored_one(ctx)
+    for key in ("id", "severity", "title", "body", "type"):
+        if key not in tip:
+            fail("built-in tip missing required key %r" % key)
 
     def _body(host):
         _reset(ctx)
@@ -457,57 +450,6 @@ def _test_builtin_tips_shape(ctx):
         if "scope=changed" in body:
             fail("aspect-api-token tip should not mention --scope=changed (App is only a fallback there)")
 
-def _test_builtin_insufficient_scope_renders(ctx):
-    """`tip_add_github_token_scope` is the canonical multi-accumulator
-    JINJA2 tip — both `scopes` and `endpoints` accumulate, the
-    title pluralizes on `scopes`, and the body pluralizes on
-    `endpoints` and renders one bullet per endpoint. One tip per task;
-    distinct scopes union into the same tip's `scopes` accumulator."""
-    _reset(ctx)
-    tip_add_github_token_scope(
-        ctx,
-        scopes = "pull-requests: read",
-        endpoints = "GET /repos/{owner}/{repo}/pulls/{pull_number}/files",
-    )
-    tip = tips._inspect_for_test(ctx)[0]
-    _eq("scope tip — id is the canonical id (no suffix)", tip["id"], "add-github-token-scope")
-    _eq("scope tip — severity is WARNING", tip["severity"], TIP_WARNING)
-    _eq("scope tip — type is JINJA2", tip["type"], TIP_TEMPLATE_JINJA2)
-    if "pull-requests: read" not in tip["title"]:
-        fail("scope tip — title missing scope: %r" % tip["title"])
-    if "GET /repos/{owner}/{repo}/pulls/{pull_number}/files" not in tip["body"]:
-        fail("scope tip — body missing endpoint: %r" % tip["body"])
-    _eq("scope tip — scopes accumulated", tip["accumulate"]["scopes"], ["pull-requests: read"])
-    _eq(
-        "scope tip — endpoints accumulated",
-        tip["accumulate"]["endpoints"],
-        ["GET /repos/{owner}/{repo}/pulls/{pull_number}/files"],
-    )
-
-    # Second emit with a different scope + endpoint: merge.
-    tip_add_github_token_scope(
-        ctx,
-        scopes = "actions: read",
-        endpoints = "GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs",
-    )
-    _eq("scope tip — still single tip after merge", len(tips._inspect_for_test(ctx)), 1)
-    merged = tips._inspect_for_test(ctx)[0]
-    _eq(
-        "scope tip — both scopes unioned",
-        merged["accumulate"]["scopes"],
-        ["pull-requests: read", "actions: read"],
-    )
-    _eq(
-        "scope tip — both endpoints unioned",
-        merged["accumulate"]["endpoints"],
-        [
-            "GET /repos/{owner}/{repo}/pulls/{pull_number}/files",
-            "GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs",
-        ],
-    )
-    if "2 scopes" not in merged["title"]:
-        fail("scope tip — merged title not pluralized: %r" % merged["title"])
-
 def _test_silence_hint_line(ctx):
     _eq("silence_hint — empty id", silence_hint_line("", TIP_INFO), "")
     _eq(
@@ -516,8 +458,8 @@ def _test_silence_hint_line(ctx):
         "",
     )
     for sev in (TIP_WARNING, TIP_SUGGESTION, TIP_INFO):
-        line = silence_hint_line("add-github-token", sev)
-        if "add-github-token" not in line:
+        line = silence_hint_line("some-tip", sev)
+        if "some-tip" not in line:
             fail("silence_hint %s: missing tip id: %r" % (sev, line))
         if "tips" not in line or "silence" not in line:
             fail("silence_hint %s: missing tips/silence ref: %r" % (sev, line))
@@ -786,7 +728,6 @@ def _test_impl(ctx):
     _test_severity_rank(ctx)
     _test_blockquote_body(ctx)
     _test_builtin_tips_shape(ctx)
-    _test_builtin_insufficient_scope_renders(ctx)
     _test_silence_hint_line(ctx)
     _test_decorate_tip(ctx)
     _test_tip_to_payload(ctx)
@@ -797,7 +738,7 @@ def _test_impl(ctx):
     _test_tip_suggestion_hook(ctx)
     _test_strip_code_fences(ctx)
     _test_auto_print_flag(ctx)
-    print("tips.axl: OK (35 sections)")
+    print("tips.axl: OK (34 sections)")
     return 0
 
 tips_tests = task(

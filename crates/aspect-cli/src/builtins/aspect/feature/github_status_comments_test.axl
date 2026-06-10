@@ -425,15 +425,15 @@ def _check_collect_tip_rows(ctx):
     if "tips" not in by_id["s"]["silence_hint"] or "silence" not in by_id["s"]["silence_hint"]:
         fail("collect_tip_rows: suggestion row must reference the tips silence knob in silence_hint")
 
-    # combine_across_tasks: two tasks emit the `add-github-token-scope`
-    # JINJA2 tip with distinct scopes/endpoints. The combined row unions
-    # each `accumulate` field across tasks (first-seen order) and
-    # re-renders title + body (pluralized title, full endpoint list).
+    # combine_across_tasks: two tasks emit a multi-accumulator JINJA2 tip
+    # with distinct scopes/endpoints. The combined row unions each
+    # `accumulate` field across tasks (first-seen order) and re-renders
+    # title + body (pluralized title, full endpoint list).
     title_tmpl = "Grant {% if scopes|length == 1 %}`{{ scopes[0] }}`{% else %}{{ scopes|length }} scopes{% endif %}"
     body_tmpl = "{{ endpoints|length }} calls fell back:\n{% for e in endpoints %}- {{ e }}\n{% endfor %}"
     rows = collect_tip_rows(ctx, [
         {"key": "build-task", "tips": [{
-            "id": "add-github-token-scope",
+            "id": "sample-scope-tip",
             "severity": "warning",
             "title": "Grant `actions: read`",
             "body": "...",
@@ -444,7 +444,7 @@ def _check_collect_tip_rows(ctx):
             "accumulate": {"scopes": ["actions: read"], "endpoints": ["/a/jobs"]},
         }]},
         {"key": "test-task", "tips": [{
-            "id": "add-github-token-scope",
+            "id": "sample-scope-tip",
             "severity": "warning",
             "title": "Grant `pull-requests: read`",
             "body": "...",
@@ -1904,10 +1904,10 @@ def _test_impl(ctx):
                     make_lint_passed_clean(),
                     16000,
                     tips = [{
-                        "id": "add-github-token",
+                        "id": "sample-suggestion",
                         "severity": "suggestion",
-                        "title": "Export `GITHUB_TOKEN` to free App quota",
-                        "body": "Setting `GITHUB_TOKEN` routes supporting calls through the job-scoped token.",
+                        "title": "A sample suggestion tip",
+                        "body": "Body text for a representative suggestion-severity tip.",
                     }],
                 ),
             ],
@@ -1924,10 +1924,10 @@ def _test_impl(ctx):
                     make_build_passed(),
                     8000,
                     tips = [{
-                        "id": "add-github-token",
+                        "id": "sample-suggestion",
                         "severity": "suggestion",
-                        "title": "Export `GITHUB_TOKEN` to free App quota",
-                        "body": "Setting `GITHUB_TOKEN` routes supporting calls through the job-scoped token.",
+                        "title": "A sample suggestion tip",
+                        "body": "Body text for a representative suggestion-severity tip.",
                     }],
                 ),
                 _entry(
@@ -1939,10 +1939,10 @@ def _test_impl(ctx):
                     make_test_passed_flaky_only(),
                     12000,
                     tips = [{
-                        "id": "add-github-token",
+                        "id": "sample-suggestion",
                         "severity": "suggestion",
-                        "title": "Export `GITHUB_TOKEN` to free App quota",
-                        "body": "Setting `GITHUB_TOKEN` routes supporting calls through the job-scoped token.",
+                        "title": "A sample suggestion tip",
+                        "body": "Body text for a representative suggestion-severity tip.",
                     }],
                 ),
                 _entry(
@@ -1954,10 +1954,10 @@ def _test_impl(ctx):
                     make_lint_passed_clean(),
                     4000,
                     tips = [{
-                        "id": "add-github-token",
+                        "id": "sample-suggestion",
                         "severity": "suggestion",
-                        "title": "Export `GITHUB_TOKEN` to free App quota",
-                        "body": "Setting `GITHUB_TOKEN` routes supporting calls through the job-scoped token.",
+                        "title": "A sample suggestion tip",
+                        "body": "Body text for a representative suggestion-severity tip.",
                     }],
                 ),
             ],

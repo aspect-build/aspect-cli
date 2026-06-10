@@ -541,10 +541,9 @@ def _test_impl(ctx):
 
     # ── list_pull_request_files 4xx-auth fallback ─────────────────────
     # When the primary token returns 401 / 403 / 404 on page 1,
-    # `list_pull_request_files` retries with the fallback token and
-    # accumulates the missing scope into the `add-github-token-scope`
-    # tip. With App-primary, env-fallback the fallback is reached only
-    # when the App's installation token unexpectedly 4xx's on a
+    # `list_pull_request_files` retries silently with the fallback token.
+    # With App-primary, env-fallback the fallback is reached only when
+    # the App's installation token unexpectedly 4xx's on a
     # supporting-call endpoint (rare; typically only when the App
     # installation is mid-rotation or scope-pruned).
     _test_pr_files_4xx_auth_fallback(ctx)
@@ -824,20 +823,9 @@ def _test_pr_files_4xx_auth_fallback(ctx):
     _eq("pr-files fallback: 1st call used App token", state["calls"][0]["auth"], "Bearer app-tok")
     _eq("pr-files fallback: 2nd call used env-token fallback", state["calls"][1]["auth"], "Bearer env-tok")
 
-    # Tip emitted with the missing scope + endpoint accumulated.
-    _eq("pr-files fallback: one tip surfaced", len(tips._inspect_for_test(ctx)), 1)
-    tip = tips._inspect_for_test(ctx)[0]
-    _eq("pr-files fallback: tip id", tip["id"], "add-github-token-scope")
-    _eq(
-        "pr-files fallback: scope accumulated",
-        tip["accumulate"]["scopes"],
-        ["pull-requests: read"],
-    )
-    _eq(
-        "pr-files fallback: endpoint accumulated",
-        tip["accumulate"]["endpoints"],
-        ["GET /repos/{owner}/{repo}/pulls/{pull_number}/files"],
-    )
+    # The fallback retry is silent: we no longer advertise the
+    # `GITHUB_TOKEN` scope tip on the 4xx-auth fallback path.
+    _eq("pr-files fallback: no tip surfaced", len(tips._inspect_for_test(ctx)), 0)
 
     # No fallback supplied: same 403 surfaces as a hard failure
     # (no silent --scope=all expansion path because the caller decides).
@@ -850,7 +838,7 @@ def _test_pr_files_4xx_auth_fallback(ctx):
     if result2["success"]:
         fail("pr-files no-fallback: expected success=False on 403 with no fallback, got %r" % result2)
     _eq("pr-files no-fallback: only the primary call ran", len(state2["calls"]), 1)
-    _eq("pr-files no-fallback: no tip emitted (fallback drives the tip)", len(tips._inspect_for_test(ctx)), 0)
+    _eq("pr-files no-fallback: no tip emitted", len(tips._inspect_for_test(ctx)), 0)
 
     _test_pr_files_bucket_class_routes_observations(ctx)
 
