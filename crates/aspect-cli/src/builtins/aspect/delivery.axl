@@ -321,6 +321,21 @@ def should_upload_grpc_log(setting: str, unresolved: int) -> bool:
         return False
     return unresolved > 0
 
+def count_unexplained_unresolved(targets: list, output_shas: dict, misses_by_producer: dict) -> int:
+    """Count delivery targets whose digest is missing for an unexplained reason.
+
+    A target is unresolved when it has no entry in `output_shas`, and explained
+    when a non-OK GetActionResult was logged against its apparent label (a key
+    in `misses_by_producer`) — a diagnosed cache miss surfaced inline. One with
+    no such entry (e.g. its own DeliveryHash lookup came back non-OK, which the
+    log scan doesn't record as a miss) is unexplained. Exported for unit
+    testing; feeds `should_surface_phase2_stderr`."""
+    return len([
+        label
+        for label in targets
+        if label not in output_shas and apparent_label(label) not in misses_by_producer
+    ])
+
 def should_surface_phase2_stderr(unexplained_unresolved: int, getactionresult_count: int) -> bool:
     """Whether to echo phase-2's captured Bazel stderr to the console.
 
@@ -595,17 +610,7 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
                 misses_by_producer[entry_label] = existing
     _unresolved = len(targets) - len(output_shas)
 
-    # An unresolved target is "explained" when a non-OK GetActionResult for
-    # one of its actions was logged (recorded in misses_by_producer keyed by
-    # the producer's apparent label) — the per-target WARN row then names the
-    # drifting mnemonic. An unresolved target with no such entry (e.g. its
-    # DeliveryHash lookup itself came back non-OK, which isn't recorded as a
-    # miss) is unexplained and only gets a generic message, so stderr is the
-    # actionable surface for it.
-    _unexplained_unresolved = 0
-    for label in targets:
-        if label not in output_shas and apparent_label(label) not in misses_by_producer:
-            _unexplained_unresolved += 1
+    _unexplained_unresolved = count_unexplained_unresolved(targets, output_shas, misses_by_producer)
 
     # Preserve the gRPC log (the ground truth for which GetActionResult
     # missed) as a CI artifact per --upload-grpc-log; see the flag's
@@ -625,20 +630,13 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
             _unresolved,
             phase2_log_path,
         ))
-        # An unresolved digest that's diagnosed per-target below (a logged
-        # miss → WARN row naming the drifting mnemonic) makes the verbose
-        # stderr redundant noise. Surface it only for the cases the per-target
-        # row can't explain — see the helper.
         if should_surface_phase2_stderr(_unexplained_unresolved, getactionresult_count):
-            # Frame the stderr first: it runs under
-            # `--experimental_remote_require_cached`, so its `Action must be
-            # cached ... but it is not` errors are expected — phase 2 only
-            # reads digests from the gRPC log, it never builds — and are not
-            # themselves the delivery failure.
+            # Frame the stderr so its expected require-cached errors don't read
+            # as the failure.
             info(ctx.std, "The Bazel errors below are from phase 2's --experimental_remote_require_cached probe" +
-                          " (which reads delivery digests from the remote cache without building); the" +
-                          " \"Action must be cached ... but it is not\" lines are expected. They are shown" +
-                          " because a digest could not be resolved for an unexpected reason.")
+                          " (it reads delivery digests from the remote cache without building); the" +
+                          " \"Action must be cached ... but it is not\" lines are expected, and are shown" +
+                          " only because a digest could not be resolved for an unexpected reason.")
             _surface_phase_stderr(ctx, 2, phase2_log_path)
 
     # Filter to misses on actions that did NOT declare a remote-cache

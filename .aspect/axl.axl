@@ -2,7 +2,7 @@
 Exercise axl
 """
 
-load("@aspect//delivery.axl", delivery_fmt_elapsed = "fmt_elapsed", delivery_should_surface_phase2_stderr = "should_surface_phase2_stderr", delivery_should_upload_grpc_log = "should_upload_grpc_log")
+load("@aspect//delivery.axl", delivery_count_unexplained_unresolved = "count_unexplained_unresolved", delivery_fmt_elapsed = "fmt_elapsed", delivery_should_surface_phase2_stderr = "should_surface_phase2_stderr", delivery_should_upload_grpc_log = "should_upload_grpc_log")
 load("@aspect//lib/artifacts.axl", "artifact_name")
 load("@aspect//lib/bazel_results.axl", "compute_reproducer_command", "init_data", "render_check_output", "resolve_aspect_url", "summary_title")
 load(
@@ -1820,6 +1820,36 @@ def test_delivery_should_upload_grpc_log(tc: int) -> int:
 
     return tc
 
+def test_delivery_count_unexplained_unresolved(tc: int) -> int:
+    """Coverage for the unexplained-unresolved tally feeding the stderr gate."""
+
+    a = "//pkg:a"
+    b = "//pkg:b"
+    c = "//pkg:c"
+    targets = [a, b, c]
+
+    # All resolved → none unexplained.
+    tc = test_case(tc, delivery_count_unexplained_unresolved(targets, {a: "h1", b: "h2", c: "h3"}, {}) == 0,
+                   "count_unexplained: all resolved → 0")
+
+    # `b` unresolved with a logged miss → explained, not counted.
+    tc = test_case(tc, delivery_count_unexplained_unresolved(targets, {a: "h1", c: "h3"}, {b: ["PyWriteBuildData"]}) == 0,
+                   "count_unexplained: unresolved but logged miss → 0")
+
+    # `b` unresolved with no logged miss → unexplained, counted.
+    tc = test_case(tc, delivery_count_unexplained_unresolved(targets, {a: "h1", c: "h3"}, {}) == 1,
+                   "count_unexplained: unresolved with no logged miss → 1")
+
+    # Mixed: `b` explained, `c` unexplained → 1.
+    tc = test_case(tc, delivery_count_unexplained_unresolved(targets, {a: "h1"}, {b: ["X"]}) == 1,
+                   "count_unexplained: one explained, one unexplained → 1")
+
+    # All unresolved, none logged → all unexplained.
+    tc = test_case(tc, delivery_count_unexplained_unresolved(targets, {}, {}) == 3,
+                   "count_unexplained: all unresolved, none logged → 3")
+
+    return tc
+
 def test_delivery_should_surface_phase2_stderr(tc: int) -> int:
     """Coverage for the phase-2 stderr-surfacing predicate.
 
@@ -3129,6 +3159,7 @@ def impl(ctx: TaskContext) -> int:
     tc = test_sanitize_filename(tc)
     tc = test_deliveryd_parse_endpoint(tc)
     tc = test_delivery_should_upload_grpc_log(tc)
+    tc = test_delivery_count_unexplained_unresolved(tc)
     tc = test_delivery_should_surface_phase2_stderr(tc)
     tc = test_build_metadata_lib(tc)
     tc = test_severity_for_status(tc)
