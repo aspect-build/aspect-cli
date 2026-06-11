@@ -2,7 +2,7 @@
 Exercise axl
 """
 
-load("@aspect//delivery.axl", delivery_fmt_elapsed = "fmt_elapsed", delivery_should_upload_grpc_log = "should_upload_grpc_log")
+load("@aspect//delivery.axl", delivery_count_unexplained_unresolved = "count_unexplained_unresolved", delivery_fmt_elapsed = "fmt_elapsed", delivery_should_surface_phase2_stderr = "should_surface_phase2_stderr", delivery_should_upload_grpc_log = "should_upload_grpc_log")
 load("@aspect//lib/artifacts.axl", "artifact_name")
 load("@aspect//lib/bazel_results.axl", "compute_reproducer_command", "init_data", "render_check_output", "resolve_aspect_url", "summary_title")
 load(
@@ -1820,6 +1820,81 @@ def test_delivery_should_upload_grpc_log(tc: int) -> int:
 
     return tc
 
+def test_delivery_count_unexplained_unresolved(tc: int) -> int:
+    """Coverage for the unexplained-unresolved tally feeding the stderr gate.
+
+    The third arg is `non_hermetic_misses` — the post-opt-out-filter set that
+    drives the per-target WARN row. A target keyed there is explained; an
+    unresolved target absent from it (no surviving miss, or only a declared
+    opt-out, which never reaches this dict) is unexplained."""
+
+    a = "//pkg:a"
+    b = "//pkg:b"
+    c = "//pkg:c"
+    targets = [a, b, c]
+
+    # All resolved → none unexplained.
+    tc = test_case(
+        tc,
+        delivery_count_unexplained_unresolved(targets, {a: "h1", b: "h2", c: "h3"}, {}) == 0,
+        "count_unexplained: all resolved → 0",
+    )
+
+    # `b` unresolved but a surviving (non-hermetic) miss explains it → not counted.
+    tc = test_case(
+        tc,
+        delivery_count_unexplained_unresolved(targets, {a: "h1", c: "h3"}, {b: ["PyWriteBuildData"]}) == 0,
+        "count_unexplained: unresolved but explained by surviving miss → 0",
+    )
+
+    # `b` unresolved with no surviving miss → unexplained, counted. (Same shape
+    # as an opt-out-only miss, which is filtered out before reaching this dict.)
+    tc = test_case(
+        tc,
+        delivery_count_unexplained_unresolved(targets, {a: "h1", c: "h3"}, {}) == 1,
+        "count_unexplained: unresolved with no surviving miss → 1",
+    )
+
+    # Mixed: `b` explained, `c` unexplained → 1.
+    tc = test_case(
+        tc,
+        delivery_count_unexplained_unresolved(targets, {a: "h1"}, {b: ["X"]}) == 1,
+        "count_unexplained: one explained, one unexplained → 1",
+    )
+
+    # All unresolved, none explained → all unexplained.
+    tc = test_case(
+        tc,
+        delivery_count_unexplained_unresolved(targets, {}, {}) == 3,
+        "count_unexplained: all unresolved, none explained → 3",
+    )
+
+    return tc
+
+def test_delivery_should_surface_phase2_stderr(tc: int) -> int:
+    """Coverage for the phase-2 stderr-surfacing predicate.
+
+    Args are `(unexplained_unresolved, getactionresult_count)`. Phase 2 is
+    expected to exit non-zero on first delivery; misses diagnosed per-target
+    (a logged GetActionResult miss) suppress the noisy stderr. It surfaces only
+    when the log was empty, or a digest is missing for an unexplained reason."""
+
+    # Everything explained, log had entries → never surface (the expected,
+    # noisy first-delivery case).
+    tc = test_case(tc, not delivery_should_surface_phase2_stderr(0, 5), "phase2-stderr: all explained + log entries → skip")
+
+    # Empty gRPC log → bazel failed before any remote lookup; stderr is the
+    # only clue, regardless of the unexplained count.
+    tc = test_case(tc, delivery_should_surface_phase2_stderr(0, 0), "phase2-stderr: empty log → surface")
+    tc = test_case(tc, delivery_should_surface_phase2_stderr(2, 0), "phase2-stderr: empty log + unexplained → surface")
+
+    # Log had entries but a digest we expected is missing for an unexplained
+    # reason (e.g. its DeliveryHash lookup came back non-OK) → the per-target
+    # row is generic, so surface the raw stderr.
+    tc = test_case(tc, delivery_should_surface_phase2_stderr(1, 6), "phase2-stderr: unexplained miss + log entries → surface")
+
+    return tc
+
 def test_build_metadata_lib(tc: int) -> int:
     """Coverage for the pure helpers in lib/build_metadata.axl."""
 
@@ -3105,6 +3180,8 @@ def impl(ctx: TaskContext) -> int:
     tc = test_sanitize_filename(tc)
     tc = test_deliveryd_parse_endpoint(tc)
     tc = test_delivery_should_upload_grpc_log(tc)
+    tc = test_delivery_count_unexplained_unresolved(tc)
+    tc = test_delivery_should_surface_phase2_stderr(tc)
     tc = test_build_metadata_lib(tc)
     tc = test_severity_for_status(tc)
     tc = test_gazelle_dir_helpers(tc)
