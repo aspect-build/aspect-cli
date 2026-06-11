@@ -27,6 +27,7 @@ use starlark::values::NoSerialize;
 use starlark::values::ProvidesStaticType;
 use starlark::values::Trace;
 use starlark::values::ValueLike;
+use starlark::values::list::UnpackList;
 use starlark::values::starlark_value;
 use starlark::values::type_repr::StarlarkTypeRepr;
 
@@ -165,6 +166,8 @@ pub struct Query {
     expr: RefCell<String>,
     #[allocative(skip)]
     startup_flags: Vec<String>,
+    #[allocative(skip)]
+    flags: Vec<String>,
 }
 
 impl Query {
@@ -172,18 +175,21 @@ impl Query {
         Self {
             expr: RefCell::new(String::new()),
             startup_flags,
+            flags: vec![],
         }
     }
 
     pub fn query(
         expr: &str,
         startup_flags: &[String],
+        flags: &[String],
         announce: super::build::AnnounceSpawn,
     ) -> anyhow::Result<TargetSet> {
         let mut cmd = super::bazel_command();
         cmd.args(startup_flags);
         cmd.arg("query");
         cmd.arg(expr);
+        cmd.args(flags);
         cmd.arg("--output=streamed_proto");
         let out = temp_dir().join("query.bin");
         let _ = fs::remove_file(&out);
@@ -294,6 +300,7 @@ pub(crate) fn query_methods(registry: &mut MethodsBuilder) {
         Ok(Query {
             expr: RefCell::new(expr.as_str().to_string()),
             startup_flags: query.startup_flags.clone(),
+            flags: query.flags.clone(),
         })
     }
 
@@ -325,6 +332,13 @@ pub(crate) fn query_methods(registry: &mut MethodsBuilder) {
     /// matched nothing.
     ///
     /// # Arguments
+    /// * `flags` - Command flags to pass to `bazel query` (between the
+    ///   expression and `--output`). Callers that run `query` alongside
+    ///   `build` / `test` under `--ignore_all_rc_files` MUST forward the
+    ///   rc-expanded command flags here, so the query resolves external
+    ///   repositories the same way the build does (e.g. an rc-set
+    ///   `--noenable_bzlmod` / `--enable_workspace`). Omitting them lets the
+    ///   query diverge from the build and fail on repos the build can see.
     /// * `announce_version` - Print an `INFO: Bazel <version>` line before
     ///   spawning. Resolved from the `--announce-bazel-version` task flag.
     /// * `announce_command` - Print an `INFO: Spawning: <command>` line
@@ -332,16 +346,24 @@ pub(crate) fn query_methods(registry: &mut MethodsBuilder) {
     ///   flag. Both mirror the `ctx.bazel.build` / `.test` disclosure.
     fn eval<'v>(
         this: values::Value<'v>,
+        #[starlark(require = named, default = UnpackList::default())] flags: UnpackList<String>,
         #[starlark(require = named, default = false)] announce_version: bool,
         #[starlark(require = named, default = false)] announce_command: bool,
     ) -> anyhow::Result<TargetSet> {
         let this = this.downcast_ref_err::<Query>().into_anyhow_result()?;
         let expr = this.expr.borrow();
+        // Flags passed to `.eval()` win over any carried on the builder, but
+        // fall back to the builder's so the common case still works.
+        let flags = if flags.items.is_empty() {
+            this.flags.clone()
+        } else {
+            flags.items
+        };
         let announce = super::build::AnnounceSpawn {
             version: announce_version,
             command: announce_command,
         };
-        Query::query(&expr, &this.startup_flags, announce)
+        Query::query(&expr, &this.startup_flags, &flags, announce)
     }
 }
 

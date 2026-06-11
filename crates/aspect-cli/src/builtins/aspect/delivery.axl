@@ -1035,7 +1035,18 @@ def _delivery_impl(ctx):
         # attributable to it. The spawn disclosure (announce flags) and the
         # query both fall within the resolve phase opened above.
         info(ctx.std, "Running bazel query: {}".format(query_expr))
+        # The query runs with `--ignore_all_rc_files` on its startup flags
+        # (see lib/bazel_flags.axl), so it sees none of the workspace
+        # `.bazelrc`. Forward the rc-expanded command flags — the same
+        # `expanded_flags` the build phases use — so the query resolves
+        # external repositories the way the build does. Without this an
+        # rc-set `--noenable_bzlmod` / `--enable_workspace` is dropped and
+        # the query fails on repos the build can see. expand_all returns
+        # plain strings or `(value, version-constraint)` tuples; take the
+        # value from the tuple form (cf. the remote-cache scan above).
+        query_flags = [f[0] if type(f) == "tuple" else f for f in expanded_flags]
         targets = [t.name for t in ctx.bazel.query().raw(query_expr).eval(
+            flags = query_flags,
             announce_version = announce_version,
             announce_command = announce_command,
         )]
