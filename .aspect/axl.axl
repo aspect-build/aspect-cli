@@ -473,6 +473,35 @@ def test_conditional_flags(ctx: TaskContext, tc: int) -> int:
 
     return tc
 
+def test_query_flags(ctx: TaskContext, tc: int) -> int:
+    # `bazel query` accepts the same `flags` (incl. version-gated tuples) as
+    # `ctx.bazel.build`, resolving conditionals against the running Bazel
+    # version. Delivery relies on this to forward rc-expanded flags to its
+    # resolve query under `--ignore_all_rc_files`.
+    expr = "//crates/aspect-cli:aspect-cli"
+
+    # Plain flags are passed through.
+    targets1 = [t.name for t in ctx.bazel.query().raw(expr).eval(
+        flags = ["--noimplicit_deps"],
+    )]
+    tc = test_case(tc, expr in targets1, "query with plain flags should resolve the target")
+
+    # An always-matching conditional flag is applied.
+    targets2 = [t.name for t in ctx.bazel.query().raw(expr).eval(
+        flags = [("--noimplicit_deps", ">=1")],
+    )]
+    tc = test_case(tc, expr in targets2, "query with always-matching conditional flag should resolve the target")
+
+    # A never-matching conditional flag is dropped rather than forced onto the
+    # query — an unrecognized flag would otherwise hard-error. This is the
+    # regression guard for version-gated rc flags reaching the resolve query.
+    targets3 = [t.name for t in ctx.bazel.query().raw(expr).eval(
+        flags = ["--noimplicit_deps", ("--ASPECT_NEVER_MATCH_FLAG_XYZ", ">=99999")],
+    )]
+    tc = test_case(tc, expr in targets3, "query with never-matching conditional flag should drop it and still resolve")
+
+    return tc
+
 def test_cancel_invocation(ctx: TaskContext, tc: int) -> int:
     # Test 1: Server-wide cancel_invocation when no build is running
     cancellation3 = ctx.bazel.cancel_invocation()
@@ -3050,6 +3079,7 @@ def impl(ctx: TaskContext) -> int:
     tc = test_bazel_info(ctx, tc)
     tc = test_http_get_post(ctx, tc, temp_dir)
     tc = test_conditional_flags(ctx, tc)
+    tc = test_query_flags(ctx, tc)
     tc = test_cancel_invocation(ctx, tc)
     tc = test_template_rendering(ctx, tc)
     tc = test_path_glob(tc)
