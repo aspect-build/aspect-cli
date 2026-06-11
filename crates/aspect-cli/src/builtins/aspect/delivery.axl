@@ -523,7 +523,7 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
 
     if status.code != 0:
         return {}, {}, status.code
-    print("  Build took {}.".format(fmt_elapsed(time.monotonic() - _t_phase1)))
+    info(ctx.std, "Build took {}.".format(fmt_elapsed(time.monotonic() - _t_phase1)))
 
     # Phase 2. We parse the gRPC log regardless of exit code — a non-zero
     # result usually just means DeliveryHash wasn't cached remotely yet,
@@ -655,9 +655,9 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
     ctx.std.fs.remove_file(log_path)
 
     if _unresolved == 0:
-        print("  Resolved digests for all {} in {}.".format(targets_label, fmt_elapsed(time.monotonic() - _t_phase2)))
+        info(ctx.std, "Resolved digests for all {} in {}.".format(targets_label, fmt_elapsed(time.monotonic() - _t_phase2)))
     else:
-        print("  Resolved {} of {} delivery digests in {}; {} could not be hashed. Phase-2 raw log: {}".format(
+        info(ctx.std, "Resolved {} of {} delivery digests in {}; {} could not be hashed. Phase-2 raw log: {}".format(
             len(output_shas),
             len(targets),
             fmt_elapsed(time.monotonic() - _t_phase2),
@@ -667,11 +667,11 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
         if should_surface_phase2_stderr(_unexplained_unresolved, getactionresult_count):
             # Frame the stderr so its expected require-cached errors don't read
             # as the failure.
-            info(ctx.std, "The Bazel errors below are from phase 2's --experimental_remote_require_cached probe" +
+            _surface_phase_stderr(ctx, 2, phase2_log_path)
+            info(ctx.std, "The Bazel errors above are from phase 2's --experimental_remote_require_cached probe" +
                           " (it reads delivery digests from the remote cache without building); the" +
                           " \"Action must be cached ... but it is not\" lines are expected, and are shown" +
                           " only because a digest could not be resolved for an unexpected reason.")
-            _surface_phase_stderr(ctx, 2, phase2_log_path)
 
     return output_shas, non_hermetic_misses, 0
 
@@ -1159,7 +1159,7 @@ def _delivery_impl(ctx):
     if phase_1_2_runs:
         _t_build = time.monotonic()
         output_shas, non_hermetic_misses, build_code = _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, expanded_flags, remote_cache_uri, ansi, data)
-        print("  Build+checksum total: {}.".format(fmt_elapsed(time.monotonic() - _t_build)))
+        info(ctx.std, "Build+checksum total: {}.".format(fmt_elapsed(time.monotonic() - _t_build)))
 
         for handler in bazel_trait.build_end:
             handler(ctx, build_code)
@@ -1308,7 +1308,7 @@ def _delivery_impl(ctx):
                 )
                 _fire_target_hook(data, delivery_trait, None, label)
             return _emit_final(ctx, lifecycle, data, exit_code = status.code)
-        print("  Download took {}.".format(fmt_elapsed(time.monotonic() - _t_download)))
+        info(ctx.std, "Download took {}.".format(fmt_elapsed(time.monotonic() - _t_download)))
 
     max_par = ctx.args.max_parallelization
     if max_par < 1:
