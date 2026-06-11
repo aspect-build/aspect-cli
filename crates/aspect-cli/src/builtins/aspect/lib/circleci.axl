@@ -344,7 +344,9 @@ def _delete_artifact(ctx, name):
 # Upload Bazel JUnit XML to CircleCI's runner output test-results API
 # (reverse-engineered from circleci-agent, verified against real CircleCI):
 #   POST /api/v2/output/test-result          {"step_id": N}  -> Key
-#   <Key.method> the gzipped tar to the (relative) S3 Key.location, sigv4-signed
+#   <Key.method> the gzipped tar to the S3 Key.location, replaying
+#     Key.headers verbatim — the Key is already pre-signed by the runner,
+#     so we do NOT re-sign (see `_s3_put_object`).
 #   POST /api/v2/output/test-result/process  {"step_id": N}  -> summary
 # step_id is the agent's internal step index; when unknown we probe for it.
 
@@ -396,19 +398,26 @@ def _resolve_step_id(ctx, session, step_id):
     return None, None
 
 def _s3_put_object(ctx, session, method, url, headers, path):
-    """sigv4 PUT `path` to `url` with the runner's STS creds + Key headers.
-    Returns `(ok, detail)`."""
-    aws_creds = session["aws_creds"]
-    region = session["region"]
+    """Replay the runner's pre-signed upload request: PUT `path` to `url`
+    with `Key.headers` (`headers`) sent verbatim. Returns `(ok, detail)`.
+
+    The CircleCI output service returns a *fully pre-signed* request in the
+    test-result `Key` — `Key.headers` already carries the `Authorization`
+    (sigv4), `x-amz-date`, `x-amz-content-sha256`, and `x-amz-security-token`
+    the runner computed against this exact object. So we must NOT re-sign:
+    curl's `--aws-sigv4` steps aside the moment it sees an explicit
+    `Authorization`, which drops the `x-amz-content-sha256` it would
+    otherwise add and makes S3 reject the request with
+    `400 InvalidRequest: Missing required header ... x-amz-content-sha256`.
+    Replaying the runner's headers as-is (no `--aws-sigv4`, no `--user`, no
+    locally-injected security token) keeps the request the runner signed.
+
+    `session` is unused here (the headers are self-contained) but kept in
+    the signature so the call site mirrors `_s3_put`.
+    """
     curl_args = [
         "--silent",
         "--show-error",
-        "--aws-sigv4",
-        "aws:amz:" + region + ":s3",
-        "--user",
-        aws_creds["AccessKeyID"] + ":" + aws_creds["SecretAccessKey"],
-        "-H",
-        "x-amz-security-token: " + aws_creds["SessionToken"],
         "-T",
         path,
         "-X",
