@@ -141,6 +141,29 @@ fn resolve_flags<'v>(
     Ok(result)
 }
 
+/// Resolve a mixed flag list against the running Bazel version.
+///
+/// Like [`resolve_flags`], but sources the version itself: a `bazel info`
+/// probe is run only when at least one conditional `(flag, constraint)` tuple
+/// is present, so unconditional flag lists never pay for the probe. A
+/// non-release Bazel reports no version, in which case the constraints resolve
+/// against an assumed-latest version (see [`constraint_matches`]).
+///
+/// Shared by every Bazel subcommand that accepts version-gated flags
+/// (`build` / `test` / `query`) so they filter conditional flags identically.
+fn resolve_flags_for_running_bazel<'v>(
+    items: &[Either<values::StringValue<'v>, (values::StringValue<'v>, values::StringValue<'v>)>],
+) -> anyhow::Result<Vec<String>> {
+    let version = if items.iter().any(|f| f.is_right()) {
+        info::server_info()
+            .map_err(|e| anyhow::anyhow!("failed to get Bazel server info: {}", e))?
+            .1
+    } else {
+        None
+    };
+    resolve_flags(items, version.as_ref())
+}
+
 /// Whether a semver `constraint` is satisfied by the running Bazel `version`.
 ///
 /// `version` is `None` when Bazel reports a non-release build (a
@@ -327,17 +350,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             Either::Left(b) => (b, vec![]),
             Either::Right(sinks) => (true, sinks.items),
         };
-        let has_conditional = flags.items.iter().any(|f| f.is_right());
-        // `server_info` returns `None` for the version on a non-release Bazel;
-        // `resolve_flags` then assumes the latest version for conditional flags.
-        let bazel_version = if has_conditional {
-            let (_, version) = info::server_info()
-                .map_err(|e| anyhow::anyhow!("failed to get Bazel server info: {}", e))?;
-            version
-        } else {
-            None
-        };
-        let resolved_flags = resolve_flags(&flags.items, bazel_version.as_ref())?;
+        let resolved_flags = resolve_flags_for_running_bazel(&flags.items)?;
         let resolved_startup_flags = read_startup_flags(this)?;
         let env = Env::from_eval(eval)?;
         let (stdout, stderr) = resolve_stdio(stdio, stdout, stderr)?;
@@ -448,17 +461,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             Either::Left(b) => (b, vec![]),
             Either::Right(sinks) => (true, sinks.items),
         };
-        let has_conditional = flags.items.iter().any(|f| f.is_right());
-        // `server_info` returns `None` for the version on a non-release Bazel;
-        // `resolve_flags` then assumes the latest version for conditional flags.
-        let bazel_version = if has_conditional {
-            let (_, version) = info::server_info()
-                .map_err(|e| anyhow::anyhow!("failed to get Bazel server info: {}", e))?;
-            version
-        } else {
-            None
-        };
-        let resolved_flags = resolve_flags(&flags.items, bazel_version.as_ref())?;
+        let resolved_flags = resolve_flags_for_running_bazel(&flags.items)?;
         let resolved_startup_flags = read_startup_flags(this)?;
         let env = Env::from_eval(eval)?;
         let (stdout, stderr) = resolve_stdio(stdio, stdout, stderr)?;

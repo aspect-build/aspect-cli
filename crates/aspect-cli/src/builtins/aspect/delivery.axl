@@ -1035,18 +1035,15 @@ def _delivery_impl(ctx):
         # attributable to it. The spawn disclosure (announce flags) and the
         # query both fall within the resolve phase opened above.
         info(ctx.std, "Running bazel query: {}".format(query_expr))
-        # The query runs with `--ignore_all_rc_files` on its startup flags
-        # (see lib/bazel_flags.axl), so it sees none of the workspace
-        # `.bazelrc`. Forward the rc-expanded command flags — the same
-        # `expanded_flags` the build phases use — so the query resolves
-        # external repositories the way the build does. Without this an
-        # rc-set `--noenable_bzlmod` / `--enable_workspace` is dropped and
-        # the query fails on repos the build can see. `expanded_flags` may
-        # carry `(flag, version-constraint)` tuples (e.g. from
-        # `try-import`-if-bazel-version); `.eval()` resolves them against the
-        # running Bazel version exactly as `ctx.bazel.build` does, so a flag
-        # gated to a different version is filtered out rather than forced
-        # onto the query.
+
+        # The query carries `--ignore_all_rc_files` (see lib/bazel_flags.axl),
+        # so it reads none of the workspace `.bazelrc`. Forward the same
+        # rc-expanded `expanded_flags` the build phases use, so the query
+        # resolves external repositories the way the build does — otherwise an
+        # rc-set `--noenable_bzlmod` / `--enable_workspace` is dropped and the
+        # query fails on repos the build can see. `.eval()` filters any
+        # version-gated flags against the running Bazel version exactly as
+        # `ctx.bazel.build` does.
         targets = [t.name for t in ctx.bazel.query().raw(query_expr).eval(
             flags = expanded_flags,
             announce_version = announce_version,
