@@ -1,6 +1,13 @@
-"""CircleCI artifact upload library.
+"""CircleCI runner output upload library.
 
-Uses the CircleCI runner API (Unix socket + HTTP) to upload artifacts to S3.
+Uploads to CircleCI's runner output API (Unix socket + HTTP) over two
+distinct flows that both end in an S3 PUT:
+
+  - Artifacts (`upload_artifact`): the runner returns a bare S3 key and we
+    sign the PUT ourselves with the job-scoped STS credentials.
+  - Test results (`store_test_results`): the runner returns a *pre-signed*
+    request (`Key.method`/`location`/`headers`) that we replay verbatim —
+    see `_s3_put_object`.
 
 Credential lifetime: the runner mints the temporary S3 (STS) credentials
 returned by `/api/v2/output/credentials` with a short TTL (≈10 min) and
@@ -210,6 +217,69 @@ def s3_upload_error_detail(http_code, curl_err, body):
         return "curl transport error: " + curl_err.replace("\n", " ")
     return "curl s3 upload failed"
 
+# Shared `-w` suffix: curl appends the HTTP status as a trailing line so the
+# S3 `<Error>` body (everything before it) stays parseable. No `--fail`, so
+# curl exits 0 on a 4xx and that body lands on stdout for diagnosis.
+_CURL_S3_BASE_ARGS = ["--silent", "--show-error", "-w", "\n%{http_code}"]
+
+def _header_args(headers):
+    """Flatten `{k: v}` into `["-H", "k: v", ...]`; [] when empty/None."""
+    args = []
+    for k, v in (headers or {}).items():
+        args = args + ["-H", k + ": " + v]
+    return args
+
+def s3_sigv4_put_args(region, aws_creds, path, headers = None):
+    """curl args for a self-signed sigv4 PUT (the artifact path mints its own
+    S3 key, so we sign locally). `headers` is an optional `{k: v}` of extra
+    request headers. Public so `circleci_test.axl` can load it.
+    """
+    args = _CURL_S3_BASE_ARGS + [
+        "--aws-sigv4",
+        "aws:amz:" + region + ":s3",
+        "--user",
+        aws_creds["AccessKeyID"] + ":" + aws_creds["SecretAccessKey"],
+        "-H",
+        "x-amz-security-token: " + aws_creds["SessionToken"],
+        "-T",
+        path,
+        "-X",
+        "PUT",
+    ]
+    return args + _header_args(headers)
+
+def s3_replay_put_args(method, path, headers = None):
+    """curl args replaying a pre-signed PUT verbatim — no local signing, just
+    the runner's `Key.headers`. See `_s3_put_object`. Public so
+    `circleci_test.axl` can load it.
+    """
+    return _CURL_S3_BASE_ARGS + ["-T", path, "-X", method] + _header_args(headers)
+
+def _run_s3_put(ctx, curl_args, url):
+    """Spawn `curl <args> <url>` and classify the result.
+
+    Returns `(ok, http_code, body, curl_err)`. `ok` is True only on a 2xx
+    with a clean exit; `body` is the S3 response (the trailing `%{http_code}`
+    line stripped) for error diagnosis.
+    """
+    child = ctx.std.process.command("curl") \
+        .args(curl_args + [url]) \
+        .stdout("piped") \
+        .stderr("piped") \
+        .spawn()
+    out = child.stdout().read_to_string()
+    curl_err = child.stderr().read_to_string().strip()
+    status = child.wait()
+
+    parts = out.rsplit("\n", 1)
+    if len(parts) == 2:
+        body, http_code = parts[0], parts[1].strip()
+    else:
+        body, http_code = "", parts[0].strip()
+
+    ok = status.code == 0 and http_code.startswith("2")
+    return (ok, http_code, body, curl_err)
+
 def _s3_put(ctx, session, path, name):
     """Register the artifact with the runner and PUT it to S3.
 
@@ -233,64 +303,29 @@ def _s3_put(ctx, session, path, name):
     prefix = artifact_resp["prefix"]
     tags = artifact_resp.get("key", {}).get("tags", {})
 
-    s3_key = prefix + "/" + name
-    s3_url = "https://" + bucket + ".s3." + region + ".amazonaws.com/" + s3_key
+    s3_url = "https://" + bucket + ".s3." + region + ".amazonaws.com/" + prefix + "/" + name
 
-    # No `--fail`: let curl exit 0 on a 4xx so the S3 `<Error>` body lands
-    # on stdout for diagnosis. `-w "\n%{http_code}"` appends the status as
-    # the final line; everything before it is the response body.
-    curl_args = [
-        "--silent",
-        "--show-error",
-        "--aws-sigv4",
-        "aws:amz:" + region + ":s3",
-        "--user",
-        aws_creds["AccessKeyID"] + ":" + aws_creds["SecretAccessKey"],
-        "-H",
-        "x-amz-security-token: " + aws_creds["SessionToken"],
-        "-T",
-        path,
-        "-X",
-        "PUT",
-        "-w",
-        "\n%{http_code}",
-    ]
+    extra_headers = {}
     if tags:
-        tag_str = "&".join([k + "=" + v for k, v in tags.items()])
-        curl_args = curl_args + ["-H", "x-amz-tagging: " + tag_str]
-    curl_args = curl_args + [s3_url]
+        extra_headers["x-amz-tagging"] = "&".join([k + "=" + v for k, v in tags.items()])
 
-    child = ctx.std.process.command("curl") \
-        .args(curl_args) \
-        .stdout("piped") \
-        .stderr("piped") \
-        .spawn()
+    ok, http_code, body, curl_err = _run_s3_put(
+        ctx,
+        s3_sigv4_put_args(region, aws_creds, path, extra_headers),
+        s3_url,
+    )
+    if not ok:
+        return (False, s3_upload_error_detail(http_code, curl_err, body), "")
 
-    out = child.stdout().read_to_string()
-    curl_err = child.stderr().read_to_string().strip()
-    status = child.wait()
-
-    # Final line is the `-w` status code; the rest is the S3 response body.
-    parts = out.rsplit("\n", 1)
-    if len(parts) == 2:
-        body = parts[0]
-        http_code = parts[1].strip()
+    # Stable public CircleCI artifact URL so callers can link to individual
+    # files. CIRCLE_WORKFLOW_JOB_ID is always set by the runner; fall back to
+    # the signed S3 URL if it's ever absent.
+    job_id = ctx.std.env.var("CIRCLE_WORKFLOW_JOB_ID") or ""
+    if job_id:
+        download_url = "https://output.circle-artifacts.com/output/job/" + job_id + "/artifacts/0/" + name
     else:
-        body = ""
-        http_code = parts[0].strip()
-
-    if status.code == 0 and http_code.startswith("2"):
-        # Stable public CircleCI artifact URL so callers can link to
-        # individual files. CIRCLE_WORKFLOW_JOB_ID is always set by the
-        # runner; fall back to the signed S3 URL if it's ever absent.
-        job_id = ctx.std.env.var("CIRCLE_WORKFLOW_JOB_ID") or ""
-        if job_id:
-            download_url = "https://output.circle-artifacts.com/output/job/" + job_id + "/artifacts/0/" + name
-        else:
-            download_url = s3_url
-        return (True, "", download_url)
-
-    return (False, s3_upload_error_detail(http_code, curl_err, body), "")
+        download_url = s3_url
+    return (True, "", download_url)
 
 def _upload_artifact(ctx, path, name, cache = None):
     """Upload a file to CircleCI via the runner API and S3.
@@ -344,7 +379,9 @@ def _delete_artifact(ctx, name):
 # Upload Bazel JUnit XML to CircleCI's runner output test-results API
 # (reverse-engineered from circleci-agent, verified against real CircleCI):
 #   POST /api/v2/output/test-result          {"step_id": N}  -> Key
-#   <Key.method> the gzipped tar to the (relative) S3 Key.location, sigv4-signed
+#   <Key.method> the gzipped tar to the S3 Key.location, replaying
+#     Key.headers verbatim — the Key is already pre-signed by the runner,
+#     so we do NOT re-sign (see `_s3_put_object`).
 #   POST /api/v2/output/test-result/process  {"step_id": N}  -> summary
 # step_id is the agent's internal step index; when unknown we probe for it.
 
@@ -395,50 +432,23 @@ def _resolve_step_id(ctx, session, step_id):
             return k, key
     return None, None
 
-def _s3_put_object(ctx, session, method, url, headers, path):
-    """sigv4 PUT `path` to `url` with the runner's STS creds + Key headers.
-    Returns `(ok, detail)`."""
-    aws_creds = session["aws_creds"]
-    region = session["region"]
-    curl_args = [
-        "--silent",
-        "--show-error",
-        "--aws-sigv4",
-        "aws:amz:" + region + ":s3",
-        "--user",
-        aws_creds["AccessKeyID"] + ":" + aws_creds["SecretAccessKey"],
-        "-H",
-        "x-amz-security-token: " + aws_creds["SessionToken"],
-        "-T",
-        path,
-        "-X",
-        method,
-        "-w",
-        "\n%{http_code}",
-    ]
-    for k, v in (headers or {}).items():
-        curl_args = curl_args + ["-H", k + ": " + v]
-    curl_args = curl_args + [url]
+def _s3_put_object(ctx, method, url, headers, path):
+    """Replay the runner's pre-signed upload request: PUT `path` to `url`
+    with `Key.headers` (`headers`) sent verbatim. Returns `(ok, detail)`.
 
-    child = ctx.std.process.command("curl") \
-        .args(curl_args) \
-        .stdout("piped") \
-        .stderr("piped") \
-        .spawn()
-    out = child.stdout().read_to_string()
-    curl_err = child.stderr().read_to_string().strip()
-    status = child.wait()
-
-    # Last line is the `-w` status code; the rest is the body.
-    parts = out.rsplit("\n", 1)
-    if len(parts) == 2:
-        body = parts[0]
-        http_code = parts[1].strip()
-    else:
-        body = ""
-        http_code = parts[0].strip()
-
-    if status.code == 0 and http_code.startswith("2"):
+    The CircleCI output service returns a *fully pre-signed* request in the
+    test-result `Key` — `Key.headers` already carries the `Authorization`
+    (sigv4), `x-amz-date`, `x-amz-content-sha256`, and `x-amz-security-token`
+    the runner computed against this exact object. So we must NOT re-sign:
+    curl's `--aws-sigv4` steps aside the moment it sees an explicit
+    `Authorization`, which drops the `x-amz-content-sha256` it would
+    otherwise add and makes S3 reject the request with
+    `400 InvalidRequest: Missing required header ... x-amz-content-sha256`.
+    Replaying the runner's headers as-is (no `--aws-sigv4`, no `--user`, no
+    locally-injected security token) keeps the request the runner signed.
+    """
+    ok, http_code, body, curl_err = _run_s3_put(ctx, s3_replay_put_args(method, path, headers), url)
+    if ok:
         return (True, "")
     return (False, s3_upload_error_detail(http_code, curl_err, body))
 
@@ -472,9 +482,10 @@ def _store_test_results(ctx, archive_path, step_id = None, cache = None) -> Test
         return TestResultsUploadResult(success = False, step_id = sid, errors = ["test-result Key had no 'location'"])
 
     url = test_results_object_url(session["bucket"], session["region"], location)
-    ok, detail = _s3_put_object(ctx, session, key.get("method", "PUT"), url, key.get("headers") or {}, archive_path)
+    ok, detail = _s3_put_object(ctx, key.get("method", "PUT"), url, key.get("headers") or {}, archive_path)
     if not ok:
-        # Drop the session so a later call re-mints (handles expired creds).
+        # Drop the session so the next `store_test_results` re-mints a fresh
+        # runner token + Key rather than reusing one we just saw fail.
         session_cache_clear(cache)
         return TestResultsUploadResult(success = False, step_id = sid, errors = [detail])
 

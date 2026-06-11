@@ -1,12 +1,13 @@
-"""Unit tests for lib/circleci.axl S3 error parsing.
+"""Unit tests for lib/circleci.axl pure helpers.
 
 The upload flow itself (socket token, runner API, curl PUT) needs live
-runner infrastructure, so these tests cover the pure helpers that turn an
-S3 error response into a diagnosable failure reason — the part that makes
-an expired-credential `400` legible instead of an opaque "curl exit 22".
+runner infrastructure, so these tests cover the pure pieces around it:
+S3 error parsing, the session cache, test-result URL resolution, the
+curl arg builders (what we sign vs. replay verbatim), and JUnit
+skipped-marking.
 """
 
-load("./circleci.axl", "mark_testcases_skipped", "s3_extract_error_code", "s3_extract_error_message", "s3_upload_error_detail", "session_cache_clear", "session_cache_get", "session_cache_put", "test_results_object_url")
+load("./circleci.axl", "mark_testcases_skipped", "s3_extract_error_code", "s3_extract_error_message", "s3_replay_put_args", "s3_sigv4_put_args", "s3_upload_error_detail", "session_cache_clear", "session_cache_get", "session_cache_put", "test_results_object_url")
 
 def _eq(label, got, want):
     if got != want:
@@ -139,14 +140,62 @@ def _test_object_url_relative_key(_ctx):
     )
 
 def _test_object_url_absolute_https_passthrough(_ctx):
-    """An already-absolute https location is returned unchanged (future
-    presigned-URL responses keep working without a code change)."""
+    """An already-absolute https location is returned unchanged (the runner
+    can hand back a full presigned URL instead of a relative key)."""
     url = "https://example.s3.amazonaws.com/key?X-Amz-Signature=abc"
     _eq("https location passthrough", test_results_object_url("b", "r", url), url)
 
 def _test_object_url_absolute_http_passthrough(_ctx):
     url = "http://localhost:9000/bucket/key"
     _eq("http location passthrough", test_results_object_url("b", "r", url), url)
+
+# ---------------------------------------------------------------------------
+# s3 PUT curl arg builders — what we sign vs. what we replay verbatim
+# ---------------------------------------------------------------------------
+
+def _header_value(args, name):
+    """Return the value of the first `-H "name: value"` in `args`, or None."""
+    prefix = name + ": "
+    for i in range(len(args) - 1):
+        if args[i] == "-H" and args[i + 1].startswith(prefix):
+            return args[i + 1][len(prefix):]
+    return None
+
+_FAKE_CREDS = {"AccessKeyID": "AKIA", "SecretAccessKey": "secret", "SessionToken": "tok"}
+
+def _test_sigv4_args_self_sign(_ctx):
+    """The artifact path signs locally: --aws-sigv4 + --user + the session token,
+    PUT of the file."""
+    args = s3_sigv4_put_args("us-west-2", _FAKE_CREDS, "/tmp/a.tar.gz")
+    if "--aws-sigv4" not in args:
+        fail("sigv4 args must include --aws-sigv4: %r" % args)
+    if "--user" not in args:
+        fail("sigv4 args must include --user: %r" % args)
+    _eq("region in the sigv4 scope", args[args.index("--aws-sigv4") + 1], "aws:amz:us-west-2:s3")
+    _eq("session token forwarded", _header_value(args, "x-amz-security-token"), "tok")
+    _eq("PUT of the file", args[args.index("-T") + 1], "/tmp/a.tar.gz")
+
+def _test_sigv4_args_extra_headers(_ctx):
+    args = s3_sigv4_put_args("r", _FAKE_CREDS, "/tmp/a", {"x-amz-tagging": "k=v"})
+    _eq("extra header included", _header_value(args, "x-amz-tagging"), "k=v")
+
+def _test_replay_args_no_local_signing(_ctx):
+    """The test-result path replays the runner's pre-signed request: no
+    --aws-sigv4, no --user, no locally-injected token — only Key.headers."""
+    headers = {"Authorization": "AWS4-HMAC-SHA256 ...", "x-amz-content-sha256": "abc"}
+    args = s3_replay_put_args("PUT", "/tmp/tr.tar.gz", headers)
+    if "--aws-sigv4" in args:
+        fail("replay must NOT re-sign (--aws-sigv4 present): %r" % args)
+    if "--user" in args:
+        fail("replay must NOT pass --user: %r" % args)
+    _eq("no locally-injected security token", _header_value(args, "x-amz-security-token"), None)
+    _eq("runner Authorization forwarded", _header_value(args, "Authorization"), "AWS4-HMAC-SHA256 ...")
+    _eq("runner content-sha256 forwarded", _header_value(args, "x-amz-content-sha256"), "abc")
+
+def _test_replay_args_honors_method(_ctx):
+    """Key.method drives -X (the runner can hand back a non-PUT verb)."""
+    args = s3_replay_put_args("POST", "/tmp/tr.tar.gz", {})
+    _eq("method passed through", args[args.index("-X") + 1], "POST")
 
 # ---------------------------------------------------------------------------
 # mark_testcases_skipped — move cached tests into the "skipped" bucket
@@ -184,6 +233,10 @@ _UNIT_TESTS = [
     _test_object_url_relative_key,
     _test_object_url_absolute_https_passthrough,
     _test_object_url_absolute_http_passthrough,
+    _test_sigv4_args_self_sign,
+    _test_sigv4_args_extra_headers,
+    _test_replay_args_no_local_signing,
+    _test_replay_args_honors_method,
     _test_skip_self_closing,
     _test_skip_with_body,
     _test_skip_multiple,
