@@ -321,15 +321,40 @@ def should_upload_grpc_log(setting: str, unresolved: int) -> bool:
         return False
     return unresolved > 0
 
+def should_surface_phase2_stderr(unexplained_unresolved: int, getactionresult_count: int) -> bool:
+    """Whether to echo phase-2's captured Bazel stderr to the console.
+
+    Phase 2 is *expected* to exit non-zero on first delivery — its
+    `--experimental_remote_require_cached` build reports the not-yet-cached
+    digests as `ERROR:` lines, which is exactly what the gRPC log captures.
+    Echoing that stderr would drown the user in expected errors, so a target
+    whose miss is explained — diagnosed inline as a non-cacheable upstream
+    action — never triggers it.
+
+    Surface it when either:
+
+    - the gRPC log yielded no GetActionResult entries (`getactionresult_count
+      == 0`): bazel failed before issuing any remote lookup
+      (auth/network/config), so no per-target diagnosis can fire; or
+    - a digest we expected to resolve is missing for an *unexplained* reason
+      (`unexplained_unresolved > 0`): e.g. the DeliveryHash lookup itself came
+      back non-OK. The per-target row falls back to a generic message, so the
+      raw stderr is the actionable surface.
+
+    Exported for unit testing."""
+    return getactionresult_count == 0 or unexplained_unresolved > 0
+
 def _surface_phase_stderr(ctx, phase, log_path):
     """Echo a failing phase's captured Bazel stderr to the console and upload
     it as a CI artifact (`delivery_phase{phase}_log`).
 
     Phases 2 and 3 redirect Bazel's stderr to a file rather than the console
-    (phase-2 require-cached misses are noisy-but-expected). On failure that
-    file holds Bazel's own diagnosis, so echo it verbatim and preserve it as
-    a downloadable artifact. The stderr carries no env/command lines, so it
-    uploads unconditionally. No-op if the file is absent or off-CI."""
+    because phase-2 require-cached misses are noisy-but-expected. Callers gate
+    this to the genuinely-failed cases (the expected misses are diagnosed from
+    the gRPC log instead); when called, the file holds Bazel's own diagnosis,
+    so echo it verbatim and preserve it as a downloadable artifact. The stderr
+    carries no env/command lines, so it uploads unconditionally. No-op if the
+    file is absent or off-CI."""
     if not ctx.std.fs.exists(log_path):
         return
     ctx.std.io.stderr.write(ctx.std.fs.read_to_string(log_path))
@@ -341,9 +366,12 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
     drive the `data` (delivery_results) metadata; phase 2's gRPC log yields
     the per-target action digests used for change detection.
 
-    On a phase-2 failure or any unresolved digest, the captured Bazel stderr
-    is echoed and uploaded as a CI artifact; the gRPC log is uploaded per
-    `ctx.args.upload_grpc_log` ("auto"/"true"/"false"). Uploads no-op off-CI.
+    Phase 2 is expected to exit non-zero on first delivery (require-cached
+    reports the not-yet-cached digests), so its stderr is captured to a file
+    and echoed/uploaded only when the per-target rows can't explain the
+    outcome — see `should_surface_phase2_stderr`. The gRPC log itself is
+    uploaded per `ctx.args.upload_grpc_log` ("auto"/"true"/"false"). Uploads
+    no-op off-CI.
     """
     repo_dir = "/tmp/aspect_delivery_" + ctx.task.key
     _write_aspect_repo(ctx, repo_dir)
@@ -546,9 +574,11 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
         return {}, {}, (phase2_status.code if phase2_status.code != 0 else 1)
 
     log_file = ctx.std.fs.open(log_path)
+    getactionresult_count = 0
     for entry in remote.logging.LogEntry().parse_from_delimited(log_file):
         if entry.method_name != "build.bazel.remote.execution.v2.ActionCache/GetActionResult":
             continue
+        getactionresult_count += 1
         trace.log(entry)
         entry_label = apparent_label(entry.metadata.target_id)
         mnemonic = entry.metadata.action_mnemonic
@@ -565,6 +595,18 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
                 misses_by_producer[entry_label] = existing
     _unresolved = len(targets) - len(output_shas)
 
+    # An unresolved target is "explained" when a non-OK GetActionResult for
+    # one of its actions was logged (recorded in misses_by_producer keyed by
+    # the producer's apparent label) — the per-target WARN row then names the
+    # drifting mnemonic. An unresolved target with no such entry (e.g. its
+    # DeliveryHash lookup itself came back non-OK, which isn't recorded as a
+    # miss) is unexplained and only gets a generic message, so stderr is the
+    # actionable surface for it.
+    _unexplained_unresolved = 0
+    for label in targets:
+        if label not in output_shas and apparent_label(label) not in misses_by_producer:
+            _unexplained_unresolved += 1
+
     # Preserve the gRPC log (the ground truth for which GetActionResult
     # missed) as a CI artifact per --upload-grpc-log; see the flag's
     # description for the gating rationale. No-op off-CI.
@@ -576,10 +618,6 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
     if _unresolved == 0:
         print("  Resolved digests for all {} in {}.".format(targets_label, fmt_elapsed(time.monotonic() - _t_phase2)))
     else:
-        # Point at the phase-2 stderr when anything went unresolved: the
-        # gRPC log may hold zero useful entries (an auth/network/config error
-        # before any GetActionResult fired), so the per-target inline
-        # diagnosis can't fire and the stderr is the actionable surface.
         print("  Resolved {} of {} delivery digests in {}; {} could not be hashed. Phase-2 raw log: {}".format(
             len(output_shas),
             len(targets),
@@ -587,7 +625,21 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
             _unresolved,
             phase2_log_path,
         ))
-        _surface_phase_stderr(ctx, 2, phase2_log_path)
+        # An unresolved digest that's diagnosed per-target below (a logged
+        # miss → WARN row naming the drifting mnemonic) makes the verbose
+        # stderr redundant noise. Surface it only for the cases the per-target
+        # row can't explain — see the helper.
+        if should_surface_phase2_stderr(_unexplained_unresolved, getactionresult_count):
+            # Frame the stderr first: it runs under
+            # `--experimental_remote_require_cached`, so its `Action must be
+            # cached ... but it is not` errors are expected — phase 2 only
+            # reads digests from the gRPC log, it never builds — and are not
+            # themselves the delivery failure.
+            info(ctx.std, "The Bazel errors below are from phase 2's --experimental_remote_require_cached probe" +
+                          " (which reads delivery digests from the remote cache without building); the" +
+                          " \"Action must be cached ... but it is not\" lines are expected. They are shown" +
+                          " because a digest could not be resolved for an unexpected reason.")
+            _surface_phase_stderr(ctx, 2, phase2_log_path)
 
     # Filter to misses on actions that did NOT declare a remote-cache
     # opt-out — these are real key-drift symptoms (transient or
