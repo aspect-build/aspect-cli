@@ -8,6 +8,8 @@ use std::process::Stdio;
 
 use anyhow::Context;
 
+use either::Either;
+
 use allocative::Allocative;
 use anyhow::anyhow;
 use derive_more::Display;
@@ -339,6 +341,12 @@ pub(crate) fn query_methods(registry: &mut MethodsBuilder) {
     ///   repositories the same way the build does (e.g. an rc-set
     ///   `--noenable_bzlmod` / `--enable_workspace`). Omitting them lets the
     ///   query diverge from the build and fail on repos the build can see.
+    ///   Accepts the same `str | (str, version-constraint)` shape as
+    ///   `ctx.bazel.build` / `.test`: a conditional `(flag, constraint)`
+    ///   tuple is resolved against the running Bazel version and dropped
+    ///   when the constraint does not hold — so a flag gated to a different
+    ///   Bazel version is filtered out here exactly as it would be on the
+    ///   build, rather than being forced onto the query.
     /// * `announce_version` - Print an `INFO: Bazel <version>` line before
     ///   spawning. Resolved from the `--announce-bazel-version` task flag.
     /// * `announce_command` - Print an `INFO: Spawning: <command>` line
@@ -346,18 +354,33 @@ pub(crate) fn query_methods(registry: &mut MethodsBuilder) {
     ///   flag. Both mirror the `ctx.bazel.build` / `.test` disclosure.
     fn eval<'v>(
         this: values::Value<'v>,
-        #[starlark(require = named, default = UnpackList::default())] flags: UnpackList<String>,
+        #[starlark(require = named, default = UnpackList::default())] flags: UnpackList<
+            Either<values::StringValue<'v>, (values::StringValue<'v>, values::StringValue<'v>)>,
+        >,
         #[starlark(require = named, default = false)] announce_version: bool,
         #[starlark(require = named, default = false)] announce_command: bool,
     ) -> anyhow::Result<TargetSet> {
         let this = this.downcast_ref_err::<Query>().into_anyhow_result()?;
         let expr = this.expr.borrow();
         // Flags passed to `.eval()` win over any carried on the builder, but
-        // fall back to the builder's so the common case still works.
+        // fall back to the builder's so the common case still works. Resolve
+        // conditional `(flag, constraint)` tuples against the running Bazel
+        // version the same way `ctx.bazel.build` does (see `resolve_flags`),
+        // so a version-gated flag is filtered out — not force-applied — on a
+        // mismatch. Only pay for the `bazel info` version probe when a
+        // conditional flag is actually present.
         let flags = if flags.items.is_empty() {
             this.flags.clone()
         } else {
-            flags.items
+            let has_conditional = flags.items.iter().any(|f| f.is_right());
+            let bazel_version = if has_conditional {
+                let (_, version) = super::info::server_info()
+                    .map_err(|e| anyhow!("failed to get Bazel server info: {}", e))?;
+                version
+            } else {
+                None
+            };
+            super::resolve_flags(&flags.items, bazel_version.as_ref())?
         };
         let announce = super::build::AnnounceSpawn {
             version: announce_version,
