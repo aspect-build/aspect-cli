@@ -1821,7 +1821,12 @@ def test_delivery_should_upload_grpc_log(tc: int) -> int:
     return tc
 
 def test_delivery_count_unexplained_unresolved(tc: int) -> int:
-    """Coverage for the unexplained-unresolved tally feeding the stderr gate."""
+    """Coverage for the unexplained-unresolved tally feeding the stderr gate.
+
+    The third arg is `non_hermetic_misses` — the post-opt-out-filter set that
+    drives the per-target WARN row. A target keyed there is explained; an
+    unresolved target absent from it (no surviving miss, or only a declared
+    opt-out, which never reaches this dict) is unexplained."""
 
     a = "//pkg:a"
     b = "//pkg:b"
@@ -1829,24 +1834,40 @@ def test_delivery_count_unexplained_unresolved(tc: int) -> int:
     targets = [a, b, c]
 
     # All resolved → none unexplained.
-    tc = test_case(tc, delivery_count_unexplained_unresolved(targets, {a: "h1", b: "h2", c: "h3"}, {}) == 0,
-                   "count_unexplained: all resolved → 0")
+    tc = test_case(
+        tc,
+        delivery_count_unexplained_unresolved(targets, {a: "h1", b: "h2", c: "h3"}, {}) == 0,
+        "count_unexplained: all resolved → 0",
+    )
 
-    # `b` unresolved with a logged miss → explained, not counted.
-    tc = test_case(tc, delivery_count_unexplained_unresolved(targets, {a: "h1", c: "h3"}, {b: ["PyWriteBuildData"]}) == 0,
-                   "count_unexplained: unresolved but logged miss → 0")
+    # `b` unresolved but a surviving (non-hermetic) miss explains it → not counted.
+    tc = test_case(
+        tc,
+        delivery_count_unexplained_unresolved(targets, {a: "h1", c: "h3"}, {b: ["PyWriteBuildData"]}) == 0,
+        "count_unexplained: unresolved but explained by surviving miss → 0",
+    )
 
-    # `b` unresolved with no logged miss → unexplained, counted.
-    tc = test_case(tc, delivery_count_unexplained_unresolved(targets, {a: "h1", c: "h3"}, {}) == 1,
-                   "count_unexplained: unresolved with no logged miss → 1")
+    # `b` unresolved with no surviving miss → unexplained, counted. (Same shape
+    # as an opt-out-only miss, which is filtered out before reaching this dict.)
+    tc = test_case(
+        tc,
+        delivery_count_unexplained_unresolved(targets, {a: "h1", c: "h3"}, {}) == 1,
+        "count_unexplained: unresolved with no surviving miss → 1",
+    )
 
     # Mixed: `b` explained, `c` unexplained → 1.
-    tc = test_case(tc, delivery_count_unexplained_unresolved(targets, {a: "h1"}, {b: ["X"]}) == 1,
-                   "count_unexplained: one explained, one unexplained → 1")
+    tc = test_case(
+        tc,
+        delivery_count_unexplained_unresolved(targets, {a: "h1"}, {b: ["X"]}) == 1,
+        "count_unexplained: one explained, one unexplained → 1",
+    )
 
-    # All unresolved, none logged → all unexplained.
-    tc = test_case(tc, delivery_count_unexplained_unresolved(targets, {}, {}) == 3,
-                   "count_unexplained: all unresolved, none logged → 3")
+    # All unresolved, none explained → all unexplained.
+    tc = test_case(
+        tc,
+        delivery_count_unexplained_unresolved(targets, {}, {}) == 3,
+        "count_unexplained: all unresolved, none explained → 3",
+    )
 
     return tc
 
