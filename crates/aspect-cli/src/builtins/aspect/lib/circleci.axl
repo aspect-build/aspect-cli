@@ -1,13 +1,15 @@
 """CircleCI runner output upload library.
 
 Uploads to CircleCI's runner output API (Unix socket + HTTP) over two
-distinct flows that both end in an S3 PUT:
+flows that both end in a sigv4-signed S3 PUT using the job-scoped STS
+credentials:
 
-  - Artifacts (`upload_artifact`): the runner returns a bare S3 key and we
-    sign the PUT ourselves with the job-scoped STS credentials.
-  - Test results (`store_test_results`): the runner returns a *pre-signed*
-    request (`Key.method`/`location`/`headers`) that we replay verbatim —
-    see `_s3_put_object`.
+  - Artifacts (`upload_artifact`): the runner returns a bare S3 key.
+  - Test results (`store_test_results`): the runner returns an unsigned
+    upload target (`Key.location` + the `Content-Type` to send).
+
+Neither is pre-signed by the runner; the client signs both — see `_s3_put`
+and `_s3_put_object`.
 
 Credential lifetime: the runner mints the temporary S3 (STS) credentials
 returned by `/api/v2/output/credentials` with a short TTL (≈10 min) and
@@ -230,9 +232,13 @@ def _header_args(headers):
     return args
 
 def s3_sigv4_put_args(region, aws_creds, path, headers = None):
-    """curl args for a self-signed sigv4 PUT (the artifact path mints its own
-    S3 key, so we sign locally). `headers` is an optional `{k: v}` of extra
-    request headers. Public so `circleci_test.axl` can load it.
+    """curl args for a sigv4-signed PUT using the job-scoped STS credentials.
+
+    Both upload flows sign locally — the runner hands back a bare S3 key for
+    artifacts and an unsigned upload target for test results. `headers` is an
+    optional `{k: v}` of extra request headers folded into the signed set
+    (artifact tags, the test-result `Content-Type`). Public so
+    `circleci_test.axl` can load it.
     """
     args = _CURL_S3_BASE_ARGS + [
         "--aws-sigv4",
@@ -248,22 +254,37 @@ def s3_sigv4_put_args(region, aws_creds, path, headers = None):
     ]
     return args + _header_args(headers)
 
-def s3_replay_put_args(method, path, headers = None):
-    """curl args replaying a pre-signed PUT verbatim — no local signing, just
-    the runner's `Key.headers`. See `_s3_put_object`. Public so
-    `circleci_test.axl` can load it.
+def redact_curl_trace(text):
+    """Strip secret-bearing values from curl's `-v` stderr before logging.
+
+    curl `-v` echoes the request as `> Header: value` lines; the
+    `Authorization` and `x-amz-security-token` values are secrets, so keep
+    the header name and elide the value. Other lines pass through. Public so
+    `circleci_test.axl` can assert the redaction.
     """
-    return _CURL_S3_BASE_ARGS + ["-T", path, "-X", method] + _header_args(headers)
+    secret = ("authorization", "x-amz-security-token")
+    out = []
+    for line in text.split("\n"):
+        stripped = line.lstrip("> ").lower()
+        if line.lstrip().startswith(">") and stripped.split(":", 1)[0] in secret:
+            out.append(line.split(":", 1)[0] + ": <redacted>")
+        else:
+            out.append(line)
+    return "\n".join(out)
 
 def _run_s3_put(ctx, curl_args, url):
     """Spawn `curl <args> <url>` and classify the result.
 
     Returns `(ok, http_code, body, curl_err)`. `ok` is True only on a 2xx
     with a clean exit; `body` is the S3 response (the trailing `%{http_code}`
-    line stripped) for error diagnosis.
+    line stripped) for error diagnosis. When `trace.enabled`, runs curl
+    `-v` and logs the (redacted) request/response trace on failure — the
+    sent request headers are what diagnose a signature/`AccessDenied`
+    rejection, since they reveal anything curl added beyond what was signed.
     """
+    args = curl_args + (["-v"] if trace.enabled else [])
     child = ctx.std.process.command("curl") \
-        .args(curl_args + [url]) \
+        .args(args + [url]) \
         .stdout("piped") \
         .stderr("piped") \
         .spawn()
@@ -278,6 +299,8 @@ def _run_s3_put(ctx, curl_args, url):
         body, http_code = "", parts[0].strip()
 
     ok = status.code == 0 and http_code.startswith("2")
+    if not ok and trace.enabled:
+        trace.log("curl PUT failed (http=%s):\n%s" % (http_code, redact_curl_trace(curl_err)))
     return (ok, http_code, body, curl_err)
 
 def _s3_put(ctx, session, path, name):
@@ -379,9 +402,9 @@ def _delete_artifact(ctx, name):
 # Upload Bazel JUnit XML to CircleCI's runner output test-results API
 # (reverse-engineered from circleci-agent, verified against real CircleCI):
 #   POST /api/v2/output/test-result          {"step_id": N}  -> Key
-#   <Key.method> the gzipped tar to the S3 Key.location, replaying
-#     Key.headers verbatim — the Key is already pre-signed by the runner,
-#     so we do NOT re-sign (see `_s3_put_object`).
+#   sigv4-PUT the gzipped tar to the S3 Key.location, sending the
+#     Content-Type from Key.headers (the Key is an unsigned target; we sign
+#     with the STS creds — see `_s3_put_object`).
 #   POST /api/v2/output/test-result/process  {"step_id": N}  -> summary
 # step_id is the agent's internal step index; when unknown we probe for it.
 
@@ -432,22 +455,18 @@ def _resolve_step_id(ctx, session, step_id):
             return k, key
     return None, None
 
-def _s3_put_object(ctx, method, url, headers, path):
-    """Replay the runner's pre-signed upload request: PUT `path` to `url`
-    with `Key.headers` (`headers`) sent verbatim. Returns `(ok, detail)`.
+def _s3_put_object(ctx, session, url, headers, path):
+    """Sign and PUT `path` to the test-result `url`. Returns `(ok, detail)`.
 
-    The CircleCI output service returns a *fully pre-signed* request in the
-    test-result `Key` — `Key.headers` already carries the `Authorization`
-    (sigv4), `x-amz-date`, `x-amz-content-sha256`, and `x-amz-security-token`
-    the runner computed against this exact object. So we must NOT re-sign:
-    curl's `--aws-sigv4` steps aside the moment it sees an explicit
-    `Authorization`, which drops the `x-amz-content-sha256` it would
-    otherwise add and makes S3 reject the request with
-    `400 InvalidRequest: Missing required header ... x-amz-content-sha256`.
-    Replaying the runner's headers as-is (no `--aws-sigv4`, no `--user`, no
-    locally-injected security token) keeps the request the runner signed.
+    The output service's test-result `Key` is an *unsigned* upload target:
+    a bare S3 object key (`Key.location`) plus the `Content-Type` it expects
+    in `Key.headers`. The client signs the PUT itself with the job-scoped STS
+    credentials — the same flow as the artifact path (`_s3_put`) — so we reuse
+    `s3_sigv4_put_args`, folding the runner's headers into the signed set.
     """
-    ok, http_code, body, curl_err = _run_s3_put(ctx, s3_replay_put_args(method, path, headers), url)
+    aws_creds = session["aws_creds"]
+    region = session["region"]
+    ok, http_code, body, curl_err = _run_s3_put(ctx, s3_sigv4_put_args(region, aws_creds, path, headers), url)
     if ok:
         return (True, "")
     return (False, s3_upload_error_detail(http_code, curl_err, body))
@@ -482,7 +501,7 @@ def _store_test_results(ctx, archive_path, step_id = None, cache = None) -> Test
         return TestResultsUploadResult(success = False, step_id = sid, errors = ["test-result Key had no 'location'"])
 
     url = test_results_object_url(session["bucket"], session["region"], location)
-    ok, detail = _s3_put_object(ctx, key.get("method", "PUT"), url, key.get("headers") or {}, archive_path)
+    ok, detail = _s3_put_object(ctx, session, url, key.get("headers") or {}, archive_path)
     if not ok:
         # Drop the session so the next `store_test_results` re-mints a fresh
         # runner token + Key rather than reusing one we just saw fail.

@@ -3,11 +3,10 @@
 The upload flow itself (socket token, runner API, curl PUT) needs live
 runner infrastructure, so these tests cover the pure pieces around it:
 S3 error parsing, the session cache, test-result URL resolution, the
-curl arg builders (what we sign vs. replay verbatim), and JUnit
-skipped-marking.
+sigv4 PUT arg builder, trace redaction, and JUnit skipped-marking.
 """
 
-load("./circleci.axl", "mark_testcases_skipped", "s3_extract_error_code", "s3_extract_error_message", "s3_replay_put_args", "s3_sigv4_put_args", "s3_upload_error_detail", "session_cache_clear", "session_cache_get", "session_cache_put", "test_results_object_url")
+load("./circleci.axl", "mark_testcases_skipped", "redact_curl_trace", "s3_extract_error_code", "s3_extract_error_message", "s3_sigv4_put_args", "s3_upload_error_detail", "session_cache_clear", "session_cache_get", "session_cache_put", "test_results_object_url")
 
 def _eq(label, got, want):
     if got != want:
@@ -140,8 +139,8 @@ def _test_object_url_relative_key(_ctx):
     )
 
 def _test_object_url_absolute_https_passthrough(_ctx):
-    """An already-absolute https location is returned unchanged (the runner
-    can hand back a full presigned URL instead of a relative key)."""
+    """An already-absolute https location is returned unchanged, so a future
+    runner that returns an absolute URL keeps working without a code change."""
     url = "https://example.s3.amazonaws.com/key?X-Amz-Signature=abc"
     _eq("https location passthrough", test_results_object_url("b", "r", url), url)
 
@@ -150,7 +149,7 @@ def _test_object_url_absolute_http_passthrough(_ctx):
     _eq("http location passthrough", test_results_object_url("b", "r", url), url)
 
 # ---------------------------------------------------------------------------
-# s3 PUT curl arg builders — what we sign vs. what we replay verbatim
+# s3_sigv4_put_args — the sigv4-signed PUT both upload flows share
 # ---------------------------------------------------------------------------
 
 def _header_value(args, name):
@@ -164,7 +163,7 @@ def _header_value(args, name):
 _FAKE_CREDS = {"AccessKeyID": "AKIA", "SecretAccessKey": "secret", "SessionToken": "tok"}
 
 def _test_sigv4_args_self_sign(_ctx):
-    """The artifact path signs locally: --aws-sigv4 + --user + the session token,
+    """Both flows sign locally: --aws-sigv4 + --user + the session token,
     PUT of the file."""
     args = s3_sigv4_put_args("us-west-2", _FAKE_CREDS, "/tmp/a.tar.gz")
     if "--aws-sigv4" not in args:
@@ -175,27 +174,44 @@ def _test_sigv4_args_self_sign(_ctx):
     _eq("session token forwarded", _header_value(args, "x-amz-security-token"), "tok")
     _eq("PUT of the file", args[args.index("-T") + 1], "/tmp/a.tar.gz")
 
-def _test_sigv4_args_extra_headers(_ctx):
+def _test_sigv4_args_artifact_tags(_ctx):
+    """The artifact path folds its tag header into the signed set."""
     args = s3_sigv4_put_args("r", _FAKE_CREDS, "/tmp/a", {"x-amz-tagging": "k=v"})
-    _eq("extra header included", _header_value(args, "x-amz-tagging"), "k=v")
+    _eq("tag header included", _header_value(args, "x-amz-tagging"), "k=v")
 
-def _test_replay_args_no_local_signing(_ctx):
-    """The test-result path replays the runner's pre-signed request: no
-    --aws-sigv4, no --user, no locally-injected token — only Key.headers."""
-    headers = {"Authorization": "AWS4-HMAC-SHA256 ...", "x-amz-content-sha256": "abc"}
-    args = s3_replay_put_args("PUT", "/tmp/tr.tar.gz", headers)
-    if "--aws-sigv4" in args:
-        fail("replay must NOT re-sign (--aws-sigv4 present): %r" % args)
-    if "--user" in args:
-        fail("replay must NOT pass --user: %r" % args)
-    _eq("no locally-injected security token", _header_value(args, "x-amz-security-token"), None)
-    _eq("runner Authorization forwarded", _header_value(args, "Authorization"), "AWS4-HMAC-SHA256 ...")
-    _eq("runner content-sha256 forwarded", _header_value(args, "x-amz-content-sha256"), "abc")
+def _test_sigv4_args_test_result_content_type(_ctx):
+    """The test-result path folds the runner's Content-Type into the signed set."""
+    args = s3_sigv4_put_args("r", _FAKE_CREDS, "/tmp/tr.tar.gz", {"Content-Type": "application/gzip"})
+    _eq("content-type signed", _header_value(args, "Content-Type"), "application/gzip")
 
-def _test_replay_args_honors_method(_ctx):
-    """Key.method drives -X (the runner can hand back a non-PUT verb)."""
-    args = s3_replay_put_args("POST", "/tmp/tr.tar.gz", {})
-    _eq("method passed through", args[args.index("-X") + 1], "POST")
+# ---------------------------------------------------------------------------
+# redact_curl_trace — strip secrets from curl -v output before logging
+# ---------------------------------------------------------------------------
+
+def _test_redact_curl_trace_elides_secrets(_ctx):
+    """curl -v request lines for Authorization / security-token keep the
+    header name but drop the value; everything else passes through."""
+    raw = "\n".join([
+        "> PUT /k HTTP/1.1",
+        "> Authorization: AWS4-HMAC-SHA256 SECRETAUTH",
+        "> x-amz-security-token: SECRETTOKEN",
+        "> x-amz-content-sha256: UNSIGNED-PAYLOAD",
+        "< HTTP/1.1 403 Forbidden",
+    ])
+    got = redact_curl_trace(raw)
+    if "SECRETAUTH" in got or "SECRETTOKEN" in got:
+        fail("curl trace leaked a secret: %r" % got)
+    _eq(
+        "redacted trace",
+        got,
+        "\n".join([
+            "> PUT /k HTTP/1.1",
+            "> Authorization: <redacted>",
+            "> x-amz-security-token: <redacted>",
+            "> x-amz-content-sha256: UNSIGNED-PAYLOAD",
+            "< HTTP/1.1 403 Forbidden",
+        ]),
+    )
 
 # ---------------------------------------------------------------------------
 # mark_testcases_skipped — move cached tests into the "skipped" bucket
@@ -234,9 +250,9 @@ _UNIT_TESTS = [
     _test_object_url_absolute_https_passthrough,
     _test_object_url_absolute_http_passthrough,
     _test_sigv4_args_self_sign,
-    _test_sigv4_args_extra_headers,
-    _test_replay_args_no_local_signing,
-    _test_replay_args_honors_method,
+    _test_sigv4_args_artifact_tags,
+    _test_sigv4_args_test_result_content_type,
+    _test_redact_curl_trace_elides_secrets,
     _test_skip_self_closing,
     _test_skip_with_body,
     _test_skip_multiple,
