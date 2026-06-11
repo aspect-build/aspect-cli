@@ -185,7 +185,8 @@ def _test_sigv4_args_test_result_content_type(_ctx):
     _eq("content-type signed", _header_value(args, "Content-Type"), "application/gzip")
 
 # ---------------------------------------------------------------------------
-# redact_curl_trace — strip secrets from curl -v output before logging
+# redact_curl_trace — strip SigV4 secrets from curl -v output (logged and,
+# on a transport failure, surfaced in the error detail)
 # ---------------------------------------------------------------------------
 
 def _test_redact_curl_trace_elides_secrets(_ctx):
@@ -212,6 +213,24 @@ def _test_redact_curl_trace_elides_secrets(_ctx):
             "< HTTP/1.1 403 Forbidden",
         ]),
     )
+
+def _test_redact_curl_trace_transport_error_no_leak(_ctx):
+    """A transport failure after `-v` emitted the request (http_code "000")
+    builds its detail from curl_err; redacting at the source keeps the SigV4
+    secrets out of that surfaced message."""
+
+    # `-v` echoes the request headers, then curl reports the transport error.
+    raw = "\n".join([
+        "> PUT /k HTTP/1.1",
+        "> Authorization: AWS4-HMAC-SHA256 SECRETAUTH",
+        "> x-amz-security-token: SECRETTOKEN",
+        "* Recv failure: Connection reset by peer",
+    ])
+    detail = s3_upload_error_detail("000", redact_curl_trace(raw), "")
+    if "SECRETAUTH" in detail or "SECRETTOKEN" in detail:
+        fail("transport-error detail leaked a secret: %r" % detail)
+    if "Connection reset by peer" not in detail:
+        fail("transport-error detail dropped the actual error: %r" % detail)
 
 # ---------------------------------------------------------------------------
 # mark_testcases_skipped — move cached tests into the "skipped" bucket
@@ -253,6 +272,7 @@ _UNIT_TESTS = [
     _test_sigv4_args_artifact_tags,
     _test_sigv4_args_test_result_content_type,
     _test_redact_curl_trace_elides_secrets,
+    _test_redact_curl_trace_transport_error_no_leak,
     _test_skip_self_closing,
     _test_skip_with_body,
     _test_skip_multiple,

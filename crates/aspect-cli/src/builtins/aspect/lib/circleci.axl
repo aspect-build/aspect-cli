@@ -277,10 +277,11 @@ def _run_s3_put(ctx, curl_args, url):
 
     Returns `(ok, http_code, body, curl_err)`. `ok` is True only on a 2xx
     with a clean exit; `body` is the S3 response (the trailing `%{http_code}`
-    line stripped) for error diagnosis. When `trace.enabled`, runs curl
-    `-v` and logs the (redacted) request/response trace on failure — the
-    sent request headers are what diagnose a signature/`AccessDenied`
-    rejection, since they reveal anything curl added beyond what was signed.
+    line stripped) for error diagnosis. When `trace.enabled`, runs curl `-v`
+    so the sent request headers — which reveal anything curl added beyond
+    what was signed — show in the trace; `curl_err` is redacted before being
+    returned so a transport-error detail built from it can't leak the SigV4
+    `Authorization` / `x-amz-security-token` that `-v` echoes.
     """
     args = curl_args + (["-v"] if trace.enabled else [])
     child = ctx.std.process.command("curl") \
@@ -289,7 +290,7 @@ def _run_s3_put(ctx, curl_args, url):
         .stderr("piped") \
         .spawn()
     out = child.stdout().read_to_string()
-    curl_err = child.stderr().read_to_string().strip()
+    curl_err = redact_curl_trace(child.stderr().read_to_string().strip())
     status = child.wait()
 
     parts = out.rsplit("\n", 1)
@@ -300,7 +301,7 @@ def _run_s3_put(ctx, curl_args, url):
 
     ok = status.code == 0 and http_code.startswith("2")
     if not ok and trace.enabled:
-        trace.log("curl PUT failed (http=%s):\n%s" % (http_code, redact_curl_trace(curl_err)))
+        trace.log("curl PUT failed (http=%s):\n%s" % (http_code, curl_err))
     return (ok, http_code, body, curl_err)
 
 def _s3_put(ctx, session, path, name):
