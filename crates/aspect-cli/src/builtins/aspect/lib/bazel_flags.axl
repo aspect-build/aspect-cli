@@ -31,6 +31,11 @@ also checked at runtime by `assert_ctx_bazel_ready_for_health_check` (see
     `lib/lifecycle.axl::setup_phase`; call it directly only for unusual
     layering. The smaller building blocks below exist mostly for testing.
 
+  - `resolve_query_flags` — re-resolve the rc command flags expanded for
+    the `query` command, for a task that also runs a sidecar `bazel query`
+    under `--ignore_all_rc_files`. Returns the flag list without mutating
+    `ctx.bazel.startup_flags` or emitting a disclosure.
+
   - `resolve_startup_flags` — combine `ctx.args.bazel_startup_flags`
     with `BazelTrait.extra_startup_flags` + transform. Returns the list
     without mutating `ctx.bazel.startup_flags`.
@@ -210,4 +215,31 @@ def setup_bazel_command(ctx, command, bazel_trait, base_flags = []):
         print(rc.announce(command = command, ansi = color_enabled(ctx.std)))
     trace.log(rc.announce(command = command, ansi = False))
 
+    return expanded_flags
+
+def resolve_query_flags(ctx, bazel_trait):
+    """Resolve the `.bazelrc` command flags for a `bazel query` spawn, expanded
+    for the `query` command.
+
+    A task that spawns `bazel build`/`test` reaches Bazel under
+    `--ignore_all_rc_files` (see `setup_bazel_command`), so a sidecar
+    `bazel query` it runs reads none of the workspace `.bazelrc` either. To
+    keep the query's external-repository resolution consistent with the build
+    it must replay the rc flags — but expanded for `query`, not `build`:
+
+      - a `build`-section option (e.g. `--show_result`) is simply absent from
+        the `query` expansion, so it never reaches — and breaks — the query;
+      - a `common`-section option arrives as `--default_override=0:common=…`,
+        which `query` silently ignores when it doesn't recognize the wrapped
+        option (the same option passed bare would hard-error).
+
+    Returns the command flag list (same `str | (str, version-constraint)`
+    shape as `setup_bazel_command`) to pass as `ctx.bazel.query().…eval(flags
+    = …)`. Does not mutate `ctx.bazel.startup_flags` and emits no disclosure —
+    the build's `setup_bazel_command` already owns both for the task.
+    """
+    startup_flags = resolve_startup_flags(ctx, bazel_trait)
+    flags = resolve_flags(ctx, bazel_trait)
+    rc = ctx.bazel.parse_rc(startup_flags = startup_flags, flags = flags)
+    _, expanded_flags = rc.expand_all(command = "query")
     return expanded_flags

@@ -127,7 +127,7 @@ User-facing migration guide: https://docs.aspect.build/cli/migration/delivery
 
 load("@aspect//bazel.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
 load("@aspect//lib/artifacts.axl", "artifacts")
-load("@aspect//lib/bazel_flags.axl", "announce_bazel_args", "resolve_bazel_announce")
+load("@aspect//lib/bazel_flags.axl", "announce_bazel_args", "resolve_bazel_announce", "resolve_query_flags")
 load("@aspect//lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "now_ms", "process_event", bazel_init_data = "init_data")
 load("@aspect//lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
 load("@aspect//lib/ci.axl", "resolve_build_url")
@@ -1093,15 +1093,14 @@ def _delivery_impl(ctx):
         info(ctx.std, "Running bazel query: {}".format(query_expr))
 
         # The query carries `--ignore_all_rc_files` (see lib/bazel_flags.axl),
-        # so it reads none of the workspace `.bazelrc`. Forward the same
-        # rc-expanded `expanded_flags` the build phases use, so the query
-        # resolves external repositories the way the build does — otherwise an
-        # rc-set `--noenable_bzlmod` / `--enable_workspace` is dropped and the
-        # query fails on repos the build can see. `.eval()` filters any
-        # version-gated flags against the running Bazel version exactly as
-        # `ctx.bazel.build` does.
+        # so it reads none of the workspace `.bazelrc`. Replay the rc flags
+        # expanded for `query` — not the build's `expanded_flags`, which carry
+        # build-only options (e.g. `--show_result`) the query rejects — so the
+        # query resolves external repositories the way the build does (an
+        # rc-set `--noenable_bzlmod` / `--enable_workspace` would otherwise be
+        # dropped). See `resolve_query_flags`.
         targets = [t.name for t in ctx.bazel.query().raw(query_expr).eval(
-            flags = expanded_flags,
+            flags = resolve_query_flags(ctx, bazel_trait),
             announce_version = announce_version,
             announce_command = announce_command,
         )]

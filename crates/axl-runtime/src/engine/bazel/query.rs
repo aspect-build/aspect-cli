@@ -339,7 +339,12 @@ pub(crate) fn query_methods(registry: &mut MethodsBuilder) {
     ///   query diverge from the build and fail on repos the build can see.
     ///   Accepts the same `str | (str, version-constraint)` shape as
     ///   `ctx.bazel.build` / `.test`; version-gated flags are filtered
-    ///   against the running Bazel version identically.
+    ///   against the running Bazel version identically. Flags MUST be
+    ///   expanded for the `query` command (e.g. via `resolve_query_flags`):
+    ///   a build-only option expanded for `build` (such as `--show_result`)
+    ///   would reach the query as a bare flag and hard-error, whereas a
+    ///   `common`-section option arrives as `--default_override=0:common=…`,
+    ///   which `query` silently ignores.
     /// * `announce_version` - Print an `INFO: Bazel <version>` line before
     ///   spawning. Resolved from the `--announce-bazel-version` task flag.
     /// * `announce_command` - Print an `INFO: Spawning: <command>` line
