@@ -35,6 +35,8 @@ also checked at runtime by `assert_ctx_bazel_ready_for_health_check` (see
     the `query` command, for a task that also runs a sidecar `bazel query`
     under `--ignore_all_rc_files`. Returns the flag list without mutating
     `ctx.bazel.startup_flags` or emitting a disclosure.
+    `requested_config_names` extracts the `--config=` names it tolerates as
+    build-only.
 
   - `resolve_startup_flags` — combine `ctx.args.bazel_startup_flags`
     with `BazelTrait.extra_startup_flags` + transform. Returns the list
@@ -217,6 +219,20 @@ def setup_bazel_command(ctx, command, bazel_trait, base_flags = []):
 
     return expanded_flags
 
+_CONFIG_PREFIX = "--config="
+
+def requested_config_names(flags: list) -> list:
+    """The `--config=NAME` names requested in `flags`.
+
+    Each item is a plain `str` or a `(value, version-constraint)` tuple.
+    Exported for unit testing; used by `resolve_query_flags`."""
+    names = []
+    for flag in flags:
+        value = flag[0] if type(flag) == "tuple" else flag
+        if value.startswith(_CONFIG_PREFIX):
+            names.append(value[len(_CONFIG_PREFIX):])
+    return names
+
 def resolve_query_flags(ctx, bazel_trait):
     """Resolve the `.bazelrc` command flags for a `bazel query` spawn, expanded
     for the `query` command.
@@ -225,13 +241,29 @@ def resolve_query_flags(ctx, bazel_trait):
     `--ignore_all_rc_files` (see `setup_bazel_command`), so a sidecar
     `bazel query` it runs reads none of the workspace `.bazelrc` either. To
     keep the query's external-repository resolution consistent with the build
-    it must replay the rc flags — but expanded for `query`, not `build`:
+    it must replay the rc flags — but expanded for `query`, not `build`.
+
+    This is a separate helper rather than another `setup_bazel_command` call
+    because the query is a *secondary* command: the build already owns
+    `ctx.bazel.startup_flags` and the rc disclosure, which this must not
+    re-do. (`build`/`test` need no such helper — each expands for its own
+    command via `setup_bazel_command`, and `test` inherits `build:*` through
+    Bazel's command graph; only `query`, which has no ancestor, is special.)
+    Expanding for `query`:
 
       - a `build`-section option (e.g. `--show_result`) is simply absent from
         the `query` expansion, so it never reaches — and breaks — the query;
       - a `common`-section option arrives as `--default_override=0:common=…`,
         which `query` silently ignores when it doesn't recognize the wrapped
         option (the same option passed bare would hard-error).
+
+    `query` has no `build` ancestor, so a requested `--config=NAME` that is
+    defined only as a `build:NAME` section (the common case) has no section
+    visible to `query` and would raise `undefined config`. Such configs are
+    passed in `skip_config_if_missing` so they're dropped rather than fatal —
+    they carry build configuration, not the repo-resolution flags the query
+    needs. A config that *does* have a `common:`/`query:` section still
+    expands.
 
     Returns the command flag list (same `str | (str, version-constraint)`
     shape as `setup_bazel_command`) to pass as `ctx.bazel.query().…eval(flags
@@ -240,6 +272,10 @@ def resolve_query_flags(ctx, bazel_trait):
     """
     startup_flags = resolve_startup_flags(ctx, bazel_trait)
     flags = resolve_flags(ctx, bazel_trait)
-    rc = ctx.bazel.parse_rc(startup_flags = startup_flags, flags = flags)
+    rc = ctx.bazel.parse_rc(
+        startup_flags = startup_flags,
+        flags = flags,
+        skip_config_if_missing = requested_config_names(flags),
+    )
     _, expanded_flags = rc.expand_all(command = "query")
     return expanded_flags

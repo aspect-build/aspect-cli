@@ -28,9 +28,13 @@ common:pure_go --@rules_go//go/config:pure
 
 common --test_output=errors
 
-# A build-only option that `bazel query` rejects: regression coverage for the
-# delivery resolve query, which must expand the rc for `query` (dropping this)
-# rather than forward the build expansion. See lib/bazel_flags.axl
-# `resolve_query_flags`. Mirrors the AssemblyAI DeepLearning repo's
-# convenience.bazelrc that surfaced the bug.
-build --show_result=20
+# Regression coverage for the delivery resolve query, which expands the rc for
+# the `query` command rather than forwarding the build expansion. See
+# lib/bazel_flags.axl `resolve_query_flags`. A config defined only under
+# `build:` (no `common:`/`query:` section) is invisible to `query`, which has
+# no `build` ancestor — `resolve_query_flags` must drop it rather than let the
+# query fatal with "undefined config". (`bazel/defaults.bazelrc` already
+# carries a `common --show_result=20`, which exercises the build-only-flag side
+# of the fix: it reaches the query wrapped as `--default_override`, which Bazel
+# silently ignores.)
+build:delivery-query-test --show_result=20
