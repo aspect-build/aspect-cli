@@ -28,13 +28,8 @@ common:pure_go --@rules_go//go/config:pure
 
 common --test_output=errors
 
-# Regression coverage for the delivery resolve query, which expands the rc for
-# the `query` command rather than forwarding the build expansion. See
-# lib/bazel_flags.axl `resolve_query_flags`. A config defined only under
-# `build:` (no `common:`/`query:` section) is invisible to `query`, which has
-# no `build` ancestor — `resolve_query_flags` must drop it rather than let the
-# query fatal with "undefined config". (`bazel/defaults.bazelrc` already
-# carries a `common --show_result=20`, which exercises the build-only-flag side
-# of the fix: it reaches the query wrapped as `--default_override`, which Bazel
-# silently ignores.)
+# Regression fixture for `resolve_query_flags` (lib/bazel_flags.axl): a config
+# defined only under `build:` is invisible to `bazel query` (no `build`
+# ancestor), so the delivery resolve query must drop it rather than fatal with
+# "undefined config". Exercised by bazel_flags_test.axl.
 build:delivery-query-test --show_result=20

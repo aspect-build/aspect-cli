@@ -260,13 +260,16 @@ def resolve_query_flags(ctx, bazel_trait):
         which `query` silently ignores when it doesn't recognize the wrapped
         option (the same option passed bare would hard-error).
 
-    `query` has no `build` ancestor, so a requested `--config=NAME` that is
-    defined only as a `build:NAME` section (the common case) has no section
-    visible to `query` and would raise `undefined config`. Such configs are
-    passed in `skip_config_if_missing` so they're dropped rather than fatal —
-    they carry build configuration, not the repo-resolution flags the query
-    needs. A config that *does* have a `common:`/`query:` section still
-    expands.
+    `query` has no `build` ancestor, so a requested `--config=NAME` defined
+    only as `build:NAME` (the common case) has no section visible to `query`
+    and would raise `undefined config`. The requested config names are passed
+    in `skip_config_if_missing` so such configs are dropped rather than fatal;
+    they carry build/test configuration, not the repo-resolution flags the
+    query needs, and the build phase (which does error on an undefined config)
+    already validates them. A config that *does* have a `common:`/`query:`
+    section still expands. (A `--config` written into a `common`/`query` rc
+    section that resolves only via `build:` is out of scope — such an rc
+    already breaks a plain `bazel query` in the repo.)
 
     Returns the command flag list (same `str | (str, version-constraint)`
     shape as `setup_bazel_command`) to pass as `ctx.bazel.query().…eval(flags
