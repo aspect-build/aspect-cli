@@ -759,7 +759,7 @@ impl Build {
         announce: AnnounceSpawn,
         rt: AsyncRuntime,
     ) -> Result<Build, std::io::Error> {
-        let (pid, version) = super::info::server_info()?;
+        let (pid, version) = super::info::server_info(current_dir.as_deref())?;
 
         let span = tracing::info_span!(
             "ctx.bazel.build",

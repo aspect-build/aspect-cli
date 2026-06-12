@@ -14,6 +14,7 @@ Aspect-CLI ships with six built-in tasks that drive Bazel for the most common CI
 | [format](#format) | `bazel run` of a `format_multirun` | `aspect format [--scope=changed\|all]`                       | `format_results`     |
 | [gazelle](#gazelle) | `bazel run` of a `gazelle()` / `aspect_gazelle()` target | `aspect gazelle [--check]`                                   | `gazelle_results`    |
 | [delivery](#delivery) | Multi-phase delivery flow | `aspect delivery //pkg/foo:release //pkg/bar:release`        | `delivery_results`   |
+| rbe check / rbe analyze | `bazel query` (+ instrumented `bazel test` for `analyze`) | `aspect rbe analyze [--workspace=/path/to/repo] [--report-out=rbe.txt] [--target-wall-time=600] [-- //...]` | *(stdout only; no status surfaces yet)* |
 
 Every task:
 

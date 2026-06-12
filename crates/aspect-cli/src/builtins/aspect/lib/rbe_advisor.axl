@@ -1,0 +1,826 @@
+"""
+RBE readiness analysis: hermeticity checks + worker-pool capacity sizing.
+
+Pure logic for the `aspect rbe` task group (see ../rbe.axl). Nothing here
+touches Bazel or the filesystem — inputs are typed records built by the
+task layer, outputs are typed records the task layer renders. This keeps
+every check and the sizing math unit-testable from `tests axl`.
+
+Methodology (see docs/rbe-advisor-design.md for the full rationale):
+
+- Hermeticity: static checks over target tags/attrs and .bazelrc lines,
+  plus dynamic checks over execution-log spawn facts from an instrumented
+  local run. Violations are weighted by the CPU-seconds they affect, and
+  any blocker caps the overall score.
+- Sizing: wall time on a pool of W executor slots is approximately
+  T(W) = max(T_critical_path, total_cpu_seconds / (W * utilization)).
+  Tests are binned into worker classes by (cpu, mem) demand; per-class
+  executor counts are packed onto EC2/GCE instance shapes.
+"""
+
+# ---------------------------------------------------------------- types
+
+# `advisory` = surfaced for visibility but not scored: deliberate opt-outs
+# from remote execution (no-remote / no-remote-exec) are a declared choice,
+# not a hermeticity defect — they simply keep running locally under RBE.
+Severity = enum("blocker", "non_hermetic", "efficiency", "advisory")
+
+CloudProvider = enum("aws", "gcp", "both")
+
+TargetInfo = record(
+    label = field(str),
+    rule_class = field(str, default = ""),
+    size = field(str, default = "medium"),
+    tags = field(list, default = []),
+    local_attr = field(bool, default = False),
+    flaky = field(bool, default = False),
+    # BUILD-file position from `bazel query` ("path/BUILD:line:col");
+    # empty when the query backend didn't report one.
+    location = field(str, default = ""),
+)
+
+SpawnFact = record(
+    label = field(str),
+    mnemonic = field(str, default = ""),
+    runner = field(str, default = ""),
+    cacheable = field(bool, default = True),
+    remote_cacheable = field(bool, default = True),
+    remotable = field(bool, default = True),
+    cache_hit = field(bool, default = False),
+    wall_s = field(float, default = 0.0),
+    # Command line and environment from the exec log; drive the
+    # assumed-system-dependency checks (host-only paths, system tools).
+    args = field(list, default = []),
+    env = field(dict, default = {}),
+)
+
+Violation = record(
+    severity = field(Severity),
+    subject = field(str),
+    check = field(str),
+    detail = field(str),
+    cpu_seconds = field(float, default = 0.0),
+    # Where the violation originates: BUILD-file position for target
+    # checks, "file:line" for bazelrc checks. Empty when unknown
+    # (e.g. a dynamic spawn fact whose target wasn't in the query).
+    location = field(str, default = ""),
+    # Concrete remediation suggestion; empty when there's no
+    # one-size-fits-all fix.
+    fix = field(str, default = ""),
+)
+
+WorkerClass = record(
+    name = field(str),
+    cpu = field(int),
+    mem_gb = field(int),
+)
+
+InstancePlan = record(
+    instance_type = field(str),
+    count_min = field(int),
+    count_max = field(int),
+    executors_per_instance = field(int),
+)
+
+ClassPlan = record(
+    worker_class = field(WorkerClass),
+    tests = field(int),
+    cpu_seconds = field(float),
+    executors_steady = field(int),
+    executors_peak = field(int),
+    # cloud name -> InstancePlan; dict because keys are caller-selected clouds.
+    instances = field(dict, default = {}),
+)
+
+SizingPlan = record(
+    total_cpu_seconds = field(float),
+    critical_path_s = field(float),
+    min_achievable_wall_s = field(float),
+    target_wall_s = field(float),
+    target_achievable = field(bool),
+    concurrent_builds = field(float),
+    pct_compute_remotable = field(float),
+    pct_compute_cacheable = field(float),
+    # class name -> ClassPlan
+    classes = field(dict, default = {}),
+)
+
+# ---------------------------------------------------------------- constants
+
+# Bazel test-size heuristic peak RAM (MB), per the test encyclopedia.
+_SIZE_MEM_MB = {"small": 20, "medium": 100, "large": 300, "enormous": 800}
+
+# Heuristic mem -> provisioned mem safety factor. Exec logs don't carry
+# peak RSS, so we provision conservatively. Calibrate against real RBE
+# telemetry before trusting for production pools.
+_MEM_INFLATION = 3.0
+
+# Local wall -> remote wall factor (input fetch, scheduling). Calibrate.
+REMOTE_OVERHEAD = 1.15
+
+# Tag -> (severity, explanation, suggested fix) for tags that degrade
+# or break RBE.
+_BAD_TAGS = {
+    "local": (
+        Severity("blocker"),
+        "runs outside the sandbox and cannot execute remotely",
+        "remove the `local` tag and fix whatever forced it (host paths, daemons, devices); if the target is genuinely machine-bound, switch to `no-remote-exec` to make the opt-out explicit",
+    ),
+    "no-sandbox": (
+        Severity("blocker"),
+        "depends on unsandboxed local state",
+        "make the action sandbox-clean (declare all inputs, drop absolute paths) and remove the `no-sandbox` tag",
+    ),
+    "no-remote": (
+        Severity("advisory"),
+        "declared opt-out from remote execution and cache; will keep running locally",
+        "intentional opt-out — no action needed; revisit if this target dominates wall time",
+    ),
+    "no-remote-exec": (
+        Severity("advisory"),
+        "declared opt-out from remote execution; will keep running locally",
+        "intentional opt-out — no action needed; revisit if this target dominates wall time",
+    ),
+    "requires-network": (
+        Severity("blocker"),
+        "needs network access during the action",
+        "hermetize the dependency (vendor it, fetch in a repository rule, or fake the endpoint); if the network use is essential, keep the tag so RBE schedulers route it to a network-enabled pool",
+    ),
+    "exclusive": (
+        Severity("efficiency"),
+        "serializes the test run; defeats RBE parallelism",
+        "remove `exclusive` if the test no longer needs sole ownership of the machine; otherwise expect it to gate total wall time",
+    ),
+    "no-cache": (
+        Severity("efficiency"),
+        "never cached; re-executes every build",
+        "remove `no-cache` once outputs are deterministic; check for timestamps or randomness in outputs. For large non-deterministic blobs (archives, container images), prefer `no-remote-cache` instead — local caching keeps working, and rebuilding remotely is often cheaper than pushing/pulling the blob",
+    ),
+    "no-remote-cache": (
+        Severity("efficiency"),
+        "excluded from the remote cache",
+        "remove `no-remote-cache` unless outputs contain secrets or machine-specific data — or keep it deliberately for large non-deterministic outputs, where rebuilding every run beats the I/O and network cost of cache round-trips",
+    ),
+}
+
+# .bazelrc red flags: (substring-or-prefix, severity, message, fix).
+# Substring match keeps this dependency-free; false positives in
+# comments are filtered by the caller stripping `#` comments first.
+_RC_CHECKS = [
+    (
+        "--spawn_strategy=local",
+        Severity("blocker"),
+        "forces local spawn strategy; remote execution disabled",
+        "delete the flag (Bazel picks sandboxed/remote automatically) or scope it to a config like `--config=local_dev`",
+    ),
+    (
+        "--spawn_strategy=standalone",
+        Severity("blocker"),
+        "forces standalone spawn strategy; remote execution disabled",
+        "delete the flag (Bazel picks sandboxed/remote automatically) or scope it to a config like `--config=local_dev`",
+    ),
+    (
+        "--workspace_status_command",
+        Severity("non_hermetic"),
+        "volatile workspace status consumed by non-stamp actions breaks caching",
+        "keep volatile keys (timestamps, commit) in the volatile-status file and ensure only `stamp = True` targets consume them; or scope the flag to a release config",
+    ),
+    (
+        "--noincompatible_strict_action_env",
+        Severity("non_hermetic"),
+        "full client env leaks into action cache keys",
+        "remove the flag and allowlist needed vars with pinned values: `--action_env=VAR=value`",
+    ),
+]
+
+# Path prefixes that exist only on a developer machine (or differ per
+# machine). A spawn referencing one passes locally — the sandbox can
+# read the host filesystem — but breaks or poisons the cache on a remote
+# worker. This is the "assumed system dependency" detector: it fires on
+# the actual command line / env, so removing a `local` tag without
+# fixing the root cause does not silence it.
+_HOST_ONLY_MARKERS = ["/home/", "/Users/", "/usr/local/", "/opt/homebrew/", "/opt/local/"]
+
+# System-tool prefixes worth flagging when used as the spawn's
+# executable: an un-pinned host compiler/interpreter means whatever
+# version the machine has — classic autodetected-toolchain leak.
+_SYSTEM_TOOL_PREFIXES = ["/usr/bin/", "/bin/", "/usr/sbin/"]
+
+# Shell plumbing that every executor image ships; invoking these is not
+# a toolchain-hermeticity signal.
+_SYSTEM_TOOL_ALLOWLIST = ["/bin/sh", "/bin/bash", "/usr/bin/env", "/bin/true", "/bin/false"]
+
+# Env values Bazel itself standardizes — identical on every machine, so
+# they trip the host-path markers without being machine-specific.
+_BAZEL_FIXED_ENV_VALUES = [
+    # PATH under --incompatible_strict_action_env
+    "/bin:/usr/bin:/usr/local/bin",
+    # PATH fallback when the client env has none
+    "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+]
+
+WORKER_CLASSES = [
+    WorkerClass(name = "standard", cpu = 1, mem_gb = 4),
+    WorkerClass(name = "medium", cpu = 2, mem_gb = 8),
+    WorkerClass(name = "large", cpu = 4, mem_gb = 16),
+    WorkerClass(name = "xlarge", cpu = 8, mem_gb = 32),
+]
+
+# Per cloud: (instance type, vCPUs, mem GB). 1 vCPU / 2 GB per instance is
+# reserved for the worker agent + OS when packing executors.
+_INSTANCE_CATALOG = {
+    "aws": [
+        ("c7a.xlarge", 4, 8),
+        ("c7a.2xlarge", 8, 16),
+        ("c7a.4xlarge", 16, 32),
+        ("m7a.xlarge", 4, 16),
+        ("m7a.2xlarge", 8, 32),
+        ("m7a.4xlarge", 16, 64),
+        ("r7a.xlarge", 4, 32),
+    ],
+    "gcp": [
+        ("c2d-standard-4", 4, 16),
+        ("c2d-standard-8", 8, 32),
+        ("c2d-standard-16", 16, 64),
+        ("n2d-standard-4", 4, 16),
+        ("n2d-standard-8", 8, 32),
+        ("n2d-highmem-4", 4, 32),
+    ],
+}
+_AGENT_RESERVE_CPU = 1
+_AGENT_RESERVE_MEM_GB = 2
+
+_SEV_ORDER = {"blocker": 0, "non_hermetic": 1, "efficiency": 2, "advisory": 3}
+
+# Tags that declare an intentional local-only target; their spawns
+# reporting not-remotable is expected, not a hermeticity finding.
+_DECLARED_LOCAL_TAGS = ("local", "no-sandbox", "no-remote", "no-remote-exec")
+
+# ---------------------------------------------------------------- helpers
+
+def _ceil_div(a: int, b: int) -> int:
+    return (a + b - 1) // b
+
+def _ceil(x: float) -> int:
+    i = int(x)
+    return i + 1 if x > float(i) else i
+
+def cpu_demand(target: TargetInfo) -> int:
+    """CPU cores a test occupies: the `cpu:N` tag, else 1."""
+    for t in target.tags:
+        if t.startswith("cpu:") and t[4:].isdigit():
+            return int(t[4:])
+    return 1
+
+def mem_demand_gb(target: TargetInfo) -> float:
+    """Provisioned memory: `resources:memory:<MB>` tag, else size-class
+    heuristic inflated by the safety factor."""
+    for t in target.tags:
+        if t.startswith("resources:memory:") and t[17:].isdigit():
+            return int(t[17:]) / 1024.0
+    return _SIZE_MEM_MB.get(target.size, 100) * _MEM_INFLATION / 1024.0
+
+def _first_host_path(strings: list) -> str | None:
+    """First string referencing a host-only path, or None."""
+    for s in strings:
+        for marker in _HOST_ONLY_MARKERS:
+            if marker in s:
+                return s
+    return None
+
+def _system_tool(args: list) -> str | None:
+    """The spawn's executable when it is an un-allowlisted system
+    binary, else None."""
+    if not args:
+        return None
+    tool = args[0]
+    if tool in _SYSTEM_TOOL_ALLOWLIST:
+        return None
+    for prefix in _SYSTEM_TOOL_PREFIXES:
+        if tool.startswith(prefix):
+            return tool
+    return None
+
+# ---------------------------------------------------------------- checks
+
+def check_static(targets: list, rc_lines: list) -> list:
+    """Static hermeticity checks over TargetInfo records and .bazelrc lines.
+
+    `rc_lines` is a list of (source_name, line_number, line) tuples with
+    comments already stripped. Returns list[Violation] (cpu_seconds filled
+    in later by `attach_costs` once spawn timing is known).
+    """
+    out = []
+    for t in targets:
+        for tag in t.tags:
+            if tag in _BAD_TAGS:
+                sev, why, fix = _BAD_TAGS[tag]
+                out.append(Violation(
+                    severity = sev,
+                    subject = t.label,
+                    check = "tag:" + tag,
+                    detail = why,
+                    location = t.location,
+                    fix = fix,
+                ))
+        if t.local_attr:
+            out.append(Violation(
+                severity = Severity("blocker"),
+                subject = t.label,
+                check = "attr:local=True",
+                detail = "local = True forces non-remote execution",
+                location = t.location,
+                fix = "remove `local = True` and fix whatever forced it; if genuinely machine-bound, tag with `no-remote-exec` instead to make the opt-out explicit",
+            ))
+        if t.flaky:
+            out.append(Violation(
+                severity = Severity("efficiency"),
+                subject = t.label,
+                check = "attr:flaky=True",
+                detail = "flaky retries multiply remote executor load",
+                location = t.location,
+                fix = "deflake the test and remove `flaky = True`; each retry consumes another executor slot",
+            ))
+    for src, lineno, line in rc_lines:
+        loc = "{}:{}".format(src, lineno)
+        for needle, sev, msg, fix in _RC_CHECKS:
+            if needle in line:
+                out.append(Violation(
+                    severity = sev,
+                    subject = loc,
+                    check = "bazelrc",
+                    detail = "`{}` — {}".format(line.strip(), msg),
+                    location = loc,
+                    fix = fix,
+                ))
+
+        # --action_env=FOO / --test_env=FOO without `=value` passes the
+        # host's value through, which varies per machine.
+        for flag in ("--action_env=", "--test_env="):
+            idx = line.find(flag)
+            if idx >= 0:
+                rest = line[idx + len(flag):].split(" ")[0]
+                if "=" not in rest:
+                    out.append(Violation(
+                        severity = Severity("non_hermetic"),
+                        subject = loc,
+                        check = "bazelrc",
+                        detail = "`{}` — passes through host env var `{}` by name; value varies per machine and poisons cache keys".format(line.strip(), rest),
+                        location = loc,
+                        fix = "pin the value (`{}{}=<value>`) or drop the passthrough".format(flag, rest),
+                    ))
+
+    # Absence check: without strict_action_env Bazel forwards the host
+    # PATH (and more) into action keys — every machine computes
+    # different cache keys even when nothing is declared wrong.
+    strict_env_seen = False
+    for _, _, line in rc_lines:
+        if "--incompatible_strict_action_env" in line and "--noincompatible_strict_action_env" not in line:
+            strict_env_seen = True
+            break
+    if rc_lines and not strict_env_seen:
+        out.append(Violation(
+            severity = Severity("non_hermetic"),
+            subject = ".bazelrc",
+            check = "bazelrc:missing-strict-action-env",
+            detail = "no `--incompatible_strict_action_env` found — the host PATH leaks into action cache keys, so caches diverge across machines",
+            fix = "add `common --incompatible_strict_action_env` to .bazelrc, then pin any vars actions truly need with `--action_env=VAR=value`",
+        ))
+    return out
+
+def check_dynamic(spawns: list, targets_by_label: dict) -> list:
+    """Dynamic hermeticity checks over SpawnFact records from an
+    instrumented run."""
+    out = []
+
+    # The system-dep checks fire per spawn but a target usually has many
+    # spawns with the same root cause; report each (label, check) once.
+    seen = {}
+    for sp in spawns:
+        target = targets_by_label.get(sp.label)
+        tags = target.tags if target else []
+        loc = target.location if target else ""
+
+        # Assumed system dependencies: paths/tools that the local
+        # sandbox tolerates but a remote worker won't have. These fire
+        # regardless of tags — they detect the root cause, not the
+        # declaration.
+        host_arg = _first_host_path(sp.args)
+        if host_arg != None and (sp.label, "spawn:host-path-arg") not in seen:
+            seen[(sp.label, "spawn:host-path-arg")] = True
+            out.append(Violation(
+                severity = Severity("blocker"),
+                subject = sp.label,
+                check = "spawn:host-path-arg",
+                detail = "{} command line references a host-only path: `{}` — the file will not exist on a remote worker".format(sp.mnemonic, host_arg),
+                cpu_seconds = sp.wall_s,
+                location = loc,
+                fix = "declare the file as an action input (srcs/data/tools) so Bazel ships it to the worker, or take the tool from a hermetic toolchain instead of the host",
+            ))
+        host_env = _first_host_path([v for v in sp.env.values() if v not in _BAZEL_FIXED_ENV_VALUES])
+        if host_env != None and (sp.label, "spawn:host-path-env") not in seen:
+            seen[(sp.label, "spawn:host-path-env")] = True
+            out.append(Violation(
+                severity = Severity("non_hermetic"),
+                subject = sp.label,
+                check = "spawn:host-path-env",
+                detail = "{} environment carries a host-only path: `{}` — varies per machine and poisons cache keys".format(sp.mnemonic, host_env),
+                cpu_seconds = sp.wall_s,
+                location = loc,
+                fix = "pin the variable to a stable value (`--action_env=VAR=value`) or stop passing it through; `--incompatible_strict_action_env` prevents the default leak",
+            ))
+        sys_tool = _system_tool(sp.args)
+        if sys_tool != None and (sp.label, "spawn:system-tool") not in seen:
+            seen[(sp.label, "spawn:system-tool")] = True
+            out.append(Violation(
+                severity = Severity("non_hermetic"),
+                subject = sp.label,
+                check = "spawn:system-tool",
+                detail = "{} invokes the system binary `{}` — whatever version the machine has; differs across workers and developer machines".format(sp.mnemonic, sys_tool),
+                cpu_seconds = sp.wall_s,
+                location = loc,
+                fix = "pin a hermetic toolchain for this tool (e.g. toolchains_llvm, rules_java remote JDK, rules_python interpreter) or vendor it into the repo",
+            ))
+        if sp.runner in ("local", "standalone") and "local" not in tags and "no-sandbox" not in tags:
+            out.append(Violation(
+                severity = Severity("blocker"),
+                subject = sp.label,
+                check = "runner:local-fallback",
+                detail = "{} ran with the `{}` runner without a local/no-sandbox tag — a strategy fell back; would fail or silently localize under RBE".format(sp.mnemonic, sp.runner),
+                cpu_seconds = sp.wall_s,
+                location = loc,
+                fix = "re-run with `--execution_log_compact_file` and check why the {} strategy fell back (often a sandbox failure or a strategy regex in .bazelrc); add an explicit tag if local execution is intended".format(sp.mnemonic),
+            ))
+        if sp.cacheable and not sp.remote_cacheable:
+            out.append(Violation(
+                severity = Severity("efficiency"),
+                subject = sp.label,
+                check = "spawn:not-remote-cacheable",
+                detail = "{} is locally cacheable but not remote-cacheable".format(sp.mnemonic),
+                cpu_seconds = sp.wall_s,
+                location = loc,
+                fix = "look for `no-remote-cache` in tags or `--modify_execution_info` rules covering {}; note this can be intentional — for large non-deterministic outputs, rebuilding each run is often cheaper than cache push/pull".format(sp.mnemonic),
+            ))
+        if not sp.remotable:
+            declared = False
+            for t in _DECLARED_LOCAL_TAGS:
+                if t in tags:
+                    declared = True
+                    break
+            out.append(Violation(
+                severity = Severity("advisory") if declared else Severity("blocker"),
+                subject = sp.label,
+                check = "spawn:not-remotable",
+                detail = "{} is marked not remotable{}".format(
+                    sp.mnemonic,
+                    " (declared via tag)" if declared else "",
+                ),
+                cpu_seconds = sp.wall_s,
+                location = loc,
+                fix = "" if declared else "find what marks {} non-remotable: `local`-family tags on the rule, an execution requirement in the rule implementation, or a strategy flag".format(sp.mnemonic),
+            ))
+    return out
+
+def aggregate_test_wall(spawns: list, bes_details: dict) -> dict:
+    """label -> total test wall seconds.
+
+    Exec-log spawn metrics are primary: sharded and retried tests emit
+    one TestRunner spawn per shard/attempt and every one costs executor
+    time, so they are summed per label. BES test_details can't provide
+    that — each test_result event overwrites the label's entry, so it
+    holds a single attempt's duration. It remains the fallback for
+    labels whose spawns carried no metrics.
+    """
+    out = {}
+    for sp in spawns:
+        if sp.mnemonic == "TestRunner" and sp.wall_s > 0.0:
+            out[sp.label] = out.get(sp.label, 0.0) + sp.wall_s
+    for label, detail in bes_details.items():
+        if label not in out:
+            out[label] = float(detail.get("duration_ms", 0)) / 1000.0
+    return out
+
+def attach_costs(violations: list, wall_by_label: dict) -> list:
+    """Return violations with cpu_seconds backfilled from measured wall
+    time, so static violations rank by the compute they affect."""
+    out = []
+    for v in violations:
+        if v.cpu_seconds > 0.0:
+            out.append(v)
+        else:
+            out.append(Violation(
+                severity = v.severity,
+                subject = v.subject,
+                check = v.check,
+                detail = v.detail,
+                cpu_seconds = wall_by_label.get(v.subject, 0.0),
+                location = v.location,
+                fix = v.fix,
+            ))
+    return out
+
+def sort_violations(violations: list) -> list:
+    return sorted(violations, key = lambda v: (_SEV_ORDER[v.severity.value], -v.cpu_seconds))
+
+def readiness_score(violations: list, total_cpu_s: float) -> int:
+    """100 = clean. Compute-weighted penalty, capped by distinct blocker
+    count — any blocker prevents full migration regardless of how little
+    compute it represents. Advisory violations are surfaced but never
+    scored (weight 0): they record deliberate opt-outs, not defects."""
+    blocker_subjects = {}
+    scored = 0
+    for v in violations:
+        if v.severity.value == "blocker":
+            blocker_subjects[v.subject] = True
+        if v.severity.value != "advisory":
+            scored += 1
+    cap = max(20, 100 - 8 * len(blocker_subjects)) if blocker_subjects else 100
+    if total_cpu_s <= 0.0:
+        n = len(blocker_subjects)
+        return min(cap, max(0, 100 - 15 * n - 3 * (scored - n)))
+    weights = {"blocker": 1.0, "non_hermetic": 0.6, "efficiency": 0.25, "advisory": 0.0}
+
+    # Dedup: one (subject, severity) pair counts its compute once.
+    impacted = {}
+    for v in violations:
+        k = (v.subject, v.severity.value)
+        impacted[k] = max(impacted.get(k, 0.0), v.cpu_seconds)
+    penalty = 0.0
+    for (_, sev), cpu in impacted.items():
+        penalty += weights[sev] * cpu
+    frac = min(1.0, penalty / total_cpu_s)
+    return min(cap, max(0, int(100.0 * (1.0 - frac) + 0.5)))
+
+# ---------------------------------------------------------------- sizing
+
+def assign_class(cpu: int, mem_gb: float) -> WorkerClass:
+    """Smallest worker class that fits the (cpu, mem) demand."""
+    for wc in WORKER_CLASSES:
+        if cpu <= wc.cpu and mem_gb <= float(wc.mem_gb):
+            return wc
+    return WORKER_CLASSES[-1]
+
+def _pick_instance(cloud: str, wc: WorkerClass, executors_steady: int, executors_peak: int) -> InstancePlan | None:
+    """Best instance for a worker class: fewest instances at peak, then
+    least wasted vCPU."""
+    best = None
+    for iname, vcpu, mem in _INSTANCE_CATALOG[cloud]:
+        slots = min(
+            (vcpu - _AGENT_RESERVE_CPU) // wc.cpu,
+            (mem - _AGENT_RESERVE_MEM_GB) // wc.mem_gb,
+        )
+        if slots <= 0:
+            continue
+        count = _ceil_div(executors_peak, slots)
+        waste = count * vcpu - executors_peak * wc.cpu
+        if best == None or (count, waste) < (best[1], best[2]):
+            best = (iname, count, waste, slots)
+    if best == None:
+        return None
+    return InstancePlan(
+        instance_type = best[0],
+        count_min = max(1, _ceil_div(executors_steady, best[3])),
+        count_max = best[1],
+        executors_per_instance = best[3],
+    )
+
+def size_pool(
+        targets_by_label: dict,
+        wall_by_label: dict,
+        spawns: list,
+        critical_path_s: float,
+        target_wall_s: float = 0.0,
+        utilization: float = 0.8,
+        headroom: float = 0.2,
+        builds_per_hour: float = 1.0,
+        clouds: list = ["aws", "gcp"]) -> SizingPlan:
+    """Capacity plan from measured per-target wall time + declared demand.
+
+    `target_wall_s = 0` auto-selects 2x the minimum achievable wall time.
+    """
+    class_cpu_s = {}
+    class_tests = {}
+    total_cpu_s = 0.0
+    for label, wall in wall_by_label.items():
+        t = targets_by_label.get(label) or TargetInfo(label = label)
+        wc = assign_class(cpu_demand(t), mem_demand_gb(t))
+        cpu_s = wall * float(cpu_demand(t)) * REMOTE_OVERHEAD
+        class_cpu_s[wc.name] = class_cpu_s.get(wc.name, 0.0) + cpu_s
+        class_tests[wc.name] = class_tests.get(wc.name, 0) + 1
+        total_cpu_s += cpu_s
+
+    min_wall = critical_path_s * REMOTE_OVERHEAD
+    auto_target = target_wall_s <= 0.0
+    if auto_target:
+        target_wall_s = max(2.0 * min_wall, 60.0)
+    achievable = target_wall_s >= min_wall
+    eff_wall = max(target_wall_s, min_wall, 1.0)
+
+    # Builds sharing the pool concurrently (Little's law).
+    concurrent_builds = max(1.0, builds_per_hour * eff_wall / 3600.0)
+
+    classes = {}
+    for wc in WORKER_CLASSES:
+        cpu_s = class_cpu_s.get(wc.name, 0.0)
+        if cpu_s <= 0.0:
+            continue
+        cores_needed = cpu_s / (eff_wall * utilization)
+        executors = max(1, _ceil(cores_needed / float(wc.cpu) * concurrent_builds))
+        executors_peak = _ceil(float(executors) * (1.0 + headroom))
+        instances = {}
+        for cloud in clouds:
+            plan = _pick_instance(cloud, wc, executors, executors_peak)
+            if plan != None:
+                instances[cloud] = plan
+        classes[wc.name] = ClassPlan(
+            worker_class = wc,
+            tests = class_tests.get(wc.name, 0),
+            cpu_seconds = cpu_s,
+            executors_steady = executors,
+            executors_peak = executors_peak,
+            instances = instances,
+        )
+
+    spawn_cpu = 0.0
+    remotable_cpu = 0.0
+    cacheable_cpu = 0.0
+    for sp in spawns:
+        spawn_cpu += sp.wall_s
+        if sp.remotable:
+            remotable_cpu += sp.wall_s
+        if sp.remote_cacheable:
+            cacheable_cpu += sp.wall_s
+    if spawn_cpu <= 0.0:
+        spawn_cpu = 1.0
+
+    return SizingPlan(
+        total_cpu_seconds = total_cpu_s,
+        critical_path_s = critical_path_s,
+        min_achievable_wall_s = min_wall,
+        target_wall_s = target_wall_s,
+        target_achievable = achievable,
+        concurrent_builds = concurrent_builds,
+        pct_compute_remotable = 100.0 * remotable_cpu / spawn_cpu,
+        pct_compute_cacheable = 100.0 * cacheable_cpu / spawn_cpu,
+        classes = classes,
+    )
+
+# ---------------------------------------------------------------- render
+
+def _fmt0(x: float) -> str:
+    """Format a float with no decimals (Starlark format lacks {:.0f})."""
+    return str(int(x + 0.5))
+
+def _fmt2(x: float) -> str:
+    """Format a float with two decimals."""
+    whole = int(x)
+    cents = int((x - float(whole)) * 100.0 + 0.5)
+    if cents >= 100:
+        whole += 1
+        cents -= 100
+    return "{}.{}{}".format(whole, cents // 10, cents % 10)
+
+# SGR code per severity: blocker red, non_hermetic magenta,
+# efficiency yellow, advisory cyan (informational, not a defect).
+_SEV_SGR = {"blocker": "31", "non_hermetic": "35", "efficiency": "33", "advisory": "36"}
+
+def _styled(s: str, sgr: str, ansi: bool) -> str:
+    """Wrap `s` in an SGR escape when ansi is on; identity otherwise."""
+    return "\x1b[{}m{}\x1b[0m".format(sgr, s) if ansi else s
+
+def _score_sgr(score: int) -> str:
+    """Green ≥90, yellow ≥70, red below — all bold."""
+    if score >= 90:
+        return "1;32"
+    if score >= 70:
+        return "1;33"
+    return "1;31"
+
+def render_disclaimer(ansi: bool = False) -> str:
+    """Experimental-status footer for every rbe report. The sizing factors
+    (memory heuristics, remote overhead, utilization) are documented as
+    uncalibrated in docs/rbe-advisor-design.md §8 — say so where users
+    actually read: the report itself."""
+    return _styled(
+        "Note: `aspect rbe` is experimental. Findings and estimates come from\n" +
+        "heuristics and instrumented local runs — useful for scoping an RBE\n" +
+        "migration, not a guarantee. Treat the capacity plan as a starting\n" +
+        "point and validate against real RBE telemetry before provisioning.",
+        "2",
+        ansi,
+    )
+
+# Cap the per-group subject list; one root cause doesn't need 50 rows.
+_GROUP_ITEM_CAP = 15
+
+def _rel_location(loc: str, workspace_root: str) -> str:
+    """Workspace-relative form of a location for compact display."""
+    if workspace_root and loc.startswith(workspace_root + "/"):
+        return loc[len(workspace_root) + 1:]
+    return loc
+
+def render_check_report(violations: list, score: int, ansi: bool = False, workspace_root: str = "") -> str:
+    """Violations grouped by (severity, check, fix): the shared
+    explanation and fix print once per group, subjects as a compact
+    list. Keeps a 16-target tag epidemic to one screenful instead of
+    sixteen near-identical stanzas."""
+    lines = ["{} {}".format(
+        _styled("## Hermeticity readiness:", "1", ansi),
+        _styled("{}/100".format(score), _score_sgr(score), ansi),
+    ), ""]
+    if not violations:
+        lines.append(_styled("No violations found.", "32", ansi))
+        return "\n".join(lines)
+    counts = {}
+    for v in violations:
+        counts[v.severity.value] = counts.get(v.severity.value, 0) + 1
+    summary = []
+    for sev in ("blocker", "non_hermetic", "efficiency", "advisory"):
+        if counts.get(sev, 0) > 0:
+            summary.append(_styled("{}: {}".format(sev, counts[sev]), _SEV_SGR[sev], ansi))
+    lines.append("  ".join(summary))
+
+    # Group while preserving the severity-then-cost sort of the input.
+    groups = {}
+    order = []
+    for v in violations:
+        k = (v.severity.value, v.check, v.fix)
+        if k not in groups:
+            groups[k] = []
+            order.append(k)
+        groups[k].append(v)
+
+    for k in order:
+        sev, check, fix = k
+        vs = groups[k]
+        details = {}
+        cpu = 0.0
+        for v in vs:
+            details[v.detail] = True
+            cpu += v.cpu_seconds
+        uniform = len(details) == 1
+        meta = "{} finding{}".format(len(vs), "" if len(vs) == 1 else "s")
+        if cpu > 0.0:
+            meta += ", {} cpu-s".format(_fmt0(cpu))
+        lines.append("")
+        lines.append("{} {}{}  {}".format(
+            _styled("[{}]".format(sev), _SEV_SGR[sev], ansi),
+            _styled(check, "1", ansi),
+            " — " + vs[0].detail if uniform else "",
+            _styled("({})".format(meta), "2", ansi),
+        ))
+        if fix:
+            lines.append("  {} {}".format(_styled("fix:", "1;32", ansi), fix))
+        for v in vs[:_GROUP_ITEM_CAP]:
+            item = "    " + _styled(v.subject, "1", ansi)
+            if not uniform:
+                item += " — " + v.detail
+            loc = _rel_location(v.location, workspace_root)
+            if loc and loc != v.subject:
+                item += _styled("  ({})".format(loc), "2", ansi)
+            if v.cpu_seconds > 0.0:
+                item += "  [{} cpu-s]".format(_fmt0(v.cpu_seconds))
+            lines.append(item)
+        if len(vs) > _GROUP_ITEM_CAP:
+            lines.append(_styled("    … and {} more".format(len(vs) - _GROUP_ITEM_CAP), "2", ansi))
+    return "\n".join(lines)
+
+def render_sizing_report(plan: SizingPlan, ansi: bool = False) -> str:
+    lines = [
+        _styled("## Capacity plan", "1", ansi),
+        "",
+        "Total test compute: {} cpu-s  ·  critical path: {}s  ·  min achievable wall: {}s".format(
+            _fmt0(plan.total_cpu_seconds),
+            _fmt0(plan.critical_path_s),
+            _fmt0(plan.min_achievable_wall_s),
+        ),
+        "Target wall time: {}s{}".format(
+            _fmt0(plan.target_wall_s),
+            "" if plan.target_achievable else _styled("  (below critical path — raised to the minimum)", "33", ansi),
+        ),
+        "Remotable compute: {}%  ·  remote-cacheable: {}%  ·  modeled concurrent builds: {}".format(
+            _fmt2(plan.pct_compute_remotable),
+            _fmt2(plan.pct_compute_cacheable),
+            _fmt2(plan.concurrent_builds),
+        ),
+        "",
+    ]
+    for name, cp in plan.classes.items():
+        lines.append("{} ({}c/{}G): {} tests, {} cpu-s, executors {}→{}".format(
+            _styled(name, "1;36", ansi),
+            cp.worker_class.cpu,
+            cp.worker_class.mem_gb,
+            cp.tests,
+            _fmt0(cp.cpu_seconds),
+            cp.executors_steady,
+            cp.executors_peak,
+        ))
+        for cloud, ip in cp.instances.items():
+            lines.append("    {}: {}–{}x {} ({} executors/instance)".format(
+                _styled(cloud, "36", ansi),
+                ip.count_min,
+                ip.count_max,
+                _styled(ip.instance_type, "1", ansi),
+                ip.executors_per_instance,
+            ))
+    return "\n".join(lines)

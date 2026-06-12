@@ -168,13 +168,16 @@ pub struct Query {
     expr: RefCell<String>,
     #[allocative(skip)]
     startup_flags: Vec<String>,
+    #[allocative(skip)]
+    workdir: Option<String>,
 }
 
 impl Query {
-    pub fn new(startup_flags: Vec<String>) -> Self {
+    pub fn new(startup_flags: Vec<String>, workdir: Option<String>) -> Self {
         Self {
             expr: RefCell::new(String::new()),
             startup_flags,
+            workdir,
         }
     }
 
@@ -183,8 +186,12 @@ impl Query {
         startup_flags: &[String],
         flags: &[String],
         announce: super::build::AnnounceSpawn,
+        workdir: Option<&str>,
     ) -> anyhow::Result<TargetSet> {
         let mut cmd = super::bazel_command();
+        if let Some(dir) = workdir {
+            cmd.current_dir(dir);
+        }
         cmd.args(startup_flags);
         cmd.arg("query");
         cmd.arg(expr);
@@ -209,7 +216,7 @@ impl Query {
         // extra `bazel info`, so only pay for it when actually announcing.
         if announce.version || announce.command {
             let version = if announce.version {
-                super::info::server_info_with_startup_flags(startup_flags)
+                super::info::server_info_with_startup_flags(startup_flags, workdir)
                     .ok()
                     .and_then(|(_pid, version)| version)
             } else {
@@ -299,6 +306,7 @@ pub(crate) fn query_methods(registry: &mut MethodsBuilder) {
         Ok(Query {
             expr: RefCell::new(expr.as_str().to_string()),
             startup_flags: query.startup_flags.clone(),
+            workdir: query.workdir.clone(),
         })
     }
 
@@ -360,12 +368,18 @@ pub(crate) fn query_methods(registry: &mut MethodsBuilder) {
     ) -> anyhow::Result<TargetSet> {
         let this = this.downcast_ref_err::<Query>().into_anyhow_result()?;
         let expr = this.expr.borrow();
-        let flags = super::resolve_flags_for_running_bazel(&flags.items)?;
+        let flags = super::resolve_flags_for_running_bazel(&flags.items, this.workdir.as_deref())?;
         let announce = super::build::AnnounceSpawn {
             version: announce_version,
             command: announce_command,
         };
-        Query::query(&expr, &this.startup_flags, &flags, announce)
+        Query::query(
+            &expr,
+            &this.startup_flags,
+            &flags,
+            announce,
+            this.workdir.as_deref(),
+        )
     }
 }
 
