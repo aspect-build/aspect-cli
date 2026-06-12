@@ -243,12 +243,15 @@ def resolve_query_flags(ctx, bazel_trait):
     keep the query's external-repository resolution consistent with the build
     it must replay the rc flags — but expanded for `query`, not `build`.
 
-    This is a separate helper rather than another `setup_bazel_command` call
-    because the query is a *secondary* command: the build already owns
-    `ctx.bazel.startup_flags` and the rc disclosure, which this must not
-    re-do. (`build`/`test` need no such helper — each expands for its own
-    command via `setup_bazel_command`, and `test` inherits `build:*` through
-    Bazel's command graph; only `query`, which has no ancestor, is special.)
+    The query shares the build's startup flags — they're command-independent
+    (`--output_base`, `--ignore_all_rc_files`, the literal rc `startup`
+    section) — and inherits them from `ctx.bazel.startup_flags`. This is a
+    separate helper, rather than a second `setup_bazel_command` call, only
+    because that call *appends* to `ctx.bazel.startup_flags` and prints the rc
+    disclosure: calling it again would duplicate both. So this resolves just
+    the per-command flags and touches neither. (`build`/`test` need no such
+    helper — each expands for its own command, and `test` inherits `build:*`
+    through Bazel's command graph; only `query`, with no ancestor, is special.)
     Expanding for `query`:
 
       - a `build`-section option (e.g. `--show_result`) is simply absent from
@@ -268,7 +271,7 @@ def resolve_query_flags(ctx, bazel_trait):
     Returns the command flag list (same `str | (str, version-constraint)`
     shape as `setup_bazel_command`) to pass as `ctx.bazel.query().…eval(flags
     = …)`. Does not mutate `ctx.bazel.startup_flags` and emits no disclosure —
-    the build's `setup_bazel_command` already owns both for the task.
+    the build's `setup_bazel_command` already did both for the task.
     """
     startup_flags = resolve_startup_flags(ctx, bazel_trait)
     flags = resolve_flags(ctx, bazel_trait)
