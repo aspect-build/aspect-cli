@@ -4,7 +4,7 @@ Run with:
   aspect dev test-bazel-flags
 """
 
-load("./bazel_flags.axl", "announce_bazel_args", "requested_config_names", "resolve_announce", "resolve_bazel_announce", "resolve_flags", "resolve_query_flags", "resolve_startup_flags", "setup_bazel_command")
+load("./bazel_flags.axl", "announce_bazel_args", "requested_config_names", "resolve_announce", "resolve_bazel_announce", "resolve_flags", "resolve_startup_flags", "setup_bazel_command")
 
 def _eq(label, got, want):
     if got != want:
@@ -182,22 +182,6 @@ def _test_requested_config_names(ctx):
         ["a", "b", "c"],
     )
 
-# ── resolve_query_flags (integration) ────────────────────────────────────
-
-def _test_resolve_query_flags_drops_build_only_config(ctx):
-    """End-to-end on a real `ctx` against the workspace `.bazelrc`, which has a
-    `build:delivery-query-test` section with no `common:`/`query:` counterpart.
-
-    `query` has no `build` ancestor, so that config is invisible to it.
-    `resolve_query_flags` must pass the requested config name in
-    `skip_config_if_missing` so the expansion drops it — without that this call
-    raises `undefined config 'delivery-query-test' for command 'query'`."""
-    bazel_trait = _fake_trait(extra = ["--config=delivery-query-test"])
-
-    # The assertion is that this does not raise; a build-only `--config` would
-    # otherwise be a fatal `undefined config` for the query.
-    resolve_query_flags(ctx, bazel_trait)
-
 # ── contract enforcement ─────────────────────────────────────────────────
 #
 # The helpers fail with a clear message when a calling task omits the
@@ -220,12 +204,10 @@ def _test_impl(ctx):
     _test_announce_bazel_args_shape(ctx)
     _test_requested_config_names(ctx)
 
-    # The integration subtests touch the real `ctx.bazel` / workspace `.bazelrc`;
-    # run them last. `setup_bazel_command` also mutates `ctx.bazel.startup_flags`,
+    # Run last: `setup_bazel_command` mutates the real `ctx.bazel.startup_flags`,
     # so keeping it after the pure subtests prevents bleed-through.
-    _test_resolve_query_flags_drops_build_only_config(ctx)
     _test_setup_bazel_command_applies_to_ctx_bazel(ctx)
-    print("bazel_flags_test.axl: OK (14 sections)")
+    print("bazel_flags_test.axl: OK (13 sections)")
     return 0
 
 bazel_flags_tests = task(

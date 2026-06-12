@@ -28,8 +28,9 @@ common:pure_go --@rules_go//go/config:pure
 
 common --test_output=errors
 
-# Regression fixture for `resolve_query_flags` (lib/bazel_flags.axl): a config
-# defined only under `build:` is invisible to `bazel query` (no `build`
-# ancestor), so the delivery resolve query must drop it rather than fatal with
-# "undefined config". Exercised by bazel_flags_test.axl.
-build:delivery-query-test --show_result=20
+# A `build`-section option that `bazel query` rejects. The live
+# `aspect delivery --query` task on CI runs its resolve query against this
+# repo, so it exercises `resolve_query_flags` (lib/bazel_flags.axl) dropping
+# build-only options from the query expansion. Mirrors the customer rc that
+# surfaced the bug.
+build --show_result=20
