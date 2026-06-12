@@ -4,7 +4,7 @@ Run with:
   aspect dev test-bazel-flags
 """
 
-load("./bazel_flags.axl", "announce_bazel_args", "resolve_announce", "resolve_bazel_announce", "resolve_flags", "resolve_startup_flags", "setup_bazel_command")
+load("./bazel_flags.axl", "announce_bazel_args", "requested_config_names", "resolve_announce", "resolve_bazel_announce", "resolve_flags", "resolve_startup_flags", "setup_bazel_command")
 
 def _eq(label, got, want):
     if got != want:
@@ -168,6 +168,20 @@ def _test_setup_bazel_command_applies_to_ctx_bazel(ctx):
     if "--ignore_all_rc_files" not in startup:
         fail("setup_bazel_command — --ignore_all_rc_files not appended: %r" % startup)
 
+# ── requested_config_names (pure) ────────────────────────────────────────
+
+def _test_requested_config_names(ctx):
+    """Extracts `--config=NAME` names from plain and version-gated flags,
+    ignoring everything else."""
+    _eq("no configs", requested_config_names(["--keep_going", "--show_result=20"]), [])
+    _eq("plain config", requested_config_names(["--config=release", "--keep_going"]), ["release"])
+    _eq("tuple config", requested_config_names([("--config=ci", ">=8.0.0")]), ["ci"])
+    _eq(
+        "mixed",
+        requested_config_names(["--config=a", "--foo", ("--config=b", "<7"), "--config=c"]),
+        ["a", "b", "c"],
+    )
+
 # ── contract enforcement ─────────────────────────────────────────────────
 #
 # The helpers fail with a clear message when a calling task omits the
@@ -188,11 +202,12 @@ def _test_impl(ctx):
     _test_resolve_announce_explicit_overrides_ci(ctx)
     _test_resolve_bazel_announce_maps_args_to_tuple(ctx)
     _test_announce_bazel_args_shape(ctx)
+    _test_requested_config_names(ctx)
 
-    # setup_bazel_command mutates the real `ctx.bazel.startup_flags`;
-    # run last so the mutation can't bleed into earlier pure subtests.
+    # Run last: `setup_bazel_command` mutates the real `ctx.bazel.startup_flags`,
+    # so keeping it after the pure subtests prevents bleed-through.
     _test_setup_bazel_command_applies_to_ctx_bazel(ctx)
-    print("bazel_flags_test.axl: OK (12 sections)")
+    print("bazel_flags_test.axl: OK (13 sections)")
     return 0
 
 bazel_flags_tests = task(

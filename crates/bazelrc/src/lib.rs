@@ -852,6 +852,46 @@ build:b --config=a
         assert!(matches!(err, BazelRcError::UndefinedConfig { .. }));
     }
 
+    #[test]
+    fn build_only_config_is_undefined_for_query() {
+        // `query` has no `build` ancestor, so a config defined only as
+        // `build:<name>` is invisible to it and errors — even though the same
+        // config resolves fine for `build`. (Regression context: the delivery
+        // resolve query.)
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(root.join(".bazelrc"), "build:rel --copt=-O2\n").unwrap();
+
+        let rc = BazelRC::new(root, ISOLATE, &flags(&["--config=rel"])).unwrap();
+        assert!(
+            rc.expand_configs("build", &[]).is_ok(),
+            "build sees build:rel"
+        );
+        let err = rc.expand_configs("query", &[]).unwrap_err();
+        assert!(
+            matches!(err, BazelRcError::UndefinedConfig { .. }),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn skip_config_if_missing_drops_undefined_config() {
+        // Naming the config in `skip_config_if_missing` turns the otherwise
+        // fatal undefined-config into a silent no-op — how the delivery query
+        // tolerates a build-only `--config` it can't resolve.
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(root.join(".bazelrc"), "build:rel --copt=-O2\n").unwrap();
+
+        let rc = BazelRC::new(root, ISOLATE, &flags(&["--config=rel"])).unwrap();
+        let expanded = rc.expand_configs("query", &["rel"]).unwrap();
+        let values: Vec<&str> = expanded.iter().map(|o| o.value.as_str()).collect();
+        assert!(
+            !values.contains(&"--copt=-O2"),
+            "build:rel must not leak to query: {values:?}"
+        );
+    }
+
     // ── File discovery order and deduplication ───────────────────────────────
 
     #[test]

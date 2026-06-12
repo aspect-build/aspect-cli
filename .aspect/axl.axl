@@ -500,6 +500,17 @@ def test_query_flags(ctx: TaskContext, tc: int) -> int:
     )]
     tc = test_case(tc, expr in targets3, "query with never-matching conditional flag should drop it and still resolve")
 
+    # A `common`-section option that `query` doesn't recognize (e.g. the
+    # build-only `--show_result`) arrives from rc expansion wrapped as
+    # `--default_override=0:common=…`, which Bazel silently ignores — whereas
+    # the same option passed bare (`--show_result=20`) would hard-error. This
+    # is the regression guard for delivery replaying rc `common` flags onto
+    # its resolve query.
+    targets4 = [t.name for t in ctx.bazel.query().raw(expr).eval(
+        flags = ["--default_override=0:common=--show_result=20"],
+    )]
+    tc = test_case(tc, expr in targets4, "query with common-section override should be silently ignored")
+
     return tc
 
 def test_cancel_invocation(ctx: TaskContext, tc: int) -> int:
