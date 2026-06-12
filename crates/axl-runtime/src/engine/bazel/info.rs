@@ -21,16 +21,21 @@ fn parse_release(value: &str) -> Option<semver::Version> {
 /// Query bazel server info (server_pid, release version).
 ///
 /// The version is `None` when Bazel reports a non-release build (see
-/// [`parse_release`]); the pid is always required.
-pub fn server_info() -> io::Result<(u32, Option<semver::Version>)> {
-    server_info_with_startup_flags(&[])
+/// [`parse_release`]); the pid is always required. `workdir` is the
+/// workspace to run `bazel info` in (default: process working directory).
+pub fn server_info(workdir: Option<&str>) -> io::Result<(u32, Option<semver::Version>)> {
+    server_info_with_startup_flags(&[], workdir)
 }
 
 /// Query bazel server info with startup flags prepended before the subcommand.
 pub fn server_info_with_startup_flags(
     startup_flags: &[String],
+    workdir: Option<&str>,
 ) -> io::Result<(u32, Option<semver::Version>)> {
     let mut cmd = super::bazel_command();
+    if let Some(dir) = workdir {
+        cmd.current_dir(dir);
+    }
     cmd.args(startup_flags);
     cmd.arg("info");
     cmd.arg("server_pid");

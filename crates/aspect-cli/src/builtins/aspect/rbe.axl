@@ -1,0 +1,341 @@
+"""
+`aspect rbe` task group: analyze a Bazel workspace for RBE readiness.
+
+Two tasks:
+
+- `aspect rbe check [targets...]` — static hermeticity checks only (target
+  tags/attrs from `bazel query`, plus .bazelrc red flags). Fast; no build.
+- `aspect rbe analyze [targets...]` — runs an instrumented local
+  `bazel test` (execution log + BES), then reports dynamic hermeticity
+  violations and a worker-pool capacity plan (cores / memory / EC2-GCE
+  instance counts) for running the tests under RBE.
+
+All analysis logic lives in lib/rbe_advisor.axl; this file is the thin
+task layer: Bazel I/O in, typed records through, rendered report out.
+
+v0 scope notes:
+- Reports print to stdout. Status-surface integration (TaskLifecycleTrait,
+  a `rbe_results` renderer kind) is deliberately deferred — see the
+  "How to add a new task kind" section of DEVELOPMENT.md when promoting.
+- Memory demand is heuristic (Bazel size class x safety factor); the
+  remote-overhead and utilization factors need calibration against real
+  RBE telemetry. Treat the capacity plan as a starting point, not a quote.
+"""
+
+load("./lib/bazel_results.axl", "init_data", "process_event")
+load("./lib/environment.axl", "color_enabled")
+load("./lib/rbe_advisor.axl", "SpawnFact", "TargetInfo", "aggregate_test_wall", "attach_costs", "check_dynamic", "check_static", "readiness_score", "render_check_report", "render_disclaimer", "render_sizing_report", "size_pool", "sort_violations")
+
+_RC_FILES = [".bazelrc", "tools/bazel.rc", "user.bazelrc"]
+
+def _query_expr(patterns: list) -> str:
+    return "tests({})".format(" + ".join(patterns))
+
+def _attr_value(rule, name: str):
+    """Pull a named attribute's value off a blaze_query.Rule, tolerating
+    shape differences across Bazel versions."""
+    if not hasattr(rule, "attribute"):
+        return None
+    for attr in rule.attribute:
+        if attr.name != name:
+            continue
+        if hasattr(attr, "string_list_value") and attr.string_list_value:
+            return list(attr.string_list_value)
+        if hasattr(attr, "string_value") and attr.string_value:
+            return attr.string_value
+        if hasattr(attr, "boolean_value"):
+            return attr.boolean_value
+        return None
+    return None
+
+def _workspace_dir(ctx: TaskContext) -> str | None:
+    """--workspace arg, or None to run Bazel in the current directory."""
+    ws = ctx.args.workspace
+    if not ws:
+        return None
+    if not ctx.std.fs.exists(ws):
+        fail("--workspace {} does not exist".format(ws))
+    return ws
+
+def _collect_targets(ctx: TaskContext, patterns: list, workspace: str | None) -> dict:
+    """label -> TargetInfo for every test target under the patterns."""
+    out = {}
+    for rule in ctx.bazel.query(current_dir = workspace).raw(_query_expr(patterns)).eval():
+        if not hasattr(rule, "rule_class"):
+            continue  # source/generated files in the result set
+        tags = _attr_value(rule, "tags") or []
+        location = rule.location if hasattr(rule, "location") else None
+        out[rule.name] = TargetInfo(
+            label = rule.name,
+            rule_class = rule.rule_class,
+            size = _attr_value(rule, "size") or "medium",
+            tags = tags if type(tags) == "list" else [],
+            local_attr = _attr_value(rule, "local") == True,
+            flaky = _attr_value(rule, "flaky") == True,
+            location = location or "",
+        )
+    return out
+
+def _read_rc_lines(ctx: TaskContext, workspace_root: str) -> list:
+    """(source, lineno, line) for every non-comment .bazelrc line."""
+    out = []
+    for name in _RC_FILES:
+        path = workspace_root + "/" + name if workspace_root else name
+        if not ctx.std.fs.exists(path):
+            continue
+        lineno = 0
+        for line in ctx.std.fs.read_to_string(path).splitlines():
+            lineno += 1
+            stripped = line.split("#")[0]
+            if stripped.strip():
+                out.append((name, lineno, stripped))
+    return out
+
+def _duration_s(d) -> float:
+    """google.protobuf.Duration -> seconds; 0.0 when absent."""
+    if d == None:
+        return 0.0
+    secs = float(d.seconds) if hasattr(d, "seconds") else 0.0
+    nanos = float(d.nanos) if hasattr(d, "nanos") else 0.0
+    return secs + nanos / 1000000000.0
+
+def _spawn_fact(spawn) -> SpawnFact:
+    """Map a compact execution-log Spawn entry to a SpawnFact, tolerating
+    fields that are absent on older Bazel versions."""
+    wall = 0.0
+    if hasattr(spawn, "metrics") and spawn.metrics != None:
+        m = spawn.metrics
+        wall = _duration_s(m.total_time if hasattr(m, "total_time") else None)
+    env = {}
+    if hasattr(spawn, "env_vars"):
+        for ev in spawn.env_vars:
+            env[ev.name] = ev.value
+    return SpawnFact(
+        args = list(spawn.args) if hasattr(spawn, "args") else [],
+        env = env,
+        label = spawn.target_label,
+        mnemonic = spawn.mnemonic,
+        runner = spawn.runner if hasattr(spawn, "runner") else "",
+        cacheable = spawn.cacheable if hasattr(spawn, "cacheable") else True,
+        remote_cacheable = spawn.remote_cacheable if hasattr(spawn, "remote_cacheable") else True,
+        remotable = spawn.remotable if hasattr(spawn, "remotable") else True,
+        cache_hit = spawn.cache_hit if hasattr(spawn, "cache_hit") else False,
+        wall_s = wall,
+    )
+
+# ---------------------------------------------------------------- check
+
+def _write_report(ctx: TaskContext, path: str, text: str):
+    """Write the ANSI-free report to `path` and announce it."""
+    ctx.std.fs.write(path, text + "\n")
+    print("")
+    print("Report written to " + path)
+
+def _check_impl(ctx: TaskContext) -> int:
+    workspace = _workspace_dir(ctx)
+    ws_root = ctx.bazel.info(current_dir = workspace).get("workspace", "")
+    targets = _collect_targets(ctx, ctx.args.targets, workspace)
+    violations = sort_violations(check_static(targets.values(), _read_rc_lines(ctx, ws_root)))
+    score = readiness_score(violations, 0.0)
+    ansi = color_enabled(ctx.std)
+    note = "(static checks only — run `aspect rbe analyze` for dynamic checks and capacity sizing)"
+    print(render_check_report(violations, score, ansi = ansi, workspace_root = ws_root))
+    print("")
+    print(note)
+    print("")
+    print(render_disclaimer(ansi))
+    if ctx.args.report_out:
+        _write_report(ctx, ctx.args.report_out, "\n".join([
+            render_check_report(violations, score, workspace_root = ws_root),
+            "",
+            note,
+            "",
+            render_disclaimer(),
+        ]))
+    if ctx.args.fail_on_blocker:
+        for v in violations:
+            if v.severity.value == "blocker":
+                return 1
+    return 0
+
+check = task(
+    group = ["rbe"],
+    implementation = _check_impl,
+    args = {
+        "targets": args.positional(
+            minimum = 0,
+            maximum = 512,
+            default = ["//..."],
+            description = "Bazel target patterns whose tests are analyzed. Defaults to //...",
+        ),
+        "fail_on_blocker": args.boolean(
+            default = False,
+            description = "Exit non-zero when any blocker-severity violation is found (for CI gating).",
+        ),
+        "workspace": args.string(
+            default = "",
+            description = "Path to the Bazel workspace to analyze. Defaults to the current directory.",
+        ),
+        "report_out": args.string(
+            default = "",
+            description = "Also write the report (plain text, no color) to this file.",
+        ),
+    },
+)
+
+# ---------------------------------------------------------------- analyze
+
+def _analyze_impl(ctx: TaskContext) -> int:
+    patterns = ctx.args.targets
+    workspace = _workspace_dir(ctx)
+    ws_root = ctx.bazel.info(current_dir = workspace).get("workspace", "")
+    targets = _collect_targets(ctx, patterns, workspace)
+    rc_lines = _read_rc_lines(ctx, ws_root)
+
+    flags = ["--nocache_test_results", "--keep_going"]
+    for f in ctx.args.bazel_flags:
+        flags.append(f)
+
+    # BES iterator handle must exist before the spawn so the early event
+    # burst is buffered (see DEVELOPMENT.md "BES streaming").
+    events = bazel.build_events.iterator()
+    build = ctx.bazel.test(
+        flags = flags,
+        build_events = [events],
+        execution_log = True,
+        current_dir = workspace,
+        *patterns
+    )
+
+    # Drain the execution log BEFORE wait() — the stream is consumed as
+    # part of wait() (see build_methods docs).
+    spawns = []
+    for entry in build.execution_logs():
+        sp = entry.type  # oneof payload: invocation | file | spawn | ...
+        if type(sp) != "spawn" or not sp.target_label:
+            continue
+        spawns.append(_spawn_fact(sp))
+
+    data = init_data()
+    for event in events:
+        process_event(data, event)
+    status = build.wait()
+    if not status.success:
+        print("warning: bazel test exited with code {} — analysis covers the targets that ran".format(status.code))
+
+    # Per-test wall time: summed exec-log spawn metrics (covers every
+    # shard/attempt), BES durations as fallback — see aggregate_test_wall.
+    wall_by_label = aggregate_test_wall(spawns, data["bazel"]["test_details"])
+
+    violations = check_static(targets.values(), rc_lines) + check_dynamic(spawns, targets)
+    violations = sort_violations(attach_costs(violations, wall_by_label))
+
+    total_cpu_s = 0.0
+    for wall in wall_by_label.values():
+        total_cpu_s += wall
+    score = readiness_score(violations, total_cpu_s)
+
+    plan = size_pool(
+        targets_by_label = targets,
+        wall_by_label = wall_by_label,
+        spawns = spawns,
+        critical_path_s = float(data["bazel"]["critical_path_ms"]) / 1000.0,
+        target_wall_s = float(ctx.args.target_wall_time),
+        utilization = float(ctx.args.utilization_pct) / 100.0,
+        headroom = float(ctx.args.headroom_pct) / 100.0,
+        builds_per_hour = float(ctx.args.builds_per_hour),
+        clouds = ["aws", "gcp"] if ctx.args.cloud == "both" else [ctx.args.cloud],
+    )
+
+    ansi = color_enabled(ctx.std)
+    title = "# RBE readiness report"
+    experimental = "(experimental)"
+    if ansi:
+        title = "\x1b[1m{}\x1b[0m \x1b[2m{}\x1b[0m".format(title, experimental)
+    else:
+        title = "{} {}".format(title, experimental)
+    print(title)
+    print("")
+    print(render_check_report(violations, score, ansi = ansi, workspace_root = ws_root))
+    print("")
+    print(render_sizing_report(plan, ansi = ansi))
+    print("")
+    print(render_disclaimer(ansi))
+    if ctx.args.report_out:
+        _write_report(ctx, ctx.args.report_out, "\n".join([
+            "# RBE readiness report (experimental)",
+            "",
+            render_check_report(violations, score, workspace_root = ws_root),
+            "",
+            render_sizing_report(plan),
+            "",
+            render_disclaimer(),
+        ]))
+    if ctx.args.json_out:
+        report = {
+            "experimental": True,
+            "score": score,
+            "violations": [{
+                "severity": v.severity.value,
+                "subject": v.subject,
+                "check": v.check,
+                "detail": v.detail,
+                "cpu_seconds": v.cpu_seconds,
+                "location": v.location,
+                "fix": v.fix,
+            } for v in violations],
+            "sizing": json.decode(json.encode(plan)),
+        }
+        ctx.std.fs.write(ctx.args.json_out, json.encode(report))
+        print("")
+        print("JSON report written to " + ctx.args.json_out)
+    return 0
+
+analyze = task(
+    group = ["rbe"],
+    implementation = _analyze_impl,
+    args = {
+        "targets": args.positional(
+            minimum = 0,
+            maximum = 512,
+            default = ["//..."],
+            description = "Bazel target patterns whose tests are analyzed. Defaults to //...",
+        ),
+        "target_wall_time": args.int(
+            default = 0,
+            description = "Desired test wall-time under RBE, in seconds. 0 (default) auto-selects 2x the critical-path floor.",
+        ),
+        "builds_per_hour": args.int(
+            default = 1,
+            description = "Expected CI build arrival rate sharing the worker pool; scales executor counts for shared pools.",
+        ),
+        "utilization_pct": args.int(
+            default = 80,
+            description = "Assumed executor utilization efficiency (scheduling gaps, I/O stalls), as a percentage.",
+        ),
+        "headroom_pct": args.int(
+            default = 20,
+            description = "Peak headroom added on top of steady-state executor counts, as a percentage.",
+        ),
+        "cloud": args.string(
+            default = "both",
+            description = "Instance catalog to map worker classes onto: aws, gcp, or both.",
+        ),
+        "bazel_flags": args.string_list(
+            long = "bazel-flag",
+            description = "Additional Bazel flags forwarded to the instrumented test run. Repeat to pass multiple.",
+        ),
+        "json_out": args.string(
+            default = "",
+            description = "Also write the full report as JSON to this path.",
+        ),
+        "workspace": args.string(
+            default = "",
+            description = "Path to the Bazel workspace to analyze. Defaults to the current directory.",
+        ),
+        "report_out": args.string(
+            default = "",
+            description = "Also write the report (plain text, no color) to this file.",
+        ),
+    },
+)

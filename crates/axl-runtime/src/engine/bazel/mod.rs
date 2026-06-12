@@ -153,9 +153,10 @@ fn resolve_flags<'v>(
 /// (`build` / `test` / `query`) so they filter conditional flags identically.
 fn resolve_flags_for_running_bazel<'v>(
     items: &[Either<values::StringValue<'v>, (values::StringValue<'v>, values::StringValue<'v>)>],
+    workdir: Option<&str>,
 ) -> anyhow::Result<Vec<String>> {
     let version = if items.iter().any(|f| f.is_right()) {
-        info::server_info()
+        info::server_info(workdir)
             .map_err(|e| anyhow::anyhow!("failed to get Bazel server info: {}", e))?
             .1
     } else {
@@ -350,7 +351,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             Either::Left(b) => (b, vec![]),
             Either::Right(sinks) => (true, sinks.items),
         };
-        let resolved_flags = resolve_flags_for_running_bazel(&flags.items)?;
+        let current_dir = current_dir.into_option();
+        let resolved_flags = resolve_flags_for_running_bazel(&flags.items, current_dir.as_deref())?;
         let resolved_startup_flags = read_startup_flags(this)?;
         let env = Env::from_eval(eval)?;
         let (stdout, stderr) = resolve_stdio(stdio, stdout, stderr)?;
@@ -364,7 +366,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             resolved_startup_flags,
             stdout,
             stderr,
-            current_dir.into_option(),
+            current_dir,
             build::AnnounceSpawn {
                 version: announce_version,
                 command: announce_command,
@@ -461,7 +463,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             Either::Left(b) => (b, vec![]),
             Either::Right(sinks) => (true, sinks.items),
         };
-        let resolved_flags = resolve_flags_for_running_bazel(&flags.items)?;
+        let current_dir = current_dir.into_option();
+        let resolved_flags = resolve_flags_for_running_bazel(&flags.items, current_dir.as_deref())?;
         let resolved_startup_flags = read_startup_flags(this)?;
         let env = Env::from_eval(eval)?;
         let (stdout, stderr) = resolve_stdio(stdio, stdout, stderr)?;
@@ -475,7 +478,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             resolved_startup_flags,
             stdout,
             stderr,
-            current_dir.into_option(),
+            current_dir,
             build::AnnounceSpawn {
                 version: announce_version,
                 command: announce_command,
@@ -506,9 +509,12 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///     .kind("source file")
     ///     .eval()
     /// ```
-    fn query<'v>(this: values::Value<'v>) -> anyhow::Result<query::Query> {
+    fn query<'v>(
+        this: values::Value<'v>,
+        #[starlark(require = named, default = NoneOr::None)] current_dir: NoneOr<String>,
+    ) -> anyhow::Result<query::Query> {
         let startup_flags = read_startup_flags(this)?;
-        Ok(query::Query::new(startup_flags))
+        Ok(query::Query::new(startup_flags, current_dir.into_option()))
     }
 
     /// Run `bazel info` and return all key/value pairs as a dict.
@@ -517,7 +523,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// with a non-zero code.
     ///
     /// # Arguments
-    /// * `workdir`: workspace root to run `bazel info` in (default: inferred from ctx)
+    /// * `current_dir`: workspace root to run `bazel info` in (default: process working directory)
     ///
     /// **Examples**
     ///
@@ -527,10 +533,16 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///     print(info["output_base"])
     ///     print(info["execution_root"])
     /// ```
-    fn info<'v>(this: values::Value<'v>) -> anyhow::Result<SmallMap<String, String>> {
+    fn info<'v>(
+        this: values::Value<'v>,
+        #[starlark(require = named, default = NoneOr::None)] current_dir: NoneOr<String>,
+    ) -> anyhow::Result<SmallMap<String, String>> {
         let startup_flags = read_startup_flags(this)?;
 
         let mut cmd = bazel_command();
+        if let Some(dir) = current_dir.into_option() {
+            cmd.current_dir(dir);
+        }
         cmd.args(&startup_flags);
         cmd.arg("info");
         cmd.stdout(Stdio::piped());

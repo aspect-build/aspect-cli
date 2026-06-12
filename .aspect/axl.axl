@@ -24,6 +24,7 @@ load(
 )
 load("@aspect//lib/github.axl", "detect_commit_sha", "github")
 load("@aspect//lib/path_glob.axl", "match_any", "match_path")
+load("@aspect//lib/rbe_advisor.axl", "SpawnFact", "TargetInfo", "aggregate_test_wall", "assign_class", "attach_costs", "check_dynamic", "check_static", "cpu_demand", "mem_demand_gb", "readiness_score", "render_check_report", "size_pool", "sort_violations")
 load("@aspect//lib/repro_commands.axl", "build_aspect_command", "dedup_and_attribute", "patch_download_cmd", "task_cli_path")
 load("@aspect//lib/result_text.axl", "severity_for_status")
 load("@aspect//lib/runnable.axl", "apparent_label", "runnable")
@@ -3196,9 +3197,157 @@ def impl(ctx: TaskContext) -> int:
     tc = test_build_metadata_lib(tc)
     tc = test_severity_for_status(tc)
     tc = test_gazelle_dir_helpers(tc)
+    tc = test_rbe_advisor(tc)
 
     print(tc, "tests passed")
     return 0
+
+def test_rbe_advisor(tc: int) -> int:
+    # --- demand helpers
+    t_plain = TargetInfo(label = "//a:t1")
+    t_big = TargetInfo(label = "//a:t2", size = "large", tags = ["cpu:4"])
+    tc = test_case(tc, cpu_demand(t_plain) == 1, "rbe: default cpu demand is 1")
+    tc = test_case(tc, cpu_demand(t_big) == 4, "rbe: cpu:N tag drives cpu demand")
+    tc = test_case(tc, mem_demand_gb(t_plain) > 0.2 and mem_demand_gb(t_plain) < 0.4, "rbe: medium mem heuristic ~0.3G")
+    tc = test_case(tc, assign_class(1, 0.3).name == "standard", "rbe: small demand -> standard class")
+    tc = test_case(tc, assign_class(4, 10.0).name == "large", "rbe: 4c/10G -> large class")
+    tc = test_case(tc, assign_class(64, 512.0).name == "xlarge", "rbe: oversized demand clamps to xlarge")
+
+    # --- static checks
+    tagged = TargetInfo(label = "//a:net", tags = ["requires-network", "no-remote-cache"], location = "a/BUILD:12:1")
+    rc = [(".bazelrc", 1, "build --action_env=PATH"), (".bazelrc", 2, "build --action_env=FOO=pinned")]
+    vs = check_static([tagged, t_plain], rc)
+    blockers = [v for v in vs if v.severity.value == "blocker"]
+    tc = test_case(tc, len(blockers) == 1 and blockers[0].check == "tag:requires-network", "rbe: requires-network is a blocker")
+    tc = test_case(tc, blockers[0].location == "a/BUILD:12:1", "rbe: violation carries BUILD location")
+    tc = test_case(tc, "hermetize" in blockers[0].fix, "rbe: violation carries a fix suggestion")
+    rc_violations = [v for v in vs if v.check == "bazelrc"]
+    tc = test_case(tc, len(rc_violations) == 1 and "PATH" in rc_violations[0].detail, "rbe: by-name action_env flagged, pinned value not")
+    opted_out = TargetInfo(label = "//a:optout", tags = ["no-remote-exec"])
+    avs = check_static([opted_out], [])
+    tc = test_case(tc, len(avs) == 1 and avs[0].severity.value == "advisory", "rbe: no-remote-exec is advisory, not blocker")
+
+    # --- dynamic checks
+    spawns = [
+        SpawnFact(label = "//a:t1", mnemonic = "TestRunner", runner = "local", wall_s = 30.0),
+        SpawnFact(label = "//a:local", mnemonic = "TestRunner", runner = "local", wall_s = 5.0),
+        SpawnFact(label = "//a:t2", mnemonic = "TestRunner", runner = "linux-sandbox", wall_s = 60.0, remote_cacheable = False),
+    ]
+    by_label = {
+        "//a:t1": t_plain,
+        "//a:local": TargetInfo(label = "//a:local", tags = ["local"]),
+        "//a:t2": t_big,
+    }
+    dvs = check_dynamic(spawns, by_label)
+    fallbacks = [v for v in dvs if v.check == "runner:local-fallback"]
+    tc = test_case(tc, len(fallbacks) == 1 and fallbacks[0].subject == "//a:t1", "rbe: untagged local runner flagged, tagged one not")
+    tc = test_case(tc, len([v for v in dvs if v.check == "spawn:not-remote-cacheable"]) == 1, "rbe: not-remote-cacheable flagged")
+
+    # assumed-system-dep checks: fire on actual command/env, not tags
+    sysdep_spawns = [
+        SpawnFact(label = "//a:t1", mnemonic = "TestRunner", runner = "darwin-sandbox", wall_s = 5.0, args = ["/usr/local/bin/mytool", "run"]),
+        SpawnFact(label = "//a:t1", mnemonic = "TestRunner", runner = "darwin-sandbox", wall_s = 5.0, args = ["/usr/local/bin/mytool", "again"]),
+        SpawnFact(label = "//a:t2", mnemonic = "Javac", runner = "darwin-sandbox", wall_s = 9.0, args = ["/usr/bin/javac", "A.java"]),
+        SpawnFact(label = "//a:t2", mnemonic = "Javac", runner = "darwin-sandbox", wall_s = 9.0, env = {"JAVA_HOME": "/Users/dev/jdk"}),
+        SpawnFact(label = "//a:ok", mnemonic = "TestRunner", runner = "darwin-sandbox", wall_s = 1.0, args = ["/bin/bash", "-c", "true"]),
+    ]
+    svs = check_dynamic(sysdep_spawns, by_label)
+    tc = test_case(tc, len([v for v in svs if v.check == "spawn:host-path-arg"]) == 1, "rbe: host-only arg path is a blocker, deduped per target")
+    tc = test_case(tc, [v for v in svs if v.check == "spawn:host-path-arg"][0].severity.value == "blocker", "rbe: host-path-arg severity is blocker")
+    tc = test_case(tc, len([v for v in svs if v.check == "spawn:system-tool"]) == 1, "rbe: un-pinned system tool flagged once")
+    tc = test_case(tc, len([v for v in svs if v.check == "spawn:host-path-env"]) == 1, "rbe: host path in env flagged as non_hermetic")
+    tc = test_case(tc, len([v for v in svs if v.subject == "//a:ok"]) == 0, "rbe: allowlisted /bin/bash not flagged")
+    fixed_path = check_dynamic([SpawnFact(label = "//a:t1", mnemonic = "TestRunner", runner = "darwin-sandbox", env = {"PATH": "/bin:/usr/bin:/usr/local/bin"})], by_label)
+    tc = test_case(tc, len(fixed_path) == 0, "rbe: bazel-standardized PATH not flagged as host leak")
+
+    # strict_action_env absence check
+    no_strict = check_static([], [(".bazelrc", 1, "build --jobs=8")])
+    tc = test_case(tc, len([v for v in no_strict if v.check == "bazelrc:missing-strict-action-env"]) == 1, "rbe: missing strict_action_env flagged")
+    with_strict = check_static([], [(".bazelrc", 1, "common --incompatible_strict_action_env")])
+    tc = test_case(tc, len([v for v in with_strict if v.check == "bazelrc:missing-strict-action-env"]) == 0, "rbe: strict_action_env present, no absence violation")
+
+    # declared opt-out spawn: not-remotable downgraded to advisory
+    optout_spawn = SpawnFact(label = "//a:optout", mnemonic = "TestRunner", runner = "linux-sandbox", wall_s = 10.0, remotable = False)
+    ovs = check_dynamic([optout_spawn], {"//a:optout": opted_out})
+    tc = test_case(tc, len(ovs) == 1 and ovs[0].severity.value == "advisory", "rbe: declared not-remotable spawn is advisory")
+    undeclared_spawn = SpawnFact(label = "//a:t1", mnemonic = "TestRunner", runner = "linux-sandbox", wall_s = 10.0, remotable = False)
+    uvs = check_dynamic([undeclared_spawn], by_label)
+    tc = test_case(tc, len(uvs) == 1 and uvs[0].severity.value == "blocker", "rbe: undeclared not-remotable spawn stays a blocker")
+
+    # --- wall-time aggregation: shards/attempts sum; BES is fallback only
+    shard_spawns = [
+        SpawnFact(label = "//a:sharded", mnemonic = "TestRunner", wall_s = 30.0),
+        SpawnFact(label = "//a:sharded", mnemonic = "TestRunner", wall_s = 25.0),
+        SpawnFact(label = "//a:sharded", mnemonic = "Javac", wall_s = 99.0),
+    ]
+    agg = aggregate_test_wall(shard_spawns, {"//a:sharded": {"duration_ms": 30000}, "//a:bes_only": {"duration_ms": 7000}})
+    tc = test_case(tc, agg["//a:sharded"] == 55.0, "rbe: shard/attempt spawn times sum; BES does not override")
+    tc = test_case(tc, agg["//a:bes_only"] == 7.0, "rbe: BES duration fills labels with no spawn metrics")
+    tc = test_case(tc, len(agg) == 2, "rbe: non-TestRunner spawns excluded from test wall")
+
+    # --- scoring
+    tc = test_case(tc, readiness_score([], 100.0) == 100, "rbe: clean run scores 100")
+    tc = test_case(tc, readiness_score(attach_costs(avs + ovs, {"//a:optout": 500.0}), 1000.0) == 100, "rbe: advisory-only violations leave score at 100")
+    one_blocker = [v for v in dvs if v.severity.value == "blocker"]
+    score = readiness_score(attach_costs(one_blocker, {"//a:t1": 30.0}), 1000.0)
+    tc = test_case(tc, score <= 92, "rbe: any blocker caps the score at 92")
+    tc = test_case(tc, score > 0, "rbe: small blocker does not zero the score")
+
+    # --- sizing: 100 medium tests x 60s, cp 120s, target 600s, util 80%
+    targets = {}
+    walls = {}
+    for i in range(100):
+        label = "//pkg:t{}".format(i)
+        targets[label] = TargetInfo(label = label)
+        walls[label] = 60.0
+    plan = size_pool(
+        targets_by_label = targets,
+        wall_by_label = walls,
+        spawns = spawns,
+        critical_path_s = 120.0,
+        target_wall_s = 600.0,
+        utilization = 0.8,
+        headroom = 0.2,
+        builds_per_hour = 1.0,
+        clouds = ["aws"],
+    )
+
+    # total = 100 * 60 * 1.15 = 6900 cpu-s; 6900 / (600 * 0.8) = 14.375 -> 15
+    tc = test_case(tc, plan.target_achievable, "rbe: 600s target above 138s floor is achievable")
+    std = plan.classes["standard"]
+    tc = test_case(tc, std.tests == 100, "rbe: all tests binned standard")
+    tc = test_case(tc, std.executors_steady == 15, "rbe: steady executors = ceil(6900/480) = 15")
+    tc = test_case(tc, std.executors_peak == 18, "rbe: peak executors = ceil(15 * 1.2) = 18")
+    aws = std.instances["aws"]
+    tc = test_case(tc, aws.instance_type == "m7a.4xlarge" and aws.count_max == 2 and aws.count_min == 1, "rbe: aws packing picks m7a.4xlarge 1-2x")
+    tc = test_case(tc, sort_violations(dvs)[0].severity.value == "blocker", "rbe: blockers sort first")
+
+    # --- rendering (grouped layout)
+    plain = render_check_report(vs, 90)
+    tc = test_case(tc, "(a/BUILD:12:1)" in plain, "rbe: report shows BUILD location next to subject")
+    tc = test_case(tc, "  fix: " in plain, "rbe: report renders fix line per group")
+    rc_only = render_check_report([v for v in vs if v.check == "bazelrc"], 90)
+    tc = test_case(tc, "(.bazelrc:1)" not in rc_only, "rbe: bazelrc location == subject, not repeated")
+
+    # two targets, same tag -> one group header, one fix line, two subjects
+    twin = check_static([tagged, TargetInfo(label = "//b:net2", tags = ["requires-network"], location = "b/BUILD:5:1")], [])
+    twin_report = render_check_report([v for v in twin if v.check == "tag:requires-network"], 90)
+    tc = test_case(tc, twin_report.count("tag:requires-network — ") == 1, "rbe: same check+fix groups under one header")
+    tc = test_case(tc, twin_report.count("fix: ") == 1, "rbe: grouped fix printed once")
+    tc = test_case(tc, "(2 findings" in twin_report, "rbe: group header counts findings")
+    tc = test_case(tc, "//a:net" in twin_report and "//b:net2" in twin_report, "rbe: both subjects listed in group")
+
+    # workspace_root strips the location prefix
+    abs_v = check_static([TargetInfo(label = "//c:t", tags = ["requires-network"], location = "/repo/c/BUILD:1:1")], [])
+    tc = test_case(tc, "(c/BUILD:1:1)" in render_check_report(abs_v, 90, workspace_root = "/repo"), "rbe: workspace_root relativizes locations")
+
+    plain = render_check_report(dvs, 90)
+    tc = test_case(tc, "\x1b[" not in plain, "rbe: ansi off emits no escape codes")
+    colored = render_check_report(dvs, 90, ansi = True)
+    tc = test_case(tc, "\x1b[31m[blocker]\x1b[0m" in colored, "rbe: ansi on colors severity tags")
+    tc = test_case(tc, "\x1b[1;32m90/100\x1b[0m" in colored, "rbe: score >=90 renders bold green")
+    tc = test_case(tc, "\x1b[1;31m40/100\x1b[0m" in render_check_report(dvs, 40, ansi = True), "rbe: score <70 renders bold red")
+    return tc
 
 axl = task(
     group = ["tests"],
