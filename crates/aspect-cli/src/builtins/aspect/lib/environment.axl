@@ -449,6 +449,13 @@ def is_warming_complete(std) -> bool:
     path = std.env.var("ASPECT_WORKFLOWS_RUNNER_WARMING_COMPLETE_MARKER_FILE")
     return bool(path) and std.fs.exists(path)
 
+def is_warming_observable(std) -> bool:
+    """True when the runner agent published the warming completion marker
+    path, i.e. `is_warming_complete` can ever return True. Guards waits on
+    warming completion against spinning forever on a runner that enables
+    warming without publishing the marker path."""
+    return bool(std.env.var("ASPECT_WORKFLOWS_RUNNER_WARMING_COMPLETE_MARKER_FILE"))
+
 def parse_git_url_name(url: str) -> str:
     """Extract the repo name from a git URL; "" on empty input."""
     if not url:

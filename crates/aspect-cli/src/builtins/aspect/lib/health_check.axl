@@ -19,7 +19,7 @@ canonical helpers that satisfy it.
 """
 
 load("@std//time.axl", "time")
-load("./environment.axl", "AWS_LOG_GROUP", "get_workflows_environment", "is_warming_complete")
+load("./environment.axl", "AWS_LOG_GROUP", "get_workflows_environment", "is_warming_complete", "is_warming_observable", "warn")
 
 def _url_encode(s):
     """Percent-encode a string for use in URLs."""
@@ -90,6 +90,10 @@ def _wait_for_warming(std, environment):
     configured / already done). Side-effect only: re-reads the environment
     so the caller sees `warming_complete` / `warming_current_cache` set.
 
+    If the runner enables warming without publishing the completion marker
+    path, completion can never be observed — warn and skip the wait rather
+    than spin forever.
+
     Display is intentionally separate (`_display_warming`): the saved
     Runner Health output from the previous job should render *first*, then
     per-section sub-blocks (Warming, Bazel Health) underneath.
@@ -101,6 +105,11 @@ def _wait_for_warming(std, environment):
     # The bootstrap process runs concurrently. If it hits a critical error,
     # it terminates the runner — so this loop will not hang indefinitely.
     if not environment.runner.warming_complete:
+        if not is_warming_observable(std):
+            warn(std, "Warming is enabled on this runner but " +
+                      "ASPECT_WORKFLOWS_RUNNER_WARMING_COMPLETE_MARKER_FILE is " +
+                      "not set; unable to wait for warming to complete.")
+            return environment
         print("Waiting for warming to complete...")
         for _ in time.sleep_iter(1000):
             if is_warming_complete(std):
