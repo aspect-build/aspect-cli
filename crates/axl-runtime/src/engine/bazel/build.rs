@@ -579,6 +579,64 @@ pub(crate) fn build_event_iter_methods(registry: &mut MethodsBuilder) {
     }
 }
 
+/// How the captured stderr fd is allocated for a build.
+///
+/// Pipe mode is the plain-`Stdio::piped()` substrate used in non-TTY contexts
+/// (CI, redirected output): Bazel emits clean newline-terminated lines.
+/// Pty mode allocates a pseudo-terminal so Bazel keeps its live curses UI; the
+/// runtime forwards the master bytes near-verbatim. The mode is decided when
+/// the processor is constructed, from whether the parent's stderr is a TTY
+/// (see `bazel.output.processor`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureMode {
+    Pipe,
+    Pty,
+}
+
+/// Starlark handle passed as `ctx.bazel.build(output = ...)` to enable stderr
+/// capture + forwarding. Created via `bazel.output.processor(...)`, single-use
+/// per build (mirrors `BuildEventIter`).
+///
+/// Phase 1 carries only the capture mode; it is the seam where the deferred
+/// dedup config and pattern matchers will be added. `Build::spawn` reads the
+/// mode to decide how to allocate the child's stderr and starts an
+/// `OutputStream` over the read end.
+#[derive(Clone, Debug, ProvidesStaticType, Display, Trace, NoSerialize, Allocative)]
+#[display("<bazel.output.OutputProcessor>")]
+pub struct OutputProcessor {
+    #[allocative(skip)]
+    mode: CaptureMode,
+}
+
+impl OutputProcessor {
+    pub fn new(mode: CaptureMode) -> Self {
+        Self { mode }
+    }
+
+    pub fn mode(&self) -> CaptureMode {
+        self.mode
+    }
+}
+
+impl<'v> AllocValue<'v> for OutputProcessor {
+    fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
+        heap.alloc_complex_no_freeze(self)
+    }
+}
+
+impl<'v> UnpackValue<'v> for OutputProcessor {
+    type Error = anyhow::Error;
+    fn unpack_value_impl(value: Value<'v>) -> Result<Option<Self>, Self::Error> {
+        let v = value
+            .downcast_ref_err::<OutputProcessor>()
+            .into_anyhow_result()?;
+        Ok(Some(v.clone()))
+    }
+}
+
+#[starlark_value(type = "bazel.output.OutputProcessor")]
+impl<'v> values::StarlarkValue<'v> for OutputProcessor {}
+
 fn matches_kinds(event: &BuildEvent, kinds: Option<&Arc<HashSet<i32>>>) -> bool {
     let Some(kinds) = kinds else {
         return true;
@@ -716,6 +774,13 @@ pub struct Build {
     #[allocative(skip)]
     execlog_stream: RefCell<Option<ExecLogStream>>,
 
+    /// Captured-stderr forwarder, present only when the build was spawned with
+    /// `output = bazel.output.processor(...)`. Joined in `wait()` after the
+    /// child is reaped so all forwarded stderr is flushed before the task
+    /// prints its terminal summary.
+    #[allocative(skip)]
+    output_stream: RefCell<Option<super::stream::OutputStream>>,
+
     /// Shared UUID every gRPC sink indexes this invocation under. Minted
     /// before bazel emits `build_started` so forwarders can start
     /// immediately; distinct from Bazel's `build_started.uuid`.
@@ -755,6 +820,7 @@ impl Build {
         startup_flags: Vec<String>,
         stdout: Stdio,
         stderr: Stdio,
+        output: Option<OutputProcessor>,
         current_dir: Option<String>,
         announce: AnnounceSpawn,
         rt: AsyncRuntime,
@@ -856,12 +922,42 @@ impl Build {
         announce_spawn(announce, version.as_ref(), &cmd);
 
         cmd.stdout(stdout);
-        cmd.stderr(stderr);
+        // When capturing, the child's stderr goes to a runtime-owned pipe/PTY
+        // instead of the resolved `stderr` Stdio; the `OutputStream` started
+        // after spawn reads, processes, and forwards it to the real stderr.
+        let mut capture = match &output {
+            Some(p) => Some(super::capture::Capture::open(p.mode())?),
+            None => None,
+        };
+        match &mut capture {
+            Some(c) => {
+                cmd.stderr(std::mem::replace(&mut c.child_stderr, Stdio::null()));
+            }
+            None => {
+                cmd.stderr(stderr);
+            }
+        }
         cmd.stdin(Stdio::null());
 
         let child = cmd
             .spawn()
             .map_err(|e| io::Error::other(format!("failed to spawn bazel: {e}")))?;
+
+        // Start forwarding captured stderr now that the child holds the write
+        // end. Drop the parent's PTY-slave copy first (release_after_spawn) so
+        // the master read can observe EOF when the child exits — otherwise the
+        // forwarder thread would hang forever in `wait()`.
+        let output_stream = match capture {
+            Some(mut c) => {
+                c.release_after_spawn();
+                Some(super::stream::OutputStream::spawn(
+                    c.reader,
+                    Box::new(std::io::stderr()),
+                    vec![],
+                ))
+            }
+            None => None,
+        };
 
         // Register the bazel client with the live-subprocess registry so
         // aspect-cli's OS-signal handler can forward SIGINT to it on
@@ -952,6 +1048,7 @@ impl Build {
             build_event_stream: RefCell::new(build_event_stream),
             workspace_event_stream: RefCell::new(workspace_event_stream),
             execlog_stream: RefCell::new(execlog_stream),
+            output_stream: RefCell::new(output_stream),
             sink_invocation_id: RefCell::new(sink_invocation_id),
             live_guard: RefCell::new(Some(live_guard)),
             span: RefCell::new(span),
@@ -1084,6 +1181,18 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
             match execlog_stream.join() {
                 Ok(_) => {}
                 Err(err) => anyhow::bail!("execlog stream thread error: {}", err),
+            }
+        };
+
+        // Drain the captured-stderr forwarder. The child has exited (reaped
+        // above), so its stderr write end is closed and the reader reaches
+        // EOF; joining here guarantees all forwarded stderr is flushed before
+        // the caller (`_emit_terminal`) prints the task's terminal summary.
+        let output_stream = build.output_stream.take();
+        if let Some(mut output_stream) = output_stream {
+            match output_stream.join() {
+                Ok(_) => {}
+                Err(err) => anyhow::bail!("output stream thread error: {}", err),
             }
         };
 

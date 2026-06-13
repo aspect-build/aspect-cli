@@ -34,6 +34,7 @@ use axl_types::stream::Writable;
 
 mod build;
 mod cancel;
+mod capture;
 mod health_check;
 mod info;
 mod iter;
@@ -287,6 +288,11 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// * `stdio` - Shorthand: set both `stdout` and `stderr` from a single
     ///   `Stdio` bundle (typically `ctx.std.io`). Cannot be combined with
     ///   `stdout`/`stderr`.
+    /// * `output` - An `OutputProcessor` from `bazel.output.processor(...)`.
+    ///   When set, the child's stderr is captured by the runtime, run through
+    ///   the output processing pipeline, and forwarded to the real stderr
+    ///   (overriding the resolved `stderr` slot). Omit (the default) to leave
+    ///   stderr handling to `stderr`/`stdio`/inherit.
     /// * `current_dir` - Working directory for the Bazel invocation.
     /// * `announce_version` - Print an `INFO: Bazel <version>` line before
     ///   spawning. Resolved from the `--announce-bazel-version` task flag.
@@ -340,6 +346,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named)] stdout: Option<NoneOr<Writable>>,
         #[starlark(require = named)] stderr: Option<NoneOr<Writable>>,
         #[starlark(require = named, default = NoneOr::None)] stdio: NoneOr<StdStdio>,
+        #[starlark(require = named, default = NoneOr::None)] output: NoneOr<build::OutputProcessor>,
         #[starlark(require = named, default = NoneOr::None)] current_dir: NoneOr<String>,
         #[starlark(require = named, default = false)] announce_version: bool,
         #[starlark(require = named, default = false)] announce_command: bool,
@@ -364,6 +371,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             resolved_startup_flags,
             stdout,
             stderr,
+            output.into_option(),
             current_dir.into_option(),
             build::AnnounceSpawn {
                 version: announce_version,
@@ -400,6 +408,11 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// * `stdio` - Shorthand: set both `stdout` and `stderr` from a single
     ///   `Stdio` bundle (typically `ctx.std.io`). Cannot be combined with
     ///   `stdout`/`stderr`.
+    /// * `output` - An `OutputProcessor` from `bazel.output.processor(...)`.
+    ///   When set, the child's stderr is captured by the runtime, run through
+    ///   the output processing pipeline, and forwarded to the real stderr
+    ///   (overriding the resolved `stderr` slot). Omit (the default) to leave
+    ///   stderr handling to `stderr`/`stdio`/inherit.
     /// * `current_dir` - Working directory for the Bazel invocation.
     /// * `announce_version` - Print an `INFO: Bazel <version>` line before
     ///   spawning. Resolved from the `--announce-bazel-version` task flag.
@@ -451,6 +464,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named)] stdout: Option<NoneOr<Writable>>,
         #[starlark(require = named)] stderr: Option<NoneOr<Writable>>,
         #[starlark(require = named, default = NoneOr::None)] stdio: NoneOr<StdStdio>,
+        #[starlark(require = named, default = NoneOr::None)] output: NoneOr<build::OutputProcessor>,
         #[starlark(require = named, default = NoneOr::None)] current_dir: NoneOr<String>,
         #[starlark(require = named, default = false)] announce_version: bool,
         #[starlark(require = named, default = false)] announce_command: bool,
@@ -475,6 +489,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             resolved_startup_flags,
             stdout,
             stderr,
+            output.into_option(),
             current_dir.into_option(),
             build::AnnounceSpawn {
                 version: announce_version,
@@ -894,6 +909,45 @@ fn parse_event_kind<'v>(value: values::Value<'v>) -> anyhow::Result<i32> {
 }
 
 #[starlark_module]
+fn register_output(globals: &mut GlobalsBuilder) {
+    /// Create a captured-output processor. Pass it as
+    /// `ctx.bazel.build(output = bazel.output.processor(...))` to capture the
+    /// child's stderr, run it through the processing pipeline, and forward it
+    /// to the real stderr instead of letting Bazel write the terminal directly.
+    ///
+    /// # Arguments
+    /// * `tty` - Whether the destination stderr is an interactive terminal.
+    ///   `True` → allocate a PTY so Bazel keeps its live curses progress UI
+    ///   (bytes forwarded near-verbatim). `False` → a plain pipe, so Bazel
+    ///   emits clean newline-terminated lines (set `--curses=no --isatty=0` on
+    ///   the invocation to match). Defaults to auto-detecting the real stderr.
+    ///
+    /// The caller is responsible for setting `--isatty` / `--curses` on the
+    /// Bazel invocation to match the chosen mode (see `bazel_runner.axl`).
+    #[starlark(as_type = build::OutputProcessor)]
+    fn processor(
+        #[starlark(require = named, default = NoneOr::None)] tty: NoneOr<bool>,
+    ) -> anyhow::Result<build::OutputProcessor> {
+        use std::io::IsTerminal;
+        let is_tty = match tty {
+            NoneOr::Other(b) => b,
+            NoneOr::None => std::io::stderr().is_terminal(),
+        };
+        let mode = if is_tty {
+            build::CaptureMode::Pty
+        } else {
+            build::CaptureMode::Pipe
+        };
+        Ok(build::OutputProcessor::new(mode))
+    }
+}
+
+#[starlark_module]
+fn register_output_types(globals: &mut GlobalsBuilder) {
+    const OutputProcessor: StarlarkValueAsType<build::OutputProcessor> = StarlarkValueAsType::new();
+}
+
+#[starlark_module]
 fn register_execlog_sinks(globals: &mut GlobalsBuilder) {
     #[starlark(as_type = sink::execlog::ExecLogSink)]
     fn file(
@@ -960,6 +1014,11 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
 
     globals.namespace("build_events", |globals| {
         register_build_events(globals);
+    });
+
+    globals.namespace("output", |globals| {
+        register_output_types(globals);
+        register_output(globals);
     });
 
     globals.namespace("execution_log", |globals| {

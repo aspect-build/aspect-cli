@@ -279,7 +279,27 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
     # forwarded as a flag rather than expanded to argv (the flag exists
     # to bypass OS command-line length limits). These are defaults the
     # user can still override via --bazel-flag=...
-    base_flags = ["--isatty=" + str(int(ctx.std.io.stdout.is_tty))]
+    #
+    # When output capture is on, the child's stderr no longer goes to the real
+    # terminal — it goes to a runtime-owned pipe/PTY (see `output_processor`
+    # below). `--isatty` must match the captured fd, not the parent's stdout:
+    #   - destination stderr is a TTY → a PTY is allocated → --isatty=1 so
+    #     Bazel renders its curses UI into the PTY (forwarded near-verbatim).
+    #   - otherwise → a plain pipe → --isatty=0 --curses=no so Bazel emits
+    #     clean newline-terminated lines (the tractable substrate for the
+    #     deferred dedup/match work).
+    # When capture is off, keep the historical behavior: derive --isatty from
+    # the parent's stdout (the child inherits the terminal directly).
+    output_processor = None
+    if bazel_trait.capture_output:
+        capture_is_tty = ctx.std.io.stderr.is_tty
+        output_processor = bazel.output.processor(tty = capture_is_tty)
+        if capture_is_tty:
+            base_flags = ["--isatty=1"]
+        else:
+            base_flags = ["--isatty=0", "--curses=no"]
+    else:
+        base_flags = ["--isatty=" + str(int(ctx.std.io.stdout.is_tty))]
 
     if targets == None:
         # --target-pattern-file is only honored when the task declares it.
@@ -385,6 +405,7 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
                 build_events = build_events,
                 execution_log = bazel_trait.execution_log_sinks or False,
                 flags = flags,
+                output = output_processor,
                 announce_version = announce_version,
                 announce_command = announce_command,
                 *targets
@@ -394,6 +415,7 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
                 build_events = build_events,
                 execution_log = bazel_trait.execution_log_sinks or False,
                 flags = flags,
+                output = output_processor,
                 announce_version = announce_version,
                 announce_command = announce_command,
                 *targets
