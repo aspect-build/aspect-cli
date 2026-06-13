@@ -1,0 +1,99 @@
+"""A 'warming' task: pre-populate Bazel caches on a CI runner.
+
+Cleans the prior Bazel state under ${ASPECT__STORAGE_PATH}, then runs
+`bazel build --nobuild` against the given targets so the repository,
+output, and bazel caches under that mount (and the aspect-launcher /
+aspect-cli caches under ${ASPECT__STORAGE_PATH}/caches/{aspect-launcher,
+aspect-cli}) are populated and ready for the warming archive. When
+running on an Aspect Workflows runner, this task also invokes
+/etc/aspect/workflows/bin/warming_archive to upload the populated
+caches to the warming bucket — so the customer's CI workflow only
+needs to call `aspect ci warming`.
+"""
+load("./traits.axl", "BazelTrait")
+
+
+WARMING_ARCHIVE_BIN = "/etc/aspect/workflows/bin/warming_archive"
+
+
+def _impl(ctx: TaskContext) -> int:
+    on_workflows_runner = bool(ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER"))
+    mount = ctx.std.env.var("ASPECT__STORAGE_PATH")
+    if mount:
+        # Match rosetta's pre-warming cleanup. Best-effort: bazel may have
+        # left output dirs read-only, so chmod first; spawn errors are
+        # tolerated since the dirs may not exist yet on a fresh runner.
+        for sub in ["bazel", "output", "caches/repository"]:
+            d = mount + "/" + sub
+            ctx.std.process.command("find").args([d, "-type", "d", "-exec", "chmod", "u+w", "{}", "+"]).spawn().wait()
+            ctx.std.process.command("rm").args(["-rf", d]).spawn().wait()
+
+    bazel_trait = ctx.traits[BazelTrait]
+
+    flags = ["--nobuild"]
+    flags.extend(ctx.args.bazel_flags)
+    flags.extend(bazel_trait.extra_flags)
+    for hook in bazel_trait.task_flags:
+        flags.extend(hook(ctx))
+    if bazel_trait.flags:
+        flags = bazel_trait.flags(flags)
+
+    startup_flags = list(ctx.args.bazel_startup_flags)
+    startup_flags.extend(bazel_trait.extra_startup_flags)
+    if ctx.args.output_base:
+        startup_flags.insert(0, "--output_base=" + ctx.args.output_base)
+    if bazel_trait.startup_flags:
+        startup_flags = bazel_trait.startup_flags(startup_flags)
+    ctx.bazel.startup_flags.extend(startup_flags)
+
+    invocation = ctx.bazel.build(
+        flags = flags,
+        *ctx.args.targets,
+    )
+    code = invocation.wait().code
+    if code != 0:
+        return code
+
+    if on_workflows_runner:
+        # Upload the populated caches to the warming bucket. Inherits the
+        # script's stdout/stderr so the user sees its progress in real time.
+        archive = ctx.std.process.command(WARMING_ARCHIVE_BIN).spawn().wait()
+        return archive.code
+
+    ctx.std.io.stderr.write(
+        "warning: ASPECT_WORKFLOWS_RUNNER is not set; skipping the warming " +
+        "archive upload step. The bazel cache populate step ran successfully. " +
+        "On an Aspect Workflows runner this task also invokes " +
+        WARMING_ARCHIVE_BIN + " to upload the populated caches to the warming " +
+        "bucket.\n"
+    )
+    return 0
+
+
+warming = task(
+    group = ["ci"],
+    summary = "Pre-populate Bazel caches on a CI runner.",
+    description = "Cleans prior Bazel state under ${ASPECT__STORAGE_PATH}, then runs `bazel build --nobuild` against the given targets so subsequent jobs on the same runner pool start with hot caches. Intended to run on Aspect Workflows warming runners; the populated caches are captured by the warming archive.",
+    implementation = _impl,
+    traits = [BazelTrait],
+    args = {
+        "targets": args.positional(
+            minimum = 1,
+            maximum = 512,
+            default = ["..."],
+            description = "Bazel target patterns to warm. Defaults to '...' which expands to all rule targets in the package at and beneath the current directory.",
+        ),
+        "bazel_flags": args.string_list(
+            long = "bazel-flag",
+            description = "Additional Bazel flags forwarded to the build (e.g. --bazel-flag=--config=ci). Repeat the flag to pass multiple.",
+        ),
+        "bazel_startup_flags": args.string_list(
+            long = "bazel-startup-flag",
+            description = "Additional Bazel startup flags. Repeat the flag to pass multiple.",
+        ),
+        "output_base": args.string(
+            default = "",
+            description = "Bazel output base path. Use to target a specific Bazel server instance.",
+        ),
+    },
+)
