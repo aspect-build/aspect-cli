@@ -160,6 +160,13 @@ def _header_value(args, name):
             return args[i + 1][len(prefix):]
     return None
 
+def _has_header_arg(args, header):
+    """True if `-H <header>` appears verbatim (for value-less headers like `Expect:`)."""
+    for i in range(len(args) - 1):
+        if args[i] == "-H" and args[i + 1] == header:
+            return True
+    return False
+
 _FAKE_CREDS = {"AccessKeyID": "AKIA", "SecretAccessKey": "secret", "SessionToken": "tok"}
 
 def _test_sigv4_args_self_sign(_ctx):
@@ -183,6 +190,19 @@ def _test_sigv4_args_test_result_content_type(_ctx):
     """The test-result path folds the runner's Content-Type into the signed set."""
     args = s3_sigv4_put_args("r", _FAKE_CREDS, "/tmp/tr.tar.gz", {"Content-Type": "application/gzip"})
     _eq("content-type signed", _header_value(args, "Content-Type"), "application/gzip")
+
+def _test_sigv4_args_pins_content_sha256(_ctx):
+    """`x-amz-content-sha256` is always sent — curl 7.88 drops it on large
+    (Expect: 100-continue) bodies, which S3 rejects as a missing header."""
+    args = s3_sigv4_put_args("r", _FAKE_CREDS, "/tmp/big.tar.gz")
+    _eq("content-sha256 pinned", _header_value(args, "x-amz-content-sha256"), "UNSIGNED-PAYLOAD")
+
+def _test_sigv4_args_suppresses_expect(_ctx):
+    """`-H Expect:` (empty, no value) drops curl's automatic
+    `Expect: 100-continue` on larger bodies (the trigger for the bug)."""
+    args = s3_sigv4_put_args("r", _FAKE_CREDS, "/tmp/big.tar.gz")
+    if not _has_header_arg(args, "Expect:"):
+        fail("expected `-H Expect:` to suppress 100-continue: %r" % args)
 
 # ---------------------------------------------------------------------------
 # redact_curl_trace — strip SigV4 secrets from curl -v output (logged and,
@@ -271,6 +291,8 @@ _UNIT_TESTS = [
     _test_sigv4_args_self_sign,
     _test_sigv4_args_artifact_tags,
     _test_sigv4_args_test_result_content_type,
+    _test_sigv4_args_pins_content_sha256,
+    _test_sigv4_args_suppresses_expect,
     _test_redact_curl_trace_elides_secrets,
     _test_redact_curl_trace_transport_error_no_leak,
     _test_skip_self_closing,

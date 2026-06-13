@@ -239,6 +239,19 @@ def s3_sigv4_put_args(region, aws_creds, path, headers = None):
     optional `{k: v}` of extra request headers folded into the signed set
     (artifact tags, the test-result `Content-Type`). Public so
     `circleci_test.axl` can load it.
+
+    Two headers are pinned rather than left to curl:
+
+      - `x-amz-content-sha256: UNSIGNED-PAYLOAD` — curl's `--aws-sigv4` adds
+        this itself for small bodies, but on some versions (e.g. 7.88) drops
+        it once the body is large enough to trigger `Expect: 100-continue`,
+        so S3 rejects the larger uploads with `400 InvalidRequest: Missing
+        required header ... x-amz-content-sha256`. We always send it; the
+        value matches what `--aws-sigv4` signs, so it's a no-op where curl
+        would have added it.
+      - `Expect:` (empty) — drops curl's automatic `Expect: 100-continue` on
+        larger bodies, which is both the trigger for the bug above and a
+        wasted round-trip.
     """
     args = _CURL_S3_BASE_ARGS + [
         "--aws-sigv4",
@@ -247,6 +260,10 @@ def s3_sigv4_put_args(region, aws_creds, path, headers = None):
         aws_creds["AccessKeyID"] + ":" + aws_creds["SecretAccessKey"],
         "-H",
         "x-amz-security-token: " + aws_creds["SessionToken"],
+        "-H",
+        "x-amz-content-sha256: UNSIGNED-PAYLOAD",
+        "-H",
+        "Expect:",
         "-T",
         path,
         "-X",
