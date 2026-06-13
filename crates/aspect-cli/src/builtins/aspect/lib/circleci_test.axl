@@ -252,6 +252,12 @@ def _test_redact_curl_trace_transport_error_no_leak(_ctx):
     if "Connection reset by peer" not in detail:
         fail("transport-error detail dropped the actual error: %r" % detail)
 
+def _test_redact_curl_trace_plain_error_unchanged(_ctx):
+    """A plain curl error (no `-v`, so no `> ` request lines) passes through
+    untouched — redaction runs on every curl_err, not just verbose ones."""
+    msg = "curl: (6) Could not resolve host: bucket.s3.amazonaws.com"
+    _eq("plain error unchanged", redact_curl_trace(msg), msg)
+
 # ---------------------------------------------------------------------------
 # mark_testcases_skipped — move cached tests into the "skipped" bucket
 # ---------------------------------------------------------------------------
@@ -295,6 +301,7 @@ _UNIT_TESTS = [
     _test_sigv4_args_suppresses_expect,
     _test_redact_curl_trace_elides_secrets,
     _test_redact_curl_trace_transport_error_no_leak,
+    _test_redact_curl_trace_plain_error_unchanged,
     _test_skip_self_closing,
     _test_skip_with_body,
     _test_skip_multiple,

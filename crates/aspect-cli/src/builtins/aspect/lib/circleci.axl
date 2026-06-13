@@ -231,6 +231,10 @@ def _header_args(headers):
         args = args + ["-H", k + ": " + v]
     return args
 
+def _s3_object_url(bucket, region, key):
+    """Virtual-hosted S3 URL for `key` in `bucket`/`region`."""
+    return "https://" + bucket + ".s3." + region + ".amazonaws.com/" + key
+
 def s3_sigv4_put_args(region, aws_creds, path, headers = None):
     """curl args for a sigv4-signed PUT using the job-scoped STS credentials.
 
@@ -344,7 +348,7 @@ def _s3_put(ctx, session, path, name):
     prefix = artifact_resp["prefix"]
     tags = artifact_resp.get("key", {}).get("tags", {})
 
-    s3_url = "https://" + bucket + ".s3." + region + ".amazonaws.com/" + prefix + "/" + name
+    s3_url = _s3_object_url(bucket, region, prefix + "/" + name)
 
     extra_headers = {}
     if tags:
@@ -450,7 +454,7 @@ def test_results_object_url(bucket: str, region: str, location: str) -> str:
     """
     if location.startswith("http://") or location.startswith("https://"):
         return location
-    return "https://" + bucket + ".s3." + region + ".amazonaws.com/" + location
+    return _s3_object_url(bucket, region, location)
 
 def _post_test_result(ctx, session, step_id):
     """Register an upload for `step_id`; the Key dict, or None if rejected."""
