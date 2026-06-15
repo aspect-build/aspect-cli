@@ -165,7 +165,7 @@ def _gitlab_status_comments(ctx: FeatureContext):
         if _state.get("_gitlab_token"):
             return True
         auth_reason = {}
-        token = gitlab_token_cache.get_or_mint(
+        token, auth_kind = gitlab_token_cache.resolve_token(
             ctx,
             project_path = project_path,
             project_id = project_id,
@@ -174,7 +174,8 @@ def _gitlab_status_comments(ctx: FeatureContext):
             # `gitlabScope: null` and `read_api`, which together resolve
             # to scope `read_api` only — and GitLab's notes API requires
             # `api` scope. Until roles.ts marks `mr_notes.write` as
-            # `api`-scoped, request `api` here directly.
+            # `api`-scoped, request `api` here directly. (Ignored on the
+            # explicit-token path, which doesn't mint.)
             roles = ["api"],
             _reason = auth_reason,
         )
@@ -185,6 +186,7 @@ def _gitlab_status_comments(ctx: FeatureContext):
             ))
             return False
         _state["_gitlab_token"] = token
+        _state["_auth_kind"] = auth_kind
         return True
 
     def _fetch_existing_note_body(ctx, token):
@@ -201,7 +203,7 @@ def _gitlab_status_comments(ctx: FeatureContext):
             # The notes API doesn't expose a single-note GET that filters by id
             # uniquely without `list`; we approximate by listing and matching id.
             # Cheap on a small page; expensive only when the MR has many notes.
-            listed = gitlab.notes.list(ctx, token = token, project = project_path, mr_iid = mr_iid, api_base = api_base, auth_kind = "bearer")
+            listed = gitlab.notes.list(ctx, token = token, project = project_path, mr_iid = mr_iid, api_base = api_base, auth_kind = _state["_auth_kind"])
             if not listed["success"]:
                 _LOG.warn(ctx.std, "List notes failed: %s" % listed.get("error", "unknown"))
                 return None
@@ -212,7 +214,7 @@ def _gitlab_status_comments(ctx: FeatureContext):
             # Note vanished — fall through to re-discovery.
             _state.pop("_note_id", None)
 
-        listed = gitlab.notes.list(ctx, token = token, project = project_path, mr_iid = mr_iid, api_base = api_base, auth_kind = "bearer")
+        listed = gitlab.notes.list(ctx, token = token, project = project_path, mr_iid = mr_iid, api_base = api_base, auth_kind = _state["_auth_kind"])
         if not listed["success"]:
             _LOG.warn(ctx.std, "List notes failed: %s" % listed.get("error", "unknown"))
             return None
@@ -236,7 +238,7 @@ def _gitlab_status_comments(ctx: FeatureContext):
                 note_id = _state["_note_id"],
                 body = body,
                 api_base = api_base,
-                auth_kind = "bearer",
+                auth_kind = _state["_auth_kind"],
             )
             if not res["success"]:
                 _LOG.warn(ctx.std, "Update note failed: %s" % res.get("error", "unknown"))
@@ -250,7 +252,7 @@ def _gitlab_status_comments(ctx: FeatureContext):
             mr_iid = mr_iid,
             body = body,
             api_base = api_base,
-            auth_kind = "bearer",
+            auth_kind = _state["_auth_kind"],
         )
         if not res["success"]:
             _LOG.warn(ctx.std, "Create note failed: %s" % res.get("error", "unknown"))
@@ -260,7 +262,7 @@ def _gitlab_status_comments(ctx: FeatureContext):
         # Race mitigation: if two tasks both POSTed within the same
         # window, keep the lowest note id and delete the rest. Stable
         # choice across writers so they converge on the same survivor.
-        listed2 = gitlab.notes.list(ctx, token = token, project = project_path, mr_iid = mr_iid, api_base = api_base, auth_kind = "bearer")
+        listed2 = gitlab.notes.list(ctx, token = token, project = project_path, mr_iid = mr_iid, api_base = api_base, auth_kind = _state["_auth_kind"])
         if not listed2["success"]:
             return True
         dupes = [n for n in listed2["notes"] if marker in (n.get("body") or "")]
@@ -277,7 +279,7 @@ def _gitlab_status_comments(ctx: FeatureContext):
                 mr_iid = mr_iid,
                 note_id = d["id"],
                 api_base = api_base,
-                auth_kind = "bearer",
+                auth_kind = _state["_auth_kind"],
             )
             if not del_res["success"]:
                 _LOG.trace("Cleanup of duplicate note %s failed; will retry next cycle" % d["id"])

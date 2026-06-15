@@ -11,6 +11,7 @@ Run with:
 """
 
 load("./gitlab.axl", "gitlab")
+load("./gitlab_token_cache.axl", "gitlab_token_cache")
 
 def _eq(label, got, want):
     if got != want:
@@ -152,6 +153,40 @@ def _test_impl(ctx):
         gitlab.resolve_api_base(_env({"ASPECT_GITLAB_API_URL": "https://self-hosted.gitlab.com/api/v4/"})),
         "https://self-hosted.gitlab.com/api/v4",
     )
+
+    # resolve_token — the explicit-token escape hatch (self-hosted path).
+    # ASPECT_GITLAB_TOKEN short-circuits before any mint and selects the
+    # PRIVATE-TOKEN header convention; absent it, the mint path is used
+    # and auth_kind is "bearer" (and None on mint failure).
+    def _ctx_with_env(env_vars):
+        return struct(
+            std = struct(
+                env = struct(
+                    var = lambda name: env_vars.get(name, ""),
+                    temp_dir = lambda: "/tmp",
+                ),
+                fs = struct(exists = lambda path: False),
+                process = struct(id = lambda: 1234),
+            ),
+            aspect = struct(auth = struct(credentials = lambda profile = None: None)),
+        )
+
+    tok, kind = gitlab_token_cache.resolve_token(
+        _ctx_with_env({"ASPECT_GITLAB_TOKEN": "  glpat-xxx  "}),
+        project_path = "group/project",
+    )
+    _eq("resolve_token / explicit token value (trimmed)", tok, "glpat-xxx")
+    _eq("resolve_token / explicit token uses private_token", kind, "private_token")
+
+    # No explicit token + no creds → mint path fails → (None, "bearer").
+    reason = {}
+    tok, kind = gitlab_token_cache.resolve_token(
+        _ctx_with_env({"CI": "true"}),
+        project_path = "group/project",
+        _reason = reason,
+    )
+    _eq("resolve_token / fallback no-creds returns None", tok, None)
+    _eq("resolve_token / fallback auth_kind is bearer", kind, "bearer")
 
     # commit_status.STATES exposed
     if "success" not in gitlab.commit_status.STATES:

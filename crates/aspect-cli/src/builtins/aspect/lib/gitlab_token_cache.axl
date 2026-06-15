@@ -102,6 +102,45 @@ def get_or_mint(ctx, project_path, project_id = None, profile = None, roles = No
     ctx.std.fs.write(path, tok)
     return tok
 
+# Explicit-token escape hatch. Set to a GitLab personal / group / project
+# access token with `api` scope to bypass the Aspect GitLab App entirely.
+_EXPLICIT_TOKEN_ENV = "ASPECT_GITLAB_TOKEN"
+
+def resolve_token(ctx, project_path, project_id = None, profile = None, roles = None, _reason = None):
+    """Resolve a GitLab token plus the auth header convention to use,
+    returning `(token, auth_kind)`.
+
+    Precedence:
+
+      * `ASPECT_GITLAB_TOKEN` (a personal / group / project access token)
+        takes precedence when set and is sent as `PRIVATE-TOKEN`
+        (`auth_kind = "private_token"`). This is the path for self-hosted
+        GitLab: the Aspect GitLab App is registered on `gitlab.com`, so a
+        minted token can't authenticate against another instance — the
+        caller must supply a token valid for their own host. No minting,
+        no per-process caching (a PAT has no refresh-rotation hazard).
+      * Otherwise mint via the Aspect GitLab App through `get_or_mint`
+        and send as a bearer token (`auth_kind = "bearer"`), with the
+        per-process caching described above.
+
+    Returns `(None, "bearer")` on mint failure, with `_reason` populated
+    exactly as `gitlab.authenticate` documents. The explicit-token path
+    never fails here — an invalid token surfaces as a 401 at the first
+    API call, handled by the feature's existing warn-and-skip path."""
+    explicit = ctx.std.env.var(_EXPLICIT_TOKEN_ENV) or ""
+    if explicit:
+        return explicit.strip(), "private_token"
+    tok = get_or_mint(
+        ctx,
+        project_path = project_path,
+        project_id = project_id,
+        profile = profile,
+        roles = roles,
+        _reason = _reason,
+    )
+    return tok, "bearer"
+
 gitlab_token_cache = struct(
     get_or_mint = get_or_mint,
+    resolve_token = resolve_token,
 )
