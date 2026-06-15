@@ -1,7 +1,8 @@
 """Unit tests for lib/runnable.axl: apparent_label normalization, BES matching,
-entrypoint selection (passes 1–3), and runfiles directory detection."""
+entrypoint selection (passes 1–3), runfiles directory detection, and the
+`runenv` aspect's resolved-`env` collection."""
 
-load("./runnable.axl", "apparent_label", "resolve_run_in", "runnable")
+load("./runnable.axl", "apparent_label", "resolve_run_in", "runenv_aspect_flags", "runnable")
 
 def _eq(label, got, want):
     if got != want:
@@ -350,15 +351,18 @@ def _test_pass3_skips_non_executable(ctx):
 # disk with a minimal mock ctx.
 # ---------------------------------------------------------------------------
 
-def _make_mock_ctx(existing_paths, executable_paths = None):
+def _make_mock_ctx(existing_paths, executable_paths = None, file_contents = None):
     """Minimal TaskContext mock for filesystem detection tests.
 
     existing_paths: absolute paths that `std.fs.exists()` returns True for.
     executable_paths: absolute paths that `std.fs.metadata().executable` is True
         for. None means "every path is executable" — the right default for tests
         that don't exercise pass-3's executable-bit check.
+    file_contents: optional {path: str} for `std.fs.read_to_string`, used by the
+        runenv tests; paths here are also treated as existing.
     """
     is_executable = (lambda path: True) if executable_paths == None else (lambda path: path in executable_paths)
+    contents = file_contents or {}
     return struct(
         std = struct(
             env = struct(
@@ -366,9 +370,24 @@ def _make_mock_ctx(existing_paths, executable_paths = None):
                 current_dir = lambda: "/workspace",
             ),
             fs = struct(
-                exists = lambda path: path in existing_paths,
+                exists = lambda path: path in existing_paths or path in contents,
                 metadata = lambda path: struct(executable = is_executable(path)),
+                read_to_string = lambda path: contents[path],
             ),
+        ),
+    )
+
+def _make_runenv_target_event(bes_label, default_set_id, runenv_set_id):
+    """target_completed event carrying both the `default` and the
+    `aspect_runenv` output groups (the latter from the injected runenv aspect)."""
+    return struct(
+        kind = "target_completed",
+        id = struct(label = bes_label),
+        payload = struct(
+            output_group = [
+                struct(name = "default", file_sets = [struct(id = default_set_id)]),
+                struct(name = "aspect_runenv", file_sets = [struct(id = runenv_set_id)]),
+            ],
         ),
     )
 
@@ -409,6 +428,101 @@ def _test_filesystem_no_runfiles(ctx):
         fail("fs/no-runfiles: expected runfiles_dir=None (no .runfiles on disk), got %r" % ep.runfiles_dir)
     if ep.runfiles_workspace_dir != None:
         fail("fs/no-runfiles: expected runfiles_workspace_dir=None (no runfiles_dir), got %r" % ep.runfiles_workspace_dir)
+
+# ---------------------------------------------------------------------------
+# runenv tests — the `runenv` aspect's resolved `env` attribute, collected
+# from the `aspect_runenv` output group and surfaced on the entrypoint struct
+# so `_spawn` can replay it (matching `bazel run`).
+# ---------------------------------------------------------------------------
+
+def _test_runenv_collected_from_aspect_output_group(ctx):
+    """When the aspect's JSON is present, environment + inherited_environment
+    surface on the entrypoint struct."""
+    runenv_path = "/out/bin/cloud/anyscale/monitor/service.release.aspect_runenv.json"
+    mock = _make_mock_ctx(
+        existing_paths = ["/out/bin/cloud/anyscale/monitor/service.release.runfiles"],
+        file_contents = {runenv_path: json.encode({
+            "environment": {"JQ_BIN": "../jq_toolchains+/jq", "REPOSITORY": "anyscale"},
+            "inherited_environment": ["HOME"],
+        })},
+    )
+    r = runnable(mock, ["//cloud/anyscale/monitor:service.release"])
+    r.event(_make_fileset_event("default", ["/out/bin/cloud/anyscale/monitor/service.release"]))
+    r.event(_make_fileset_event("runenv", [runenv_path]))
+    r.event(_make_runenv_target_event("//cloud/anyscale/monitor:service.release", "default", "runenv"))
+    ep = r.determine_entrypoint("//cloud/anyscale/monitor:service.release")
+    if ep == None:
+        fail("runenv: expected entrypoint, got None")
+    _eq("runenv: JQ_BIN verbatim", ep.environment.get("JQ_BIN"), "../jq_toolchains+/jq")
+    _eq("runenv: REPOSITORY", ep.environment.get("REPOSITORY"), "anyscale")
+    _eq("runenv: inherited", ep.inherited_environment, ["HOME"])
+
+def _test_runenv_absent_yields_empty_env(ctx):
+    """No aspect_runenv output group (aspect not injected / no
+    RunEnvironmentInfo) → empty environment + inherited_environment."""
+    mock = _make_mock_ctx(["/out/bin/tools/format/runner.runfiles"])
+    r = runnable(mock, ["//tools/format:runner"])
+    r.event(_make_fileset_event("s1", ["/out/bin/tools/format/runner"]))
+    r.event(_make_target_event("//tools/format:runner", "s1"))
+    ep = r.determine_entrypoint("//tools/format:runner")
+    if ep == None:
+        fail("runenv-absent: expected entrypoint, got None")
+    _eq("runenv-absent: empty environment", ep.environment, {})
+    _eq("runenv-absent: empty inherited", ep.inherited_environment, [])
+
+def _test_runenv_empty_when_ctx_none(ctx):
+    """Without a ctx (no filesystem), the JSON can't be read → empty env even
+    when the output group was reported."""
+    r = runnable(None, ["//tools/format:runner"])
+    r.event(_make_fileset_event("default", ["/out/bin/tools/format/runner"]))
+    r.event(_make_fileset_event("runenv", ["/out/bin/tools/format/runner.aspect_runenv.json"]))
+    r.event(_make_runenv_target_event("//tools/format:runner", "default", "runenv"))
+    ep = r.determine_entrypoint("//tools/format:runner")
+    if ep == None:
+        fail("runenv-ctx-none: expected entrypoint, got None")
+    _eq("runenv-ctx-none: empty environment", ep.environment, {})
+
+def _test_runenv_partial_json_defaults_missing_keys(ctx):
+    """A JSON missing `inherited_environment` (e.g. a rule that set only
+    `environment`) decodes to an empty list, not a failure."""
+    runenv_path = "/out/bin/tools/format/runner.aspect_runenv.json"
+    mock = _make_mock_ctx(
+        existing_paths = ["/out/bin/tools/format/runner.runfiles"],
+        file_contents = {runenv_path: json.encode({"environment": {"FOO": "bar"}})},
+    )
+    r = runnable(mock, ["//tools/format:runner"])
+    r.event(_make_fileset_event("default", ["/out/bin/tools/format/runner"]))
+    r.event(_make_fileset_event("runenv", [runenv_path]))
+    r.event(_make_runenv_target_event("//tools/format:runner", "default", "runenv"))
+    ep = r.determine_entrypoint("//tools/format:runner")
+    if ep == None:
+        fail("runenv-partial: expected entrypoint, got None")
+    _eq("runenv-partial: environment", ep.environment, {"FOO": "bar"})
+    _eq("runenv-partial: inherited defaults empty", ep.inherited_environment, [])
+
+def _test_runenv_aspect_flags_writes_repo_and_returns_flags(ctx):
+    """`runenv_aspect_flags` materializes a task-scoped injectable repo and
+    returns the aspect / output-group / inject-repository flags pointing at it."""
+    writes = {}
+    mock = struct(
+        task = struct(key = "fmt-123"),
+        std = struct(fs = struct(
+            create_dir_all = lambda path: writes.setdefault("__dir__", path),
+            write = lambda path, content: writes.setdefault(path, content),
+        )),
+    )
+    flags = runenv_aspect_flags(mock)
+    repo = "/tmp/aspect_runenv_fmt-123"
+    _eq("flags/dir", writes["__dir__"], repo)
+    if repo + "/REPO.bazel" not in writes or repo + "/BUILD.bazel" not in writes:
+        fail("flags: expected empty REPO.bazel + BUILD.bazel, wrote %r" % writes.keys())
+    if "RunEnvironmentInfo" not in writes[repo + "/runenv.bzl"]:
+        fail("flags: runenv.bzl missing aspect source")
+    _eq("flags/list", flags, [
+        "--aspects=@aspect_runenv//:runenv.bzl%runenv",
+        "--output_groups=+aspect_runenv",
+        "--inject_repository=aspect_runenv=" + repo,
+    ])
 
 # ---------------------------------------------------------------------------
 # runfiles_workspace_dir tests — `<runfiles_dir>/<workspace>`, the cwd
@@ -631,6 +745,11 @@ _UNIT_TESTS = [
     _test_filesystem_sh_extension,
     _test_filesystem_bash_extension,
     _test_filesystem_no_runfiles,
+    _test_runenv_collected_from_aspect_output_group,
+    _test_runenv_absent_yields_empty_env,
+    _test_runenv_empty_when_ctx_none,
+    _test_runenv_partial_json_defaults_missing_keys,
+    _test_runenv_aspect_flags_writes_repo_and_returns_flags,
     _test_run_in_empty_is_none,
     _test_run_in_runfiles_is_none,
     _test_run_in_cwd,

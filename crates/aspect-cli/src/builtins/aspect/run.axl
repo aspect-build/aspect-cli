@@ -9,7 +9,7 @@ load("./lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_bui
 load("./lib/environment.axl", "error")
 load("./lib/health_check.axl", "HealthCheckTrait")
 load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "dispatch_task_update", "setup_phase", "task_update")
-load("./lib/runnable.axl", "LOCAL_SPAWN_BASE_FLAGS", "LOCAL_SPAWN_FLAGS", "RUN_IN_DESCRIPTION", "resolve_run_in", "runnable")
+load("./lib/runnable.axl", "LOCAL_SPAWN_BASE_FLAGS", "LOCAL_SPAWN_FLAGS", "RUN_IN_DESCRIPTION", "resolve_run_in", "runenv_aspect_flags", "runnable")
 load("./lib/tips.axl", "tips")
 
 def _terminal_status(data, exit_code):
@@ -83,6 +83,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     announce_version, announce_command = resolve_bazel_announce(ctx)
 
     flags.extend(LOCAL_SPAWN_FLAGS)
+
+    # Replay the target's `env` attribute on spawn (matching `bazel run`).
+    flags.extend(runenv_aspect_flags(ctx))
 
     r = runnable(ctx, [target])
     events = bazel.build_events.iterator()

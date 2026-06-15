@@ -198,7 +198,7 @@ load("./lib/health_check.axl", "HealthCheckTrait")
 load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "pick_task_status", "resolve_severity", "setup_phase", "task_update")
 load("./lib/path_glob.axl", "match_any")
 load("./lib/repro_commands.axl", "build_aspect_command", "build_bazel_command", "explicit_flags", "has_tools_bazel_wrapper", "print_repro_and_fix", "repro_prefix", "task_cli_path")
-load("./lib/runnable.axl", "LOCAL_SPAWN_BASE_FLAGS", "LOCAL_SPAWN_FLAGS", "runnable")
+load("./lib/runnable.axl", "LOCAL_SPAWN_BASE_FLAGS", "LOCAL_SPAWN_FLAGS", "runenv_aspect_flags", "runnable")
 load("./lib/text.axl", "pluralize")
 load("./lib/tips.axl", "tips")
 
@@ -600,6 +600,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         return _emit_final(ctx, lifecycle, data, 0)
 
     flags.extend(LOCAL_SPAWN_FLAGS)
+
+    # Replay the gazelle target's `env` attribute on spawn (matching `bazel run`).
+    flags.extend(runenv_aspect_flags(ctx))
 
     r = runnable(ctx, [ctx.args.gazelle_target])
 

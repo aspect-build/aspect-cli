@@ -31,7 +31,7 @@ load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskL
 load("./lib/path_glob.axl", "match_any")
 load("./lib/path_normalize.axl", "normalize_files_for_cwd")
 load("./lib/repro_commands.axl", "build_aspect_command", "build_bazel_command", "explicit_flags", "has_tools_bazel_wrapper", "print_repro_and_fix", "repro_prefix", "task_cli_path")
-load("./lib/runnable.axl", "LOCAL_SPAWN_BASE_FLAGS", "LOCAL_SPAWN_FLAGS", "RUN_IN_DESCRIPTION", "resolve_run_in", "runnable")
+load("./lib/runnable.axl", "LOCAL_SPAWN_BASE_FLAGS", "LOCAL_SPAWN_FLAGS", "RUN_IN_DESCRIPTION", "resolve_run_in", "runenv_aspect_flags", "runnable")
 load("./lib/text.axl", "pluralize")
 load("./lib/tips.axl", "tips")
 
@@ -370,6 +370,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     announce_version, announce_command = resolve_bazel_announce(ctx)
 
     flags.extend(LOCAL_SPAWN_FLAGS)
+
+    # Replay the formatter target's `env` attribute on spawn (matching `bazel run`).
+    flags.extend(runenv_aspect_flags(ctx))
 
     r = runnable(ctx, [ctx.args.formatter_target])
 

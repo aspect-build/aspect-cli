@@ -2,6 +2,14 @@ load("./bazel_results.axl", "bes_get")
 
 _DEFAULT_WORKSPACE_NAME = "_main"
 
+# Output group + JSON-file suffix the `runenv` aspect uses. These mirror the
+# literals baked into `_RUNENV_ASPECT_BZL` below — the aspect runs as a
+# separate Starlark file and can't reference these constants, so keep the two
+# in sync. `_process_bes` reads the group from BES alongside `default`;
+# `_collect_runenv` matches the suffix to find the file.
+_RUNENV_OUTPUT_GROUP = "aspect_runenv"
+_RUNENV_FILE_SUFFIX = ".aspect_runenv.json"
+
 # Mandatory Bazel flags for a task that immediately spawns the built binary
 # (format, gazelle, run, delivery phase 3). Append these LAST so they win
 # over any user rc / `--bazel-flag` value that would flip them: the spawn
@@ -47,6 +55,56 @@ RUN_IN_DESCRIPTION = (
     "`/` are taken as absolute; paths starting with `./` or `../` " +
     "resolve against the user's cwd."
 )
+
+# Bazel rule source for the `runenv` aspect. Reads each target's
+# `RunEnvironmentInfo` — the provider that carries the resolved `env`
+# attribute `bazel run` injects into the spawned process — and writes it as
+# JSON to a declared output in the `aspect_runenv` output group. `_spawn`
+# reads this file and replays the env so direct spawns match `bazel run`.
+#
+# Not every binary rule populates `RunEnvironmentInfo`: legacy native
+# `sh_binary` historically does not (https://github.com/bazelbuild/bazel/issues/23658),
+# while rules_shell's Starlark `sh_binary` and most language rulesets do.
+# The `RunEnvironmentInfo in target` guard makes the aspect a no-op for the
+# former, so its spawn sees no target env.
+#
+# Values are already location/rootpath-expanded at analysis time and are
+# stored relative to the runfiles workspace dir (rootpath semantics), which
+# is exactly the cwd `_spawn` uses — so they are replayed verbatim, never
+# rewritten to absolute paths.
+_RUNENV_ASPECT_BZL = """def _runenv_impl(target, ctx):
+    if RunEnvironmentInfo not in target:
+        return []
+    run_env = target[RunEnvironmentInfo]
+    out = ctx.actions.declare_file(target.label.name + ".aspect_runenv.json")
+    ctx.actions.write(out, json.encode(struct(
+        environment = run_env.environment,
+        inherited_environment = run_env.inherited_environment,
+    )))
+    return [OutputGroupInfo(aspect_runenv = depset([out]))]
+
+runenv = aspect(implementation = _runenv_impl)
+"""
+
+def runenv_aspect_flags(ctx) -> list[str]:
+    """Materialize the `runenv` aspect repo and return the flags that inject it.
+
+    Append the result to a build whose BES is streamed into a `runnable()`
+    tracker; the tracker then collects each target's resolved run environment
+    and `spawn` replays it. Writes a throwaway repo (empty `REPO.bazel` /
+    `BUILD.bazel` plus the aspect `.bzl`) under a task-scoped `/tmp` dir, the
+    same injectable-repo pattern delivery's hashsum aspect uses.
+    """
+    repo_dir = "/tmp/aspect_runenv_" + ctx.task.key
+    ctx.std.fs.create_dir_all(repo_dir)
+    ctx.std.fs.write(repo_dir + "/REPO.bazel", "")
+    ctx.std.fs.write(repo_dir + "/BUILD.bazel", "")
+    ctx.std.fs.write(repo_dir + "/runenv.bzl", _RUNENV_ASPECT_BZL)
+    return [
+        "--aspects=@aspect_runenv//:runenv.bzl%runenv",
+        "--output_groups=+" + _RUNENV_OUTPUT_GROUP,
+        "--inject_repository=aspect_runenv=" + repo_dir,
+    ]
 
 def resolve_run_in(ctx, choice: str) -> str | None:
     """Resolve `--run-in=<choice>` to an absolute cwd for the spawn.
@@ -182,6 +240,8 @@ def _process_bes(state: struct, event):
             for og in (bes_get(event.payload, "output_group", None) or []):
                 if og.name == "default":
                     state.target_fileset[label_key] = og.file_sets
+                elif og.name == _RUNENV_OUTPUT_GROUP:
+                    state.runenv_fileset[label_key] = og.file_sets
     elif event.kind == "workspace_config":
         # WorkspaceConfig.local_exec_root is "<output_base>/execroot/<workspace_name>".
         # Its basename is the canonical repo name Bazel uses inside runfiles trees.
@@ -233,12 +293,46 @@ def _get_default_outputs(state: struct, target: str) -> list[str]:
         return []
     return _collect_fileset_paths(state, state.target_fileset[target])
 
+def _collect_runenv(state: struct, target: str) -> struct | None:
+    """Read the `runenv` aspect's JSON for `target`, or None if absent.
+
+    Returns `struct(environment: dict, inherited_environment: list[str])` when
+    the aspect ran for the target AND its declared file is on disk; None when
+    no `aspect_runenv` output group was reported (aspect not injected, or the
+    rule has no `RunEnvironmentInfo`), the file isn't materialized, or it can't
+    be parsed. On None, the caller leaves the entrypoint's env fields empty and
+    `_spawn` injects no target env.
+
+    Reading requires `state.ctx` (filesystem access) and the JSON on disk —
+    callers run this only after the build that requested the `aspect_runenv`
+    output group has completed (the file is a requested top-level output, so
+    `--remote_download_outputs=toplevel` materializes it).
+    """
+    if state.ctx == None:
+        return None
+    target = apparent_label(target, state.current_package)
+    if target not in state.runenv_fileset:
+        return None
+    for path in _collect_fileset_paths(state, state.runenv_fileset[target]):
+        if not path.endswith(_RUNENV_FILE_SUFFIX):
+            continue
+        if not state.ctx.std.fs.exists(path):
+            return None
+        decoded = json.decode(state.ctx.std.fs.read_to_string(path))
+        return struct(
+            environment = decoded.get("environment", {}) or {},
+            inherited_environment = decoded.get("inherited_environment", []) or [],
+        )
+    return None
+
 def _determine_entrypoint(state: struct, target: str) -> struct | None:
     """Resolve `target` to an executable path and runfiles directory.
 
-    Returns `struct(path, runfiles_dir, runfiles_workspace_dir)` or
-    `None` when the target produced no BES `target_completed` event or
-    its default output group has no selectable executable.
+    Returns `struct(path, runfiles_dir, runfiles_workspace_dir, environment,
+    inherited_environment)` or `None` when the target produced no BES
+    `target_completed` event or its default output group has no selectable
+    executable. The two env fields carry the target's resolved `env` attribute
+    when the `runenv` aspect was injected (empty otherwise); `_spawn` replays them.
 
     `runfiles_dir` is the resolved runfiles directory path (e.g.
     `…/format.runfiles`), or `None` when no `<entrypoint>.runfiles`
@@ -305,10 +399,17 @@ def _determine_entrypoint(state: struct, target: str) -> struct | None:
             runfiles_dir = entrypoint + ".runfiles"
             runfiles_workspace_dir = runfiles_dir + "/" + (state.workspace_name[0] or _DEFAULT_WORKSPACE_NAME)
 
+    # Resolved run environment from the `runenv` aspect, when injected; None
+    # otherwise (`_spawn` then sets no target env). Read here, at entrypoint
+    # resolution, so `_spawn` stays a pure function of `ep`.
+    runenv = _collect_runenv(state, target)
+
     return struct(
         path = entrypoint,
         runfiles_dir = runfiles_dir,
         runfiles_workspace_dir = runfiles_workspace_dir,
+        environment = runenv.environment if runenv else {},
+        inherited_environment = runenv.inherited_environment if runenv else [],
     )
 
 def _spawn(ctx: TaskContext, state: struct, ep: struct, args: list[str], capture: bool = False, cwd: str | None = None) -> std.process.Child:
@@ -325,17 +426,40 @@ def _spawn(ctx: TaskContext, state: struct, ep: struct, args: list[str], capture
     for tools that want the canonical workspace root inside runfiles without
     re-deriving it from RUNFILES_DIR.
 
+    Replays the target's resolved `env` attribute (`ep.environment` /
+    `ep.inherited_environment`, populated by the `runenv` aspect) so direct
+    spawns match `bazel run` — e.g. a `set -u` script reading `${JQ_BIN}` from
+    `env` finds it set. These are applied FIRST so the runfiles / BUILD_* /
+    ASPECT_* vars below win on any key collision — the target env must not
+    clobber the runfiles plumbing the spawn depends on. `environment` values
+    are set verbatim (already rootpath-expanded relative to the runfiles
+    workspace dir, the cwd used below); `inherited_environment` names are
+    copied from the aspect process's own environment when present.
+
     Working directory defaults to `runfiles_dir/<workspace>` (matching `bazel run`)
     when a runfiles tree is present, falling back to the aspect invocation directory
     when the target has no runfiles tree. Pass `cwd` explicitly to override — both
     `run.axl` and `format.axl` resolve `--run-in=<choice>` via `resolve_run_in()` and
     forward the result here so targets that don't switch to `$BUILD_WORKSPACE_DIRECTORY`
     on their own (such as `@buildifier_prebuilt//buildifier`) resolve workspace-relative
-    arguments against the user's cwd.
+    arguments against the user's cwd. Note: a `--run-in` override moves the cwd
+    away from the runfiles workspace dir, so verbatim rootpath-form `env` values
+    won't resolve — the same limitation `bazel run` has, which always uses the
+    runfiles workspace cwd.
     """
     effective_cwd = cwd or ep.runfiles_workspace_dir or ctx.std.env.current_dir()
-    cmd = ctx.std.process.command(ep.path) \
-        .current_dir(effective_cwd) \
+    cmd = ctx.std.process.command(ep.path).current_dir(effective_cwd)
+
+    # Target `env` first, so the runfiles / BUILD_* / ASPECT_* vars set below
+    # take precedence on any collision.
+    for key, value in ep.environment.items():
+        cmd = cmd.env(key, value)
+    for key in ep.inherited_environment:
+        inherited = ctx.std.env.var(key)
+        if inherited != None:
+            cmd = cmd.env(key, inherited)
+
+    cmd = cmd \
         .env("BUILD_WORKSPACE_DIRECTORY", ctx.std.env.bazel_root_dir()) \
         .env("BUILD_WORKING_DIRECTORY", ctx.std.env.current_dir()) \
         .env("ASPECT_WORKING_DIRECTORY", ctx.std.env.current_dir()) \
@@ -359,14 +483,17 @@ def runnable(ctx, targets: list[str]) -> struct:
     Feed BES events via `.event(event)` as they arrive from the build. Once the
     build completes, query results per target through the returned struct:
 
-      determine_entrypoint(target) → struct(path, runfiles_dir, runfiles_workspace_dir) | None
+      determine_entrypoint(target) → struct(path, runfiles_dir, runfiles_workspace_dir, environment, inherited_environment) | None
           Best executable output for `target` from its BES default output group,
           or None if no BES data was received for it. `runfiles_dir` is the
           resolved runfiles directory (e.g. `…/format.runfiles`), or `None`
           when no `<entrypoint>.runfiles` directory exists on disk.
           `runfiles_workspace_dir` is `runfiles_dir + "/" + <workspace>` (the
           cwd `bazel run` uses; usually `…/format.runfiles/_main`), or `None`
-          when `runfiles_dir` is `None`.
+          when `runfiles_dir` is `None`. `environment` (dict) and
+          `inherited_environment` (list[str]) carry the target's resolved `env`
+          attribute when the caller injected the `runenv` aspect (see
+          `runenv_aspect_flags`); both are empty otherwise. `spawn` replays them.
 
       get_default_outputs(target) → list[str]
           Absolute paths of every file in `target`'s default output group,
@@ -377,11 +504,14 @@ def runnable(ctx, targets: list[str]) -> struct:
           responsible for materializing what it intends to read.
 
       spawn(ep, args, capture=False, cwd=None) → Child
-          Spawn `ep.path` with Bazel runfiles environment variables set.
-          `cwd` defaults to `ep.runfiles_dir/<workspace>` when a runfiles tree
-          is present (matching `bazel run`), falling back to the aspect
-          invocation directory when there is no runfiles tree. Pass an
-          explicit `cwd` to override — e.g. the resolved value from `--run-in=<choice>`.
+          Spawn `ep.path` with Bazel runfiles environment variables set, plus
+          the target's `env` attribute replayed from `ep.environment` /
+          `ep.inherited_environment` (matching `bazel run`; empty unless the
+          `runenv` aspect was injected). `cwd` defaults to
+          `ep.runfiles_dir/<workspace>` when a runfiles tree is present
+          (matching `bazel run`), falling back to the aspect invocation
+          directory when there is no runfiles tree. Pass an explicit `cwd` to
+          override — e.g. the resolved value from `--run-in=<choice>`.
     """
     current_package = _current_package(ctx) if ctx else ""
     state = struct(
@@ -390,6 +520,10 @@ def runnable(ctx, targets: list[str]) -> struct:
         targets = {apparent_label(t, current_package): t for t in targets},
         filesets = {},
         target_fileset = {},
+        # Filesets of the `aspect_runenv` output group, populated only when a
+        # caller injects the `runenv` aspect (via `runenv_aspect_flags`). Empty
+        # otherwise, so `determine_entrypoint` reports no target env.
+        runenv_fileset = {},
         # Single-element list so `_process_bes` can mutate it (struct fields are
         # otherwise read-only after construction).
         workspace_name = [""],

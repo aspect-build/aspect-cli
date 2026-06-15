@@ -144,7 +144,7 @@ load("@aspect//lib/github.axl", "detect_commit_sha")
 load("@aspect//lib/health_check.axl", "HealthCheckTrait")
 load("@aspect//lib/lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "setup_phase", "task_update")
 load("@aspect//lib/repro_commands.axl", "build_aspect_command", "print_repro_and_fix", "repro_prefix", "task_cli_path")
-load("@aspect//lib/runnable.axl", "LOCAL_SPAWN_BASE_FLAGS", "LOCAL_SPAWN_FLAGS", "apparent_label", "runnable")
+load("@aspect//lib/runnable.axl", "LOCAL_SPAWN_BASE_FLAGS", "LOCAL_SPAWN_FLAGS", "apparent_label", "runenv_aspect_flags", "runnable")
 load("@aspect//lib/text.axl", "pluralize")
 load("@aspect//lib/tips.axl", "tips")
 load("@std//time.axl", "sleep_iter", "time")
@@ -1261,9 +1261,12 @@ def _delivery_impl(ctx):
         #   release_bazel_flags     — release-only flags via `--release-bazel-flag`
         #                             (e.g. `--stamp`).
         #   LOCAL_SPAWN_FLAGS       — mandatory; last so nothing can flip them.
+        #   runenv_aspect_flags     — inject the run-environment aspect so the
+        #                             deliverable's `env` attribute is replayed
+        #                             on spawn (e.g. JQ_BIN for a `set -u` script).
         #   --noremote_upload_local_results — release artifacts shouldn't pollute
         #                             the shared remote cache (delivery-specific).
-        phase3_flags = LOCAL_SPAWN_BASE_FLAGS + list(expanded_flags) + list(ctx.args.release_bazel_flags) + LOCAL_SPAWN_FLAGS + [
+        phase3_flags = LOCAL_SPAWN_BASE_FLAGS + list(expanded_flags) + list(ctx.args.release_bazel_flags) + LOCAL_SPAWN_FLAGS + runenv_aspect_flags(ctx) + [
             "--noremote_upload_local_results",
         ]
         _t_download = time.monotonic()
