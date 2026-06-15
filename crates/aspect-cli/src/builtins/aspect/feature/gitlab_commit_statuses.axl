@@ -172,6 +172,7 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
     project_path = mr["project_path"]
     sha = mr["sha"]
     mr_iid = mr["mr_iid"]
+    api_base = gitlab.resolve_api_base(ctx.std.env)
 
     _ci_links_base = _collect_ci_links(ctx, workflows_results_url(ctx.std))
 
@@ -233,6 +234,7 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
             name = _state["_status_name"],
             target_url = target_url or None,
             description = description or None,
+            api_base = api_base,
             auth_kind = "bearer",
         )
         if not result["success"]:

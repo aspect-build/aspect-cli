@@ -125,6 +125,7 @@ def _gitlab_status_comments(ctx: FeatureContext):
     project_id = mr.get("project_id")
     mr_iid = mr["mr_iid"]
     head_sha = mr["sha"]
+    api_base = gitlab.resolve_api_base(ctx.std.env)
     marker = _MARKER_FMT % mr_iid
 
     # GitLab CI pipeline + job identity. CI_PIPELINE_ID is the unique
@@ -200,7 +201,7 @@ def _gitlab_status_comments(ctx: FeatureContext):
             # The notes API doesn't expose a single-note GET that filters by id
             # uniquely without `list`; we approximate by listing and matching id.
             # Cheap on a small page; expensive only when the MR has many notes.
-            listed = gitlab.notes.list(ctx, token = token, project = project_path, mr_iid = mr_iid, auth_kind = "bearer")
+            listed = gitlab.notes.list(ctx, token = token, project = project_path, mr_iid = mr_iid, api_base = api_base, auth_kind = "bearer")
             if not listed["success"]:
                 _LOG.warn(ctx.std, "List notes failed: %s" % listed.get("error", "unknown"))
                 return None
@@ -211,7 +212,7 @@ def _gitlab_status_comments(ctx: FeatureContext):
             # Note vanished — fall through to re-discovery.
             _state.pop("_note_id", None)
 
-        listed = gitlab.notes.list(ctx, token = token, project = project_path, mr_iid = mr_iid, auth_kind = "bearer")
+        listed = gitlab.notes.list(ctx, token = token, project = project_path, mr_iid = mr_iid, api_base = api_base, auth_kind = "bearer")
         if not listed["success"]:
             _LOG.warn(ctx.std, "List notes failed: %s" % listed.get("error", "unknown"))
             return None
@@ -234,6 +235,7 @@ def _gitlab_status_comments(ctx: FeatureContext):
                 mr_iid = mr_iid,
                 note_id = _state["_note_id"],
                 body = body,
+                api_base = api_base,
                 auth_kind = "bearer",
             )
             if not res["success"]:
@@ -247,6 +249,7 @@ def _gitlab_status_comments(ctx: FeatureContext):
             project = project_path,
             mr_iid = mr_iid,
             body = body,
+            api_base = api_base,
             auth_kind = "bearer",
         )
         if not res["success"]:
@@ -257,7 +260,7 @@ def _gitlab_status_comments(ctx: FeatureContext):
         # Race mitigation: if two tasks both POSTed within the same
         # window, keep the lowest note id and delete the rest. Stable
         # choice across writers so they converge on the same survivor.
-        listed2 = gitlab.notes.list(ctx, token = token, project = project_path, mr_iid = mr_iid, auth_kind = "bearer")
+        listed2 = gitlab.notes.list(ctx, token = token, project = project_path, mr_iid = mr_iid, api_base = api_base, auth_kind = "bearer")
         if not listed2["success"]:
             return True
         dupes = [n for n in listed2["notes"] if marker in (n.get("body") or "")]
@@ -273,6 +276,7 @@ def _gitlab_status_comments(ctx: FeatureContext):
                 project = project_path,
                 mr_iid = mr_iid,
                 note_id = d["id"],
+                api_base = api_base,
                 auth_kind = "bearer",
             )
             if not del_res["success"]:
