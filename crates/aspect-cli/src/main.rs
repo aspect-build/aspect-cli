@@ -1,5 +1,6 @@
 mod builtins;
 mod cmd;
+mod credential_helper;
 mod helpers;
 mod trace;
 mod trace_buffer;
@@ -207,6 +208,18 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
 }
 
 fn main() -> ExitCode {
+    // Intercept the Bazel credential helper (`aspect get`) before the async
+    // runtime and workspace discovery so it stays fast (see `credential_helper`).
+    if credential_helper::is_invocation() {
+        return match credential_helper::run() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => {
+                eprintln!("error: {err:?}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
     match run() {
         Ok(code) => code,
         Err(err) => {
