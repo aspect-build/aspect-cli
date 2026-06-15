@@ -116,6 +116,32 @@ pub mod google {
     // `axl-proto/build.rs`, so the `include!`'d content brings in both
     // the inner mod and its sibling `<name>_toplevels` function.
     include!(concat!(env!("OUT_DIR"), "/google.bytestream.rs"));
+
+    #[starbuf_derive::service(
+        client = "crate::google::bytestream::byte_stream_client::ByteStreamClient",
+        methods(
+            name = "Read",
+            method = "read",
+            request = "crate::google::bytestream::ReadRequest",
+            response = "crate::google::bytestream::ReadResponse",
+            streaming = true,
+        ),
+        methods(
+            name = "Write",
+            method = "write",
+            request = "crate::google::bytestream::WriteRequest",
+            response = "crate::google::bytestream::WriteResponse",
+            request_streaming = true,
+        ),
+        methods(
+            name = "QueryWriteStatus",
+            method = "query_write_status",
+            request = "crate::google::bytestream::QueryWriteStatusRequest",
+            response = "crate::google::bytestream::QueryWriteStatusResponse",
+        )
+    )]
+    pub struct ByteStream;
+
     pub mod devtools {
         pub mod build {
             pub mod v1 {

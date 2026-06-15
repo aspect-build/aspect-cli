@@ -1148,7 +1148,10 @@ Test = task(implementation = _impl)
     #[test]
     fn bug_1060_remote_cache_evicted_without_retry_does_not_hang() {
         use std::time::Duration;
-        let result = crate::test::with_timeout(Duration::from_secs(5), || {
+        // The timeout exists to catch a hang, not to bound a healthy run —
+        // keep it generous so full-suite pool contention can't trip it
+        // (a healthy run finishes in well under a second).
+        let result = crate::test::with_timeout(Duration::from_secs(60), || {
             crate::test::eval(
                 r#"
 def _impl(ctx):
@@ -1390,7 +1393,10 @@ Test = task(implementation = _impl)
     #[test]
     fn sink_grpc_failure_surfaces_on_wait() {
         use std::time::Duration;
-        let result = crate::test::with_timeout(Duration::from_secs(15), || {
+        // Generous timeout: this runs concurrently with the engine::grpc
+        // e2e server tests (same `grpc` filter), and pool contention can
+        // stretch a normally sub-second run well past 15s.
+        let result = crate::test::with_timeout(Duration::from_secs(60), || {
             crate::test::eval(
                 r#"
 def _impl(ctx):

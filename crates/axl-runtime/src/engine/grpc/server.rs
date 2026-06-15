@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::fmt;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -211,6 +211,10 @@ impl<'v> StarlarkValue<'v> for GrpcServerHandle {
             None
         }
     }
+
+    fn dir_attr(&self) -> Vec<String> {
+        vec!["endpoint".to_owned()]
+    }
 }
 
 #[starlark_module]
@@ -221,6 +225,9 @@ fn grpc_server_handle_methods(registry: &mut MethodsBuilder) {
     /// `timeout` is an int (milliseconds) for now. When `@std//time.axl`
     /// exposes a Duration record we'll accept that too. Omitted = wait
     /// forever.
+    ///
+    /// If the timeout elapses before in-flight RPCs drain, this returns
+    /// anyway and the server task is left running until process exit.
     ///
     /// Idempotent — calling twice is a no-op.
     fn drain_and_quit<'v>(
@@ -280,16 +287,35 @@ fn bind_endpoint(
 ) -> anyhow::Result<(String, BoundListener)> {
     if let Some(path) = endpoint.strip_prefix("unix://") {
         // Stale-socket workaround: leftover socket files from prior runs
-        // are a common foot-gun. Better UX than "address already in use".
-        let _ = std::fs::remove_file(path);
+        // are a common foot-gun. Better UX than "address already in use" —
+        // but only remove the file if nothing is actually listening on it,
+        // so we don't clobber a live server's socket.
+        if std::path::Path::new(path).exists() {
+            match std::os::unix::net::UnixStream::connect(path) {
+                Ok(_) => {
+                    return Err(anyhow!(
+                        "bind unix://{}: address already in use (another server is listening)",
+                        path
+                    ));
+                }
+                Err(_) => {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        }
         let l = UnixListener::bind(path).with_context(|| format!("bind unix://{}", path))?;
         let resolved = format!("unix://{}", path);
         return Ok((resolved, BoundListener::Unix(l)));
     }
     let addr = endpoint.strip_prefix("tcp://").unwrap_or(endpoint);
+    // `to_socket_addrs` resolves hostnames (`localhost:8080`) as well as
+    // parsing IP literals. Resolution is synchronous, matching serve()'s
+    // bind-synchronously contract.
     let parsed: SocketAddr = addr
-        .parse()
-        .with_context(|| format!("parse TCP address {:?}", addr))?;
+        .to_socket_addrs()
+        .with_context(|| format!("resolve TCP address {:?}", addr))?
+        .next()
+        .ok_or_else(|| anyhow!("TCP address {:?} resolved to no addresses", addr))?;
     let l = rt
         .block_on(async { TcpListener::bind(parsed).await })
         .with_context(|| format!("bind tcp {}", parsed))?;

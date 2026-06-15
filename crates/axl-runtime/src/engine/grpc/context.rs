@@ -8,7 +8,8 @@ use starlark::environment::{Methods, MethodsBuilder, MethodsStatic};
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
 use starlark::values::{
-    NoSerialize, StarlarkValue, Value, ValueLike, none::NoneType, starlark_value,
+    Heap, NoSerialize, StarlarkValue, Value, ValueLike, dict::AllocDict, none::NoneType,
+    starlark_value,
 };
 
 use super::status::{code_from_i32, into_tonic_status};
@@ -27,15 +28,24 @@ pub struct RpcContextInner {
     /// tonic `Status`.
     abort: Mutex<Option<tonic::Status>>,
 
-    /// Polled by handlers via `rpc.cancelled()`.
+    /// Polled by handlers via `rpc.cancelled()`. Set by [`CancelGuard`]
+    /// when tonic drops the dispatch future (unary / client-streaming), or
+    /// by the stream plumbing when the response channel's receiver is gone
+    /// (server-streaming).
     cancelled: AtomicBool,
+
+    /// ASCII request metadata captured before the dispatch consumed the
+    /// `tonic::Request`. Binary (`-bin`) entries are skipped — no `.axl`
+    /// use case yet.
+    metadata: Vec<(String, String)>,
 }
 
 impl RpcContextInner {
-    pub fn new() -> Arc<Self> {
+    pub fn new(metadata: Vec<(String, String)>) -> Arc<Self> {
         Arc::new(Self {
             abort: Mutex::new(None),
             cancelled: AtomicBool::new(false),
+            metadata,
         })
     }
 
@@ -50,6 +60,54 @@ impl RpcContextInner {
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Relaxed)
     }
+
+    pub fn metadata(&self) -> &[(String, String)] {
+        &self.metadata
+    }
+}
+
+/// Flips the cancelled flag when dropped without being disarmed.
+///
+/// The macro-generated trait methods hold one of these across the
+/// `__dispatch_*` await: tonic drops the dispatch future when the client
+/// cancels or disconnects, which drops the guard, which lets the (detached)
+/// `spawn_blocking` handler observe the cancellation via `rpc.cancelled()`.
+pub struct CancelGuard {
+    inner: Option<Arc<RpcContextInner>>,
+}
+
+impl CancelGuard {
+    pub fn new(inner: Arc<RpcContextInner>) -> Self {
+        Self { inner: Some(inner) }
+    }
+
+    /// Consume the guard without marking the RPC cancelled. Called after
+    /// the dispatch completed normally.
+    pub fn disarm(mut self) {
+        self.inner = None;
+    }
+}
+
+impl Drop for CancelGuard {
+    fn drop(&mut self) {
+        if let Some(inner) = self.inner.take() {
+            inner.mark_cancelled();
+        }
+    }
+}
+
+/// Collect the ASCII entries of a tonic `MetadataMap` as owned pairs.
+/// Used by the macro-generated dispatch to capture request metadata before
+/// `into_inner()` consumes the request envelope.
+pub fn metadata_pairs(md: &tonic::metadata::MetadataMap) -> Vec<(String, String)> {
+    md.iter()
+        .filter_map(|kv| match kv {
+            tonic::metadata::KeyAndValueRef::Ascii(k, v) => {
+                Some((k.as_str().to_string(), v.to_str().ok()?.to_string()))
+            }
+            tonic::metadata::KeyAndValueRef::Binary(..) => None,
+        })
+        .collect()
 }
 
 impl GrpcRpcContext {
@@ -123,5 +181,20 @@ fn grpc_rpc_methods(registry: &mut MethodsBuilder) {
             .downcast_ref::<GrpcRpcContext>()
             .ok_or_else(|| anyhow::anyhow!("cancelled called on non-rpc value"))?;
         Ok(ctx.inner.is_cancelled())
+    }
+
+    /// Request metadata (headers) as a `dict[str, str]`. ASCII entries
+    /// only; binary (`-bin`) entries are not exposed. Includes transport
+    /// headers like `grpc-timeout` when the client set a deadline.
+    fn metadata<'v>(this: Value<'v>, heap: Heap<'v>) -> anyhow::Result<Value<'v>> {
+        let ctx = this
+            .downcast_ref::<GrpcRpcContext>()
+            .ok_or_else(|| anyhow::anyhow!("metadata called on non-rpc value"))?;
+        Ok(heap.alloc(AllocDict(
+            ctx.inner
+                .metadata
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str())),
+        )))
     }
 }

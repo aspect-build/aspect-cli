@@ -2,10 +2,8 @@ use std::fmt;
 
 use allocative::Allocative;
 use starlark::any::ProvidesStaticType;
-use starlark::environment::{Methods, MethodsBuilder, MethodsStatic};
-use starlark::starlark_module;
 use starlark::starlark_simple_value;
-use starlark::values::{NoSerialize, StarlarkValue, Value, ValueLike, starlark_value};
+use starlark::values::{Heap, NoSerialize, StarlarkValue, Value, ValueLike, starlark_value};
 
 /// gRPC `Status` value constructed via `grpc.Status(code = ..., message = ...)`.
 ///
@@ -28,14 +26,18 @@ starlark_simple_value!(GrpcStatus);
 
 #[starlark_value(type = "grpc.Status")]
 impl<'v> StarlarkValue<'v> for GrpcStatus {
-    fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(grpc_status_methods)
+    fn get_attr(&self, attr: &str, heap: Heap<'v>) -> Option<Value<'v>> {
+        match attr {
+            "code" => Some(heap.alloc(self.code)),
+            "message" => Some(heap.alloc(self.message.clone())),
+            _ => None,
+        }
+    }
+
+    fn dir_attr(&self) -> Vec<String> {
+        vec!["code".to_owned(), "message".to_owned()]
     }
 }
-
-#[starlark_module]
-fn grpc_status_methods(_registry: &mut MethodsBuilder) {}
 
 /// Extract a tonic `Status` from a `grpc.Status` Starlark value. Used by
 /// `rpc.abort(status=...)` and `stream.complete(status=...)`.

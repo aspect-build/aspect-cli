@@ -3,7 +3,7 @@
 //! Bundles documentation for both the Rust-defined globals and the embedded
 //! `@std//*.axl` builtin modules.
 
-use crate::builtins::{self, STD_DIR};
+use crate::builtins::{self, BAZEL_DIR, STD_DIR};
 use crate::eval::Loader;
 use crate::eval::api::get_globals;
 use anyhow::anyhow;
@@ -16,9 +16,11 @@ pub struct Documentation {
     /// Documentation for all Rust-defined types and globals (the result of
     /// `get_globals().build().documentation()`).
     pub types: DocModule,
-    /// Documentation for each embedded `@std//*.axl` builtin, keyed by the
-    /// basename without the `.axl` suffix (e.g. `"time"`).
-    pub builtins: Vec<(String, DocModule)>,
+    /// Documentation for each embedded builtin `.axl` module (`@std//*`
+    /// and `@bazel//*`) as `(module, name, docs)` tuples, where `module`
+    /// is the bare specifier (`"std"`, `"bazel"`) and `name` the basename
+    /// without the `.axl` suffix (e.g. `"time"`, `"grpc"`).
+    pub builtins: Vec<(String, String, DocModule)>,
 }
 
 /// Collect documentation for the entire AXL runtime — both Rust-defined types
@@ -37,23 +39,40 @@ pub fn documentation() -> anyhow::Result<Documentation> {
     let loader = Loader::new("docgen".to_string(), cwd.clone(), cwd, None, &[]);
 
     let mut builtins = Vec::new();
-    for filename in list_std_files() {
-        let content = builtins::get("std", filename)
-            .ok_or_else(|| anyhow!("'{}' does not exist in @std", filename))?;
-        let path = PathBuf::from(format!("/@std/{filename}"));
-        let frozen = loader
-            .eval_std_module(&path, content)
-            .map_err(|e| anyhow!("{}", e))?;
-        let name = filename.trim_end_matches(".axl").to_string();
-        builtins.push((name, frozen.documentation()));
+    let modules = [
+        ("std", list_std_files().collect::<Vec<_>>()),
+        ("bazel", list_bazel_files().collect::<Vec<_>>()),
+    ];
+    for (module, filenames) in modules {
+        for filename in filenames {
+            let content = builtins::get(module, filename)
+                .ok_or_else(|| anyhow!("'{}' does not exist in @{}", filename, module))?;
+            let path = PathBuf::from(format!("/@{module}/{filename}"));
+            let frozen = loader
+                .eval_std_module(&path, content)
+                .map_err(|e| anyhow!("{}", e))?;
+            let name = filename.trim_end_matches(".axl").to_string();
+            builtins.push((module.to_string(), name, frozen.documentation()));
+        }
     }
-    builtins.sort_by(|a, b| a.0.cmp(&b.0));
+    builtins.sort_by(|a, b| a.1.cmp(&b.1));
     Ok(Documentation { types, builtins })
 }
 
 /// Iterate over the embedded `@std//` builtin filenames (e.g. `"time.axl"`).
 pub fn list_std_files() -> impl Iterator<Item = &'static str> {
     STD_DIR
+        .files()
+        .filter_map(|f| f.path().file_name()?.to_str())
+        .filter(|name| name.ends_with(".axl"))
+}
+
+/// Iterate over the embedded `@bazel//` builtin filenames (e.g.
+/// `"grpc.axl"`). The synthetic `proto/*.axl` shims are not included —
+/// they're one-line re-exports of `_proto.<pkg>` namespaces whose docs
+/// come from the Rust-defined globals.
+pub fn list_bazel_files() -> impl Iterator<Item = &'static str> {
+    BAZEL_DIR
         .files()
         .filter_map(|f| f.path().file_name()?.to_str())
         .filter(|name| name.ends_with(".axl"))

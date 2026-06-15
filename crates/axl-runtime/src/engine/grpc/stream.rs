@@ -23,10 +23,10 @@ use super::status::into_tonic_status;
 pub trait DynSender: Send + Sync + std::fmt::Debug {
     /// Downcast `value` to the response type and forward to the channel.
     /// Blocks the caller on backpressure (the underlying `blocking_send`).
-    /// Best-effort on cancellation: returns `Ok(())` after dropping the
-    /// message so handler producer loops can keep going and detect
-    /// cancellation via `stream.cancelled()`.
-    fn send_value(&self, value: Value<'_>) -> anyhow::Result<()>;
+    /// Returns `Ok(false)` when the receiver is gone (client cancelled /
+    /// disconnected) — the message is dropped and the caller flips the
+    /// rpc's cancelled flag so producer loops can bail.
+    fn send_value(&self, value: Value<'_>) -> anyhow::Result<bool>;
 
     /// Close the channel. `None` = success. `Some(status)` = error
     /// trailing status. Idempotent.
@@ -35,6 +35,11 @@ pub trait DynSender: Send + Sync + std::fmt::Debug {
     /// Whether the channel has already been closed (via `close` or
     /// completion).
     fn is_closed(&self) -> bool;
+
+    /// Whether the receiving side has been dropped — i.e. the client
+    /// cancelled the call or disconnected. Distinct from [`is_closed`],
+    /// which reflects *our* side closing via `close`.
+    fn receiver_gone(&self) -> bool;
 
     /// Human-readable response type name for error messages (e.g.
     /// `"Operation"`). Used by `stream.push` to produce a helpful error
@@ -92,7 +97,12 @@ fn grpc_stream_methods(registry: &mut MethodsBuilder) {
         let s = this
             .downcast_ref::<GrpcStream>()
             .ok_or_else(|| anyhow::anyhow!("push called on non-stream value"))?;
-        s.sender.send_value(msg)?;
+        if !s.sender.send_value(msg)? {
+            // Receiver dropped — the client cancelled or disconnected.
+            // Record it so this loop's next `stream.cancelled()` poll
+            // (and the rpc value's) sees it.
+            s.rpc.mark_cancelled();
+        }
         Ok(NoneType)
     }
 
@@ -119,6 +129,11 @@ fn grpc_stream_methods(registry: &mut MethodsBuilder) {
         let s = this
             .downcast_ref::<GrpcStream>()
             .ok_or_else(|| anyhow::anyhow!("cancelled called on non-stream value"))?;
+        // Live-poll the channel too: a dropped receiver means the client
+        // went away even if no push has failed yet.
+        if !s.rpc.is_cancelled() && s.sender.receiver_gone() {
+            s.rpc.mark_cancelled();
+        }
         Ok(s.rpc.is_cancelled())
     }
 }

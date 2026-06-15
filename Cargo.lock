@@ -321,6 +321,7 @@ dependencies = [
  "starlark",
  "starlark_derive",
  "tokio",
+ "tokio-stream",
  "tonic",
  "tonic-build",
  "tonic-prost",

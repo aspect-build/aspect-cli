@@ -205,7 +205,10 @@ struct ServiceRpc {
     method: Ident,
     request: Type,
     response: Type,
+    /// Server-streaming RPC: the call returns an iterable stream handle.
     streaming: bool,
+    /// Client-streaming RPC: the call takes a list of request messages.
+    request_streaming: bool,
 }
 
 fn parse_service_attr(attr: TokenStream) -> Result<(Type, Vec<ServiceRpc>), Error> {
@@ -233,6 +236,7 @@ fn parse_service_attr(attr: TokenStream) -> Result<(Type, Vec<ServiceRpc>), Erro
                 let mut request: Option<Type> = None;
                 let mut response: Option<Type> = None;
                 let mut streaming: bool = false;
+                let mut request_streaming: bool = false;
 
                 let nested: syn::punctuated::Punctuated<Meta, syn::Token![,]> =
                     syn::punctuated::Punctuated::parse_terminated.parse2(list.tokens.clone())?;
@@ -284,6 +288,15 @@ fn parse_service_attr(attr: TokenStream) -> Result<(Type, Vec<ServiceRpc>), Erro
                             };
                             streaming = lit.value;
                         }
+                        Meta::NameValue(nv) if nv.path.is_ident("request_streaming") => {
+                            let syn::Expr::Lit(expr_lit) = &nv.value else {
+                                bail!("request_streaming must be a bool literal");
+                            };
+                            let Lit::Bool(lit) = &expr_lit.lit else {
+                                bail!("request_streaming must be a bool literal");
+                            };
+                            request_streaming = lit.value;
+                        }
                         _ => {}
                     }
                 }
@@ -300,12 +313,20 @@ fn parse_service_attr(attr: TokenStream) -> Result<(Type, Vec<ServiceRpc>), Erro
                     bail!("each methods(...) entry must include response");
                 };
 
+                if streaming && request_streaming {
+                    bail!(
+                        "service: bidirectional streaming is not supported (method {})",
+                        name
+                    );
+                }
+
                 methods.push(ServiceRpc {
                     name,
                     method,
                     request,
                     response,
                     streaming,
+                    request_streaming,
                 });
             }
             _ => {}
@@ -1503,7 +1524,66 @@ fn try_service(attr: TokenStream, item: TokenStream) -> Result<TokenStream, Erro
         let req = &rpc.request;
         let resp = &rpc.response;
 
-        if rpc.streaming {
+        if rpc.request_streaming {
+            // Client-streaming: the .axl call takes a list of request
+            // messages, which we feed to tonic as a ready-made stream.
+            // Good enough for bounded uploads (ByteStream.Write of
+            // already-materialized chunks); incremental producers would
+            // need an iterator-driven bridge, which no caller needs yet.
+            quote! {
+                fn #rpc_name<'v>(
+                    this: ::starlark::values::Value<'v>,
+                    reqs: ::starlark::values::Value<'v>,
+                ) -> ::starlark::Result<#resp> {
+                    use ::starlark::values::ValueLike;
+                    let handle = this.downcast_ref_err::<#handle_ident>()?;
+
+                    let list = ::starlark::values::list::ListRef::from_value(reqs)
+                        .ok_or_else(|| ::starlark::Error::from(::anyhow::anyhow!(
+                            "expected a list of request messages, got {}", reqs.get_type())))?;
+                    let mut messages: ::std::vec::Vec<#req> =
+                        ::std::vec::Vec::with_capacity(list.len());
+                    for item in list.iter() {
+                        messages.push(item.downcast_ref_err::<#req>()?.clone());
+                    }
+
+                    let client = handle.client.get()
+                        .ok_or_else(|| ::starlark::Error::from(::anyhow::anyhow!(
+                            "service not connected; call .connect(ctx) first")))?
+                        .clone();
+                    let rt = handle.rt.get()
+                        .ok_or_else(|| ::starlark::Error::from(::anyhow::anyhow!(
+                            "service not connected; call .connect(ctx) first")))?
+                        .clone();
+
+                    let headers = handle.headers.clone();
+
+                    let resp = rt.block_on(async move {
+                        let mut c = client.as_ref().clone();
+                        let mut request = ::tonic::Request::new(
+                            ::tokio_stream::iter(messages),
+                        );
+                        for (key, value) in &headers {
+                            request.metadata_mut().insert(
+                                key.parse::<::tonic::metadata::MetadataKey<::tonic::metadata::Ascii>>()
+                                    .map_err(|e| ::anyhow::anyhow!("invalid header key '{}': {}", key, e))?,
+                                value.parse::<::tonic::metadata::MetadataValue<::tonic::metadata::Ascii>>()
+                                    .map_err(|e| ::anyhow::anyhow!("invalid header value: {}", e))?,
+                            );
+                        }
+                        let resp = c
+                            .#rpc_method(request)
+                            .await
+                            .map_err(::anyhow::Error::new)?
+                            .into_inner();
+                        Ok::<#resp, ::anyhow::Error>(resp)
+                    })
+                    .map_err(|e| ::starlark::Error::from(::anyhow::anyhow!(e)))?;
+
+                    Ok(resp)
+                }
+            }
+        } else if rpc.streaming {
             let stream_ident = Ident::new(
                 &format!("{}{}Stream", handle_ident, rpc_name),
                 rpc_name.span(),
@@ -1753,12 +1833,12 @@ pub fn service(
 // pub struct Capabilities;
 // ```
 //
-// In v1 each RPC body is stubbed with `Status::unimplemented` — the
-// Starlark-from-tokio dispatch (creating a fresh `Evaluator` on a tokio
-// worker, invoking the stored callable, marshalling proto<->Starlark)
-// lands in a focused follow-up. The structural pieces (constructor,
-// `ServiceHandle` impl, tonic server wrapping) compile end-to-end now so
-// the API surface is testable.
+// Each RPC body runs the stored Starlark callable on a tokio blocking
+// worker via a fresh `Evaluator` (`Module::with_temp_heap`), marshalling
+// proto<->Starlark at the boundary. Unary and client-streaming methods
+// hold a `CancelGuard` across the dispatch so client cancellation is
+// observable from handlers; server-streaming methods detect it through
+// the response channel instead.
 
 struct ServerRpc {
     name: Ident,
@@ -1891,6 +1971,15 @@ fn parse_service_server_attr(
                 let Some(response) = response else {
                     bail!("each methods(...) entry must include response");
                 };
+                if request_streaming && response_streaming {
+                    // The trait-method and helper generators each branch
+                    // on one flag and would emit mismatched halves for a
+                    // bidi method — fail loudly instead.
+                    bail!(
+                        "service_server: bidirectional streaming is not supported (method {})",
+                        name
+                    );
+                }
 
                 methods.push(ServerRpc {
                     name,
@@ -1931,20 +2020,16 @@ fn try_service_server(attr: TokenStream, item: TokenStream) -> Result<TokenStrea
     let module_ident = Ident::new(&format!("{}_service_module", ident_snake), ident.span());
     let ctor_ident = Ident::new(&format!("{}Service", ident), ident.span());
 
-    // Per-method async fn bodies on the dispatch struct. v1: every body is
-    // a stub returning `tonic::Status::unimplemented` so the trait impl
-    // compiles. Real dispatch (invoking the stored Starlark callable on a
-    // tokio worker via a fresh `Evaluator`) lands in a follow-up.
+    // Per-method async fn bodies on the dispatch struct. Each one captures
+    // the request metadata, builds the per-RPC context, and delegates the
+    // Starlark call-out to the matching `__dispatch_<method>` helper.
+    // Unary / client-streaming methods also hold a `CancelGuard` across
+    // the await: tonic drops the dispatch future on client cancellation,
+    // which flips the context's cancelled flag for the detached handler.
     let trait_methods = methods.iter().map(|m| {
         let rpc_method = &m.method;
         let req_ty = &m.request;
         let resp_ty = &m.response;
-        // `rpc_name_str` was used by the old stub bodies that embedded the
-        // RPC name in error strings. Real dispatch now lives in the
-        // `__dispatch_<method>` helpers, so this trait-side `rpc_name`
-        // string isn't needed — prefix with underscore to silence the
-        // unused-variable lint without restructuring the loop.
-        let _rpc_name_str = m.name.to_string();
         if m.response_streaming {
             // Server-streaming dispatch: trait method delegates to a
             // free-standing helper just like the unary case.
@@ -1968,9 +2053,16 @@ fn try_service_server(attr: TokenStream, item: TokenStream) -> Result<TokenStrea
                     &self,
                     request: ::tonic::Request<#req_ty>,
                 ) -> ::core::result::Result<::tonic::Response<Self::#stream_ident>, ::tonic::Status> {
+                    let metadata = ::axl_runtime::engine::grpc::context::metadata_pairs(
+                        request.metadata(),
+                    );
                     let inner = request.into_inner();
                     let on_method = ::std::sync::Arc::clone(&self.#field_ident);
-                    let rx = Self::#helper_ident(on_method, inner);
+                    // No CancelGuard here: cancellation of a server-stream
+                    // surfaces as the receiver side of the channel being
+                    // dropped, which `stream.push`/`stream.cancelled()`
+                    // detect via `DynSender::receiver_gone`.
+                    let rx = Self::#helper_ident(on_method, inner, metadata);
                     ::core::result::Result::Ok(::tonic::Response::new(
                         ::tokio_stream::wrappers::ReceiverStream::new(rx),
                     ))
@@ -1991,9 +2083,18 @@ fn try_service_server(attr: TokenStream, item: TokenStream) -> Result<TokenStrea
                     &self,
                     request: ::tonic::Request<::tonic::Streaming<#req_ty>>,
                 ) -> ::core::result::Result<::tonic::Response<#resp_ty>, ::tonic::Status> {
+                    let metadata = ::axl_runtime::engine::grpc::context::metadata_pairs(
+                        request.metadata(),
+                    );
                     let inner = request.into_inner();
                     let on_method = ::std::sync::Arc::clone(&self.#field_ident);
-                    let resp = Self::#helper_ident(on_method, inner).await?;
+                    let rpc_inner =
+                        ::axl_runtime::engine::grpc::context::RpcContextInner::new(metadata);
+                    let guard = ::axl_runtime::engine::grpc::context::CancelGuard::new(
+                        ::std::sync::Arc::clone(&rpc_inner),
+                    );
+                    let resp = Self::#helper_ident(on_method, inner, rpc_inner).await?;
+                    guard.disarm();
                     ::core::result::Result::Ok(::tonic::Response::new(resp))
                 }
             }
@@ -2013,9 +2114,18 @@ fn try_service_server(attr: TokenStream, item: TokenStream) -> Result<TokenStrea
                     &self,
                     request: ::tonic::Request<#req_ty>,
                 ) -> ::core::result::Result<::tonic::Response<#resp_ty>, ::tonic::Status> {
+                    let metadata = ::axl_runtime::engine::grpc::context::metadata_pairs(
+                        request.metadata(),
+                    );
                     let inner = request.into_inner();
                     let on_method = ::std::sync::Arc::clone(&self.#field_ident);
-                    let resp = Self::#helper_ident(on_method, inner).await?;
+                    let rpc_inner =
+                        ::axl_runtime::engine::grpc::context::RpcContextInner::new(metadata);
+                    let guard = ::axl_runtime::engine::grpc::context::CancelGuard::new(
+                        ::std::sync::Arc::clone(&rpc_inner),
+                    );
+                    let resp = Self::#helper_ident(on_method, inner, rpc_inner).await?;
+                    guard.disarm();
                     ::core::result::Result::Ok(::tonic::Response::new(resp))
                 }
             }
@@ -2043,13 +2153,14 @@ fn try_service_server(attr: TokenStream, item: TokenStream) -> Result<TokenStrea
                 async fn #helper_ident(
                     on_method: ::std::sync::Arc<::starlark::values::OwnedFrozenValue>,
                     inner: ::tonic::Streaming<#req_ty>,
+                    rpc_inner: ::std::sync::Arc<
+                        ::axl_runtime::engine::grpc::context::RpcContextInner,
+                    >,
                 ) -> ::core::result::Result<#resp_ty, ::tonic::Status> {
                     let rt = ::tokio::runtime::Handle::current();
                     ::tokio::task::spawn_blocking(move || {
                         #[allow(unused_imports)]
                         use ::starlark::values::ValueLike as _;
-                        let rpc_inner =
-                            ::axl_runtime::engine::grpc::context::RpcContextInner::new();
                         ::starlark::environment::Module::with_temp_heap(|module| {
                             let mut eval = ::starlark::eval::Evaluator::new(&module);
                             let callable = eval
@@ -2115,6 +2226,7 @@ fn try_service_server(attr: TokenStream, item: TokenStream) -> Result<TokenStrea
                 fn #helper_ident(
                     on_method: ::std::sync::Arc<::starlark::values::OwnedFrozenValue>,
                     inner: #req_ty,
+                    metadata: ::std::vec::Vec<(::std::string::String, ::std::string::String)>,
                 ) -> ::tokio::sync::mpsc::Receiver<
                     ::core::result::Result<#resp_ty, ::tonic::Status>
                 > {
@@ -2133,7 +2245,7 @@ fn try_service_server(attr: TokenStream, item: TokenStream) -> Result<TokenStrea
                     let sender_for_handler = ::std::sync::Arc::clone(&sender);
                     ::tokio::task::spawn_blocking(move || {
                         let rpc_inner =
-                            ::axl_runtime::engine::grpc::context::RpcContextInner::new();
+                            ::axl_runtime::engine::grpc::context::RpcContextInner::new(metadata);
                         let close_on_exit = ::std::sync::Arc::clone(&sender_for_handler);
                         let outcome: ::core::result::Result<(), ::tonic::Status> =
                             ::starlark::environment::Module::with_temp_heap(|module| {
@@ -2189,6 +2301,9 @@ fn try_service_server(attr: TokenStream, item: TokenStream) -> Result<TokenStrea
             async fn #helper_ident(
                 on_method: ::std::sync::Arc<::starlark::values::OwnedFrozenValue>,
                 inner: #req_ty,
+                rpc_inner: ::std::sync::Arc<
+                    ::axl_runtime::engine::grpc::context::RpcContextInner,
+                >,
             ) -> ::core::result::Result<#resp_ty, ::tonic::Status> {
                 // `downcast_ref` / `get_type` come from the `ValueLike`
                 // trait; pulling it in here keeps the macro's emission
@@ -2197,8 +2312,6 @@ fn try_service_server(attr: TokenStream, item: TokenStream) -> Result<TokenStrea
                 #[allow(unused_imports)]
                 use ::starlark::values::ValueLike as _;
                 ::tokio::task::spawn_blocking(move || {
-                    let rpc_inner =
-                        ::axl_runtime::engine::grpc::context::RpcContextInner::new();
                     ::starlark::environment::Module::with_temp_heap(|module| {
                         let mut eval = ::starlark::eval::Evaluator::new(&module);
                         // `access_owned_frozen_value` adds the source
@@ -2366,7 +2479,7 @@ fn try_service_server(attr: TokenStream, item: TokenStream) -> Result<TokenStrea
                 fn send_value(
                     &self,
                     value: ::starlark::values::Value<'_>,
-                ) -> ::anyhow::Result<()> {
+                ) -> ::anyhow::Result<bool> {
                     #[allow(unused_imports)]
                     use ::starlark::values::ValueLike as _;
                     let msg = value
@@ -2386,11 +2499,11 @@ fn try_service_server(attr: TokenStream, item: TokenStream) -> Result<TokenStrea
                     // `blocking_send` parks the calling thread (a tokio
                     // blocking worker) until the channel accepts. On
                     // client cancellation the receiver is dropped and
-                    // this returns Err — treat as best-effort and let
-                    // the producer notice via `stream.cancelled()`.
+                    // this returns Err — report it as `false` (dropped)
+                    // so the caller can flip the rpc's cancelled flag.
                     match tx.blocking_send(::core::result::Result::Ok(msg)) {
-                        ::core::result::Result::Ok(()) => ::core::result::Result::Ok(()),
-                        ::core::result::Result::Err(_) => ::core::result::Result::Ok(()),
+                        ::core::result::Result::Ok(()) => ::core::result::Result::Ok(true),
+                        ::core::result::Result::Err(_) => ::core::result::Result::Ok(false),
                     }
                 }
 
@@ -2411,6 +2524,14 @@ fn try_service_server(attr: TokenStream, item: TokenStream) -> Result<TokenStrea
 
                 fn is_closed(&self) -> bool {
                     self.tx.lock().unwrap().is_none()
+                }
+
+                fn receiver_gone(&self) -> bool {
+                    self.tx
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .is_some_and(|tx| tx.is_closed())
                 }
 
                 fn response_type_name(&self) -> &'static str {
@@ -2453,10 +2574,9 @@ fn try_service_server(attr: TokenStream, item: TokenStream) -> Result<TokenStrea
     });
 
     let expanded = quote! {
-        // Dispatch struct: holds one frozen Starlark callable per RPC plus
-        // a tokio handle for re-entering an Evaluator from server tasks.
-        // Real dispatch (creating an Evaluator on a worker, invoking the
-        // callable) is filled in by a follow-up.
+        // Dispatch struct: holds one frozen Starlark callable per RPC.
+        // The `__dispatch_*` helpers re-enter Starlark from tonic's tokio
+        // tasks via `spawn_blocking` + a fresh Evaluator.
         #[derive(Clone)]
         pub struct #dispatch_ident {
             #(#dispatch_field_decls)*
@@ -2648,7 +2768,11 @@ mod tests {
     //     assert!(false);
     // }
 
+    // Debug aid: dumps the prettified macro expansion and then fails so
+    // the output is visible. Ignored by default — run with
+    // `cargo test -p starbuf-derive -- --ignored try_message_test`.
     #[test]
+    #[ignore = "debug expansion dump; always fails by design"]
     fn try_message_test() {
         let output = try_message(quote! {
             pub struct TargetMetrics {

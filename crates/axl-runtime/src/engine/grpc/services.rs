@@ -6,11 +6,10 @@
 //! so the macro's `::axl_runtime::...` paths resolve from inside the
 //! crate.
 //!
-//! In v1 each RPC method body is `Status::unimplemented` — the
-//! Starlark-from-tokio dispatch (creating a fresh `Evaluator` on a tokio
-//! worker, invoking the stored callable, marshalling proto<->Starlark)
-//! lands in a focused follow-up. The structural pieces compile end-to-end
-//! now so the API surface is testable.
+//! Each RPC method dispatches to its stored Starlark callable on a tokio
+//! blocking worker via a fresh `Evaluator`, marshalling proto<->Starlark
+//! at the boundary (see the `service_server` macro in `starbuf-derive`
+//! for the generated dispatch bodies).
 
 use starlark::environment::GlobalsBuilder;
 

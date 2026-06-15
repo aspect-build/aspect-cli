@@ -83,6 +83,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
             // lives at `axl_proto::google::bytestream_toplevels`, not
             // `axl_proto::google::bytestream::bytestream_toplevels`.
             axl_proto::google::bytestream_toplevels(g);
+            axl_proto::google::byte_stream_client_module(g);
             grpc::services::register_bytestream_services(g);
         });
         g.namespace("longrunning", axl_proto::google::longrunning_toplevels);
