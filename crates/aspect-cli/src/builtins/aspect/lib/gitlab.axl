@@ -386,6 +386,45 @@ def _extract_project_path_from_url(url):
         tail = tail[:-len(".git")]
     return tail
 
+# API base resolution
+#
+# Self-hosted GitLab instances live on their own host (e.g.
+# `https://gitlab.example.com/api/v4`), so the API base can't stay a
+# hard-coded constant. Resolution precedence:
+#
+#   1. ASPECT_GITLAB_API_URL — explicit override. Matches the
+#      `ASPECT_GITLAB_*` escape-hatch family in `gitlab_detect.axl` (for
+#      Aspect-Workflows runners on a non-GitLab CI host posting back to
+#      a self-hosted GitLab MR). Accepts either a full API base
+#      (`https://host/api/v4`) or a bare instance root (`https://host`),
+#      to which `/api/v4` is appended.
+#   2. CI_API_V4_URL — set natively by GitLab CI on every job; already
+#      points at the running instance's API. Zero config on self-hosted
+#      GitLab CI.
+#   3. DEFAULT_GITLAB_API — public gitlab.com.
+
+def _normalize_api_base(url) -> str:
+    """Trim a trailing slash and append `/api/v4` when the URL looks
+    like a bare instance root (no `/api/v` segment present)."""
+    url = url.rstrip("/")
+    if url.find("/api/v") < 0:
+        url = url + "/api/v4"
+    return url
+
+def _resolve_api_base(env) -> str:
+    """Resolve the GitLab REST v4 API base from the environment.
+
+    See the section comment above for precedence. Always returns a
+    usable base — falls back to `DEFAULT_GITLAB_API` (gitlab.com) when
+    neither env var is set."""
+    explicit = env.var("ASPECT_GITLAB_API_URL") or ""
+    if explicit:
+        return _normalize_api_base(explicit)
+    ci = env.var("CI_API_V4_URL") or ""
+    if ci:
+        return _normalize_api_base(ci)
+    return DEFAULT_GITLAB_API
+
 # Authentication
 #
 # Mirrors the shape of `lib/github.axl::_authenticate`. Exchanges the
@@ -566,6 +605,7 @@ gitlab = struct(
     encode_project_path = encode_project_path,
     extract_host = _extract_host,
     extract_project_path = _extract_project_path_from_url,
+    resolve_api_base = _resolve_api_base,
     authenticate = _authenticate,
     validate_role = validate_role,
     VALID_ROLES = VALID_ROLES,

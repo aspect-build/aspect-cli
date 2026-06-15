@@ -119,6 +119,40 @@ def _test_impl(ctx):
         "",
     )
 
+    # resolve_api_base — precedence + normalization. `env` is faked as a
+    # struct with a `.var(name)` lookup, matching the std env shape.
+    def _env(vars):
+        return struct(var = lambda name: vars.get(name, ""))
+
+    _eq(
+        "resolve_api_base / default when nothing set",
+        gitlab.resolve_api_base(_env({})),
+        "https://gitlab.com/api/v4",
+    )
+    _eq(
+        "resolve_api_base / CI_API_V4_URL (native GitLab CI)",
+        gitlab.resolve_api_base(_env({"CI_API_V4_URL": "https://self-hosted.gitlab.com/api/v4"})),
+        "https://self-hosted.gitlab.com/api/v4",
+    )
+    _eq(
+        "resolve_api_base / explicit override wins over CI_API_V4_URL",
+        gitlab.resolve_api_base(_env({
+            "ASPECT_GITLAB_API_URL": "https://override.gitlab.com/api/v4",
+            "CI_API_V4_URL": "https://self-hosted.gitlab.com/api/v4",
+        })),
+        "https://override.gitlab.com/api/v4",
+    )
+    _eq(
+        "resolve_api_base / bare instance root gets /api/v4 appended",
+        gitlab.resolve_api_base(_env({"ASPECT_GITLAB_API_URL": "https://self-hosted.gitlab.com"})),
+        "https://self-hosted.gitlab.com/api/v4",
+    )
+    _eq(
+        "resolve_api_base / trailing slash trimmed",
+        gitlab.resolve_api_base(_env({"ASPECT_GITLAB_API_URL": "https://self-hosted.gitlab.com/api/v4/"})),
+        "https://self-hosted.gitlab.com/api/v4",
+    )
+
     # commit_status.STATES exposed
     if "success" not in gitlab.commit_status.STATES:
         fail("commit_status.STATES missing 'success'")
@@ -240,6 +274,7 @@ def _test_impl(ctx):
         "encode_project_path",
         "extract_host",
         "extract_project_path",
+        "resolve_api_base",
         "authenticate",
         "validate_role",
         "VALID_ROLES",
