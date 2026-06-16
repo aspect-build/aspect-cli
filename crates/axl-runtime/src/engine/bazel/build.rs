@@ -747,6 +747,7 @@ impl Build {
     // TODO: this should return a thiserror::Error
     pub fn spawn(
         verb: &str,
+        backend: super::backend::BazelBackend,
         targets: impl IntoIterator<Item = String>,
         (build_events, sinks, iters): (bool, Vec<BuildEventSink>, Vec<BuildEventIter>),
         (execution_logs, execlog_sinks): (bool, Vec<ExecLogSink>),
@@ -759,7 +760,16 @@ impl Build {
         announce: AnnounceSpawn,
         rt: AsyncRuntime,
     ) -> Result<Build, std::io::Error> {
-        let (pid, version) = super::info::server_info()?;
+        // `Real` probes the live bazel server for its pid + version. `Fake`
+        // must NOT shell out to a real bazel: the fake child is itself the
+        // BES writer, so its pid (known only post-spawn) is the relevant
+        // `server_pid` for galvanize's `IfOpenForPid` policy. We thread a
+        // placeholder here and rebind to the child pid below.
+        let (pid, version) = if backend.is_fake() {
+            (0u32, None)
+        } else {
+            super::info::server_info()?
+        };
 
         let span = tracing::info_span!(
             "ctx.bazel.build",
@@ -772,7 +782,9 @@ impl Build {
 
         let targets: Vec<String> = targets.into_iter().collect();
 
-        let mut cmd = super::bazel_command();
+        // `Real` → `bazel_command()` (sets the anti-inception env, honors
+        // BAZEL_REAL). `Fake` → the fake binary directly, NO global env.
+        let mut cmd = backend.command();
         cmd.args(startup_flags);
         cmd.arg(verb);
         cmd.args(flags);
@@ -859,9 +871,34 @@ impl Build {
         cmd.stderr(stderr);
         cmd.stdin(Stdio::null());
 
+        // Fake backend: open a per-invocation control channel (socketpair),
+        // arrange for the fake child to inherit the read end, and remember
+        // the expectation to send once the child is alive. Each spawn mints
+        // its own channel, so concurrent test workers never collide.
+        let mut control: Option<Box<dyn super::backend::ControlChannel>> = None;
+        let fake_expectation = if let super::backend::BazelBackend::Fake { expectation, .. } =
+            &backend
+        {
+            let chan = super::backend::open_control_channel()?;
+            super::backend::prepare_command(&mut cmd, chan.child_fd());
+            control = Some(chan);
+            Some(expectation.clone())
+        } else {
+            None
+        };
+
         let child = cmd
             .spawn()
             .map_err(|e| io::Error::other(format!("failed to spawn bazel: {e}")))?;
+
+        // Hand the declared expectation to the fake over the control channel
+        // now that it's running. Dropping the parent end (inside
+        // `send_expectation`) closes the write half so the fake's
+        // `read_to_end` returns and it can synthesize the BES stream.
+        if let (Some(mut chan), Some(exp)) = (control.take(), fake_expectation) {
+            chan.send_expectation(&exp)
+                .map_err(|e| io::Error::other(format!("failed to send fake expectation: {e}")))?;
+        }
 
         // Register the bazel client with the live-subprocess registry so
         // aspect-cli's OS-signal handler can forward SIGINT to it on
@@ -875,8 +912,13 @@ impl Build {
         // REMOTE_CACHE_EVICTED state. The server (daemon) pid passed to
         // galvanize stays alive across invocations and cannot signal
         // end-of-build, which is why we want a separate per-invocation pid.
+        // For the `Fake` backend the fake child IS the FIFO writer, so its
+        // own pid is the relevant `server_pid` for galvanize's `IfOpenForPid`
+        // retry policy (the real-bazel `pid` placeholder of 0 would never
+        // match an open writer).
+        let server_pid = if backend.is_fake() { child.id() } else { pid };
         let build_event_stream = match bes_path {
-            Some(p) => Some(BuildEventStream::spawn(p, pid, child.id(), file_sinks)?),
+            Some(p) => Some(BuildEventStream::spawn(p, server_pid, child.id(), file_sinks)?),
             None => None,
         };
 

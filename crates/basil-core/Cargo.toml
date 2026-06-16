@@ -1,5 +1,5 @@
 [package]
-name = "basil"
+name = "basil-core"
 version.workspace = true
 categories.workspace = true
 homepage.workspace = true
@@ -9,11 +9,10 @@ edition.workspace = true
 readme.workspace = true
 rust-version.workspace = true
 
-[[bin]]
-name = "basil"
-path = "src/main.rs"
+[lib]
+name = "basil_core"
+path = "src/lib.rs"
 
 [dependencies]
 axl-proto = { path = "../axl-proto" }
-basil-core = { path = "../basil-core" }
 prost = "0.14.1"

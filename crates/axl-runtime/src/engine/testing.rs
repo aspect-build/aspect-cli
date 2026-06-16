@@ -53,6 +53,7 @@ use starlark::eval::Evaluator;
 use starlark::syntax::AstModule;
 use starlark::values::list::AllocList;
 use starlark::values::none::{NoneOr, NoneType};
+use starlark::values::tuple::UnpackTuple;
 use starlark::values::{
     Heap, NoSerialize, ProvidesStaticType, StarlarkValue, Value, ValueLike, starlark_value,
 };
@@ -60,6 +61,7 @@ use starlark::{starlark_module, starlark_simple_value, values};
 
 use crate::engine::arguments::Arguments;
 use crate::engine::bazel::Bazel;
+use crate::engine::bazel::backend::BazelBackend;
 use crate::engine::std::Std;
 use crate::engine::store::{Env as RuntimeEnv, TestEnvMap};
 use crate::engine::task_context::TaskContext;
@@ -189,11 +191,40 @@ pub fn register_test_globals(globals: &mut GlobalsBuilder) {
 /// `t.ctx.std.env` are all minted from this one shared `Rc`, so a mutation
 /// through any of them is observed through the others. Nothing is fished out
 /// of `eval.extra` — the mock route is value-carried, never ambient.
+///
+/// Its bazel fixture is likewise value-carried: a per-test
+/// [`PendingExpectation`] cell + the located fake-bazel binary, so a declared
+/// `t.bazel.expect_build(...)` reaches the `Fake` backend minted by `t.ctx`
+/// (state on the value, never a global — decisions 6/8).
 #[derive(Clone, Debug, ProvidesStaticType, NoSerialize, Allocative, Display)]
 #[display("<Test>")]
 pub struct Test {
     #[allocative(skip)]
     overlay: TestEnvMap,
+    /// Fake-bazel binary path. `None` → `t.ctx.bazel` is `Real` (production
+    /// behavior; the bazel mock is opt-in per the runner that constructs it).
+    #[allocative(skip)]
+    fake_bin: Option<Arc<str>>,
+    /// The expectation declared by `t.bazel.expect_build(...)` for the next
+    /// `t.ctx.bazel.build(...)`. Shared (by `Arc` clone) with the `t.bazel`
+    /// handle and read by `t.ctx`.
+    #[allocative(skip)]
+    expectation: PendingExpectation,
+}
+
+/// Shared per-test cell holding the declared `BazelExpectation`, if any.
+type PendingExpectation = Arc<Mutex<Option<basil_core::BazelExpectation>>>;
+
+impl Test {
+    /// A harness carrying `overlay`. `fake_bin = Some` wires `t.ctx.bazel` to a
+    /// `Fake` backend driving that binary; `None` leaves it `Real`.
+    fn new(overlay: TestEnvMap, fake_bin: Option<Arc<str>>) -> Self {
+        Self {
+            overlay,
+            fake_bin,
+            expectation: Arc::new(Mutex::new(None)),
+        }
+    }
 }
 
 #[starlark_value(type = "Test")]
@@ -233,15 +264,53 @@ fn test_methods(registry: &mut MethodsBuilder) {
         Ok(Std::with_env_overlay(test_overlay(this)?))
     }
 
+    /// The bazel mock fixture. Declare expected invocations with
+    /// `t.bazel.expect_build(...)`; the declaration is consumed by the next
+    /// `t.ctx.bazel.build(...)` via the `Fake` backend.
+    #[starlark(attribute)]
+    fn bazel<'v>(this: Value<'v>) -> anyhow::Result<TestBazel> {
+        let t = this
+            .downcast_ref::<Test>()
+            .ok_or_else(|| anyhow::anyhow!("t.bazel called on a non-Test value"))?;
+        Ok(TestBazel {
+            expectation: t.expectation.clone(),
+        })
+    }
+
     /// A real `TaskContext` wired over this test's mock backends. Same Rust
     /// type production uses, so functions annotated `ctx: TaskContext` accept
     /// it with no drift. The context carries this test's overlay `Rc`, so
     /// `t.ctx.std.env` observes the same map as `t.env` / `t.std.env`.
     #[starlark(attribute)]
     fn ctx<'v>(this: Value<'v>, heap: Heap<'v>) -> anyhow::Result<Value<'v>> {
-        let overlay = test_overlay(this)?;
+        let t = this
+            .downcast_ref::<Test>()
+            .ok_or_else(|| anyhow::anyhow!("t.ctx called on a non-Test value"))?;
+        let overlay = t.overlay.clone();
         let startup_flags = heap.alloc(AllocList(Vec::<String>::new()));
-        let bazel = heap.alloc(Bazel { startup_flags });
+        // Mint the bazel backend from the harness: a `Fake` pointing at the
+        // located fake binary + the expectation declared so far (defaulting to
+        // a clean passing build), or `Real` when no fake binary was installed.
+        let backend = match &t.fake_bin {
+            Some(fake_bin) => {
+                let exp = t.expectation.lock().unwrap().clone().unwrap_or_else(|| {
+                    basil_core::BazelExpectation::new(
+                        Vec::new(),
+                        basil_core::BuildResult::Passed,
+                        None,
+                    )
+                });
+                BazelBackend::Fake {
+                    fake_bin: fake_bin.to_string(),
+                    expectation: Arc::new(exp),
+                }
+            }
+            None => BazelBackend::Real,
+        };
+        let bazel = heap.alloc(Bazel {
+            startup_flags,
+            backend,
+        });
         let args = heap.alloc(Arguments::new());
         let traits = heap.alloc(TraitMap::new());
         let task_info = heap.alloc(TaskInfo::new(
@@ -251,6 +320,75 @@ fn test_methods(registry: &mut MethodsBuilder) {
             "test".to_string(),
         ));
         Ok(heap.alloc(TaskContext::new(args, traits, task_info, bazel).with_env_overlay(overlay)))
+    }
+}
+
+// ─── The `t.bazel` fixture ────────────────────────────────────────────────────
+
+/// The `t.bazel` fixture handle. Carries (by `Arc` clone) the per-test
+/// expectation cell that `t.ctx`'s `Fake` backend reads.
+#[derive(Clone, Debug, ProvidesStaticType, NoSerialize, Allocative, Display)]
+#[display("<Test.bazel>")]
+pub struct TestBazel {
+    #[allocative(skip)]
+    expectation: PendingExpectation,
+}
+
+starlark_simple_value!(TestBazel);
+
+#[starlark_value(type = "Test.bazel")]
+impl<'v> StarlarkValue<'v> for TestBazel {
+    fn get_methods() -> Option<&'static Methods> {
+        static RES: MethodsStatic = MethodsStatic::new();
+        RES.methods(test_bazel_methods)
+    }
+}
+
+/// Map the AXL `result=` string onto the typed [`basil_core::BuildResult`].
+/// Mirrors a `BuildResult` enum (`passed | failed | cache_evicted`); an unknown
+/// value fails fast with the legal set, exactly as an `enum(...)` would.
+fn parse_build_result(s: &str) -> anyhow::Result<basil_core::BuildResult> {
+    match s {
+        "passed" => Ok(basil_core::BuildResult::Passed),
+        "failed" => Ok(basil_core::BuildResult::Failed),
+        "cache_evicted" => Ok(basil_core::BuildResult::CacheEvicted),
+        other => Err(anyhow::anyhow!(
+            "t.bazel.expect_build: unknown result {other:?}; expected one of \
+             \"passed\", \"failed\", \"cache_evicted\""
+        )),
+    }
+}
+
+#[starlark_module]
+fn test_bazel_methods(registry: &mut MethodsBuilder) {
+    /// Declare the expected outcome of the next `t.ctx.bazel.build(...)`.
+    ///
+    /// The fake bazel synthesizes a consistent BES stream from this:
+    /// `BuildStarted` → one `TargetComplete` per target (pass/fail per
+    /// `result`) → `BuildFinished` carrying the exit code — then exits with
+    /// that code. The parent reads it back through the real
+    /// `ctx.bazel.build` BES path.
+    ///
+    /// # Arguments
+    /// * `targets` - Target patterns the build "covers"; one `TargetComplete`
+    ///   per entry.
+    /// * `result` - `"passed"` | `"failed"` | `"cache_evicted"`.
+    /// * `exit_code` - Override the process exit code (default: derived from
+    ///   `result` — 0 / 1 / 39).
+    fn expect_build<'v>(
+        this: Value<'v>,
+        #[starlark(args)] targets: UnpackTuple<values::StringValue<'v>>,
+        #[starlark(require = named, default = "passed")] result: &str,
+        #[starlark(require = named, default = NoneOr::None)] exit_code: NoneOr<i32>,
+    ) -> anyhow::Result<NoneType> {
+        let tb = this
+            .downcast_ref::<TestBazel>()
+            .ok_or_else(|| anyhow::anyhow!("expected Test.bazel"))?;
+        let result = parse_build_result(result)?;
+        let targets: Vec<String> = targets.items.iter().map(|t| t.as_str().to_string()).collect();
+        let exp = basil_core::BazelExpectation::new(targets, result, exit_code.into_option());
+        *tb.expectation.lock().unwrap() = Some(exp);
+        Ok(NoneType)
     }
 }
 
@@ -450,6 +588,7 @@ fn run_shard(
     base_env: &RuntimeEnv,
     source: &str,
     shard: Vec<(usize, String)>,
+    fake_bin: Option<Arc<str>>,
 ) -> anyhow::Result<Vec<(usize, TestOutcome)>> {
     let globals = crate::eval::api::get_test_globals();
     let ast = parse_test_source(source)?;
@@ -492,7 +631,12 @@ fn run_shard(
             // `RuntimeEnv::from_eval`; only the env-overlay route moved onto the
             // value.
             let overlay: TestEnvMap = Arc::new(Mutex::new(BTreeMap::new()));
-            let t = module.heap().alloc(Test { overlay });
+            // Fresh harness per test: its own expectation cell, so a declared
+            // `t.bazel.expect_build(...)` in one test never bleeds into another
+            // (parallel-safe — state lives on the value, not a global).
+            let t = module
+                .heap()
+                .alloc(Test::new(overlay, fake_bin.clone()));
 
             let mut eval = Evaluator::new(&module);
             eval.extra = Some(base_env);
@@ -531,17 +675,35 @@ fn default_jobs(n_tests: usize) -> usize {
 pub fn run_test_source(source: &str, base_env: &RuntimeEnv) -> anyhow::Result<TestSummary> {
     let names = discover_test_names(source, base_env)?;
     let jobs = default_jobs(names.len());
-    run_test_source_with_jobs(source, base_env, names, jobs)
+    run_test_source_with_jobs(source, base_env, names, jobs, None)
+}
+
+/// Like [`run_test_source`] but installs a fake-bazel binary so
+/// `t.ctx.bazel.build(...)` drives the `Fake` backend (spawns `fake_bin`,
+/// feeds it the declared `BazelExpectation`). `fake_bin` is located the way
+/// `crate::test::basil_bin` does today; a shipped self-exec subcommand is
+/// roadmap item 6.
+pub fn run_test_source_with_fake_bazel(
+    source: &str,
+    base_env: &RuntimeEnv,
+    fake_bin: Arc<str>,
+) -> anyhow::Result<TestSummary> {
+    let names = discover_test_names(source, base_env)?;
+    let jobs = default_jobs(names.len());
+    run_test_source_with_jobs(source, base_env, names, jobs, Some(fake_bin))
 }
 
 /// Like [`run_test_source`] but with an explicit worker count (the `--jobs`
 /// knob). `jobs <= 1` runs serially on the calling thread; higher values fan
 /// the tests out across that many threads, each with its own Starlark heap.
+/// `fake_bin`, when set, wires every harness's `t.ctx.bazel` to a `Fake`
+/// backend driving that binary.
 fn run_test_source_with_jobs(
     source: &str,
     base_env: &RuntimeEnv,
     names: Vec<String>,
     jobs: usize,
+    fake_bin: Option<Arc<str>>,
 ) -> anyhow::Result<TestSummary> {
     let jobs = jobs.max(1);
 
@@ -549,7 +711,7 @@ fn run_test_source_with_jobs(
     // is already inside the tokio runtime context the caller established).
     if jobs <= 1 || names.len() <= 1 {
         let shard: Vec<(usize, String)> = names.into_iter().enumerate().collect();
-        let mut outcomes = run_shard(base_env, source, shard)?;
+        let mut outcomes = run_shard(base_env, source, shard, fake_bin)?;
         outcomes.sort_by_key(|(idx, _)| *idx);
         return Ok(TestSummary {
             outcomes: outcomes.into_iter().map(|(_, o)| o).collect(),
@@ -573,6 +735,7 @@ fn run_test_source_with_jobs(
         .map(|shard| {
             let seed = seed.clone();
             let source = source.clone();
+            let fake_bin = fake_bin.clone();
             std::thread::spawn(move || -> anyhow::Result<Vec<(usize, TestOutcome)>> {
                 // Enter the shared runtime so `RuntimeEnv::new`'s `Handle::current()`
                 // resolves, then mint this thread's own env (no `Rc` crosses here).
@@ -583,7 +746,7 @@ fn run_test_source_with_jobs(
                     seed.bazel_root,
                     seed.git_root,
                 );
-                run_shard(&env, &source, shard)
+                run_shard(&env, &source, shard, fake_bin)
             })
         })
         .collect();
@@ -701,7 +864,7 @@ def helper_not_discovered(t):
         assert_eq!(names.len(), 17, "16 isolation tests + 1 failure");
 
         // Force the parallel path with several workers.
-        let summary = run_test_source_with_jobs(&src, &base_env(), names, 8)
+        let summary = run_test_source_with_jobs(&src, &base_env(), names, 8, None)
             .expect("parallel runner should not error");
 
         assert_eq!(summary.passed(), 16, "report:\n{}", summary.report());
@@ -752,5 +915,61 @@ def test_sets_overlay(t):
             std::env::var("AXL_POC_LEAK_CHECK").is_err(),
             "overlay must not leak into the real process env"
         );
+    }
+
+    /// End-to-end proof of the bazel `Fake` backend (increment 2): a test
+    /// declares a typed `BazelExpectation` via `t.bazel.expect_build(...)`, the
+    /// `Fake` backend on `t.ctx.bazel` fork+execs the fake-bazel binary
+    /// (basil), hands it the expectation over the inherited socketpair control
+    /// channel, and the fake synthesizes a real BES stream onto the
+    /// `--build_event_binary_file` the parent already wires. The assertions run
+    /// entirely through the production `ctx.bazel.build` read path
+    /// (`BuildEventIter` + `build.wait()`), so the mock's contract is the real
+    /// one.
+    #[test]
+    fn fake_bazel_backend_synthesizes_declared_expectation() {
+        let rt = Runtime::new().unwrap();
+        let _g = rt.enter();
+        let fake_bin: Arc<str> = Arc::from(crate::test::basil_bin());
+
+        let src = r#"
+def test_passing_build_synthesizes_events_and_exit(t):
+    t.bazel.expect_build("//a:b", "//c:d", result = "passed")
+    iter = bazel.build_events.iterator()
+    build = t.ctx.bazel.build(build_events = [iter], stderr = None)
+    started = 0
+    completed = 0
+    finished = 0
+    for event in iter:
+        kind = event.kind
+        if kind == "build_started":
+            started += 1
+        elif kind == "target_completed":
+            completed += 1
+        elif kind == "build_finished":
+            finished += 1
+    status = build.wait()
+    asserts.is_true(status.success)
+    asserts.eq(status.code, 0)
+    asserts.eq(started, 1)
+    asserts.eq(completed, 2)
+    asserts.eq(finished, 1)
+
+def test_failing_build_surfaces_declared_exit_code(t):
+    t.bazel.expect_build("//x:y", result = "failed", exit_code = 7)
+    build = t.ctx.bazel.build(build_events = True, stderr = None)
+    status = build.wait()
+    asserts.is_false(status.success)
+    asserts.eq(status.code, 7)
+"#;
+        let summary = run_test_source_with_fake_bazel(src, &base_env(), fake_bin)
+            .expect("fake-bazel runner ok");
+        assert_eq!(
+            summary.failed(),
+            0,
+            "expected all fake-bazel tests to pass; report:\n{}",
+            summary.report()
+        );
+        assert_eq!(summary.passed(), 2, "report:\n{}", summary.report());
     }
 }

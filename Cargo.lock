@@ -339,6 +339,7 @@ dependencies = [
  "axl-proto",
  "axl-types",
  "base64 0.22.1",
+ "basil-core",
  "bazelrc",
  "blake2",
  "build-event-stream",
@@ -487,6 +488,15 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "basil"
+version = "0.0.0-dev"
+dependencies = [
+ "axl-proto",
+ "basil-core",
+ "prost",
+]
+
+[[package]]
+name = "basil-core"
 version = "0.0.0-dev"
 dependencies = [
  "axl-proto",
@@ -2520,6 +2530,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "memoffset"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
+dependencies = [
+ "autocfg",
+]
+
+[[package]]
 name = "miette"
 version = "5.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2677,6 +2696,7 @@ dependencies = [
  "cfg-if",
  "cfg_aliases 0.2.1",
  "libc",
+ "memoffset 0.9.1",
 ]
 
 [[package]]
@@ -4161,7 +4181,7 @@ dependencies = [
  "inventory",
  "itertools 0.14.0",
  "maplit",
- "memoffset",
+ "memoffset 0.6.5",
  "num-bigint",
  "num-traits",
  "once_cell",

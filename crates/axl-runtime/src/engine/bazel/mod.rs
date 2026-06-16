@@ -33,6 +33,7 @@ use crate::engine::store::Env;
 use axl_proto;
 use axl_types::stream::Writable;
 
+pub mod backend;
 mod build;
 mod cancel;
 mod health_check;
@@ -205,6 +206,11 @@ pub struct Bazel<'v> {
     /// source of both command and startup flags for every Bazel invocation.
     #[allocative(skip)]
     pub active_rc: RefCell<Option<values::Value<'v>>>,
+    /// Which bazel this context drives — `Real` (production) or a `Fake`
+    /// carrying the fake-bazel path + declared expectation (testing). Carried
+    /// ON the value (decision 6), not fished out of `eval.extra`, so it's
+    /// per-value and parallel-safe. Not a Starlark value, so untraced.
+    pub backend: backend::BazelBackend,
 }
 
 unsafe impl<'v> Trace<'v> for Bazel<'v> {
@@ -229,6 +235,7 @@ impl<'v> values::Freeze for Bazel<'v> {
                 Some(v) => Some(v.freeze(freezer)?),
                 None => None,
             },
+            backend: self.backend,
         })
     }
 }
@@ -246,6 +253,7 @@ impl<'v> values::StarlarkValue<'v> for Bazel<'v> {
 pub struct FrozenBazel {
     #[allocative(skip)]
     pub active_rc: Option<values::FrozenValue>,
+    pub backend: backend::BazelBackend,
 }
 
 starlark_simple_value!(FrozenBazel);
@@ -310,6 +318,18 @@ fn resolve_invocation_flags<'v>(
             Ok((cmd, startup))
         }
         None => Ok((extras, read_startup_flags(this)?)),
+    }
+}
+
+/// Read the `BazelBackend` carried on the `Bazel` value. Defaults to `Real`
+/// for any other value shape (so non-`Bazel` callers see production behavior).
+fn read_backend<'v>(this: values::Value<'v>) -> backend::BazelBackend {
+    if let Some(b) = this.downcast_ref::<Bazel>() {
+        b.backend.clone()
+    } else if let Some(b) = this.downcast_ref::<FrozenBazel>() {
+        b.backend.clone()
+    } else {
+        backend::BazelBackend::Real
     }
 }
 
@@ -444,10 +464,12 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         };
         let (resolved_flags, resolved_startup_flags) =
             resolve_invocation_flags(this, "build", rc, &flags.items)?;
+        let backend = read_backend(this);
         let env = Env::from_eval(eval)?;
         let (stdout, stderr) = resolve_stdio(stdio, stdout, stderr)?;
         let build = build::Build::spawn(
             "build",
+            backend,
             targets.items.iter().map(|f| f.as_str().to_string()),
             build_events,
             execution_log,
@@ -556,10 +578,12 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         };
         let (resolved_flags, resolved_startup_flags) =
             resolve_invocation_flags(this, "test", rc, &flags.items)?;
+        let backend = read_backend(this);
         let env = Env::from_eval(eval)?;
         let (stdout, stderr) = resolve_stdio(stdio, stdout, stderr)?;
         let test = build::Build::spawn(
             "test",
+            backend,
             targets.items.iter().map(|f| f.as_str().to_string()),
             build_events,
             execution_log,

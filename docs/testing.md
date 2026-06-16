@@ -223,11 +223,21 @@ Build order (each independently shippable):
     handle. Removed `Env::test_env` + the `from_eval` mock route. (Handle is
     `Arc<Mutex<…>>` so the value satisfies the `Send + Sync` bound frozen
     Starlark values require.)
-2. `bazel` → `BazelBackend::{Real, Fake}` on the `bazel.Bazel` value. `Fake` =
-   fork+exec a generic fake-bazel (basil-core) with a `socketpair` control
-   channel carrying a `BazelExpectation` fixture; the fake synthesizes BES +
-   execlog + streams + exit onto the real channels. Per-invocation-unique
-   resources; drop the `BAZEL_REAL` global. (See decision 7/8.)
+2. ✅ `bazel` → `BazelBackend::{Real, Fake}` on the `bazel.Bazel` value (carried
+   on the value, read via `read_backend`, not `eval.extra`). `Fake` fork+execs a
+   generic fake-bazel (`basil-core`, reused via the standalone `basil` binary
+   today) with a per-invocation `socketpair` control channel carrying a
+   length-delimited `BazelExpectation` fixture; the fake synthesizes a
+   consistent `BuildStarted` → `TargetComplete`* → `BuildFinished` BES stream +
+   exit code onto the real `--build_event_binary_file` the parent already wires,
+   so the production `ctx.bazel.build` read path is exercised unchanged. `Fake`
+   builds the `Command` straight from the fake path — no `BAZEL_REAL` global —
+   and derives the child pid as galvanize's `server_pid`. `t.bazel.expect_build(
+   *targets, result=, exit_code=)` declares the fixture. (See decisions 7/8.)
+   *Not yet synthesized from the typed fixture:* execlog + stdout/stderr (BES +
+   exit only); a raw `events=` escape hatch passes pre-framed `BuildEvent`s
+   through. Unix-only — the control transport sits behind a `ControlChannel`
+   trait so a Windows named-pipe impl is a drop-in.
 3. `io` backend → captured `t.stdout()` (per-test buffer, never process stdout).
 4. `fs` backend → `t.fs.tmpdir()` (tmpdir-rooted real fs by default).
 5. `process` / `net` backends → `t.process.stub(...)` / `t.http.stub(...)`,
@@ -243,8 +253,9 @@ Open questions to settle before promoting past POC:
 - ✅ env "overlay" vs bazel "backend"; state carried on the value (decision 6).
 - ✅ bazel `Fake` shape — generic process + socketpair + synthesized surfaces,
   reusing basil-core; not canned events, not Rust scenarios (decisions 7, 8).
-- `BazelExpectation` control-channel **wire format** (lean: length-delimited
-  protobuf, the framing basil already uses for BES).
+- ✅ `BazelExpectation` control-channel **wire format** — length-delimited
+  protobuf (the framing basil already uses for BES); the `events=` escape hatch
+  carries pre-framed `BuildEvent`s as opaque `bytes` passed through untouched.
 - Snapshot golden location: `__snapshots__/` dir vs inline-string snapshots.
 - Should the test surface also gate on *where* the runner loads from, so a
   stray `_test.axl` evaluated outside the runner can't pick up test globals?

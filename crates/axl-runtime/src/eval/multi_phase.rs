@@ -520,6 +520,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
 
         let bazel = heap.alloc(Bazel {
             active_rc: std::cell::RefCell::new(None),
+            backend: crate::engine::bazel::backend::BazelBackend::Real,
         });
         // Allocate `task_info` on the heap and keep the resulting Value
         // so we can read back timing + phases after `_impl` returns.

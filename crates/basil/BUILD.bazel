@@ -9,6 +9,7 @@ rust_binary(
     ],
     deps = [
         "//crates/axl-proto",
+        "//crates/basil-core",
         "@crates//:prost",
     ],
 )
