@@ -187,6 +187,7 @@ def config(ctx: ConfigContext):
     ctx.tasks["lint"].args.targets = ["//examples/lint/..."]
 
     ctx.tasks["delivery"].args.query = "attr(tags, deliverable, //...)"
+    ctx.tasks["delivery"].args.release_bazel_flags = ["--config=release"]
     ctx.tasks["delivery"].args.warn_not_runnable = True
 
     ctx.tasks["build"].args.targets = ["//...", "-//exclude/..."]

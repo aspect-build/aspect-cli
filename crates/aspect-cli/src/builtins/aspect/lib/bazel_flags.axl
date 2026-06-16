@@ -285,3 +285,43 @@ def resolve_query_flags(ctx, bazel_trait):
     )
     _, expanded_flags = rc.expand_all(command = "query")
     return expanded_flags
+
+def expand_config_flags(ctx, bazel_trait, extra_flags, command = "build"):
+    """Expand the `--config=NAME` references in `extra_flags` against the rc.
+
+    Tasks reach Bazel under `--ignore_all_rc_files`, so any `--config=NAME` in a
+    flag list that bypasses `setup_bazel_command`'s expansion (e.g. delivery's
+    `release_bazel_flags`, appended after `expanded_flags`) would otherwise hit
+    Bazel un-expanded and fail with "Config value 'NAME' is not defined". So a
+    `--config=release` resolves to its `common:release`/`build:release` options,
+    exactly as the task's own flags do.
+
+    Returns ONLY the options `extra_flags` contributes — the delta between
+    expanding the rc with `extra_flags` and without them. This is deliberate:
+    `rc.expand_all` always prepends the full `command` rc base (so its result is
+    not just the passed flags), and the caller appends this AFTER the task's own
+    `expanded_flags`. Returning the whole base again would re-apply rc defaults
+    last and clobber the user's `--bazel-flag` overrides (last-wins). The delta
+    is `extra_flags` with each `--config=NAME` replaced by its section options,
+    and nothing the base already provided. Order within the delta is preserved.
+
+    Mutates nothing on `ctx.bazel` (no startup flags added, no disclosure) — the
+    task's setup already did that.
+    """
+    startup_flags = resolve_startup_flags(ctx, bazel_trait)
+
+    # Base expansion (no extra flags) vs. with extra flags; the suffix the latter
+    # adds is exactly what extra_flags + their config expansions contribute.
+    base_rc = ctx.bazel.parse_rc(startup_flags = startup_flags, flags = [])
+    _, base_flags = base_rc.expand_all(command = command)
+
+    full_rc = ctx.bazel.parse_rc(
+        startup_flags = startup_flags,
+        flags = list(extra_flags),
+        skip_config_if_missing = requested_config_names(list(extra_flags)),
+    )
+    _, full_flags = full_rc.expand_all(command = command)
+
+    # expand_all lists base options first, then the passed flags' expansion; the
+    # tail beyond the base length is the extra_flags' contribution.
+    return full_flags[len(base_flags):]
