@@ -1,17 +1,7 @@
 """`aspect wrapper install` / `aspect wrapper uninstall` — vendor the
-`tools/bazel` Bazelisk wrapper (and its companion `tools/bazel.md`) into a
-Bazel workspace so a team can keep typing `bazel` while transparently routing
-through the Aspect CLI. See tools/bazel.md for what the wrapper does.
-
-The script is downloaded from a ref of aspect-build/aspect-cli via
-raw.githubusercontent.com. The default resolves the latest published release
-tag (never HEAD); `--version` pins an explicit ref — a tag or commit SHA for
-reproducibility (a branch name also works but is not reproducible). `install`
-is idempotent: a re-run that already matches no-ops, a newer target offers an
-upgrade, and a copy that lost its executable bit is repaired. `--check` is the
-CI gate (non-zero when missing / stale, never writes); `--dry-run` previews
-without writing. Shell env instructions are printed, never written to the
-user's rc files.
+`tools/bazel` Bazelisk wrapper (and `tools/bazel.md`) into a Bazel workspace,
+downloaded from a ref of aspect-build/aspect-cli. See the task descriptions
+below for the flags and tools/bazel.md for what the wrapper does.
 """
 
 load("./lib/environment.axl", "error", "info")
@@ -39,10 +29,8 @@ def _http_headers() -> dict:
     return {"User-Agent": _USER_AGENT}
 
 def _resolve_ref(ctx: TaskContext, version: str) -> str | None:
-    """Resolve the requested `--version` to a concrete git ref. "latest" (the
-    default) queries the GitHub releases API for the newest published tag; any
-    other value is used verbatim. Returns None after reporting a failed
-    lookup."""
+    """Resolve `--version` to a git ref: "latest" queries the releases API for
+    the newest tag; any other value is used verbatim. None on failure."""
     if version and version != "latest":
         return version
     url = "https://api.github.com/repos/%s/%s/releases/latest" % (WRAPPER_REPO_OWNER, WRAPPER_REPO_NAME)
@@ -57,8 +45,7 @@ def _resolve_ref(ctx: TaskContext, version: str) -> str | None:
     return parsed["tag_name"]
 
 def _fetch_text(ctx: TaskContext, url: str) -> str | None:
-    """GET a text file (the wrapper script or its doc). Returns the body, or
-    None after reporting the failure."""
+    """GET a text file. Returns the body, or None after reporting failure."""
     response = ctx.http().get(url = url, headers = _http_headers()).block()
     if response.status == 404:
         error(ctx.std, "Not found at %s — does this version ship the wrapper? Try a newer --version." % url)
@@ -69,8 +56,8 @@ def _fetch_text(ctx: TaskContext, url: str) -> str | None:
     return response.body
 
 def _print_shell_instructions(ctx: TaskContext) -> None:
-    """Print rc snippets for the user's shell (or all shells with
-    `--all-shells`). Informational only — never edits the user's rc files."""
+    """Print rc snippets for the user's shell (or all with `--all-shells`).
+    Informational only — never edits rc files."""
     if ctx.args.all_shells:
         shells = ALL_SHELLS
     else:
@@ -107,9 +94,8 @@ def _install_impl(ctx: TaskContext) -> int:
 
     existing = ctx.std.fs.read_to_string(script_path) if ctx.std.fs.exists(script_path) else None
 
-    # The executable bit only matters on Unix-like platforms; it's always
-    # reported false on Windows (where the tools/bazel hook is moot anyway), so
-    # treat it as set there to avoid a perpetual "needs repair" verdict.
+    # The executable bit only matters on Unix; treat it as set on Windows to
+    # avoid a perpetual "needs repair" verdict.
     existing_executable = True
     if existing != None and ctx.std.env.os() != "windows":
         existing_executable = ctx.std.fs.metadata(script_path).executable
@@ -118,12 +104,10 @@ def _install_impl(ctx: TaskContext) -> int:
     target_version = parse_wrapper_version(target) or "unknown"
     local_version = parse_wrapper_version(existing) or "unknown"
 
-    # A "repair" is matching bytes that merely lost the executable bit — same
-    # version, only the mode is wrong. Worth its own message so the user isn't
-    # told a same-version file is being "upgraded".
+    # Matching bytes that merely lost the executable bit — its own message so
+    # the user isn't told a same-version file is being "upgraded".
     is_repair = existing != None and existing == target
 
-    # --check: CI gate. Exit non-zero when missing or stale; never write.
     if ctx.args.check:
         if action == InstallAction("install"):
             error(ctx.std, "%s is missing. Run `aspect wrapper install` to add it." % WRAPPER_SCRIPT_PATH)
@@ -149,7 +133,6 @@ def _install_impl(ctx: TaskContext) -> int:
 
     is_install = action == InstallAction("install")
 
-    # --dry-run: describe the change, write nothing.
     if ctx.args.dry_run:
         if is_install:
             print("Would install %s (version %s from %s)." % (WRAPPER_SCRIPT_PATH, target_version, ref))
@@ -161,17 +144,16 @@ def _install_impl(ctx: TaskContext) -> int:
         _print_shell_instructions(ctx)
         return 0
 
-    # Overwrite protection for upgrades (a fresh install has nothing to clobber,
-    # and a repair is byte-identical to our own wrapper so it's safe).
+    # Overwrite protection for upgrades (install / repair have nothing unsafe
+    # to clobber).
     if not is_install and not is_repair:
-        # Never silently replace a hand-maintained tools/bazel that isn't ours
-        # — symmetric with `uninstall`'s marker check. Requires --yes in any
-        # mode, so non-interactive / CI runs can't clobber a foreign wrapper.
+        # Refuse to replace a foreign tools/bazel without --yes, in any mode —
+        # symmetric with `uninstall`'s marker check.
         if not has_wrapper_marker(existing) and not ctx.args.yes:
             error(ctx.std, "%s exists but is not the Aspect wrapper (missing the `%s` marker). Re-run with --yes to replace it." % (WRAPPER_SCRIPT_PATH, WRAPPER_MARKER))
             return 1
 
-        # Confirm a same-name upgrade of our own wrapper interactively unless --yes.
+        # Confirm upgrading our own wrapper unless --yes.
         if not ctx.args.yes and ctx.std.io.stdout.is_tty:
             ctx.std.io.stdout.write("Upgrade %s from local %s to %s? [y/N]: " % (WRAPPER_SCRIPT_PATH, local_version, target_version))
             ctx.std.io.stdout.flush()
@@ -179,12 +161,9 @@ def _install_impl(ctx: TaskContext) -> int:
                 print("Cancelled.")
                 return 1
 
-    # Write the script with the executable bit set, then the doc alongside it.
-    # `download` (rather than fs.write) is used for the script so the 0o755
-    # mode lands without shelling out to chmod — but it only applies the mode
-    # when creating the file, so remove any existing copy first (otherwise an
-    # upgrade / exec-bit repair would keep the old, possibly non-executable,
-    # permissions).
+    # `download` (not fs.write) sets mode 0o755 without shelling out to chmod,
+    # but only on create — so remove any existing copy first, else an upgrade /
+    # repair would keep the old, possibly non-executable, permissions.
     tools_dir = root + "/tools"
     if not ctx.std.fs.exists(tools_dir):
         ctx.std.fs.create_dir_all(tools_dir)

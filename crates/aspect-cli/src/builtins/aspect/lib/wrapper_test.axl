@@ -31,16 +31,12 @@ def _fake_std(current_dir, existing_paths):
         fs = struct(exists = lambda p: p in existing),
     )
 
-# --- raw_content_url ---
-
 def _test_raw_content_url(ctx):
     _eq(
         "raw url",
         raw_content_url("aspect-build", "aspect-cli", "v1.2.3", "tools/bazel"),
         "https://raw.githubusercontent.com/aspect-build/aspect-cli/v1.2.3/tools/bazel",
     )
-
-# --- find_workspace_root ---
 
 def _test_workspace_root_at_cwd(ctx):
     std = _fake_std("/home/me/repo", ["/home/me/repo/MODULE.bazel"])
@@ -66,8 +62,6 @@ def _test_workspace_root_none_when_absent(ctx):
     std = _fake_std("/tmp/scratch/deep", [])
     _eq("no root", find_workspace_root(std), None)
 
-# --- parse_wrapper_version ---
-
 def _test_parse_version_quoted(ctx):
     content = "#!/usr/bin/env bash\nASPECT_BAZEL_WRAPPER_VERSION=\"7\"\nexport ASPECT_BAZEL_WRAPPER_VERSION\n"
     _eq("quoted version", parse_wrapper_version(content), "7")
@@ -82,16 +76,12 @@ def _test_parse_version_empty(ctx):
     _eq("empty content", parse_wrapper_version(""), None)
     _eq("none content", parse_wrapper_version(None), None)
 
-# --- has_wrapper_marker ---
-
 def _test_marker_present(ctx):
     _eq("marker present", has_wrapper_marker("# aspect-build/tools-bazel-wrapper\n..."), True)
 
 def _test_marker_absent(ctx):
     _eq("marker absent", has_wrapper_marker("#!/usr/bin/env bash\necho hi\n"), False)
     _eq("marker none", has_wrapper_marker(None), False)
-
-# --- classify_install ---
 
 def _test_classify_install(ctx):
     _eq("fresh install", classify_install(None, "abc").value, InstallAction("install").value)
@@ -110,8 +100,6 @@ def _test_classify_noop_default_executable(ctx):
     # Default existing_executable is True, so matching bytes no-op.
     _eq("default exec noop", classify_install("abc", "abc").value, InstallAction("noop").value)
 
-# --- detect_shell ---
-
 def _test_detect_shell_bash(ctx):
     _eq("bash", detect_shell("/bin/bash").value, Shell("bash").value)
 
@@ -127,8 +115,6 @@ def _test_detect_shell_unknown(ctx):
 def _test_detect_shell_unset(ctx):
     _eq("unset shell", detect_shell(None), None)
     _eq("empty shell", detect_shell(""), None)
-
-# --- shell_snippet ---
 
 def _test_shell_snippet_posix(ctx):
     snippet = shell_snippet(Shell("zsh"))

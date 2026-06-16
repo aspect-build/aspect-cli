@@ -1,35 +1,23 @@
-"""Helpers for the `aspect wrapper install` / `aspect wrapper uninstall`
-tasks: locating the Bazel workspace root, building raw-content URLs for the
-vendored `tools/bazel` wrapper, fingerprinting an installed copy, comparing it
-against a target version, and rendering per-shell environment snippets.
-
-Pure functions only, with one exception — `find_workspace_root` takes `std`
-and walks the filesystem. Everything lives here (rather than in wrapper.axl)
-so the command file stays thin and the logic is unit-testable without IO; see
-lib/wrapper_test.axl.
+"""Pure helpers for the `aspect wrapper` tasks, unit-tested in
+lib/wrapper_test.axl. `find_workspace_root` is the one exception: it takes
+`std` to walk the filesystem.
 """
 
-# GitHub coordinates of the canonical wrapper. The script and its companion
-# doc are vendored from this repo's `tools/` directory into a user's
-# workspace; see tools/bazel.md for the source-of-truth note.
+# GitHub coordinates of the canonical wrapper, vendored from this repo's
+# `tools/` directory.
 WRAPPER_REPO_OWNER = "aspect-build"
 WRAPPER_REPO_NAME = "aspect-cli"
 WRAPPER_SCRIPT_PATH = "tools/bazel"
 WRAPPER_DOC_PATH = "tools/bazel.md"
 
-# Marker comment the wrapper carries at its top; identifies a file as the
-# Aspect-shipped wrapper (vs. a hand-rolled tools/bazel). `uninstall` refuses
-# to delete a tools/bazel that lacks it.
+# Identifies a file as the Aspect-shipped wrapper; `uninstall` refuses to
+# delete a tools/bazel that lacks it.
 WRAPPER_MARKER = "# aspect-build/tools-bazel-wrapper"
 
-# The variable the wrapper exports to advertise its own schema version. Parsed
-# out of an installed copy to report local-vs-upstream versions in upgrade /
-# check messages.
+# Version the wrapper exports; parsed to report local-vs-upstream versions.
 WRAPPER_VERSION_VAR = "ASPECT_BAZEL_WRAPPER_VERSION"
 
-# Bazel workspace boundary markers (mirrors BAZEL_BOUNDARY_FILES in
-# crates/aspect-cli/src/helpers.rs). Presence of any one identifies a
-# workspace root.
+# Mirrors BAZEL_BOUNDARY_FILES in crates/aspect-cli/src/helpers.rs.
 BAZEL_WORKSPACE_MARKERS = [
     "MODULE.bazel",
     "MODULE.bazel.lock",
@@ -38,26 +26,22 @@ BAZEL_WORKSPACE_MARKERS = [
     "WORKSPACE.bazel",
 ]
 
-# Outcome of comparing an installed wrapper against the fetched target.
 InstallAction = enum(
-    "install",  # no tools/bazel present — fresh install
-    "upgrade",  # present but differs from the target — replace
-    "noop",  # present and byte-identical to the target — nothing to do
+    "install",  # no tools/bazel present
+    "upgrade",  # present but differs from the target
+    "noop",  # present and byte-identical to the target
 )
 
-# Shells we know how to emit an rc snippet for.
 Shell = enum("bash", "zsh", "fish")
 
 ALL_SHELLS = [Shell("bash"), Shell("zsh"), Shell("fish")]
 
 def raw_content_url(owner: str, repo: str, ref: str, path: str) -> str:
-    """raw.githubusercontent.com URL for `path` in `owner/repo` at `ref` (a
-    tag, branch, or commit sha)."""
+    """raw.githubusercontent.com URL for `path` in `owner/repo` at `ref`."""
     return "https://raw.githubusercontent.com/%s/%s/%s/%s" % (owner, repo, ref, path)
 
 def _parent_dir(path: str) -> str:
-    """Parent of an absolute path. Returns "" once the walk climbs past the
-    filesystem root, so callers can terminate."""
+    """Parent of an absolute path, or "" past the filesystem root."""
     trimmed = path.rstrip("/")
     if not trimmed or "/" not in trimmed:
         return ""
@@ -65,16 +49,13 @@ def _parent_dir(path: str) -> str:
     return parent if parent else "/"
 
 def find_workspace_root(std) -> str | None:
-    """Deepest ancestor of the current directory that contains a Bazel
-    workspace marker, or None when not inside a workspace. Walks upward like
-    Bazel / Bazelisk do; see BAZEL_WORKSPACE_MARKERS.
-
-    Takes `std` (for `env.current_dir()` + `fs.exists`) rather than the full
-    ctx so tests can pass a small fake.
+    """Deepest ancestor of the cwd containing a BAZEL_WORKSPACE_MARKERS file,
+    or None when not inside a workspace. Takes `std` (not ctx) so tests can
+    pass a small fake.
     """
     current = std.env.current_dir()
 
-    # Bounded to avoid spinning on a pathological path; real trees are shallow.
+    # Bounded against a pathological path; real trees are shallow.
     for _ in range(256):
         if not current:
             return None
@@ -88,8 +69,7 @@ def find_workspace_root(std) -> str | None:
 
 def parse_wrapper_version(content: str | None) -> str | None:
     """The `ASPECT_BAZEL_WRAPPER_VERSION` value declared in a wrapper script,
-    or None when the line is absent or `content` is empty. Used to report
-    local-vs-upstream versions in upgrade / check messages.
+    or None when absent.
     """
     if not content:
         return None
@@ -99,7 +79,7 @@ def parse_wrapper_version(content: str | None) -> str | None:
         if line.startswith(prefix):
             value = line[len(prefix):].strip()
 
-            # Strip a surrounding pair of matching quotes if present.
+            # Strip a surrounding pair of matching quotes.
             if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
                 value = value[1:-1]
             return value
@@ -110,16 +90,10 @@ def has_wrapper_marker(content: str | None) -> bool:
     return bool(content) and WRAPPER_MARKER in content
 
 def classify_install(existing: str | None, target: str, existing_executable: bool = True) -> InstallAction:
-    """Decide what an install would do, given the on-disk wrapper content
-    (`existing`, None when absent), the freshly-fetched `target`, and whether
-    the on-disk file currently has its executable bit set.
-
-    Matching bytes that lack the executable bit are classified `upgrade`, not
-    `noop` — Bazelisk execs `tools/bazel` directly, so a copy committed or
-    pulled without `chmod +x` is a broken hook that install must repair rather
-    than report as up to date. Callers on platforms where the bit is
-    meaningless (Windows) pass `existing_executable = True` so the content
-    comparison alone decides.
+    """What an install would do. Matching bytes that lack the executable bit
+    are `upgrade`, not `noop` — Bazelisk execs tools/bazel directly, so a copy
+    without `chmod +x` is a broken hook to repair. Windows callers pass
+    `existing_executable = True` (the bit is meaningless there).
     """
     if existing == None:
         return InstallAction("install")
@@ -128,8 +102,7 @@ def classify_install(existing: str | None, target: str, existing_executable: boo
     return InstallAction("upgrade")
 
 def detect_shell(shell_path: str | None) -> Shell | None:
-    """Map a `$SHELL` value (e.g. "/bin/zsh") to a Shell, or None when unset or
-    unrecognized."""
+    """Map a `$SHELL` value (e.g. "/bin/zsh") to a Shell, or None."""
     if not shell_path:
         return None
     name = shell_path.rstrip("/").rsplit("/", 1)[-1]
@@ -142,12 +115,9 @@ def detect_shell(shell_path: str | None) -> Shell | None:
     return None
 
 def shell_snippet(shell: Shell) -> str:
-    """Copy-pasteable rc snippet for `shell`.
-
-    The wrapper needs no environment setup to function — it activates via
-    Bazelisk's `tools/bazel` hook. The snippet documents that requirement and
-    the optional opt-out / trace toggles, commented out by default so a paste
-    changes nothing until the user uncomments a line.
+    """Copy-pasteable rc snippet for `shell`. The wrapper needs no env setup;
+    the snippet just documents the Bazelisk requirement and the optional
+    toggles, all commented out so a paste changes nothing by default.
     """
     if shell.value == "fish":
         return "\n".join([
