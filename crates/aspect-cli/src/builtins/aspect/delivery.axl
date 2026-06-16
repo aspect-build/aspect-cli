@@ -597,6 +597,15 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
     # it once with the aggregate build_code after `_get_output_shas` returns.
     dispatch_bazel_attempt_end(ctx, bazel_trait, phase2_status.code)
 
+    # Tear down the dummy executor now that the phase-2 build has exited: Bazel
+    # only talks to it while building, and the remaining log parsing touches no
+    # remote. Done here (not before the final return) so every return path
+    # below — including the no-gRPC-log early bail — leaves nothing running.
+    # No-op when a real --remote_executor was used (dummy is None). Starlark
+    # has no finally, so cleanup lives at the one point all paths pass through.
+    if dummy:
+        stop_dummy_executor(dummy)
+
     # Normalize user-supplied targets to apparent form so they match however
     # the gRPC log records the label (canonical @@module+// or apparent @module//).
     apparent_targets = {apparent_label(t): t for t in targets}
@@ -701,12 +710,6 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
                           " (it reads delivery digests from the remote cache without building); the" +
                           " \"Action must be cached ... but it is not\" lines are expected, and are shown" +
                           " only because a digest could not be resolved for an unexpected reason.")
-
-    # Tear down the dummy executor (no-op when a real --remote_executor was
-    # used). Safe as the single post-phase-2 return: the only earlier return
-    # (phase-1 failure) is before the dummy is started.
-    if dummy:
-        stop_dummy_executor(dummy)
 
     return output_shas, non_hermetic_misses, 0
 
