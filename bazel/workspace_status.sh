@@ -5,22 +5,21 @@ set -o errexit -o nounset -o pipefail
 git_commit=$(git rev-parse HEAD)
 readonly git_commit
 
-# Monorepo version. For example, 2025.34.0+201b9a8.
-# Follows https://blog.aspect.build/versioning-releases-from-a-monorepo
+# Monorepo version as semver, e.g. 2025.34.1+201b9a8:
+# - major = year (2025), minor = ISO week (34),
+# - patch = commits since the week's tag (1), +build = short commit (201b9a8).
+# The two --match globs cover single- and double-digit week tags (2025.1-2025.59).
+# Follows https://aspect.build/blog/versioning-releases-from-a-monorepo
 monorepo_version=$(
     git describe --tags --long --match="2[0-9][0-9][0-9].[1-9]" --match="2[0-9][0-9][0-9].[1-5][0-9]" |
         sed -e 's/-/./;s/-g/+/'
 )
 
-# A short variant of the monorepo version. For example, 2025.34.0.
-# The short version conforms with the version scheme Bazelisk supports.
-# It assumes the upstream `bazel` binary releases are the only ones referenced,
-# so we are forced to adopt a matching scheme.
-# https://github.com/bazelbuild/bazelisk/blob/47f60477721681a117cbf905784ee5220100e68b/versions/versions.go#L20-L25
+# A short variant of the monorepo version that drops the +build metadata. For example, 2025.34.0.
 monorepo_short_version=$(sed 's/+.*//' <<<"$monorepo_version")
 
-# Image repository compatible monrepo version. For example, 2025.34.0-201b9a8.
-# AWS ECR does not allow `+` characters in tags so we swap with `-`.
+# Registry-tag-safe variant, e.g. 2025.34.1-201b9a8: registries like AWS ECR
+# disallow `+` in tags, so swap it for `-`.
 monorepo_image_tag_version="${monorepo_version//+/-}"
 
 function has_local_changes {
