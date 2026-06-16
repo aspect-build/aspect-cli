@@ -11,7 +11,10 @@ build phases plus a dispatch loop:
   2. Phase 2 — re-run with `--experimental_remote_require_cached` and
      `--remote_grpc_log`. Bazel emits a gRPC log entry for every action
      including `DeliveryHash`, and the impl extracts `action_digest.hash` per
-     target. (Phases 1 and 2 share a single function.)
+     target. (Phases 1 and 2 share a single function.) The `no-local`
+     DeliveryHash action requires a remote executor; phase 2 uses the user's
+     `--remote_executor` if set, otherwise an in-process dummy executor so a
+     plain `--remote_cache` (no RBE) is enough — see `lib/remote_executor.axl`.
   3. deliveryd record/query — record (label, digest) pairs and query the
      per-prefix delivery state.
   4. Phase 3 — download runfiles for the targets that survived change
@@ -143,10 +146,12 @@ load("@aspect//lib/environment.axl", "color_enabled", "error", "info", "warn")
 load("@aspect//lib/github.axl", "detect_commit_sha")
 load("@aspect//lib/health_check.axl", "HealthCheckTrait")
 load("@aspect//lib/lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "setup_phase", "task_update")
+load("@aspect//lib/remote_executor.axl", "start_dummy_executor", "stop_dummy_executor")
 load("@aspect//lib/repro_commands.axl", "build_aspect_command", "print_repro_and_fix", "repro_prefix", "task_cli_path")
 load("@aspect//lib/runnable.axl", "LOCAL_SPAWN_BASE_FLAGS", "LOCAL_SPAWN_FLAGS", "apparent_label", "runnable")
 load("@aspect//lib/text.axl", "pluralize")
 load("@aspect//lib/tips.axl", "tips")
+load("@bazel//proto/remote_logging.axl", "remote_logging")
 load("@std//time.axl", "sleep_iter", "time")
 
 DeliveryTrait = trait(
@@ -376,7 +381,7 @@ def _surface_phase_stderr(ctx, phase, log_path):
     ctx.std.io.stderr.write(ctx.std.fs.read_to_string(log_path))
     artifacts.upload_file(ctx, "delivery_phase{}_log".format(phase), "phase{}-stderr.log".format(phase), log_path)
 
-def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_flags, remote_executor_uri, ansi, data):
+def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_flags, user_remote_executor_uri, ansi, data):
     """Run phase 1 (main build) + phase 2 (digest extraction) and return
     `(output_shas, non_hermetic_misses, exit_code)`. Phase 1 BES events
     drive the `data` (delivery_results) metadata; phase 2's gRPC log yields
@@ -545,9 +550,30 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
     _t_phase2 = time.monotonic()
     log_path = _GRPC_LOG_PATH.format(ctx.task.key)
 
+    # Phase 2 needs a remote *executor* endpoint: the DeliveryHash action is
+    # `no-local`, so Bazel requires some executor for it even though
+    # --experimental_remote_require_cached means it never actually executes
+    # (it resolves against the cache or fails). The user's real --remote_cache
+    # is already in bazel_flags and serves GetActionResult, so it carries the
+    # digests regardless of where the executor points. Two cases:
+    #
+    #  - User configured a real --remote_executor: use it.
+    #  - User configured only --remote_cache (the common case — a cache, not
+    #    RBE): stand up an in-process dummy executor and point --remote_executor
+    #    at it. require-cached means Bazel never dispatches execution to it; the
+    #    dummy just satisfies the "no-local needs an executor" requirement, so
+    #    delivery no longer needs a real remote executor. See
+    #    lib/remote_executor.axl.
+    if user_remote_executor_uri:
+        dummy = None
+        phase2_executor_uri = user_remote_executor_uri
+    else:
+        dummy = start_dummy_executor()
+        phase2_executor_uri = dummy.grpc_uri
+
     # Force `=minimal`: phase 2 reads digests from the gRPC log, not disk.
     phase2_flags = bazel_flags + aspect_flags + [
-        "--remote_executor=" + remote_executor_uri,
+        "--remote_executor=" + phase2_executor_uri,
         "--experimental_remote_require_cached",
         "--remote_grpc_log=" + log_path,
         "--keep_going",
@@ -571,6 +597,15 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
     # it once with the aggregate build_code after `_get_output_shas` returns.
     dispatch_bazel_attempt_end(ctx, bazel_trait, phase2_status.code)
 
+    # Tear down the dummy executor now that the phase-2 build has exited: Bazel
+    # only talks to it while building, and the remaining log parsing touches no
+    # remote. Done here (not before the final return) so every return path
+    # below — including the no-gRPC-log early bail — leaves nothing running.
+    # No-op when a real --remote_executor was used (dummy is None). Starlark
+    # has no finally, so cleanup lives at the one point all paths pass through.
+    if dummy:
+        stop_dummy_executor(dummy)
+
     # Normalize user-supplied targets to apparent form so they match however
     # the gRPC log records the label (canonical @@module+// or apparent @module//).
     apparent_targets = {apparent_label(t): t for t in targets}
@@ -591,7 +626,7 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
 
     log_file = ctx.std.fs.open(log_path)
     getactionresult_count = 0
-    for entry in remote.logging.LogEntry().parse_from_delimited(log_file):
+    for entry in remote_logging.LogEntry().parse_from_delimited(log_file):
         if entry.method_name != "build.bazel.remote.execution.v2.ActionCache/GetActionResult":
             continue
         getactionresult_count += 1
@@ -619,9 +654,12 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
         action_meta = {}
         execlog_file = ctx.std.fs.open(phase1_execlog_path)
         for entry in bazel.build.execution_log.ExecLogEntry().parse_from_delimited(execlog_file):
-            if entry.kind != "spawn":
+            # The ExecLogEntry oneof surfaces as `entry.type`: the active
+            # variant's value directly (or None when unset). A spawn entry's
+            # value reports `type() == "spawn"`; skip everything else.
+            spawn = entry.type
+            if spawn == None or type(spawn) != "spawn":
                 continue
-            spawn = entry.payload
             if not spawn.target_label or not spawn.mnemonic:
                 continue
             action_meta[(spawn.target_label, spawn.mnemonic)] = {
@@ -1044,7 +1082,12 @@ def _delivery_impl(ctx):
     # section as --default_override=0:common=--remote_cache=...).
     # expand_all returns either strings or (value, version-constraint)
     # tuples; take the first element of the tuple form.
+    #
+    # A real --remote_executor is tracked separately: when one is configured
+    # phase 2 uses it directly; when only a cache is configured phase 2 stands
+    # up a dummy executor instead, so delivery no longer requires real RBE.
     remote_cache_uri = None
+    user_remote_executor_uri = None
     _override_prefix = "--default_override=0:common="
     for flag in expanded_flags:
         f = flag[0] if type(flag) == "tuple" else flag
@@ -1053,7 +1096,11 @@ def _delivery_impl(ctx):
         if f.startswith("--remote_cache="):
             remote_cache_uri = f[len("--remote_cache="):]
         elif f.startswith("--remote_executor="):
-            remote_cache_uri = f[len("--remote_executor="):]
+            user_remote_executor_uri = f[len("--remote_executor="):]
+
+    # An executor implies a cache, so either flag satisfies the requirement.
+    if not remote_cache_uri:
+        remote_cache_uri = user_remote_executor_uri
     if not remote_cache_uri and phase_1_2_runs:
         # --mode=always --dry-run --track-state=false degrades gracefully
         # (skip phase 1/2, no digests). Other combinations need digests
@@ -1157,7 +1204,7 @@ def _delivery_impl(ctx):
     # Phase 1/2 — skipped only in --mode=always + --track-state=false.
     if phase_1_2_runs:
         _t_build = time.monotonic()
-        output_shas, non_hermetic_misses, build_code = _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, expanded_flags, remote_cache_uri, ansi, data)
+        output_shas, non_hermetic_misses, build_code = _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, expanded_flags, user_remote_executor_uri or "", ansi, data)
         info(ctx.std, "Build+checksum total: {}.".format(fmt_elapsed(time.monotonic() - _t_build)))
 
         for handler in bazel_trait.build_end:

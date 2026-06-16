@@ -1,0 +1,66 @@
+"""In-process **dummy** Bazel Remote Execution v2 executor."""
+
+load("@bazel//grpc.axl", "grpc")
+load("@bazel//proto/remote/execution/v2.axl", "v2")
+load("@bazel//proto/semver.axl", "semver")
+
+# Handle is the opaque `grpc.ServerHandle` value returned by `serve()`; its
+# Starlark type isn't nameable from an `@aspect` module, so it's typed Any.
+DummyExecutor = record(
+    handle = field(typing.Any),
+    grpc_uri = field(str),
+)
+
+def _get_capabilities(req, rpc):
+    """Advertise a SHA256, exec-enabled RE v2 server so Bazel's startup
+    capability check passes for this `--remote_executor` endpoint."""
+    return v2.ServerCapabilities(
+        cache_capabilities = v2.CacheCapabilities(
+            digest_functions = [v2.digest_function.Value.SHA256],
+            action_cache_update_capabilities = v2.ActionCacheUpdateCapabilities(update_enabled = True),
+        ),
+        execution_capabilities = v2.ExecutionCapabilities(
+            exec_enabled = True,
+            digest_function = v2.digest_function.Value.SHA256,
+        ),
+        low_api_version = semver.SemVer(major = 2, minor = 0),
+        high_api_version = semver.SemVer(major = 2, minor = 3),
+    )
+
+def _get_action_result(req, rpc):
+    """Unused in practice: with a separate --remote_cache configured, Bazel
+    routes action-cache lookups there, not to the executor. Present so the
+    ActionCache service is constructible; always reports a miss."""
+    rpc.abort(grpc.Code.NOT_FOUND, "aspect delivery dummy executor: no cached results")
+
+def _update_action_result(req, rpc):
+    """Require-cached builds don't write, but the ActionCache constructor
+    needs a handler for every method. Return an empty result."""
+    return v2.ActionResult()
+
+def start_dummy_executor(endpoint: str = "tcp://127.0.0.1:0") -> DummyExecutor:
+    """Bind a loopback dummy RE v2 server and start serving. `endpoint`
+    defaults to an ephemeral loopback port; pass a fixed `tcp://host:port`
+    only when an external process needs a stable address. Returns a
+    `DummyExecutor` carrying the server handle (for teardown) and a
+    `grpc://host:port` URI ready to pass to Bazel's `--remote_executor`.
+
+    Must be called from inside a task implementation (the server runs on the
+    task's tokio runtime). Raises on bind failure.
+    """
+    srv = grpc.Server(endpoint = endpoint)
+    srv.add(v2.CapabilitiesService(on_get_capabilities = _get_capabilities))
+    srv.add(v2.ActionCacheService(
+        on_get_action_result = _get_action_result,
+        on_update_action_result = _update_action_result,
+    ))
+    h = srv.serve()
+
+    # `serve()` reports the kernel-assigned endpoint as `tcp://host:port`;
+    # Bazel's `--remote_executor` wants the `grpc://` scheme.
+    grpc_uri = "grpc://" + h.endpoint[len("tcp://"):]
+    return DummyExecutor(handle = h, grpc_uri = grpc_uri)
+
+def stop_dummy_executor(executor: DummyExecutor, timeout_ms: int = 5000) -> None:
+    """Gracefully drain and stop a dummy executor. Idempotent."""
+    executor.handle.drain_and_quit(timeout = timeout_ms)

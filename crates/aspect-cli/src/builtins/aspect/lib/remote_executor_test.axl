@@ -1,0 +1,55 @@
+"""Tests for `lib/remote_executor.axl`.
+
+Covers the dummy RE server lifecycle end to end:
+  - `start_dummy_executor` binds a loopback server on an ephemeral port and
+    reports a `grpc://127.0.0.1:<port>` URI (the scheme Bazel's
+    `--remote_executor` expects, translated from the handle's `tcp://`).
+  - `stop_dummy_executor` drains and shuts it down (and is idempotent).
+
+The server runs on the task's tokio runtime, so this must run inside a task
+impl (not at module-eval time).
+
+Run with:
+  aspect dev test-remote-executor
+"""
+
+load("./remote_executor.axl", "start_dummy_executor", "stop_dummy_executor")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _test_start_reports_grpc_uri(_):
+    ex = start_dummy_executor()
+    _eq(
+        "grpc_uri scheme/host",
+        ex.grpc_uri.startswith("grpc://127.0.0.1:"),
+        True,
+    )
+
+    # Ephemeral bind must have resolved to a concrete non-zero port.
+    port = ex.grpc_uri[len("grpc://127.0.0.1:"):]
+    _eq("port is numeric", port.isdigit(), True)
+    _eq("port is not the ephemeral 0", port != "0", True)
+
+    stop_dummy_executor(ex)
+
+def _test_stop_is_idempotent(_):
+    ex = start_dummy_executor()
+    stop_dummy_executor(ex)
+
+    # Second call must be a no-op, not raise.
+    stop_dummy_executor(ex)
+
+def _test_impl(ctx):
+    _test_start_reports_grpc_uri(ctx)
+    _test_stop_is_idempotent(ctx)
+    print("remote_executor_test.axl: OK (2 sections)")
+    return 0
+
+remote_executor_tests = task(
+    name = "test-remote-executor",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

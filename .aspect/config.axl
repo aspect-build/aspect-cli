@@ -25,6 +25,7 @@ load("@aspect//lib/health_check_ready_test.axl", "health_check_ready_tests")
 load("@aspect//lib/lint_comments_test.axl", "lint_comments_tests")
 load("@aspect//lib/lint_results_test.axl", "detect_lint_tool_tests", "lint_annotation_plan_tests", "lint_template_snapshot_tests", "linter_rows_tests")
 load("@aspect//lib/rate_limit_test.axl", "rate_limit_tests")
+load("@aspect//lib/remote_executor_test.axl", "remote_executor_tests")
 load("@aspect//lib/repro_commands_test.axl", "repro_commands_tests")
 load("@aspect//lib/runnable_test.axl", "runnable_tests")
 load("@aspect//lib/runner_job_history_test.axl", "runner_job_history_tests")
@@ -346,6 +347,12 @@ def config(ctx: ConfigContext):
     # feature registers.
     # Run with: aspect dev test-sandbox-recovery
     ctx.tasks.add(sandbox_recovery_tests)
+
+    # Dummy RE v2 executor used by `aspect delivery` phase 2 when the user has
+    # a --remote_cache but no real --remote_executor — binds a loopback server
+    # and reports a grpc:// URI for --remote_executor.
+    # Run with: aspect dev test-remote-executor
+    ctx.tasks.add(remote_executor_tests)
 
     # canonical_label normalization — local labels, external labels, and bzlmod
     # canonical @@module+version//... → @module//... conversion.

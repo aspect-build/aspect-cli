@@ -1,0 +1,39 @@
+_g = __builtins__.grpc()
+
+# `Server(endpoint = ...)` — non-blocking builder. `.add(service)` attaches a
+# service value from a proto module; `.serve()` binds synchronously and
+# returns a handle.
+Server = _g.Server
+
+# `Status(code = ..., message = ...)` — passed to `rpc.abort(status = ...)`
+# or `stream.complete(status = ...)`. Details (proto Any payloads) are not
+# yet supported.
+Status = _g.Status
+
+# Canonical gRPC status codes. Mirrors `tonic::Code` exactly so values are
+# wire-compatible. Use as `grpc.Code.NOT_FOUND` in handler bodies.
+Code = struct(
+    OK = 0,
+    CANCELLED = 1,
+    UNKNOWN = 2,
+    INVALID_ARGUMENT = 3,
+    DEADLINE_EXCEEDED = 4,
+    NOT_FOUND = 5,
+    ALREADY_EXISTS = 6,
+    PERMISSION_DENIED = 7,
+    RESOURCE_EXHAUSTED = 8,
+    FAILED_PRECONDITION = 9,
+    ABORTED = 10,
+    OUT_OF_RANGE = 11,
+    UNIMPLEMENTED = 12,
+    INTERNAL = 13,
+    UNAVAILABLE = 14,
+    DATA_LOSS = 15,
+    UNAUTHENTICATED = 16,
+)
+
+grpc = struct(
+    Server = Server,
+    Status = Status,
+    Code = Code,
+)

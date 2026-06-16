@@ -23,6 +23,7 @@ starlark_derive = "0.13.0"
 tonic = { version = "0.14.2", features = ["transport", "tls-native-roots"] }
 tonic-prost = "0.14.2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio-stream = "0.1.17"
 
 [build-dependencies]
 prost-build = "0.14.1"
