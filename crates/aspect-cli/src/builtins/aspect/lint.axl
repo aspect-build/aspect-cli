@@ -1,9 +1,7 @@
 """Define the 'lint' task
 
-First, perform a build with linting aspects enabled, and selecting appropriate output groups.
-These can be remotely cached like any other actions.
-
-Then collect the data for presentation, either locally on the terminal or in the code review with Aspect's Marvin bot.
+Builds with linting aspects enabled (remotely cacheable), then presents the
+data locally on the terminal or in code review via Aspect's Marvin bot.
 
 Install:
     Add rules_lint to MODULE.aspect.
@@ -39,23 +37,18 @@ load("./lib/tips.axl", "tips")
 # bb_clientd FUSE mount root for resolving bytestream:// URIs on Aspect Workflows runners.
 _BB_CLIENTD_ROOT = "/mnt/ephemeral/buildbarn/bb_clientd"
 
-# How long to poll for pending lint output files after build.wait() returns.
-# Remote downloads are async; the BES event can arrive before the file lands.
-# 30 s is a generous upper bound — in practice downloads complete in < 1 s.
+# Poll budget for pending lint files after build.wait(): remote downloads are
+# async and the BES event can arrive before the file lands. 30s is generous.
 _POST_BUILD_DOWNLOAD_TIMEOUT_MS = 30000
 
 def file_uri_to_path(uri):
     """Resolve a BES file URI to a local path via the bb_clientd FUSE mount.
 
-    Handles both bytestream forms Bazel emits:
-      - bytestream://HOST:PORT/blobs/HASH/SIZE                      (4 parts)
-      - bytestream://HOST:PORT/blobs/<digest>/HASH/SIZE             (5 parts)
-
-    The 5-part form is what modern Bazel (with sha256) emits — `parts[2]`
-    holds the digest function name ("sha256"), and HASH/SIZE move to
-    parts[3] / parts[4]. Treating the digest-function segment as the hash
-    (the previous behavior) produced bb_clientd paths like
-    `.../sha256/file/sha256-HASH`, which don't resolve.
+    Handles both bytestream forms:
+      - bytestream://HOST:PORT/blobs/HASH/SIZE              (4 parts)
+      - bytestream://HOST:PORT/blobs/<digest>/HASH/SIZE     (5 parts, modern sha256)
+    In the 5-part form parts[2] is the digest-function name, HASH/SIZE shift to
+    parts[3]/parts[4]; treating parts[2] as the hash yields non-resolving paths.
     """
     if uri.startswith("file://"):
         return uri[len("file://"):]
@@ -64,9 +57,7 @@ def file_uri_to_path(uri):
         parts = rest.split("/")
         host = parts[0].split(":")[0]
 
-        # Detect the digest-function segment by checking if parts[2] is
-        # one of the known function names. If it is, the hash/size shift
-        # right by one. Default sha256 if unspecified.
+        # parts[2] is a digest-function name in the 5-part form; hash/size shift right.
         if len(parts) >= 5 and parts[2] in ("sha256", "sha512", "blake3"):
             digest_fn = parts[2]
             blob_hash = parts[3]
@@ -83,24 +74,13 @@ def filter_all(diagnostics, changed_files):
     return diagnostics
 
 def filter_hunks(diagnostics, changed_files):
-    """Filter to diagnostics whose line falls within a displayed hunk of
-    a changed file. The displayed hunk is the `hunk_lines` window
-    populated by `detect_changed_files` (added lines + ±3 lines of
-    context, matching GitHub's Files Changed view). Falls back to
-    `lines` (added-only) if `hunk_lines` is absent on a changed-files
-    entry (older hand-built fixtures).
+    """Keep diagnostics whose line is in a changed file's displayed-hunk window.
 
-    SARIF diagnostic lines are 1-based; `hunk_lines` is 0-based, so
-    we compare `(diag.line - 1)`.
-
-    Compared to `filter_changeset` (file-level), this aligns the
-    strategy filter with the per-line filters used by PR-comment
-    posting and changed-region annotations: what survives the
-    strategy filter and shows in the rendered details body is the
-    same set GitHub can actually annotate or comment on. Without
-    this alignment, findings on an unchanged line of a changed file
-    surface in the rendered details but are silently dropped by
-    the API-facing filters — confusing.
+    The window is `hunk_lines` (added + ±3 context, matching GitHub's Files
+    Changed view) populated by `detect_changed_files`; falls back to `lines`
+    (added-only) on older fixtures. SARIF lines are 1-based, `hunk_lines`
+    0-based, so compare `(diag.line - 1)`. Line-level (unlike `filter_changeset`)
+    so the strategy filter matches what PR comments / annotations can surface.
     """
     if not changed_files:
         return []  # no change context → treat as no relevant diagnostics
@@ -128,12 +108,9 @@ def filter_hunks(diagnostics, changed_files):
 def _parse_patch_hunks(content):
     """Extract the (file, line) span of every hunk in a unified diff.
 
-    Returns a list of `{file, start_line, end_line}` dicts, one per
-    hunk. `file` is the post-fix path (the `+++ b/<path>` side; the
-    leading `b/` is stripped if present). Lines are 1-based and
-    inclusive. Returns an empty list when the diff is unparseable —
-    callers treat that as "leave the patch alone" to avoid silently
-    dropping ambiguous fixes.
+    Returns `{file, start_line, end_line}` per hunk; `file` is the post-fix
+    `+++ b/<path>` side (leading `b/` stripped), lines 1-based inclusive.
+    Empty list when unparseable — callers treat that as "leave the patch alone".
     """
     hunks = []
     current_file = ""
@@ -148,9 +125,8 @@ def _parse_patch_hunks(content):
         if not current_file or not line.startswith("@@"):
             continue
 
-        # Unified-diff hunk header: `@@ -X,Y +A,B @@ optional ctx`.
-        # The `+A,B` side gives the post-fix line range (1-based, B
-        # lines). `,B` is omitted when B == 1.
+        # Hunk header `@@ -X,Y +A,B @@`: the `+A,B` side is the post-fix range
+        # (1-based, B lines). `,B` omitted when B == 1.
         parts = line.split(" ")
         if len(parts) < 3 or not parts[2].startswith("+"):
             continue
@@ -173,19 +149,12 @@ def _parse_patch_hunks(content):
     return hunks
 
 def _filter_patches_by_strategy(ctx, patches, strategy, changed_files):
-    """Return the subset of `patches` whose hunks land in the
-    strategy's scope.
+    """Return the subset of `patches` whose hunks land in the strategy's scope.
 
-    For each patch, parse its hunks and synthesize a diagnostic at
-    every line in each hunk's post-fix range. Pass the union through
-    `strategy.filter`; keep the patch iff any synthetic diagnostic
-    survives. Unparseable patches pass through unchanged (no hunks to
-    check ⇒ no way to filter ⇒ default-keep so we don't silently drop).
-
-    `soft` / `hard` use `filter_all` so they keep every patch;
-    `hold-the-file` keeps patches that touch any changed file;
-    `hold-the-line` keeps patches whose hunks overlap a displayed
-    region of a changed file.
+    Synthesizes a diagnostic at every line of each hunk's post-fix range and
+    keeps the patch iff any survives `strategy.filter`. Unparseable patches
+    default-keep (no hunks ⇒ can't filter). soft/hard keep all; hold-the-file
+    keeps patches touching a changed file; hold-the-line requires hunk overlap.
     """
     if not patches:
         return []
@@ -205,13 +174,8 @@ def _filter_patches_by_strategy(ctx, patches, strategy, changed_files):
     return kept
 
 def _filter_suggestions_by_strategy(suggestions, strategy, changed_files):
-    """Drop suggestions whose anchor `(file, end_line || start_line)`
-    falls outside the strategy's scope.
-
-    Reuses the strategy's diagnostic filter so the gating matches:
-    `hold-the-line` keeps suggestions anchored in a displayed hunk,
-    `hold-the-file` keeps suggestions on any touched file, and
-    `soft` / `hard` keep everything (they wrap `filter_all`).
+    """Drop suggestions whose anchor `(file, end_line || start_line)` is out of
+    the strategy's scope, reusing `strategy.filter` so gating matches diagnostics.
     """
     if not suggestions:
         return []
@@ -231,20 +195,12 @@ def _filter_suggestions_by_strategy(suggestions, strategy, changed_files):
     ]
 
 def filter_changeset(diagnostics, changed_files):
-    """Filter to ALL diagnostics from any changed file (file-level).
+    """Keep ALL diagnostics from any changed file (file-level).
 
-    Looser than `filter_hunks`: a finding on an unchanged line of a
-    changed file is kept. Useful when the team wants every linter
-    issue in any touched file to surface, even outside the diff
-    window — common as a nudge to clean up adjacent issues while
-    you're already in a file. The downside is that those findings
-    can't post as PR comments (GitHub's review-comment API rejects
-    lines outside the displayed hunk with 422) or annotate inside
-    the diff view, so the rendered details body will list them but
-    the per-line surfaces won't — that mismatch is the explicit
-    trade-off this strategy accepts.
-
-    If no changed file context is available, returns [].
+    Looser than `filter_hunks`: findings on unchanged lines of a changed file
+    are kept. Such findings can't post as PR comments (GitHub 422s lines outside
+    the displayed hunk) or annotate, so rendered details list them but per-line
+    surfaces won't — the accepted trade-off. Returns [] with no change context.
     """
     if not changed_files:
         return []  # no change context → treat as no relevant diagnostics
@@ -273,24 +229,18 @@ StrategyHard = Strategy(
     fail_on_linter_error = True,  # also fail if linter exits non-zero
 )
 
-# `hold-the-line` (default): line-level — findings must fall within a
-# displayed hunk on a changed file. The "line" in the name is literal:
-# a finding only counts if it's on a line the diff actually changed
-# (or in the ±3 context window GitHub displays alongside it). This is
-# the right default for PR review workflows because every surface
-# (rendered details, annotations, PR comments) shows the same set.
+# hold-the-line (default): line-level — findings must fall in a displayed hunk
+# on a changed file. Right default for PR review: every surface (details,
+# annotations, comments) shows the same set.
 StrategyHoldTheLine = Strategy(
     filter = filter_hunks,
     fail_on_severity = "error",
     fail_on_linter_error = False,
 )
 
-# `hold-the-file`: file-level — every finding on any touched file counts,
-# regardless of whether the line was in the diff. Use when "you touched
-# this file, clean up the rest of it while you're here" is the desired
-# nudge. Trades surface symmetry for broader coverage in the rendered
-# details (annotations / PR comments won't post for findings outside
-# the displayed hunk; only the rendered details body will list them).
+# hold-the-file: file-level — every finding on any touched file counts. Broader
+# coverage at the cost of surface symmetry (out-of-hunk findings list in details
+# only, can't annotate/comment).
 StrategyHoldTheFile = Strategy(
     filter = filter_changeset,
     fail_on_severity = "error",
@@ -305,181 +255,64 @@ _STRATEGIES = {
 }
 
 LintTrait = trait(
-    # Where to surface lint findings. This setting is cross-cutting —
-    # it's consulted by BOTH the `GithubStatusChecks` feature (which
-    # owns channel 1) and the `GithubLintComments` feature (which
-    # owns channels 2 and 3). That's why it lives on the
-    # cross-feature `LintTrait` and not on either feature's args.
-    #
-    # There are three channels:
-    #
-    #   1. **Check-run annotations** (inline markers in Files
-    #      Changed, via `GithubStatusChecks`) — SARIF-driven.
-    #   2. **SARIF-derived PR comments** (Conversation thread, via
-    #      `GithubLintComments`) — one comment per SARIF result.
-    #   3. **Patch-derived auto-fix comments** (one comment per
-    #      `.patch` hunk from rules_lint's `--format=diff`, also via
-    #      `GithubLintComments`) — rendered as a GitHub `suggestion`
-    #      block with an Apply button. Posts when a patch is
-    #      available and the hunk anchors on a line in the PR's
-    #      displayed-hunk window.
-    #
+    # Where to surface lint findings. Cross-cutting: read by GithubStatusChecks
+    # (annotations) and GithubLintComments (SARIF + patch-derived comments).
     # Modes:
-    #
-    #   "auto"        — (default) split surfaces; suppress
-    #                   duplication. Annotates every SARIF finding
-    #                   on channel 1 EXCEPT those whose anchor
-    #                   (file, line) matches a posted patch-derived
-    #                   auto-fix comment on channel 3 — the reviewer
-    #                   already sees that finding via the auto-fix
-    #                   comment in the diff, so a second annotation
-    #                   at the same line is noise. Auto-fix comments
-    #                   (channel 3) post on PR. SARIF-derived
-    #                   comments (channel 2) post only for
-    #                   fix-bearing findings (SARIF `has_fix=True`)
-    #                   — see DORMANT below; the flag is False for
-    #                   every rules_lint Go-errorformat linter today
-    #                   (tracked: https://github.com/aspect-build/rules_lint/issues/749), so
-    #                   in practice channel 2 is empty and the
-    #                   observable behavior is: every SARIF finding
-    #                   annotates UNLESS a correlated auto-fix
-    #                   comment covers the same anchor.
-    #                   Off PR (no comments possible): every SARIF
-    #                   finding annotates.
-    #   "both"        — every SARIF finding annotates (no
-    #                   suppression based on auto-fix correlation),
-    #                   AND fix-bearing findings post as
-    #                   SARIF-derived comments. Auto-fix comments
-    #                   (channel 3) post on PR. The "see everything
-    #                   twice" mode — useful when surface coverage
-    #                   matters more than de-duplication.
-    #   "comments"    — every SARIF finding → comment. No
-    #                   annotations. Auto-fix comments post.
-    #                   Requires a PR.
-    #   "annotations" — every SARIF finding → annotation. NO PR
-    #                   comments of any kind — channel 2 AND
-    #                   channel 3 are suppressed. The explicit "no
-    #                   PR review noise" choice: each comment
-    #                   triggers an email / inbox ping per reviewer,
-    #                   so users who want findings visible on the
-    #                   diff without notification spam pick this
-    #                   mode. Patches are still produced by the
-    #                   build (and applied locally with `--fix`);
-    #                   they just don't post as PR comments.
-    #
-    # PR review comments (channels 2 and 3) are tagged with hidden
-    # HTML markers carrying `(run_id, task_key, tool, file, line,
-    # rule_id)` so subsequent runs can dedupe and stale-cleanup
-    # correctly. See the module docstring of
-    # `feature/github_lint_comments.axl` for the full cleanup state
-    # machine — especially the cross-task / cross-run rules and
-    # per-CI-host `run_id` semantics that determine how retries
-    # (GHA re-runs, Buildkite rebuilds, etc.) interact with comments
-    # from prior runs.
-    #
-    # DORMANT-SPLIT NOTE — the SARIF `has_fix` flag is the key
-    # discriminant between "auto"/"both" and "comments" at the
-    # SARIF-derived-comments surface (channel 2). It's set by
-    # `lib/sarif.axl::_result_has_fix` from SARIF
-    # `relatedLocations`, which `aspect-build/rules_lint` does NOT
-    # emit for any Go-errorformat linter today (shellcheck,
-    # yamllint, clang-tidy, …) — tracked in
-    # https://github.com/aspect-build/rules_lint/issues/749. Only clippy (separate JS
-    # formatter) emits the matching SARIF shape. For every other
-    # rules_lint linter, `has_fix=False` on every diagnostic, so:
-    #   - Channel 2 (SARIF-derived comments) is empty in
-    #     "auto"/"both" — only "comments" mode posts SARIF-derived
-    #     comments today.
-    #   - "auto" still annotates differently from "both": the
-    #     patch-correlation-based suppression on channel 1 is
-    #     active and observable (channel 3 has correlated auto-fix
-    #     comments at known anchors; "auto" skips channel-1
-    #     annotations at those anchors, "both" doesn't). That's
-    #     why "auto" remains the de-duplication default and "both"
-    #     the see-everything-twice option.
-    #   - "annotations" annotates everything and suppresses both
-    #     comment channels (2 and 3).
-    # See `shellcheck-sarif-investigation.md` at the repo root for
-    # the full trace and the upstream rules_lint fix we own.
+    #   "auto"        — (default) annotate every SARIF finding except those whose
+    #                   anchor matches a posted patch auto-fix comment (de-dup);
+    #                   fix-bearing SARIF findings → comments; patches post on PR.
+    #   "both"        — annotate everything (no de-dup) + fix-bearing → comments.
+    #   "comments"    — every finding → comment, no annotations. Requires a PR.
+    #   "annotations" — every finding → annotation, suppress ALL PR comments.
+    # has_fix/DORMANT caveat: the `has_fix` discriminant (set from SARIF
+    # relatedLocations by lib/sarif.axl::_result_has_fix) is False for every
+    # rules_lint Go-errorformat linter today, so SARIF-derived comments are empty
+    # in auto/both and only patch comments post; auto still differs from both via
+    # patch-correlated annotation suppression. Tracked:
+    # https://github.com/aspect-build/rules_lint/issues/749. Full trace in
+    # shellcheck-sarif-investigation.md. Comments carry hidden markers
+    # (run_id, task_key, tool, file, line, rule_id) for dedup/cleanup — see the
+    # module docstring of feature/github_lint_comments.axl for the state machine.
     findings_destination = attr(str, default = "auto"),
 
-    # Lifecycle hooks. Each is a list of callables; features compose by
-    # appending their hook to the list.
+    # Lifecycle hooks. Each is a list of callables; features append to compose.
 
-    # Called once before the build, after lint_trait.changed_files is set.
-    # Signature: (ctx) -> None.
+    # Once before the build, after changed_files is set. (ctx) -> None
     lint_start = attr(list[typing.Callable[[TaskContext], None]], default = []),
 
-    # Called per SARIF file as it arrives during the build stream.
-    # Signature: (ctx, sarif_filepath) -> None.
+    # Per SARIF file as it streams in. (ctx, sarif_filepath) -> None
     lint_report = attr(list[typing.Callable[[TaskContext, str], None]], default = []),
 
-    # Called per `.patch` file as it arrives during the build stream.
-    # Patches come from rules_lint's `--format=diff` mode and carry a
-    # unified diff describing the linter's auto-fix. The patch
-    # contents can be parsed via `lib/patch.axl::parse`; consumers
-    # (e.g. GithubLintComments) translate hunks into PR review
-    # comments with GitHub `suggestion` blocks.
-    # Signature: (ctx, patch_filepath, patch_name) -> None.
-    #   patch_filepath — content-addressed local path resolved via
-    #                    bb_clientd FUSE on Aspect Workflows runners,
-    #                    or `bazel-bin/...` locally. Useful for
-    #                    reading the patch contents.
-    #   patch_name     — Bazel-output logical name like
-    #                    `examples/lint/hello.AspectRulesLintShellCheck.patch`.
-    #                    Use this (not the filepath) for anything that
-    #                    needs the original mnemonic — the resolved
-    #                    bytestream path is content-hash-only on CI
-    #                    so it loses the `.AspectRulesLint<Tool>` tail.
+    # Per `.patch` file (rules_lint `--format=diff`; parse via lib/patch.axl::parse).
+    # (ctx, patch_filepath, patch_name) -> None. patch_name retains the
+    # `.AspectRulesLint<Tool>` mnemonic; the resolved filepath is content-hashed
+    # on CI so use patch_name when the tool name matters.
     lint_patch = attr(list[typing.Callable[[TaskContext, str, str], None]], default = []),
 
-    # Called once after all SARIF reports are collected, receives the
-    # strategy-filtered diagnostics for this run.
-    # Signature: (ctx, relevant_diagnostics) -> None.
+    # Once after all SARIF collected, with strategy-filtered diagnostics.
+    # (ctx, relevant_diagnostics) -> None
     lint_end = attr(list[typing.Callable[[TaskContext, list], None]], default = []),
 
-    # Canonical changed-file set for this lint run. Populated by the task
-    # impl via detect_changed_files (GitHub PR Files API → local-git
-    # fallback) BEFORE any lifecycle hook fires, so features read it as a
-    # data field rather than each computing their own. Shape:
-    # [{"file": str, "lines": [int (0-based added line indices)]}].
+    # Canonical changed-file set, populated by the task impl via
+    # detect_changed_files BEFORE any hook fires so features read it as data.
+    # Shape: [{"file": str, "lines": [int 0-based added line indices]}].
     changed_files = attr(list, default = []),
 
-    # Records of suggested-fix PR review comments posted by the
-    # GithubLintComments feature, populated during `lint_end` and
-    # consumed by the lint task to thread into `data["lint"]
-    # ["suggestions"]` for the rendered check-run detail body. Each
-    # record:
-    #   {
-    #       "tool":         str,    # e.g. "ShellCheck"
-    #       "file":         str,    # repo-relative path
-    #       "start_line":   int,    # 1-based new-side
-    #       "end_line":     int,    # 1-based new-side, inclusive
-    #       "severity":     str,    # "error"|"warning"|"info"|"" (uncorrelated)
-    #       "rule_id":      str,    # SARIF ruleId when correlated, else ""
-    #       "correlated":   bool,   # True iff a SARIF diagnostic on the same
-    #                               # (file, line) was found
-    #       "comment_url":  str,    # GitHub html_url of the posted review
-    #                               # comment, empty when the post failed or
-    #                               # the comment was deduped against a prior
-    #                               # run (we don't fetch URLs for those).
-    #   }
+    # Suggested-fix comment records posted by GithubLintComments during lint_end,
+    # threaded into data["lint"]["suggestions"]. Each record:
+    #   {tool, file, start_line, end_line (1-based new-side incl),
+    #    severity ("error"|"warning"|"info"|"" uncorrelated),
+    #    rule_id (SARIF ruleId or ""), correlated (bool: SARIF diag on same
+    #    (file,line)), comment_url (html_url; "" when post failed or deduped)}
     suggestions = attr(list, default = []),
 
-    # `(file, line) → comment_url` map for every successfully posted
-    # PR review comment — covers SARIF-derived diagnostics across
-    # destinations. The lint-results renderer consults this so a
-    # finding row that has a posted comment renders a 💬 link to
-    # that comment, not just the fix-bearing subset captured in
-    # `suggestions`. In "comments" mode every finding posts and so
-    # gets a link; in "auto" / "both" mode only fix-bearing comments
-    # exist (and patch-derived suggestion comments live on
-    # `suggestions` separately).
+    # `(file, line) → comment_url` for every posted SARIF-derived comment, so the
+    # renderer links a finding row to its 💬 comment. "comments" mode links every
+    # finding; "auto"/"both" only fix-bearing. Patch comments live on `suggestions`.
     comment_urls = attr(dict, default = {}),
 )
 
-# Allowed values for LintTrait.findings_destination — keep this and the trait
-# docstring in sync.
+# Allowed LintTrait.findings_destination values — keep in sync with the trait docstring.
 FINDINGS_DESTINATIONS = ["auto", "both", "comments", "annotations"]
 
 def validate_findings_destination(value):
@@ -492,10 +325,7 @@ def validate_findings_destination(value):
     return value
 
 def _strategy_name(strategy):
-    """Best-effort label for a Strategy record — returns the same
-    kebab-case form the user passes via `--strategy=…`, so the
-    rendered "Strategy: <name>" row in the lint status surface
-    matches what the user typed on the command line."""
+    """Kebab-case label for a Strategy record, matching the `--strategy=…` form."""
     if strategy == StrategyHoldTheLine:
         return "hold-the-line"
     if strategy == StrategyHoldTheFile:
@@ -513,11 +343,7 @@ _SEV_CLI_ICON = {
 }
 
 def _print_linters_run(ctx, tools_run):
-    """Print a one-line summary of the linters that fired.
-
-    Paired with `_print_relevant_findings` to give a "what ran / what's
-    wrong" pair on the CLI. No-op when nothing ran.
-    """
+    """Print a one-line summary of the linters that fired. No-op when none ran."""
     if not tools_run:
         return
     ansi = color_enabled(ctx.std)
@@ -527,22 +353,10 @@ def _print_linters_run(ctx, tools_run):
     print("%s🧹 Linters%s (%d): %s" % (bold, reset, len(tools_run), ", ".join(tools_run)))
 
 def _print_relevant_findings(ctx, relevant, strategy_name):
-    """Print the strategy-filtered findings to stderr.
-
-    Solves the long-standing UX gap where the linter's raw output
-    (every finding the build produced) gets streamed inline during
-    the Lint phase, but the user has no way to tell *which* of those
-    findings actually drive the exit code, surface on PR comments,
-    or get annotated on the check run. After `Filter`, this helper
-    prints the relevant subset in a compact `file:line · tool ·
-    rule_id · message` form — the same info the per-severity tables
-    in the rendered check-run details show, just visible from a
-    terminal.
-
-    No-op when the relevant list is empty (the linter already said
-    "no issues" via its own output) or when the strategy is `soft`
-    + nothing relevant (we never want to nag with structural prints
-    on a clean run).
+    """Print the strategy-filtered findings to stderr in compact
+    `file:line · tool · rule_id · message` form — the subset that drives the
+    exit code / PR comments / annotations, distinct from the raw streamed output.
+    No-op when empty.
     """
     if not relevant:
         return
@@ -578,14 +392,10 @@ def _print_relevant_findings(ctx, relevant, strategy_name):
             print("  " + head)
 
 def _upload_patches_artifact(ctx, patches):
-    """Bundle the lint task's `.patch` files into a single tar.gz and
-    upload it as a CI artifact via `artifacts.upload_file` (GitHub /
-    Buildkite / GitLab / CircleCI). No-op when no patches were emitted
-    or when not on a recognized CI host.
-
-    Each patch is placed under its original repo-relative directory in
-    the archive so a downloader can `tar xf` and `git apply` the lot
-    without rewriting paths.
+    """Bundle the `.patch` files into one tar.gz and upload as a CI artifact via
+    `artifacts.upload_file`. No-op with no patches or off a recognized CI host.
+    Each patch keeps its repo-relative path so a downloader can `tar xf` + `git
+    apply` without rewriting paths.
     """
     if not patches:
         return
@@ -594,10 +404,8 @@ def _upload_patches_artifact(ctx, patches):
     archive_dir = ctx.std.fs.mkdtemp(prefix = "aspect-lint-patches-", parent = tmpdir)
     archive_path = archive_dir + "/lint-patches.tar.gz"
 
-    # Build mtree mapping each patch into the archive under its
-    # bazel-bin-relative path. Strip a leading bazel-bin/ prefix so the
-    # archive entries read as `examples/lint/hello.AspectRulesLintShellCheck.patch`
-    # rather than the full sandbox path.
+    # mtree mapping each patch under its repo-relative path; strip the
+    # bazel-out/bazel-bin prefix so entries read as `examples/lint/hello...patch`.
     lines = ["#mtree"]
     for patch in patches:
         idx = patch.find("/bazel-out/")
@@ -609,8 +417,7 @@ def _upload_patches_artifact(ctx, patches):
                 if tail.startswith(prefix):
                     rest = tail[len(prefix):]
 
-                    # `bazel-out/<config>/bin/...` — drop two segments.
-                    # `bazel-bin/...` — already repo-relative.
+                    # bazel-out/<config>/bin/... — drop two segments; bazel-bin/ is repo-relative.
                     if prefix == "bazel-out/":
                         slash1 = rest.find("/")
                         if slash1 >= 0:
@@ -634,22 +441,15 @@ def _upload_patches_artifact(ctx, patches):
     if ctx.std.fs.exists(archive_path):
         ctx.std.fs.remove_file(archive_path)
 
-# ─── Lifecycle status + Result-cell text ──────────────────────────────────────
-#
-# The lint task owns its mapping from accumulated `data` to:
-#   - lifecycle status: running | warning | failing | passed | failed | aborted
-#   - PR-comment Result-cell compact string
-# Each task owns its branch directly rather than a centralized kind-aware switch.
+# Lint task owns its mapping from `data` to lifecycle status (running | warning |
+# failing | passed | failed | aborted) and the PR-comment Result-cell string.
 
 def _pick_status(data, had_failure, terminal):
-    """Decide a lint task's lifecycle status from accumulated data.
+    """Decide lifecycle status from accumulated data.
 
     `had_failure` — hard-fail signal (build failed, fail_on_severity hit).
-    `terminal`    — True iff this is the task's final `task_update` emit.
-
-    Aborted check rides on `data["bazel"]["aborted"]` since lint's build
-    phase shares the BES counter shape — when bazel aborts (timeout,
-    OOM, ctrl-c) that flag rides through.
+    `terminal`    — True iff this is the final `task_update` emit.
+    Aborted rides on `data["bazel"]["aborted"]` (shared BES counter shape).
     """
     if data.get("bazel", {}).get("aborted"):
         return "aborted"
@@ -663,17 +463,15 @@ def _pick_status(data, had_failure, terminal):
 def _compact_text(status, data):
     """Compact Result-cell string for the PR-comment surface.
 
-    Pure (status, data) → str. Reports both severity breakdown and
-    suggested-fix count when present. Empty when no data has
-    accumulated yet (renderer falls back to phase prefix).
+    Pure (status, data) → str: severity breakdown + suggested-fix count.
+    Empty when no data accumulated yet (renderer falls back to phase prefix).
     """
     counts = (data.get("lint", {}) or {}).get("counts_by_severity", {}) or {}
     e = counts.get("error", 0)
     w = counts.get("warning", 0)
     i = counts.get("info", 0)
 
-    # Suggestion list is populated post-lint_end (see lint.axl).
-    # Mid-flight emits won't have it yet; treat absence as 0.
+    # Suggestions are populated post-lint_end; treat absence as 0 mid-flight.
     suggestions = (data.get("lint", {}) or {}).get("suggestions", []) or []
     s = len(suggestions)
     if status == "failed" or status == "failing":
@@ -695,17 +493,14 @@ def _compact_text(status, data):
             return " · ".join(bits)
         return ""
 
-    # running: surface live counts as they accumulate. Suggestions
-    # don't exist until lint_end runs, so just the severity breakdown.
+    # running: severity breakdown only (suggestions don't exist until lint_end).
     bits = _sev_bits(e, w, i)
     if bits:
         return " · ".join(bits)
     return ""
 
 def _sev_bits(e, w, i):
-    """Build the per-severity count bits in display order (error →
-    warning → info). Skips zeros. Returns a list ready to
-    `" · ".join(...)` or extend with other count bits."""
+    """Per-severity count bits in display order (error → warning → info), skipping zeros."""
     bits = []
     if e > 0:
         bits.append("%d error%s" % (e, "s" if e != 1 else ""))
@@ -716,12 +511,8 @@ def _sev_bits(e, w, i):
     return bits
 
 def _body_text(status, data):
-    """Narrative-form `progress.body` for the PR-comment 💬 line.
-
-    Wraps `_compact_text` with a status-specific verb prefix: `Lint
-    complete · 5 warnings`, `Lint failed · 3 errors`, `Lint passed`.
-    Live (running/warning/failing) emits keep the producer's own
-    phase-narrative form; this is just for terminal emits.
+    """Narrative `progress.body` for the PR-comment 💬 line — wraps `_compact_text`
+    with a status verb prefix (e.g. `Lint failed · 3 errors`). Terminal emits only.
     """
     compact = _compact_text(status, data)
     if status == "passed":
@@ -735,11 +526,8 @@ def _body_text(status, data):
     return ""
 
 def _has_aspect_flag(flags):
-    """True iff `flags` (post-rc-expansion) contains any `--aspects`
-    entry — `--aspects=<label>` or bare `--aspects` (the value lands
-    in the next arg). Used to differentiate "no aspect configured"
-    from "aspect configured but produced no rules_lint output" in
-    the post-build error path."""
+    """True iff `flags` contains any `--aspects` entry (=<label> or bare).
+    Distinguishes "no aspect configured" from "configured but no output"."""
     for f in flags:
         if f == "--aspects" or f.startswith("--aspects="):
             return True
@@ -748,20 +536,13 @@ def _has_aspect_flag(flags):
 def _try_process_lint_file(ctx, file, filepath, data, strategy, changed_files, lint_trait, github_output, patches):
     """Read and process one BES lint output file.
 
-    Returns None when the file is not yet on disk (Bazel's remote-cache download
-    is still in flight), or {"interesting": bool, "linter_exit_code": int} on
-    success.
-
-    Bazel downloads outputs to a unique temp path first, then moves them to the
-    final path atomically via FileSystemUtils.moveFile (moveOutputsToFinalLocation
-    L930, called at L1396):
+    Returns None when the file isn't on disk yet (remote download in flight),
+    else {"interesting": bool, "linter_exit_code": int}. Bazel moves outputs to
+    their final path atomically (moveOutputsToFinalLocation), so fs.exists()==True
+    means fully written:
     https://github.com/bazelbuild/bazel/blob/d3c9a2080e30cecd661c02a8f0cce84caa696aed/src/main/java/com/google/devtools/build/lib/remote/RemoteExecutionService.java#L930
-    fs.exists() returning True therefore means the file is fully written.
-
-    SARIF reports are filtered per-batch against the strategy scope so the live
-    status surface never shows out-of-scope findings mid-build. The strategy
-    filter is pure (diag + changed_files), so per-batch results equal a single
-    terminal pass — findings don't flicker as later batches arrive.
+    SARIF is filtered per-batch against the (pure) strategy scope, so per-batch
+    results equal a terminal pass and findings don't flicker as batches arrive.
     """
     if file.name.endswith(".out"):
         if not ctx.std.fs.exists(filepath):
@@ -799,10 +580,8 @@ def _try_process_lint_file(ctx, file, filepath, data, strategy, changed_files, l
     return {"interesting": False, "linter_exit_code": 0}
 
 def _drain_pending_files(ctx, pending, data, strategy, changed_files, lint_trait, github_output, patches):
-    """Process one pass over pending files, attempting to read each.
-
-    Returns (still_pending, was_interesting, linter_exit_code).
-    still_pending contains files whose remote download hasn't landed yet.
+    """One pass over pending files → (still_pending, was_interesting, linter_exit_code).
+    still_pending holds files whose remote download hasn't landed yet.
     """
     still_pending = []
     interesting = False
@@ -828,55 +607,44 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     strategy = _STRATEGIES[ctx.args.strategy]
     ansi = color_enabled(ctx.std)
 
-    # Validate findings_destination up front so a typo doesn't fail late
-    # (after the build has already run).
+    # Validate up front so a typo doesn't fail after the build has run.
     validate_findings_destination(lint_trait.findings_destination)
 
-    # Initialize lint data for status-check emission.
     data = lint_init_data()
     data["start_time_ms"] = now_ms(ctx)
     data["lint"]["strategy"] = _strategy_name(strategy)
     data["target_pattern"] = " ".join(list(ctx.args.targets)) if ctx.args.targets else ""
 
-    # Lint-specific base flags, computed before setup_phase since it forwards
-    # them to setup_bazel_command.
+    # Base flags computed before setup_phase, which forwards them to setup_bazel_command.
     base_flags = ["--remote_download_regex='.*AspectRulesLint.*'"]
     for aspect in ctx.args.aspects:
         base_flags.append("--aspects=" + aspect)
 
-    # Patch production is gated by --fix OR any registered lint_patch
-    # hook (e.g. GithubLintComments translates hunks into review-comment
-    # suggestion blocks). Applying patches still requires --fix; a
-    # hook-only run produces patches without mutating the working tree.
+    # Patch production is gated by --fix OR any lint_patch hook. Applying still
+    # requires --fix; a hook-only run produces patches without touching the tree.
     fix_apply = ctx.args.fix
     fix_produce = fix_apply or bool(lint_trait.lint_patch)
     if fix_produce:
         base_flags.append("--output_groups=rules_lint_patch")
         base_flags.append("--@aspect_rules_lint//lint:fix")
 
-    # rules_lint_human and rules_lint_machine are separate action sets:
-    # requesting both runs each linter twice. Human gives colored terminal
-    # output; machine gives exit codes + SARIF. detect_ci() guards against
-    # CI hosts (e.g. GHA) that allocate a pseudo-TTY while still needing
-    # machine output.
+    # rules_lint_human / rules_lint_machine are separate action sets (requesting
+    # both runs each linter twice): human = colored terminal output, machine =
+    # exit codes + SARIF. detect_ci() guards CI hosts that allocate a pseudo-TTY.
     is_interactive = ctx.std.io.stdout.is_tty and not detect_ci(ctx.std.env)
     if is_interactive:
         base_flags.append("--output_groups=rules_lint_human")
     if lint_trait.lint_report or not is_interactive:
         base_flags.append("--output_groups=rules_lint_machine")
 
-    # The single pre-task setup phase (status surface, rc parse, health
-    # checks); returns the resolved flags (a failed health check fails the task
-    # inside setup_phase).
+    # Pre-task setup phase (status surface, rc parse, health checks); returns
+    # resolved flags (a failed health check fails the task inside setup_phase).
     flags = setup_phase(ctx, lifecycle, data["target_pattern"], "lint_results", data, hc_trait, bazel_trait, "build", bazel_base_flags = base_flags)
     announce_version, announce_command = resolve_bazel_announce(ctx)
 
-    # Detect changed files BEFORE lint_start hooks so features can read
-    # lint_trait.changed_files as the canonical set. Prefers the GitHub
-    # PR Files API when authenticated and in a PR context (works on any
-    # CI host), falling back to local `git diff <base> --unified=0`.
-    # Lives in lib/github.axl because format also wants the same
-    # precedence.
+    # Detect changed files BEFORE lint_start hooks so features read the canonical
+    # lint_trait.changed_files. Prefers GitHub PR Files API, falls back to local
+    # `git diff <base> --unified=0`. Lives in lib/github.axl (format wants it too).
     status = _pick_status(data, had_failure = False, terminal = False)
     task_update(
         ctx,
@@ -897,11 +665,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         merge_base = ctx.args.merge_base or None,
     )
     if detect_result.get("unscoped"):
-        # Change detection failed (e.g. shallow checkout with no
-        # remote-tracking ref). Surface all findings rather than
-        # silently hiding them: override to `StrategyHard` which uses
-        # `filter_all` and ignores `changed_files`. Any user
-        # `--strategy=...` choice is overridden with the warning.
+        # Change detection failed (e.g. shallow checkout). Override to
+        # StrategyHard (filter_all, ignores changed_files) so we surface all
+        # findings rather than silently hiding them; any --strategy is overridden.
         warn(ctx.std, "Could not determine the changed-file set (%s). Linting with `strategy=hard` (all findings shown, no hold-the-line scoping). Override with --merge-base=<sha> or set --base-ref to a ref available locally." % detect_result["source"])
         strategy = StrategyHard
         changed_files = []
@@ -910,12 +676,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     lint_trait.changed_files = changed_files
     data["lint"]["changed_files"] = changed_files
 
-    # Shared diagnostic listing — announces the source (PR Files API
-    # vs local git diff with SHAs) and prints every entry sorted
-    # alphabetically with per-status brackets. Lives in lib/github
-    # so format prints the same shape. See
-    # `lib/github.axl::print_changed_files_listing` for the row
-    # format and the rename-splitting rules.
+    # Shared changed-file listing (announces source, prints sorted entries).
+    # See lib/github.axl::print_changed_files_listing for row format / rename rules.
     print_changed_files_listing(ctx, detect_result)
 
     for hook in lint_trait.lint_start:
@@ -942,10 +704,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     )
 
     # 6. Build + stream events
-    # TODO: re-introduce a --quiet arg once we can capture (rather than
-    # only inherit-or-not) Bazel's stdout/stderr. Today suppressing both
-    # streams hides build failures from the user, which is the opposite
-    # of what most --quiet expectations imply.
+    # TODO: re-introduce --quiet once we can capture (not only inherit-or-not)
+    # Bazel's stdout/stderr. Today suppressing both hides build failures.
     build = ctx.bazel.build(
         flags = flags,
         build_events = build_events,
@@ -954,17 +714,13 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         *ctx.args.targets
     )
 
-    # `build.sink_invocation_id` is minted inside the runtime's `Build::spawn`
-    # before it returns, so we can populate `data["sink_invocation_id"]`
-    # here — well before `build.wait()`. Emitting a running task_update at
-    # this point lets the BK annotation / status check pick up the Aspect
-    # Workflows link as soon as the build is spawned, instead of waiting for
-    # the first SARIF report (or terminal task_update) to surface it.
+    # sink_invocation_id is minted in Build::spawn before it returns, so set it
+    # here (before build.wait()) — an early task_update lets the BK annotation /
+    # status check surface the Aspect Workflows link as soon as the build spawns.
     data["sink_invocation_id"] = build.sink_invocation_id
 
-    # Re-emit (now that the sink_invocation_id is known so we can show
-    # the Web UI link) but target only the status surfaces — empty
-    # `stream` suppresses the duplicate CLI line.
+    # Re-emit now that sink_invocation_id is known (Web UI link); status surfaces
+    # only — empty `stream` suppresses the duplicate CLI line.
     status = _pick_status(data, had_failure = False, terminal = False)
     task_update(
         ctx,
@@ -981,15 +737,15 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     patches = []
     github_output = ctx.std.env.var("GITHUB_OUTPUT")
 
-    # Files whose remote-cache download hadn't completed when their
-    # named_set_of_files BES event arrived. Retried each tick.
+    # Files whose download hadn't completed when their named_set_of_files BES
+    # event arrived; retried each tick.
     pending_files = []
 
-    # Set of rules_lint tool names observed in BES file-name markers.
+    # rules_lint tool names observed in BES file-name markers.
     lint_tools_run = {}
 
-    # Emit a status update on each interesting tick, and at least every
-    # MIN_HEARTBEAT_INTERVAL_MS to keep the rendered elapsed timer live.
+    # Emit on each interesting tick, and at least every MIN_HEARTBEAT_INTERVAL_MS
+    # to keep the elapsed timer live.
     last_emit_ms = now_ms(ctx)
     for _tick in sleep_iter(BES_DRAIN_TICK_MS):
         interesting = False
@@ -1033,8 +789,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                             if result["linter_exit_code"] != 0:
                                 linter_exit_code = 1
         if interesting or now_ms(ctx) - last_emit_ms >= MIN_HEARTBEAT_INTERVAL_MS:
-            # Flip to "failing" on action failure mid-build so the breakdown
-            # tags Lint (not the downstream Filter phase) as the failure point.
+            # Flip to "failing" on mid-build action failure so the breakdown tags Lint.
             had_action_failure = data["bazel"].get("failed_actions_total", 0) > 0
             heartbeat_status = _pick_status(data, had_failure = had_action_failure, terminal = False)
             dispatch_task_update(ctx, lifecycle, TaskUpdate(
@@ -1054,10 +809,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
     dispatch_bazel_attempt_end(ctx, bazel_trait, build_status.code)
 
-    # Final drain: build is complete; poll until all pending downloads land
-    # or the timeout expires. Bazel schedules --remote_download_regex
-    # transfers asynchronously, so files can still be in flight here even
-    # though build.wait() has returned.
+    # Final drain: poll until pending downloads land or timeout. --remote_download_regex
+    # transfers are async, so files can still be in flight after build.wait().
     if pending_files:
         _POST_BUILD_SLOW_WARN_MS = 3000
         post_build_start_ms = now_ms(ctx)
@@ -1100,34 +853,19 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # 8. BazelTrait.build_end hooks
     dispatch_bazel_build_end(ctx, bazel_trait, build_status.code)
 
-    # Scope the patch set to the strategy: hold-the-line / hold-the-
-    # file drop patches whose hunks don't overlap the user's PR diff,
-    # so we neither rewrite out-of-scope files locally nor publish a
-    # patch artifact full of unrelated fixes. `soft` / `hard` keep
-    # everything (they use `filter_all`).
+    # Scope patches to the strategy so we neither rewrite out-of-scope files
+    # locally nor publish an artifact of unrelated fixes. soft/hard keep all.
     scoped_patches = _filter_patches_by_strategy(ctx, patches, strategy, changed_files)
 
-    # 8b. Upload patches as a single artifact when running on a CI host
-    # that supports artifact upload. Lets users download the bundled
-    # `.patch` files for offline application or review when a feature
-    # didn't post them as PR-comment suggestions (e.g.
-    # GithubLintComments wasn't enabled, or the cap dropped some).
+    # 8b. Upload patches as one artifact on a CI host that supports it, so users
+    # can apply them offline when a feature didn't post them as PR suggestions.
     if scoped_patches and not build_failed:
         _upload_patches_artifact(ctx, scoped_patches)
 
-    # 9. Apply patches — gated on `not build_failed` AND on the
-    # strategy-scoped subset being non-empty. Patches arrive via SARIF
-    # reports during the BES stream; if the build failed (especially
-    # at analysis time), no SARIF was produced so there's nothing to
-    # apply. Even when partial patches did arrive, applying auto-fixes
-    # against a broken build risks compounding the breakage — better
-    # to let the user fix the build first, then re-run.
-    #
-    # Skipping the phase emit also keeps `ctx.task.current_phase()` on
-    # the prior phase (`lint`) so the closing breakdown tags the
-    # correct phase as failed — and on hold-the-line runs where every
-    # patch is out-of-scope, the `Task timing` table doesn't carry a
-    # zero-work `Apply` row that confuses reviewers.
+    # 9. Apply patches — gated on `not build_failed` AND a non-empty scoped
+    # subset. Applying auto-fixes against a broken build risks compounding the
+    # breakage. Skipping the phase emit also keeps current_phase() on `lint` so
+    # the breakdown tags the right phase and no zero-work `Apply` row appears.
     if not build_failed and fix_apply and scoped_patches:
         patches_label = pluralize(len(scoped_patches), "auto-fix patch", plural = "auto-fix patches")
         status = _pick_status(data, had_failure = False, terminal = False)
@@ -1147,16 +885,10 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             ctx.std.process.command("patch").arg("-p1").arg("--input=" + patch) \
                 .current_dir(ctx.std.env.current_dir()).spawn().wait()
 
-    # 10. Apply strategy filter → relevant diagnostics for reporting and exit code.
-    #
-    # Skip the `filter` phase emit when the build failed OR no lint
-    # aspect actually ran — in either case the failure originates in
-    # the `lint` phase, and emitting a `filter` phase boundary here
-    # would cause `close_active_phase` to tag Filter as `(failed)` in
-    # the breakdown instead of Lint. Without the boundary, the `lint`
-    # phase stays active until `_emit_final`, so the breakdown
-    # correctly tags `Lint (failed)` and the GHSC `_failed_in_phase`
-    # latch picks up "lint".
+    # 10. Strategy filter → relevant diagnostics for reporting + exit code.
+    # Skip the `filter` phase emit when the build failed or no aspect ran:
+    # emitting a filter boundary would make the breakdown tag Filter (failed)
+    # instead of Lint; without it the lint phase stays active so Lint is tagged.
     if not build_failed and lint_tools_run:
         status = _pick_status(data, had_failure = False, terminal = False)
         task_update(
@@ -1172,57 +904,36 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             phase = Phase(name = "filter", description = "Filter diagnostics", emoji = "🔎"),
         )
 
-    # `data["lint"]["diagnostics"]` was already filtered per-batch as
-    # SARIF reports streamed in (see the call site above), so the
-    # rendered summary tables, `compute_annotations`, and the per-
-    # tool / per-severity counts all already see the strategy-scoped
-    # set. The `Filter` phase emit above is the UI / Task-timing
-    # marker; no separate filtering pass is needed here.
+    # diagnostics were already filtered per-batch as SARIF streamed in, so the
+    # Filter phase emit above is just the UI marker; no separate pass needed.
     relevant = list(data["lint"]["diagnostics"])
 
-    # Thread the linter set onto data so the rendered "🧹 Linters"
-    # chart and the CLI summary share a sorted snapshot.
+    # Thread the linter set so the 🧹 chart and CLI summary share a sorted snapshot.
     data["lint"]["tools_run"] = sorted(lint_tools_run.keys())
     _print_linters_run(ctx, data["lint"]["tools_run"])
 
-    # Print the post-filter findings on the CLI so users see *what
-    # actually matters* after strategy filtering. The linter's raw
-    # output (every diagnostic the build produced, including ones
-    # outside the strategy's scope) was already streamed inline
-    # during the Lint phase; that's high-volume and not always
-    # actionable. The list here is the subset that drives the exit
-    # code, surfaces on the PR, and gets annotated on the check run.
+    # Print the post-filter subset (drives exit code / PR / annotations), distinct
+    # from the high-volume raw output streamed during the Lint phase.
     _print_relevant_findings(ctx, relevant, _strategy_name(strategy))
 
     # 11. lint_end hooks receive filtered diagnostics
     for hook in lint_trait.lint_end:
         hook(ctx, relevant)
 
-    # 11b. Copy suggestion records populated by lint_end hooks onto
-    # `data["lint"]["suggestions"]` so the rendered lint detail
-    # body can list the auto-fixes posted to the PR. Apply the same
-    # strategy filter that gated the diagnostic set above — otherwise
-    # `hold-the-line` runs surface auto-fixes for files / lines the
-    # strategy explicitly excluded, confusing reviewers ("0 findings
-    # but 3 auto-fixes?"). We anchor each suggestion at `end_line` (or
-    # `start_line` when end is unset), build a synthetic diagnostic,
-    # and keep the suggestion iff that anchor passes the strategy's
-    # filter.
+    # 11b. Copy lint_end suggestion records onto data, applying the same strategy
+    # filter as the diagnostics — otherwise hold-the-line surfaces auto-fixes for
+    # excluded lines ("0 findings but 3 auto-fixes?").
     data["lint"]["suggestions"] = _filter_suggestions_by_strategy(
         list(lint_trait.suggestions),
         strategy,
         changed_files,
     )
 
-    # Threaded the same way: feature populates the dict during
-    # `lint_end`, task copies it onto `data` so the renderer can read
-    # it without reaching back into the trait. See LintTrait.comment_urls
-    # for the per-finding-row link semantics.
+    # Threaded the same way; see LintTrait.comment_urls for link semantics.
     data["lint"]["comment_urls"] = dict(lint_trait.comment_urls)
 
-    # 12. Determine exit code. `not lint_tools_run` guards against the
-    # silent zero-aspect case — in CI a green `aspect lint` must mean
-    # "lint passed", not "lint never ran".
+    # 12. Exit code. `not lint_tools_run` guards the silent zero-aspect case —
+    # a green `aspect lint` in CI must mean "passed", not "never ran".
     if build_failed:
         exit_code = 1
     elif not lint_tools_run:
@@ -1246,13 +957,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     else:
         exit_code = 0
 
-    # Repro reruns the same scope. The fix variant adds `--fix` and is
-    # gated on the strategy-filtered suggestion set
-    # (`data["lint"]["suggestions"]`) rather than the raw trait list:
-    # rules_lint may have produced patches for findings the strategy
-    # then excluded (e.g. `hold-the-line` on a file outside the diff),
-    # and offering a fix command for nothing-to-fix-in-scope reads as
-    # noise.
+    # Repro reruns the same scope. The fix variant (adds --fix) is gated on the
+    # strategy-filtered suggestion set, not the raw trait list, so we don't offer
+    # a fix command for patches the strategy excluded.
     repro_flags = explicit_flags(ctx, [
         ("strategy", "--strategy"),
         ("aspects", "--aspect"),
@@ -1274,14 +981,12 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             slug = "lint-fix",
         ))
 
-    # Final task_update — for GithubStatusChecks this drives the terminal
-    # render. `_pick_status` picks one of: passed | warning | failed.
+    # Final task_update — drives the GithubStatusChecks terminal render.
     final_status = _pick_status(data, had_failure = exit_code != 0, terminal = True)
     bookend = lint_conclusion(final_status, data)
 
-    # Pre-hook with rich `ReproFixInfo` (exit_code / targets / extras)
-    # the safety-net call inside `dispatch_task_update` can't supply.
-    # Entries hooked here are skipped on dispatch via the `_hooked` flag.
+    # Pre-hook with rich ReproFixInfo (exit_code/targets/extras) that the
+    # dispatch_task_update safety-net can't supply; these are skipped on dispatch.
     apply_repro_fix_hooks(
         ctx,
         lifecycle,

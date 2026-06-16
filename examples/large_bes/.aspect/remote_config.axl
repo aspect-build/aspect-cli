@@ -2,12 +2,14 @@
 
 load("./bazelrc.axl", "bazelrc")
 
-def remote_config(ctx, path = None):
-    """Parse .bazelrc and extract remote cache/execution configuration.
+RemoteConfig = record(
+    uri = field(str, default = ""),
+    headers = field(dict, default = {}),
+    instance_name = field(str, default = ""),
+)
 
-    Returns:
-        struct with fields: uri, headers, instance_name
-    """
+def remote_config(ctx, path = None) -> RemoteConfig:
+    """Parse .bazelrc and extract remote cache/execution configuration."""
     workspace_dir = ctx.std.env.aspect_root_dir()
     if not path:
         path = workspace_dir + "/.bazelrc"
@@ -30,4 +32,4 @@ def remote_config(ctx, path = None):
         elif flag.startswith("--remote_instance_name="):
             instance_name = flag[len("--remote_instance_name="):]
 
-    return struct(uri = uri, headers = headers, instance_name = instance_name)
+    return RemoteConfig(uri = uri, headers = headers, instance_name = instance_name)

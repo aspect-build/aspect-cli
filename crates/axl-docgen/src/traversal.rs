@@ -50,21 +50,24 @@ pub struct TraversalResult {
 const TYPES_ROOT: &str = "types";
 const BUILTINS_ROOT: &str = "builtins";
 
-/// Traverse both the Rust-defined globals tree and the per-`@std//` builtin DocModules,
-/// merging them into a single page set.
+/// Traverse both the Rust-defined globals tree and the per-module builtin
+/// DocModules (`@std//*`, `@bazel//*`), merging them into a single page set.
 ///
 /// - Rust-defined types/globals → `types/...`
 /// - `.axl` builtin modules     → `builtins/<name>` (each page begins with a
-///   synthesized `load("@std//<name>.axl", ...)` snippet derived from the
-///   module's public top-level symbols)
-pub fn traverse_all(globals: &DocModule, builtins: &[(String, DocModule)]) -> TraversalResult {
+///   synthesized `load("@<module>//<name>.axl", ...)` snippet derived from
+///   the module's public top-level symbols)
+pub fn traverse_all(
+    globals: &DocModule,
+    builtins: &[(String, String, DocModule)],
+) -> TraversalResult {
     let mut registry = TypeRegistry::new();
     let mut pages: HashMap<String, DocPage> = HashMap::new();
     register_builtin_types(&mut registry);
 
     traverse_module(globals, TYPES_ROOT, &mut pages, &mut registry);
 
-    for (name, dm) in builtins {
+    for (module, name, dm) in builtins {
         let page_path = normalize_path(&format!("{BUILTINS_ROOT}/{name}"));
         registry.register(name, &page_path);
 
@@ -92,7 +95,7 @@ pub fn traverse_all(globals: &DocModule, builtins: &[(String, DocModule)]) -> Tr
             &mut pages,
             page_path.clone(),
             vec![DocPageItem::LoadStatement {
-                module: format!("@std//{name}.axl"),
+                module: format!("@{module}//{name}.axl"),
                 symbols,
             }],
         );

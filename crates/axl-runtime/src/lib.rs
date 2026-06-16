@@ -1,4 +1,9 @@
 #![allow(clippy::new_without_default)]
+
+// Self-alias so the `service_server` proc-macro (which emits
+// `::axl_runtime::...` paths) resolves when invoked from this crate.
+extern crate self as axl_runtime;
+
 pub mod banner;
 pub mod builtins;
 pub mod ci;

@@ -36,65 +36,38 @@ load("./lib/text.axl", "pluralize")
 load("./lib/tips.axl", "tips")
 
 def _git_capture(ctx, *args):
-    """Run `git <args>` and return (stdout, exit_code, stderr).
-
-    All stderr goes to a string so caller can include it in a fail()
-    message. Stdout is captured as-is (no trim).
-    """
+    """Run `git <args>` → (stdout, exit_code, stderr). Stdout untrimmed."""
     result = ctx.std.process.command("git").args(list(args)) \
         .current_dir(ctx.std.env.current_dir()) \
         .stdout("piped").stderr("piped").spawn().wait_with_output()
     return result.stdout, result.status.code, result.stderr
 
 def _snapshot_tracked_state(ctx):
-    """Snapshot the current tracked-tree state via `git stash create`.
+    """Snapshot tracked-tree state via `git stash create`. Returns:
+        - commit SHA (str) on success — pass to `_diff_against`.
+        - "" when clean (stash create writes nothing); `_diff_against("")`
+          falls back to `git diff HEAD`, same answer.
+        - None when no initial commit (stash create requires HEAD). Caller
+          skips the diff phase. (Diffing the empty-tree object 4b825d… was
+          rejected: it flags every tracked file regardless of the formatter.)
 
-    Returns:
-        - commit SHA (str) on success — pass to `_diff_against` to compute
-          the formatter-induced diff.
-        - "" when the working tree is clean (`git stash create` produces
-          empty output and no commit object). `_diff_against("")` then
-          falls back to `git diff HEAD` which gives the same answer.
-        - None when the workspace has no initial commit yet. `git stash
-          create` requires HEAD, so on a freshly-initialized repo it
-          fails with "You do not have the initial commit yet". We can't
-          snapshot in that case, but we don't want to break `aspect
-          format` either — callers should skip the diff phase and run
-          the formatter as-is. Diffing against the empty tree object
-          (4b825d…) was considered as a fallback but rejected: it would
-          report every tracked file as "changed" regardless of whether
-          the formatter actually touched it, which defeats the purpose
-          of the detection.
-
-    This is non-destructive: stash create writes a commit object to the
-    object store without modifying the working tree, index, or stash list.
-
-    No cleanup needed. `stash create` does NOT add a stash entry — there's
-    nothing in `git stash list` to drop. The commit object it writes is
-    unreachable from any ref, so `git gc` reaps it automatically (after the
-    default ~2-week grace period for unreachable objects). Don't add a
-    "leak" cleanup pass — there is no leak.
+    Non-destructive: writes a commit object only, no working-tree/index/stash
+    changes. No cleanup needed — the unreachable object is gc'd automatically;
+    there is no leak, don't add a cleanup pass.
     """
 
-    # Probe for HEAD before attempting `git stash create`. Fresh repos
-    # with no commits fail the stash with a confusing "do not have the
-    # initial commit yet" message; check explicitly so the caller can
-    # decide what to do.
+    # Probe HEAD first: fresh repos fail stash create with a confusing
+    # "do not have the initial commit yet".
     _, head_code, _ = _git_capture(ctx, "rev-parse", "--verify", "HEAD")
     if head_code != 0:
         return None
 
-    # Refresh the index before `git stash create` to avoid a known git
-    # race: when the index's cached stat info disagrees with the working
-    # tree (common after a CI workspace restore via tar — content matches
-    # HEAD but mtimes don't), `git stash create`'s entry-point dirty
-    # check sees "changes", then its internal refresh clears the
-    # stat-mismatch, then the post-refresh check sees "no changes" and
-    # exits 1 silently with no stderr. Refreshing first makes the entry
-    # check observe the same state the internal refresh will produce.
-    # Exit code is intentionally ignored: --refresh exits 1 when any
-    # entry has a real content difference, which is fine — we want the
-    # stat-info sync, not a verdict.
+    # Refresh the index first to dodge a git race: when cached stat info
+    # disagrees with the tree (common after a CI tar restore — content matches
+    # HEAD, mtimes don't), stash create's entry check sees "changes", its
+    # internal refresh clears the mismatch, the post-refresh check sees none and
+    # exits 1 silently. Refreshing first syncs the stat info. Exit code ignored
+    # (--refresh exits 1 on real content diffs; we want the sync, not a verdict).
     _git_capture(ctx, "update-index", "--refresh", "-q")
 
     out, code, err = _git_capture(ctx, "stash", "create")
@@ -104,12 +77,8 @@ def _snapshot_tracked_state(ctx):
     return out.strip()
 
 def _diff_against(ctx, base):
-    """Return the diff between `base` (a commit SHA) and the working tree
-    as a string. `base=""` means diff against HEAD.
-
-    No --color flag — output is consumed by string equality and patch
-    archival; both want plain text.
-    """
+    """Diff `base` (commit SHA) against the working tree; base="" → HEAD.
+    No --color — output is string-compared and archived as a patch."""
     target = base if base else "HEAD"
     out, code, err = _git_capture(ctx, "diff", target)
     if code != 0:
@@ -118,12 +87,9 @@ def _diff_against(ctx, base):
     return out
 
 def _normalize_files_for_formatter(ctx, files):
-    """Rebase git-root-relative `files` to CWD-relative paths.
-
-    Thin wrapper around `normalize_files_for_cwd` that reads CWD and git root
-    from ctx. CWD-relative paths work for the formatter because bare binaries
-    spawn in CWD, and sh_binary wrappers (e.g. format_multirun) cd to
-    BUILD_WORKING_DIRECTORY (= CWD) before invoking the underlying formatter.
+    """Rebase git-root-relative `files` to CWD-relative (ctx-reading wrapper
+    around normalize_files_for_cwd). CWD-relative works because bare binaries
+    spawn in CWD and sh_binary wrappers cd to BUILD_WORKING_DIRECTORY (= CWD).
     """
     return normalize_files_for_cwd(
         ctx.std.env.current_dir(),
@@ -161,52 +127,41 @@ def _body_text(status, data):
         return "Format aborted"
     return ""
 
-# When a single fix command would carry more files than this, the
-# producer emits a truncated positional-list entry plus a re-discovery
-# fallback that uses the detection flags.
+# Above this many files, the producer truncates the positional list and adds a
+# re-discovery fallback using the detection flags.
 _FIX_FILES_LIMIT = 20
 
-# Character budget for the vanilla-bazel alternate fix command. Long
-# affected-file lists truncate entry-wise at this limit with a
-# `# +N more` shell-comment marker — there's no re-discovery fallback
-# for the bazel alt (the user can fall back to the aspect commands above).
+# Char budget for the vanilla-bazel alternate; long file lists truncate with a
+# `# +N more` marker (no re-discovery fallback — use the aspect commands above).
 _BAZEL_ALT_MAX_CHARS = 4096
 
-# Plain-default flags echoed iff the user explicitly passed them on
-# the CLI. Auto / env-resolved flags (`--severity`, `--base-ref`) are
-# pinned by the repro / fix callers themselves — the local default
-# typically differs from CI's resolution, so the repro must encode
-# CI's behavior to be faithful.
+# Plain-default flags echoed iff explicitly passed. Auto/env-resolved flags
+# (--severity, --base-ref) are pinned by the repro/fix callers since the local
+# default differs from CI's resolution.
 _DETECTION_PAIRS = [
     ("scope", "--scope"),
     ("formatter_target", "--formatter-target"),
     ("exclude_patterns", "--exclude-pattern"),
     ("include_patterns", "--include-pattern"),
     ("merge_base", "--merge-base"),
-    # Explicit formatter args survive into the Reproduce command and the
-    # re-discovery fallback Fix command so a CLI-passed tree-walk flag
-    # isn't lost when CI surfaces a failure.
+    # Explicit formatter args survive into repro + re-discovery fix so a
+    # CLI-passed tree-walk flag isn't lost on a CI failure.
     ("formatter_args", "--formatter-arg"),
     ("formatter_args_for_tree_walk", "--formatter-arg-for-tree-walk"),
 ]
 
 def _surfaced_base_ref_flag(ctx):
-    """`--base-ref` carrying CI's resolved base ref (env var if unset).
-    Returned as a one-element list for `+`-concatenation, empty when
-    no base ref is known."""
+    """--base-ref carrying CI's resolved base ref (env var if unset), as a
+    one-element list for +-concatenation; empty when no base ref is known."""
     surfaced = ctx.args.base_ref or detect_ci_base_ref(ctx.std)
     return [("--base-ref", surfaced)] if surfaced else []
 
 def _append_repro_command(ctx, data):
-    """Append the always-rendered "Reproduce" command. Re-runs the
-    same `aspect format ...` invocation CI ran so the user gets the
-    same diagnose-then-fail behavior locally. `--severity=fail` is
-    pinned — the repro intent is "make me see the failure".
+    """Append the always-rendered Reproduce command: re-runs CI's
+    `aspect format ...` with --severity=fail pinned (intent: "make me see it").
 
-    The vanilla-bazel alternate goes in fix_commands (see
-    `_append_fix_commands`): `bazel run <formatter_target>` actually
-    formats files rather than re-reporting failure, which is the
-    semantic of a fix, not a repro.
+    The vanilla-bazel alternate is a fix, not a repro, so it lives in
+    fix_commands (`bazel run` formats rather than re-reporting failure).
     """
     flags = ([("--severity", "fail")] +
              explicit_flags(ctx, _DETECTION_PAIRS) +
@@ -218,24 +173,15 @@ def _append_repro_command(ctx, data):
     ))
 
 def _append_fix_commands(ctx, data):
-    """Append fix-command entries to `data["fix_commands"]`.
-
-    Three commands at most:
-
-      1. Aspect fix on the affected file list (or first N when long) —
+    """Append fix-command entries to data["fix_commands"]. No-op when no
+    affected files. Up to three commands:
+      1. Aspect fix on affected files (first N when long):
          `aspect format --severity=info <files>`.
-      2. Re-discover fallback (only when the file list was truncated) —
-         `aspect format` with the original change-detection flags so
-         the user formats every affected file even though the list
-         didn't fit.
-      3. Vanilla-bazel alternate for users without the Aspect CLI —
-         `bazel run <formatter_target> -- <formatter_args> <files>`. Bounded
-         at `_BAZEL_ALT_MAX_CHARS`; when the command exceeds that budget,
-         `build_bazel_command` wraps it onto multiple lines and truncates the
-         trailing args with a `# +N more` shell-comment marker. Skipped
-         entirely when the Aspect `tools/bazel` wrapper is in play.
-
-    No-op when there are no affected files: nothing to fix, no commands.
+      2. Re-discover fallback (only when truncated): `aspect format` with the
+         change-detection flags.
+      3. Vanilla-bazel alternate `bazel run <formatter_target> -- ...`, bounded
+         at _BAZEL_ALT_MAX_CHARS (truncates with `# +N more`); skipped under the
+         Aspect `tools/bazel` wrapper.
     """
     affected = (data.get("format", {}) or {}).get("affected_files", []) or []
     if not affected:
@@ -243,9 +189,8 @@ def _append_fix_commands(ctx, data):
     task_path = task_cli_path(ctx.task)
     prefix = repro_prefix(ctx)
 
-    # Positional file list bypasses --scope / --base-ref / --merge-base /
-    # --include-pattern / --exclude-pattern, so the explicit-file fix command
-    # omits them and only preserves the user-explicit `--formatter-target`.
+    # Positional file list bypasses --scope/--base-ref/--merge-base/--include-/
+    # --exclude-pattern, so this fix command omits them, keeping --formatter-target.
     positional_flags = ([("--severity", "info")] +
                         explicit_flags(ctx, [("formatter_target", "--formatter-target")]))
     if len(affected) <= _FIX_FILES_LIMIT:
@@ -276,13 +221,9 @@ def _append_fix_commands(ctx, data):
             slug = "format-fix-rediscover",
         ))
 
-    # Vanilla-bazel alternate. Skipped under the Aspect `tools/bazel`
-    # wrapper — there, `bazel run` re-routes through `aspect run`, so
-    # the "vanilla" framing would be misleading.
-    #
-    # Only `--run-in=cwd` maps to a Bazel flag (`--run_in_cwd`); other
-    # modes have no direct Bazel equivalent and are dropped from the
-    # alternate.
+    # Vanilla-bazel alternate. Skipped under the `tools/bazel` wrapper — there
+    # `bazel run` re-routes through `aspect run`, so "vanilla" would mislead.
+    # Only --run-in=cwd maps to a Bazel flag (--run_in_cwd); other modes drop.
     if not has_tools_bazel_wrapper(ctx):
         bazel_flags = ["--run_in_cwd"] if ctx.args.run_in == "cwd" else []
         bazel_run_args = [ctx.args.formatter_target] + list(ctx.args.formatter_args) + affected
@@ -310,9 +251,8 @@ def _emit_final(ctx, lifecycle, data, exit_code):
 
     bookend = format_conclusion(status, data)
 
-    # Pre-hook with rich `ReproFixInfo` (exit_code / extras) the
-    # safety-net call inside `dispatch_task_update` can't supply.
-    # Entries hooked here are skipped on dispatch via the `_hooked` flag.
+    # Pre-hook with rich ReproFixInfo (exit_code/extras) the dispatch_task_update
+    # safety-net can't supply; hooked entries skip dispatch via `_hooked`.
     apply_repro_fix_hooks(
         ctx,
         lifecycle,
@@ -350,9 +290,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     lifecycle = ctx.traits[TaskLifecycleTrait]
     ansi = color_enabled(ctx.std)
 
-    # Resolve --run-in up front: a bad value (typo, `git-root` outside
-    # a git repo) must fail before setup_phase opens status surfaces
-    # and before the formatter build spends time.
+    # Resolve --run-in up front: a bad value must fail before setup_phase opens
+    # status surfaces and the build spends time.
     spawn_cwd = resolve_run_in(ctx, ctx.args.run_in)
 
     # Initialize data for status-check emission.
@@ -363,9 +302,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     severity_resolved = resolve_severity(ctx)
     data["format"]["severity_resolved"] = severity_resolved
 
-    # The single pre-task setup phase (status surface, rc parse, health
-    # checks); returns the resolved flags (a failed health check fails the task
-    # inside setup_phase).
+    # Single pre-task setup phase (status surface, rc parse, health checks);
+    # returns resolved flags (a failed health check fails the task inside).
     flags = setup_phase(ctx, lifecycle, ctx.args.formatter_target, "format_results", data, hc_trait, bazel_trait, bazel_base_flags = LOCAL_SPAWN_BASE_FLAGS)
     announce_version, announce_command = resolve_bazel_announce(ctx)
 
@@ -373,16 +311,13 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
     r = runnable(ctx, [ctx.args.formatter_target])
 
-    # Pass `bazel_trait.build_event_sinks` (which carries the Aspect
-    # backend gRPC sink in CI) so the "✨ Aspect Workflows" link resolves
-    # to a real backend record; otherwise we'd 404 on the sink_invocation_id.
+    # Pass build_event_sinks (carries the Aspect backend gRPC sink in CI) so the
+    # "✨ Aspect Workflows" link resolves to a real record, not a 404.
     events = bazel.build_events.iterator()
     build_events = [events] + list(bazel_trait.build_event_sinks)
 
-    # Fire `bazel_trait.build_start` hooks before spawning bazel —
-    # Workflows registers the BK `--- :bazel: Running bazel …`
-    # section marker here, and other features hook the build kick-off
-    # for instrumentation / pre-spawn work.
+    # Fire build_start hooks before spawning — Workflows registers the BK
+    # `--- :bazel: Running bazel …` marker; other features hook pre-spawn work.
     for hook in bazel_trait.build_start:
         hook(ctx)
 
@@ -409,15 +344,12 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         announce_command = announce_command,
     )
 
-    # `build.sink_invocation_id` is minted inside the runtime's `Build::spawn`
-    # before it returns. Populate `data["sink_invocation_id"]` here and
-    # emit a running task_update so the BK annotation / status check picks up
-    # the Aspect Workflows link as soon as the build is spawned, rather than
-    # waiting for `build.wait()` to surface it.
+    # sink_invocation_id is minted in Build::spawn before it returns. Populate
+    # data + emit a running task_update so the BK annotation / status check
+    # picks up the Workflows link at spawn rather than waiting for build.wait().
     data["sink_invocation_id"] = build.sink_invocation_id
 
-    # Re-emit (now that the sink_invocation_id is known so we can show
-    # the Web UI link) but target only the status surfaces — empty
+    # Re-emit now the link is known, but only to status surfaces — empty
     # `stream` suppresses the duplicate CLI line.
     status = _pick_status(data, had_failure = False, terminal = False)
     task_update(
@@ -431,11 +363,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         data = data,
     )
 
-    # Tick-driven drain: fires a heartbeat refresh every
-    # MIN_HEARTBEAT_INTERVAL_MS even when bazel is silent. Per-event
-    # work: r.event() (entrypoint discovery), bazel_trait.build_event
-    # hooks (ArtifactUpload records testlog paths), process_event
-    # populates the shared bazel state for the rendered body.
+    # Tick-driven drain: heartbeat refresh every MIN_HEARTBEAT_INTERVAL_MS even
+    # when bazel is silent. Per event: r.event() (entrypoint discovery),
+    # build_event hooks (ArtifactUpload records testlogs), process_event.
     last_emit_ms = now_ms(ctx)
     for _tick in sleep_iter(BES_DRAIN_TICK_MS):
         interesting = False
@@ -478,12 +408,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     exclude_patterns = list(ctx.args.exclude_patterns)
     include_patterns = list(ctx.args.include_patterns)
 
-    # Positional files explicitly provided → bypass change-detection
-    # entirely. `--scope`, `--base-ref`, `--merge-base`, `--exclude-pattern`,
-    # and `--include-pattern` are silently ignored here; the formatter
-    # receives exactly the listed paths. This is the typical local
-    # repro path: the user copies the fix command from CI which
-    # carries a positional file list, runs it as-is.
+    # Explicit positional files → bypass change-detection; --scope/--base-ref/
+    # --merge-base/--exclude-/--include-pattern ignored, formatter gets exactly
+    # these paths. Typical local repro: user pastes CI's fix command as-is.
     explicit_files = list(ctx.args.files)
 
     format_args = []
@@ -495,10 +422,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         data["changed_files_count"] = len(explicit_files)
         format_args = explicit_files
     elif ctx.args.scope == "changed":
-        # Prefers the GitHub PR Files API when authenticated and in a PR
-        # context (works on any CI host), falling back to a local
-        # `git diff <merge-base> --diff-filter=d --name-only`. The
-        # --base-ref / --merge-base flags below only apply to that fallback.
+        # Prefers the GitHub PR Files API (authenticated PR context, any CI
+        # host), else local `git diff <merge-base> --diff-filter=d --name-only`.
+        # --base-ref / --merge-base apply only to that fallback.
         status = _pick_status(data, had_failure = False, terminal = False)
         task_update(
             ctx,
@@ -519,16 +445,11 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             merge_base = ctx.args.merge_base or None,
         )
 
-        # Shared diagnostic listing — announces the source (PR Files
-        # API vs local git diff with SHAs) and lists every entry the
-        # source returned. format uses line_level=False so the
-        # entries are bare filenames; the listing prints just the
-        # filename per row (no +/- counts — the source didn't give
-        # us per-line data).
+        # Shared diagnostic listing — announces the source and lists each entry.
+        # line_level=False → bare filenames, no +/- counts.
         print_changed_files_listing(ctx, detect_result)
         if detect_result.get("unscoped"):
-            # Degrade to `--scope=all`: no positionals, formatter
-            # walks the working tree itself.
+            # Degrade to --scope=all: no positionals, formatter walks the tree.
             warn(ctx.std, "Could not determine the changed-file set (%s). Formatting all files in scope (equivalent to --scope=all). Override with --merge-base=<sha> or set --base-ref to a ref available locally." % detect_result["source"])
             format_args = []
         else:
@@ -551,18 +472,12 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                 data["format"]["no_files_to_format"] = True
                 return _emit_final(ctx, lifecycle, data, 0)
 
-            # Surface the input file count so the Configuration row can show
-            # `Scope: changed — N file(s)` (analogous to lint's
-            # "Strategy: hold-the-line — filtered to N changed files"). This
-            # is the post-filter set the formatter actually sees.
+            # Post-filter count for the Configuration row's `Scope: changed — N file(s)`.
             data["changed_files_count"] = len(changed_files)
             format_args = changed_files
 
-    # Snapshot pre-format tracked state so we can detect what the formatter
-    # changed independently of any pre-existing dirty files. `git stash
-    # create` is non-destructive: writes a commit object representing the
-    # working-tree+index state and returns its SHA without touching the
-    # working tree, index, or stash list. Empty output = clean tree.
+    # Snapshot pre-format tracked state to detect formatter changes
+    # independently of pre-existing dirty files. Non-destructive; "" = clean.
     pre_snap = _snapshot_tracked_state(ctx)
 
     if explicit_files or ctx.args.scope == "changed":
@@ -604,19 +519,15 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     exit = r.spawn(ep, spawn_args, cwd = spawn_cwd).wait()
 
     if not exit.success:
-        # Formatter binary itself errored — surface that and skip the
-        # formatting-required check. Whatever the formatter wrote to disk
-        # is left in place for the user to inspect.
+        # Formatter itself errored — skip the formatting-required check;
+        # whatever it wrote stays on disk for inspection.
         error(ctx.std, "Formatter exited with code %d." % exit.code)
         data["format"]["formatter_error"] = True
         data["format"]["formatter_error_code"] = exit.code
         return _emit_final(ctx, lifecycle, data, exit.code)
 
-    # No HEAD means snapshot wasn't possible — either we're not in a git
-    # repository or the repo has no initial commit yet. The formatter still
-    # ran and wrote whatever it wanted to disk; we just can't compute a
-    # diff, so degrade the detection feature with a warning rather than
-    # failing the task.
+    # No HEAD (no git repo / no initial commit) → no snapshot, can't diff. The
+    # formatter ran; degrade detection with a warning rather than failing.
     if pre_snap == None:
         warn(ctx.std, "Cannot resolve HEAD (no initial git commit, or not in a git repository); " +
                       "formatting-required detection is skipped. The formatter ran, but we cannot tell " +
@@ -625,10 +536,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         data["format"]["no_git"] = True
         return _emit_final(ctx, lifecycle, data, 0)
 
-    # Diff the post-format tree against the pre-format snapshot. Any
-    # non-empty diff means the formatter modified files = "formatting
-    # required". When `pre_snap` is empty (working tree was clean before),
-    # `git diff HEAD` gives the same answer.
+    # Diff post-format tree vs the pre-format snapshot; non-empty = formatting
+    # required. Empty pre_snap (was clean) → `git diff HEAD`, same answer.
     status = _pick_status(data, had_failure = False, terminal = False)
     task_update(
         ctx,
@@ -644,9 +553,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     )
     formatter_diff = _diff_against(ctx, pre_snap)
     if not formatter_diff:
-        # CLI verdict is descriptive past-tense ("N files were modified")
-        # — distinct from the prescriptive CI-style status pane phrasing
-        # ("All N files are properly formatted").
+        # CLI verdict is descriptive past-tense ("N files were modified"),
+        # distinct from the prescriptive CI status pane phrasing.
         if explicit_files:
             scope_text = ""
         elif ctx.args.scope == "changed":
@@ -656,9 +564,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         print("No files%s were modified." % scope_text)
         return _emit_final(ctx, lifecycle, data, 0)
 
-    # Pattern filters hide files from the user-facing affected list and the
-    # failure decision. They don't undo the formatter's changes — those still
-    # sit in the working tree — but they prevent unexpected files from failing.
+    # Pattern filters hide files from the affected list + failure decision; they
+    # don't undo changes (still in the tree), just stop unexpected files failing.
     name_out, _, _ = _git_capture(ctx, "diff", "--name-only", pre_snap if pre_snap else "HEAD")
     affected_raw = [f for f in name_out.strip().split("\n") if f]
     affected = affected_raw
@@ -693,13 +600,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     data["format"]["affected_files"] = affected
     data["format"]["filtered_count"] = filtered_count
 
-    # Optional: archive the diff as a CI artifact so reviewers can apply
-    # it locally without re-running the formatter. Off by default.
-    #
-    # Scope the uploaded patch to `affected` so it matches the failure-decision
-    # basis. In --scope=all mode the formatter rewrites filtered files too;
-    # without re-scoping the uploaded patch would carry those changes even
-    # though they don't contribute to failure or appear in the affected list.
+    # Optionally archive the diff as a CI artifact. Scope it to `affected` so it
+    # matches the failure-decision basis — in --scope=all the formatter rewrites
+    # filtered files too, which shouldn't appear in the uploaded patch.
     if ctx.args.upload_format_diff:
         if filtered_count > 0:
             upload_diff, _, _ = _git_capture(
@@ -712,10 +615,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         else:
             upload_diff = formatter_diff
 
-        # Upload as a CI artifact and surface the URL in data so the
-        # status-check renderer can link to it. `artifacts.upload`
-        # handles CI detection, naming, transport, and registration; a
-        # silent no-op (returning "") when off-CI or upload fails.
+        # Upload as a CI artifact; URL surfaced in data for the renderer.
+        # artifacts.upload handles CI detection/naming/transport, "" no-op off-CI.
         data["format"]["patch_url"] = artifacts.upload(
             ctx,
             kind = "format_diff",
@@ -798,19 +699,10 @@ format = task(
             long = "bazel-startup-flag",
             description = "Additional Bazel startup flags. Repeat the flag to pass multiple. Note: changing startup flags restarts the Bazel server.",
         ),
-        # Positional file list. When non-empty, the formatter receives
-        # these files directly — change-detection is skipped, and
-        # `--scope`, `--base-ref`, `--merge-base`, `--include-pattern`,
-        # and `--exclude-pattern` are silently ignored. This is the
-        # "format these specific files" mode reviewers use locally after
-        # picking up a fix command from CI:
-        #
-        #   aspect format -- crates/aspect-cli/src/foo.axl crates/aspect-cli/src/bar.axl
-        #
-        # Defaults to an empty list, which falls back to the
-        # change-detection path driven by `--scope`. Hyphen-led entries
-        # are accepted via the standard `--` separator (`aspect
-        # format -- file1 file2`).
+        # Positional file list: when non-empty the formatter gets these directly
+        # (change-detection + --scope/--base-ref/--merge-base/--include-/
+        # --exclude-pattern skipped). Empty → change-detection via --scope.
+        # Hyphen-led entries via `--` (`aspect format -- file1 file2`).
         "files": args.positional(
             default = [],
             description = "Optional positional list of files to format. When non-empty the formatter runs on exactly these paths and the change-detection flags (--scope / --base-ref / --merge-base / --include-pattern / --exclude-pattern) are ignored. When empty, the task auto-discovers files via the configured --scope.",

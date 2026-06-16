@@ -114,13 +114,11 @@ def _test_bzlmod_bazel7_version_with_plus_build_metadata(ctx):
         "@foo//pkg:tgt",
     )
 
-# ---------------------------------------------------------------------------
 # Relative-label resolution
 #
 # `apparent_label` resolves relative labels (`:foo`, bare `foo`, `pkg:foo`)
 # against the caller's `current_package` so `aspect run :foo` works from a
 # subdirectory. Absolute and repo-prefixed labels ignore `current_package`.
-# ---------------------------------------------------------------------------
 
 def _test_relative_colon_name_at_root(ctx):
     _eq(":foo at root", apparent_label(":foo", ""), "//:foo")
@@ -144,14 +142,12 @@ def _test_absolute_ignores_current_package(ctx):
     """Absolute labels are not rewritten by a non-empty current_package."""
     _eq("//foo/bar:baz with pkg context", apparent_label("//foo/bar:baz", "ignored"), "//foo/bar:baz")
 
-# ---------------------------------------------------------------------------
 # BES matching integration tests
 #
 # Construct minimal mock BES events and verify that the full
 # runnable() → _process_bes → _determine_entrypoint pipeline correctly
 # maps BES-emitted labels (including bzlmod canonical forms) to the
 # apparent labels registered by the caller.
-# ---------------------------------------------------------------------------
 
 def _make_fileset_event(set_id, file_paths):
     """Minimal named_set_of_files BES event. file_paths is a list of absolute paths."""
@@ -243,9 +239,7 @@ def _test_bes_unknown_target_returns_none(ctx):
     if r.determine_entrypoint("//tools/format:format") != None:
         fail("bes unknown target: expected None")
 
-# ---------------------------------------------------------------------------
 # runfiles_dir tests — runfiles directory detection
-# ---------------------------------------------------------------------------
 
 def _test_no_runfiles_dir_when_ctx_none(ctx):
     """runfiles_dir is None when ctx is None — filesystem probe requires ctx.
@@ -345,10 +339,8 @@ def _test_pass3_skips_non_executable(ctx):
         fail("pass3-exec-bit: expected entrypoint, got None")
     _eq("pass3-exec-bit: non-executable skipped", ep.path, "/out/bin/tools/format/format_impl")
 
-# ---------------------------------------------------------------------------
 # Filesystem detection tests — exercise `<entrypoint>.runfiles` discovery on
 # disk with a minimal mock ctx.
-# ---------------------------------------------------------------------------
 
 def _make_mock_ctx(existing_paths, executable_paths = None):
     """Minimal TaskContext mock for filesystem detection tests.
@@ -410,11 +402,9 @@ def _test_filesystem_no_runfiles(ctx):
     if ep.runfiles_workspace_dir != None:
         fail("fs/no-runfiles: expected runfiles_workspace_dir=None (no runfiles_dir), got %r" % ep.runfiles_workspace_dir)
 
-# ---------------------------------------------------------------------------
 # runfiles_workspace_dir tests — `<runfiles_dir>/<workspace>`, the cwd
 # `bazel run` uses. The workspace name comes from a `workspace_config`
 # BES event; falls back to `_main` when none arrives.
-# ---------------------------------------------------------------------------
 
 def _make_workspace_config_event(workspace_name):
     """Minimal workspace_config BES event. `_process_bes` reads the
@@ -463,10 +453,8 @@ def _test_runfiles_workspace_dir_default_when_no_workspace_config(ctx):
         fail("rwd/default: expected entrypoint, got None")
     _eq("rwd/default: runfiles_workspace_dir", ep.runfiles_workspace_dir, "/out/bin/tools/format/runner.runfiles/_main")
 
-# ---------------------------------------------------------------------------
 # get_default_outputs tests — full BES default-output-group enumeration,
 # regardless of whether any file is an executable entrypoint.
-# ---------------------------------------------------------------------------
 
 def _make_nested_fileset_event(set_id, file_paths, child_set_ids):
     """named_set_of_files event whose payload references other filesets by id."""
@@ -541,9 +529,7 @@ def _test_get_default_outputs_strips_file_uri_prefix(ctx):
     if got[0].startswith("file://"):
         fail("file:// prefix not stripped: %r" % got[0])
 
-# ---------------------------------------------------------------------------
 # resolve_run_in — `--run-in=<choice>` cwd resolution
-# ---------------------------------------------------------------------------
 
 def _make_env_ctx(cwd = "/user/cwd", bazel_root = "/repo", aspect_root = "/repo", git_root = "/repo"):
     """Minimal ctx with `std.env.*` dirs for resolve_run_in tests."""

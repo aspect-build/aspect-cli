@@ -1,23 +1,23 @@
 """
 `aspect delivery` — deliver Bazel-built artifacts with change detection.
 
-Replaces the legacy two-task `delivery_manifest` + `delivery` pipeline that
-ran on Redis-backed state. Each invocation goes through up to three Bazel
-build phases plus a dispatch loop:
+Replaces the legacy Redis-backed `delivery_manifest` + `delivery` pipeline.
+Up to three Bazel build phases plus a dispatch loop:
 
-  1. Phase 1 — build the resolved targets with the `hashsum` aspect injected.
-     The aspect produces a `DeliveryHash` action per target, marked `no-local`
-     so the action always resolves through the remote cache.
-  2. Phase 2 — re-run with `--experimental_remote_require_cached` and
-     `--remote_grpc_log`. Bazel emits a gRPC log entry for every action
-     including `DeliveryHash`, and the impl extracts `action_digest.hash` per
-     target. (Phases 1 and 2 share a single function.)
-  3. deliveryd record/query — record (label, digest) pairs and query the
-     per-prefix delivery state.
-  4. Phase 3 — download runfiles for the targets that survived change
-     detection, streaming BES into a run tracker to discover entrypoints.
-  5. Dispatch — `bazel run` each pending target, then `deliveryd_deliver` (or
-     `deliveryd_delete_artifact` on failure).
+  1. Phase 1 — build with the `hashsum` aspect injected; it emits a
+     `DeliveryHash` action per target, marked `no-local` so it always
+     resolves through the remote cache.
+  2. Phase 2 — re-run with `--experimental_remote_require_cached` +
+     `--remote_grpc_log`; extract `action_digest.hash` per target from the
+     gRPC log. (Phases 1+2 share one function.) The `no-local` action needs
+     a remote executor: use the user's `--remote_executor` if set, else an
+     in-process dummy so a plain `--remote_cache` suffices — see
+     `lib/remote_executor.axl`.
+  3. deliveryd record/query — record (label, digest) pairs, query per-prefix state.
+  4. Phase 3 — download runfiles for targets that survived change detection,
+     streaming BES into a run tracker to discover entrypoints.
+  5. Dispatch — `bazel run` each pending target, then `deliveryd_deliver`
+     (or `deliveryd_delete_artifact` on failure).
 
 
 Flags
@@ -29,21 +29,16 @@ Three orthogonal flags shape every invocation:
   --dry-run                       default off — preview, do not run targets
   --track-state={true,false}      default true — record/query delivery state
 
-`--mode=selective` uses change detection: only runs candidates that haven't
-already been delivered for the `--task-key[:--salt]` prefix. `--mode=always`
-skips change detection and treats every resolved target as a candidate
-(closest analogue to the legacy `only_on_change: false` rule attribute;
-`--force-target` is redundant in this mode).
+`selective` uses change detection (only candidates not yet delivered for the
+`--task-key[:--salt]` prefix); `always` skips it and treats every resolved
+target as a candidate (legacy `only_on_change: false`; `--force-target`
+redundant here). `--track-state=true` records this run's digests/deliveries
+and queries prior ones; since change detection builds on it,
+`--mode=selective --track-state=false` is rejected at startup.
 
-`--track-state=true` (the default) records the digests and deliveries this
-run produces, and queries the state backend for prior deliveries. Change
-detection is built on this state, so `--mode=selective --track-state=false`
-is rejected at startup with a pointer to `--mode=always`.
-
-Today the state backend is `deliveryd` (a Unix-socket HTTP server that
-Aspect Workflows runners start automatically and expose via
-`ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT`). Other backends may be supported
-in the future.
+State backend is `deliveryd` today (Unix-socket HTTP server that Aspect
+Workflows runners start and expose via
+`ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT`).
 
 
 Combination matrix
@@ -102,10 +97,9 @@ Failure modes
 Manifest
 --------
 
-Every invocation produces a structured delivery manifest at end-of-task
-that records every target's outcome (ok / skip / warn / fail / pending),
-the resolved CI metadata (host, build URL, commit), and any per-target
-enrichment a customer hook attached. Surfaces:
+Every invocation produces a structured manifest at end-of-task recording
+each target's outcome (ok/skip/warn/fail/pending), the resolved CI metadata
+(host, build URL, commit), and any per-target hook enrichment. Surfaces:
 
   --manifest-file=<path>             write the rendered manifest to disk
                                        (off by default)
@@ -143,10 +137,12 @@ load("@aspect//lib/environment.axl", "color_enabled", "error", "info", "warn")
 load("@aspect//lib/github.axl", "detect_commit_sha")
 load("@aspect//lib/health_check.axl", "HealthCheckTrait")
 load("@aspect//lib/lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "setup_phase", "task_update")
+load("@aspect//lib/remote_executor.axl", "start_dummy_executor", "stop_dummy_executor")
 load("@aspect//lib/repro_commands.axl", "build_aspect_command", "print_repro_and_fix", "repro_prefix", "task_cli_path")
 load("@aspect//lib/runnable.axl", "LOCAL_SPAWN_BASE_FLAGS", "LOCAL_SPAWN_FLAGS", "apparent_label", "runnable")
 load("@aspect//lib/text.axl", "pluralize")
 load("@aspect//lib/tips.axl", "tips")
+load("@bazel//proto/remote_logging.axl", "remote_logging")
 load("@std//time.axl", "sleep_iter", "time")
 
 DeliveryTrait = trait(
@@ -230,7 +226,7 @@ _RED = "\033[31m"
 _RESET = "\033[0m"
 
 def _style(text, codes, ansi):
-    """Wrap text in ANSI codes if terminal is TTY."""
+    """Wrap text in ANSI codes when `ansi`."""
     if ansi:
         return codes + text + _RESET
     return text
@@ -239,11 +235,8 @@ def pad(s, width):
     return s + " " * (width - len(s))
 
 def fmt_elapsed(secs):
-    """Format an elapsed-seconds duration as `S.Ts` (sub-minute) or `MmSs` (≥1 min).
-
-    Sub-minute output truncates to the tenths place (no rounding) — e.g. 9.99 → "9.9s".
-    Minute output is whole-second; a minute is the largest unit (3661 → "61m1s").
-    """
+    """Format elapsed seconds as `S.Ts` (<1 min, truncated to tenths) or
+    `MmSs` (≥1 min, whole-second; minute is the largest unit, 3661 → "61m1s")."""
     if secs < 60:
         return "{}.{}s".format(int(secs), int(secs * 10) % 10)
     return "{}m{}s".format(int(secs) // 60, int(secs) % 60)
@@ -303,18 +296,15 @@ _PHASE2_LOG_PATH = "/tmp/aspect-delivery-phase2-{}.log"
 _PHASE3_LOG_PATH = "/tmp/aspect-delivery-phase3-{}.log"
 _EXECLOG_PATH = "/tmp/aspect-delivery-execlog-{}.bin"
 
-# Mnemonic of the action our hashsum aspect registers per delivery target.
-# The gRPC log uses this to identify the entries that carry change-detection
-# digests. Anything else with a non-OK status is an action whose key drifted
-# between phases (non-hermetic input); the phase-1 execution log's
-# `remote_cacheable` field tells us whether the rule declared the opt-out.
+# Mnemonic of the per-target action our hashsum aspect registers; the gRPC
+# log uses it to find the change-detection digest entries. Any other non-OK
+# entry is a key that drifted between phases (non-hermetic); phase-1
+# execlog's `remote_cacheable` says whether the rule declared the opt-out.
 _DELIVERY_HASH_MNEMONIC = "DeliveryHash"
 
 def should_upload_grpc_log(setting: str, unresolved: int) -> bool:
-    """Resolve the --upload-grpc-log tristate against the phase-2 outcome.
-
-    "true" always uploads, "false" never, "auto" only when a digest went
-    unresolved (`unresolved > 0`). Exported for unit testing."""
+    """Resolve the --upload-grpc-log tristate: "true" always, "false" never,
+    "auto" only when `unresolved > 0`. Exported for unit testing."""
     if setting == "true":
         return True
     if setting == "false":
@@ -324,13 +314,11 @@ def should_upload_grpc_log(setting: str, unresolved: int) -> bool:
 def count_unexplained_unresolved(targets: list, output_shas: dict, non_hermetic_misses: dict) -> int:
     """Count delivery targets whose digest is missing for an unexplained reason.
 
-    A target is unresolved when it has no entry in `output_shas`, and explained
-    when its apparent label is a key in `non_hermetic_misses` — the same
-    (post opt-out filter) set that produces the per-target mnemonic WARN row.
-    One with no such entry (e.g. its own DeliveryHash lookup came back non-OK,
-    or its only miss was a declared opt-out) gets the generic "not in grpc log"
-    message, so it is unexplained. Exported for unit testing; feeds
-    `should_surface_phase2_stderr`."""
+    Unresolved = no entry in `output_shas`; explained = its apparent label is
+    in `non_hermetic_misses` (the post-opt-out set driving the WARN rows).
+    Targets with no such entry (own DeliveryHash lookup non-OK, or only a
+    declared opt-out) get the generic message and count as unexplained.
+    Exported for testing; feeds `should_surface_phase2_stderr`."""
     return len([
         label
         for label in targets
@@ -340,54 +328,37 @@ def count_unexplained_unresolved(targets: list, output_shas: dict, non_hermetic_
 def should_surface_phase2_stderr(unexplained_unresolved: int, getactionresult_count: int) -> bool:
     """Whether to echo phase-2's captured Bazel stderr to the console.
 
-    Phase 2 is *expected* to exit non-zero on first delivery — its
-    `--experimental_remote_require_cached` build reports the not-yet-cached
-    digests as `ERROR:` lines, which is exactly what the gRPC log captures.
-    Echoing that stderr would drown the user in expected errors, so a target
-    whose miss is explained — diagnosed inline as a non-cacheable upstream
-    action — never triggers it.
-
-    Surface it when either:
-
-    - the gRPC log yielded no GetActionResult entries (`getactionresult_count
-      == 0`): bazel failed before issuing any remote lookup
-      (auth/network/config), so no per-target diagnosis can fire; or
-    - a digest we expected to resolve is missing for an *unexplained* reason
-      (`unexplained_unresolved > 0`): e.g. the DeliveryHash lookup itself came
-      back non-OK. The per-target row falls back to a generic message, so the
-      raw stderr is the actionable surface.
-
-    Exported for unit testing."""
+    Phase 2 is expected to exit non-zero on first delivery (require-cached
+    reports not-yet-cached digests as ERROR lines, captured in the gRPC log),
+    so explained misses don't trigger an echo. Surface it when either:
+    no GetActionResult entries (bazel failed before any remote lookup —
+    auth/network/config), or an unexplained unresolved digest (the per-target
+    row falls back to a generic message, so raw stderr is the actionable
+    surface). Exported for unit testing."""
     return getactionresult_count == 0 or unexplained_unresolved > 0
 
 def _surface_phase_stderr(ctx, phase, log_path):
-    """Echo a failing phase's captured Bazel stderr to the console and upload
-    it as a CI artifact (`delivery_phase{phase}_log`).
+    """Echo a failing phase's captured Bazel stderr and upload it as a CI
+    artifact (`delivery_phase{phase}_log`).
 
-    Phases 2 and 3 redirect Bazel's stderr to a file rather than the console
-    because phase-2 require-cached misses are noisy-but-expected. Callers gate
-    this to the genuinely-failed cases (the expected misses are diagnosed from
-    the gRPC log instead); when called, the file holds Bazel's own diagnosis,
-    so echo it verbatim and preserve it as a downloadable artifact. The stderr
-    carries no env/command lines, so it uploads unconditionally. No-op if the
-    file is absent or off-CI."""
+    Phases 2/3 redirect stderr to a file (phase-2 require-cached misses are
+    noisy-but-expected); callers gate this to genuine failures, where the file
+    holds Bazel's own diagnosis. Stderr carries no env/command lines, so it
+    uploads unconditionally. No-op if the file is absent or off-CI."""
     if not ctx.std.fs.exists(log_path):
         return
     ctx.std.io.stderr.write(ctx.std.fs.read_to_string(log_path))
     artifacts.upload_file(ctx, "delivery_phase{}_log".format(phase), "phase{}-stderr.log".format(phase), log_path)
 
-def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_flags, remote_executor_uri, ansi, data):
-    """Run phase 1 (main build) + phase 2 (digest extraction) and return
-    `(output_shas, non_hermetic_misses, exit_code)`. Phase 1 BES events
-    drive the `data` (delivery_results) metadata; phase 2's gRPC log yields
-    the per-target action digests used for change detection.
+def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_flags, user_remote_executor_uri, ansi, data):
+    """Run phase 1 (build) + phase 2 (digest extraction); return
+    `(output_shas, non_hermetic_misses, exit_code)`. Phase-1 BES events drive
+    `data`; phase-2's gRPC log yields the per-target digests for change detection.
 
-    Phase 2 is expected to exit non-zero on first delivery (require-cached
-    reports the not-yet-cached digests), so its stderr is captured to a file
-    and echoed/uploaded only when the per-target rows can't explain the
-    outcome — see `should_surface_phase2_stderr`. The gRPC log itself is
-    uploaded per `ctx.args.upload_grpc_log` ("auto"/"true"/"false"). Uploads
-    no-op off-CI.
+    Phase 2 is expected to exit non-zero on first delivery, so its stderr is
+    captured and echoed/uploaded only when rows can't explain it (see
+    `should_surface_phase2_stderr`). The gRPC log uploads per
+    `ctx.args.upload_grpc_log`. Uploads no-op off-CI.
     """
     repo_dir = "/tmp/aspect_delivery_" + ctx.task.key
     _write_aspect_repo(ctx, repo_dir)
@@ -403,15 +374,12 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
     _t_phase1 = time.monotonic()
     announce_version, announce_command = resolve_bazel_announce(ctx)
 
-    # Snapshot pre-loop state so retries reset BES-derived counters
-    # without re-running caller-managed setup. Restored via clear+update
-    # to keep the caller's `data` reference valid.
+    # Snapshot pre-loop state so retries reset BES counters without re-running
+    # setup. Restored via clear+update to keep the caller's `data` ref valid.
     pre_loop_state = dict(data)
 
-    # `hasattr` guard so a future caller of `_get_output_shas` without
-    # `--bazel-retry-attempts` wired up still works; `max(1, ...)` so a 0
-    # or negative value still runs bazel once instead of being a silent
-    # no-op.
+    # `hasattr` guard for callers without `--bazel-retry-attempts`; `max(1,
+    # ...)` so a 0/negative value still runs bazel once.
     requested = ctx.args.bazel_retry_attempts if hasattr(ctx.args, "bazel_retry_attempts") else DEFAULT_BAZEL_RETRY_ATTEMPTS
     max_attempts = max(1, requested)
     for attempt in range(max_attempts):
@@ -427,20 +395,17 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
             data["bazel_attempts"] = prior_attempts
         events = bazel.build_events.iterator()
 
-        # Capture the execution log so we can read each spawn's
-        # `remote_cacheable` flag — used post-wait to decide whether a
-        # phase-2 miss was a declared opt-out or a real key drift.
-        # Local-action-cache hits aren't logged (per spawn.proto), but
-        # that's the same blind spot aquery has and we accept it.
+        # Capture the execution log to read each spawn's `remote_cacheable`
+        # flag — used post-wait to tell a declared opt-out from a real
+        # phase-2 key drift. Local-action-cache hits aren't logged (per
+        # spawn.proto), the same blind spot aquery has; accepted.
         phase1_execlog_path = _EXECLOG_PATH.format(ctx.task.key)
         phase1_execlog_sinks = list(bazel_trait.execution_log_sinks)
         phase1_execlog_sinks.append(bazel.execution_log.file(path = phase1_execlog_path))
 
-        # Advertise the build phase before spawning bazel so the phase
-        # header precedes the spawn disclosure (announce flags below) and
-        # the potentially-minutes-long build output. Phase 1 inherits the
-        # CLI's stdout/stderr (unlike phase 2/3), so this is the only
-        # "we're working" signal during the build.
+        # Emit the phase header before spawning bazel so it precedes the
+        # spawn disclosure and the long build output. Phase 1 inherits the
+        # CLI's stdout/stderr (unlike 2/3), so this is the only progress signal.
         targets_label = pluralize(len(targets), "target")
         status = _pick_status(data, had_failure = False, terminal = False)
         if attempt == 0:
@@ -483,12 +448,12 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
             *targets
         )
 
-        # Phase 1's sink UUID drives the "✨ Aspect Workflows" link in
-        # the BK annotation / status check. Retries overwrite it.
+        # Phase-1 sink UUID drives the "✨ Aspect Workflows" link in the BK
+        # annotation / status check. Retries overwrite it.
         data["sink_invocation_id"] = build.sink_invocation_id
 
-        # Tick-driven drain: fires a heartbeat refresh every
-        # MIN_HEARTBEAT_INTERVAL_MS even when bazel is silent.
+        # Tick-driven drain: heartbeat refresh every MIN_HEARTBEAT_INTERVAL_MS
+        # even when bazel is silent.
         last_emit_ms = now_ms(ctx)
         for _tick in sleep_iter(BES_DRAIN_TICK_MS):
             interesting = False
@@ -507,8 +472,8 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
                 break
         status = build.wait()
 
-        # Flush trait sinks (e.g. bessie) before any potential retry —
-        # re-binding a Live sink errors.
+        # Flush trait sinks (e.g. bessie) before any retry — re-binding a
+        # Live sink errors.
         for sink in build_events:
             sink.wait()
 
@@ -525,9 +490,8 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
         return {}, {}, status.code
     info(ctx.std, "Build took {}.".format(fmt_elapsed(time.monotonic() - _t_phase1)))
 
-    # Phase 2. We parse the gRPC log regardless of exit code — a non-zero
-    # result usually just means DeliveryHash wasn't cached remotely yet,
-    # which is normal on first delivery.
+    # Phase 2. Parse the gRPC log regardless of exit code — non-zero usually
+    # just means DeliveryHash wasn't cached yet, normal on first delivery.
     targets_label = pluralize(len(targets), "target")
     status = _pick_status(data, had_failure = False, terminal = False)
     task_update(
@@ -545,18 +509,31 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
     _t_phase2 = time.monotonic()
     log_path = _GRPC_LOG_PATH.format(ctx.task.key)
 
+    # Phase 2 needs a remote executor endpoint: DeliveryHash is `no-local`, so
+    # Bazel requires one even though require-cached means it never executes
+    # (resolves against the cache or fails). The user's --remote_cache (already
+    # in bazel_flags) serves GetActionResult and carries the digests regardless
+    # of where the executor points. So: use the user's --remote_executor if set,
+    # else stand up an in-process dummy to satisfy the no-local requirement —
+    # delivery needs no real RBE. See lib/remote_executor.axl.
+    if user_remote_executor_uri:
+        dummy = None
+        phase2_executor_uri = user_remote_executor_uri
+    else:
+        dummy = start_dummy_executor()
+        phase2_executor_uri = dummy.grpc_uri
+
     # Force `=minimal`: phase 2 reads digests from the gRPC log, not disk.
     phase2_flags = bazel_flags + aspect_flags + [
-        "--remote_executor=" + remote_executor_uri,
+        "--remote_executor=" + phase2_executor_uri,
         "--experimental_remote_require_cached",
         "--remote_grpc_log=" + log_path,
         "--keep_going",
         "--remote_download_outputs=minimal",
     ]
 
-    # Redirect stderr to a log file: require-cached failures on first
-    # delivery are noisy-but-expected, and the actionable signal lives in
-    # the gRPC log we parse below. The log file is the escape hatch.
+    # Redirect stderr to a file: require-cached failures are noisy-but-expected;
+    # the actionable signal is the gRPC log below. The file is the escape hatch.
     phase2_log_path = _PHASE2_LOG_PATH.format(ctx.task.key)
     phase2_status = ctx.bazel.build(
         flags = phase2_flags,
@@ -567,23 +544,30 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
         *targets
     ).wait()
 
-    # `build_end` deliberately not fired here — the outer caller dispatches
-    # it once with the aggregate build_code after `_get_output_shas` returns.
+    # `build_end` not fired here — the outer caller dispatches it once with
+    # the aggregate build_code after `_get_output_shas` returns.
     dispatch_bazel_attempt_end(ctx, bazel_trait, phase2_status.code)
 
-    # Normalize user-supplied targets to apparent form so they match however
-    # the gRPC log records the label (canonical @@module+// or apparent @module//).
+    # Tear down the dummy executor now the build exited (Bazel only talks to
+    # it while building). Done here, at the one point all return paths pass
+    # through (Starlark has no finally), so nothing is left running on any
+    # bail. No-op when a real --remote_executor was used (dummy is None).
+    if dummy:
+        stop_dummy_executor(dummy)
+
+    # Normalize targets to apparent form to match the gRPC log's labels
+    # (canonical @@module+// or apparent @module//).
     apparent_targets = {apparent_label(t): t for t in targets}
 
-    # output_shas: DeliveryHash action_digest per target (hit or miss).
-    # misses_by_producer: non-OK entries for any other mnemonic, keyed by
-    # the producing target (may be a transitive dep, not a deliverable).
+    # output_shas: DeliveryHash digest per target (hit or miss).
+    # misses_by_producer: non-OK entries for any other mnemonic, keyed by the
+    # producing target (may be a transitive dep, not a deliverable).
     output_shas = {}
     misses_by_producer = {}
 
-    # Bazel only writes `--remote_grpc_log` once it issues remote RPCs; a
-    # phase-2 that fails before then leaves no log, so there's nothing to
-    # parse — surface the captured stderr (Bazel's own reason) and bail.
+    # Bazel writes `--remote_grpc_log` only once it issues remote RPCs; a
+    # phase-2 failing before then leaves no log — surface the captured stderr
+    # (Bazel's reason) and bail.
     if not ctx.std.fs.exists(log_path):
         error(ctx.std, "Phase-2 produced no gRPC log; could not checksum delivery digests. Phase-2 raw log: {}".format(phase2_log_path))
         _surface_phase_stderr(ctx, 2, phase2_log_path)
@@ -591,7 +575,7 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
 
     log_file = ctx.std.fs.open(log_path)
     getactionresult_count = 0
-    for entry in remote.logging.LogEntry().parse_from_delimited(log_file):
+    for entry in remote_logging.LogEntry().parse_from_delimited(log_file):
         if entry.method_name != "build.bazel.remote.execution.v2.ActionCache/GetActionResult":
             continue
         getactionresult_count += 1
@@ -611,17 +595,19 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
                 misses_by_producer[entry_label] = existing
     _unresolved = len(targets) - len(output_shas)
 
-    # Filter to misses on actions that did NOT declare a remote-cache
-    # opt-out — these are real key-drift symptoms (transient or
-    # non-hermetic). Caller surfaces them inline on the failed row.
+    # Filter to misses on actions that did NOT declare a remote-cache opt-out
+    # — real key-drift symptoms (transient/non-hermetic). Caller surfaces them
+    # inline on the failed row.
     non_hermetic_misses = {}
     if misses_by_producer:
         action_meta = {}
         execlog_file = ctx.std.fs.open(phase1_execlog_path)
         for entry in bazel.build.execution_log.ExecLogEntry().parse_from_delimited(execlog_file):
-            if entry.kind != "spawn":
+            # The ExecLogEntry oneof surfaces as `entry.type` (active variant's
+            # value, or None). Keep only spawn entries.
+            spawn = entry.type
+            if spawn == None or type(spawn) != "spawn":
                 continue
-            spawn = entry.payload
             if not spawn.target_label or not spawn.mnemonic:
                 continue
             action_meta[(spawn.target_label, spawn.mnemonic)] = {
@@ -632,23 +618,19 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
             for m in mnemonics:
                 meta = action_meta.get((producer, m))
 
-                # Skip declared opt-outs — they don't cause delivery
-                # failures, so there's nowhere to surface them inline.
+                # Skip declared opt-outs — they don't cause delivery failures.
                 if meta and not meta["remote_cacheable"]:
                     continue
                 non_hermetic_misses.setdefault(producer, []).append(m)
     ctx.std.fs.remove_file(phase1_execlog_path)
 
-    # Gate on the same misses that drive the per-target WARN row
-    # (`non_hermetic_misses`, post opt-out filter), not the raw
-    # `misses_by_producer` — a target explained only by a declared opt-out
-    # still gets the generic "not in grpc log" message, so its stderr must
-    # surface.
+    # Gate on `non_hermetic_misses` (post opt-out filter), not raw
+    # `misses_by_producer` — a target explained only by an opt-out still gets
+    # the generic message, so its stderr must surface.
     _unexplained_unresolved = count_unexplained_unresolved(targets, output_shas, non_hermetic_misses)
 
-    # Preserve the gRPC log (the ground truth for which GetActionResult
-    # missed) as a CI artifact per --upload-grpc-log; see the flag's
-    # description for the gating rationale. No-op off-CI.
+    # Preserve the gRPC log (ground truth for which GetActionResult missed) as
+    # a CI artifact per --upload-grpc-log. No-op off-CI.
     upload_grpc = ctx.args.upload_grpc_log if hasattr(ctx.args, "upload_grpc_log") else "auto"
     if should_upload_grpc_log(upload_grpc, _unresolved):
         artifacts.upload_file(ctx, "delivery_grpc_log", "phase2-grpc.binpb", log_path)
@@ -665,8 +647,7 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
             phase2_log_path,
         ))
         if should_surface_phase2_stderr(_unexplained_unresolved, getactionresult_count):
-            # Frame the stderr so its expected require-cached errors don't read
-            # as the failure.
+            # Frame the stderr so its expected require-cached errors don't read as the failure.
             _surface_phase_stderr(ctx, 2, phase2_log_path)
             info(ctx.std, "The Bazel errors above are from phase 2's --experimental_remote_require_cached probe" +
                           " (it reads delivery digests from the remote cache without building); the" +
@@ -676,12 +657,9 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
     return output_shas, non_hermetic_misses, 0
 
 def _pick_status(data, had_failure, terminal):
-    """Decide a delivery task's lifecycle status from accumulated data.
-
-    Aborted (bazel terminated mid-build of phase 1/2/3) → "aborted".
-    Hard failure (`fail` count > 0 or build failed) → "failing"/"failed".
-    `warn` count > 0 → "warning" (soft signal).
-    Else → "running"/"passed"."""
+    """Delivery lifecycle status from accumulated data: aborted → "aborted";
+    had_failure → "failing"/"failed"; `warn` count > 0 → "warning";
+    else → "running"/"passed"."""
     if data.get("bazel", {}).get("aborted"):
         return "aborted"
     if had_failure:
@@ -734,14 +712,10 @@ def _body_text(status, data):
     return ""
 
 def _fire_target_hook(data, delivery_trait, run_tracker, label):
-    """Enrich the most-recent outcome entry with on-disk paths and fire
-    the per-target `delivery_target` hook, merging any returned dict
-    into `entry["custom"]`.
-
-    `run_tracker` is None for early-failure sites that record an outcome
-    before runfiles were materialized; the entry then carries None /
-    empty path fields and the hook can react accordingly.
-    """
+    """Enrich the most-recent outcome entry with on-disk paths and fire the
+    `delivery_target` hook, merging its returned dict into `entry["custom"]`.
+    `run_tracker` is None at early-failure sites (before runfiles
+    materialized) — the entry then carries None/empty path fields."""
     entry = data["delivery"]["deliveries"][-1]
     ep = run_tracker.determine_entrypoint(label) if run_tracker else None
     entry["entrypoint_path"] = ep.path if ep else None
@@ -758,14 +732,12 @@ def _fire_target_hook(data, delivery_trait, run_tracker, label):
         entry["custom"][k] = v
 
 def _emit_update(ctx, lifecycle, data, had_failure = False):
-    """Emit a bare task_update carrying the accumulating delivery data.
+    """Emit a bare task_update carrying accumulating delivery data.
 
-    Used for data-only refreshes during phase 1 BES streaming — the
-    feature side preserves the most recent phase label when
-    `update.progress` is empty, so these emits push updated `data` state
-    without disturbing the displayed "Last update" line. Phase
-    transitions go through `task_update()` instead.
-    """
+    For data-only refreshes during phase-1 BES streaming: an empty
+    `update.progress` keeps the surface's latched phase label, so `data`
+    updates without disturbing the "Last update" line. Phase transitions go
+    through `task_update()`."""
     status = _pick_status(data, had_failure = had_failure, terminal = False)
     dispatch_task_update(ctx, lifecycle, TaskUpdate(
         kind = "delivery_results",
@@ -775,19 +747,17 @@ def _emit_update(ctx, lifecycle, data, had_failure = False):
     ))
 
 def _emit_final(ctx, lifecycle, data, exit_code):
-    """Emit the terminal `task_update(final=True)` for delivery, plus
-    the delivery manifest (see `_emit_manifest`). Called at every return
-    path out of _delivery_impl so a check run is always completed — even
-    on early error exits before any per-target data exist.
-    """
+    """Emit the terminal `task_update(final=True)` plus the manifest. Called
+    on every return path out of `_delivery_impl` so a check run is always
+    completed, even on early error exits before any per-target data exist."""
     if not data.get("finish_time_ms"):
         data["finish_time_ms"] = now_ms(ctx)
     if not data.get("wall_time_ms") and data.get("start_time_ms"):
         data["wall_time_ms"] = data["finish_time_ms"] - data["start_time_ms"]
 
-    # Build a local-repro command pinned to `--mode=always --dry-run
-    # --track-state=false` (the only combo that runs off a Workflows
-    # runner). Skipped when zero targets resolved (repro would be noise).
+    # Local-repro command pinned to `--mode=always --dry-run
+    # --track-state=false` (the only combo that runs off a Workflows runner).
+    # Skipped when zero targets resolved.
     targets_total = (data.get("delivery", {}) or {}).get("targets_total", 0) or 0
     if targets_total > 0:
         flags = []
@@ -812,9 +782,8 @@ def _emit_final(ctx, lifecycle, data, exit_code):
     final_status = _pick_status(data, had_failure = exit_code != 0, terminal = True)
     bookend = delivery_conclusion(final_status, data)
 
-    # Pre-hook with rich `ReproFixInfo` (exit_code / targets / extras)
-    # the safety-net call inside `dispatch_task_update` can't supply.
-    # Entries hooked here are skipped on dispatch via the `_hooked` flag.
+    # Pre-hook with rich `ReproFixInfo` the dispatch safety-net can't supply;
+    # entries hooked here are skipped on dispatch via `_hooked`.
     apply_repro_fix_hooks(
         ctx,
         lifecycle,
@@ -829,9 +798,8 @@ def _emit_final(ctx, lifecycle, data, exit_code):
         },
     )
 
-    # Publish the manifest BEFORE the terminal dispatch so the "Delivery
-    # Manifest" artifact link is in the registry when the GitHub status
-    # check + Buildkite annotation snapshot their artifact_urls.
+    # Publish the manifest BEFORE the terminal dispatch so its artifact link
+    # is registered when the GHSC / BK annotation snapshot their artifact_urls.
     manifest = _publish_manifest(ctx, data)
 
     dispatch_task_update(ctx, lifecycle, TaskUpdate(
@@ -846,9 +814,8 @@ def _emit_final(ctx, lifecycle, data, exit_code):
     ))
     print_repro_and_fix(ctx.std, data, final_status)
 
-    # Fire the customer's announce hook last — a slow/failing hook
-    # mustn't block the on-disk file, the artifact upload, or the
-    # terminal status surfaces (all already committed above).
+    # Fire the customer's announce hook last — a slow/failing hook mustn't
+    # block the file write, upload, or terminal surfaces (all committed above).
     ctx.traits[DeliveryTrait].delivery_manifest(manifest)
 
     return TaskConclusion(
@@ -858,8 +825,7 @@ def _emit_final(ctx, lifecycle, data, exit_code):
     )
 
 def _default_manifest_json(manifest):
-    """Default manifest renderer: pretty-printed JSON with
-    insertion-order-preserving dict serialization."""
+    """Default manifest renderer: pretty-printed, insertion-order JSON."""
     return json.encode(manifest, indent = 2)
 
 def _resolve_render_manifest_file(hook, manifest):
@@ -873,12 +839,9 @@ def _resolve_render_manifest_file(hook, manifest):
     return rendered
 
 def _resolve_upload_manifest(hook, manifest, manifest_file):
-    """Invoke `upload_manifest`; fall back to one JSON artifact named
-    after `--manifest-file`'s basename (or `delivery-manifest.json`
-    when unset). `fail()` on any return-shape violation.
-
-    Returns a list of `{"name": str, "content": str}` dicts.
-    """
+    """Invoke `upload_manifest`; fall back to one JSON artifact named after
+    `--manifest-file`'s basename (or `delivery-manifest.json`). `fail()` on a
+    return-shape violation. Returns `[{"name": str, "content": str}, ...]`."""
     entries = hook(manifest)
     if entries == None:
         name = manifest_file.rsplit("/", 1)[-1] if manifest_file else "delivery-manifest.json"
@@ -895,24 +858,20 @@ def _resolve_upload_manifest(hook, manifest, manifest_file):
     return entries
 
 def _publish_manifest(ctx, data):
-    """Render, persist, and upload the delivery manifest. Returns the
-    structured manifest dict so a caller can pass it to the
-    `delivery_manifest` announce hook AFTER the terminal task_update.
+    """Render, persist, and upload the delivery manifest; return the manifest
+    dict so the caller can pass it to the `delivery_manifest` hook AFTER the
+    terminal task_update.
 
-    Must run BEFORE the terminal `dispatch_task_update` so uploaded
-    artifact URLs are in the artifacts registry when status surfaces
-    snapshot links — otherwise the manifest's download links are
-    missing from the GitHub status check and Buildkite annotation.
+    Must run BEFORE the terminal dispatch so uploaded artifact URLs are
+    registered when surfaces snapshot links — else download links are missing
+    from the GHSC / BK annotation.
 
-    Persist: when `--manifest-file` is set, write the result of
-        `DeliveryTrait.render_manifest_file(manifest)` (default JSON)
-        to disk.
-    Upload: ask `DeliveryTrait.upload_manifest(manifest)` for the list
-        of artifacts; default is one JSON artifact named after
-        `--manifest-file`'s basename or `delivery-manifest.json`. Each
-        entry uploads under the canonical `delivery_manifest` kind so
-        `artifacts.list_kind` returns them all and the status-surface
-        renderer emits one labeled link per file.
+    Persist (when `--manifest-file` set): write
+        `DeliveryTrait.render_manifest_file(manifest)` (default JSON) to disk.
+    Upload: `DeliveryTrait.upload_manifest(manifest)`; default one JSON named
+        after `--manifest-file`'s basename or `delivery-manifest.json`. Each
+        entry uploads under the `delivery_manifest` kind so the renderer emits
+        one labeled link per file.
     """
     manifest = delivery_build_manifest(data)
     manifest_file = ctx.args.manifest_file
@@ -923,11 +882,9 @@ def _publish_manifest(ctx, data):
         ctx.std.fs.write(manifest_file, rendered)
         info(ctx.std, "Delivery manifest written to {}".format(manifest_file))
 
-    # Every manifest upload registers under the canonical
-    # `delivery_manifest` kind. The status-surface renderer reads the
-    # full list via `artifacts.list_kind` and emits one labeled link per
-    # uploaded file, so a customer hook that splits the manifest across
-    # files / formats gets one link per file.
+    # Every upload registers under the `delivery_manifest` kind; the renderer
+    # reads the full list via `artifacts.list_kind` and emits one labeled link
+    # per file (so a hook splitting across files/formats gets one link each).
     for entry in _resolve_upload_manifest(delivery_trait.upload_manifest, manifest, manifest_file):
         artifacts.upload(ctx, "delivery_manifest", entry["name"], entry["content"])
 
@@ -938,32 +895,29 @@ def _delivery_impl(ctx):
     bazel_trait = ctx.traits[BazelTrait]
     lifecycle = ctx.traits[TaskLifecycleTrait]
 
-    # Build the delivery-data shell up front so an early failure (before
-    # setup_phase opens the status surface) still has data to render.
+    # Build the data shell up front so an early failure (before setup_phase
+    # opens the surface) still has data to render.
     data = delivery_init_data()
     data["start_time_ms"] = now_ms(ctx)
     data["delivery"]["commit_sha"] = ctx.args.commit_sha
     data["delivery"]["build_url"] = ctx.args.build_url
     data["delivery"]["ci_host"] = ctx.args.ci_host
 
-    # Surface the run-shape so the check-run / annotation summary shows
-    # `Mode: selective` or `Mode: always (dry-run, untracked)` above the
-    # data table — analogous to lint's `Strategy:` line.
+    # Surface the run-shape so the summary shows `Mode: …` above the data
+    # table — analogous to lint's `Strategy:` line.
     data["delivery"]["mode"] = ctx.args.mode
     data["delivery"]["dry_run"] = bool(ctx.args.dry_run)
     data["delivery"]["track_state"] = bool(ctx.args.track_state)
 
     ansi = color_enabled(ctx.std)
 
-    # The requested targets feed setup_phase's `subject`, which the status
-    # check renders in its "Explicit command line" block; without it the
-    # rendered command is missing the target list. Often empty for query-based
-    # delivery — the resolved set is pushed into the data later.
+    # Requested targets feed setup_phase's `subject` (rendered in the status
+    # check's "Explicit command line"). Often empty for query-based delivery —
+    # the resolved set lands in `data` later.
     targets_subject = " ".join(list(ctx.args.targets)) if ctx.args.targets else ""
 
-    # The single pre-task setup phase (status surface, rc parse, health
-    # checks); returns expanded_flags (a failed health check fails the task
-    # inside setup_phase). phase1/2/3_flags layer on top later.
+    # Single pre-task setup phase (surface, rc parse, health checks); returns
+    # expanded_flags. A failed health check fails the task inside setup_phase.
     expanded_flags = setup_phase(
         ctx,
         lifecycle,
@@ -980,7 +934,7 @@ def _delivery_impl(ctx):
     delivery_trait.delivery_start()
 
     # Three orthogonal flags shape this invocation. See the module docstring
-    # at the top of this file for the full reference and combination matrix.
+    # for the full reference + combination matrix.
     mode = ctx.args.mode
     dry_run = ctx.args.dry_run
     track_state = ctx.args.track_state
@@ -996,15 +950,14 @@ def _delivery_impl(ctx):
     # dry-run + --track-state=false: phase 3 has nothing to do.
     preview_only = dry_run and not track_state
 
-    # deliveryd is the current state backend. Aspect Workflows runners start it
-    # automatically and expose its Unix socket via the env var below.
+    # deliveryd state backend; Workflows runners expose its Unix socket here.
     endpoint = ctx.std.env.var("ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT")
     if not endpoint and track_state:
         _emit_final(ctx, lifecycle, data, exit_code = 1)
         fail("ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT is not set. The delivery state backend must be running. (Pass --track-state=false to run without state tracking; allowed in combination with --dry-run or --mode=always.)")
 
-    # commit-sha / build-url auto-detect from CI env vars. commit_sha is
-    # only consumed under track_state, so we only fail when both apply.
+    # commit-sha / build-url auto-detect from CI env. commit_sha is only
+    # consumed under track_state, so fail only when both apply.
     ci_host = ctx.args.ci_host
     commit_sha = ctx.args.commit_sha or detect_commit_sha(ctx.std)
     if not commit_sha and track_state:
@@ -1015,12 +968,12 @@ def _delivery_impl(ctx):
         commit_sha = "-"
     build_url = ctx.args.build_url or resolve_build_url(ctx) or "-"
 
-    # Persist the resolved values so the delivery manifest reflects what
-    # was actually used, not the raw (possibly empty) args.
+    # Persist resolved values so the manifest reflects what was used, not the
+    # raw (possibly empty) args.
     data["delivery"]["commit_sha"] = commit_sha
     data["delivery"]["build_url"] = build_url
 
-    # Change-detection prefix: always anchored to --task-key, optionally extended by --salt
+    # Change-detection prefix: --task-key, optionally extended by --salt.
     if ctx.args.salt:
         prefix = ctx.task.key + ":" + ctx.args.salt
         prefix_source = "--task-key + --salt"
@@ -1028,10 +981,9 @@ def _delivery_impl(ctx):
         prefix = ctx.task.key
         prefix_source = "--task-key"
 
-    # Surface the salt-augmented prefix to renderers so the "KEY" column
-    # shows `<prefix>:<hash>` — the change-detection identity. The raw
-    # output_sha alone is identical across salt namespaces, hiding that
-    # records are stored separately per salt.
+    # Surface the salt-augmented prefix so the "KEY" column shows
+    # `<prefix>:<hash>` (the change-detection identity); the raw output_sha is
+    # identical across salt namespaces, hiding the per-salt separation.
     data["delivery"]["prefix"] = prefix
 
     # iter handles are created per attempt inside the retry loop.
@@ -1040,11 +992,13 @@ def _delivery_impl(ctx):
     for handler in bazel_trait.build_start:
         handler(ctx)
 
-    # Delivery requires a remote cache (and may surface via common
-    # section as --default_override=0:common=--remote_cache=...).
-    # expand_all returns either strings or (value, version-constraint)
-    # tuples; take the first element of the tuple form.
+    # Delivery needs a remote cache (may arrive via
+    # --default_override=0:common=--remote_cache=...). expand_all yields
+    # strings or (value, constraint) tuples; take the tuple's first element.
+    # A real --remote_executor is tracked separately (used directly by phase 2;
+    # else phase 2 uses a dummy, so no real RBE is required).
     remote_cache_uri = None
+    user_remote_executor_uri = None
     _override_prefix = "--default_override=0:common="
     for flag in expanded_flags:
         f = flag[0] if type(flag) == "tuple" else flag
@@ -1053,11 +1007,14 @@ def _delivery_impl(ctx):
         if f.startswith("--remote_cache="):
             remote_cache_uri = f[len("--remote_cache="):]
         elif f.startswith("--remote_executor="):
-            remote_cache_uri = f[len("--remote_executor="):]
+            user_remote_executor_uri = f[len("--remote_executor="):]
+
+    # An executor implies a cache, so either flag satisfies the requirement.
+    if not remote_cache_uri:
+        remote_cache_uri = user_remote_executor_uri
     if not remote_cache_uri and phase_1_2_runs:
-        # --mode=always --dry-run --track-state=false degrades gracefully
-        # (skip phase 1/2, no digests). Other combinations need digests
-        # and hard-error.
+        # --mode=always --dry-run --track-state=false degrades gracefully (skip
+        # phase 1/2, no digests); other combinations need digests and hard-error.
         if mode == "always" and dry_run and not track_state:
             info(ctx.std, "No remote cache configured; the preview will list candidates without action digests." +
                           " Configure --bazel-flag=--remote_cache=<uri> (or set it in .bazelrc) to surface digests in the preview output.")
@@ -1067,10 +1024,9 @@ def _delivery_impl(ctx):
                            " (Use --mode=always --track-state=false to deliver every target without change detection.)")
             return _emit_final(ctx, lifecycle, data, exit_code = 1)
 
-    # Resolve the delivery set — via a `--query` or from positional
-    # targets — under a single `resolve` phase. The phase update is the
-    # phase's opening bookend, so it's emitted before the query runs (when
-    # there is one); the resolved set is then recorded into `data` within
+    # Resolve the delivery set (via `--query` or positional targets) under a
+    # single `resolve` phase. The phase update is the opening bookend, emitted
+    # before the query runs; the resolved set is recorded into `data` within
     # the same phase and surfaces on the next phase's update.
     query_expr = ctx.args.query
     task_update(
@@ -1087,18 +1043,15 @@ def _delivery_impl(ctx):
         subject = query_expr,
     )
     if query_expr:
-        # Echo the query so the resolved set — or a query failure — is
-        # attributable to it. The spawn disclosure (announce flags) and the
-        # query both fall within the resolve phase opened above.
+        # Echo the query so the resolved set (or failure) is attributable to it.
         info(ctx.std, "Running bazel query: {}".format(query_expr))
 
-        # The query carries `--ignore_all_rc_files` (see lib/bazel_flags.axl),
-        # so it reads none of the workspace `.bazelrc`. Replay the rc flags
-        # expanded for `query` — not the build's `expanded_flags`, which carry
-        # build-only options (e.g. `--show_result`) the query rejects — so the
-        # query resolves external repositories the way the build does (an
-        # rc-set `--noenable_bzlmod` / `--enable_workspace` would otherwise be
-        # dropped). See `resolve_query_flags`.
+        # The query carries `--ignore_all_rc_files`, so it reads no `.bazelrc`.
+        # Replay the rc flags expanded for `query` (not the build's
+        # `expanded_flags`, which carry build-only options like `--show_result`
+        # the query rejects) so it resolves external repos the way the build
+        # does — else an rc-set `--noenable_bzlmod` would be dropped. See
+        # `resolve_query_flags`.
         targets = [t.name for t in ctx.bazel.query().raw(query_expr).eval(
             flags = resolve_query_flags(ctx, bazel_trait),
             announce_version = announce_version,
@@ -1110,25 +1063,22 @@ def _delivery_impl(ctx):
     else:
         targets = ctx.args.targets
 
-    # Also accept ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS (whitespace-
-    # separated; commas collide with valid Bazel labels) for CI systems
-    # that wire a parameter field to the env var.
+    # Also accept ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS (whitespace-separated;
+    # commas collide with Bazel labels) for CI param-field wiring.
     forced_targets = list(ctx.args.force_targets)
     env_forced = ctx.std.env.var("ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS") or ""
     for tok in env_forced.split():
         if tok and tok not in forced_targets:
             forced_targets.append(tok)
 
-    # Setup opened the surface with the *requested* subject (often a query,
-    # so empty here); now that the target set is resolved, record it into
-    # `data` (so the check-run table reflects the actual targets) and refine
-    # the surface `subject` from the requested pattern to the resolved label
-    # list. `summary_title` caps a long list, so the full pattern is fine.
+    # Setup opened the surface with the requested subject (often an empty
+    # query); now record the resolved set into `data` and refine the surface
+    # `subject` to the resolved labels. `summary_title` caps long lists.
     data["target_pattern"] = " ".join(list(targets)) if targets else ""
     data["delivery"]["targets_total"] = len(targets)
 
-    # Emit within the resolve phase (no `phase`, so no boundary or extra
-    # `→` line) — just latches the resolved data and refined subject.
+    # Emit within the resolve phase (no `phase`, so no boundary/`→`) — just
+    # latches the resolved data and refined subject.
     dispatch_task_update(ctx, lifecycle, TaskUpdate(
         kind = "delivery_results",
         data = data,
@@ -1139,9 +1089,8 @@ def _delivery_impl(ctx):
         info(ctx.std, "No targets to deliver")
         return _emit_final(ctx, lifecycle, data, exit_code = 0)
 
-    # Hard-fail on forced labels not in the resolved set: force-target
-    # only flips change detection, it doesn't add labels. Catches typos
-    # at startup rather than silently ignoring them.
+    # Hard-fail on forced labels not in the resolved set: force-target only
+    # flips change detection, it doesn't add labels — catches typos at startup.
     unmatched_forced = [t for t in forced_targets if t not in targets]
     if unmatched_forced:
         msg = "--force-target / ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS labels not in the resolved delivery set: " + ", ".join(unmatched_forced) + ". Force-target re-delivers labels already selected by --query or positional args; it does not add new labels. Either fix the typo or update --query / positional targets to include them."
@@ -1157,7 +1106,7 @@ def _delivery_impl(ctx):
     # Phase 1/2 — skipped only in --mode=always + --track-state=false.
     if phase_1_2_runs:
         _t_build = time.monotonic()
-        output_shas, non_hermetic_misses, build_code = _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, expanded_flags, remote_cache_uri, ansi, data)
+        output_shas, non_hermetic_misses, build_code = _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, expanded_flags, user_remote_executor_uri or "", ansi, data)
         info(ctx.std, "Build+checksum total: {}.".format(fmt_elapsed(time.monotonic() - _t_build)))
 
         for handler in bazel_trait.build_end:
@@ -1166,7 +1115,7 @@ def _delivery_impl(ctx):
         if build_code != 0:
             error(ctx.std, "Build failed with exit code {}.".format(build_code))
 
-            # Synthetic warn rows so the check run conveys WHY it failed.
+            # Synthetic warn rows so the check run conveys why it failed.
             for label in targets:
                 delivery_add_result(
                     data,
@@ -1199,10 +1148,9 @@ def _delivery_impl(ctx):
             if label in output_shas:
                 deliveryd_record(ctx, endpoint, ci_host, commit_sha, prefix, label, output_shas[label])
 
-    # Change detection: query deliveryd for prior-delivery state, then
-    # filter below to the targets that actually changed. Skipped when
-    # --track-state=false (no endpoint) or --mode=always (every target is
-    # a candidate regardless of state).
+    # Change detection: query deliveryd for prior-delivery state, filtered
+    # below to changed targets. Skipped when --track-state=false (no endpoint)
+    # or --mode=always (every target is a candidate).
     if track_state and mode != "always":
         status = _pick_status(data, had_failure = False, terminal = False)
         task_update(
@@ -1221,8 +1169,8 @@ def _delivery_impl(ctx):
     else:
         delivery_state = {}
 
-    # Phase 3: download + BES for targets that actually need delivery.
-    # In --mode=always every resolved target is a delivery candidate (no change detection).
+    # Phase 3: download + BES for targets needing delivery. In --mode=always
+    # every resolved target is a candidate (no change detection).
     if mode == "always":
         delivery_targets = list(targets)
     else:
@@ -1235,9 +1183,8 @@ def _delivery_impl(ctx):
             )
         ]
 
-    # Phase 3 builds + materializes runfiles for `bazel run`. Skipped
-    # only for the dry-run + --track-state=false preview (nothing to
-    # run, no entrypoints needed).
+    # Phase 3 builds + materializes runfiles for `bazel run`. Skipped only for
+    # the dry-run + --track-state=false preview (nothing to run).
     if delivery_targets and not preview_only:
         delivery_targets_label = pluralize(len(delivery_targets), "target")
         status = _pick_status(data, had_failure = False, terminal = False)
@@ -1255,23 +1202,20 @@ def _delivery_impl(ctx):
         )
 
         # Phase 3 flag order (last-wins):
-        #   LOCAL_SPAWN_BASE_FLAGS  — default `--remote_download_outputs=toplevel`;
-        #                             first so user/rc overrides win.
+        #   LOCAL_SPAWN_BASE_FLAGS  — defaults first so user/rc overrides win.
         #   expanded_flags          — user `--bazel-flag` / rc settings.
-        #   release_bazel_flags     — release-only flags via `--release-bazel-flag`
-        #                             (e.g. `--stamp`).
-        #   LOCAL_SPAWN_FLAGS       — mandatory; last so nothing can flip them.
-        #   --noremote_upload_local_results — release artifacts shouldn't pollute
-        #                             the shared remote cache (delivery-specific).
+        #   release_bazel_flags     — `--release-bazel-flag` (e.g. `--stamp`).
+        #   LOCAL_SPAWN_FLAGS       — mandatory; last so nothing flips them.
+        #   --noremote_upload_local_results — keep release artifacts out of the
+        #                             shared remote cache (delivery-specific).
         phase3_flags = LOCAL_SPAWN_BASE_FLAGS + list(expanded_flags) + list(ctx.args.release_bazel_flags) + LOCAL_SPAWN_FLAGS + [
             "--noremote_upload_local_results",
         ]
         _t_download = time.monotonic()
 
-        # Redirect stderr to a log file. Phase 3 re-materializes
-        # artifacts (OCI layers, runfiles trees) and the progress lines
-        # look misleadingly like redundant rebuilds; the log is the
-        # escape hatch on real failure.
+        # Redirect stderr to a file: phase-3 re-materializes artifacts (OCI
+        # layers, runfiles) and its progress looks like redundant rebuilds;
+        # the log is the escape hatch on real failure.
         phase3_log_path = _PHASE3_LOG_PATH.format(ctx.task.key)
         phase3_events = bazel.build_events.iterator()
         build = ctx.bazel.build(
@@ -1289,9 +1233,8 @@ def _delivery_impl(ctx):
 
         dispatch_bazel_attempt_end(ctx, bazel_trait, status.code)
 
-        # When phase 1/2 was skipped, phase 3 is the only build that ran;
-        # otherwise the outer caller already fired `build_end` with the
-        # aggregate phase-1 build_code.
+        # When phase 1/2 was skipped, phase 3 is the only build; otherwise the
+        # outer caller already fired `build_end` with the phase-1 build_code.
         if not phase_1_2_runs:
             dispatch_bazel_build_end(ctx, bazel_trait, status.code)
         if status.code != 0:
@@ -1337,15 +1280,14 @@ def _delivery_impl(ctx):
     pending = []  # [(label, entrypoint, is_forced, output_sha)]
 
     for label in targets:
-        # --mode=always behaves as if every target was passed via --force-target.
+        # --mode=always behaves as if every target was --force-target'd.
         is_forced = label in forced_targets or mode == "always"
         target_state = delivery_state.get(label)
         output_sha = output_shas.get(label)
 
         if not output_sha and phase_1_2_runs:
-            # Surface the drifting mnemonic inline when we have one
-            # (e.g. PyWriteBuildData with --stamp); otherwise give the
-            # generic alias hint.
+            # Surface the drifting mnemonic inline when we have one (e.g.
+            # PyWriteBuildData with --stamp); else give the generic alias hint.
             pending_count += 1
             mnemonics = non_hermetic_misses.get(apparent_label(label), [])
             if mnemonics:
@@ -1375,7 +1317,7 @@ def _delivery_impl(ctx):
             )
             _fire_target_hook(data, delivery_trait, run_tracker, label)
         elif preview_only:
-            # No entrypoint needed; dry_run=True skips the bazel run path.
+            # No entrypoint needed; dry_run skips the bazel run path.
             pending.append((label, None, is_forced, output_sha or "-"))
         else:
             ep = run_tracker.determine_entrypoint(label)
@@ -1399,8 +1341,8 @@ def _delivery_impl(ctx):
             else:
                 pending.append((label, ep, is_forced, output_sha or "-"))
 
-    # Intermediate update so skip/warn state is visible in the check run
-    # before the (potentially long) per-target loop starts.
+    # Intermediate update so skip/warn state is visible before the
+    # (potentially long) per-target loop.
     pending_label = pluralize(len(pending), "target")
     if dry_run:
         prepass_progress = "Previewing {}... (dry-run)".format(pending_label)
@@ -1488,9 +1430,9 @@ def _delivery_impl(ctx):
                 )
             _fire_target_hook(data, delivery_trait, run_tracker, label)
 
-            # Per-completion progress update. priority=False throttles BK
-            # / GHSC PATCHes; stream="" suppresses the CLI line since the
-            # per-target "Delivering <label>..." already ticks.
+            # Per-completion progress. priority=False throttles BK/GHSC
+            # PATCHes; empty stream suppresses the CLI line (the per-target
+            # "Delivering <label>..." already ticks).
             done = success_count + failed_count
             status = _pick_status(data, had_failure = failed_count > 0, terminal = False)
             task_update(
@@ -1529,8 +1471,8 @@ def _delivery_impl(ctx):
         "fail": _BOLD + _RED,
     }
 
-    # KEY = <prefix>:<hash[:12]> — the change-detection identity that
-    # uniquely names this delivery (namespace + content).
+    # KEY = <prefix>:<hash[:12]> — the change-detection identity (namespace +
+    # content) naming this delivery.
     key_width = max(len("KEY"), len(prefix) + 13)
 
     print("")

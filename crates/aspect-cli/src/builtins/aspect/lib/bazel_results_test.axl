@@ -10,9 +10,7 @@ Two task implementations live here:
 
 load("./bazel_results.axl", "MAX_TEST_TARGETS", "STATUS_ICONS", "STATUS_LABELS", "aspect_web_ui_url", "bes_get", "build_details_data", "common_label_root", "compute_invocation_state", "conclusion", "init_data", "process_event", "render_bes_url", "render_check_output", "repro_targets")
 
-# ---------------------------------------------------------------------------
 # Fake data builders
-# ---------------------------------------------------------------------------
 
 def _make_results_passed():
     """All tests passed, most cached. Clean successful run."""
@@ -454,9 +452,7 @@ def _make_results_large():
     r["bazel"]["metadata"] = {"BRANCH": "main"}
     return r
 
-# ---------------------------------------------------------------------------
 # Shared render context and links
-# ---------------------------------------------------------------------------
 
 def _render_ctx(subject = "//...", task_name = "test", progress = ""):
     return {
@@ -553,9 +549,7 @@ def _links(with_artifact = False, ci = "github"):
         # Buildkite: URLs expire, so no per-kind URLs — just the browse page.
     return d
 
-# ---------------------------------------------------------------------------
 # Test task
-# ---------------------------------------------------------------------------
 
 def _test_impl(ctx):
     """Render each scenario and print TITLE + SUMMARY + first 3000 chars of DETAILS."""
