@@ -645,9 +645,12 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
         action_meta = {}
         execlog_file = ctx.std.fs.open(phase1_execlog_path)
         for entry in bazel.build.execution_log.ExecLogEntry().parse_from_delimited(execlog_file):
-            if entry.kind != "spawn":
+            # The ExecLogEntry oneof surfaces as `entry.type`: the active
+            # variant's value directly (or None when unset). A spawn entry's
+            # value reports `type() == "spawn"`; skip everything else.
+            spawn = entry.type
+            if spawn == None or type(spawn) != "spawn":
                 continue
-            spawn = entry.payload
             if not spawn.target_label or not spawn.mnemonic:
                 continue
             action_meta[(spawn.target_label, spawn.mnemonic)] = {

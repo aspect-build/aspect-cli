@@ -45,6 +45,7 @@ rust_library(
         "@crates//:prost-types",
         "@crates//:starlark",
         "@crates//:tokio",
+        "@crates//:tokio-stream",
         "@crates//:tonic",
         "@crates//:tonic-prost",
         "@crates//:uuid",
