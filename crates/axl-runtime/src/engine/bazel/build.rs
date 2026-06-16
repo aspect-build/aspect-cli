@@ -1146,7 +1146,10 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
 #[cfg(test)]
 mod tests {
     //! End-to-end coverage of `ctx.bazel.build` via the `basil` fake-bazel
-    //! binary, selected per-test via `--scenario=<name>`.
+    //! binary. Each test mints `ctx.bazel` with a `Fake` backend
+    //! (`.with_fake_bazel()` / `.with_fake_bazel_expectation(...)`) that
+    //! fork+execs basil and feeds it a declared `BazelExpectation` over the
+    //! socketpair control channel; basil synthesizes the BES stream + exit.
 
     /// Iter handle subscribed pre-spawn receives every event from a clean
     /// build, even on the warm-daemon path that drops late subscribers.
@@ -1157,7 +1160,6 @@ mod tests {
 def _impl(ctx):
     iter = bazel.build_events.iterator()
     build = ctx.bazel.build(
-        flags = ["--scenario=success"],
         build_events = [iter],
         stderr = None,
     )
@@ -1203,7 +1205,6 @@ Test = task(implementation = _impl)
 def _impl(ctx):
     iter = bazel.build_events.iterator()
     build = ctx.bazel.build(
-        flags = ["--scenario=cache_evicted_no_retry"],
         build_events = [iter],
         stderr = None,
     )
@@ -1215,7 +1216,11 @@ def _impl(ctx):
 Test = task(implementation = _impl)
 "#,
             )
-            .with_fake_bazel()
+            .with_fake_bazel_expectation(basil_core::BazelExpectation::new(
+                Vec::new(),
+                basil_core::BuildResult::CacheEvicted,
+                None,
+            ))
             .run_task(0)
         });
 
@@ -1236,7 +1241,6 @@ Test = task(implementation = _impl)
 def _impl(ctx):
     iter = bazel.build_events.iterator()
     first = ctx.bazel.build(
-        flags = ["--scenario=success"],
         build_events = [iter],
         stderr = None,
     )
@@ -1244,7 +1248,6 @@ def _impl(ctx):
         pass
     first.wait()
     second = ctx.bazel.build(
-        flags = ["--scenario=success"],
         build_events = [iter],
         stderr = None,
     )
@@ -1356,7 +1359,6 @@ Test = task(implementation = _impl)
 def _impl(ctx):
     iter = bazel.build_events.iterator(kinds = ["build_finished"])
     build = ctx.bazel.build(
-        flags = ["--scenario=success"],
         build_events = [iter],
         stderr = None,
     )
@@ -1388,7 +1390,6 @@ Test = task(implementation = _impl)
 def _impl(ctx):
     iter = bazel.build_events.iterator()
     build = ctx.bazel.build(
-        flags = ["--scenario=success"],
         build_events = [iter],
         stderr = None,
     )
@@ -1453,7 +1454,6 @@ def _impl(ctx):
         retry_min_delay = "0s",
     )
     build = ctx.bazel.build(
-        flags = ["--scenario=success"],
         build_events = [iter, sink],
         stderr = None,
     )
@@ -1486,13 +1486,11 @@ def _impl(ctx):
     sink = bazel.build_events.grpc(uri = "not a uri", max_retries = 0, retry_min_delay = "0s")
     iter = bazel.build_events.iterator()
     first = ctx.bazel.build(
-        flags = ["--scenario=success"],
         build_events = [iter, sink],
         stderr = None,
     )
     iter2 = bazel.build_events.iterator()
     second = ctx.bazel.build(
-        flags = ["--scenario=success"],
         build_events = [iter2, sink],
         stderr = None,
     )

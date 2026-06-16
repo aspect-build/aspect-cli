@@ -35,14 +35,17 @@ pub fn eval(code: &str) -> EvalBuilder {
     EvalBuilder {
         code: code.to_string(),
         with_loader: false,
-        with_fake_bazel: false,
+        fake_bazel: None,
     }
 }
 
 pub struct EvalBuilder {
     code: String,
     with_loader: bool,
-    with_fake_bazel: bool,
+    /// When set, `run_task` mints `ctx.bazel` with a `Fake` backend driving
+    /// the basil fake-bazel binary, fed this declared expectation over the
+    /// socketpair control channel. `None` → production `Real`.
+    fake_bazel: Option<basil_core::BazelExpectation>,
 }
 
 impl EvalBuilder {
@@ -53,12 +56,27 @@ impl EvalBuilder {
         self
     }
 
-    /// Install the basil fake-bazel binary as `BAZEL_REAL` before running.
-    /// Use on any builder whose snippet calls `ctx.bazel.build` so the
-    /// runtime spawns basil instead of shelling out to a real `bazel`.
-    /// Idempotent across tests; see `install_basil` for details.
-    pub fn with_fake_bazel(mut self) -> Self {
-        self.with_fake_bazel = true;
+    /// Mint `ctx.bazel` with a `Fake` backend so a snippet's `ctx.bazel.build`
+    /// fork+execs the basil fake-bazel binary instead of a real `bazel`. The
+    /// fake synthesizes a clean passing build (`BuildStarted` →
+    /// `BuildFinished` exit 0). Use [`with_fake_bazel_expectation`] to declare
+    /// a different outcome.
+    ///
+    /// [`with_fake_bazel_expectation`]: Self::with_fake_bazel_expectation
+    pub fn with_fake_bazel(self) -> Self {
+        self.with_fake_bazel_expectation(basil_core::BazelExpectation::new(
+            Vec::new(),
+            basil_core::BuildResult::Passed,
+            None,
+        ))
+    }
+
+    /// Like [`with_fake_bazel`] but with an explicit declared expectation, so
+    /// the fake synthesizes the BES stream + exit code the test needs.
+    ///
+    /// [`with_fake_bazel`]: Self::with_fake_bazel
+    pub fn with_fake_bazel_expectation(mut self, exp: basil_core::BazelExpectation) -> Self {
+        self.fake_bazel = Some(exp);
         self
     }
 
@@ -138,12 +156,16 @@ impl EvalBuilder {
     /// be self-contained. Task `idx` runs with empty `Arguments`.
     ///
     /// Snippets that call `ctx.bazel.build` should opt in via
-    /// `.with_fake_bazel()` so the runtime spawns the basil fake-bazel
-    /// instead of a real `bazel`.
+    /// `.with_fake_bazel()` so `ctx.bazel` is minted with a `Fake` backend
+    /// that fork+execs the basil fake-bazel instead of a real `bazel`.
     pub fn run_task(self, task_index: usize) -> anyhow::Result<Option<u8>> {
-        if self.with_fake_bazel {
-            install_basil();
-        }
+        let fake_backend =
+            self.fake_bazel
+                .clone()
+                .map(|exp| crate::engine::bazel::backend::BazelBackend::Fake {
+                    fake_bin: basil_bin().to_string(),
+                    expectation: std::sync::Arc::new(exp),
+                });
         let tmp = tempfile::tempdir()?;
         let script_path = tmp.path().join("test.axl");
         std::fs::write(&script_path, &self.code)?;
@@ -166,6 +188,9 @@ impl EvalBuilder {
                 &modules,
             );
             let mut mpe = MultiPhaseEval::new(env, &loader);
+            if let Some(backend) = fake_backend {
+                mpe = mpe.with_bazel_backend(backend);
+            }
             let scripts = vec![script_path];
             mpe.eval(&scripts, &root_mod, &modules)
                 .map_err(anyhow::Error::from)?;
@@ -243,21 +268,6 @@ pub fn basil_bin() -> &'static str {
         );
         path.to_string_lossy().into_owned()
     })
-}
-
-/// Point axl-runtime at basil. Idempotent and safe under parallel test
-/// execution: every test sets the same value, so there is nothing to race
-/// over (no PATH_LOCK needed).
-///
-/// Per-scenario timing (e.g. the post-open pause that lets a late AXL
-/// subscriber land its `.subscribe()` call before basil writes) lives in
-/// basil's `scenario()` table, not here.
-pub fn install_basil() {
-    // SAFETY: process-wide env mutation. All callers in this test binary
-    // converge on the same value, so concurrent writes are no-ops.
-    unsafe {
-        std::env::set_var("BAZEL_REAL", basil_bin());
-    }
 }
 
 /// Run `f` on a worker thread; return `Some(result)` if it finished within

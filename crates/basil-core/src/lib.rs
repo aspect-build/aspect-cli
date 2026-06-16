@@ -1,23 +1,18 @@
 //! `basil-core` — the reusable guts of the `basil` fake-`bazel` binary.
 //!
 //! Two consumers share this crate:
-//!   - the standalone `basil` binary (`crates/basil`), kept for the existing
-//!     `BAZEL_REAL`-driven Rust integration tests; and
+//!   - the standalone `basil` binary (`crates/basil`), spawned by the
+//!     `BazelBackend::Fake` path the axl-runtime tests drive; and
 //!   - a shipped self-exec subcommand of `aspect` (roadmap item 6) so the AXL
 //!     test runner can fork+exec a fake bazel without embedding a second
 //!     binary (see `docs/testing.md`, decision 7).
 //!
-//! It exposes two replay paths:
-//!   - [`scenario`] + [`write_scenario`]: the original hard-coded named
-//!     scenarios (`success`, `cache_evicted_no_retry`, …). Driven by
-//!     `--scenario=<name>` in argv. Retained verbatim so the existing
-//!     `crates/axl-runtime/src/engine/bazel/build.rs` tests keep passing.
-//!   - [`replay_expectation`]: the *generic* path. Reads a typed, declared
-//!     [`BazelExpectation`] (length-delimited protobuf) off a control channel
-//!     and **synthesizes** a consistent `BuildStarted` → `TargetComplete`
-//!     (one per target) → `BuildFinished` BES stream onto
-//!     `--build_event_binary_file`, then exits with the fixture's code. This
-//!     is the contract the AXL `BazelExpectation` record serializes into.
+//! Replay path — [`replay_expectation`]: reads a typed, declared
+//! [`BazelExpectation`] (length-delimited protobuf) off a control channel and
+//! **synthesizes** a consistent `BuildStarted` → `TargetComplete` (one per
+//! target) → `BuildFinished` BES stream onto `--build_event_binary_file`,
+//! then exits with the fixture's code. This is the contract the AXL
+//! `BazelExpectation` record serializes into.
 //!
 //! Wire format (control channel): the [`BazelExpectation`] message encoded
 //! **length-delimited** via `prost::Message::encode_length_delimited` — the
@@ -231,76 +226,6 @@ pub fn write_frames(path: &str, frames: &[Vec<u8>], open_delay: Duration) {
         f.write_all(frame)
             .unwrap_or_else(|e| panic!("basil-core: writing to BES path: {e}"));
     }
-}
-
-// ─── Named-scenario replay (extracted verbatim from basil) ────────────────────
-
-/// How the fake terminates after writing the event stream.
-pub enum ExitBehavior {
-    Code(i32),
-    Signal(i32),
-}
-
-/// One full BES interaction. Each attempt is one open/write/close cycle on the
-/// FIFO. `open_delay` sleeps after the FIFO open and before any writes.
-pub struct Scenario {
-    pub open_delay: Duration,
-    pub attempts: Vec<Vec<BuildEvent>>,
-    pub exit: ExitBehavior,
-}
-
-/// Write a multi-attempt scenario: one open/write/close per attempt, modelling
-/// Bazel reopening the BEP file on each retry.
-pub fn write_scenario(path: &str, scenario: &Scenario) {
-    for events in &scenario.attempts {
-        let frames: Vec<Vec<u8>> = events
-            .iter()
-            .map(|ev| {
-                let mut buf = Vec::new();
-                ev.encode_length_delimited(&mut buf)
-                    .expect("basil-core: encode BuildEvent");
-                buf
-            })
-            .collect();
-        write_frames(path, &frames, scenario.open_delay);
-    }
-}
-
-/// Resolve a named scenario. Each documents the behavior or bug it targets.
-/// Returns `None` for an unknown name so the caller can report it.
-pub fn scenario(name: &str) -> Option<Scenario> {
-    let s = match name {
-        "success" => Scenario {
-            open_delay: Duration::from_millis(50),
-            attempts: vec![vec![build_started(), build_finished(0, true)]],
-            exit: ExitBehavior::Code(0),
-        },
-        "cache_evicted_no_retry" => Scenario {
-            open_delay: Duration::ZERO,
-            attempts: vec![vec![build_started(), build_finished(39, true)]],
-            exit: ExitBehavior::Code(0),
-        },
-        "cache_evicted_with_retry" => Scenario {
-            open_delay: Duration::ZERO,
-            attempts: vec![
-                vec![build_started(), build_finished(39, false)],
-                vec![build_started(), build_finished(0, true)],
-            ],
-            exit: ExitBehavior::Code(0),
-        },
-        "nonzero_exit" => Scenario {
-            open_delay: Duration::ZERO,
-            attempts: vec![vec![build_started(), build_finished(2, true)]],
-            exit: ExitBehavior::Code(2),
-        },
-        "signal_killed_sigkill" => Scenario {
-            open_delay: Duration::ZERO,
-            attempts: vec![vec![build_started(), build_finished(0, true)]],
-            exit: ExitBehavior::Signal(9),
-        },
-        _ => return None,
-    };
-    Some(s)
 }
 
 // ─── BES event constructors ──────────────────────────────────────────────────

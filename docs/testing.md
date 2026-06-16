@@ -177,11 +177,14 @@ change:
      (frozen locks, broken runtime). `exec` is what gives the "start fresh"
      image; inherited FDs (the socketpair, BES file) give fork's only useful
      property without its hazard.
-   - **Reuse `basil`, don't reinvent.** `basil` already *is* the separate
-     fake-bazel binary (spawned via `BAZEL_REAL`, writes real length-delimited
-     `BuildEvent`s). Plan: extract its replay/synthesis into a `basil-core` lib;
-     standalone `basil` stays for the Rust integration tests; shipped
-     `aspect test` reuses the lib via a hidden self-exec subcommand. We do
+   - **Reuse `basil`, don't reinvent.** *Done.* `basil`'s replay/synthesis was
+     extracted into a `basil-core` lib; `basil` is now a thin argv/env
+     front-end that reads a `BazelExpectation` off the control fd and replays
+     via the lib. The named-scenario table (`--scenario=<name>`, the
+     `BAZEL_REAL` global, `BASIL_SERVER_PID`) is **gone** — all `ctx.bazel.build`
+     Rust tests (`engine::bazel::build::tests`) now drive the `Fake` backend
+     with a typed `BazelExpectation` (one mechanism, less to maintain). Shipped
+     `aspect test` reuses `basil-core` via a hidden self-exec subcommand. We do
      **not** `include_bytes!` a standalone `basil` (≈2–3 MB stripped, mostly
      `prost`/proto already linked into aspect-cli) — that duplicate is the
      binary bloat to avoid.
@@ -189,9 +192,11 @@ change:
 8. **Parallelism makes "state on the value, nothing global" a correctness
    requirement, and turns three in-tree shortcuts into bugs to fix before the
    bazel `Fake` lands:**
-   - `std::env::set_var("BAZEL_REAL", …)` (`test.rs`) is process-global → the
-     `Fake` backend must build the `Command` with the fake path directly
-     (carried on the value), not flip a global env var.
+   - ✅ `std::env::set_var("BAZEL_REAL", …)` (`test.rs`) was process-global →
+     removed. The `Fake` backend builds the `Command` with the fake path
+     directly (carried on the value); `crate::test`'s `.with_fake_bazel()` mints
+     `ctx.bazel` with a `Fake` backend via `MultiPhaseEval::with_bazel_backend`,
+     no global env var.
    - the BES output path / gRPC port and execlog path must be per-invocation
      unique (fixed paths/ports collide across concurrent builds).
    - the spawn registry (`bazel/live.rs`, `static REG`) pools pids from *all*
