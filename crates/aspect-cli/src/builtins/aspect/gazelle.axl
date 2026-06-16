@@ -1,187 +1,84 @@
 """Define the 'gazelle' task
 
-`aspect gazelle` runs a single gazelle target with `-mode=diff` to
-get the verdict (was anything out of date) and the patch (unified
-diff on stdout) without modifying the tree. In fix mode (default)
-the captured patch is then applied via `git apply -p0` — there's no
-second gazelle invocation, which matters on large monorepos where
-gazelle's whole-repo scan is the slow part.
+`aspect gazelle` runs a single gazelle target with `-mode=diff` to get the
+verdict + patch (unified diff on stdout) without touching the tree. In fix mode
+(default) the captured patch is applied via `git apply -p0` — no second gazelle
+invocation, which matters on large monorepos where the whole-repo scan is slow.
 
 Flow:
     1. Build the gazelle target.
-    2. Run it with `-mode=diff`, capture stdout. The wrapper
-       hardcodes `-mode fix`; Gazelle's Go flag parser treats the
-       second `-mode` as a last-wins override (BEHAVIOR switches
-       to diff-mode — no tree modification, unified diff on
-       stdout). Exit code is unreliable in this duplicate-flag
-       config (it's 0 even on diff), so the verdict comes from
-       stdout content, not exit code.
-    3. If stdout is empty → exit 0 (clean).
-    4. If stdout has a diff:
-         - In `--check` mode: report the affected files and exit 1.
-         - In fix mode (default): `git apply -p0 <diff>` to write
-           the changes, report the affected files, exit 1. The
-           non-zero exit signals "BUILDs were out of date — please
-           commit the working-tree changes" (matches format's
-           contract).
-    5. With `--upload-gazelle-diff` set on a recognized CI host,
-       the captured patch is also uploaded as `gazelle.patch` so
-       reviewers can apply it locally.
+    2. Run with `-mode=diff`, capture stdout. The wrapper hardcodes `-mode fix`;
+       Go's flag parser makes our appended `-mode` last-wins (→ diff mode). Exit
+       code is unreliable here (0 even on diff), so the verdict is stdout content.
+    3. Empty stdout → exit 0 (clean).
+    4. Non-empty diff: report affected files, exit 1. `--check` only reports;
+       fix mode (default) also `git apply -p0`s the patch. Non-zero exit means
+       "BUILDs were out of date — commit the changes" (matches format).
+    5. `--upload-gazelle-diff` on a recognized CI host also uploads `gazelle.patch`.
 
-Why a single target (rather than a `with_check = True` sibling
-`.check` target):
-  - `with_check` is specific to `aspect_gazelle()` from
-    `aspect_gazelle_prebuilt`. Upstream `gazelle()` from
-    `bazel-contrib/bazel-gazelle` (used when building gazelle from
-    source via `bazel_dep(name = "gazelle")` + rules_go) has no
-    equivalent — it only emits `<name>` and `<name>-runner.bash`.
-    The `-mode=diff` runtime override works against both, so the
-    same task implementation drives prebuilt and from-source
-    targets. We exercise the from-source path via the
-    `:gazelle_from_source` regression target in CI.
+Single target (not a `with_check=True` sibling): `with_check` is specific to
+`aspect_gazelle()` from aspect_gazelle_prebuilt; upstream `gazelle()`
+(bazel-contrib/bazel-gazelle, from-source) only emits `<name>` and
+`<name>-runner.bash`. The `-mode=diff` override drives both; CI exercises the
+from-source path via `:gazelle_from_source`.
 
-Why not git stash + git diff (the format task):
-  - We can rely on gazelle's own `-mode=diff` to produce a clean
-    unified diff. Formatters mostly can't — see format.axl's
-    docstring for that story.
-  - Detecting newly-created BUILD files (a common gazelle output)
-    via `git diff` is awkward — that's tracked-file-only, so we'd
-    need a separate `git ls-files --others` snapshot. The diff
-    from `-mode=diff` includes new files natively
-    (`--- /dev/null +++ <new path>`).
+Not git stash + git diff (unlike format): gazelle's own `-mode=diff` yields a
+clean diff that natively includes new BUILD files (`--- /dev/null +++ <path>`),
+which `git diff` (tracked-only) would miss.
 
-Install:
-    Add `aspect_gazelle_prebuilt` to MODULE.bazel:
-
+Install — add to MODULE.bazel (`with_check` NOT required):
         bazel_dep(name = "aspect_gazelle_prebuilt", version = "0.0.8")
 
-    Define a gazelle target. `with_check` is NOT required:
-
         load("@aspect_gazelle_prebuilt//:def.bzl", "aspect_gazelle")
-
-        aspect_gazelle(
-            name = "gazelle",
-            languages = ["go", "proto", "python"],  # whatever fits
-        )
+        aspect_gazelle(name = "gazelle", languages = ["go", "proto", "python"])
 
 Usage:
-    # Default — apply locally (exit 0, no signal), gate on CI (exit 1 on diff).
-    # `--severity=auto` resolves to "fail" on a recognized CI host and
-    # "info" otherwise; `--check-only=auto` resolves to True on CI and
-    # False locally. Together: local applies the patch silently, CI
-    # detects drift and fails the build.
+    # Default: --severity/--check-only=auto → apply silently locally, gate (exit 1) on CI.
     aspect gazelle
-
-    # CI gate: detect drift, exit 1 (`fail`), don't modify the tree.
+    # CI gate: detect drift, exit 1, don't touch the tree.
     aspect gazelle --severity=fail --check-only=true
-
-    # Limit BUILD-file updates to specific directories.
+    # Limit to dirs / intersect with --scope=changed.
     aspect gazelle --severity=fail --check-only=true tools/go services/api
-
-    # Fast incremental mode: restrict updates to directories that
-    # contain changed files (against `--base-ref`, default origin/main).
-    aspect gazelle --severity=fail --check-only=true --scope=changed
-
-    # Combine --scope=changed with positional dirs to intersect — only
-    # update changed subtrees that fall under apps/web/.
     aspect gazelle --severity=fail --check-only=true --scope=changed apps/web/
-
-    # Soft-fail mode for incremental adoption — surface a yellow warning
-    # instead of failing the build when BUILD files are out of date.
+    # Incremental: restrict to dirs with files changed vs --base-ref (default origin/main).
+    aspect gazelle --severity=fail --check-only=true --scope=changed
+    # Soft-fail (warn, exit 0) / audit (warn + apply locally).
     aspect gazelle --severity=warn --check-only=true
-
-    # Audit mode — apply locally AND surface a warning that something
-    # was out of date. Useful for maintainers wanting an explicit
-    # "BUILD files needed regen" signal even on a successful local run.
     aspect gazelle --severity=warn
-
-    # Pass arbitrary gazelle flags (e.g. aspect-gazelle's --progress).
+    # Forward gazelle flags / pick subcommand / upload patch.
     aspect gazelle --gazelle-flag=-progress --gazelle-flag=-r tools/go
-
-    # Use the 'fix' subcommand (removes obsolete rules too).
     aspect gazelle --gazelle-command=fix
-
-    # CI patch upload: archives the diff as a `gazelle.patch` artifact.
     aspect gazelle --severity=fail --check-only=true --upload-gazelle-diff
-
-    # Override the gazelle target (e.g. build-from-source variant).
-    # Combine with `--bazel-flag=--config=pure_go` if linking against
-    # toolchains_llvm_bootstrapped on Linux.
+    # Override target (e.g. from-source; pair with --config=pure_go on Linux).
     aspect gazelle --severity=fail --check-only=true \\
-        --gazelle-target=//tools/gazelle:gazelle_from_source \\
-        --bazel-flag=--config=pure_go
+        --gazelle-target=//tools/gazelle:gazelle_from_source --bazel-flag=--config=pure_go
 
-⚠️  Caution on --scope=changed and its dependent flags
+CAUTION — --scope=changed and its dir-shaping flags (--dirs,
+--scope-all-on-change, --changed-file-pattern) narrow gazelle's work; each is a
+place a misconfig can silently MISS updates a full --scope=all run would produce:
+  - --dirs: intersection-filters; changed dirs outside listed roots dropped.
+  - --changed-file-pattern: filters contributing files; every source extension
+    your plugins care about MUST be listed or those dirs are dropped.
+  - --scope-all-on-change: escalation list for repo-wide-effect config files
+    (gazelle_python.yaml, tsconfig.json, package.json, top-level BUILD.bazel);
+    unlisted changes won't force the full pass.
+Default to --scope=all; reach for these only when CI latency justifies it, and
+periodically re-run --scope=all to catch missed drift.
 
-  `--scope=changed` and the flags that shape its dir set — `--dirs`,
-  `--scope-all-on-change`, `--changed-file-pattern` — are an
-  incremental-CI optimization that *narrows the work* gazelle does.
-  Each one is a place a misconfiguration can silently cause gazelle
-  to MISS BUILD-file updates that a full `--scope=all` run would have
-  produced. Concretely:
-
-    - `--dirs` (under scope=changed): intersection-filters the
-      derived dir set. Changed dirs outside the listed roots are
-      dropped.
-    - `--changed-file-pattern`: filters which changed files
-      contribute. Source-language extensions your gazelle plugins
-      care about MUST all be listed, otherwise dirs whose only
-      changes are those file types are dropped.
-    - `--scope-all-on-change`: the escalation list for
-      gazelle-config-style files. Anything that influences gazelle's
-      output repo-wide (e.g. `gazelle_python.yaml`, `tsconfig.json`,
-      `package.json`, top-level `BUILD.bazel`) needs to be here,
-      otherwise a change to one of those won't force the full pass.
-
-  Default to `--scope=all` and reach for these flags only when CI
-  latency justifies the configuration burden. Periodically re-run
-  with `--scope=all` to catch any drift the incremental path missed.
-
-  Performance note — pair with gazelle's `-index=lazy`. With
-  gazelle's default `-index=all`, passing positional dirs (which is
-  what `--scope=changed` does under the hood) only skips the
-  BUILD-regeneration step for non-listed dirs. Gazelle still:
-
-    1. traverses the entire workspace,
-    2. parses every BUILD file, and
-    3. determines what each existing target exports (per language;
-       may re-parse source files in srcs to do so).
-
-  On large repos those three steps are the bulk of the wall time,
-  so the `--scope=changed` speedup against a stock gazelle invocation
-  is much smaller than it looks. For the full incremental win, pass
-  gazelle's `-index=lazy`:
-
-      aspect gazelle --severity=fail --check-only=true --scope=changed \\
-          --gazelle-flag=-index=lazy
-
-  With lazy indexing gazelle restricts the traverse + parse + export
-  work to the dirs it was asked to visit plus those announced through
-  `# gazelle:go_search` / `# gazelle:proto_search` directives. Those
-  directives MUST cover every external code root your project depends
-  on (third_party trees, Go module replacements, vendored proto, …)
-  — same silent-miss risk as the other dependent flags.
-
-  Two prerequisites for `-index=lazy` to behave correctly:
-
-    - Every gazelle language extension you use must implement the
-      lazy-indexing API (`GenerateResult.RelsToIndex`, opt-in
-      search directives). Extensions that pre-date the API will
-      under-index under `-index=lazy` and may resolve imports
-      incorrectly. This is why `-index=all` is still gazelle's
-      default. Verify your active plugins support it before flipping
-      this on in CI.
-    - All external code roots your project imports from must be
-      reachable through `# gazelle:<lang>_search` directives in
-      checked-in BUILD files.
-
-  You can optionally also pass `--gazelle-flag=-r=false` to skip
-  recursing into subdirectories on top of `-index=lazy`, but some
-  gazelle language extensions are incompatible with non-recursive
-  mode — test it against your plugin set before relying on it.
-
-  See the gazelle docs:
-  https://github.com/bazel-contrib/bazel-gazelle#lazy-indexing-in-fix-and-update
+Perf: under gazelle's default `-index=all`, positional dirs (what
+--scope=changed passes) only skip BUILD regeneration — gazelle still traverses
+the whole workspace, parses every BUILD, and re-determines target exports
+(dominates wall time on large repos). For the full win pass
+`--gazelle-flag=-index=lazy`, which restricts that work to visited dirs plus
+those announced via `# gazelle:<lang>_search` directives. Those directives MUST
+cover every external code root (third_party, Go replacements, vendored proto, …)
+— same silent-miss risk. Two prerequisites: every active language extension
+must implement the lazy-indexing API (`GenerateResult.RelsToIndex` + search
+directives; pre-API ones under-index — why `-index=all` is still default), and
+all imported external roots must be reachable via search directives. Optionally
+add `--gazelle-flag=-r=false` to skip recursion, but some extensions are
+incompatible with non-recursive mode — test first.
+https://github.com/bazel-contrib/bazel-gazelle#lazy-indexing-in-fix-and-update
 """
 
 load("@std//time.axl", "sleep_iter")
@@ -203,20 +100,9 @@ load("./lib/text.axl", "pluralize")
 load("./lib/tips.axl", "tips")
 
 def _parse_diff_paths(diff_text):
-    """Extract the set of affected paths from a unified diff.
-
-    Looks at `+++` lines (the "after" file in each hunk header).
-    Format:
-
-        +++ path/to/file.bazel\\t<timestamp>
-
-    For new files the corresponding `---` line is `--- /dev/null`,
-    which we don't need — the `+++` side is always the path that
-    would exist post-fix.
-
-    Returns a sorted list of unique paths. Empty list if the diff
-    is unparseable; callers fall back to printing the raw diff in
-    that case so the user still has something to act on.
+    """Extract affected paths from a unified diff via `+++` lines
+    (`+++ path\\t<timestamp>`, the post-fix side). Sorted unique paths;
+    empty when unparseable (callers then print the raw diff).
     """
     paths = {}
     for line in diff_text.split("\n"):
@@ -224,7 +110,7 @@ def _parse_diff_paths(diff_text):
             continue
         rest = line[len("+++ "):]
 
-        # Strip the trailing tab + timestamp if present.
+        # Strip trailing tab + timestamp.
         tab_idx = rest.find("\t")
         path = rest[:tab_idx] if tab_idx >= 0 else rest
         path = path.strip()
@@ -264,21 +150,18 @@ def _body_text(status, data):
         return "Gazelle aborted"
     return ""
 
-# When a single fix command would carry more dirs than this, the
-# producer emits a truncated positional-list entry plus a re-discovery
-# fallback that uses the detection flags.
+# Above this many dirs, the producer truncates the positional list and adds a
+# re-discovery fallback using the detection flags.
 _FIX_DIRS_LIMIT = 20
 
-# Per-task forwarded flags that aren't scope/check related — echoed
-# in every emitted repro / fix command iff the user passed them.
+# Forwarded flags echoed in repro/fix commands iff the user passed them.
 _FORWARDED_PAIRS = [
     ("gazelle_command", "--gazelle-command"),
     ("gazelle_flags", "--gazelle-flag"),
 ]
 
-# Plain-default scope / change-detection flags echoed iff the user
-# explicitly passed them. Auto / env-resolved flags (`--severity`,
-# `--check-only`, `--base-ref`) are pinned by the callers below.
+# Scope/change-detection flags echoed iff explicitly passed. Auto/env-resolved
+# flags (--severity, --check-only, --base-ref) are pinned by the callers below.
 _SCOPE_PAIRS = [
     ("scope", "--scope"),
     ("gazelle_target", "--gazelle-target"),
@@ -290,19 +173,16 @@ _CHANGED_SCOPE_PAIRS = [
 ]
 
 def _mode_prefix(mode):
-    """Pin the auto-style `--severity` and `--check-only` flags to the
-    explicit values needed to reproduce CI's behavior locally:
-    `mode="check"` → diagnose-then-fail, `mode="apply"` → apply-locally."""
+    """Pin --severity/--check-only to reproduce CI locally:
+    "check" → diagnose-then-fail, "apply" → apply-locally."""
     if mode == "check":
         return [("--severity", "fail"), ("--check-only", "true")]
     return [("--severity", "info"), ("--check-only", "false")]
 
 def _detection_flags(ctx, mode):
-    """Flag set that recreates the original change-detection invocation.
-    Used by the repro command and by the fix-command's re-discovery
-    fallback. `--base-ref` is surfaced from `detect_ci_base_ref` so
-    the repro encodes CI's resolved base ref even when CI itself ran
-    without `--base-ref`."""
+    """Flags recreating the change-detection invocation (repro command +
+    fix re-discovery fallback). --base-ref surfaced from detect_ci_base_ref so
+    the repro encodes CI's resolved base ref even if CI ran without it."""
     flags = _mode_prefix(mode) + explicit_flags(ctx, _SCOPE_PAIRS)
     if ctx.args.scope == "changed":
         surfaced_base_ref = ctx.args.base_ref or detect_ci_base_ref(ctx.std)
@@ -312,22 +192,19 @@ def _detection_flags(ctx, mode):
     return flags + explicit_flags(ctx, _FORWARDED_PAIRS)
 
 def _explicit_dirs_flags(ctx, mode):
-    """Flag set for invocations that scope via explicit positional dirs
-    and bypass change detection. Smaller subset of `_detection_flags`."""
+    """Flags for invocations scoped via explicit positional dirs (bypass
+    change detection). Smaller subset of _detection_flags."""
     return (_mode_prefix(mode) +
             explicit_flags(ctx, [("gazelle_target", "--gazelle-target")]) +
             explicit_flags(ctx, _FORWARDED_PAIRS))
 
 def _append_repro_command(ctx, data):
-    """Append the always-rendered Reproduce command. Re-runs the same
-    `aspect gazelle --severity=fail --check-only=true ...` invocation
-    CI ran, with the post-resolution effective dirs as positionals so
-    the user reproduces CI's exact working set.
+    """Append the always-rendered Reproduce command: re-runs CI's
+    `aspect gazelle --severity=fail --check-only=true ...` with the
+    post-resolution effective dirs as positionals (CI's exact working set).
 
-    The vanilla-bazel alternate goes in fix_commands (see
-    `_append_fix_commands`): `bazel run <gazelle_target>` actually
-    applies BUILD-file updates rather than re-reporting the diff,
-    which is the semantic of a fix, not a repro.
+    The vanilla-bazel alternate is a fix, not a repro, so it lives in
+    fix_commands (`bazel run` applies updates rather than re-reporting).
     """
     effective_dirs = (data.get("gazelle", {}) or {}).get("dirs", []) or []
     prefix = repro_prefix(ctx)
@@ -341,25 +218,17 @@ def _append_repro_command(ctx, data):
     ))
 
 def _append_fix_commands(ctx, data):
-    """Append fix-command entries to `data["fix_commands"]`. Emitted
-    only when gazelle actually found something to update.
-
-    Three commands at most:
-
-      1. Aspect fix on the affected dir list (or first N when long) —
+    """Append fix-command entries to data["fix_commands"]. Only when gazelle
+    found something. Up to three commands:
+      1. Aspect fix on affected dirs (first N when long):
          `aspect gazelle --severity=info --check-only=false <dirs>`.
       2. Re-discover fallback (only when the dir list was truncated).
-      3. Vanilla-bazel alternate — `bazel run <gazelle_target>`. The
-         standard gazelle binary runs in fix/update mode by default
-         when invoked via `bazel run`. Skipped entirely when the
-         Aspect `tools/bazel` wrapper is in play.
+      3. Vanilla-bazel alternate `bazel run <gazelle_target>` (fix/update by
+         default); skipped under the Aspect `tools/bazel` wrapper.
 
-    The primary fix flips to `--severity=info --check-only=false` and
-    carries the parent dirs of the affected BUILD files as positionals —
-    gazelle re-walks those subtrees and applies the captured diff via
-    `git apply -p0`. Positionals supersede scope=changed (gazelle walks
-    the listed dirs under the implicit --scope=all), so the detection
-    flags are omitted."""
+    The primary fix flips to --severity=info --check-only=false with the
+    affected dirs as positionals; positionals supersede scope=changed (implicit
+    --scope=all over the listed dirs), so detection flags are omitted."""
     affected = (data.get("gazelle", {}) or {}).get("affected_files", []) or []
     if not affected:
         return
@@ -392,9 +261,8 @@ def _append_fix_commands(ctx, data):
             slug = "gazelle-fix-rediscover",
         ))
 
-    # Vanilla-bazel alternate. Skipped under the Aspect `tools/bazel`
-    # wrapper — there, `bazel run` re-routes through `aspect run`, so
-    # the "vanilla" framing would be misleading.
+    # Vanilla-bazel alternate. Skipped under the `tools/bazel` wrapper — there
+    # `bazel run` re-routes through `aspect run`, so "vanilla" would mislead.
     if not has_tools_bazel_wrapper(ctx):
         data["fix_commands"].append(ReproFixCommand(
             command = prefix + build_bazel_command("run", [ctx.args.gazelle_target]),
@@ -403,12 +271,9 @@ def _append_fix_commands(ctx, data):
         ))
 
 def _resolve_check_only(ctx):
-    """Resolve `--check-only=auto|true|false` to a bool.
-
-    `auto` → True on CI (don't dirty the tree at the gate), False
-    locally (apply the patch as part of the task). `true` / `false`
-    pass through. Independent of `--severity`: check-only controls
-    whether gazelle applies the patch, severity controls the verdict.
+    """Resolve --check-only=auto|true|false to a bool. auto → True on CI
+    (don't dirty the tree), False locally (apply). Independent of --severity:
+    check-only controls applying the patch, severity controls the verdict.
     """
     val = ctx.args.check_only
     if val == "auto":
@@ -416,20 +281,16 @@ def _resolve_check_only(ctx):
     return val == "true"
 
 def _resolve_effective_dirs(ctx, lifecycle, data):
-    """Combine --scope, --dirs, --scope-all-on-change, and
-    --changed-file-pattern into the effective dir list to pass to gazelle.
+    """Combine --scope/--dirs/--scope-all-on-change/--changed-file-pattern into
+    the effective dir list. Returns (effective_dirs, no_op); no_op=True → exit 0
+    cleanly (--scope=changed found no dirs, or --scope=all positionals all
+    filtered out — widening to whole-repo would surprise the caller).
 
-    Returns (effective_dirs, no_op). no_op=True signals the caller to
-    exit 0 cleanly — either `--scope=changed` saw no surviving dirs,
-    or `--scope=all` had positionals that all got filtered out (in
-    which case widening to whole-repo would surprise the caller).
-
-    --scope=all (default): user-supplied dirs verbatim (post-existence-filter
-        and post-subtree-dedupe). Empty list = whole-repo update.
-    --scope=changed: detect changed files, optionally escalate to whole-repo
-        if a triggering file matched, filter by --changed-file-pattern (if set),
-        derive parent dirs, intersect with user_dirs if non-empty, dedupe
-        overlapping subtrees."""
+    --scope=all (default): user dirs verbatim (post existence-filter + subtree-
+        dedupe); empty = whole-repo.
+    --scope=changed: detect changed files, escalate to whole-repo on a
+        --scope-all-on-change match, filter by --changed-file-pattern, derive
+        parent dirs, intersect with user_dirs, dedupe overlapping subtrees."""
     raw_user_dirs = list(ctx.args.dirs or [])
     user_dirs = []
     for d in raw_user_dirs:
@@ -438,10 +299,8 @@ def _resolve_effective_dirs(ctx, lifecycle, data):
         else:
             warn(ctx.std, "Skipping non-existent directory: %s" % d)
 
-    # If positionals were supplied but none survived the existence
-    # filter, refuse to silently widen scope to whole-repo. The user
-    # asked for scoping; running on everything because of a typo or a
-    # stale path would unexpectedly rewrite unrelated BUILD files.
+    # Positionals given but none survived: refuse to widen to whole-repo. A
+    # typo/stale path shouldn't rewrite unrelated BUILD files.
     if raw_user_dirs and not user_dirs:
         info(ctx.std, "All supplied directories were missing — skipping gazelle to avoid widening to a whole-repo run.")
         return [], True
@@ -471,15 +330,13 @@ def _resolve_effective_dirs(ctx, lifecycle, data):
     )
     print_changed_files_listing(ctx, detect_result)
     if detect_result.get("unscoped"):
-        # Degrade to whole-repo update (equivalent to --scope=all).
+        # Degrade to whole-repo (== --scope=all).
         warn(ctx.std, "Could not determine the changed-file set (%s). Escalating to a whole-repo gazelle update (equivalent to --scope=all). Override with --merge-base=<sha> or set --base-ref to a ref available locally." % detect_result["source"])
         return dedupe_subtrees(user_dirs), False
 
-    # Escalate to whole-repo if any changed file matches a
-    # --scope-all-on-change pattern (e.g. MODULE.bazel changed → deps
-    # set may have shifted, gazelle should re-resolve everywhere).
-    # Checked against the unfiltered set so the escalation still
-    # triggers even when --changed-file-pattern would have dropped it.
+    # Escalate to whole-repo on any --scope-all-on-change match (e.g.
+    # MODULE.bazel → deps may have shifted). Checked against the unfiltered set
+    # so it still fires even when --changed-file-pattern would drop the file.
     escalate = list(ctx.args.scope_all_on_change or [])
     if escalate:
         for f in detect_result["files"]:
@@ -487,8 +344,7 @@ def _resolve_effective_dirs(ctx, lifecycle, data):
                 info(ctx.std, "Changed file %r matches --scope-all-on-change pattern — escalating to a whole-repo update." % f)
                 return dedupe_subtrees(user_dirs), False
 
-    # Filter changed files by --changed-file-pattern (when set).
-    # Empty list = keep everything (gazelle decides relevance per-dir).
+    # Filter by --changed-file-pattern; empty = keep all (gazelle decides per-dir).
     file_patterns = list(ctx.args.changed_file_patterns or [])
     if file_patterns:
         matching_files = [f for f in detect_result["files"] if match_any(file_patterns, f)]
@@ -515,9 +371,8 @@ def _resolve_effective_dirs(ctx, lifecycle, data):
     return effective, False
 
 def _emit_final(ctx, lifecycle, data, exit_code):
-    """Emit the terminal `task_update` and return a `TaskConclusion` for
-    `_impl` to return. Always appends the repro command; appends fix
-    commands when gazelle reported something to update."""
+    """Emit the terminal task_update and return a TaskConclusion. Always
+    appends the repro command; appends fix commands when gazelle had updates."""
     status = _pick_status(data, had_failure = exit_code != 0, terminal = True)
     if not data.get("finish_time_ms"):
         data["finish_time_ms"] = now_ms(ctx)
@@ -529,9 +384,8 @@ def _emit_final(ctx, lifecycle, data, exit_code):
 
     bookend = gazelle_conclusion(status, data)
 
-    # Pre-hook with rich `ReproFixInfo` (exit_code / extras) the
-    # safety-net call inside `dispatch_task_update` can't supply.
-    # Entries hooked here are skipped on dispatch via the `_hooked` flag.
+    # Pre-hook with rich ReproFixInfo (exit_code/extras) the dispatch_task_update
+    # safety-net can't supply; hooked entries skip dispatch via `_hooked`.
     apply_repro_fix_hooks(
         ctx,
         lifecycle,
@@ -582,17 +436,14 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     data["gazelle"]["severity_resolved"] = severity_resolved
     data["gazelle"]["check_only"] = check_only
 
-    # The single pre-task setup phase (status surface, rc parse, health
-    # checks); returns the resolved flags (a failed health check fails the task
-    # inside setup_phase).
+    # Single pre-task setup phase (status surface, rc parse, health checks);
+    # returns resolved flags (a failed health check fails the task inside).
     flags = setup_phase(ctx, lifecycle, ctx.args.gazelle_target, "gazelle_results", data, hc_trait, bazel_trait, bazel_base_flags = LOCAL_SPAWN_BASE_FLAGS)
     announce_version, announce_command = resolve_bazel_announce(ctx)
 
-    # Resolve effective dirs before the bazel build phase: gazelle
-    # needs the dir list when spawned, the no-op short-circuit lets
-    # us skip the build entirely when there's nothing to update, and
-    # the repro/fix builders below read `data["gazelle"]["dirs"]` to
-    # emit the post-resolution working set.
+    # Resolve dirs before the build: gazelle needs them when spawned, the no-op
+    # short-circuit skips the build entirely, and the repro/fix builders read
+    # data["gazelle"]["dirs"].
     effective_dirs, no_op = _resolve_effective_dirs(ctx, lifecycle, data)
     data["gazelle"]["dirs"] = list(effective_dirs)
     if no_op:
@@ -607,9 +458,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     events = bazel.build_events.iterator()
     build_events = [events] + list(bazel_trait.build_event_sinks)
 
-    # Fire `bazel_trait.build_start` hooks before spawning bazel — features
-    # like Workflows register the BK `--- :bazel: Running bazel …`
-    # section marker here.
+    # Fire build_start hooks before spawning — Workflows registers the BK
+    # `--- :bazel: Running bazel …` section marker here.
     for hook in bazel_trait.build_start:
         hook(ctx)
 
@@ -636,16 +486,13 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         announce_command = announce_command,
     )
 
-    # `build.sink_invocation_id` is minted inside the runtime's `Build::spawn`
-    # before it returns. Populate `data["sink_invocation_id"]` here and
-    # emit a running task_update so the BK annotation / status check picks up
-    # the Aspect Workflows link as soon as the build is spawned, rather than
-    # waiting for `build.wait()` to surface it.
+    # sink_invocation_id is minted in Build::spawn before it returns. Populate
+    # data + emit a running task_update so the BK annotation / status check
+    # picks up the Workflows link at spawn rather than waiting for build.wait().
     data["sink_invocation_id"] = build.sink_invocation_id
 
-    # Re-emit (now that the sink_invocation_id is known so we can show the Web UI link)
-    # but target only the status surfaces — empty `stream` suppresses the
-    # duplicate CLI line.
+    # Re-emit now the link is known, but only to status surfaces — empty
+    # `stream` suppresses the duplicate CLI line.
     status = _pick_status(data, had_failure = False, terminal = False)
     task_update(
         ctx,
@@ -658,11 +505,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         data = data,
     )
 
-    # Tick-driven drain: fires a heartbeat refresh every
-    # MIN_HEARTBEAT_INTERVAL_MS even when bazel is silent. Per-event
-    # work: r.event() (entrypoint discovery), bazel_trait.build_event
-    # hooks (ArtifactUpload records testlog paths), process_event
-    # populates the shared bazel state for the rendered body.
+    # Tick-driven drain: heartbeat refresh every MIN_HEARTBEAT_INTERVAL_MS even
+    # when bazel is silent. Per event: r.event() (entrypoint discovery),
+    # build_event hooks (ArtifactUpload records testlogs), process_event.
     last_emit_ms = now_ms(ctx)
     for _tick in sleep_iter(BES_DRAIN_TICK_MS):
         interesting = False
@@ -702,49 +547,26 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         _emit_final(ctx, lifecycle, data, 1)
         fail("Failed to determine the gazelle target's entrypoint.")
 
-    # Upstream `gazelle()` (bazel-gazelle, used by `gazelle_from_source`-
-    # style targets) produces both a `<name>` sh_binary and an inner
-    # `<name>-runner.bash` script — and `determine_entrypoint` may
-    # surface either depending on BES ordering. The inner runner
-    # script's `$0`-relative runfiles lookup expects to find a sibling
-    # `<name>-runner.bash.runfiles` dir, but bazel actually creates
-    # the runfiles tree as `<name>.runfiles` (matching the sh_binary).
-    # Stripping the suffix points us at the sh_binary symlink instead,
-    # whose runfiles dir resolves correctly.
+    # Upstream gazelle() (from-source) emits both a `<name>` sh_binary and an
+    # inner `<name>-runner.bash`; determine_entrypoint may surface either (BES
+    # ordering). The runner script's $0-relative runfiles lookup wants
+    # `<name>-runner.bash.runfiles`, but bazel creates `<name>.runfiles`.
+    # Stripping the suffix points at the sh_binary, whose runfiles resolve.
     if ep.path.endswith("-runner.bash"):
         ep = struct(path = ep.path[:-len("-runner.bash")], runfiles_dir = ep.runfiles_dir)
 
-    # Diff phase: run with -mode=diff to get the verdict and the patch
-    # without modifying the tree. The aspect_gazelle wrapper hardcodes
-    # `-mode fix`; we append `-mode=diff` to flip the inner gazelle's
-    # flag parser to diff mode (last-wins, via Go's stdlib flag pkg)
-    # so it prints a unified diff to stdout instead of writing files.
+    # Diff phase: -mode=diff yields the verdict + patch without touching the
+    # tree. The wrapper hardcodes `-mode fix`; our appended `-mode=diff` wins
+    # (Go flag last-wins) so gazelle prints a unified diff instead of writing.
     #
-    # Exit code can't be trusted as the verdict — it differs by gazelle
-    # provenance:
+    # Exit code isn't the verdict — it varies by provenance: prebuilt exits 0
+    # even on a non-empty diff (first-wins outer arg extraction keeps mode=fix,
+    # swallows ErrDiff), from-source exits 1. So drive off stdout: empty stdout
+    # + non-zero = real error; otherwise stdout speaks regardless of exit code.
     #
-    #   * aspect_gazelle_prebuilt: exits 0 even on a non-empty diff.
-    #     The aspect-gazelle binary's own arg extraction is first-wins,
-    #     so its outer `mode` stays at the wrapper's hardcoded "fix"
-    #     and never trips its `mode != Fix` exit-1 branch. (Its
-    #     vendored gazelle copy also swallows the upstream ErrDiff for
-    #     this same reason.)
-    #   * upstream gazelle (from-source path): exits 1 on a non-empty
-    #     diff — standard upstream behavior.
-    #
-    # So we drive the verdict off stdout content, not the exit code.
-    # Empty stdout + non-zero exit = real gazelle error; otherwise the
-    # stdout content speaks for itself regardless of exit code.
-    #
-    # capture=True pipes both stdout and stderr. We drain both so
-    # nothing is silently dropped — order matters (read stdout to EOF
-    # before stderr; gazelle has typically flushed stderr by the time
-    # stdout closes).
-    #
-    # User flags from --gazelle-flag are passed through, but any -mode
-    # flag is stripped — our appended -mode=diff must be the last mode
-    # flag so that Go's last-wins flag parsing keeps us in diff mode
-    # regardless of gazelle provenance.
+    # capture=True pipes stdout+stderr; drain both, stdout to EOF first (gazelle
+    # has usually flushed stderr by then). User --gazelle-flag values pass
+    # through but any -mode is stripped so our -mode=diff stays last.
     diff_args = []
     if ctx.args.gazelle_command:
         diff_args.append(ctx.args.gazelle_command)
@@ -773,16 +595,14 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     diff_stderr = diff_proc.stderr().read_to_string()
     diff_status = diff_proc.wait()
 
-    # Surface gazelle's stderr unconditionally so warnings, "encountered
-    # changes" notes, language-plugin diagnostics, etc. aren't swallowed.
+    # Surface gazelle's stderr unconditionally (warnings, plugin diagnostics).
     if diff_stderr.strip():
         print(diff_stderr)
         if not diff_stderr.endswith("\n"):
             print("")
 
-    # Real gazelle errors (config issues, missing language plugin, etc.)
-    # surface as non-zero exit + empty stdout. We've already printed
-    # stderr above; just turn that into a hard failure.
+    # Real errors (config, missing plugin) = non-zero exit + empty stdout;
+    # stderr already printed, so just fail hard.
     if not diff_status.success and not diff_stdout.strip():
         error(ctx.std, "Gazelle (-mode=diff) exited %d with no diff output (likely a configuration error)." % diff_status.code)
         data["gazelle"]["gazelle_error"] = True
@@ -790,28 +610,17 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         return _emit_final(ctx, lifecycle, data, diff_status.code)
 
     if not diff_stdout.strip():
-        # Clean — gazelle reports no changes needed regardless of
-        # --severity / --check-only mode.
+        # Clean, regardless of --severity / --check-only.
         print("✅ All BUILD files are up to date.")
         return _emit_final(ctx, lifecycle, data, 0)
 
     affected = _parse_diff_paths(diff_stdout)
 
-    # Apply phase (default mode): apply the captured diff via
-    # `git apply -p0` rather than re-running gazelle. Skipping the
-    # second gazelle invocation is a meaningful win — gazelle scans
-    # the whole repo and on large workspaces that's slow even when
-    # cached. The diff we already have is exactly what fix-mode
-    # would produce, so `git apply` is equivalent.
-    #
-    # `-p0` is required: gazelle emits paths relative to the
-    # workspace root (e.g. `tools/gazelle/testdata/BUILD.bazel`) and
-    # the default `-p1` would strip the leading directory and look
-    # for `gazelle/testdata/BUILD.bazel`, which doesn't exist.
-    #
-    # `--check-only=true` (CI default) skips this entirely — the gate
-    # doesn't want a dirtied tree. `--check-only=false` (local default)
-    # runs `git apply` so the user's working tree gets updated.
+    # Apply phase (default): `git apply -p0` the captured diff rather than
+    # re-running gazelle (the whole-repo scan is slow; the diff is exactly what
+    # fix-mode would write). `-p0` is required — gazelle emits workspace-root-
+    # relative paths and the default `-p1` would strip the leading dir.
+    # --check-only=true (CI) skips this (no dirtied tree); false (local) applies.
     if not check_only:
         files_label = pluralize(len(affected), "file")
         status = _pick_status(data, had_failure = False, terminal = False)
@@ -847,20 +656,15 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         for f in affected:
             print("  - %s" % f)
     else:
-        # Diff was non-empty but `+++` lines didn't yield paths —
-        # fall back to printing the raw diff so the user has
-        # something to act on.
+        # Non-empty diff but no `+++` paths parsed — print the raw diff.
         print("\nGazelle %s BUILD files (raw diff follows):" % verb)
         print(diff_stdout)
 
-    # Populate data for status-check consumers.
     data["gazelle"]["affected_files"] = affected
 
     if ctx.args.upload_gazelle_diff:
-        # Upload as a CI artifact and surface the URL in data so the
-        # status-check renderer can link to it. `artifacts.upload`
-        # handles CI detection, naming, transport, and registration; a
-        # silent no-op (returning "") when off-CI or upload fails.
+        # Upload as a CI artifact; URL surfaced in data for the renderer.
+        # artifacts.upload handles CI detection/naming/transport, "" no-op off-CI.
         data["gazelle"]["patch_url"] = artifacts.upload(
             ctx,
             kind = "gazelle_diff",
@@ -875,8 +679,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     if severity_resolved == "warn":
         info(ctx.std, "BUILD files are out of date. --severity=warn → exiting 0 with a warning signal.")
     elif not check_only:
-        # Local apply, silent: we just updated the tree; don't tell the
-        # user to run what they just ran.
+        # Local apply: tree already updated, don't tell them to re-run.
         print("Gazelle updated %d file(s). Review and commit the changes." % len(affected))
     return _emit_final(ctx, lifecycle, data, 0)
 

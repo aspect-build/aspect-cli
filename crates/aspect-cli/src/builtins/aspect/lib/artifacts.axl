@@ -1,17 +1,14 @@
 """Artifact registry + per-CI upload orchestration.
 
-Per the feature-owned state pattern in `DEVELOPMENT.md`: the typed
-`_Artifact` record, the private `_ArtifactsTrait`, the public `artifacts`
-wrapper struct, and the owner feature `ArtifactUpload` are all co-located
-in this file. Consumers load `artifacts` and use its API; the underscore-
-prefixed `_ArtifactsTrait` is implementation detail.
+Feature-owned state pattern (see `DEVELOPMENT.md`): the `_Artifact`
+record, private `_ArtifactsTrait`, public `artifacts` wrapper, and owner
+feature `ArtifactUpload` are co-located here. Consumers use `artifacts`.
 
-When `ArtifactUpload` isn't loaded by the task graph, the trait callable
-defaults are null-objects — `artifacts.append(...)` becomes a silent no-op,
-`artifacts.list/by_kind/by_label` read empty. Callers don't need to probe
-for the feature; the data flow degrades gracefully.
+Without `ArtifactUpload` in the task graph, the trait callables are
+null-objects: `append` no-ops, `list/by_kind/by_label` read empty — so
+callers degrade gracefully without probing for the feature.
 
-CI platforms supported: GitHub Actions, Buildkite, CircleCI, GitLab.
+CI platforms: GitHub Actions, Buildkite, CircleCI, GitLab.
 
 Task registration:
 
@@ -49,44 +46,33 @@ load("./github.axl", "github")
 load("./tar.axl", "tar_create", "zip_create")
 load("../bazel.axl", "BazelTrait")
 
-# ============================================================================
 # Public types
-# ============================================================================
 
 _Artifact = record(
     # "testlogs", "profile", "execlog", "bep", "format_diff",
-    # "gazelle_diff", "testlog_file", or any custom kind a task introduces.
+    # "gazelle_diff", "testlog_file", or any custom kind.
     kind = field(str),
 
-    # Direct download URL. Empty when the CI provider doesn't expose a
-    # stable URL (Buildkite — browse_url is the user-facing path instead).
+    # Direct download URL. Empty when the CI exposes no stable URL
+    # (Buildkite — use browse_url instead).
     url = field(str),
 
-    # Human-readable filename for the rendered link. `"testlogs.tar.gz"`,
-    # `"test.log"`, `"format.patch"`. Falls back to `kind` if empty.
+    # Display filename for the link; falls back to `kind` if empty.
     name = field(str, default = ""),
 
-    # Bazel label for per-target artifacts (kind="testlog_file"). Empty
-    # for singleton artifacts. Drives `by_label` grouping.
+    # Bazel label for per-target artifacts (kind="testlog_file"); empty
+    # for singletons. Drives `by_label` grouping.
     label = field(str, default = ""),
 )
 
-# ============================================================================
-# Private trait — implementation detail; never exported by name
-# ============================================================================
-#
-# Defaults are null-objects: when no owner feature binds these callables,
-# `append` is a silent no-op and `list` returns empty. Callers
-# (`artifacts.append`, `artifacts.list`, …) hit the defaults transparently.
+# Private trait. Defaults are null-objects so unbound callables no-op.
 
 _ArtifactsTrait = trait(
     append = attr(typing.Callable[[_Artifact], None], default = lambda a: None),
     list = attr(typing.Callable[[], list[_Artifact]], default = lambda: []),
 )
 
-# ============================================================================
 # Derived views — pure functions over list()
-# ============================================================================
 
 def _by_kind(ctx):
     """Singleton-per-kind URL map. Entries with a `label` set are excluded
@@ -99,16 +85,12 @@ def _by_kind(ctx):
     return out
 
 def _list_kind(ctx, kind):
-    """Every registered singleton artifact with `kind`, in registration order.
+    """Every singleton artifact with `kind`, in registration order.
 
-    Unlike `by_kind` (which collapses to one URL per kind), this returns
-    the full list so callers can surface every artifact a task uploaded.
-    Used by the status-surface link renderer for kinds that legitimately
-    produce multiple artifacts (e.g. `delivery_manifest` when a customer
-    `upload_manifest` hook splits the manifest into per-format files).
-
-    Skips entries with a non-empty `label` (those belong to `by_label`)
-    and entries with no URL (the CI host returned no stable link).
+    Unlike `by_kind` (one URL per kind), returns the full list — for
+    kinds that legitimately produce multiple artifacts (e.g. a split
+    `delivery_manifest`). Skips labeled entries (→ `by_label`) and
+    URL-less ones.
     """
     out = []
     for a in ctx.traits[_ArtifactsTrait].list():
@@ -125,24 +107,12 @@ def _by_label(ctx):
             files[a.name or a.kind] = a.url
     return out
 
-# ============================================================================
-# Upload helpers — high-level "upload + register" API for producers
-# ============================================================================
-#
-# These are the API producers should call. They wrap CI detection, naming
-# convention, transport, error handling, and registration into one step
-# so producers never touch the underlying uploader/factory directly.
-#
-# Both return the download URL string:
-#   - URL on success when the CI provides a stable one (GitHub, GitLab,
-#     CircleCI)
-#   - empty string on success when the CI doesn't (Buildkite) — the
-#     artifact is still registered but no clickable URL exists
-#   - empty string on failure or off-CI — see warn / info log for reason
-#
-# The caller can disambiguate via `artifacts.by_kind(ctx).get(kind)` if
-# it needs to distinguish "no URL" from "no upload at all," but most
-# producers only care about the URL for rendering.
+# Upload helpers — high-level "upload + register" API for producers.
+# Wrap CI detection, naming, transport, errors, and registration.
+# Return the download URL: stable URL on success (GitHub/GitLab/CircleCI),
+# "" on success when the CI has no stable URL (Buildkite, still
+# registered), "" on failure / off-CI (see warn/info log). To distinguish
+# "no URL" from "no upload", check `artifacts.by_kind(ctx).get(kind)`.
 
 def _upload_file(ctx, kind, name, path):
     """Upload an on-disk file as a CI artifact and register it.
@@ -180,11 +150,8 @@ def _upload_file(ctx, kind, name, path):
     return url
 
 def _upload(ctx, kind, name, content):
-    """Write content to a per-task tmp file, upload, and register.
-
-    Convenience over `_upload_file` for callers that have in-memory
-    content (a diff text, a serialized report) and don't want to manage
-    the tmp file themselves.
+    """Write in-memory content to a per-task tmp file, then upload+register.
+    Convenience over `_upload_file` for callers holding content directly.
     """
     if _create_uploader(ctx.std.env) == None:
         _info_skip_no_ci_host(ctx, name)
@@ -198,20 +165,18 @@ def _upload(ctx, kind, name, content):
     ctx.std.fs.remove_file(tmppath)
     return url
 
-# ============================================================================
 # Public wrapper struct — the only symbol consumers should reach for
-# ============================================================================
 
 artifacts = struct(
     Artifact = _Artifact,
 
-    # High-level: upload + register in one call. Returns the download URL
-    # ("" off-CI / on failure / when the CI host has no stable URL).
+    # Upload + register in one call. Returns the download URL ("" off-CI /
+    # on failure / when the CI host has no stable URL).
     upload = _upload,  # (ctx, kind, name, content) -> str
     upload_file = _upload_file,  # (ctx, kind, name, path)    -> str
 
-    # Low-level: register a known URL without uploading. Use only when
-    # bypassing the standard CI upload path (e.g. a custom uploader).
+    # Register a known URL without uploading — only when bypassing the
+    # standard CI upload path (e.g. a custom uploader).
     append = lambda ctx, a: ctx.traits[_ArtifactsTrait].append(a),
     list = lambda ctx: ctx.traits[_ArtifactsTrait].list(),
     by_kind = _by_kind,
@@ -221,33 +186,26 @@ artifacts = struct(
     TRAITS = [_ArtifactsTrait],
 )
 
-# ============================================================================
 # Artifact naming convention per CI platform
-# ============================================================================
 
 def artifact_name(ci, task_name, task_key, filename):
-    """Format an artifact name based on CI platform conventions.
+    """Format an artifact name per CI conventions.
 
-    Buildkite/CircleCI/GitLab support hierarchical path-style names
-    (`task_name/task_key/filename`), grouping artifacts in their UIs.
-    GitHub Actions requires flat names (`task_name.task_key.filename`)
-    because artifacts are a flat list.
+    Buildkite/CircleCI/GitLab group via path-style `task_name/task_key/
+    filename`; GitHub Actions needs flat `task_name.task_key.filename`.
     """
     if ci == "github":
         return task_name + "." + task_key + "." + filename
     return task_name + "/" + task_key + "/" + filename
 
-# ============================================================================
 # GitLab CI uploader (inline — no separate lib needed)
-# ============================================================================
 
 def _upload_file_gitlab(ctx, path, name):
     """Upload a single file to GitLab via the Generic Packages API.
 
     GitLab treats slashes in the package name as nested path segments,
-    which makes the browser derive an ugly URL-encoded filename on
-    download. Flatten slashes to dashes so the downloaded filename stays
-    clean (`testlogs.tar.gz` instead of `test%2Fgl-test%2F…`).
+    giving an ugly URL-encoded download filename; flatten slashes to
+    dashes to keep it clean.
     """
     token = ctx.std.env.var("CI_JOB_TOKEN")
     api_url = ctx.std.env.var("CI_API_V4_URL")
@@ -283,29 +241,18 @@ _gitlab = struct(
     delete_artifact = lambda ctx, name: {"success": True},
 )
 
-# ============================================================================
-# Testlog upload strategies (tar / zip / per-file / buildkite-agent)
-# ============================================================================
-#
-# Each strategy mutates the per-group state dict in place:
-#   last_count   — number of entries from the global list already in the
-#                  last uploaded archive (for batch threshold + idempotency)
-#   version      — incremented per partial upload for `.partial.N` naming
-#   prev_ref     — opaque handle the provider's delete_artifact reaps
-#                  (rolling-replace; GitHub only — others ignore)
-#   download_url — direct download URL for the latest archive (when stable)
+# Testlog upload strategies (tar / zip / per-file / buildkite-agent).
+# Each mutates the per-group state dict in place:
+#   last_count   — entries already in the last uploaded archive
+#   version      — bumped per partial upload for `.partial.N` naming
+#   prev_ref     — handle delete_artifact reaps (rolling-replace; GitHub only)
+#   download_url — latest archive's direct URL (when stable)
 #   label_urls   — {label: {filename: url}} for per-file strategies
 
 def _print_upload_error(ctx, what, err):
-    """Warn that uploading `what` failed with `err`.
-
-    `what` is the artifact — the archive name for the tar/zip strategies,
-    or the per-file destination for the per-file strategy — so an operator
-    can tell which channel and file hit the failure.
-
-    Emitted inline at each failure rather than summarized at build end: a
-    tail summary can be truncated or never reached when uploads (and the
-    build) are failing.
+    """Warn that uploading `what` (archive name or per-file dest) failed.
+    Emitted inline at each failure, not summarized at build end — a tail
+    summary can be truncated/unreached when the build is failing.
     """
     warn(ctx.std, "Artifact upload failed for %s: %s" % (what, err))
 
@@ -324,10 +271,9 @@ def _new_archive_dir(ctx):
 def _upload_archive(ctx, provider, group, entries, name, ext, build_archive, final):
     """Build an archive via `build_archive(ctx, path, mtree)` and upload it.
 
-    Used by tar and zip strategies (GitHub uses zip; GitLab uses tar).
-    When `final=False`, uploads under a versioned `.partial.N` name so
-    incremental snapshots don't collide; on `final=True`, uploads under
-    the plain `{name}` so the user-downloaded artifact is `{name}{ext}`.
+    Tar/zip strategies (GitHub=zip, GitLab=tar). `final=False` uploads as
+    `.partial.N` so snapshots don't collide; `final=True` uses plain
+    `{name}` so the downloaded artifact is `{name}{ext}`.
     """
     count = len(entries)
     if count == 0:
@@ -372,15 +318,13 @@ def _upload_testlogs_tar(ctx, provider, group, entries, name, final = False):
     return _upload_archive(ctx, provider, group, entries, name, ".tar.gz", tar_create, final)
 
 def _upload_testlogs_zip(ctx, provider, group, entries, name, final = False):
-    """Zip strategy — GitHub. The v2 artifact API requires ZIP-formatted
-    uploads; building the zip directly avoids `.zip(.tar.gz)` double-wrap
-    (provider would otherwise re-wrap our tar)."""
+    """Zip strategy — GitHub. The v2 artifact API requires ZIP uploads;
+    building the zip directly avoids the provider double-wrapping a tar."""
     return _upload_archive(ctx, provider, group, entries, name, ".zip", zip_create, final)
 
 def _upload_testlogs_buildkite(ctx, group, entries, name):
-    """Symlink-tree + `buildkite-agent artifact upload` — uploads files
-    individually, no archive. Only the entries added since the last
-    successful upload get uploaded (incremental)."""
+    """Symlink-tree + `buildkite-agent artifact upload` — per-file, no
+    archive. Incremental: only entries added since the last upload."""
     count = len(entries)
     if count == 0 or count == group["last_count"]:
         return False
@@ -415,9 +359,8 @@ def _upload_testlogs_buildkite(ctx, group, entries, name):
     return False
 
 def _upload_testlogs_per_file(ctx, provider, group, entries, name):
-    """Per-file upload — CircleCI. Each new file goes up individually; the
-    per-(label, filename) URL is recorded into group['label_urls'] so the
-    rendered output can link to each file separately."""
+    """Per-file upload — CircleCI. Records each per-(label, filename) URL
+    into group['label_urls'] so output can link files separately."""
     count = len(entries)
     if count == 0 or count == group["last_count"]:
         return False
@@ -426,12 +369,9 @@ def _upload_testlogs_per_file(ctx, provider, group, entries, name):
     any_success = False
     label_urls = group.setdefault("label_urls", {})
 
-    # One runner session shared across every file in this group (and across
-    # the incremental snapshots that reuse the same `group`): the CircleCI
-    # runner returns the same job-scoped creds each call, so minting once
-    # and reusing avoids a socket + 2 runner-API round-trips per file. A
-    # failed PUT clears it inside upload_artifact, so an expired credential
-    # re-mints on retry.
+    # Shared runner session across files/snapshots in this group: creds
+    # are job-scoped, so minting once avoids a socket + 2 runner-API
+    # round-trips per file. A failed PUT clears it (re-mints on retry).
     session_cache = group.setdefault("circleci_session", {})
     for entry in new_entries:
         dest = name + "/" + entry["dest"]
@@ -451,14 +391,11 @@ def _upload_testlogs_per_file(ctx, provider, group, entries, name):
 
     return any_success
 
-# ============================================================================
 # Provider factory — pick the right strategy + auth check per CI host
-# ============================================================================
 
 def _info_skip_no_ci_host(ctx, name):
-    """Print the artifact-upload skip message — but only when something
-    signals we're on CI. Locally (no `CI` env var, no recognized host
-    marker) artifact uploads aren't expected, so the message is noise.
+    """Print the artifact-upload skip message, but only when on CI —
+    locally uploads aren't expected, so the message would be noise.
     """
     env = ctx.std.env
     on_ci = bool(env.var("CI")) or detect_ci_host(env) != None
@@ -466,12 +403,9 @@ def _info_skip_no_ci_host(ctx, name):
         info(ctx.std, "Skipping artifact upload (%s): not on a recognized CI host." % name)
 
 def _create_uploader(env):
-    """Returns a per-CI uploader struct, or None when not on a recognized
-    CI host. Each method takes the full task ctx as its first argument so
-    file/HTTP/process APIs are available from build event handlers.
-
-    Internal — producers should call `artifacts.upload`/`upload_file` and
-    let those handle CI detection, naming, transport, and registration."""
+    """Per-CI uploader struct, or None off a recognized CI host. Each
+    method takes the task ctx first (file/HTTP/process APIs). Internal —
+    producers should call `artifacts.upload`/`upload_file`."""
     ci = detect_ci(env)
     if ci == "github":
         provider = github
@@ -513,9 +447,7 @@ def _create_uploader(env):
         upload_testlogs = upload_testlogs,
     )
 
-# ============================================================================
 # Helpers for the owner feature impl
-# ============================================================================
 
 # Upload every N new collected files per group.
 _BATCH_SIZE = 5
@@ -535,9 +467,9 @@ def _make_uuid(ctx):
     return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
 
 def _file_uri_to_path(uri):
-    """Convert a file:// or bytestream:// URI to a local filesystem path.
+    """Convert a file:// or bytestream:// URI to a local path.
 
-    bytestream:// URIs resolve via the bb_clientd FUSE mount:
+    bytestream:// resolves via the bb_clientd FUSE mount:
       `bytestream://host:port/blobs/<hash>/<size>`
       → `{_BB_CLIENTD_ROOT}/cas/{host}/blobs/sha256/file/{hash}-{size}`
     """
@@ -555,9 +487,8 @@ def _file_uri_to_path(uri):
         return _BB_CLIENTD_ROOT + "/cas/" + host + "/blobs/sha256/file/" + blob_hash + "-" + blob_size
     return uri
 
-# Statuses that count as "not passed" for upload_test_logs="failed".
-# Matches `_FAILED_STATUSES` in lib/bazel_results.axl plus flaky — a
-# flaky test's log is exactly as interesting as a failing one.
+# "Not passed" statuses for upload_test_logs="failed". Matches
+# `_FAILED_STATUSES` in lib/bazel_results.axl plus flaky.
 _NOT_PASSED_STATUSES = [
     "failed",
     "timeout",
@@ -589,14 +520,12 @@ def _should_collect_test(strategy, status, cached_locally):
     return False
 
 def _collect_test_files(ctx, event, strategy, test_entries, skipped_files):
-    """Append testlog entries (and per-file skip reasons) from a test_result
-    BES event into the closure-private lists.
+    """Append testlog entries (+ skip reasons) from a test_result BES
+    event into the closure-private lists.
 
-    BES can deliver a `test_result`-kinded event whose payload is the `aborted`
-    union variant (e.g. the test was aborted before running) — that variant
-    lacks `status` / `cached_locally` / `test_action_output`. All payload
-    field accesses go through `bes_get` so a schema-mismatched payload no-ops
-    instead of raising.
+    A test_result event may carry the `aborted` payload variant (lacks
+    `status` / `cached_locally` / `test_action_output`); all field reads
+    go through `bes_get` so a schema mismatch no-ops instead of raising.
     """
     if event.kind != "test_result":
         return
@@ -624,8 +553,8 @@ def _collect_test_files(ctx, event, strategy, test_entries, skipped_files):
         test_entries.append({"src": src, "dest": label_path + "/" + file.name, "label": label})
 
 def _new_test_group():
-    """Fresh per-group upload-orchestration state. See the comment block
-    above the upload strategies for field semantics."""
+    """Fresh per-group upload state. Field semantics: see the upload
+    strategies comment block above."""
     return {
         "last_count": 0,
         "version": 0,
@@ -660,33 +589,25 @@ def _trace_summary(ctx, items, test_entries, skipped_files, profile_path, execlo
         trace.log("  " + a.kind + suffix + " " + (a.name or "") + " -> " + a.url)
     trace.log("------------------------------------")
 
-# ============================================================================
 # Owner feature — co-located so it can bind closures to the private trait
-# ============================================================================
 
 def _artifact_upload_impl(ctx: FeatureContext):
-    """Wire interval-based artifact upload into BazelTrait lifecycle hooks.
+    """Wire interval-based artifact upload into BazelTrait hooks.
 
       build_event  → collect testlog entries, batch-upload at threshold
       build_end    → final flush of testlogs + upload profile/execlog/BEP
 
-    Each successful upload registers an `_Artifact` via the closure-bound
-    `_append`; consumers of the public `artifacts` API see the registered
-    entries via `artifacts.list/by_kind/by_label`.
+    Each upload registers an `_Artifact` via the closure-bound `_append`.
     """
     bazel_trait = ctx.traits[BazelTrait]
 
-    # Bind the artifacts trait callables unconditionally — even when no CI
-    # is detected. Producers (format/gazelle hooks) that call
-    # `artifacts.append(ctx, ...)` then record a no-op-but-listed entry
-    # locally; the wrapper API is the contract regardless of whether
-    # a real upload happens.
+    # Bind the trait callables unconditionally — even off-CI — so
+    # producers' `artifacts.append(...)` records a listed entry locally.
     items = []
 
     def _append(a):
-        # Upsert by (kind, label, name). Rolling-replace for batch uploads
-        # of the same logical artifact (testlogs across batches), append
-        # for distinct ones (per-test-target files).
+        # Upsert by (kind, label, name): rolling-replace same logical
+        # artifact (testlogs across batches), append distinct ones.
         for i, existing in enumerate(items):
             if existing.kind == a.kind and existing.label == a.label and existing.name == a.name:
                 items[i] = a
@@ -706,8 +627,7 @@ def _artifact_upload_impl(ctx: FeatureContext):
     upload_bep = ctx.args.upload_bep
     upload_exec_log = ctx.args.upload_exec_log
 
-    # Per-task tmpdir under the Aspect Workflows job dir when present
-    # (matches the rest of the codebase); falls back to the OS tmp.
+    # Per-task tmpdir under the Aspect Workflows job dir, else OS tmp.
     uuid = _make_uuid(ctx)
     tmpdir = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_JOB_TMPDIR") or ctx.std.env.temp_dir()
     profile_path = tmpdir + "/" + uuid + ".profile.gz"
@@ -734,9 +654,8 @@ def _artifact_upload_impl(ctx: FeatureContext):
     test_group = _new_test_group()
 
     def _publish_testlogs():
-        """Translate upload-orchestration state into Artifact records.
-        Re-emits on every batch; `_append` upserts so the items list
-        doesn't bloat with stale URLs."""
+        """Translate upload state into Artifact records. Re-emits each
+        batch; `_append` upserts so items don't bloat with stale URLs."""
         if test_group["download_url"]:
             _append(_Artifact(
                 kind = "testlogs",
@@ -770,17 +689,14 @@ def _artifact_upload_impl(ctx: FeatureContext):
                 if upload_testlogs:
                     name = artifact_name(ci, ctx.task.name, ctx.task.key, "testlogs")
 
-                    # final=True publishes under the plain `{name}` (no
-                    # `.partial.N` suffix); rolling-delete still reaps the
-                    # prior partial via provider.delete_artifact(prev_ref).
+                    # final=True publishes plain `{name}`; rolling-delete
+                    # still reaps the prior partial via prev_ref.
                     if uploader.upload_testlogs(ctx, test_group, test_entries, name, final = True):
                         _publish_testlogs()
 
-                # Profile / BEP / exec-log — opt-in each. Source files
-                # are removed on success AND failure (a failed upload
-                # doesn't retry, so leaving the file just leaks a
-                # potentially-sensitive artifact). `_upload_file` handles
-                # the upload + register + log dance.
+                # Profile / BEP / exec-log — opt-in each. Source files are
+                # removed on success AND failure (no retry, so a leftover
+                # file just leaks a potentially-sensitive artifact).
                 singletons = []
                 if upload_profile:
                     singletons.append(("profile", profile_path, "profile.gz"))
@@ -804,23 +720,17 @@ ArtifactUpload = feature(
     summary = "Automatically upload build artifacts to CI. Supports GitHub Actions, Buildkite, CircleCI, and GitLab.",
     implementation = _artifact_upload_impl,
     args = {
-        # All uploads opt-in. An artifact published to CI is downloadable
-        # by anyone with read access to the job, so "secrets never leave
-        # the machine" means defaulting every channel to off and letting
-        # the operator enable the ones they want for their threat model.
+        # All uploads opt-in: a CI artifact is downloadable by anyone with
+        # job read access, so every channel defaults off.
         #
-        # Risk level, highest to lowest:
-        #   upload_exec_log — action env vars + command lines; on-disk
-        #                     redaction not yet implemented. Highest risk.
-        #   upload_testlogs — test stdout/stderr/XML may echo env vars or
-        #                     print-debugged secrets.
+        # Risk, highest to lowest:
+        #   upload_exec_log — action env vars + command lines; no on-disk
+        #                     redaction yet. Highest risk.
+        #   upload_testlogs — test stdout/stderr/XML may echo secrets.
         #   upload_bep      — redacted at the stream source
-        #                     (stream/redaction.rs); on-disk contents match
-        #                     the redacted form. Low risk but not zero.
-        #   upload_profile  — JSON trace profile: target labels, file
-        #                     paths, timing counters. No env values or
-        #                     command lines; labels can still leak project
-        #                     structure.
+        #                     (stream/redaction.rs); low but nonzero.
+        #   upload_profile  — labels/paths/timings; no env/command lines,
+        #                     but labels can leak project structure.
         "upload_test_logs": args.string(
             default = "none",
             values = ["none", "failed", "executed", "all"],

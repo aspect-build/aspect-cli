@@ -1,96 +1,49 @@
 """GitHub PR review comment reporter for the lint task.
 
-Posts SARIF-derived diagnostics + patch-derived suggestion-block
-comments to a PR's review-comments thread, with marker-based dedup
-across runs and stale-cleanup of comments the lint task no longer
-considers active.
+Posts SARIF-derived + patch-derived suggestion comments to a PR's review thread,
+with marker-based dedup across runs and stale-cleanup of no-longer-active comments.
 
 # Marker scheme
 
-Every comment carries a hidden HTML marker as the first line of its
-body. The marker uniquely identifies the source of the comment so
-later runs can:
-
-  - **dedupe**: skip re-posting an identical comment that's already
-    on the PR
-  - **clean up**: delete comments the lint task no longer reports
-    (a finding got fixed, a strategy/destination changed, …)
-
-Marker shape:
+Each comment's first body line is a hidden marker uniquely identifying its source,
+so later runs can dedup (skip identical reposts) and clean up (delete dropped
+findings). Shape:
 
     <!-- aspect-lint:<run_id>:<task_key>:<tool>:<file>:<line>:<rule_id> -->
 
-Each field plays a distinct role in the cleanup state machine
-(`_cleanup_comments`):
-
-  - `run_id`   — CI-run-unique identifier (`gha-…-<attempt>`,
-                 `bk-<build_id>`, `cci-<workflow_id>`, `gl-<pipeline_id>`,
-                 or `""` off CI). Scopes cross-task / cross-run cleanup.
-  - `task_key` — the lint task's key (e.g. `lint-bk-debug`). Scopes
-                 the per-task desired-set check.
+  - `run_id`   — CI-run-unique (`gha-…-<attempt>`, `bk-<build_id>`,
+                 `cci-<workflow_id>`, `gl-<pipeline_id>`, or `""` off CI).
+                 Scopes cross-task / cross-run cleanup.
+  - `task_key` — lint task key; scopes the per-task desired-set check.
   - `tool`     — linter display name (e.g. `ShellCheck`).
   - `file`     — repo-relative path (must match the PR-side path).
-  - `line`     — 1-based line number on the new side.
-  - `rule_id`  — SARIF result's `ruleId`, or for patch-derived
-                 suggestion comments a synthetic `patch_<start>_<end>`.
+  - `line`     — 1-based new-side line.
+  - `rule_id`  — SARIF `ruleId`, or synthetic `patch_<start>_<end>` for patches.
 
-# Cleanup semantics
+# Cleanup semantics (`_cleanup_comments`)
 
-When a lint task finishes, its cleanup walks every aspect-lint
-comment on the PR. Cleanup is **scoped to the current CI host** —
-the `run_id`'s leading prefix (`gha`, `bk`, `cci`, `gl`) identifies
-the host. A Buildkite lint task only reaps comments posted by other
-Buildkite runs; comments from a concurrent GitHub Actions run on
-the same PR are left alone (and vice versa). Without this scoping,
-two CI hosts running the same PR clobber each other's review
-comments because their run_ids look "different" to the naive
-cross-run reaper. Each comment bins into one of four buckets:
+Cleanup walks every aspect-lint comment and is scoped to the current CI host
+(the run_id prefix gha/bk/cci/gl): without this, two hosts on the same PR clobber
+each other's comments. Each comment bins into one of four buckets:
 
-  0. **Different CI host** — marker's run_id prefix doesn't match
-     this task's. Left alone. The other CI host owns those comments.
+  0. Different CI host (run_id prefix ≠ ours) → leave alone.
+  1. Same host, different run_id → reap (prior-run cleanup; any active task on the
+     host reaps these, so removed tasks' markers eventually go away).
+  2. Same run_id, different task_key → leave alone (valid sibling-task comment).
+  3. Same run_id, same task_key → keep if in `desired` (dedup extras), else reap
+     (finding disappeared or destination/strategy changed).
 
-  1. **Same CI host, different `run_id`** — posted by *any* lint
-     task in a *prior* run on this CI host. Reaped unconditionally.
-     Every active lint task on this host helps clean up regardless
-     of which task originally posted, so even if a lint task is
-     renamed or removed from the pipeline its stale markers
-     eventually go away once any other lint task on this host runs.
+`run_id` is the broadest scope two siblings in one logical CI run share. Per-host:
+  - GHA: `gha-<GITHUB_RUN_ID>-<GITHUB_RUN_ATTEMPT>` (stable across jobs; attempt
+    increments on re-run so re-runs reap the prior attempt).
+  - Buildkite: `bk-<BUILDKITE_BUILD_ID>` (new per build; job Retry keeps the id →
+    bucket 3 via per-task desired set, not the cross-run reaper).
+  - CircleCI: `cci-<CIRCLE_WORKFLOW_ID>` (job rerun → same id → per-task path).
+  - GitLab: `gl-<CI_PIPELINE_ID>` (job retry → same id → per-task path).
 
-  2. **Same `run_id`, different `task_key`** — posted by a sibling
-     lint task in the *current* run. Left alone. The sibling is
-     either still running or just finished; its comments are valid.
-
-  3. **Same `run_id`, same `task_key`** — this task's own current-run
-     comments. Compared against the just-built `desired` set:
-     - in `desired`  → keep (extras with the same marker get
-       deduped down to a single comment)
-     - not in `desired` → reap (the finding disappeared since the
-       task's last emit in this run, or destination/strategy changed)
-
-The `run_id` field is the **broadest scope two sibling tasks in the
-same logical CI run will share**. Per-host:
-
-  - **GHA**: `GITHUB_RUN_ID` is stable across jobs in a workflow run;
-    `GITHUB_RUN_ATTEMPT` increments on "Re-run failed jobs" /
-    "Re-run all jobs". Marker uses `gha-<run_id>-<attempt>` so
-    re-runs reap the prior attempt's comments.
-  - **Buildkite**: `BUILDKITE_BUILD_ID` is unique per build; rebuilds
-    create a new build_id. Job-level "Retry" within a build keeps
-    the same `BUILDKITE_BUILD_ID` and re-runs the same task — that
-    falls into bucket (3) and is handled by the per-task desired
-    set, NOT by the cross-run reaper.
-  - **CircleCI**: `CIRCLE_WORKFLOW_ID` is unique per workflow attempt.
-    Workflow rerun → new ID. Job rerun within a workflow → same
-    workflow_id → handled by per-task path same as BK.
-  - **GitLab**: `CI_PIPELINE_ID` is unique per pipeline run.
-    Pipeline rerun → new ID. Job retry within a pipeline → same
-    pipeline_id → per-task path.
-
-Notably we do NOT include per-job retry counters
-(`BUILDKITE_RETRY_COUNT`, `CI_JOB_ID`, `CIRCLE_BUILD_NUM`) in
-`run_id`. Including a job-level identifier would make sibling
-lint tasks running as separate jobs in the same run see each other
-as "different runs" and incorrectly reap each other.
+We do NOT include per-job counters (BUILDKITE_RETRY_COUNT, CI_JOB_ID,
+CIRCLE_BUILD_NUM): siblings in separate jobs would then see each other as
+"different runs" and reap each other.
 """
 
 load("../lib/environment.axl", "color_enabled", "feature_logger")
@@ -107,10 +60,8 @@ _BOLD = "\033[1m"
 _YELLOW = "\033[33m"
 _RESET = "\033[0m"
 
-# Severity priority for cap ordering — errors come first, then warnings,
-# then info. Unknown severities sort last. Keys are aspect-cli's
-# internal severity vocabulary (post lib/sarif.axl::_translate_sarif_level),
-# not raw SARIF level names.
+# Cap-ordering priority (error < warning < info, unknown last). Keys are the
+# internal severity vocabulary (post lib/sarif.axl::_translate_sarif_level).
 _SEVERITY_RANK = {"error": 0, "warning": 1, "info": 2}
 
 def _comment_sort_key(comment):
@@ -122,18 +73,12 @@ def _comment_sort_key(comment):
     )
 
 def _enrich_with_suggestions(ctx, comments):
-    """Append GitHub suggestion blocks to comments that carry fix hints.
+    """Append GitHub suggestion blocks to comments carrying `_fixes` hints.
 
-    DORMANT in practice — `_fixes` (set by `sarif_result_to_comment`)
-    is empty on every comment derived from a rules_lint
-    Go-errorformat linter (shellcheck, yamllint, clang-tidy, …). See
-    the anchor docstring on `lib/sarif.axl::_result_has_fix` (tracked
-    in https://github.com/aspect-build/rules_lint/issues/749). This loop short-circuits on the
-    `if not fixes` guard at line 1 of the body, so it's effectively a
-    no-op for the current rules_lint integration; today's "fix"
-    comments (with Apply buttons) come through the parallel
-    `.patch`-file path (`_build_suggestion_comments`), not this
-    function.
+    DORMANT: `_fixes` is empty on every rules_lint Go-errorformat linter (anchor
+    on lib/sarif.axl::_result_has_fix; tracked in
+    https://github.com/aspect-build/rules_lint/issues/749), so this no-ops today
+    — fix comments come via the `.patch` path (`_build_suggestion_comments`).
     """
     file_cache = {}
     for comment in comments:
@@ -174,15 +119,8 @@ def _enrich_with_suggestions(ctx, comments):
             comment["body"] += "\n\n" + lc_suggestion_block(fixed, current = line_num, start_line = line_num, end_line = line_num, vcs = "github")
         comment.pop("_fixes", None)
 
-# Severity → leading-emoji map for suggestion-comment body headers.
-# Mirrors the icons used by the lint-results "Auto fixes"
-# section so the visual cue is the same on the PR comment thread,
-# the rendered check-run details, and the BK annotation. Pairs with
-# GitHub's built-in `annotation_level` icon on inline annotations
-# (warning ⚠ / failure ❌ / notice ℹ).
-#
-# Uncorrelated suggestions don't carry a severity — they get the
-# generic 🔧 icon instead.
+# Severity → emoji for suggestion-comment headers; mirrors the lint-results
+# "Auto fixes" icons. Uncorrelated suggestions use the generic 🔧 instead.
 _SUGGESTION_SEVERITY_ICONS = {
     "error": "🚨",
     "warning": "⚠️",
@@ -190,24 +128,14 @@ _SUGGESTION_SEVERITY_ICONS = {
 }
 
 def _ci_run_id(env):
-    """Stable, CI-host-unique identifier for the current run.
+    """Stable, CI-host-unique run identifier — the marker's leading field, so
+    cleanup reaps any prior-run comment (any task) while leaving current-run
+    siblings alone. "" off CI (local doesn't post; feature exits before cleanup).
 
-    Used as the leading field in the lint-comment marker so cleanup
-    can reap any aspect-lint comment posted by a *prior* CI run —
-    regardless of which lint task posted it — while leaving
-    sibling-task comments from the *current* run alone.
-
-    Empty string when not on a recognized CI host (local runs don't
-    post PR review comments, so cross-run cleanup is moot — the
-    feature exits early before reaching cleanup anyway).
-
-      GitHub Actions:  `gha-<run_id>-<run_attempt>`  (re-runs increment
-                       the attempt and need their own identity so a
-                       failed-then-retried run reaps its prior
-                       attempt's comments)
-      Buildkite:       `bk-<build_id>` (UUID, unique per build)
-      CircleCI:        `cci-<workflow_id>` (UUID-shaped)
-      GitLab:          `gl-<pipeline_id>`
+      GHA:       `gha-<run_id>-<run_attempt>` (attempt distinguishes re-runs)
+      Buildkite: `bk-<build_id>`
+      CircleCI:  `cci-<workflow_id>`
+      GitLab:    `gl-<pipeline_id>`
     """
     gh_run = env.var("GITHUB_RUN_ID") or ""
     if gh_run:
@@ -225,17 +153,9 @@ def _ci_run_id(env):
     return ""
 
 def _ci_host_from_run_id(run_id):
-    """Return the CI-host prefix ("gha" / "bk" / "cci" / "gl") encoded
-    at the start of a run_id, or "" if the run_id is empty or its
-    prefix doesn't match a known host.
-
-    Used by cleanup to scope cross-run reaping to the *same CI host*:
-    a Buildkite lint task's prior-run reap must never touch comments
-    posted by a concurrent GitHub Actions lint task on the same PR
-    (and vice versa). Without this, the two CI hosts wipe each other's
-    comments because their run_ids carry different prefixes and the
-    naive "different run_id ⇒ reap" rule treats the other host's
-    current-run comments as stale.
+    """Return the CI-host prefix ("gha"/"bk"/"cci"/"gl") at the start of a run_id,
+    or "" if empty/unknown. Cleanup uses it to scope cross-run reaping to the same
+    host so one host doesn't wipe another's comments on the same PR.
     """
     if not run_id:
         return ""
@@ -245,22 +165,13 @@ def _ci_host_from_run_id(run_id):
     return run_id[:dash]
 
 def _files_changed_url(html_url):
-    """Rewrite a PR review comment's GitHub `html_url` from the
-    conversation-tab form to the Files-Changed-tab form.
+    """Rewrite a comment's `html_url` from conversation-tab to Files-Changed-tab form:
 
       input:  https://github.com/<o>/<r>/pull/<N>#discussion_r<id>
       output: https://github.com/<o>/<r>/pull/<N>/files#r<id>
 
-    Lint-suggestion comments are always anchored to a specific line in
-    a specific file, so the Files Changed view is the right landing
-    surface: the reader sees the diff, the comment expanded on its
-    anchor line, and the `Apply suggestion` button without scrolling
-    past the chronological discussion that `#discussion_r<id>` opens.
-
-    Returns the input unchanged when it doesn't match the expected
-    shape (empty string, non-PR comment URL, future GitHub URL
-    changes) — better to surface a working-but-suboptimal link than
-    to break the link entirely on a parse miss.
+    Lint comments anchor to a file line, so Files Changed (diff + Apply button) is
+    the right landing surface. Returns the input unchanged on a parse miss.
     """
     if not html_url:
         return html_url
@@ -271,18 +182,11 @@ def _files_changed_url(html_url):
     return html_url[:idx] + "/files#r" + html_url[idx + len(marker):]
 
 def _dedup_by_marker(comments, task_key):
-    """Drop duplicates: keep the first comment carrying each marker,
-    discard subsequent ones with the same marker.
+    """Keep the first comment per marker, drop later same-marker dupes.
 
-    Multiple linter aspects in the same task run can emit identical
-    findings — e.g. two checkers each flagging `$name` on the same
-    line with the same rule_id, or a SARIF result and a patch hunk
-    that share an anchor. Without intra-run dedup the lint task
-    would post N copies of the same finding, just under different
-    cap-budget slots. Mirrors rosetta's `deduplicateDiagnostics`.
-
-    Comments without a recognizable marker (shouldn't happen in
-    normal use) pass through untouched.
+    Multiple aspects in one run can emit identical findings (same rule_id+line, or
+    a SARIF result + patch hunk sharing an anchor); without this they'd post N
+    copies. Mirrors rosetta's `deduplicateDiagnostics`. Marker-less comments pass through.
     """
     seen = {}
     out = []
@@ -298,15 +202,9 @@ def _dedup_by_marker(comments, task_key):
     return out
 
 def _tool_name_from_patch_path(filepath):
-    """Extract a human-readable linter name from a rules_lint patch
-    filename.
-
-    rules_lint emits patches as
-    `<target>.AspectRulesLint<Tool>.patch` (e.g.
-    `hello.AspectRulesLintShellCheck.patch`). Strip the
-    `AspectRulesLint` prefix to recover the tool's display name.
-    Returns "Linter" as a generic fallback when the filename doesn't
-    follow the convention.
+    """Extract the linter name from a rules_lint patch filename, e.g.
+    `hello.AspectRulesLintShellCheck.patch` → `ShellCheck`. Returns "Linter" when
+    the filename doesn't follow the convention.
     """
     name = filepath.rsplit("/", 1)[-1]
     if name.endswith(".patch"):
@@ -319,75 +217,44 @@ def _tool_name_from_patch_path(filepath):
     return "Linter"
 
 def _filter_for_destination(comments, destination):
-    """Filter the candidate review-comment list per `findings_destination`.
+    """Filter candidate review comments per `findings_destination`.
 
-      "comments"    — no filtering. Every finding posts a comment, with
-                      the suggestion block when `_fixes` is present.
-      "annotations" — drop everything. Every finding (fix-bearing or
-                      not) goes to check-run annotations via
-                      GithubStatusChecks; the suggestion block is lost
-                      since the check-runs API has no patch primitive,
-                      and that's the tradeoff this mode accepts.
-      "auto"        — keep only fix-bearing comments. Non-fix findings
-                      go to annotations (the lighter-weight surface);
-                      fix-bearing findings stay here so the suggestion
-                      block renders inline next to the diagnostic. The
-                      annotation surface SKIPS fix-bearing findings so
-                      each finding shows on exactly one surface.
-      "both"        — same comment selection as "auto" (fix-bearing
-                      only). Differs from "auto" only at the
-                      annotation surface, which still includes
-                      fix-bearing findings — so fix-bearing items
-                      double up on annotation + suggestion comment.
+      "comments"    — no filtering; every finding posts.
+      "annotations" — drop everything; findings go to annotations (suggestion
+                      block lost — check-runs API has no patch primitive).
+      "auto"/"both" — keep only fix-bearing (`_fixes`) comments. Identical here;
+                      they differ only at the annotation surface (both also
+                      annotates fix-bearing, auto skips them).
 
-    The `_fixes` key (set by `sarif_result_to_comment` when the SARIF
-    result has an inline-fix relatedLocation) is the canonical
-    fix-bearing predicate at this layer; mirrors the diagnostic-level
-    `has_fix` flag.
+    `_fixes` (set by `sarif_result_to_comment`) is the fix-bearing predicate,
+    mirroring diagnostic-level `has_fix`.
 
-    DORMANT-PREDICATE NOTE — `_fixes` is empty on every comment from
-    a rules_lint Go-errorformat linter (see anchor on
-    `lib/sarif.axl::_result_has_fix`; tracked in
-    https://github.com/aspect-build/rules_lint/issues/749). So in "auto"/"both" mode the
-    SARIF-derived comment stream effectively returns `[]` today for
-    those linters, and the only comments that get posted in those
-    modes are the patch-derived suggestion comments
-    (`_build_suggestion_comments` runs in `_lint_end` regardless of
-    this filter). When the upstream rules_lint SARIF generator
-    starts emitting `relatedLocations`, this filter starts retaining
-    SARIF-derived comments alongside the patch ones.
+    DORMANT: `_fixes` is empty on every rules_lint Go-errorformat linter (anchor
+    on lib/sarif.axl::_result_has_fix; tracked in
+    https://github.com/aspect-build/rules_lint/issues/749), so auto/both return
+    [] here today and only patch-derived comments post.
     """
     if destination == "comments":
         return comments
     if destination == "annotations":
         return []
 
-    # "auto" or "both" — comment-side selection is identical; the
-    # annotation surface decides whether fix-bearing also annotates.
+    # "auto"/"both" — fix-bearing only.
     return [c for c in comments if c.get("_fixes")]
 
 def _build_comments(ctx, filepath, run_id, task_key, destination):
-    """Parse a SARIF report into review comments with markers and suggestions applied.
+    """Parse a SARIF report into review comments with markers + suggestions.
 
-    `run_id` and `task_key` are both woven into the marker so cleanup
-    can identify comments from prior CI runs (across all tasks) and
-    from this task in the current run separately. See the module
-    docstring's "Marker scheme" section for the full scoping rationale.
-
-    `destination` matches `LintTrait.findings_destination` and drives
-    the per-comment filter via `_filter_for_destination`.
-
-    Marker attribution joins each surviving comment to its source
-    diagnostic by `(file, line)` anchor — works whether the comment
-    list was filtered or not, and survives any future filter change.
+    run_id/task_key are woven into each marker (see "Marker scheme"). `destination`
+    drives `_filter_for_destination`. Markers attribute each surviving comment to
+    its source diagnostic by `(file, line)` anchor.
     """
     content = ctx.std.fs.read_to_string(filepath)
     sarif = parse_sarif(content)
     comments = sarif_to_review_comments(sarif)
 
-    # Filter BEFORE enrichment because _enrich_with_suggestions pops `_fixes`
-    # after applying its suggestion block — once that runs, we can't tell
-    # which comments were fix-bearing anymore.
+    # Filter BEFORE enrichment: _enrich_with_suggestions pops `_fixes`, so after
+    # it we can't tell which comments were fix-bearing.
     comments = _filter_for_destination(comments, destination)
     _enrich_with_suggestions(ctx, comments)
 
@@ -408,32 +275,15 @@ def _build_comments(ctx, filepath, run_id, task_key, destination):
     return comments
 
 def _task_attribution_footer(task_key):
-    """Reviewer-visible footer identifying which lint task posted this
-    comment. Pairs with the hidden marker for the machine-readable
-    side. Sub-element keeps the line visually de-emphasized."""
+    """Reviewer-visible footer naming the posting lint task (pairs with the hidden marker)."""
     return "\n\n<sub>posted by `%s` lint task</sub>" % task_key
 
 def _get_existing_markers(ctx, gh, task_key):
-    """Fetch existing review-comment markers belonging to THIS task.
-
-    Returns `{marker_string: html_url}` — the URL is empty string when
-    the API response didn't carry one (defensive; in practice every
-    comment has an `html_url`). The dict form serves dual purpose:
-
-      - `marker in markers`  → fast dedup check (the standard usage
-                               in `_post_individually`).
-      - `markers[marker]`    → look up the prior-run comment's URL so
-                               `_post_individually` can carry it onto
-                               the dedup-skipped comment dict's
-                               `_html_url`, keeping the per-finding
-                               💬 link working across reruns instead
-                               of going dark once a comment is
-                               deduped against an existing post.
-
-    Comments from sibling lint tasks (different `task_key`) are
-    intentionally absent from the returned set so dedup in this
-    task doesn't see them as already-posted, and cleanup doesn't
-    reap them.
+    """Fetch existing review-comment markers for THIS task → `{marker: html_url}`
+    (url "" if absent). Dual use: `marker in markers` for dedup, and `markers[marker]`
+    so `_post_individually` carries the prior-run URL onto a deduped comment's
+    `_html_url` (keeping the 💬 link live across reruns). Sibling-task comments are
+    excluded so dedup/cleanup don't touch them.
     """
     result = github.pulls.list_review_comments(
         ctx,
@@ -452,26 +302,18 @@ def _get_existing_markers(ctx, gh, task_key):
     return markers
 
 def _post_individually(ctx, gh, comments, existing_markers, task_key):
-    """Post each comment via the GitHub API. Mutates comment dicts in
-    place — sets `_html_url` on success or on dedup-against-prior-run
-    so callers can record where each comment landed. Returns a list
-    of human-readable error strings for any failures.
-
-    Dedup-against-prior-run carries the existing comment's URL
-    forward via `existing_markers[marker]` so the per-finding 💬 link
-    keeps pointing at the live comment instead of going dark after
-    the first run.
+    """Post each comment via the GitHub API. Mutates dicts in place, setting
+    `_html_url` on success or on dedup-against-prior-run (via existing_markers[marker])
+    so the 💬 link stays live. Returns human-readable error strings for failures.
     """
     errors = []
     prefix = gh.get("prefix", "")
     for c in comments:
-        # _severity is internal — drop it before sending to GitHub.
+        # _severity is internal — drop before sending to GitHub.
         c.pop("_severity", None)
         marker = lc_extract_marker(c.get("body", ""), task_key = task_key)
         if marker and marker in existing_markers:
-            # Already posted on this PR (current task, prior run) —
-            # don't repost, but DO surface the existing URL so the
-            # detail-body link still resolves.
+            # Already posted (prior run) — don't repost, but surface the URL.
             existing_url = existing_markers[marker]
             if existing_url:
                 c["_html_url"] = existing_url
@@ -495,11 +337,7 @@ def _post_individually(ctx, gh, comments, existing_markers, task_key):
             if marker:
                 existing_markers[marker] = url
 
-            # Stash the in-browser comment URL on the comment dict so
-            # callers (specifically the suggestion-record bookkeeping
-            # in `_lint_end`) can carry it onto the lint detail body
-            # — reviewers can jump from the rendered "Auto fixes"
-            # list straight to the comment thread.
+            # Stash the comment URL so _lint_end bookkeeping can link the detail body.
             c["_html_url"] = url
         else:
             errors.append("[%s:%s] %s" % (c.get("path", "?"), c.get("line", 0), result.get("error", "unknown error")))
@@ -521,63 +359,28 @@ def _check_staleness(ctx, gh):
 def _cleanup_comments(ctx, gh, relevant_diagnostics, run_id, task_key, suggestion_markers, destination):
     """Delete stale lint markers — comments this run no longer wants.
 
-    Cleanup is scoped to the *same CI host* as the current task: a
-    Buildkite lint task only reaps comments posted by other Buildkite
-    runs, never by a concurrent GitHub Actions run on the same PR.
-    Without this, two CI hosts running the same PR clobber each
-    other's review comments because their run_ids carry different
-    host prefixes and a naive "different run_id ⇒ reap" rule treats
-    the other host's current-run comments as stale.
+    Scoped to the same CI host (run_id prefix) so one host doesn't clobber
+    another's comments. Buckets (see module docstring for full rationale):
+      0. Different host → skip.
+      1. Same host, different run_id → reap (prior-run cleanup, any task).
+      2. Same run_id, different task_key → leave alone (sibling).
+      3. Same run_id, same task_key → keep if in `desired`, else reap.
 
-    Buckets when walking the PR's aspect-lint comments:
+    `suggestion_markers` (patch-derived, not in relevant_diagnostics) are added
+    to `desired` directly so they aren't reaped next run.
 
-      0. **Different CI host** (marker's run_id prefix ≠ this task's):
-         skip. The other CI host owns its comments.
-
-      1. **Same CI host, different `run_id`**: posted by *any* lint
-         task in a *prior* run on this CI host. Reap unconditionally —
-         every active lint task on this host reaps these on every run,
-         so even if a task is removed from the pipeline its old
-         markers eventually get cleaned up by whatever lint task on
-         this host remains.
-
-      2. **Same `run_id`, different `task_key`**: posted by a sibling
-         lint task in the *current* run. Leave alone — that task is
-         still running (or just finished), its markers are valid.
-
-      3. **Same `run_id`, same `task_key`**: this task's own comments
-         from earlier in this run. Use `desired` to decide:
-            - in `desired`  → keep (or dedupe extras)
-            - not in `desired` → reap
-
-    `suggestion_markers` is the set of patch-derived markers this run
-    posted; they don't have entries in `relevant_diagnostics` so we
-    add them to `desired` directly — otherwise they'd get reaped on
-    the next same-task run.
-
-    Mirrors `_filter_for_destination` so switching destination modes
-    between runs naturally reaps the prior mode's leftover comments:
-
-      "comments"     — every relevant diagnostic should still have a
-                       comment; only delete markers for diagnostics
-                       that have disappeared since the last run.
-      "annotations"  — no diagnostic should have a comment; delete any
-                       lint marker for this task (other tasks unaffected).
-      "auto"/"both"  — only fix-bearing diagnostics should have a
-                       comment; non-fix markers from a prior run get
-                       reaped. The two modes differ only on the
-                       annotation surface, not here.
+    Mirrors `_filter_for_destination` so switching modes reaps the prior mode's
+    leftovers: "comments" keeps every relevant diagnostic's comment; "annotations"
+    deletes all this task's markers; "auto"/"both" keep only fix-bearing.
     """
     desired = {}
     for diag in relevant_diagnostics:
         if destination == "annotations":
             continue  # no comments desired in this mode
 
-        # `diag["has_fix"]` is dormant for rules_lint Go-errorformat
-        # linters today (anchored on `lib/sarif.axl::_result_has_fix`,
-        # tracked in aspect-build/rules_lint#749) so in "auto"/"both"
-        # the SARIF-derived "desired" set is empty and only the
-        # patch-derived `suggestion_markers` (added below) remain.
+        # `has_fix` is dormant today (anchor lib/sarif.axl::_result_has_fix,
+        # aspect-build/rules_lint#749), so in auto/both the SARIF desired set is
+        # empty and only patch-derived suggestion_markers remain.
         if destination in ("auto", "both") and not diag.get("has_fix"):
             continue
         lines = gh["changed_lines"].get(diag["file"])
@@ -585,9 +388,8 @@ def _cleanup_comments(ctx, gh, relevant_diagnostics, run_id, task_key, suggestio
             marker = lc_build_marker(run_id, task_key, diag["tool"], diag["file"], diag["line"], diag["rule_id"])
             desired[marker] = True
 
-    # Patch-derived suggestion markers come from the run, not from
-    # diagnostics — keep them in the desired set so subsequent runs
-    # don't reap them as stale.
+    # Patch-derived markers aren't in diagnostics; keep them desired so subsequent
+    # runs don't reap them.
     for m in suggestion_markers:
         desired[m] = True
     result = github.pulls.list_review_comments(
@@ -600,10 +402,8 @@ def _cleanup_comments(ctx, gh, relevant_diagnostics, run_id, task_key, suggestio
     if not result["success"]:
         return
 
-    # Walk every aspect-lint comment on the PR (no task_key scoping —
-    # we need to see sibling and prior-run markers to decide what to
-    # reap). Bucket into a dict keyed by marker so we can also dedupe
-    # accidental duplicates of the same marker.
+    # Walk every aspect-lint comment (no task_key scoping — need sibling/prior-run
+    # markers to decide). Key by marker so we also dedupe accidental dupes.
     by_marker = {}
     prior_run_comments = []
     current_ci_host = _ci_host_from_run_id(run_id)
@@ -616,19 +416,13 @@ def _cleanup_comments(ctx, gh, relevant_diagnostics, run_id, task_key, suggestio
             continue
         marker_ci_host = _ci_host_from_run_id(fields["run_id"])
 
-        # Bucket 0: different CI host → skip. Don't touch comments
-        # posted by another CI host (e.g. don't let GHA reap BK
-        # comments or vice versa). Legacy markers (marker_ci_host == "")
-        # fall through into bucket 1 so a fresh CI run still reaps
-        # the pre-upgrade backlog.
+        # Bucket 0: different CI host → skip. Legacy markers (host == "") fall
+        # through to bucket 1 so a fresh run reaps the pre-upgrade backlog.
         if current_ci_host and marker_ci_host and marker_ci_host != current_ci_host:
             continue
 
-        # Bucket 1: same CI host, different run_id → always reap
-        # (cross-task, prior-run cleanup on this host). Skipped when
-        # this run has no run_id (local) so we don't accidentally reap
-        # CI-posted comments while debugging locally — local
-        # invocations don't post to PR anyway, but better safe.
+        # Bucket 1: same host, different run_id → reap. Skipped with no run_id
+        # (local) so we don't reap CI-posted comments while debugging.
         if run_id and fields["run_id"] != run_id:
             prior_run_comments.append(c)
             continue
@@ -675,16 +469,13 @@ def _cleanup_comments(ctx, gh, relevant_diagnostics, run_id, task_key, suggestio
 def _github_lint_impl(ctx: FeatureContext):
     lint_trait = ctx.traits[LintTrait]
 
-    # Read at config time and capture in the closure so subsequent reassignment
-    # of LintTrait fields can't desync the various hooks below.
+    # Capture at config time so later LintTrait reassignment can't desync hooks.
     destination = lint_trait.findings_destination
 
     if github.bail_if_not_public_github(ctx.std, _LOG, "Skipping PR review comments."):
         return
 
-    # CI-run identity for cross-task / cross-run cleanup. See
-    # `_ci_run_id` for shape; "" off CI (no cross-run reaping then,
-    # which is fine — local doesn't post comments).
+    # CI-run identity for cross-run cleanup (see `_ci_run_id`); "" off CI.
     run_id = _ci_run_id(ctx.std.env)
 
     pr, gh_inactive_reason = github.detect_pr(ctx.std)
@@ -707,10 +498,8 @@ def _github_lint_impl(ctx: FeatureContext):
         else:
             gh_inactive_reason = "authentication failed: %s" % auth_reason.get("reason", "unknown")
 
-            # We are demonstrably in a GitHub PR context (detect_pr succeeded)
-            # but auth failed — surface that to the build log so the user
-            # knows why no comments are appearing. Non-PR contexts stay silent
-            # because they mean the feature doesn't apply, not that it failed.
+            # In a PR context but auth failed — log it so the user knows why no
+            # comments appear. Non-PR contexts stay silent (feature just doesn't apply).
             _LOG.warn(ctx.std, "Authentication failed for %s/%s — %s" % (
                 pr["owner"],
                 pr["repo"],
@@ -723,32 +512,23 @@ def _github_lint_impl(ctx: FeatureContext):
     max_pr_comments = ctx.args.max_pr_comments
     state = {
         "all_comments": [],
-        # all_comments_count tracks the total number of diagnostics seen
-        # across the run regardless of whether the objects are still buffered.
-        # Once the cap is exhausted, all_comments is cleared and stops growing.
+        # Total diagnostics seen across the run (keeps counting after all_comments
+        # is cleared on cap exhaustion).
         "all_comments_count": 0,
         "posted": 0,
         "errors": [],
         "dropped_due_to_cap": 0,
-        # Per-severity breakdown of cap-dropped diagnostics. Surfaced in the
-        # WARNING line so the user knows what the cap suppressed.
+        # Per-severity breakdown of cap-dropped diagnostics, for the WARNING line.
         "dropped_per_severity": {},
-        # Buffered .patch filepaths from the lint_patch hook — parsed in
-        # `_lint_end` and converted into PR review comments with GitHub
-        # `suggestion` blocks (one comment per hunk). We can't post these
-        # mid-stream because they need to be intermixed with the
-        # SARIF-derived comments for cap ordering.
+        # Buffered .patch paths from lint_patch; parsed in _lint_end and posted as
+        # suggestion comments. Deferred so they intermix with SARIF comments for cap ordering.
         "pending_patches": [],
-        # Count of patch-derived suggestion comments posted; surfaced in
-        # the trace summary at end of run.
         "suggestions_posted": 0,
     }
 
     def _increment_dropped(comments_or_severity, count = 1):
-        """Bump dropped_due_to_cap and per-severity counters.
-
-        Pass either an iterable of comment dicts (severity inferred from
-        each `_severity` key) or a string severity + count.
+        """Bump dropped_due_to_cap + per-severity counters. Accepts an iterable of
+        comment dicts (severity from `_severity`) or a string severity + count.
         """
         if type(comments_or_severity) == "string":
             sev = comments_or_severity
@@ -761,41 +541,27 @@ def _github_lint_impl(ctx: FeatureContext):
                 state["dropped_per_severity"][sev] = state["dropped_per_severity"].get(sev, 0) + 1
 
     if gh:
-        # Workspace prefix relative to the git root (e.g. "subdir/") —
-        # _post_individually prepends it when posting because SARIF paths are
-        # workspace-relative but GitHub expects repo-relative paths.
+        # Workspace prefix relative to the git root; _post_individually prepends
+        # it since SARIF paths are workspace-relative but GitHub wants repo-relative.
         git_out = ctx.std.process.command("git").arg("rev-parse").arg("--show-prefix").current_dir(ctx.std.env.aspect_root_dir()).stdout("piped").stderr("null").spawn().wait_with_output()
         if git_out.status.success:
             gh["prefix"] = git_out.stdout.strip()
 
     def _lint_start(ctx):
-        # Read changed_files from the lint trait, populated by the lint
-        # task impl via detect_changed_files. Avoids a duplicate GitHub
-        # PR Files API call (or a duplicate `git diff`) — the task impl
-        # has already done the work.
+        # Read changed_files from the trait (already computed by the task impl) to
+        # avoid a duplicate PR Files API call / git diff.
         if not gh:
             return
 
-        # Use `hunk_lines` (added + displayed-context lines) rather than
-        # `lines` (added only). GitHub's PR review comment API accepts
-        # comments anywhere in the displayed hunk window, not just on
-        # added lines — and lint findings often land on the line right
-        # next to the user's edit (e.g. SC2164 flags the `cd` on the
-        # line following an edited comment). Using `lines` would drop
-        # the comment in those cases. `hunk_lines` is populated exactly
-        # from the patch on the PR Files API path; the local-git
-        # fallback approximates it as `lines` widened by ±3.
+        # Use `hunk_lines` (added + ±3 context) not `lines` (added only): GitHub
+        # accepts comments anywhere in the displayed hunk, and findings often land
+        # next to an edit (e.g. SC2164 on the line after an edited comment).
         gh["changed_lines"] = {f["file"]: f.get("hunk_lines") or f["lines"] for f in lint_trait.changed_files}
 
     def _lint_report(ctx, filepath):
-        # Per-SARIF-file callback. Hybrid posting strategy:
-        #   - Errors are streamed immediately (subject to cap, dedup, and
-        #     line-level diff filter) so reviewers get fast feedback on the
-        #     most important diagnostics during long lint runs.
-        #   - Warnings/notes are buffered and posted in _lint_end so the cap
-        #     remainder is filled in priority + stable order across the full
-        #     build, not per-SARIF-file arrival order.
-        # Errors are always top priority; FIFO among them is fine.
+        # Per-SARIF-file callback. Errors stream immediately (fast feedback);
+        # warnings/notes buffer and post in _lint_end so the cap remainder fills
+        # in priority/stable order, not per-file arrival order.
         if gh and gh["stale"]:
             return
         comments = _build_comments(ctx, filepath, run_id, ctx.task.key, destination = destination)
@@ -803,8 +569,7 @@ def _github_lint_impl(ctx: FeatureContext):
 
         cap_exhausted = bool(gh) and state["posted"] >= max_pr_comments
 
-        # If the cap is already exhausted, just count by severity and return.
-        # Skip buffering entirely.
+        # Cap already hit: count by severity and skip buffering.
         if cap_exhausted:
             _increment_dropped(comments)
             return
@@ -813,33 +578,22 @@ def _github_lint_impl(ctx: FeatureContext):
         if not gh:
             return
 
-        # Lazy-init existing markers on first stream so we can dedup against
-        # comments posted in prior runs of this task.
+        # Lazy-init existing markers on first stream for prior-run dedup.
         if "existing_markers" not in gh:
             gh["existing_markers"] = _get_existing_markers(ctx, gh, ctx.task.key)
 
-        # Pull just the errors from this batch; everything else goes into the
-        # buffered set processed in _lint_end.
+        # Errors stream now; everything else buffers for _lint_end.
         errors_in_batch = [c for c in comments if c.get("_severity") == "error"]
         if not errors_in_batch:
             return
 
-        # No diff-region pre-filter — attempt to post every comment.
-        # GitHub returns 422 for review comments outside the displayed
-        # hunk window; those errors land in `state["errors"]` via
-        # `_post_individually` and get logged in the trace summary but
-        # don't fail the task. The strategy filter (`hold-the-line` →
-        # hunk-level by default) already keeps `relevant_diagnostics`
-        # aligned with the diff window; only `--strategy=hard` /
-        # `--strategy=soft` + `findings_destination=comments` would
-        # produce outside-hunk attempts in the first place, and we'd
-        # rather try and tolerate a 422 than silently drop something
-        # the user asked us to post.
+        # No diff-region pre-filter: try every comment. Out-of-hunk attempts 422,
+        # collected in state["errors"] (logged, non-fatal). The strategy filter
+        # already keeps relevant_diagnostics aligned with the diff window.
         ready = errors_in_batch
 
-        # Cap accounting. _post_individually internally skips entries whose
-        # marker is already in existing_markers, so duplicates won't consume
-        # cap budget — slice only counts new postable comments.
+        # Cap accounting — _post_individually skips already-posted markers, so
+        # dupes don't consume budget; count only new postable comments.
         new_only = []
         for c in ready:
             marker = lc_extract_marker(c.get("body", ""), task_key = ctx.task.key)
@@ -862,8 +616,7 @@ def _github_lint_impl(ctx: FeatureContext):
         state["posted"] += len(gh["existing_markers"]) - before
         state["errors"].extend(errors)
 
-        # Streaming just exhausted the cap — drop any warnings/notes already
-        # buffered from earlier reports; they can't be posted now.
+        # Streaming exhausted the cap — drop already-buffered warnings/notes.
         if state["posted"] >= max_pr_comments and state["all_comments"]:
             for c in state["all_comments"]:
                 if c.get("_severity") != "error":
@@ -873,61 +626,33 @@ def _github_lint_impl(ctx: FeatureContext):
             state["all_comments"] = []
 
     def _lint_patch(ctx, filepath, name):
-        """Per-`.patch`-file callback. Stash the path AND the Bazel
-        output name; we parse and post in `_lint_end` so the
-        patch-derived suggestion comments share the cap budget and
-        dedup logic with the SARIF-derived ones.
-
-        `name` carries the original `.AspectRulesLint<Tool>.patch`
-        suffix even on Aspect Workflows runners where the resolved
-        `filepath` points at a content-addressed bb_clientd FUSE
-        entry that has lost the mnemonic — `_tool_name_from_patch_path`
-        keys off this to surface the linter name in the comment body.
+        """Per-`.patch` callback. Stash path AND Bazel output name; parse/post in
+        `_lint_end` so patch comments share the cap/dedup logic with SARIF ones.
+        `name` retains the `.AspectRulesLint<Tool>.patch` mnemonic (the resolved
+        filepath is content-hashed on CI) for `_tool_name_from_patch_path`.
         """
         if gh and gh["stale"]:
             return
         state["pending_patches"].append({"path": filepath, "name": name})
 
     def _build_suggestion_comments(ctx, relevant_diagnostics):
-        """Parse buffered patches into suggestion-block comments.
+        """Parse buffered patches into suggestion-block comments, one per edit
+        block (contiguous +/- run within a hunk).
 
-        Each contiguous run of `+`/`-` ops within a unified-diff hunk
-        ("edit block") becomes its own PR review comment with a GitHub
-        `suggestion` block. See `_build_suggestion_comments` history
-        for the rationale on why we split per edit-block rather than
-        per hunk.
-
-        **Correlation with SARIF.** When a SARIF diagnostic exists at
-        the same `(file, line)` as the patch hunk's anchor, we copy
-        its severity + rule_id onto the suggestion record. The
-        diagnostic's hidden marker on the SARIF-derived comment also
-        gets tagged so the lint-results renderer can show the
-        suggestion's severity (e.g. `\342\232\240\357\270\217 **ShellCheck** \302\267 \\`SC2164\\``).
-        When no diagnostic matches the
-        suggestion is recorded as `correlated = False` and rendered
-        as "uncorrelated" \342\200\224 common for patch-only suggestions or
-        when SARIF severity filtering dropped the diagnostic
-        upstream (see `shellcheck-sarif-investigation.md`).
-
-        Each suggestion comment dict carries internal `_severity`,
-        `_correlated`, `_rule_id`, `_hunk_start`, `_hunk_end`,
-        `_tool`, and `_file` fields used by the post-loop bookkeeping
-        in `_lint_end` to populate `lint_trait.suggestions`.
+        Correlation: when a SARIF diagnostic shares the hunk anchor's `(file, line)`,
+        copy its severity + rule_id onto the record; else `correlated = False`
+        ("uncorrelated" — patch-only, or SARIF dropped upstream; see
+        shellcheck-sarif-investigation.md). Each comment dict carries internal
+        `_severity`, `_correlated`, `_rule_id`, `_hunk_start`, `_hunk_end`,
+        `_tool`, `_file` for the `_lint_end` bookkeeping that fills lint_trait.suggestions.
         """
         comments = []
         task_key = ctx.task.key
 
-        # Index diagnostics by (file, line, tool) for correlation.
-        # Including `tool` keeps the match same-linter — a shellcheck
-        # patch hunk on hello.sh:11 won't pick up an eslint SARIF
-        # finding that happens to be on the same line. Case-folded so
-        # the rules_lint `AspectRulesLint<Tool>` mnemonic ("ShellCheck")
-        # matches the SARIF `run.tool.driver.name` value
-        # (often lowercased: "shellcheck"). Use a simple line-equality
-        # check; if a hunk's anchor doesn't match an exact
-        # (file, line, tool) triple, fall through to "uncorrelated"
-        # rather than guessing — false correlation across linters
-        # would mis-attribute a fix to the wrong rule.
+        # Index diagnostics by (file, line, tool) for correlation. `tool` keeps
+        # the match same-linter; case-folded since the BES mnemonic ("ShellCheck")
+        # and SARIF driver name ("shellcheck") disagree. No fuzzy match — a miss
+        # falls through to "uncorrelated" rather than mis-attributing across linters.
         diag_by_anchor = {}
         for d in relevant_diagnostics:
             f = d.get("file", "")
@@ -940,31 +665,23 @@ def _github_lint_impl(ctx: FeatureContext):
             if not content:
                 continue
 
-            # Tool name is derived from the BES `name` field (the
-            # logical Bazel-output name, retains the
-            # `.AspectRulesLint<Tool>.patch` mnemonic) rather than
-            # the resolved filepath, which is content-addressed on
-            # bb_clientd FUSE mounts and has no mnemonic.
+            # Tool name from the BES `name` (retains the mnemonic), not the
+            # content-addressed filepath.
             tool = _tool_name_from_patch_path(entry["name"])
             tool_key = tool.lower()
             for f in patch_parse(content):
                 file_path = f["file"]
                 for h in f["hunks"]:
                     for block in patch_hunk_edit_blocks(h):
-                        # Skip blocks with no real changes (defensive —
-                        # `hunk_edit_blocks` only emits change blocks,
-                        # but a pure-context hunk can sneak through
-                        # with adds == removes == 0).
+                        # Skip no-change blocks (defensive; pure-context hunk).
                         if block["adds"] == 0 and block["removes"] == 0:
                             continue
                         start_line = block["start_line"]
                         end_line = block["end_line"]
                         replacement = block["replacement"]
 
-                        # Try to correlate with a same-linter SARIF
-                        # diagnostic on the same (file, line). Check
-                        # every line in the hunk's new-side range;
-                        # first match wins.
+                        # Correlate with a same-linter diagnostic on any line in
+                        # the hunk's new-side range; first match wins.
                         diag = None
                         for ln in range(start_line, end_line + 1):
                             d = diag_by_anchor.get((file_path, ln, tool_key))
@@ -977,21 +694,13 @@ def _github_lint_impl(ctx: FeatureContext):
                         sarif_tool = diag.get("tool", "") if diag else ""
                         sarif_message = diag.get("message", "") if diag else ""
 
-                        # Display tool: prefer the SARIF-reported tool
-                        # name when correlated (it's the canonical
-                        # spelling — e.g. "ShellCheck" not "Shellcheck"
-                        # — that the SARIF comment also uses), fall
-                        # back to filename-derived form.
+                        # Prefer the SARIF tool name when correlated (canonical
+                        # spelling), else the filename-derived form.
                         display_tool = sarif_tool if correlated and sarif_tool else tool
 
-                        # Marker uses the same shape as SARIF-derived
-                        # comments. Synthetic rule_id encodes the
-                        # block range so non-overlapping fixes on the
-                        # same line don't collide. We don't reuse the
-                        # SARIF rule_id here because the SARIF-derived
-                        # comment may also exist on the same line with
-                        # that rule_id — distinct markers keep them
-                        # from deduping into each other.
+                        # Synthetic rule_id encodes the block range so distinct
+                        # fixes on a line don't collide, and so the marker stays
+                        # distinct from any SARIF-derived comment on the same line.
                         rule_id = "patch_%d_%d" % (start_line, end_line)
                         marker = lc_build_marker(
                             run_id,
@@ -1002,31 +711,9 @@ def _github_lint_impl(ctx: FeatureContext):
                             rule_id,
                         )
 
-                        # Body shape differs between correlated and
-                        # uncorrelated suggestions:
-                        #
-                        # Correlated — leading severity icon and
-                        # rule_id, the diagnostic's original message
-                        # for context, then the suggestion block.
-                        # Reviewers see the *why* (e.g. SC2164:
-                        # "Use 'cd ... || exit'…") alongside the
-                        # *what* (the actual replacement).
-                        #
-                        # Uncorrelated — minimal header, no severity
-                        # claim, just the suggestion block. The
-                        # generic 🔧 icon mirrors the icon used in
-                        # the check-run "Auto fixes" list. Header
-                        # packs tool + (rule_id) onto a single
-                        # ·-separated line so the SARIF message
-                        # (when present) gets its own line right
-                        # above the suggestion block, instead
-                        # of being sandwiched between two header
-                        # rows. Same layout for correlated and
-                        # uncorrelated — the only differences are
-                        # the leading severity icon vs. the generic
-                        # 🔧 and whether a SARIF message paragraph
-                        # appears between the header and the
-                        # suggestion block.
+                        # Body: severity-icon + tool + (rule_id) header, optional
+                        # SARIF message paragraph, then the suggestion block.
+                        # Correlated uses the severity icon; uncorrelated the generic 🔧.
                         suggestion_fence = lc_suggestion_block(replacement, current = end_line, start_line = start_line, end_line = end_line, vcs = "github")
                         if correlated:
                             sev_icon = _SUGGESTION_SEVERITY_ICONS.get(severity, "🔧")
@@ -1051,11 +738,8 @@ def _github_lint_impl(ctx: FeatureContext):
                             ]
                         body = "\n".join(body_lines) + _task_attribution_footer(task_key)
 
-                        # Use the correlated severity for cap-priority
-                        # ordering when known; otherwise keep the old
-                        # default of "warning" (between errors and
-                        # notes — sensible middle ground for an
-                        # unattributed suggestion).
+                        # Cap-priority severity: correlated severity when known,
+                        # else "warning" (middle ground for an unattributed fix).
                         cap_severity = severity if correlated and severity else "warning"
                         comment = {
                             "path": file_path,
@@ -1063,8 +747,7 @@ def _github_lint_impl(ctx: FeatureContext):
                             "side": "RIGHT",
                             "body": body,
                             "_severity": cap_severity,
-                            # Internal bookkeeping for the suggestion
-                            # record built post-post in _lint_end.
+                            # Bookkeeping for the suggestion record built in _lint_end.
                             "_correlated": correlated,
                             "_rule_id": sarif_rule_id,
                             "_tool": display_tool,
@@ -1080,12 +763,8 @@ def _github_lint_impl(ctx: FeatureContext):
         return comments
 
     def _lint_end(ctx, relevant_diagnostics):
-        # Post-phase status — populated by the actual posting work below so
-        # the trace summary at the end of the function reflects the FINAL
-        # state, not the entry-time snapshot. Every code path that either
-        # exits early or completes posting writes something here so the
-        # summary always tells the user *why* `posted comments: N` was
-        # what it was.
+        # Reason string for the trace summary; every code path sets it so the
+        # summary explains why `posted comments: N`.
         outcome = ""
 
         if gh:
@@ -1093,46 +772,27 @@ def _github_lint_impl(ctx: FeatureContext):
                 gh["stale"] = True
                 outcome = "PR head moved during the run (stale); skipped posting"
             else:
-                # Errors were streamed in _lint_report; here we post the remaining
-                # warnings/notes (sorted by severity, capped to whatever budget
-                # is left after streaming). Patch-derived suggestion
-                # comments (each `lint_patch` hunk → one comment with a
-                # GitHub suggestion block) join the same buffer so they
-                # share the cap, dedup, and diff-filter logic.
+                # Errors streamed in _lint_report; post remaining warnings/notes
+                # (severity-sorted, capped to leftover budget). Patch suggestion
+                # comments join the same buffer for shared cap/dedup logic.
                 #
-                # `findings_destination = "annotations"` is the
-                # explicit "no PR comments at all" mode — skip the
-                # patch-derived auto-fix channel here too. SARIF
-                # comments are already empty in this mode (the
-                # destination filter in `_build_comments` drops
-                # them), but patches go through `_build_suggestion_comments`
-                # independently of that filter, so they need their
-                # own gate. Users select "annotations" specifically
-                # to reduce PR notification noise (each comment
-                # sends an email / inbox ping per reviewer); posting
-                # auto-fix comments anyway would defeat the choice.
+                # "annotations" = no PR comments: patches go through
+                # _build_suggestion_comments independently of the destination
+                # filter, so gate them here too (SARIF comments are already empty).
                 if destination == "annotations":
                     suggestion_comments = []
                 else:
                     suggestion_comments = _build_suggestion_comments(ctx, relevant_diagnostics)
                 non_errors = [c for c in state["all_comments"] if c.get("_severity") != "error"] + suggestion_comments
 
-                # Intra-run dedup. Multiple linters / aspects can emit
-                # the exact same finding (rosetta did this dedup too —
-                # see `deduplicateDiagnostics`). Dedup by marker so the
-                # same diagnostic doesn't post twice from the same
-                # task run. This dedup catches WITHIN-run duplicates;
-                # the existing-markers check below catches duplicates
-                # against PRIOR runs.
+                # Intra-run dedup by marker (within-run dupes; the existing-markers
+                # check below handles prior-run dupes).
                 non_errors = _dedup_by_marker(non_errors, ctx.task.key)
 
-                # No diff-region pre-filter — see _lint_report. We
-                # try every comment; outside-hunk attempts return 422
-                # from GitHub, which we tolerate via the error
-                # collection in `_post_individually`.
+                # No diff-region pre-filter (see _lint_report); out-of-hunk 422s
+                # are tolerated via _post_individually's error collection.
 
-                # 1. Dedup against existing markers (which now include the
-                #    just-streamed errors thanks to _post_individually's mutation).
+                # 1. Dedup against existing markers (now include just-streamed errors).
                 deduped_skipped = 0
                 new_only = []
                 for c in non_errors:
@@ -1168,22 +828,17 @@ def _github_lint_impl(ctx: FeatureContext):
                 else:
                     outcome = "no comments survived dedup/cap filters"
 
-                # Pass the markers we just emitted from patch hunks
-                # so cleanup keeps them in the desired set (they
-                # don't appear in `relevant_diagnostics`).
+                # Patch-hunk markers (absent from relevant_diagnostics) so cleanup
+                # keeps them desired.
                 suggestion_markers = []
                 for c in suggestion_comments:
                     m = lc_extract_marker(c.get("body", ""), task_key = ctx.task.key)
                     if m:
                         suggestion_markers.append(m)
 
-                # Stash suggestion-comment records on the trait so
-                # the lint task copies them onto `data["lint"]
-                # ["suggestions"]` for the rendered detail body.
-                # `_html_url` is set by `_post_individually` on
-                # successful posts; empty string when the comment
-                # was deduped against a prior run (we don't fetch
-                # existing comments' URLs via list_review_comments).
+                # Stash suggestion records on the trait for the rendered detail body.
+                # `_html_url` is set on successful posts; "" when deduped against a
+                # prior run (we don't fetch existing comments' URLs).
                 for c in suggestion_comments:
                     if not c.get("_is_suggestion"):
                         continue
@@ -1198,20 +853,11 @@ def _github_lint_impl(ctx: FeatureContext):
                         "comment_url": _files_changed_url(c.get("_html_url", "")),
                     })
 
-                # Stash a (file, line) → comment_url map for every
-                # successfully-posted SARIF-derived comment so the
-                # lint-results renderer can link each finding row to
-                # its PR review comment — not just the fix-bearing
-                # subset. In "comments" mode this means every finding
-                # gets a link; in "auto"/"both" mode it's just the
-                # fix-bearing ones (only those produce SARIF-derived
-                # comments). Patch-derived suggestion comments are
-                # tracked separately via `lint_trait.suggestions`
-                # since they need the start/end_line span. Comments
-                # deduped against a prior run don't have an
-                # `_html_url` here (we never fetched it), so their
-                # finding rows show without a link — acceptable
-                # tradeoff vs. a list_review_comments roundtrip.
+                # (file, line) → comment_url for every posted SARIF comment so the
+                # renderer links each finding row (every finding in "comments" mode,
+                # fix-bearing only in auto/both). Patch comments are tracked via
+                # lint_trait.suggestions. Prior-run-deduped comments lack _html_url
+                # so their rows render link-less (vs. a list_review_comments roundtrip).
                 for c in state["all_comments"]:
                     url = c.get("_html_url", "") or ""
                     if not url:
@@ -1224,8 +870,7 @@ def _github_lint_impl(ctx: FeatureContext):
                 _cleanup_comments(ctx, gh, relevant_diagnostics, run_id, ctx.task.key, suggestion_markers, destination = destination)
 
                 if state["dropped_due_to_cap"] > 0:
-                    # Build a per-severity breakdown — well-known levels in
-                    # priority order, then anything else as "other".
+                    # Per-severity breakdown (known levels in priority order, rest "other").
                     by_sev = state["dropped_per_severity"]
                     parts = []
                     for sev in ["error", "warning", "info"]:

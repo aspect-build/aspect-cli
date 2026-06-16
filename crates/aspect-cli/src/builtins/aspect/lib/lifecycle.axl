@@ -1,127 +1,56 @@
-"""Task lifecycle: TaskUpdate record, TaskLifecycleTrait, the
-canonical `task_update()` emitter, and the repro/fix suggestion
-records + helpers (`ReproFixCommand`, `ReproFixInfo`,
-`ReproFixSuggestion`, `apply_repro_fix_hooks`, `dispatch_task_update`).
+"""Task lifecycle: TaskUpdate record, TaskLifecycleTrait, the canonical
+`task_update()` emitter, and the repro/fix suggestion records + helpers.
 
-`TaskLifecycleTrait` has two hooks: `task_update`, fired on every
-structured update during a task (features surface live progress
-through it), and `repro_fix_suggestion`, called by the framework on
-each surface emit so a user's `config.axl` can accept/reject/modify
-each repro/fix suggestion. See `apply_repro_fix_hooks` and
-`dispatch_task_update` below.
+`TaskLifecycleTrait` has two hooks: `task_update` (every structured
+update during a task) and `repro_fix_suggestion` (per surface emit, so
+a user's `config.axl` can accept/reject/modify each repro/fix
+suggestion). See `apply_repro_fix_hooks` / `dispatch_task_update`.
 
-`task_update(ctx, lifecycle, status, progress, ...)` prints a phase
-label to stderr (as `→ <progress>`) *and* emits a `TaskUpdate` to every
-handler on `lifecycle.task_update`. The two side effects are paired so
-a single call surfaces the new phase in CI logs *and* in the BK
-annotation / GHSC summary's "Last update" line — keeping the two
-sources of truth in sync.
+`task_update(ctx, lifecycle, status, progress, ...)` both prints
+`→ <progress>` to stderr and emits a `TaskUpdate` to every
+`lifecycle.task_update` handler — paired to keep CI logs and the
+BK annotation / GHSC "Last update" line in sync.
 
-`progress` accepts two shapes:
+`progress` is either a str (same text every surface; stream verbatim,
+body ANSI-stripped) or a `ProgressStyles` (per-style; unset → "").
 
-  string         → same text for every surface. The CLI (`stream`) gets it
-                   verbatim; the body surface (`body`) receives the
-                   ANSI-stripped variant. (When the string has no ANSI,
-                   "stripped" is a no-op.) Use this for the common case
-                   where every surface should show the same line.
+Without a `kind`, surfaces skip template dispatch (they filter by kind),
+so the basic call is CLI-only on surfaces; the TaskUpdate still reaches
+every handler so non-template observers see it.
 
-  ProgressStyles → per-style text. Set whichever fields you want; unset
-                   fields default to `""` (which surfaces interpret as
-                   "no text — keep the prior latched value or render
-                   nothing"). See the `ProgressStyles` record below for
-                   field semantics.
-
-      task_update(ctx, lifecycle, "running", ProgressStyles(
-          stream = "Building 5 targets",
-          body   = "Building 5 targets...",
-      ))
-
-      # str shortcut — same text everywhere:
-      task_update(ctx, lifecycle, "running", "Building...")
-
-Bare `task_update(...)` calls without a `kind` skip template dispatch
-on the status surface — surfaces filter by kind and ignore unset kinds,
-so the basic case (`task_update(ctx, lifecycle, "running", "Building...")`)
-is CLI-only on surfaces. The TaskUpdate still flows through every
-`lifecycle.task_update` handler so non-template observers (telemetry,
-logging) see every state change.
-
-The closing `→ Completed <Task> task in <duration>` (or `→ Failed ...`)
-line is emitted automatically by the runtime after the task's
-`implementation` returns — every task gets it for free without needing
-to call anything from AXL. Status surfaces (BK / GHSC) get the terminal
-status via the per-task `task_update(..., "passed"|"failed", ...)` call
-that the task makes for the rendered annotation / check-run to flip to
-the verdict.
+The closing `→ Completed/Failed <Task> task in <duration>` line is
+emitted automatically by the runtime after `implementation` returns.
+Status surfaces flip to the verdict via the task's own terminal
+`task_update(..., "passed"|"failed", ...)`.
 """
 
-# ---------------------------------------------------------------------------
-# TaskUpdate record + TaskLifecycleTrait
-#
-# The record, trait, and canonical emitter (`task_update()`) sit together
-# here; `traits.axl` re-exports them for user `config.axl` files.
-# ---------------------------------------------------------------------------
+# Record, trait, and emitter sit together here; `traits.axl` re-exports
+# them for user `config.axl` files.
 
 load("./bazel_flags.axl", "setup_bazel_command")
 load("./environment.axl", "color_enabled", "detect_ci")
 load("./health_check.axl", "run_health_checks")
 load("./runner_job_history.axl", "append_runner_job_history")
 
-# Structured update passed to task_update hooks.
-#
-# Mandatory fields (always present):
-#   progress: str  — human-readable status message; may be "" if there is nothing to say
-#   status:   str  — "running" | "failing" | "passed" | "failed"
-#   kind:     str  — discriminator for the data payload (None / "" → no template)
-#   priority: bool — when True, observers should bypass any throttling and emit
-#                    immediately. Used for status transitions the user should see
-#                    without delay (e.g. the first "Bazel build running" tick when
-#                    BES events start arriving — the throttle would otherwise hold
-#                    the rendered "Last update" line at "Spawning bazel build…"
-#                    for up to `min_update_interval_seconds` after the build is
-#                    already well underway).
-#
-# "passed" and "failed" are terminal — the task is done. Features should complete
-# their output (e.g. close a check run) on these statuses.
-# "failing" means the task is still running but has already accumulated failures.
-#
-# data — kind-specific payload, passed through verbatim to surface renderers.
-# Renderers know the shape because they're selected by `kind`.
-#
-# progress — multi-style progress message. See ProgressStyles for the
-# fields and the per-surface fallback chain. Producers populate
-# whichever variants they're willing to maintain; consumers pick the
-# variant that best matches their rendering capabilities.
+# Multi-style progress message. Producers set whichever variants they
+# maintain; consumers pick the best match.
 ProgressStyles = record(
-    # Body form for status-surface "Last update" lines (BK annotation
-    # body, GHSC check-run summary, PR-comment 💬 line). Full sentence
-    # with metrics; ANSI-free. e.g. "Bazel test running... (12 tests run)"
-    # while live, "Bazel test complete · 58/58 passed" at terminal.
+    # Status-surface "Last update" lines (BK annotation, GHSC summary,
+    # PR-comment 💬). Full sentence with metrics; ANSI-free.
     body = field(str, default = ""),
 
-    # Stream form for live terminal output. ANSI codes welcome; tense
-    # and punctuation tuned for streaming (often present-continuous, no
-    # trailing "..." since the line is in a live stream).
-    # e.g. "\033[36mTesting\033[0m 12 tests run".
+    # Live terminal output. ANSI welcome; present-continuous, no
+    # trailing "..." since it's a live stream.
     stream = field(str, default = ""),
 )
 
-# Lifecycle severity bucket. One of:
-#   running  — clean, in-flight
-#   warning  — non-fatal signal accumulated (live or terminal)
-#   failing  — hard failure detected, still in-flight
-#   passed   — clean, terminal
-#   failed   — hard failure, terminal
-#   aborted  — bazel terminated the invocation (timeout, OOM, ctrl-c)
-#
-# Live/terminal disambiguation lives on `TaskUpdate.final` — `warning` is
-# the same name for both live and terminal non-fatal cases; surfaces that
-# need to know which it is read `final`.
-#
-# `task_update(...)` validates the incoming string against this enum and
-# raises with the enum's standard "X is not a valid Status value" error
-# on typos. `TaskUpdate.status` stays as `str` (the canonical value) so
-# downstream surfaces continue to compare with plain string literals.
+# Lifecycle severity bucket:
+#   running — clean in-flight; warning — non-fatal (live or terminal);
+#   failing — hard failure in-flight; passed/failed — terminal;
+#   aborted — bazel terminated (timeout, OOM, ctrl-c).
+# `warning` is both live and terminal — read `TaskUpdate.final` to tell.
+# `task_update(...)` validates against this enum; `TaskUpdate.status`
+# stays `str` so surfaces compare with plain literals.
 Status = enum("running", "failing", "warning", "passed", "failed", "aborted")
 
 TaskUpdate = record(
@@ -129,91 +58,66 @@ TaskUpdate = record(
     status = field(str, default = "running"),
     kind = field(str, default = ""),
     priority = field(bool, default = False),
-    # The task's subject — its target patterns / formatter target / etc.,
-    # rendered in the status-surface title. `setup_phase` sets it on the first
-    # update (the Setup phase mark) so a handler has it at init time, but a
-    # later update may carry a refined subject (e.g. a query task that only
-    # knows its resolved targets after the resolve phase). Empty means "no
-    # change" — handlers latch the last non-empty value, so consumers must
-    # check it on EVERY update, not only the first.
+    # Task subject (target patterns / formatter target / etc.), rendered in
+    # the status-surface title. Empty means "no change" — handlers latch the
+    # last non-empty value, so check it on EVERY update. `setup_phase` sets it
+    # first; a later update may refine it (e.g. query task's resolved targets).
     subject = field(str, default = ""),
-    # True iff this update crossed a phase boundary — set by
-    # `task_update(...)` when `phase.name` differs from the previous
-    # `ctx.task.current_phase().name`. Surfaces with a cold-start
-    # swarm throttle (GithubStatusChecks, GithubStatusComments) read
-    # it to gate phase emits on a debounce separate from the heartbeat
-    # throttle. Same condition that triggers the BK section header.
+    # True iff this update crossed a phase boundary (set when `phase.name`
+    # differs from the prior `current_phase().name`). Cold-start swarm
+    # surfaces (GHSC, GithubStatusComments) gate phase emits on a debounce
+    # separate from the heartbeat throttle. Same trigger as the BK section header.
     phase_change = field(bool, default = False),
-    # True iff this is the final TaskUpdate the producer will emit. Used by
-    # surfaces that distinguish live from terminal renders even when status
-    # alone wouldn't (e.g. `warning` being both live and terminal). Producers
-    # pass `final = True` on their final emit; everywhere else defaults to False.
+    # True iff the producer's final emit. Lets surfaces distinguish live from
+    # terminal even when status can't (e.g. `warning`).
     final = field(bool, default = False),
-    # Short, plain-text, one-line terminal summary (`"58/58 passed"`,
-    # `"Reformatted 12 files"`, `"3 errors in 2 files"`). Only meaningful
-    # on the `final = True` emit; the runtime reads it to render the
-    # bookend's trailing `· <conclusion>` suffix. Each task kind's
-    # `*_results.axl` module exposes a `conclusion(status, data) -> str`
-    # helper that produces the canonical string per status.
+    # Short one-line terminal summary (`"58/58 passed"`, `"Reformatted 12
+    # files"`). Only meaningful when `final = True`; rendered as the bookend's
+    # trailing `· <conclusion>`. Each `*_results.axl` exposes
+    # `conclusion(status, data) -> str` for the canonical per-status string.
     conclusion = field(str, default = ""),
     data = field(dict, default = {}),
 )
 
-# Input record for `task_update(..., phase = Phase(...))` — what the
-# caller wants the new phase to be. The runtime records the boundary
-# and later exposes a snapshot back via `ctx.task.phases()` /
-# `current_phase()` as the Rust `TaskPhase` value type, which has the
-# same input fields plus runtime-set `duration_ms` + `interrupted`.
-# Phase is intentionally input-only; TaskPhase is intentionally
-# output-only.
+# Input-only record for `task_update(..., phase = Phase(...))`. The runtime
+# records the boundary and exposes it back via `ctx.task.phases()` /
+# `current_phase()` as the output-only Rust `TaskPhase` (same fields plus
+# runtime-set `duration_ms` + `interrupted`).
 Phase = record(
-    # Phase id — lowercase identifier (`setup`, `build`, `test`,
-    # `detect`, …). Used as the key for same-name no-op detection in
-    # `ctx.task.phase()` and as the input to titlecase for the
-    # display label when `display_name` is unset.
+    # Lowercase phase id (`setup`, `build`, …). Key for same-name no-op
+    # detection in `ctx.task.phase()`; titlecased for the display label
+    # when `display_name` is unset.
     name = field(str),
 
-    # Human-readable description for the phase row in the Task-timing
-    # body table (e.g. `"Build delivery targets"`). Empty when unset
-    # — the table renders the progress text as a fallback.
+    # Phase-row description in the Task-timing table; falls back to
+    # progress text when empty.
     description = field(str, default = ""),
 
-    # Unicode emoji prefixed onto the phase label across every
-    # surface (BK section header `--- 🔨 Build · …`, CLI `→ 🔨 Build`,
-    # Task-timing strip). Empty falls back to `:aspect:` on BK
-    # section headers and no icon elsewhere.
+    # Emoji prefixed onto the phase label everywhere. Empty → `:aspect:`
+    # on BK section headers, no icon elsewhere.
     emoji = field(str, default = ""),
 
-    # Display-label override. Non-empty wins over titlecase(name);
-    # empty falls back to `<name>[0].upper() + <name>[1:].replace("_",
-    # " ")`. Use when naive titlecase reads oddly.
+    # Display-label override; wins over titlecase(name) when non-empty.
     display_name = field(str, default = ""),
 )
 
 # A single repro / fix command suggestion. Stored in
-# `data["repro_commands"]` / `data["fix_commands"]` by built-in tasks
-# and surfaced to every downstream consumer (CLI printer, GHSC body,
-# BK annotation, GitHub PR-comment rollup). See `lib/repro_commands.axl`
-# for the producer helpers (`build_aspect_command`, `repro_prefix`, …)
-# and the catalogue of `slug` values.
+# `data["repro_commands"]` / `data["fix_commands"]` and surfaced to every
+# consumer (CLI, GHSC body, BK annotation, PR-comment rollup). Producer
+# helpers + the `slug` catalogue live in `lib/repro_commands.axl`.
 ReproFixCommand = record(
     # Shell-ready line (with optional `cd` prefix). Required.
     command = field(str),
-    # Optional short label rendered as a `# <description>` comment line
-    # above the command. Disambiguates multiple suggestions of the same
-    # type from the same task (e.g. "Update snapshot 1" vs "Update
-    # snapshot 2"). Empty when there's only one of its type per task.
+    # Optional `# <description>` comment line above the command;
+    # disambiguates multiple same-type suggestions ("Update snapshot 1" vs
+    # "2"). Empty when there's only one of its type.
     description = field(str, default = ""),
-    # Stable kebab-case identifier ("lint-repro", "format-fix-vanilla-bazel",
-    # …). Lets `repro_fix_suggestion` hooks scope by suggestion type
-    # without parsing the command string. Required.
+    # Stable kebab-case id ("lint-repro", …). Lets hooks scope by suggestion
+    # type without parsing the command. Required.
     slug = field(str),
-    # Idempotence flag flipped by `apply_repro_fix_hooks` after the
-    # entry has passed through `lifecycle.repro_fix_suggestion`.
-    # `dispatch_task_update` calls the helper on every emit; this flag
-    # ensures the same suggestion runs through the user hook chain
-    # at most once. Producers leave it `False`; user hooks must not
-    # read it.
+    # Idempotence flag flipped by `apply_repro_fix_hooks` after the entry
+    # passes through `lifecycle.repro_fix_suggestion`, so each entry hooks at
+    # most once. Producers leave `False`; user hooks must not read it.
     _hooked = field(bool, default = False),
 )
 
@@ -226,86 +130,61 @@ ReproFixCommandKind = enum("repro", "fix")
 # and/or description fields on the returned `ReproFixSuggestion`.
 ReproFixAction = enum("accept", "reject", "replace")
 
-# Metadata + per-suggestion fields passed to `repro_fix_suggestion`
-# hooks. The hook receives this single record (alongside `ctx`) and
-# returns a `ReproFixSuggestion` verdict. Typed common-case fields
-# cover most decisions; `extras` and `data` are escape hatches for
-# hooks that need kind-specific detail.
+# Passed to each `repro_fix_suggestion` hook (alongside `ctx`); the hook
+# returns a `ReproFixSuggestion` verdict. Typed fields cover most
+# decisions; `extras` / `data` are escape hatches.
 ReproFixInfo = record(
     # Task identity. `task_path` is the joined `<group...> <name>`
-    # CLI invocation path (e.g. "aspect lint"); `task_name` and
-    # `task_group` are the constituents for hooks that scope by either.
+    # ("aspect lint"); `task_name` / `task_group` are the parts.
     task_path = field(str),
     task_name = field(str),
     task_group = field(list[str]),
-    # Task result kind: "lint_results" | "bazel_results" | "format_results"
-    # | "gazelle_results" | "delivery_results". Matches `TaskUpdate.kind`
-    # so hooks can route by the same key the surface templates use.
+    # Task result kind ("lint_results" | "bazel_results" | …). Matches
+    # `TaskUpdate.kind` so hooks route by the surface-template key.
     kind = field(str),
-    # Which suggestion list this entry belongs to (`repro` | `fix`).
+    # Which list this entry came from (`repro` | `fix`).
     command_kind = field(ReproFixCommandKind),
 
-    # Per-suggestion fields — the entry the hook is about to decide on.
-    # `command` is the shell-ready line, `description` is the optional
-    # short label rendered as a `# <description>` comment above the
-    # command, and `slug` is the stable kebab-case identifier
-    # (catalogued in `apply_repro_fix_hooks`). Hooks scope by `slug`
-    # rather than parsing the command string.
+    # The entry the hook is deciding on. Scope by `slug`, not by parsing
+    # `command`. (`slug` catalogue is in `apply_repro_fix_hooks`.)
     command = field(str),
     description = field(str),
     slug = field(str),
 
-    # Lifecycle status the task is about to emit. `running` | `failing`
-    # mid-task, `passed` | `warning` | `failed` | `aborted` at terminal.
-    # Hooks fire on every emit, so mid-task statuses are observable.
+    # Status the task is about to emit (`running`/`failing` mid-task,
+    # terminal otherwise). Hooks fire on every emit.
     status = field(str),
-    # Task exit code. Only meaningful on the terminal emit; `0` mid-task.
+    # Task exit code; only meaningful on the terminal emit, `0` mid-task.
     exit_code = field(int),
 
-    # Bazel-only fields. Empty / 0-length on non-Bazel tasks.
-    # `bazel_subcommand` is "build" | "test" | "run" when the task wrapped
-    # Bazel; "" otherwise. `targets` is the resolved patterns the task ran
-    # on. `failed_targets` is the deduplicated list of Bazel labels that
-    # failed (the union of failed actions, failed targets, and failed
-    # tests — see `failed_labels` in `lib/bazel_results.axl`).
+    # Bazel-only; empty on non-Bazel tasks. `bazel_subcommand` is
+    # "build"/"test"/"run". `failed_targets` is the deduped union of failed
+    # actions/targets/tests (see `failed_labels` in `lib/bazel_results.axl`).
     bazel_subcommand = field(str, default = ""),
     targets = field(list[str], default = []),
     failed_targets = field(list[str], default = []),
 
-    # Open-ended, task-stamped, curated keys. Documented and stable across
-    # releases on a per-task basis — see `apply_repro_fix_hooks` call sites
-    # for the keys each task contributes. Examples:
-    #   lint:     {"aspects": [...], "suggestion_count": N}
-    #   format:   {"affected_files": [...]}
-    #   gazelle:  {"affected_files": [...]}
-    #   delivery: {"mode": str, "targets_total": N}
+    # Task-stamped curated keys, stable per-task — see `apply_repro_fix_hooks`
+    # call sites. E.g. lint: {"aspects", "suggestion_count"}; format/gazelle:
+    # {"affected_files"}; delivery: {"mode", "targets_total"}.
     extras = field(dict, default = {}),
 
-    # Full task `data` dict — escape hatch for hooks that need fields not
-    # surfaced by the typed fields or `extras`. Couples user hooks to
-    # internal data shape; treat as UNSTABLE and prefer the typed/curated
-    # surfaces above.
+    # Full task `data` dict — escape hatch. Couples hooks to internal shape;
+    # UNSTABLE, prefer the typed/curated fields above.
     data = field(dict, default = {}),
 )
 
-# Verdict returned by every `repro_fix_suggestion` hook. `action` is
-# required; `command` and `description` are only consulted when
-# `action == ReproFixAction("replace")`. Either or both replace fields
-# may be omitted to keep the prior value — useful when a hook only
-# wants to retag the description without touching the command (or vice
-# versa). A replace with both `command` and `description` left as
-# `None` is a no-op (equivalent to accept).
+# Verdict from a `repro_fix_suggestion` hook. `action` required;
+# `command` / `description` consulted only on `replace`, each left `None`
+# to keep the prior value (so `replace` with both `None` == accept).
 ReproFixSuggestion = record(
     action = field(ReproFixAction),
     command = field(str | None, default = None),
     description = field(str | None, default = None),
 )
 
-# Shared singletons for the two no-argument verdicts so hooks read as
-# `return REPRO_FIX_ACCEPT` rather than re-constructing the record at
-# every return site. Use `repro_fix_replace(...)` for the replace
-# verdict — record literals require keyword args, so the factory
-# spares hook authors the boilerplate.
+# Shared singletons for the no-argument verdicts (`return
+# REPRO_FIX_ACCEPT`); use `repro_fix_replace(...)` for replace.
 REPRO_FIX_ACCEPT = ReproFixSuggestion(action = ReproFixAction("accept"))
 REPRO_FIX_REJECT = ReproFixSuggestion(action = ReproFixAction("reject"))
 
@@ -318,45 +197,29 @@ def repro_fix_replace(command: str | None = None, description: str | None = None
         description = description,
     )
 
-# Lifecycle hooks that any task can fire, allowing features like GithubStatusChecks
-# to observe task progress without coupling to Bazel-specific hooks.
+# Lifecycle hooks any task can fire, so features like GithubStatusChecks
+# observe progress without coupling to Bazel-specific hooks.
 TaskLifecycleTrait = trait(
-    # The primary lifecycle hook. Called for every structured update during the
-    # task; receives (ctx, update: TaskUpdate). Features close over their own
-    # state dict rather than receiving one.
+    # Primary hook: `(ctx, update: TaskUpdate) -> None`, called for every
+    # structured update. Features close over their own state.
     #
-    # The FIRST update a handler sees is its cue to initialize — create the
-    # status surface (GHSC check run / BK annotation), authenticate, read
-    # `update.subject` for the title. `setup_phase` emits that first update (the
-    # Setup phase mark, carrying `subject`) at the very start of every task, so
-    # init lands inside the Setup phase. The update carrying `final = True` is
-    # the LAST one — handlers conclude the surface there. There is no separate
-    # started/complete hook: the first and last `task_update` carry that intent.
+    # The FIRST update a handler sees is its init cue (create the GHSC check
+    # run / BK annotation, read `update.subject` for the title); `setup_phase`
+    # emits it (Setup phase mark) at task start. The `final = True` update is
+    # the last — handlers conclude there. No separate started/complete hook.
     task_update = attr(list[typing.Callable[[TaskContext, TaskUpdate], None]], default = []),
 
-    # User-customization hook for repro / fix command suggestions. Called
-    # once per suggestion in `data["repro_commands"]` /
-    # `data["fix_commands"]` — `dispatch_task_update` runs it on every
-    # surface emit, and the `_hooked` flag on each `ReproFixCommand`
-    # makes the call idempotent. Multiple handlers chain in
-    # registration order; a `reject` short-circuits.
-    #
-    # Signature: `(ctx: TaskContext, info: ReproFixInfo) -> ReproFixSuggestion`
-    #
-    # See `apply_repro_fix_hooks` below and `ReproFixInfo` /
-    # `ReproFixSuggestion` above.
+    # `(ctx: TaskContext, info: ReproFixInfo) -> ReproFixSuggestion`, called
+    # once per repro/fix suggestion to let `config.axl` accept/reject/replace
+    # it. `dispatch_task_update` runs it on every emit; the `_hooked` flag
+    # makes it idempotent. Handlers chain in order; `reject` short-circuits.
+    # See `apply_repro_fix_hooks`.
     repro_fix_suggestion = attr(list[typing.Callable[[TaskContext, ReproFixInfo], ReproFixSuggestion]], default = []),
 )
 
-# ---------------------------------------------------------------------------
-# apply_repro_fix_hooks + dispatch_task_update
-#
-# Lives next to `task_update()` (below) so every surface emit can route
-# through `dispatch_task_update`, which runs un-hooked repro/fix
-# entries through the user hook chain before invoking surface handlers.
-# Idempotent via the `_hooked` flag on `ReproFixCommand` — repeated
-# calls only process new entries.
-# ---------------------------------------------------------------------------
+# Lives next to `task_update()` so every surface emit routes through
+# `dispatch_task_update`, which runs un-hooked repro/fix entries through
+# the user hook chain first. Idempotent via the `_hooked` flag.
 
 def apply_repro_fix_hooks(
         ctx,
@@ -372,26 +235,14 @@ def apply_repro_fix_hooks(
     """Filter / rewrite `data["repro_commands"]` and `data["fix_commands"]`
     through every handler on `lifecycle.repro_fix_suggestion`.
 
-    Called automatically on every surface emit via
-    `dispatch_task_update`, so producers don't need to invoke this
-    themselves. Producers MAY call it explicitly before a terminal
-    emit to supply rich `info` (exit_code, bazel_subcommand, targets,
-    failed_targets, extras) — entries hooked there are skipped by the
-    automatic call, so each entry runs through the hook chain at most
-    once. The `_hooked` flag on `ReproFixCommand` carries the
-    idempotence: surviving entries come back with `_hooked = True`.
-
-    For each entry, every handler is invoked in registration order with
-    `(ctx, info)` where `info` is a `ReproFixInfo` carrying both
-    task-level metadata and the per-suggestion `command` / `description`
-    / `slug`. Use `info.slug` to scope by suggestion type without
-    parsing the command string. The handler returns a
-    `ReproFixSuggestion`; on `replace`, omitted fields keep the prior
-    value, and a `reject` short-circuits the chain for that entry.
-
-    No-op when `lifecycle.repro_fix_suggestion` is empty (the common
-    case) or every entry is already hooked. Mutates
-    `data["repro_commands"]` and `data["fix_commands"]` in place.
+    Called automatically on every emit via `dispatch_task_update`.
+    Producers MAY call it explicitly before a terminal emit to supply rich
+    `info` (exit_code, bazel_subcommand, …); the `_hooked` flag makes it
+    idempotent, so each entry hooks at most once (surviving entries come
+    back `_hooked = True`). Each entry runs every handler in order with
+    `(ctx, info)`; on `replace` omitted fields keep the prior value, a
+    `reject` short-circuits that entry. Mutates `data` in place; no-op when
+    no handlers or all entries already hooked.
 
     Stable suggestion slugs by built-in task:
 
@@ -411,35 +262,21 @@ def apply_repro_fix_hooks(
         test):  bazel-repro-aspect
                 bazel-repro-vanilla-bazel
 
-    Slug conventions hooks can rely on: every "vanilla `bazel run` for
-    users without the Aspect CLI" suggestion ends in `-vanilla-bazel`,
-    so a hook can suffix-match to scope across all producers without
-    listing each slug.
+    Every "vanilla bazel for non-Aspect-CLI users" slug ends in
+    `-vanilla-bazel`, so a hook can suffix-match across all producers.
 
     Args:
-        ctx:              TaskContext, passed through to each handler.
-        lifecycle:        TaskLifecycleTrait — source of the hook list.
-        data:             The task's `data` dict. Mutated in place.
-        kind:             Task result kind ("lint_results" |
-                          "bazel_results" | "format_results" |
-                          "gazelle_results" | "delivery_results").
-                          Matches `TaskUpdate.kind`.
-        status:           Lifecycle status the task is about to emit
-                          ("running" | "failing" | "warning" |
-                          "passed" | "failed" | "aborted").
-        exit_code:        Task exit code; only meaningful on the terminal
-                          emit. Defaults to 0 (mid-task callers leave
-                          unset).
-        bazel_subcommand: "build" | "test" | "run" for Bazel-wrapping
-                          tasks; "" otherwise.
-        targets:          Resolved target patterns the task ran on.
-        failed_targets:   Deduplicated list of Bazel labels that failed
-                          (union of failed actions / targets / tests —
-                          see `failed_labels` in `bazel_results.axl`).
-                          Empty on non-Bazel tasks.
-        extras:           Open-ended, task-stamped, curated keys
-                          surfaced verbatim on `ReproFixInfo.extras`.
-                          See call sites for the per-task contract.
+        ctx:              passed to each handler.
+        lifecycle:        source of the hook list.
+        data:             task `data` dict. Mutated in place.
+        kind:             result kind, matches `TaskUpdate.kind`.
+        status:           status about to be emitted.
+        exit_code:        only meaningful on the terminal emit; 0 mid-task.
+        bazel_subcommand: "build"/"test"/"run" for Bazel tasks, else "".
+        targets:          resolved target patterns.
+        failed_targets:   deduped failed-label union (see `failed_labels`
+                          in `bazel_results.axl`); empty on non-Bazel.
+        extras:           task-stamped curated keys; see call sites.
     """
     handlers = lifecycle.repro_fix_suggestion
     if not handlers:
@@ -479,11 +316,10 @@ def apply_repro_fix_hooks(
 def _apply_chain(ctx, info_base, command_kind, entry, handlers):
     """Run a `ReproFixCommand` entry through every handler in order.
 
-    Returns the post-chain `ReproFixCommand` with `_hooked = True`, or
-    `None` when any handler rejected. The slug is carried through
-    `replace` verdicts unchanged — hooks rewrite commands, not
-    suggestion identity. A fresh `ReproFixInfo` is built per handler so
-    each one sees the prior handler's post-verdict state.
+    Returns the post-chain `ReproFixCommand` (`_hooked = True`), or `None`
+    on reject. Slug is carried through `replace` unchanged (hooks rewrite
+    commands, not identity). A fresh `ReproFixInfo` per handler so each sees
+    the prior's post-verdict state.
     """
     command = entry.command
     description = entry.description
@@ -508,15 +344,14 @@ def _apply_chain(ctx, info_base, command_kind, entry, handlers):
     return ReproFixCommand(command = command, description = description, slug = slug, _hooked = True)
 
 def dispatch_task_update(ctx, lifecycle, update):
-    """Run any un-hooked repro/fix entries through `lifecycle.repro_fix_suggestion`,
-    then deliver `update` to every `lifecycle.task_update` handler.
+    """Run any un-hooked repro/fix entries through
+    `lifecycle.repro_fix_suggestion`, then deliver `update` to every
+    `lifecycle.task_update` handler.
 
-    Single dispatch point used by both the canonical `task_update()`
-    emitter and the direct-emit paths in `_emit_terminal` / `_emit_final`
-    so surfaces never see an un-hooked entry. Producers that want to
-    supply rich `ReproFixInfo` (exit_code, bazel_subcommand, …) can
-    still call `apply_repro_fix_hooks(...)` explicitly before the
-    emit; entries hooked there are skipped here (idempotent).
+    Single dispatch point (used by `task_update()` and the direct-emit
+    paths) so surfaces never see an un-hooked entry. Producers may
+    pre-hook with rich `ReproFixInfo` via `apply_repro_fix_hooks(...)`;
+    those entries are skipped here (idempotent).
     """
     data = update.data
     if data and (data.get("repro_commands") or data.get("fix_commands")):
@@ -530,28 +365,16 @@ def dispatch_task_update(ctx, lifecycle, update):
     for handler in lifecycle.task_update:
         handler(ctx, update)
 
-# ---------------------------------------------------------------------------
-# Highlight: ANSI verb styling
-# ---------------------------------------------------------------------------
-
 _RESET = "\033[0m"
 
-# Default highlight color when ASPECT_CLI_HIGHLIGHT_COLOR isn't set:
-# bold cyan (`\033[1;36m`). Picked for legibility on dark terminals
-# without harshness. Override via env var:
-#
-#   ASPECT_CLI_HIGHLIGHT_COLOR=1;36          bold cyan (default)
-#   ASPECT_CLI_HIGHLIGHT_COLOR=94            bright blue
-#   ASPECT_CLI_HIGHLIGHT_COLOR=38;5;75       256-color sky blue
-#   ASPECT_CLI_HIGHLIGHT_COLOR=              empty disables highlight color
+# Default phase-label highlight when ASPECT_CLI_HIGHLIGHT_COLOR is unset:
+# bold cyan. The env var holds SGR params (e.g. `94`, `38;5;75`); empty
+# disables the highlight color.
 _DEFAULT_HIGHLIGHT_COLOR = "1;36"
 
 def _highlight_style(std):
     """ANSI prefix for the styled phase label, or "" when color is off.
-
-    Reads `ASPECT_CLI_HIGHLIGHT_COLOR` (SGR parameters between `\\033[`
-    and `m`); defaults to _DEFAULT_HIGHLIGHT_COLOR.
-    """
+    Reads `ASPECT_CLI_HIGHLIGHT_COLOR`; defaults to _DEFAULT_HIGHLIGHT_COLOR."""
     if not color_enabled(std):
         return ""
     color_arg = std.env.var("ASPECT_CLI_HIGHLIGHT_COLOR")
@@ -561,17 +384,9 @@ def _highlight_style(std):
         return ""
     return "\033[" + color_arg + "m"
 
-# ---------------------------------------------------------------------------
-# task_update: the canonical TaskUpdate emitter
-# ---------------------------------------------------------------------------
-
 def _strip_ansi(text):
-    """Return `text` with ANSI CSI/SGR escape sequences removed.
-
-    Drops sequences that start with `\\033[` and end at the next `m`
-    (the SGR terminator). Implemented as a character walk because AXL's
-    Starlark runtime doesn't expose a regex module.
-    """
+    """Return `text` with ANSI CSI/SGR escapes removed (`\\033[`…`m`).
+    Character walk because the Starlark runtime has no regex module."""
     if not text:
         return text
     if "\033" not in text:
@@ -584,7 +399,7 @@ def _strip_ansi(text):
             break
         c = text[i]
         if c == "\033" and i + 1 < n and text[i + 1] == "[":
-            # Skip until the next 'm' (SGR terminator) — or end of string.
+            # Skip to the next 'm' (SGR terminator) or end of string.
             j = i + 2
             for _ in range(n - j):
                 if j >= n:
@@ -599,31 +414,16 @@ def _strip_ansi(text):
             i += 1
     return out
 
-# Default phase icon when `Phase.emoji` is empty. `:aspect:` is a
-# Buildkite-custom shortcode that renders as the Aspect brand glyph
-# on BK; other surfaces show the literal text. Keeps the BK section
-# header from rendering an empty space for custom user phases that
-# don't supply an emoji.
+# `Phase.emoji` fallback: a Buildkite shortcode rendering the Aspect
+# brand glyph on BK (literal text elsewhere), so custom phases without an
+# emoji still get a section marker.
 _ASPECT_BK_SHORTCODE = ":aspect:"
 
 def _emit_bk_phase_section(ctx, phase, progress_styles = None):
-    """Emit a per-phase BK section header on Buildkite.
-
-    Header shape: `--- <emoji> <Phase> · <cli-text>` where the cli
-    text mirrors the live `→ ...` print so the BK section list (the
-    collapsed step view) carries the same information the user sees in
-    the section body. The text picks `progress_styles.stream` first
-    (matches what the CLI prints) then falls back to `.body`.
-
-    `phase` is a `Phase` input record. `phase.emoji` falls back to
-    `:aspect:` when empty so user-custom phases without an icon still
-    get a section marker. `phase.display_name` falls back to
-    titlecasing `phase.name`.
-
-    Gives a 1:1 mapping between AXL phases and BK collapsible
-    sections so the BK log structure mirrors the rendered Task
-    timing table.
-    """
+    """Emit a per-phase BK section header `--- <emoji> <Phase> · <cli>`
+    (1:1 AXL-phase → BK collapsible section). The `<cli>` mirrors the live
+    `→` print (`progress_styles.stream`, falling back to `.body`).
+    `phase.emoji` → `:aspect:`, `phase.display_name` → titlecase(name)."""
     if not ctx.std.env.var("BUILDKITE"):
         return
     label = phase.display_name or _titlecase_phase(phase.name)
@@ -638,26 +438,15 @@ def _emit_bk_phase_section(ctx, phase, progress_styles = None):
     print("--- " + (phase.emoji or _ASPECT_BK_SHORTCODE) + " " + label + suffix)
 
 def _titlecase_phase(phase):
-    """Title-case a phase id for display. Underscores → spaces; first
-    char upper-cased. Callers that need a non-naive display label set
-    `Phase.display_name`; this helper is the fallback when that field
-    is empty.
-    """
+    """Title-case a phase id (underscores → spaces, first char upper).
+    Fallback for an empty `Phase.display_name`."""
     if not phase:
         return ""
     return phase[0].upper() + phase[1:].replace("_", " ")
 
 def _resolve_progress_styles(progress):
-    """Coerce caller-supplied `progress` into a `ProgressStyles` record.
-
-    Accepts two forms:
-      str             → same text for every surface. Stream gets it
-                        verbatim (ANSI preserved); body gets the
-                        ANSI-stripped form so the body surface doesn't
-                        print escape sequences as text.
-      ProgressStyles  → returned as-is. Caller has already chosen which
-                        fields to set; unset fields default to "".
-    """
+    """Coerce `progress` into a `ProgressStyles`. A str → stream verbatim,
+    body ANSI-stripped; a `ProgressStyles` is returned as-is."""
     if type(progress) == "string":
         bare = _strip_ansi(progress)
         return ProgressStyles(
@@ -665,104 +454,54 @@ def _resolve_progress_styles(progress):
             stream = progress,
         )
 
-    # Otherwise assume `progress` is a ProgressStyles record and pass
-    # it through. If a caller passes the wrong type, downstream field
-    # access raises with the actual offending value, which is plenty
-    # of context to fix the call.
+    # Wrong type → downstream field access raises with the offending value.
     return progress
 
 def task_update(ctx, lifecycle, status, progress, kind = "", data = None, priority = True, phase = None, final = False, conclusion = "", exit_code = 0, subject = ""):
-    """Emit a TaskUpdate to all `lifecycle.task_update` handlers and
-    print a `→ <progress>` line to stderr. When `final = True`,
-    returns a `TaskConclusion` carrying `exit_code`, `conclusion`, and
-    `flagged = (status == "warning")` — `_impl` returns it directly
-    to drive the runtime's closing bookend.
+    """Emit a TaskUpdate to all `lifecycle.task_update` handlers and print
+    `→ <progress>` to stderr. When `final = True`, returns a
+    `TaskConclusion(exit_code, text=conclusion, flagged=(status=="warning"))`
+    that `_impl` returns to drive the runtime's closing bookend (else None).
 
     Args:
         ctx:       The TaskContext.
-        lifecycle: The TaskLifecycleTrait with task_update handlers.
-        status:    Lifecycle status — one of "running" | "failing" |
-                   "warning" | "passed" | "failed" | "aborted". Required
-                   so callers state intent at every emit (terminal vs
-                   phase boundary).
-        progress:  Either a single string (same text for every
-                   surface — `stream` gets it verbatim, `body` gets
-                   the ANSI-stripped form) or a `ProgressStyles`
-                   record (per-style text; unset fields default to "").
-                   See `ProgressStyles` for field semantics.
-        kind:      Template dispatch key for status surfaces (e.g.
-                   "bazel_results", "lint_results"). Empty string (the
-                   default) means no template — surfaces filter and
-                   ignore the update for rendering, but it still flows
-                   through every `lifecycle.task_update` handler.
-        data:      Kind-specific payload. Passed through to
-                   `TaskUpdate.data` verbatim. Renderers know the shape
-                   because they're selected by `kind`. Defaults to `{}`.
-        priority:  Whether the rendered annotation / check-run should
-                   bypass the BK / GHSC throttle for this update.
-                   Default True (phase boundary semantics).
-        phase:     Optional `Phase` record marking a phase boundary.
-                   When set, calls `ctx.task.phase(name, description,
-                   emoji, display_name)` to record the boundary on
-                   `TaskInfo`; the first call also synthesizes a
-                   leading `init` phase covering pre-first-phase
-                   setup, subsequent same-name calls are no-ops, and
-                   different-name calls close the prior phase and
-                   open the new one. `phase.description` falls back
-                   to the resolved status-surface text (ANSI-stripped)
-                   when empty. `phase.emoji` prefixes the phase label
-                   on every surface (BK section header / CLI `→` line
-                   / Task-timing strip). `phase.display_name` wins
-                   over `titlecase(phase.name)` when non-empty.
-        final:     `True` on the producer's last `task_update` — the
-                   terminal emit. Causes `task_update` to return a
-                   `TaskConclusion(exit_code=exit_code, text=conclusion,
-                   flagged=(status == "warning"))` that the task should
-                   return from `_impl` — the runtime reads it to render
-                   `→ ✅ Passed / ⚠️ Flagged / ❌ Failed \\`<task>\\` task
-                   in <duration> · <conclusion>`. Returns `None` when
-                   `final=False`.
-        conclusion: Short, plain-text, one-line summary of the
-                   terminal outcome (e.g. `"58/58 passed"`,
-                   `"Reformatted 12 files"`, `"3 errors in 2 files"`).
-                   Appended to the bookend as ` · <conclusion>`. Only
-                   read when `final=True`. Use the per-kind
-                   `conclusion(status, data)` helper in each
-                   `*_results.axl` module for consistency with the
-                   check-run titles.
-        exit_code: The task's exit code. Threaded onto the returned
-                   `TaskConclusion` when `final=True`; ignored otherwise.
-        subject:   The task's subject — its target patterns / formatter
-                   target / etc., rendered in the status-surface title.
-                   `setup_phase` sets it on the first emit so handlers have
-                   it at init; a later emit may carry a refined subject.
-                   Empty means "no change" — handlers latch the last
-                   non-empty value (see `TaskUpdate.subject`).
+        lifecycle: TaskLifecycleTrait with task_update handlers.
+        status:    Required lifecycle status (Status enum value).
+        progress:  str (same everywhere) or `ProgressStyles` (per-style).
+        kind:      Template dispatch key (e.g. "bazel_results"). Empty (default)
+                   → no template, but still flows through every handler.
+        data:      Kind-specific payload, verbatim onto `TaskUpdate.data` ({}).
+        priority:  Bypass the BK/GHSC throttle for this update (default True).
+        phase:     Optional `Phase` boundary. Calls `ctx.task.phase(...)`; the
+                   first call synthesizes a leading `init` phase, same-name
+                   calls no-op, different-name closes prior + opens new.
+                   `phase.description` falls back to the resolved (ANSI-stripped)
+                   surface text. See `Phase`.
+        final:     `True` on the terminal emit; returns the `TaskConclusion`
+                   the runtime renders as `→ ✅/⚠️/❌ ... · <conclusion>`.
+        conclusion: One-line terminal summary, appended as ` · <conclusion>`.
+                   Read only when `final=True`. Use each `*_results.axl`'s
+                   `conclusion(status, data)` for check-run-title consistency.
+        exit_code: Threaded onto the `TaskConclusion` when `final=True`.
+        subject:   Status-surface title subject; "" means "no change". See
+                   `TaskUpdate.subject`.
     """
 
-    # Validate the status against the `Status` enum — typos raise here
-    # with the enum's standard error. Normalize back to the canonical
-    # string so downstream surfaces and `TaskUpdate.status` see a `str`.
+    # Validate + normalize to the canonical `str` (typos raise here).
     status = Status(status).value
 
-    # Resolve once at entry — every downstream consumer (phase
-    # description fallback, BK section header, CLI print, TaskUpdate
-    # emit) reads from the same ProgressStyles record.
+    # Resolve once — every downstream consumer reads this same record.
     progress_styles = _resolve_progress_styles(progress)
 
-    # True when we just printed a `--- <emoji> <Phase> · …` BK section
-    # header — the `→` print below skips itself to avoid duplicating
-    # the same text. False on mid-phase emits (no `phase=`) and off-BK
-    # surfaces, where the `→` print is the only phase marker.
+    # True after a BK section header is printed, so the `→` print below
+    # skips itself to avoid duplicating the text.
     bk_section_emitted = False
 
-    # Plumbed onto `TaskUpdate.phase_change` below — see field comment.
     phase_change = False
 
     if phase != None:
-        # `ctx.task.phase()` no-ops on same-name; capture the prior
-        # phase name so we only auto-emit a BK section header on real
-        # transitions, not on bare task_update re-emits.
+        # `ctx.task.phase()` no-ops on same-name; capture the prior name so
+        # we only auto-emit a BK section header on real transitions.
         prev = ctx.task.current_phase()
         prev_phase = prev.name if prev else ""
         ctx.task.phase(
@@ -778,10 +517,8 @@ def task_update(ctx, lifecycle, status, progress, kind = "", data = None, priori
 
     cli_text = progress_styles.stream
     if cli_text:
-        # Phase entries lead with a styled `<emoji> <Title>` and a
-        # leading blank line so they visually break up the stream of
-        # `→` progress prints. Mid-phase updates print as plain
-        # `→ <text>`.
+        # Phase entries lead with a styled `<emoji> <Title>` + a leading
+        # blank line to break up the `→` stream; mid-phase is plain `→ <text>`.
         if phase != None:
             style = _highlight_style(ctx.std)
             label = phase.display_name or _titlecase_phase(phase.name)
@@ -792,19 +529,14 @@ def task_update(ctx, lifecycle, status, progress, kind = "", data = None, priori
             else:
                 cli_text = label + " · " + cli_text
 
-            # Skip the leading blank on BK — the section marker
-            # `_emit_bk_phase_section` just printed already provides
-            # the visual break.
+            # On BK the just-printed section marker is the visual break.
             if not ctx.std.env.var("BUILDKITE"):
                 print("")
 
-        # On BK, the section header just emitted carries the same text
-        # this `→` line would; skip to avoid duplicate output. Mid-
-        # phase emits (no new section header) still print `→` so
-        # streaming progress stays visible inside the section body.
+        # Skip on BK: the section header already carries this text. Mid-phase
+        # emits still print `→` to keep streaming progress visible.
         if not bk_section_emitted:
-            # Starlark `print()` writes to stderr in this runtime — the
-            # right channel for diagnostic phase labels.
+            # `print()` writes to stderr here — the right channel for labels.
             print("→ " + cli_text)
 
     update = TaskUpdate(
@@ -828,47 +560,27 @@ def task_update(ctx, lifecycle, status, progress, kind = "", data = None, priori
         )
     return None
 
-# ---------------------------------------------------------------------------
-# --severity policy: shared resolver + lifecycle-status helper
-#
-# Tasks that detect drift and want to gate / signal / fix on it (format,
-# gazelle, and future task types with the same shape) expose a
-# `--severity=auto|info|warn|fail` flag. `resolve_severity` resolves
-# `auto` per environment; `pick_task_status` derives the lifecycle status
-# from the resolved policy and per-task data.
-# ---------------------------------------------------------------------------
+# --severity policy for drift-gating tasks (format, gazelle, …) that
+# expose `--severity=auto|info|warn|fail`. `resolve_severity` resolves
+# `auto`; `pick_task_status` derives the lifecycle status.
 
 def resolve_severity(ctx):
-    """Resolve `--severity=auto` to a concrete `info|warn|fail` value.
-
-    `auto` picks `fail` on a recognized CI host (CI gates remain
-    effective) and `info` off CI (local invocations don't surface
-    the task doing its job as a warning). Any explicit value passes
-    through unchanged. Tasks stamp the resolved value onto their
-    `data[kind]["severity_resolved"]` field for `pick_task_status` to
-    read.
-    """
+    """Resolve `--severity=auto` to `info|warn|fail`: `fail` on CI (gates
+    stay effective), `info` off CI. Explicit values pass through. Tasks
+    stamp the result onto `data[kind]["severity_resolved"]`."""
     val = ctx.args.severity
     if val == "auto":
         return "fail" if detect_ci(ctx.std.env) else "info"
     return val
 
 def pick_task_status(data, kind_key, had_failure, terminal):
-    """Lifecycle status for a task whose verdict gates on `--severity`.
+    """Lifecycle status for a `--severity`-gated task. Reads
+    `data[kind_key].affected_files` (drift iff non-empty) and
+    `.severity_resolved`.
 
-    `kind_key` is the data namespace (e.g. `"format"`, `"gazelle"`).
-    Inputs the function reads off `data[kind_key]`:
-
-      - `affected_files` (list)        — non-empty iff drift was found
-      - `severity_resolved` (str)      — `info|warn|fail`
-
-    Aborted (bazel terminated mid-build) → `"aborted"`.
-    Hard failure (`had_failure=True`)    → `"failed"` / `"failing"`.
-    Drift + `severity_resolved`:
-      - `info`   → `"passed"` (apply silently)
-      - `warn`   → `"warning"` (audit / soft-fail signal)
-      - `fail`   → `"failed"` / `"failing"` (CI gate)
-    No drift → `"passed"` / `"running"`.
+    aborted → "aborted"; had_failure → "failed"/"failing";
+    drift+info → "passed"; drift+warn → "warning"; drift+fail →
+    "failed"/"failing"; no drift → "passed"/"running".
     """
     if data.get("bazel", {}).get("aborted"):
         return "aborted"
@@ -884,70 +596,45 @@ def pick_task_status(data, kind_key, had_failure, terminal):
 
 def setup_phase(ctx, lifecycle, subject, kind, data, hc_trait = None, bazel_trait = None, bazel_command = "build", bazel_base_flags = []):
     """Run the `setup` phase — all pre-task work — and return the resolved
-    Bazel command flags (or `None` for a task that doesn't build).
+    Bazel command flags (or `None` for a non-building task).
 
-    Every built-in task opens with this single phase, locally and on CI, as
-    the first thing in its `_impl`. It is the one place pre-task work lives,
-    in execution order:
+    Every built-in task opens with this as the first thing in `_impl`.
+    Steps, in execution order:
 
-      1. `append_runner_job_history` — self-gates on the Workflows
-         runner-job-history env var; a no-op elsewhere.
-      2. Open the `🔧 Setup` phase mark (the timing-table row + `→ Setup`
-         line / BK section), carrying `kind`, `data`, and the initial
-         `subject`. Always emitted, so the phase is uniform across tasks and
-         environments. This is the first `task_update` of the task: each
-         status-surface handler runs its one-time init (creating the GHSC
-         check run / BK annotation) and, because the update carries `kind`,
-         renders the task's first surface body from `data`. See `task_update`.
-         It runs before the steps that can fail (rc parse, health check) so a
-         failure surfaces on an already-created check run.
-      3. Bazel setup, only when `bazel_trait` is given: `setup_bazel_command`
-         resolves startup + command flags, parses the workspace `.bazelrc`,
-         populates `ctx.bazel.startup_flags`, emits the parsed-rc disclosure,
-         and its flag list is returned. Skipped (returns `None`) for tasks
-         that never invoke Bazel.
-      4. `hc_trait.health_check` hooks, when `hc_trait` is given —
-         Workflows runner env table and Bazel server health check. The health
-         check reads the startup flags step 3 populated, so it must run after;
-         an empty hook list (the local case) is fine. If a hook reports the
-         environment unhealthy, `setup_phase` concludes the surface
-         ("Health check failed") and `fail()`s the task — it never returns.
+      1. `append_runner_job_history` — self-gates on the Workflows env var.
+      2. Open the `🔧 Setup` phase mark, carrying `kind`/`data`/`subject`.
+         Always emitted. This is the task's first `task_update`: handlers
+         self-init (GHSC check run / BK annotation) and render the first
+         surface body from `data`. Runs before the steps that can fail
+         (rc parse, health check) so failures surface on a created check run.
+      3. Bazel setup (only with `bazel_trait`): `setup_bazel_command`
+         resolves flags, parses `.bazelrc`, populates
+         `ctx.bazel.startup_flags`, and returns the flag list. Else `None`.
+      4. `hc_trait.health_check` hooks (only with `hc_trait`) — must run
+         after step 3 (they read its startup flags). On unhealthy, concludes
+         the surface ("Health check failed") and `fail()`s — never returns.
 
     Args:
       ctx:         TaskContext.
-      lifecycle:   TaskLifecycleTrait — dispatch target for the phase-boundary
-                   TaskUpdate (whose handlers self-initialize on first sight).
-      subject:     Short task subject (the target patterns / formatter target /
-                   etc. the task acts on) carried on this first `task_update`
-                   so surface handlers can latch it for the title. A later
-                   `task_update` may refine it — see `TaskUpdate.subject`.
-      kind:        The task's result-library kind (e.g. `"bazel_results"`,
-                   `"lint_results"`) so the first surface render dispatches to
-                   the right renderer.
-      data:        The task's results dict (from `init_data()`), typically just
-                   the seed fields at this point. Rendered on the first surface
-                   body and on the health-failure terminal.
-      hc_trait:    HealthCheckTrait, or `None`. When given, its
-                   `health_check` hooks run inside the open phase.
-      bazel_trait:      BazelTrait, or `None`. When given, Bazel flags are
-                        resolved and the workspace `.bazelrc` is parsed; the
-                        flag list is returned. `None` for non-Bazel tasks.
-      bazel_command:    Bazel subcommand whose rc sections to expand
-                        ("build"/"test"). Ignored when `bazel_trait` is `None`.
-      bazel_base_flags: Task-injected default flags forwarded to
-                        `setup_bazel_command`. Ignored when `bazel_trait`
-                        is `None`.
+      lifecycle:   TaskLifecycleTrait — phase-boundary dispatch target.
+      subject:     Task subject for the first `task_update`; may be refined
+                   later (see `TaskUpdate.subject`).
+      kind:        result-library kind (e.g. `"bazel_results"`) for renderer dispatch.
+      data:        results dict (from `init_data()`); rendered on the first
+                   surface body and the health-failure terminal.
+      hc_trait:    HealthCheckTrait or `None`.
+      bazel_trait:      BazelTrait or `None` (non-Bazel tasks).
+      bazel_command:    rc sections to expand ("build"/"test"); ignored sans bazel_trait.
+      bazel_base_flags: default flags for `setup_bazel_command`; ignored sans bazel_trait.
 
     Returns:
-      list[str] | None: the resolved command flags when `bazel_trait` is given,
-      otherwise `None`. Does not return when a `health_check` hook fails (see
-      step 4) — the task is `fail()`ed after its surface is concluded.
+      list[str] | None: resolved flags with `bazel_trait`, else `None`. Does
+      not return when a health check fails (step 4).
     """
     append_runner_job_history(ctx)
 
-    # Open the Setup phase — the task's first `task_update`. Carrying `kind` +
-    # `data` makes it both init the status surfaces and render their first
-    # body (see the docstring).
+    # Open the Setup phase — the task's first `task_update`. `kind`+`data`
+    # both init the surfaces and render their first body.
     task_update(
         ctx,
         lifecycle,
@@ -966,33 +653,28 @@ def setup_phase(ctx, lifecycle, subject, kind, data, hc_trait = None, bazel_trai
         subject = subject,
     )
 
-    # Bazel flag resolution + rc parse, only for tasks that build. Must run
-    # before the health-check hooks, which read the startup flags it sets.
+    # Bazel flags + rc parse (building tasks only). Must precede the health
+    # checks, which read the startup flags it sets.
     flags = None
     if bazel_trait != None:
         flags = setup_bazel_command(ctx, bazel_command, bazel_trait, base_flags = bazel_base_flags)
 
-    # Health checks last (they read the startup flags above). A non-None result
-    # is fatal: conclude the surface and fail the task — never returns.
+    # Health checks last. A non-None result is fatal: concludes the surface
+    # and fails the task — never returns.
     health_error = run_health_checks(ctx, hc_trait)
     if health_error != None:
         _fail_health_check(ctx, lifecycle, kind, data, health_error)
 
     return flags
 
-# Surface progress body + conclusion shown when a `health_check` hook fails the
-# task. Uniform across tasks; the detailed reason goes to the CLI/log instead.
+# Uniform surface body/conclusion on health-check failure; the detailed
+# reason goes to the CLI/log instead.
 _HEALTH_CHECK_FAILED = "Health check failed"
 
 def _fail_health_check(ctx, lifecycle, kind, data, reason):
-    """Conclude the status surface for a failed `setup_phase` health check,
-    then `fail(reason)`. Internal to `setup_phase`.
-
-    Emits a terminal `task_update` (so the GHSC check run / BK annotation flips
-    to failed with a "Health check failed" body instead of sticking at
-    "running"), then aborts the task with the hook's detailed `reason` as the
-    CLI/log message. `kind` is the task's result kind so the surface renders;
-    `data` is its results dict (typically still just seed fields here)."""
+    """Conclude the surface for a failed `setup_phase` health check, then
+    `fail(reason)`. Emits a terminal `task_update` so the surface flips to
+    failed instead of sticking at "running"; `reason` is the CLI/log message."""
     dispatch_task_update(ctx, lifecycle, TaskUpdate(
         kind = kind,
         status = "failed",

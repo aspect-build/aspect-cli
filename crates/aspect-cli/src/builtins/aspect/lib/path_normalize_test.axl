@@ -81,9 +81,7 @@ def _test_preserves_order(_ctx):
         ["b.go", "a.go"],
     )
 
-# ---------------------------------------------------------------------------
 # Case 3: git_root is under cwd — prefix must be added
-# ---------------------------------------------------------------------------
 
 def _test_git_root_under_cwd_direct(_ctx):
     """git_root is a direct child of cwd — prepend the git_root basename."""

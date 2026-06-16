@@ -45,9 +45,7 @@ Low-level API (escape hatch)
                 "source": str, "line": int}
 """
 
-# =============================================================================
 # Internal: comment stripping
-# =============================================================================
 
 def _strip_comment(line):
     """Remove everything from the first unquoted '#' to end of line."""
@@ -91,9 +89,7 @@ def _strip_comment(line):
             result += c
     return result
 
-# =============================================================================
 # Internal: line-continuation joining
-# =============================================================================
 
 def _join_continuation_lines(raw_lines):
     """Join lines ending with \\ into logical lines.
@@ -123,9 +119,7 @@ def _join_continuation_lines(raw_lines):
             result.append((start, stripped))
     return result
 
-# =============================================================================
 # Internal: tokeniser
-# =============================================================================
 
 def _tokenize(s):
     """Split *s* into tokens, handling quoted strings and backslash escapes.
@@ -185,9 +179,7 @@ def _tokenize(s):
         tokens.append(token)
     return tokens
 
-# =============================================================================
 # Internal: path helpers
-# =============================================================================
 
 def _dir_of(path):
     parts = path.split("/")
@@ -211,9 +203,7 @@ def _resolve_import_path(raw_path, workspace_dir, source_path):
         return raw_path
     return raw_path
 
-# =============================================================================
 # Internal: recursive single-file parser
-# =============================================================================
 
 def _parse_lines(raw_lines, source_path, workspace_dir, std, visited):
     entries = []
@@ -282,9 +272,7 @@ def _parse_lines(raw_lines, source_path, workspace_dir, std, visited):
         })
     return (entries, errors)
 
-# =============================================================================
 # Internal: helpers for the public API
-# =============================================================================
 
 def _effective_flags(result, command, config):
     """Return the fully-merged flag list for (command, config).
@@ -324,9 +312,7 @@ def _detect_workspace(std):
         ""
     )
 
-# =============================================================================
 # Low-level API
-# =============================================================================
 
 def parse(content, source_path = "", workspace_dir = "", std = None):
     """Parse .bazelrc content from a string.
@@ -373,9 +359,7 @@ def parse_file(path, workspace_dir = "", std = None):
         std = std,
     )
 
-# =============================================================================
 # Primary API
-# =============================================================================
 
 def bazelrc(ctx, command, config = None, path = None, workspace_dir = None):
     """Parse .bazelrc and return flags for *command*.

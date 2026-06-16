@@ -1,35 +1,28 @@
 """GitHub Status Comments feature — aggregates per-task status from sibling CI jobs into one PR comment.
 
 Every job is both a producer (uploads its task identity + data subset as an
-artifact) and a writer (polls sibling-job artifacts for its own run, refreshes
-sibling-workflow artifacts for other runs named in the comment's state block,
-and PATCHes one PR comment). Polling is event-paced — the loop ticks when
-Bazel emits BES events, throttled by min_poll_interval_seconds.
+artifact) and a writer (polls own-run + sibling-workflow artifacts and
+PATCHes one PR comment). Polling is event-paced (ticks on BES events),
+throttled by min_poll_interval_seconds. GitHub Actions only.
 
-GitHub Actions only.
-
-Requires the Aspect GitHub App with roles `prs.write` (issue-comment
+Requires the Aspect GitHub App with `prs.write` (issue-comment
 POST/PATCH/DELETE/GET) and `actions.read` (run-artifact list/download
 across any workflow on the same PR).
 
-The comment shape is precomputed in AXL — the Jinja2 template is a pure
-renderer. `_prepare_for_render` walks raw entry payloads and decorates
-each with:
-  - `_severity`     ("error" | "warning" | "info" | "success") — drives the
-                    badge and the row sort.
-  - `_badge_key`    ("failed" | "warning" | "running" | "passed" | "aborted")
-                    used to look up `status_badges[...]`.
-  - `_links_text`   Multi-link Markdown for the Links cell, gracefully
-                    omitting URLs that aren't populated.
-  - `_result_text`  Task-kind-specific Result cell text + elapsed.
+Comment shape is precomputed in AXL; the Jinja2 template is a pure
+renderer. `_prepare_for_render` decorates each entry with:
+  - `_severity`     "error"|"warning"|"info"|"success" — badge + row sort.
+  - `_badge_key`    "failed"|"warning"|"running"|"passed"|"aborted" — keys
+                    into `status_badges[...]`.
+  - `_links_text`   Multi-link Markdown for the Links cell (omits unset URLs).
+  - `_result_text`  Kind-specific Result cell text + elapsed.
 
 Body-template variables:
-    marker         — HTML comment used to identify the comment across PATCHes.
-    started_at     — Earliest sibling-task start time, formatted UTC.
-    status_badges  — dict {badge_key -> label}.
-    rollup         — counts dict ({error, warning, running, passed, aborted})
-                     used in the **Status:** rollup line.
-    entries        — list of per-task entry dicts, alphabetical by (job, name, key).
+    marker         — HTML comment identifying this comment across PATCHes.
+    started_at     — Earliest sibling-task start time, UTC.
+    status_badges  — {badge_key -> label}.
+    rollup         — {error, warning, running, passed, aborted} counts.
+    entries        — per-task entry dicts, alphabetical by (job, name, key).
 """
 
 load("@std//base64.axl", "base64")
@@ -81,41 +74,33 @@ _MARKER_FMT = "<!-- aspect-ci-status:pr-%d -->"
 
 # Cross-workflow state block embedded in the rendered comment.
 #
-# The PR comment is the canonical source of truth across concurrent GitHub
-# Actions workflows on the same PR — each workflow's artifact swarm can
-# only see its own run_id's artifacts, so the comment carries the
-# cross-workflow `workflow_runs` slot list, per-task `entries` snapshot,
-# `head_sha`, and `last_upsert_epoch_s` as a base64-encoded JSON payload
-# inside an HTML comment. base64 keeps the literal `-->` (HTML-comment
-# terminator) out of the payload regardless of entry content.
+# The PR comment is the canonical cross-workflow source of truth — each
+# workflow's artifact swarm sees only its own run_id's artifacts, so the
+# comment carries `workflow_runs` slots, per-task `entries` snapshot,
+# `head_sha`, and `last_upsert_epoch_s` as base64 JSON in an HTML comment.
+# base64 keeps the literal `-->` terminator out of the payload.
 _STATE_BLOCK_OPEN = "<!-- aspect-ci-status-state-v1:"
 _STATE_BLOCK_CLOSE = " -->"
 
 # Used by `_should_quiet_delete_log` — see that helper's docstring.
 _EVENTUAL_CONSISTENCY_WINDOW_S = 15
 
-# Buffer applied between a task's terminal publish and a one-shot
-# re-sweep. Catches the eventual-consistency race where two tasks
-# finish near-simultaneously: the LIST call on the artifact API may
-# not yet reflect the other task's freshly-uploaded terminal artifact,
-# so the first publish would render the sibling as still `running`.
-# The re-sweep re-collects after this delay and the body-diff
-# short-circuit skips the second PATCH when no race actually occurred.
+# Delay before a terminal publish's one-shot re-sweep. Catches the race
+# where two tasks finish near-simultaneously and the artifact LIST
+# doesn't yet show the other's terminal artifact (would render it as
+# still `running`). The body-diff short-circuit skips the second PATCH
+# when no race actually occurred.
 _TERMINAL_SETTLE_DELAY_MS = 5000
 
-# Status badges keyed by the precomputed `_badge_key` on each entry,
-# *not* the raw lifecycle status. `_badge_key` is one of:
-#   "failed"  — terminal `failed` or live `failing` (severity error)
-#   "warning" — passed/running with non-fatal signal (severity warning)
-#   "running" — still in flight, no warning yet
-#   "passed"  — terminal `passed` clean
-#   "aborted" — Bazel aborted the invocation (timeout, OOM, ctrl-c)
-#
-# Emoji-only — placed directly in front of the task name so the row
-# reads as `✅ build (build-gha)` rather than `✅ Passed · 🔨 build`.
-# The status emoji effectively replaces the per-kind icon (the kind
-# is implicit in the task name); the rollup line above the table
-# spells out severity counts in words for screen readers / scanning.
+# Badges keyed by the precomputed `_badge_key`, not raw status:
+#   "failed"  — terminal failed / live failing (error)
+#   "warning" — passed/running with non-fatal signal
+#   "running" — in flight, no warning
+#   "passed"  — terminal clean
+#   "aborted" — Bazel aborted (timeout, OOM, ctrl-c)
+# Emoji-only, prefixed to the task name (`✅ build (build-gha)`),
+# effectively replacing the per-kind icon; the rollup line spells out
+# counts in words for screen readers.
 _DEFAULT_STATUS_BADGES = {
     "running": "🔄",
     "passed": "✅",
@@ -124,19 +109,13 @@ _DEFAULT_STATUS_BADGES = {
     "aborted": "🔥",
 }
 
-# Rows sort alphabetically by (job, name, key) so a row's position
-# stays stable across PATCHes — reviewers scan by muscle memory and
-# the badge column carries the verdict. Severity-first sort would
-# surface red at the top but shuffle rows on every status transition.
+# Rows sort by (job, name, key) so positions stay stable across PATCHes;
+# the badge column carries the verdict. Severity-first sort would shuffle
+# rows on every transition.
 
-# Default body template — Jinja2, rendered via ctx.template.jinja2.
-# The renderer is intentionally dumb — every cell is precomputed in
-# AXL (`_prepare_for_render`). The template only stitches values into
-# the markdown shell, so changes to *what* a cell says happen in AXL.
-#
-# `<pre><code>` for the reproducer block (the same primitive the
-# legacy Marvin comments used) renders consistently on GitHub — fenced
-# code inside <details> does not.
+# Default body template — Jinja2. The renderer is dumb; every cell is
+# precomputed in AXL (`_prepare_for_render`), so what a cell says is
+# changed in AXL.
 _DEFAULT_BODY_TEMPLATE = """{{ marker }}
 
 ## ✨ Aspect Workflows Tasks
@@ -203,10 +182,8 @@ _No tasks have reported yet._
 
 _LOG = feature_logger("GitHub status comments")
 
-# Direct mapping from the producer-supplied status to the badge key.
-# `warning` covers both live (non-fatal signal mid-flight) and terminal
-# (passed-with-warnings); `failing` is the live precursor of `failed`.
-# Aborted is a status of its own (no longer a separate flag).
+# Producer status → badge key. `warning` = live or terminal non-fatal;
+# `failing` is the live precursor of `failed`.
 _STATUS_BADGE_KEY = {
     "running": "running",
     "warning": "warning",
@@ -222,31 +199,16 @@ def _badge_key_for(entry):
 # ─── Cell formatters ──────────────────────────────────────────────────────────
 
 def _links_cell_text(entry):
-    """Build the link line for the row. Each link is `<icon> <label>`;
-    the link line sits on its own row in the list so there's
-    horizontal budget for full names:
+    """Build the row's link line; each link is `<icon> <label>`, omitted
+    when its URL is unset (see `_publish` for URL sourcing):
 
       ✨ Aspect          — Aspect Web UI (per-task BES sink view).
-                            Aspect's product surface leads since this
-                            is the most differentiated link of the
-                            four; GitHub-side links are universal,
-                            this one is the reason to be using us.
-      🔗 BES             — generic BES results link from
-                            `--bes_results_url` + Bazel's invocation_id.
-                            Independent of Aspect; both render when both
-                            point at distinct backends.
-      🐙 GitHub Actions  — workflow run / per-job page (the producer
-                            upgrades to the per-job URL when the
-                            GitHub Actions API resolves one).
-      ☑️ Check           — GitHub Status Check. Distinct icon from the
-                            GitHub Actions row so the two GitHub-side
-                            links are visually separable; the per-row
-                            status badge conveys the verdict, so this
-                            icon stays constant rather than mirroring
-                            severity.
-
-    Each is omitted when its URL isn't populated (graceful
-    degradation — see _publish for which URLs are sourced where).
+      🔗 BES             — generic BES link from `--bes_results_url` +
+                           invocation_id; independent of Aspect (both
+                           render when pointed at distinct backends).
+      🐙 GitHub Actions  — run / per-job page (upgrades to per-job URL).
+      ☑️ Check           — GitHub Status Check; distinct icon from the
+                           GitHub Actions row, constant (not severity).
     """
     parts = []
 
@@ -267,29 +229,23 @@ def _links_cell_text(entry):
     return " · ".join(parts)
 
 def _elapsed_text(entry):
-    """Format the elapsed-time segment as `⏱ <duration>` for the row.
-    Returns "" when no elapsed has accrued yet."""
+    """`⏱ <duration>` for the row, or "" when no elapsed accrued."""
     ms = entry.get("elapsed_ms", 0) or 0
     if ms <= 0:
         return ""
     return "⏱ " + format_duration_ms(ms)
 
 def _result_cell_text(entry):
-    """Compose the row's trailing result text from the producer-authored
-    `progress.body` narrative.
+    """Compose the row's result text from the producer's `progress.body`.
 
     Layout per status:
       aborted                       — `aborted (reason)?`
       failed (with failed_in_phase) — `failed in <phase> · <body>?`
       failed (no phase prefix)      — `<body or "failed">`
-      running / warning / failing   — `<body or status>`
-      passed                        — `<body or status>`
+      running/warning/failing/passed — `<body or status>`
 
-    Elapsed is rendered separately by `_elapsed_text` and placed earlier
-    in the row (right after task name); not appended here.
-
-    All kind-specific composition lives upstream in each producer's
-    `_body_text` helper; this function has zero kind awareness."""
+    Elapsed is rendered separately. Kind-agnostic — composition lives in
+    each producer's `_body_text`."""
     status = entry.get("status", "running")
     if status == "aborted":
         text = "aborted"
@@ -314,8 +270,7 @@ def _result_cell_text(entry):
         if body:
             parts.append(body)
         elif status == "running":
-            # No body yet — task hasn't reported a phase narrative.
-            # "Starting..." reads better than the bare "running" status.
+            # No body yet — "Starting..." reads better than bare "running".
             parts.append("Starting...")
         else:
             parts.append(status)
@@ -325,15 +280,9 @@ def _result_cell_text(entry):
 # ─── Pre-render decoration + rollup ───────────────────────────────────────────
 
 def _prepare_for_render(entries):
-    """Return a list of entries decorated for the template, sorted
-    alphabetically by (job, name, key). The leading status badge on
-    each row carries the verdict; row position stays stable across
-    PATCHes so reviewers can return to a row by muscle memory.
-
-    Severity comes from `severity_for_status(entry["status"])` — a
-    pure status lookup, exposed on `entry["_severity"]` for templates
-    that want it.
-    """
+    """Decorate entries for the template, sorted by (job, name, key) so
+    positions stay stable across PATCHes. `_severity` is a pure status
+    lookup exposed for templates."""
     for e in entries:
         e["_severity"] = severity_for_status(e.get("status", "running"))
         e["_badge_key"] = _badge_key_for(e)
@@ -356,21 +305,17 @@ def _run_attempt_int(entry):
     return int(raw)
 
 def _run_id_sort_key(run_id):
-    """Order GitHub Actions run_ids oldest-to-newest. Run_ids are
-    monotonically increasing integers per repo, so a larger value is the
-    more recent run. `(0, int)` for numeric ids; `(1, str)` for anything
-    non-numeric (defensive — a hand-edited slot sorts after all numeric
-    ids and compares by string)."""
+    """Sort key ordering run_ids oldest→newest (run_ids increase
+    monotonically per repo). `(0, int)` for numeric; `(1, str)` for
+    non-numeric (hand-edited slots sort last)."""
     s = str(run_id or "")
     if s.isdigit():
         return (0, int(s))
     return (1, s)
 
 def _collapse_by(entries, key_of, rank_of):
-    """Collapse entries sharing a `key_of(entry)` identity to the single
-    entry with the greatest `rank_of(entry)`. Ties keep the first seen,
-    so callers that pre-sort can rely on stable first-wins behavior.
-    Returns the survivors in arbitrary order."""
+    """Collapse entries sharing `key_of(entry)` to the one with greatest
+    `rank_of(entry)`; ties keep first-seen. Survivors in arbitrary order."""
     best = {}
     for e in entries:
         k = key_of(e)
@@ -380,10 +325,8 @@ def _collapse_by(entries, key_of, rank_of):
     return list(best.values())
 
 def _union_entries_by_name_key(primary, fallback):
-    """Concatenate `primary` with the `fallback` entries whose
-    `(name, key)` isn't already in `primary`. Primary wins per task;
-    fallback fills the gaps. Order: all of `primary`, then the surviving
-    fallback rows in their original order."""
+    """`primary` plus `fallback` entries whose `(name, key)` isn't in
+    `primary` (primary wins; fallback fills gaps), preserving order."""
     primary_keys = {(e.get("name", ""), e.get("key", "")): True for e in primary}
     return list(primary) + [
         e
@@ -392,27 +335,14 @@ def _union_entries_by_name_key(primary, fallback):
     ]
 
 def _dedup_by_run_attempt(entries):
-    """Collapse entries that share a `(name, key, job)` identity to the
-    one with the highest `run_attempt`.
+    """Collapse `(name, key, job)` to the highest `run_attempt`.
 
-    The artifacts API (`GET /actions/runs/{run_id}/artifacts`) doesn't
-    accept an `attempt_number` filter, so a re-run workflow's listing
-    returns artifacts from every prior attempt alongside the live
-    attempt's. Without this dedup, a task that uploaded a "Starting..."
-    payload on attempt 1 and then a terminal payload on attempt 2
-    surfaces in BOTH `running` and the relevant terminal section of
-    the rendered comment.
-
-    Same-task / different-job rows (e.g. matrix jobs) are NOT collapsed
-    because they're legitimately distinct entries — `job` is part of
-    the dedup key.
-
-    Tiebreak on equal `run_attempt`: the first entry seen wins. Callers
-    feeding entries newest-first (e.g. `_collect_sibling_entries`'s
-    newest-id-first artifact sort) get the newest-by-upstream-ordering
-    as the tiebreaker — sufficient for the only realistic tie (two
-    same-name artifacts on the same attempt left over from a
-    delete-race)."""
+    The artifacts API has no `attempt_number` filter, so a re-run's
+    listing returns every prior attempt; without this a task that
+    uploaded "Starting..." on attempt 1 and a terminal on attempt 2
+    appears in BOTH `running` and a terminal section. `job` is in the
+    key so matrix rows stay distinct. Ties keep first-seen (newest by
+    upstream order when callers feed newest-first)."""
     return _collapse_by(
         entries,
         lambda e: (e.get("name", ""), e.get("key", ""), e.get("job", "")),
@@ -420,19 +350,14 @@ def _dedup_by_run_attempt(entries):
     )
 
 def _dedup_for_display(entries):
-    """Collapse exact-duplicate rows — same `(workflow_run_id, job,
-    name, key)` — to the highest `run_attempt`, for the render path.
+    """Collapse exact-duplicate `(workflow_run_id, job, name, key)` rows
+    to the highest `run_attempt`, for the render path only.
 
-    Defense-in-depth: `_merge_state` keeps one live run per
-    `workflow_name` (`_live_runs`) and sources each run's entries from a
-    single place, so in steady state every row is already unique. This
-    guards against a snapshot that briefly carries two rows for the same
-    task within one run_id (e.g. an artifact-listing eventual-
-    consistency blip). `workflow_run_id` is part of the identity so rows
-    from genuinely-distinct concurrent workflows that happen to share a
-    `(job, name, key)` are preserved — collapsing those would drop a
-    real workflow's row. Operates on the display copy only; the
-    persisted state block is untouched."""
+    Defense-in-depth: `_merge_state` already produces unique rows. Guards
+    a snapshot briefly carrying two rows for one task in one run_id
+    (eventual-consistency blip). `workflow_run_id` is in the key so
+    distinct concurrent workflows sharing a `(job, name, key)` survive.
+    Display copy only; persisted state untouched."""
     return _collapse_by(
         entries,
         lambda e: (e.get("workflow_run_id", ""), e.get("job", ""), e.get("name", ""), e.get("key", "")),
@@ -440,43 +365,23 @@ def _dedup_for_display(entries):
     )
 
 def _should_quiet_delete_log(last_upload_at, now):
-    """Decide whether a `DeleteArtifact` failure on a pre-upload cleanup
-    should log at INFO (`True`) or WARN (`False`).
-
-    Two benign cases:
-
-      - `last_upload_at == None` → first cycle, nothing was ever
-        uploaded for this artifact name. The Twirp `DeleteArtifact`
-        will return 404; that's expected.
-      - `(now - last_upload_at) <= _EVENTUAL_CONSISTENCY_WINDOW_S` →
-        the Azure-backed read replica handling the delete may not yet
-        see the freshly-uploaded artifact. The next cycle's delete
-        typically catches up once the consistency window closes.
-
-    Past the window, a continued failure is no longer attributable to
-    eventual consistency and stays at WARN."""
+    """Quiet (INFO vs WARN) a pre-upload `DeleteArtifact` failure in two
+    benign cases:
+      - `last_upload_at == None` → first cycle, nothing uploaded yet; the
+        Twirp delete 404s as expected.
+      - within `_EVENTUAL_CONSISTENCY_WINDOW_S` of an upload → the Azure
+        read replica may not see the fresh artifact yet.
+    Past the window, a failure stays at WARN."""
     if last_upload_at == None:
         return True
     return (now - last_upload_at) <= _EVENTUAL_CONSISTENCY_WINDOW_S
 
 def _bucket_entries(entries):
-    """Split entries into status sections for the rendered comment.
-
-    The five sections mirror how GitHub Actions organizes its check
-    runs: in-progress at top (action-cue: still happening), then
-    decided-bad (failed → fix now) before still-going-bad (failing →
-    will likely fail), then non-fatal flagged (warnings), and finally
-    successful at the bottom. Within each section rows stay
-    alphabetical by (job, name, key) so a row's vertical position
-    inside its bucket is stable across PATCHes — only the bucket
-    membership changes as a task transitions, not the per-row order.
-
-    Aborted is folded into `failed` rather than getting its own
-    section: the user-facing list is five buckets per the GitHub
-    Actions analogy, and aborted is a flavor of terminal failure.
-
-    `entries` should already be `_prepare_for_render`-d so the
-    decoration fields the template reads are populated.
+    """Split entries into five status sections: running, failed, failing,
+    flagged (warnings), successful — top-to-bottom by urgency, mirroring
+    GitHub Actions' check-run ordering. Rows stay (job, name, key)-sorted
+    within each bucket so only bucket membership changes across PATCHes.
+    Aborted folds into `failed`. `entries` must be `_prepare_for_render`-d.
     """
     running = []
     failed = []
@@ -492,17 +397,13 @@ def _bucket_entries(entries):
         elif status == "failing":
             failing.append(e)
         elif status == "warning":
-            # Non-fatal signal — live or terminal (lifecycle disambiguates
-            # via `update.final`). Surfaces in the flagged section so a
-            # passed-with-non-fatal task still gets a visible callout
-            # rather than blending into the bottom ✅ successful list.
+            # Non-fatal signal → flagged, so a passed-with-warnings task
+            # gets a callout instead of blending into ✅ successful.
             flagged.append(e)
         elif status == "passed":
             successful.append(e)
         else:
-            # Unknown status — bucket as in-progress so it surfaces
-            # somewhere rather than vanishing.
-            running.append(e)
+            running.append(e)  # unknown status — surface as in-progress
     return {
         "running": running,
         "failed": failed,
@@ -512,13 +413,9 @@ def _bucket_entries(entries):
     }
 
 def _extract_zip(ctx, zip_path, dest_dir):
-    """Extract a zip into dest_dir using bsdtar (already cached for zip_create).
-
-    Returns False (with a warning) if the bsdtar binary is unavailable —
-    sibling-artifact discovery is best-effort and must not abort the task
-    when github.com's release CDN has a hiccup. The root-cause warning is
-    emitted by `bsdtar` itself; this one surfaces what was skipped.
-    """
+    """Extract a zip into dest_dir using bsdtar. Returns False (warning)
+    when bsdtar is unavailable — sibling-artifact discovery is best-effort
+    and must not abort the task."""
     bin_path = bsdtar(ctx)
     if not bin_path:
         _LOG.warn(ctx.std, "Sibling-artifact extraction skipped: bsdtar unavailable")
@@ -527,9 +424,8 @@ def _extract_zip(ctx, zip_path, dest_dir):
     return child.wait().code == 0
 
 def _earliest_start_ms(entries):
-    """Pick the smallest `start_time_ms` across entries — the moment
-    the first sibling task started, used as the body's headline
-    timestamp. Returns 0 if no entry carries one."""
+    """Smallest `start_time_ms` across entries (the body's headline
+    timestamp), or 0 if none carry one."""
     best = 0
     for e in entries:
         s = e.get("start_time_ms", 0) or 0
@@ -538,8 +434,8 @@ def _earliest_start_ms(entries):
     return best
 
 def _max_recent_upsert_epoch(entries):
-    """Largest `last_pr_comment_upsert_epoch_s` across entries
-    (including our own). Drives the lease decision in `_publish`."""
+    """Largest `last_pr_comment_upsert_epoch_s` across entries. Drives
+    the lease decision in `_publish`."""
     best = 0
     for e in entries:
         v = e.get("last_pr_comment_upsert_epoch_s", 0) or 0
@@ -548,10 +444,8 @@ def _max_recent_upsert_epoch(entries):
     return best
 
 def _running_sibling_count(entries):
-    """Count entries whose status is still live (`running` / `failing`).
-    Used by `_publish` to decide whether a terminal update should pay
-    the eventual-consistency settle delay — only the last couple of
-    finishers need it."""
+    """Count entries still live (`running`/`failing`). `_publish` uses it
+    to pay the settle delay only for the last couple of finishers."""
     n = 0
     for e in entries:
         s = e.get("status", "running")
@@ -560,19 +454,17 @@ def _running_sibling_count(entries):
     return n
 
 def _lease_held(now_epoch, last_upsert_epoch, lease_window_s):
-    """True when a swarm member published within `lease_window_s` of
-    `now_epoch`. `last_upsert_epoch == 0` means nobody has published
-    yet — lease never held on the first cycle. `max(0, …)` floors the
-    elapsed-since-upsert against GitHub Actions clock skew between
-    runners (negative diff → treat as lease held; slight over-throttle
-    is safer than under)."""
+    """True when a member published within `lease_window_s` of `now_epoch`.
+    `last_upsert_epoch == 0` → nobody yet (first cycle). `max(0, …)` floors
+    cross-runner clock skew (negative diff → lease held; over-throttle is
+    safer than under)."""
     if last_upsert_epoch <= 0:
         return False
     return max(0, now_epoch - last_upsert_epoch) < lease_window_s
 
 def _iso_in(ctx, minutes):
-    """RFC 3339 UTC timestamp `minutes` from now via GNU `date -u -d "+N minutes"`.
-    Returns "" on failure so the caller can drop the field rather than send junk."""
+    """RFC 3339 UTC timestamp `minutes` from now via GNU `date`. Returns
+    "" on failure so the caller drops the field rather than send junk."""
     if minutes <= 0:
         return ""
     result = ctx.std.process.command("date").args([
@@ -595,9 +487,8 @@ def _ci_run_url(env):
     return server + "/" + repository + "/actions/runs/" + run_id
 
 def _progress_dict(progress_styles):
-    """Serialize a ProgressStyles record to the dict shape that
-    survives the artifact-upload JSON round-trip. Reader-side
-    consumers see entry["progress"]["body"] / ["stream"]."""
+    """Serialize a ProgressStyles record to a dict surviving the
+    artifact-upload JSON round-trip (entry["progress"]["body"/"stream"])."""
     if progress_styles == None:
         return {"body": "", "stream": ""}
     return {
@@ -616,44 +507,31 @@ def _results_subset(
         progress_styles,
         failed_in_phase,
         start_time_ms = 0):
-    """Slice `init_data()` + live state down to the fields the
-    comment renderer needs.
-
-    Kind-agnostic: every kind-specific count is composed at producer
-    time and shipped via `progress.body`. Repro/fix commands pass
-    through verbatim; the renderer dedupes at render time.
-
-    `data` is frozen on the final update so we copy out fields.
-    Live-state fields (phase, progress, failed_in_phase) come from
-    `_state` and outlive any single update.
-    """
+    """Slice `init_data()` + live state to the fields the renderer needs.
+    Kind-agnostic (counts ship via `progress.body`; repro/fix pass through,
+    deduped at render). `data` is frozen on the final update so fields are
+    copied out; live-state fields come from `_state`."""
     bz = data.get("bazel", {})
     return {
         "elapsed_ms": elapsed_ms,
-        # Earliest moment the producer started — used at render time
-        # to pick the earliest start across all sibling tasks for the
-        # body's headline timestamp.
+        # Earliest producer start; render picks the min across siblings.
         "start_time_ms": start_time_ms or 0,
         "aspect_url": aspect_url or "",
         "bes_url": bes_url or "",
         "check_run_url": check_run_url or "",
-        # Live-state fields (running rows + failed-in-phase):
         "current_phase": current_phase or "",
         "current_phase_elapsed_ms": current_phase_elapsed_ms or 0,
         "progress": _progress_dict(progress_styles),
         "failed_in_phase": failed_in_phase or "",
-        # Producer-authored; `_collect_repro_fix_rows` dedupes across
-        # siblings into the "🔁 Reproduce" / "🛠️ Fix" sections.
+        # Producer-authored; deduped across siblings by `_collect_repro_fix_rows`.
         "repro_commands": list(data.get("repro_commands", []) or []),
         "fix_commands": list(data.get("fix_commands", []) or []),
-        # `status == "aborted"` carries the verdict; abort_reason is
-        # the human-readable rider (timeout, OOM, ctrl-c, …).
+        # abort_reason: human-readable rider (timeout, OOM, ctrl-c, …).
         "abort_reason": bz.get("abort_reason", ""),
     }
 
-# Severity rank per bucket, highest first. Drives both the per-row
-# emoji (max severity across the row's contributing tasks) and the
-# in-section row ordering (most-severe first).
+# Per-bucket severity rank (highest first). Drives the per-row emoji and
+# in-section ordering.
 _BUCKET_SEVERITY_RANK = {
     "failed": 3,
     "failing": 3,
@@ -665,18 +543,13 @@ _BUCKET_SEVERITY_RANK = {
 _RANK_EMOJI = {3: "❌", 2: "⚠️", 1: "🔄", 0: "✅"}
 
 def _collect_repro_fix_rows(sections):
-    """Walk every entry's `repro_commands` / `fix_commands` and return
-    `(repro_rows, fix_rows)` ready for the template, each row shaped
+    """Return `(repro_rows, fix_rows)` for the template, each row
     `{"kind", "command", "description", "task_keys": [...], "severity_emoji"}`.
 
-    Scope: repro = non-passing only (failed/failing/flagged); fix =
-    every task that contributed (so format/gazelle can always
-    advertise their fix even on green).
-
-    Dedup keys on `(kind, command, description)` so identical commands
-    from different kinds keep their own heading. `severity_emoji` is
-    the max across contributors. Rows are sorted most-severe first,
-    first-seen-order tiebreak.
+    Scope: repro = non-passing (failed/failing/flagged); fix = every
+    contributor (so format/gazelle advertise fixes even on green). Dedup
+    on `(kind, command, description)`; `severity_emoji` = max across
+    contributors. Sorted most-severe first, first-seen tiebreak.
     """
 
     # task_key → highest severity rank across buckets it appears in.
@@ -708,13 +581,10 @@ def _collect_repro_fix_rows(sections):
             r["_rank"] = max(ranks)
             r["severity_emoji"] = _RANK_EMOJI.get(r["_rank"], "")
 
-        # Stable sort: most-severe first, first-seen for the tiebreak.
         sorted_rows = sorted(rows, key = lambda r: -r["_rank"])
 
-        # Collapse consecutive headings when (kind, task_keys) repeats —
-        # producers may contribute multiple commands per task (e.g. the
-        # `aspect …` + vanilla `bazel …` alternates) and rendering the
-        # same `#### kind (task_keys)` heading twice in a row is noise.
+        # Collapse consecutive repeated (kind, task_keys) headings — a task
+        # may contribute multiple commands (e.g. `aspect …` + `bazel …`).
         prev_heading_key = None
         for r in sorted_rows:
             heading_key = (r["kind"], tuple(r["task_keys"]))
@@ -726,20 +596,16 @@ def _collect_repro_fix_rows(sections):
     fix_rows = _gather(("running", "failed", "failing", "flagged", "successful"), "fix_commands")
     return (repro_rows, fix_rows)
 
-# Cap for non-important / non-warning tips in the aggregated section.
-# Important and warning always render in full; this cap applies to
-# suggestion + info combined so the comment can't get drowned by a
-# flood of low-urgency tips. See `_collect_tip_rows` for the contract.
+# Cap on suggestion+info tips combined (important/warning always render
+# in full). See `_collect_tip_rows`.
 _MAX_SUBORDINATE_TIPS = 5
 
 def _is_must_show(severity):
-    """Tips at this severity always surface in the PR-comment Tips
-    section regardless of cap — important signals key-feature breakage
-    and warning signals degraded behavior."""
+    """Severities that always surface regardless of cap (important/warning)."""
     return severity == TIP_IMPORTANT or severity == TIP_WARNING
 
 def _ordered_unique(values):
-    """First-seen-order dedup of a list (no set; preserves order)."""
+    """First-seen-order dedup of a list."""
     out = []
     for v in values:
         if v and v not in out:
@@ -749,12 +615,9 @@ def _ordered_unique(values):
 def _combine_across(ctx, contributors):
     """Collapse a same-`(id, key)` group into one row, unioning across tasks.
 
-    `contributors` is a list of `(tip, task_key)`. JINJA2 `accumulate`
-    fields are unioned across tasks (first-seen order) and re-rendered
-    against `vars` + the merged lists, so the row surfaces the full
-    cross-task set. Pre-rendered title/body follow newest-wins: the row
-    starts from the last contributor. Attribution is every contributing
-    task."""
+    `contributors` is `[(tip, task_key)]`. JINJA2 `accumulate` fields are
+    unioned (first-seen) and re-rendered against `vars` + merged lists;
+    title/body are newest-wins (last contributor); attributed to all."""
     tips_ = [t for t, _ in contributors]
     row = dict(tips_[-1])
     merged = {}
@@ -773,13 +636,9 @@ def _combine_across(ctx, contributors):
     return row
 
 def _latest(contributors):
-    """Collapse a same-`(id, key)` group into one row, no cross-task
-    accumulation. `contributors` is `(tip, task_key)` in task order.
-
-    When every task rendered identical `(title, body)`, the row keeps that
-    content attributed to all of them — so N tasks emitting the same tip
-    read as one row crediting all N. When content diverges, the latest
-    task's content wins, attributed to that task."""
+    """Collapse a same-`(id, key)` group into one row, no accumulation.
+    Identical `(title, body)` across tasks → kept, attributed to all;
+    divergent → latest task's content wins, attributed to that task."""
     distinct = _ordered_unique([(t.get("title", ""), t.get("body", "")) for t, _ in contributors])
     if len(distinct) == 1:
         row = dict(contributors[0][0])
@@ -791,34 +650,20 @@ def _latest(contributors):
     return row
 
 def _collect_tip_rows(ctx, entries):
-    """Group every entry's `tips` by `(id, key)`, combine each group into
-    a PR-summary row, attribute by task key, sort by severity, then apply
-    the rendering caps.
+    """Group entries' `tips` by `(id, key)`, combine each group, attribute
+    by task key, sort by severity, apply caps.
 
-    Eligibility: a tip is a rollup candidate only when its `surfaces`
-    allowlist is empty (all surfaces) or contains `SURFACE_GITHUB_PR_SUMMARY`.
-    The per-task producer already filtered with
-    `collect_tips_sorted(ctx, surface = SURFACE_GITHUB_PR_SUMMARY)`, so this is a
-    defensive re-assertion.
+    Eligibility: `surfaces` empty or contains `SURFACE_GITHUB_PR_SUMMARY`
+    (defensive re-assertion; producer already filtered).
 
-    Each `(id, key)` group combines per `combine_across_tasks` (True if
-    any contributor sets it):
+    Per group, `combine_across_tasks` (True if any contributor sets it):
+      - True  → `_combine_across` (union `accumulate`, attribute all).
+      - False → `_latest` (identical content attributes all; divergent
+        takes latest).
 
-      - True  — one row unioning the `accumulate` fields across every
-        task (`_combine_across`), attributed to all of them.
-      - False — one row (`_latest`): identical content across tasks is
-        attributed to all of them; divergent content takes the latest
-        task's. Distinct subjects belong under distinct `key`s, which
-        group separately here.
-
-    Render caps:
-      - `TIP_IMPORTANT` and `TIP_WARNING` always surface.
-      - `TIP_SUGGESTION` + `TIP_INFO` are combined and capped at
-        `_MAX_SUBORDINATE_TIPS` total so a noisy task can't drown the
-        section.
-
-    Returns rows in `decorate_tip` shape plus `task_keys` (sorted) for
-    the attribution footer."""
+    Caps: important/warning always surface; suggestion+info capped at
+    `_MAX_SUBORDINATE_TIPS`. Returns `decorate_tip` rows + sorted
+    `task_keys`."""
     groups = {}
     insertion_order = []
     for e in entries:
@@ -853,50 +698,23 @@ def _collect_tip_rows(ctx, entries):
     return out
 
 def _render_body(ctx, marker, entries, started_at, body_template, status_badges, sections, last_updated_at = "", api_usage = "", state = None):
-    """Render the comment body via the (possibly user-overridden) Jinja2 template.
+    """Render the comment body via the (possibly overridden) Jinja2 template.
 
-    `entries` is expected to be the output of `_prepare_for_render` —
-    each entry is decorated with `_severity`, `_badge_key`,
-    `_links_text`, `_elapsed_text`, and `_result_text` so the template
-    stays a pure renderer.
+    `entries` must be `_prepare_for_render`-d so the template is a pure
+    renderer. `sections` is the `_bucket_entries` output. `started_at`
+    is the earliest sibling start, pinned so the headline doesn't wobble
+    across PATCHes ("" until a task starts).
 
-    `sections` is the `_bucket_entries` output: {running, failed,
-    failing, flagged, successful} → list[entry]. The default template
-    renders one `## N <label> tasks` section per non-empty bucket,
-    in that fixed order; a custom template can iterate them
-    differently or fall back to the flat `entries` list.
+    `last_updated_at` / `api_usage` are caller-supplied: the publish path
+    renders twice — once with both `""` (deterministic diff baseline for
+    the PATCH short-circuit) and once live for the upsert.
 
-    `started_at` is the formatted earliest start time across all
-    sibling tasks (`format_run_date(_earliest_start_ms(...))`). Pinned
-    to the start so the headline timestamp doesn't wobble across
-    PATCHes once the run is underway. Empty string until at least one
-    task has started.
+    `repro_rows` / `fix_rows` / `tip_rows` are the deduped + attributed
+    outputs of `_collect_repro_fix_rows` / `_collect_tip_rows`.
 
-    `last_updated_at` and `api_usage` are caller-supplied — the
-    publish path renders the body twice per cycle, once with both set
-    to `""` (the diff baseline — stable across polls so an unchanged
-    task state can short-circuit the PATCH) and once with their live
-    values for the actual upsert. Pulling them off the template's own
-    side-effecting calls (`now_ms`, `usage_footer`) into parameters
-    keeps the diff-render deterministic.
-
-    `repro_rows` / `fix_rows` are computed from the per-entry
-    `repro_commands` / `fix_commands` lists via
-    `_collect_repro_fix_rows`, with dedup-and-attribute applied so a
-    command contributed by two tasks renders as one row with both
-    task keys.
-
-    `tip_rows` is the deduped + attributed + severity-sorted output of
-    `_collect_tip_rows`, with the cap applied so suggestion / info
-    tips can't drown the section (important + warning always pass
-    through in full).
-
-    `state` — when set, an HTML-comment state block carrying the
-    cross-workflow state (head_sha, last_upsert_epoch_s, workflow_runs,
-    entries) is appended after the rendered body. The block is the
-    canonical cross-workflow source of truth read by other workflows
-    on the same PR. Pass `None` to omit (used by snapshot tests and
-    callers that don't need cross-workflow merge)."""
+    `state` — when set, appends the cross-workflow state block (the
+    canonical source of truth across PR workflows). `None` omits it
+    (snapshot tests / non-merge callers)."""
     repro_rows, fix_rows = _collect_repro_fix_rows(sections)
     tip_rows = _collect_tip_rows(ctx, entries)
     body = ctx.template.jinja2(body_template, data = {
@@ -920,25 +738,18 @@ def _render_body(ctx, marker, entries, started_at, body_template, status_badges,
 
 def _serialize_state(state):
     """Encode the cross-workflow state as a single-line HTML comment.
-
-    Wraps a base64-encoded JSON payload so the literal `-->` HTML-comment
-    terminator can never appear inside the body — regardless of entry
-    string content. Round-tripped via `_parse_state`.
-
-    `state` is a dict with `head_sha`, `last_upsert_epoch_s`,
-    `workflow_runs` (`[{run_id, workflow_name}, ...]`), and `entries`
-    (per-task snapshots used as TTL/race fallback).
-    """
+    base64-wraps the JSON so the literal `-->` terminator can't appear
+    inside. Round-tripped via `_parse_state`. `state`: `head_sha`,
+    `last_upsert_epoch_s`, `workflow_runs` (`[{run_id, workflow_name}]`),
+    `entries` (snapshots; TTL/race fallback)."""
     encoded = base64.encode(json.encode(state))
     return _STATE_BLOCK_OPEN + encoded + _STATE_BLOCK_CLOSE
 
 _BASE64_ALPHABET = {c: True for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=".elems()}
 
 def _is_standard_base64(s):
-    """Cheap pre-flight check: every char in the standard base64 alphabet
-    (A-Z, a-z, 0-9, +, /, =) and the length is a multiple of 4. Lets
-    `_parse_state` return `None` for a malformed payload rather than
-    have `base64.decode` raise into the writer."""
+    """Pre-flight: all chars in standard base64 alphabet and length %4==0,
+    so `_parse_state` can return None instead of `base64.decode` raising."""
     if not s or len(s) % 4 != 0:
         return False
     for c in s.elems():
@@ -947,20 +758,13 @@ def _is_standard_base64(s):
     return True
 
 def _parse_state(body):
-    """Extract the cross-workflow state block from a comment body, if present.
+    """Extract the cross-workflow state block from a comment body.
 
-    Returns a dict with `head_sha`, `last_upsert_epoch_s`,
-    `workflow_runs`, and `entries` on success. Returns `None` when the
-    block is absent or malformed — the caller falls back to
-    current-workflow-only behavior in that case.
-
-    Each field is shape-checked before use: a payload that's syntactically
-    valid base64-JSON but carries wrong types (e.g. `last_upsert_epoch_s`
-    as a string after a manual comment edit, or `entries` as a dict
-    instead of a list) is normalized to defaults rather than raising into
-    the caller. List fields are filtered to drop non-dict elements so
-    downstream merge/render can assume dict shape per row.
-    """
+    Returns `{head_sha, last_upsert_epoch_s, workflow_runs, entries}`, or
+    `None` when absent/malformed (caller falls back to current-workflow-
+    only). Wrong-typed fields (e.g. after a manual edit) normalize to
+    defaults; list fields drop non-dict elements so downstream can assume
+    dict rows."""
     if not body:
         return None
     start = body.find(_STATE_BLOCK_OPEN)
@@ -982,12 +786,9 @@ def _parse_state(body):
     entries = decoded.get("entries")
     parsed_entries = [e for e in entries if type(e) == "dict"] if type(entries) == "list" else []
 
-    # JSON round-trip turns ReproFixCommand records into plain dicts;
-    # rehydrate per-entry so downstream `_collect_repro_fix_rows` can
-    # do record-attribute access (`c.command`, `c.description`). Only
-    # touch keys that are already present so entries written by older
-    # aspect-cli releases (predating the command lists) round-trip
-    # unchanged.
+    # JSON round-trip flattens ReproFixCommand records to dicts; rehydrate
+    # so `_collect_repro_fix_rows` can do `c.command`/`c.description`.
+    # Only touch present keys so older-release entries round-trip unchanged.
     for e in parsed_entries:
         if "repro_commands" in e:
             e["repro_commands"] = rehydrate_commands(e["repro_commands"])
@@ -1001,28 +802,15 @@ def _parse_state(body):
     }
 
 def _live_runs(workflow_runs, my_run_id, my_workflow_name):
-    """Reduce the comment's `workflow_runs` slots — plus this writer's
-    own run as a candidate — to the live run per `workflow_name`.
+    """Reduce `workflow_runs` slots (plus this writer's own run) to the
+    newest `run_id` per `workflow_name`.
 
-    A workflow re-triggered on the same head SHA keeps its
-    `GITHUB_WORKFLOW` name but gets a fresh `GITHUB_RUN_ID`. Left in
-    place, the stale slot lingers (its artifacts expire → frozen
-    snapshot fallback), duplicating every task in that workflow on the
-    rendered comment. For each named workflow only the newest `run_id`
-    survives.
-
-    This writer's own run competes in the contest like any other slot.
-    It does NOT win by fiat: in a re-run race the older run is still
-    executing and publishing, so if a newer run of our name already
-    holds the slot, that newer slot wins and ours is dropped (it would
-    otherwise resurrect stale rows over the newer run's). Any existing
-    slot at `my_run_id` (e.g. one whose `workflow_name` was renamed
-    out of band) is replaced by our current identity.
-
-    Slots with an empty `workflow_name` are passed through untouched —
-    they can't be matched to a newer run reliably, so each keeps its
-    own identity. If our own run has no name (GITHUB_WORKFLOW unset),
-    our candidate is one of these and is always kept."""
+    A re-triggered workflow keeps its name but gets a fresh `GITHUB_RUN_ID`;
+    the stale slot would duplicate every task (artifacts expire → snapshot
+    fallback), so only the newest survives. Our own run competes like any
+    slot — a newer run of our name wins and drops ours (else we'd resurrect
+    stale rows). Empty-`workflow_name` slots pass through untouched (can't
+    match to a newer run); a nameless own-run is always kept."""
     candidates = [r for r in workflow_runs if str(r.get("run_id", "")) != str(my_run_id)]
     candidates.append({"run_id": str(my_run_id), "workflow_name": my_workflow_name})
 
@@ -1041,34 +829,23 @@ def _live_runs(workflow_runs, my_run_id, my_workflow_name):
 def _merge_state(existing_state, head_sha, my_run_id, my_workflow_name, my_entries, refreshed_other_entries):
     """Build the new state block to write to the comment.
 
-    The hybrid cross-workflow model:
-      * `workflow_runs` is the list of `{run_id, workflow_name}` slots —
-        the newest `run_id` per `workflow_name` active on this PR. Each
-        writer overlays its own slot, preserving sibling-workflow slots
-        unchanged. Writes are slot-independent → no cross-workflow data
-        race. A workflow re-triggered on the same head SHA supersedes
-        its prior slot (`_live_runs`) so stale runs don't accumulate as
-        duplicate task rows; a still-running older run that lost the
-        contest contributes nothing rather than resurrecting its rows.
-      * `entries` is the full per-task snapshot, kept for two reasons:
-        (a) fallback when a sibling workflow's artifacts are unreachable
-        (TTL expiry, transient API error); (b) terminal-state
-        persistence past the artifact retention window.
+    Hybrid cross-workflow model:
+      * `workflow_runs`: `{run_id, workflow_name}` slots, newest run_id per
+        name. Each writer overlays only its own slot (slot-independent →
+        no data race); `_live_runs` evicts re-triggered runs.
+      * `entries`: full per-task snapshot, kept for (a) fallback when a
+        sibling's artifacts are unreachable (TTL/API error), (b) terminal
+        persistence past artifact retention.
 
     Args:
-      existing_state: parsed state from the current comment body, or
-        `None` for a first-writer comment.
-      head_sha: PR head SHA for THIS push. A mismatch in
-        `existing_state.head_sha` discards everything — a new push
-        starts the comment fresh.
+      existing_state: parsed comment state, or `None` for first writer.
+      head_sha: THIS push's SHA; a mismatch discards everything (fresh start).
       my_run_id, my_workflow_name: this writer's identity.
-      my_entries: this writer's swarm's authoritative entries.
-      refreshed_other_entries: `{run_id_str: [entry, ...]}` for sibling
-        workflows whose artifacts we successfully refreshed this cycle.
-        Missing run_ids fall back to the snapshot in `existing_state`.
+      my_entries: this swarm's authoritative entries.
+      refreshed_other_entries: `{run_id_str: [entry]}` for siblings refreshed
+        this cycle; missing run_ids fall back to the snapshot.
 
-    Returns a dict ready to feed to `_serialize_state` (caller stamps
-    `last_upsert_epoch_s`).
+    Returns a dict for `_serialize_state` (caller stamps `last_upsert_epoch_s`).
     """
 
     # Drop everything from a prior push.
@@ -1077,18 +854,12 @@ def _merge_state(existing_state, head_sha, my_run_id, my_workflow_name, my_entri
 
     existing_runs = (existing_state or {}).get("workflow_runs", []) or []
 
-    # Reduce to the live run per workflow_name (evicting runs superseded
-    # by a re-trigger on the same head SHA), with our own run competing
-    # as a candidate. We only own the slot for our name if we won the
-    # contest; in a re-run race a newer run of our name wins and we
-    # contribute nothing this cycle. See `_live_runs`.
+    # Live run per workflow_name, our run competing as a candidate; we only
+    # own our slot if we won (see `_live_runs`).
     workflow_runs = _live_runs(existing_runs, my_run_id, my_workflow_name)
 
-    # Index the comment's prior per-task snapshot by run_id. It backfills
-    # tasks a sibling-workflow refresh didn't return this cycle (see the
-    # union below) — a partial refresh under artifact-listing eventual
-    # consistency would otherwise drop a row this cycle and re-add it the
-    # next, thrashing the visible entry count.
+    # Index the prior snapshot by run_id to backfill tasks a refresh didn't
+    # return this cycle — else a partial refresh thrashes the entry count.
     snapshot_by_run = {}
     for e in ((existing_state or {}).get("entries", []) or []):
         rid = str(e.get("workflow_run_id", ""))
@@ -1098,7 +869,7 @@ def _merge_state(existing_state, head_sha, my_run_id, my_workflow_name, my_entri
     for r in workflow_runs:
         rid = str(r.get("run_id", ""))
         if rid == str(my_run_id):
-            # Our own authoritative entries (only present when we won our slot).
+            # Our authoritative entries (present only when we won our slot).
             entries.extend(my_entries)
             continue
         snapshot = snapshot_by_run.get(rid, [])
@@ -1108,12 +879,9 @@ def _merge_state(existing_state, head_sha, my_run_id, my_workflow_name, my_entri
         else:
             entries.extend(_union_entries_by_name_key(refreshed, snapshot))
 
-    # Deterministic ordering so the serialized state block is byte-stable
-    # across writers. Without this, publish ownership alternating between
-    # workflows would flip the slot/row order on each cycle (`_live_runs`
-    # iteration order depends on which writer "mine" is), and
-    # `stable_body`'s unchanged-content short-circuit in `_publish` would
-    # never fire.
+    # Deterministic order so the serialized block is byte-stable across
+    # writers; else alternating ownership flips order each cycle and
+    # `_publish`'s unchanged-content short-circuit never fires.
     workflow_runs = sorted(workflow_runs, key = lambda r: str(r.get("run_id", "")))
     entries = sorted(entries, key = lambda e: (
         str(e.get("workflow_run_id", "")),
@@ -1132,8 +900,8 @@ def _merge_state(existing_state, head_sha, my_run_id, my_workflow_name, my_entri
 def _github_status_comments(ctx: FeatureContext):
     lifecycle = ctx.traits[TaskLifecycleTrait]
 
-    # The GHSC check-run feature publishes the URL after its API call
-    # via `checkrun.set_url`; `checkrun.url(ctx)` returns "" until then.
+    # GHSC publishes the check-run URL via `checkrun.set_url`;
+    # `checkrun.url(ctx)` returns "" until then.
 
     mode = ctx.args.mode
     is_ci = bool(ctx.std.env.var("CI"))
@@ -1170,7 +938,7 @@ def _github_status_comments(ctx: FeatureContext):
     min_poll_interval_seconds = ctx.args.min_poll_interval_seconds
     artifact_expires_minutes = ctx.args.artifact_expires_minutes
 
-    # args.custom(dict, ...) hands us None at runtime, not the declared default.
+    # args.custom(dict, ...) hands None at runtime, not the declared default.
     templates = ctx.args.templates or {}
     body_template = templates.get("body") or _DEFAULT_BODY_TEMPLATE
     status_badges = dict(_DEFAULT_STATUS_BADGES)
@@ -1179,8 +947,7 @@ def _github_status_comments(ctx: FeatureContext):
     _state = {}
 
     def _empty_results_subset():
-        """Default _results_subset for the brief window between the first
-        task_update (init) and the first BES-data update."""
+        """Default subset for the window between init and the first BES update."""
         return _results_subset(
             init_data(),
             0,  # elapsed_ms
@@ -1194,34 +961,23 @@ def _github_status_comments(ctx: FeatureContext):
         )
 
     def _own_payload(ctx):
-        """Build our own task entry dict — what _publish_self writes to disk and
-        also what gets folded into the rendered comment without going through a
-        download round-trip.
+        """Build our own task entry dict — written to disk by _publish_self
+        and folded into the comment without a download round-trip.
 
-        `tips` carries this task's tips at upload time (filtered + sorted by
-        `collect_tips_sorted`); the comment aggregator dedups by id across
-        siblings and attributes by task key. Trimmed to render fields so the
-        upload payload doesn't carry filter glob lists or other internals.
+        `tips`: this task's tips (filtered/sorted), trimmed to render fields;
+        the aggregator dedups by id across siblings.
 
-        `rate_limit_observations` piggybacks this task's recent GitHub-API
-        observations onto the artifact (`rate_limit.export_observations`).
-        Sibling tasks ingest the field in `_collect_sibling_entries` so every
-        swarm member computes `throttle_factor` over the same merged sample
-        set — that's what makes the `lease_window` computed in `_publish`
-        agree across the swarm.
+        `rate_limit_observations`: piggybacks recent GitHub-API observations
+        so siblings ingest them and every member computes the same
+        `throttle_factor` → agreeing `lease_window` in `_publish`.
 
-        `last_pr_comment_upsert_epoch_s` is a high-water mark of any
-        PR-comment upsert this writer is aware of — either our own
-        successful upsert or a sibling-workflow upsert observed via the
-        comment's state block (`max(state.last_upsert_epoch_s, our prior
-        stamp)`). `0` until we've published or observed one. The lease
-        decision in `_publish` takes `max(...)` across this field from
-        all sibling entries: when any swarm member has published or seen
-        a recent cross-workflow publish, everyone else honors the lease
-        and skips both the comment GET and their own upsert."""
+        `last_pr_comment_upsert_epoch_s`: high-water mark of any upsert this
+        writer knows of (own or cross-workflow via the state block); 0 until
+        seen. `_publish` takes `max(...)` across siblings, so when anyone has
+        published recently everyone else honors the lease and skips the GET +
+        upsert."""
 
-        # Prefer the per-job URL when we have it — drops the reviewer
-        # straight on the failing job's logs.
+        # Prefer the per-job URL to drop the reviewer on the failing job's logs.
         link_url = _state.get("_ci_link_url") or ci_run_url
         payload = {
             "name": _state["_task_name"],
@@ -1233,30 +989,25 @@ def _github_status_comments(ctx: FeatureContext):
             "tips": [tip_to_payload(t) for t in collect_tips_sorted(ctx, surface = SURFACE_GITHUB_PR_SUMMARY)],
             "rate_limit_observations": export_observations(ctx),
             "last_pr_comment_upsert_epoch_s": _state.get("_last_pr_comment_upsert_epoch_s", 0),
-            # Cross-workflow merge tags. `head_sha` lets `_merge_state`
-            # drop rows from a prior push; `workflow_run_id` keys the
-            # snapshot-fallback bucket and the slot in `workflow_runs`;
-            # `workflow_name` is for display.
+            # Cross-workflow merge tags: `head_sha` (drop prior-push rows),
+            # `workflow_run_id` (snapshot bucket + slot key), `workflow_name`.
             "workflow_run_id": run_id,
             "workflow_name": workflow_name,
             "head_sha": head_sha,
         }
         payload.update(_state.get("_results_subset") or _empty_results_subset())
 
-        # Re-read each publish — the check-run feature publishes the
-        # URL asynchronously, after the first bazel_results update.
+        # Re-read each publish — the check-run feature publishes the URL
+        # asynchronously, after the first bazel_results update.
         check_run_url = checkrun.url(ctx)
         if check_run_url:
             payload["check_run_url"] = check_run_url
         return payload
 
     def _publish_self(ctx, token):
-        """Upload this task's status payload, replacing the prior
-        cycle's artifact in place. Skips the API round-trip when the
-        payload hasn't changed since the last successful upload —
-        saves ~half the API calls on quiet builds. The pre-upload
-        `delete_artifact` call uses `quiet_failure_log` gated on
-        `_should_quiet_delete_log` so benign 404s don't spam WARN."""
+        """Upload this task's status payload, replacing the prior artifact.
+        Skips the round-trip when the payload is unchanged. Pre-upload
+        `delete_artifact` quiets benign 404s via `_should_quiet_delete_log`."""
         if "_workdir" not in _state:
             _state["_workdir"] = ctx.std.fs.mkdtemp(prefix = "aspect-ci-status-")
         _state["_my_artifact_name"] = _ARTIFACT_PREFIX + job_name + "-" + _state["_task_key"] + "-" + run_attempt
@@ -1272,8 +1023,8 @@ def _github_status_comments(ctx: FeatureContext):
         quiet = _should_quiet_delete_log(_state.get("_last_upload_at"), monotonic())
         github.delete_artifact(ctx, _state["_my_artifact_name"], quiet_failure_log = quiet)
 
-        # Server-side TTL — fresh per-cycle so a still-polling task
-        # keeps its artifact alive while inactive ones expire on their own.
+        # Server-side TTL, refreshed per-cycle so active tasks stay alive
+        # while inactive ones expire.
         expires_at = _iso_in(ctx, artifact_expires_minutes)
         up = github.upload_artifact(ctx, payload_path, _state["_my_artifact_name"], expires_at = expires_at)
         if not up.get("success"):
@@ -1284,51 +1035,32 @@ def _github_status_comments(ctx: FeatureContext):
         return True
 
     def _list_and_download_workflow_artifacts(ctx, token, target_run_id, is_own_swarm):
-        """Shared artifact-listing + download logic for both own-swarm and
-        cross-workflow discovery.
+        """Shared artifact list+download for own-swarm and cross-workflow.
 
-        Per-artifact downloads are cached by artifact id under a
-        per-run_id cache slot; only new ids cost a download. Artifact
-        ids change on every replacement (delete + upload), so a stable
-        id means the producer hasn't pushed a new payload since the
+        Downloads cached by artifact id (per-run_id slot); ids change on
+        every replacement, so a stable id means no new payload since the
         last poll.
 
-        Two duplicate-handling paths converge here:
+        Two dedup paths converge:
+          - Duplicate names: Azure eventual-consistency reads can list a
+            deleted artifact alongside the fresh one. Sort newest-id-first
+            and skip `seen` names → newest wins.
+          - `(name, key, job)` across attempts: no `attempt_number` filter,
+            so re-runs list every attempt; `_dedup_by_run_attempt` collapses.
 
-          - **Same artifact name appears multiple times.** GitHub's
-            artifact API is backed by Azure storage with eventual-
-            consistency reads, so a listing can briefly include a
-            previously-deleted artifact alongside the freshly-uploaded
-            one. Sort newest-first (by artifact id; ids are
-            monotonically increasing per repo) and skip names already
-            in `seen` — the newest payload always wins.
+        `is_own_swarm=True` also: substitutes our own payload from `_state`,
+        GCs stale cache entries, and ingests sibling rate-limit observations
+        (swarm-scoped).
 
-          - **Same logical `(name, key, job)` across run attempts.**
-            The artifacts endpoint doesn't accept an `attempt_number`
-            filter, so a re-run workflow's listing returns every prior
-            attempt's artifacts alongside the live attempt's.
-            `_dedup_by_run_attempt` collapses them to the latest
-            attempt before returning.
-
-        When `is_own_swarm=True` the function additionally:
-          * substitutes our own payload from `_state` (avoids a
-            self-download round-trip),
-          * GCs cache entries whose artifacts were replaced or deleted,
-          * ingests sibling rate-limit observations into our merged
-            ring buffer (swarm-only — cross-workflow siblings share the
-            App-bucket quota by definition, but the swarm-coordination
-            model is workflow-scoped).
-
-        Returns `None` on transport failure listing artifacts.
+        Returns `None` on a list transport failure.
         """
         listed = github.actions.list_run_artifacts(ctx, token, owner, repo, target_run_id, name_prefix = _ARTIFACT_PREFIX)
         if not listed.get("success"):
             _LOG.warn(ctx.std, "List artifacts failed (run_id=%s): %s" % (target_run_id, listed.get("error", "unknown")))
             return None
 
-        # Per-run_id cache slot — different runs have disjoint artifact
-        # id spaces, so a shared cache would mis-GC cross-workflow
-        # entries against the own-swarm listing.
+        # Per-run_id cache slot — disjoint id spaces; a shared cache would
+        # mis-GC cross-workflow entries against the own-swarm listing.
         cache_key = "_entry_cache:" + str(target_run_id)
         cache = _state.setdefault(cache_key, {})
         own_name = _state.get("_my_artifact_name", "") if is_own_swarm else ""
@@ -1369,11 +1101,9 @@ def _github_status_comments(ctx: FeatureContext):
             if not entry:
                 continue
 
-            # JSON round-trip turns ReproFixCommand records into plain
-            # dicts; rehydrate them so downstream `_collect_repro_fix_rows`
-            # can do record-attribute access (`c.command`, `c.description`).
-            # Only touch keys that are present so entries from older
-            # aspect-cli releases pass through unchanged.
+            # JSON round-trip flattens ReproFixCommand records to dicts;
+            # rehydrate for `c.command`/`c.description`. Only touch present
+            # keys so older-release entries pass through unchanged.
             if "repro_commands" in entry:
                 entry["repro_commands"] = rehydrate_commands(entry["repro_commands"])
             if "fix_commands" in entry:
@@ -1382,12 +1112,9 @@ def _github_status_comments(ctx: FeatureContext):
             seen[aname] = entry
 
             if is_own_swarm:
-                # The artifact name (stable per `(job, task_key,
-                # run_attempt)`) is the `sibling_id`, so a sibling that
-                # re-uploads under the same logical identity overwrites
-                # its prior slice instead of accumulating. Producers
-                # that predate the share protocol leave the field absent
-                # → ingest no-ops.
+                # Artifact name (stable per `(job, task_key, run_attempt)`)
+                # is the `sibling_id`, so a re-upload overwrites its prior
+                # slice. Absent field (older producers) → ingest no-ops.
                 ingest_sibling_observations(
                     ctx,
                     aname,
@@ -1402,38 +1129,26 @@ def _github_status_comments(ctx: FeatureContext):
         return _dedup_by_run_attempt(list(seen.values()))
 
     def _collect_sibling_entries(ctx, token):
-        """Discover entries from our own workflow run's artifacts. Thin
-        wrapper around `_list_and_download_workflow_artifacts` with the
-        own-swarm flag set."""
+        """Entries from our own run's artifacts (own-swarm wrapper)."""
         return _list_and_download_workflow_artifacts(ctx, token, run_id, is_own_swarm = True)
 
     def _collect_other_workflow_entries(ctx, token, other_run_id):
-        """Discover entries from a sibling workflow's artifacts on the
-        same PR. Used to refresh data for workflow_run_ids we learned
-        from the comment state block, so our PATCH carries fresh
-        sibling-workflow values instead of stale snapshots.
+        """Entries from a sibling workflow's artifacts (run_ids learned
+        from the state block), so our PATCH carries fresh values.
 
-        Returns the entry list (possibly empty) on success, or `None`
-        on API failure. `_merge_state` per-task-unions whatever we
-        return with the comment's snapshot — partial or empty refresh
-        results never drop entries that are still in the snapshot, so
-        a finished workflow's terminal state survives past its artifact
-        retention window and partial listings during the API's
-        eventual-consistency window don't cause comment thrashing."""
+        Returns the (possibly empty) list, or `None` on API failure.
+        `_merge_state` unions this with the snapshot, so partial/empty
+        refreshes never drop snapshot entries (terminal state survives
+        retention; no eventual-consistency thrashing)."""
         return _list_and_download_workflow_artifacts(ctx, token, other_run_id, is_own_swarm = False)
 
     def _upsert_comment(ctx, token, body):
-        """PATCH the existing comment when its id is known (set by
-        `_fetch_existing_comment_body`), else POST a fresh one. The
-        unchanged-content short-circuit lives in `_publish` (gated on a
-        timestamp-stripped diff); by the time we reach here we're
-        committing to an upsert.
+        """PATCH the existing comment when its id is known, else POST a
+        fresh one (the unchanged-content short-circuit is in `_publish`).
 
-        Returns `True` when the upsert hit GitHub successfully (so the
-        caller can stamp `_last_pr_comment_upsert_epoch_s` and let the
-        swarm-wide lease honor it). `False` on any failure — the caller
-        skips the stamp so a sibling can take over the publisher role
-        instead of honoring a stale lease behind a broken upsert."""
+        Returns `True` on success so the caller stamps the lease; `False`
+        on failure so the caller skips the stamp and a sibling can take
+        over rather than honor a stale lease behind a broken upsert."""
         if "_comment_id" in _state:
             res = github.issues.update_comment(ctx, token, owner, repo, _state["_comment_id"], body)
             if not res.get("success"):
@@ -1447,9 +1162,8 @@ def _github_status_comments(ctx: FeatureContext):
             return False
         _state["_comment_id"] = res["comment_id"]
 
-        # Race mitigation: if two jobs both POSTed within the same window, keep the
-        # lowest comment id and delete the rest. Stable choice across all writers
-        # so they converge on the same survivor.
+        # Race mitigation: if two jobs both POSTed, keep the lowest comment
+        # id and delete the rest so all writers converge on one survivor.
         listed2 = github.issues.list_comments(ctx, token, owner, repo, pr_number)
         if not listed2.get("success"):
             return True
@@ -1463,24 +1177,19 @@ def _github_status_comments(ctx: FeatureContext):
         return True
 
     def _fetch_existing_comment_body(ctx, token):
-        """Read the PR's marker comment body so the upcoming render can
-        merge entries written by other concurrent workflows.
+        """Read the PR's marker comment body so the render can merge other
+        workflows' entries.
 
-        Returns the body string (empty string when no marker comment
-        exists yet). Returns `None` on transient API failure so the caller
-        can skip this cycle rather than clobber the comment with a
-        merge-less render.
-
-        Sets `_state["_comment_id"]` when the marker comment is found, so
-        `_upsert_comment`'s follow-on PATCH knows the id without re-listing.
-        """
+        Returns the body ("" when no marker comment yet), or `None` on
+        transient API failure so the caller skips this cycle rather than
+        clobber with a merge-less render. Sets `_state["_comment_id"]` on
+        a hit so `_upsert_comment` skips re-listing."""
         if "_comment_id" in _state:
             res = github.issues.get_comment(ctx, token, owner, repo, _state["_comment_id"])
             if res.get("success"):
                 return res.get("body", "") or ""
 
-            # If the comment was deleted out from under us, fall back to
-            # list_comments and re-establish.
+            # Comment deleted under us → fall back to list_comments.
             if res.get("status_code") == 404:
                 _state.pop("_comment_id", None)
             else:
@@ -1507,17 +1216,11 @@ def _github_status_comments(ctx: FeatureContext):
         if raw_entries == None:
             return
 
-        # Terminal-settle delay: when we're terminal and look likely to
-        # be the last or second-to-last finisher, wait out the artifact
-        # LIST API's eventual-consistency window and re-collect.
-        # Catches the race where two tasks finish near-simultaneously
-        # and one of them snapshots the swarm before the other's
-        # terminal artifact is visible — without this, the PR comment
-        # can get stuck on a stale `running` entry.
-        #
-        # Gated on (a) a multi-task swarm — a solo task has nobody to
-        # race — and (b) ≤ 1 sibling still running, so mid-stream
-        # terminals skip the wait (the actual last task will catch up).
+        # Terminal-settle delay: when terminal and likely the last (or
+        # second-to-last) finisher, wait out the LIST eventual-consistency
+        # window and re-collect — else the comment can stick on a stale
+        # `running` entry. Gated on a multi-task swarm with ≤1 sibling still
+        # running (mid-stream terminals skip; the last task catches up).
         if (
             final and
             len(raw_entries) > 1 and
@@ -1528,23 +1231,16 @@ def _github_status_comments(ctx: FeatureContext):
             if raw_entries == None:
                 return
 
-        # Lease coordination — the quota-burning PR-comment PATCH (App
-        # bucket) is gated on a lease that any swarm member can hold.
-        # The combined lease epoch is `max(state.last_upsert_epoch_s,
-        # swarm-local last_upsert_epoch_s)`: the state block carries
-        # any-workflow's most-recent upsert, while the swarm-local term
-        # covers the bootstrap before any writer has stamped a state
-        # block. `lease_window_s` is fed `swarm_elapsed_s` and the
-        # merged-view quota factor so every member converges on the
-        # same answer.
+        # Lease coordination — the quota-burning PATCH is gated on a lease
+        # any member can hold. Combined epoch = `max(state.last_upsert_epoch_s,
+        # swarm-local)`: state block covers any-workflow; swarm-local covers
+        # bootstrap before any state block. `lease_window_s` uses
+        # `swarm_elapsed_s` + merged quota factor so members converge.
         #
-        # Fast path: if the swarm-local lease alone holds, the combined
-        # lease holds too — skip the comment GET and per-sibling-workflow
-        # `list_run_artifacts` refresh entirely. We'd miss a new
-        # sibling-workflow row for one cycle, but we wouldn't have
-        # PATCHed either; the next cycle catches up. `final=True`
-        # always runs the full path so terminal verdicts pick up the
-        # freshest cross-workflow state.
+        # Fast path: if the swarm-local lease holds, the combined one does
+        # too — skip the comment GET + per-sibling refresh (miss a new row
+        # for one cycle, but we wouldn't have PATCHed; next cycle catches
+        # up). `final=True` always runs the full path.
         prepared_local = _prepare_for_render(raw_entries)
         local_earliest_ms = _earliest_start_ms(prepared_local)
         now_epoch = epoch_now_s(ctx.std)
@@ -1556,33 +1252,25 @@ def _github_status_comments(ctx: FeatureContext):
         if not final and _lease_held(now_epoch, swarm_local_lease_epoch, lease_window_s):
             return
 
-        # Cross-workflow merge — see `_merge_state` for the contract.
-        # Each writer fetches the current comment, refreshes every
-        # sibling workflow's entries directly from that workflow's
-        # artifacts, and overlays its own slot. Writes are
-        # slot-independent so workflow A's PATCH cannot clobber
-        # workflow B's data.
+        # Cross-workflow merge (see `_merge_state`): fetch the comment,
+        # refresh each sibling's entries from its artifacts, overlay our
+        # own slot. Slot-independent writes → no cross-workflow clobber.
         existing_body = _fetch_existing_comment_body(ctx, token)
         if existing_body == None:
             return
         parsed = _parse_state(existing_body)
         cross_workflow_lease_epoch = parsed["last_upsert_epoch_s"] if parsed else 0
 
-        # Propagate the cross-workflow lease epoch into our own stamp so
-        # the next `_publish_self` carries it on our artifact. Sibling
-        # swarm members' `_collect_sibling_entries` then sees the higher
-        # value via `_max_recent_upsert_epoch` and their swarm-local
-        # fast-path above can skip the GET — only the leaseholder ever
-        # pays the cross-workflow GET cost per swarm.
+        # Propagate the cross-workflow epoch into our stamp so the next
+        # `_publish_self` carries it; siblings then see the higher value and
+        # skip their GET — only the leaseholder pays the cross-workflow GET.
         if cross_workflow_lease_epoch > _state.get("_last_pr_comment_upsert_epoch_s", 0):
             _state["_last_pr_comment_upsert_epoch_s"] = cross_workflow_lease_epoch
 
-        # Combined lease check — a sibling workflow may have published
-        # recently even when our own swarm hasn't. Terminal updates
-        # bypass the lease (or the verdict could be frozen on stale
-        # state); the body-diff short-circuit below still gates a
-        # redundant terminal PATCH when our verdict has already been
-        # picked up by a sibling's earlier publish.
+        # Combined lease check — a sibling workflow may have published even
+        # when our swarm hasn't. Terminal bypasses the lease (else the
+        # verdict could freeze on stale state); the body-diff below still
+        # gates a redundant terminal PATCH.
         last_publish_epoch = max(cross_workflow_lease_epoch, swarm_local_lease_epoch)
         if not final and _lease_held(now_epoch, last_publish_epoch, lease_window_s):
             return
@@ -1600,24 +1288,18 @@ def _github_status_comments(ctx: FeatureContext):
         new_state = _merge_state(parsed, head_sha, run_id, workflow_name, raw_entries, refreshed_others)
 
         # Drop exact-duplicate rows before rendering (defense-in-depth;
-        # `_merge_state` already produces unique rows). The persisted
-        # `new_state["entries"]` is untouched.
+        # persisted `new_state["entries"]` untouched).
         prepared = _prepare_for_render(_dedup_for_display(new_state["entries"]))
         sections = _bucket_entries(prepared)
 
-        # Earliest start across all sibling tasks (own + cross-workflow)
-        # — formatted as the body's headline timestamp. Pinned to the
-        # run's wall-clock start so it doesn't wobble across PATCHes.
+        # Earliest start across all siblings, pinned so it doesn't wobble.
         earliest_ms = _earliest_start_ms(prepared)
         started_at = format_run_date(ctx, earliest_ms)
 
-        # Two renders: `stable_body` zeros out `last_updated_at`,
-        # `api_usage`, and the lease epoch so the unchanged-content
-        # short-circuit fires when no task state changed. `final_body`
-        # carries the live timestamp + quota footer + lease-stamped
-        # state block. The state block's `entries` and `workflow_runs`
-        # are in the diff so a new sibling-workflow row still
-        # invalidates the cache.
+        # Two renders: `stable_body` zeros timestamp/usage/epoch so the
+        # unchanged-content short-circuit fires when no state changed;
+        # `final_body` carries live values. The state block's entries +
+        # workflow_runs are in the diff so a new sibling row invalidates it.
         stable_state = dict(new_state)
         stable_state["last_upsert_epoch_s"] = 0
         stable_body = _render_body(
@@ -1647,21 +1329,18 @@ def _github_status_comments(ctx: FeatureContext):
             state = final_state,
         )
         if not _upsert_comment(ctx, token, final_body):
-            # Skip stamping the lease — the swarm should retry rather
-            # than honor a stale lease behind a broken publisher.
+            # Skip stamping — the swarm should retry, not honor a stale
+            # lease behind a broken publisher.
             return
         _state["_last_stable_body"] = stable_body
 
-        # Siblings see this epoch on our next `_publish_self` upload
-        # (one outer cycle ≈ 10s later). Cross-workflow siblings see it
-        # immediately via the state block we just PATCHed.
+        # Swarm siblings see this on our next `_publish_self` (~1 cycle
+        # later); cross-workflow siblings see it now via the state block.
         _state["_last_pr_comment_upsert_epoch_s"] = now_epoch
 
     def _init(ctx):
-        # One-time init on the first task_update. Caches task identity from
-        # TaskContext so the FeatureContext-level closure can build the artifact
-        # name without reaching for ctx.task (which doesn't exist on
-        # FeatureContext), then authenticates so `_publish` has a token.
+        # One-time init on first task_update: cache task identity (FeatureContext
+        # has no ctx.task) for the artifact name, then authenticate for `_publish`.
         _state["_task_name"] = ctx.task.name
         _state["_task_key"] = ctx.task.key
 
@@ -1677,8 +1356,7 @@ def _github_status_comments(ctx: FeatureContext):
             _reason = auth_reason,
         )
         if not token:
-            # `_publish` no-ops without `_github_token`, so leaving it unset
-            # disables this surface for the rest of the task.
+            # `_publish` no-ops without `_github_token`, disabling this surface.
             _LOG.warn(ctx.std, "Authentication failed for %s/%s — %s" % (
                 owner,
                 repo,
@@ -1687,8 +1365,7 @@ def _github_status_comments(ctx: FeatureContext):
             return
         _state["_github_token"] = token
 
-        # Re-resolve with the just-minted App token; cache-hits if a
-        # sibling feature already resolved.
+        # Re-resolve with the App token; cache-hits if a sibling already did.
         upgraded = resolve_build_url(ctx, existing_app_token = token)
         if upgraded:
             _state["_ci_link_url"] = upgraded
@@ -1700,29 +1377,21 @@ def _github_status_comments(ctx: FeatureContext):
 
         _state["_status"] = update.status
 
-        # Latch the producer-supplied progress record. Mirrors the BK /
-        # GHSC body trick of overwriting only when the producer set a
-        # value, so a quiet-tick TaskUpdate (empty record) doesn't wipe
-        # the prior in-flight text.
+        # Latch progress only when set, so a quiet-tick (empty) update
+        # doesn't wipe the prior in-flight text.
         if update.progress.body or update.progress.stream:
             _state["_progress_styles"] = update.progress
 
-        # Latch the phase we were in when the task first transitioned
-        # to failing/failed. ctx.task.current_phase() auto-clears on
-        # terminal failure, so we have to capture it before the
-        # transition completes.
+        # Latch the phase at the first failing/failed transition —
+        # current_phase() auto-clears on terminal failure.
         if update.status in ("failing", "failed") and not _state.get("_failed_in_phase"):
             cur = ctx.task.current_phase()
             _state["_failed_in_phase"] = cur.name if cur else ""
 
-        # Capture data on every update kind we know how to render —
-        # not just bazel_results. The lint/format/gazelle/delivery
-        # results dicts all extend `init_data()` (they layer their
-        # kind-specific keys onto the same `data["bazel"]` skeleton),
-        # so `resolve_aspect_url` and `_results_subset` work
-        # uniformly. Without this, the Aspect Web UI link is missing
-        # from format/lint/gazelle/delivery rows in the PR comment
-        # because the subset-builder never runs for those kinds.
+        # Capture data on every renderable kind, not just bazel_results:
+        # all results dicts extend `init_data()` so `resolve_aspect_url` /
+        # `_results_subset` work uniformly. Else the Aspect link is missing
+        # from format/lint/gazelle/delivery rows.
         if update.kind in (
             "bazel_results",
             "lint_results",
@@ -1732,14 +1401,12 @@ def _github_status_comments(ctx: FeatureContext):
         ):
             data = update.data if update.data else init_data()
 
-            # Aspect Web UI URL — same resolver every other surface uses.
             aspect_url = resolve_aspect_url(
                 {"results_base_url": workflows_results_url(ctx.std)},
                 data,
             )
 
-            # Generic BES results link from `--bes_results_url` + the
-            # Bazel-side invocation_id captured from the BES stream.
+            # Generic BES link from `--bes_results_url` + invocation_id.
             bes_url = render_bes_url(data)
 
             cur = ctx.task.current_phase()
@@ -1756,27 +1423,16 @@ def _github_status_comments(ctx: FeatureContext):
                 start_time_ms = data.get("start_time_ms", 0) or 0,
             )
 
-        # Bypass the throttle on:
-        #   - `update.final` — terminal emits ("Lint complete", "Bazel
-        #     test failed (3 tests failed)", …) always need to land.
-        #     Covers `warning` and `aborted` as well as `passed` /
-        #     `failed`; all four arrive with `final = True`.
-        #   - the *first* `update.priority` event per task — the one
-        #     that flips off the spawn-label placeholder once Bazel
-        #     starts emitting real data. Subsequent priority events
-        #     (phase transitions) are throttled normally; on a chatty
-        #     task with many phases they'd otherwise PATCH the PR
-        #     comment on every boundary and burn through App quota.
-        #     BK annotations honor every priority (no API cost); GHSC
-        #     and this surface honor only the first.
+        # Bypass throttle on `update.final` (all terminal verdicts) and the
+        # *first* priority event (spawn-label flip); later priority events
+        # throttle normally, else a many-phase task burns App quota per
+        # boundary. BK annotations honor every priority (no API cost).
         is_initial = update.priority and not _state.get("_saw_priority", False)
         if update.priority:
             _state["_saw_priority"] = True
         if not (update.final or is_initial):
-            # Outer throttle on candidate-publish events. Task-local
-            # elapsed — per-task BES-tick rate-limiting. The swarm-wide
-            # lease in `_publish` is what actually gates the
-            # App-bucket-burning REST PATCH.
+            # Outer per-task throttle on BES ticks; the swarm-wide lease in
+            # `_publish` is what actually gates the App-bucket PATCH.
             now = monotonic()
             phase_result = should_emit_phase_change(
                 ctx,
@@ -1802,10 +1458,8 @@ def _github_status_comments(ctx: FeatureContext):
 
 # ─── Public test hooks ────────────────────────────────────────────────────────
 #
-# Re-exports of internals so `github_status_comments_test.axl` can drive
-# the renderer without standing up the whole feature machinery. Same
-# pattern as `buildkite_annotations.axl`'s `format_body` / `severity_for`
-# public test hooks.
+# Re-exports of internals so the test can drive the renderer without
+# standing up the feature. Same pattern as `buildkite_annotations.axl`.
 
 def prepare_for_render(entries):
     """Public test hook; see `_prepare_for_render`."""
@@ -1876,11 +1530,8 @@ def results_subset(
         failed_in_phase = "",
         start_time_ms = 0):
     """Public test hook; see `_results_subset`. Defaults match an empty
-    artifact payload so test fixtures can omit the live-state fields.
-    Producer-authored `repro_commands` / `fix_commands` lists on `data`
-    are passed through verbatim — fixtures should populate them via
-    the standard `data["repro_commands"]` / `data["fix_commands"]`
-    fields, not a separate parameter."""
+    payload so fixtures can omit live-state fields. repro/fix commands
+    pass through from `data`, not a separate parameter."""
     return _results_subset(
         data,
         elapsed_ms,

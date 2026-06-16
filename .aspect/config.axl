@@ -50,25 +50,17 @@ _user_task = task(
 buildifier = format.alias(
     defaults = {
         "formatter_target": "@buildifier_prebuilt//buildifier",
-        # Fires only when the format task would otherwise pass zero files
-        # to the formatter (e.g. `--scope=all`, or a `--scope=changed` run
-        # that degraded because no changed files matched). The bare
-        # buildifier binary needs `-r .` to walk the tree on its own. Inert
-        # whenever a file list is passed, so `--scope=changed` (the default)
-        # and per-file invocations are unaffected.
-        #
-        # Caveat: `buildifier -r .` auto-discovers only BUILD, BUILD.bazel,
-        # MODULE.bazel, WORKSPACE, WORKSPACE.bazel, *.bzl, and *.star, so
-        # `--scope=all` silently skips *.axl, *.MODULE.bazel, Tiltfile, and
-        # BUCK files from the `include_patterns` list below. `--scope=changed`
-        # passes the changed file list positionally, so those extensions are
-        # covered there. See
-        # https://docs.aspect.build/cli/tasks/buildifier#run-it-locally for
-        # the user-facing reference.
+        # `-r .` lets the bare buildifier walk the tree; fires only when the
+        # format task would pass zero files (e.g. --scope=all). Inert when a
+        # file list is passed, so --scope=changed and per-file are unaffected.
+        # Caveat: `buildifier -r .` auto-discovers only BUILD(.bazel),
+        # MODULE.bazel, WORKSPACE(.bazel), *.bzl, *.star — so --scope=all skips
+        # *.axl, *.MODULE.bazel, Tiltfile, BUCK from include_patterns below;
+        # --scope=changed passes them positionally so they're covered.
+        # https://docs.aspect.build/cli/tasks/buildifier#run-it-locally
         "formatter_args_for_tree_walk": ["-r", "."],
-        # buildifier_binary is a symlink to the raw Go binary; it does not
-        # switch to $BUILD_WORKING_DIRECTORY on its own, so we run it in
-        # the user's cwd to make relative paths resolve.
+        # Symlink to the raw Go binary, doesn't cd to $BUILD_WORKING_DIRECTORY,
+        # so run in the user's cwd for relative paths to resolve.
         "run_in": "cwd",
         "include_patterns": [
             "**/BUCK",
@@ -88,14 +80,9 @@ buildifier = format.alias(
 )
 
 def _buildifier_repro_fix(ctx: TaskContext, info: ReproFixInfo) -> ReproFixSuggestion:
-    """Rewrite buildifier `aspect ...` suggestions to `bazel ...`.
-
-    Our `tools/bazel` wrapper routes verbs to the Aspect CLI, so
-    `bazel buildifier ...` and `aspect buildifier ...` are
-    interchangeable in this workspace. Suggest the wrapper form so
-    new contributors copy-paste a command that uses the checked-in
-    Bazel version. Buildifier-only — leaves other tasks untouched.
-    """
+    """Rewrite buildifier `aspect ...` suggestions to `bazel ...`. The
+    `tools/bazel` wrapper makes them interchangeable here; suggest the wrapper
+    form so contributors use the checked-in Bazel. Buildifier-only."""
     if info.task_name != "buildifier":
         return REPRO_FIX_ACCEPT
     return repro_fix_replace(
@@ -103,14 +90,9 @@ def _buildifier_repro_fix(ctx: TaskContext, info: ReproFixInfo) -> ReproFixSugge
     )
 
 def _shorten_delivery_local_preview(ctx: TaskContext, info: ReproFixInfo) -> ReproFixSuggestion:
-    """Shorten the delivery local-preview description.
-
-    The built-in description for `delivery-repro-local-preview` switches
-    between two sentences depending on `--mode`; the longer "CI ran
-    --mode=<X>; ..." form fires on every aspect-cli CI run and adds
-    little value over the canonical short form. Force the short form
-    everywhere so the suggestion renders identically across runs.
-    """
+    """Force the short `delivery-repro-local-preview` description everywhere so
+    it renders identically across runs (the built-in --mode-dependent long form
+    adds little value)."""
     if info.slug != "delivery-repro-local-preview":
         return REPRO_FIX_ACCEPT
     return repro_fix_replace(
@@ -120,18 +102,11 @@ def _shorten_delivery_local_preview(ctx: TaskContext, info: ReproFixInfo) -> Rep
 def _customize_message(s: str, a: str) -> str:
     return s + a
 
-# Example: a custom `suggestion` tip that points at the CI build page, plus
-# the Aspect Web UI invocation page and BES results when the task ran Bazel
-# on an Aspect Workflows runner. Registered in `config(ctx)` below via
-# `lifecycle.task_update.append(_links_task_update)`, it reads the links off
-# each `TaskUpdate` the way the built-in surfaces do and surfaces whichever
-# it knows, one link per line. Every task has a CI link; the Web UI / BES
-# links appear for any task that invokes Bazel. Links can resolve across
-# separate updates; each emit rebuilds the full body and re-adds the tip
-# under the same id, so last-emit-wins overwrites in place and it grows as
-# links appear. No tip when none are known — there's nothing to click
-# through to. `surfaces = TASK_SCREENS` keeps it off the cross-task PR
-# summary, where per-invocation links don't belong.
+# Example custom `suggestion` tip: CI build page + (for Bazel-on-Workflows
+# tasks) Web UI invocation + BES results, one link per line. Registered below
+# via lifecycle.task_update.append. Each emit rebuilds the body and re-adds the
+# tip under the same id (last-emit-wins, grows as links resolve); no tip when
+# none known. surfaces=TASK_SCREENS keeps it off the cross-task PR summary.
 def _links_task_update(ctx: TaskContext, update: TaskUpdate) -> None:
     lines = []
     aspect_url = aspect_web_ui_url(ctx.std.env, update.data)
@@ -158,15 +133,9 @@ def _links_task_update(ctx: TaskContext, update: TaskUpdate) -> None:
     )
 
 def _runfiles_path(entry, suffix):
-    """Resolve `<runfiles_workspace_dir>/<package>/<target_name><suffix>`
-    for a local-label delivery target — the canonical path inside the
-    runfiles tree where files declared via `data = [...]` live.
-
-    Returns None when the entry has no runfiles tree (e.g. an early-exit
-    failure before runfiles materialized) or when the label isn't local.
-    `@repo//...` deliverables need a different workspace path derived
-    from the repo name and aren't handled here.
-    """
+    """Resolve `<runfiles_workspace_dir>/<package>/<target_name><suffix>` for a
+    local-label delivery target (where `data = [...]` files live). None when no
+    runfiles tree or non-local label (`@repo//...` needs a repo-derived path)."""
     rwd = entry.get("runfiles_workspace_dir")
     if not rwd:
         return None
@@ -178,13 +147,10 @@ def _runfiles_path(entry, suffix):
         return "{}/{}/{}{}".format(rwd, package, target_name, suffix)
     return "{}/{}{}".format(rwd, target_name, suffix)
 
-# Jinja2 template for the YAML side-artifact: just the images that
-# delivered successfully along with the digest + layer-path the
-# per-target enrichment attached. Entries without an `image_digest`
-# in `custom` (non-OCI deliverables, dry-run paths, failed deliveries)
-# are filtered out so the YAML stays focused on the OCI subset.
-# `is defined` guards keep minijinja's strict-undefined check happy
-# on entries whose `custom` lacks the optional fields.
+# Jinja2 YAML side-artifact: successfully-delivered images + digest/layer-path
+# from per-target enrichment. Entries without `custom.image_digest` (non-OCI,
+# dry-run, failed) are filtered out. `is defined` guards satisfy minijinja's
+# strict-undefined check on entries lacking the optional fields.
 _DELIVERY_IMAGES_YAML = """\
 images:
 {% for d in deliveries %}{% if d.outcome == "ok" and d.custom.image_digest is defined %}
@@ -198,11 +164,9 @@ def config(ctx: ConfigContext):
     # assert we can call a lambda with a global bind from another module in a config script
     lambda_with_global_bind()("assert")
 
-    # Dogfood the telemetry.exporters API: when our GitHub Actions workflow
-    # injects DASH0_ENDPOINT / DASH0_TOKEN, ship aspect-cli's own traces and
-    # logs to Dash0 so the team can see real instrumentation data from CI
-    # runs. No-op outside of CI (both vars must be set). Auth is a Bearer
-    # header on the OTLP request — Dash0's standard ingestion path.
+    # Dogfood telemetry.exporters: when DASH0_ENDPOINT/DASH0_TOKEN are injected
+    # (CI), ship aspect-cli's own traces/logs to Dash0 via OTLP + Bearer auth.
+    # No-op when either var is unset.
     dash0_endpoint = ctx.std.env.var("DASH0_ENDPOINT")
     dash0_token = ctx.std.env.var("DASH0_TOKEN")
     if dash0_endpoint and dash0_token:
@@ -227,13 +191,9 @@ def config(ctx: ConfigContext):
     ctx.tasks["build"].args.targets = ["//...", "-//exclude/..."]
     ctx.tasks["test"].args.targets = ["//...", "-//exclude/..."]
 
-    # Enable artifact uploads for testlogs, profile, and BEP. All four channels
-    # default to off so operators opt in per repo. The compact execution log stays
-    # off because on-disk redaction isn't implemented yet — re-enable once Bazel's
-    # zstd execlog passes through the same redactor as the BEP stream.
-    #
-    # upload_test_logs="failed" — the logs from passing tests are noise;
-    # failing/flaky tests' logs are the ones anyone would actually open.
+    # Enable artifact uploads (default off, opt-in per repo). Compact execlog
+    # stays off until on-disk redaction lands (zstd execlog must pass through
+    # the same redactor as the BEP stream). "failed" — passing-test logs are noise.
     ctx.features[ArtifactUpload].args.upload_test_logs = "failed"
     ctx.features[ArtifactUpload].args.upload_profile = True
     ctx.features[ArtifactUpload].args.upload_bep = True
@@ -242,30 +202,22 @@ def config(ctx: ConfigContext):
     ctx.features[CircleCITestResults].args.upload_test_results = "all"
     ctx.features[CircleCITestResults].args.cached_as_skipped = True
 
-    # Silence tips — was `ctx.traits[TipsTrait].silenced_tips = [...]`
-    # before the tips refactor; now done via the Tips feature's args.
-    # Example: ctx.features["tips"].args.silence.append("some-tip-id")
-    # (Left empty — append ids here to suppress specific tips.)
+    # Silence tips via the Tips feature args (append ids to suppress):
+    # ctx.features["tips"].args.silence.append("some-tip-id")
 
-    # Add a new task
     ctx.tasks.add(_user_task)
-
-    # Register the buildifier alias as a real CLI command.
     ctx.tasks.add(buildifier)
 
-    # Customize repro/fix suggestions; see the hook docstrings for the
-    # rationale. Order matters: rewrite first (turns `aspect buildifier`
-    # into `bazel buildifier`), then drop vanilla-bazel alternates so the
-    # buildifier rewrite has nothing to undo on already-renamed entries.
+    # Customize repro/fix suggestions; order matters — rewrite first (aspect →
+    # bazel buildifier), then drop vanilla-bazel alternates.
     lifecycle = ctx.traits[TaskLifecycleTrait]
     lifecycle.repro_fix_suggestion.append(_buildifier_repro_fix)
     lifecycle.repro_fix_suggestion.append(_shorten_delivery_local_preview)
 
-    # Subscribe to task_update so the click-through-links tip is offered on
-    # whatever task ends up running. See `_links_task_update` above.
+    # Offer the click-through-links tip on whatever task runs.
     lifecycle.task_update.append(_links_task_update)
 
-    # Announce the resolved Bazel version on every task that supports it.
+    # Announce the resolved Bazel version on every supporting task.
     ctx.tasks["build"].args.announce_bazel_version = "true"
     ctx.tasks["buildifier"].args.announce_bazel_version = "true"
     ctx.tasks["format"].args.announce_bazel_version = "true"
@@ -273,7 +225,7 @@ def config(ctx: ConfigContext):
     ctx.tasks["lint"].args.announce_bazel_version = "true"
     ctx.tasks["test"].args.announce_bazel_version = "true"
 
-    # Announce the spawned Bazel command on every task that supports it.
+    # Announce the spawned Bazel command on every supporting task.
     ctx.tasks["build"].args.announce_bazel_command = "true"
     ctx.tasks["buildifier"].args.announce_bazel_command = "true"
     ctx.tasks["format"].args.announce_bazel_command = "true"
@@ -281,107 +233,84 @@ def config(ctx: ConfigContext):
     ctx.tasks["lint"].args.announce_bazel_command = "true"
     ctx.tasks["test"].args.announce_bazel_command = "true"
 
-    # Template snapshot tests — renders bazel_results templates across failure modes.
+    # bazel_results template snapshots across failure modes.
     # Run with: aspect test-template-snapshots
     ctx.tasks.add(template_snapshot_tests)
 
-    # Bazel results unit tests — compute_invocation_state, conclusion,
-    # and skipped-bucket plumbing.
+    # Bazel results unit: compute_invocation_state, conclusion, skipped buckets.
     # Run with: aspect dev test-bazel-results
     ctx.tasks.add(bazel_results_unit_tests)
 
-    # GitLab HTTP client smoke tests — pure-fn URL helpers + input
-    # validation on the network-touching surfaces.
+    # GitLab HTTP client smoke: URL helpers + input validation.
     # Run with: aspect dev test-gitlab-client
     ctx.tasks.add(gitlab_client_tests)
 
-    # GitLab MR detection smoke — env-var detection across CI hosts.
+    # GitLab MR detection smoke: env-var detection across CI hosts.
     # Run with: aspect dev test-gitlab-detect
     ctx.tasks.add(gitlab_detect_tests)
 
-    # GitLab features unit tests — state mapping + description
-    # truncation + marker shape for GitlabCommitStatuses /
-    # GitlabStatusComments.
+    # GitLab features unit: state mapping + description truncation + marker shape.
     # Run with: aspect dev test-gitlab-features
     ctx.tasks.add(gitlab_features_tests)
 
-    # GitHub event detection smoke — pull_request / merge_group / push
-    # event shapes drive change-detection routing in detect_changed_files.
+    # GitHub event detection smoke: PR/merge_group/push shapes for detect_changed_files.
     # Run with: aspect dev test-github-detect
     ctx.tasks.add(github_detect_tests)
 
-    # Lint template snapshot tests — renders lint_results templates.
+    # lint_results template snapshots.
     # Run with: aspect dev test-lint-template-snapshots
     ctx.tasks.add(lint_template_snapshot_tests)
 
-    # Tips framework primitives — add_tip / collect_tips_sorted,
-    # severity helpers, blockquote_body, task_keys glob filtering,
-    # silenced_tips short-circuit, and built-in tip shape.
+    # Tips primitives: add_tip/collect_tips_sorted, severity, glob filter, silence.
     # Run with: aspect dev test-tips
     ctx.tasks.add(tips_tests)
 
-    # bsdtar platform-key mapping — supported (darwin/linux × amd64/arm64)
-    # and unsupported host inputs.
+    # bsdtar platform-key mapping (supported + unsupported hosts).
     # Run with: aspect dev test-tar
     ctx.tasks.add(tar_tests)
 
-    # CircleCI artifact-upload S3 error parsing — turns an expired-credential
-    # 400 into a legible reason instead of an opaque "curl exit 22".
+    # CircleCI S3 error parsing: expired-credential 400 → legible reason.
     # Run with: aspect dev test-circleci
     ctx.tasks.add(circleci_tests)
 
-    # Cross-CI URL helpers (lib/ci.axl) — host detection, env-only build
-    # URL resolution, the per-job cache short-circuit, and the off-GHA
-    # resolve_build_url delegation.
+    # Cross-CI URL helpers (lib/ci.axl): host detection, build URL, per-job cache.
     # Run with: aspect dev test-ci
     ctx.tasks.add(ci_tests)
 
-    # `@aspect//helpers.axl` public facade — re-exports resolve to the
-    # real helpers a config.axl hook loads.
+    # @aspect//helpers.axl facade: re-exports resolve to the real helpers.
     # Run with: aspect dev test-helpers
     ctx.tasks.add(helpers_facade_tests)
 
-    # Runner-side mitigations for bazelbuild/bazel#23880 and persistent
-    # server-internal failures — detect-and-repair + signal-instance-unhealthy
-    # policy for the bazel_attempt_end / build_end hooks the Workflows
-    # feature registers.
+    # Runner-side mitigations for bazelbuild/bazel#23880 + server-internal
+    # failures: detect-repair + signal-unhealthy on bazel_attempt_end/build_end.
     # Run with: aspect dev test-sandbox-recovery
     ctx.tasks.add(sandbox_recovery_tests)
 
-    # Dummy RE v2 executor used by `aspect delivery` phase 2 when the user has
-    # a --remote_cache but no real --remote_executor — binds a loopback server
-    # and reports a grpc:// URI for --remote_executor.
+    # Dummy RE v2 executor for `aspect delivery` phase 2 (remote_cache, no
+    # remote_executor): loopback server reporting a grpc:// URI.
     # Run with: aspect dev test-remote-executor
     ctx.tasks.add(remote_executor_tests)
 
-    # canonical_label normalization — local labels, external labels, and bzlmod
-    # canonical @@module+version//... → @module//... conversion.
+    # canonical_label normalization (local/external/bzlmod @@module+version → @module).
     # Run with: aspect dev test-runnable
     ctx.tasks.add(runnable_tests)
 
-    # Repro-command filtering — `explicit_flags` skips flags whose
-    # values match the task's default (including alias-overridden
-    # defaults and config.axl overrides).
+    # Repro-command filtering: explicit_flags skips defaults (incl. alias/config overrides).
     # Run with: aspect dev test-repro-commands
     ctx.tasks.add(repro_commands_tests)
 
-    # Adaptive rate-limit throttling — observations / burn-rate
-    # inference / threshold ladder / tip firing / two-bucket
-    # independence / `prefer_app_when_env_critical` rebalancing /
-    # `seed_from_rate_limit_body` + watermark badge rendering.
+    # Adaptive rate-limit throttling: burn-rate, threshold ladder, two-bucket
+    # independence, prefer_app_when_env_critical, watermark badge.
     # Run with: aspect dev test-rate-limit
     ctx.tasks.add(rate_limit_tests)
 
-    # Runner job history — exercises the silent-no-op + dedup behavior
-    # of `append_runner_job_history`. Scenario list lives in the test
-    # file's module docstring.
+    # Runner job history: append_runner_job_history silent-no-op + dedup
+    # (scenarios in the test file's module docstring).
     # Run with: aspect dev test-runner-job-history
     ctx.tasks.add(runner_job_history_tests)
 
-    # Bazel health check ordering — locks in the contract that
-    # ctx.bazel.startup_flags must contain --output_base before the
-    # health check runs on a Workflows runner. Catches regressions of
-    # the silent "wrong server" bug.
+    # Bazel health check ordering: startup_flags must contain --output_base
+    # before the check runs (catches the silent "wrong server" bug).
     # Run with: aspect dev test-health-check-ready
     ctx.tasks.add(health_check_ready_tests)
 
@@ -389,21 +318,19 @@ def config(ctx: ConfigContext):
     # Run with: aspect dev test-bazel-flags
     ctx.tasks.add(bazel_flags_tests)
 
-    # bazel_runner.axl dispatch helpers — the seam every bazel-driving task
-    # uses to fire `bazel_trait.bazel_attempt_end` and `build_end` hooks.
+    # bazel_runner.axl dispatch helpers: the bazel_attempt_end/build_end seam.
     # Run with: aspect dev test-bazel-runner
     ctx.tasks.add(bazel_runner_tests)
 
-    # Delivery template snapshot tests — renders delivery_results templates.
+    # delivery_results template snapshots.
     # Run with: aspect dev test-delivery-template-snapshots
     ctx.tasks.add(delivery_template_snapshot_tests)
 
-    # Delivery results unit tests — init_data / add_result / build_manifest
-    # schema-shape assertions.
+    # Delivery results unit: init_data/add_result/build_manifest schema shape.
     # Run with: aspect dev test-delivery-results
     ctx.tasks.add(delivery_results_unit_tests)
 
-    # Format template snapshot tests — renders format_results templates.
+    # format_results template snapshots.
     # Run with: aspect dev test-format-template-snapshots
     ctx.tasks.add(format_template_snapshot_tests)
 
@@ -411,59 +338,45 @@ def config(ctx: ConfigContext):
     # Run with: aspect dev test-format-spawn
     ctx.tasks.add(format_spawn_tests)
 
-    # Gazelle template snapshot tests — renders gazelle_results templates.
+    # gazelle_results template snapshots.
     # Run with: aspect dev test-gazelle-template-snapshots
     ctx.tasks.add(gazelle_template_snapshot_tests)
 
-    # Buildkite annotations — snapshots the body that would be passed to
-    # `buildkite-agent annotate` for each task kind and status combo.
+    # Buildkite annotations: snapshots the annotate body per kind × status.
     # Run with: aspect dev test-bk-annotation-snapshots
     ctx.tasks.add(bk_annotation_snapshot_tests)
 
-    # GitHub PR comment — snapshots the aggregate-status PR comment
-    # body across mixed task kinds, statuses, link availability, and
-    # phase / progress shapes.
+    # GitHub PR comment: aggregate-status body across kinds/statuses/links/phases.
     # Run with: aspect dev test-pr-comment-snapshots
     ctx.tasks.add(pr_comment_snapshot_tests)
 
-    # Pins the lint task's PR auto-detect contract for routing findings
-    # between check-run annotations and PR-review comments.
+    # Lint PR auto-detect: routing findings between annotations and review comments.
     # Run with: aspect dev test-lint-annotation-plan
     ctx.tasks.add(lint_annotation_plan_tests)
 
-    # Pins the lint-data → per-linter row builder consumed by both the
-    # rendered chart and the section header count, so the "Linters (N)"
-    # label always matches the rows beneath it.
+    # Per-linter row builder: keeps "Linters (N)" matching the rows beneath it.
     # Run with: aspect dev test-lint-linter-rows
     ctx.tasks.add(linter_rows_tests)
 
-    # Pins the BES filename shape that the zero-aspect safeguard keys
-    # off — must match `.AspectRulesLint<Tool>.<known_ext>` exactly so
-    # unrelated outputs can't bypass the "no lint aspect ran" check.
+    # Pins the BES filename shape (`.AspectRulesLint<Tool>.<known_ext>`) the
+    # zero-aspect safeguard keys off so unrelated outputs can't bypass the check.
     # Run with: aspect dev test-lint-detect-tool
     ctx.tasks.add(detect_lint_tool_tests)
 
     # Run with: aspect dev test-lint-comments
     ctx.tasks.add(lint_comments_tests)
 
-    # GitLab-specific lint-comment helpers: position translation, suggestion
-    # rendering, and marker-based discussion dedup.
+    # GitLab lint-comment helpers: position translation, suggestions, marker dedup.
     # Run with: aspect dev test-gitlab-lint-comments
     ctx.tasks.add(gitlab_lint_comments_tests)
 
-    # Inject a mix of secret-ish and safe Bazel flags on every task so the
-    # status-check redaction path is exercised live against a real BES stream.
-    # In the rendered "Command line options" the check run should show:
-    #   DUMMY_API_TOKEN / DUMMY_DB_PASSWORD → `<REDACTED>` (not allowlisted)
-    #   DUMMY_BUILD_MODE_ON / DUMMY_FEATURE → kept as `1` / `true` (safe values)
-    #   GIT_URL                              → URL kept, user:password stripped
-    #
-    # Also inject TAGS / TAG_* / ASPECT_WORKFLOWS_LINKS build_metadata so the
-    # summary-row renderers for tags and custom links are exercised live:
-    #   TAGS                    → "dev · local · axl-testing"     (row 6)
-    #   TAG_ENV                 → "ENV=dev"                         (row 6)
-    #   TAG_COMPONENT           → "COMPONENT=aspect-cli"            (row 6)
-    #   ASPECT_WORKFLOWS_LINKS  → "[Runbook](…) · [Dashboard](…)"  (row 7)
+    # Inject secret-ish + safe flags on every task to exercise the status-check
+    # redaction path live. Expected in "Command line options":
+    #   DUMMY_API_TOKEN / DUMMY_DB_PASSWORD → <REDACTED> (not allowlisted)
+    #   DUMMY_BUILD_MODE_ON / DUMMY_FEATURE → kept (safe values)
+    #   GIT_URL                             → URL kept, user:password stripped
+    # Plus TAGS / TAG_* / ASPECT_WORKFLOWS_LINKS build_metadata to exercise the
+    # tag (row 6) and custom-link (row 7) summary-row renderers.
     ctx.traits[BazelTrait].extra_flags.extend([
         "--client_env=DUMMY_API_TOKEN=super-secret-token-do-not-print",
         "--action_env=DUMMY_DB_PASSWORD=hunter2",
@@ -482,29 +395,24 @@ def config(ctx: ConfigContext):
     t.args.run_count = 2
     t.args.customize_message = lambda s: _customize_message(s, "!")
 
-    # Dogfood the delivery manifest hooks so the live aspect-cli delivery
-    # runs exercise the enrichment + final-hook paths in CI. The example
-    # //examples/deliverable:deliverable_with_digest target mirrors the
-    # rules_oci push rule shape — an executable + a sibling `.digest`
-    # (reachable via runfiles) + a sibling `.layer` (in default outputs
-    # only). The hook below demonstrates both lookup styles.
+    # Dogfood the delivery manifest hooks (enrichment + final-hook paths) in CI.
+    # The example //examples/deliverable:deliverable_with_digest mirrors the
+    # rules_oci push shape — executable + sibling `.digest` (in runfiles) +
+    # sibling `.layer` (default outputs only); the hook shows both lookup styles.
     def _on_delivery_target(entry):
         if entry["outcome"] != "ok":
             return None
         extras = {}
 
-        # Pattern 1 — read a sibling default output that's also in runfiles.
-        # `runfiles_workspace_dir` is the cwd `bazel run` uses; files
-        # declared via `data =` live at `<rwd>/<package>/<filename>`.
-        # (Local labels only; `@repo//...` deliverables need a different
-        # workspace path derived from the repo name.)
+        # Pattern 1: sibling default output that's also in runfiles
+        # (`data =` files live at <runfiles_workspace_dir>/<package>/<filename>;
+        # local labels only — @repo//... needs a repo-derived path).
         digest_path = _runfiles_path(entry, suffix = ".digest")
         if digest_path and ctx.std.fs.exists(digest_path):
             extras["image_digest"] = ctx.std.fs.read_to_string(digest_path).strip()
 
-        # Pattern 2 — read a sibling default output that's NOT in runfiles.
-        # `default_outputs` lists every file BES reported in the target's
-        # default output group; scan it by suffix for the `.layer` blob.
+        # Pattern 2: sibling default output NOT in runfiles — scan
+        # default_outputs (every file BES reported) by suffix for `.layer`.
         for path in entry.get("default_outputs", []):
             if path.endswith(".layer"):
                 extras["layer_path"] = path
@@ -519,10 +427,8 @@ def config(ctx: ConfigContext):
         ))
 
     def _on_upload_manifest(manifest):
-        """Ship two artifacts: the full JSON manifest (default shape, for
-        tooling) and a focused YAML side-artifact listing just the OCI
-        images that delivered successfully and their digests (for humans
-        and the release-notes pipeline)."""
+        """Ship two artifacts: full JSON manifest (tooling) and a YAML
+        side-artifact of successfully-delivered OCI images + digests (humans)."""
         return [
             {
                 "name": "delivery-manifest.json",
@@ -541,19 +447,16 @@ def config(ctx: ConfigContext):
     testing = ctx.std.env.var("ASPECT_CLI_TESTING")
 
     def _detect_sha(env):
-        """Get HEAD sha from git; used to simulate CI env vars for local testing."""
+        """HEAD sha from git, for simulating CI env vars in local testing."""
         if not env.var("_HEAD_SHA"):
             r = ctx.std.process.command("git").args(["rev-parse", "HEAD"]).stdout("piped").stderr("piped").spawn().wait_with_output()
             if r.status.code == 0:
                 env.set_var("_HEAD_SHA", r.stdout.strip())
         return env.var("_HEAD_SHA") or ""
 
-    # github_status_checks: Simulate a GitHub Actions CI environment so that the
-    # GithubStatusChecks feature creates real check runs during local testing.
-    # github.authenticate() uses Aspect CLI login credentials to obtain a GitHub
-    # App token — no GITHUB_TOKEN needed. GITHUB_SHA is auto-detected from git.
-    #
-    # Usage:
+    # github_status_checks: simulate GHA so GithubStatusChecks creates real check
+    # runs locally. github.authenticate() uses Aspect CLI login for a GitHub App
+    # token (no GITHUB_TOKEN); GITHUB_SHA auto-detected from git.
     #   ASPECT_CLI_TESTING=github_status_checks aspect build //...
     if testing == "github_status_checks":
         ctx.std.env.set_var("CI", "true")
@@ -565,7 +468,7 @@ def config(ctx: ConfigContext):
         if not ctx.std.env.var("GITHUB_SHA"):
             ctx.std.env.set_var("GITHUB_SHA", _detect_sha(ctx.std.env))
 
-        # Fake a real GitHub Actions run URL for local testing of CI link rendering.
+        # Fake a GHA run URL for CI-link-rendering tests.
         if not ctx.std.env.var("GITHUB_SERVER_URL"):
             ctx.std.env.set_var("GITHUB_SERVER_URL", "https://github.com")
         if not ctx.std.env.var("GITHUB_REPOSITORY"):
@@ -577,10 +480,7 @@ def config(ctx: ConfigContext):
 
         print("[ASPECT_CLI_TESTING=github_status_checks] Simulating GitHub Actions CI environment")
 
-    # buildkite_status_checks: Simulate a Buildkite CI environment for local
-    # testing of CI link rendering, artifact upload paths, etc.
-    #
-    # Usage:
+    # buildkite_status_checks: simulate Buildkite for CI-link / artifact-upload tests.
     #   ASPECT_CLI_TESTING=buildkite_status_checks aspect build //...
     if testing == "buildkite_status_checks":
         ctx.std.env.set_var("CI", "true")
@@ -593,14 +493,10 @@ def config(ctx: ConfigContext):
         ctx.features[GithubStatusChecks].args.enabled = True
         print("[ASPECT_CLI_TESTING=buildkite_status_checks] Simulating Buildkite CI environment")
 
-    # buildkite_annotations: Simulate a Buildkite CI environment AND enable
-    # the BuildkiteAnnotations feature so `buildkite-agent annotate` is
-    # actually invoked during the task. Requires buildkite-agent on PATH —
-    # the feature probes for it at startup and no-ops if missing.
-    #
-    # Usage:
+    # buildkite_annotations: simulate Buildkite + enable BuildkiteAnnotations so
+    # `buildkite-agent annotate` actually runs. Needs buildkite-agent on PATH
+    # (feature probes at startup, no-ops if missing).
     #   ASPECT_CLI_TESTING=buildkite_annotations aspect build //...
-    #   ASPECT_CLI_TESTING=buildkite_annotations aspect lint //...
     #   ASPECT_CLI_TESTING=buildkite_annotations aspect delivery --commit-sha=$(git rev-parse HEAD) //...
     if testing == "buildkite_annotations":
         ctx.std.env.set_var("CI", "true")
@@ -630,8 +526,8 @@ def config(ctx: ConfigContext):
         ctx.features[GithubStatusChecks].args.enabled = True
         print("[ASPECT_CLI_TESTING=circleci_status_checks] Simulating CircleCI environment")
 
-    # gitlab_status_checks: Simulate a GitLab CI environment (typically mirrored
-    # from GitHub so we post checks back to the upstream GitHub repo).
+    # gitlab_status_checks: simulate GitLab CI (typically mirrored from GitHub,
+    # so we post checks back to the upstream GitHub repo).
     if testing == "gitlab_status_checks":
         ctx.std.env.set_var("CI", "true")
         ctx.std.env.set_var("GITLAB_CI", "true")
@@ -642,10 +538,9 @@ def config(ctx: ConfigContext):
         ctx.std.env.set_var("CI_COMMIT_SHA", _detect_sha(ctx.std.env))
         ctx.std.env.set_var("GITLAB_USER_LOGIN", ctx.std.env.var("USER") or "local-test")
 
-        # Since GitLab mirrors GitHub, point at the upstream GitHub URL. This
-        # single env var drives both status-check posting (GithubStatusChecks
-        # reads it to pick the right owner/repo) and status-check rendering
-        # (build_metadata sets REPO_URL / REPO_OWNER / REPO_NAME / VCS from it).
+        # Point at the upstream GitHub URL (GitLab mirrors it). This one var
+        # drives both status-check posting (GithubStatusChecks picks owner/repo)
+        # and rendering (build_metadata sets REPO_URL/REPO_OWNER/REPO_NAME/VCS).
         if not ctx.std.env.var("ASPECT_VCS_URL"):
             ctx.std.env.set_var("ASPECT_VCS_URL", "https://github.com/aspect-build/aspect-cli")
         ctx.features[GithubStatusChecks].args.enabled = True

@@ -109,9 +109,7 @@ def _test_empty_pairs_list_returns_empty(ctx):
     ))
     _eq("empty pairs → empty list", explicit_flags(fake, []), [])
 
-# ---------------------------------------------------------------------------
 # subdir_prefix
-# ---------------------------------------------------------------------------
 
 def _test_subdir_prefix_at_root(_ctx):
     _eq("cwd == root → no prefix", subdir_prefix("/repo", "/repo"), "")
@@ -139,9 +137,7 @@ def _test_subdir_prefix_simple_path_unquoted(_ctx):
     """Simple paths must not be wrapped in quotes — they stay copy-paste clean."""
     _eq("simple path → no quotes", subdir_prefix("/repo/e2e/runner", "/repo"), "cd e2e/runner\n")
 
-# ---------------------------------------------------------------------------
 # repro_prefix — uses a struct-based fake ctx
-# ---------------------------------------------------------------------------
 
 def _fake_env(cwd, git_root, aspect_root = None):
     """Build a minimal ctx.std.env struct for repro_prefix tests."""
@@ -172,7 +168,6 @@ def _test_repro_prefix_no_git_root_at_aspect_root(_ctx):
     _eq("at aspect_root, no git → empty", repro_prefix(fake), "")
 
 # has_tools_bazel_wrapper — env-first, file-marker fallback
-# ---------------------------------------------------------------------------
 
 def _fake_wrapper_ctx(env_var = None, bazel_root = "/repo", files = None):
     """Build a minimal ctx for has_tools_bazel_wrapper tests.
@@ -261,9 +256,7 @@ def _test_wrapper_empty_file(_ctx):
     )
     _eq("empty file → False", has_tools_bazel_wrapper(fake), False)
 
-# ---------------------------------------------------------------------------
 # rehydrate_commands — JSON round-trip recovery for repro/fix lists
-# ---------------------------------------------------------------------------
 
 def _test_rehydrate_dicts_become_records(_ctx):
     out = rehydrate_commands([
@@ -420,9 +413,7 @@ def _test_bazel_run_truncates_long_arg_list(_ctx):
     if included_count == 0 or included_count >= 20:
         fail("bazel run truncation: expected partial inclusion (some included, some omitted); included %d/20" % included_count)
 
-# ---------------------------------------------------------------------------
 # Flag truncation — list-valued flags are length-bounded; scalars survive
-# ---------------------------------------------------------------------------
 
 def _test_flags_all_fit_render_verbatim(_ctx):
     """When everything fits, no reorder and no truncation: scalars and a
@@ -591,9 +582,7 @@ def _test_overflow_comments_never_carry_continuation(_ctx):
         if "# +" not in got:
             fail("%s: expected an overflow marker — test isn't exercising truncation:\n%s" % (label, got))
 
-# ---------------------------------------------------------------------------
 # apply_repro_fix_hooks — user customization hook
-# ---------------------------------------------------------------------------
 
 def _fake_apply_ctx():
     """Build a fake `ctx` with the fields `apply_repro_fix_hooks` reads —
@@ -930,9 +919,7 @@ def _test_slug_visible_after_replace_in_chain(_ctx):
     )
     _eq("downstream hook sees inherited slug", later_saw, ["lint-repro"])
 
-# ---------------------------------------------------------------------------
 # ReproFixCommand record + verdict helpers
-# ---------------------------------------------------------------------------
 
 def _test_repro_fix_command_description_defaults_to_empty(_ctx):
     """`description` is optional on `ReproFixCommand` and defaults to ""."""
@@ -966,9 +953,7 @@ def _test_repro_fix_replace_factory(_ctx):
     _eq("both: command set", v3.command, "x")
     _eq("both: description set", v3.description, "y")
 
-# ---------------------------------------------------------------------------
 # Idempotence — apply_repro_fix_hooks is safe to call repeatedly
-# ---------------------------------------------------------------------------
 
 def _test_post_hook_entries_carry_hooked_flag(_ctx):
     """After `apply_repro_fix_hooks` runs, surviving entries have
@@ -1030,9 +1015,7 @@ def _test_mixed_new_and_hooked_entries(_ctx):
     _eq("second pass saw only the new entry", seen[len(seen_first):], ["added-later"])
     _eq("new entry now marked hooked", data["repro_commands"][-1]._hooked, True)
 
-# ---------------------------------------------------------------------------
 # dispatch_task_update — framework choke point
-# ---------------------------------------------------------------------------
 
 def _test_dispatch_hooks_then_fans_out(_ctx):
     """`dispatch_task_update` runs un-hooked repro/fix entries through

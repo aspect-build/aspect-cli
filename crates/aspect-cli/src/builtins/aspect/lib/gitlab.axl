@@ -1,19 +1,13 @@
 """GitLab API client library.
 
-Mirrors the shape of `lib/github.axl` so the per-VCS feature modules can
-call into the right backend with the same call-site ergonomics.
+Mirrors `lib/github.axl` so per-VCS feature modules share call-site
+ergonomics. Callers pass a `token` (PAT, group/project access token, or
+OAuth bearer); `auth_kind` picks the header convention:
 
-Auth is intentionally not implemented here: callers pass a `token` they
-obtained however they like (PAT, group/project access token, OAuth bearer
-from the Aspect GitLab App). The `auth_kind` argument toggles between the
-two GitLab header conventions:
-
-  * `"private_token"` (default) → `PRIVATE-TOKEN: <token>`
-    Works for personal access tokens, group access tokens, and project
-    access tokens — the primary surface MVP customers will use.
-  * `"bearer"`                  → `Authorization: Bearer <token>`
-    For OAuth/Application tokens (e.g. the Aspect GitLab App once
-    ENG-1650 lands).
+  * `"private_token"` (default) → `PRIVATE-TOKEN: <token>` (PATs, group/
+    project access tokens).
+  * `"bearer"`                  → `Authorization: Bearer <token>` (OAuth/
+    Application tokens, e.g. the Aspect GitLab App once ENG-1650 lands).
 """
 
 DEFAULT_GITLAB_API = "https://gitlab.com/api/v4"
@@ -58,8 +52,7 @@ def _do_request(ctx, method, url, token, auth_kind = "private_token", payload = 
     if not body:
         return (success, response.status, body)
 
-    # 5xx commonly comes back as HTML/text from edge proxies; don't try
-    # to decode. Surface a transport-style snippet instead.
+    # 5xx is often HTML/text from edge proxies; don't JSON-decode.
     if response.status >= 500:
         snippet = body[:200].replace("\n", " ")
         return (False, response.status, "upstream error (status %d): %s" % (response.status, snippet))
@@ -73,11 +66,8 @@ def _do_request(ctx, method, url, token, auth_kind = "private_token", payload = 
 
 # URL-encoding helpers
 
-# Characters reserved in GitLab project paths that must be percent-
-# encoded when the path appears inside a URL path segment (the `:id`
-# slot). Group/project slugs are restricted to letters/digits/`._-`
-# plus `/` as the group separator, so this short table covers every
-# real case.
+# Percent-encoding for the `:id` URL slot. Slugs are limited to
+# letters/digits/`._-` plus `/`, so this short table covers every case.
 _PERCENT_ENCODE = {
     "/": "%2F",
     " ": "%20",
@@ -92,11 +82,9 @@ _PERCENT_ENCODE = {
 def encode_project_path(path):
     """Percent-encode a GitLab project path for use as `:id` in URLs.
 
-    GitLab accepts either the numeric project ID or the URL-encoded
-    full path (e.g. `mygroup%2Fmyproject`). Callers usually start with
-    `CI_PROJECT_PATH`, which is the slash form, so this is the path
-    they'll hit most — but numeric IDs (e.g. from `CI_PROJECT_ID`) are
-    coerced to string so they round-trip unchanged.
+    GitLab accepts the numeric ID or the URL-encoded full path
+    (`mygroup%2Fmyproject`). Numeric IDs are coerced to string so they
+    round-trip unchanged.
     """
     path = str(path)
     out = ""
@@ -161,12 +149,10 @@ def _commit_status_skipped(ctx, token, project, sha, name, **kwargs):
     return _commit_status_post(ctx, token, project, sha, "skipped", name, **kwargs)
 
 # External Status Checks API (Premium/Ultimate tier)
+# https://docs.gitlab.com/ee/api/status_checks.html
 #
-# Reference: https://docs.gitlab.com/ee/api/status_checks.html
-#
-# Premium customers register an External Status Check on the project;
+# Admin registers the check on the project (one-time, not managed here);
 # pipelines respond against `(mr_iid, sha, external_status_check_id)`.
-# We don't manage registration here — that's a one-time admin action.
 
 def _external_status_check_respond(ctx, token, project, mr_iid, sha, external_status_check_id, status, api_base = DEFAULT_GITLAB_API, auth_kind = "private_token"):
     """Set the response for a registered External Status Check.
@@ -201,8 +187,7 @@ def _external_status_check_list(ctx, token, project, mr_iid, api_base = DEFAULT_
 # Merge Request Notes (the GitLab equivalent of a GitHub issue/PR comment)
 
 def _notes_list(ctx, token, project, mr_iid, api_base = DEFAULT_GITLAB_API, auth_kind = "private_token"):
-    """List notes on an MR, paginated. GitLab returns up to 100 per
-    page; we walk until short page or the safety cap."""
+    """List notes on an MR, paginated (100/page, walk to short page or cap)."""
     base = _project_url(api_base, project, "/merge_requests/" + str(mr_iid) + "/notes")
     per_page = 100
     max_pages = 30
@@ -248,12 +233,11 @@ def _mr_get(ctx, token, project, mr_iid, api_base = DEFAULT_GITLAB_API, auth_kin
     return {"success": False, "error": "request failed: %d" % status_code, "status": status_code, "body": body}
 
 def _mr_list_changes(ctx, token, project, mr_iid, api_base = DEFAULT_GITLAB_API, auth_kind = "private_token"):
-    """List the file changes for an MR. Returns the raw `changes` array
-    from GitLab (each entry has `old_path`, `new_path`, `diff`, …).
+    """List file changes for an MR. Returns GitLab's raw `changes` array
+    (each entry: `old_path`, `new_path`, `diff`, …).
 
-    Note: `/changes` is paginated implicitly by GitLab via a size cap on
-    the response. For very large MRs callers should fall back to a
-    local `git diff` rather than relying on the API (same pattern as
+    `/changes` is size-capped, not page-walked — for very large MRs
+    callers should fall back to local `git diff` (cf.
     `lib/github.axl::detect_changed_files`).
     """
     url = _project_url(api_base, project, "/merge_requests/" + str(mr_iid) + "/changes")
@@ -264,18 +248,15 @@ def _mr_list_changes(ctx, token, project, mr_iid, api_base = DEFAULT_GITLAB_API,
         return {"success": True, "merge_request": None, "changes": []}
     return {"success": False, "error": "request failed: %d" % status_code, "status": status_code, "body": body}
 
-# Merge Request Discussions (position-bound diff threads — the GitLab
-# equivalent of a GitHub PR review comment). Used by GitlabLintComments
-# to post inline lint findings on MR diff lines.
-#
-# Reference: https://docs.gitlab.com/ee/api/discussions.html#merge-requests
+# Merge Request Discussions (position-bound diff threads — GitLab's
+# GitHub-PR-review-comment equivalent; used by GitlabLintComments).
+# https://docs.gitlab.com/ee/api/discussions.html#merge-requests
 
 def _discussions_list(ctx, token, project, mr_iid, api_base = DEFAULT_GITLAB_API, auth_kind = "private_token"):
     """List discussions on an MR, paginated. Mirrors `_notes_list`.
 
-    Each discussion dict carries an `id` (string hash) and a `notes`
-    list; each note has `id`, `body`, `resolvable`, `resolved`, and
-    (for diff threads) a `position` object.
+    Each discussion: `id` (string hash) + `notes` list; each note has
+    `id`, `body`, `resolvable`, `resolved`, and (diff threads) `position`.
     """
     base = _project_url(api_base, project, "/merge_requests/" + str(mr_iid) + "/discussions")
     per_page = 100
@@ -310,11 +291,10 @@ def _discussions_create(ctx, token, project, mr_iid, body, position, api_base = 
     return {"success": False, "error": "request failed: %d" % status_code, "status": status_code, "body": resp}
 
 def _discussions_delete(ctx, token, project, mr_iid, discussion_id, note_id, api_base = DEFAULT_GITLAB_API, auth_kind = "private_token"):
-    """Delete a single note from a discussion. Removes stale annotations.
+    """Delete a single note from a discussion (removes stale annotations).
 
-    GitLab has no delete-whole-discussion endpoint; a position-bound
-    lint discussion is a single note, so deleting that note removes the
-    thread.
+    GitLab has no delete-whole-discussion endpoint, but a position-bound
+    lint discussion is a single note, so deleting it removes the thread.
     """
     url = _project_url(api_base, project, "/merge_requests/" + str(mr_iid) + "/discussions/" + str(discussion_id) + "/notes/" + str(note_id))
     success, status_code, _ = _do_request(ctx, "DELETE", url, token, auth_kind = auth_kind)
@@ -333,14 +313,11 @@ def _discussions_resolve(ctx, token, project, mr_iid, discussion_id, resolved = 
 # URL helpers
 
 def _extract_host(url):
-    """Extract the host (without scheme) from a URL. Returns "" on
-    failure. Mirrors `lib/github.axl::_extract_host`.
+    """Extract the host (no scheme) from a URL, "" on failure.
 
-    Strips any `user:password@` userinfo segment first — GitLab CI
-    populates `CI_REPOSITORY_URL` as
-    `https://gitlab-ci-token:<job-token>@<host>/...`, and we must not
-    leak the token into the returned host string (which gets logged
-    and used to derive API endpoints).
+    Strips any `user:password@` userinfo first — `CI_REPOSITORY_URL` is
+    `https://gitlab-ci-token:<job-token>@<host>/...` and the token must
+    not leak into the returned host (it gets logged / used for endpoints).
     """
     if not url:
         return ""
@@ -359,12 +336,9 @@ def _extract_host(url):
     return after_scheme
 
 def _extract_project_path_from_url(url):
-    """Parse `https://gitlab.example.com/<group>/<project>(.git)?` →
-    `<group>/<project>`. Returns "" on failure.
-
-    GitLab supports nested subgroups, so the path can be arbitrarily
-    deep (e.g. `org/team/project`). We keep every segment after the
-    host and strip a trailing `.git` if present.
+    """Parse `https://host/<group>/<project>(.git)?` → `<group>/<project>`,
+    "" on failure. Keeps all post-host segments (subgroups nest
+    arbitrarily deep) and strips a trailing `.git`.
     """
     if not url:
         return ""
@@ -386,21 +360,12 @@ def _extract_project_path_from_url(url):
         tail = tail[:-len(".git")]
     return tail
 
-# API base resolution
-#
-# Self-hosted GitLab instances live on their own host (e.g.
-# `https://gitlab.example.com/api/v4`), so the API base can't stay a
-# hard-coded constant. Resolution precedence:
-#
-#   1. ASPECT_GITLAB_API_URL — explicit override. Matches the
-#      `ASPECT_GITLAB_*` escape-hatch family in `gitlab_detect.axl` (for
-#      Aspect-Workflows runners on a non-GitLab CI host posting back to
-#      a self-hosted GitLab MR). Accepts either a full API base
-#      (`https://host/api/v4`) or a bare instance root (`https://host`),
-#      to which `/api/v4` is appended.
-#   2. CI_API_V4_URL — set natively by GitLab CI on every job; already
-#      points at the running instance's API. Zero config on self-hosted
-#      GitLab CI.
+# API base resolution (self-hosted instances need a non-constant base).
+# Precedence:
+#   1. ASPECT_GITLAB_API_URL — explicit override (cf. `ASPECT_GITLAB_*`
+#      family in `gitlab_detect.axl`). Full base or bare root (gets
+#      `/api/v4` appended).
+#   2. CI_API_V4_URL — set natively by GitLab CI; zero-config self-hosted.
 #   3. DEFAULT_GITLAB_API — public gitlab.com.
 
 def _normalize_api_base(url) -> str:
@@ -427,29 +392,17 @@ def _resolve_api_base(env) -> str:
 
 # Authentication
 #
-# Mirrors the shape of `lib/github.axl::_authenticate`. Exchanges the
-# locally-persisted Aspect credentials (set by `aspect auth login` or
-# `ASPECT_API_TOKEN`) for a short-lived GitLab token minted by the
-# Aspect GitLab App through the Marvin v2 `/gitlab/token` endpoint.
+# Mirrors `lib/github.axl::_authenticate`: exchanges Aspect credentials
+# (from `aspect auth login` or `ASPECT_API_TOKEN`) for a short-lived
+# GitLab token via the Marvin v2 `/gitlab/token` endpoint. Transport
+# errors translate to None + `_reason`, never raised.
 #
-# Returns the token string on success, or None on failure with an
-# optional `_reason` dict populated with both a stable `kind` (one of
-# the `_AUTH_KIND_*` constants) and a human-readable `reason` string.
-# Designed for feature lifecycle hooks: transport errors are caught
-# and translated to None + `_reason`, never raised, so a parent
-# `aspect build` / `aspect test` task is never failed by the auth
-# layer alone.
-#
-# Some kinds + classification helpers are duplicated verbatim from
-# `lib/github.axl` rather than imported. This is deliberate while the
-# GH and GL code paths are stabilizing; the cancelled ENG-1647 VCS
-# trait would have unified them, and a future refactor (likely when a
-# third SCM lands) can lift the common pieces into a shared helper.
+# Kinds + classification helpers are duplicated from `lib/github.axl`
+# rather than imported — deliberate while the paths stabilize; the
+# cancelled ENG-1647 VCS trait would have unified them.
 
-# Token roles the server is willing to honor on the `?roles=` query
-# parameter. The server validates again — this is a client-side
-# fail-fast for typos. GitLab's OAuth scope model is coarser than
-# GitHub's check/PR/issue split, so the role surface is shorter.
+# Roles for the `?roles=` query param. Server re-validates; this is a
+# client-side fail-fast for typos.
 VALID_ROLES = [
     "api",  # Broad GitLab API access — needed for External Status Checks + MR notes write
     "external_status_checks.write",  # Premium/Ultimate: respond to External Status Checks
@@ -507,21 +460,12 @@ def _missing_credentials_reason(ctx):
     return msg
 
 def _authenticate(ctx, project_path, project_id = None, profile = None, roles = None, _reason = None):
-    """Resolve a GitLab token by exchanging Aspect credentials via the
-    Aspect GitLab App (requires `project_path` to be provided; optional
-    `project_id` is forwarded as a numeric hint when available).
+    """Exchange Aspect credentials for a GitLab token via the Aspect
+    GitLab App. Requires `project_path`; optional `project_id` is a
+    numeric hint (server treats `project_path` as authoritative).
 
-    Returns the token string, or None if authentication is not possible.
-    If `_reason` is a dict, it is populated on failure with both a
-    stable `kind` (one of the `_AUTH_KIND_*` identifiers) and a
-    human-readable `reason` describing why auth failed.
-
-    GitLab projects are addressed by their full slash-separated path
-    (e.g. `group/subgroup/project`) — see `encode_project_path` for
-    why subgroups round-trip through the API as part of `:id`. The
-    optional `project_id` lets callers that already have the numeric
-    ID skip a lookup on the server side; the server treats it as a
-    hint only — `project_path` remains authoritative.
+    Returns the token, or None with `_reason` populated on failure
+    (stable `kind` from `_AUTH_KIND_*` + human-readable `reason`).
     """
     if not project_path:
         _set_auth_reason(_reason, _AUTH_KIND_NO_PROJECT_PATH, "project_path not provided")
@@ -547,10 +491,7 @@ def _authenticate(ctx, project_path, project_id = None, profile = None, roles = 
     if project_id != None:
         payload["project_id"] = project_id
 
-    # Transport errors are converted to a string here so they don't
-    # bubble up as exceptions and fail the parent task (e.g. when this
-    # is called from a lifecycle hook in a feature like
-    # GitlabExternalStatusChecks).
+    # Convert transport errors to a string so they don't fail the parent task.
     resp = ctx.http().post(
         url = url,
         headers = {
@@ -569,10 +510,8 @@ def _authenticate(ctx, project_path, project_id = None, profile = None, roles = 
         return None
 
     if resp.status >= 200 and resp.status < 300:
-        # Aspect's auth endpoint returns JSON on success. try_decode
-        # so a malformed/empty 2xx body (rare, but possible during
-        # partial outages) doesn't crash the parent task — falls
-        # through to the `_reason` error path instead.
+        # try_decode so a malformed/empty 2xx body falls through to the
+        # `_reason` error path instead of crashing the parent task.
         parsed = json.try_decode(resp.body, None)
         if parsed != None and "token" in parsed:
             return parsed["token"]

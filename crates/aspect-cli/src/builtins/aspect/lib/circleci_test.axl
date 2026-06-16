@@ -12,9 +12,7 @@ def _eq(label, got, want):
     if got != want:
         fail("%s: got %r, want %r" % (label, got, want))
 
-# ---------------------------------------------------------------------------
 # s3_extract_error_code — pull <Code>…</Code> out of an S3 error body
-# ---------------------------------------------------------------------------
 
 def _test_extract_expired_token(_ctx):
     body = "<?xml version=\"1.0\"?><Error><Code>ExpiredToken</Code><Message>The provided token has expired.</Message></Error>"
@@ -34,9 +32,7 @@ def _test_extract_unterminated_code(_ctx):
     """Open tag without a closing tag → empty, no crash."""
     _eq("unterminated <Code> → empty", s3_extract_error_code("<Code>ExpiredToken"), "")
 
-# ---------------------------------------------------------------------------
 # s3_extract_error_message — pull <Message>…</Message> out of an S3 error body
-# ---------------------------------------------------------------------------
 
 def _test_extract_message(_ctx):
     body = "<Error><Code>InvalidRequest</Code><Message>The provided header is not signed.</Message></Error>"
@@ -48,9 +44,7 @@ def _test_extract_no_message_element(_ctx):
 def _test_extract_unterminated_message(_ctx):
     _eq("unterminated <Message> → empty", s3_extract_error_message("<Message>oops"), "")
 
-# ---------------------------------------------------------------------------
 # s3_upload_error_detail — build the one-line failure reason
-# ---------------------------------------------------------------------------
 
 def _test_detail_expired_token(_ctx):
     body = "<Error><Code>ExpiredToken</Code></Error>"
@@ -93,9 +87,7 @@ def _test_detail_no_signal(_ctx):
     """No HTTP status and no stderr → generic fallback, never empty."""
     _eq("generic fallback", s3_upload_error_detail("000", "", ""), "curl s3 upload failed")
 
-# ---------------------------------------------------------------------------
 # session_cache_* — reuse one runner session across a batch of uploads
-# ---------------------------------------------------------------------------
 
 def _test_cache_get_none_cache(_ctx):
     """No cache dict (standalone upload) → always a miss, never crashes."""
@@ -126,9 +118,7 @@ def _test_cache_clear_empty_noop(_ctx):
     session_cache_clear(cache)
     _eq("clear on empty cache stays a miss", session_cache_get(cache), None)
 
-# ---------------------------------------------------------------------------
 # test_results_object_url — resolve a test-result Key.location to a PUT URL
-# ---------------------------------------------------------------------------
 
 def _test_object_url_relative_key(_ctx):
     """The common case: a relative S3 object key → virtual-hosted bucket URL."""
@@ -148,9 +138,7 @@ def _test_object_url_absolute_http_passthrough(_ctx):
     url = "http://localhost:9000/bucket/key"
     _eq("http location passthrough", test_results_object_url("b", "r", url), url)
 
-# ---------------------------------------------------------------------------
 # s3_sigv4_put_args — the sigv4-signed PUT both upload flows share
-# ---------------------------------------------------------------------------
 
 def _header_value(args, name):
     """Return the value of the first `-H "name: value"` in `args`, or None."""
@@ -204,10 +192,8 @@ def _test_sigv4_args_suppresses_expect(_ctx):
     if not _has_header_arg(args, "Expect:"):
         fail("expected `-H Expect:` to suppress 100-continue: %r" % args)
 
-# ---------------------------------------------------------------------------
 # redact_curl_trace — strip SigV4 secrets from curl -v output (logged and,
 # on a transport failure, surfaced in the error detail)
-# ---------------------------------------------------------------------------
 
 def _test_redact_curl_trace_elides_secrets(_ctx):
     """curl -v request lines for Authorization / security-token keep the
@@ -258,9 +244,7 @@ def _test_redact_curl_trace_plain_error_unchanged(_ctx):
     msg = "curl: (6) Could not resolve host: bucket.s3.amazonaws.com"
     _eq("plain error unchanged", redact_curl_trace(msg), msg)
 
-# ---------------------------------------------------------------------------
 # mark_testcases_skipped — move cached tests into the "skipped" bucket
-# ---------------------------------------------------------------------------
 
 def _test_skip_self_closing(_ctx):
     """A self-closing <testcase/> is expanded with a <skipped> child."""
