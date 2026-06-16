@@ -14,12 +14,12 @@ A test author writes:
 load("./ci.axl", "detect_ci_host")
 
 def test_detect_ci_host_none_off_ci(t):
-    expect.eq(detect_ci_host(t.ctx.std.env), None)
+    asserts.eq(detect_ci_host(t.ctx.std.env), None)
 
 def test_github_actions_precedence(t):
     t.env.set("GITHUB_ACTIONS", "true")
     t.env.set("BUILDKITE", "true")
-    expect.eq(detect_ci_host(t.ctx.std.env)["marker"], "GITHUB_ACTIONS")
+    asserts.eq(detect_ci_host(t.ctx.std.env)["marker"], "GITHUB_ACTIONS")
 ```
 
 and runs `aspect test //...`. No per-test wiring in `config.axl`, no
@@ -68,7 +68,7 @@ All in `crates/axl-runtime`:
 
 | Piece | Location |
 |---|---|
-| `expect` namespace (`eq`, `ne`, `is_true`, `is_false`, `contains`, `fails`) | `src/engine/testing.rs` |
+| `asserts` namespace (`eq`, `ne`, `is_true`, `is_false`, `contains`, `fails`) | `src/engine/testing.rs` |
 | `Test` harness value (`t.env`, `t.std`, `t.ctx`) | `src/engine/testing.rs` |
 | `test_*` discovery + isolated runner + summary | `src/engine/testing.rs` (`run_test_source`) |
 | In-memory env overlay backend | `src/engine/store.rs` (`Env::test_env`, `with_test_env`) |
@@ -82,7 +82,7 @@ Run the end-to-end proof:
 cargo test -p axl-runtime testing::
 ```
 
-`discovers_and_runs_test_functions` proves: test-only `expect` parses only via
+`discovers_and_runs_test_functions` proves: test-only `asserts` parses only via
 the test surface; `test_*` discovery (and that `helper_*` is *not* run);
 `t.env` overlay observed through both `t.std.env` and a real `t.ctx`;
 isolation; and per-test failure capture. `overlay_does_not_leak_into_process`
@@ -93,13 +93,13 @@ proves the overlay never mutates the real process environment.
 These were forced or chosen to keep the POC moving; none are load-bearing
 commitments and all are cheap to change:
 
-1. **`expect`, not `assert`.** `assert` is a **reserved keyword** in the
+1. **`asserts`, not `assert`.** `assert` is a **reserved keyword** in the
    AXL/Starlark dialect and cannot be used as an identifier, so the namespace
-   `assert.eq(...)` won't parse. I named it `expect` (`expect.eq`,
-   `expect.contains`, …). Alternatives: a different namespace (`check`), or
-   move assertions onto the harness (`t.eq(...)`, `t.assert_eq(...)`). I went
-   with a global namespace because it reads closest to the pytest/`assert.*`
-   shape we discussed.
+   `assert.eq(...)` won't parse. Per review, the plural `asserts` is used
+   (`asserts.eq`, `asserts.contains`, …) — it parses and reads almost exactly
+   like `assert.*`. Alternatives considered: a different namespace (`check`,
+   `expect`), or moving assertions onto the harness (`t.eq(...)`,
+   `t.assert_eq(...)`).
 
 2. **Assertions are a global namespace, not harness methods.** Consistent with
    (1); the alternative (`t.assert_eq`) is equally viable and would remove the
@@ -137,7 +137,7 @@ commitments and all are cheap to change:
 Build order (each independently shippable, all reuse the
 `from_eval(eval).<sub>()` backend-routing pattern):
 
-1. ✅ `env` backend + `expect` + discovery + runner + `t.ctx` (this POC).
+1. ✅ `env` backend + `asserts` + discovery + runner + `t.ctx` (this POC).
 2. `io` backend → captured `t.stdout()` for output assertions.
 3. `fs` backend → `t.fs.tmpdir()` (tmpdir-rooted real fs by default).
 4. `process` / `net` backends → `t.process.stub(...)` / `t.http.stub(...)`,
@@ -150,7 +150,7 @@ Build order (each independently shippable, all reuse the
 8. Teach `axl-lsp` / `axl-docgen` about the `_test.axl` augmented surface.
 
 Open questions to settle before promoting past POC:
-- Namespace name (`expect` vs `check` vs harness methods) — decision (1).
+- Namespace name (`asserts` vs `check`/`expect` vs harness methods) — decision (1).
 - Snapshot golden location: `__snapshots__/` dir vs inline-string snapshots.
 - Should the test surface also gate on *where* the runner loads from, so a
   stray `_test.axl` evaluated outside the runner can't pick up test globals?

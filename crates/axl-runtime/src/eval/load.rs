@@ -34,7 +34,7 @@ pub struct AxlLoader<'m> {
     pub(crate) globals: Globals,
 
     /// Augmented globals surface used when evaluating `*_test.axl` files:
-    /// the base surface plus the test-only vocabulary (`assert`, …). Selected
+    /// the base surface plus the test-only vocabulary (`asserts`, …). Selected
     /// per-file by suffix in `eval_module_inner` so the test surface never
     /// reaches production AXL.
     test_globals: Globals,
@@ -154,7 +154,7 @@ impl<'m> AxlLoader<'m> {
 
         let ast = AstModule::parse(&path.to_string_lossy(), raw, &self.dialect)?;
         // `*_test.axl` files are evaluated against the augmented test surface
-        // (base AXL + `assert`, …); every other file gets the production
+        // (base AXL + `asserts`, …); every other file gets the production
         // surface. Keying on the filename suffix keeps the test vocabulary
         // strictly scoped to test files.
         let is_test = path

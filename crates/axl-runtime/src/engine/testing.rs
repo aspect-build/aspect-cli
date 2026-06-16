@@ -5,7 +5,7 @@
 //! load-bearing decisions end to end:
 //!
 //!   1. **Test-only globals.** `*_test.axl` files are evaluated against an
-//!      augmented globals surface (base AXL + the `expect` namespace). The
+//!      augmented globals surface (base AXL + the `asserts` namespace). The
 //!      vocabulary exists *only* in test files (see `eval::api::get_test_globals`
 //!      and the loader's per-file globals selection in `eval::load`), so it
 //!      can never leak into production `config.axl` / builtins.
@@ -59,7 +59,7 @@ use crate::engine::task_context::TaskContext;
 use crate::engine::task_info::TaskInfo;
 use crate::engine::trait_map::TraitMap;
 
-// ─── The `expect` namespace (test-only global) ───────────────────────────────
+// ─── The `asserts` namespace (test-only global) ──────────────────────────────
 
 #[starlark_module]
 fn assert_namespace(globals: &mut GlobalsBuilder) {
@@ -70,12 +70,12 @@ fn assert_namespace(globals: &mut GlobalsBuilder) {
     ) -> anyhow::Result<NoneType> {
         let equal = got
             .equals(want)
-            .map_err(|e| anyhow::anyhow!("expect.eq: comparison failed: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("asserts.eq: comparison failed: {e}"))?;
         if equal {
             Ok(NoneType)
         } else {
             Err(anyhow::anyhow!(
-                "expect.eq failed:\n  got:  {}\n  want: {}",
+                "asserts.eq failed:\n  got:  {}\n  want: {}",
                 got.to_repr(),
                 want.to_repr()
             ))
@@ -89,10 +89,10 @@ fn assert_namespace(globals: &mut GlobalsBuilder) {
     ) -> anyhow::Result<NoneType> {
         let equal = got
             .equals(unwanted)
-            .map_err(|e| anyhow::anyhow!("expect.ne: comparison failed: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("asserts.ne: comparison failed: {e}"))?;
         if equal {
             Err(anyhow::anyhow!(
-                "expect.ne failed: both values are {}",
+                "asserts.ne failed: both values are {}",
                 got.to_repr()
             ))
         } else {
@@ -106,7 +106,7 @@ fn assert_namespace(globals: &mut GlobalsBuilder) {
             Ok(NoneType)
         } else {
             Err(anyhow::anyhow!(
-                "expect.is_true failed: {} is falsy",
+                "asserts.is_true failed: {} is falsy",
                 value.to_repr()
             ))
         }
@@ -116,7 +116,7 @@ fn assert_namespace(globals: &mut GlobalsBuilder) {
     fn is_false<'v>(#[starlark(require = pos)] value: Value<'v>) -> anyhow::Result<NoneType> {
         if value.to_bool() {
             Err(anyhow::anyhow!(
-                "expect.is_false failed: {} is truthy",
+                "asserts.is_false failed: {} is truthy",
                 value.to_repr()
             ))
         } else {
@@ -134,15 +134,15 @@ fn assert_namespace(globals: &mut GlobalsBuilder) {
     ) -> anyhow::Result<NoneType> {
         let h = haystack
             .unpack_str()
-            .ok_or_else(|| anyhow::anyhow!("expect.contains (POC): haystack must be a string"))?;
+            .ok_or_else(|| anyhow::anyhow!("asserts.contains (POC): haystack must be a string"))?;
         let n = needle
             .unpack_str()
-            .ok_or_else(|| anyhow::anyhow!("expect.contains (POC): needle must be a string"))?;
+            .ok_or_else(|| anyhow::anyhow!("asserts.contains (POC): needle must be a string"))?;
         if h.contains(n) {
             Ok(NoneType)
         } else {
             Err(anyhow::anyhow!(
-                "expect.contains failed: {:?} not found in {:?}",
+                "asserts.contains failed: {:?} not found in {:?}",
                 n,
                 h
             ))
@@ -157,7 +157,7 @@ fn assert_namespace(globals: &mut GlobalsBuilder) {
     ) -> anyhow::Result<NoneType> {
         match eval.eval_function(f, &[], &[]) {
             Ok(_) => Err(anyhow::anyhow!(
-                "expect.fails: expected the callable to raise, but it returned normally"
+                "asserts.fails: expected the callable to raise, but it returned normally"
             )),
             Err(_) => Ok(NoneType),
         }
@@ -168,10 +168,11 @@ fn assert_namespace(globals: &mut GlobalsBuilder) {
 /// `eval::api::get_test_globals` to build the surface used for `*_test.axl`
 /// files and by the test runner.
 ///
-/// NOTE: the namespace is `expect`, not `assert` — `assert` is a reserved
-/// keyword in the AXL/Starlark dialect and cannot be used as an identifier.
+/// NOTE: the namespace is `asserts`, not `assert` — `assert` is a reserved
+/// keyword in the AXL/Starlark dialect and cannot be used as an identifier,
+/// so the plural `asserts` is used instead.
 pub fn register_test_globals(globals: &mut GlobalsBuilder) {
-    globals.namespace("expect", assert_namespace);
+    globals.namespace("asserts", assert_namespace);
 }
 
 // ─── The harness value `t` ───────────────────────────────────────────────────
@@ -445,25 +446,25 @@ mod tests {
         let src = r#"
 def test_env_overlay_is_isolated(t):
     # overlay starts empty; reads go through the real std.Env type
-    expect.eq(t.std.env.var("BUILDKITE"), None)
+    asserts.eq(t.std.env.var("BUILDKITE"), None)
     t.env.set("BUILDKITE", "true")
     # same overlay observed through both t.std and a real TaskContext (t.ctx)
-    expect.eq(t.std.env.var("BUILDKITE"), "true")
-    expect.eq(t.ctx.std.env.var("BUILDKITE"), "true")
+    asserts.eq(t.std.env.var("BUILDKITE"), "true")
+    asserts.eq(t.ctx.std.env.var("BUILDKITE"), "true")
 
 def test_env_set_and_remove(t):
     t.env.set("FOO", "1")
-    expect.eq(t.env.get("FOO"), "1")
+    asserts.eq(t.env.get("FOO"), "1")
     t.env.remove("FOO")
-    expect.eq(t.env.get("FOO"), None)
+    asserts.eq(t.env.get("FOO"), None)
 
 def test_contains_and_truthy(t):
-    expect.contains("hello world", "world")
-    expect.is_true(1 == 1)
-    expect.fails(lambda: fail("boom"))
+    asserts.contains("hello world", "world")
+    asserts.is_true(1 == 1)
+    asserts.fails(lambda: fail("boom"))
 
 def test_intentional_failure(t):
-    expect.eq(1, 2)
+    asserts.eq(1, 2)
 
 def helper_not_discovered(t):
     fail("helper_* is not a test and must not run")
@@ -492,26 +493,26 @@ def helper_not_discovered(t):
                 .message
                 .as_deref()
                 .unwrap_or("")
-                .contains("expect.eq failed"),
+                .contains("asserts.eq failed"),
             "failure should carry the assertion message, got {:?}",
             failure.message
         );
     }
 
     #[test]
-    fn expect_surface_is_test_only() {
-        // The `expect` namespace exists in the test surface…
+    fn asserts_surface_is_test_only() {
+        // The `asserts` namespace exists in the test surface…
         let test_globals = crate::eval::api::get_test_globals();
         assert!(
-            test_globals.names().any(|n| n.as_str() == "expect"),
-            "test globals must expose `expect`"
+            test_globals.names().any(|n| n.as_str() == "asserts"),
+            "test globals must expose `asserts`"
         );
         // …and is absent from the production surface, so it can never leak
         // into config.axl / builtins.
         let prod_globals = crate::eval::get_globals().build();
         assert!(
-            !prod_globals.names().any(|n| n.as_str() == "expect"),
-            "production globals must NOT expose `expect`"
+            !prod_globals.names().any(|n| n.as_str() == "asserts"),
+            "production globals must NOT expose `asserts`"
         );
     }
 
@@ -524,7 +525,7 @@ def helper_not_discovered(t):
         let src = r#"
 def test_sets_overlay(t):
     t.env.set("AXL_POC_LEAK_CHECK", "should-not-leak")
-    expect.eq(t.std.env.var("AXL_POC_LEAK_CHECK"), "should-not-leak")
+    asserts.eq(t.std.env.var("AXL_POC_LEAK_CHECK"), "should-not-leak")
 "#;
         let summary = run_test_source(src, &base_env()).expect("runner ok");
         assert_eq!(summary.passed(), 1, "report:\n{}", summary.report());
