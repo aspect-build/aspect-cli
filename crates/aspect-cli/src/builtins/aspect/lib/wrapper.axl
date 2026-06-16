@@ -109,13 +109,22 @@ def has_wrapper_marker(content: str | None) -> bool:
     """True when `content` carries the Aspect wrapper marker comment."""
     return bool(content) and WRAPPER_MARKER in content
 
-def classify_install(existing: str | None, target: str) -> InstallAction:
+def classify_install(existing: str | None, target: str, existing_executable: bool = True) -> InstallAction:
     """Decide what an install would do, given the on-disk wrapper content
-    (`existing`, None when absent) and the freshly-fetched `target`."""
+    (`existing`, None when absent), the freshly-fetched `target`, and whether
+    the on-disk file currently has its executable bit set.
+
+    Matching bytes that lack the executable bit are classified `upgrade`, not
+    `noop` — Bazelisk execs `tools/bazel` directly, so a copy committed or
+    pulled without `chmod +x` is a broken hook that install must repair rather
+    than report as up to date. Callers on platforms where the bit is
+    meaningless (Windows) pass `existing_executable = True` so the content
+    comparison alone decides.
+    """
     if existing == None:
         return InstallAction("install")
     if existing == target:
-        return InstallAction("noop")
+        return InstallAction("noop") if existing_executable else InstallAction("upgrade")
     return InstallAction("upgrade")
 
 def detect_shell(shell_path: str | None) -> Shell | None:

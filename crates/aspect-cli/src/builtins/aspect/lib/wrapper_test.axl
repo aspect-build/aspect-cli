@@ -97,10 +97,18 @@ def _test_classify_install(ctx):
     _eq("fresh install", classify_install(None, "abc").value, InstallAction("install").value)
 
 def _test_classify_noop(ctx):
-    _eq("identical noop", classify_install("abc", "abc").value, InstallAction("noop").value)
+    _eq("identical executable noop", classify_install("abc", "abc", True).value, InstallAction("noop").value)
 
 def _test_classify_upgrade(ctx):
     _eq("differs upgrade", classify_install("old", "new").value, InstallAction("upgrade").value)
+
+def _test_classify_repair_non_executable(ctx):
+    # Matching bytes but not executable -> upgrade (install repairs the mode).
+    _eq("non-exec repair", classify_install("abc", "abc", False).value, InstallAction("upgrade").value)
+
+def _test_classify_noop_default_executable(ctx):
+    # Default existing_executable is True, so matching bytes no-op.
+    _eq("default exec noop", classify_install("abc", "abc").value, InstallAction("noop").value)
 
 # --- detect_shell ---
 
@@ -154,6 +162,8 @@ _UNIT_TESTS = [
     _test_classify_install,
     _test_classify_noop,
     _test_classify_upgrade,
+    _test_classify_repair_non_executable,
+    _test_classify_noop_default_executable,
     _test_detect_shell_bash,
     _test_detect_shell_zsh,
     _test_detect_shell_fish,
