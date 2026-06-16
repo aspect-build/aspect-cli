@@ -31,6 +31,7 @@ load("@aspect//lib/runner_job_history_test.axl", "runner_job_history_tests")
 load("@aspect//lib/sandbox_recovery_test.axl", "sandbox_recovery_tests")
 load("@aspect//lib/tar_test.axl", "tar_tests")
 load("@aspect//lib/tips_test.axl", "tips_tests")
+load("@aspect//lib/wrapper_test.axl", "wrapper_tests")
 load("@aspect//tips.axl", "TASK_SCREENS", "TIP_SUGGESTION", "TIP_TEMPLATE_RAW", "add_tip")
 load("@aspect//traits.axl", "BazelTrait", "DeliveryTrait", "LintTrait", "REPRO_FIX_ACCEPT", "REPRO_FIX_REJECT", "ReproFixInfo", "ReproFixSuggestion", "TaskLifecycleTrait", "TaskUpdate", "repro_fix_replace")
 load("./lambda.axl", "lambda_with_global_bind")
@@ -351,6 +352,12 @@ def config(ctx: ConfigContext):
     # canonical @@module+version//... → @module//... conversion.
     # Run with: aspect dev test-runnable
     ctx.tasks.add(runnable_tests)
+
+    # tools/bazel wrapper helpers — workspace-root detection, raw-URL
+    # building, wrapper-version parsing, install classification, shell
+    # detection + per-shell snippet rendering.
+    # Run with: aspect dev test-wrapper
+    ctx.tasks.add(wrapper_tests)
 
     # Repro-command filtering — `explicit_flags` skips flags whose
     # values match the task's default (including alias-overridden

@@ -1,0 +1,257 @@
+"""`aspect wrapper install` / `aspect wrapper uninstall` — vendor the
+`tools/bazel` Bazelisk wrapper (and its companion `tools/bazel.md`) into a
+Bazel workspace so a team can keep typing `bazel` while transparently routing
+through the Aspect CLI. See tools/bazel.md for what the wrapper does.
+
+The script is downloaded from a pinned tag of aspect-build/aspect-cli (never
+HEAD); `--version` selects the tag, defaulting to the latest published
+release. `install` is idempotent: a re-run that already matches no-ops, a
+newer target offers an upgrade. `--check` is the CI gate (non-zero when
+missing / stale, never writes); `--dry-run` previews without writing. Shell
+env instructions are printed, never written to the user's rc files.
+"""
+
+load("./lib/environment.axl", "error", "info")
+load(
+    "./lib/wrapper.axl",
+    "ALL_SHELLS",
+    "InstallAction",
+    "WRAPPER_DOC_PATH",
+    "WRAPPER_MARKER",
+    "WRAPPER_REPO_NAME",
+    "WRAPPER_REPO_OWNER",
+    "WRAPPER_SCRIPT_PATH",
+    "classify_install",
+    "detect_shell",
+    "find_workspace_root",
+    "has_wrapper_marker",
+    "parse_wrapper_version",
+    "raw_content_url",
+    "shell_snippet",
+)
+
+_USER_AGENT = "aspect-cli wrapper installer"
+
+def _http_headers() -> dict:
+    return {"User-Agent": _USER_AGENT}
+
+def _resolve_ref(ctx: TaskContext, version: str) -> str | None:
+    """Resolve the requested `--version` to a concrete git ref. "latest" (the
+    default) queries the GitHub releases API for the newest published tag; any
+    other value is used verbatim. Returns None after reporting a failed
+    lookup."""
+    if version and version != "latest":
+        return version
+    url = "https://api.github.com/repos/%s/%s/releases/latest" % (WRAPPER_REPO_OWNER, WRAPPER_REPO_NAME)
+    response = ctx.http().get(url = url, headers = _http_headers()).block()
+    if response.status != 200:
+        error(ctx.std, "Could not resolve the latest aspect-cli release (HTTP %d). Pass --version=<tag> to pin one explicitly." % response.status)
+        return None
+    parsed = json.try_decode(response.body, None)
+    if parsed == None or not parsed.get("tag_name"):
+        error(ctx.std, "GitHub returned an unexpected response while resolving the latest release. Pass --version=<tag> to pin one explicitly.")
+        return None
+    return parsed["tag_name"]
+
+def _fetch_text(ctx: TaskContext, url: str) -> str | None:
+    """GET a text file (the wrapper script or its doc). Returns the body, or
+    None after reporting the failure."""
+    response = ctx.http().get(url = url, headers = _http_headers()).block()
+    if response.status == 404:
+        error(ctx.std, "Not found at %s — does this version ship the wrapper? Try a newer --version." % url)
+        return None
+    if response.status != 200:
+        error(ctx.std, "Download failed (HTTP %d): %s" % (response.status, url))
+        return None
+    return response.body
+
+def _print_shell_instructions(ctx: TaskContext) -> None:
+    """Print rc snippets for the user's shell (or all shells with
+    `--all-shells`). Informational only — never edits the user's rc files."""
+    if ctx.args.all_shells:
+        shells = ALL_SHELLS
+    else:
+        detected = detect_shell(ctx.std.env.var("SHELL"))
+        if detected == None:
+            info(ctx.std, "Could not detect your shell from $SHELL; printing every snippet (use --all-shells to silence this note).")
+            shells = ALL_SHELLS
+        else:
+            shells = [detected]
+
+    print("")
+    print("Shell setup (optional — the wrapper works without it):")
+    for shell in shells:
+        print("")
+        print(shell_snippet(shell))
+
+def _install_impl(ctx: TaskContext) -> int:
+    root = find_workspace_root(ctx.std)
+    if root == None:
+        error(ctx.std, "Not inside a Bazel workspace (no MODULE.bazel / WORKSPACE found in this directory or any parent). Run `aspect wrapper install` from your workspace.")
+        return 1
+
+    script_path = root + "/" + WRAPPER_SCRIPT_PATH
+    doc_path = root + "/" + WRAPPER_DOC_PATH
+
+    ref = _resolve_ref(ctx, ctx.args.version)
+    if ref == None:
+        return 1
+
+    script_url = raw_content_url(WRAPPER_REPO_OWNER, WRAPPER_REPO_NAME, ref, WRAPPER_SCRIPT_PATH)
+    target = _fetch_text(ctx, script_url)
+    if target == None:
+        return 1
+
+    existing = ctx.std.fs.read_to_string(script_path) if ctx.std.fs.exists(script_path) else None
+    action = classify_install(existing, target)
+    target_version = parse_wrapper_version(target) or "unknown"
+    local_version = parse_wrapper_version(existing) or "unknown"
+
+    # --check: CI gate. Exit non-zero when missing or stale; never write.
+    if ctx.args.check:
+        if action == InstallAction("install"):
+            error(ctx.std, "%s is missing. Run `aspect wrapper install` to add it." % WRAPPER_SCRIPT_PATH)
+            return 1
+        if action == InstallAction("upgrade"):
+            error(ctx.std, "%s is stale (local %s; %s ships %s). Run `aspect wrapper install` to update." % (
+                WRAPPER_SCRIPT_PATH,
+                local_version,
+                ref,
+                target_version,
+            ))
+            return 1
+        print("%s is up to date (version %s)." % (WRAPPER_SCRIPT_PATH, target_version))
+        return 0
+
+    if action == InstallAction("noop"):
+        print("%s is already up to date (version %s)." % (WRAPPER_SCRIPT_PATH, target_version))
+        _print_shell_instructions(ctx)
+        return 0
+
+    is_install = action == InstallAction("install")
+
+    # --dry-run: describe the change, write nothing.
+    if ctx.args.dry_run:
+        if is_install:
+            print("Would install %s (version %s from %s)." % (WRAPPER_SCRIPT_PATH, target_version, ref))
+        else:
+            print("Would upgrade %s (local %s -> %s from %s)." % (WRAPPER_SCRIPT_PATH, local_version, target_version, ref))
+        print("Would write %s." % WRAPPER_DOC_PATH)
+        _print_shell_instructions(ctx)
+        return 0
+
+    # Confirm an upgrade interactively unless --yes. A fresh install needs no
+    # confirmation (there is nothing to overwrite).
+    if not is_install and not ctx.args.yes and ctx.std.io.stdout.is_tty:
+        ctx.std.io.stdout.write("Upgrade %s from local %s to %s? [y/N]: " % (WRAPPER_SCRIPT_PATH, local_version, target_version))
+        ctx.std.io.stdout.flush()
+        if str(ctx.std.io.stdin.read(1)).lower() != "y":
+            print("Cancelled.")
+            return 1
+
+    # Write the script with the executable bit set, then the doc alongside it.
+    # `download` (rather than fs.write) is used for the script so the 0o755
+    # mode lands without shelling out to chmod.
+    tools_dir = root + "/tools"
+    if not ctx.std.fs.exists(tools_dir):
+        ctx.std.fs.create_dir_all(tools_dir)
+    ctx.http().download(url = script_url, output = script_path, mode = 0o755, headers = _http_headers()).block()
+
+    doc_url = raw_content_url(WRAPPER_REPO_OWNER, WRAPPER_REPO_NAME, ref, WRAPPER_DOC_PATH)
+    doc_body = _fetch_text(ctx, doc_url)
+    if doc_body != None:
+        ctx.std.fs.write(doc_path, doc_body)
+
+    if is_install:
+        print("Installed %s (version %s from %s)." % (WRAPPER_SCRIPT_PATH, target_version, ref))
+    else:
+        print("Upgraded %s (local %s -> version %s from %s)." % (WRAPPER_SCRIPT_PATH, local_version, target_version, ref))
+    if doc_body != None:
+        print("Wrote %s." % WRAPPER_DOC_PATH)
+    _print_shell_instructions(ctx)
+    return 0
+
+def _uninstall_impl(ctx: TaskContext) -> int:
+    root = find_workspace_root(ctx.std)
+    if root == None:
+        error(ctx.std, "Not inside a Bazel workspace (no MODULE.bazel / WORKSPACE found in this directory or any parent). Run `aspect wrapper uninstall` from your workspace.")
+        return 1
+
+    script_path = root + "/" + WRAPPER_SCRIPT_PATH
+    doc_path = root + "/" + WRAPPER_DOC_PATH
+
+    if not ctx.std.fs.exists(script_path):
+        info(ctx.std, "No %s to remove." % WRAPPER_SCRIPT_PATH)
+        return 0
+
+    content = ctx.std.fs.read_to_string(script_path)
+    if not has_wrapper_marker(content):
+        error(ctx.std, "%s exists but is not the Aspect wrapper (missing the `%s` marker). Refusing to delete a file this command did not install; remove it by hand if that is intended." % (WRAPPER_SCRIPT_PATH, WRAPPER_MARKER))
+        return 1
+
+    has_doc = ctx.std.fs.exists(doc_path)
+
+    if ctx.args.dry_run:
+        print("Would remove %s." % WRAPPER_SCRIPT_PATH)
+        if has_doc:
+            print("Would remove %s." % WRAPPER_DOC_PATH)
+        return 0
+
+    if not ctx.args.yes and ctx.std.io.stdout.is_tty:
+        also = " and " + WRAPPER_DOC_PATH if has_doc else ""
+        ctx.std.io.stdout.write("Remove %s%s? [y/N]: " % (WRAPPER_SCRIPT_PATH, also))
+        ctx.std.io.stdout.flush()
+        if str(ctx.std.io.stdin.read(1)).lower() != "y":
+            print("Cancelled.")
+            return 1
+
+    ctx.std.fs.remove_file(script_path)
+    print("Removed %s." % WRAPPER_SCRIPT_PATH)
+    if has_doc:
+        ctx.std.fs.remove_file(doc_path)
+        print("Removed %s." % WRAPPER_DOC_PATH)
+    return 0
+
+install = task(
+    group = ["wrapper"],
+    summary = "Install the tools/bazel Bazelisk wrapper into this workspace.",
+    implementation = _install_impl,
+    args = {
+        "version": args.string(
+            default = "latest",
+            description = "Release tag of aspect-build/aspect-cli to vendor the wrapper from (e.g. --version=v2026.23.18). Defaults to the latest published release. The wrapper is always pulled from a tag, never HEAD.",
+        ),
+        "check": args.boolean(
+            default = False,
+            description = "CI gate: exit non-zero if tools/bazel is missing or differs from the target version. Writes nothing. Combine with --version to pin the expected version.",
+        ),
+        "dry_run": args.boolean(
+            default = False,
+            description = "Print what would change (install / upgrade / no-op, plus the doc and shell snippets) without writing any files.",
+        ),
+        "all_shells": args.boolean(
+            default = False,
+            description = "Print rc snippets for every supported shell (bash, zsh, fish) instead of only the one detected from $SHELL.",
+        ),
+        "yes": args.boolean(
+            default = False,
+            description = "Skip the interactive confirmation prompt when upgrading an existing tools/bazel.",
+        ),
+    },
+)
+
+uninstall = task(
+    group = ["wrapper"],
+    summary = "Remove the Aspect tools/bazel wrapper from this workspace.",
+    implementation = _uninstall_impl,
+    args = {
+        "dry_run": args.boolean(
+            default = False,
+            description = "Print what would be removed without deleting any files.",
+        ),
+        "yes": args.boolean(
+            default = False,
+            description = "Skip the interactive confirmation prompt before removing tools/bazel.",
+        ),
+    },
+)
