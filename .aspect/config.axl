@@ -7,6 +7,7 @@ load("@aspect//feature/github_status_comments_test.axl", "pr_comment_snapshot_te
 load("@aspect//format.axl", "format")
 load("@aspect//helpers.axl", "aspect_web_ui_url", "detect_build_url", "detect_ci_host", "render_bes_url")
 load("@aspect//helpers_test.axl", "helpers_facade_tests")
+load("@aspect//init/init_test.axl", "init_tests")
 load("@aspect//lib/bazel_flags_test.axl", "bazel_flags_tests")
 load("@aspect//lib/bazel_results_test.axl", "bazel_results_unit_tests", "template_snapshot_tests")
 load("@aspect//lib/bazel_runner_test.axl", "bazel_runner_tests")
@@ -282,6 +283,10 @@ def config(ctx: ConfigContext):
     # @aspect//helpers.axl facade: re-exports resolve to the real helpers.
     # Run with: aspect dev test-helpers
     ctx.tasks.add(helpers_facade_tests)
+
+    # `aspect init` renderer unit tests.
+    # Run with: aspect dev test-init
+    ctx.tasks.add(init_tests)
 
     # Runner-side mitigations for bazelbuild/bazel#23880 + server-internal
     # failures: detect-repair + signal-unhealthy on bazel_attempt_end/build_end.

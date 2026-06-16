@@ -288,3 +288,40 @@ jobs:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Test Task (ASPECT_DEBUG=1)
         run: ASPECT_DEBUG=1 aspect test --task-key test-gha-debug
+  # Render each template preset with the freshly-built `aspect init` and build
+  # the generated workspace. Catches CLI-side breakage of the init renderer
+  # against the live template. `--template-ref=main` tests the current template
+  # tip; `init`'s default (latest release) is what end users get.
+  init-preset:
+    runs-on: ubuntu-latest
+    needs: [pre-build]
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        preset:
+          - minimal
+          - shell
+          - go
+          - js
+          - py
+          - java
+          - kotlin
+          - cpp
+          - rust
+          - ruby
+          - scala
+          - kitchen-sink
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+      - uses: aspect-build/setup-aspect@c22a8f64fb38f82f59ce809cd7eb9f8ae096da44 # v2026.23.2
+        with:
+          launcher-install: false
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+      - name: Scaffold preset
+        run: |
+          aspect init "$RUNNER_TEMP/proj" --task-key init-${{ matrix.preset }} --preset='${{ matrix.preset }}' --name=my_project --template-ref=main
+      - name: Build generated workspace
+        working-directory: ${{ runner.temp }}/proj
+        run: aspect build --task-key init-${{ matrix.preset }} -- //...

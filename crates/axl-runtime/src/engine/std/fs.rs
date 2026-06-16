@@ -468,7 +468,30 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         Ok(NoneType)
     }
 
-    // TODO: add set_permissions
+    /// Sets the Unix permission bits of a file to `mode` (e.g. `0o755`).
+    ///
+    /// On non-Unix platforms this is a no-op. Useful when writing a file with
+    /// `fs.write` (which uses the default umask) but the result must be
+    /// executable, e.g. a generated shell script or tool wrapper.
+    ///
+    /// Returns an error if `path` does not exist or the user lacks permission to
+    /// change its mode (not an exhaustive list).
+    fn set_permissions<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        #[starlark(require = pos)] path: values::StringValue,
+        #[starlark(require = pos)] mode: u32,
+    ) -> anyhow::Result<NoneType> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path.as_str(), fs::Permissions::from_mode(mode))?;
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (path, mode);
+        }
+        Ok(NoneType)
+    }
 
     // NB: Don't add deprecated soft_link (https://doc.rust-lang.org/std/fs/fn.soft_link.html);
     // instead add std.os.unix.fs.symlink to follow Rust's convention of not adding

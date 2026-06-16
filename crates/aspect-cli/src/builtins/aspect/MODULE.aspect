@@ -12,6 +12,7 @@ use_task("format.axl", "format")
 use_task("gazelle.axl", "gazelle")
 use_task("wrapper.axl", "install")
 use_task("wrapper.axl", "uninstall")
+use_task("init.axl", "init")
 
 use_feature("feature/artifacts.axl", "ArtifactUpload")
 use_feature("feature/circleci_test_results.axl", "CircleCITestResults")

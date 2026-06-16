@@ -1,0 +1,228 @@
+"""Shared, template-agnostic renderer for project templates.
+
+Renders a `template/` jinja2 tree into a fresh project directory for a given set
+of feature flags. The renderer is generic: everything template-specific (the
+presets, the per-file inclusion rules, the copy-verbatim and executable lists)
+is read from a `template-config.json` data file that ships with the template —
+NOT hard-coded here. This lets the renderer live in the Aspect CLI (embedded)
+while each template owns its own config as data, with no cross-repo `load()`.
+
+It depends only on the AXL stdlib available in a task `ctx`:
+  - `ctx.std.fs` (read_dir, read_to_string, write, create_dir_all, copy, metadata)
+  - `ctx.template.jinja2(template, data = {...})`
+  - `json.decode`
+
+Public API:
+  - `load_config(ctx, repo_dir)` -> config dict (parsed template-config.json)
+  - `preset_names(config)` -> sorted list of preset names
+  - `preset_flags(config, name)` -> feature-flag dict for a preset
+  - `render(ctx, config, template_dir, out_dir, project_snake, flags)` -> [paths]
+"""
+
+# --- config ------------------------------------------------------------------
+
+# The template's config lives at the repo root alongside `template/`.
+CONFIG_FILENAME = "template-config.json"
+
+def load_config(ctx, repo_dir):
+    """Read + parse the template-config.json at repo_dir."""
+    return json.decode(ctx.std.fs.read_to_string(repo_dir + "/" + CONFIG_FILENAME))
+
+def preset_names(config):
+    return sorted(config["presets"].keys())
+
+def preset_flags(config, name):
+    if name not in config["presets"]:
+        fail("unknown preset {!r}; known presets: {}".format(name, ", ".join(preset_names(config))))
+    return config["presets"][name]
+
+# --- predicate evaluation (data, not code) -----------------------------------
+
+def _predicate_true(rule, flags):
+    """A rule predicate is `{"flag": x}` (single), `{"all": [..]}` (AND), or
+    `{"any": [..]}` (OR)."""
+    if "flag" in rule:
+        return bool(flags.get(rule["flag"], False))
+    if "all" in rule:
+        return all([bool(flags.get(f, False)) for f in rule["all"]])
+    if "any" in rule:
+        return any([bool(flags.get(f, False)) for f in rule["any"]])
+    fail("rule missing 'flag', 'all', or 'any': {}".format(rule))
+
+# --- glob matching -----------------------------------------------------------
+
+def _seg_match(pat, seg):
+    """Match a single path segment against a glob pattern with `*` and `?`."""
+    if pat == "*" or pat == seg:
+        return True
+    if "*" not in pat and "?" not in pat:
+        return False
+
+    # Iterative two-pointer backtracking; Starlark has no recursion.
+    star_idx = -1
+    match_idx = 0
+    p = 0
+    s = 0
+    plen = len(pat)
+    slen = len(seg)
+    for _ in range(plen + slen + 1):
+        if s < slen and p < plen and (pat[p] == seg[s] or pat[p] == "?"):
+            p += 1
+            s += 1
+        elif p < plen and pat[p] == "*":
+            star_idx = p
+            match_idx = s
+            p += 1
+        elif star_idx != -1:
+            p = star_idx + 1
+            match_idx += 1
+            s = match_idx
+        else:
+            return False
+        if s >= slen:
+            break
+
+    for _ in range(plen):
+        if p < plen and pat[p] == "*":
+            p += 1
+        else:
+            break
+    return p == plen and s == slen
+
+def glob_match(pattern, rel_path):
+    """Match a `/`-separated relative path against a glob with `*` and `**`."""
+    pat_segs = pattern.split("/")
+    path_segs = rel_path.split("/")
+
+    n = len(path_segs)
+    m = len(pat_segs)
+    reachable = [False] * (n + 1)
+    reachable[0] = True
+    for i in range(m):
+        pseg = pat_segs[i]
+        nxt = [False] * (n + 1)
+        if pseg == "**":
+            carry = False
+            for j in range(n + 1):
+                if reachable[j]:
+                    carry = True
+                nxt[j] = carry
+        else:
+            for j in range(1, n + 1):
+                if reachable[j - 1] and _seg_match(pseg, path_segs[j - 1]):
+                    nxt[j] = True
+        reachable = nxt
+    return reachable[n]
+
+def _any_glob(globs, rel_path):
+    for g in globs:
+        if glob_match(g, rel_path):
+            return True
+    return False
+
+# --- inclusion / render decisions -------------------------------------------
+
+def is_included(config, rel_path, flags):
+    """True if `rel_path` (relative to template/) belongs in the output.
+
+    A path is included unless it matches a rule whose predicate is false. Paths
+    matched by no rule are always included.
+    """
+    for rule in config["rules"]:
+        if _any_glob(rule["globs"], rel_path):
+            if not _predicate_true(rule, flags):
+                return False
+    return True
+
+def should_render(config, rel_path):
+    """True unless the file is on the no_render (copy-verbatim) list."""
+    return not _any_glob(config["no_render"], rel_path)
+
+def is_executable(config, rel_path):
+    """True if the rendered file must have the executable bit set."""
+    return _any_glob(config["executable"], rel_path)
+
+def _make_executable(ctx, path):
+    """Set +x on a rendered file.
+
+    Prefers `ctx.std.fs.set_permissions` (newer Aspect CLIs); falls back to
+    shelling out to `chmod`.
+    """
+    set_perms = getattr(ctx.std.fs, "set_permissions", None)
+    if set_perms:
+        set_perms(path, 0o755)
+    else:
+        ctx.std.process.command("chmod").args(["+x", path]).spawn().wait()
+
+# --- directory walk ----------------------------------------------------------
+
+def _walk(ctx, root):
+    """Return file paths (relative to root) under root, recursively (worklist)."""
+    files = []
+    stack = [""]
+    for _ in range(100000):  # generous bound; templates are small
+        if not stack:
+            break
+        rel_dir = stack.pop()
+        abs_dir = root if rel_dir == "" else root + "/" + rel_dir
+        for entry in ctx.std.fs.read_dir(abs_dir):
+            child = entry.path if rel_dir == "" else rel_dir + "/" + entry.path
+            if entry.is_dir:
+                stack.append(child)
+            else:
+                files.append(child)
+    return files
+
+# --- public API --------------------------------------------------------------
+
+def render(ctx, config, template_dir, out_dir, project_snake, flags):
+    """Render the template tree into out_dir.
+
+    Args:
+      ctx: a task context exposing `std.fs` and `template`.
+      config: the parsed template config (see load_config).
+      template_dir: path to the `template/` jinja source tree.
+      out_dir: destination directory (created if missing).
+      project_snake: project name in snake_case, substituted as `{{ project_snake }}`.
+      flags: feature-flag dict (see preset_flags); also passed to jinja2 as data.
+
+    Returns the list of output paths written (relative to out_dir).
+    """
+    data = dict(flags)
+    data["project_snake"] = project_snake
+
+    # Name variants so templates can use the right casing per ecosystem (npm
+    # wants kebab-case, etc.). project_name is an alias for the snake form.
+    parts = [p for p in project_snake.replace("-", "_").split("_") if p]
+    data["project_kebab"] = "-".join(parts)
+    data["project_pascal"] = "".join([p[:1].upper() + p[1:] for p in parts])
+    data["project_name"] = project_snake
+
+    written = []
+    for rel in _walk(ctx, template_dir):
+        if not is_included(config, rel, flags):
+            continue
+        src = template_dir + "/" + rel
+        dst = out_dir + "/" + rel
+
+        parent = dst.rsplit("/", 1)[0] if "/" in dst else out_dir
+        ctx.std.fs.create_dir_all(parent)
+
+        if should_render(config, rel):
+            content = ctx.std.fs.read_to_string(src)
+            rendered = ctx.template.jinja2(content, data = data)
+
+            # jinja2 (minijinja) strips the source's trailing newline. Restore it
+            # when the source had one, so rendered files keep a final newline
+            # (formatters like gofumpt/shfmt/ruff require it).
+            if content.endswith("\n") and not rendered.endswith("\n"):
+                rendered += "\n"
+            ctx.std.fs.write(dst, rendered)
+        else:
+            ctx.std.fs.copy(src, dst)
+
+        if is_executable(config, rel):
+            _make_executable(ctx, dst)
+        written.append(rel)
+
+    return written

@@ -1,0 +1,166 @@
+"""Unit tests for `aspect init` (init.axl) and its generic renderer (render.axl).
+
+Renders a small in-memory template fixture, driven by an inline config dict (the
+same shape as a template's `template-config.json`), into a temp dir and asserts
+the renderer's glob matching, inclusion (rule predicates), jinja2 substitution,
+and executable-bit handling, plus init.axl's project-name resolution. The full
+template tree is exercised end-to-end by the aspect-workflows-template repo's
+CI; this guards the logic that ships in the CLI.
+
+Run with:
+  aspect dev test-init
+"""
+
+load("../init.axl", "project_name")
+load(
+    "./init_render.axl",
+    "glob_match",
+    "is_executable",
+    "is_included",
+    "preset_flags",
+    "preset_names",
+    "render",
+    "should_render",
+)
+
+# A miniature template config, same schema as a real template-config.json. The
+# `{"all": [...]}` rule exercises the AND predicate and `{"any": [...]}` the OR.
+_CONFIG = {
+    "flags": ["python", "rust", "ruby", "lint"],
+    "presets": {
+        "minimal": {"python": False, "rust": False, "ruby": False, "lint": False},
+        "py": {"python": True, "rust": False, "ruby": False, "lint": True},
+        "rust": {"python": False, "rust": True, "ruby": False, "lint": True},
+    },
+    "rules": [
+        {"flag": "python", "globs": ["pyproject.toml", "requirements/**"]},
+        {"flag": "rust", "globs": ["Cargo.toml"]},
+        {"flag": "ruby", "globs": ["Gemfile"]},
+        {"all": ["python", "lint"], "globs": ["ruff.toml"]},
+        {"any": ["rust", "ruby"], "globs": [".compiled-lang"]},
+    ],
+    "no_render": ["*.lock"],
+    "executable": ["tools/repin"],
+}
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _true(label, got):
+    if not got:
+        fail("%s: expected true" % label)
+
+def _false(label, got):
+    if got:
+        fail("%s: expected false" % label)
+
+def _test_glob():
+    _true("glob exact", glob_match("MODULE.bazel", "MODULE.bazel"))
+    _true("glob star segment", glob_match("*.toml", "Cargo.toml"))
+    _false("glob star no cross dir", glob_match("*.toml", "a/Cargo.toml"))
+    _true("glob double-star", glob_match("requirements/**", "requirements/a/b.txt"))
+    _true("glob double-star zero", glob_match("packages/**", "packages"))
+    _true("glob mid star", glob_match("pnpm-*.yaml", "pnpm-workspace.yaml"))
+    _true("glob question mark", glob_match("file?.txt", "file1.txt"))
+    _false("glob question mark no-cross-dir", glob_match("a?b", "a/b"))
+
+def _test_project_name():
+    # Explicit name wins; hyphens become underscores (snake_case identifier).
+    _eq("explicit name", project_name("my_app", "anything"), "my_app")
+    _eq("explicit kebab -> snake", project_name("my-app", "anything"), "my_app")
+
+    # No name: derive from the output directory's basename.
+    _eq("basename of path", project_name("", "path/to/cool-proj"), "cool_proj")
+    _eq("basename trailing slash", project_name("", "path/to/proj/"), "proj")
+    _eq("bare name", project_name("", "widget"), "widget")
+
+    # "." or empty out_dir falls back to the default.
+    _eq("dot -> default", project_name("", "."), "my_project")
+    _eq("empty -> default", project_name("", ""), "my_project")
+
+def _test_presets():
+    _eq("preset_names sorted", preset_names(_CONFIG), ["minimal", "py", "rust"])
+    _eq("preset_flags py", preset_flags(_CONFIG, "py")["python"], True)
+
+def _test_inclusion():
+    py = preset_flags(_CONFIG, "py")
+    _true("py includes pyproject.toml", is_included(_CONFIG, "pyproject.toml", py))
+    _false("py excludes Cargo.toml", is_included(_CONFIG, "Cargo.toml", py))
+    _false("py excludes Gemfile", is_included(_CONFIG, "Gemfile", py))
+
+    # `ruff.toml` requires BOTH python AND lint (the {"all": [...]} predicate).
+    _true("py+lint includes ruff.toml", is_included(_CONFIG, "ruff.toml", py))
+
+    # `.compiled-lang` requires rust OR ruby (the {"any": [...]} predicate).
+    _false("py excludes .compiled-lang (OR unmet)", is_included(_CONFIG, ".compiled-lang", py))
+    rs = preset_flags(_CONFIG, "rust")
+    _true("rust includes .compiled-lang (OR met)", is_included(_CONFIG, ".compiled-lang", rs))
+    mn = preset_flags(_CONFIG, "minimal")
+    _false("minimal excludes pyproject.toml", is_included(_CONFIG, "pyproject.toml", mn))
+    _false("minimal excludes ruff.toml (AND unmet)", is_included(_CONFIG, "ruff.toml", mn))
+    _false("minimal excludes .compiled-lang (OR unmet)", is_included(_CONFIG, ".compiled-lang", mn))
+    _true("minimal includes unmatched BUILD", is_included(_CONFIG, "BUILD.bazel", mn))
+
+def _test_render_flags():
+    # no_render: copied verbatim (not jinja-rendered).
+    _false("*.lock is no_render", should_render(_CONFIG, "Cargo.lock"))
+    _true("BUILD.bazel renders", should_render(_CONFIG, "BUILD.bazel"))
+
+    # executable bit.
+    _true("tools/repin executable", is_executable(_CONFIG, "tools/repin"))
+    _false("BUILD.bazel not executable", is_executable(_CONFIG, "BUILD.bazel"))
+
+def _test_render(ctx):
+    tmpl = ctx.std.fs.mkdtemp(prefix = "init-test-tmpl-")
+    out = ctx.std.fs.mkdtemp(prefix = "init-test-out-")
+
+    # Fixture covering each render path: an always-included file with a
+    # conditional + name vars, a python-gated file, an executable script, and a
+    # no_render lockfile that must be copied verbatim (not jinja-rendered).
+    ctx.std.fs.write(tmpl + "/MODULE.bazel", "name={{ project_snake }} kebab={{ project_kebab }}\n{% if python %}py=1{% endif %}\n")
+    ctx.std.fs.create_dir_all(tmpl + "/requirements")
+    ctx.std.fs.write(tmpl + "/requirements/all.in", "placeholder\n")
+    ctx.std.fs.create_dir_all(tmpl + "/tools")
+    ctx.std.fs.write(tmpl + "/tools/repin", "#!/usr/bin/env bash\n")
+    ctx.std.fs.write(tmpl + "/Cargo.lock", "literal {{ not_rendered }}\n")
+
+    flags = preset_flags(_CONFIG, "py")
+
+    # render() expects project_snake already in snake_case (init.axl normalizes
+    # before calling); the kebab variant is derived from it.
+    written = render(ctx, _CONFIG, tmpl, out, "my_proj", flags)
+
+    # MODULE.bazel rendered: snake/kebab name variants + the python branch.
+    # (jinja trims the newline after {% endif %}; assert on substantive content.)
+    got = ctx.std.fs.read_to_string(out + "/MODULE.bazel")
+    _true("render substitutes snake name", "name=my_proj" in got)
+    _true("render derives kebab name", "kebab=my-proj" in got)
+    _true("render keeps python branch", "py=1" in got)
+
+    # python-gated file included for the py preset.
+    _true("render includes requirements", ctx.std.fs.exists(out + "/requirements/all.in"))
+
+    # tools/repin is executable.
+    _true("repin executable", ctx.std.fs.metadata(out + "/tools/repin").executable)
+
+    # no_render lockfile copied verbatim — jinja markers survive untouched.
+    _eq("lockfile copied verbatim", ctx.std.fs.read_to_string(out + "/Cargo.lock"), "literal {{ not_rendered }}\n")
+    _true("render returned paths", len(written) >= 4)
+
+def _test_impl(ctx):
+    _test_glob()
+    _test_project_name()
+    _test_presets()
+    _test_inclusion()
+    _test_render_flags()
+    _test_render(ctx)
+    print("init + renderer tests: OK")
+    return 0
+
+init_tests = task(
+    name = "test-init",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)
