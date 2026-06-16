@@ -586,6 +586,82 @@ async fn refresh_access_token(entry: &CredentialsEntry) -> anyhow::Result<Creden
     })
 }
 
+/// Shown when a stored session is expired and cannot be silently refreshed.
+const SESSION_EXPIRED_MESSAGE: &str =
+    "session expired\n\nRun `aspect auth login` to re-authenticate.";
+
+/// What to do with a stored credentials entry, decided purely from the entry
+/// (no IO). Lets the expiry policy be unit-tested without disk or network.
+enum TokenAction {
+    /// The token is current; use it as-is.
+    Use,
+    /// The token is expired but refreshable; mint a new one.
+    Refresh,
+    /// The token is expired and cannot be refreshed; the caller must error.
+    Expired,
+}
+
+fn classify_token(entry: &CredentialsEntry) -> TokenAction {
+    if !is_expired_jwt(entry) {
+        TokenAction::Use
+    } else if can_refresh(entry) {
+        TokenAction::Refresh
+    } else {
+        TokenAction::Expired
+    }
+}
+
+/// Environment variable naming the credentials profile to use when no explicit
+/// profile is given. The single selector shared by the `auth` tasks and the
+/// Bazel credential helper (which has no way to pass a flag), so one
+/// `export ASPECT_AUTH_PROFILE=...` drives both.
+pub const PROFILE_ENV: &str = "ASPECT_AUTH_PROFILE";
+
+/// The credentials profile when none is configured.
+const DEFAULT_PROFILE: &str = "default";
+
+/// Resolve the effective profile name: an explicit (non-empty) value wins, then
+/// [`PROFILE_ENV`] (non-empty), then [`DEFAULT_PROFILE`]. An empty `explicit` is
+/// treated as absent (the `auth` tasks pass `""` when `--profile` is omitted),
+/// so it still falls through to the env var.
+pub fn resolve_profile(explicit: Option<&str>) -> String {
+    let non_empty = |s: String| (!s.is_empty()).then_some(s);
+    explicit
+        .map(str::to_owned)
+        .and_then(non_empty)
+        .or_else(|| std::env::var(PROFILE_ENV).ok().and_then(non_empty))
+        .unwrap_or_else(|| DEFAULT_PROFILE.to_owned())
+}
+
+/// Resolve the current access token (JWT) for `profile` (already resolved, e.g.
+/// via [`resolve_profile`]), preferring an explicit `ASPECT_API_TOKEN` over
+/// stored login credentials, and auto-refreshing an expired-but-refreshable
+/// token (persisting the refresh). Returns `None` when no credential exists for
+/// the profile, and errors when the stored token is expired and cannot be
+/// refreshed: it never returns a known-expired token, so a consumer (e.g. the
+/// credential helper) does not emit one a server will 401. Requires a Tokio
+/// runtime (the refresh path blocks on async HTTP).
+pub fn resolve_access_token(profile: &str) -> anyhow::Result<Option<String>> {
+    if let Some(entry) = credentials_from_api_token_env()? {
+        return Ok(Some(entry.access_token));
+    }
+    let mut map = load_all_credentials()?;
+    let Some(entry) = map.get(profile).cloned() else {
+        return Ok(None);
+    };
+    match classify_token(&entry) {
+        TokenAction::Use => Ok(Some(entry.access_token)),
+        TokenAction::Expired => Err(anyhow::anyhow!(SESSION_EXPIRED_MESSAGE)),
+        TokenAction::Refresh => {
+            let refreshed = block_on(refresh_access_token(&entry))
+                .map_err(|_| anyhow::anyhow!(SESSION_EXPIRED_MESSAGE))?;
+            map.insert(profile.to_string(), refreshed.clone());
+            save_all_credentials(&map)?;
+            Ok(Some(refreshed.access_token))
+        }
+    }
+}
+
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative, Clone)]
 #[display("<AuthCredentials>")]
 pub struct AuthCredentials {
@@ -854,13 +930,9 @@ fn auth_methods(registry: &mut MethodsBuilder) {
         let creds = creds
             .downcast_ref_err::<AuthCredentials>()
             .into_anyhow_result()?;
-        let profile_opt = profile.into_option();
-        let profile = profile_opt
-            .as_deref()
-            .filter(|p| !p.is_empty())
-            .unwrap_or("default");
+        let profile = resolve_profile(profile.into_option().as_deref());
         let mut map = load_all_credentials()?;
-        map.insert(profile.to_string(), creds.to_entry());
+        map.insert(profile, creds.to_entry());
         save_all_credentials(&map)?;
         Ok(values::Value::new_none())
     }
@@ -869,13 +941,9 @@ fn auth_methods(registry: &mut MethodsBuilder) {
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = named, default = NoneOr::None)] profile: NoneOr<String>,
     ) -> anyhow::Result<values::Value<'v>> {
-        let profile_opt = profile.into_option();
-        let profile = profile_opt
-            .as_deref()
-            .filter(|p| !p.is_empty())
-            .unwrap_or("default");
+        let profile = resolve_profile(profile.into_option().as_deref());
         let mut map = load_all_credentials()?;
-        map.remove(profile);
+        map.remove(&profile);
         save_all_credentials(&map)?;
         Ok(values::Value::new_none())
     }
@@ -885,25 +953,20 @@ fn auth_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = NoneOr::None)] profile: NoneOr<String>,
         heap: values::Heap<'v>,
     ) -> anyhow::Result<values::Value<'v>> {
-        let profile_opt = profile.into_option();
-        let profile = profile_opt
-            .as_deref()
-            .filter(|p| !p.is_empty())
-            .unwrap_or("default");
+        let profile = resolve_profile(profile.into_option().as_deref());
         // Prefer an explicit ASPECT_API_TOKEN source over cache login credentials.
         if let Some(entry) = credentials_from_api_token_env()? {
             return Ok(heap.alloc(AuthCredentials::from_entry(&entry)));
         }
-        let map = load_all_credentials()?;
-        let Some(entry) = map.get(profile).cloned() else {
+        let mut map = load_all_credentials()?;
+        let Some(entry) = map.get(&profile).cloned() else {
             return Ok(values::Value::new_none());
         };
         // Auto-refresh if expired and refreshable
         let entry = if is_expired_jwt(&entry) && can_refresh(&entry) {
             match block_on(refresh_access_token(&entry)) {
                 Ok(refreshed) => {
-                    let mut map = map;
-                    map.insert(profile.to_string(), refreshed.clone());
+                    map.insert(profile.clone(), refreshed.clone());
                     save_all_credentials(&map)?;
                     refreshed
                 }
@@ -929,4 +992,120 @@ fn register_auth_types(globals: &mut GlobalsBuilder) {
 
 pub fn register_globals(globals: &mut GlobalsBuilder) {
     globals.namespace("auth", register_auth_types);
+}
+
+#[cfg(test)]
+mod tests {
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    use super::*;
+
+    /// A JWT whose payload is `{"exp": <exp>}` (header and signature are
+    /// placeholders; only the payload is decoded). `exp` of `None` omits the
+    /// claim entirely.
+    fn jwt_with_exp(exp: Option<u64>) -> String {
+        let payload = match exp {
+            Some(exp) => format!("{{\"exp\":{exp}}}"),
+            None => "{}".to_string(),
+        };
+        format!("header.{}.sig", URL_SAFE_NO_PAD.encode(payload))
+    }
+
+    fn entry(access_token: String) -> CredentialsEntry {
+        CredentialsEntry {
+            access_token,
+            refresh_token: String::new(),
+            email: "user@example.com".to_string(),
+            name: "User".to_string(),
+            tenant_id: "tenant".to_string(),
+            auth_domain: None,
+            auth_client_id: None,
+        }
+    }
+
+    fn now() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
+
+    #[test]
+    fn is_expired_jwt_classifies_by_exp() {
+        // A token well in the future is current.
+        assert!(!is_expired_jwt(&entry(jwt_with_exp(Some(now() + 3600)))));
+        // One in the past is expired, as is one inside the 60s pre-expiry buffer.
+        assert!(is_expired_jwt(&entry(jwt_with_exp(Some(now() - 1)))));
+        assert!(is_expired_jwt(&entry(jwt_with_exp(Some(now() + 30)))));
+        // No `exp` claim means non-expiring.
+        assert!(!is_expired_jwt(&entry(jwt_with_exp(None))));
+    }
+
+    #[test]
+    fn is_expired_jwt_treats_malformed_tokens_as_expired() {
+        assert!(is_expired_jwt(&entry("not-a-jwt".to_string())));
+        assert!(is_expired_jwt(&entry("only.two".to_string())));
+        assert!(is_expired_jwt(&entry("a.!!!.c".to_string())));
+    }
+
+    #[test]
+    fn can_refresh_requires_token_domain_and_client_id() {
+        let mut e = entry(jwt_with_exp(Some(now() - 1)));
+        assert!(!can_refresh(&e));
+        e.refresh_token = "refresh".to_string();
+        assert!(!can_refresh(&e));
+        e.auth_domain = Some("https://auth.example".to_string());
+        assert!(!can_refresh(&e));
+        e.auth_client_id = Some("client".to_string());
+        assert!(can_refresh(&e));
+    }
+
+    #[test]
+    fn resolve_profile_prefers_explicit_then_env_then_default() {
+        // An explicit, non-empty profile always wins, regardless of the env.
+        assert_eq!(resolve_profile(Some("ci")), "ci");
+
+        // This test mutates the process env, so it must run serially with any
+        // other PROFILE_ENV reader; it is currently the only one.
+        let saved = std::env::var(PROFILE_ENV).ok();
+
+        // SAFETY: single-threaded test body; restored before returning.
+        unsafe { std::env::set_var(PROFILE_ENV, "from-env") };
+        // An absent or empty explicit profile falls through to the env var.
+        assert_eq!(resolve_profile(None), "from-env");
+        assert_eq!(resolve_profile(Some("")), "from-env");
+        // An explicit profile still overrides the env.
+        assert_eq!(resolve_profile(Some("explicit")), "explicit");
+
+        // With the env unset, everything falls through to the default.
+        unsafe { std::env::remove_var(PROFILE_ENV) };
+        assert_eq!(resolve_profile(None), DEFAULT_PROFILE);
+        assert_eq!(resolve_profile(Some("")), DEFAULT_PROFILE);
+
+        match saved {
+            Some(v) => unsafe { std::env::set_var(PROFILE_ENV, v) },
+            None => unsafe { std::env::remove_var(PROFILE_ENV) },
+        }
+    }
+
+    #[test]
+    fn classify_token_covers_each_branch() {
+        // Current token: use as-is.
+        assert!(matches!(
+            classify_token(&entry(jwt_with_exp(Some(now() + 3600)))),
+            TokenAction::Use
+        ));
+        // Expired and not refreshable: error (never returned as-is).
+        assert!(matches!(
+            classify_token(&entry(jwt_with_exp(Some(now() - 1)))),
+            TokenAction::Expired
+        ));
+        // Expired but refreshable: refresh.
+        let mut refreshable = entry(jwt_with_exp(Some(now() - 1)));
+        refreshable.refresh_token = "refresh".to_string();
+        refreshable.auth_domain = Some("https://auth.example".to_string());
+        refreshable.auth_client_id = Some("client".to_string());
+        assert!(matches!(classify_token(&refreshable), TokenAction::Refresh));
+    }
 }

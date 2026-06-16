@@ -12,6 +12,11 @@ mod std;
 mod template;
 mod wasm;
 
+/// Re-exported for the credential helper: resolve the effective credentials
+/// profile, and resolve the current Aspect access token (JWT) for a profile,
+/// auto-refreshing if needed.
+pub use aspect::auth::{resolve_access_token, resolve_profile};
+
 pub mod feature;
 pub mod names;
 pub mod r#trait;

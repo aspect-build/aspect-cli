@@ -41,6 +41,11 @@ pub enum CmdError {
     TooManyGroups(String, String, usize),
     #[error("task {0:?} in group {1:?} (defined in {2:?}) conflicts with another task or group")]
     NameConflict(String, Vec<String>, String),
+    #[error(
+        "task {0:?} (defined in {1:?}) uses the reserved command name {2:?}; \
+         rename it or nest it under a group"
+    )]
+    ReservedName(String, String, String),
     #[error("no task selected")]
     NoTaskSelected,
 }
@@ -748,6 +753,16 @@ impl Tree {
                 MAX_TASK_GROUPS,
             ));
         }
+        // A top-level `get` task is unreachable: `main` routes `aspect get` to
+        // the credential helper before task parsing. Reject it rather than let
+        // it silently never run. Nested under a group it is reachable and fine.
+        if group.is_empty() && task.name() == crate::credential_helper::GET_COMMAND {
+            return Err(CmdError::ReservedName(
+                task.name(),
+                label.to_owned(),
+                crate::credential_helper::GET_COMMAND.to_owned(),
+            ));
+        }
         self.insert_at(&task.name(), &group[..], &group[..], label, cmd)
     }
 
@@ -1075,6 +1090,45 @@ mod tests {
             Err(CmdError::NameConflict(name, ..)) => assert_eq!(name, "dup"),
             other => panic!("expected NameConflict, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn build_rejects_top_level_task_named_get() {
+        let t = stub_task(crate::credential_helper::GET_COMMAND, &[], SmallMap::new());
+        let cmd = Cmd {
+            tasks: vec![&t],
+            features: vec![],
+            aspect_root: Path::new("/repo"),
+            modules: &[],
+        };
+        match cmd.build("0.0.0") {
+            Err(CmdError::ReservedName(name, ..)) => {
+                assert_eq!(name, crate::credential_helper::GET_COMMAND);
+            }
+            other => panic!("expected ReservedName, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn build_allows_get_task_nested_in_group() {
+        // Bazel only invokes the bare `aspect get`, so `aspect dev get` is fine.
+        let t = stub_task(
+            crate::credential_helper::GET_COMMAND,
+            &["dev"],
+            SmallMap::new(),
+        );
+        let cmd = Cmd {
+            tasks: vec![&t],
+            features: vec![],
+            aspect_root: Path::new("/repo"),
+            modules: &[],
+        };
+        let root = cmd.build("0.0.0").expect("build ok");
+        let dev = root.find_subcommand("dev").expect("dev group present");
+        assert!(
+            dev.find_subcommand(crate::credential_helper::GET_COMMAND)
+                .is_some()
+        );
     }
 
     // ── Dispatch ───────────────────────────────────────────────────────────

@@ -37,9 +37,17 @@ login = task(
     group = ["auth"],
     implementation = _login_impl,
     args = {
-        "with_token": args.boolean(default = False),
-        "with_api_token": args.boolean(default = False),
-        "profile": args.string(),
+        "with_token": args.boolean(
+            default = False,
+            description = "Log in with a JWT read from stdin instead of the browser flow.",
+        ),
+        "with_api_token": args.boolean(
+            default = False,
+            description = "Log in with an 'id:secret' API token read from stdin instead of the browser flow.",
+        ),
+        "profile": args.string(
+            description = "Credentials profile name. Defaults to $ASPECT_AUTH_PROFILE, then \"default\".",
+        ),
     },
 )
 
@@ -52,7 +60,9 @@ logout = task(
     group = ["auth"],
     implementation = _logout_impl,
     args = {
-        "profile": args.string(),
+        "profile": args.string(
+            description = "Credentials profile name. Defaults to $ASPECT_AUTH_PROFILE, then \"default\".",
+        ),
     },
 )
 
@@ -72,6 +82,8 @@ whoami = task(
     group = ["auth"],
     implementation = _whoami_impl,
     args = {
-        "profile": args.string(),
+        "profile": args.string(
+            description = "Credentials profile name. Defaults to $ASPECT_AUTH_PROFILE, then \"default\".",
+        ),
     },
 )

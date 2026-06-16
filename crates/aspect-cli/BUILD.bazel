@@ -1,5 +1,5 @@
 load("//bazel/release:release.bzl", "release")
-load("//bazel/rust:defs.bzl", "rust_binary")
+load("//bazel/rust:defs.bzl", "rust_binary", "rust_test")
 load("//bazel/rust:multi_platform_rust_binaries.bzl", "multi_platform_rust_binaries")
 
 rust_binary(
@@ -44,6 +44,18 @@ rust_binary(
         "@crates//:tracing-opentelemetry",
         "@crates//:tracing-subscriber",
         "@crates//:uuid",
+    ],
+)
+
+rust_test(
+    name = "test",
+    compile_data = glob([
+        "src/builtins/**/*.axl",
+        "src/builtins/**/*.aspect",
+    ]),
+    crate = ":aspect-cli",
+    deps = [
+        "@crates//:tempfile",
     ],
 )
 
