@@ -58,9 +58,16 @@ hand-maintained list in `pipeline.yaml`, no copied `_eq` helper, no
    look-alike type — and it keeps every internal `downcast_ref::<RealType>()`
    working, which a masquerading type would silently break.
 
-5. **Per-test isolation, pytest semantics.** Each test runs with a fresh
-   overlay. A failed assertion raises; the runner catches it per-test, records
-   the failure, and continues to the next test.
+5. **Per-test isolation, pytest semantics, run in parallel.** Each test runs
+   with a fresh overlay. A failed assertion raises; the runner catches it
+   per-test, records the failure, and continues to the next test. Tests fan
+   out across `min(tests, cpus)` worker threads (overridable, `--jobs`-style),
+   each with its own Starlark heap — heaps are `!Send`, so workers re-evaluate
+   the side-effect-free module body locally rather than sharing one. Results
+   merge back into definition order so the report is deterministic. This is
+   sound **because** every per-test fixture lives on the test's own values
+   (the env overlay, and the bazel backend below), never in a process-global —
+   concurrent workers therefore share no mutable state.
 
 ## What the POC implements (and how to run it)
 
@@ -70,7 +77,7 @@ All in `crates/axl-runtime`:
 |---|---|
 | `asserts` namespace (`eq`, `ne`, `is_true`, `is_false`, `contains`, `fails`) | `src/engine/testing.rs` |
 | `Test` harness value (`t.env`, `t.std`, `t.ctx`) | `src/engine/testing.rs` |
-| `test_*` discovery + isolated runner + summary | `src/engine/testing.rs` (`run_test_source`) |
+| `test_*` discovery + parallel (thread-per-shard) runner + summary | `src/engine/testing.rs` (`run_test_source`) |
 | In-memory env overlay backend | `src/engine/store.rs` (`Env::test_env`, `with_test_env`) |
 | `std.env` reads/writes the overlay when present | `src/engine/std/env.rs` (`var`/`set_var`/`remove_var`/`vars`) |
 | Test-only globals surface | `src/eval/api.rs` (`get_test_globals`) |
@@ -87,11 +94,15 @@ the test surface; `test_*` discovery (and that `helper_*` is *not* run);
 `t.env` overlay observed through both `t.std.env` and a real `t.ctx`;
 isolation; and per-test failure capture. `overlay_does_not_leak_into_process`
 proves the overlay never mutates the real process environment.
+`runs_tests_in_parallel_shards` forces the multi-worker path (8 jobs over 17
+tests) and proves cross-test isolation holds concurrently and that outcomes
+still merge back into definition order.
 
-## Decisions made without explicit sign-off — please review
+## Decisions — reviewed
 
-These were forced or chosen to keep the POC moving; none are load-bearing
-commitments and all are cheap to change:
+Items marked *Decided* were reviewed and settled during the design walkthrough;
+the rest were forced or chosen to keep the POC moving and remain cheap to
+change:
 
 1. **`asserts`, not `assert`.** `assert` is a **reserved keyword** in the
    AXL/Starlark dialect and cannot be used as an identifier, so the namespace
@@ -101,10 +112,11 @@ commitments and all are cheap to change:
    `expect`), or moving assertions onto the harness (`t.eq(...)`,
    `t.assert_eq(...)`).
 
-2. **Assertions are a global namespace, not harness methods.** Consistent with
-   (1); the alternative (`t.assert_eq`) is equally viable and would remove the
-   need for the test-globals swap entirely. Kept the swap because it's the
-   mechanism that scopes *future* test-only builders (`bes.*`, `parametrize`).
+2. **Assertions are a global namespace, not harness methods.** *Decided:* keep
+   `asserts.*` global. The alternative (`t.assert_eq`) is viable but the
+   test-globals swap is the mechanism that scopes *future* test-only builders
+   (`parametrize`, fixtures), so we keep it and free-standing `asserts.eq`
+   reads cleaner than threading `t.` through every check.
 
 3. **`contains` is string-only in the POC.** Collection membership
    (`needle in haystack`) is stubbed out with a clear error. Trivial to extend.
@@ -117,40 +129,114 @@ commitments and all are cheap to change:
    freeze/thaw; the loader globals-swap is still implemented and exercised for
    the normal load path. A production runner should unify these.
 
-6. **Only the `env` backend is mocked so far.** It's the smallest surface and
-   the one every existing suite needs (`ci_test.axl` etc.). `io`/`fs`/`net`/
-   `process`/`bazel` follow the identical pattern (see roadmap) but are not in
-   the POC.
+6. **`env` is an *overlay*, not a "backend"; bazel *is* a backend.** *Decided
+   vocabulary.* For env, the `std.Env` type and methods are identical — only
+   the map they read swaps — so "overlay" fits. For bazel, `Real` (spawns a
+   subprocess, live BES) and `Fake` (below) are genuinely different
+   implementations of one contract, so `BazelBackend::{Real, Fake}` fits.
+   *Decided mechanism:* both the overlay handle and the bazel backend are
+   **carried on the harness-constructed value**, not bolted onto the production
+   `Env` and fished out of `eval.extra`. (Today's POC still uses the
+   `eval.extra`/`from_eval` route for the env overlay — moving it onto the
+   value is roadmap item 1b; it is per-`Evaluator` and so already parallel-safe,
+   but the value-carried form is the cleaner target and the only one that scales
+   to multiple backends.)
 
-7. **No `aspect test` CLI task yet.** The runner is exposed as a Rust function
-   and proven by a Rust test. The design calls for `aspect test` to be a
+7. **bazel `Fake` = a generic fake-bazel process driven by declared data.**
+   *Decided, superseding the earlier "canned `BuildEvent`s" sketch.* Canned
+   in-process events were rejected for two reasons: (a) they'd force us to
+   hand-reimplement *every* surface AXL consumes — BES (`BuildEventIter`),
+   execlog (`ExecLogSink`, incl. the zstd `CompactFile` format), stdout/stderr
+   streams, exit codes — and keep them mutually consistent; (b) baking named
+   scenarios into Rust (as `basil` does) means a test author can't express new
+   behavior without editing Rust, which breaks the no-Rust promise. Instead:
+   - a **single generic fake-bazel** *synthesizes* all surfaces from a declared,
+     typed AXL fixture (a `BazelExpectation` record: `targets` / `result` enum /
+     `exit_code`, with a raw `events=` escape hatch). Author writes intent; the
+     fake manufactures consistent BES + execlog + streams + exit so they can't
+     drift.
+   - **Control channel = an inherited `socketpair`** (parent → fake) carrying
+     the serialized fixture; bidirectional so timing/cancellation tests can
+     drive the fake mid-stream (the lifecycle fidelity canned events can't
+     reach). Unix-only — the control transport sits behind a small trait so a
+     Windows named-pipe/loopback impl is a drop-in later.
+   - **Output channels are the *real* bazel channels** the parent already wires
+     for real bazel (`--build_event_binary_file`/gRPC, `--execution_log_*`,
+     stdout/stderr), so the production `ctx.bazel.build` read path is exercised
+     unchanged. Every per-invocation resource (socketpair, BES path/port,
+     execlog path, temp dir) is **uniquely derived per spawn** — a hard
+     requirement under the parallel runner.
+   - **Process model = fork+exec (`current_exe`/`posix_spawn`), never bare
+     `fork()`.** We carry a tokio runtime + threads; a bare `fork()` is unsafe
+     (frozen locks, broken runtime). `exec` is what gives the "start fresh"
+     image; inherited FDs (the socketpair, BES file) give fork's only useful
+     property without its hazard.
+   - **Reuse `basil`, don't reinvent.** `basil` already *is* the separate
+     fake-bazel binary (spawned via `BAZEL_REAL`, writes real length-delimited
+     `BuildEvent`s). Plan: extract its replay/synthesis into a `basil-core` lib;
+     standalone `basil` stays for the Rust integration tests; shipped
+     `aspect test` reuses the lib via a hidden self-exec subcommand. We do
+     **not** `include_bytes!` a standalone `basil` (≈2–3 MB stripped, mostly
+     `prost`/proto already linked into aspect-cli) — that duplicate is the
+     binary bloat to avoid.
+
+8. **Parallelism makes "state on the value, nothing global" a correctness
+   requirement, and turns three in-tree shortcuts into bugs to fix before the
+   bazel `Fake` lands:**
+   - `std::env::set_var("BAZEL_REAL", …)` (`test.rs`) is process-global → the
+     `Fake` backend must build the `Command` with the fake path directly
+     (carried on the value), not flip a global env var.
+   - the BES output path / gRPC port and execlog path must be per-invocation
+     unique (fixed paths/ports collide across concurrent builds).
+   - the spawn registry (`bazel/live.rs`, `static REG`) pools pids from *all*
+     concurrent tests → cancellation scope must be per-test, not the global
+     registry.
+   `t.stdout()` (roadmap) must likewise be a per-test buffer, never a
+   process-stdout redirect.
+
+9. **No `aspect test` CLI task yet.** The runner is exposed as a Rust function
+   and proven by Rust tests. The design calls for `aspect test` to be a
    builtin **AXL task** (next to `axl_add.axl`) that calls a sandbox-run
    primitive — wiring that touches `cmd.rs` + `MODULE.aspect` and is the next
-   step, deliberately out of this slice.
+   step, deliberately out of this slice. The fake-bazel embedding (item 7's
+   self-exec subcommand) rides on this step.
 
-8. **No deny-by-default for unstubbed net/process.** That hermeticity property
-   (an unstubbed subprocess/HTTP call fails the test) is designed but not
-   built, since those backends aren't mocked yet.
+10. **No deny-by-default for unstubbed net/process.** That hermeticity property
+    (an unstubbed subprocess/HTTP call fails the test) is designed but not
+    built, since those backends aren't mocked yet.
 
 ## Roadmap / open questions
 
-Build order (each independently shippable, all reuse the
-`from_eval(eval).<sub>()` backend-routing pattern):
+Build order (each independently shippable):
 
-1. ✅ `env` backend + `asserts` + discovery + runner + `t.ctx` (this POC).
-2. `io` backend → captured `t.stdout()` for output assertions.
-3. `fs` backend → `t.fs.tmpdir()` (tmpdir-rooted real fs by default).
-4. `process` / `net` backends → `t.process.stub(...)` / `t.http.stub(...)`,
+1. ✅ `env` overlay + `asserts` + discovery + `t.ctx` (this POC).
+1b. ✅ **Parallel runner** — thread-per-shard, `min(tests, cpus)` workers,
+    deterministic merge (`run_test_source` / `run_test_source_with_jobs`).
+1c. Move the env overlay off the production `Env`/`eval.extra` and **onto the
+    `std.Env` value** (`Option<overlay>`); `t.env` and `t.ctx.std.env` share one
+    `Rc`. Removes `Env::test_env` + the `from_eval` mock route.
+2. `bazel` → `BazelBackend::{Real, Fake}` on the `bazel.Bazel` value. `Fake` =
+   fork+exec a generic fake-bazel (basil-core) with a `socketpair` control
+   channel carrying a `BazelExpectation` fixture; the fake synthesizes BES +
+   execlog + streams + exit onto the real channels. Per-invocation-unique
+   resources; drop the `BAZEL_REAL` global. (See decision 7/8.)
+3. `io` backend → captured `t.stdout()` (per-test buffer, never process stdout).
+4. `fs` backend → `t.fs.tmpdir()` (tmpdir-rooted real fs by default).
+5. `process` / `net` backends → `t.process.stub(...)` / `t.http.stub(...)`,
    **deny-by-default**.
-5. `bazel` → `BazelBackend::{Real, Fake}` enum; `Fake` feeds canned
-   `BuildEvent` protos into the existing `BuildEventIter` channel (basil stays
-   the process-level / contract-pinning tier).
-6. `aspect test` as an AXL runner task + the sandbox-run engine primitive.
+6. `aspect test` as an AXL runner task + the sandbox-run engine primitive;
+   extract `basil-core` and ship the fake-bazel via a hidden self-exec
+   subcommand (no embedded second binary — see decision 7).
 7. Snapshots: `t.snapshot(value, name=...)` + golden files + `--update`.
 8. Teach `axl-lsp` / `axl-docgen` about the `_test.axl` augmented surface.
 
 Open questions to settle before promoting past POC:
-- Namespace name (`asserts` vs `check`/`expect` vs harness methods) — decision (1).
+- ✅ Namespace name — `asserts`, global (decisions 1, 2).
+- ✅ env "overlay" vs bazel "backend"; state carried on the value (decision 6).
+- ✅ bazel `Fake` shape — generic process + socketpair + synthesized surfaces,
+  reusing basil-core; not canned events, not Rust scenarios (decisions 7, 8).
+- `BazelExpectation` control-channel **wire format** (lean: length-delimited
+  protobuf, the framing basil already uses for BES).
 - Snapshot golden location: `__snapshots__/` dir vs inline-string snapshots.
 - Should the test surface also gate on *where* the runner loads from, so a
   stray `_test.axl` evaluated outside the runner can't pick up test globals?

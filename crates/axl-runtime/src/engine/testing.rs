@@ -27,9 +27,14 @@
 //!      the test. The type is unchanged; only the backend it consults differs.
 //!      This is what keeps the mock's contract identical to reality.
 //!
-//!   5. **Per-test isolation.** Each test runs with a fresh overlay; a failed
-//!      assertion (which raises) is caught per-test and recorded, so one
-//!      failure never aborts the run — pytest semantics.
+//!   5. **Per-test isolation, run in parallel.** Each test runs with a fresh
+//!      overlay; a failed assertion (which raises) is caught per-test and
+//!      recorded, so one failure never aborts the run — pytest semantics.
+//!      Tests fan out across `min(tests, cpus)` worker threads, each with its
+//!      own Starlark heap (heaps are `!Send`), and results merge back into
+//!      definition order. This is sound precisely because per-test state lives
+//!      on the test's own values, never in a process-global — so concurrent
+//!      workers share no mutable state.
 //!
 //! Not yet built (tracked in `docs/testing.md`): the `aspect test` runner as
 //! an AXL task, snapshot golden files, fs/process/http mock backends, and the
@@ -352,34 +357,29 @@ impl TestSummary {
     }
 }
 
-/// Run every `test_*` function defined in `source` against the test globals,
-/// each with an isolated in-memory environment overlay. A raised error
-/// (assertion failure or otherwise) fails that test and is recorded; the run
-/// continues — pytest semantics.
-///
-/// `base_env` supplies the non-mocked context (roots, async runtime); the
-/// runner clones it per test with a fresh `test_env` overlay installed.
-pub fn run_test_source(source: &str, base_env: &RuntimeEnv) -> anyhow::Result<TestSummary> {
-    let globals = crate::eval::api::get_test_globals();
-    let ast = AstModule::parse(
+/// Parse `source` into the test AST against the test globals dialect.
+fn parse_test_source(source: &str) -> anyhow::Result<AstModule> {
+    AstModule::parse(
         "<axl-test>",
         source.to_string(),
         &crate::eval::api::dialect(),
     )
-    .map_err(|e| anyhow::anyhow!("parse error: {e}"))?;
+    .map_err(|e| anyhow::anyhow!("parse error: {e}"))
+}
 
-    Module::with_temp_heap(|module| -> anyhow::Result<TestSummary> {
-        // Evaluate the module body — this only binds the `def test_*` functions;
-        // a well-behaved test file performs no side effects at module scope.
-        {
-            let mut eval = Evaluator::new(&module);
-            eval.extra = Some(base_env);
-            eval.eval_module(ast, &globals)
-                .map_err(|e| anyhow::anyhow!("eval error: {e}"))?;
-        }
-
-        // Discover `test_*` callables (definition order is the module's name order).
-        let names: Vec<String> = module
+/// Enumerate the `test_*` callables in definition order. Evaluates the module
+/// body once in a throwaway heap purely to learn the names; the result is
+/// `Send` (plain `String`s), so the caller can shard it across worker threads
+/// even though the `Module` itself is `!Send`.
+fn discover_test_names(source: &str, base_env: &RuntimeEnv) -> anyhow::Result<Vec<String>> {
+    let globals = crate::eval::api::get_test_globals();
+    let ast = parse_test_source(source)?;
+    Module::with_temp_heap(|module| -> anyhow::Result<Vec<String>> {
+        let mut eval = Evaluator::new(&module);
+        eval.extra = Some(base_env);
+        eval.eval_module(ast, &globals)
+            .map_err(|e| anyhow::anyhow!("eval error: {e}"))?;
+        Ok(module
             .names()
             .map(|n| n.as_str().to_string())
             .filter(|n| n.starts_with("test_"))
@@ -389,14 +389,78 @@ pub fn run_test_source(source: &str, base_env: &RuntimeEnv) -> anyhow::Result<Te
                     .map(|v| v.get_type() == "function")
                     .unwrap_or(false)
             })
-            .collect();
+            .collect())
+    })
+}
 
-        let mut summary = TestSummary::default();
-        for name in names {
-            let f = module.get(&name).expect("name came from module.names()");
+/// The `Send` slice of a [`RuntimeEnv`] needed to rebuild one on a worker
+/// thread. `RuntimeEnv` itself is `!Send` (it carries an `Rc` overlay slot),
+/// so we never move one across a thread boundary — instead each worker enters
+/// the shared tokio runtime handle and mints its own `RuntimeEnv` locally.
+#[derive(Clone)]
+struct EnvSeed {
+    cli_version: String,
+    aspect_root: std::path::PathBuf,
+    bazel_root: std::path::PathBuf,
+    git_root: Option<std::path::PathBuf>,
+    rt: tokio::runtime::Handle,
+}
+
+impl EnvSeed {
+    fn from_env(env: &RuntimeEnv) -> Self {
+        Self {
+            cli_version: env.cli_version.clone(),
+            aspect_root: env.aspect_root_dir.clone(),
+            bazel_root: env.bazel_root_dir.clone(),
+            git_root: env.git_root_dir.clone(),
+            rt: env.rt.0.clone(),
+        }
+    }
+}
+
+/// Run a slice of tests (carrying their original indices, so results can be
+/// merged back into definition order) in a fresh `Module` on the current
+/// thread. Each test gets its own isolated env overlay; a raised error fails
+/// that test and is recorded — the slice continues (pytest semantics).
+fn run_shard(
+    base_env: &RuntimeEnv,
+    source: &str,
+    shard: Vec<(usize, String)>,
+) -> anyhow::Result<Vec<(usize, TestOutcome)>> {
+    let globals = crate::eval::api::get_test_globals();
+    let ast = parse_test_source(source)?;
+    Module::with_temp_heap(|module| -> anyhow::Result<Vec<(usize, TestOutcome)>> {
+        // Evaluate the module body — this only binds the `def test_*` functions;
+        // a well-behaved test file performs no side effects at module scope,
+        // which is also what makes re-evaluating it per worker thread safe.
+        {
+            let mut eval = Evaluator::new(&module);
+            eval.extra = Some(base_env);
+            eval.eval_module(ast, &globals)
+                .map_err(|e| anyhow::anyhow!("eval error: {e}"))?;
+        }
+
+        let mut out = Vec::with_capacity(shard.len());
+        for (idx, name) in shard {
+            let f = match module.get(&name) {
+                Some(f) => f,
+                None => {
+                    out.push((
+                        idx,
+                        TestOutcome {
+                            name,
+                            passed: false,
+                            message: Some("test disappeared after discovery".to_string()),
+                        },
+                    ));
+                    continue;
+                }
+            };
 
             // Fresh, isolated overlay per test; shared between `t.env` and the
-            // `std.env` backend via this `eval.extra`.
+            // `std.env` backend via this `eval.extra`. Because the overlay lives
+            // on this thread's evaluator (not in any process-global), concurrent
+            // workers never contend.
             let overlay: TestEnvMap = Rc::new(RefCell::new(BTreeMap::new()));
             let test_env = base_env.with_test_env(overlay);
             let t = module.heap().alloc(Test {});
@@ -415,10 +479,96 @@ pub fn run_test_source(source: &str, base_env: &RuntimeEnv) -> anyhow::Result<Te
                     message: Some(e.to_string()),
                 },
             };
-            summary.outcomes.push(outcome);
+            out.push((idx, outcome));
         }
+        Ok(out)
+    })
+}
 
-        Ok(summary)
+/// Default worker count: one per test, capped at the available parallelism.
+fn default_jobs(n_tests: usize) -> usize {
+    let cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    n_tests.min(cpus).max(1)
+}
+
+/// Run every `test_*` function defined in `source`, each with an isolated
+/// in-memory environment overlay, across up to `min(tests, cpus)` worker
+/// threads. Results are merged back into definition order so the report is
+/// deterministic regardless of how tests were sharded.
+///
+/// `base_env` supplies the non-mocked context (roots, async runtime).
+pub fn run_test_source(source: &str, base_env: &RuntimeEnv) -> anyhow::Result<TestSummary> {
+    let names = discover_test_names(source, base_env)?;
+    let jobs = default_jobs(names.len());
+    run_test_source_with_jobs(source, base_env, names, jobs)
+}
+
+/// Like [`run_test_source`] but with an explicit worker count (the `--jobs`
+/// knob). `jobs <= 1` runs serially on the calling thread; higher values fan
+/// the tests out across that many threads, each with its own Starlark heap.
+fn run_test_source_with_jobs(
+    source: &str,
+    base_env: &RuntimeEnv,
+    names: Vec<String>,
+    jobs: usize,
+) -> anyhow::Result<TestSummary> {
+    let jobs = jobs.max(1);
+
+    // Serial fast path: no threads, run everything on the calling thread (which
+    // is already inside the tokio runtime context the caller established).
+    if jobs <= 1 || names.len() <= 1 {
+        let shard: Vec<(usize, String)> = names.into_iter().enumerate().collect();
+        let mut outcomes = run_shard(base_env, source, shard)?;
+        outcomes.sort_by_key(|(idx, _)| *idx);
+        return Ok(TestSummary {
+            outcomes: outcomes.into_iter().map(|(_, o)| o).collect(),
+        });
+    }
+
+    // Parallel path: shard test names round-robin so each worker gets a roughly
+    // even mix, then rebuild an isolated `RuntimeEnv` + `Module` per thread. The
+    // `Module`/heap is `!Send`, so each worker re-parses + re-evaluates the
+    // (side-effect-free) module body locally rather than sharing one.
+    let seed = EnvSeed::from_env(base_env);
+    let source: std::sync::Arc<str> = std::sync::Arc::from(source);
+    let mut shards: Vec<Vec<(usize, String)>> = vec![Vec::new(); jobs];
+    for (idx, name) in names.into_iter().enumerate() {
+        shards[idx % jobs].push((idx, name));
+    }
+
+    let handles: Vec<_> = shards
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .map(|shard| {
+            let seed = seed.clone();
+            let source = source.clone();
+            std::thread::spawn(move || -> anyhow::Result<Vec<(usize, TestOutcome)>> {
+                // Enter the shared runtime so `RuntimeEnv::new`'s `Handle::current()`
+                // resolves, then mint this thread's own env (no `Rc` crosses here).
+                let _guard = seed.rt.enter();
+                let env = RuntimeEnv::new(
+                    seed.cli_version,
+                    seed.aspect_root,
+                    seed.bazel_root,
+                    seed.git_root,
+                );
+                run_shard(&env, &source, shard)
+            })
+        })
+        .collect();
+
+    let mut merged: Vec<(usize, TestOutcome)> = Vec::new();
+    for h in handles {
+        let shard_outcomes = h
+            .join()
+            .map_err(|_| anyhow::anyhow!("a test worker thread panicked"))??;
+        merged.extend(shard_outcomes);
+    }
+    merged.sort_by_key(|(idx, _)| *idx);
+    Ok(TestSummary {
+        outcomes: merged.into_iter().map(|(_, o)| o).collect(),
     })
 }
 
@@ -496,6 +646,46 @@ def helper_not_discovered(t):
                 .contains("asserts.eq failed"),
             "failure should carry the assertion message, got {:?}",
             failure.message
+        );
+    }
+
+    #[test]
+    fn runs_tests_in_parallel_shards() {
+        let rt = Runtime::new().unwrap();
+        let _g = rt.enter();
+        // Many tests, each mutating its own overlay under the same key. If the
+        // overlay leaked across the concurrent workers, the cross-checks below
+        // would observe another test's value and fail. The intentional failure
+        // (test_xxx_fail) also proves per-test capture survives sharding.
+        let mut src = String::new();
+        for i in 0..16 {
+            src.push_str(&format!(
+                "def test_iso_{i:02}(t):\n    \
+                   asserts.eq(t.std.env.var(\"K\"), None)\n    \
+                   t.env.set(\"K\", \"{i}\")\n    \
+                   asserts.eq(t.ctx.std.env.var(\"K\"), \"{i}\")\n\n"
+            ));
+        }
+        src.push_str("def test_zzz_fail(t):\n    asserts.eq(1, 2)\n");
+
+        let names = discover_test_names(&src, &base_env()).expect("discovery ok");
+        assert_eq!(names.len(), 17, "16 isolation tests + 1 failure");
+
+        // Force the parallel path with several workers.
+        let summary = run_test_source_with_jobs(&src, &base_env(), names, 8)
+            .expect("parallel runner should not error");
+
+        assert_eq!(summary.passed(), 16, "report:\n{}", summary.report());
+        assert_eq!(summary.failed(), 1, "report:\n{}", summary.report());
+
+        // Results are merged back into definition order regardless of sharding.
+        let ordered: Vec<&str> = summary.outcomes.iter().map(|o| o.name.as_str()).collect();
+        let mut expected: Vec<String> = (0..16).map(|i| format!("test_iso_{i:02}")).collect();
+        expected.push("test_zzz_fail".to_string());
+        assert_eq!(
+            ordered,
+            expected.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            "outcomes must be in definition order, not completion order"
         );
     }
 
