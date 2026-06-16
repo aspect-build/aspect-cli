@@ -285,3 +285,23 @@ def resolve_query_flags(ctx, bazel_trait):
     )
     _, expanded_flags = rc.expand_all(command = "query")
     return expanded_flags
+
+def expand_config_flags(ctx, bazel_trait, extra_flags, command = "build"):
+    """Expand the `--config=NAME` references in `extra_flags` against the rc.
+
+    Tasks reach Bazel under `--ignore_all_rc_files`, so any `--config=NAME` in a
+    flag list that bypasses `setup_bazel_command`'s expansion (e.g. delivery's
+    `release_bazel_flags`, appended after `expanded_flags`) would otherwise hit
+    Bazel un-expanded and fail with "Config value 'NAME' is not defined". Parse
+    the workspace rc with `extra_flags` and expand for `command` so a
+    `--config=release` resolves to its `common:release`/`build:release` options,
+    exactly as the task's own flags do.
+
+    Returns the expanded flag list (same shape as `setup_bazel_command`).
+    Non-`--config` flags pass through unchanged. Mutates nothing on `ctx.bazel`
+    (no startup flags added, no disclosure) — the task's setup already did that.
+    """
+    startup_flags = resolve_startup_flags(ctx, bazel_trait)
+    rc = ctx.bazel.parse_rc(startup_flags = startup_flags, flags = list(extra_flags))
+    _, expanded_flags = rc.expand_all(command = command)
+    return expanded_flags

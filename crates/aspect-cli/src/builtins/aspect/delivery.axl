@@ -121,7 +121,7 @@ User-facing migration guide: https://docs.aspect.build/cli/migration/delivery
 
 load("@aspect//bazel.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
 load("@aspect//lib/artifacts.axl", "artifacts")
-load("@aspect//lib/bazel_flags.axl", "announce_bazel_args", "resolve_bazel_announce", "resolve_query_flags")
+load("@aspect//lib/bazel_flags.axl", "announce_bazel_args", "expand_config_flags", "resolve_bazel_announce", "resolve_query_flags")
 load("@aspect//lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "now_ms", "process_event", bazel_init_data = "init_data")
 load("@aspect//lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
 load("@aspect//lib/ci.axl", "resolve_build_url")
@@ -1201,14 +1201,21 @@ def _delivery_impl(ctx):
             phase = Phase(name = "download", description = "Download runfiles", emoji = "📥"),
         )
 
+        # Expand any `--config=NAME` in release_bazel_flags against the rc — the
+        # release build reaches Bazel under --ignore_all_rc_files, so an
+        # unexpanded `--config=release` would fail with "Config value not
+        # defined" (the task's own expanded_flags already went through this).
+        release_flags = expand_config_flags(ctx, bazel_trait, ctx.args.release_bazel_flags)
+
         # Phase 3 flag order (last-wins):
         #   LOCAL_SPAWN_BASE_FLAGS  — defaults first so user/rc overrides win.
         #   expanded_flags          — user `--bazel-flag` / rc settings.
-        #   release_bazel_flags     — `--release-bazel-flag` (e.g. `--stamp`).
+        #   release_flags           — `--release-bazel-flag` (e.g. `--stamp`,
+        #                             `--config=release`), rc-config-expanded.
         #   LOCAL_SPAWN_FLAGS       — mandatory; last so nothing flips them.
         #   --noremote_upload_local_results — keep release artifacts out of the
         #                             shared remote cache (delivery-specific).
-        phase3_flags = LOCAL_SPAWN_BASE_FLAGS + list(expanded_flags) + list(ctx.args.release_bazel_flags) + LOCAL_SPAWN_FLAGS + [
+        phase3_flags = LOCAL_SPAWN_BASE_FLAGS + list(expanded_flags) + list(release_flags) + LOCAL_SPAWN_FLAGS + [
             "--noremote_upload_local_results",
         ]
         _t_download = time.monotonic()
