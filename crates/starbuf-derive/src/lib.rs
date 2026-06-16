@@ -10,7 +10,7 @@ use syn::Item;
 use syn::parse::Parser;
 use syn::{Attribute, Field, ItemStruct, Lit, Meta, parse_str, spanned::Spanned};
 use syn::{
-    Data, DataEnum, DataStruct, DeriveInput, Expr, Fields, FieldsNamed, FieldsUnnamed, Ident, Type,
+    Data, DataEnum, DataStruct, DeriveInput, Fields, FieldsNamed, FieldsUnnamed, Ident, Type,
     Variant,
 };
 
@@ -117,12 +117,33 @@ fn try_types(input: TokenStream) -> Result<TokenStream, Error> {
                     traverse(subpath, defs, &subitem)
                 }
             }
-            Item::Enum(_) => {
-                // Generate empty entry to allow generation of the toplevels function below.
-                defs.entry(prefix.to_string())
-                    .or_insert_with(|| (vec![], vec![]))
-                    .0
-                    .push(quote! {});
+            Item::Enum(en) => {
+                // A Rust `enum` here is either a proto *enumeration* (derives
+                // `Enumeration`) or a proto *oneof* (derives `Oneof`). Only
+                // enumerations get a `<Enum>Members` namespace ZST (emitted by
+                // `try_enumeration`); expose it under the enum's own name so
+                // `<pkg>.<mod>.<Enum>.<MEMBER>` resolves to a typed instance.
+                // Oneofs register nothing (their value is surfaced via the
+                // owning message's field).
+                let is_enumeration = en.attrs.iter().any(|a| {
+                    a.path().is_ident("derive")
+                        && a.to_token_stream().to_string().contains("Enumeration")
+                });
+                if is_enumeration {
+                    let ident = &en.ident;
+                    let members_ident = Ident::new(&format!("{}Members", ident), ident.span());
+                    defs.entry(prefix.to_string())
+                        .or_insert_with(|| (vec![], vec![]))
+                        .0
+                        .push(quote! {
+                            const #ident: #prefix::#members_ident = #prefix::#members_ident;
+                        });
+                } else {
+                    defs.entry(prefix.to_string())
+                        .or_insert_with(|| (vec![], vec![]))
+                        .0
+                        .push(quote! {});
+                }
             }
             Item::Struct(st) if st.generics.params.is_empty() => {
                 let ident = &st.ident;
@@ -559,8 +580,13 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
         } else if attrs.oneof.is_some() {
             &new_return_type.unwrap()
         } else if attrs.enumeration.is_some() {
-            &Type::from_string(&attrs.enumeration.as_ref().unwrap())
-                .expect("failed to parse enum type")
+            // Reads return the lowercase proto name (e.g. "sha256") — the same
+            // string the field has always read back as, so `== "sha256"`
+            // comparisons keep working. The typed enum value is used only on
+            // the write side (members + constructor); a custom value can't be
+            // `==` a builtin string reliably (starlark's operand-dispatch is
+            // unspecified), so reads stay string for back-compat.
+            &parse_str::<Type>("::std::string::String").expect("failed to parse String type")
         } else if attrs.bytes.is_some() {
             &parse_str::<Type>("::starlark::values::bytes::StarlarkBytes")
                 .expect("failed to parse bytes type")
@@ -583,7 +609,7 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
         } else if attrs.enumeration.is_some() {
             let ty = Type::from_string(&attrs.enumeration.as_ref().unwrap())
                 .expect("failed to parse enum type");
-            quote! { Ok(#ty::try_from(this.#fident)?) }
+            quote! { Ok(#ty::try_from(this.#fident)?.starlark_str().to_string()) }
         } else if attrs.bytes.is_some() {
             quote! { Ok(::starlark::values::bytes::StarlarkBytes::new(this.#fident.as_ref())) }
         } else {
@@ -654,9 +680,16 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
                         .ok_or_else(|| ::anyhow::anyhow!("field '{}' expects a bool", #fident_str))?);
                 }
             } else if attrs.optional && attrs.enumeration.is_some() {
+                let enum_ty = Type::from_string(attrs.enumeration.as_ref().unwrap())
+                    .expect("failed to parse enum type");
                 quote! {
-                    result.#fident = Some(<i32 as ::starlark::values::UnpackValue>::unpack_value(value)?
-                        .ok_or_else(|| ::anyhow::anyhow!("expected int"))? as i32);
+                    use ::starlark::values::ValueLike;
+                    result.#fident = Some(if let Some(__e) = value.downcast_ref::<#enum_ty>() {
+                        *__e as i32
+                    } else {
+                        <i32 as ::starlark::values::UnpackValue>::unpack_value(value)?
+                            .ok_or_else(|| ::anyhow::anyhow!("field '{}' expects an enum member or int", #fident_str))? as i32
+                    });
                 }
             } else if attrs.repeated && attrs.message {
                 let inner_ty = extract_inner_type(&field.ty, "prost::alloc::vec::Vec")?;
@@ -688,12 +721,19 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
                     }
                 }
             } else if attrs.repeated && attrs.enumeration.is_some() {
+                let enum_ty = Type::from_string(attrs.enumeration.as_ref().unwrap())
+                    .expect("failed to parse enum type");
                 quote! {
+                    use ::starlark::values::ValueLike;
                     let list = ::starlark::values::list::ListRef::from_value(value)
                         .ok_or_else(|| ::anyhow::anyhow!("field '{}' expects a list", #fident_str))?;
                     for item in list.iter() {
-                        result.#fident.push(<i32 as ::starlark::values::UnpackValue>::unpack_value(item)?
-                            .ok_or_else(|| ::anyhow::anyhow!("expected int"))? as i32);
+                        result.#fident.push(if let Some(__e) = item.downcast_ref::<#enum_ty>() {
+                            *__e as i32
+                        } else {
+                            <i32 as ::starlark::values::UnpackValue>::unpack_value(item)?
+                                .ok_or_else(|| ::anyhow::anyhow!("list items for '{}' must be enum members or ints", #fident_str))? as i32
+                        });
                     }
                 }
             } else if attrs.string {
@@ -718,9 +758,16 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
                         .ok_or_else(|| ::anyhow::anyhow!("expected int"))? as _;
                 }
             } else if attrs.enumeration.is_some() {
+                let enum_ty = Type::from_string(attrs.enumeration.as_ref().unwrap())
+                    .expect("failed to parse enum type");
                 quote! {
-                    result.#fident = <i32 as ::starlark::values::UnpackValue>::unpack_value(value)?
-                        .ok_or_else(|| ::anyhow::anyhow!("expected int"))? as i32;
+                    use ::starlark::values::ValueLike;
+                    result.#fident = if let Some(__e) = value.downcast_ref::<#enum_ty>() {
+                        *__e as i32
+                    } else {
+                        <i32 as ::starlark::values::UnpackValue>::unpack_value(value)?
+                            .ok_or_else(|| ::anyhow::anyhow!("field '{}' expects an enum member or int", #fident_str))? as i32
+                    };
                 }
             } else if attrs.message {
                 let ty = &field.ty;
@@ -1328,8 +1375,9 @@ fn try_enumeration(input: TokenStream) -> Result<TokenStream, Error> {
         Data::Union(..) => bail!("enumeration can not be derived for a union"),
     };
 
-    // Map the variants into 'fields'.
-    let mut variants: Vec<(Ident, Expr)> = Vec::new();
+    // Collect variant idents (discriminants must be present, but their values
+    // come from prost's `as_str_name`/`from_str_name`, so we don't need them).
+    let mut variant_idents: Vec<Ident> = Vec::new();
     for Variant {
         ident,
         fields,
@@ -1343,33 +1391,105 @@ fn try_enumeration(input: TokenStream) -> Result<TokenStream, Error> {
                 bail!("enumeration variants may not have fields")
             }
         }
-        match discriminant {
-            Some((_, expr)) => variants.push((ident, expr)),
-            None => bail!("enumeration variants must have a discriminant"),
+        if discriminant.is_none() {
+            bail!("enumeration variants must have a discriminant");
         }
+        variant_idents.push(ident);
     }
 
-    let alloc = variants.iter().map(|(ident, _expr)| {
-        let value = snake(ident.to_string());
-        quote! {
-            Self::#ident => heap.alloc_str(#value).to_value()
-        }
+    // The enum value is its own Starlark type: each variant is an instance
+    // carrying the discriminant, displayed as its proto SCREAMING name
+    // (`SHA256`). `equals` is string-compatible (case-insensitive against the
+    // proto name) so existing `field == "sha256"` comparisons keep working,
+    // and also compares against the raw discriminant int. Members are reached
+    // through a sibling `<Enum>Members` namespace value registered under the
+    // enum's name, so `pkg.mod.Value.SHA256` resolves to an instance.
+    let ident_snake = snake(ident.to_string());
+    let members_ident = Ident::new(&format!("{}Members", ident), ident.span());
+    let members_type_str = format!("{}_members", ident_snake);
+
+    let dir_names = variant_idents.iter().map(|v| {
+        quote! { #ident::#v.as_str_name().to_string() }
+    });
+
+    // `starlark_str` reproduces the legacy read format: the snake_case of the
+    // *Rust* variant ident (e.g. `Sha256` -> "sha256"). Enum-typed message
+    // fields read back through this, so existing `field == "sha256"`
+    // comparisons keep working unchanged (and prefix-stripped variants keep
+    // their old form rather than the full proto name).
+    let str_arms = variant_idents.iter().map(|v| {
+        let s = snake(v.to_string());
+        quote! { Self::#v => #s }
     });
 
     let expanded = quote! {
-        impl starlark::values::type_repr::StarlarkTypeRepr for #ident {
-            type Canonical = Self;
-
-            fn starlark_type_repr() -> ::starlark::typing::Ty {
-                ::starlark::typing::Ty::string()
+        impl #ident {
+            /// Legacy snake_case string form used by enum-typed message-field
+            /// reads (back-compat with the pre-typed-enum behavior).
+            pub fn starlark_str(self) -> &'static str {
+                match self {
+                    #(#str_arms),*
+                }
             }
         }
 
-        impl<'v> ::starlark::values::AllocValue<'v> for #ident {
-            fn alloc_value(self, heap: starlark::values::Heap<'v>) -> starlark::values::Value<'v> {
-                match self {
-                    #(#alloc,)*
+        impl ::std::fmt::Display for #ident {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                f.write_str(self.as_str_name())
+            }
+        }
+
+        ::starlark::starlark_simple_value!(#ident);
+
+        #[::starlark::values::starlark_value(type = #ident_snake)]
+        impl<'v> ::starlark::values::StarlarkValue<'v> for #ident {
+            fn equals(&self, other: ::starlark::values::Value<'v>) -> ::starlark::Result<bool> {
+                use ::starlark::values::ValueLike;
+                if let ::std::option::Option::Some(o) = other.downcast_ref::<#ident>() {
+                    return ::std::result::Result::Ok(self == o);
                 }
+                if let ::std::option::Option::Some(i) = other.unpack_i32() {
+                    return ::std::result::Result::Ok(*self as i32 == i);
+                }
+                if let ::std::option::Option::Some(s) = other.unpack_str() {
+                    return ::std::result::Result::Ok(s.eq_ignore_ascii_case(self.as_str_name()));
+                }
+                ::std::result::Result::Ok(false)
+            }
+        }
+
+        /// Members namespace for the proto enum: exposes each variant by its
+        /// proto name (e.g. `.SHA256`) as a typed instance of the enum.
+        #[derive(
+            ::std::fmt::Debug,
+            ::std::clone::Clone,
+            ::std::marker::Copy,
+            ::allocative::Allocative,
+            ::starlark::values::NoSerialize,
+            ::starlark::values::ProvidesStaticType
+        )]
+        pub struct #members_ident;
+
+        impl ::std::fmt::Display for #members_ident {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                f.write_str(#members_type_str)
+            }
+        }
+
+        ::starlark::starlark_simple_value!(#members_ident);
+
+        #[::starlark::values::starlark_value(type = #members_type_str)]
+        impl<'v> ::starlark::values::StarlarkValue<'v> for #members_ident {
+            fn get_attr(
+                &self,
+                attr: &str,
+                heap: ::starlark::values::Heap<'v>,
+            ) -> ::std::option::Option<::starlark::values::Value<'v>> {
+                #ident::from_str_name(attr).map(|v| heap.alloc(v))
+            }
+
+            fn dir_attr(&self) -> ::std::vec::Vec<::std::string::String> {
+                ::std::vec![ #(#dir_names),* ]
             }
         }
     };

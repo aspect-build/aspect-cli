@@ -235,11 +235,9 @@ def _get_capabilities(req, rpc):
     return v2.ServerCapabilities(
         execution_capabilities = v2.ExecutionCapabilities(
             exec_enabled = True,
-            # DigestFunction.Value enum: 1 = SHA256. Using the raw int
-            # because the proto generates a nested-mod enum and the
-            # nesting depth doesn't match a simple `Enum.MEMBER` access
-            # path through the starbuf-derived constructor.
-            digest_function = 1,
+            # Typed proto enum member: an instance of the DigestFunction.Value
+            # enum, reached via the prost module namespace.
+            digest_function = v2.digest_function.Value.SHA256,
         ),
         low_api_version  = semver.SemVer(major = 2, minor = 0),
         high_api_version = semver.SemVer(major = 2, minor = 3),
@@ -256,16 +254,21 @@ resp = client.GetCapabilities(v2.GetCapabilitiesRequest())
 
 h.drain_and_quit(timeout = 5000)
 
+member = v2.digest_function.Value.SHA256
 [resp.execution_capabilities.exec_enabled,
- resp.execution_capabilities.digest_function,
+ resp.execution_capabilities.digest_function,   # reads back as the lowercase string
+ str(member),                                   # typed member renders the proto name
+ member == v2.digest_function.Value.SHA256,      # typed member equality
  resp.low_api_version.major,
  resp.high_api_version.minor]
 "#
     )
     .unwrap();
-    // exec_enabled=True; digest_function read back as the enum's string
-    // name ("sha256"); low.major=2; high.minor=3.
-    assert_eq!(result, "[True, \"sha256\", 2, 3]");
+    // The field was SET with the typed member `v2.digest_function.Value.SHA256`
+    // (no magic int). It reads back as the lowercase proto string "sha256"
+    // (back-compat); the typed member itself renders as "SHA256" and compares
+    // equal to itself.
+    assert_eq!(result, "[True, \"sha256\", \"SHA256\", True, 2, 3]");
 }
 
 #[test]

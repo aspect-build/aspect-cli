@@ -48,6 +48,8 @@ fn main() -> Result<(), std::io::Error> {
                 r#"#[derive(
                     ::starbuf_derive::Enumeration,
                     ::allocative::Allocative,
+                    ::starlark::values::NoSerialize,
+                    ::starlark::values::ProvidesStaticType,
                 )]"#,
             );
         }

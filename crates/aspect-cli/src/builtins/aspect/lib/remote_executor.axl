@@ -1,37 +1,8 @@
-"""In-process **dummy** Bazel Remote Execution v2 executor.
-
-`aspect delivery`'s phase 2 hashes each target with a `DeliveryHash` aspect
-action marked `no-local`. Because the action is `no-local`, Bazel requires a
-remote *executor* to be configured for it — even under
-`--experimental_remote_require_cached`, where the action never actually
-executes (it resolves against the cache or fails). Historically delivery
-satisfied this by pointing `--remote_executor` at the user's
-`--remote_cache` endpoint, which forced every user to run real remote
-execution (RBE), not just a cache.
-
-This module removes that requirement: when the user has a `--remote_cache` but
-no real `--remote_executor`, delivery stands up this dummy executor and points
-`--remote_executor` at it. The user's real cache (still passed via
-`--remote_cache`) serves `GetActionResult`, so it carries the real digests;
-require-cached means Bazel never dispatches execution to this dummy. It exists
-only to satisfy the "a `no-local` action needs an executor" check and Bazel's
-`GetCapabilities` handshake.
-
-Service surface is deliberately minimal: `Capabilities` (advertises an
-exec-enabled SHA256 server so the handshake passes) + `ActionCache` (present
-for completeness; with a separate `--remote_cache` configured Bazel routes
-action-cache lookups there, not here). If a future Bazel dispatches `Execute`
-to the executor despite require-cached, add an `Execution` stub here.
-"""
+"""In-process **dummy** Bazel Remote Execution v2 executor."""
 
 load("@bazel//grpc.axl", "grpc")
 load("@bazel//proto/remote/execution/v2.axl", "v2")
 load("@bazel//proto/semver.axl", "semver")
-
-# DigestFunction.Value enum: 1 = SHA256. Using the raw int because the proto
-# generates a nested-mod enum whose nesting depth doesn't match a simple
-# `Enum.MEMBER` access path through the starbuf-derived constructor.
-_DIGEST_FUNCTION_SHA256 = 1
 
 # Handle is the opaque `grpc.ServerHandle` value returned by `serve()`; its
 # Starlark type isn't nameable from an `@aspect` module, so it's typed Any.
@@ -45,12 +16,12 @@ def _get_capabilities(req, rpc):
     capability check passes for this `--remote_executor` endpoint."""
     return v2.ServerCapabilities(
         cache_capabilities = v2.CacheCapabilities(
-            digest_functions = [_DIGEST_FUNCTION_SHA256],
+            digest_functions = [v2.digest_function.Value.SHA256],
             action_cache_update_capabilities = v2.ActionCacheUpdateCapabilities(update_enabled = True),
         ),
         execution_capabilities = v2.ExecutionCapabilities(
             exec_enabled = True,
-            digest_function = _DIGEST_FUNCTION_SHA256,
+            digest_function = v2.digest_function.Value.SHA256,
         ),
         low_api_version = semver.SemVer(major = 2, minor = 0),
         high_api_version = semver.SemVer(major = 2, minor = 3),
