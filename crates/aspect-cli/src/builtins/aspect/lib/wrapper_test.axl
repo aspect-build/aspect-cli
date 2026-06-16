@@ -1,0 +1,173 @@
+"""Unit tests for lib/wrapper.axl: workspace-root detection, raw-URL building,
+wrapper-version parsing, marker detection, install classification, shell
+detection, and per-shell snippet rendering.
+
+Run with: aspect dev test-wrapper
+"""
+
+load(
+    "./wrapper.axl",
+    "InstallAction",
+    "Shell",
+    "classify_install",
+    "detect_shell",
+    "find_workspace_root",
+    "has_wrapper_marker",
+    "parse_wrapper_version",
+    "raw_content_url",
+    "shell_snippet",
+)
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _fake_std(current_dir, existing_paths):
+    """A minimal `std` exposing only what find_workspace_root touches:
+    env.current_dir() and fs.exists()."""
+    existing = {p: True for p in existing_paths}
+    return struct(
+        env = struct(current_dir = lambda: current_dir),
+        fs = struct(exists = lambda p: p in existing),
+    )
+
+def _test_raw_content_url(ctx):
+    _eq(
+        "raw url",
+        raw_content_url("aspect-build", "aspect-cli", "v1.2.3", "tools/bazel"),
+        "https://raw.githubusercontent.com/aspect-build/aspect-cli/v1.2.3/tools/bazel",
+    )
+
+def _test_workspace_root_at_cwd(ctx):
+    std = _fake_std("/home/me/repo", ["/home/me/repo/MODULE.bazel"])
+    _eq("root at cwd", find_workspace_root(std), "/home/me/repo")
+
+def _test_workspace_root_at_ancestor(ctx):
+    std = _fake_std("/home/me/repo/pkg/sub", ["/home/me/repo/WORKSPACE.bazel"])
+    _eq("root at ancestor", find_workspace_root(std), "/home/me/repo")
+
+def _test_workspace_root_picks_deepest(ctx):
+    # Both an outer and an inner workspace exist; the deepest (nearest) wins.
+    std = _fake_std(
+        "/mono/proj/pkg",
+        ["/mono/WORKSPACE", "/mono/proj/MODULE.bazel"],
+    )
+    _eq("deepest root", find_workspace_root(std), "/mono/proj")
+
+def _test_workspace_root_legacy_workspace_file(ctx):
+    std = _fake_std("/repo", ["/repo/WORKSPACE"])
+    _eq("legacy WORKSPACE", find_workspace_root(std), "/repo")
+
+def _test_workspace_root_none_when_absent(ctx):
+    std = _fake_std("/tmp/scratch/deep", [])
+    _eq("no root", find_workspace_root(std), None)
+
+def _test_parse_version_quoted(ctx):
+    content = "#!/usr/bin/env bash\nASPECT_BAZEL_WRAPPER_VERSION=\"7\"\nexport ASPECT_BAZEL_WRAPPER_VERSION\n"
+    _eq("quoted version", parse_wrapper_version(content), "7")
+
+def _test_parse_version_unquoted(ctx):
+    _eq("unquoted version", parse_wrapper_version("ASPECT_BAZEL_WRAPPER_VERSION=12\n"), "12")
+
+def _test_parse_version_absent(ctx):
+    _eq("absent version", parse_wrapper_version("#!/usr/bin/env bash\necho hi\n"), None)
+
+def _test_parse_version_empty(ctx):
+    _eq("empty content", parse_wrapper_version(""), None)
+    _eq("none content", parse_wrapper_version(None), None)
+
+def _test_marker_present(ctx):
+    _eq("marker present", has_wrapper_marker("# aspect-build/tools-bazel-wrapper\n..."), True)
+
+def _test_marker_absent(ctx):
+    _eq("marker absent", has_wrapper_marker("#!/usr/bin/env bash\necho hi\n"), False)
+    _eq("marker none", has_wrapper_marker(None), False)
+
+def _test_classify_install(ctx):
+    _eq("fresh install", classify_install(None, "abc").value, InstallAction("install").value)
+
+def _test_classify_noop(ctx):
+    _eq("identical executable noop", classify_install("abc", "abc", True).value, InstallAction("noop").value)
+
+def _test_classify_upgrade(ctx):
+    _eq("differs upgrade", classify_install("old", "new").value, InstallAction("upgrade").value)
+
+def _test_classify_repair_non_executable(ctx):
+    # Matching bytes but not executable -> upgrade (install repairs the mode).
+    _eq("non-exec repair", classify_install("abc", "abc", False).value, InstallAction("upgrade").value)
+
+def _test_classify_noop_default_executable(ctx):
+    # Default existing_executable is True, so matching bytes no-op.
+    _eq("default exec noop", classify_install("abc", "abc").value, InstallAction("noop").value)
+
+def _test_detect_shell_bash(ctx):
+    _eq("bash", detect_shell("/bin/bash").value, Shell("bash").value)
+
+def _test_detect_shell_zsh(ctx):
+    _eq("zsh", detect_shell("/usr/local/bin/zsh").value, Shell("zsh").value)
+
+def _test_detect_shell_fish(ctx):
+    _eq("fish", detect_shell("/opt/homebrew/bin/fish").value, Shell("fish").value)
+
+def _test_detect_shell_unknown(ctx):
+    _eq("unknown shell", detect_shell("/bin/dash"), None)
+
+def _test_detect_shell_unset(ctx):
+    _eq("unset shell", detect_shell(None), None)
+    _eq("empty shell", detect_shell(""), None)
+
+def _test_shell_snippet_posix(ctx):
+    snippet = shell_snippet(Shell("zsh"))
+    if "export ASPECT_WRAPPER_SKIP=1" not in snippet:
+        fail("zsh snippet missing export toggle: %r" % snippet)
+    if "~/.zshrc" not in snippet:
+        fail("zsh snippet missing rc path: %r" % snippet)
+    if "Bazelisk" not in snippet:
+        fail("zsh snippet missing Bazelisk note: %r" % snippet)
+
+def _test_shell_snippet_fish(ctx):
+    snippet = shell_snippet(Shell("fish"))
+    if "set -gx ASPECT_WRAPPER_SKIP 1" not in snippet:
+        fail("fish snippet missing set toggle: %r" % snippet)
+    if "config.fish" not in snippet:
+        fail("fish snippet missing config path: %r" % snippet)
+
+_UNIT_TESTS = [
+    _test_raw_content_url,
+    _test_workspace_root_at_cwd,
+    _test_workspace_root_at_ancestor,
+    _test_workspace_root_picks_deepest,
+    _test_workspace_root_legacy_workspace_file,
+    _test_workspace_root_none_when_absent,
+    _test_parse_version_quoted,
+    _test_parse_version_unquoted,
+    _test_parse_version_absent,
+    _test_parse_version_empty,
+    _test_marker_present,
+    _test_marker_absent,
+    _test_classify_install,
+    _test_classify_noop,
+    _test_classify_upgrade,
+    _test_classify_repair_non_executable,
+    _test_classify_noop_default_executable,
+    _test_detect_shell_bash,
+    _test_detect_shell_zsh,
+    _test_detect_shell_fish,
+    _test_detect_shell_unknown,
+    _test_detect_shell_unset,
+    _test_shell_snippet_posix,
+    _test_shell_snippet_fish,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("wrapper.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+wrapper_tests = task(
+    name = "test-wrapper",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

@@ -1,0 +1,141 @@
+"""Pure helpers for the `aspect wrapper` tasks, unit-tested in
+lib/wrapper_test.axl. `find_workspace_root` is the one exception: it takes
+`std` to walk the filesystem.
+"""
+
+# GitHub coordinates of the canonical wrapper, vendored from this repo's
+# `tools/` directory.
+WRAPPER_REPO_OWNER = "aspect-build"
+WRAPPER_REPO_NAME = "aspect-cli"
+WRAPPER_SCRIPT_PATH = "tools/bazel"
+WRAPPER_DOC_PATH = "tools/bazel.md"
+
+# Identifies a file as the Aspect-shipped wrapper; `uninstall` refuses to
+# delete a tools/bazel that lacks it.
+WRAPPER_MARKER = "# aspect-build/tools-bazel-wrapper"
+
+# Version the wrapper exports; parsed to report local-vs-upstream versions.
+WRAPPER_VERSION_VAR = "ASPECT_BAZEL_WRAPPER_VERSION"
+
+# Mirrors BAZEL_BOUNDARY_FILES in crates/aspect-cli/src/helpers.rs.
+BAZEL_WORKSPACE_MARKERS = [
+    "MODULE.bazel",
+    "MODULE.bazel.lock",
+    "REPO.bazel",
+    "WORKSPACE",
+    "WORKSPACE.bazel",
+]
+
+InstallAction = enum(
+    "install",  # no tools/bazel present
+    "upgrade",  # present but differs from the target
+    "noop",  # present and byte-identical to the target
+)
+
+Shell = enum("bash", "zsh", "fish")
+
+ALL_SHELLS = [Shell("bash"), Shell("zsh"), Shell("fish")]
+
+def raw_content_url(owner: str, repo: str, ref: str, path: str) -> str:
+    """raw.githubusercontent.com URL for `path` in `owner/repo` at `ref`."""
+    return "https://raw.githubusercontent.com/%s/%s/%s/%s" % (owner, repo, ref, path)
+
+def _parent_dir(path: str) -> str:
+    """Parent of an absolute path, or "" past the filesystem root."""
+    trimmed = path.rstrip("/")
+    if not trimmed or "/" not in trimmed:
+        return ""
+    parent = trimmed.rsplit("/", 1)[0]
+    return parent if parent else "/"
+
+def find_workspace_root(std) -> str | None:
+    """Deepest ancestor of the cwd containing a BAZEL_WORKSPACE_MARKERS file,
+    or None when not inside a workspace. Takes `std` (not ctx) so tests can
+    pass a small fake.
+    """
+    current = std.env.current_dir()
+
+    # Bounded against a pathological path; real trees are shallow.
+    for _ in range(256):
+        if not current:
+            return None
+        for marker in BAZEL_WORKSPACE_MARKERS:
+            if std.fs.exists(current + "/" + marker):
+                return current
+        if current == "/":
+            return None
+        current = _parent_dir(current)
+    return None
+
+def parse_wrapper_version(content: str | None) -> str | None:
+    """The `ASPECT_BAZEL_WRAPPER_VERSION` value declared in a wrapper script,
+    or None when absent.
+    """
+    if not content:
+        return None
+    prefix = WRAPPER_VERSION_VAR + "="
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        if line.startswith(prefix):
+            value = line[len(prefix):].strip()
+
+            # Strip a surrounding pair of matching quotes.
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                value = value[1:-1]
+            return value
+    return None
+
+def has_wrapper_marker(content: str | None) -> bool:
+    """True when `content` carries the Aspect wrapper marker comment."""
+    return bool(content) and WRAPPER_MARKER in content
+
+def classify_install(existing: str | None, target: str, existing_executable: bool = True) -> InstallAction:
+    """What an install would do. Matching bytes that lack the executable bit
+    are `upgrade`, not `noop` — Bazelisk execs tools/bazel directly, so a copy
+    without `chmod +x` is a broken hook to repair. Windows callers pass
+    `existing_executable = True` (the bit is meaningless there).
+    """
+    if existing == None:
+        return InstallAction("install")
+    if existing == target:
+        return InstallAction("noop") if existing_executable else InstallAction("upgrade")
+    return InstallAction("upgrade")
+
+def detect_shell(shell_path: str | None) -> Shell | None:
+    """Map a `$SHELL` value (e.g. "/bin/zsh") to a Shell, or None."""
+    if not shell_path:
+        return None
+    name = shell_path.rstrip("/").rsplit("/", 1)[-1]
+    if name == "bash":
+        return Shell("bash")
+    if name == "zsh":
+        return Shell("zsh")
+    if name == "fish":
+        return Shell("fish")
+    return None
+
+def shell_snippet(shell: Shell) -> str:
+    """Copy-pasteable rc snippet for `shell`. The wrapper needs no env setup;
+    the snippet just documents the Bazelisk requirement and the optional
+    toggles, all commented out so a paste changes nothing by default.
+    """
+    if shell.value == "fish":
+        return "\n".join([
+            "# ~/.config/fish/config.fish — Aspect tools/bazel wrapper.",
+            "# The wrapper activates via Bazelisk's tools/bazel hook; make sure the",
+            "# `bazel` on your PATH is Bazelisk (https://github.com/bazelbuild/bazelisk).",
+            "# The toggles below are optional escape hatches, off by default:",
+            "# set -gx ASPECT_WRAPPER_SKIP 1   # bypass the wrapper entirely (vanilla bazel)",
+            "# set -gx ASPECT_WRAPPER_TRACE 1  # print the resolved command on every exec",
+            "# set -gx ASPECT_WRAPPER_QUIET 1  # silence the grey [tools/bazel] trace line",
+        ])
+    rc = "~/.bashrc" if shell.value == "bash" else "~/.zshrc"
+    return "\n".join([
+        "# %s — Aspect tools/bazel wrapper." % rc,
+        "# The wrapper activates via Bazelisk's tools/bazel hook; make sure the",
+        "# `bazel` on your PATH is Bazelisk (https://github.com/bazelbuild/bazelisk).",
+        "# The toggles below are optional escape hatches, off by default:",
+        "# export ASPECT_WRAPPER_SKIP=1    # bypass the wrapper entirely (vanilla bazel)",
+        "# export ASPECT_WRAPPER_TRACE=1   # print the resolved command on every exec",
+        "# export ASPECT_WRAPPER_QUIET=1   # silence the grey [tools/bazel] trace line",
+    ])
