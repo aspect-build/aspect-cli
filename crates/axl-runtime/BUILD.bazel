@@ -5,8 +5,10 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     compile_data = glob([
         "src/builtins/std/**/*.axl",
+        "src/builtins/bazel/**/*.axl",
     ]),
     proc_macro_deps = [
+        "//crates/starbuf-derive",
         "@crates//:starlark_derive",
     ],
     visibility = [
