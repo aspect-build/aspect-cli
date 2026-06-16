@@ -1,15 +1,10 @@
-"""
-Build Metadata Flag Generation
+"""Build metadata flag generation.
 
-Generates --build_metadata=KEY=VALUE flags for Bazel invocations. The same
-metadata is used by both:
-
-  • Aspect Web UI  — consumes the `build_metadata` BES event
-  • Status checks  — consumes results["metadata"] in bazel_results.axl
-
-Key names match the Aspect Web UI's expected schema (see silo
-kilgore/app/layout/header/ExecutionContext.tsx). Canonical values are
-uppercase enum-style strings (VCS=GITHUB, CI_HOST=BUILDKITE, …).
+Generates --build_metadata=KEY=VALUE flags consumed by both the Aspect Web UI
+(`build_metadata` BES event) and status checks (results["metadata"] in
+bazel_results.axl). Key names match the Web UI schema (silo
+kilgore/app/layout/header/ExecutionContext.tsx); values are uppercase enum
+strings (VCS=GITHUB, CI_HOST=BUILDKITE, …).
 """
 
 load("./ci.axl", "detect_buildkite_build_url")
@@ -21,11 +16,8 @@ _VCS_HOST_TO_ENUM = {
 }
 
 def detect_vcs_from_host(host):
-    """Return the canonical VCS enum for a host, or "" if unrecognized.
-
-    Suffix match so Enterprise / self-hosted subdomains (`github.mycorp.com`,
-    `gitlab.mycorp.com`) are recognized as their parent VCS.
-    """
+    """Canonical VCS enum for a host, "" if unrecognized. Suffix-matches so
+    Enterprise/self-hosted subdomains (github.mycorp.com) map to the parent VCS."""
     if not host:
         return ""
     h = host.lower()
@@ -33,7 +25,7 @@ def detect_vcs_from_host(host):
         if h == domain or h.endswith("." + domain.split(".")[0] + "." + domain.split(".", 1)[1]):
             return enum
 
-    # Simple heuristic for self-hosted: "github" or "gitlab" in the hostname.
+    # Self-hosted heuristic: vendor name in the hostname.
     if "github" in h:
         return "GITHUB"
     if "gitlab" in h:
@@ -44,14 +36,9 @@ def detect_vcs_from_host(host):
 
 def parse_git_remote_url(url):
     """Parse a git remote URL (SSH or HTTPS) into {host, owner, repo, path}.
-
-    - `owner` is the top-level group (first path segment).
-    - `repo`  is the leaf project name (last path segment).
-    - `path`  is the full namespace path joining them, needed for GitLab
-      nested subgroups (e.g. `group/subgroup/project`) so callers can build
-      a canonical URL that actually resolves.
-
-    Returns {} if the URL can't be parsed. Strips credentials, trailing .git.
+    owner = first path segment, repo = last, path = full namespace (needed for
+    GitLab nested subgroups so the canonical URL resolves). {} if unparseable;
+    strips credentials and trailing .git.
     """
     if not url:
         return {}
@@ -114,7 +101,7 @@ def _git_show(process):
     if email:
         result["COMMIT_AUTHOR_EMAIL"] = email
 
-    # Keep COMMIT_AUTHOR in the "Name <email>" form the Web UI docs advertise.
+    # COMMIT_AUTHOR in the "Name <email>" form the Web UI docs advertise.
     if name and email:
         result["COMMIT_AUTHOR"] = name + " <" + email + ">"
     elif name:
@@ -141,11 +128,8 @@ def _git_show(process):
 
 def _apply_repo_url(meta, host, owner, repo, scheme = "https", url_path = None):
     """Set REPO_URL / REPO_OWNER / REPO_NAME / VCS from a parsed triple.
-
-    url_path — optional override for the path segment of REPO_URL, used when the
-    canonical URL includes more than just "owner/repo" (e.g. GitLab with nested
-    subgroups: "group/subgroup/project"). Defaults to "owner/repo".
-    """
+    url_path overrides the REPO_URL path segment for nested paths (GitLab
+    subgroups "group/subgroup/project"); defaults to "owner/repo"."""
     if owner:
         meta["REPO_OWNER"] = owner
     if repo:
@@ -158,18 +142,14 @@ def _apply_repo_url(meta, host, owner, repo, scheme = "https", url_path = None):
         meta["VCS"] = vcs
 
 def _apply_vcs_override(env, meta):
-    """Apply the ASPECT_VCS_URL override.
+    """Apply the ASPECT_VCS_URL override: a full repo URL that replaces any
+    VCS/REPO_OWNER/REPO_NAME/REPO_URL the CI collector set — for mirror /
+    vendored-checkout setups where the code actually lives elsewhere.
 
-    A full repository URL that replaces any VCS / REPO_OWNER / REPO_NAME /
-    REPO_URL the CI collector may have populated. It's the cleanest way to
-    say "ignore what git remote or the CI env says the repo is — this is
-    where the code actually lives" in mirror / vendored-checkout setups.
-
-    Accepted forms (all resolve to the same (host, owner, repo)):
+    Accepted forms (HTTPS/SSH, Enterprise hosts, GitLab nested groups):
         https://github.com/aspect-build/aspect-cli
-        https://github.mycorp.com/team/repo          (GitHub Enterprise)
-        https://gitlab.com/group/subgroup/project    (GitLab with nested groups)
-        git@github.com:aspect-build/aspect-cli.git   (SSH also accepted)
+        https://gitlab.com/group/subgroup/project
+        git@github.com:aspect-build/aspect-cli.git
     """
     vcs_url = env.var("ASPECT_VCS_URL") or ""
     if not vcs_url:
@@ -185,8 +165,7 @@ def _apply_vcs_override(env, meta):
 
     scheme = "http" if vcs_url.startswith("http://") else "https"
 
-    # Override — these fields win over anything the CI collector set. Use the
-    # full parsed path so nested-group GitLab repos keep their subgroups.
+    # Wins over the CI collector; full parsed path keeps GitLab subgroups.
     meta["REPO_URL"] = scheme + "://" + host + "/" + url_path
     meta["REPO_OWNER"] = owner
     meta["REPO_NAME"] = repo
@@ -194,9 +173,7 @@ def _apply_vcs_override(env, meta):
     if vcs:
         meta["VCS"] = vcs
 
-# ---------------------------------------------------------------------------
 # GitHub Actions
-# ---------------------------------------------------------------------------
 
 def _collect_github(env, meta):
     meta["CI_HOST"] = "GITHUB_ACTIONS"
@@ -213,7 +190,7 @@ def _collect_github(env, meta):
     # Branch / tag detection.
     head_ref = env.var("GITHUB_HEAD_REF")
     if head_ref:
-        # PR event — head ref is the PR source branch, main ref is "refs/pull/N/merge".
+        # PR event: head ref = PR source branch; GITHUB_REF = "refs/pull/N/merge".
         meta["BRANCH_NAME"] = head_ref
         meta["PR_SOURCE_BRANCH_NAME"] = head_ref
         base_ref = env.var("GITHUB_BASE_REF") or ""
@@ -243,10 +220,8 @@ def _collect_github(env, meta):
     elif event_name in ("workflow_dispatch", "repository_dispatch"):
         meta["RUN_TYPE"] = "MANUAL"
 
-    # Repo info. GITHUB_SERVER_URL supports GitHub Enterprise; GITHUB_REPOSITORY
-    # is "{owner}/{name}". Mirror / vendored-checkout setups where the actual
-    # repo lives elsewhere use ASPECT_VCS_URL (handled by _apply_vcs_override)
-    # to override these values after the fact.
+    # GITHUB_SERVER_URL supports Enterprise; GITHUB_REPOSITORY = "{owner}/{name}".
+    # ASPECT_VCS_URL (via _apply_vcs_override) overrides these afterward.
     server = env.var("GITHUB_SERVER_URL") or "https://github.com"
     server_host = server
     if "://" in server_host:
@@ -267,9 +242,7 @@ def _collect_github(env, meta):
     if repo and run_id:
         meta["BUILD_URL"] = server + "/" + repo + "/actions/runs/" + run_id
 
-# ---------------------------------------------------------------------------
 # Buildkite
-# ---------------------------------------------------------------------------
 
 def _collect_buildkite(env, meta):
     meta["CI_HOST"] = "BUILDKITE"
@@ -290,8 +263,7 @@ def _collect_buildkite(env, meta):
     if tag:
         meta["TAG"] = tag
 
-    # Repo parsing (supports both github.com and gitlab.com Buildkite setups,
-    # plus Enterprise / self-hosted via suffix detection).
+    # Repo parsing (github.com / gitlab.com / Enterprise via suffix detection).
     repo_url = env.var("BUILDKITE_REPO")
     if repo_url:
         parsed = parse_git_remote_url(repo_url)
@@ -324,15 +296,12 @@ def _collect_buildkite(env, meta):
     else:
         meta["RUN_TYPE"] = "BRANCH_PUSH"
 
-    # BUILD_URL — the job-anchored form so the link lands on the specific
-    # job execution rather than the build root.
+    # BUILD_URL — job-anchored so the link lands on the specific job execution.
     build_url = detect_buildkite_build_url(env)
     if build_url:
         meta["BUILD_URL"] = build_url
 
-# ---------------------------------------------------------------------------
 # CircleCI
-# ---------------------------------------------------------------------------
 
 def _collect_circleci(env, meta):
     meta["CI_HOST"] = "CIRCLE_CI"
@@ -353,8 +322,8 @@ def _collect_circleci(env, meta):
     if tag:
         meta["TAG"] = tag
 
-    # Repo — CIRCLE_REPOSITORY_URL is the authoritative URL; CIRCLE_PROJECT_*
-    # env vars are useful fallbacks but don't carry the host.
+    # CIRCLE_REPOSITORY_URL is authoritative; CIRCLE_PROJECT_* fall back but
+    # don't carry the host.
     repo_url = env.var("CIRCLE_REPOSITORY_URL") or ""
     if repo_url:
         parsed = parse_git_remote_url(repo_url)
@@ -366,7 +335,7 @@ def _collect_circleci(env, meta):
             url_path = parsed.get("path"),
         )
 
-    # Fallback to CIRCLE_PROJECT_* for owner/repo when URL parsing didn't cover them.
+    # Fall back to CIRCLE_PROJECT_* for owner/repo if URL parsing missed them.
     if "REPO_OWNER" not in meta:
         owner = env.var("CIRCLE_PROJECT_USERNAME") or ""
         if owner:
@@ -392,9 +361,7 @@ def _collect_circleci(env, meta):
     if build_url:
         meta["BUILD_URL"] = build_url
 
-# ---------------------------------------------------------------------------
 # GitLab CI
-# ---------------------------------------------------------------------------
 
 def _collect_gitlab(env, meta):
     meta["CI_HOST"] = "GITLAB"
@@ -416,8 +383,7 @@ def _collect_gitlab(env, meta):
     if tag:
         meta["TAG"] = tag
 
-    # Self-hosted GitLab: use CI_SERVER_URL directly to construct the repo URL
-    # so URLs still point at the right host.
+    # Self-hosted GitLab: CI_SERVER_URL so URLs point at the right host.
     server_url = env.var("CI_SERVER_URL") or "https://gitlab.com"
     server_host = server_url
     if "://" in server_host:
@@ -427,9 +393,8 @@ def _collect_gitlab(env, meta):
     project = env.var("CI_PROJECT_NAME") or ""
     project_path = env.var("CI_PROJECT_PATH") or ""  # full namespace/project path
     if project_path and "/" in project_path:
-        # GitLab supports nested subgroups ("group/subgroup/project"). REPO_OWNER
-        # carries the top-level group and REPO_NAME the leaf project, but REPO_URL
-        # must retain the full path to actually resolve.
+        # Nested subgroups: REPO_OWNER = top group, REPO_NAME = leaf, but
+        # REPO_URL must keep the full path to resolve.
         parts = project_path.split("/")
         _apply_repo_url(
             meta,
@@ -486,16 +451,11 @@ def _collect_gitlab(env, meta):
     if build_url:
         meta["BUILD_URL"] = build_url
 
-# ---------------------------------------------------------------------------
 # Task-identity metadata (depends on TaskContext, not just env)
-# ---------------------------------------------------------------------------
 
 def version_tuple(s):
-    """Parse "5.18.0" → [5, 18, 0]. Tolerant of pre-release suffixes.
-
-    Non-numeric leading parts or missing segments become 0 so bad inputs
-    sort *before* a valid "0.0.1" rather than crashing.
-    """
+    """Parse "5.18.0" → [5, 18, 0], tolerant of pre-release suffixes.
+    Non-numeric/missing segments become 0 so bad inputs sort before "0.0.1"."""
     if not s:
         return [0, 0, 0]
     out = [0, 0, 0]
@@ -520,15 +480,9 @@ def version_gte(a, b):
     return version_tuple(a) >= version_tuple(b)
 
 def task_display_name(task_name):
-    """Derive a Title-Case display-name from a raw task name.
-
-    Converts "test" → "Test", "my-task" / "my_task" → "My Task". Used
-    for the `ASPECT_TASK_DISPLAY_NAME` build metadata field consumed
-    by the Aspect Web UI for its task-list rendering. The check-run /
-    BK annotation titles render the raw lowercase `task_name` instead
-    (with a leading status emoji), so this is no longer required to
-    match those surfaces.
-    """
+    """Title-Case a raw task name ("my-task"/"my_task" → "My Task"). Used for
+    ASPECT_TASK_DISPLAY_NAME (Web UI task-list). Check-run / BK titles use the
+    raw lowercase name, so this needn't match those surfaces."""
     if not task_name:
         return task_name
     if "/" in task_name:
@@ -536,30 +490,22 @@ def task_display_name(task_name):
     words = [w.capitalize() for w in task_name.replace("_", "-").split("-") if w]
     return " ".join(words) if words else task_name
 
-# Workflows runner version at which the Web UI adopts the split
-# DISPLAY_NAME/NAME/KEY/ID metadata schema. Below this we emit the old
-# two-field form (ASPECT_TASK_NAME=display, ASPECT_TASK_ID=key) that the
-# older Web UI knows how to read.
+# Runner version at which the Web UI adopts the split DISPLAY_NAME/NAME/KEY/ID
+# schema. Below it we emit the legacy two-field form (NAME=display, ID=key).
 _TASK_METADATA_NEW_SCHEMA_MIN_VERSION = "5.18.0"
 
 def get_task_metadata_flags(ctx):
-    """Generate --build_metadata flags for the current Aspect task identity.
+    """Generate --build_metadata flags for the current task identity.
 
-    Two schemas depending on the detected Workflows runner version:
+    Two schemas by detected runner version:
+      pre-5.18 / off-runner (legacy Web UI):
+        ASPECT_TASK_NAME = <display>, ASPECT_TASK_ID = <key>
+      5.18.0+ (split schema):
+        ASPECT_TASK_DISPLAY_NAME = <display>, ASPECT_TASK_NAME = <raw>,
+        ASPECT_TASK_KEY = <key>, ASPECT_TASK_ID = <UUID>
 
-      pre-5.18 (today, legacy Web UI):
-        ASPECT_TASK_NAME   = <display name>  — e.g. "Test"
-        ASPECT_TASK_ID     = <task key>      — e.g. "test-bk-debug"
-
-      5.18.0+ (Web UI understands the split schema):
-        ASPECT_TASK_DISPLAY_NAME = <display name>
-        ASPECT_TASK_NAME         = <raw name>      — e.g. "test"
-        ASPECT_TASK_KEY          = <task key>
-        ASPECT_TASK_ID           = <UUID>
-
-    Outside of a Workflows runner (ASPECT_WORKFLOWS_RUNNER_VERSION unset)
-    we use the legacy form so check runs rendered against non-Aspect
-    backends still show something readable.
+    Off a Workflows runner (ASPECT_WORKFLOWS_RUNNER_VERSION unset) → legacy form
+    so check runs against non-Aspect backends stay readable.
     """
     task = ctx.task
     name = task.name or ""
@@ -581,30 +527,20 @@ def get_task_metadata_flags(ctx):
         if uuid:
             flags.append("--build_metadata=ASPECT_TASK_ID=" + uuid)
     else:
-        # Legacy Web UI: NAME carries the display name; ID is the task key.
+        # Legacy: NAME = display name, ID = task key.
         if display_name:
             flags.append("--build_metadata=ASPECT_TASK_NAME=" + display_name)
         if key:
             flags.append("--build_metadata=ASPECT_TASK_ID=" + key)
     return flags
 
-# ---------------------------------------------------------------------------
 # Public entry point
-# ---------------------------------------------------------------------------
 
 def get_build_metadata_flags(std):
-    """
-    Generate --build_metadata=KEY=VALUE flags for Bazel invocations.
-
-    Args:
-        std: Standard context (ctx.std)
-
-    Returns:
-        list of --build_metadata=KEY=VALUE strings (empty values are skipped)
-    """
+    """Generate --build_metadata=KEY=VALUE flags (empty values skipped)."""
     meta = {}
 
-    # Step 1: Collect CI-host-specific metadata.
+    # 1: CI-host-specific metadata.
     if std.env.var("GITHUB_ACTIONS"):
         _collect_github(std.env, meta)
     elif std.env.var("BUILDKITE"):
@@ -614,26 +550,24 @@ def get_build_metadata_flags(std):
     elif std.env.var("GITLAB_CI"):
         _collect_gitlab(std.env, meta)
 
-    # Step 2: Overlay commit data from `git show`. Git is authoritative for
-    # COMMIT_* fields since it works offline and outside CI too.
+    # 2: Overlay `git show` commit data — authoritative for COMMIT_* (works
+    # offline and off-CI).
     git_data = _git_show(std.process)
     for k, v in git_data.items():
         meta[k] = v
 
-    # Step 3: VCS-URL override (for mirror / vendored-checkout setups).
-    # Runs AFTER the CI collector so it can overwrite anything the CI got
-    # wrong about where the code actually lives.
+    # 3: VCS-URL override (mirror / vendored-checkout); after the CI collector
+    # so it can correct where the code actually lives.
     _apply_vcs_override(std.env, meta)
 
-    # Step 4: USER fallback for non-CI local runs — prefer the git commit
-    # author name, then the $USER env var.
+    # 4: USER fallback (non-CI): git author name, then $USER.
     if not meta.get("USER"):
         if meta.get("COMMIT_AUTHOR_NAME"):
             meta["USER"] = meta["COMMIT_AUTHOR_NAME"]
         elif std.env.var("USER"):
             meta["USER"] = std.env.var("USER")
 
-    # Step 5: Emit --build_metadata=KEY=VALUE strings, skipping empty values.
+    # 5: Emit strings, skipping empty values.
     flags = []
     for key, value in meta.items():
         if value:

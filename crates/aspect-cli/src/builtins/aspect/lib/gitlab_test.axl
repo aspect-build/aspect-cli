@@ -188,7 +188,7 @@ def _test_impl(ctx):
     if "invalid status" not in (res.get("error") or ""):
         fail("external_status_checks.respond error message changed: %r" % res)
 
-    # ----- authenticate() smoke -----
+    # authenticate() smoke
     #
     # Mirrors the GH `_authenticate` test pattern: stub `ctx` where
     # `aspect.auth.credentials(...)` returns None so the function
@@ -267,7 +267,7 @@ def _test_impl(ctx):
     if gitlab.validate_role("garbage"):
         fail("validate_role('garbage') should be False")
 
-    # ----- struct shape sanity -----
+    # struct shape sanity
 
     for name in (
         "DEFAULT_API",

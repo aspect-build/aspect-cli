@@ -1,57 +1,42 @@
-"""Surface-rendered tips: actionable suggestions for users.
+"""Surface-rendered tips: non-fatal recommendations shown on the surface
+the user is already looking at (check-run summary, PR comment) so the
+product is self-documenting.
 
-Tips are non-fatal recommendations that should be visible on the same
-surface the user is already looking at (check-run summary, PR comment)
-so the product is self-documenting — users shouldn't have to grep
-logs for WARNs or read docs to discover improvements.
-
-This module is the implementation; the public authoring API
-(`add_tip`, the `tip_*` built-ins, severities, surfaces, the
-`tip_suggestion` hook) is documented on the facade `@aspect//tips.axl`.
-The producer functions here leave `ctx` untyped so internal callers and
-tests can drive them with a stub context; the facade re-wraps them with
-the typed signature and the full per-argument docstring. The sections
-below cover the implementation-level semantics those docs reference.
+This is the implementation; the public authoring API (`add_tip`, the
+`tip_*` built-ins, severities, surfaces, the `tip_suggestion` hook) is
+documented on the facade `@aspect//tips.axl`. Functions here leave `ctx`
+untyped so tests can pass a stub; the facade re-wraps with the typed
+signature.
 
 # Template types
 
-The `type` field selects the interpolation engine for `title` / `body`:
+The `type` field selects the engine for `title` / `body`:
 
-  - `TIP_TEMPLATE_RAW`    — no interpolation; `vars` / `accumulate` ignored.
-                            The default — most tip bodies are literal
-                            markdown with `{}` that must survive verbatim.
-  - `TIP_TEMPLATE_FORMAT` — Starlark `str.format(**vars)` — `{name}`
-                            placeholders replaced from `vars`.
-  - `TIP_TEMPLATE_JINJA2` — Jinja2 source rendered against `vars`
-                            (scalars) plus `accumulate` (each name a
-                            deduped + sorted list). Re-rendered whenever
-                            `accumulate` grows, so the surfaced strings
-                            always reflect the merged state.
+  - `TIP_TEMPLATE_RAW`    — no interpolation (default; most bodies are
+                            literal markdown with `{}` to keep verbatim).
+  - `TIP_TEMPLATE_FORMAT` — `str.format(**vars)`.
+  - `TIP_TEMPLATE_JINJA2` — Jinja2 over `vars` (scalars) + `accumulate`
+                            (each a deduped+sorted list); re-rendered as
+                            `accumulate` grows.
 
 # Feature-disabled behavior
 
-When the `Tips` feature is off (`ctx.features["tips"].enabled = False` or
-`--tips:enabled=false`), the trait's null-object defaults take over:
-`add_tip` is a silent no-op everywhere and `collect_tips_sorted` returns
-[]. Emit sites don't need to probe for the feature — the data flow just
-goes quiet.
+When `Tips` is off, the trait's null-object defaults take over: `add_tip`
+is a silent no-op and `collect_tips_sorted` returns []. Emit sites don't
+need to probe — the data flow just goes quiet.
 
 # Surface rendering
 
-`collect_tips_sorted(ctx, surface = ...)` returns tips sorted by
-severity (most urgent first), stable within a bucket by insertion
-order, filtered to those allowed on `surface` (see "Surface
-allowlist"). Renderers (check-run summary template, PR comment
-aggregator) call it with their own surface id and display the result.
+`collect_tips_sorted(ctx, surface = ...)` returns tips sorted by severity
+(most urgent first, stable within a bucket), filtered to those allowed on
+`surface`. Renderers pass their own surface id.
 
 # Severity ordering (highest → lowest urgency)
 
     TIP_IMPORTANT   — action required; key features broken without it.
-                      Cannot be silenced (`silenced_tips` is ignored).
-                      Surface and terminal rendering omit the silence
-                      hint footer for important tips.
-    TIP_WARNING     — degraded behavior; user should fix to restore full function.
-    TIP_SUGGESTION  — improvement opportunity; product works fine without it.
+                      Cannot be silenced; rendering omits the silence footer.
+    TIP_WARNING     — degraded behavior; fix to restore full function.
+    TIP_SUGGESTION  — improvement opportunity; works fine without it.
     TIP_INFO        — FYI.
 """
 
@@ -78,10 +63,8 @@ _SEVERITY_EMOJI = {
     TIP_INFO: "ℹ️",
 }
 
-# Human-readable label paired with the emoji on each tip's header line
-# (e.g. `💡 **Tip:** ...`, `🔥 **Important:** ...`). The label is part of
-# the rendered tip — it makes the severity legible even where the emoji
-# may not render.
+# Label paired with the emoji on each tip header (`💡 **Tip:** ...`), so
+# severity is legible even where the emoji doesn't render.
 _SEVERITY_LABEL = {
     TIP_IMPORTANT: "Important",
     TIP_WARNING: "Warning",
@@ -99,63 +82,44 @@ _VALID_TEMPLATE_TYPES = [TIP_TEMPLATE_RAW, TIP_TEMPLATE_FORMAT, TIP_TEMPLATE_JIN
 
 # ── Surface allowlist ────────────────────────────────────────────────
 #
-# Each tip carries a `surfaces` list naming the status surfaces it is
-# allowed to render on. The surface identifiers below name every place a
-# tip can appear today. A tip with an empty / unset `surfaces` list shows
-# everywhere (`SURFACE_ALL`) — the back-compatible default, so existing
-# producers need no change.
+# Each tip's `surfaces` list names the surfaces it may render on; empty
+# means everywhere (`SURFACE_ALL`, the back-compat default). Each surface
+# filters by passing its id to `collect_tips_sorted(ctx, surface = ...)`
+# (the CLI path checks `SURFACE_CLI` inside `add_tip`). Names are verbose
+# + host-qualified because they're customer-facing (`.aspect/config.axl`).
 #
-# Each rendering surface filters by passing its own identifier to
-# `collect_tips_sorted(ctx, surface = ...)` (and the CLI print path checks
-# `SURFACE_CLI` inside `add_tip`); a tip whose `surfaces` list omits that
-# identifier is skipped for that surface only.
+#   SURFACE_CLI                    terminal `TIP:` block printed on emit
+#   SURFACE_GITHUB_STATUS_CHECKS   GitHub check-run summary
+#   SURFACE_BUILDKITE_ANNOTATIONS  Buildkite annotation
+#   SURFACE_GITHUB_PR_SUMMARY      cross-task PR summary comment — the only
+#                                  aggregate surface (same-(id,key) tips from
+#                                  sibling tasks combine; see "Cross-task
+#                                  accumulation").
 #
-# Names are intentionally verbose and host-qualified — they're
-# customer-facing (set in `.aspect/config.axl`), and leave room for
-# sibling surfaces on the same host (e.g. a future GitLab MR note or
-# Buildkite PR comment) without ambiguity.
-#
-#   SURFACE_CLI                    the terminal `TIP:` block printed on emit
-#   SURFACE_GITHUB_STATUS_CHECKS   GitHub check-run summary (GithubStatusChecks)
-#   SURFACE_BUILDKITE_ANNOTATIONS  Buildkite annotation (BuildkiteAnnotations)
-#   SURFACE_GITHUB_PR_SUMMARY      the cross-task GitHub PR summary comment
-#                                  (GithubStatusComments) — the only
-#                                  *aggregate* surface, where same-`(id, key)`
-#                                  tips from sibling tasks combine. See
-#                                  "Cross-task accumulation".
-#
-# (GitLab commit statuses are a single short description string with no
-# room to render a tip, so there's no GitLab surface.)
+# (GitLab commit statuses are too short to render a tip — no GitLab surface.)
 SURFACE_CLI = "cli"
 SURFACE_GITHUB_STATUS_CHECKS = "github-status-checks"
 SURFACE_BUILDKITE_ANNOTATIONS = "buildkite-annotations"
 SURFACE_GITHUB_PR_SUMMARY = "github-pr-summary"
 
-# Per-task status screens — every surface bound to a single task's own
-# render. Excludes the aggregate PR summary. A tip that's only meaningful
-# in the context of the one task that emitted it (dynamic, per-invocation
-# detail) should set `surfaces = TASK_SCREENS` so it never lands in the
+# Per-task screens (excludes the aggregate PR summary). Set
+# `surfaces = TASK_SCREENS` for a tip that should never enter the
 # cross-task rollup.
 TASK_SCREENS = [SURFACE_CLI, SURFACE_GITHUB_STATUS_CHECKS, SURFACE_BUILDKITE_ANNOTATIONS]
 
-# The aggregate screen(s) — just the PR summary today, named as a list so
-# `surfaces = AGGREGATE_SCREENS` reads symmetrically with `TASK_SCREENS`
-# for a tip that should ONLY appear in the rollup.
+# Aggregate screen(s) — just the PR summary today; a list so
+# `surfaces = AGGREGATE_SCREENS` reads symmetrically for a rollup-only tip.
 AGGREGATE_SCREENS = [SURFACE_GITHUB_PR_SUMMARY]
 
-# Every surface. The default for a tip that doesn't restrict itself.
+# Every surface; the default for an unrestricted tip.
 SURFACE_ALL = TASK_SCREENS + AGGREGATE_SCREENS
 
 _VALID_SURFACES = SURFACE_ALL
 
 def tip_shows_on(tip, surface):
-    """True iff `tip` is allowed to render on `surface`.
-
-    Empty / missing `surfaces` means "all surfaces" (back-compat). A
-    non-empty list is an allowlist: the tip renders on `surface` only when
-    the list contains it. `surface = None` (the unfiltered collect) always
-    passes — callers that don't name a surface get every tip, as before.
-    """
+    """True iff `tip` may render on `surface`. Empty `surfaces` → all
+    surfaces (back-compat); otherwise an allowlist. `surface = None`
+    (unfiltered collect) always passes."""
     if surface == None:
         return True
     allowed = tip.get("surfaces") or []
@@ -165,71 +129,50 @@ def tip_shows_on(tip, surface):
 
 # ── Tip identity: (id, key) ──────────────────────────────────────────
 #
-# A tip is identified by the pair `(id, key)`:
+# A tip is identified by `(id, key)`:
+#   id  — kind + silence key; `--tips:silence=<id>` matches on `id`, so
+#         silencing covers every `key` under it.
+#   key — optional discriminator (default ""); same `id`, different `key`
+#         are DISTINCT (coexist on a surface, separate PR-summary rows).
+#         Use for "same kind, different subject" — e.g. one `flaky-test`
+#         tip per failing target, all silenceable via `flaky-test`.
 #
-#   id  — the tip kind + silence key. `--tips:silence=<id>` (and the
-#         `silence` feature arg) match on `id`, so silencing one id
-#         covers every `key` under it.
-#   key — optional discriminator (default ""). Two tips with the same
-#         `id` but different `key` are DISTINCT: they coexist on a task's
-#         surface and as separate rows in the PR summary. Use it for "same
-#         tip kind, different subject" — e.g. one `flaky-test` tip per
-#         failing target, all silenceable with `--tips:silence=flaky-test`.
-#
-# Within a task, re-emitting the same `(id, key)` REPLACES the stored tip
-# (last content wins); `accumulate` fields ride along, unioned (deduped +
-# sorted) onto the prior. Across tasks in the PR summary, same-`(id, key)`
-# tips combine per `combine_across_tasks` (below).
+# Re-emitting the same `(id, key)` within a task REPLACES the stored tip
+# (last content wins); `accumulate` fields union (deduped+sorted) onto the
+# prior. Across tasks, they combine per `combine_across_tasks`.
 
 # ── Cross-task accumulation ──────────────────────────────────────────
 #
-# `combine_across_tasks` (bool, default False) controls how same-(id,
-# key) tips from different tasks combine in the PR summary rollup:
-#
-#   False (default) — each task stands alone; if several share an
-#                     (id, key), the latest task's rendered content wins
-#                     (one row). `accumulate` fields are NOT unioned
-#                     across tasks.
-#   True            — `accumulate` fields are unioned across every
-#                     contributing task (deduped + sorted) and the tip is
-#                     re-rendered, surfacing the full cross-task set (e.g.
-#                     every scope every task was missing). One row.
-#
-# Eligibility for the rollup at all is governed by `surfaces` — a tip
-# whose `surfaces` omits `SURFACE_GITHUB_PR_SUMMARY` (e.g. `TASK_SCREENS`) never
-# enters the rollup regardless of this flag.
+# `combine_across_tasks` (default False): how same-(id,key) tips from
+# different tasks combine in the PR-summary rollup.
+#   False — each task stands alone; latest rendered content wins (one row);
+#           `accumulate` NOT unioned across tasks.
+#   True  — `accumulate` unioned across contributing tasks (deduped+sorted)
+#           and re-rendered, surfacing the full cross-task set. One row.
+# Rollup eligibility is governed by `surfaces` regardless of this flag — a
+# tip omitting `SURFACE_GITHUB_PR_SUMMARY` never enters the rollup.
 
 # ── tip_suggestion hook records ──────────────────────────────────────
 #
-# A `tip_suggestion` hook (registered on the public `TipsTrait` below)
-# fires on every `add_tip`, letting `config.axl` accept /
-# reject / rewrite any tip — the same accept/reject/replace shape as the
-# `repro_fix_suggestion` hook on `TaskLifecycleTrait`.
+# A `tip_suggestion` hook (on the public `TipsTrait`) fires on every
+# `add_tip`, letting `config.axl` accept/reject/rewrite any tip — same
+# shape as `repro_fix_suggestion` on `TaskLifecycleTrait`.
 
-# Verdict action: `accept` keeps the tip, `reject` drops it (never enters
-# storage / surfaces), `replace` overrides the fields set on the returned
-# `TipSuggestion`.
+# `accept` keeps, `reject` drops (never stored/surfaced), `replace`
+# overrides the set fields on the returned `TipSuggestion`.
 TipAction = enum("accept", "reject", "replace")
 
-# Metadata passed to each `tip_suggestion` hook alongside `ctx`. Carries
-# the tip's identity + content + policy fields so the hook can scope by
-# `id` / `key` / `severity` / `type` and rewrite any of them. Fires on
-# every `add_tip`, including each accumulate re-emit.
+# Passed to each `tip_suggestion` hook (alongside `ctx`); carries identity
+# + content + policy so the hook can scope and rewrite. Fires on every
+# `add_tip`, including accumulate re-emits.
 TipInfo = record(
-    # Task identity — joined `<group...> <name>` path plus its parts, for
-    # hooks that scope by task (e.g. only adjust tips on `aspect lint`).
+    # Task identity for hooks that scope by task.
     task_path = field(str),
     task_name = field(str),
     task_group = field(list[str]),
 
-    # The tip about to be stored. `id` / `key` are the identity (see "Tip
-    # identity"); `severity` is a TIP_* value; `type` is the template
-    # kind; `surfaces` / `combine_across_tasks` are the policy fields.
-    #
-    # `title` / `body` are the pre-rendered strings for RAW / FORMAT tips.
-    # For a JINJA2 tip they are EMPTY — the templates aren't rendered
-    # until the tip is stored, after this hook runs — so scope JINJA2
-    # tips by `id` / `key` / `type`, not by rendered text.
+    # The tip about to be stored. For JINJA2 tips `title`/`body` are EMPTY
+    # (rendered after this hook), so scope JINJA2 by `id`/`key`/`type`.
     id = field(str),
     key = field(str),
     severity = field(str),
@@ -240,11 +183,9 @@ TipInfo = record(
     combine_across_tasks = field(bool),
 )
 
-# Verdict returned by every `tip_suggestion` hook. `action` is required.
-# The remaining fields are consulted only on `action == "replace"`; each
-# left `None` keeps the tip's current value, so a hook can retag just the
-# `severity` (or just the `surfaces`) without restating the rest. A
-# `replace` with every field `None` is a no-op (equivalent to accept).
+# Verdict from a `tip_suggestion` hook. `action` required; other fields
+# consulted only on `replace`, each `None` keeping the current value (so
+# `replace` with all `None` == accept).
 TipSuggestion = record(
     action = field(TipAction),
     severity = field(str | None, default = None),
@@ -254,8 +195,8 @@ TipSuggestion = record(
     combine_across_tasks = field(bool | None, default = None),
 )
 
-# Shared singletons for the no-argument verdicts so hooks read as
-# `return TIP_ACCEPT`. Use `tip_replace(...)` for the replace verdict.
+# Shared singletons for the no-argument verdicts (`return TIP_ACCEPT`);
+# use `tip_replace(...)` for replace.
 TIP_ACCEPT = TipSuggestion(action = TipAction("accept"))
 TIP_REJECT = TipSuggestion(action = TipAction("reject"))
 
@@ -279,65 +220,50 @@ def tip_replace(
 # ── Private trait — owner-feature implementation detail ────────────
 #
 # Every stored tip carries `{id, key, severity, title, body, type,
-# surfaces, combine_across_tasks}`; JINJA2 tips additionally
-# carry `_title_src`, `_body_src` (the Jinja2 source), `vars`, and
-# `accumulate` (dict<name, list<value>>) so the owner can re-render on
-# accumulation. A same-`(id, key)` re-emit replaces the stored tip
-# (accumulate fields union onto the prior); ids in the silence list are
-# dropped on `add_tip`
-# (unless severity is TIP_IMPORTANT).
+# surfaces, combine_across_tasks}`; JINJA2 tips also carry `_title_src`,
+# `_body_src`, `vars`, `accumulate` (dict<name, list>) for re-rendering on
+# accumulation. Same-`(id, key)` re-emit replaces the stored tip
+# (accumulate unions onto the prior); silenced ids are dropped on
+# `add_tip` (unless TIP_IMPORTANT).
 #
-# When the `Tips` feature isn't loaded (user set `enabled = False` or
-# the framework didn't enable it), the trait callable defaults are
-# null-objects: `add` is a silent no-op, `collect` returns []. Emit
-# sites don't need to probe — they just call `add_tip`
-# and the disabled state propagates as zero output.
+# When `Tips` isn't loaded the callable defaults are null-objects: `add` a
+# no-op, `collect` []. Emit sites don't probe — disabled propagates as zero
+# output.
 
 _TipsTrait = trait(
-    # Add a constructed tip dict. The owner's closure handles the
-    # silence-list check, the `tip_suggestion` hook chain, the
-    # (id, key) replace-with-accumulate dedup, and the terminal-print side
-    # effect. Takes ctx for jinja2 rendering (`ctx.template.jinja2`) and
-    # the print path (`ctx.std`).
+    # Add a constructed tip dict. The owner closure handles silence check,
+    # the `tip_suggestion` chain, (id,key) replace-with-accumulate dedup, and
+    # the terminal print. Takes ctx for jinja2 + the print path.
     add = attr(typing.Callable[[TaskContext, dict], None], default = lambda ctx, t: None),
 
-    # Return the raw, insertion-ordered list of stored tip dicts.
-    # `collect_tips_sorted` filters by surface and sorts on top.
+    # Raw insertion-ordered stored tips; `collect_tips_sorted` filters + sorts.
     collect = attr(typing.Callable[[], list], default = lambda: []),
 
-    # Test seams. Owner feature binds these; production code should
-    # not call them (defaults are no-ops / empty).
+    # Test seams — owner binds these; production code should not call them.
     _reset = attr(typing.Callable[[], None], default = lambda: None),
     _set_silenced = attr(typing.Callable[[list], None], default = lambda ids: None),
     _set_auto_print = attr(typing.Callable[[bool], None], default = lambda v: None),
 )
 
-# Public trait carrying the user `tip_suggestion` hook list. Separate
-# from `_TipsTrait` (whose `add` / `collect` callables are internal) so
-# users only see the hook surface. Tasks include it via `tips.TRAITS`;
-# users register from `.aspect/config.axl`:
+# Public trait carrying the user `tip_suggestion` hook list, separate from
+# `_TipsTrait` so users see only the hook surface. Tasks include it via
+# `tips.TRAITS`; users register from `.aspect/config.axl`:
 #
 #     ctx.traits[TipsTrait].tip_suggestion.append(my_hook)
 #
-# Each hook is `(ctx: TaskContext, info: TipInfo) -> TipSuggestion`, run
-# on every `add_tip` by `apply_tip_suggestion_hooks`. See that helper and
-# the "tip_suggestion hook records" section above.
+# Each hook is `(ctx: TaskContext, info: TipInfo) -> TipSuggestion`, run on
+# every `add_tip` by `apply_tip_suggestion_hooks`.
 TipsTrait = trait(
     tip_suggestion = attr(list[typing.Callable[[TaskContext, TipInfo], TipSuggestion]], default = []),
 )
 
 # ── Built-in tips ────────────────────────────────────────────────────
 #
-# Each built-in is a `tip_*(ctx, ...)` function wrapping `add_tip` with
-# its content baked in, exposing only the parts that vary as named
-# params. The wire-up that decides *when* to fire them (host detection,
-# `ctx.traits` availability) lives in `lib/github.axl`; these functions
-# own only the tip *content*.
-#
-# The YAML constants below are shared snippets the bodies splice in;
-# both render at workflow-top-level indentation so users can paste them
-# verbatim above `jobs:` or re-indent under a specific `jobs.<name>:`
-# for per-job scoping.
+# Each built-in `tip_*(ctx, ...)` wraps `add_tip` with content baked in,
+# exposing only the varying parts. The wire-up deciding *when* to fire
+# (host detection, `ctx.traits`) lives in `lib/github.axl`; these own only
+# the content. YAML constants below are at workflow-top-level indent so
+# users can paste them above `jobs:` or re-indent per job.
 
 GITHUB_TOKEN_ENV_YAML = """env:
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -347,13 +273,12 @@ ID_TOKEN_PERMISSIONS_YAML = """permissions:
   id-token: write    # artifact uploads + PR summary comment aggregation
 """
 
-# CI hosts on which `ASPECT_API_TOKEN` is a documented Aspect
-# integration — selects the host-specific wire-up advice and silence id.
+# CI hosts where `ASPECT_API_TOKEN` is a documented Aspect integration —
+# selects the host-specific advice + silence id.
 AspectApiTokenHost = enum("github-actions", "buildkite", "circleci")
 
-# Per-host wire-up advice + the set of features that degrade without
-# `ASPECT_API_TOKEN`. Both differ by host (PR-summary-comment
-# aggregation is GHA-only today). Keyed by each host's enum `.value`.
+# Per-host wire-up advice + degraded-feature list (both differ by host;
+# PR-summary aggregation is GHA-only). Keyed by each host's enum `.value`.
 _ASPECT_API_TOKEN_HOST_DETAIL = {
     AspectApiTokenHost("github-actions").value: struct(
         degraded_features = "PR check-run creation and updates, and PR summary comment aggregation",
@@ -423,10 +348,9 @@ def tip_add_id_token_permission(ctx):
 # ── API ──────────────────────────────────────────────────────────────
 
 def _merge_accumulators(existing, incoming):
-    """Merge `incoming` (dict<name, value>) into `existing`
-    (dict<name, list<value>>). Returns `(merged, changed)`. `changed`
-    is True when at least one new value landed — callers re-render
-    and re-print only on `changed`."""
+    """Merge `incoming` (dict<name, value>) into `existing` (dict<name,
+    list>). Returns `(merged, changed)`; `changed` is True when a new value
+    landed (callers re-render/re-print only then)."""
     merged = {name: list(values) for name, values in (existing or {}).items()}
     changed = False
     for name, value in (incoming or {}).items():
@@ -490,20 +414,13 @@ def add_tip(
     ctx.traits[_TipsTrait].add(ctx, tip)
 
 def collect_tips_sorted(ctx, limit = None, surface = None):
-    """Return the task's tips filtered by `surface` (when set) against each
-    tip's `surfaces` allowlist, then sorted by severity (highest urgency
-    first); the sort is stable, so insertion order is preserved within a
-    severity bucket.
+    """Return the task's tips filtered by `surface` (against each tip's
+    `surfaces` allowlist) then sorted by severity (highest first, stable
+    within a bucket).
 
-    `surface` is the calling surface's identifier (e.g.
-    `SURFACE_GITHUB_STATUS_CHECKS`, `SURFACE_GITHUB_PR_SUMMARY`). When set, a tip
-    is dropped unless its `surfaces` allowlist is empty (all surfaces) or
-    contains `surface`. When `None` (the default), no surface filtering is
-    applied — every tip passes, preserving the pre-surface behavior for
-    callers that don't name a surface. See `tip_shows_on`.
-
-    Pass `limit` to cap the result for space-constrained surfaces
-    (e.g. PR comment summary).
+    `surface` is the caller's id (e.g. `SURFACE_GITHUB_STATUS_CHECKS`);
+    `None` (default) skips filtering. See `tip_shows_on`. Pass `limit` to
+    cap the result for space-constrained surfaces.
     """
     filtered = [t for t in ctx.traits[_TipsTrait].collect() if tip_shows_on(t, surface)]
     out = sorted(filtered, key = lambda t: severity_rank(t.get("severity")))
@@ -516,43 +433,32 @@ def severity_emoji(severity):
     return _SEVERITY_EMOJI.get(severity, "ℹ️")
 
 def severity_label(severity):
-    """Human-readable label for a tip's severity (e.g. "Tip",
-    "Warning", "Important"). Paired with `severity_emoji` to introduce
-    each rendered tip — readable even where the emoji may not."""
+    """Human-readable severity label (e.g. "Tip", "Warning"). Paired with
+    `severity_emoji` so the tip reads even where the emoji may not."""
     return _SEVERITY_LABEL.get(severity, "Info")
 
 def severity_rank(severity):
-    """Sort rank for a tip's severity — lower = more urgent. Use for
-    cross-task aggregators (e.g. PR-comment tip dedup) that need to
-    order tips without taking a dependency on the underlying constant
-    dict. Unknown severities sort after `TIP_INFO`."""
+    """Sort rank for a severity — lower = more urgent. For cross-task
+    aggregators that order tips without depending on the constant dict.
+    Unknown severities sort after `TIP_INFO`."""
     return _SEVERITY_ORDER.get(severity, 999)
 
 def silence_hint_line(id, severity):
-    """Standard Markdown `<sub>` silence-hint line for a tip — the
-    fine-print footer naming the tip's id and the knob to silence
-    it via `.aspect/config.axl`.
-
-    Returns `""` for important tips (which can't be silenced) and for
-    blank ids. Used by the check-run summary's `TIPS_BLOCK` and by
-    the PR-comment tip section so the two surfaces stay aligned on
-    the silence affordance."""
+    """Markdown `<sub>` silence-hint footer naming the tip's id and the
+    silence knob. Returns `""` for important tips (can't be silenced) and
+    blank ids. Shared by the check-run `TIPS_BLOCK` and PR-comment section
+    so both stay aligned."""
     if not id or severity == TIP_IMPORTANT:
         return ""
     return '<sub>_Silence by adding `"%s"` to `ctx.features["tips"].args.silence` in `.aspect/config.axl`, or pass `--tips:silence=%s` on the command line._</sub>' % (id, id)
 
 def tip_to_payload(t):
-    """Project a stored tip dict into the render-only field subset
-    that crosses the per-task artifact boundary (PR-comment
-    aggregation pipeline). JINJA2 fields (`vars`, `accumulate`, the
-    templates) are preserved so the cross-task merge in
-    `_collect_tip_rows` can re-render against the unioned state.
-
-    `key` is carried so the aggregator groups by `(id, key)`;
-    `combine_across_tasks` so it knows whether to union accumulators
-    across tasks; `surfaces` so it can re-assert the `SURFACE_GITHUB_PR_SUMMARY`
-    gate defensively even though the producer already filtered with
-    `collect_tips_sorted(ctx, surface = SURFACE_GITHUB_PR_SUMMARY)`."""
+    """Project a stored tip into the render-only subset crossing the per-task
+    artifact boundary (PR-comment aggregation). JINJA2 fields (`vars`,
+    `accumulate`, templates) are preserved so `_collect_tip_rows` can
+    re-render against the unioned state. Carries `key` (group by `(id,
+    key)`), `combine_across_tasks` (union accumulators across tasks), and
+    `surfaces` (defensively re-assert the PR-summary gate)."""
     return {
         "id": t.get("id", ""),
         "key": t.get("key", ""),
@@ -569,13 +475,11 @@ def tip_to_payload(t):
     }
 
 def decorate_tip(t):
-    """Project a stored tip dict into the render-shape consumed by the
-    surface templates (`TIPS_BLOCK` in `bazel_results.axl`, the
-    `## 💡 Tips` section in `feature/github_status_comments.axl`).
-    Single source of truth so both surfaces stay aligned by
-    construction. The PR-comment aggregator additionally injects a
-    `task_keys` list on top of this shape for its "Surfaced by:"
-    attribution footer."""
+    """Project a stored tip into the render-shape consumed by the surface
+    templates (`TIPS_BLOCK` in `bazel_results.axl`, the `## 💡 Tips` section
+    in `feature/github_status_comments.axl`) — single source of truth so both
+    stay aligned. The PR-comment aggregator adds a `task_keys` list for its
+    "Surfaced by:" footer."""
     severity = t.get("severity")
     return {
         "id": t.get("id", ""),
@@ -588,10 +492,9 @@ def decorate_tip(t):
     }
 
 def strip_code_fences(body):
-    """Drop Markdown code-fence delimiter lines (``` or ```lang) so a
-    tip body renders cleanly on the terminal. Inner content of the
-    fenced block is preserved — only the delimiter lines disappear.
-    Surface (Markdown) rendering uses the unmodified body."""
+    """Drop Markdown code-fence delimiter lines so a tip body renders cleanly
+    on the terminal; inner content is preserved. Surface (Markdown) rendering
+    uses the unmodified body."""
     if not body:
         return body
     kept = []
@@ -608,26 +511,15 @@ _TERMINAL_TIP_COLOR = {
 }
 
 def _print_tip(std, id, severity, title, body):
-    """Print a tip block to the terminal — called from `add_tip` whenever
-    a tip's stored content changes (first add, a re-emit replace, or an
-    accumulate re-render).
+    """Print a tip block to the terminal — called from `add_tip` whenever a
+    tip's stored content changes (first add, replace, or accumulate re-render).
 
-    Header line is `<emoji> <LABEL>: <title>`, rendered bold throughout.
-    The `<emoji> <LABEL>:` segment is colored by severity (red / yellow
-    / green / cyan; see `_TERMINAL_TIP_COLOR`); the title follows in
-    bold-default-color so the urgency reads loud at a glance without
-    the title blending into the colored prefix. Matches the
-    surface-template rendering on the GHSC check-run summary, BK
-    annotation, and PR summary comment, which bold the entire header.
-
-    Body and silence footer are prefixed with a colored vertical bar
-    (`│ `) so the tip boundary is visually drawn down the left edge of
-    the terminal — readers can see exactly where the tip starts and
-    ends in a stream of WARNINGs and INFO lines.
-
-    Code-fence delimiter lines are stripped from the body so the inline
-    YAML reads naturally on the terminal. The silence footer is
-    omitted for important tips (they can't be silenced)."""
+    Header `<emoji> <LABEL>: <title>`, bold throughout; the `<emoji>
+    <LABEL>:` prefix is severity-colored (see `_TERMINAL_TIP_COLOR`), the
+    title bold-default so urgency reads without blending. Body + silence
+    footer are prefixed with a colored `│ ` so the tip boundary is visible in
+    a stream of WARN/INFO lines. Code fences are stripped; the silence footer
+    is omitted for important tips."""
     code = _TERMINAL_TIP_COLOR.get(severity, "1;36")  # default to INFO's cyan for unknown severities
     color_on = color_enabled(std)
 
@@ -635,8 +527,7 @@ def _print_tip(std, id, severity, title, body):
     if color_on:
         prefix = "\x1b[" + code + "m" + prefix + "\x1b[0m"
 
-        # Bold the title too (without color) so the whole header reads
-        # as a single emphasized line, matching the rendered surfaces.
+        # Bold the title (no color) so the whole header reads as one line.
         title = "\x1b[1m" + title + "\x1b[0m"
     print(prefix + " " + title)
 
@@ -650,12 +541,10 @@ def _print_tip(std, id, severity, title, body):
         print(bar + ' (Silence this tip with `--tips:silence=%s` or by adding it to `ctx.features["tips"].args.silence` in `.aspect/config.axl`.)' % id)
 
 def blockquote_body(body):
-    """Prefix every line of a tip body with `> ` (or `>` for empty
-    lines) so the body renders inside a Markdown blockquote — the
-    closest "box" affordance available on both GitHub check-run
-    summaries and Buildkite annotations. Code fences inside the body
-    are preserved because GFM and Buildkite both nest code blocks
-    inside blockquotes correctly."""
+    """Prefix every body line with `> ` (or `>` for blank) so it renders as a
+    Markdown blockquote — the closest "box" on GHSC summaries and BK
+    annotations. Code fences are preserved (GFM + BK both nest them in
+    blockquotes correctly)."""
     if not body:
         return ""
     lines = body.split("\n")
@@ -672,24 +561,16 @@ def blockquote_body(body):
 def apply_tip_suggestion_hooks(ctx, tip: dict) -> dict | None:
     """Run `tip` through every `TipsTrait.tip_suggestion` handler.
 
-    Internal (not re-exported from `@aspect//tips.axl`). `ctx` is left
-    unannotated because this runs inside the trait's `add` path, which
-    `github.axl`'s detection tests drive with a fake `ctx` struct rather
-    than a real `TaskContext`. Only `ctx.traits` and `ctx.task.{group,name}`
-    are read.
+    Internal (not re-exported). `ctx` is unannotated because `github.axl`'s
+    detection tests drive this with a fake `ctx` struct; only `ctx.traits`
+    and `ctx.task.{group,name}` are read.
 
-    Returns the post-chain tip dict (with any `replace` overrides
-    applied), or `None` when a handler rejected it. Handlers run in
-    registration order; a `reject` short-circuits. No-op pass-through
-    when no handlers are registered (the common case).
-
-    Called by `_tips_impl._add` on every `add_tip`, including each
-    accumulate re-emit. For a JINJA2 tip the hook runs before the
-    templates are rendered, so `info.title` / `info.body` are empty and a
-    `replace` of `title` / `body` has no effect (the stored values come
-    from rendering the templates); scope JINJA2 tips by `id` / `key` /
-    `type` and rewrite policy fields (`severity` / `surfaces` /
-    `combine_across_tasks`) instead.
+    Returns the post-chain tip (with `replace` overrides), or `None` on
+    reject. Handlers run in order, `reject` short-circuits; no-op when no
+    handlers. Called on every `add_tip` including accumulate re-emits. For
+    JINJA2 tips the hook runs before rendering, so `info.title`/`info.body`
+    are empty and replacing them has no effect — scope JINJA2 by `id`/`key`/
+    `type` and rewrite policy fields instead.
     """
     handlers = ctx.traits[TipsTrait].tip_suggestion
     if not handlers:
@@ -733,23 +614,20 @@ def apply_tip_suggestion_hooks(ctx, tip: dict) -> dict | None:
 # ── Owner feature — co-located with the trait so it can bind closures ─
 
 def _tips_impl(ctx):
-    """Owner feature impl. Holds the per-task tip list and silence list
-    in closure state; reads `silence` / `auto_print` from feature args at
-    bind time so user configuration in .aspect/config.axl or via
-    `--tips:*` command-line flags propagates."""
+    """Owner feature impl. Holds the per-task tip + silence lists in closure
+    state; reads `silence` / `auto_print` from feature args at bind time so
+    config / `--tips:*` flags propagate."""
     state = []
 
-    # `args.custom(...)` returns None at runtime when unset, even when
-    # the declaration has `default = []` (same quirk used elsewhere with
-    # `args.custom(dict, ...)`). Coalesce defensively.
+    # `args.custom(...)` returns None when unset despite `default = []`;
+    # coalesce defensively.
     silenced = list(ctx.args.silence or [])
     auto_print = [ctx.args.auto_print]  # boxed so test seam can mutate
 
     def _render_jinja2(call_ctx, tip, accumulate):
-        """Render `tip`'s `_title_src` / `_body_src` against `vars`
-        (scalars) + `accumulate` (dict<name, list>) and return the stored
-        tip with the rendered `title` / `body` and the merged `accumulate`
-        recorded."""
+        """Render `tip`'s `_title_src`/`_body_src` against `vars` +
+        `accumulate` and return the stored tip with rendered `title`/`body`
+        and the merged `accumulate`."""
         data = dict(tip.get("vars") or {})
         data.update(accumulate)
         stored = dict(tip)
@@ -759,17 +637,16 @@ def _tips_impl(ctx):
         return stored
 
     def _store(call_ctx, tip):
-        """Materialize a freshly-emitted `tip` into its stored form. For
-        JINJA2 tips this seeds each `accumulate` value into a single-entry
-        list and renders; pre-rendered tips store as-is."""
+        """Materialize a freshly-emitted `tip` into stored form. JINJA2 tips
+        seed each `accumulate` value into a single-entry list and render;
+        pre-rendered tips store as-is."""
         if tip.get("type") == TIP_TEMPLATE_JINJA2:
             seeded = {name: [value] for name, value in tip["accumulate"].items() if value}
             return _render_jinja2(call_ctx, tip, seeded)
         return dict(tip)
 
     def _emit_print(call_ctx, stored):
-        """Print the stored tip to the terminal, gated on auto_print and
-        the tip's SURFACE_CLI allowlist."""
+        """Print the stored tip, gated on auto_print + the SURFACE_CLI allowlist."""
         if auto_print[0] and tip_shows_on(stored, SURFACE_CLI):
             _print_tip(call_ctx.std, stored["id"], stored["severity"], stored["title"], stored["body"])
 
@@ -777,8 +654,7 @@ def _tips_impl(ctx):
         if tip["severity"] != TIP_IMPORTANT and tip["id"] in silenced:
             return
 
-        # Run the tip through the user `tip_suggestion` hook chain. A
-        # reject drops it; a replace returns the rewritten dict.
+        # Run the `tip_suggestion` chain: reject drops, replace rewrites.
         tip = apply_tip_suggestion_hooks(call_ctx, tip)
         if tip == None:
             return
@@ -788,17 +664,16 @@ def _tips_impl(ctx):
             if (existing["id"], existing.get("key", "")) != identity:
                 continue
 
-            # Re-emit of the same (id, key): replace the stored tip, but
-            # union any `accumulate` fields onto the prior so the running
-            # total carries across emits.
+            # Re-emit of same (id, key): replace the stored tip, unioning
+            # `accumulate` onto the prior so the running total carries across.
             if tip.get("type") == TIP_TEMPLATE_JINJA2:
                 merged, _ = _merge_accumulators(existing.get("accumulate", {}), tip["accumulate"])
                 refreshed = _render_jinja2(call_ctx, tip, merged)
             else:
                 refreshed = _store(call_ctx, tip)
 
-            # Re-print only when the rendered content actually changed, so
-            # a no-op re-emit (e.g. a streaming progress loop) stays quiet.
+            # Re-print only when rendered content changed, so a no-op re-emit
+            # (e.g. a streaming loop) stays quiet.
             changed = (refreshed["title"], refreshed["body"]) != (existing.get("title"), existing.get("body"))
             state[i] = refreshed
             if changed:
@@ -813,11 +688,9 @@ def _tips_impl(ctx):
         return list(state)
 
     def _reset():
-        # Clear in place. `state = []` inside the closure would shadow
-        # the outer name; `state.clear()` mutates the underlying list
-        # the closures over `state` (in `_add`, `_collect`) share.
-        # Pin `auto_print = False` since this seam is only ever called
-        # from tests — production never invokes it.
+        # Clear in place: `state = []` would shadow the outer name; `.clear()`
+        # mutates the list the other closures share. Test-only seam, so pin
+        # auto_print False.
         state.clear()
         silenced.clear()
         auto_print[0] = False
@@ -855,9 +728,8 @@ Tips = feature(
 
 # ── Public wrapper struct ────────────────────────────────────────────
 #
-# Consumers go through this. Internal storage (the trait, the closure
-# state inside `_tips_impl`) stays hidden — emit sites only see
-# `tips.add / .collect`. Test seams are underscore-prefixed.
+# Consumers go through this; internal storage stays hidden (emit sites see
+# only `tips.add` / `.collect`). Test seams are underscore-prefixed.
 
 tips = struct(
     add = add_tip,

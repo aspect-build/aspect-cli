@@ -690,7 +690,7 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
         "progress": "",
     }
 
-    # --- Test 1: all-passed smoke test ---
+    # Test 1: all-passed smoke test
     r = init_data()
     r["bazel"]["passed_test_total"] = 5
     r["bazel"]["cached_test_total"] = 5
@@ -716,7 +716,7 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
     tc = test_case(tc, "//..." in out["title"], "passed title contains target pattern: " + out["title"])
     tc = test_case(tc, "//pkg:a_test" in out["text"], "passed details contain test label")
 
-    # --- Test 2: failed tests ---
+    # Test 2: failed tests
     r2 = init_data()
     r2["bazel"]["failed_test_total"] = 2
     r2["bazel"]["failed_tests"] = [
@@ -732,7 +732,7 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
     tc = test_case(tc, "//pkg:fail_test" in out2["text"], "failed details contain failed test label")
     tc = test_case(tc, "Test Failure" in out2["text"], "failed details show Test Failure(s) bucket header")
 
-    # --- Test 3: flaky tests ---
+    # Test 3: flaky tests
     r3 = init_data()
     r3["bazel"]["flaky_test_total"] = 1
     r3["bazel"]["flaky_tests"] = [{"label": "//pkg:flaky_test", "cached": False, "duration_ms": 5000}]
@@ -743,7 +743,7 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
     tc = test_case(tc, "//pkg:flaky_test" in out3["text"], "flaky details contain flaky label")
     tc = test_case(tc, "Test Flake" in out3["text"], "flaky details contain Test Flakes bucket header")
 
-    # --- Test 4: build action failure ---
+    # Test 4: build action failure
     r4 = init_data()
     r4["bazel"]["failed_actions_total"] = 1
     r4["bazel"]["failed_actions"] = [{
@@ -759,7 +759,7 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
     tc = test_case(tc, "//pkg:broken" in out4["text"], "build failure details contain failed label")
     tc = test_case(tc, "CppCompile" in out4["text"], "build failure details contain mnemonic")
 
-    # --- Test 5: summary_title corner cases ---
+    # Test 5: summary_title corner cases
     r5 = init_data()
 
     # "Running..." wins while the build is streaming, regardless of counts.
@@ -789,7 +789,7 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
     title_long = summary_title(r5, "passed", target_pattern = long_p)
     tc = test_case(tc, "…" in title_long, "long target pattern gets truncated: " + title_long)
 
-    # --- Test 6: artifact URL rendered in details ---
+    # Test 6: artifact URL rendered in details
     r6 = init_data()
     r6["bazel"]["failed_test_total"] = 1
     r6["bazel"]["failed_tests"] = [{"label": "//pkg:t", "cached": False, "duration_ms": 1000}]
@@ -806,7 +806,7 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
     tc = test_case(tc, "[Artifacts]" in out6["text"], "artifacts page renders Artifacts link")
     tc = test_case(tc, "tab=artifacts" in out6["text"], "Artifacts href points to artifacts tab")
 
-    # --- Test 7: aborted build ---
+    # Test 7: aborted build
     r7 = init_data()
     r7["bazel"]["aborted"] = True
     r7["bazel"]["abort_reason"] = "user_interrupt"
@@ -820,7 +820,7 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
     # the aborted notice at the top is authoritative.
     tc = test_case(tc, "Build in progress" not in out7["text"], "aborted details don't show pending message")
 
-    # --- Test 7a: long labels get truncated with `...` for bounded columns ---
+    # Test 7a: long labels get truncated with `...` for bounded columns
     r_long = init_data()
     long_label = "//bazel/release/homebrew/tests:myapp_artifacts_with_bottle_root_url_formula_override_formula_bottle_test_very_long"
     r_long["bazel"]["failed_test_total"] = 1
@@ -830,7 +830,7 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
     tc = test_case(tc, "..." in out_long["text"], "long label truncated with ellipsis: " + out_long["text"][:300])
     tc = test_case(tc, long_label not in out_long["text"], "full long label does NOT appear verbatim")
 
-    # --- Test 7b: fresh build with no target info yet → "Build in progress" message ---
+    # Test 7b: fresh build with no target info yet → "Build in progress" message
     r7b = init_data()
     r7b["bazel"]["build_command"] = "test"
     out7b = render_check_output(ctx, r7b, "running", render_ctx, links)
@@ -842,7 +842,7 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
     out7b2 = render_check_output(ctx, r7b, "running", render_ctx, links)
     tc = test_case(tc, "Build in progress" not in out7b2["text"], "waiting placeholder gone once targets appear")
 
-    # --- Test 8b: root vs derived failure partitioning ---
+    # Test 8b: root vs derived failure partitioning
     # A root failure (own actions failed) plus two derived failures
     # (target_completed reported failure but no matching failed action — a dep broke).
     r_broken = init_data()
@@ -869,7 +869,7 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
     tc = test_case(tc, "//pkg/consumer:bin" in out_broken["text"], "root+derived: derived labels listed")
     tc = test_case(tc, "//pkg/other:test" in out_broken["text"], "root+derived: derived labels listed")
 
-    # --- Test 9: per-file label URLs (CircleCI) ---
+    # Test 9: per-file label URLs (CircleCI)
     # Exercise both the bullet path (failed/flaky tests) and the <pre> table
     # path (passed tests). Each test label has test.log + test.xml URLs.
     r8 = init_data()
@@ -909,7 +909,7 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
     tc = test_case(tc, '<a href="' + base_url + '/pkg/ok_test/test.log">log</a>' in out8["text"], "per-file URLs: passed test has log <a> in <pre>")
     tc = test_case(tc, '<a href="' + base_url + '/pkg/ok_test/test.xml">xml</a>' in out8["text"], "per-file URLs: passed test has xml <a> in <pre>")
 
-    # --- Test 10: new Invocation / Workspace Status / Build Metadata / Stats sections ---
+    # Test 10: new Invocation / Workspace Status / Build Metadata / Stats sections
     # Populate the fields that drive each section and assert they render — plus
     # that empty values are skipped (no "COMMIT_TAG" or "BUILD_EMBED_LABEL" rows).
     r9 = init_data()
@@ -976,7 +976,7 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
     tc = test_case(tc, "**Host name:** `MacBook-Pro-2.local`" in out9b["text"], "invocation: host name row (from BUILD_HOST)")
     tc = test_case(tc, "**User:** `greg`" in out9b["text"], "invocation: user row (from BUILD_USER)")
 
-    # --- Test 9c: Aspect Workflows Runner row + details section ---
+    # Test 9c: Aspect Workflows Runner row + details section
     # Set the runner env vars locally, render, assert the new summary row
     # and the `## Aspect Workflows Runner` section both show up.
     env = ctx.std.env
@@ -1066,7 +1066,7 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
     tc = test_case(tc, "**BRANCH:** `main`" in out9["text"], "new sections: metadata BRANCH row")
     tc = test_case(tc, "COMMIT_TAG" not in out9["text"], "new sections: empty metadata value is skipped")
 
-    # --- Test 11: flag-value quoting boundary ---
+    # Test 11: flag-value quoting boundary
     # For `--flag=value` tokens with spaces in the value, the quote boundary
     # should fall after the `=` so the flag name stays readable. For space-
     # separated "flag value" tokens (one string with an embedded space between
@@ -1095,7 +1095,7 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
     # Whole-token quoting for flag-with-space token (no `=`).
     tc = test_case(tc, "&#x27;--build_event_binary_file &#x2f;var&#x2f;folders&#x2f;zm&#x2f;build-event-out-fbd8f66b.bin&#x27;" in out10["text"], "flag quoting: space-separated flag gets whole-token quoting")
 
-    # --- Test 12: Build graph one-liners + Runner table + aspects split ---
+    # Test 12: Build graph one-liners + Runner table + aspects split
     r11 = init_data()
     r11["bazel"]["build_command"] = "test"
     r11["bazel"]["targets_configured"] = 134227
@@ -1143,7 +1143,7 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
     tc = test_case(tc, "**Actions**: 1 action" in out12["text"], "stats: incremental Actions line shows executed only")
     tc = test_case(tc, "**Packages**: 0 packages loaded" in out12["text"], "stats: incremental Packages line shows 0")
 
-    # --- Test 13: VCS linking, PR, merged metadata, TAGS, ASPECT_WORKFLOWS_LINKS ---
+    # Test 13: VCS linking, PR, merged metadata, TAGS, ASPECT_WORKFLOWS_LINKS
     r13 = init_data()
     r13["bazel"]["build_command"] = "test"
     r13["bazel"]["build_tool_version"] = "9.0.1"
@@ -1216,7 +1216,7 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
     tc = test_case(tc, "🔗 [Runbook](https://example.com/runbook)" in sum_txt, "summary: ASPECT_WORKFLOWS_LINKS Runbook")
     tc = test_case(tc, "🔗 [Dashboard](https://example.com/dash)" in sum_txt, "summary: ASPECT_WORKFLOWS_LINKS Dashboard")
 
-    # --- Test 14a: User display precedence (name only, never email) ---
+    # Test 14a: User display precedence (name only, never email)
     # GitHub-flavored markdown autolinks bare emails — so we deliberately
     # never render `@` in the summary user row. Full "Name <email>" still
     # lives in the Build Metadata section.
@@ -1275,7 +1275,7 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
     out_uc = render_check_output(ctx, r_uc, "passed", render_ctx, links)
     tc = test_case(tc, "👤 `solo@example.com`" in out_uc["summary"], "user fallback: email-only wrapped in backticks (immune to GFM autolink)")
 
-    # --- Test 14b: REPO_URL wins over VCS+owner+name (self-hosted support) ---
+    # Test 14b: REPO_URL wins over VCS+owner+name (self-hosted support)
     r_rh = init_data()
     r_rh["bazel"]["build_command"] = "test"
     r_rh["bazel"]["targets_total"] = 1
@@ -1293,7 +1293,7 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
     tc = test_case(tc, "https://github.mycorp.com/myteam/myrepo/commit/abc1234567" in out_rh["summary"], "self-hosted: commit URL built from REPO_URL")
     tc = test_case(tc, "github.com/someone-else/different-repo" not in out_rh["summary"], "self-hosted: hardcoded domain not used when REPO_URL is set")
 
-    # --- Test 14c: summary row 2 on incremental + fresh ---
+    # Test 14c: summary row 2 on incremental + fresh
     # Back-to-back invocation: wall_time > 0, actions_executed=1 (just the
     # always-rerun BazelWorkspaceStatusAction), actions_total recovered from
     # summing per-mnemonic action_data.actions_created — so the cached
@@ -1328,7 +1328,7 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
     tc = test_case(tc, "📦 146 targets" in out_aspect["summary"], "fresh build: targets count (no parens)")
     tc = test_case(tc, "⚡ 361 of 46,325 actions executed (99% cached)" in out_aspect["summary"], "fresh build: actions with cached pct")
 
-    # --- Test 14: Performance section Timing labels + cpu-seconds units ---
+    # Test 14: Performance section Timing labels + cpu-seconds units
     r14 = init_data()
     r14["bazel"]["build_command"] = "test"
     r14["bazel"]["wall_time_ms"] = 10000
@@ -1361,9 +1361,7 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
 
     return tc
 
-# =============================================================================
 # lib/path_glob.axl
-# =============================================================================
 
 def test_path_glob(tc: int) -> int:
     """Coverage for lib/path_glob.axl (match_path / match_any)."""
@@ -1420,9 +1418,7 @@ def test_path_glob(tc: int) -> int:
 
     return tc
 
-# =============================================================================
 # lib/github.axl
-# =============================================================================
 
 # Helper — clear out any host-specific env vars that detect_github_pr looks
 # at, so each scenario starts from a clean slate. Tests assume the real
@@ -1467,7 +1463,7 @@ def test_github_lib(ctx: TaskContext, tc: int) -> int:
     env = ctx.std.env
     _clear_pr_env(env)
 
-    # ----- detect_github_pr -----
+    # detect_github_pr
 
     # No env vars at all → no PR detected.
     pr, reason = github.detect_pr(ctx.std)
@@ -1571,7 +1567,7 @@ def test_github_lib(ctx: TaskContext, tc: int) -> int:
     pr, reason = github.detect_pr(ctx.std)
     tc = test_case(tc, pr != None and pr["pr_number"] == 999, "detect_pr: explicit override beats GHA")
 
-    # ----- detect_commit_sha -----
+    # detect_commit_sha
 
     _clear_pr_env(env)
     tc = test_case(tc, detect_commit_sha(ctx.std) == "", "detect_commit_sha: no env → empty")
@@ -1597,7 +1593,7 @@ def test_github_lib(ctx: TaskContext, tc: int) -> int:
     env.set_var("BUILDKITE_COMMIT", "bk-sha")
     tc = test_case(tc, detect_commit_sha(ctx.std) == "gh-sha", "detect_commit_sha: GITHUB_SHA precedence")
 
-    # ----- extract_owner_repo (URL parsing) -----
+    # extract_owner_repo (URL parsing)
 
     cases = [
         ("https://github.com/acme/widgets", ("acme", "widgets"), "https url"),
@@ -1616,7 +1612,7 @@ def test_github_lib(ctx: TaskContext, tc: int) -> int:
         got = github.extract_owner_repo(url)
         tc = test_case(tc, got == expected, "extract_owner_repo: %s → %s" % (desc, str(expected)))
 
-    # ----- extract_host -----
+    # extract_host
 
     cases = [
         ("https://github.com/foo/bar", "github.com", "https"),
@@ -1628,7 +1624,7 @@ def test_github_lib(ctx: TaskContext, tc: int) -> int:
     for (url, expected, desc) in cases:
         tc = test_case(tc, github.extract_host(url) == expected, "extract_host: %s → %r" % (desc, expected))
 
-    # ----- is_public_github_url -----
+    # is_public_github_url
 
     tc = test_case(tc, github.is_public_github_url("https://github.com/foo/bar"), "is_public_github_url: github.com → True")
     tc = test_case(tc, github.is_public_github_url("git@github.com:foo/bar"), "is_public_github_url: ssh github.com → True")
@@ -1638,7 +1634,7 @@ def test_github_lib(ctx: TaskContext, tc: int) -> int:
     # Empty URL is intentionally True (defers to other fallback paths) — see docstring.
     tc = test_case(tc, github.is_public_github_url(""), "is_public_github_url: empty → True (deferral)")
 
-    # ----- parse_pr_patch (GitHub PR Files API patch format) -----
+    # parse_pr_patch (GitHub PR Files API patch format)
     # Returns (added_lines, hunk_lines):
     #   added_lines: 0-based indices of `+` lines (lines added on the new side).
     #   hunk_lines:  0-based indices of every line visible in any displayed
@@ -1689,7 +1685,7 @@ def test_github_lib(ctx: TaskContext, tc: int) -> int:
     # "+a" → added[1], hunk[1]; cur=3. "+b" → added[2], hunk[2]; cur=4.
     tc = test_case(tc, github.parse_pr_patch(patch7) == ([1, 2], [0, 1, 2]), "parse_pr_patch: marker before additions doesn't shift them")
 
-    # ----- parse_local_diff (git diff --unified=0 format) -----
+    # parse_local_diff (git diff --unified=0 format)
 
     # New file with one added line.
     diff1 = "diff --git a/foo.txt b/foo.txt\nnew file mode 100644\n--- /dev/null\n+++ b/foo.txt\n@@ -0,0 +1,1 @@\n+hello"
@@ -1755,9 +1751,7 @@ rename to new.txt
     _clear_pr_env(env)
     return tc
 
-# =============================================================================
 # lib/environment.axl (color_enabled)
-# =============================================================================
 
 def test_parse_git_url_name(tc: int) -> int:
     """Coverage for environment.parse_git_url_name."""
@@ -1988,7 +1982,7 @@ def test_gazelle_dir_helpers(tc: int) -> int:
       - dedupe_subtrees      : drop dirs whose ancestor is in the list
     """
 
-    # ----- extract_changed_dirs -----
+    # extract_changed_dirs
 
     tc = test_case(tc, extract_changed_dirs([]) == [], "extract_changed_dirs: empty → []")
 
@@ -2034,7 +2028,7 @@ def test_gazelle_dir_helpers(tc: int) -> int:
         "extract_changed_dirs: deeply nested → direct parent only",
     )
 
-    # ----- dir_at_or_below -----
+    # dir_at_or_below
 
     tc = test_case(
         tc,
@@ -2113,7 +2107,7 @@ def test_gazelle_dir_helpers(tc: int) -> int:
         "dir_at_or_below: `./` (trailing slash) matches any path",
     )
 
-    # ----- dedupe_subtrees -----
+    # dedupe_subtrees
 
     tc = test_case(tc, dedupe_subtrees([]) == [], "dedupe_subtrees: empty → []")
 
@@ -2953,9 +2947,7 @@ def test_color_enabled(ctx: TaskContext, tc: int) -> int:
 
     return tc
 
-# =============================================================================
 # lib/sarif.axl
-# =============================================================================
 
 def test_detect_github_repo(ctx: TaskContext, tc: int) -> int:
     """detect_github_repo: ASPECT_VCS_URL > GITHUB_REPOSITORY > git remote.

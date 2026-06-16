@@ -5,21 +5,14 @@ Reads runner environment from environment variables and exposes it as typed
 records. Also provides bazelrc flag generation and host/CI detection.
 """
 
-# Default storage path on Workflows Runners
 DEFAULT_STORAGE_PATH = "/mnt/ephemeral"
-
-# Default bin directory for Workflows runner binaries
 DEFAULT_BIN_DIR = "/etc/aspect/workflows/bin"
-
-# AWS CloudWatch log group
-AWS_LOG_GROUP = "/aw/runner/cloud-init/output"
+AWS_LOG_GROUP = "/aw/runner/cloud-init/output"  # AWS CloudWatch log group
 
 RemoteCache = record(
-    # gRPC cache endpoint, fed to Bazel as `--remote_cache=<endpoint>`.
+    # → Bazel `--remote_cache=<endpoint>`.
     endpoint = field(str, default = ""),
-    # Optional bytestream URI prefix for cross-cache de-duplication, fed
-    # to Bazel as `--remote_bytestream_uri_prefix=<prefix>`. Empty when
-    # the runner didn't surface one.
+    # → Bazel `--remote_bytestream_uri_prefix`; cross-cache de-dup. "" when runner didn't surface one.
     bytestream_uri_prefix = field(str, default = ""),
 )
 
@@ -67,31 +60,24 @@ CI = record(
 )
 
 WorkflowsEnvironment = record(
-    # Every field is independently `None` when its `_read_*` helper
-    # didn't find signals — callers gate per field (e.g. plain GHA
-    # without Workflows leaves `runner == None` but `ci != None`).
+    # Each field is independently None when its `_read_*` found no signals;
+    # callers gate per field (e.g. plain GHA: runner == None but ci != None).
     remote_cache = field(RemoteCache | None, default = None),
     build_events = field(BuildEvents | None, default = None),
     runner = field(Runner | None, default = None),
     ci = field(CI | None, default = None),
 )
 
-# --- Terminal / ANSI detection ---
+# Terminal / ANSI detection
 
 def color_enabled(std):
-    """Should ANSI color codes be emitted to stdout?
+    """Should ANSI color be emitted to stdout? The "emit color?" predicate.
 
-    True when stdout is a real TTY, or when a recognized CI host is
-    detected (GitHub Actions, Buildkite, CircleCI, GitLab) — those CIs
-    render ANSI in their log viewers even though stdout is captured into
-    a non-TTY pipe.
+    True on a real TTY, or on a recognized CI host (GHA, Buildkite, CircleCI,
+    GitLab) — those render ANSI in log viewers despite a non-TTY pipe.
 
-    This is the "should I emit color?" predicate. Use it everywhere
-    styled output / `rc.announce(ansi=...)` decisions are made.
-
-    Note: broader than `CI.supports_curses` — curses cursor control
-    breaks line-oriented log viewers, but plain ANSI color
-    codes render fine. Don't conflate the two.
+    Broader than `CI.supports_curses`: curses cursor control breaks
+    line-oriented log viewers, but plain ANSI color renders fine.
     """
     if std.io.stdout.is_tty:
         return True
@@ -103,153 +89,40 @@ def color_enabled(std):
         env.var("GITLAB_CI"),
     )
 
-# --- Severity-prefixed output ---
+# Severity-prefixed output. Channels (increasing alarm):
+#   trace.log(msg)  — debug only, ASPECT_DEBUG=1-gated; never on a clean run.
+#   print(msg)      — narrative beats every run produces (banners, tables, outcomes).
+#   info(std, msg)  — cyan `INFO:`; conditional aside (a branch fired).
+#   warn(std, msg)  — yellow `WARNING:`; subsystem problem, task continues.
+#   error(std, msg) — red `ERROR:`; recoverable error, usually precedes non-zero exit.
+#   fail(msg)       — unrecoverable; aborts immediately.
 #
-# Full output convention (in increasing alarm):
+# print vs info: every successful run (predictable spot) → print; only when a
+#   branch fires (env/flag/fallback) → info.
+# info vs warn: deliberate/expected outcome or auto-recovery → info; a subsystem
+#   we expected to work failed or returned degraded data we can't recover → warn.
+# Don't stack consecutive prefixed lines — collapse into one info()/warn().
 #
-#   trace.log(msg)    — debug only; surfaces under `ASPECT_DEBUG=1`.
-#                       Per-API-call diagnostics, render details, the
-#                       parsed-rc disclosure — anything you'd want to
-#                       see when investigating, never on a clean run.
-#   print(msg)        — narrative beats: every run's expected
-#                       sequence. Banners, action narration
-#                       ("Building formatter…"), tables, listings,
-#                       outcome statements ("Formatted 5 files.").
-#                       What the task is *doing*.
-#   info(std, msg)    — cyan `INFO:` — out-of-band notifications.
-#                       Conditional asides that interrupt the
-#                       narrative because a specific branch fired.
-#                       "Skipping upload — not on a recognized CI
-#                       host", "Filtered N files via
-#                       --exclude-pattern", "Auto-resolved Z". What
-#                       the task *noticed*.
-#   warn(std, msg)    — yellow `WARNING:` — subsystem-level problem;
-#                       task continues. Artifact upload failures, GH
-#                       API non-fatal failures, rate-limit hits, BES
-#                       sink drops.
-#   error(std, msg)   — red `ERROR:` — recoverable error; task can't
-#                       deliver its primary contract. Typically
-#                       followed by a non-zero exit.
-#   fail(msg)         — unrecoverable; task aborts immediately.
+# Message style (info/warn/error + non-table print; NOT trace.log, which is
+# terse lowercase): capitalize first word; end with terminal punctuation only
+# for full sentences (short noun-phrase status lines omit it); prefer a single
+# scannable sentence. Don't prefix with the task name (already `aspect <task>`).
+#   Exception: lead with a flag/path/feature identifier in its native case,
+#   cargo-style after it ("WARNING: --gazelle-flag=X ignored in diff phase").
+#   Feature prefixes use the human-readable prose label, not the CamelCase
+#   symbol, and still capitalize the body after the namespace colon. Declare the
+#   namespace once via `feature_logger(...)` rather than hand-spelling it.
+#   feature_logger wraps info/warn/error only — features have no inline print()
+#   in event-driven bodies (a bare print there reads as a task narrative beat);
+#   reach for info() instead. Narrow exception: features register display hooks
+#   firing at deterministic phases that render multi-line blocks where per-line
+#   prefixes look wrong — factor those into a named lib/ helper (e.g.
+#   print_environment_info) that the feature just registers.
 #
-# Litmus test for `print` vs `info`: does this line appear on every
-# successful run, or only when a specific condition triggers?
-#   - Every run, in a predictable spot in the sequence → `print()`.
-#     ("Building formatter…" fires every time; readers expect it.)
-#   - Only when a branch fires (env-detected, flag-driven, fallback
-#     path) → `info()`. ("Skipping upload — not on a recognized CI
-#     host" only fires sometimes; the prefix says "this is conditional,
-#     don't skim past it.")
-#
-# Litmus test for `info` vs `warn`: did something *fail*, or is this
-# a deliberate / expected outcome of the runtime conditions?
-#   - User opted in via flag → `info()`. ("--severity=warn → exiting 0
-#     with a warning signal", "--gazelle-flag=X ignored in diff phase".)
-#   - Environment-detected limitation / feature unavailable here →
-#     `info()`. ("Missing GITHUB_RUN_ID; skipping", "ASPECT_VCS_URL
-#     non-github.com; skipping check-run creation".)
-#   - Auto-recovery, nothing failed visibly → `info()`. ("bsdtar
-#     cache sha256 mismatch, re-downloading".)
-#   - A subsystem we expected to work didn't → `warn()`. ("Artifact
-#     upload failed: X", "GitHub status checks: API call failed: Y",
-#     "buildkite-agent annotate returned code N".)
-#   - A subsystem returned data that's wrong or degraded but we
-#     can't recover → `warn()`. ("GitHub PR Files API returned N
-#     entries with inconsistent line counts".)
-#
-# Multiple consecutive prefixed lines look broken. Collapse a
-# multi-paragraph announcement into a single `info()` / `warn()`
-# call instead of stacking prefixes.
-#
-# Message style (applies to `info` / `warn` / `error` and to bare
-# `print` calls that aren't formatted tables / listings). **Does not
-# apply to `trace.log` / `_LOG.trace`** — debug-channel output is
-# developer-facing, terse, and conventionally lowercase (mirrors
-# `log::debug!` / `logging.debug(...)` in other ecosystems):
-#   - Capitalize the first word.
-#   - End with `.` / `?` / `!` when the message is a full sentence
-#     (subject + verb) or contains internal punctuation. Short
-#     noun-phrase status lines ("No token on stdin", "Logged out")
-#     can omit the trailing period — they read cleaner without it.
-#   - Multi-sentence prose: full sentences with periods between.
-#     Prefer a single sentence (semicolon- or comma-joined) when
-#     reasonable — keeps the line scannable.
-#   - Exception: when the message leads with a flag, file path, or
-#     subsystem identifier that disambiguates *which* component
-#     emitted it, keep the identifier's native case. Cargo- /
-#     rustc-style applies *after* the identifier:
-#       WARNING: --gazelle-flag=X ignored in diff phase.
-#       WARNING: bsdtar cache: sha256 mismatch, re-downloading.
-#       WARNING: GitHub status checks: authentication failed: …
-#     Feature-name prefixes (e.g. `GitHub status checks:`,
-#     `GitHub lint comments:`, `Buildkite annotations:`) belong here
-#     — features run alongside tasks, so naming the feature in the
-#     message tells the user *which* subsystem failed. Use the
-#     **human-readable prose form** (lowercase space-separated
-#     words, mirroring the feature's user-facing label), NOT the
-#     CamelCase code identifier (`GithubStatusChecks`,
-#     `BuildkiteAnnotations`) — the CLI output is for humans, not
-#     for grep-matching the feature's source symbol. Pick a single
-#     consistent form for each feature (plural matches the existing
-#     `GithubStatusChecks` / `GithubStatusComments` / etc. naming)
-#     and use it across every message in that feature.
-#
-#     The message body **still** capitalizes after the namespace
-#     colon — the namespace is a label slotted in, not part of the
-#     sentence. Both bare and namespaced messages then read
-#     consistently with a capital after the last colon:
-#       WARNING: Authentication failed for foo/bar — 401
-#       WARNING: GitHub status checks: Authentication failed for foo/bar — 401
-#     Don't write the namespaced version with a lowercase body
-#     (`...comments: list comments failed`); the visual asymmetry
-#     vs. bare warnings is jarring when both appear together.
-#
-#     Don't hand-spell the namespace at every call site. Declare it
-#     once at the top of the feature file via `feature_logger(...)`:
-#       _LOG = feature_logger("GitHub status comments")
-#       _LOG.info(ctx.std, "Missing GITHUB_RUN_ID; skipping.")
-#       _LOG.warn(ctx.std, "Upload failed: %s" % err)
-#     The factory wraps `info` / `warn` / `error` only — `print` is
-#     intentionally not wrapped: **features don't have inline
-#     `print()` calls in their event-driven bodies** (BES handlers,
-#     `task_update` handlers, API callbacks). Those fire at
-#     unpredictable times and should announce themselves via
-#     severity prefixes so the user can tell *which subsystem* is
-#     talking. A feature emitting an un-prefixed `print()` from an
-#     event handler would read as one of the task's expected
-#     narrative beats and blur that distinction. If you reach for
-#     `print` inside a feature event handler, it's almost certainly
-#     an `info()`.
-#
-#     The narrow exception: features may register **display hooks**
-#     that fire at deterministic task phases (setup, terminal)
-#     and render structured multi-line blocks (section headers,
-#     status tables) where per-line `INFO:` prefixes would be
-#     visually wrong. The discipline that keeps this clean: factor
-#     the display body into a named `lib/` helper — e.g.
-#     `print_environment_info`, `agent_health_check`'s warming /
-#     bazel-health renderers — and have the feature just *register*
-#     the helper. Feature impl files stay free of raw `print()`
-#     scattered through their event-handling code; the lib helpers
-#     own the print and have descriptive names that signal "this is
-#     a display block."
-#   - DON'T prefix with the task name itself. A message emitted
-#     from the lint task already runs as `aspect lint`; prepending
-#     `lint:` is redundant. Same for `format:`, `build:`, etc.
-#
-# Hybrid of two ecosystems: prefix style mirrors Bazel's
-# capitalized `ERROR:` / `WARNING:` (https://bazel.build/run/scripts
-# #parsing-output), which keeps aspect-cli output familiar to
-# Bazel users. Punctuation rules match what uv / cargo-style modern
-# Rust CLIs actually do (period when it adds meaning, omit on short
-# status lines) rather than a strict "always period" pedant rule.
-# We don't adopt the fully-lowercase Cargo prefix (`error:` /
-# `warning:`) because the visual weight of an uppercase prefix
-# stands out better against the rest of a task's output stream.
-#
-# ANSI color is gated on `color_enabled`, so the prefix degrades to
-# plain `INFO:` / `WARNING:` / `ERROR:` when output is captured to a
-# non-rendering log.
+# Prefix style mirrors Bazel's uppercase ERROR:/WARNING:
+# (https://bazel.build/run/scripts#parsing-output); punctuation follows
+# uv/cargo (period only when it adds meaning). color_enabled gates the ANSI, so
+# the prefix degrades to plain INFO:/WARNING:/ERROR: in a non-rendering log.
 
 def info(std, msg):
     """Print a bold cyan `INFO:` line for notable runtime state."""
@@ -273,22 +146,14 @@ def error(std, msg):
         print("ERROR: " + msg)
 
 def feature_logger(feature):
-    """Return an (info, warn, error, trace) bundle that prepends
-    `<feature>: ` to every message.
+    """(info, warn, error, trace) bundle prepending `<feature>: ` to each message.
 
         _LOG = feature_logger("GitHub status comments")
         _LOG.info(ctx.std, "Missing GITHUB_RUN_ID; skipping.")
-        _LOG.warn(ctx.std, "List comments failed: %s" % err)
-        _LOG.trace("Polling artifact %s (attempt %d)" % (name, n))
 
-    `info`/`warn`/`error` take `std` first since the std handle isn't
-    available at module-load time. `trace` routes through the runtime
-    builtin which is `ASPECT_DEBUG`-gated independently — use it for
-    single lines; for multi-line debug blocks (header + indented
-    rows) keep using bare `trace.log` so the prefix doesn't clutter.
-
-    Narrative `print()` lines stay unwrapped — they don't carry a
-    `Feature:` prefix in this convention.
+    info/warn/error take `std` first (no std handle at module-load time).
+    trace is ASPECT_DEBUG-gated; for multi-line debug blocks use bare trace.log
+    to avoid the prefix. print() lines stay unwrapped.
     """
     prefix = feature + ": "
     return struct(
@@ -298,14 +163,12 @@ def feature_logger(feature):
         trace = lambda msg: trace.log(prefix + msg),
     )
 
-# --- Reading environment ---
+# Reading environment
 
 def _read_ci(std) -> CI | None:
-    """Detect the CI host. Returns `None` outside the four Aspect
-    Workflows supports (BK / GHA / CircleCI / GitLab) — every
-    `ci.host` consumer has host-specific branches, so claiming
-    detection on unsupported hosts would route silently to the wrong
-    code path.
+    """Detect the CI host. None outside the four Workflows supports
+    (BK/GHA/CircleCI/GitLab) — consumers have host-specific branches, so
+    claiming detection elsewhere would route silently to the wrong path.
     """
     if std.env.var("BUILDKITE_REPO"):
         return CI(
@@ -335,9 +198,8 @@ def _read_ci(std) -> CI | None:
     return None
 
 def _read_build_events(std) -> BuildEvents | None:
-    """Read BES coordinates; `None` when `ASPECT_WORKFLOWS_BES_BACKEND`
-    is unset. `ASPECT_WORKFLOWS_BES_RESULTS_URL` alone isn't enough
-    (no backend to stream events to)."""
+    """Read BES coordinates; None when ASPECT_WORKFLOWS_BES_BACKEND is unset
+    (RESULTS_URL alone isn't enough — no backend to stream events to)."""
     backend = std.env.var("ASPECT_WORKFLOWS_BES_BACKEND") or ""
     if not backend:
         return None
@@ -347,10 +209,8 @@ def _read_build_events(std) -> BuildEvents | None:
     )
 
 def _read_remote_cache(std) -> RemoteCache | None:
-    """Read remote-cache coordinates; `None` when
-    `ASPECT_WORKFLOWS_REMOTE_CACHE` is unset.
-    `ASPECT_WORKFLOWS_REMOTE_BYTESTREAM_URI_PREFIX` alone isn't enough
-    (no endpoint to serve the reads)."""
+    """Read remote-cache coordinates; None when ASPECT_WORKFLOWS_REMOTE_CACHE
+    is unset (BYTESTREAM_URI_PREFIX alone isn't enough — no endpoint to read)."""
     endpoint = std.env.var("ASPECT_WORKFLOWS_REMOTE_CACHE") or ""
     if not endpoint:
         return None
@@ -362,9 +222,8 @@ def _read_remote_cache(std) -> RemoteCache | None:
 def get_workflows_environment(std) -> WorkflowsEnvironment:
     """Read all Aspect-Workflows-managed environment state in one call.
 
-    Always returns a `WorkflowsEnvironment`; per-field `_read_*` helpers
-    return `None` when their signals aren't present, so callers gate
-    per field instead of branching at the top level.
+    Always returns a WorkflowsEnvironment; per-field _read_* return None when
+    their signals are absent, so callers gate per field, not at the top level.
     """
     return WorkflowsEnvironment(
         remote_cache = _read_remote_cache(std),
@@ -374,14 +233,13 @@ def get_workflows_environment(std) -> WorkflowsEnvironment:
     )
 
 def _read_runner(std) -> Runner | None:
-    """Read Aspect Workflows runner metadata; return None when not on
-    a Workflows runner. The `ASPECT_WORKFLOWS_RUNNER` env var is the
-    canonical signal — every other `ASPECT_WORKFLOWS_RUNNER_*` field is
-    populated by the same agent that sets it."""
+    """Read Workflows runner metadata; None when not on a runner.
+    ASPECT_WORKFLOWS_RUNNER is the canonical signal — every other
+    ASPECT_WORKFLOWS_RUNNER_* field is set by the same agent."""
     if not std.env.var("ASPECT_WORKFLOWS_RUNNER"):
         return None
 
-    # Read dynamic state from files at env-var-provided paths
+    # Dynamic state read from files at env-var-provided paths.
     # TODO: replace with agent http api call once available
     warming_complete = False
     warming_complete_path = std.env.var("ASPECT_WORKFLOWS_RUNNER_WARMING_COMPLETE_MARKER_FILE")
@@ -437,10 +295,8 @@ def _read_runner(std) -> Runner | None:
     )
 
 def workflows_results_url(std) -> str:
-    """BES results-page base URL, or `""` when no backend is wired up.
-    Convenience around `env.build_events.results_url` for the status
-    surfaces that only want this one field.
-    """
+    """BES results-page base URL, or "" when no backend is wired up.
+    Convenience around env.build_events.results_url."""
     env = get_workflows_environment(std)
     return env.build_events.results_url if env.build_events else ""
 
@@ -450,10 +306,9 @@ def is_warming_complete(std) -> bool:
     return bool(path) and std.fs.exists(path)
 
 def is_warming_observable(std) -> bool:
-    """True when the runner agent published the warming completion marker
-    path, i.e. `is_warming_complete` can ever return True. Guards waits on
-    warming completion against spinning forever on a runner that enables
-    warming without publishing the marker path."""
+    """True when the agent published the warming-completion marker path, i.e.
+    is_warming_complete can ever return True. Guards warming waits against
+    spinning forever on a runner that warms without publishing the path."""
     return bool(std.env.var("ASPECT_WORKFLOWS_RUNNER_WARMING_COMPLETE_MARKER_FILE"))
 
 def parse_git_url_name(url: str) -> str:
@@ -477,14 +332,11 @@ def sanitize_filename(name: str) -> str:
     return result
 
 def get_bazelrc_flags(environment: WorkflowsEnvironment, aspect_root_dir: str) -> (list, list):
-    """
-    Generate bazelrc flags from platform configuration.
+    """Generate bazelrc flags from platform configuration.
 
     Args:
-        environment: WorkflowsEnvironment from `get_workflows_environment`.
-                     Caller is expected to have already verified
-                     `environment.runner != None` since the output_base
-                     / output_user_root paths come from the runner.
+        environment: WorkflowsEnvironment. Caller must have verified
+                     `runner != None` (output_base/output_user_root come from it).
         aspect_root_dir: absolute path to the Aspect project root.
 
     Returns:
@@ -521,9 +373,8 @@ def get_bazelrc_flags(environment: WorkflowsEnvironment, aspect_root_dir: str) -
 
     build_flags.append("--repository_cache=" + runner.repository_cache_dir)
 
-    # Inside the runner the home / system rc files are redundant —
-    # everything we want is in the workspace .bazelrc plus the flags
-    # we're synthesizing right here.
+    # In the runner, home/system rc files are redundant — workspace .bazelrc
+    # plus these synthesized flags cover everything.
     startup_flags = ["--nohome_rc", "--nosystem_rc"]
 
     bazel_root = runner.bazel_root_dir
@@ -538,7 +389,7 @@ def get_bazelrc_flags(environment: WorkflowsEnvironment, aspect_root_dir: str) -
 
     return (startup_flags, build_flags)
 
-# --- Display helpers ---
+# Display helpers
 
 def _url_encode(s: str) -> str:
     """Percent-encode a string for use in URLs."""
@@ -565,11 +416,8 @@ _CLOUD_PROVIDER_DISPLAY = {
 }
 
 def display_cloud_provider(raw):
-    """Canonical display form of a cloud provider value.
-
-    Our env vars report lowercase ("aws", "gcp") but the marketing / reader-
-    facing casing is "AWS", "GCP", "Azure". Unknown values pass through as-is.
-    """
+    """Canonical display form of a cloud provider. Env vars are lowercase
+    ("aws"); display is "AWS"/"GCP"/"Azure". Unknown values pass through."""
     return _CLOUD_PROVIDER_DISPLAY.get(raw.lower(), raw) if raw else raw
 
 def is_aspect_workflows_runner(env):
@@ -577,19 +425,11 @@ def is_aspect_workflows_runner(env):
     return bool(env.var("ASPECT_WORKFLOWS_RUNNER"))
 
 def detect_ci(env):
-    """Detect the CI platform from environment variables.
-
-    Returns one of:
-      - "github" / "buildkite" / "gitlab" / "circleci" — recognized hosts,
-        gated on a host-specific marker each provider exclusively sets.
-      - "unknown" — generic `CI` env var is set but no specific marker was
-        found. Lets callers that only need "are we on CI?" (e.g. the
-        `--severity=auto` resolution in format / gazelle) behave
-        correctly on hosts we haven't been taught yet.
-      - None — no CI env detected at all (typical local dev shell).
-
-    Args:
-      env: Environment interface (ctx.std.env).
+    """Detect the CI platform from env vars (env = ctx.std.env). Returns:
+      - "github"/"buildkite"/"gitlab"/"circleci" — gated on a host-exclusive marker.
+      - "unknown" — generic `CI` set but no specific marker; lets "are we on
+        CI?" callers (--severity=auto) work on hosts we haven't been taught.
+      - None — no CI env at all (typical local dev shell).
     """
     if env.var("GITHUB_ACTIONS"):
         return "github"
@@ -604,17 +444,15 @@ def detect_ci(env):
     return None
 
 def build_aspect_runner_rows(std):
-    """Build [{key, value}] rows for the Aspect Workflows Runner details section.
+    """Build [{key, value}] rows for the Workflows Runner details section.
 
     Single source of truth for runner metadata: both the status-surface
-    `### Workflows runner metadata` block and the CLI
-    `Workflows runner environment` BK section render from this list, so
-    field set, order, and naming stay in lockstep across surfaces.
+    `### Workflows runner metadata` block and the CLI BK section render from
+    this list, keeping field set/order/naming in lockstep across surfaces.
 
-    Rows with empty values are dropped, except for boolean flags that
-    always render yes/no so the reader sees the full runner shape
-    (preemptible matters for surprise-teardown debugging; warming_complete:
-    no is a notable anomaly worth seeing).
+    Empty-valued rows are dropped, except boolean flags which always render
+    yes/no so the reader sees the full runner shape (preemptible matters for
+    surprise-teardown debugging; warming_complete: no is a notable anomaly).
     """
     env = get_workflows_environment(std)
     if env.runner == None:
@@ -668,16 +506,10 @@ def _gcp_debug_cli(runner: Runner) -> str:
             " --freshness=30d | tac")
 
 def print_environment_info(std: std.Std, env: WorkflowsEnvironment) -> None:
-    """
-    Print debug/diagnostic information about the runner environment.
+    """Print debug/diagnostic info about the runner environment.
 
-    Caller is expected to gate on `env.runner != None`; this body
-    assumes runner-shaped state since the metadata it prints only
-    makes sense on a Workflows runner.
-
-    Args:
-        std: Standard context (ctx.std)
-        env: WorkflowsEnvironment
+    Caller must gate on `env.runner != None`; the body assumes runner-shaped
+    state (the metadata only makes sense on a Workflows runner).
     """
     runner = env.runner
     if runner == None:
@@ -685,15 +517,14 @@ def print_environment_info(std: std.Std, env: WorkflowsEnvironment) -> None:
 
     if env.ci and env.ci.host == "buildkite":
         # `:rocket:` mirrors the status-surface "🚀 Workflows runner metadata"
-        # disclosure summary so the same identifier surfaces on both CLI logs
-        # and rendered checks.
+        # so the same identifier appears on CLI logs and rendered checks.
         print("--- :rocket: Workflows runner metadata")
 
     color = color_enabled(std)
     title = "Workflows runner metadata"
     if color:
-        # Bold + underline + blue, mirrors `_display_runner_health` in
-        # health_check.axl so the two setup-phase CLI sections share a look.
+        # Bold+underline+blue, mirrors `_display_runner_health` in
+        # health_check.axl so the two setup-phase sections match.
         print("\x1b[1;4;34m" + title + "\x1b[0m")
     else:
         print(title)
@@ -705,8 +536,7 @@ def print_environment_info(std: std.Std, env: WorkflowsEnvironment) -> None:
         else:
             print(row["key"] + ": " + row["value"])
 
-    # Cloud-specific debug command — handy for jumping straight from the
-    # job log to the runner's bootstrap logs.
+    # Cloud-specific debug command — jump from job log to runner bootstrap logs.
     if runner.cloud_provider == "aws":
         cli = _aws_debug_cli(runner)
     elif runner.cloud_provider == "gcp":
