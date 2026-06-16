@@ -42,16 +42,26 @@ pub(crate) fn env_methods(registry: &mut MethodsBuilder) {
         Ok(eval.heap().alloc_str(&env.cli_version))
     }
 
-    /// Fetches the environment variable key from the current process.
+    /// Fetches the environment variable key from the current process — or,
+    /// under a test harness, from the in-memory `test_env` overlay.
     fn var<'v>(
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = pos)] key: values::StringValue<'v>,
-        heap: Heap<'v>,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneOr<values::StringValue<'v>>> {
-        let val = std::env::var(key.as_str())
-            .map(|val| heap.alloc_str(val.as_str()))
-            .ok();
-        Ok(NoneOr::from_option(val))
+        // Resolve the value (owned) before touching the heap so the immutable
+        // borrow of `eval` for the env store ends first.
+        let resolved: Option<String> = {
+            let env = RuntimeEnv::from_eval(eval)?;
+            match &env.test_env {
+                Some(map) => map.borrow().get(key.as_str()).cloned(),
+                None => std::env::var(key.as_str()).ok(),
+            }
+        };
+        let heap = eval.heap();
+        Ok(NoneOr::from_option(
+            resolved.map(|val| heap.alloc_str(val.as_str())),
+        ))
     }
 
     /// Sets an environment variable for the current process.
@@ -63,7 +73,14 @@ pub(crate) fn env_methods(registry: &mut MethodsBuilder) {
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = pos)] key: values::StringValue<'v>,
         #[starlark(require = pos)] value: values::StringValue<'v>,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<values::none::NoneType> {
+        let env = RuntimeEnv::from_eval(eval)?;
+        if let Some(map) = &env.test_env {
+            map.borrow_mut()
+                .insert(key.as_str().to_string(), value.as_str().to_string());
+            return Ok(values::none::NoneType);
+        }
         // SAFETY: AXL evaluation is single-threaded; no concurrent env reads.
         #[allow(deprecated)]
         unsafe {
@@ -79,7 +96,13 @@ pub(crate) fn env_methods(registry: &mut MethodsBuilder) {
     fn remove_var<'v>(
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = pos)] key: values::StringValue<'v>,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<values::none::NoneType> {
+        let env = RuntimeEnv::from_eval(eval)?;
+        if let Some(map) = &env.test_env {
+            map.borrow_mut().remove(key.as_str());
+            return Ok(values::none::NoneType);
+        }
         // SAFETY: AXL evaluation is single-threaded; no concurrent env reads.
         #[allow(deprecated)]
         unsafe {
@@ -96,15 +119,29 @@ pub(crate) fn env_methods(registry: &mut MethodsBuilder) {
     /// variables afterwards will not be reflected in the returned iterator.
     fn vars<'v>(
         #[allow(unused)] this: values::Value<'v>,
-        heap: Heap<'v>,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<
         ValueOfUnchecked<
             'v,
             UnpackList<ValueOfUnchecked<'v, UnpackTuple<values::StringValue<'v>>>>,
         >,
     > {
+        // Snapshot into an owned vec before touching the heap so the env
+        // store's immutable borrow of `eval` ends first.
+        let pairs: Vec<(String, String)> = {
+            let env = RuntimeEnv::from_eval(eval)?;
+            match &env.test_env {
+                Some(map) => map
+                    .borrow()
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+                None => std::env::vars().collect(),
+            }
+        };
+        let heap = eval.heap();
         Ok(heap
-            .alloc_typed_unchecked(AllocList(std::env::vars().map(|(k, v)| {
+            .alloc_typed_unchecked(AllocList(pairs.into_iter().map(|(k, v)| {
                 let val = [heap.alloc_str(k.as_str()), heap.alloc_str(v.as_str())];
                 heap.alloc_typed_unchecked(AllocTuple(val))
                     .cast::<UnpackTuple<values::StringValue<'v>>>()

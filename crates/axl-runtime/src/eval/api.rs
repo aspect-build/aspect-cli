@@ -1,4 +1,5 @@
 use crate::engine;
+use starlark::environment::Globals;
 use starlark::environment::GlobalsBuilder;
 use starlark::environment::LibraryExtension;
 use starlark::syntax::{Dialect, DialectTypes};
@@ -33,6 +34,16 @@ pub fn get_globals() -> GlobalsBuilder {
     engine::register_globals(&mut globals);
     crate::trace::register_globals(&mut globals);
     globals
+}
+
+/// Returns the globals surface for `*_test.axl` files: the full AXL surface
+/// plus the test-only vocabulary (`assert`, …). The extra names exist *only*
+/// in test files — the loader selects this surface by filename suffix (see
+/// `eval::load`) — so test scaffolding can never leak into production AXL.
+pub fn get_test_globals() -> Globals {
+    let mut globals = get_globals();
+    engine::testing::register_test_globals(&mut globals);
+    globals.build()
 }
 
 pub fn dialect() -> Dialect {

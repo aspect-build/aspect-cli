@@ -33,6 +33,12 @@ pub struct AxlLoader<'m> {
     dialect: Dialect,
     pub(crate) globals: Globals,
 
+    /// Augmented globals surface used when evaluating `*_test.axl` files:
+    /// the base surface plus the test-only vocabulary (`assert`, …). Selected
+    /// per-file by suffix in `eval_module_inner` so the test surface never
+    /// reaches production AXL.
+    test_globals: Globals,
+
     /// All modules (root + deps) discovered during MODULE.aspect expansion,
     /// looked up by name to resolve `@<name>//path` loads.
     modules: &'m [Mod],
@@ -64,6 +70,7 @@ impl<'m> AxlLoader<'m> {
             env: Env::new(cli_version, aspect_root, bazel_root, git_root),
             dialect: api::dialect(),
             globals: api::get_globals().build(),
+            test_globals: api::get_test_globals(),
             modules,
             load_stack: RefCell::new(vec![]),
             module_stack: RefCell::new(vec![]),
@@ -146,6 +153,19 @@ impl<'m> AxlLoader<'m> {
         };
 
         let ast = AstModule::parse(&path.to_string_lossy(), raw, &self.dialect)?;
+        // `*_test.axl` files are evaluated against the augmented test surface
+        // (base AXL + `assert`, …); every other file gets the production
+        // surface. Keying on the filename suffix keeps the test vocabulary
+        // strictly scoped to test files.
+        let is_test = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.ends_with("_test.axl"));
+        let globals = if is_test {
+            &self.test_globals
+        } else {
+            &self.globals
+        };
         Module::with_temp_heap(|module| {
             if is_std {
                 module.set("#_is_std#", Value::new_bool(true));
@@ -153,7 +173,7 @@ impl<'m> AxlLoader<'m> {
             let mut eval = Evaluator::new(&module);
             eval.set_loader(self);
             eval.extra = Some(&self.env);
-            eval.eval_module(ast, &self.globals)?;
+            eval.eval_module(ast, globals)?;
             drop(eval);
             module
                 .freeze()
