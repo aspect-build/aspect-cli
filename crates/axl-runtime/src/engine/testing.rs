@@ -385,7 +385,11 @@ fn test_bazel_methods(registry: &mut MethodsBuilder) {
             .downcast_ref::<TestBazel>()
             .ok_or_else(|| anyhow::anyhow!("expected Test.bazel"))?;
         let result = parse_build_result(result)?;
-        let targets: Vec<String> = targets.items.iter().map(|t| t.as_str().to_string()).collect();
+        let targets: Vec<String> = targets
+            .items
+            .iter()
+            .map(|t| t.as_str().to_string())
+            .collect();
         let exp = basil_core::BazelExpectation::new(targets, result, exit_code.into_option());
         *tb.expectation.lock().unwrap() = Some(exp);
         Ok(NoneType)
@@ -634,9 +638,7 @@ fn run_shard(
             // Fresh harness per test: its own expectation cell, so a declared
             // `t.bazel.expect_build(...)` in one test never bleeds into another
             // (parallel-safe — state lives on the value, not a global).
-            let t = module
-                .heap()
-                .alloc(Test::new(overlay, fake_bin.clone()));
+            let t = module.heap().alloc(Test::new(overlay, fake_bin.clone()));
 
             let mut eval = Evaluator::new(&module);
             eval.extra = Some(base_env);

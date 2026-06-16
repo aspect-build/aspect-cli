@@ -93,35 +93,30 @@ pub const FAKE_FD_ENV: &str = "ASPECT_FAKE_BAZEL_FD";
 mod unix {
     use super::*;
     use std::io::Write;
-    use std::os::fd::{AsRawFd, OwnedFd};
+    use std::os::fd::AsRawFd;
     use std::os::unix::net::UnixStream;
     use std::os::unix::process::CommandExt;
 
     use nix::libc;
-    use nix::sys::socket::{AddressFamily, SockFlag, SockType, socketpair};
 
-    /// A Unix `socketpair`-backed control channel. The parent keeps one end
-    /// (as a `UnixStream` for convenient writes); the raw fd of the other is
-    /// inherited by the child and learned via `ASPECT_FAKE_BAZEL_FD`.
+    /// A Unix `socketpair`-backed control channel. Built with
+    /// [`UnixStream::pair`] — a connected `AF_UNIX`/`SOCK_STREAM` socketpair
+    /// straight from std, so no extra `nix` features are pulled into the crate
+    /// graph. The parent keeps one end (for convenient writes); the raw fd of
+    /// the other is inherited by the child and learned via `ASPECT_FAKE_BAZEL_FD`.
     pub struct SocketPairChannel {
         /// Parent write/read end. `take`n once the expectation is sent so the
         /// write half closes and the child's `read_to_end` terminates.
         parent: Option<UnixStream>,
         /// Child end. Held (keeping the fd open) until the child is spawned.
-        child: OwnedFd,
+        child: UnixStream,
     }
 
     impl SocketPairChannel {
         pub fn new() -> std::io::Result<Self> {
-            let (parent, child) = socketpair(
-                AddressFamily::Unix,
-                SockType::Stream,
-                None,
-                SockFlag::empty(),
-            )
-            .map_err(|e| std::io::Error::other(format!("socketpair: {e}")))?;
+            let (parent, child) = UnixStream::pair()?;
             Ok(Self {
-                parent: Some(UnixStream::from(parent)),
+                parent: Some(parent),
                 child,
             })
         }
@@ -150,10 +145,10 @@ mod unix {
     /// Arrange for `cmd` to inherit the child control fd and learn its number
     /// via `ASPECT_FAKE_BAZEL_FD`.
     ///
-    /// `std::process::Command` leaves CLOEXEC as-is on fds it doesn't manage,
-    /// and `socketpair(2)` fds are not CLOEXEC by default, so the fd survives
-    /// `exec` — but we clear CLOEXEC explicitly in a `pre_exec` hook to be
-    /// robust against the flag being set elsewhere.
+    /// `UnixStream::pair()` sets `FD_CLOEXEC` on both ends (std sets it on every
+    /// fd it creates), so without intervention the child end would be closed on
+    /// `exec`. We clear `FD_CLOEXEC` on the inherited fd in a `pre_exec` hook so
+    /// it survives into the fake bazel process.
     pub fn prepare_command(cmd: &mut Command, child_fd: i32) {
         cmd.env(FAKE_FD_ENV, child_fd.to_string());
         // SAFETY: `pre_exec` runs in the forked child before exec. We only call

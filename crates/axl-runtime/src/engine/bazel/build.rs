@@ -876,16 +876,15 @@ impl Build {
         // the expectation to send once the child is alive. Each spawn mints
         // its own channel, so concurrent test workers never collide.
         let mut control: Option<Box<dyn super::backend::ControlChannel>> = None;
-        let fake_expectation = if let super::backend::BazelBackend::Fake { expectation, .. } =
-            &backend
-        {
-            let chan = super::backend::open_control_channel()?;
-            super::backend::prepare_command(&mut cmd, chan.child_fd());
-            control = Some(chan);
-            Some(expectation.clone())
-        } else {
-            None
-        };
+        let fake_expectation =
+            if let super::backend::BazelBackend::Fake { expectation, .. } = &backend {
+                let chan = super::backend::open_control_channel()?;
+                super::backend::prepare_command(&mut cmd, chan.child_fd());
+                control = Some(chan);
+                Some(expectation.clone())
+            } else {
+                None
+            };
 
         let child = cmd
             .spawn()
@@ -918,7 +917,12 @@ impl Build {
         // match an open writer).
         let server_pid = if backend.is_fake() { child.id() } else { pid };
         let build_event_stream = match bes_path {
-            Some(p) => Some(BuildEventStream::spawn(p, server_pid, child.id(), file_sinks)?),
+            Some(p) => Some(BuildEventStream::spawn(
+                p,
+                server_pid,
+                child.id(),
+                file_sinks,
+            )?),
             None => None,
         };
 
