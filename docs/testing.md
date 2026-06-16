@@ -78,8 +78,9 @@ All in `crates/axl-runtime`:
 | `asserts` namespace (`eq`, `ne`, `is_true`, `is_false`, `contains`, `fails`) | `src/engine/testing.rs` |
 | `Test` harness value (`t.env`, `t.std`, `t.ctx`) | `src/engine/testing.rs` |
 | `test_*` discovery + parallel (thread-per-shard) runner + summary | `src/engine/testing.rs` (`run_test_source`) |
-| In-memory env overlay backend | `src/engine/store.rs` (`Env::test_env`, `with_test_env`) |
-| `std.env` reads/writes the overlay when present | `src/engine/std/env.rs` (`var`/`set_var`/`remove_var`/`vars`) |
+| In-memory env overlay handle (`TestEnvMap`) carried on the harness values | `src/engine/store.rs` (`TestEnvMap`); minted in `src/engine/testing.rs` |
+| `std.Env`/`Std`/`TaskContext` carry the overlay (`Option<TestEnvMap>`) on the value | `src/engine/std/env.rs`, `src/engine/std/mod.rs`, `src/engine/task_context.rs` |
+| `std.env` reads/writes the overlay carried on its value when present | `src/engine/std/env.rs` (`var`/`set_var`/`remove_var`/`vars`) |
 | Test-only globals surface | `src/eval/api.rs` (`get_test_globals`) |
 | Loader selects test globals for `*_test.axl` | `src/eval/load.rs` |
 
@@ -136,11 +137,16 @@ change:
    implementations of one contract, so `BazelBackend::{Real, Fake}` fits.
    *Decided mechanism:* both the overlay handle and the bazel backend are
    **carried on the harness-constructed value**, not bolted onto the production
-   `Env` and fished out of `eval.extra`. (Today's POC still uses the
-   `eval.extra`/`from_eval` route for the env overlay — moving it onto the
-   value is roadmap item 1b; it is per-`Evaluator` and so already parallel-safe,
-   but the value-carried form is the cleaner target and the only one that scales
-   to multiple backends.)
+   `Env` and fished out of `eval.extra`. *Done for env (roadmap item 1c):* the
+   overlay is a `TestEnvMap` (`Arc<Mutex<BTreeMap<…>>>`) carried as an
+   `Option` on the `std.Env` / `Std` / `TaskContext` values. The runner mints
+   the harness's `t.env`, `t.std`, and `t.ctx` from one shared handle, so all
+   three observe the same map; production mints these values with `None` and
+   `std.env` hits the real process env unchanged. `Env::test_env` /
+   `with_test_env` and the `from_eval` mock route are gone. (`Arc<Mutex>`, not
+   `Rc<RefCell>`, because the values that carry it must satisfy the `Send +
+   Sync` bound frozen Starlark values require; each overlay is still only
+   touched on its own worker thread, so the mutex is never contended.)
 
 7. **bazel `Fake` = a generic fake-bazel process driven by declared data.**
    *Decided, superseding the earlier "canned `BuildEvent`s" sketch.* Canned
@@ -212,9 +218,11 @@ Build order (each independently shippable):
 1. ✅ `env` overlay + `asserts` + discovery + `t.ctx` (this POC).
 1b. ✅ **Parallel runner** — thread-per-shard, `min(tests, cpus)` workers,
     deterministic merge (`run_test_source` / `run_test_source_with_jobs`).
-1c. Move the env overlay off the production `Env`/`eval.extra` and **onto the
+1c. ✅ Move the env overlay off the production `Env`/`eval.extra` and **onto the
     `std.Env` value** (`Option<overlay>`); `t.env` and `t.ctx.std.env` share one
-    `Rc`. Removes `Env::test_env` + the `from_eval` mock route.
+    handle. Removed `Env::test_env` + the `from_eval` mock route. (Handle is
+    `Arc<Mutex<…>>` so the value satisfies the `Send + Sync` bound frozen
+    Starlark values require.)
 2. `bazel` → `BazelBackend::{Real, Fake}` on the `bazel.Bazel` value. `Fake` =
    fork+exec a generic fake-bazel (basil-core) with a `socketpair` control
    channel carrying a `BazelExpectation` fixture; the fake synthesizes BES +

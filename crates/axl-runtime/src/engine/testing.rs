@@ -22,10 +22,13 @@
 //!      the mock backends). `t` deliberately has no bazel surface.
 //!
 //!   4. **Mock-by-backend-swap, not by masquerade.** `t.ctx.std.env` is the
-//!      genuine `std.Env` type; it reads the in-memory overlay only because
-//!      the runner installs a `test_env` on `eval.extra` for the duration of
-//!      the test. The type is unchanged; only the backend it consults differs.
-//!      This is what keeps the mock's contract identical to reality.
+//!      genuine `std.Env` type; it reads the in-memory overlay because the
+//!      `std.Env` value is *minted carrying* the test's overlay `Rc` (the
+//!      mock route is value-carried, not ambient on `eval.extra`). The type
+//!      and its method table are unchanged; only the map a given instance
+//!      consults differs. This is what keeps the mock's contract identical to
+//!      reality — and the one shared `Rc` is what makes `t.env`, `t.std.env`,
+//!      and `t.ctx.std.env` observe the same map.
 //!
 //!   5. **Per-test isolation, run in parallel.** Each test runs with a fresh
 //!      overlay; a failed assertion (which raises) is caught per-test and
@@ -40,9 +43,8 @@
 //! an AXL task, snapshot golden files, fs/process/http mock backends, and the
 //! LSP knowing about the `_test.axl` surface.
 
-use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use allocative::Allocative;
 use derive_more::Display;
@@ -52,7 +54,7 @@ use starlark::syntax::AstModule;
 use starlark::values::list::AllocList;
 use starlark::values::none::{NoneOr, NoneType};
 use starlark::values::{
-    Heap, NoSerialize, ProvidesStaticType, StarlarkValue, Value, starlark_value,
+    Heap, NoSerialize, ProvidesStaticType, StarlarkValue, Value, ValueLike, starlark_value,
 };
 use starlark::{starlark_module, starlark_simple_value, values};
 
@@ -182,13 +184,17 @@ pub fn register_test_globals(globals: &mut GlobalsBuilder) {
 
 // ─── The harness value `t` ───────────────────────────────────────────────────
 
-/// The per-test harness handed to every `def test_*(t)`. Carries no state
-/// itself — its fixtures operate on the `test_env` overlay that the runner
-/// installs on `eval.extra`, exactly as the real `std` surface reaches the
-/// process via `eval.extra`.
+/// The per-test harness handed to every `def test_*(t)`. Carries the test's
+/// in-memory env overlay **on the value itself**: `t.env`, `t.std`, and
+/// `t.ctx.std.env` are all minted from this one shared `Rc`, so a mutation
+/// through any of them is observed through the others. Nothing is fished out
+/// of `eval.extra` — the mock route is value-carried, never ambient.
 #[derive(Clone, Debug, ProvidesStaticType, NoSerialize, Allocative, Display)]
 #[display("<Test>")]
-pub struct Test {}
+pub struct Test {
+    #[allocative(skip)]
+    overlay: TestEnvMap,
+}
 
 #[starlark_value(type = "Test")]
 impl<'v> StarlarkValue<'v> for Test {
@@ -200,27 +206,40 @@ impl<'v> StarlarkValue<'v> for Test {
 
 starlark_simple_value!(Test);
 
+/// Read the shared overlay `Rc` carried on a `t` (`Test`) value.
+fn test_overlay<'v>(this: Value<'v>) -> anyhow::Result<TestEnvMap> {
+    let t = this
+        .downcast_ref::<Test>()
+        .ok_or_else(|| anyhow::anyhow!("test harness method called on a non-Test value"))?;
+    Ok(t.overlay.clone())
+}
+
 #[starlark_module]
 fn test_methods(registry: &mut MethodsBuilder) {
     /// In-memory environment fixture for this test. Mutations are visible
-    /// through `t.ctx.std.env` / `t.std.env` and never touch the real process.
+    /// through `t.ctx.std.env` / `t.std.env` and never touch the real process —
+    /// all three share the one overlay `Rc` carried on `t`.
     #[starlark(attribute)]
-    fn env<'v>(#[allow(unused)] this: Value<'v>) -> anyhow::Result<TestEnv> {
-        Ok(TestEnv {})
+    fn env<'v>(this: Value<'v>) -> anyhow::Result<TestEnv> {
+        Ok(TestEnv {
+            overlay: test_overlay(this)?,
+        })
     }
 
-    /// The real `std` surface (filesystem, env, io, …). Under the runner its
-    /// env backend reads the test overlay.
+    /// The real `std` surface (filesystem, env, io, …). Its `env` reads/writes
+    /// this test's overlay because the `Std` is minted carrying that `Rc`.
     #[starlark(attribute)]
-    fn std<'v>(#[allow(unused)] this: Value<'v>) -> anyhow::Result<Std> {
-        Ok(Std {})
+    fn std<'v>(this: Value<'v>) -> anyhow::Result<Std> {
+        Ok(Std::with_env_overlay(test_overlay(this)?))
     }
 
     /// A real `TaskContext` wired over this test's mock backends. Same Rust
     /// type production uses, so functions annotated `ctx: TaskContext` accept
-    /// it with no drift.
+    /// it with no drift. The context carries this test's overlay `Rc`, so
+    /// `t.ctx.std.env` observes the same map as `t.env` / `t.std.env`.
     #[starlark(attribute)]
-    fn ctx<'v>(#[allow(unused)] this: Value<'v>, heap: Heap<'v>) -> anyhow::Result<Value<'v>> {
+    fn ctx<'v>(this: Value<'v>, heap: Heap<'v>) -> anyhow::Result<Value<'v>> {
+        let overlay = test_overlay(this)?;
         let startup_flags = heap.alloc(AllocList(Vec::<String>::new()));
         let bazel = heap.alloc(Bazel { startup_flags });
         let args = heap.alloc(Arguments::new());
@@ -231,15 +250,18 @@ fn test_methods(registry: &mut MethodsBuilder) {
             "test".to_string(),
             "test".to_string(),
         ));
-        Ok(heap.alloc(TaskContext::new(args, traits, task_info, bazel)))
+        Ok(heap.alloc(TaskContext::new(args, traits, task_info, bazel).with_env_overlay(overlay)))
     }
 }
 
-/// The `t.env` fixture handle. Stateless — it mutates the `test_env` overlay
-/// carried on `eval.extra`.
+/// The `t.env` fixture handle. Carries the test's overlay `Rc` directly, so
+/// its mutations are observed through `t.std.env` / `t.ctx.std.env`.
 #[derive(Clone, Debug, ProvidesStaticType, NoSerialize, Allocative, Display)]
 #[display("<Test.env>")]
-pub struct TestEnv {}
+pub struct TestEnv {
+    #[allocative(skip)]
+    overlay: TestEnvMap,
+}
 
 #[starlark_value(type = "Test.env")]
 impl<'v> StarlarkValue<'v> for TestEnv {
@@ -251,35 +273,40 @@ impl<'v> StarlarkValue<'v> for TestEnv {
 
 starlark_simple_value!(TestEnv);
 
-fn test_env_map<'v>(eval: &Evaluator<'v, '_, '_>) -> anyhow::Result<TestEnvMap> {
-    let env = RuntimeEnv::from_eval(eval)?;
-    env.test_env
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("t.env is only available under the AXL test runner"))
+/// Read the overlay `Rc` carried on a `t.env` (`TestEnv`) value.
+fn test_env_map<'v>(this: Value<'v>) -> anyhow::Result<TestEnvMap> {
+    let env = this
+        .downcast_ref::<TestEnv>()
+        .ok_or_else(|| anyhow::anyhow!("t.env method called on a non-Test.env value"))?;
+    Ok(env.overlay.clone())
 }
 
 #[starlark_module]
 fn test_env_methods(registry: &mut MethodsBuilder) {
     /// Set an environment variable in the in-memory overlay.
     fn set<'v>(
-        #[allow(unused)] this: Value<'v>,
+        this: Value<'v>,
         #[starlark(require = pos)] key: values::StringValue<'v>,
         #[starlark(require = pos)] value: values::StringValue<'v>,
-        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
-        test_env_map(eval)?
-            .borrow_mut()
+        test_env_map(this)?
+            .lock()
+            .unwrap()
             .insert(key.as_str().to_string(), value.as_str().to_string());
         Ok(NoneType)
     }
 
     /// Read an environment variable from the overlay (`None` if unset).
     fn get<'v>(
-        #[allow(unused)] this: Value<'v>,
+        this: Value<'v>,
         #[starlark(require = pos)] key: values::StringValue<'v>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneOr<values::StringValue<'v>>> {
-        let resolved = test_env_map(eval)?.borrow().get(key.as_str()).cloned();
+        let resolved = test_env_map(this)?
+            .lock()
+            .unwrap()
+            .get(key.as_str())
+            .cloned();
         let heap = eval.heap();
         Ok(NoneOr::from_option(
             resolved.map(|v| heap.alloc_str(v.as_str())),
@@ -288,20 +315,16 @@ fn test_env_methods(registry: &mut MethodsBuilder) {
 
     /// Remove a variable from the overlay.
     fn remove<'v>(
-        #[allow(unused)] this: Value<'v>,
+        this: Value<'v>,
         #[starlark(require = pos)] key: values::StringValue<'v>,
-        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
-        test_env_map(eval)?.borrow_mut().remove(key.as_str());
+        test_env_map(this)?.lock().unwrap().remove(key.as_str());
         Ok(NoneType)
     }
 
     /// Clear the overlay back to empty.
-    fn reset<'v>(
-        #[allow(unused)] this: Value<'v>,
-        eval: &mut Evaluator<'v, '_, '_>,
-    ) -> anyhow::Result<NoneType> {
-        test_env_map(eval)?.borrow_mut().clear();
+    fn reset<'v>(this: Value<'v>) -> anyhow::Result<NoneType> {
+        test_env_map(this)?.lock().unwrap().clear();
         Ok(NoneType)
     }
 }
@@ -394,9 +417,10 @@ fn discover_test_names(source: &str, base_env: &RuntimeEnv) -> anyhow::Result<Ve
 }
 
 /// The `Send` slice of a [`RuntimeEnv`] needed to rebuild one on a worker
-/// thread. `RuntimeEnv` itself is `!Send` (it carries an `Rc` overlay slot),
-/// so we never move one across a thread boundary — instead each worker enters
-/// the shared tokio runtime handle and mints its own `RuntimeEnv` locally.
+/// thread. We never move a `RuntimeEnv` (or the per-test overlay) across a
+/// thread boundary — the `Module`/heap is `!Send` anyway, so each worker
+/// enters the shared tokio runtime handle, mints its own `RuntimeEnv`, and
+/// builds its own per-test overlays locally.
 #[derive(Clone)]
 struct EnvSeed {
     cli_version: String,
@@ -457,16 +481,21 @@ fn run_shard(
                 }
             };
 
-            // Fresh, isolated overlay per test; shared between `t.env` and the
-            // `std.env` backend via this `eval.extra`. Because the overlay lives
-            // on this thread's evaluator (not in any process-global), concurrent
-            // workers never contend.
-            let overlay: TestEnvMap = Rc::new(RefCell::new(BTreeMap::new()));
-            let test_env = base_env.with_test_env(overlay);
-            let t = module.heap().alloc(Test {});
+            // Fresh, isolated overlay per test, carried directly on the harness
+            // value `t`. `t.env`, `t.std`, and `t.ctx.std.env` are all minted
+            // from this one `Rc`, so they observe one shared map — and because
+            // the overlay lives on the value (not in any process-global or
+            // ambient `eval.extra`), concurrent workers never contend.
+            //
+            // `base_env` is still installed on `eval.extra` for the *production*
+            // reads `std.env` makes (`aspect_cli_version`, roots) via
+            // `RuntimeEnv::from_eval`; only the env-overlay route moved onto the
+            // value.
+            let overlay: TestEnvMap = Arc::new(Mutex::new(BTreeMap::new()));
+            let t = module.heap().alloc(Test { overlay });
 
             let mut eval = Evaluator::new(&module);
-            eval.extra = Some(&test_env);
+            eval.extra = Some(base_env);
             let outcome = match eval.eval_function(f, &[t], &[]) {
                 Ok(_) => TestOutcome {
                     name,

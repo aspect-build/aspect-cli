@@ -130,7 +130,7 @@ pub(crate) fn config_context_methods(registry: &mut MethodsBuilder) {
     /// Standard library is the foundation of powerful AXL tasks.
     #[starlark(attribute)]
     fn std<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<Std> {
-        Ok(Std {})
+        Ok(Std::new())
     }
 
     /// Expand template files.

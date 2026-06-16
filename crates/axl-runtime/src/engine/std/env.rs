@@ -5,20 +5,48 @@ use starlark::eval::Evaluator;
 use starlark::values::list::{AllocList, UnpackList};
 use starlark::values::none::NoneOr;
 use starlark::values::tuple::{AllocTuple, UnpackTuple};
-use starlark::values::{Heap, NoSerialize, ProvidesStaticType, ValueOfUnchecked};
+use starlark::values::{Heap, NoSerialize, ProvidesStaticType, ValueLike, ValueOfUnchecked};
 use starlark::values::{StarlarkValue, starlark_value};
 use starlark::{starlark_module, starlark_simple_value, values};
 
-use crate::engine::store::Env as RuntimeEnv;
+use crate::engine::store::{Env as RuntimeEnv, TestEnvMap};
 
 #[derive(Clone, Debug, ProvidesStaticType, NoSerialize, Allocative, Display)]
 #[display("<std.Env>")]
-pub struct Env {}
+pub struct Env {
+    /// When `Some`, `var`/`set_var`/`remove_var`/`vars` read and write this
+    /// in-memory overlay instead of the real process environment. The overlay
+    /// is **carried on this value** — the test runner mints the harness's
+    /// `std.Env` (and the one reachable through `t.ctx.std.env`) carrying the
+    /// test's shared overlay `Rc`, rather than fishing an ambient overlay out
+    /// of `eval.extra`. Production `std.env` leaves this `None` and hits the
+    /// real process env, unchanged.
+    pub overlay: Option<TestEnvMap>,
+}
 
 impl Env {
+    /// Production constructor: no overlay, reads the real process env.
     pub fn new() -> Self {
-        Self {}
+        Self { overlay: None }
     }
+
+    /// Test constructor: reads/writes the supplied in-memory overlay instead
+    /// of the real process env.
+    pub fn with_overlay(overlay: TestEnvMap) -> Self {
+        Self {
+            overlay: Some(overlay),
+        }
+    }
+}
+
+/// Read the env overlay carried on a `std.Env` value. Returns `None` for a
+/// production `std.Env` (real process env) and `Some(map)` under the test
+/// runner. Errors only if `this` is somehow not a `std.Env`.
+fn overlay_of<'v>(this: values::Value<'v>) -> anyhow::Result<Option<TestEnvMap>> {
+    let env = this
+        .downcast_ref::<Env>()
+        .ok_or_else(|| anyhow::anyhow!("std.env method called on a non-std.Env value"))?;
+    Ok(env.overlay.clone())
 }
 
 #[starlark_value(type = "std.Env")]
@@ -43,20 +71,16 @@ pub(crate) fn env_methods(registry: &mut MethodsBuilder) {
     }
 
     /// Fetches the environment variable key from the current process — or,
-    /// under a test harness, from the in-memory `test_env` overlay.
+    /// under a test harness, from the in-memory overlay carried on this value.
     fn var<'v>(
-        #[allow(unused)] this: values::Value<'v>,
+        this: values::Value<'v>,
         #[starlark(require = pos)] key: values::StringValue<'v>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneOr<values::StringValue<'v>>> {
-        // Resolve the value (owned) before touching the heap so the immutable
-        // borrow of `eval` for the env store ends first.
-        let resolved: Option<String> = {
-            let env = RuntimeEnv::from_eval(eval)?;
-            match &env.test_env {
-                Some(map) => map.borrow().get(key.as_str()).cloned(),
-                None => std::env::var(key.as_str()).ok(),
-            }
+        // Resolve the value (owned) before touching the heap.
+        let resolved: Option<String> = match overlay_of(this)? {
+            Some(map) => map.lock().unwrap().get(key.as_str()).cloned(),
+            None => std::env::var(key.as_str()).ok(),
         };
         let heap = eval.heap();
         Ok(NoneOr::from_option(
@@ -64,20 +88,20 @@ pub(crate) fn env_methods(registry: &mut MethodsBuilder) {
         ))
     }
 
-    /// Sets an environment variable for the current process.
+    /// Sets an environment variable for the current process — or, under a test
+    /// harness, in the in-memory overlay carried on this value.
     ///
     /// This affects all subsequent `var()` calls and any child processes spawned
     /// after this call. Use with care — environment variables are global process
     /// state.
     fn set_var<'v>(
-        #[allow(unused)] this: values::Value<'v>,
+        this: values::Value<'v>,
         #[starlark(require = pos)] key: values::StringValue<'v>,
         #[starlark(require = pos)] value: values::StringValue<'v>,
-        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<values::none::NoneType> {
-        let env = RuntimeEnv::from_eval(eval)?;
-        if let Some(map) = &env.test_env {
-            map.borrow_mut()
+        if let Some(map) = overlay_of(this)? {
+            map.lock()
+                .unwrap()
                 .insert(key.as_str().to_string(), value.as_str().to_string());
             return Ok(values::none::NoneType);
         }
@@ -94,13 +118,11 @@ pub(crate) fn env_methods(registry: &mut MethodsBuilder) {
     /// Has no effect if the variable is not set. Subsequent `var()` calls will
     /// return `None` for the removed variable.
     fn remove_var<'v>(
-        #[allow(unused)] this: values::Value<'v>,
+        this: values::Value<'v>,
         #[starlark(require = pos)] key: values::StringValue<'v>,
-        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<values::none::NoneType> {
-        let env = RuntimeEnv::from_eval(eval)?;
-        if let Some(map) = &env.test_env {
-            map.borrow_mut().remove(key.as_str());
+        if let Some(map) = overlay_of(this)? {
+            map.lock().unwrap().remove(key.as_str());
             return Ok(values::none::NoneType);
         }
         // SAFETY: AXL evaluation is single-threaded; no concurrent env reads.
@@ -118,7 +140,7 @@ pub(crate) fn env_methods(registry: &mut MethodsBuilder) {
     /// variables at the time of this invocation. Modifications to environment
     /// variables afterwards will not be reflected in the returned iterator.
     fn vars<'v>(
-        #[allow(unused)] this: values::Value<'v>,
+        this: values::Value<'v>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<
         ValueOfUnchecked<
@@ -126,18 +148,15 @@ pub(crate) fn env_methods(registry: &mut MethodsBuilder) {
             UnpackList<ValueOfUnchecked<'v, UnpackTuple<values::StringValue<'v>>>>,
         >,
     > {
-        // Snapshot into an owned vec before touching the heap so the env
-        // store's immutable borrow of `eval` ends first.
-        let pairs: Vec<(String, String)> = {
-            let env = RuntimeEnv::from_eval(eval)?;
-            match &env.test_env {
-                Some(map) => map
-                    .borrow()
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect(),
-                None => std::env::vars().collect(),
-            }
+        // Snapshot into an owned vec before touching the heap.
+        let pairs: Vec<(String, String)> = match overlay_of(this)? {
+            Some(map) => map
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            None => std::env::vars().collect(),
         };
         let heap = eval.heap();
         Ok(heap

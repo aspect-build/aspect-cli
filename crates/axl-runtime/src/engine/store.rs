@@ -1,20 +1,27 @@
-use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use starlark::{eval::Evaluator, values::ProvidesStaticType};
 
 use super::r#async::rt::AsyncRuntime;
 
 /// In-memory environment-variable overlay shared between a test's harness
-/// (`t.env`) and the `std.env` backend reachable through `ctx.std.env`.
+/// (`t.env`) and the `std.env` backend reachable through `t.std.env` /
+/// `t.ctx.std.env`.
 ///
-/// Shared via `Rc<RefCell<…>>` so a mutation through one view (e.g.
-/// `t.env.set(...)`) is observed through the other (`ctx.std.env.var(...)`)
-/// — they are two handles onto the same map. A `BTreeMap` keeps `vars()`
+/// Shared via a handle so a mutation through one view (e.g. `t.env.set(...)`)
+/// is observed through the others (`t.ctx.std.env.var(...)`) — they all hold
+/// clones of the same handle onto one map. A `BTreeMap` keeps `vars()`
 /// iteration deterministic for snapshot-style assertions.
-pub type TestEnvMap = Rc<RefCell<BTreeMap<String, String>>>;
+///
+/// `Arc<Mutex<…>>` (not `Rc<RefCell<…>>`) so the handle is `Send + Sync`: the
+/// `std.Env` / `Std` Starlark values that now *carry* it must satisfy the
+/// `Send + Sync` bound that frozen Starlark values require. Each test's
+/// overlay is only ever touched on that test's own worker thread, so the
+/// `Mutex` is never actually contended — it is correctness insurance for the
+/// parallel runner, not a hot path.
+pub type TestEnvMap = Arc<Mutex<BTreeMap<String, String>>>;
 
 /// Process-wide environment passed to every Starlark evaluator via `eval.extra`.
 ///
@@ -34,13 +41,6 @@ pub struct Env {
     /// not inside a git repository.
     pub git_root_dir: Option<PathBuf>,
     pub rt: AsyncRuntime,
-
-    /// When `Some`, the `std.env` builtins read and write this in-memory map
-    /// instead of the real process environment. Installed per-test by the
-    /// test runner (see [`crate::engine::testing`]) so env mutations during a
-    /// test are isolated and never leak into the process — the real type
-    /// (`std.Env`) is unchanged; only the backend it consults differs.
-    pub test_env: Option<TestEnvMap>,
 }
 
 impl Env {
@@ -56,17 +56,7 @@ impl Env {
             bazel_root_dir,
             git_root_dir,
             rt: AsyncRuntime::new(),
-            test_env: None,
         }
-    }
-
-    /// Clone this env with an in-memory `test_env` overlay installed. Used by
-    /// the test runner to give each test an isolated, process-free environment
-    /// that `std.env` transparently reads through.
-    pub fn with_test_env(&self, map: TestEnvMap) -> Self {
-        let mut cloned = self.clone();
-        cloned.test_env = Some(map);
-        cloned
     }
 
     pub fn from_eval<'v, 'a>(eval: &'a Evaluator<'v, '_, '_>) -> anyhow::Result<&'a Env> {
