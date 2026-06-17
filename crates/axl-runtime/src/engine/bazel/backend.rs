@@ -78,10 +78,6 @@ impl BazelBackend {
         self.base_command(&[])
     }
 
-    pub fn is_fake(&self) -> bool {
-        matches!(self, BazelBackend::Fake { .. })
-    }
-
     /// Run `bazel [startup_flags] info [keys...]` and return the parsed
     /// `key → value` map. Empty `keys` asks bazel for every key.
     pub fn info(
@@ -198,6 +194,39 @@ impl BazelBackend {
         let pid_path = std::path::Path::new(output_base.trim()).join("server/server.pid.txt");
         let contents = std::fs::read_to_string(pid_path).ok()?;
         contents.trim().parse::<u32>().ok()
+    }
+
+    /// Server info to seed a build with: `(server_pid, release_version)`.
+    ///
+    /// `Real` probes the live daemon. `Fake` has no daemon to probe — the
+    /// fake child we are about to fork is its own BES writer — so it returns
+    /// `(0, None)`; the real per-invocation pid is supplied post-spawn by
+    /// [`bes_server_pid`]. The `None` version makes the announce line read
+    /// "development version", same as a non-release real bazel.
+    ///
+    /// [`bes_server_pid`]: Self::bes_server_pid
+    pub fn build_server_info(
+        &self,
+        startup_flags: &[String],
+    ) -> io::Result<(u32, Option<semver::Version>)> {
+        match self {
+            BazelBackend::Real => self.server_info(startup_flags),
+            BazelBackend::Fake { .. } => Ok((0, None)),
+        }
+    }
+
+    /// The pid that owns the BEP file for an invocation whose client process
+    /// is `child_pid`. Real bazel's BEP file is written by the long-lived
+    /// daemon (`probed_daemon_pid` from [`build_server_info`]); the fake child
+    /// writes it itself, so it IS its own server and galvanize's
+    /// `IfOpenForPid` liveness watches the child pid.
+    ///
+    /// [`build_server_info`]: Self::build_server_info
+    pub fn bes_server_pid(&self, child_pid: u32, probed_daemon_pid: u32) -> u32 {
+        match self {
+            BazelBackend::Real => probed_daemon_pid,
+            BazelBackend::Fake { .. } => child_pid,
+        }
     }
 }
 

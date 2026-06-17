@@ -760,16 +760,10 @@ impl Build {
         announce: AnnounceSpawn,
         rt: AsyncRuntime,
     ) -> Result<Build, std::io::Error> {
-        // `Real` probes the live bazel server for its pid + version. `Fake`
-        // must NOT shell out to a real bazel: the fake child is itself the
-        // BES writer, so its pid (known only post-spawn) is the relevant
-        // `server_pid` for galvanize's `IfOpenForPid` policy. We thread a
-        // placeholder here and rebind to the child pid below.
-        let (pid, version) = if backend.is_fake() {
-            (0u32, None)
-        } else {
-            backend.server_info(&[])?
-        };
+        // `Real` probes the live daemon for its pid + version; `Fake` has no
+        // daemon and returns `(0, None)` — its per-invocation server pid is
+        // the child we spawn below (see `bes_server_pid`).
+        let (pid, version) = backend.build_server_info(&[])?;
 
         let span = tracing::info_span!(
             "ctx.bazel.build",
@@ -911,11 +905,9 @@ impl Build {
         // REMOTE_CACHE_EVICTED state. The server (daemon) pid passed to
         // galvanize stays alive across invocations and cannot signal
         // end-of-build, which is why we want a separate per-invocation pid.
-        // For the `Fake` backend the fake child IS the FIFO writer, so its
-        // own pid is the relevant `server_pid` for galvanize's `IfOpenForPid`
-        // retry policy (the real-bazel `pid` placeholder of 0 would never
-        // match an open writer).
-        let server_pid = if backend.is_fake() { child.id() } else { pid };
+        // The backend decides which pid plays the BES-writer role: the daemon
+        // for `Real`, the fake child itself for `Fake` (it has no daemon).
+        let server_pid = backend.bes_server_pid(child.id(), pid);
         let build_event_stream = match bes_path {
             Some(p) => Some(BuildEventStream::spawn(
                 p,
