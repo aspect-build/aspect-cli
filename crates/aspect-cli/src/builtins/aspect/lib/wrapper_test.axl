@@ -1,6 +1,6 @@
-"""Unit tests for lib/wrapper.axl: workspace-root detection, raw-URL building,
-wrapper-version parsing, marker detection, install classification, shell
-detection, and per-shell snippet rendering.
+"""Unit tests for lib/wrapper.axl: workspace-root detection, wrapper-version
+parsing, marker detection, install classification, flag harvesting/derivation,
+template rendering, shell detection, and per-shell snippet rendering.
 
 Run with: aspect dev test-wrapper
 """
@@ -18,8 +18,8 @@ load(
     "flag_specs_from_collection",
     "has_wrapper_marker",
     "parse_wrapper_version",
-    "raw_content_url",
     "render_flag_array",
+    "render_install",
     "render_wrapper",
     "shell_snippet",
 )
@@ -36,13 +36,6 @@ def _fake_std(current_dir, existing_paths):
     return struct(
         env = struct(current_dir = lambda: current_dir),
         fs = struct(exists = lambda p: p in existing),
-    )
-
-def _test_raw_content_url(ctx):
-    _eq(
-        "raw url",
-        raw_content_url("aspect-build", "aspect-cli", "v1.2.3", "tools/bazel"),
-        "https://raw.githubusercontent.com/aspect-build/aspect-cli/v1.2.3/tools/bazel",
     )
 
 def _test_workspace_root_at_cwd(ctx):
@@ -221,6 +214,22 @@ def _test_render_wrapper_substitutes_all_placeholders(ctx):
     _eq("bool filled", "    keep_going" in out, True)
     _eq("no placeholders left", "{{" not in out, True)
 
+def _test_render_install_stamps_versions(ctx):
+    template = "\n".join([
+        'ASPECT_BAZEL_WRAPPER_VERSION="{{ASPECT_CLI_VERSION}}"',
+        'ASPECT_BAZEL_WRAPPER_BAZEL_VERSION="{{BAZEL_VERSION}}"',
+        "BAZEL_VERBS=(", "{{BAZEL_VERBS}}", ")",
+        "BAZEL_VALUE_FLAGS=(", "{{BAZEL_VALUE_FLAGS}}", ")",
+        "BAZEL_BOOL_FLAGS=(", "{{BAZEL_BOOL_FLAGS}}", ")",
+        "BAZEL_SHORT_VALUE_FLAGS=(", "{{BAZEL_SHORT_VALUE_FLAGS}}", ")",
+        "BAZEL_SHORT_BOOL_FLAGS=(", "{{BAZEL_SHORT_BOOL_FLAGS}}", ")",
+    ])
+    lists = BazelFlagLists(verbs = ["build"], value_flags = ["config"], bool_flags = ["keep_going"], short_value_flags = ["c"], short_bool_flags = ["k"])
+    out = render_install(template, lists, "9.9.9", "9.0.0")
+    _eq("cli version stamped", parse_wrapper_version(out), "9.9.9")
+    _eq("bazel version stamped", 'ASPECT_BAZEL_WRAPPER_BAZEL_VERSION="9.0.0"' in out, True)
+    _eq("no placeholders left", "{{" not in out, True)
+
 def _test_template_has_all_placeholders(ctx):
     for ph in ["{{BAZEL_VERBS}}", "{{BAZEL_VALUE_FLAGS}}", "{{BAZEL_BOOL_FLAGS}}", "{{BAZEL_SHORT_VALUE_FLAGS}}", "{{BAZEL_SHORT_BOOL_FLAGS}}", "{{ASPECT_CLI_VERSION}}", "{{BAZEL_VERSION}}"]:
         _eq("placeholder " + ph + " present once", WRAPPER_TEMPLATE.count(ph), 1)
@@ -229,7 +238,6 @@ def _test_template_has_all_placeholders(ctx):
     _eq("aspect verbs kept intact", "ASPECT_VERBS_WITH_BAZEL_FLAGS=(" in WRAPPER_TEMPLATE, True)
 
 _UNIT_TESTS = [
-    _test_raw_content_url,
     _test_workspace_root_at_cwd,
     _test_workspace_root_at_ancestor,
     _test_workspace_root_picks_deepest,
@@ -259,6 +267,7 @@ _UNIT_TESTS = [
     _test_derive_flag_lists_omits_unclassified,
     _test_render_flag_array_indents_and_joins,
     _test_render_wrapper_substitutes_all_placeholders,
+    _test_render_install_stamps_versions,
     _test_template_has_all_placeholders,
 ]
 

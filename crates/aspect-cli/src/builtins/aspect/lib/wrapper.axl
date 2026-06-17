@@ -3,10 +3,6 @@ lib/wrapper_test.axl. `find_workspace_root` is the one exception: it takes
 `std` to walk the filesystem.
 """
 
-# GitHub coordinates of the canonical wrapper, vendored from this repo's
-# `tools/` directory.
-WRAPPER_REPO_OWNER = "aspect-build"
-WRAPPER_REPO_NAME = "aspect-cli"
 WRAPPER_SCRIPT_PATH = "tools/bazel"
 WRAPPER_DOC_PATH = "tools/bazel.md"
 
@@ -35,10 +31,6 @@ InstallAction = enum(
 Shell = enum("bash", "zsh", "fish")
 
 ALL_SHELLS = [Shell("bash"), Shell("zsh"), Shell("fish")]
-
-def raw_content_url(owner: str, repo: str, ref: str, path: str) -> str:
-    """raw.githubusercontent.com URL for `path` in `owner/repo` at `ref`."""
-    return "https://raw.githubusercontent.com/%s/%s/%s/%s" % (owner, repo, ref, path)
 
 def _parent_dir(path: str) -> str:
     """Parent of an absolute path, or "" past the filesystem root."""
@@ -169,6 +161,13 @@ def render_wrapper(template: str, lists: BazelFlagLists) -> str:
     out = out.replace("{{BAZEL_BOOL_FLAGS}}", render_flag_array(lists.bool_flags))
     out = out.replace("{{BAZEL_SHORT_VALUE_FLAGS}}", render_flag_array(lists.short_value_flags))
     out = out.replace("{{BAZEL_SHORT_BOOL_FLAGS}}", render_flag_array(lists.short_bool_flags))
+    return out
+
+def render_install(template: str, lists: BazelFlagLists, cli_version: str, bazel_version: str) -> str:
+    """Fill the flag arrays and stamp the aspect-cli and Bazel versions."""
+    out = render_wrapper(template, lists)
+    out = out.replace("{{ASPECT_CLI_VERSION}}", cli_version)
+    out = out.replace("{{BAZEL_VERSION}}", bazel_version)
     return out
 
 def detect_shell(shell_path: str | None) -> Shell | None:

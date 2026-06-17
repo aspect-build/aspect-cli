@@ -1,7 +1,8 @@
-"""`aspect wrapper install` / `aspect wrapper uninstall` — vendor the
-`tools/bazel` Bazelisk wrapper (and `tools/bazel.md`) into a Bazel workspace,
-downloaded from a ref of aspect-build/aspect-cli. See the task descriptions
-below for the flags and tools/bazel.md for what the wrapper does.
+"""`aspect wrapper install` / `aspect wrapper uninstall` — generate the
+`tools/bazel` Bazelisk wrapper (and `tools/bazel.md`) into a Bazel workspace.
+The wrapper is filled from an embedded template, with the Bazel flag arrays
+harvested from the workspace's own Bazel. See the task descriptions below for
+the flags and tools/bazel.md for what the wrapper does.
 """
 
 load("./lib/environment.axl", "error", "info")
@@ -11,49 +12,18 @@ load(
     "InstallAction",
     "WRAPPER_DOC_PATH",
     "WRAPPER_MARKER",
-    "WRAPPER_REPO_NAME",
-    "WRAPPER_REPO_OWNER",
     "WRAPPER_SCRIPT_PATH",
     "classify_install",
+    "derive_flag_lists",
     "detect_shell",
     "find_workspace_root",
+    "flag_specs_from_collection",
     "has_wrapper_marker",
     "parse_wrapper_version",
-    "raw_content_url",
+    "render_install",
     "shell_snippet",
 )
-
-_USER_AGENT = "aspect-cli wrapper installer"
-
-def _http_headers() -> dict:
-    return {"User-Agent": _USER_AGENT}
-
-def _resolve_ref(ctx: TaskContext, version: str) -> str | None:
-    """Resolve `--version` to a git ref: "latest" queries the releases API for
-    the newest tag; any other value is used verbatim. None on failure."""
-    if version and version != "latest":
-        return version
-    url = "https://api.github.com/repos/%s/%s/releases/latest" % (WRAPPER_REPO_OWNER, WRAPPER_REPO_NAME)
-    response = ctx.http().get(url = url, headers = _http_headers()).block()
-    if response.status != 200:
-        error(ctx.std, "Could not resolve the latest aspect-cli release (HTTP %d). Pass --version=<tag> to pin one explicitly." % response.status)
-        return None
-    parsed = json.try_decode(response.body, None)
-    if parsed == None or not parsed.get("tag_name"):
-        error(ctx.std, "GitHub returned an unexpected response while resolving the latest release. Pass --version=<tag> to pin one explicitly.")
-        return None
-    return parsed["tag_name"]
-
-def _fetch_text(ctx: TaskContext, url: str) -> str | None:
-    """GET a text file. Returns the body, or None after reporting failure."""
-    response = ctx.http().get(url = url, headers = _http_headers()).block()
-    if response.status == 404:
-        error(ctx.std, "Not found at %s — does this version ship the wrapper? Try a newer --version." % url)
-        return None
-    if response.status != 200:
-        error(ctx.std, "Download failed (HTTP %d): %s" % (response.status, url))
-        return None
-    return response.body
+load("./lib/wrapper_template.axl", "WRAPPER_DOC", "WRAPPER_TEMPLATE")
 
 def _print_shell_instructions(ctx: TaskContext) -> None:
     """Print rc snippets for the user's shell (or all with `--all-shells`).
@@ -83,14 +53,14 @@ def _install_impl(ctx: TaskContext) -> int:
     script_path = root + "/" + WRAPPER_SCRIPT_PATH
     doc_path = root + "/" + WRAPPER_DOC_PATH
 
-    ref = _resolve_ref(ctx, ctx.args.version)
-    if ref == None:
-        return 1
-
-    script_url = raw_content_url(WRAPPER_REPO_OWNER, WRAPPER_REPO_NAME, ref, WRAPPER_SCRIPT_PATH)
-    target = _fetch_text(ctx, script_url)
-    if target == None:
-        return 1
+    # Harvest the workspace's Bazel flags and render the wrapper. This raises
+    # (no bazel, too old, undecodable output) and aborts the task non-zero
+    # before any file is written — the intended fail-fast.
+    collection = ctx.bazel.flags_as_proto()
+    specs = flag_specs_from_collection(collection)
+    lists = derive_flag_lists(specs)
+    cli_version = ctx.std.env.aspect_cli_version() or "unknown"
+    target = render_install(WRAPPER_TEMPLATE, lists, cli_version, "")
 
     existing = ctx.std.fs.read_to_string(script_path) if ctx.std.fs.exists(script_path) else None
 
@@ -116,12 +86,7 @@ def _install_impl(ctx: TaskContext) -> int:
             if is_repair:
                 error(ctx.std, "%s has the right contents but is not executable. Run `aspect wrapper install` to repair it." % WRAPPER_SCRIPT_PATH)
             else:
-                error(ctx.std, "%s is stale (local %s; %s ships %s). Run `aspect wrapper install` to update." % (
-                    WRAPPER_SCRIPT_PATH,
-                    local_version,
-                    ref,
-                    target_version,
-                ))
+                error(ctx.std, "%s is stale (Bazel flags changed or aspect-cli updated). Run `aspect wrapper install` to update." % WRAPPER_SCRIPT_PATH)
             return 1
         print("%s is up to date (version %s)." % (WRAPPER_SCRIPT_PATH, target_version))
         return 0
@@ -135,11 +100,11 @@ def _install_impl(ctx: TaskContext) -> int:
 
     if ctx.args.dry_run:
         if is_install:
-            print("Would install %s (version %s from %s)." % (WRAPPER_SCRIPT_PATH, target_version, ref))
+            print("Would install %s (version %s)." % (WRAPPER_SCRIPT_PATH, target_version))
         elif is_repair:
             print("Would repair the executable bit on %s (version %s)." % (WRAPPER_SCRIPT_PATH, target_version))
         else:
-            print("Would upgrade %s (local %s -> %s from %s)." % (WRAPPER_SCRIPT_PATH, local_version, target_version, ref))
+            print("Would upgrade %s (local %s -> %s)." % (WRAPPER_SCRIPT_PATH, local_version, target_version))
         print("Would write %s." % WRAPPER_DOC_PATH)
         _print_shell_instructions(ctx)
         return 0
@@ -161,29 +126,25 @@ def _install_impl(ctx: TaskContext) -> int:
                 print("Cancelled.")
                 return 1
 
-    # `download` (not fs.write) sets mode 0o755 without shelling out to chmod,
-    # but only on create — so remove any existing copy first, else an upgrade /
-    # repair would keep the old, possibly non-executable, permissions.
     tools_dir = root + "/tools"
     if not ctx.std.fs.exists(tools_dir):
         ctx.std.fs.create_dir_all(tools_dir)
-    if ctx.std.fs.exists(script_path):
-        ctx.std.fs.remove_file(script_path)
-    ctx.http().download(url = script_url, output = script_path, mode = 0o755, headers = _http_headers()).block()
+    ctx.std.fs.write(script_path, target)
 
-    doc_url = raw_content_url(WRAPPER_REPO_OWNER, WRAPPER_REPO_NAME, ref, WRAPPER_DOC_PATH)
-    doc_body = _fetch_text(ctx, doc_url)
-    if doc_body != None:
-        ctx.std.fs.write(doc_path, doc_body)
+    # `fs.write` does not set the executable bit, and Bazelisk execs tools/bazel
+    # directly — so chmod it ourselves. No-op on Windows (no exec bit there).
+    if ctx.std.env.os() != "windows":
+        ctx.std.process.command("chmod").args(["+x", script_path]).spawn().wait()
+
+    ctx.std.fs.write(doc_path, WRAPPER_DOC)
 
     if is_install:
-        print("Installed %s (version %s from %s)." % (WRAPPER_SCRIPT_PATH, target_version, ref))
+        print("Installed %s (version %s)." % (WRAPPER_SCRIPT_PATH, target_version))
     elif is_repair:
         print("Repaired the executable bit on %s (version %s)." % (WRAPPER_SCRIPT_PATH, target_version))
     else:
-        print("Upgraded %s (local %s -> version %s from %s)." % (WRAPPER_SCRIPT_PATH, local_version, target_version, ref))
-    if doc_body != None:
-        print("Wrote %s." % WRAPPER_DOC_PATH)
+        print("Upgraded %s (local %s -> version %s)." % (WRAPPER_SCRIPT_PATH, local_version, target_version))
+    print("Wrote %s." % WRAPPER_DOC_PATH)
     _print_shell_instructions(ctx)
     return 0
 
@@ -233,13 +194,9 @@ install = task(
     summary = "Install the tools/bazel Bazelisk wrapper into this workspace.",
     implementation = _install_impl,
     args = {
-        "version": args.string(
-            default = "latest",
-            description = "Ref of aspect-build/aspect-cli to vendor the wrapper from. Defaults to `latest`, which resolves the newest published release tag (never HEAD). Pass a tag or commit SHA for a reproducible pin (e.g. --version=v2026.25.2); a branch name also works but is not reproducible.",
-        ),
         "check": args.boolean(
             default = False,
-            description = "CI gate: exit non-zero if tools/bazel is missing or differs from the target version. Writes nothing. Combine with --version to pin the expected version.",
+            description = "CI gate: exit non-zero if tools/bazel is missing or stale (Bazel flags changed or aspect-cli updated). Writes nothing.",
         ),
         "dry_run": args.boolean(
             default = False,
