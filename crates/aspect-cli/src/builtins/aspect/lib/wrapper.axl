@@ -101,6 +101,61 @@ def classify_install(existing: str | None, target: str, existing_executable: boo
         return InstallAction("noop") if existing_executable else InstallAction("upgrade")
     return InstallAction("upgrade")
 
+FlagSpec = record(
+    name = field(str),
+    requires_value = field(bool, default = False),
+    has_negative_flag = field(bool, default = False),
+    abbreviation = field(str, default = ""),
+    commands = field(list[str], default = []),
+)
+
+BazelFlagLists = record(
+    verbs = field(list[str]),
+    value_flags = field(list[str]),
+    bool_flags = field(list[str]),
+    short_value_flags = field(list[str]),
+    short_bool_flags = field(list[str]),
+)
+
+def flag_specs_from_collection(collection) -> list[FlagSpec]:
+    """Map a harvested FlagCollection (from ctx.bazel.flags_as_proto) to
+    FlagSpec records. Optional proto fields may be None; coerce to defaults."""
+    specs = []
+    for fi in collection.flag_infos:
+        specs.append(FlagSpec(
+            name = fi.name,
+            requires_value = bool(fi.requires_value),
+            has_negative_flag = bool(fi.has_negative_flag),
+            abbreviation = fi.abbreviation or "",
+            commands = list(fi.commands),
+        ))
+    return specs
+
+def derive_flag_lists(specs: list[FlagSpec]) -> BazelFlagLists:
+    """Split FlagSpecs into the wrapper's five bash arrays. Value flags key on
+    requires_value, booleans on has_negative_flag (independent signals); a flag
+    matching neither is omitted. The pseudo-command `startup` is not a verb."""
+    value, bool_, short_value, short_bool, verbs = {}, {}, {}, {}, {}
+    for s in specs:
+        if s.requires_value:
+            value[s.name] = True
+            if s.abbreviation:
+                short_value[s.abbreviation] = True
+        if s.has_negative_flag:
+            bool_[s.name] = True
+            if s.abbreviation:
+                short_bool[s.abbreviation] = True
+        for c in s.commands:
+            if c != "startup":
+                verbs[c] = True
+    return BazelFlagLists(
+        verbs = sorted(verbs.keys()),
+        value_flags = sorted(value.keys()),
+        bool_flags = sorted(bool_.keys()),
+        short_value_flags = sorted(short_value.keys()),
+        short_bool_flags = sorted(short_bool.keys()),
+    )
+
 def detect_shell(shell_path: str | None) -> Shell | None:
     """Map a `$SHELL` value (e.g. "/bin/zsh") to a Shell, or None."""
     if not shell_path:

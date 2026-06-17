@@ -7,9 +7,11 @@ Run with: aspect dev test-wrapper
 
 load(
     "./wrapper.axl",
+    "FlagSpec",
     "InstallAction",
     "Shell",
     "classify_install",
+    "derive_flag_lists",
     "detect_shell",
     "find_workspace_root",
     "has_wrapper_marker",
@@ -132,6 +134,37 @@ def _test_shell_snippet_fish(ctx):
     if "config.fish" not in snippet:
         fail("fish snippet missing config path: %r" % snippet)
 
+def _test_derive_flag_lists_classifies_by_signal(ctx):
+    specs = [
+        FlagSpec(name = "config", requires_value = True, has_negative_flag = False, abbreviation = "", commands = ["build", "test"]),
+        FlagSpec(name = "keep_going", requires_value = False, has_negative_flag = True, abbreviation = "k", commands = ["build", "test"]),
+        FlagSpec(name = "compilation_mode", requires_value = True, has_negative_flag = False, abbreviation = "c", commands = ["build"]),
+        FlagSpec(name = "watchfs", requires_value = False, has_negative_flag = True, abbreviation = "", commands = ["startup"]),
+    ]
+    lists = derive_flag_lists(specs)
+    _eq("value flags", lists.value_flags, ["compilation_mode", "config"])
+    _eq("bool flags", lists.bool_flags, ["keep_going", "watchfs"])
+    _eq("short value flags", lists.short_value_flags, ["c"])
+    _eq("short bool flags", lists.short_bool_flags, ["k"])
+    _eq("verbs (startup excluded)", lists.verbs, ["build", "test"])
+
+def _test_derive_flag_lists_dedupes_and_sorts(ctx):
+    specs = [
+        FlagSpec(name = "b", requires_value = True, has_negative_flag = False, abbreviation = "", commands = ["test", "build"]),
+        FlagSpec(name = "a", requires_value = True, has_negative_flag = False, abbreviation = "", commands = ["build"]),
+        FlagSpec(name = "a", requires_value = True, has_negative_flag = False, abbreviation = "", commands = ["build"]),
+    ]
+    lists = derive_flag_lists(specs)
+    _eq("deduped sorted value flags", lists.value_flags, ["a", "b"])
+    _eq("deduped sorted verbs", lists.verbs, ["build", "test"])
+
+def _test_derive_flag_lists_omits_unclassified(ctx):
+    specs = [FlagSpec(name = "help", requires_value = False, has_negative_flag = False, abbreviation = "", commands = ["build"])]
+    lists = derive_flag_lists(specs)
+    _eq("unclassified omitted from value", lists.value_flags, [])
+    _eq("unclassified omitted from bool", lists.bool_flags, [])
+    _eq("verbs still collected", lists.verbs, ["build"])
+
 _UNIT_TESTS = [
     _test_raw_content_url,
     _test_workspace_root_at_cwd,
@@ -157,6 +190,9 @@ _UNIT_TESTS = [
     _test_detect_shell_unset,
     _test_shell_snippet_posix,
     _test_shell_snippet_fish,
+    _test_derive_flag_lists_classifies_by_signal,
+    _test_derive_flag_lists_dedupes_and_sorts,
+    _test_derive_flag_lists_omits_unclassified,
 ]
 
 def _test_impl(ctx):
