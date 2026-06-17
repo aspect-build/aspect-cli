@@ -1433,9 +1433,11 @@ classify_flags() {
 
         # `bare` is the flag name without leading dashes or =value (keeping the
         # short `-x` form so short flags match separately). `neg` is the bare
-        # name with a `no` boolean-negation prefix stripped, so `--nokeep_going`
-        # matches the boolean `keep_going`. No bazel flag name starts with `no`,
-        # so stripping never produces a false match.
+        # name with a leading `no` stripped, so `--nokeep_going` matches the
+        # boolean `keep_going`. A few real flags are themselves named `no…`
+        # (e.g. `nodep_deps`, `noorder_results`); those still match directly via
+        # `bare`, and the `neg` arm only ever adds a match for a genuine
+        # `--no<bool>` negation — so the strip can't misroute a flag.
         body="${t#--}"
         bare="${body%%=*}"
         neg="${bare#no}"
@@ -1467,6 +1469,19 @@ classify_flags() {
             ;;
         esac
         case "$BAZEL_BOOL_FLAGS_STR" in *" $bare "* | *" $neg "*)
+            array_push "$out_name" "${prefix}${t}"
+            continue
+            ;;
+        esac
+
+        # Starlark build settings / flags are labels: --//pkg:flag,
+        # --@repo//pkg:flag (and --no… for bool_flag negation). They never appear
+        # in the harvested native-flag lists — flags-as-proto can't see
+        # build-graph-defined settings — and they are always self-contained (bare
+        # bool or `=value`; Bazel requires `=`, never a space), so wrap the whole
+        # token and never consume the next arg.
+        case "$body" in
+        //* | @*//* | no//* | no@*//*)
             array_push "$out_name" "${prefix}${t}"
             continue
             ;;
