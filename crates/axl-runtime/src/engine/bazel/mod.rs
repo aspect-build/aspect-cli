@@ -716,7 +716,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// ```python
     /// def _impl(ctx):
     ///     fc = ctx.bazel.flags_as_proto()
-    ///     value_flags = [fi.name for fi in fc.flag_infos if not fi.has_negative_flag]
+    ///     value_flags = [fi.name for fi in fc.flag_infos if fi.requires_value]
     /// ```
     fn flags_as_proto<'v>(
         this: values::Value<'v>,
@@ -724,10 +724,17 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         let _ = this;
         use base64::Engine;
         use prost::Message;
-        let out = bazel_command()
-            .args(["help", "flags-as-proto"])
-            .stderr(Stdio::inherit())
-            .output()
+        let mut cmd = bazel_command();
+        cmd.args(["help", "flags-as-proto"]);
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::inherit());
+        cmd.stdin(Stdio::null());
+        // Register with the live-bazel registry so OS-signal cancellation
+        // can reach this `bazel help flags-as-proto` even if the daemon is busy.
+        let (child, _guard) = live::spawn_registered(&mut cmd)
+            .map_err(|e| anyhow::anyhow!("failed to run `bazel help flags-as-proto`: {e}"))?;
+        let out = child
+            .wait_with_output()
             .map_err(|e| anyhow::anyhow!("failed to run `bazel help flags-as-proto`: {e}"))?;
         if !out.status.success() {
             anyhow::bail!(
