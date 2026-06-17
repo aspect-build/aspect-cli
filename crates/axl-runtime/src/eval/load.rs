@@ -87,7 +87,12 @@ impl<'m> AxlLoader<'m> {
         path: &Path,
     ) -> Result<FrozenModule, EvalError> {
         self.module_stack.borrow_mut().push(scope);
-        let result = self.eval_module_impl(path, None, false);
+        // The first-party `@aspect` standard library is privileged like the
+        // embedded `@std`/`@bazel` modules: its files may reach `__builtins__`
+        // (e.g. the test runner backing `aspect axl test`). Third-party modules
+        // stay unprivileged, so the gate still blocks arbitrary user code.
+        let is_std = scope.name == "aspect";
+        let result = self.eval_module_impl(path, None, is_std);
         self.module_stack.borrow_mut().pop();
         result
     }

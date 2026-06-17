@@ -64,7 +64,7 @@ fn check_std_context(eval: &Evaluator) -> anyhow::Result<()> {
         Ok(())
     } else {
         Err(anyhow::anyhow!(
-            "__builtins__ is only available within @std modules"
+            "__builtins__ is only available within standard-library modules (@std, @bazel, @aspect)"
         ))
     }
 }
@@ -487,6 +487,124 @@ fn builtins_time_methods(registry: &mut MethodsBuilder) {
     }
 }
 
+/// Returned by `__builtins__.testing()`. Exposes the `*_test.axl` runner.
+#[derive(Debug, Clone, Copy, ProvidesStaticType, NoSerialize, Allocative)]
+pub struct BuiltinsTesting;
+
+impl fmt::Display for BuiltinsTesting {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<BuiltinsTesting>")
+    }
+}
+
+starlark_simple_value!(BuiltinsTesting);
+
+#[starlark_value(type = "BuiltinsTesting")]
+impl<'v> StarlarkValue<'v> for BuiltinsTesting {
+    fn get_methods() -> Option<&'static Methods> {
+        static RES: MethodsStatic = MethodsStatic::new();
+        RES.methods(builtins_testing_methods)
+    }
+}
+
+/// Marshal a test run into the AXL-facing summary dict:
+/// `{"error": None|str, "passed": int, "failed": int, "outcomes": [...]}`,
+/// where each outcome is `{"name": str, "passed": bool, "message": None|str}`.
+///
+/// A module-level failure (parse error, or a `load(...)` the loader-free
+/// runner can't resolve) is surfaced as the top-level `error` string with no
+/// outcomes, rather than raising — so one bad file never aborts a whole
+/// `aspect axl test` run.
+fn marshal_test_result<'v>(
+    result: anyhow::Result<super::testing::TestSummary>,
+    heap: Heap<'v>,
+) -> Value<'v> {
+    use starlark::values::dict::AllocDict;
+    use starlark::values::list::AllocList;
+
+    let (error, outcomes, passed, failed): (Value<'v>, Vec<Value<'v>>, i32, i32) = match result {
+        Ok(summary) => {
+            let outcomes = summary
+                .outcomes
+                .iter()
+                .map(|o| {
+                    let message = match &o.message {
+                        Some(m) => heap.alloc(m.as_str()).to_value(),
+                        None => Value::new_none(),
+                    };
+                    let entries: Vec<(Value<'v>, Value<'v>)> = vec![
+                        (
+                            heap.alloc("name").to_value(),
+                            heap.alloc(o.name.as_str()).to_value(),
+                        ),
+                        (heap.alloc("passed").to_value(), Value::new_bool(o.passed)),
+                        (heap.alloc("message").to_value(), message),
+                    ];
+                    heap.alloc(AllocDict(entries))
+                })
+                .collect();
+            (
+                Value::new_none(),
+                outcomes,
+                summary.passed() as i32,
+                summary.failed() as i32,
+            )
+        }
+        Err(e) => (
+            heap.alloc(format!("{e:#}").as_str()).to_value(),
+            Vec::new(),
+            0,
+            0,
+        ),
+    };
+
+    let entries: Vec<(Value<'v>, Value<'v>)> = vec![
+        (heap.alloc("error").to_value(), error),
+        (
+            heap.alloc("passed").to_value(),
+            heap.alloc(passed).to_value(),
+        ),
+        (
+            heap.alloc("failed").to_value(),
+            heap.alloc(failed).to_value(),
+        ),
+        (
+            heap.alloc("outcomes").to_value(),
+            heap.alloc(AllocList(outcomes)).to_value(),
+        ),
+    ];
+    heap.alloc(AllocDict(entries))
+}
+
+#[starlark_module]
+fn builtins_testing_methods(registry: &mut MethodsBuilder) {
+    /// Runs every top-level `def test_*(t)` function defined in `source` (the
+    /// contents of a `*_test.axl` file), each with an isolated in-memory
+    /// environment overlay, fanned out across worker threads. Returns the
+    /// summary dict described on [`marshal_test_result`].
+    ///
+    /// `source` is evaluated with no module loader, so a file that
+    /// `load(...)`s other modules comes back as a top-level `error` rather
+    /// than running.
+    fn run<'v>(
+        this: Value<'v>,
+        #[starlark(require = pos)] source: &str,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<Value<'v>> {
+        let _ = this;
+        // No `check_std_context` here: the gate lives on the `testing()`
+        // accessor (same as `hash()`/`time()`). A task captures the namespace
+        // at module-eval time (where the marker is present) and calls `run`
+        // later from the shared execution module, which carries no marker —
+        // re-checking here would reject every legitimate call.
+        let result = {
+            let env = super::store::Env::from_eval(eval)?;
+            super::testing::run_test_source(source, env)
+        };
+        Ok(marshal_test_result(result, eval.heap()))
+    }
+}
+
 #[starlark_module]
 fn builtins_methods(registry: &mut MethodsBuilder) {
     /// Returns the hash namespace, exposing constructors for supported
@@ -535,6 +653,21 @@ fn builtins_methods(registry: &mut MethodsBuilder) {
     ) -> anyhow::Result<super::grpc::BuiltinsGrpc> {
         let _ = this;
         super::grpc::make_builtins_grpc(eval)
+    }
+
+    /// Returns the testing namespace, exposing `run(source)` — the built-in
+    /// parallel `*_test.axl` runner that backs `aspect axl test`.
+    ///
+    /// Only callable from within standard-library modules (`@std`, `@bazel`,
+    /// `@aspect`); there is no public `@std//…` wrapper because the runner is
+    /// an internal capability of the `@aspect` standard library.
+    fn testing<'v>(
+        this: Value<'v>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<BuiltinsTesting> {
+        let _ = this;
+        check_std_context(eval)?;
+        Ok(BuiltinsTesting)
     }
 }
 
@@ -617,6 +750,59 @@ pub fn register_json(globals: &mut GlobalsBuilder) {
 pub fn register_globals(globals: &mut GlobalsBuilder) {
     const __builtins__: Builtins = Builtins;
     const Hash: StarlarkValueAsType<HashObject> = StarlarkValueAsType::new();
+}
+
+#[cfg(test)]
+mod marshal_tests {
+    use super::marshal_test_result;
+    use crate::engine::testing::{TestOutcome, TestSummary};
+    use starlark::environment::Module;
+
+    #[test]
+    fn ok_summary_marshals_to_documented_dict_shape() {
+        Module::with_temp_heap(|m| -> anyhow::Result<()> {
+            let summary = TestSummary {
+                outcomes: vec![
+                    TestOutcome {
+                        name: "test_a".to_string(),
+                        passed: true,
+                        message: None,
+                    },
+                    TestOutcome {
+                        name: "test_b".to_string(),
+                        passed: false,
+                        message: Some("boom".to_string()),
+                    },
+                ],
+            };
+            let repr = marshal_test_result(Ok(summary), m.heap()).to_repr();
+            // Top-level summary fields.
+            assert!(repr.contains("\"error\""), "{repr}");
+            assert!(repr.contains("None"), "{repr}");
+            assert!(repr.contains("\"passed\""), "{repr}");
+            assert!(repr.contains("\"failed\""), "{repr}");
+            assert!(repr.contains("\"outcomes\""), "{repr}");
+            // Per-outcome fields, including the failure message.
+            assert!(repr.contains("\"name\""), "{repr}");
+            assert!(repr.contains("test_a"), "{repr}");
+            assert!(repr.contains("test_b"), "{repr}");
+            assert!(repr.contains("boom"), "{repr}");
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn module_error_marshals_as_top_level_error_with_no_outcomes() {
+        Module::with_temp_heap(|m| -> anyhow::Result<()> {
+            let repr = marshal_test_result(Err(anyhow::anyhow!("kaboom")), m.heap()).to_repr();
+            assert!(repr.contains("kaboom"), "{repr}");
+            assert!(repr.contains("\"outcomes\""), "{repr}");
+            assert!(repr.contains("[]"), "{repr}");
+            Ok(())
+        })
+        .unwrap();
+    }
 }
 
 #[cfg(test)]
