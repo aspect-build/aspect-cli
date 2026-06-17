@@ -237,6 +237,9 @@ def _test_template_has_all_placeholders(ctx):
     _eq("marker kept", "# aspect-build/tools-bazel-wrapper" in WRAPPER_TEMPLATE, True)
     _eq("aspect verbs kept intact", "ASPECT_VERBS_WITH_BAZEL_FLAGS=(" in WRAPPER_TEMPLATE, True)
 
+def _test_template_preserves_eval_quoting(ctx):
+    _eq("array_push eval quoting intact", 'eval "$1+=(\\"\\$2\\")"' in WRAPPER_TEMPLATE, True)
+
 _UNIT_TESTS = [
     _test_workspace_root_at_cwd,
     _test_workspace_root_at_ancestor,
@@ -269,6 +272,7 @@ _UNIT_TESTS = [
     _test_render_wrapper_substitutes_all_placeholders,
     _test_render_install_stamps_versions,
     _test_template_has_all_placeholders,
+    _test_template_preserves_eval_quoting,
 ]
 
 def _test_impl(ctx):
