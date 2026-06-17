@@ -104,7 +104,7 @@ def _install_impl(ctx: TaskContext) -> int:
         elif is_repair:
             print("Would repair the executable bit on %s (version %s)." % (WRAPPER_SCRIPT_PATH, target_version))
         else:
-            print("Would upgrade %s (local %s -> %s)." % (WRAPPER_SCRIPT_PATH, local_version, target_version))
+            print("Would upgrade %s (local %s -> version %s)." % (WRAPPER_SCRIPT_PATH, local_version, target_version))
         print("Would write %s." % WRAPPER_DOC_PATH)
         _print_shell_instructions(ctx)
         return 0
@@ -208,7 +208,7 @@ install = task(
         ),
         "yes": args.boolean(
             default = False,
-            description = "Skip the interactive confirmation prompt when upgrading an existing tools/bazel.",
+            description = "Skip the interactive confirmation prompt and allow replacing a tools/bazel not installed by this command (one missing the wrapper marker).",
         ),
     },
 )
