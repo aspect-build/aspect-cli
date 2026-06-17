@@ -158,8 +158,8 @@ def _test_derive_flag_lists_classifies_by_signal(ctx):
     lists = derive_flag_lists(specs)
     _eq("value flags", lists.value_flags, ["compilation_mode", "config"])
     _eq("bool flags", lists.bool_flags, ["keep_going", "watchfs"])
-    _eq("short value flags", lists.short_value_flags, ["c"])
-    _eq("short bool flags", lists.short_bool_flags, ["k"])
+    _eq("short value flags", lists.short_value_flags, ["-c"])
+    _eq("short bool flags", lists.short_bool_flags, ["-k"])
     _eq("verbs (startup excluded)", lists.verbs, ["build", "test"])
 
 def _test_derive_flag_lists_dedupes_and_sorts(ctx):

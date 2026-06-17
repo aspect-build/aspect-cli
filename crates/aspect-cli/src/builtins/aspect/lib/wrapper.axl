@@ -132,11 +132,11 @@ def derive_flag_lists(specs: list[FlagSpec]) -> BazelFlagLists:
         if s.requires_value:
             value[s.name] = True
             if s.abbreviation:
-                short_value[s.abbreviation] = True
+                short_value["-" + s.abbreviation] = True
         if s.has_negative_flag:
             bool_[s.name] = True
             if s.abbreviation:
-                short_bool[s.abbreviation] = True
+                short_bool["-" + s.abbreviation] = True
         for c in s.commands:
             if c != "startup":
                 verbs[c] = True
