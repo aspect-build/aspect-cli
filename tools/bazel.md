@@ -1,10 +1,10 @@
 # `tools/bazel` wrapper — transparent Aspect routing
 
-> **Source of truth:** <https://github.com/aspect-build/aspect-cli/blob/main/tools/bazel> (and this doc at `tools/bazel.md` alongside it). Both files are designed to be **vendored** into your workspace via the install instructions below — your `tools/bazel` and `tools/bazel.md` are copies of the upstream files. When upstream changes (new Bazel flags, routing tweaks, doc updates), re-run the vendor step to pull the latest.
+> **Source of truth:** <https://github.com/aspect-build/aspect-cli/blob/main/tools/bazel> (and this doc at `tools/bazel.md` alongside it). Both files are generated into your workspace by `aspect wrapper install` (see [Installing in your repo](#installing-in-your-repo) below): it writes `tools/bazel` and `tools/bazel.md` and harvests this workspace's Bazel flags. Re-run `aspect wrapper install` to refresh them (e.g. after upgrading Bazel or aspect-cli).
 
 A drop-in `tools/bazel` shell script that lets developers keep typing `bazel` while still reaching Aspect-specific functionality (`lint`, `format`, `delivery`, …) and Aspect's value-added wrappers around `build` / `test`.
 
-Copy `tools/bazel` from this repo into your own workspace, adjust the verb lists at the top, commit it, and you're done.
+Run `aspect wrapper install` in your workspace to generate `tools/bazel`, adjust the verb lists at the top if you like, commit it, and you're done.
 
 ## About the Aspect CLI
 
@@ -65,7 +65,7 @@ curl -fsSL https://install.aspect.build | bash
 
 Bazel is the closed set. The wrapper classifies each flag against the embedded Bazel flag lists; a flag whose name is in one of them is a Bazel flag, and **everything else** — aspect's own flags and anything unrecognized — passes through to aspect unchanged.
 
-- `BAZEL_VALUE_FLAGS` — Bazel flags that take a value (consume the next token when space-separated). From `bazel help build|test|run|startup_options --long`, **Bazel 9.x**.
+- `BAZEL_VALUE_FLAGS` — Bazel flags that take a value (consume the next token when space-separated). Harvested by `aspect wrapper install` from your workspace's `bazel help flags-as-proto`.
 - `BAZEL_BOOL_FLAGS` — Bazel boolean (no-value) flags. The wrapper also matches their `--no…` negations.
 - `BAZEL_SHORT_VALUE_FLAGS` (`-c`, `-j`) / `BAZEL_SHORT_BOOL_FLAGS` (`-k`, `-s`, `-t`) — the short-flag abbreviations, so `bazel build -c opt //...` consumes `opt` instead of leaving it as a stray target.
 
@@ -76,32 +76,25 @@ The rules:
 3. After `--`, everything passes through verbatim (positional targets, `run` arguments, etc.).
 4. Flags **before the verb** get the same classification, except Bazel flags wrap as `--bazel-startup-flag=…` (which aspect accepts as a post-verb flag, so they're moved after the verb). Aspect global flags stay in front of the verb.
 
-To refresh the embedded Bazel flag lists when Bazel adds flags. These scrape `bazel help` and aren't aspect- or repo-specific — the output depends only on the Bazel version, so run them against the version you target. Note that in a workspace where this wrapper is on `PATH`, plain `bazel help build` would route through the wrapper; `ASPECT_WRAPPER_SKIP=1` (below) bypasses it so `help` reaches the real bazel. (Outside such a workspace, drop the prefix.)
+To refresh the embedded Bazel flag lists when Bazel adds or changes flags, re-run `aspect wrapper install`. It re-harvests the flag set from your workspace's Bazel via `bazel help flags-as-proto` and rewrites `tools/bazel` (and `tools/bazel.md`) in place — no manual scraping, no network. Run it after a Bazel upgrade (or an aspect-cli upgrade) so the lists track the Bazel version you actually build with.
 
 ```sh
-export ASPECT_WRAPPER_SKIP=1  # ensure `bazel help` reaches the real bazel
-
-# Value-taking flags
-for h in build test run startup_options; do bazel help $h --long; done \
-  | grep -oE '^[[:space:]]+--[a-z_][a-z0-9_]*' | grep -vE '\-\-\[no\]' \
-  | sed -E 's/^[[:space:]]*--//' | sort -u
-
-# Boolean flags
-for h in build test run startup_options; do bazel help $h --long; done \
-  | grep -oE '^[[:space:]]+--\[no\][a-z][a-z0-9_]*' \
-  | sed -E 's/^[[:space:]]*--\[no\]//' | sort -u
+aspect wrapper install
 ```
+
+In CI, use `aspect wrapper install --check` as a staleness gate: it regenerates the wrapper in memory and fails (non-zero exit) if the committed `tools/bazel` is out of date, without modifying anything. Wire it into your checks so an out-of-date wrapper is caught in review rather than drifting silently.
 
 ## Installing in your repo
 
-Grab the script straight from this repo and drop it in your own `tools/` directory, along with this doc so your team has the routing reference:
+From your workspace root, run:
 
 ```sh
-mkdir -p tools
-base=https://raw.githubusercontent.com/aspect-build/aspect-cli/main/tools
-curl -fsSL "$base/bazel" -o tools/bazel
-curl -fsSL "$base/bazel.md" -o tools/bazel.md
-chmod +x tools/bazel
+aspect wrapper install
+```
+
+This writes `tools/bazel` (executable) and `tools/bazel.md` (this routing reference) into your `tools/` directory, harvesting your workspace's Bazel flag set from `bazel help flags-as-proto` so the embedded lists match the Bazel version you build with. No network access is needed — the wrapper template ships inside the aspect CLI. Then commit both files:
+
+```sh
 git add tools/bazel tools/bazel.md
 ```
 
