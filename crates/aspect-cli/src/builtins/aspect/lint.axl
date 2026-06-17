@@ -525,14 +525,6 @@ def _body_text(status, data):
         return "Lint aborted"
     return ""
 
-def _has_aspect_flag(flags):
-    """True iff `flags` contains any `--aspects` entry (=<label> or bare).
-    Distinguishes "no aspect configured" from "configured but no output"."""
-    for f in flags:
-        if f == "--aspects" or f.startswith("--aspects="):
-            return True
-    return False
-
 def _try_process_lint_file(ctx, file, filepath, data, strategy, changed_files, lint_trait, github_output, patches):
     """Read and process one BES lint output file.
 
@@ -639,7 +631,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
     # Pre-task setup phase (status surface, rc parse, health checks); returns
     # resolved flags (a failed health check fails the task inside setup_phase).
-    flags = setup_phase(ctx, lifecycle, data["target_pattern"], "lint_results", data, hc_trait, bazel_trait, "build", bazel_base_flags = base_flags)
+    rc = setup_phase(ctx, lifecycle, data["target_pattern"], "lint_results", data, hc_trait, bazel_trait, "build", bazel_base_flags = base_flags)
     announce_version, announce_command = resolve_bazel_announce(ctx)
 
     # Detect changed files BEFORE lint_start hooks so features read the canonical
@@ -707,7 +699,6 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # TODO: re-introduce --quiet once we can capture (not only inherit-or-not)
     # Bazel's stdout/stderr. Today suppressing both hides build failures.
     build = ctx.bazel.build(
-        flags = flags,
         build_events = build_events,
         announce_version = announce_version,
         announce_command = announce_command,
@@ -937,7 +928,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     if build_failed:
         exit_code = 1
     elif not lint_tools_run:
-        if _has_aspect_flag(flags):
+        if rc.flag_values("--aspects", command = "build"):
             error(ctx.std, (
                 "Lint aspect(s) configured but produced no rules_lint output. " +
                 "Verify the configured aspect is from aspect_rules_lint and " +

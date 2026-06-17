@@ -297,9 +297,10 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
     data = init_data()
 
     # The single pre-task `setup` phase: status-surface init + first render, rc
-    # parse, health checks. Returns the resolved Bazel command flags (a failed
-    # health check concludes the surface and fails the task inside setup_phase).
-    flags = setup_phase(ctx, lifecycle, " ".join(targets), "bazel_results", data, hc_trait, bazel_trait, command, bazel_base_flags = base_flags)
+    # parse + `use_rc`, health checks. The active run command drives the
+    # build/test below (a failed health check concludes the surface and fails
+    # the task inside setup_phase).
+    setup_phase(ctx, lifecycle, " ".join(targets), "bazel_results", data, hc_trait, bazel_trait, command, bazel_base_flags = base_flags)
     announce_version, announce_command = resolve_bazel_announce(ctx)
 
     bes_sinks = _collect_bes_from_args(ctx)
@@ -384,7 +385,6 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
             invocation = ctx.bazel.test(
                 build_events = build_events,
                 execution_log = bazel_trait.execution_log_sinks or False,
-                flags = flags,
                 announce_version = announce_version,
                 announce_command = announce_command,
                 *targets
@@ -393,7 +393,6 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
             invocation = ctx.bazel.build(
                 build_events = build_events,
                 execution_log = bazel_trait.execution_log_sinks or False,
-                flags = flags,
                 announce_version = announce_version,
                 announce_command = announce_command,
                 *targets

@@ -304,10 +304,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
     # Single pre-task setup phase (status surface, rc parse, health checks);
     # returns resolved flags (a failed health check fails the task inside).
-    flags = setup_phase(ctx, lifecycle, ctx.args.formatter_target, "format_results", data, hc_trait, bazel_trait, bazel_base_flags = LOCAL_SPAWN_BASE_FLAGS)
+    setup_phase(ctx, lifecycle, ctx.args.formatter_target, "format_results", data, hc_trait, bazel_trait, bazel_base_flags = LOCAL_SPAWN_BASE_FLAGS)
     announce_version, announce_command = resolve_bazel_announce(ctx)
-
-    flags.extend(LOCAL_SPAWN_FLAGS)
 
     r = runnable(ctx, [ctx.args.formatter_target])
 
@@ -338,7 +336,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     build = ctx.bazel.build(
         ctx.args.formatter_target,
         build_events = build_events,
-        flags = flags,
+        flags = LOCAL_SPAWN_FLAGS,
         current_dir = ctx.std.env.aspect_root_dir(),
         announce_version = announce_version,
         announce_command = announce_command,

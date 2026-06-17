@@ -121,7 +121,7 @@ User-facing migration guide: https://docs.aspect.build/cli/migration/delivery
 
 load("@aspect//bazel.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
 load("@aspect//lib/artifacts.axl", "artifacts")
-load("@aspect//lib/bazel_flags.axl", "announce_bazel_args", "expand_config_flags", "resolve_bazel_announce", "resolve_query_flags")
+load("@aspect//lib/bazel_flags.axl", "announce_bazel_args", "expand_config_flags", "resolve_bazel_announce")
 load("@aspect//lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "now_ms", "process_event", bazel_init_data = "init_data")
 load("@aspect//lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
 load("@aspect//lib/ci.axl", "resolve_build_url")
@@ -350,7 +350,7 @@ def _surface_phase_stderr(ctx, phase, log_path):
     ctx.std.io.stderr.write(ctx.std.fs.read_to_string(log_path))
     artifacts.upload_file(ctx, "delivery_phase{}_log".format(phase), "phase{}-stderr.log".format(phase), log_path)
 
-def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_flags, user_remote_executor_uri, ansi, data):
+def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, user_remote_executor_uri, ansi, data):
     """Run phase 1 (build) + phase 2 (digest extraction); return
     `(output_shas, non_hermetic_misses, exit_code)`. Phase-1 BES events drive
     `data`; phase-2's gRPC log yields the per-target digests for change detection.
@@ -363,14 +363,25 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
     repo_dir = "/tmp/aspect_delivery_" + ctx.task.key
     _write_aspect_repo(ctx, repo_dir)
 
+    # `--inject_repository` only registers the repo in the bzlmod graph; under
+    # WORKSPACE mode the injected repo is invisible and `@aspect_delivery` fails
+    # to resolve. `--override_repository` injects in both modes — use it when the
+    # build disables bzlmod. (Bazel 7+ defaults bzlmod on — None means on — so
+    # WORKSPACE is the explicit `--enable_bzlmod=false` the run command reports.)
+    if rc.bool_flag("--enable_bzlmod", command = "build") == False:
+        inject_flag = "--override_repository=aspect_delivery=" + repo_dir
+    else:
+        inject_flag = "--inject_repository=aspect_delivery=" + repo_dir
+
     aspect_flags = [
         "--aspects=@aspect_delivery//:hashsum.bzl%hashsum",
         "--output_groups=+delivery_hash",
-        "--inject_repository=aspect_delivery=" + repo_dir,
+        inject_flag,
     ]
 
-    # Force `=minimal`: phase 1 reads outputs via BES, never from disk.
-    phase1_flags = bazel_flags + ["--nokeep_state_after_build", "--remote_download_outputs=minimal"]
+    # Phase-1 extras layered on the active run command. Force `=minimal`:
+    # phase 1 reads outputs via BES, never from disk.
+    phase1_flags = ["--nokeep_state_after_build", "--remote_download_outputs=minimal"]
     _t_phase1 = time.monotonic()
     announce_version, announce_command = resolve_bazel_announce(ctx)
 
@@ -523,8 +534,9 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
         dummy = start_dummy_executor()
         phase2_executor_uri = dummy.grpc_uri
 
-    # Force `=minimal`: phase 2 reads digests from the gRPC log, not disk.
-    phase2_flags = bazel_flags + aspect_flags + [
+    # Phase-2 extras on the active run command. Force `=minimal`: phase 2 reads
+    # digests from the gRPC log, not disk.
+    phase2_flags = aspect_flags + [
         "--remote_executor=" + phase2_executor_uri,
         "--experimental_remote_require_cached",
         "--remote_grpc_log=" + log_path,
@@ -916,9 +928,9 @@ def _delivery_impl(ctx):
     # the resolved set lands in `data` later.
     targets_subject = " ".join(list(ctx.args.targets)) if ctx.args.targets else ""
 
-    # Single pre-task setup phase (surface, rc parse, health checks); returns
-    # expanded_flags. A failed health check fails the task inside setup_phase.
-    expanded_flags = setup_phase(
+    # Single pre-task setup phase (surface, rc parse + use_rc, health checks);
+    # returns the active RunCommand. A failed health check fails the task inside.
+    rc = setup_phase(
         ctx,
         lifecycle,
         targets_subject,
@@ -992,22 +1004,12 @@ def _delivery_impl(ctx):
     for handler in bazel_trait.build_start:
         handler(ctx)
 
-    # Delivery needs a remote cache (may arrive via
-    # --default_override=0:common=--remote_cache=...). expand_all yields
-    # strings or (value, constraint) tuples; take the tuple's first element.
-    # A real --remote_executor is tracked separately (used directly by phase 2;
-    # else phase 2 uses a dummy, so no real RBE is required).
-    remote_cache_uri = None
-    user_remote_executor_uri = None
-    _override_prefix = "--default_override=0:common="
-    for flag in expanded_flags:
-        f = flag[0] if type(flag) == "tuple" else flag
-        if f.startswith(_override_prefix):
-            f = f[len(_override_prefix):]
-        if f.startswith("--remote_cache="):
-            remote_cache_uri = f[len("--remote_cache="):]
-        elif f.startswith("--remote_executor="):
-            user_remote_executor_uri = f[len("--remote_executor="):]
+    # Delivery needs a remote cache (may arrive from any rc section, incl. a
+    # common --remote_cache=...). A real --remote_executor is tracked separately
+    # (used directly by phase 2; else phase 2 uses a dummy, so no real RBE is
+    # required). The run command resolves both regardless of source section.
+    remote_cache_uri = rc.flag_value("--remote_cache", command = "build")
+    user_remote_executor_uri = rc.flag_value("--remote_executor", command = "build")
 
     # An executor implies a cache, so either flag satisfies the requirement.
     if not remote_cache_uri:
@@ -1046,14 +1048,13 @@ def _delivery_impl(ctx):
         # Echo the query so the resolved set (or failure) is attributable to it.
         info(ctx.std, "Running bazel query: {}".format(query_expr))
 
-        # The query carries `--ignore_all_rc_files`, so it reads no `.bazelrc`.
-        # Replay the rc flags expanded for `query` (not the build's
-        # `expanded_flags`, which carry build-only options like `--show_result`
-        # the query rejects) so it resolves external repos the way the build
-        # does — else an rc-set `--noenable_bzlmod` would be dropped. See
-        # `resolve_query_flags`.
-        targets = [t.name for t in ctx.bazel.query().raw(query_expr).eval(
-            flags = resolve_query_flags(ctx, bazel_trait),
+        # The query runs off the active run command, self-expanded for the
+        # `query` command (and carrying `--ignore_all_rc_files`), so it resolves
+        # external repos the way the build does — e.g. an rc-set
+        # `--noenable_bzlmod` is honored — without a separate flag dance.
+        targets = [t.name for t in ctx.bazel.query(
+            query_expr,
+            rc = rc,
             announce_version = announce_version,
             announce_command = announce_command,
         )]
@@ -1097,7 +1098,7 @@ def _delivery_impl(ctx):
         _emit_final(ctx, lifecycle, data, exit_code = 1)
         fail(msg)
 
-    _print_header(ansi, endpoint, ci_host, commit_sha, prefix, prefix_source, build_url, expanded_flags, targets, forced_targets, mode, dry_run, track_state)
+    _print_header(ansi, endpoint, ci_host, commit_sha, prefix, prefix_source, build_url, rc.expand(command = "build"), targets, forced_targets, mode, dry_run, track_state)
 
     run_tracker = runnable(ctx, targets)
 
@@ -1106,7 +1107,7 @@ def _delivery_impl(ctx):
     # Phase 1/2 — skipped only in --mode=always + --track-state=false.
     if phase_1_2_runs:
         _t_build = time.monotonic()
-        output_shas, non_hermetic_misses, build_code = _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, expanded_flags, user_remote_executor_uri or "", ansi, data)
+        output_shas, non_hermetic_misses, build_code = _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, user_remote_executor_uri or "", ansi, data)
         info(ctx.std, "Build+checksum total: {}.".format(fmt_elapsed(time.monotonic() - _t_build)))
 
         for handler in bazel_trait.build_end:
@@ -1207,15 +1208,24 @@ def _delivery_impl(ctx):
         # defined" (the task's own expanded_flags already went through this).
         release_flags = expand_config_flags(ctx, bazel_trait, ctx.args.release_bazel_flags)
 
-        # Phase 3 flag order (last-wins):
-        #   LOCAL_SPAWN_BASE_FLAGS  — defaults first so user/rc overrides win.
-        #   expanded_flags          — user `--bazel-flag` / rc settings.
-        #   release_flags           — `--release-bazel-flag` (e.g. `--stamp`,
-        #                             `--config=release`), rc-config-expanded.
-        #   LOCAL_SPAWN_FLAGS       — mandatory; last so nothing flips them.
-        #   --noremote_upload_local_results — keep release artifacts out of the
-        #                             shared remote cache (delivery-specific).
-        phase3_flags = LOCAL_SPAWN_BASE_FLAGS + list(expanded_flags) + list(release_flags) + LOCAL_SPAWN_FLAGS + [
+        # LOCAL_SPAWN_BASE_FLAGS are delivery defaults the rc/user override (a
+        # repo's `build --remote_download_outputs=all` must win over the default
+        # `toplevel`). Per-call extras win over the rc, so apply each base flag
+        # only when the active run command doesn't already set it — that's a
+        # default the rc overrides, not an override of the rc.
+        base_defaults = [
+            f
+            for f in LOCAL_SPAWN_BASE_FLAGS
+            if rc.flag_value(f.split("=", 1)[0], command = "build") == None
+        ]
+
+        # Phase 3 flag order (last-wins): active run command, then the per-call
+        # extras below. release_flags are `--release-bazel-flag`s (e.g. `--stamp`,
+        # `--config=release`) rc-config-expanded; LOCAL_SPAWN_FLAGS are mandatory
+        # and last; `--noremote_upload_local_results` keeps release artifacts out
+        # of the shared remote cache (delivery-specific). base_defaults lead so a
+        # release flag could still override them.
+        phase3_flags = base_defaults + list(release_flags) + LOCAL_SPAWN_FLAGS + [
             "--noremote_upload_local_results",
         ]
         _t_download = time.monotonic()

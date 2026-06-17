@@ -76,9 +76,9 @@ def _test_on_runner_missing_output_base_returns_false(ctx):
     )
 
 def _test_on_runner_with_output_base_passes(ctx):
-    """Once --output_base is in `ctx.bazel.startup_flags`, the predicate
-    transitions to True."""
-    ctx.bazel.startup_flags.extend(["--output_base=/tmp/health-check-ready-test/sentinel"])
+    """Once an active rc carries --output_base, the predicate transitions to
+    True."""
+    ctx.bazel.use_rc(ctx.bazel.new_rc(startup_flags = ["--output_base=/tmp/health-check-ready-test/sentinel"]))
     _eq(
         "on-runner with --output_base — predicate True",
         ctx_bazel_ready_for_health_check(ctx, _ON_RUNNER),
@@ -257,9 +257,9 @@ def _test_rewrite_only_replaces_first_match(ctx):
     _assert("rewrite — second match left intact", "bogus body" in got)
 
 def _test_impl(ctx):
-    # `ctx.bazel.startup_flags` is shared mutable state across subtests
-    # (no clear() method). The "missing" subtest must run BEFORE the
-    # "with_output_base" subtest, which permanently appends the sentinel.
+    # The active rc on `ctx.bazel` is shared state across subtests. The
+    # "missing" subtest (no active rc) must run BEFORE the "with_output_base"
+    # subtest, which permanently sets an active rc carrying the sentinel.
     _test_off_runner_passes(ctx)
     _test_on_runner_missing_output_base_returns_false(ctx)
     _test_on_runner_with_output_base_passes(ctx)

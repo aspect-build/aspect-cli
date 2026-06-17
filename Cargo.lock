@@ -497,6 +497,12 @@ dependencies = [
 name = "bazelrc"
 version = "0.0.0-dev"
 dependencies = [
+ "allocative",
+ "anyhow",
+ "derive_more 2.0.1",
+ "semver",
+ "starlark",
+ "starlark_derive",
  "tempfile",
  "thiserror 2.0.18",
 ]

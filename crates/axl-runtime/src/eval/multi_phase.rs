@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 use anyhow::anyhow;
 use starlark::environment::{FrozenModule, Module};
 use starlark::eval::Evaluator;
-use starlark::values::list::AllocList;
 use starlark::values::{Heap, Value, ValueLike};
 use uuid::Uuid;
 
@@ -519,8 +518,9 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             None => heap.alloc(TraitMap::new()),
         };
 
-        let startup_flags = heap.alloc(AllocList([] as [String; 0]));
-        let bazel = heap.alloc(Bazel { startup_flags });
+        let bazel = heap.alloc(Bazel {
+            active_rc: std::cell::RefCell::new(None),
+        });
         // Allocate `task_info` on the heap and keep the resulting Value
         // so we can read back timing + phases after `_impl` returns.
         // `TaskInfo::started_at` is the authoritative task start (stamped

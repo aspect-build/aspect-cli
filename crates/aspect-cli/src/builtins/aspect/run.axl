@@ -79,10 +79,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # ultimately invokes `ctx.bazel.build`, which spawns a literal `bazel
     # build`. The `run:` rc section can contain options Bazel's `build` command
     # rejects as unrecognized (e.g. `--script_path`).
-    flags = setup_phase(ctx, lifecycle, target, "bazel_results", data, hc_trait, bazel_trait, "build", bazel_base_flags = LOCAL_SPAWN_BASE_FLAGS)
+    setup_phase(ctx, lifecycle, target, "bazel_results", data, hc_trait, bazel_trait, "build", bazel_base_flags = LOCAL_SPAWN_BASE_FLAGS)
     announce_version, announce_command = resolve_bazel_announce(ctx)
-
-    flags.extend(LOCAL_SPAWN_FLAGS)
 
     r = runnable(ctx, [target])
     events = bazel.build_events.iterator()
@@ -107,7 +105,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     build = ctx.bazel.build(
         target,
         build_events = build_events,
-        flags = flags,
+        flags = LOCAL_SPAWN_FLAGS,
         announce_version = announce_version,
         announce_command = announce_command,
     )

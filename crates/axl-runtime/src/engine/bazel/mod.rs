@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::process::Stdio;
 
@@ -14,12 +15,12 @@ use starlark::values;
 use starlark::values::NoSerialize;
 use starlark::values::ProvidesStaticType;
 use starlark::values::Trace;
-use starlark::values::UnpackValue;
+use starlark::values::Tracer;
 use starlark::values::ValueLike;
 use starlark::values::dict::UnpackDictEntries;
-use starlark::values::list::ListRef;
 use starlark::values::list::UnpackList;
 use starlark::values::none::NoneOr;
+use starlark::values::none::NoneType;
 use starlark::values::starlark_value;
 use starlark::values::tuple::UnpackTuple;
 use starlark::{
@@ -40,7 +41,6 @@ mod iter;
 pub mod live;
 mod process;
 mod query;
-mod rc;
 mod sandbox_recovery;
 mod sink;
 mod stream;
@@ -123,6 +123,23 @@ fn partition_build_events(
 /// Resolve a mixed list of plain flags and conditional `(flag, constraint)` tuples into
 /// a `Vec<String>`. Plain flags are always included; conditional flags are
 /// included only when [`constraint_matches`] holds for `version`.
+/// Resolve the Bazel version a `RunCommand` should use for version-gated
+/// options: an explicit `requested` string when given, else the running Bazel
+/// (probed only when `rc` actually carries a gated option, so the common case
+/// pays nothing). A failed probe degrades to `None` (assumed-latest).
+fn resolve_rc_version(
+    requested: Option<String>,
+    rc: &bazelrc::BazelRC,
+) -> anyhow::Result<Option<semver::Version>> {
+    if let Some(s) = requested {
+        return Ok(semver::Version::parse(&s).ok());
+    }
+    if rc.has_version_gated_options() {
+        return Ok(info::server_info().ok().and_then(|t| t.1));
+    }
+    Ok(None)
+}
+
 fn resolve_flags<'v>(
     items: &[Either<values::StringValue<'v>, (values::StringValue<'v>, values::StringValue<'v>)>],
     version: Option<&semver::Version>,
@@ -180,10 +197,22 @@ fn constraint_matches(constraint: &str, version: Option<&semver::Version>) -> an
     Ok(req.matches(version.unwrap_or(&assumed_latest)))
 }
 
-#[derive(Debug, Display, ProvidesStaticType, Trace, NoSerialize, Allocative)]
+#[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
 #[display("<bazel.Bazel>")]
 pub struct Bazel<'v> {
-    pub startup_flags: values::Value<'v>,
+    /// The active `RunCommand` set by `use_rc` (interior-mutable so `use_rc`
+    /// can swap it across phases). A per-call `rc=` overrides it. The single
+    /// source of both command and startup flags for every Bazel invocation.
+    #[allocative(skip)]
+    pub active_rc: RefCell<Option<values::Value<'v>>>,
+}
+
+unsafe impl<'v> Trace<'v> for Bazel<'v> {
+    fn trace(&mut self, tracer: &Tracer<'v>) {
+        if let Some(v) = self.active_rc.get_mut() {
+            v.trace(tracer);
+        }
+    }
 }
 
 impl<'v> values::AllocValue<'v> for Bazel<'v> {
@@ -196,7 +225,10 @@ impl<'v> values::Freeze for Bazel<'v> {
     type Frozen = FrozenBazel;
     fn freeze(self, freezer: &values::Freezer) -> values::FreezeResult<FrozenBazel> {
         Ok(FrozenBazel {
-            startup_flags: self.startup_flags.freeze(freezer)?,
+            active_rc: match self.active_rc.into_inner() {
+                Some(v) => Some(v.freeze(freezer)?),
+                None => None,
+            },
         })
     }
 }
@@ -213,7 +245,7 @@ impl<'v> values::StarlarkValue<'v> for Bazel<'v> {
 #[display("<bazel.Bazel>")]
 pub struct FrozenBazel {
     #[allocative(skip)]
-    pub startup_flags: values::FrozenValue,
+    pub active_rc: Option<values::FrozenValue>,
 }
 
 starlark_simple_value!(FrozenBazel);
@@ -227,38 +259,97 @@ impl<'v> values::StarlarkValue<'v> for FrozenBazel {
     }
 }
 
+/// The startup flags for an invocation: sourced from the active `RunCommand`
+/// (set by `use_rc`), or empty when none is active.
 fn read_startup_flags<'v>(this: values::Value<'v>) -> anyhow::Result<Vec<String>> {
-    let flags_val = if let Some(b) = this.downcast_ref::<Bazel>() {
-        b.startup_flags
+    Ok(read_active_rc(this)
+        .map(|rc| rc.invocation_startup_flags())
+        .unwrap_or_default())
+}
+
+/// The active `RunCommand` set via `use_rc`, if any.
+fn read_active_rc<'v>(this: values::Value<'v>) -> Option<bazelrc::BazelRC> {
+    let slot = if let Some(b) = this.downcast_ref::<Bazel>() {
+        *b.active_rc.borrow()
     } else if let Some(b) = this.downcast_ref::<FrozenBazel>() {
-        b.startup_flags.to_value()
+        b.active_rc.map(|v| v.to_value())
     } else {
-        return Ok(vec![]);
+        None
     };
-    let list = ListRef::from_value(flags_val)
-        .ok_or_else(|| anyhow::anyhow!("startup_flags is not a list"))?;
-    list.iter()
-        .enumerate()
-        .map(|(i, v)| {
-            v.unpack_str().map(str::to_string).ok_or_else(|| {
-                anyhow::anyhow!("startup_flags[{}]: expected str, got {}", i, v.get_type())
-            })
-        })
-        .collect()
+    slot.and_then(|v| v.downcast_ref::<bazelrc::BazelRC>().cloned())
+}
+
+/// Resolve the `RunCommand` in effect for an invocation: a per-call `rc=`
+/// overrides the active (`use_rc`) one; `None` means no rc (vanilla passthrough,
+/// Bazel reads its own `.bazelrc`).
+fn effective_rc<'v>(
+    this: values::Value<'v>,
+    rc_param: NoneOr<values::Value<'v>>,
+) -> Option<bazelrc::BazelRC> {
+    if let NoneOr::Other(v) = rc_param {
+        return v.downcast_ref::<bazelrc::BazelRC>().cloned();
+    }
+    read_active_rc(this)
+}
+
+/// Assemble `(command_flags, startup_flags)` for `command`: when a `RunCommand`
+/// is in effect, expand it and append the per-call `flags=` as extras (auto
+/// `--ignore_all_rc_files`); otherwise fall back to raw `flags=` + the legacy
+/// `ctx.bazel.startup_flags` (Bazel reads its own rc).
+fn resolve_invocation_flags<'v>(
+    this: values::Value<'v>,
+    command: &str,
+    rc_param: NoneOr<values::Value<'v>>,
+    flags: &[Either<values::StringValue<'v>, (values::StringValue<'v>, values::StringValue<'v>)>],
+) -> anyhow::Result<(Vec<String>, Vec<String>)> {
+    let extras = resolve_flags_for_running_bazel(flags)?;
+    match effective_rc(this, rc_param) {
+        Some(rc) => {
+            let (startup, mut cmd) = rc.resolve_for_command(command)?;
+            cmd.extend(extras);
+            Ok((cmd, startup))
+        }
+        None => Ok((extras, read_startup_flags(this)?)),
+    }
 }
 
 #[starlark_module]
 pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
-    /// Mutable list of startup flags prepended to every Bazel invocation on this context.
-    #[starlark(attribute)]
-    fn startup_flags<'v>(this: values::Value<'v>) -> anyhow::Result<values::Value<'v>> {
-        if let Some(b) = this.downcast_ref::<Bazel>() {
-            Ok(b.startup_flags)
+    /// The active `RunCommand` set via `use_rc`, or `None` if none is active.
+    /// Lets AXL inspect what build/test/query will run with (flags, startup).
+    fn active_rc<'v>(this: values::Value<'v>) -> anyhow::Result<NoneOr<values::Value<'v>>> {
+        let slot = if let Some(b) = this.downcast_ref::<Bazel>() {
+            *b.active_rc.borrow()
         } else if let Some(b) = this.downcast_ref::<FrozenBazel>() {
-            Ok(b.startup_flags.to_value())
+            b.active_rc.map(|v| v.to_value())
         } else {
-            Err(anyhow::anyhow!("expected Bazel"))
+            None
+        };
+        Ok(match slot {
+            Some(v) => NoneOr::Other(v),
+            None => NoneOr::None,
+        })
+    }
+
+    /// Set the active `RunCommand` for subsequent `build` / `test` / `query` on
+    /// this context. Callable repeatedly to swap the active run command between
+    /// phases. A per-call `rc=` on an invocation overrides the active one; with
+    /// no active and no per-call rc, Bazel runs vanilla (reads its own `.bazelrc`).
+    fn use_rc<'v>(
+        this: values::Value<'v>,
+        #[starlark(require = pos)] rc: values::Value<'v>,
+    ) -> anyhow::Result<NoneType> {
+        if rc.downcast_ref::<bazelrc::BazelRC>().is_none() {
+            return Err(anyhow::anyhow!(
+                "use_rc expects a RunCommand (from parse_rc / new_rc), got {}",
+                rc.get_type()
+            ));
         }
+        let bazel = this
+            .downcast_ref::<Bazel>()
+            .ok_or_else(|| anyhow::anyhow!("use_rc: ctx.bazel is frozen"))?;
+        bazel.active_rc.replace(Some(rc));
+        Ok(NoneType)
     }
 
     /// Build one or more Bazel targets.
@@ -337,6 +428,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = UnpackList::default())] flags: UnpackList<
             Either<values::StringValue<'v>, (values::StringValue<'v>, values::StringValue<'v>)>,
         >,
+        #[starlark(require = named, default = NoneOr::None)] rc: NoneOr<values::Value<'v>>,
         #[starlark(require = named)] stdout: Option<NoneOr<Writable>>,
         #[starlark(require = named)] stderr: Option<NoneOr<Writable>>,
         #[starlark(require = named, default = NoneOr::None)] stdio: NoneOr<StdStdio>,
@@ -350,8 +442,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             Either::Left(b) => (b, vec![]),
             Either::Right(sinks) => (true, sinks.items),
         };
-        let resolved_flags = resolve_flags_for_running_bazel(&flags.items)?;
-        let resolved_startup_flags = read_startup_flags(this)?;
+        let (resolved_flags, resolved_startup_flags) =
+            resolve_invocation_flags(this, "build", rc, &flags.items)?;
         let env = Env::from_eval(eval)?;
         let (stdout, stderr) = resolve_stdio(stdio, stdout, stderr)?;
         let build = build::Build::spawn(
@@ -448,6 +540,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = UnpackList::default())] flags: UnpackList<
             Either<values::StringValue<'v>, (values::StringValue<'v>, values::StringValue<'v>)>,
         >,
+        #[starlark(require = named, default = NoneOr::None)] rc: NoneOr<values::Value<'v>>,
         #[starlark(require = named)] stdout: Option<NoneOr<Writable>>,
         #[starlark(require = named)] stderr: Option<NoneOr<Writable>>,
         #[starlark(require = named, default = NoneOr::None)] stdio: NoneOr<StdStdio>,
@@ -461,8 +554,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             Either::Left(b) => (b, vec![]),
             Either::Right(sinks) => (true, sinks.items),
         };
-        let resolved_flags = resolve_flags_for_running_bazel(&flags.items)?;
-        let resolved_startup_flags = read_startup_flags(this)?;
+        let (resolved_flags, resolved_startup_flags) =
+            resolve_invocation_flags(this, "test", rc, &flags.items)?;
         let env = Env::from_eval(eval)?;
         let (stdout, stderr) = resolve_stdio(stdio, stdout, stderr)?;
         let test = build::Build::spawn(
@@ -485,30 +578,58 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         Ok(test)
     }
 
-    /// The query system provides a programmatic interface for analyzing build dependencies
-    /// and target relationships. Queries are constructed using a chain API and are lazily
-    /// evaluated only when `.eval()` is explicitly called.
+    /// Run `bazel query <expr>` and return the matching targets as an iterable
+    /// `Query` (supports `len()`, indexing, and `for t in result`).
     ///
-    /// The entry point is `ctx.bazel.query()`, which returns a `query` for creating initial
-    /// query expressions. Most operations operate on `query` objects, which represent
-    /// sets of targets that can be filtered, transformed, and combined.
+    /// Blocking. Fails with Bazel's own stderr if the query exits non-zero (bad
+    /// expression, BUILD error, …) rather than returning an empty set.
+    ///
+    /// # Arguments
+    /// * `expr` - The query expression (e.g. `"deps(//foo)"`, `"kind(cc_*, //...)"`).
+    /// * `rc` - `RunCommand` to resolve under; falls back to the active one
+    ///   (`use_rc`). With an rc in effect the query self-expands for the
+    ///   `query` command (carrying `--ignore_all_rc_files`) so it resolves
+    ///   external repos the same way the build does. Without one, Bazel reads
+    ///   its own `.bazelrc`.
+    /// * `flags` - Per-call command extras appended after the rc expansion.
+    ///   Same `str | (str, version-constraint)` shape as `build` / `test`.
+    /// * `announce_version` / `announce_command` - Mirror the build/test
+    ///   spawn disclosure.
     ///
     /// **Example**
     ///
-    /// ```starlark
-    /// **Query** dependencies of a target
-    /// deps = ctx.bazel.query().targets("//myapp:main").deps()
-    /// all_deps = deps.eval()
-    ///
-    /// **Chain** multiple operations
-    /// sources = ctx.bazel.query().targets("//myapp:main")
-    ///     .deps()
-    ///     .kind("source file")
-    ///     .eval()
+    /// ```python
+    /// for t in ctx.bazel.query("deps(//myapp:main)", rc = rc):
+    ///     print(t.name)
     /// ```
-    fn query<'v>(this: values::Value<'v>) -> anyhow::Result<query::Query> {
-        let startup_flags = read_startup_flags(this)?;
-        Ok(query::Query::new(startup_flags))
+    fn query<'v>(
+        this: values::Value<'v>,
+        #[starlark(require = pos)] expr: String,
+        #[starlark(require = named, default = NoneOr::None)] rc: NoneOr<values::Value<'v>>,
+        #[starlark(require = named, default = UnpackList::default())] flags: UnpackList<
+            Either<values::StringValue<'v>, (values::StringValue<'v>, values::StringValue<'v>)>,
+        >,
+        #[starlark(require = named, default = false)] announce_version: bool,
+        #[starlark(require = named, default = false)] announce_command: bool,
+    ) -> anyhow::Result<query::Query> {
+        let extras = resolve_flags_for_running_bazel(&flags.items)?;
+        let (startup, command_flags) = match effective_rc(this, rc) {
+            Some(rc) => {
+                let (startup, mut base) = rc.resolve_for_command("query")?;
+                base.extend(extras);
+                (startup, base)
+            }
+            None => (read_startup_flags(this)?, extras),
+        };
+        query::run(
+            &expr,
+            &startup,
+            &command_flags,
+            build::AnnounceSpawn {
+                version: announce_version,
+                command: announce_command,
+            },
+        )
     }
 
     /// Run `bazel info` and return all key/value pairs as a dict.
@@ -644,7 +765,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         ))
     }
 
-    /// Parse `.bazelrc` files rooted at `root` and return a `BazelRC` object.
+    /// Parse `.bazelrc` files rooted at `root` and return a `RunCommand`.
     ///
     /// # Arguments
     /// * `root` - Bazel workspace root directory. Defaults to
@@ -654,80 +775,96 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///   root here in a sub-workspace layout would read the outer
     ///   `.bazelrc` and leak the parent project's flags.
     /// * `startup_flags` - Startup flags (e.g. `["--bazelrc=/path/to/extra.bazelrc"]`).
-    /// * `flags` - Command-line flags to inject as synthetic `always` options
-    ///   (e.g. `["--config=opt"]`).
+    /// * `flags` - Command flags to inject as synthetic `always` options; each
+    ///   element is a `str` or a `(flag, version_constraint)` tuple.
+    /// * `skip_config_if_missing` - `--config` names to drop if undefined.
+    /// * `version` - Bazel version for evaluating version-gated options. When
+    ///   unset, the running Bazel is probed (only if a gated option exists).
     ///
     /// **Examples**
     ///
     /// ```python
     /// def _impl(ctx):
     ///     rc = ctx.bazel.parse_rc(flags = ["--config=opt"])
-    ///     build = ctx.bazel.build("//...", flags = rc.expand(command = "build"))
-    ///     build.wait()
+    ///     ctx.bazel.use_rc(rc)
+    ///     ctx.bazel.build("//...").wait()
     /// ```
     fn parse_rc<'v>(
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = named, default = NoneOr::None)] root: NoneOr<String>,
         #[starlark(require = named, default = UnpackList::default())] startup_flags: UnpackList<
-            values::Value<'v>,
+            String,
         >,
         #[starlark(require = named, default = UnpackList::default())] flags: UnpackList<
-            values::Value<'v>,
+            bazelrc::RcOption,
         >,
         #[starlark(require = named, default = UnpackList::default())]
         skip_config_if_missing: UnpackList<String>,
+        #[starlark(require = named, default = NoneOr::None)] version: NoneOr<String>,
         eval: &mut Evaluator<'v, '_, '_>,
-    ) -> anyhow::Result<rc::StarlarkBazelRC> {
-        fn unpack_rc_option<'v>(item: values::Value<'v>) -> anyhow::Result<bazelrc::RcOption> {
-            if let Some(s) = item.unpack_str() {
-                return Ok(bazelrc::RcOption {
-                    value: s.to_owned(),
-                    ..bazelrc::RcOption::default()
-                });
-            }
-            if let Ok(Some(tup)) = UnpackTuple::<&str>::unpack_value(item) {
-                if let Some(flag) = tup.items.first() {
-                    return Ok(bazelrc::RcOption {
-                        value: flag.to_string(),
-                        version_condition: tup.items.get(1).map(|s| s.to_string()),
-                        ..bazelrc::RcOption::default()
-                    });
-                }
-            }
-            Err(anyhow::anyhow!(
-                "parse_rc: flag items must be str or (str, str), got {}",
-                item.get_type()
-            ))
-        }
-
+    ) -> anyhow::Result<bazelrc::BazelRC> {
         let env = Env::from_eval(eval)?;
         let root = root
             .into_option()
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| env.bazel_root_dir.clone());
-        let startup_flags_vec: Vec<&str> = startup_flags
-            .items
-            .iter()
-            .map(|v| {
-                v.unpack_str().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "parse_rc: startup_flags items must be str, got {}",
-                        v.get_type()
-                    )
-                })
-            })
-            .collect::<anyhow::Result<_>>()?;
-        let flags_vec: Vec<bazelrc::RcOption> = flags
-            .items
-            .iter()
-            .map(|v| unpack_rc_option(*v))
-            .collect::<anyhow::Result<_>>()?;
-        let inner = bazelrc::BazelRC::new(root, &startup_flags_vec, &flags_vec)
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-        Ok(rc::StarlarkBazelRC {
-            inner,
-            skip_config_if_missing: skip_config_if_missing.items,
-        })
+        let rc = bazelrc::BazelRC::new(root, &startup_flags.items, &flags.items)
+            .map_err(|e| anyhow::anyhow!("{}", e))?
+            .with_skip_config_if_missing(skip_config_if_missing.items);
+        let version = resolve_rc_version(version.into_option(), &rc)?;
+        Ok(rc.with_version(version))
+    }
+
+    /// Create a blank `RunCommand` that reads no `.bazelrc` on disk — only the
+    /// flags you provide. Compose further with `merge`.
+    ///
+    /// # Arguments
+    /// * `startup_flags` - Startup flags carried by the run command.
+    /// * `flags` - Command flags, same `str | (str, str)` shape as `parse_rc`.
+    /// * `version` - Bazel version for evaluating version-gated options.
+    fn new_rc<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        #[starlark(require = named, default = UnpackList::default())] startup_flags: UnpackList<
+            String,
+        >,
+        #[starlark(require = named, default = UnpackList::default())] flags: UnpackList<
+            bazelrc::RcOption,
+        >,
+        #[starlark(require = named, default = NoneOr::None)] version: NoneOr<String>,
+    ) -> anyhow::Result<bazelrc::BazelRC> {
+        let rc = bazelrc::BazelRC::blank(&flags.items)
+            .with_startup_flags(startup_flags.items)
+            .with_version(
+                version
+                    .into_option()
+                    .and_then(|s| semver::Version::parse(&s).ok()),
+            );
+        Ok(rc)
+    }
+
+    /// Render the `--announce-bazel-rc` disclosure for a `RunCommand`: the
+    /// options loaded for `command`, grouped by source file, with secrets in
+    /// flag values redacted. Replaces the former `rc.announce` method (which
+    /// would need workspace-root + redaction context the value can't carry).
+    fn announce_rc<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        #[starlark(require = pos)] rc: &bazelrc::BazelRC,
+        #[starlark(require = named)] command: String,
+        #[starlark(require = named, default = false)] ansi: bool,
+        #[starlark(require = named, default = 120)] max_width: i64,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<String> {
+        let root = Env::from_eval(eval)?.bazel_root_dir.clone();
+        let home = std::env::home_dir();
+        let redact = stream::redaction::redactor(rc.all_option_values());
+        Ok(rc.announce(
+            &command,
+            ansi,
+            max_width.max(0) as usize,
+            &root,
+            home.as_deref(),
+            redact,
+        ))
     }
 
     /// Cancel whatever invocation is currently running on the Bazel server.
@@ -930,13 +1067,12 @@ fn register_execlog_types(globals: &mut GlobalsBuilder) {
 #[starlark_module]
 fn register_query_types(globals: &mut GlobalsBuilder) {
     const Query: StarlarkValueAsType<query::Query> = StarlarkValueAsType::new();
-    const TargetSet: StarlarkValueAsType<query::TargetSet> = StarlarkValueAsType::new();
 }
 
 #[starlark_module]
 fn register_types(globals: &mut GlobalsBuilder) {
     const Bazel: StarlarkValueAsType<FrozenBazel> = StarlarkValueAsType::new();
-    const BazelRC: StarlarkValueAsType<rc::StarlarkBazelRC> = StarlarkValueAsType::new();
+    const RunCommand: StarlarkValueAsType<bazelrc::BazelRC> = StarlarkValueAsType::new();
     const HealthCheckResult: StarlarkValueAsType<health_check::HealthCheckResult> =
         StarlarkValueAsType::new();
     const SandboxRecoveryResult: StarlarkValueAsType<sandbox_recovery::SandboxRecoveryResult> =
