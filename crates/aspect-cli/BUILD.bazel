@@ -8,6 +8,7 @@ rust_binary(
     compile_data = glob([
         "src/builtins/**/*.axl",
         "src/builtins/**/*.aspect",
+        "src/builtins/**/*.sh",
     ]),
     version_key = "STABLE_MONOREPO_VERSION",
     visibility = [
@@ -52,6 +53,7 @@ rust_test(
     compile_data = glob([
         "src/builtins/**/*.axl",
         "src/builtins/**/*.aspect",
+        "src/builtins/**/*.sh",
     ]),
     crate = ":aspect-cli",
     deps = [

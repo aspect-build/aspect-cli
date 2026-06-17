@@ -1,2 +1,6 @@
 **/*.axl linguist-language=Starlark
 docs/**/*.md linguist-generated=true
+# tools/bazel wrapper template: byte-identical source for the generated
+# tools/bazel. Its `{{...}}` placeholders sit at column 0 by design, so shfmt
+# must not reindent them — exclude it from the formatter.
+crates/aspect-cli/src/builtins/aspect/lib/wrapper.tmpl.sh -linguist-detectable rules-lint-ignored
