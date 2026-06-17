@@ -24,6 +24,14 @@ use std::path::{Path, PathBuf};
 
 use std::fmt;
 
+use allocative::Allocative;
+use starlark::eval::Evaluator;
+use starlark::starlark_simple_value;
+use starlark::values::none::NoneOr;
+use starlark::values::{
+    NoSerialize, ProvidesStaticType, StarlarkValue, UnpackValue, Value, starlark_value,
+    type_repr::StarlarkTypeRepr,
+};
 use thiserror::Error;
 
 /// A single option value parsed from a bazelrc file.
@@ -82,13 +90,46 @@ pub enum BazelRcError {
     },
 }
 
-/// Parsed representation of one or more `.bazelrc` files.
-#[derive(Debug)]
+/// Parsed representation of one or more `.bazelrc` files, plus the user-supplied
+/// startup flags, `--config` skip policy, and Bazel version context that make it
+/// the complete resolved set of run commands for invoking Bazel.
+///
+/// This is the Starlark `bazel.RunCommand` value — constructed by
+/// `ctx.bazel.parse_rc()` / `ctx.bazel.new_rc()`, composed with `merge`,
+/// inspected with `flag_value` / `bool_flag` / `flag_values`, and handed to
+/// `ctx.bazel.build` / `test` / `query`.
+#[derive(Debug, Clone, Default, ProvidesStaticType, NoSerialize, Allocative)]
 pub struct BazelRC {
     /// Map from command key (e.g. `"build"`, `"build:opt"`) to its options.
+    #[allocative(skip)]
     options: HashMap<String, Vec<RcOption>>,
     /// Ordered list of source files that were loaded.
+    #[allocative(skip)]
     sources: Vec<PathBuf>,
+    /// `--config` names to drop when undefined (so a sidecar `query` does not
+    /// fail on a config that only the build command defines).
+    #[allocative(skip)]
+    skip_config_if_missing: Vec<String>,
+    /// User-provided startup flags (e.g. `--output_base=`), distinct from the
+    /// rc-file `startup` section; a Bazel invocation sources startup options
+    /// from here.
+    #[allocative(skip)]
+    startup_flags: Vec<String>,
+    /// Bazel version used to evaluate version-gated options; `None` falls back
+    /// to assuming the latest. Resolved at construction.
+    #[allocative(skip)]
+    version: Option<semver::Version>,
+}
+
+starlark_simple_value!(BazelRC);
+
+#[starlark_value(type = "bazel.RunCommand")]
+impl<'v> StarlarkValue<'v> for BazelRC {
+    fn get_methods() -> Option<&'static starlark::environment::Methods> {
+        static RES: starlark::environment::MethodsStatic =
+            starlark::environment::MethodsStatic::new();
+        RES.methods(runcommand_methods)
+    }
 }
 
 impl fmt::Display for BazelRC {
@@ -150,7 +191,73 @@ impl BazelRC {
             }
         }
 
-        Ok(BazelRC { options, sources })
+        Ok(BazelRC {
+            options,
+            startup_flags: startup_flags
+                .iter()
+                .map(|s| s.as_ref().to_string())
+                .collect(),
+            sources,
+            ..Default::default()
+        })
+    }
+
+    /// Carry the `--config` skip policy (consumed by query/inspection so an
+    /// undefined config doesn't error). Builder; returns `self`.
+    pub fn with_skip_config_if_missing(mut self, skip: Vec<String>) -> Self {
+        self.skip_config_if_missing = skip;
+        self
+    }
+
+    /// Carry user-provided startup flags. Builder; returns `self`.
+    pub fn with_startup_flags(mut self, startup_flags: Vec<String>) -> Self {
+        self.startup_flags = startup_flags;
+        self
+    }
+
+    /// Set the Bazel version used to evaluate version-gated options. Builder.
+    pub fn with_version(mut self, version: Option<semver::Version>) -> Self {
+        self.version = version;
+        self
+    }
+
+    /// The user-provided startup flags carried by this run command.
+    pub fn startup_flag_values(&self) -> &[String] {
+        &self.startup_flags
+    }
+
+    /// Whether any option (in any section) is version-gated — lets a caller
+    /// skip probing the Bazel version when no gate would consult it.
+    pub fn has_version_gated_options(&self) -> bool {
+        self.options
+            .values()
+            .flatten()
+            .any(|o| o.version_condition.is_some())
+    }
+
+    /// A `BazelRC` that reads no files — only the given command `flags`,
+    /// stored as synthetic `always` options. Used by `ctx.bazel.new_rc()` to
+    /// build a run command from scratch with no `.bazelrc` on disk involved.
+    pub fn blank(flags: &[RcOption]) -> Self {
+        let mut options: HashMap<String, Vec<RcOption>> = HashMap::new();
+        let mut sources: Vec<PathBuf> = Vec::new();
+        if !flags.is_empty() {
+            let cli_source_index = 0;
+            sources.push(PathBuf::from("<command line>"));
+            let always_opts = options.entry("always".to_owned()).or_default();
+            for flag in flags {
+                always_opts.push(RcOption {
+                    source_index: cli_source_index,
+                    command: "always".to_owned(),
+                    ..flag.clone()
+                });
+            }
+        }
+        BazelRC {
+            options,
+            sources,
+            ..Default::default()
+        }
     }
 
     /// The ordered list of source files that were loaded.
@@ -194,19 +301,20 @@ impl BazelRC {
     ///   `always` (rc-file) + `common` + `build` + `test` + `always` (cli)
     pub fn options_for(&self, command: &str) -> Vec<&RcOption> {
         // CLI-provided flags live in the "always" bucket but with source "<command line>".
-        // We need to separate them so they can be appended last.
-        let cli_source_idx = self
-            .sources
-            .iter()
-            .position(|p| p.as_path() == std::path::Path::new("<command line>"));
+        // We separate them so they can be appended last. A merged BazelRC can carry more than
+        // one "<command line>" source (one per merged input), so match on the path rather than a
+        // single index; the "always" bucket preserves insertion order, so a merged overlay's CLI
+        // flags follow the base's and win under last-write-wins.
+        let is_cli = |o: &RcOption| {
+            self.sources
+                .get(o.source_index)
+                .is_some_and(|p| p.as_path() == std::path::Path::new("<command line>"))
+        };
 
         let mut result = Vec::new();
         // RC-file always flags first (not from the synthetic CLI source)
         if let Some(opts) = self.options.get("always") {
-            result.extend(
-                opts.iter()
-                    .filter(|o| cli_source_idx.map_or(true, |cli_idx| o.source_index != cli_idx)),
-            );
+            result.extend(opts.iter().filter(|o| !is_cli(o)));
         }
         // common, then ancestor commands, then the command itself
         if let Some(opts) = self.options.get("common") {
@@ -221,10 +329,8 @@ impl BazelRC {
             result.extend(opts.iter());
         }
         // CLI-provided flags last — they must override all RC-file flags
-        if let Some(cli_idx) = cli_source_idx {
-            if let Some(opts) = self.options.get("always") {
-                result.extend(opts.iter().filter(|o| o.source_index == cli_idx));
-            }
+        if let Some(opts) = self.options.get("always") {
+            result.extend(opts.iter().filter(|o| is_cli(o)));
         }
         result
     }
@@ -494,6 +600,39 @@ impl BazelRC {
             });
     }
 
+    /// Overlay `other` on top of `self`, returning a new `BazelRC`.
+    ///
+    /// `other` wins on conflicts: within each command section its options are
+    /// appended **after** `self`'s, so Bazel's last-write-wins ordering resolves
+    /// in `other`'s favor. Sources are concatenated, with `other`'s
+    /// `source_index` values rebased onto the combined list. Neither input is
+    /// mutated.
+    pub fn merge(&self, other: &BazelRC) -> BazelRC {
+        let mut merged = self.clone();
+        let offset = merged.sources.len();
+        merged.sources.extend(other.sources.iter().cloned());
+        for (command, opts) in &other.options {
+            let bucket = merged.options.entry(command.clone()).or_default();
+            for opt in opts {
+                let mut opt = opt.clone();
+                opt.source_index += offset;
+                bucket.push(opt);
+            }
+        }
+        merged
+            .startup_flags
+            .extend(other.startup_flags.iter().cloned());
+        for s in &other.skip_config_if_missing {
+            if !merged.skip_config_if_missing.contains(s) {
+                merged.skip_config_if_missing.push(s.clone());
+            }
+        }
+        if other.version.is_some() {
+            merged.version = other.version.clone();
+        }
+        merged
+    }
+
     /// Expand all `--config=` flags for the given command.
     ///
     /// Starts from `options_for(command)` (which includes `always`, `common`, and command-specific
@@ -509,6 +648,517 @@ impl BazelRC {
         skip_config_if_missing: &[&str],
     ) -> Result<Vec<RcOption>, BazelRcError> {
         expand::expand_configs(self, command, skip_config_if_missing)
+    }
+
+    /// Assemble the `(startup_flags, command_flags)` to run `command` with this
+    /// run command. `command_flags` are the config-expanded, version-filtered
+    /// options (common-section ones rendered as `--default_override=0:common=…`);
+    /// `startup_flags` are the user startup flags plus the rc-file `startup`
+    /// section plus `--ignore_all_rc_files` (the on-disk rc is already absorbed).
+    pub fn resolve_for_command(&self, command: &str) -> anyhow::Result<(Vec<String>, Vec<String>)> {
+        let opts = self.applicable_options(command, None)?;
+        let (overrides, regular) = partition_expand_all(&opts);
+        let command_flags: Vec<String> = overrides
+            .into_iter()
+            .map(|(v, _)| v)
+            .chain(regular.into_iter().map(|(v, _)| v))
+            .collect();
+        Ok((self.invocation_startup_flags(), command_flags))
+    }
+
+    /// The startup flags Bazel runs with when this run command is in effect:
+    /// the user startup flags, the rc-file `startup` section, and
+    /// `--ignore_all_rc_files` (the on-disk rc is already absorbed). Command-
+    /// independent; the single source for build/test/query/info/health_check.
+    pub fn invocation_startup_flags(&self) -> Vec<String> {
+        let mut startup = self.startup_flags.clone();
+        // Gate the rc-file `startup` section by version like command options: a
+        // `try-import-if-bazel-version` startup flag meant for another Bazel
+        // version must not be passed to the running one.
+        startup.extend(
+            self.raw_options("startup")
+                .iter()
+                .filter(|o| self.version_condition_holds(&o.version_condition))
+                .map(|o| o.value.clone()),
+        );
+        startup.push("--ignore_all_rc_files".to_string());
+        startup
+    }
+
+    /// Whether a version-gated option's `condition` holds at this run command's
+    /// configured Bazel version (assumed-latest when unset). `None` → always.
+    /// A malformed constraint is treated as applicable; the build surfaces it.
+    fn version_condition_holds(&self, condition: &Option<String>) -> bool {
+        let Some(cond) = condition else {
+            return true;
+        };
+        let assumed_latest = semver::Version::new(u64::MAX, u64::MAX, u64::MAX);
+        let probe = self.version.as_ref().unwrap_or(&assumed_latest);
+        semver::VersionReq::parse(cond)
+            .map(|req| req.matches(probe))
+            .unwrap_or(true)
+    }
+
+    /// Config-expanded options for `command`, filtered to those that apply at
+    /// the effective Bazel version (the per-call `version_override`, else the
+    /// configured `version`, else assumed-latest). Used by the value queries.
+    fn applicable_options(
+        &self,
+        command: &str,
+        version_override: Option<&str>,
+    ) -> anyhow::Result<Vec<RcOption>> {
+        let skip: Vec<&str> = self
+            .skip_config_if_missing
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let opts = self
+            .expand_configs(command, &skip)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        if !opts.iter().any(|o| o.version_condition.is_some()) {
+            return Ok(opts);
+        }
+
+        let version = match version_override {
+            Some(v) => semver::Version::parse(v).ok(),
+            None => self.version.clone(),
+        };
+        let assumed_latest = semver::Version::new(u64::MAX, u64::MAX, u64::MAX);
+        let probe = version.as_ref().unwrap_or(&assumed_latest);
+
+        let mut out = Vec::with_capacity(opts.len());
+        for opt in opts {
+            match &opt.version_condition {
+                None => out.push(opt),
+                Some(cond) => {
+                    let req = semver::VersionReq::parse(cond).map_err(|e| {
+                        anyhow::anyhow!("invalid version constraint '{}': {}", cond, e)
+                    })?;
+                    if req.matches(probe) {
+                        out.push(opt);
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// Split an expanded option list into `(default_override_flags, regular_flags)`.
+///
+/// `common`-section options become `--default_override=0:common=<value>` strings, returned first
+/// so they precede user flags and lose to them under last-write-wins. Each entry keeps its
+/// `version_condition` so version-gated options aren't silently promoted to unconditional.
+fn partition_expand_all(
+    opts: &[RcOption],
+) -> (Vec<(String, Option<String>)>, Vec<(String, Option<String>)>) {
+    let mut overrides = Vec::new();
+    let mut flags = Vec::new();
+    for opt in opts {
+        let base = opt.command.split(':').next().unwrap_or(&opt.command);
+        if base == "common" {
+            overrides.push((
+                format!("--default_override=0:common={}", opt.value),
+                opt.version_condition.clone(),
+            ));
+        } else {
+            flags.push((opt.value.clone(), opt.version_condition.clone()));
+        }
+    }
+    (overrides, flags)
+}
+
+/// All values of a repeatable `--name` option among `opts`, in order. Matches
+/// `--name=VALUE` and the two-token `--name VALUE` form (value is the next token).
+fn flag_value_list(opts: &[RcOption], name: &str) -> Vec<String> {
+    let eq_prefix = format!("{name}=");
+    let mut values = Vec::new();
+    for (i, opt) in opts.iter().enumerate() {
+        let v = opt.value.as_str();
+        if let Some(rest) = v.strip_prefix(&eq_prefix) {
+            values.push(rest.to_string());
+        } else if v == name {
+            if let Some(next) = opts.get(i + 1) {
+                if !next.value.starts_with('-') {
+                    values.push(next.value.clone());
+                }
+            }
+        }
+    }
+    values
+}
+
+/// Tri-state of a boolean `--name` option: `Some(true)` for `--name` /
+/// `--name=true|1|yes`, `Some(false)` for `--noname` / `--name=false|0|no`,
+/// `None` if unset. Last occurrence wins.
+fn last_bool_flag(opts: &[RcOption], name: &str) -> Option<bool> {
+    let bare = name.strip_prefix("--").unwrap_or(name);
+    let negated = format!("--no{bare}");
+    let eq_prefix = format!("{name}=");
+    let mut state = None;
+    for opt in opts {
+        let v = opt.value.as_str();
+        if v == name {
+            state = Some(true);
+        } else if v == negated {
+            state = Some(false);
+        } else if let Some(rest) = v.strip_prefix(&eq_prefix) {
+            match rest {
+                "true" | "1" | "yes" => state = Some(true),
+                "false" | "0" | "no" => state = Some(false),
+                _ => {}
+            }
+        }
+    }
+    state
+}
+
+/// `RcOption` unpacks from a plain `str` or a `(flag, version_constraint)` tuple,
+/// so `parse_rc` / `new_rc` accept the same flag shape as `ctx.bazel.build`.
+impl StarlarkTypeRepr for RcOption {
+    type Canonical = <starlark::values::tuple::UnpackTuple<String> as StarlarkTypeRepr>::Canonical;
+    fn starlark_type_repr() -> starlark::typing::Ty {
+        // `str | (str, str)` — represented loosely as a string-or-tuple input.
+        starlark::values::tuple::UnpackTuple::<String>::starlark_type_repr()
+    }
+}
+
+impl<'v> UnpackValue<'v> for RcOption {
+    type Error = anyhow::Error;
+
+    fn unpack_value_impl(value: Value<'v>) -> Result<Option<Self>, Self::Error> {
+        if let Some(s) = value.unpack_str() {
+            return Ok(Some(RcOption {
+                value: s.to_owned(),
+                ..RcOption::default()
+            }));
+        }
+        if let Some(tup) = starlark::values::tuple::UnpackTuple::<String>::unpack_value_impl(value)?
+        {
+            let mut items = tup.items.into_iter();
+            if let Some(flag) = items.next() {
+                return Ok(Some(RcOption {
+                    value: flag,
+                    version_condition: items.next(),
+                    ..RcOption::default()
+                }));
+            }
+        }
+        Ok(None)
+    }
+}
+
+fn alloc_flag<'v>(eval: &mut Evaluator<'v, '_, '_>, opt: &RcOption) -> Value<'v> {
+    match &opt.version_condition {
+        None => eval.heap().alloc(opt.value.as_str()),
+        Some(cond) => eval.heap().alloc((opt.value.as_str(), cond.as_str())),
+    }
+}
+
+#[starlark::starlark_module]
+fn runcommand_methods(registry: &mut starlark::environment::MethodsBuilder) {
+    /// Overlay `other` on top of this run command, returning a new one. `other`
+    /// wins on conflicts (its options apply after this one's under last-write-wins);
+    /// startup flags, `--config` skip policy, and `version` are merged with `other`
+    /// taking precedence when set. Neither input is mutated.
+    fn merge<'v>(
+        this: &BazelRC,
+        #[starlark(require = pos)] other: &BazelRC,
+    ) -> anyhow::Result<BazelRC> {
+        Ok(this.merge(other))
+    }
+
+    /// The effective value of `--name` for `command`, or `None` if unset.
+    /// Last-write-wins over the config-expanded options; matches `--name=VALUE`
+    /// and the two-token `--name VALUE` form. `version` overrides the Bazel
+    /// version used for version-gated options.
+    fn flag_value<'v>(
+        this: &BazelRC,
+        #[starlark(require = pos)] name: &str,
+        #[starlark(require = named)] command: &str,
+        #[starlark(require = named, default = NoneOr::None)] version: NoneOr<String>,
+    ) -> anyhow::Result<NoneOr<String>> {
+        let opts = this.applicable_options(command, version.into_option().as_deref())?;
+        Ok(match flag_value_list(&opts, name).pop() {
+            Some(v) => NoneOr::Other(v),
+            None => NoneOr::None,
+        })
+    }
+
+    /// The tri-state of boolean `--name` for `command`: `True` for `--name` /
+    /// `--name=true`, `False` for `--noname` / `--name=false`, `None` if unset.
+    /// The caller owns the default when `None` (e.g. `--enable_bzlmod` defaults
+    /// on for Bazel 7+).
+    fn bool_flag<'v>(
+        this: &BazelRC,
+        #[starlark(require = pos)] name: &str,
+        #[starlark(require = named)] command: &str,
+        #[starlark(require = named, default = NoneOr::None)] version: NoneOr<String>,
+    ) -> anyhow::Result<NoneOr<bool>> {
+        let opts = this.applicable_options(command, version.into_option().as_deref())?;
+        Ok(match last_bool_flag(&opts, name) {
+            Some(b) => NoneOr::Other(b),
+            None => NoneOr::None,
+        })
+    }
+
+    /// All values of a repeatable `--name` option for `command`, in order — for
+    /// flags that legitimately accumulate (`--aspects`, `--output_groups`, …).
+    fn flag_values<'v>(
+        this: &BazelRC,
+        #[starlark(require = pos)] name: &str,
+        #[starlark(require = named)] command: &str,
+        #[starlark(require = named, default = NoneOr::None)] version: NoneOr<String>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<Vec<Value<'v>>> {
+        let opts = this.applicable_options(command, version.into_option().as_deref())?;
+        Ok(flag_value_list(&opts, name)
+            .into_iter()
+            .map(|v| eval.heap().alloc(v))
+            .collect())
+    }
+
+    /// Options applicable to `command` without expanding `--config=`. Each item
+    /// is a `str` or a `(flag, version_condition)` tuple.
+    fn options_for<'v>(
+        this: &BazelRC,
+        #[starlark(require = named)] command: String,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<Vec<Value<'v>>> {
+        Ok(this
+            .options_for(&command)
+            .into_iter()
+            .map(|opt| alloc_flag(eval, opt))
+            .collect())
+    }
+
+    /// Expand all `--config=` flags for `command` into the fully-resolved flag
+    /// list, compatible with `ctx.bazel.build(flags=...)`.
+    fn expand<'v>(
+        this: &BazelRC,
+        #[starlark(require = named)] command: String,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<Vec<Value<'v>>> {
+        let skip: Vec<&str> = this
+            .skip_config_if_missing
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let opts = this
+            .expand_configs(&command, &skip)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        Ok(opts.iter().map(|opt| alloc_flag(eval, opt)).collect())
+    }
+
+    /// Expand `--config=` flags for `command`, split into
+    /// `(startup_flags, flags)` where `common`-section options are rendered as
+    /// `--default_override=0:common=...` startup-side entries.
+    fn expand_all<'v>(
+        this: &BazelRC,
+        #[starlark(require = named)] command: String,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<(Vec<Value<'v>>, Vec<Value<'v>>)> {
+        let skip: Vec<&str> = this
+            .skip_config_if_missing
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let opts = this
+            .expand_configs(&command, &skip)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        let startup: Vec<Value<'v>> = this
+            .raw_options("startup")
+            .iter()
+            .map(|opt| alloc_flag(eval, opt))
+            .collect();
+
+        let (overrides, regular) = partition_expand_all(&opts);
+        let flags: Vec<Value<'v>> = overrides
+            .iter()
+            .chain(regular.iter())
+            .map(|(value, cond)| match cond {
+                None => eval.heap().alloc(value.as_str()),
+                Some(c) => eval.heap().alloc((value.as_str(), c.as_str())),
+            })
+            .collect();
+        Ok((startup, flags))
+    }
+
+    /// The source file paths that were loaded.
+    fn sources<'v>(
+        this: &BazelRC,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<Vec<Value<'v>>> {
+        Ok(this
+            .sources()
+            .iter()
+            .map(|p| eval.heap().alloc(p.display().to_string()))
+            .collect())
+    }
+
+    /// The startup flags Bazel runs with under this run command: the user
+    /// startup flags + the rc-file `startup` section + `--ignore_all_rc_files`.
+    fn startup_flags<'v>(
+        this: &BazelRC,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<Vec<Value<'v>>> {
+        Ok(this
+            .invocation_startup_flags()
+            .into_iter()
+            .map(|s| eval.heap().alloc(s))
+            .collect())
+    }
+}
+
+#[cfg(test)]
+mod runcommand_tests {
+    use super::*;
+
+    fn opts(values: &[&str]) -> Vec<RcOption> {
+        values
+            .iter()
+            .map(|v| RcOption {
+                value: v.to_string(),
+                ..RcOption::default()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn flag_value_eq_form_last_wins() {
+        let o = opts(&["--remote_cache=grpc://a", "--remote_cache=grpc://b"]);
+        assert_eq!(
+            flag_value_list(&o, "--remote_cache").pop().unwrap(),
+            "grpc://b"
+        );
+    }
+
+    #[test]
+    fn flag_value_two_token_form() {
+        let o = opts(&["--remote_cache", "grpc://x", "--jobs=4"]);
+        assert_eq!(flag_value_list(&o, "--remote_cache"), vec!["grpc://x"]);
+    }
+
+    #[test]
+    fn flag_value_bare_flag_has_no_value() {
+        // A bare `--foo` followed by another flag yields no value.
+        let o = opts(&["--remote_cache", "--jobs=4"]);
+        assert!(flag_value_list(&o, "--remote_cache").is_empty());
+    }
+
+    #[test]
+    fn flag_values_collects_all_repeats() {
+        let o = opts(&["--aspects=//:a.bzl%a", "--aspects=//:b.bzl%b"]);
+        assert_eq!(
+            flag_value_list(&o, "--aspects"),
+            vec!["//:a.bzl%a", "//:b.bzl%b"]
+        );
+    }
+
+    #[test]
+    fn bool_flag_positive_negative_and_unset() {
+        assert_eq!(
+            last_bool_flag(&opts(&["--enable_bzlmod"]), "--enable_bzlmod"),
+            Some(true)
+        );
+        assert_eq!(
+            last_bool_flag(&opts(&["--noenable_bzlmod"]), "--enable_bzlmod"),
+            Some(false)
+        );
+        assert_eq!(
+            last_bool_flag(&opts(&["--enable_bzlmod=false"]), "--enable_bzlmod"),
+            Some(false)
+        );
+        assert_eq!(
+            last_bool_flag(&opts(&["--jobs=4"]), "--enable_bzlmod"),
+            None
+        );
+    }
+
+    #[test]
+    fn bool_flag_last_occurrence_wins() {
+        let o = opts(&["--enable_bzlmod", "--noenable_bzlmod"]);
+        assert_eq!(last_bool_flag(&o, "--enable_bzlmod"), Some(false));
+    }
+
+    #[test]
+    fn partition_routes_common_to_overrides() {
+        let mut common = RcOption {
+            value: "--remote_cache=x".to_string(),
+            command: "common".to_string(),
+            ..RcOption::default()
+        };
+        let build = RcOption {
+            value: "--jobs=4".to_string(),
+            command: "build".to_string(),
+            ..RcOption::default()
+        };
+        let (overrides, flags) = partition_expand_all(&[common.clone(), build]);
+        assert_eq!(
+            overrides,
+            vec![(
+                "--default_override=0:common=--remote_cache=x".to_string(),
+                None
+            )]
+        );
+        assert_eq!(flags, vec![("--jobs=4".to_string(), None)]);
+        common.command = "common:ci".to_string();
+        let (overrides, _) = partition_expand_all(&[common]);
+        assert_eq!(overrides.len(), 1, "common:config base routes to overrides");
+    }
+
+    #[test]
+    fn merge_overlays_b_over_a_last_wins() {
+        let a = BazelRC::blank(&opts(&["--remote_cache=grpc://a"]));
+        let b = BazelRC::blank(&opts(&["--remote_cache=grpc://b"]));
+        let merged = a.merge(&b);
+        let resolved = merged.applicable_options("build", None).unwrap();
+        assert_eq!(
+            flag_value_list(&resolved, "--remote_cache").pop().unwrap(),
+            "grpc://b"
+        );
+    }
+
+    #[test]
+    fn merge_combines_startup_and_version() {
+        let a = BazelRC::blank(&[]).with_startup_flags(vec!["--output_base=/a".to_string()]);
+        let b = BazelRC::blank(&[])
+            .with_startup_flags(vec!["--host_jvm_args=-Xmx2g".to_string()])
+            .with_version(Some(semver::Version::new(8, 0, 0)));
+        let merged = a.merge(&b);
+        assert_eq!(
+            merged.startup_flag_values(),
+            &["--output_base=/a", "--host_jvm_args=-Xmx2g"]
+        );
+        assert_eq!(merged.version, Some(semver::Version::new(8, 0, 0)));
+    }
+
+    #[test]
+    fn version_gated_options_filtered_by_version() {
+        let mut gated = RcOption {
+            value: "--notmp_sandbox".to_string(),
+            command: "always".to_string(),
+            version_condition: Some(">=8".to_string()),
+            ..RcOption::default()
+        };
+        let mut rc = BazelRC::blank(&[]);
+        rc.options.insert("always".to_string(), vec![gated.clone()]);
+
+        // On 7.x the >=8 gate drops it; on 8.x it applies.
+        let rc7 = rc.clone().with_version(Some(semver::Version::new(7, 0, 0)));
+        assert!(rc7.applicable_options("build", None).unwrap().is_empty());
+        let rc8 = rc.clone().with_version(Some(semver::Version::new(8, 0, 0)));
+        assert_eq!(rc8.applicable_options("build", None).unwrap().len(), 1);
+
+        // Per-call override beats the stored version.
+        gated.value = "--notmp_sandbox".to_string();
+        assert!(
+            rc8.applicable_options("build", Some("7.0.0"))
+                .unwrap()
+                .is_empty()
+        );
     }
 }
 
@@ -640,6 +1290,7 @@ import {}
         BazelRC {
             options: map,
             sources: sources.iter().map(|p| p.to_path_buf()).collect(),
+            ..Default::default()
         }
     }
 

@@ -337,39 +337,43 @@ def run_health_checks(ctx, hc_trait):
     return health_error
 
 def ctx_bazel_ready_for_health_check(ctx, environment):
-    """True if `ctx.bazel.startup_flags` is populated such that the Bazel
-    health check would target the project-specific server.
+    """True if the active `RunCommand` (`ctx.bazel.active_rc()`) carries startup
+    flags such that the Bazel health check would target the project-specific
+    server.
 
     Returns True off-runner (no project-specific server to protect) or
-    when `--output_base=` appears in `ctx.bazel.startup_flags`. Returns
-    False on a Workflows runner with no `--output_base` configured.
+    when `--output_base=` appears in the active run command's startup flags.
+    Returns False on a Workflows runner with no active rc or no `--output_base`.
 
     Pure predicate; see `assert_ctx_bazel_ready_for_health_check` for
     the failing variant used as the runtime guard.
     """
     if environment.runner == None:
         return True
-    for flag in ctx.bazel.startup_flags:
+    rc = ctx.bazel.active_rc()
+    if rc == None:
+        return False
+    for flag in rc.startup_flags():
         if flag.startswith("--output_base="):
             return True
     return False
 
 def assert_ctx_bazel_ready_for_health_check(ctx, environment):
-    """Fail if a Workflows runner is in use and `ctx.bazel.startup_flags`
-    is missing `--output_base`.
+    """Fail if a Workflows runner is in use and the active run command
+    (`ctx.bazel.active_rc()`) is missing `--output_base`.
 
     Built-in tasks satisfy this via `lib/lifecycle.axl::setup_phase`, which
-    populates `ctx.bazel.startup_flags` (through `setup_bazel_command`) before
-    running the `health_check` hooks. Custom tasks running the health check
-    outside `setup_phase` must populate the startup flags first.
+    registers the active run command (through `setup_bazel_command` →
+    `ctx.bazel.use_rc`) before running the `health_check` hooks. Custom tasks
+    running the health check outside `setup_phase` must `use_rc` first.
     """
     if ctx_bazel_ready_for_health_check(ctx, environment):
         return
     fail(
-        "Bazel health check would target the wrong server: " +
-        "ctx.bazel.startup_flags is missing --output_base on a Workflows " +
-        "runner. Run the health check via lib/lifecycle.axl::setup_phase, " +
-        "or populate ctx.bazel.startup_flags (e.g. via setup_bazel_command) " +
+        "Bazel health check would target the wrong server: the active run " +
+        "command is missing --output_base on a Workflows runner. Run the " +
+        "health check via lib/lifecycle.axl::setup_phase, or set an active " +
+        "run command via ctx.bazel.use_rc (e.g. through setup_bazel_command) " +
         "before the health_check hooks.",
     )
 

@@ -628,8 +628,9 @@ def setup_phase(ctx, lifecycle, subject, kind, data, hc_trait = None, bazel_trai
       bazel_base_flags: default flags for `setup_bazel_command`; ignored sans bazel_trait.
 
     Returns:
-      list[str] | None: resolved flags with `bazel_trait`, else `None`. Does
-      not return when a health check fails (step 4).
+      RunCommand | None: the active run command with `bazel_trait` (also
+      registered via `ctx.bazel.use_rc`), else `None`. Does not return when a
+      health check fails (step 4).
     """
     append_runner_job_history(ctx)
 
@@ -653,11 +654,11 @@ def setup_phase(ctx, lifecycle, subject, kind, data, hc_trait = None, bazel_trai
         subject = subject,
     )
 
-    # Bazel flags + rc parse (building tasks only). Must precede the health
-    # checks, which read the startup flags it sets.
-    flags = None
+    # Bazel rc parse + use_rc (building tasks only). Must precede the health
+    # checks, which inspect the active run command's startup flags.
+    rc = None
     if bazel_trait != None:
-        flags = setup_bazel_command(ctx, bazel_command, bazel_trait, base_flags = bazel_base_flags)
+        rc = setup_bazel_command(ctx, bazel_command, bazel_trait, base_flags = bazel_base_flags)
 
     # Health checks last. A non-None result is fatal: concludes the surface
     # and fails the task — never returns.
@@ -665,7 +666,7 @@ def setup_phase(ctx, lifecycle, subject, kind, data, hc_trait = None, bazel_trai
     if health_error != None:
         _fail_health_check(ctx, lifecycle, kind, data, health_error)
 
-    return flags
+    return rc
 
 # Uniform surface body/conclusion on health-check failure; the detailed
 # reason goes to the CLI/log instead.

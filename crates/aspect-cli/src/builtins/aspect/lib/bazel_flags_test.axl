@@ -145,28 +145,30 @@ def _test_flags_empty_defaults(ctx):
 
 def _test_setup_bazel_command_applies_to_ctx_bazel(ctx):
     """End-to-end check on a real `ctx`:
-      - the caller's `base_flags` appear in the returned flag list
-        (Bazel's rc expansion may interleave them with rc-derived
-        flags, so we don't assert a specific position);
-      - the trait's `extra_startup_flags` land on
-        `ctx.bazel.startup_flags`;
-      - `--ignore_all_rc_files` is appended so the bazel subprocess
+      - the returned `RunCommand` is registered as the active rc
+        (`ctx.bazel.active_rc()`);
+      - the caller's `base_flags` appear in its `build` expansion
+        (rc expansion may interleave them, so we don't assert position);
+      - the trait's `extra_startup_flags` land on the rc's startup flags;
+      - `--ignore_all_rc_files` is present so the bazel subprocess
         doesn't re-parse rc.
     The workspace `.bazelrc` is parsed as a side effect, which is fine
     for a dev test."""
     sentinel = "/tmp/test-setup-bazel-command-sentinel"
     bazel_trait = _fake_trait(extra_startup = ["--output_base=" + sentinel])
 
-    flags = setup_bazel_command(ctx, "build", bazel_trait, base_flags = ["--from-base"])
+    rc = setup_bazel_command(ctx, "build", bazel_trait, base_flags = ["--from-base"])
 
-    if "--from-base" not in flags:
-        fail("setup_bazel_command — base_flag not in result: %r" % flags)
+    if rc != ctx.bazel.active_rc():
+        fail("setup_bazel_command — returned rc not registered as active")
+    if "--from-base" not in rc.expand(command = "build"):
+        fail("setup_bazel_command — base_flag not in build expansion: %r" % rc.expand(command = "build"))
 
-    startup = list(ctx.bazel.startup_flags)
+    startup = list(rc.startup_flags())
     if ("--output_base=" + sentinel) not in startup:
-        fail("setup_bazel_command — trait --output_base not on ctx.bazel.startup_flags: %r" % startup)
+        fail("setup_bazel_command — trait --output_base not on rc startup flags: %r" % startup)
     if "--ignore_all_rc_files" not in startup:
-        fail("setup_bazel_command — --ignore_all_rc_files not appended: %r" % startup)
+        fail("setup_bazel_command — --ignore_all_rc_files not present: %r" % startup)
 
 # ── requested_config_names (pure) ────────────────────────────────────────
 
@@ -204,7 +206,7 @@ def _test_impl(ctx):
     _test_announce_bazel_args_shape(ctx)
     _test_requested_config_names(ctx)
 
-    # Run last: `setup_bazel_command` mutates the real `ctx.bazel.startup_flags`,
+    # Run last: `setup_bazel_command` registers a real active rc on `ctx.bazel`,
     # so keeping it after the pure subtests prevents bleed-through.
     _test_setup_bazel_command_applies_to_ctx_bazel(ctx)
     print("bazel_flags_test.axl: OK (13 sections)")

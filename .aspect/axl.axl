@@ -481,13 +481,15 @@ def test_query_flags(ctx: TaskContext, tc: int) -> int:
     expr = "//crates/aspect-cli:aspect-cli"
 
     # Plain flags are passed through.
-    targets1 = [t.name for t in ctx.bazel.query().raw(expr).eval(
+    targets1 = [t.name for t in ctx.bazel.query(
+        expr,
         flags = ["--noimplicit_deps"],
     )]
     tc = test_case(tc, expr in targets1, "query with plain flags should resolve the target")
 
     # An always-matching conditional flag is applied.
-    targets2 = [t.name for t in ctx.bazel.query().raw(expr).eval(
+    targets2 = [t.name for t in ctx.bazel.query(
+        expr,
         flags = [("--noimplicit_deps", ">=1")],
     )]
     tc = test_case(tc, expr in targets2, "query with always-matching conditional flag should resolve the target")
@@ -495,7 +497,8 @@ def test_query_flags(ctx: TaskContext, tc: int) -> int:
     # A never-matching conditional flag is dropped rather than forced onto the
     # query — an unrecognized flag would otherwise hard-error. This is the
     # regression guard for version-gated rc flags reaching the resolve query.
-    targets3 = [t.name for t in ctx.bazel.query().raw(expr).eval(
+    targets3 = [t.name for t in ctx.bazel.query(
+        expr,
         flags = ["--noimplicit_deps", ("--ASPECT_NEVER_MATCH_FLAG_XYZ", ">=99999")],
     )]
     tc = test_case(tc, expr in targets3, "query with never-matching conditional flag should drop it and still resolve")
@@ -506,7 +509,8 @@ def test_query_flags(ctx: TaskContext, tc: int) -> int:
     # the same option passed bare (`--show_result=20`) would hard-error. This
     # is the regression guard for delivery replaying rc `common` flags onto
     # its resolve query.
-    targets4 = [t.name for t in ctx.bazel.query().raw(expr).eval(
+    targets4 = [t.name for t in ctx.bazel.query(
+        expr,
         flags = ["--default_override=0:common=--show_result=20"],
     )]
     tc = test_case(tc, expr in targets4, "query with common-section override should be silently ignored")
@@ -545,10 +549,10 @@ def test_cancel_invocation(ctx: TaskContext, tc: int) -> int:
     status4 = build4.wait()
     tc = test_case(tc, type(status4.code) == "int", "build.wait() after server-wide cancel should return a status")
 
-    # Test 3: cancel_invocation with instance startup_flags targeting a specific output_base (no build running)
+    # Test 3: cancel_invocation with an active run command targeting a specific output_base (no build running)
     info = ctx.bazel.info()
     output_base = info["output_base"]
-    ctx.bazel.startup_flags.append("--output_base=" + output_base)
+    ctx.bazel.use_rc(ctx.bazel.new_rc(startup_flags = ["--output_base=" + output_base]))
     cancellation5 = ctx.bazel.cancel_invocation()
     tc = test_case(tc, cancellation5.busy == False, "cancel_invocation() with output_base startup_flag and no active build should not be busy")
     result5 = cancellation5.wait()
@@ -576,13 +580,13 @@ def test_cancel_invocation(ctx: TaskContext, tc: int) -> int:
     # Test 6: cancel_invocation succeeds even when bazel commands fail (e.g. bad startup flags).
     # With bad flags, client_pid/is_server_busy return None/False, so cancel_invocation
     # returns a Cancellation and wait() returns True immediately.
-    ctx.bazel.startup_flags.append("--invalid_flag_that_does_not_exist")
+    ctx.bazel.use_rc(ctx.bazel.new_rc(startup_flags = ["--output_base=" + output_base, "--invalid_flag_that_does_not_exist"]))
     cancellation8 = ctx.bazel.cancel_invocation()
     tc = test_case(tc, type(cancellation8.busy) == "bool", "cancel_invocation() with bad flags should still return a Cancellation")
     tc = test_case(tc, cancellation8.busy == False, "cancel_invocation() with bad flags should not be busy")
     result8 = cancellation8.wait()
     tc = test_case(tc, result8 == True, "wait() with bad flags should return True")
-    ctx.bazel.startup_flags.pop()
+    ctx.bazel.use_rc(ctx.bazel.new_rc(startup_flags = ["--output_base=" + output_base]))
 
     # Test 7: force() on a running build sends a second SIGINT to the client.
     build9 = ctx.bazel.build(

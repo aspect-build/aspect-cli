@@ -3,10 +3,18 @@ load("//bazel/rust:defs.bzl", "rust_library", "rust_test")
 rust_library(
     name = "bazelrc",
     srcs = glob(["src/**/*.rs"]),
+    proc_macro_deps = [
+        "@crates//:starlark_derive",
+    ],
     visibility = [
         "//crates/axl-runtime:__pkg__",
     ],
     deps = [
+        "@crates//:allocative",
+        "@crates//:anyhow",
+        "@crates//:derive_more",
+        "@crates//:semver",
+        "@crates//:starlark",
         "@crates//:thiserror",
     ],
 )

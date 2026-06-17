@@ -16,31 +16,26 @@ parsed-rc disclosure here; `_version` / `_command` gate the per-spawn
 `INFO:` lines and are passed to `ctx.bazel.build` / `.test` by the task
 (see `resolve_bazel_announce`).
 
-Ordering contract: `ctx.bazel.startup_flags` must be populated before the
-Bazel health check runs, so the check targets the correct server. The
-`setup_phase` helper in `lib/lifecycle.axl` enforces this by calling
+Ordering contract: the active `RunCommand` (`ctx.bazel.use_rc`) must be set
+before the Bazel health check runs, so the check targets the correct server.
+The `setup_phase` helper in `lib/lifecycle.axl` enforces this by calling
 `setup_bazel_command` ahead of the `health_check` hooks; the invariant is
 also checked at runtime by `assert_ctx_bazel_ready_for_health_check` (see
 `lib/health_check.axl`).
 
-  - `setup_bazel_command` — resolves startup flags + command flags,
-    parses `.bazelrc`, populates `ctx.bazel.startup_flags` with the full
-    startup-flag set (including any rc-derived `startup …` lines), emits
-    the parsed-rc disclosure, and returns the command flag list ready for
-    `ctx.bazel.build` / `ctx.bazel.test`. Built-in tasks reach this via
-    `lib/lifecycle.axl::setup_phase`; call it directly only for unusual
-    layering. The smaller building blocks below exist mostly for testing.
-
-  - `resolve_query_flags` — re-resolve the rc command flags expanded for
-    the `query` command, for a task that also runs a sidecar `bazel query`
-    under `--ignore_all_rc_files`. Returns the flag list without mutating
-    `ctx.bazel.startup_flags` or emitting a disclosure.
-    `requested_config_names` extracts the `--config=` names it tolerates as
-    build-only.
+  - `setup_bazel_command` — resolves startup flags + command flags, parses
+    `.bazelrc` into a `RunCommand`, registers it via `ctx.bazel.use_rc`,
+    emits the parsed-rc disclosure, and returns the run command. Subsequent
+    `ctx.bazel.build` / `test` / `query` use the active run command — each
+    self-expands for its own command and adds `--ignore_all_rc_files`. Built-in
+    tasks reach this via `lib/lifecycle.axl::setup_phase`; call it directly only
+    for unusual layering. The smaller building blocks below exist mostly for
+    testing. `requested_config_names` extracts the `--config=` names fed to
+    `parse_rc(skip_config_if_missing=…)` so a sidecar `query` tolerates a
+    build-only config.
 
   - `resolve_startup_flags` — combine `ctx.args.bazel_startup_flags`
-    with `BazelTrait.extra_startup_flags` + transform. Returns the list
-    without mutating `ctx.bazel.startup_flags`.
+    with `BazelTrait.extra_startup_flags` + transform. Returns the list.
 
   - `resolve_flags` — combine CLI bazel-flags + `BazelTrait` additions
     + task-time hooks + transform into a single command flag list.
@@ -164,60 +159,61 @@ def resolve_flags(ctx, bazel_trait):
     return flags
 
 def setup_bazel_command(ctx, command, bazel_trait, base_flags = []):
-    """Prepare `ctx.bazel` for an upcoming `ctx.bazel.<command>` call
-    and return the command flag list.
+    """Prepare `ctx.bazel` for upcoming `ctx.bazel.<command>` calls and return
+    the active `RunCommand`.
 
-    Resolves startup flags + command flags, parses the workspace
-    `.bazelrc`, populates `ctx.bazel.startup_flags` with the full
-    startup-flag set, emits the parsed-rc disclosure, and returns the
-    command flag list ready for `ctx.bazel.build` / `ctx.bazel.test`.
+    Resolves startup + command flags, parses the workspace `.bazelrc` into a
+    `RunCommand`, registers it as the active run command via
+    `ctx.bazel.use_rc`, and emits the parsed-rc disclosure. Subsequent
+    `ctx.bazel.build` / `test` / `query` use the active run command — each
+    self-expands for its own command and adds `--ignore_all_rc_files`
+    automatically (the on-disk rc is already absorbed). Per-call extras go via
+    `flags = [...]`; a per-call `rc =` overrides the active one.
 
     Composed flag order:
 
         base_flags + ctx.args.bazel_flags + bazel_trait.extra_flags
             + bazel_trait.task_flags(ctx) hooks
             then bazel_trait.flags(flags) transform
-            then rc expansion for `--config=…` keys.
+            then rc expansion for `--config=…` keys at invocation time.
 
     Built-in tasks reach this through `lib/lifecycle.axl::setup_phase`,
-    which calls it before the Bazel health-check hooks so the check sees the
-    same startup flags every other Bazel call does (including any rc-derived
-    `startup --output_base=...`). Call it directly only for unusual layering.
+    which calls it before the Bazel health-check hooks so the check inspects the
+    same active run command every Bazel call uses.
 
-    The parsed-rc disclosure is emitted via `trace.log` unconditionally
-    (visible under `ASPECT_DEBUG`); the user-facing terminal print fires
-    when `--announce-bazel-rc` resolves on (on under CI by default).
+    `skip_config_if_missing` carries the requested `--config` names so a sidecar
+    `query` (no `build` ancestor) drops a build-only config rather than erroring.
 
     Args:
       ctx: TaskContext.
-      command: Bazel subcommand whose rc sections to expand
-        (e.g. `"build"`, `"test"`). Tasks that ultimately spawn
-        `bazel build` (lint, delivery, run, format, gazelle) should
-        pass `"build"`.
+      command: Bazel subcommand the disclosure is rendered for (e.g. `"build"`).
       bazel_trait: `BazelTrait` instance from `ctx.traits`.
       base_flags: task-injected defaults the user can override via
-        `--bazel-flag=...` (last-wins after rc expansion). Examples:
-        lint's `--aspects=...`, spawn tasks' `--remote_download_outputs=toplevel`.
+        `--bazel-flag=...`. Examples: lint's `--aspects=...`, spawn tasks'
+        `--remote_download_outputs=toplevel`.
 
     Requires the task to declare `bazel_startup_flags`, `bazel_flags`,
     and `announce_bazel_rc` CLI args.
 
     Returns:
-      list[str]: command flags after `:config` expansion.
+      RunCommand: the active run command (also registered via `use_rc`).
     """
     startup_flags = resolve_startup_flags(ctx, bazel_trait)
     flags = list(base_flags) + resolve_flags(ctx, bazel_trait)
-    rc = ctx.bazel.parse_rc(startup_flags = startup_flags, flags = flags)
+    rc = ctx.bazel.parse_rc(
+        startup_flags = startup_flags,
+        flags = flags,
+        skip_config_if_missing = requested_config_names(flags),
+    )
+    ctx.bazel.use_rc(rc)
     trace.event("bazel.flags", fields = {"command": command, "flags": flags, "startup_flags": startup_flags})
-    rc_startup_flags, expanded_flags = rc.expand_all(command = command)
-    ctx.bazel.startup_flags.extend(startup_flags + rc_startup_flags + ["--ignore_all_rc_files"])
 
     _require_arg(ctx, "announce_bazel_rc")
     if resolve_announce(ctx, ctx.args.announce_bazel_rc):
-        print(rc.announce(command = command, ansi = color_enabled(ctx.std)))
-    trace.log(rc.announce(command = command, ansi = False))
+        print(ctx.bazel.announce_rc(rc, command = command, ansi = color_enabled(ctx.std)))
+    trace.log(ctx.bazel.announce_rc(rc, command = command, ansi = False))
 
-    return expanded_flags
+    return rc
 
 _CONFIG_PREFIX = "--config="
 
@@ -225,7 +221,8 @@ def requested_config_names(flags: list) -> list:
     """The `--config=NAME` names requested in `flags`.
 
     Each item is a plain `str` or a `(value, version-constraint)` tuple.
-    Exported for unit testing; used by `resolve_query_flags`."""
+    Fed to `parse_rc(skip_config_if_missing=...)` so a sidecar `query` drops a
+    build-only config instead of erroring. Exported for unit testing."""
     names = []
     for flag in flags:
         value = flag[0] if type(flag) == "tuple" else flag
@@ -233,80 +230,24 @@ def requested_config_names(flags: list) -> list:
             names.append(value[len(_CONFIG_PREFIX):])
     return names
 
-def resolve_query_flags(ctx, bazel_trait):
-    """Resolve the `.bazelrc` command flags for a `bazel query` spawn, expanded
-    for the `query` command.
-
-    A task that spawns `bazel build`/`test` reaches Bazel under
-    `--ignore_all_rc_files` (see `setup_bazel_command`), so a sidecar
-    `bazel query` it runs reads none of the workspace `.bazelrc` either. To
-    keep the query's external-repository resolution consistent with the build
-    it must replay the rc flags — but expanded for `query`, not `build`.
-
-    The query shares the build's startup flags — they're command-independent
-    (`--output_base`, `--ignore_all_rc_files`, the literal rc `startup`
-    section) — and inherits them from `ctx.bazel.startup_flags`. This is a
-    separate helper, rather than a second `setup_bazel_command` call, only
-    because that call *appends* to `ctx.bazel.startup_flags` and prints the rc
-    disclosure: calling it again would duplicate both. So this resolves just
-    the per-command flags and touches neither. (`build`/`test` need no such
-    helper — each expands for its own command, and `test` inherits `build:*`
-    through Bazel's command graph; only `query`, with no ancestor, is special.)
-    Expanding for `query`:
-
-      - a `build`-section option (e.g. `--show_result`) is simply absent from
-        the `query` expansion, so it never reaches — and breaks — the query;
-      - a `common`-section option arrives as `--default_override=0:common=…`,
-        which `query` silently ignores when it doesn't recognize the wrapped
-        option (the same option passed bare would hard-error).
-
-    `query` has no `build` ancestor, so a requested `--config=NAME` defined
-    only as `build:NAME` (the common case) has no section visible to `query`
-    and would raise `undefined config`. The requested config names are passed
-    in `skip_config_if_missing` so such configs are dropped rather than fatal;
-    they carry build/test configuration, not the repo-resolution flags the
-    query needs, and the build phase (which does error on an undefined config)
-    already validates them. A config that *does* have a `common:`/`query:`
-    section still expands. (A `--config` written into a `common`/`query` rc
-    section that resolves only via `build:` is out of scope — such an rc
-    already breaks a plain `bazel query` in the repo.)
-
-    Returns the command flag list (same `str | (str, version-constraint)`
-    shape as `setup_bazel_command`) to pass as `ctx.bazel.query().…eval(flags
-    = …)`. Does not mutate `ctx.bazel.startup_flags` and emits no disclosure —
-    the build's `setup_bazel_command` already did both for the task.
-    """
-    startup_flags = resolve_startup_flags(ctx, bazel_trait)
-    flags = resolve_flags(ctx, bazel_trait)
-    rc = ctx.bazel.parse_rc(
-        startup_flags = startup_flags,
-        flags = flags,
-        skip_config_if_missing = requested_config_names(flags),
-    )
-    _, expanded_flags = rc.expand_all(command = "query")
-    return expanded_flags
-
 def expand_config_flags(ctx, bazel_trait, extra_flags, command = "build"):
     """Expand the `--config=NAME` references in `extra_flags` against the rc.
 
-    Tasks reach Bazel under `--ignore_all_rc_files`, so any `--config=NAME` in a
-    flag list that bypasses `setup_bazel_command`'s expansion (e.g. delivery's
-    `release_bazel_flags`, appended after `expanded_flags`) would otherwise hit
-    Bazel un-expanded and fail with "Config value 'NAME' is not defined". So a
-    `--config=release` resolves to its `common:release`/`build:release` options,
-    exactly as the task's own flags do.
+    A `RunCommand` in effect adds `--ignore_all_rc_files`, so any `--config=NAME`
+    in a per-call `flags = [...]` extras list (e.g. delivery's
+    `release_bazel_flags`) would otherwise hit Bazel un-expanded and fail with
+    "Config value 'NAME' is not defined". This resolves `--config=release` to
+    its `common:release`/`build:release` options, exactly as the task's own
+    flags do, so the caller can pass the result as per-call extras.
 
-    Returns ONLY the options `extra_flags` contributes — the delta between
-    expanding the rc with `extra_flags` and without them. This is deliberate:
-    `rc.expand_all` always prepends the full `command` rc base (so its result is
-    not just the passed flags), and the caller appends this AFTER the task's own
-    `expanded_flags`. Returning the whole base again would re-apply rc defaults
-    last and clobber the user's `--bazel-flag` overrides (last-wins). The delta
-    is `extra_flags` with each `--config=NAME` replaced by its section options,
-    and nothing the base already provided. Order within the delta is preserved.
+    Returns ONLY the options `extra_flags` contributes — the delta between a
+    `RunCommand` expansion with `extra_flags` and without them. Returning the
+    whole base again would re-apply rc defaults and clobber the user's
+    `--bazel-flag` overrides under last-wins. The delta is `extra_flags` with
+    each `--config=NAME` replaced by its section options, in order.
 
-    Mutates nothing on `ctx.bazel` (no startup flags added, no disclosure) — the
-    task's setup already did that.
+    Mutates nothing on `ctx.bazel` — the task's `setup_bazel_command` already
+    registered the active run command and emitted the disclosure.
     """
     startup_flags = resolve_startup_flags(ctx, bazel_trait)
 
