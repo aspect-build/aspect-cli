@@ -336,6 +336,22 @@ def _strategy_name(strategy):
         return "soft"
     return "custom"
 
+def linter_error_message(failed_linters, strategy_name):
+    """Message for the fail_on_linter_error path, naming the offending tool(s)
+    when known. A non-zero `.exit_code` whose BES name didn't parse leaves
+    `failed_linters` empty, so fall back to an unnamed message.
+
+    `failed_linters` is a set-like dict of tool names.
+    """
+    if failed_linters:
+        head = "Linter process(es) exited non-zero: %s." % ", ".join(sorted(failed_linters.keys()))
+    else:
+        head = "A linter process exited non-zero."
+    return (
+        "%s See the linter output under the 🔬 Lint phase above for details. " % head +
+        "(strategy=%s fails on any linter error.)" % strategy_name
+    )
+
 _SEV_CLI_ICON = {
     "error": "🚨",
     "warning": "⚠️",
@@ -575,28 +591,34 @@ def _try_process_lint_file(ctx, file, filepath, data, strategy, changed_files, l
 
     return {"interesting": False, "linter_exit_code": 0, "failed_tool": ""}
 
+def _record_lint_result(result, failed_linters):
+    """Fold one non-None `_try_process_lint_file` result into `failed_linters`
+    (a set-like dict of tool names that exited non-zero) and return
+    `(interesting, exit_nonzero)`. Shared by the live BES loop and the
+    post-build drain so both treat a result identically.
+    """
+    if result["linter_exit_code"] != 0 and result["failed_tool"]:
+        failed_linters[result["failed_tool"]] = True
+    return (result["interesting"], result["linter_exit_code"] != 0)
+
 def _drain_pending_files(ctx, pending, data, strategy, changed_files, lint_trait, github_output, patches, failed_linters):
-    """One pass over pending files → (still_pending, was_interesting, linter_exit_code).
+    """One pass over pending files → (still_pending, was_interesting, exit_nonzero).
     still_pending holds files whose remote download hasn't landed yet.
-    `failed_linters` is a set-like dict accumulating tool names whose `.exit_code`
-    was non-zero, so the caller can report which linters failed.
+    `failed_linters` accumulates tool names whose `.exit_code` was non-zero.
     """
     still_pending = []
     interesting = False
-    linter_exit_code = 0
+    exit_nonzero = False
     for pfile in pending:
         pfilepath = file_uri_to_path(pfile.file)
         result = _try_process_lint_file(ctx, pfile, pfilepath, data, strategy, changed_files, lint_trait, github_output, patches)
         if result == None:
             still_pending.append(pfile)
         else:
-            if result["interesting"]:
-                interesting = True
-            if result["linter_exit_code"] != 0:
-                linter_exit_code = 1
-                if result["failed_tool"]:
-                    failed_linters[result["failed_tool"]] = True
-    return (still_pending, interesting, linter_exit_code)
+            file_interesting, file_exit_nonzero = _record_lint_result(result, failed_linters)
+            interesting = interesting or file_interesting
+            exit_nonzero = exit_nonzero or file_exit_nonzero
+    return (still_pending, interesting, exit_nonzero)
 
 # buildifier: disable=function-docstring
 def _impl(ctx: TaskContext) -> int | TaskConclusion:
@@ -753,7 +775,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     for _tick in sleep_iter(BES_DRAIN_TICK_MS):
         interesting = False
 
-        pending_files, pending_interesting, pending_exit_code = _drain_pending_files(
+        pending_files, pending_interesting, pending_exit_nonzero = _drain_pending_files(
             ctx,
             pending_files,
             data,
@@ -766,7 +788,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         )
         if pending_interesting:
             interesting = True
-        if pending_exit_code != 0:
+        if pending_exit_nonzero:
             linter_exit_code = 1
 
         for _ in range(10000):
@@ -788,12 +810,10 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                         if result == None:
                             pending_files.append(file)
                         else:
-                            if result["interesting"]:
-                                interesting = True
-                            if result["linter_exit_code"] != 0:
+                            file_interesting, file_exit_nonzero = _record_lint_result(result, failed_linters)
+                            interesting = interesting or file_interesting
+                            if file_exit_nonzero:
                                 linter_exit_code = 1
-                                if result["failed_tool"]:
-                                    failed_linters[result["failed_tool"]] = True
         if interesting or now_ms(ctx) - last_emit_ms >= MIN_HEARTBEAT_INTERVAL_MS:
             # Flip to "failing" on mid-build action failure so the breakdown tags Lint.
             had_action_failure = data["bazel"].get("failed_actions_total", 0) > 0
@@ -823,7 +843,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         post_build_deadline_ms = post_build_start_ms + _POST_BUILD_DOWNLOAD_TIMEOUT_MS
         slow_warned = False
         for _i in range(_POST_BUILD_DOWNLOAD_TIMEOUT_MS // BES_DRAIN_TICK_MS + 1):
-            pending_files, _, pending_exit_code = _drain_pending_files(
+            pending_files, _, pending_exit_nonzero = _drain_pending_files(
                 ctx,
                 pending_files,
                 data,
@@ -834,7 +854,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                 patches,
                 failed_linters,
             )
-            if pending_exit_code != 0:
+            if pending_exit_nonzero:
                 linter_exit_code = 1
             if not pending_files:
                 break
@@ -960,22 +980,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     elif strategy.fail_on_severity and any([d["severity"] == strategy.fail_on_severity for d in relevant]):
         exit_code = 1
     elif strategy.fail_on_linter_error and linter_exit_code != 0:
-        # A linter process exited non-zero without producing findings — otherwise
-        # this path surfaces nothing, leaving an unexplained exit 1. Name the
-        # offending tool(s) and point at the raw `🔬 Lint` output above.
-        if failed_linters:
-            tools = ", ".join(sorted(failed_linters.keys()))
-            error(ctx.std, (
-                "Linter process(es) exited non-zero: %s. " % tools +
-                "See the linter output under the 🔬 Lint phase above for details. " +
-                "(strategy=%s fails on any linter error.)" % _strategy_name(strategy)
-            ))
-        else:
-            error(ctx.std, (
-                "A linter process exited non-zero. " +
-                "See the linter output under the 🔬 Lint phase above for details. " +
-                "(strategy=%s fails on any linter error.)" % _strategy_name(strategy)
-            ))
+        # Without this the path surfaces nothing: a linter that crashed without
+        # emitting findings would fail with an unexplained exit 1.
+        error(ctx.std, linter_error_message(failed_linters, _strategy_name(strategy)))
         exit_code = 1
     else:
         exit_code = 0
