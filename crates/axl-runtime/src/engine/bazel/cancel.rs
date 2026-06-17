@@ -110,9 +110,9 @@ pub(crate) fn cancellation_methods(registry: &mut MethodsBuilder) {
                 // After force-kill, wait indefinitely for the server to stop.
                 // Reset by breaking out and falling through to return true.
                 while cancellation
-            .backend
-            .is_server_busy(&cancellation.startup_flags)
-        {
+                    .backend
+                    .is_server_busy(&cancellation.startup_flags)
+                {
                     std::thread::sleep(std::time::Duration::from_millis(poll_ms));
                 }
                 return Ok(true);

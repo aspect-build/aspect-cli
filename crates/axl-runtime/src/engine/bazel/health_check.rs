@@ -243,10 +243,7 @@ fn output_base_from_flags(startup_flags: &[String]) -> Option<PathBuf> {
 /// On success, best-effort cleans up stranded sandbox state from a prior
 /// SIGKILL'd invocation (bazelbuild/bazel#23880) before the next bazel
 /// command runs.
-pub fn run(
-    backend: &super::backend::BazelBackend,
-    startup_flags: &[String],
-) -> HealthCheckResult {
+pub fn run(backend: &super::backend::BazelBackend, startup_flags: &[String]) -> HealthCheckResult {
     let result = check_bazel_server(backend, startup_flags);
 
     if result.success {
