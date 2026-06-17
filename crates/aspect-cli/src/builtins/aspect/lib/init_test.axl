@@ -11,7 +11,6 @@ Run with:
   aspect dev test-init
 """
 
-load("../init.axl", "project_name")
 load(
     "./init_render.axl",
     "glob_match",
@@ -22,6 +21,7 @@ load(
     "render",
     "should_render",
 )
+load("../init.axl", "parse_template", "project_name")
 
 # A miniature template config, same schema as a real template-config.json. The
 # `{"all": [...]}` rule exercises the AND predicate and `{"any": [...]}` the OR.
@@ -78,6 +78,22 @@ def _test_project_name():
     # "." or empty out_dir falls back to the default.
     _eq("dot -> default", project_name("", "."), "my_project")
     _eq("empty -> default", project_name("", ""), "my_project")
+
+def _test_parse_template():
+    # github: scheme — value is the owner/repo slug.
+    gh = parse_template("github:aspect-build/aspect-workflows-template")
+    _eq("github scheme", gh.scheme.value, "github")
+    _eq("github value", gh.value, "aspect-build/aspect-workflows-template")
+
+    # file: scheme, bare form — absolute and relative paths pass through as-is.
+    f = parse_template("file:/abs/path/to/checkout")
+    _eq("file scheme", f.scheme.value, "file")
+    _eq("file bare abs", f.value, "/abs/path/to/checkout")
+    _eq("file bare relative", parse_template("file:./checkout").value, "./checkout")
+
+    # file:// URI form — the leading `//` is stripped to the path.
+    _eq("file:// uri abs", parse_template("file:///abs/checkout").value, "/abs/checkout")
+    _eq("file:// lenient host", parse_template("file://abs/checkout").value, "abs/checkout")
 
 def _test_presets():
     _eq("preset_names sorted", preset_names(_CONFIG), ["minimal", "py", "rust"])
@@ -151,6 +167,7 @@ def _test_render(ctx):
 def _test_impl(ctx):
     _test_glob()
     _test_project_name()
+    _test_parse_template()
     _test_presets()
     _test_inclusion()
     _test_render_flags()

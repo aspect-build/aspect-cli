@@ -5,12 +5,16 @@ Everything template-specific — the presets and the file-inclusion rules — is
 read at runtime from the template's `template-config.json` (data), so the
 template owns its own config and the CLI never loads template code.
 
-The template tree (and its config) is resolved at runtime from one of:
-  1. `--template-source <dir>`: a local checkout of the template repo. Used by
-     the template repo's own CI, the aspect-starters publish job, and local
-     template development.
-  2. default: download the template archive from GitHub — the latest published
-     release, or `--template-ref` (a branch, tag, or commit) when given.
+The template tree (and its config) is resolved at runtime from the `--template`
+source, a scheme-prefixed locator (so new source kinds slot in without changing
+the flag surface):
+
+  - `github:<owner>/<repo>` (default `github:aspect-build/aspect-workflows-template`):
+    download the template archive from GitHub — the latest published release, or
+    `--template-ref` (a branch, tag, or commit) when given.
+  - `file:<dir>` (or the `file://<dir>` URI form): a local checkout of the
+    template repo. Used by the template repo's own CI, the aspect-starters
+    publish job, and local template development. `--template-ref` is ignored.
 
 After rendering, `tools/repin` regenerates the language lockfiles the template
 ships as placeholders (unless `--skip-repin`).
@@ -18,11 +22,13 @@ ships as placeholders (unless `--skip-repin`).
 
 load("./lib/init_render.axl", "load_config", "preset_flags", "preset_names", "render")
 
-# The template lives in this GitHub repo. By default `aspect init` fetches the
-# latest published release; `--template-ref` overrides with an explicit git ref
-# (branch, tag, or commit), e.g. `--template-ref=main` for the bleeding edge.
-_TEMPLATE_REPO = "aspect-build/aspect-workflows-template"
-_LATEST_RELEASE_API = "https://api.github.com/repos/{}/releases/latest".format(_TEMPLATE_REPO)
+# Default template source: the latest published release of this GitHub repo.
+# `--template-ref` overrides the ref (branch, tag, or commit), e.g.
+# `--template=github:aspect-build/aspect-workflows-template --template-ref=main`.
+_DEFAULT_TEMPLATE = "github:aspect-build/aspect-workflows-template"
+
+def _github_release_api(repo):
+    return "https://api.github.com/repos/{}/releases/latest".format(repo)
 
 _BAZEL_WORKSPACE_MARKERS = ["MODULE.bazel", "WORKSPACE", "WORKSPACE.bazel", "WORKSPACE.bzlmod"]
 
@@ -40,6 +46,38 @@ def _run(ctx, argv, current_dir = None):
     status = cmd.spawn().wait()
     if not status.success:
         fail("command failed ({}): {}".format(status.code, " ".join(argv)))
+
+_TEMPLATE_SCHEME = enum("github", "file")
+
+TemplateSource = record(
+    scheme = field(_TEMPLATE_SCHEME),
+    # github: an `<owner>/<repo>` slug. file: a local checkout directory.
+    value = field(str),
+)
+
+def parse_template(spec):
+    """Parse a `--template` locator into a `TemplateSource`.
+
+    A scheme prefix selects the source kind: `github:<owner>/<repo>` or
+    `file:<dir>`. The scheme is required so the locator is unambiguous and new
+    kinds (e.g. `gitlab:`) can be added without guessing. Fails on an unknown or
+    missing scheme.
+
+    `file:` accepts both the bare form (`file:/abs`, `file:./rel`) and the
+    `file://` URI form (`file:///abs`); a leading `//` is stripped so the
+    standard spelling and relative paths both resolve to the path.
+    """
+    scheme, sep, value = spec.partition(":")
+    if not sep or not value:
+        fail("invalid --template {!r}: expected '<scheme>:<value>', e.g. {!r}".format(spec, _DEFAULT_TEMPLATE))
+    if scheme == "github":
+        return TemplateSource(scheme = _TEMPLATE_SCHEME("github"), value = value)
+    if scheme == "file":
+        path = value[2:] if value.startswith("//") else value
+        if not path:
+            fail("invalid --template {!r}: file: needs a directory, e.g. 'file:/path/to/checkout'".format(spec))
+        return TemplateSource(scheme = _TEMPLATE_SCHEME("file"), value = path)
+    fail("unknown --template scheme {!r} in {!r}; supported: github:, file:".format(scheme, spec))
 
 def _prompt_preset(ctx, names):
     """Prompt the user to choose a preset by number (TTY only)."""
@@ -71,8 +109,8 @@ def project_name(arg_name, out_dir):
         name = base if base and base != "." else "my_project"
     return name.replace("-", "_")
 
-def _latest_release_ref(ctx):
-    """Return the tag of the template repo's latest GitHub release.
+def _latest_release_ref(ctx, repo):
+    """Return the tag of `repo`'s latest GitHub release.
 
     Queries the releases/latest API. Fails with a clear hint to pass an explicit
     `--template-ref` when the repo has no releases yet (or the API is
@@ -80,18 +118,18 @@ def _latest_release_ref(ctx):
     """
     work = ctx.std.fs.mkdtemp(prefix = "aspect-init-rel-")
     meta = work + "/release.json"
-    ctx.http().download(url = _LATEST_RELEASE_API, output = meta, mode = 0o644).block()
+    ctx.http().download(url = _github_release_api(repo), output = meta, mode = 0o644).block()
 
     # try_decode (not decode): the API can return non-JSON on a rate-limit or
     # error, which should surface as the hint below, not a parse traceback.
     parsed = json.try_decode(ctx.std.fs.read_to_string(meta), None)
     tag = parsed.get("tag_name") if parsed else None
     if not tag:
-        fail("could not determine the latest {} release; pass --template-ref=<branch|tag|commit> (e.g. --template-ref=main)".format(_TEMPLATE_REPO))
+        fail("could not determine the latest {} release; pass --template-ref=<branch|tag|commit> (e.g. --template-ref=main)".format(repo))
     return tag
 
-def _fetch_template(ctx, ref):
-    """Download + extract the template archive for `ref` from GitHub.
+def _fetch_template(ctx, repo, ref):
+    """Download + extract the `repo` template archive for `ref` from GitHub.
 
     Uses the `archive/<ref>.tar.gz` endpoint, which resolves a branch, tag, or
     commit alike. Returns the extracted repo dir — discovered by listing the
@@ -99,7 +137,7 @@ def _fetch_template(ctx, ref):
     strip-prefix, which varies by ref type (e.g. tag `v1.2` extracts to
     `aspect-workflows-template-1.2`).
     """
-    url = "https://github.com/{}/archive/{}.tar.gz".format(_TEMPLATE_REPO, ref)
+    url = "https://github.com/{}/archive/{}.tar.gz".format(repo, ref)
     work = ctx.std.fs.mkdtemp(prefix = "aspect-init-")
     archive = work + "/template.tar.gz"
     ctx.std.io.stdout.write("Fetching template from {}\n".format(url))
@@ -121,14 +159,14 @@ def _impl(ctx):
 
     # Resolve the template repo dir: a checkout root holding template-config.json
     # alongside the template/ tree (load_config + render read them from here).
-    # --template-source (a local checkout root, not the template/ dir) wins;
-    # otherwise fetch from GitHub at --template-ref, defaulting to the latest
-    # published release.
-    if ctx.args.template_source:
-        repo_dir = ctx.args.template_source
+    # `file:` uses the local checkout as-is; `github:` fetches the archive at
+    # --template-ref, defaulting to the latest published release.
+    source = parse_template(ctx.args.template)
+    if source.scheme == _TEMPLATE_SCHEME("file"):
+        repo_dir = source.value
     else:
-        ref = ctx.args.template_ref or _latest_release_ref(ctx)
-        repo_dir = _fetch_template(ctx, ref)
+        ref = ctx.args.template_ref or _latest_release_ref(ctx, source.value)
+        repo_dir = _fetch_template(ctx, source.value, ref)
     config = load_config(ctx, repo_dir)
     template_dir = repo_dir + "/template"
 
@@ -168,8 +206,8 @@ init = task(
         "directory": args.positional(minimum = 0, maximum = 1, default = ["."]),
         "preset": args.string(default = "", description = "Preset to scaffold (prompts if omitted)."),
         "name": args.string(default = "", description = "Project name (defaults to the directory name)."),
-        "template_source": args.string(default = "", description = "Local path to a template checkout (overrides the GitHub download)."),
-        "template_ref": args.string(default = "", description = "Git ref (branch, tag, or commit) of aspect-workflows-template to fetch. Defaults to the latest release. Ignored when --template-source is set."),
+        "template": args.string(default = _DEFAULT_TEMPLATE, description = "Template source as '<scheme>:<value>': 'github:<owner>/<repo>' (default 'github:aspect-build/aspect-workflows-template'), or 'file:<dir>'/'file://<dir>' for a local checkout."),
+        "template_ref": args.string(default = "", description = "Git ref (branch, tag, or commit) to fetch for a 'github:' template. Defaults to the latest release. Ignored for 'file:'."),
         "license": args.string(default = "none", values = ["Apache-2.0", "none"], description = "License to scaffold; defaults to 'none' (add your own). Pass 'Apache-2.0' to include it."),
         "skip_repin": args.boolean(default = False, description = "Skip regenerating lockfiles after scaffolding."),
     },
