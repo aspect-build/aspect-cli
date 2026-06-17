@@ -706,6 +706,44 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         Ok(health_check::run(&startup_flags))
     }
 
+    /// Harvest the Bazel flag set from the workspace's resolved Bazel by
+    /// running `bazel help flags-as-proto` and decoding the base64
+    /// `bazel_flags.FlagCollection` it prints. Returns the collection; read
+    /// `.flag_infos[].name / .has_negative_flag / .abbreviation /
+    /// .requires_value / .commands`. Errors (no Bazel, non-zero exit,
+    /// undecodable output) propagate so callers can fail fast.
+    ///
+    /// ```python
+    /// def _impl(ctx):
+    ///     fc = ctx.bazel.flags_as_proto()
+    ///     value_flags = [fi.name for fi in fc.flag_infos if not fi.has_negative_flag]
+    /// ```
+    fn flags_as_proto<'v>(
+        this: values::Value<'v>,
+    ) -> anyhow::Result<axl_proto::bazel_flags::FlagCollection> {
+        let _ = this;
+        use base64::Engine;
+        use prost::Message;
+        let out = bazel_command()
+            .args(["help", "flags-as-proto"])
+            .stderr(Stdio::inherit())
+            .output()
+            .map_err(|e| anyhow::anyhow!("failed to run `bazel help flags-as-proto`: {e}"))?;
+        if !out.status.success() {
+            anyhow::bail!(
+                "`bazel help flags-as-proto` exited {}; this Bazel may be too old (flags-as-proto requires a modern Bazel).",
+                out.status
+            );
+        }
+        let text = String::from_utf8(out.stdout)
+            .map_err(|e| anyhow::anyhow!("non-UTF-8 output from flags-as-proto: {e}"))?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(text.trim())
+            .map_err(|e| anyhow::anyhow!("flags-as-proto output was not valid base64: {e}"))?;
+        axl_proto::bazel_flags::FlagCollection::decode(bytes.as_slice())
+            .map_err(|e| anyhow::anyhow!("could not decode FlagCollection proto: {e}"))
+    }
+
     /// Detect and best-effort repair runner-poisoning sandbox state
     /// described by bazelbuild/bazel#23880.
     ///
@@ -1135,5 +1173,25 @@ mod tests {
     fn invalid_constraint_is_an_error() {
         let err = constraint_matches("not-a-constraint", None).unwrap_err();
         assert!(err.to_string().contains("invalid version constraint"));
+    }
+
+    #[test]
+    fn flags_as_proto_decodes_collection_from_bazel() {
+        let exit = crate::test::eval(
+            r#"
+def _impl(ctx):
+    fc = ctx.bazel.flags_as_proto()
+    names = [fi.name for fi in fc.flag_infos]
+    if "config" not in names: return 1
+    if "keep_going" not in names: return 2
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+        )
+        .with_fake_bazel()
+        .run_task(0)
+        .expect("run_task");
+        assert_eq!(exit, Some(0));
     }
 }
