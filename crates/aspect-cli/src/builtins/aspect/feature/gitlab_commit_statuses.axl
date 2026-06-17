@@ -235,7 +235,7 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
             target_url = target_url or None,
             description = description or None,
             api_base = api_base,
-            auth_kind = "bearer",
+            auth_kind = _state["_auth_kind"],
         )
         if not result["success"]:
             _LOG.warn(ctx.std, "commit_status POST failed (state=%s): %s" % (
@@ -249,7 +249,7 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
         if _state.get("_gitlab_token"):
             return True
         auth_reason = {}
-        token = gitlab_token_cache.get_or_mint(
+        token, auth_kind = gitlab_token_cache.resolve_token(
             ctx,
             project_path = project_path,
             project_id = mr.get("project_id"),
@@ -263,6 +263,7 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
             ))
             return False
         _state["_gitlab_token"] = token
+        _state["_auth_kind"] = auth_kind
 
         # Re-resolve CI URL with the token in scope (mirrors GH path —
         # safe no-op when the CI URL is env-derived rather than
