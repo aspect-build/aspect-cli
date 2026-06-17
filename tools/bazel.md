@@ -38,6 +38,10 @@ The interesting case is the verbs aspect wraps (`build` / `test`) and the aspect
 
 > **Why `run` isn't wrapped by default:** `aspect run` exists, but its semantics don't yet line up closely enough with `bazel run` to shadow it transparently. Until that's resolved, `bazel run` goes to vanilla bazel (via `BAZEL_VERBS`). Reach for `aspect run` directly when you want the aspect behavior, or add `run` to `ASPECT_VERBS_WITH_BAZEL_FLAGS` in your repo copy once you've validated it for your workflows.
 
+### The `aspect-build/tools-bazel-wrapper` marker
+
+The script's first comment line, `# aspect-build/tools-bazel-wrapper`, together with the `ASPECT_BAZEL_WRAPPER_VERSION` variable, identifies the file as the canonical Aspect-shipped wrapper. `aspect wrapper install` / `--uninstall` use the marker to detect the file, and Aspect detects both to know that in this workspace `bazel <verb>` is equivalent to `aspect <verb>` — so its reproduce/fix commands and any tooling that suggests "vanilla bazel" alternatives stay accurate. **Don't remove or alter the marker (or the version line) if you fork the script.** `ASPECT_BAZEL_WRAPPER_VERSION` is bumped whenever the routing rules or env-var contract change in a way downstream detection might care about.
+
 ## How verb routing works
 
 The wrapper decides where a command goes from two lists at the top of the script:
@@ -50,6 +54,8 @@ The rules, in order (`ASPECT_WRAPPER_SKIP=1` short-circuits all of them — see 
 1. Verb in `ASPECT_VERBS_WITH_BAZEL_FLAGS` → `aspect <verb>` with bazel flags rewritten (see below).
 2. Verb in `BAZEL_VERBS` but not the above (`query`, `info`, `clean`, `mod`, `coverage`, …) → vanilla bazel, untouched.
 3. Any other verb → `aspect <verb>`, args forwarded verbatim. This is how custom `.axl` tasks (arbitrary names) reach aspect; we don't rewrite their flags since they may define their own. **If your custom command accepts `--bazel-flag` / `--bazel-startup-flag`, add it to `ASPECT_VERBS_WITH_BAZEL_FLAGS`** so the wrapper rewrites bazel-native flags for it too (rule 1).
+
+With no verb at all (e.g. bare `bazel`, or a leading `--` before any verb), or when `ASPECT_CLI_RUNNING` / `ASPECT_WRAPPER_SKIP` is set, the wrapper forwards the whole command line straight to `$BAZEL_REAL` (the real bazel Bazelisk resolved, or the next `bazel` on `PATH` that isn't this wrapper when `$BAZEL_REAL` is unset — e.g. when the script is invoked directly rather than via Bazelisk).
 
 ### When `aspect` isn't installed
 
