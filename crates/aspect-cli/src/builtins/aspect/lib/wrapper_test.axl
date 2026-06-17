@@ -23,6 +23,7 @@ load(
     "render_wrapper",
     "shell_snippet",
 )
+load("./wrapper_template.axl", "WRAPPER_DOC", "WRAPPER_TEMPLATE")
 
 def _eq(label, got, want):
     if got != want:
@@ -220,6 +221,13 @@ def _test_render_wrapper_substitutes_all_placeholders(ctx):
     _eq("bool filled", "    keep_going" in out, True)
     _eq("no placeholders left", "{{" not in out, True)
 
+def _test_template_has_all_placeholders(ctx):
+    for ph in ["{{BAZEL_VERBS}}", "{{BAZEL_VALUE_FLAGS}}", "{{BAZEL_BOOL_FLAGS}}", "{{BAZEL_SHORT_VALUE_FLAGS}}", "{{BAZEL_SHORT_BOOL_FLAGS}}", "{{ASPECT_CLI_VERSION}}", "{{BAZEL_VERSION}}"]:
+        _eq("placeholder " + ph + " present once", WRAPPER_TEMPLATE.count(ph), 1)
+    _eq("doc nonempty", len(WRAPPER_DOC) > 0, True)
+    _eq("marker kept", "# aspect-build/tools-bazel-wrapper" in WRAPPER_TEMPLATE, True)
+    _eq("aspect verbs kept intact", "ASPECT_VERBS_WITH_BAZEL_FLAGS=(" in WRAPPER_TEMPLATE, True)
+
 _UNIT_TESTS = [
     _test_raw_content_url,
     _test_workspace_root_at_cwd,
@@ -251,6 +259,7 @@ _UNIT_TESTS = [
     _test_derive_flag_lists_omits_unclassified,
     _test_render_flag_array_indents_and_joins,
     _test_render_wrapper_substitutes_all_placeholders,
+    _test_template_has_all_placeholders,
 ]
 
 def _test_impl(ctx):

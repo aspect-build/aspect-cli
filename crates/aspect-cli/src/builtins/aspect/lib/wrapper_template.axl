@@ -1,0 +1,799 @@
+"""Embedded `tools/bazel` wrapper script and its `tools/bazel.md` doc.
+
+WRAPPER_TEMPLATE is the wrapper with the five Bazel-derived flag arrays and
+the two version lines replaced by `{{...}}` placeholders, filled at install
+time by lib/wrapper.axl. WRAPPER_DOC is the companion doc, verbatim.
+"""
+
+WRAPPER_TEMPLATE = r"""#!/usr/bin/env bash
+# aspect-build/tools-bazel-wrapper
+#
+# Source of truth: https://github.com/aspect-build/aspect-cli/blob/main/tools/bazel
+# This file is *vendored* into your workspace via the install instructions
+# (see tools/bazel.md): your copy is a snapshot of the upstream script. When
+# upstream changes (new Bazel flags, routing tweaks), re-run the vendor step
+# to pull the latest.
+#
+# tools/bazel — Bazel wrapper that transparently routes Aspect-specific
+# functionality through the `aspect` CLI without forcing developers to learn
+# a new command name.
+#
+# Docs: https://github.com/aspect-build/aspect-cli/blob/main/tools/bazel.md
+#
+# Surprised that `bazel build` / `bazel test` runs through `aspect`?
+# Two ways to opt out, in increasing permanence:
+#
+#   1. Per-invocation:  ASPECT_WRAPPER_SKIP=1 bazel <verb> …
+#      Forwards everything straight to vanilla bazel, this run only. The
+#      same hint appears on the grey `[tools/bazel] …` trace line when the
+#      wrapper is about to shadow a real bazel verb.
+#
+#   2. Workspace-wide:  remove the verb (e.g. `build`, `test`) from
+#      ASPECT_VERBS_WITH_BAZEL_FLAGS below in your vendored copy of this
+#      script. Aspect-only verbs (lint/format/custom .axl tasks) keep
+#      routing through aspect; the listed bazel verbs go straight to
+#      vanilla bazel. No env var needed.
+#
+# The marker comment above (`# aspect-build/tools-bazel-wrapper`) and the
+# ASPECT_BAZEL_WRAPPER_VERSION variable below identify this file as the
+# canonical Aspect-shipped wrapper. Aspect detects them to know that in
+# this workspace `bazel <verb>` is equivalent to `aspect <verb>` for
+# reproduce/fix commands and tooling that suggests "vanilla bazel"
+# alternatives. Do NOT remove these markers if you fork the script.
+#
+# Behavior (verb routing):
+#   - verb in ASPECT_VERBS_WITH_BAZEL_FLAGS  → exec aspect <verb> [rewritten]
+#       (the verbs aspect wraps plus the aspect verbs that drive bazel —
+#        bazel-native flags become --bazel-flag=<flag>; everything else
+#        passes through to aspect.)
+#   - verb in BAZEL_VERBS (not above)        → exec $BAZEL_REAL <args...>
+#       (query, info, clean, mod, version, … — vanilla bazel, untouched.)
+#   - any other verb (custom .axl task)      → exec aspect <verb> [args...]
+#       (forwarded verbatim — we don't assume an unknown verb is bazel's.)
+#   - no verb / ASPECT_CLI_RUNNING / SKIP    → exec $BAZEL_REAL <args...>
+#
+# When `aspect` is NOT on PATH but a command would route to it, the wrapper
+# prints install instructions. If the verb is also a real bazel command
+# (build/test/coverage) it then falls back to vanilla bazel so the command
+# still runs; otherwise (lint/format/custom .axl tasks, which bazel can't run)
+# it exits. Plain bazel verbs never need aspect and run regardless.
+#
+# Flag handling (for verbs routed to aspect with rewriting):
+#   Bazel is the closed set. A flag whose name is in one of the embedded
+#   BAZEL_*_FLAGS lists is wrapped as `--bazel-flag=<flag>` (post-verb) or
+#   `--bazel-startup-flag=<flag>` (pre-verb). Value-taking flags written
+#   space-separated (`--config ci`, `-c opt`) consume the next token and glue
+#   with `=` (`--bazel-flag=--config=ci`, `--bazel-flag=-c=opt`). Every other
+#   flag — aspect's own flags, and anything we don't recognize — passes
+#   through to aspect unchanged.
+#
+# Maintaining the lists (edit in your own repo copy):
+#   ASPECT_VERBS_WITH_BAZEL_FLAGS and the BAZEL_*_FLAGS lists at the top of
+#   this file are the source of truth. If Bazel adds a flag we don't know, or
+#   you add an aspect command that accepts bazel flags (e.g. a custom task
+#   that shells out to bazel), add it to the relevant list. An unknown bazel
+#   flag simply passes through to aspect until you add it.
+#
+# Drop this script at `tools/bazel` in your workspace and make it executable
+# (`chmod +x tools/bazel`). The `tools/bazel` hook is a Bazelisk feature (the
+# real bazel binary does not look for it; see
+# https://github.com/bazelbuild/bazelisk): Bazelisk execs this script and
+# passes the resolved real-bazel path in BAZEL_REAL. When BAZEL_REAL is unset
+# — the wrapper was invoked directly, or by an aspect child — we fall back to
+# finding the next `bazel` on PATH that isn't this wrapper.
+#
+# Environment variables:
+#   ASPECT_WRAPPER_SKIP=1    Forward EVERYTHING straight to bazel, untouched —
+#                            no verb parsing, no list checks, no flag rewriting.
+#                            A total escape hatch for a 1:1 vanilla-bazel
+#                            experience; reach for `aspect <verb>` directly when
+#                            you want the wrapped behavior.
+#   ASPECT_WRAPPER_TRACE=1   Also print the resolved command when forwarding
+#                            straight to bazel. The aspect-route trace already
+#                            prints unconditionally (in grey on a TTY, plain
+#                            text otherwise, always on stderr); plain bazel
+#                            forwarding stays silent unless TRACE forces it on.
+#   ASPECT_WRAPPER_QUIET=1   Suppress the trace line entirely (wins over
+#                            ASPECT_WRAPPER_TRACE).
+#
+# Implicit env var (set by aspect, not by users):
+#   ASPECT_CLI_RUNNING=1     Aspect sets this on every child bazel it spawns.
+#                            When the wrapper sees it, it bypasses ALL routing
+#                            and forwards straight to the real bazel,
+#                            preventing aspect → tools/bazel → aspect → …
+#                            recursion. Customers should never set this
+#                            manually. See bazelisk's BAZELISK_SKIP_WRAPPER
+#                            for the same pattern.
+
+set -euo pipefail
+
+# Wrapper schema version. Bumped when the routing rules or env-var contract
+# change in a way that downstream detection might care about. See the
+# `aspect-build/tools-bazel-wrapper` marker comment at the top of the file.
+ASPECT_BAZEL_WRAPPER_VERSION="{{ASPECT_CLI_VERSION}}"
+ASPECT_BAZEL_WRAPPER_BAZEL_VERSION="{{BAZEL_VERSION}}"
+export ASPECT_BAZEL_WRAPPER_VERSION
+
+# --- Anti-inception bypass ------------------------------------------------
+#
+# If aspect set ASPECT_CLI_RUNNING, we're being invoked as a CHILD of aspect.
+# Skip every code path that would re-enter aspect and forward to the real
+# bazel directly. Done before everything else so it costs nothing in the
+# common case and can't be defeated by later config.
+if [[ -n "${ASPECT_CLI_RUNNING:-}" ]]; then
+    if [[ -n "${BAZEL_REAL:-}" && -x "$BAZEL_REAL" ]]; then
+        exec "$BAZEL_REAL" "$@"
+    fi
+    # No BAZEL_REAL (aspect was invoked directly, not through Bazelisk).
+    # Find the next bazel on PATH that isn't us.
+    self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+    while IFS= read -r candidate; do
+        if [[ "$(cd "$(dirname "$candidate")" && pwd)/$(basename "$candidate")" != "$self" ]]; then
+            exec "$candidate" "$@"
+        fi
+    done < <(type -aP bazel 2>/dev/null || true)
+    echo "ERROR: tools/bazel: ASPECT_CLI_RUNNING is set but no real bazel found on PATH" >&2
+    exit 127
+fi
+
+# ============================================================================
+# Configuration — EDIT THESE in your own repo copy
+# ============================================================================
+#
+# Two kinds of list drive every routing decision; both are meant to be edited
+# by whoever owns the workspace copy of this script:
+#
+#   1. ASPECT_VERBS_WITH_BAZEL_FLAGS — which verbs go to `aspect` AND accept
+#      forwarded bazel flags.
+#   2. BAZEL_VERBS + the BAZEL_*_FLAGS lists — the closed set of "what Bazel
+#      understands". Anything outside it is treated as aspect's.
+#
+# If Bazel adds a command or flag we don't list, or you add an aspect command
+# that should accept bazel flags (e.g. a custom task that shells out to
+# bazel), add it to the relevant list below.
+
+# Verbs routed to `aspect` with bazel-flag rewriting: bazel-native flags after
+# the verb become `--bazel-flag=<flag>`, everything else passes through to
+# aspect. Includes the Bazel verbs aspect wraps (`build`/`test`) and the
+# aspect verbs that drive bazel internally (`lint`, `format`, …). Add your own
+# bazel-flag-aware aspect commands here.
+ASPECT_VERBS_WITH_BAZEL_FLAGS=(
+    build
+    buildifier
+    delivery
+    format
+    gazelle
+    lint
+    test
+)
+
+# The closed set of Bazel commands (Bazel 9). A verb here that is NOT in
+# ASPECT_VERBS_WITH_BAZEL_FLAGS forwards to vanilla bazel untouched (query,
+# info, clean, mod, …). Generated by: `bazel help` (the "Available commands"
+# list).
+BAZEL_VERBS=(
+{{BAZEL_VERBS}}
+)
+
+# Bazel flags that take a SPACE-separated value (e.g. `--config foo` rather
+# than `--config=foo`). Required so the wrapper consumes the following argv
+# element and rewrites the pair as one `--bazel-flag=--name=value` token.
+# Generated from `bazel help build|test|run|startup_options --long` at
+# Bazel 9.x. Booleans (--[no]name) live in BAZEL_BOOL_FLAGS, not here.
+BAZEL_VALUE_FLAGS=(
+{{BAZEL_VALUE_FLAGS}}
+)
+
+# Bazel boolean (no-value) flags, in their bare name form (the wrapper also
+# matches the `--[no]` / `--no` negations). These wrap as a single
+# `--bazel-flag=<flag>` token — they never consume the next argv element.
+# Generated from `bazel help build|test|run|startup_options --long` (the
+# `--[no]name` annotations) at Bazel 9.x.
+BAZEL_BOOL_FLAGS=(
+{{BAZEL_BOOL_FLAGS}}
+)
+
+# Bazel short-flag abbreviations that take a value, in their bare `-x` form
+# (e.g. `-c opt` → `--compilation_mode=opt`, `-j 8` → `--jobs=8`). Like their
+# long counterparts these consume the following argv element. `-x=value`
+# carries its value in one token already and needs no entry here.
+BAZEL_SHORT_VALUE_FLAGS=(
+{{BAZEL_SHORT_VALUE_FLAGS}}
+)
+
+# Bazel boolean short-flag abbreviations (`-k` keep_going, `-s` subcommands,
+# `-t` cache_test_results). These wrap as a single token, never consuming the
+# next arg.
+BAZEL_SHORT_BOOL_FLAGS=(
+{{BAZEL_SHORT_BOOL_FLAGS}}
+)
+
+# Lookup tables for the membership checks below. We use space-padded strings
+# rather than associative arrays so the wrapper runs on the bash 3.2 that
+# macOS still ships at /bin/bash. The check is O(n) but n is small and bash's
+# `case` pattern match is fast enough that it doesn't show up in any profile.
+#
+# Membership test: `case " $TABLE " in *" $needle "*) hit ;; esac`
+BAZEL_VALUE_FLAGS_STR=" ${BAZEL_VALUE_FLAGS[*]} "
+BAZEL_BOOL_FLAGS_STR=" ${BAZEL_BOOL_FLAGS[*]} "
+BAZEL_SHORT_VALUE_FLAGS_STR=" ${BAZEL_SHORT_VALUE_FLAGS[*]} "
+BAZEL_SHORT_BOOL_FLAGS_STR=" ${BAZEL_SHORT_BOOL_FLAGS[*]} "
+ASPECT_VERBS_WITH_BAZEL_FLAGS_STR=" ${ASPECT_VERBS_WITH_BAZEL_FLAGS[*]} "
+BAZEL_VERBS_STR=" ${BAZEL_VERBS[*]} "
+
+# --- Helpers --------------------------------------------------------------
+
+# Source-of-truth docs link, appended to every aspect-route trace so the
+# user can read about the routing rules without grepping the wrapper.
+ASPECT_WRAPPER_DOCS_URL="https://github.com/aspect-build/aspect-cli/blob/main/tools/bazel.md"
+
+# True on any recognized CI host. Mirrors the runtime's `on_recognized_ci`
+# (crates/axl-runtime/src/ci.rs). Used to grey the trace in CI logs, which
+# render ANSI color despite having no TTY. Presence — not truthiness — is
+# what counts: GHA sometimes exports `CI=` (empty), and that still counts.
+on_recognized_ci() {
+    [[ -n "${CI+x}" ]] && return 0
+    [[ -n "${BUILDKITE+x}" ]] && return 0
+    [[ -n "${GITHUB_ACTIONS+x}" ]] && return 0
+    [[ -n "${CIRCLECI+x}" ]] && return 0
+    [[ -n "${GITLAB_CI+x}" ]] && return 0
+    return 1
+}
+
+# Print a trace line on stderr showing what the wrapper is about to exec
+# (grey on a color-capable destination, plain text otherwise).
+#
+# Usage: trace_exec <category> <shadow> <argv...>
+#
+# <category> is "aspect" when routing to aspect (the interesting case — the
+# wrapper rewrote something) or "bazel" when forwarding straight to bazel
+# (uninteresting; would be visually noisy on `bazel info`, `bazel query`,
+# etc.). The "aspect" category always prints (unless ASPECT_WRAPPER_QUIET);
+# the "bazel" category is silent unless ASPECT_WRAPPER_TRACE=1 forces it on.
+#
+# <shadow> is "shadow" when this invocation is shadowing a real bazel verb
+# (e.g. `build`/`test` — verbs in both ASPECT_VERBS_WITH_BAZEL_FLAGS and
+# BAZEL_VERBS), and "" otherwise. Shadowing is the surprising case — the
+# user typed something bazel could run, and we routed it through aspect.
+# When set, the trace line gets a suffix nudging the user toward
+# `ASPECT_WRAPPER_SKIP=1` (one-shot bypass) so they know how to opt out;
+# the docs link covers the longer-lived alternative of editing
+# ASPECT_VERBS_WITH_BAZEL_FLAGS in their copy of the wrapper.
+#
+# Every aspect-route trace ends with `— docs: <url>` so the routing rules
+# are one click away regardless of whether the verb shadows bazel.
+#
+# Visibility rules:
+#
+#   aspect category (routing to / shadowing aspect — the interesting case):
+#     - always print, exclusively to stderr, regardless of TTY or CI. The
+#       wrapper rewrote/shadowed a command and the user should see it.
+#     - ASPECT_WRAPPER_QUIET → silent (the only mute).
+#
+#   bazel category (plain forwarding — uninteresting, would be noisy on
+#   `bazel info`, `bazel query`, …):
+#     - silent unless ASPECT_WRAPPER_TRACE=1 forces it on.
+#     - ASPECT_WRAPPER_QUIET → silent (wins over TRACE).
+#
+# ANSI grey wraps the line only on a TTY (or when forced / on CI, where logs
+# render color); a non-TTY stderr gets plain text, so a script capturing
+# stderr never sees escape bytes.
+trace_exec() {
+    local category="$1" shadow="$2"
+    shift 2
+    [[ -n "${ASPECT_WRAPPER_QUIET:-}" ]] && return 0
+    local force="${ASPECT_WRAPPER_TRACE:-}"
+    # Pure bazel forwarding: silent unless explicitly forced.
+    if [[ "$category" == "bazel" && -z "$force" ]]; then
+        return 0
+    fi
+    # Aspect routing always prints (handled by falling through to here). Grey
+    # only when the output renders color: a TTY, or forced / on CI.
+    local on_ci=0
+    on_recognized_ci && on_ci=1
+    local grey="" reset=""
+    if [[ -t 2 || -n "$force" || $on_ci -eq 1 ]]; then
+        grey=$'\033[38;5;244m'
+        reset=$'\033[0m'
+    fi
+    # Quote each arg if it contains anything outside the shell-safe character
+    # set, so the trace line could be copy-pasted back into a terminal.
+    local quoted=""
+    local a stripped
+    for a in "$@"; do
+        # Remove every safe character; whatever remains is "needs quoting".
+        stripped="${a//[A-Za-z0-9._\/=:@,+-]/}"
+        if [[ -z "$a" || -n "$stripped" ]]; then
+            # shellcheck disable=SC2001
+            quoted+=" '$(echo "$a" | sed "s/'/'\\\\''/g")'"
+        else
+            quoted+=" $a"
+        fi
+    done
+    # Suffix only on aspect routing: bazel forwards are already vanilla and
+    # don't need an opt-out hint. Shadow nudges go first (most actionable);
+    # the docs link is always last.
+    local suffix=""
+    if [[ "$category" == "aspect" ]]; then
+        if [[ "$shadow" == "shadow" ]]; then
+            suffix+=" — set ASPECT_WRAPPER_SKIP=1 to skip the forward to \`aspect\`"
+        fi
+        suffix+=" — docs: $ASPECT_WRAPPER_DOCS_URL"
+    fi
+    printf '%s[tools/bazel]%s%s%s\n' "$grey" "$quoted" "$suffix" "$reset" >&2
+}
+
+# Locate the real bazel binary. Bazelisk sets BAZEL_REAL when it execs this
+# wrapper; a direct or aspect-child invocation has no BAZEL_REAL. So prefer
+# BAZEL_REAL, else scan PATH for the next `bazel` that isn't this wrapper.
+resolve_bazel_real() {
+    if [[ -n "${BAZEL_REAL:-}" && -x "$BAZEL_REAL" ]]; then
+        echo "$BAZEL_REAL"
+        return
+    fi
+    local self
+    self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+    local candidate
+    while IFS= read -r candidate; do
+        if [[ "$(cd "$(dirname "$candidate")" && pwd)/$(basename "$candidate")" != "$self" ]]; then
+            echo "$candidate"
+            return
+        fi
+    done < <(type -aP bazel 2>/dev/null || true)
+    echo "ERROR: tools/bazel: cannot find a real bazel binary on PATH (and BAZEL_REAL is unset)" >&2
+    exit 127
+}
+
+contains() {
+    local needle="$1"
+    shift
+    local item
+    for item in "$@"; do
+        [[ "$item" == "$needle" ]] && return 0
+    done
+    return 1
+}
+
+# True when the `aspect` CLI is on PATH. Routing to aspect only matters when
+# it's actually installed; see aspect_missing_hint.
+aspect_on_path() {
+    command -v aspect >/dev/null 2>&1
+}
+
+# Explain that the given command needs the (missing) `aspect` CLI and print
+# install instructions. Leads with *why* so the message isn't a mystery: the
+# presence of this wrapper means `bazel <verb>` is wired to run through aspect.
+#
+# Usage: aspect_missing_hint <verb> [fallback_note]
+aspect_missing_hint() {
+    local verb="$1" fallback_note="${2:-}"
+    cat >&2 <<EOF
+[tools/bazel] \`bazel ${verb}\` runs through the Aspect CLI (\`aspect\`), which is not on your PATH.
+
+  Install it with:
+
+    curl -fsSL https://install.aspect.build | bash
+
+  or see https://docs.aspect.build/cli/install
+EOF
+    [[ -n "$fallback_note" ]] && echo "  $fallback_note" >&2
+    return 0
+}
+
+# Walk a flag list and classify each token into the OUT array. Bazel-native
+# flags (recognized by name in the embedded BAZEL_*_FLAGS lists) are wrapped
+# with WRAPPER_PREFIX (--bazel-flag= or --bazel-startup-flag=); everything
+# else — aspect's own flags, and anything we don't recognize — passes through
+# to aspect unchanged.
+#
+# Usage:  classify_flags <wrapper_prefix> <out_array_name> <args...>
+#
+# Writes the rewritten tokens to the global array named by <out_array_name>
+# (the caller declares it; we append via `eval` because bash 3.2 has no
+# nameref support — see https://wiki.bash-hackers.org/scripting/bashchanges).
+#
+# Behavior per token:
+#   --                                → stop classifying; remainder passes through
+#   non-flag (target, etc.)           → pass through
+#   --name=value / -x=value where name
+#     is a known bazel flag           → push "<prefix><token>"
+#   --name / -x where name is a known
+#     bazel value-taking flag         → consume next token N, push
+#                                       "<prefix>--name=N" (or "<prefix>-x=N")
+#   --name / -x where name is a known
+#     bazel boolean flag (incl. no-)  → push "<prefix><token>"
+#   anything else (aspect/unknown)    → pass through unchanged
+#
+# Append one element to the array named by $1. Bash 3.2 has no namerefs, so
+# the append goes through `eval`; this helper keeps that idiom in one place.
+array_push() {
+    eval "$1+=(\"\$2\")"
+}
+
+classify_flags() {
+    local prefix="$1"
+    local out_name="$2"
+    shift 2
+    local tokens=("$@")
+    local n=${#tokens[@]}
+    local i=0 passthrough=0
+    local t body bare neg
+    while [[ $i -lt $n ]]; do
+        t="${tokens[$i]}"
+        i=$((i + 1))
+
+        # Passthrough mode (after `--`) and non-flags emit verbatim.
+        if [[ $passthrough -eq 1 || "$t" != -* ]]; then
+            array_push "$out_name" "$t"
+            continue
+        fi
+        if [[ "$t" == "--" ]]; then
+            passthrough=1
+            array_push "$out_name" "$t"
+            continue
+        fi
+
+        # `bare` is the flag name without leading dashes or =value (keeping the
+        # short `-x` form so short flags match separately). `neg` is the bare
+        # name with a `no` boolean-negation prefix stripped, so `--nokeep_going`
+        # matches the boolean `keep_going`. No bazel flag name starts with `no`,
+        # so stripping never produces a false match.
+        body="${t#--}"
+        bare="${body%%=*}"
+        neg="${bare#no}"
+
+        # Space-form value flag (long or short): consume the next token and glue
+        # with `=` (`--config ci` → `--config=ci`, `-c opt` → `-c=opt`). The
+        # `=value` form already carries its value and falls through to the wrap.
+        if [[ "$body" != *=* && $i -lt $n ]]; then
+            case "$BAZEL_VALUE_FLAGS_STR" in *" $bare "*)
+                array_push "$out_name" "${prefix}--${bare}=${tokens[$i]}"
+                i=$((i + 1))
+                continue
+                ;;
+            esac
+            case "$BAZEL_SHORT_VALUE_FLAGS_STR" in *" $bare "*)
+                array_push "$out_name" "${prefix}${bare}=${tokens[$i]}"
+                i=$((i + 1))
+                continue
+                ;;
+            esac
+        fi
+
+        # Any other recognized bazel flag — value flag in `=value` form (or with
+        # no value left to consume), boolean (or its `no` negation), or short
+        # flag — wraps as a single token.
+        case "$BAZEL_VALUE_FLAGS_STR$BAZEL_SHORT_VALUE_FLAGS_STR$BAZEL_SHORT_BOOL_FLAGS_STR" in *" $bare "*)
+            array_push "$out_name" "${prefix}${t}"
+            continue
+            ;;
+        esac
+        case "$BAZEL_BOOL_FLAGS_STR" in *" $bare "* | *" $neg "*)
+            array_push "$out_name" "${prefix}${t}"
+            continue
+            ;;
+        esac
+
+        # Unrecognized flag: pass through to aspect unchanged.
+        array_push "$out_name" "$t"
+    done
+}
+
+# --- Dispatch -------------------------------------------------------------
+
+BAZEL_REAL_BIN="$(resolve_bazel_real)"
+
+# Skip mode: forward everything straight to vanilla bazel, untouched — no verb
+# parsing, no list checks, no flag rewriting. A total escape hatch for
+# developers who want a 1:1 bazel experience locally; reach for `aspect <verb>`
+# directly when you want the wrapped behavior.
+if [[ -n "${ASPECT_WRAPPER_SKIP:-}" ]]; then
+    trace_exec bazel "" "$BAZEL_REAL_BIN" "$@"
+    exec "$BAZEL_REAL_BIN" "$@"
+fi
+
+# Verb-disambiguation set: "is this bare token the verb, or the value of a
+# preceding space-separated flag?" Derived from the config lists — bazel
+# verbs plus the aspect verbs we route with rewriting. Best-effort: custom
+# aspect verbs (arbitrary .axl task names) won't appear here, but they don't
+# need to — the fallback below treats any bare token NOT preceded by a
+# value-taking flag as the verb, which covers `bazel mytask …`. The set only
+# breaks the ambiguous `bazel --some_value_flag mytask` case in mytask's
+# favor; without it that custom verb would be mistaken for the flag's value.
+KNOWN_VERBS_STR="${BAZEL_VERBS_STR}${ASPECT_VERBS_WITH_BAZEL_FLAGS_STR}"
+
+# Pre-verb walk. Anything flag-shaped is collected. Bare tokens (no leading
+# `-`) are either the verb or the value of a preceding space-separated flag;
+# we disambiguate by checking KNOWN_VERBS_STR. `--` before any verb is
+# treated as "no verb" — forward the whole thing to bazel verbatim.
+pre_verb=()
+verb=""
+verb_idx=-1
+args=("$@")
+n_args=${#args[@]}
+prev_was_value_taking=0
+i=0
+while [[ $i -lt $n_args ]]; do
+    arg="${args[$i]}"
+    if [[ "$arg" == "--" ]]; then
+        break
+    fi
+    if [[ "$arg" == -* ]]; then
+        pre_verb+=("$arg")
+        # Could this flag consume the next bare token as its value? Only
+        # space-form bazel value flags (long or short) do.
+        body="${arg#--}"
+        name="${body%%=*}"
+        if [[ "$body" == *=* ]]; then
+            prev_was_value_taking=0
+        else
+            case "$BAZEL_VALUE_FLAGS_STR$BAZEL_SHORT_VALUE_FLAGS_STR" in
+            *" $name "*) prev_was_value_taking=1 ;;
+            *) prev_was_value_taking=0 ;;
+            esac
+        fi
+        i=$((i + 1))
+        continue
+    fi
+    # Bare token. If it's a known verb, OR if the previous arg wasn't a
+    # value-taker, treat it as the verb. Otherwise consume it as the
+    # previous flag's value and keep walking.
+    is_known_verb=0
+    case "$KNOWN_VERBS_STR" in
+    *" $arg "*) is_known_verb=1 ;;
+    esac
+    if [[ $is_known_verb -eq 1 || $prev_was_value_taking -eq 0 ]]; then
+        verb="$arg"
+        verb_idx=$i
+        break
+    fi
+    pre_verb+=("$arg")
+    prev_was_value_taking=0
+    i=$((i + 1))
+done
+
+# No verb: forward verbatim to bazel.
+if [[ -z "$verb" ]]; then
+    trace_exec bazel "" "$BAZEL_REAL_BIN" "$@"
+    exec "$BAZEL_REAL_BIN" "$@"
+fi
+
+# Verb routed to aspect WITH bazel-flag rewriting (the verbs aspect wraps plus
+# the aspect verbs that drive bazel — see ASPECT_VERBS_WITH_BAZEL_FLAGS).
+# Pre-verb bazel flags become --bazel-startup-flag=; post-verb bazel flags
+# become --bazel-flag=.
+if contains "$verb" "${ASPECT_VERBS_WITH_BAZEL_FLAGS[@]}"; then
+    # No aspect on PATH: nudge toward installing it. If the verb is also a real
+    # bazel command (build/test/coverage) fall back to vanilla bazel so the
+    # command still runs; otherwise (lint/format/…) bazel can't run it, so stop.
+    if ! aspect_on_path; then
+        if contains "$verb" "${BAZEL_VERBS[@]}"; then
+            aspect_missing_hint "$verb" "Running it through vanilla bazel for now."
+            trace_exec bazel "" "$BAZEL_REAL_BIN" "$@"
+            exec "$BAZEL_REAL_BIN" "$@"
+        fi
+        aspect_missing_hint "$verb"
+        exit 127
+    fi
+    pre_for_aspect=()
+    if [[ ${#pre_verb[@]} -gt 0 ]]; then
+        classify_flags "--bazel-startup-flag=" pre_for_aspect "${pre_verb[@]}"
+    fi
+    post=("${@:$((verb_idx + 2))}")
+    post_rewritten=()
+    if [[ ${#post[@]} -gt 0 ]]; then
+        classify_flags "--bazel-flag=" post_rewritten "${post[@]}"
+    fi
+    # Aspect accepts --bazel-startup-flag as a POST-verb flag. Move pre-verb
+    # startup-flag forwards into the post-verb position; aspect global flags
+    # (--task-key, --timing, …) stay in front of the verb.
+    #
+    # The `${arr[@]+"${arr[@]}"}` form expands to nothing when the array is
+    # empty without tripping `set -u` on the bash 3.2 that macOS ships.
+    pre_globals=()
+    pre_bazel_starts=()
+    for arg in ${pre_for_aspect[@]+"${pre_for_aspect[@]}"}; do
+        if [[ "$arg" == --bazel-startup-flag=* ]]; then
+            pre_bazel_starts+=("$arg")
+        else
+            pre_globals+=("$arg")
+        fi
+    done
+    export BAZEL_REAL="$BAZEL_REAL_BIN"
+    set -- ${pre_globals[@]+"${pre_globals[@]}"} "$verb" \
+        ${pre_bazel_starts[@]+"${pre_bazel_starts[@]}"} \
+        ${post_rewritten[@]+"${post_rewritten[@]}"}
+    # A verb in both lists (build/test/…) shadows bazel — what the user typed
+    # is a real bazel command and we're routing it through aspect anyway. The
+    # trace nudges toward ASPECT_WRAPPER_SKIP=1 in that case.
+    shadow=""
+    if contains "$verb" "${BAZEL_VERBS[@]}"; then
+        shadow="shadow"
+    fi
+    trace_exec aspect "$shadow" aspect "$@"
+    exec aspect "$@"
+fi
+
+# Other bazel verb (query, info, clean, mod, …): vanilla bazel, untouched.
+if contains "$verb" "${BAZEL_VERBS[@]}"; then
+    trace_exec bazel "" "$BAZEL_REAL_BIN" "$@"
+    exec "$BAZEL_REAL_BIN" "$@"
+fi
+
+# Unknown verb: a custom aspect task (.axl) with an arbitrary name. Route to
+# aspect and forward args verbatim — we don't rewrite bazel flags because the
+# task may define its own flags, and it isn't in ASPECT_VERBS_WITH_BAZEL_FLAGS.
+# Bazel has no such command, so if aspect is missing there's no fallback.
+if ! aspect_on_path; then
+    aspect_missing_hint "$verb"
+    exit 127
+fi
+export BAZEL_REAL="$BAZEL_REAL_BIN"
+# Custom .axl tasks never shadow bazel: bazel has no such command.
+trace_exec aspect "" aspect "$@"
+exec aspect "$@"
+"""
+
+WRAPPER_DOC = r"""# `tools/bazel` wrapper — transparent Aspect routing
+
+> **Source of truth:** <https://github.com/aspect-build/aspect-cli/blob/main/tools/bazel> (and this doc at `tools/bazel.md` alongside it). Both files are designed to be **vendored** into your workspace via the install instructions below — your `tools/bazel` and `tools/bazel.md` are copies of the upstream files. When upstream changes (new Bazel flags, routing tweaks, doc updates), re-run the vendor step to pull the latest.
+
+A drop-in `tools/bazel` shell script that lets developers keep typing `bazel` while still reaching Aspect-specific functionality (`lint`, `format`, `delivery`, …) and Aspect's value-added wrappers around `build` / `test`.
+
+Copy `tools/bazel` from this repo into your own workspace, adjust the verb lists at the top, commit it, and you're done.
+
+## About the Aspect CLI
+
+The [Aspect CLI](https://github.com/aspect-build/aspect-cli) (`aspect`) is a free, open-source, Apache-2.0-licensed task runner that extends Bazel with first-class developer workflows — built-in tasks for `build`, `test`, `run`, `format`, `lint`, `gazelle`, and `delivery`, plus custom tasks defined in [AXL](https://docs.aspect.build/cli/overview#aspect-extension-language) (Aspect Extension Language, typed Starlark). Same command locally and in every CI provider; native integration with GitHub Status Checks, Buildkite Annotations, and the equivalents on GitLab and CircleCI.
+
+- **Docs:** <https://docs.aspect.build/cli/overview>
+- **Source / releases:** <https://github.com/aspect-build/aspect-cli>
+- **Install:** `curl -fsSL https://install.aspect.build | bash`
+
+### Minimum Aspect CLI version
+
+**This wrapper requires Aspect CLI v2026.23.18 or newer.** That release adds the `ASPECT_CLI_RUNNING` re-entry signal the wrapper relies on to avoid infinite recursion when `aspect` shells back out to `bazel` (see [How it avoids infinite recursion](#how-it-avoids-infinite-recursion) below). Older versions don't set `ASPECT_CLI_RUNNING`, and the wrapper would route every internal `bazel` child invocation back through `aspect` indefinitely.
+
+## What it does
+
+The `tools/bazel` hook is a [Bazelisk](https://github.com/bazelbuild/bazelisk) feature — the real `bazel` binary does not look for it. When Bazelisk finds `tools/bazel` in your workspace it execs that script instead of the bazel version it resolved, passing the resolved path as `$BAZEL_REAL`. (So this only works if the `bazel` on your `PATH` is Bazelisk — the standard setup.) This wrapper uses that hook to dispatch each command to the right tool:
+
+| You type | What runs |
+| --- | --- |
+| `bazel build //... --keep_going --config=ci` | `aspect build //... --bazel-flag=--keep_going --bazel-flag=--config=ci` |
+| `bazel build -c opt //...` | `aspect build --bazel-flag=-c=opt //...` |
+| `bazel test //... --test_output errors` | `aspect test //... --bazel-flag=--test_output=errors` |
+| `bazel lint --config=ci //src/...` | `aspect lint --bazel-flag=--config=ci //src/...` |
+| `bazel format --keep_going` | `aspect format --bazel-flag=--keep_going` |
+| `bazel delivery --config=release //...` | `aspect delivery --bazel-flag=--config=release //...` |
+| `bazel query 'deps(//foo)'` | `$BAZEL_REAL query 'deps(//foo)'` (vanilla bazel, unchanged) |
+| `bazel info workspace` | `$BAZEL_REAL info workspace` |
+| `bazel my-custom-task //...` | `aspect my-custom-task //...` (unknown verb → aspect verbatim) |
+
+The interesting case is the verbs aspect wraps (`build` / `test`) and the aspect verbs that drive Bazel internally (`lint`, `format`, `delivery`, …). The wrapper routes those through `aspect` so you pick up its DX improvements (artifact upload, GitHub PR comments, BES streaming, …), but **bazel-native flags keep working** — they're transparently rewritten as `--bazel-flag=<flag>` so aspect forwards them verbatim to Bazel.
+
+> **Why `run` isn't wrapped by default:** `aspect run` exists, but its semantics don't yet line up closely enough with `bazel run` to shadow it transparently. Until that's resolved, `bazel run` goes to vanilla bazel (via `BAZEL_VERBS`). Reach for `aspect run` directly when you want the aspect behavior, or add `run` to `ASPECT_VERBS_WITH_BAZEL_FLAGS` in your repo copy once you've validated it for your workflows.
+
+## How verb routing works
+
+The wrapper decides where a command goes from two lists at the top of the script:
+
+- `ASPECT_VERBS_WITH_BAZEL_FLAGS` — verbs routed to `aspect` **with** bazel-flag rewriting (default `build buildifier delivery format gazelle lint test`).
+- `BAZEL_VERBS` — the closed set of Bazel commands. A verb here that's *not* in the list above (`query`, `info`, `clean`, `mod`, `coverage`, …) goes to vanilla bazel.
+
+The rules, in order (`ASPECT_WRAPPER_SKIP=1` short-circuits all of them — see below):
+
+1. Verb in `ASPECT_VERBS_WITH_BAZEL_FLAGS` → `aspect <verb>` with bazel flags rewritten (see below).
+2. Verb in `BAZEL_VERBS` but not the above (`query`, `info`, `clean`, `mod`, `coverage`, …) → vanilla bazel, untouched.
+3. Any other verb → `aspect <verb>`, args forwarded verbatim. This is how custom `.axl` tasks (arbitrary names) reach aspect; we don't rewrite their flags since they may define their own. **If your custom command accepts `--bazel-flag` / `--bazel-startup-flag`, add it to `ASPECT_VERBS_WITH_BAZEL_FLAGS`** so the wrapper rewrites bazel-native flags for it too (rule 1).
+
+### When `aspect` isn't installed
+
+The wrapper's presence means the org wants devs on aspect, so if a command would route to aspect (rule 1 or 3) but `aspect` isn't on `PATH`, the wrapper prints install instructions:
+
+```
+curl -fsSL https://install.aspect.build | bash
+```
+
+…or see <https://docs.aspect.build/cli/install>. If the verb is also a real Bazel command (`build`/`test`) the wrapper then falls back to vanilla bazel so the command still runs; for aspect-only verbs (`lint`, `format`, custom tasks) Bazel has nothing to run, so it exits. Plain bazel verbs (rule 2) never need aspect and run regardless.
+
+## How flag rewriting works
+
+Bazel is the closed set. The wrapper classifies each flag against the embedded Bazel flag lists; a flag whose name is in one of them is a Bazel flag, and **everything else** — aspect's own flags and anything unrecognized — passes through to aspect unchanged.
+
+- `BAZEL_VALUE_FLAGS` — Bazel flags that take a value (consume the next token when space-separated). From `bazel help build|test|run|startup_options --long`, **Bazel 9.x**.
+- `BAZEL_BOOL_FLAGS` — Bazel boolean (no-value) flags. The wrapper also matches their `--no…` negations.
+- `BAZEL_SHORT_VALUE_FLAGS` (`-c`, `-j`) / `BAZEL_SHORT_BOOL_FLAGS` (`-k`, `-s`, `-t`) — the short-flag abbreviations, so `bazel build -c opt //...` consumes `opt` instead of leaving it as a stray target.
+
+The rules:
+
+1. A recognized Bazel flag is wrapped: `--keep_going` → `--bazel-flag=--keep_going`; `--config=ci` → `--bazel-flag=--config=ci`; `--config ci` → `--bazel-flag=--config=ci` (next token consumed and glued with `=`); `-c opt` → `--bazel-flag=-c=opt`.
+2. Anything else passes through unchanged: aspect globals (`--task-key`, `--timing`), feature flags (`--artifact-upload:enabled`), and unrecognized flags — including a typo or a brand-new Bazel flag not yet in the lists, which simply goes to aspect until you add it.
+3. After `--`, everything passes through verbatim (positional targets, `run` arguments, etc.).
+4. Flags **before the verb** get the same classification, except Bazel flags wrap as `--bazel-startup-flag=…` (which aspect accepts as a post-verb flag, so they're moved after the verb). Aspect global flags stay in front of the verb.
+
+To refresh the embedded Bazel flag lists when Bazel adds flags. These scrape `bazel help` and aren't aspect- or repo-specific — the output depends only on the Bazel version, so run them against the version you target. Note that in a workspace where this wrapper is on `PATH`, plain `bazel help build` would route through the wrapper; `ASPECT_WRAPPER_SKIP=1` (below) bypasses it so `help` reaches the real bazel. (Outside such a workspace, drop the prefix.)
+
+```sh
+export ASPECT_WRAPPER_SKIP=1  # ensure `bazel help` reaches the real bazel
+
+# Value-taking flags
+for h in build test run startup_options; do bazel help $h --long; done \
+  | grep -oE '^[[:space:]]+--[a-z_][a-z0-9_]*' | grep -vE '\-\-\[no\]' \
+  | sed -E 's/^[[:space:]]*--//' | sort -u
+
+# Boolean flags
+for h in build test run startup_options; do bazel help $h --long; done \
+  | grep -oE '^[[:space:]]+--\[no\][a-z][a-z0-9_]*' \
+  | sed -E 's/^[[:space:]]*--\[no\]//' | sort -u
+```
+
+## Installing in your repo
+
+Grab the script straight from this repo and drop it in your own `tools/` directory, along with this doc so your team has the routing reference:
+
+```sh
+mkdir -p tools
+base=https://raw.githubusercontent.com/aspect-build/aspect-cli/main/tools
+curl -fsSL "$base/bazel" -o tools/bazel
+curl -fsSL "$base/bazel.md" -o tools/bazel.md
+chmod +x tools/bazel
+git add tools/bazel tools/bazel.md
+```
+
+Make sure the `bazel` on your `PATH` is [Bazelisk](https://github.com/bazelbuild/bazelisk) — it's what execs `tools/bazel` (the real bazel binary doesn't). Every Bazelisk release since 2019 honors the hook. No other changes needed.
+
+## Trace output
+
+When the wrapper routes a command **through aspect**, it prints a single grey trace line on stderr beforehand showing the resolved command. This makes the rewrite visible:
+
+```
+[tools/bazel] aspect build --bazel-flag=--keep_going --bazel-flag=--config=ci //...
+→ 🎬 Running `build` task
+…
+```
+
+When the wrapper forwards **straight to bazel** (e.g. `bazel info`, `bazel query`, anything under skip mode below), the trace is silent — that path is uninteresting and would just add noise.
+
+Env vars:
+
+- `ASPECT_WRAPPER_TRACE=1` — print the trace on every exec, including bazel forwarding. Also forces the line on even when stderr is not a TTY (useful for piping debug output to a file).
+- `ASPECT_WRAPPER_QUIET=1` — suppress the trace entirely. Wins over `TRACE`.
+
+The trace is silent under non-TTY stderr by default, so CI logs and command-substitution captures aren't polluted.
+
+## Skip mode — total bypass
+
+Some developers prefer a 1:1 Bazel experience locally and reach for `aspect <verb>` directly when they want the wrapped behavior. Set:
+
+```sh
+export ASPECT_WRAPPER_SKIP=1
+```
+
+…and the wrapper forwards **everything** straight to `$BAZEL_REAL`, untouched — no verb parsing, no list checks, no flag rewriting. It's a complete escape hatch: even aspect-only verbs like `lint` go to vanilla bazel (where they'll error if bazel has no such command — which is the point; you asked for vanilla bazel).
+
+This is per-shell, per-developer. To change routing repo-wide instead, edit the verb lists (e.g. remove `build test run` from `ASPECT_VERBS_WITH_BAZEL_FLAGS` so they fall through to the vanilla-bazel branch).
+
+## How it avoids infinite recursion
+
+When `tools/bazel` routes a verb through `aspect`, aspect then needs to spawn its own child `bazel` to do the actual work. If your `PATH` still has `tools/bazel` first (the normal case), that child `bazel` invocation re-enters the wrapper — which routes it back to `aspect` — which spawns `bazel` again — and so on forever.
+
+The fix: aspect sets `ASPECT_CLI_RUNNING=1` on every child `bazel` it spawns. `tools/bazel` checks for this on entry and forwards straight to the real bazel (`$BAZEL_REAL` if set, else the next `bazel` on `PATH`) without any routing logic. The cycle is broken at the first hop. This matches the pattern Bazelisk uses for `BAZELISK_SKIP_WRAPPER`.
+
+**Customers should never set `ASPECT_CLI_RUNNING` manually** — it's an implementation detail of the aspect ↔ wrapper handshake. If you wrap `aspect-cli` in your own wrapper, propagate the variable through.
+
+## Customizing
+
+Two lists at the top of the script drive every routing decision; edit them in your repo copy:
+
+- `ASPECT_VERBS_WITH_BAZEL_FLAGS` — verbs routed to `aspect` with bazel-flag rewriting. Default: `build buildifier delivery format gazelle lint test`. Add your own bazel-flag-aware aspect commands (e.g. a custom task that shells out to bazel) — including `run`, once you're ready for `aspect run` to shadow `bazel run` in your workspace. (`ASPECT_WRAPPER_SKIP=1` bypasses this entirely — everything goes to vanilla bazel.)
+- `BAZEL_VERBS` — the closed set of Bazel commands. A verb here that's *not* in the list above forwards to vanilla bazel. A verb in *neither* list is treated as a custom aspect task and routed to aspect verbatim. Update this only if Bazel adds a command.
+
+Plus the embedded Bazel flag lists (`BAZEL_VALUE_FLAGS`, `BAZEL_BOOL_FLAGS`, `BAZEL_SHORT_VALUE_FLAGS`, `BAZEL_SHORT_BOOL_FLAGS`) covered above. There is no aspect-flag list — anything not recognized as a Bazel flag passes through to aspect.
+
+## What it deliberately doesn't do
+
+- **It doesn't fetch or pin Bazel.** That's Bazelisk's job. The wrapper just decides which tool to exec.
+- **It doesn't second-guess unknown flags.** A flag not in the embedded Bazel lists passes through to aspect unchanged (rather than being force-wrapped), so a typo or a not-yet-listed flag surfaces wherever it actually belongs.
+- **It doesn't replace `bazel`.** You still install Bazel through Bazelisk (which is what execs this script). The wrapper is purely an in-workspace dispatcher.
+"""
