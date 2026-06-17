@@ -19,7 +19,10 @@
 //! named-pipe / loopback implementation is a drop-in later; only a Unix
 //! `socketpair` impl ships in this slice.
 
+use std::collections::BTreeMap;
+use std::io;
 use std::process::Command;
+use std::process::Stdio;
 use std::sync::Arc;
 
 use allocative::Allocative;
@@ -51,21 +54,150 @@ impl Default for BazelBackend {
 }
 
 impl BazelBackend {
-    /// Build the base `Command` for a bazel invocation under this backend.
+    /// The single fork primitive: the base `Command` for a bazel invocation
+    /// under this backend, with `startup_flags` already applied (before any
+    /// subcommand). Every verb method below goes through here, so the
+    /// Real/Fake choice is made in exactly one place.
     ///
     /// `Real` defers to the shared `bazel_command()` helper (which sets the
     /// anti-inception env var and honors `BAZEL_REAL`). `Fake` builds the
     /// `Command` straight from `fake_bin` — deliberately NOT via
     /// `bazel_command()`, so the fake path touches no global env state.
-    pub fn command(&self) -> Command {
-        match self {
+    pub(crate) fn base_command(&self, startup_flags: &[String]) -> Command {
+        let mut cmd = match self {
             BazelBackend::Real => super::bazel_command(),
             BazelBackend::Fake { fake_bin, .. } => Command::new(fake_bin),
-        }
+        };
+        cmd.args(startup_flags);
+        cmd
+    }
+
+    /// Base command with no startup flags. Retained for the `build`/`test`
+    /// spawn path (`build.rs`), which applies startup flags itself.
+    pub fn command(&self) -> Command {
+        self.base_command(&[])
     }
 
     pub fn is_fake(&self) -> bool {
         matches!(self, BazelBackend::Fake { .. })
+    }
+
+    /// Run `bazel [startup_flags] info [keys...]` and return the parsed
+    /// `key → value` map. Empty `keys` asks bazel for every key.
+    pub fn info(
+        &self,
+        startup_flags: &[String],
+        keys: &[&str],
+    ) -> io::Result<BTreeMap<String, String>> {
+        let mut cmd = self.base_command(startup_flags);
+        cmd.arg("info");
+        cmd.args(keys);
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+        cmd.stdin(Stdio::null());
+        let (child, _guard) = super::live::spawn_registered(&mut cmd)
+            .map_err(|e| io::Error::other(format!("failed to spawn bazel: {e}")))?;
+        let out = child.wait_with_output()?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let stderr = stderr.trim();
+            let detail = if stderr.is_empty() {
+                format!("exit code {:?}", out.status.code())
+            } else {
+                format!("exit code {:?}: {stderr}", out.status.code())
+            };
+            return Err(io::Error::other(format!("bazel info failed ({detail})")));
+        }
+        Ok(super::info::parse_info_map(&String::from_utf8_lossy(
+            &out.stdout,
+        )))
+    }
+
+    /// Query `server_pid` + `release` in one `bazel info` call.
+    ///
+    /// The version is `None` for a non-release build (see
+    /// [`super::info::parse_release`]); the pid is required.
+    pub fn server_info(
+        &self,
+        startup_flags: &[String],
+    ) -> io::Result<(u32, Option<semver::Version>)> {
+        let map = self.info(startup_flags, &["server_pid", "release"])?;
+        let pid = map
+            .get("server_pid")
+            .and_then(|v| v.parse::<u32>().ok())
+            .ok_or_else(|| io::Error::other("bazel info did not return server_pid"))?;
+        let version = match map.get("release") {
+            Some(value) => {
+                let parsed = super::info::parse_release(value);
+                if parsed.is_none() {
+                    tracing::debug!(
+                        release = %value,
+                        "bazel reported a non-release version; \
+                         version-conditional flags will assume latest"
+                    );
+                }
+                parsed
+            }
+            None => None,
+        };
+        Ok((pid, version))
+    }
+
+    /// Determine the real bazel client PID via `--noblock_for_lock info
+    /// server_pid`. When another invocation holds the lock, bazel exits 9 with
+    /// `"Another command (pid=12345) is running."` on stderr; we parse it out.
+    pub fn client_pid(&self, startup_flags: &[String]) -> Option<u32> {
+        let mut cmd = self.base_command(startup_flags);
+        cmd.arg("--noblock_for_lock").arg("info").arg("server_pid");
+        cmd.stdout(Stdio::null());
+        cmd.stderr(Stdio::piped());
+        cmd.stdin(Stdio::null());
+        let (child, _guard) = super::live::spawn_registered(&mut cmd).ok()?;
+        let output = child.wait_with_output().ok()?;
+        // Exit code 9 means the lock is held — stderr carries the client PID.
+        if output.status.code() != Some(9) {
+            return None;
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let start = stderr.find("pid=")? + 4;
+        let rest = &stderr[start..];
+        let end = rest.find(')')?;
+        rest[..end].parse::<u32>().ok()
+    }
+
+    /// Whether the bazel server lock is currently held (exit 9 from the
+    /// non-blocking probe).
+    pub fn is_server_busy(&self, startup_flags: &[String]) -> bool {
+        let mut cmd = self.base_command(startup_flags);
+        cmd.arg("--noblock_for_lock").arg("info").arg("server_pid");
+        cmd.stdout(Stdio::null());
+        cmd.stderr(Stdio::null());
+        cmd.stdin(Stdio::null());
+        let Ok((child, _guard)) = super::live::spawn_registered(&mut cmd) else {
+            return false;
+        };
+        matches!(child.wait_with_output(), Ok(o) if o.status.code() == Some(9))
+    }
+
+    /// Server PID without blocking on the lock: resolve `output_base` via
+    /// `--noblock_for_lock info output_base` (computed client-side) and read
+    /// `<output_base>/server/server.pid.txt`. `None` if the server isn't
+    /// running or bazel is unavailable.
+    pub fn server_pid_nonblocking(&self, startup_flags: &[String]) -> Option<u32> {
+        let mut cmd = self.base_command(startup_flags);
+        cmd.arg("--noblock_for_lock").arg("info").arg("output_base");
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::null());
+        cmd.stdin(Stdio::null());
+        let (child, _guard) = super::live::spawn_registered(&mut cmd).ok()?;
+        let output = child.wait_with_output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let output_base = String::from_utf8_lossy(&output.stdout);
+        let pid_path = std::path::Path::new(output_base.trim()).join("server/server.pid.txt");
+        let contents = std::fs::read_to_string(pid_path).ok()?;
+        contents.trim().parse::<u32>().ok()
     }
 }
 

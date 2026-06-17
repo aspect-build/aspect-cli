@@ -768,7 +768,7 @@ impl Build {
         let (pid, version) = if backend.is_fake() {
             (0u32, None)
         } else {
-            super::info::server_info()?
+            backend.server_info(&[])?
         };
 
         let span = tracing::info_span!(

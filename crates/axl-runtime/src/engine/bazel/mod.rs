@@ -131,12 +131,13 @@ fn partition_build_events(
 fn resolve_rc_version(
     requested: Option<String>,
     rc: &bazelrc::BazelRC,
+    backend: &backend::BazelBackend,
 ) -> anyhow::Result<Option<semver::Version>> {
     if let Some(s) = requested {
         return Ok(semver::Version::parse(&s).ok());
     }
     if rc.has_version_gated_options() {
-        return Ok(info::server_info().ok().and_then(|t| t.1));
+        return Ok(backend.server_info(&[]).ok().and_then(|t| t.1));
     }
     Ok(None)
 }
@@ -171,9 +172,11 @@ fn resolve_flags<'v>(
 /// (`build` / `test` / `query`) so they filter conditional flags identically.
 fn resolve_flags_for_running_bazel<'v>(
     items: &[Either<values::StringValue<'v>, (values::StringValue<'v>, values::StringValue<'v>)>],
+    backend: &backend::BazelBackend,
 ) -> anyhow::Result<Vec<String>> {
     let version = if items.iter().any(|f| f.is_right()) {
-        info::server_info()
+        backend
+            .server_info(&[])
             .map_err(|e| anyhow::anyhow!("failed to get Bazel server info: {}", e))?
             .1
     } else {
@@ -309,8 +312,9 @@ fn resolve_invocation_flags<'v>(
     command: &str,
     rc_param: NoneOr<values::Value<'v>>,
     flags: &[Either<values::StringValue<'v>, (values::StringValue<'v>, values::StringValue<'v>)>],
+    backend: &backend::BazelBackend,
 ) -> anyhow::Result<(Vec<String>, Vec<String>)> {
-    let extras = resolve_flags_for_running_bazel(flags)?;
+    let extras = resolve_flags_for_running_bazel(flags, backend)?;
     match effective_rc(this, rc_param) {
         Some(rc) => {
             let (startup, mut cmd) = rc.resolve_for_command(command)?;
@@ -462,9 +466,9 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             Either::Left(b) => (b, vec![]),
             Either::Right(sinks) => (true, sinks.items),
         };
-        let (resolved_flags, resolved_startup_flags) =
-            resolve_invocation_flags(this, "build", rc, &flags.items)?;
         let backend = read_backend(this);
+        let (resolved_flags, resolved_startup_flags) =
+            resolve_invocation_flags(this, "build", rc, &flags.items, &backend)?;
         let env = Env::from_eval(eval)?;
         let (stdout, stderr) = resolve_stdio(stdio, stdout, stderr)?;
         let build = build::Build::spawn(
@@ -576,9 +580,9 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             Either::Left(b) => (b, vec![]),
             Either::Right(sinks) => (true, sinks.items),
         };
-        let (resolved_flags, resolved_startup_flags) =
-            resolve_invocation_flags(this, "test", rc, &flags.items)?;
         let backend = read_backend(this);
+        let (resolved_flags, resolved_startup_flags) =
+            resolve_invocation_flags(this, "test", rc, &flags.items, &backend)?;
         let env = Env::from_eval(eval)?;
         let (stdout, stderr) = resolve_stdio(stdio, stdout, stderr)?;
         let test = build::Build::spawn(
@@ -636,7 +640,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = false)] announce_version: bool,
         #[starlark(require = named, default = false)] announce_command: bool,
     ) -> anyhow::Result<query::Query> {
-        let extras = resolve_flags_for_running_bazel(&flags.items)?;
+        let backend = read_backend(this);
+        let extras = resolve_flags_for_running_bazel(&flags.items, &backend)?;
         let (startup, command_flags) = match effective_rc(this, rc) {
             Some(rc) => {
                 let (startup, mut base) = rc.resolve_for_command("query")?;
@@ -646,6 +651,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             None => (read_startup_flags(this)?, extras),
         };
         query::run(
+            &backend,
             &expr,
             &startup,
             &command_flags,
@@ -674,34 +680,13 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// ```
     fn info<'v>(this: values::Value<'v>) -> anyhow::Result<SmallMap<String, String>> {
         let startup_flags = read_startup_flags(this)?;
-
-        let mut cmd = bazel_command();
-        cmd.args(&startup_flags);
-        cmd.arg("info");
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::null());
-        cmd.stdin(Stdio::null());
-        // Register with the live-bazel registry so OS-signal cancellation
-        // can reach this `bazel info` even if the daemon is busy.
-        let (child, _guard) = live::spawn_registered(&mut cmd)
-            .map_err(|e| anyhow::anyhow!("failed to spawn bazel: {}", e))?;
-        let output = child
-            .wait_with_output()
-            .map_err(|e| anyhow::anyhow!("failed to wait on bazel: {}", e))?;
-
-        if !output.status.success() {
-            anyhow::bail!(
-                "bazel info failed with exit code {:?}",
-                output.status.code()
-            );
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let backend = read_backend(this);
+        let parsed = backend
+            .info(&startup_flags, &[])
+            .map_err(|e| anyhow::anyhow!("bazel info failed: {}", e))?;
         let mut map = SmallMap::new();
-        for line in stdout.lines() {
-            if let Some((key, value)) = line.split_once(": ") {
-                map.insert(key.trim().to_string(), value.trim().to_string());
-            }
+        for (key, value) in parsed {
+            map.insert(key, value);
         }
         Ok(map)
     }
@@ -727,7 +712,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         this: values::Value<'v>,
     ) -> anyhow::Result<health_check::HealthCheckResult> {
         let startup_flags = read_startup_flags(this)?;
-        Ok(health_check::run(&startup_flags))
+        Ok(health_check::run(&read_backend(this), &startup_flags))
     }
 
     /// Detect and best-effort repair runner-poisoning sandbox state
@@ -835,7 +820,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         let rc = bazelrc::BazelRC::new(root, &startup_flags.items, &flags.items)
             .map_err(|e| anyhow::anyhow!("{}", e))?
             .with_skip_config_if_missing(skip_config_if_missing.items);
-        let version = resolve_rc_version(version.into_option(), &rc)?;
+        let version = resolve_rc_version(version.into_option(), &rc, &read_backend(this))?;
         Ok(rc.with_version(version))
     }
 
@@ -912,14 +897,19 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ) -> anyhow::Result<cancel::Cancellation> {
         let all_flags = read_startup_flags(this)?;
         let force_kill_after_ms = force_kill_after_ms.max(0) as u64;
+        let backend = read_backend(this);
 
         // Send SIGINT to the Bazel client holding the server lock.
         // client_pid() uses --noblock_for_lock so it returns immediately.
-        if let Some(pid) = info::client_pid(&all_flags) {
+        if let Some(pid) = backend.client_pid(&all_flags) {
             process::sigint(pid);
         }
 
-        Ok(cancel::Cancellation::new(all_flags, force_kill_after_ms))
+        Ok(cancel::Cancellation::new(
+            all_flags,
+            force_kill_after_ms,
+            backend,
+        ))
     }
 }
 

@@ -51,7 +51,6 @@ use derive_more::Display;
 use starlark::environment::{GlobalsBuilder, Methods, MethodsBuilder, MethodsStatic, Module};
 use starlark::eval::Evaluator;
 use starlark::syntax::AstModule;
-use starlark::values::list::AllocList;
 use starlark::values::none::{NoneOr, NoneType};
 use starlark::values::tuple::UnpackTuple;
 use starlark::values::{
@@ -287,7 +286,6 @@ fn test_methods(registry: &mut MethodsBuilder) {
             .downcast_ref::<Test>()
             .ok_or_else(|| anyhow::anyhow!("t.ctx called on a non-Test value"))?;
         let overlay = t.overlay.clone();
-        let startup_flags = heap.alloc(AllocList(Vec::<String>::new()));
         // Mint the bazel backend from the harness: a `Fake` pointing at the
         // located fake binary + the expectation declared so far (defaulting to
         // a clean passing build), or `Real` when no fake binary was installed.
@@ -308,7 +306,7 @@ fn test_methods(registry: &mut MethodsBuilder) {
             None => BazelBackend::Real,
         };
         let bazel = heap.alloc(Bazel {
-            startup_flags,
+            active_rc: std::cell::RefCell::new(None),
             backend,
         });
         let args = heap.alloc(Arguments::new());
