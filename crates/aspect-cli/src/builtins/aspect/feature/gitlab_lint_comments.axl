@@ -239,7 +239,6 @@ def _post_comments(ctx, gl, comments, existing_markers, task_key):
             body = c["body"],
             position = position,
             api_base = gl["api_base"],
-            auth_kind = "bearer",
         )
         if res["success"]:
             if marker:
@@ -251,7 +250,7 @@ def _post_comments(ctx, gl, comments, existing_markers, task_key):
 def _get_existing_markers(ctx, gl, task_key):
     """Return `{marker: discussion_id}` for THIS task's existing lint
     discussions on the MR (dedup against prior runs)."""
-    listed = gitlab.discussions.list(ctx, token = gl["token"], project = gl["project_path"], mr_iid = gl["mr_iid"], api_base = gl["api_base"], auth_kind = "bearer")
+    listed = gitlab.discussions.list(ctx, token = gl["token"], project = gl["project_path"], mr_iid = gl["mr_iid"], api_base = gl["api_base"])
     if not listed["success"]:
         return {}
     markers = {}
@@ -460,7 +459,7 @@ def _cleanup_and_resolve(ctx, gl, relevant_diagnostics, run_id, task_key, sugges
     for m in suggestion_markers:
         desired[m] = True
 
-    listed = gitlab.discussions.list(ctx, token = gl["token"], project = gl["project_path"], mr_iid = gl["mr_iid"], api_base = gl["api_base"], auth_kind = "bearer")
+    listed = gitlab.discussions.list(ctx, token = gl["token"], project = gl["project_path"], mr_iid = gl["mr_iid"], api_base = gl["api_base"])
     if not listed["success"]:
         return
 
@@ -474,9 +473,9 @@ def _cleanup_and_resolve(ctx, gl, relevant_diagnostics, run_id, task_key, sugges
     genuinely_clean = not relevant_diagnostics and not suggestion_markers
     plan = compute_cleanup(listed["discussions"], desired, run_id, task_key, genuinely_clean = genuinely_clean)
     for e in plan["delete"]:
-        gitlab.discussions.delete(ctx, token = gl["token"], project = gl["project_path"], mr_iid = gl["mr_iid"], discussion_id = e["discussion_id"], note_id = e["note_id"], api_base = gl["api_base"], auth_kind = "bearer")
+        gitlab.discussions.delete(ctx, token = gl["token"], project = gl["project_path"], mr_iid = gl["mr_iid"], discussion_id = e["discussion_id"], note_id = e["note_id"], api_base = gl["api_base"])
     for did in plan["resolve"]:
-        gitlab.discussions.resolve(ctx, token = gl["token"], project = gl["project_path"], mr_iid = gl["mr_iid"], discussion_id = did, resolved = True, api_base = gl["api_base"], auth_kind = "bearer")
+        gitlab.discussions.resolve(ctx, token = gl["token"], project = gl["project_path"], mr_iid = gl["mr_iid"], discussion_id = did, resolved = True, api_base = gl["api_base"])
 
 def _gitlab_lint_impl(ctx: FeatureContext):
     lint_trait = ctx.traits[LintTrait]
@@ -508,7 +507,7 @@ def _gitlab_lint_impl(ctx: FeatureContext):
 
     # One call gets both the `diff_refs` SHA triple (for positions) and the
     # per-file diffs (for the new_line→old_line classification below).
-    mr_res = gitlab.merge_requests.list_changes(ctx, token = token, project = mr["project_path"], mr_iid = mr["mr_iid"], api_base = api_base, auth_kind = "bearer")
+    mr_res = gitlab.merge_requests.list_changes(ctx, token = token, project = mr["project_path"], mr_iid = mr["mr_iid"], api_base = api_base)
     if not mr_res["success"]:
         _LOG.warn(ctx.std, "Could not fetch MR %d changes: %s" % (mr["mr_iid"], mr_res.get("error", "unknown")))
         return

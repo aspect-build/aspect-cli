@@ -4,10 +4,11 @@ Mirrors `lib/github.axl` so per-VCS feature modules share call-site
 ergonomics. Callers pass a `token` (PAT, group/project access token, or
 OAuth bearer); `auth_kind` picks the header convention:
 
-  * `"private_token"` (default) → `PRIVATE-TOKEN: <token>` (PATs, group/
-    project access tokens).
-  * `"bearer"`                  → `Authorization: Bearer <token>` (OAuth/
-    Application tokens, e.g. the Aspect GitLab App once ENG-1650 lands).
+  * `"bearer"` (default)        → `Authorization: Bearer <token>` (OAuth/
+    Application tokens, e.g. the Aspect GitLab App — the canonical
+    Marvin-minted token).
+  * `"private_token"`           → `PRIVATE-TOKEN: <token>` (PATs, group/
+    project access tokens; opt-in).
 """
 
 DEFAULT_GITLAB_API = "https://gitlab.com/api/v4"
@@ -19,7 +20,7 @@ def _auth_headers(token, auth_kind):
         return {"Authorization": "Bearer " + token}
     return {"PRIVATE-TOKEN": token}
 
-def _do_request(ctx, method, url, token, auth_kind = "private_token", payload = None):
+def _do_request(ctx, method, url, token, auth_kind = "bearer", payload = None):
     headers = {
         "Accept": "application/json",
         "Content-Type": "application/json",
@@ -103,7 +104,7 @@ def _project_url(api_base, project, suffix):
 
 _COMMIT_STATUS_STATES = ["pending", "running", "success", "failed", "canceled", "skipped"]
 
-def _commit_status_post(ctx, token, project, sha, state, name, target_url = None, description = None, coverage = None, pipeline_id = None, ref = None, api_base = DEFAULT_GITLAB_API, auth_kind = "private_token"):
+def _commit_status_post(ctx, token, project, sha, state, name, target_url = None, description = None, coverage = None, pipeline_id = None, ref = None, api_base = DEFAULT_GITLAB_API, auth_kind = "bearer"):
     """Post a commit status to a SHA. GitLab does not have a distinct
     create/update split — POSTing the same `(name, sha, ref)` triple
     transitions the existing entry."""
@@ -154,7 +155,7 @@ def _commit_status_skipped(ctx, token, project, sha, name, **kwargs):
 # Admin registers the check on the project (one-time, not managed here);
 # pipelines respond against `(mr_iid, sha, external_status_check_id)`.
 
-def _external_status_check_respond(ctx, token, project, mr_iid, sha, external_status_check_id, status, api_base = DEFAULT_GITLAB_API, auth_kind = "private_token"):
+def _external_status_check_respond(ctx, token, project, mr_iid, sha, external_status_check_id, status, api_base = DEFAULT_GITLAB_API, auth_kind = "bearer"):
     """Set the response for a registered External Status Check.
 
     `status` is one of `passed`, `failed`, or `pending`.
@@ -172,7 +173,7 @@ def _external_status_check_respond(ctx, token, project, mr_iid, sha, external_st
         return {"success": True, "response": body if type(body) == "dict" else None}
     return {"success": False, "error": "request failed: %d" % status_code, "status": status_code, "body": body}
 
-def _external_status_check_list(ctx, token, project, mr_iid, api_base = DEFAULT_GITLAB_API, auth_kind = "private_token"):
+def _external_status_check_list(ctx, token, project, mr_iid, api_base = DEFAULT_GITLAB_API, auth_kind = "bearer"):
     """List registered External Status Checks visible on an MR.
 
     Useful for discovering the `external_status_check_id` to respond
@@ -186,7 +187,7 @@ def _external_status_check_list(ctx, token, project, mr_iid, api_base = DEFAULT_
 
 # Merge Request Notes (the GitLab equivalent of a GitHub issue/PR comment)
 
-def _notes_list(ctx, token, project, mr_iid, api_base = DEFAULT_GITLAB_API, auth_kind = "private_token"):
+def _notes_list(ctx, token, project, mr_iid, api_base = DEFAULT_GITLAB_API, auth_kind = "bearer"):
     """List notes on an MR, paginated (100/page, walk to short page or cap)."""
     base = _project_url(api_base, project, "/merge_requests/" + str(mr_iid) + "/notes")
     per_page = 100
@@ -204,35 +205,35 @@ def _notes_list(ctx, token, project, mr_iid, api_base = DEFAULT_GITLAB_API, auth
             break
     return {"success": True, "notes": all_notes}
 
-def _notes_create(ctx, token, project, mr_iid, body, api_base = DEFAULT_GITLAB_API, auth_kind = "private_token"):
+def _notes_create(ctx, token, project, mr_iid, body, api_base = DEFAULT_GITLAB_API, auth_kind = "bearer"):
     url = _project_url(api_base, project, "/merge_requests/" + str(mr_iid) + "/notes")
     success, status_code, resp = _do_request(ctx, "POST", url, token, auth_kind = auth_kind, payload = {"body": body})
     if success:
         return {"success": True, "note_id": resp.get("id") if type(resp) == "dict" else None, "note": resp}
     return {"success": False, "error": "request failed: %d" % status_code, "status": status_code, "body": resp}
 
-def _notes_update(ctx, token, project, mr_iid, note_id, body, api_base = DEFAULT_GITLAB_API, auth_kind = "private_token"):
+def _notes_update(ctx, token, project, mr_iid, note_id, body, api_base = DEFAULT_GITLAB_API, auth_kind = "bearer"):
     url = _project_url(api_base, project, "/merge_requests/" + str(mr_iid) + "/notes/" + str(note_id))
     success, status_code, resp = _do_request(ctx, "PUT", url, token, auth_kind = auth_kind, payload = {"body": body})
     if success:
         return {"success": True, "note_id": resp.get("id") if type(resp) == "dict" else note_id, "note": resp}
     return {"success": False, "error": "request failed: %d" % status_code, "status": status_code, "body": resp}
 
-def _notes_delete(ctx, token, project, mr_iid, note_id, api_base = DEFAULT_GITLAB_API, auth_kind = "private_token"):
+def _notes_delete(ctx, token, project, mr_iid, note_id, api_base = DEFAULT_GITLAB_API, auth_kind = "bearer"):
     url = _project_url(api_base, project, "/merge_requests/" + str(mr_iid) + "/notes/" + str(note_id))
     success, status_code, _ = _do_request(ctx, "DELETE", url, token, auth_kind = auth_kind)
     return {"success": success, "status": status_code}
 
 # Merge Request fetch
 
-def _mr_get(ctx, token, project, mr_iid, api_base = DEFAULT_GITLAB_API, auth_kind = "private_token"):
+def _mr_get(ctx, token, project, mr_iid, api_base = DEFAULT_GITLAB_API, auth_kind = "bearer"):
     url = _project_url(api_base, project, "/merge_requests/" + str(mr_iid))
     success, status_code, body = _do_request(ctx, "GET", url, token, auth_kind = auth_kind)
     if success:
         return {"success": True, "merge_request": body}
     return {"success": False, "error": "request failed: %d" % status_code, "status": status_code, "body": body}
 
-def _mr_list_changes(ctx, token, project, mr_iid, api_base = DEFAULT_GITLAB_API, auth_kind = "private_token"):
+def _mr_list_changes(ctx, token, project, mr_iid, api_base = DEFAULT_GITLAB_API, auth_kind = "bearer"):
     """List file changes for an MR. Returns GitLab's raw `changes` array
     (each entry: `old_path`, `new_path`, `diff`, …).
 
@@ -252,7 +253,7 @@ def _mr_list_changes(ctx, token, project, mr_iid, api_base = DEFAULT_GITLAB_API,
 # GitHub-PR-review-comment equivalent; used by GitlabLintComments).
 # https://docs.gitlab.com/ee/api/discussions.html#merge-requests
 
-def _discussions_list(ctx, token, project, mr_iid, api_base = DEFAULT_GITLAB_API, auth_kind = "private_token"):
+def _discussions_list(ctx, token, project, mr_iid, api_base = DEFAULT_GITLAB_API, auth_kind = "bearer"):
     """List discussions on an MR, paginated. Mirrors `_notes_list`.
 
     Each discussion: `id` (string hash) + `notes` list; each note has
@@ -274,7 +275,7 @@ def _discussions_list(ctx, token, project, mr_iid, api_base = DEFAULT_GITLAB_API
             break
     return {"success": True, "discussions": all_discussions}
 
-def _discussions_create(ctx, token, project, mr_iid, body, position, api_base = DEFAULT_GITLAB_API, auth_kind = "private_token"):
+def _discussions_create(ctx, token, project, mr_iid, body, position, api_base = DEFAULT_GITLAB_API, auth_kind = "bearer"):
     """Create a position-bound discussion on an MR diff line.
 
     `position` must be a dict shaped:
@@ -290,7 +291,7 @@ def _discussions_create(ctx, token, project, mr_iid, body, position, api_base = 
         return {"success": True, "discussion_id": resp.get("id") if type(resp) == "dict" else None, "discussion": resp}
     return {"success": False, "error": "request failed: %d" % status_code, "status": status_code, "body": resp}
 
-def _discussions_delete(ctx, token, project, mr_iid, discussion_id, note_id, api_base = DEFAULT_GITLAB_API, auth_kind = "private_token"):
+def _discussions_delete(ctx, token, project, mr_iid, discussion_id, note_id, api_base = DEFAULT_GITLAB_API, auth_kind = "bearer"):
     """Delete a single note from a discussion (removes stale annotations).
 
     GitLab has no delete-whole-discussion endpoint, but a position-bound
@@ -300,7 +301,7 @@ def _discussions_delete(ctx, token, project, mr_iid, discussion_id, note_id, api
     success, status_code, _ = _do_request(ctx, "DELETE", url, token, auth_kind = auth_kind)
     return {"success": success, "status": status_code}
 
-def _discussions_resolve(ctx, token, project, mr_iid, discussion_id, resolved = True, api_base = DEFAULT_GITLAB_API, auth_kind = "private_token"):
+def _discussions_resolve(ctx, token, project, mr_iid, discussion_id, resolved = True, api_base = DEFAULT_GITLAB_API, auth_kind = "bearer"):
     """Resolve (or unresolve) a discussion thread. GitLab takes `resolved`
     as a query parameter, not a body field."""
     resolved_str = "true" if resolved else "false"

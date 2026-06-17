@@ -235,7 +235,6 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
             target_url = target_url or None,
             description = description or None,
             api_base = api_base,
-            auth_kind = "bearer",
         )
         if not result["success"]:
             _LOG.warn(ctx.std, "commit_status POST failed (state=%s): %s" % (
