@@ -211,8 +211,8 @@ pub struct Bazel<'v> {
     pub active_rc: RefCell<Option<values::Value<'v>>>,
     /// Which bazel this context drives — `Real` (production) or a `Fake`
     /// carrying the fake-bazel path + declared expectation (testing). Carried
-    /// ON the value (decision 6), not fished out of `eval.extra`, so it's
-    /// per-value and parallel-safe. Not a Starlark value, so untraced.
+    /// on the value so it's per-value and parallel-safe; not a Starlark value,
+    /// so it's untraced.
     pub backend: backend::BazelBackend,
 }
 
