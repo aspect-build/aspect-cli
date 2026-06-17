@@ -29,7 +29,7 @@ load("@aspect//lib/result_text.axl", "severity_for_status")
 load("@aspect//lib/runnable.axl", "apparent_label", "runnable")
 load("@aspect//lib/sarif.axl", "get_sarif_summary", "parse_sarif", "parse_sarif_diagnostics", "sarif_to_review_comments")
 load("@aspect//lib/tips.axl", "tips")
-load("@aspect//lint.axl", "file_uri_to_path", "filter_all", "filter_changeset")
+load("@aspect//lint.axl", "file_uri_to_path", "filter_all", "filter_changeset", "linter_error_message")
 load("@demo//answer.axl", "ANSWER")
 load("./lambda.axl", "lambda_with_global_bind")
 
@@ -2435,6 +2435,24 @@ def test_lint_filters(tc: int) -> int:
 
     return tc
 
+def test_linter_error_message(tc: int) -> int:
+    """Coverage for lint.linter_error_message — the fail_on_linter_error text."""
+    single = linter_error_message({"PMD": True}, "hard")
+    tc = test_case(tc, "exited non-zero: PMD." in single, "linter_error_message: names the single tool")
+    tc = test_case(tc, "strategy=hard" in single, "linter_error_message: includes strategy")
+    tc = test_case(tc, "🔬 Lint phase" in single, "linter_error_message: points at the raw output")
+
+    # Multiple tools are sorted for a stable message.
+    multi = linter_error_message({"Ruff": True, "PMD": True}, "hard")
+    tc = test_case(tc, "exited non-zero: PMD, Ruff." in multi, "linter_error_message: sorts multiple tools")
+
+    # Empty set (unparsable BES name) → unnamed fallback, still actionable.
+    none = linter_error_message({}, "hard")
+    tc = test_case(tc, none.startswith("A linter process exited non-zero."), "linter_error_message: unnamed fallback")
+    tc = test_case(tc, "strategy=hard" in none, "linter_error_message: fallback keeps strategy")
+
+    return tc
+
 def test_fmt_elapsed(tc: int) -> int:
     """Coverage for delivery.fmt_elapsed — duration formatting."""
     cases = [
@@ -3178,6 +3196,7 @@ def impl(ctx: TaskContext) -> int:
     tc = test_process_bes_target_completed(ctx, tc)
     tc = test_validate_role(tc)
     tc = test_lint_filters(tc)
+    tc = test_linter_error_message(tc)
     tc = test_fmt_elapsed(tc)
     tc = test_summary_title(tc)
     tc = test_resolve_aspect_url(tc)
