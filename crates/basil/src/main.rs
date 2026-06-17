@@ -129,7 +129,12 @@ fn run_build(args: &[String]) {
 fn run_help(args: &[String]) {
     let wants_proto = args.iter().any(|a| a == "flags-as-proto");
     if !wants_proto {
-        eprintln!("basil: only `help flags-as-proto` is supported");
+        let subverb = args
+            .iter()
+            .find(|a| !a.starts_with('-') && *a != "help")
+            .map(String::as_str)
+            .unwrap_or("");
+        eprintln!("basil: `help {subverb}` is not supported; only `help flags-as-proto` is");
         process::exit(2);
     }
     if let Ok(b64) = env::var("BASIL_FLAGS_PROTO_B64") {
@@ -361,5 +366,8 @@ mod help_tests {
             .collect();
         assert!(names.contains(&"keep_going"));
         assert!(names.contains(&"config"));
+        assert!(names.contains(&"compilation_mode"));
+        assert!(names.contains(&"watchfs"));
+        assert_eq!(collection.flag_infos.len(), 4);
     }
 }
