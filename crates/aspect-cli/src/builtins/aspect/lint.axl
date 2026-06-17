@@ -529,9 +529,11 @@ def _try_process_lint_file(ctx, file, filepath, data, strategy, changed_files, l
     """Read and process one BES lint output file.
 
     Returns None when the file isn't on disk yet (remote download in flight),
-    else {"interesting": bool, "linter_exit_code": int}. Bazel moves outputs to
-    their final path atomically (moveOutputsToFinalLocation), so fs.exists()==True
-    means fully written:
+    else {"interesting": bool, "linter_exit_code": int, "failed_tool": str}.
+    `failed_tool` names the linter when its `.exit_code` was non-zero (else ""),
+    so the fail_on_linter_error path can report which tool failed. Bazel moves
+    outputs to their final path atomically (moveOutputsToFinalLocation), so
+    fs.exists()==True means fully written:
     https://github.com/bazelbuild/bazel/blob/d3c9a2080e30cecd661c02a8f0cce84caa696aed/src/main/java/com/google/devtools/build/lib/remote/RemoteExecutionService.java#L930
     SARIF is filtered per-batch against the (pure) strategy scope, so per-batch
     results equal a terminal pass and findings don't flicker as batches arrive.
@@ -540,7 +542,7 @@ def _try_process_lint_file(ctx, file, filepath, data, strategy, changed_files, l
         if not ctx.std.fs.exists(filepath):
             return None
         ctx.std.io.stderr.write(ctx.std.fs.read_to_string(filepath))
-        return {"interesting": False, "linter_exit_code": 0}
+        return {"interesting": False, "linter_exit_code": 0, "failed_tool": ""}
 
     if file.name.endswith(".report"):
         if not ctx.std.fs.exists(filepath):
@@ -550,11 +552,11 @@ def _try_process_lint_file(ctx, file, filepath, data, strategy, changed_files, l
             lint_accumulate(data, strategy.filter(parse_sarif_diagnostics(report), changed_files))
             for hook in lint_trait.lint_report:
                 hook(ctx, filepath)
-            return {"interesting": True, "linter_exit_code": 0}
+            return {"interesting": True, "linter_exit_code": 0, "failed_tool": ""}
         ctx.std.io.stdout.write(report)
         if github_output:
             ctx.std.fs.write(github_output, "lint-report=" + filepath)
-        return {"interesting": False, "linter_exit_code": 0}
+        return {"interesting": False, "linter_exit_code": 0, "failed_tool": ""}
 
     if file.name.endswith(".patch"):
         if not ctx.std.fs.exists(filepath):
@@ -562,18 +564,22 @@ def _try_process_lint_file(ctx, file, filepath, data, strategy, changed_files, l
         patches.append(filepath)
         for hook in lint_trait.lint_patch:
             hook(ctx, filepath, file.name)
-        return {"interesting": False, "linter_exit_code": 0}
+        return {"interesting": False, "linter_exit_code": 0, "failed_tool": ""}
 
     if file.name.endswith(".exit_code"):
         if not ctx.std.fs.exists(filepath):
             return None
-        return {"interesting": False, "linter_exit_code": int(ctx.std.fs.read_to_string(filepath).rstrip())}
+        exit_code = int(ctx.std.fs.read_to_string(filepath).rstrip())
+        failed_tool = detect_lint_tool(file.name) if exit_code != 0 else ""
+        return {"interesting": False, "linter_exit_code": exit_code, "failed_tool": failed_tool}
 
-    return {"interesting": False, "linter_exit_code": 0}
+    return {"interesting": False, "linter_exit_code": 0, "failed_tool": ""}
 
-def _drain_pending_files(ctx, pending, data, strategy, changed_files, lint_trait, github_output, patches):
+def _drain_pending_files(ctx, pending, data, strategy, changed_files, lint_trait, github_output, patches, failed_linters):
     """One pass over pending files → (still_pending, was_interesting, linter_exit_code).
     still_pending holds files whose remote download hasn't landed yet.
+    `failed_linters` is a set-like dict accumulating tool names whose `.exit_code`
+    was non-zero, so the caller can report which linters failed.
     """
     still_pending = []
     interesting = False
@@ -588,6 +594,8 @@ def _drain_pending_files(ctx, pending, data, strategy, changed_files, lint_trait
                 interesting = True
             if result["linter_exit_code"] != 0:
                 linter_exit_code = 1
+                if result["failed_tool"]:
+                    failed_linters[result["failed_tool"]] = True
     return (still_pending, interesting, linter_exit_code)
 
 # buildifier: disable=function-docstring
@@ -725,6 +733,10 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     )
 
     linter_exit_code = 0
+
+    # Tool names whose `.exit_code` was non-zero; reported in the
+    # fail_on_linter_error path so the failure names the offending linter.
+    failed_linters = {}
     patches = []
     github_output = ctx.std.env.var("GITHUB_OUTPUT")
 
@@ -750,6 +762,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             lint_trait,
             github_output,
             patches,
+            failed_linters,
         )
         if pending_interesting:
             interesting = True
@@ -779,6 +792,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                                 interesting = True
                             if result["linter_exit_code"] != 0:
                                 linter_exit_code = 1
+                                if result["failed_tool"]:
+                                    failed_linters[result["failed_tool"]] = True
         if interesting or now_ms(ctx) - last_emit_ms >= MIN_HEARTBEAT_INTERVAL_MS:
             # Flip to "failing" on mid-build action failure so the breakdown tags Lint.
             had_action_failure = data["bazel"].get("failed_actions_total", 0) > 0
@@ -817,6 +832,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                 lint_trait,
                 github_output,
                 patches,
+                failed_linters,
             )
             if pending_exit_code != 0:
                 linter_exit_code = 1
@@ -944,6 +960,22 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     elif strategy.fail_on_severity and any([d["severity"] == strategy.fail_on_severity for d in relevant]):
         exit_code = 1
     elif strategy.fail_on_linter_error and linter_exit_code != 0:
+        # A linter process exited non-zero without producing findings — otherwise
+        # this path surfaces nothing, leaving an unexplained exit 1. Name the
+        # offending tool(s) and point at the raw `🔬 Lint` output above.
+        if failed_linters:
+            tools = ", ".join(sorted(failed_linters.keys()))
+            error(ctx.std, (
+                "Linter process(es) exited non-zero: %s. " % tools +
+                "See the linter output under the 🔬 Lint phase above for details. " +
+                "(strategy=%s fails on any linter error.)" % _strategy_name(strategy)
+            ))
+        else:
+            error(ctx.std, (
+                "A linter process exited non-zero. " +
+                "See the linter output under the 🔬 Lint phase above for details. " +
+                "(strategy=%s fails on any linter error.)" % _strategy_name(strategy)
+            ))
         exit_code = 1
     else:
         exit_code = 0
