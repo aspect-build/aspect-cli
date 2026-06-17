@@ -7,6 +7,7 @@ Run with: aspect dev test-wrapper
 
 load(
     "./wrapper.axl",
+    "BazelFlagLists",
     "FlagSpec",
     "InstallAction",
     "Shell",
@@ -18,6 +19,8 @@ load(
     "has_wrapper_marker",
     "parse_wrapper_version",
     "raw_content_url",
+    "render_flag_array",
+    "render_wrapper",
     "shell_snippet",
 )
 
@@ -182,6 +185,41 @@ def _test_derive_flag_lists_omits_unclassified(ctx):
     _eq("unclassified omitted from bool", lists.bool_flags, [])
     _eq("verbs still collected", lists.verbs, ["build"])
 
+def _test_render_flag_array_indents_and_joins(ctx):
+    _eq("three items", render_flag_array(["a", "b", "c"]), "    a\n    b\n    c")
+    _eq("empty", render_flag_array([]), "")
+
+def _test_render_wrapper_substitutes_all_placeholders(ctx):
+    template = "\n".join([
+        "BAZEL_VERBS=(",
+        "{{BAZEL_VERBS}}",
+        ")",
+        "BAZEL_VALUE_FLAGS=(",
+        "{{BAZEL_VALUE_FLAGS}}",
+        ")",
+        "BAZEL_BOOL_FLAGS=(",
+        "{{BAZEL_BOOL_FLAGS}}",
+        ")",
+        "BAZEL_SHORT_VALUE_FLAGS=(",
+        "{{BAZEL_SHORT_VALUE_FLAGS}}",
+        ")",
+        "BAZEL_SHORT_BOOL_FLAGS=(",
+        "{{BAZEL_SHORT_BOOL_FLAGS}}",
+        ")",
+    ])
+    lists = BazelFlagLists(
+        verbs = ["build", "test"],
+        value_flags = ["config"],
+        bool_flags = ["keep_going"],
+        short_value_flags = ["c"],
+        short_bool_flags = ["k"],
+    )
+    out = render_wrapper(template, lists)
+    _eq("verbs filled", "    build\n    test" in out, True)
+    _eq("value filled", "    config" in out, True)
+    _eq("bool filled", "    keep_going" in out, True)
+    _eq("no placeholders left", "{{" not in out, True)
+
 _UNIT_TESTS = [
     _test_raw_content_url,
     _test_workspace_root_at_cwd,
@@ -211,6 +249,8 @@ _UNIT_TESTS = [
     _test_derive_flag_lists_classifies_by_signal,
     _test_derive_flag_lists_dedupes_and_sorts,
     _test_derive_flag_lists_omits_unclassified,
+    _test_render_flag_array_indents_and_joins,
+    _test_render_wrapper_substitutes_all_placeholders,
 ]
 
 def _test_impl(ctx):

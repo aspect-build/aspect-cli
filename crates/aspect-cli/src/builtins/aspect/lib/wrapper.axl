@@ -156,6 +156,21 @@ def derive_flag_lists(specs: list[FlagSpec]) -> BazelFlagLists:
         short_bool_flags = sorted(short_bool.keys()),
     )
 
+def render_flag_array(items: list[str]) -> str:
+    """Render a flag list as a 4-space-indented bash array body, one entry per
+    line. An empty list renders as the empty string (the array stays empty)."""
+    return "\n".join(["    " + item for item in items])
+
+def render_wrapper(template: str, lists: BazelFlagLists) -> str:
+    """Fill the five `{{...}}` flag-array placeholders in the template."""
+    out = template
+    out = out.replace("{{BAZEL_VERBS}}", render_flag_array(lists.verbs))
+    out = out.replace("{{BAZEL_VALUE_FLAGS}}", render_flag_array(lists.value_flags))
+    out = out.replace("{{BAZEL_BOOL_FLAGS}}", render_flag_array(lists.bool_flags))
+    out = out.replace("{{BAZEL_SHORT_VALUE_FLAGS}}", render_flag_array(lists.short_value_flags))
+    out = out.replace("{{BAZEL_SHORT_BOOL_FLAGS}}", render_flag_array(lists.short_bool_flags))
+    return out
+
 def detect_shell(shell_path: str | None) -> Shell | None:
     """Map a `$SHELL` value (e.g. "/bin/zsh") to a Shell, or None."""
     if not shell_path:
