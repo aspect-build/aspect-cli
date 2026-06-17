@@ -85,7 +85,7 @@ def _prompt_preset(ctx, names):
         ctx.std.io.stdout.write("  {}. {}\n".format(i + 1, name))
     ctx.std.io.stdout.write("Enter a number [1-{}]: ".format(len(names)))
     ctx.std.io.stdout.flush()
-    raw = ctx.std.io.stdin.read(16).strip()
+    raw = str(ctx.std.io.stdin.read(16)).strip()
     if not raw.isdigit():
         fail("invalid selection: {!r}".format(raw))
     idx = int(raw) - 1
