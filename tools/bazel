@@ -1264,17 +1264,17 @@ BAZEL_BOOL_FLAGS=(
 # long counterparts these consume the following argv element. `-x=value`
 # carries its value in one token already and needs no entry here.
 BAZEL_SHORT_VALUE_FLAGS=(
-    c
-    j
+    -c
+    -j
 )
 
 # Bazel boolean short-flag abbreviations (`-k` keep_going, `-s` subcommands,
 # `-t` cache_test_results). These wrap as a single token, never consuming the
 # next arg.
 BAZEL_SHORT_BOOL_FLAGS=(
-    k
-    s
-    t
+    -k
+    -s
+    -t
 )
 
 # Lookup tables for the membership checks below. We use space-padded strings
