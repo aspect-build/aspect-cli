@@ -721,10 +721,11 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     fn flags_as_proto<'v>(
         this: values::Value<'v>,
     ) -> anyhow::Result<axl_proto::bazel_flags::FlagCollection> {
-        let _ = this;
         use base64::Engine;
         use prost::Message;
+        let startup_flags = read_startup_flags(this)?;
         let mut cmd = bazel_command();
+        cmd.args(&startup_flags);
         cmd.args(["help", "flags-as-proto"]);
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::inherit());
