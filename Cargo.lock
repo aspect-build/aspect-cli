@@ -490,6 +490,7 @@ name = "basil"
 version = "0.0.0-dev"
 dependencies = [
  "axl-proto",
+ "base64 0.22.1",
  "prost",
 ]
 

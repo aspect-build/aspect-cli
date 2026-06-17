@@ -14,6 +14,9 @@
 //!     to the named scenario. Each "attempt" is one open/write/close cycle
 //!     on the path, so multi-attempt scenarios faithfully simulate Bazel's
 //!     reconnect-after-eviction behavior on a FIFO.
+//!   - `help flags-as-proto` — prints a base64-encoded
+//!     `bazel_flags.FlagCollection` so flag-harvesting tests have a fixture.
+//!     Tests can override the payload via `BASIL_FLAGS_PROTO_B64`.
 //!
 //! Scenarios are added in `scenario`. Pick names that document the behavior
 //! they exercise (`success`, `cache_evicted_no_retry`, etc.) so the AXL test
@@ -48,6 +51,7 @@ fn main() {
     match verb {
         "info" => run_info(&args),
         "build" | "test" => run_build(&args),
+        "help" => run_help(&args),
         "" => {
             eprintln!("basil: no verb given");
             process::exit(2);
@@ -117,6 +121,54 @@ fn run_build(args: &[String]) {
             process::exit(128 + sig);
         }
     }
+}
+
+/// Emits the base64-encoded `bazel_flags.FlagCollection` that real Bazel
+/// prints for `bazel help flags-as-proto`. Tests can pin a payload via
+/// `BASIL_FLAGS_PROTO_B64`, which is printed verbatim.
+fn run_help(args: &[String]) {
+    let wants_proto = args.iter().any(|a| a == "flags-as-proto");
+    if !wants_proto {
+        eprintln!("basil: only `help flags-as-proto` is supported");
+        process::exit(2);
+    }
+    if let Ok(b64) = env::var("BASIL_FLAGS_PROTO_B64") {
+        println!("{b64}");
+        return;
+    }
+    println!("{}", flags_proto_b64());
+}
+
+/// Builds the default fixture covering each flag-derivation branch: a value
+/// flag (`config`), a boolean with a negative form and abbreviation
+/// (`keep_going`), a short value flag (`compilation_mode`), and a
+/// startup-only flag (`watchfs`).
+fn flags_proto_b64() -> String {
+    use axl_proto::bazel_flags::{FlagCollection, FlagInfo};
+    use base64::Engine;
+
+    let fi = |name: &str, neg: bool, abbr: &str, req: bool, cmds: &[&str]| FlagInfo {
+        name: name.to_string(),
+        has_negative_flag: Some(neg),
+        abbreviation: if abbr.is_empty() {
+            None
+        } else {
+            Some(abbr.to_string())
+        },
+        requires_value: Some(req),
+        commands: cmds.iter().map(|c| c.to_string()).collect(),
+        ..Default::default()
+    };
+    let collection = FlagCollection {
+        flag_infos: vec![
+            fi("config", false, "", true, &["build", "test"]),
+            fi("keep_going", true, "k", false, &["build", "test"]),
+            fi("compilation_mode", false, "c", true, &["build", "test"]),
+            fi("watchfs", true, "", false, &["startup"]),
+        ],
+    };
+    let bytes = collection.encode_to_vec();
+    base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
 /// Finds `--name <value>` or `--name=<value>` in argv. The runtime emits both
@@ -285,5 +337,29 @@ fn build_finished(code: i32, last: bool) -> BuildEvent {
             ..Default::default()
         })),
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod help_tests {
+    use super::*;
+    use axl_proto::bazel_flags::FlagCollection;
+    use base64::Engine;
+
+    #[test]
+    fn flags_proto_b64_decodes_to_collection() {
+        let b64 = flags_proto_b64();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(b64.trim())
+            .expect("valid base64");
+        let collection =
+            FlagCollection::decode(bytes.as_slice()).expect("decodes as FlagCollection");
+        let names: Vec<&str> = collection
+            .flag_infos
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
+        assert!(names.contains(&"keep_going"));
+        assert!(names.contains(&"config"));
     }
 }

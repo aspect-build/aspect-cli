@@ -1,4 +1,4 @@
-load("//bazel/rust:defs.bzl", "rust_binary")
+load("//bazel/rust:defs.bzl", "rust_binary", "rust_test")
 
 rust_binary(
     name = "basil",
@@ -9,6 +9,12 @@ rust_binary(
     ],
     deps = [
         "//crates/axl-proto",
+        "@crates//:base64",
         "@crates//:prost",
     ],
+)
+
+rust_test(
+    name = "test",
+    crate = ":basil",
 )
