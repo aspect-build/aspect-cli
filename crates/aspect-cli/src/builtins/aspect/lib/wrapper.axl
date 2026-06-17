@@ -124,16 +124,18 @@ def flag_specs_from_collection(collection) -> list[FlagSpec]:
     return specs
 
 def derive_flag_lists(specs: list[FlagSpec]) -> BazelFlagLists:
-    """Split FlagSpecs into the wrapper's five bash arrays. Value flags key on
-    requires_value, booleans on has_negative_flag (independent signals); a flag
-    matching neither is omitted. The pseudo-command `startup` is not a verb."""
+    """Split FlagSpecs into the wrapper's five bash arrays, partitioned on
+    value-ness: a flag takes a value iff requires_value; everything else is a
+    no-value flag (real booleans and Bazel expansion/void flags alike) and
+    lands in the bool/no-value list. The pseudo-command `startup` is not a verb.
+    """
     value, bool_, short_value, short_bool, verbs = {}, {}, {}, {}, {}
     for s in specs:
         if s.requires_value:
             value[s.name] = True
             if s.abbreviation:
                 short_value["-" + s.abbreviation] = True
-        if s.has_negative_flag:
+        else:
             bool_[s.name] = True
             if s.abbreviation:
                 short_bool["-" + s.abbreviation] = True

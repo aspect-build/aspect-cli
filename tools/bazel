@@ -676,6 +676,7 @@ BAZEL_BOOL_FLAGS=(
     configure
     consistent_labels
     cycles
+    debug_app
     debug_spawn_scheduler
     defer_param_files
     desugar_for_android
@@ -862,6 +863,7 @@ BAZEL_BOOL_FLAGS=(
     experimental_skylark_debug
     experimental_skylark_debug_reset_analysis
     experimental_skylark_debug_verbose_logging
+    experimental_spawn_scheduler
     experimental_split_coverage_postprocessing
     experimental_starlark_cc_import
     experimental_starlark_type_checking
@@ -897,6 +899,7 @@ BAZEL_BOOL_FLAGS=(
     experimental_writable_outputs
     explicit_java_test_deps
     expunge
+    expunge_async
     fat_apk_hwasan
     fatal_event_bus_exceptions
     fetch
@@ -912,6 +915,7 @@ BAZEL_BOOL_FLAGS=(
     heap_dump_on_oom
     heuristically_drop_nodes
     home_rc
+    host_jvm_debug
     idle_server_tasks
     ignore_all_rc_files
     ignore_dev_dependency
@@ -1049,6 +1053,7 @@ BAZEL_BOOL_FLAGS=(
     ios_memleaks
     isatty
     j2objc_dead_code_removal
+    java_debug
     java_deps
     java_header_compilation
     jplPropagateCcLinkParamsStore
@@ -1061,18 +1066,27 @@ BAZEL_BOOL_FLAGS=(
     legacy_whole_archive
     line_terminator_null
     lock_install_base
+    long
     materialize_param_files
     merge_android_manifest_permissions
     nodep_deps
+    noorder_results
+    null
     objc_debug_with_GLIBCXX
     objc_enable_binary_stripping
     objc_generate_linkmap
     objc_use_dotd_pruning
     omit_run_args
     one_version_enforcement_on_java_tests
+    order_results
     output_library_merged_assets
     output_tree_tracking
     packages
+    persistent_android_dex_desugar
+    persistent_android_resource_processor
+    persistent_multiplex_android_dex_desugar
+    persistent_multiplex_android_resource_processor
+    persistent_multiplex_android_tools
     portable_paths
     preemptible
     print_relative_test_log_paths
@@ -1098,6 +1112,9 @@ BAZEL_BOOL_FLAGS=(
     remote_accept_cached
     remote_cache_async
     remote_cache_compression
+    remote_download_all
+    remote_download_minimal
+    remote_download_toplevel
     remote_local_fallback
     remote_upload_local_results
     remote_verify_downloads
@@ -1120,6 +1137,7 @@ BAZEL_BOOL_FLAGS=(
     save_temps
     separate_aspect_deps
     share_native_deps
+    short
     show_loading_progress
     show_make_env
     show_progress
@@ -1131,6 +1149,7 @@ BAZEL_BOOL_FLAGS=(
     split_apks
     split_bytecode_optimization_pass
     stamp
+    start_app
     start_end_lib
     strict_deps_java_protos
     strict_filesets
@@ -1182,6 +1201,7 @@ BAZEL_SHORT_VALUE_FLAGS=(
 # next arg.
 BAZEL_SHORT_BOOL_FLAGS=(
     -k
+    -l
     -s
     -t
 )

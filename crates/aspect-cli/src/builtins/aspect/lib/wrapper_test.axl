@@ -172,11 +172,13 @@ def _test_derive_flag_lists_dedupes_and_sorts(ctx):
     _eq("deduped sorted value flags", lists.value_flags, ["a", "b"])
     _eq("deduped sorted verbs", lists.verbs, ["build", "test"])
 
-def _test_derive_flag_lists_omits_unclassified(ctx):
-    specs = [FlagSpec(name = "help", requires_value = False, has_negative_flag = False, abbreviation = "", commands = ["build"])]
+def _test_derive_flag_lists_keeps_expansion_flags_as_no_value(ctx):
+    # A both-false flag (Bazel expansion/void flag, e.g. remote_download_minimal)
+    # is a no-value flag: it belongs in bool_flags, not value_flags.
+    specs = [FlagSpec(name = "remote_download_minimal", requires_value = False, has_negative_flag = False, abbreviation = "", commands = ["build"])]
     lists = derive_flag_lists(specs)
-    _eq("unclassified omitted from value", lists.value_flags, [])
-    _eq("unclassified omitted from bool", lists.bool_flags, [])
+    _eq("expansion flag in bool", lists.bool_flags, ["remote_download_minimal"])
+    _eq("expansion flag not in value", lists.value_flags, [])
     _eq("verbs still collected", lists.verbs, ["build"])
 
 def _test_render_flag_array_indents_and_joins(ctx):
@@ -277,7 +279,7 @@ _UNIT_TESTS = [
     _test_flag_specs_from_collection,
     _test_derive_flag_lists_classifies_by_signal,
     _test_derive_flag_lists_dedupes_and_sorts,
-    _test_derive_flag_lists_omits_unclassified,
+    _test_derive_flag_lists_keeps_expansion_flags_as_no_value,
     _test_render_flag_array_indents_and_joins,
     _test_render_wrapper_substitutes_all_placeholders,
     _test_render_install_stamps_versions,

@@ -129,6 +129,11 @@ def _install_impl(ctx: TaskContext) -> int:
     tools_dir = root + "/tools"
     if not ctx.std.fs.exists(tools_dir):
         ctx.std.fs.create_dir_all(tools_dir)
+
+    # Remove first so an existing symlink is replaced, not written through.
+    # `remove_file` on a symlink removes the link, not the target.
+    if ctx.std.fs.exists(script_path):
+        ctx.std.fs.remove_file(script_path)
     ctx.std.fs.write(script_path, target)
 
     # `fs.write` does not set the executable bit, and Bazelisk execs tools/bazel
@@ -136,6 +141,8 @@ def _install_impl(ctx: TaskContext) -> int:
     if ctx.std.env.os() != "windows":
         ctx.std.process.command("chmod").args(["+x", script_path]).spawn().wait()
 
+    if ctx.std.fs.exists(doc_path):
+        ctx.std.fs.remove_file(doc_path)
     ctx.std.fs.write(doc_path, WRAPPER_DOC)
 
     if is_install:
