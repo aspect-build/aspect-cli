@@ -27,9 +27,6 @@ load("./lib/init_render.axl", "load_config", "preset_flags", "preset_names", "re
 # `--template=github:aspect-build/aspect-workflows-template --template-ref=main`.
 _DEFAULT_TEMPLATE = "github:aspect-build/aspect-workflows-template"
 
-def _github_release_api(repo):
-    return "https://api.github.com/repos/{}/releases/latest".format(repo)
-
 _BAZEL_WORKSPACE_MARKERS = ["MODULE.bazel", "WORKSPACE", "WORKSPACE.bazel", "WORKSPACE.bzlmod"]
 
 def _is_bazel_workspace(ctx, dir):
@@ -118,7 +115,8 @@ def _latest_release_ref(ctx, repo):
     """
     work = ctx.std.fs.mkdtemp(prefix = "aspect-init-rel-")
     meta = work + "/release.json"
-    ctx.http().download(url = _github_release_api(repo), output = meta, mode = 0o644).block()
+    api_url = "https://api.github.com/repos/{}/releases/latest".format(repo)
+    ctx.http().download(url = api_url, output = meta, mode = 0o644).block()
 
     # try_decode (not decode): the API can return non-JSON on a rate-limit or
     # error, which should surface as the hint below, not a parse traceback.
