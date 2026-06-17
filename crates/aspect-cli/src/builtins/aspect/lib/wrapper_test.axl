@@ -14,6 +14,7 @@ load(
     "derive_flag_lists",
     "detect_shell",
     "find_workspace_root",
+    "flag_specs_from_collection",
     "has_wrapper_marker",
     "parse_wrapper_version",
     "raw_content_url",
@@ -134,6 +135,22 @@ def _test_shell_snippet_fish(ctx):
     if "config.fish" not in snippet:
         fail("fish snippet missing config path: %r" % snippet)
 
+def _test_flag_specs_from_collection(ctx):
+    # A fake struct standing in for the proto FlagCollection/FlagInfo; exercises
+    # the None-coercion of optional proto fields and the commands copy.
+    fake = struct(flag_infos = [
+        struct(name = "keep_going", requires_value = None, has_negative_flag = True, abbreviation = None, commands = ["build"]),
+        struct(name = "config", requires_value = True, has_negative_flag = False, abbreviation = "c", commands = ["build", "test"]),
+    ])
+    specs = flag_specs_from_collection(fake)
+    _eq("length", len(specs), 2)
+    _eq("null requires_value -> False", specs[0].requires_value, False)
+    _eq("null abbreviation -> empty", specs[0].abbreviation, "")
+    _eq("has_negative_flag preserved", specs[0].has_negative_flag, True)
+    _eq("commands copied", specs[0].commands, ["build"])
+    _eq("config requires_value", specs[1].requires_value, True)
+    _eq("config abbreviation", specs[1].abbreviation, "c")
+
 def _test_derive_flag_lists_classifies_by_signal(ctx):
     specs = [
         FlagSpec(name = "config", requires_value = True, has_negative_flag = False, abbreviation = "", commands = ["build", "test"]),
@@ -152,7 +169,7 @@ def _test_derive_flag_lists_dedupes_and_sorts(ctx):
     specs = [
         FlagSpec(name = "b", requires_value = True, has_negative_flag = False, abbreviation = "", commands = ["test", "build"]),
         FlagSpec(name = "a", requires_value = True, has_negative_flag = False, abbreviation = "", commands = ["build"]),
-        FlagSpec(name = "a", requires_value = True, has_negative_flag = False, abbreviation = "", commands = ["build"]),
+        FlagSpec(name = "a", requires_value = True, has_negative_flag = False, abbreviation = "", commands = ["test"]),
     ]
     lists = derive_flag_lists(specs)
     _eq("deduped sorted value flags", lists.value_flags, ["a", "b"])
@@ -190,6 +207,7 @@ _UNIT_TESTS = [
     _test_detect_shell_unset,
     _test_shell_snippet_posix,
     _test_shell_snippet_fish,
+    _test_flag_specs_from_collection,
     _test_derive_flag_lists_classifies_by_signal,
     _test_derive_flag_lists_dedupes_and_sorts,
     _test_derive_flag_lists_omits_unclassified,
