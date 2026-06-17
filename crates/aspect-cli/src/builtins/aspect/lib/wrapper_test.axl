@@ -218,11 +218,21 @@ def _test_render_install_stamps_versions(ctx):
     template = "\n".join([
         'ASPECT_BAZEL_WRAPPER_VERSION="{{ASPECT_CLI_VERSION}}"',
         'ASPECT_BAZEL_WRAPPER_BAZEL_VERSION="{{BAZEL_VERSION}}"',
-        "BAZEL_VERBS=(", "{{BAZEL_VERBS}}", ")",
-        "BAZEL_VALUE_FLAGS=(", "{{BAZEL_VALUE_FLAGS}}", ")",
-        "BAZEL_BOOL_FLAGS=(", "{{BAZEL_BOOL_FLAGS}}", ")",
-        "BAZEL_SHORT_VALUE_FLAGS=(", "{{BAZEL_SHORT_VALUE_FLAGS}}", ")",
-        "BAZEL_SHORT_BOOL_FLAGS=(", "{{BAZEL_SHORT_BOOL_FLAGS}}", ")",
+        "BAZEL_VERBS=(",
+        "{{BAZEL_VERBS}}",
+        ")",
+        "BAZEL_VALUE_FLAGS=(",
+        "{{BAZEL_VALUE_FLAGS}}",
+        ")",
+        "BAZEL_BOOL_FLAGS=(",
+        "{{BAZEL_BOOL_FLAGS}}",
+        ")",
+        "BAZEL_SHORT_VALUE_FLAGS=(",
+        "{{BAZEL_SHORT_VALUE_FLAGS}}",
+        ")",
+        "BAZEL_SHORT_BOOL_FLAGS=(",
+        "{{BAZEL_SHORT_BOOL_FLAGS}}",
+        ")",
     ])
     lists = BazelFlagLists(verbs = ["build"], value_flags = ["config"], bool_flags = ["keep_going"], short_value_flags = ["c"], short_bool_flags = ["k"])
     out = render_install(template, lists, "9.9.9", "9.0.0")
