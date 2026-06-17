@@ -1476,7 +1476,7 @@ EOF
 # Append one element to the array named by $1. Bash 3.2 has no namerefs, so
 # the append goes through `eval`; this helper keeps that idiom in one place.
 array_push() {
-    eval "$1+=(\"\$2\")"
+    eval "$1+=( $(printf '%q' "$2") )"
 }
 
 classify_flags() {
