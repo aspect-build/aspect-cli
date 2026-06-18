@@ -24,7 +24,6 @@ description: |
   `actions/download-artifact` requires both to reach across runs.
 
   To install aspect-cli normally, see https://aspect.build/docs/cli.
-
 inputs:
   run-id:
     description: |
@@ -38,7 +37,6 @@ inputs:
       `run-id` is set (the same-run download path needs no token).
     required: false
     default: ""
-
 runs:
   using: composite
   steps:

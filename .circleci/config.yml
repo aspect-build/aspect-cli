@@ -1,5 +1,4 @@
 version: 2.1
-
 # Manual break-glass override for `aspect delivery`. Settable via the
 # CircleCI "Trigger Pipeline" UI or API; default empty means normal
 # selective delivery on every other build.
@@ -8,7 +7,6 @@ parameters:
     type: string
     default: ""
     description: "Bazel targets to force-deliver (space-separated). Example: //examples/deliverable. Leave empty for normal selective delivery."
-
 workflows:
   ci:
     jobs:
@@ -29,7 +27,6 @@ workflows:
           requires: [pre-build]
       - delivery-task:
           requires: [pre-build]
-
 jobs:
   pre-build:
     machine: true
@@ -42,7 +39,6 @@ jobs:
           command: |
             echo "Build and upload CLI to remote cache"
             .aspect/bootstrap.sh
-
   build-task:
     machine: true
     resource_class: aspect-build/aspect-default
@@ -58,7 +54,6 @@ jobs:
       - run:
           name: Build Task
           command: aspect build --task-key build-cci
-
   test-task:
     machine: true
     resource_class: aspect-build/aspect-default
@@ -74,7 +69,6 @@ jobs:
       - run:
           name: Test Task
           command: aspect test --task-key test-cci
-
   lint-task:
     machine: true
     resource_class: aspect-build/aspect-default
@@ -97,7 +91,6 @@ jobs:
       - run:
           name: Lint Task
           command: aspect lint --task-key lint-cci --fix --aspect=//tools/lint:linters.bzl%shellcheck -- //examples/lint/... -//exclude/...
-
   # Dedicated buildifier-only step that runs in parallel with format-task.
   # Models the legacy Rosetta `buildifier` task using a Starlark-only
   # `format_multirun` target — see https://aspect.build/docs/cli/migration/buildifier
@@ -116,7 +109,6 @@ jobs:
       - run:
           name: Buildifier Task
           command: aspect buildifier --task-key buildifier-cci
-
   format-task:
     machine: true
     resource_class: aspect-build/aspect-default
@@ -134,7 +126,6 @@ jobs:
       - run:
           name: Format Task
           command: aspect format --task-key format-cci
-
   gazelle-task:
     machine: true
     resource_class: aspect-build/aspect-default
@@ -150,7 +141,6 @@ jobs:
       - run:
           name: Gazelle Task
           command: aspect gazelle --task-key gazelle-cci
-
   # Regression test for the build-from-source gazelle path — upstream
   # `gazelle()` macro + rules_go toolchain. Most users will adopt the
   # prebuilt binary; this job catches breakage on the alternate path.
@@ -171,7 +161,6 @@ jobs:
       - run:
           name: Gazelle Task — from-source
           command: aspect gazelle --gazelle-target=//tools/gazelle:gazelle_from_source --bazel-flag=--config=pure_go --task-key gazelle-from-source-cci
-
   delivery-task:
     machine: true
     resource_class: aspect-build/aspect-default
