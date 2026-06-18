@@ -189,7 +189,7 @@ steps:
 
   # Dedicated buildifier-only step that runs in parallel with format-task.
   # Models the legacy Rosetta `buildifier` task using a Starlark-only
-  # `format_multirun` target — see https://docs.aspect.build/cli/migration/buildifier
+  # `format_multirun` target — see https://aspect.build/docs/cli/migration/buildifier
   - key: buildifier-task
     label: ":aspect: Buildifier Task"
     depends_on:

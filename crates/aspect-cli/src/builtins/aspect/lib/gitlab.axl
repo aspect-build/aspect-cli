@@ -439,7 +439,7 @@ def _classify_missing_credentials(ctx):
     """Return `(kind, msg)` for `ctx.aspect.auth.credentials()` returning
     None. The kind discriminates the CI case (where setting
     `ASPECT_API_TOKEN` is the fix) from the local case (`aspect auth login`)."""
-    setup_url = "https://docs.aspect.build/cli/authentication"
+    setup_url = "https://aspect.build/docs/cli/authentication"
     if ctx.std.env.var("GITHUB_ACTIONS"):
         msg = "no Aspect credentials — use the aspect-build/setup-aspect action with aspect-api-token (https://github.com/aspect-build/setup-aspect)"
         kind = _AUTH_KIND_NO_CREDENTIALS
@@ -532,7 +532,7 @@ def _authenticate(ctx, project_path, project_id = None, profile = None, roles = 
         _set_auth_reason(
             _reason,
             _AUTH_KIND_APP_NOT_INSTALLED,
-            "GitLab App not installed for this project (see https://docs.aspect.build/cli/authentication)",
+            "GitLab App not installed for this project (see https://aspect.build/docs/cli/authentication)",
         )
     else:
         _set_auth_reason(_reason, _AUTH_KIND_API_ERROR, "API request failed (HTTP %d): %s" % (resp.status, resp.body))

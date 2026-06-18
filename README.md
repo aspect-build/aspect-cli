@@ -24,11 +24,11 @@ INFO: Build Event Protocol files produced successfully.
     🧪 Test   1.2s  Run bazel tests
 ```
 
-Every `aspect <task>` ends with that per-phase breakdown, so the slow part of a CI step is always called out by name. The same content gets posted back to your PR as Buildkite annotations, GitHub Status Checks, and a PR task summary comment (see [examples below](#see-it-in-action)). [The CLI overview](https://docs.aspect.build/cli/overview#what-youll-see) shows `aspect format`, `aspect buildifier`, and `aspect lint` runs too — including the hold-the-line output (linter surfaces findings in unmodified files; the task still passes because no *new* violations were introduced).
+Every `aspect <task>` ends with that per-phase breakdown, so the slow part of a CI step is always called out by name. The same content gets posted back to your PR as Buildkite annotations, GitHub Status Checks, and a PR task summary comment (see [examples below](#see-it-in-action)). [The CLI overview](https://aspect.build/docs/cli/overview#what-youll-see) shows `aspect format`, `aspect buildifier`, and `aspect lint` runs too — including the hold-the-line output (linter surfaces findings in unmodified files; the task still passes because no *new* violations were introduced).
 
 ## Configure and extend in AXL
 
-[AXL, the Aspect Extension Language](https://docs.aspect.build/cli/overview#aspect-extension-language), is how you configure built-in tasks (in `.aspect/config.axl`) and add your own (as `.aspect/*.axl` files). It's a [typed Starlark](https://github.com/facebook/starlark-rust/blob/main/docs/types.md) dialect evaluated by the [Rust Starlark](https://github.com/facebook/starlark-rust) interpreter built by the [Buck2](https://buck2.build/) team, so `.axl` files catch type errors at parse time and parse fast even on huge repos.
+[AXL, the Aspect Extension Language](https://aspect.build/docs/cli/overview#aspect-extension-language), is how you configure built-in tasks (in `.aspect/config.axl`) and add your own (as `.aspect/*.axl` files). It's a [typed Starlark](https://github.com/facebook/starlark-rust/blob/main/docs/types.md) dialect evaluated by the [Rust Starlark](https://github.com/facebook/starlark-rust) interpreter built by the [Buck2](https://buck2.build/) team, so `.axl` files catch type errors at parse time and parse fast even on huge repos.
 
 Here's an example `.aspect/config.axl` that exercises several built-ins (for a full live config running in CI, see [`aspect-build/bazel-examples`](https://github.com/aspect-build/bazel-examples/blob/main/.aspect/config.axl)):
 
@@ -108,7 +108,7 @@ def config(ctx: ConfigContext):
 - **The CI scaffolding every Bazel repo eventually re-invents** — built in: hold-the-line lint (fails only on violations *you* introduced), selective delivery (re-deploys only services whose Bazel outputs actually changed), smart changed-file detection, bounded retry on transient Bazel errors, native artifact upload, and per-step status checks on GitHub, Buildkite, GitLab, and CircleCI.
 - **Custom CLI commands in ~10 lines of Starlark.** Drop a `.axl` file into `.aspect/` and `aspect <name>` is a real CLI command (see below). Tasks can shell out, read/write files, query the build graph, and subscribe to Bazel's Build Event Stream and Compact Execution Log.
 - **Per-repo version pin.** `.aspect/version.axl` pins the CLI version; the launcher fetches the matching binary on first invocation, so local and CI stay in sync.
-- **Standalone or with Aspect Workflows.** The CLI works on its own with any Bazel workspace. Pair it with [Aspect Workflows](https://docs.aspect.build/aspect-workflows) — Aspect's managed Bazel-CI runners, deployed in your AWS or GCP account or hosted by Aspect — for sub-minute cached builds, 2–3× faster CI, 40–80% cloud-compute savings, plus a Web UI, remote cache, and remote build execution.
+- **Standalone or with Aspect Workflows.** The CLI works on its own with any Bazel workspace. Pair it with [Aspect Workflows](https://aspect.build/docs/aspect-workflows) — Aspect's managed Bazel-CI runners, deployed in your AWS or GCP account or hosted by Aspect — for sub-minute cached builds, 2–3× faster CI, 40–80% cloud-compute savings, plus a Web UI, remote cache, and remote build execution.
 
 ## Install
 
@@ -118,7 +118,7 @@ curl -fsSL https://install.aspect.build | bash
 
 macOS and Linux. Apache-2.0. No Aspect account required.
 
-The [10-minute Quickstart](https://docs.aspect.build/quickstart) walks from install to writing a custom task. Full docs: [docs.aspect.build/cli](https://docs.aspect.build/cli/overview).
+The [10-minute Quickstart](https://aspect.build/docs/quickstart) walks from install to writing a custom task. Full docs: [aspect.build/docs/cli](https://aspect.build/docs/cli/overview).
 
 ## Built-in tasks
 
@@ -126,18 +126,18 @@ Three tasks work in any Bazel workspace with no extra setup — they're `bazel b
 
 | Task | What it does |
 |---|---|
-| [`aspect build`](https://docs.aspect.build/cli/tasks/build_test) | Build Bazel targets |
-| [`aspect test`](https://docs.aspect.build/cli/tasks/build_test) | Run Bazel tests, with optional LCOV coverage |
-| [`aspect run`](https://docs.aspect.build/cli/tasks/run) | Build and run a binary target |
+| [`aspect build`](https://aspect.build/docs/cli/tasks/build_test) | Build Bazel targets |
+| [`aspect test`](https://aspect.build/docs/cli/tasks/build_test) | Run Bazel tests, with optional LCOV coverage |
+| [`aspect run`](https://aspect.build/docs/cli/tasks/run) | Build and run a binary target |
 
 The remaining built-ins need both **Bazel-graph wiring** (a tool dependency in `MODULE.bazel`, plus a BUILD target or rule wired up to it) and **AXL wiring** (programmable configuration in `.aspect/config.axl`) to point the task at your repo's setup. Each task page walks through both:
 
 | Task | What it does | What it needs |
 |---|---|---|
-| [`aspect format`](https://docs.aspect.build/cli/tasks/format) | Format files changed in the PR | A `//tools:format` BUILD target (the task's default) that wraps a formatter binary — typically via [`aspect_rules_lint`](https://registry.bazel.build/modules/aspect_rules_lint) or [`buildifier_prebuilt`](https://registry.bazel.build/modules/buildifier_prebuilt), plus the matching `bazel_dep`. Override the target path with `formatter_target` in `.aspect/config.axl` if you put it somewhere else. |
-| [`aspect lint`](https://docs.aspect.build/cli/tasks/lint) | Run linters with hold-the-line strategy | [`aspect_rules_lint`](https://registry.bazel.build/modules/aspect_rules_lint) plus the linter rules of choice (eslint, ruff, golangci-lint, …); lint aspects declared in `.aspect/config.axl` |
-| [`aspect gazelle`](https://docs.aspect.build/cli/tasks/gazelle) | Generate and sync BUILD files | A `//tools:gazelle` BUILD target (the task's default) that wraps a Gazelle binary — typically via [`gazelle`](https://registry.bazel.build/modules/gazelle) or [`aspect_gazelle_prebuilt`](https://registry.bazel.build/modules/aspect_gazelle_prebuilt) (for Starlark-defined extensions), plus the matching `bazel_dep`. Override the target path with `gazelle_target` in `.aspect/config.axl` if you put it somewhere else. |
-| [`aspect delivery`](https://docs.aspect.build/cli/tasks/delivery) | Deliver only targets whose Bazel-built outputs changed | BUILD targets that implement delivery (e.g. `oci_push`, `helm_push`, custom `bazel_run`-able scripts); a `--query` (or `config.axl` equivalent) selecting which targets are deliverables |
+| [`aspect format`](https://aspect.build/docs/cli/tasks/format) | Format files changed in the PR | A `//tools:format` BUILD target (the task's default) that wraps a formatter binary — typically via [`aspect_rules_lint`](https://registry.bazel.build/modules/aspect_rules_lint) or [`buildifier_prebuilt`](https://registry.bazel.build/modules/buildifier_prebuilt), plus the matching `bazel_dep`. Override the target path with `formatter_target` in `.aspect/config.axl` if you put it somewhere else. |
+| [`aspect lint`](https://aspect.build/docs/cli/tasks/lint) | Run linters with hold-the-line strategy | [`aspect_rules_lint`](https://registry.bazel.build/modules/aspect_rules_lint) plus the linter rules of choice (eslint, ruff, golangci-lint, …); lint aspects declared in `.aspect/config.axl` |
+| [`aspect gazelle`](https://aspect.build/docs/cli/tasks/gazelle) | Generate and sync BUILD files | A `//tools:gazelle` BUILD target (the task's default) that wraps a Gazelle binary — typically via [`gazelle`](https://registry.bazel.build/modules/gazelle) or [`aspect_gazelle_prebuilt`](https://registry.bazel.build/modules/aspect_gazelle_prebuilt) (for Starlark-defined extensions), plus the matching `bazel_dep`. Override the target path with `gazelle_target` in `.aspect/config.axl` if you put it somewhere else. |
+| [`aspect delivery`](https://aspect.build/docs/cli/tasks/delivery) | Deliver only targets whose Bazel-built outputs changed | BUILD targets that implement delivery (e.g. `oci_push`, `helm_push`, custom `bazel_run`-able scripts); a `--query` (or `config.axl` equivalent) selecting which targets are deliverables |
 
 `aspect help` lists every task available in your repo (built-ins plus any custom ones you've added).
 
@@ -163,11 +163,11 @@ codegen = task(
 aspect codegen //gen/services/...
 ```
 
-Tasks can shell out to any subprocess, read and write files, query the build graph, subscribe to Bazel's Build Event Stream, and declare typed arguments. [How to run and define tasks](https://docs.aspect.build/cli/guides/basic) covers the full walkthrough. The [AXL reference](https://docs.aspect.build/axl/types) documents every type and built-in.
+Tasks can shell out to any subprocess, read and write files, query the build graph, subscribe to Bazel's Build Event Stream, and declare typed arguments. [How to run and define tasks](https://aspect.build/docs/cli/guides/basic) covers the full walkthrough. The [AXL reference](https://aspect.build/docs/axl/types) documents every type and built-in.
 
 ## Running in CI
 
-The same `aspect <task>` command you run locally works identically in CI. [Running tasks in CI](https://docs.aspect.build/cli/tasks-ci) has ready-to-paste YAML for GitHub Actions, Buildkite, GitLab CI, and CircleCI — for both provider-hosted runners and Aspect Workflows CI runners.
+The same `aspect <task>` command you run locally works identically in CI. [Running tasks in CI](https://aspect.build/docs/cli/tasks-ci) has ready-to-paste YAML for GitHub Actions, Buildkite, GitLab CI, and CircleCI — for both provider-hosted runners and Aspect Workflows CI runners.
 
 On GitHub Actions specifically, [`aspect-build/setup-aspect`](https://github.com/aspect-build/setup-aspect) handles the install, wires up GHA caching, and exchanges your `ASPECT_API_TOKEN` for a short-lived JWT — in one action step.
 
@@ -188,7 +188,7 @@ The [`aspect-build/bazel-examples`](https://github.com/aspect-build/bazel-exampl
 - **GitHub Status Checks** — one check per `aspect <task>` invocation, named by `--task-key`.
 - **Buildkite annotations** _(when running on Buildkite)_ — one annotation per `aspect <task>` invocation, rendered at the top of the build page.
 
-Live links to each, from real runs of this repo's own CI: [What `aspect <task>` reports back](https://docs.aspect.build/cli/tasks-ci#what-aspect-%3Ctask%3E-reports-back).
+Live links to each, from real runs of this repo's own CI: [What `aspect <task>` reports back](https://aspect.build/docs/cli/tasks-ci#what-aspect-%3Ctask%3E-reports-back).
 
 ## Comparison to older versions
 
@@ -204,8 +204,8 @@ Versions before 2025.42 differed in some notable ways:
 
 ## Community and support
 
-- Documentation: [docs.aspect.build/cli](https://docs.aspect.build/cli/overview)
-- Quickstart: [docs.aspect.build/quickstart](https://docs.aspect.build/quickstart)
+- Documentation: [aspect.build/docs/cli](https://aspect.build/docs/cli/overview)
+- Quickstart: [aspect.build/docs/quickstart](https://aspect.build/docs/quickstart)
 - Slack: [slack.aspect.build](https://slack.aspect.build/)
 - Issues and discussions: this repo
 

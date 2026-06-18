@@ -28,8 +28,8 @@ everyone (and CI) uses the same Aspect CLI version:
 version("${VERSION}")
 \`\`\`
 
-See https://docs.aspect.build/cli/version-pinning for the full reference.
+See https://aspect.build/docs/cli/version-pinning for the full reference.
 
-**Documentation**: https://docs.aspect.build/cli/overview
-**Additional installation instructions**: https://docs.aspect.build/cli/install
+**Documentation**: https://aspect.build/docs/cli/overview
+**Additional installation instructions**: https://aspect.build/docs/cli/install
 EOF

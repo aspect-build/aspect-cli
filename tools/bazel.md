@@ -8,9 +8,9 @@ Copy `tools/bazel` from this repo into your own workspace, adjust the verb lists
 
 ## About the Aspect CLI
 
-The [Aspect CLI](https://github.com/aspect-build/aspect-cli) (`aspect`) is a free, open-source, Apache-2.0-licensed task runner that extends Bazel with first-class developer workflows — built-in tasks for `build`, `test`, `run`, `format`, `lint`, `gazelle`, and `delivery`, plus custom tasks defined in [AXL](https://docs.aspect.build/cli/overview#aspect-extension-language) (Aspect Extension Language, typed Starlark). Same command locally and in every CI provider; native integration with GitHub Status Checks, Buildkite Annotations, and the equivalents on GitLab and CircleCI.
+The [Aspect CLI](https://github.com/aspect-build/aspect-cli) (`aspect`) is a free, open-source, Apache-2.0-licensed task runner that extends Bazel with first-class developer workflows — built-in tasks for `build`, `test`, `run`, `format`, `lint`, `gazelle`, and `delivery`, plus custom tasks defined in [AXL](https://aspect.build/docs/cli/overview#aspect-extension-language) (Aspect Extension Language, typed Starlark). Same command locally and in every CI provider; native integration with GitHub Status Checks, Buildkite Annotations, and the equivalents on GitLab and CircleCI.
 
-- **Docs:** <https://docs.aspect.build/cli/overview>
+- **Docs:** <https://aspect.build/docs/cli/overview>
 - **Source / releases:** <https://github.com/aspect-build/aspect-cli>
 - **Install:** `curl -fsSL https://install.aspect.build | bash`
 
@@ -59,7 +59,7 @@ The wrapper's presence means the org wants devs on aspect, so if a command would
 curl -fsSL https://install.aspect.build | bash
 ```
 
-…or see <https://docs.aspect.build/cli/install>. If the verb is also a real Bazel command (`build`/`test`) the wrapper then falls back to vanilla bazel so the command still runs; for aspect-only verbs (`lint`, `format`, custom tasks) Bazel has nothing to run, so it exits. Plain bazel verbs (rule 2) never need aspect and run regardless.
+…or see <https://aspect.build/docs/cli/install>. If the verb is also a real Bazel command (`build`/`test`) the wrapper then falls back to vanilla bazel so the command still runs; for aspect-only verbs (`lint`, `format`, custom tasks) Bazel has nothing to run, so it exits. Plain bazel verbs (rule 2) never need aspect and run regardless.
 
 ## How flag rewriting works
 

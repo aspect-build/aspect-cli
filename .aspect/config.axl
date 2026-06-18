@@ -59,7 +59,7 @@ buildifier = format.alias(
         # MODULE.bazel, WORKSPACE(.bazel), *.bzl, *.star — so --scope=all skips
         # *.axl, *.MODULE.bazel, Tiltfile, BUCK from include_patterns below;
         # --scope=changed passes them positionally so they're covered.
-        # https://docs.aspect.build/cli/tasks/buildifier#run-it-locally
+        # https://aspect.build/docs/cli/tasks/buildifier#run-it-locally
         "formatter_args_for_tree_walk": ["-r", "."],
         # Symlink to the raw Go binary, doesn't cd to $BUILD_WORKING_DIRECTORY,
         # so run in the user's cwd for relative paths to resolve.
@@ -402,7 +402,7 @@ def config(ctx: ConfigContext):
         "--build_metadata=TAGS=dev,local,axl-testing",
         "--build_metadata=TAG_ENV=dev",
         "--build_metadata=TAG_COMPONENT=aspect-cli",
-        "--build_metadata=ASPECT_WORKFLOWS_LINKS=[Docs](https://docs.aspect.build),[Website](https://aspect.build/)",
+        "--build_metadata=ASPECT_WORKFLOWS_LINKS=[Docs](https://aspect.build/docs),[Website](https://aspect.build/)",
     ])
 
     # Configure user_task's attrs by path (group/name).

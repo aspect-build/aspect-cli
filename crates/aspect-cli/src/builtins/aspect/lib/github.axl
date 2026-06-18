@@ -207,7 +207,7 @@ def _classify_missing_credentials(ctx):
     stdin so the secret never lands in `GITHUB_ENV`); other CIs use raw
     `ASPECT_API_TOKEN` (no equivalent action yet).
     """
-    setup_url = "https://docs.aspect.build/cli/authentication"
+    setup_url = "https://aspect.build/docs/cli/authentication"
     if ctx.std.env.var("GITHUB_ACTIONS"):
         msg = "no Aspect credentials — use the aspect-build/setup-aspect action with aspect-api-token (https://github.com/aspect-build/setup-aspect)"
         kind = _AUTH_KIND_NO_CREDENTIALS
@@ -381,7 +381,7 @@ def _authenticate(ctx, owner, repo, profile = None, roles = None, _reason = None
         _set_auth_reason(
             _reason,
             _AUTH_KIND_APP_NOT_INSTALLED,
-            "GitHub App not installed (see https://docs.aspect.build/cli/authentication)",
+            "GitHub App not installed (see https://aspect.build/docs/cli/authentication)",
         )
     else:
         _set_auth_reason(_reason, _AUTH_KIND_API_ERROR, "API request failed (HTTP %d): %s" % (resp.status, resp.body))

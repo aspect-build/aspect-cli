@@ -1059,7 +1059,7 @@ mod tests {
         };
         let mut root = cmd.build("1.2.3").expect("build ok");
 
-        let banner = "Aspect CLI v1.2.3 — https://docs.aspect.build/cli";
+        let banner = "Aspect CLI v1.2.3 — https://aspect.build/docs/cli";
         let rendered = |c: &mut Command| c.render_help().to_string();
 
         assert!(

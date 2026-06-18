@@ -64,14 +64,14 @@ load("./lifecycle.axl", "ReproFixCommand")
 # Install docs URL surfaced in the small-text hint at the bottom of each
 # repro/fix section — developers who don't yet have `aspect` on their PATH
 # need this to be able to copy a repro command and actually run it.
-_INSTALL_URL = "https://docs.aspect.build/cli/install"
+_INSTALL_URL = "https://aspect.build/docs/cli/install"
 
 # Plain-text hint used by the CLI renderer.
 ASPECT_CLI_INSTALL_HINT = "Install aspect: " + _INSTALL_URL
 
 # Markdown `<sub>` hint spliced into per-task check-run and PR-comment
 # templates. Single source of truth for the install URL across all surfaces.
-ASPECT_CLI_INSTALL_HINT_MARKDOWN = "<sub>Install `aspect`: [docs.aspect.build/cli/install](" + _INSTALL_URL + ")</sub>"
+ASPECT_CLI_INSTALL_HINT_MARKDOWN = "<sub>Install `aspect`: [aspect.build/docs/cli/install](" + _INSTALL_URL + ")</sub>"
 
 # Soft cap on a composed command's length; targets past it collapse to
 # ` … +N more` so the output stays copy-paste-able.

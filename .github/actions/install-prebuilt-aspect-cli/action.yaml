@@ -23,7 +23,7 @@ description: |
   pass `run-id` (the upstream run that holds the artifact) and `github-token`.
   `actions/download-artifact` requires both to reach across runs.
 
-  To install aspect-cli normally, see https://docs.aspect.build/cli.
+  To install aspect-cli normally, see https://aspect.build/docs/cli.
 
 inputs:
   run-id:

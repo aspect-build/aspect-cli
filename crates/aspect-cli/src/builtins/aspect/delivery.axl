@@ -114,9 +114,9 @@ each target's outcome (ok/skip/warn/fail/pending), the resolved CI metadata
 
 Customers wire `DeliveryTrait.delivery_target` (per-target enrichment)
 and `DeliveryTrait.delivery_manifest` (end-of-task) in `config.axl`.
-See https://docs.aspect.build/cli/guides/delivery-manifest.
+See https://aspect.build/docs/cli/guides/delivery-manifest.
 
-User-facing migration guide: https://docs.aspect.build/cli/migration/delivery
+User-facing migration guide: https://aspect.build/docs/cli/migration/delivery
 """
 
 load("@aspect//bazel.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")

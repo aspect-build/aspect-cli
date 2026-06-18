@@ -18,10 +18,10 @@ const GREY: &str = "\x1b[38;5;244m";
 const RESET: &str = "\x1b[0m";
 
 /// Docs landing page advertised by the banner.
-const DOCS_URL: &str = "https://docs.aspect.build/cli";
+const DOCS_URL: &str = "https://aspect.build/docs/cli";
 
 /// The grey banner line for `version`, e.g.
-/// `Aspect CLI v1.2.3 — https://docs.aspect.build/cli`, wrapped in ANSI grey.
+/// `Aspect CLI v1.2.3 — https://aspect.build/docs/cli`, wrapped in ANSI grey.
 ///
 /// No trailing newline — callers place it within their own layout.
 pub fn line(version: &str) -> String {

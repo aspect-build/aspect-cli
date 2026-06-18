@@ -44,7 +44,7 @@ def _token_impl(ctx: TaskContext) -> int:
         error(ctx.std, "Access denied: %s" % resp.body)
         return 1
     if resp.status == 404:
-        error(ctx.std, "GitHub App not installed. See https://docs.aspect.build/cli/authentication")
+        error(ctx.std, "GitHub App not installed. See https://aspect.build/docs/cli/authentication")
         return 1
     if resp.status < 200 or resp.status >= 300:
         error(ctx.std, "API request failed (HTTP " + str(resp.status) + "): " + resp.body)
