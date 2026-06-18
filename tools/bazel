@@ -240,6 +240,7 @@ BAZEL_VALUE_FLAGS=(
     experimental_strict_java_deps
     experimental_thread_dump_action_execution_inactivity_duration
     experimental_thread_dump_interval
+    experimental_tool_command_line
     experimental_total_worker_memory_limit_mb
     experimental_ui_max_stdouterr_bytes experimental_windows_sandbox_path
     experimental_worker_allowlist experimental_worker_memory_limit_mb
@@ -701,7 +702,7 @@ aspect_missing_hint() {
 
     curl -fsSL https://install.aspect.build | bash
 
-  or see https://docs.aspect.build/cli/install
+  or see https://aspect.build/docs/cli/install
 EOF
     [[ -n "$fallback_note" ]] && echo "  $fallback_note" >&2
     return 0
