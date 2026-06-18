@@ -788,9 +788,12 @@ def chunk_annotations(annotations, batch_size = ANNOTATIONS_PER_BATCH):
         i += batch_size
     return out
 
-def render_check_output(ctx, data, status, render_ctx, links, templates = None, metadata_keys = None):
+def render_check_output(ctx, data, status, render_ctx, links, templates = None, metadata_keys = None, snippet_options = None, max_snippets = 0):
     """Render title, summary, and text for a lint check run. Shape matches
     bazel_results.render_check_output so dispatch can call either by kind.
+
+    snippet_options/max_snippets are accepted for signature parity with the
+    bazel_results renderer and ignored here (lint has no log snippets).
     """
     t = templates or {}
     run_date = format_run_date(ctx, data.get("start_time_ms", 0))

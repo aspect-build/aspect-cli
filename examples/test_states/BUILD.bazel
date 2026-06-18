@@ -5,9 +5,15 @@ Use with:
     aspect dev test //examples/test_states/...
 
 Provides:
-  always_pass  — a test that always passes (sh_test exit 0)
-  always_fail  — a test that always fails (sh_test exit 1)
-  flaky_test   — a test that flips based on a counter file (simulated flaky)
+  always_pass     — a test that always passes (sh_test exit 0)
+  always_fail     — a test that always fails (sh_test exit 1)
+  flaky_test      — a test that flips based on a counter file (simulated flaky)
+  demo_test_fail  — a failing test with a realistic multi-line test.log, for
+                    demoing the inline test-log snippet on the status surfaces
+  demo_build_fail — a failing build action with realistic compiler-style stderr,
+                    for demoing the inline action-stderr snippet
+
+All but `always_pass` are tagged `manual` (opt-in only; never run with `//...`).
 """
 
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
@@ -30,4 +36,42 @@ sh_test(
     size = "small",
     srcs = ["flaky.sh"],
     tags = ["manual"],  # opt-in only; don't run with //...
+)
+
+# Demo failures for the inline failure-snippet surfaces (status checks,
+# Buildkite annotations, PR comment). Both are `manual` (opt-in only, never run
+# with `//...`) and emit realistic, multi-line output so the snippet windowing
+# has failure markers to anchor on. Run them explicitly to see snippets render:
+#
+#   aspect test //examples/test_states:demo_test_fail   # inline test.log snippet
+#   bazel build //examples/test_states:demo_build_fail  # inline action-stderr snippet
+
+sh_test(
+    name = "demo_test_fail",
+    size = "small",
+    srcs = ["demo_test_fail.sh"],
+    tags = ["manual"],
+)
+
+genrule(
+    name = "demo_build_fail",
+    outs = ["demo_build_fail.out"],
+    # Emits a realistic compiler-style error to stderr, then exits non-zero so
+    # the action fails and BES reports its stderr — exercising the action-stderr
+    # snippet path. `>&2` so it lands on the action's stderr, not stdout.
+    cmd = """(
+cat >&2 <<'ERR'
+INFO: From Compiling examples/test_states/widget.cc:
+examples/test_states/widget.cc: In function 'int Widget::total() const':
+examples/test_states/widget.cc:42:14: error: no matching function for call to 'sum(std::vector<Item>&)'
+   42 |   return sum(items_);
+      |          ~~~^~~~~~~~~
+examples/test_states/widget.cc:18:5: note: candidate: 'int sum(const std::vector<int>&)'
+   18 | int sum(const std::vector<int>& xs);
+      |     ^~~
+examples/test_states/widget.cc:18:5: note:   no known conversion for argument 1 from 'std::vector<Item>' to 'const std::vector<int>&'
+ERR
+exit 1
+)""",
+    tags = ["manual"],
 )

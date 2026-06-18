@@ -27,11 +27,13 @@ load(
 )
 load(
     "../lib/check_dispatch.axl",
+    "SURFACE_STATUS_CHECK",
     "apply_artifact_links",
     "kind_for_task",
     "make_render_ctx",
     "renderer_for_kind",
     "should_emit_update",
+    "snippet_budget_for",
 )
 load("../lib/checkrun.axl", "checkrun")
 load("../lib/ci.axl", "detect_ci_host", "resolve_build_url")
@@ -410,6 +412,7 @@ def _github_status_checks(ctx: FeatureContext):
         elif final:
             _state["_ended_ms"] = now_ms(ctx)  # terminal render needs it for duration
 
+        _snippet_opts, _max_snippets = snippet_budget_for(SURFACE_STATUS_CHECK)
         output = renderer.render(
             ctx,
             data,
@@ -418,6 +421,8 @@ def _github_status_checks(ctx: FeatureContext):
             _make_links(data),
             templates,
             metadata_keys,
+            snippet_options = _snippet_opts,
+            max_snippets = _max_snippets,
         )
 
         # Annotations only on the terminal update — GitHub appends across

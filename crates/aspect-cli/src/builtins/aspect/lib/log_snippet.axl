@@ -1,0 +1,343 @@
+"""Extract a short, high-signal failure snippet from a test/build log.
+
+On a failure, the status surfaces (GitHub/GitLab status checks, Buildkite
+annotations, PR summary comments) want to show the *output* that explains the
+failure inline — not just the failing label. This module turns a log file on
+disk into a compact, cleaned snippet suitable for a fenced code block.
+
+Strategy, in order of preference:
+  1. Structured first — `extract_junit_failure` scans a JUnit `test.xml` for the
+     first `<failure>`/`<error>` element and emits its message + stack trace.
+     Zero heuristics; the framework already isolated the failure.
+  2. Heuristic fallback — `extract_snippet` reads the raw `test.log` / action
+     stderr and applies "tail-with-error-anchor windowing": strip ANSI/CR noise,
+     locate the last failure-marker line, and emit a window around it (plus a
+     little head context for compile errors), falling back to the tail of the
+     buffer when no marker is found.
+
+Reads are bounded at the byte level. The historical "BES can inline 40+ MB of
+action stderr onto the Starlark heap" concern (see lib/bazel_results.axl) is
+about reading a BES `File.contents` oneof — NOT about reading a file by path.
+Here we read the on-disk file via `try_read_to_string_capped`, which pulls only
+the first `max_read_bytes` (+1, to detect truncation) into memory — never the
+whole file — so even a multi-MB log degrades to a truncated prefix without
+spiking the heap.
+
+The runtime has no regex module (see lib/lifecycle.axl), so cleaning and marker
+detection are plain character/substring walks.
+
+Pure logic (`*_from_text`) is split from the I/O wrappers so it is unit-testable
+without a filesystem; the wrappers take `std` (= `ctx.std`) and degrade to
+`source = "none"` on any missing/unreadable path.
+"""
+
+SnippetOptions = record(
+    # Max lines kept in the emitted snippet body.
+    max_lines = field(int, default = 20),
+    # Hard cap on bytes/chars read from disk; a larger file is sliced to this
+    # prefix and flagged truncated.
+    max_read_bytes = field(int, default = 262144),
+    # Lines of context kept before / after the anchor marker line.
+    context_before = field(int, default = 8),
+    context_after = field(int, default = 6),
+)
+
+# Snippet provenance. "none" means nothing usable was found (missing path,
+# empty/unreadable file, or a JUnit parse miss) — the caller renders no snippet.
+SnippetSource = enum("xml", "log", "none")
+
+SnippetResult = record(
+    # Cleaned snippet body, newline-joined, no code fence. "" when source=none.
+    text = field(str, default = ""),
+    # True when lines were elided (windowed/over max_lines) or the read hit the
+    # byte cap — surfaces a "…truncated" hint on the surface.
+    truncated = field(bool, default = False),
+    source = field(SnippetSource, default = SnippetSource("none")),
+)
+
+_EMPTY = SnippetResult(text = "", truncated = False, source = SnippetSource("none"))
+
+def has_snippet(res):
+    """True when `res` carries usable snippet text (source != none, text != "")."""
+    return res.source.value != "none" and res.text != ""
+
+# Smallest fence we ever emit (a plain ```), widened past any backtick run in
+# the body so log content can't close the fence early and break out into
+# Markdown/HTML (CommonMark closes a fence only with >= the opening run length).
+_MIN_FENCE_LEN = 3
+
+def code_fence_for(text):
+    """Return a backtick fence (>= ```) guaranteed not to be closed by any
+    backtick run inside `text`. The longest run of consecutive backticks in the
+    body + 1, floored at 3. Callers wrap the snippet as `<fence>text\\n<fence>`."""
+    longest = 0
+    run = 0
+    for c in text.elems():
+        if c == "`":
+            run += 1
+            if run > longest:
+                longest = run
+        else:
+            run = 0
+    n = longest + 1
+    if n < _MIN_FENCE_LEN:
+        n = _MIN_FENCE_LEN
+    return "`" * n
+
+# Case-insensitive substrings that anchor the failure region. Converges on the
+# union used by GitHub problem matchers / Jenkins log-parser rule sets across
+# pytest / go test / cargo test / JUnit / compilers. Matched as lowercased
+# substrings (no regex), so they catch "ERROR:", "FAILED", "Traceback", etc.
+_FAILURE_MARKERS = [
+    "error",
+    "fail",
+    "fatal",
+    "panic",
+    "traceback",
+    "exception",
+    "assert",
+    "expected",
+    "segfault",
+    "sigsegv",
+    "core dumped",
+    "undefined reference",
+    "timed out",
+    "timeout",
+]
+
+def _strip_ansi(text):
+    """Remove ANSI CSI/SGR escapes (`\\033[`…final-byte) and OSC sequences
+    (`\\033]`…BEL). Character walk — the runtime has no regex module."""
+    if not text or "\033" not in text:
+        return text
+    out = []
+    i = 0
+    n = len(text)
+    for _ in range(n):
+        if i >= n:
+            break
+        c = text[i]
+        if c == "\033" and i + 1 < n and text[i + 1] == "[":
+            # CSI: parameter/intermediate bytes (digits, ;, :, space-/ ) then a
+            # single final byte terminates. Treat any non-parameter byte as final.
+            j = i + 2
+            for _ in range(n - j):
+                if j >= n:
+                    break
+                cj = text[j]
+                j += 1
+                if cj not in "0123456789;:":
+                    break
+            i = j
+        elif c == "\033" and i + 1 < n and text[i + 1] == "]":
+            # OSC: skip to BEL (0x07) or string terminator ESC\\.
+            j = i + 2
+            for _ in range(n - j):
+                if j >= n:
+                    break
+                if text[j] == "\007":
+                    j += 1
+                    break
+                j += 1
+            i = j
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+def _clean_lines(text):
+    """Split into display lines after ANSI stripping, progress-bar collapse, and
+    de-duplication of consecutive identical lines.
+
+    Carriage returns redraw a terminal line in place, so only the segment after
+    the last `\\r` on a physical line survives (drops progress-bar spam). Runs of
+    identical lines collapse to one. Returns a list of lines (no trailing \\n).
+    """
+    cleaned = _strip_ansi(text)
+    lines = []
+    prev = None
+    for raw in cleaned.split("\n"):
+        line = raw.rstrip("\r")
+        if "\r" in line:
+            line = line.split("\r")[-1]
+        if line == prev:
+            continue
+        prev = line
+        lines.append(line)
+
+    # Drop a trailing empty line from the final newline.
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines
+
+def _last_marker_index(lines):
+    """Index of the last line containing a failure marker, or -1 if none."""
+    idx = -1
+    for i in range(len(lines)):
+        low = lines[i].lower()
+        for m in _FAILURE_MARKERS:
+            if m in low:
+                idx = i
+                break
+    return idx
+
+def _window(lines, options):
+    """Pick the most relevant <= max_lines window from cleaned `lines`.
+
+    Anchors on the last failure marker (failures usually report near the end);
+    emits `[anchor - context_before, anchor + context_after]`, then caps to
+    max_lines keeping the marker. With no marker, returns the tail. Returns
+    (window_lines, elided) where `elided` is True if any line was dropped.
+    """
+    total = len(lines)
+    if total <= options.max_lines:
+        return (lines, False)
+
+    anchor = _last_marker_index(lines)
+    if anchor < 0:
+        # No marker — trust the tail.
+        return (lines[total - options.max_lines:], True)
+
+    start = anchor - options.context_before
+    if start < 0:
+        start = 0
+    end = anchor + options.context_after + 1
+    if end > total:
+        end = total
+    window = lines[start:end]
+
+    # Enforce max_lines, biasing toward keeping the marker (drop from the front).
+    if len(window) > options.max_lines:
+        window = window[len(window) - options.max_lines:]
+    return (window, True)
+
+def extract_snippet_from_text(text, hit_cap, options):
+    """Pure: turn raw log `text` into a SnippetResult via tail-with-error-anchor
+    windowing. `hit_cap` is True when `text` was already byte-capped upstream."""
+    if not text:
+        return _EMPTY
+    lines = _clean_lines(text)
+    if not lines:
+        return _EMPTY
+    window, elided = _window(lines, options)
+    if not window:
+        return _EMPTY
+    return SnippetResult(
+        text = "\n".join(window),
+        truncated = elided or hit_cap,
+        source = SnippetSource("log"),
+    )
+
+def _attr_value(tag, name):
+    """Value of `name="..."` within an XML start-tag string, or "". Handles only
+    double-quoted values (the JUnit writers we target always double-quote)."""
+    key = name + "=\""
+    at = tag.find(key)
+    if at < 0:
+        return ""
+    start = at + len(key)
+    end = tag.find("\"", start)
+    if end < 0:
+        return ""
+    return tag[start:end]
+
+def _xml_unescape(s):
+    """Reverse the five predefined XML entities. Sufficient for JUnit text/attrs."""
+    if "&" not in s:
+        return s
+    return (s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&"))
+
+def extract_junit_failure_from_text(xml, options):
+    """Pure: emit the first JUnit `<failure>`/`<error>` message + body as a
+    SnippetResult, or `none` on any parse miss (caller falls back to the log).
+
+    Lightweight scan, not a real parser: find the first `<failure`/`<error`
+    start-tag, read its `message`/`type` attrs, then capture body text up to the
+    matching close tag (or self-closing `/>`). Windowed/capped like a log snippet.
+    """
+    if not xml:
+        return _EMPTY
+
+    best = -1
+    kind = ""
+    for tagname in ["<failure", "<error"]:
+        at = xml.find(tagname)
+        if at >= 0 and (best < 0 or at < best):
+            best = at
+            kind = tagname
+    if best < 0:
+        return _EMPTY
+
+    tag_end = xml.find(">", best)
+    if tag_end < 0:
+        return _EMPTY
+    start_tag = xml[best:tag_end + 1]
+
+    message = _attr_value(start_tag, "message")
+    typ = _attr_value(start_tag, "type")
+
+    body = ""
+    if not start_tag.rstrip().endswith("/>"):
+        close = xml.find("</", tag_end + 1)
+        if close > tag_end:
+            body = xml[tag_end + 1:close]
+
+    header = ""
+    if typ and message:
+        header = typ + ": " + message
+    else:
+        header = message or typ
+
+    parts = []
+    if header:
+        parts.append(_xml_unescape(header.strip()))
+    body = _xml_unescape(body).strip()
+    if body:
+        parts.append(body)
+    if not parts:
+        return _EMPTY
+
+    lines = _clean_lines("\n".join(parts))
+    if not lines:
+        return _EMPTY
+    window, elided = _window(lines, options)
+    return SnippetResult(
+        text = "\n".join(window),
+        truncated = elided,
+        source = SnippetSource("xml"),
+    )
+
+def _read_bounded(std, path, max_read_bytes):
+    """Read up to `max_read_bytes` bytes from `path`. Returns (text, hit_cap).
+
+    Reads only the capped prefix into memory via `try_read_to_string_capped`
+    (never the whole file), so a multi-MB log can't spike the heap — the very
+    case this feature targets. Reads one extra byte to detect truncation: when
+    the result exceeds the cap, it's sliced and `hit_cap` is True. Missing /
+    unreadable paths degrade to `("", False)` rather than failing the task.
+    """
+    if not path:
+        return ("", False)
+    text = std.fs.try_read_to_string_capped(path, max_read_bytes + 1)
+    if not text:
+        return ("", False)
+    if len(text) > max_read_bytes:
+        return (text[:max_read_bytes], True)
+    return (text, False)
+
+def extract_snippet(std, path, options = None):
+    """I/O wrapper: read `path` (bounded) and window it. `none` if unreadable."""
+    opts = options or SnippetOptions()
+    text, hit_cap = _read_bounded(std, path, opts.max_read_bytes)
+    return extract_snippet_from_text(text, hit_cap, opts)
+
+def extract_junit_failure(std, xml_path, options = None):
+    """I/O wrapper: read a JUnit `test.xml` (bounded) and emit its first failure.
+    `none` on missing path or parse miss — caller should then try the raw log."""
+    opts = options or SnippetOptions()
+    text, _hit_cap = _read_bounded(std, xml_path, opts.max_read_bytes)
+    return extract_junit_failure_from_text(text, opts)

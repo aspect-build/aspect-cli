@@ -55,6 +55,7 @@ load(
     lint_init_data = "init_data",
     lint_render_check_output = "render_check_output",
 )
+load("./log_snippet.axl", "SnippetOptions")
 
 # Dispatch table: `task_update.kind` → struct(init, render). Adding a
 # new kind: implement `init_data()` + `render_check_output()` in a
@@ -108,6 +109,26 @@ def kind_for_task(task_name):
     Falls back to "bazel_results" for unknown task names.
     """
     return _TASK_KIND_DEFAULTS.get(task_name, "bazel_results")
+
+# Per-surface inline-snippet budgets (max snippets shown + per-snippet line cap).
+# Status checks / BK annotations are glanceable and bump the surface size caps
+# (GitHub 65 KB, BK 1 MiB), so they stay tight; the PR summary comment is the
+# detailed surface and matches Marvin v1's role with a larger budget. Returned as
+# `(SnippetOptions, max_snippets)`; max_snippets == 0 disables snippets.
+SURFACE_STATUS_CHECK = "status_check"
+SURFACE_BUILDKITE = "buildkite"
+SURFACE_PR_COMMENT = "pr_comment"
+
+_SNIPPET_BUDGETS = {
+    SURFACE_STATUS_CHECK: (SnippetOptions(max_lines = 15), 3),
+    SURFACE_BUILDKITE: (SnippetOptions(max_lines = 15), 3),
+    SURFACE_PR_COMMENT: (SnippetOptions(max_lines = 30), 5),
+}
+
+def snippet_budget_for(surface):
+    """Return `(SnippetOptions, max_snippets)` for a surface; `(None, 0)` (snippets
+    off) for an unknown surface."""
+    return _SNIPPET_BUDGETS.get(surface, (None, 0))
 
 def to_display_name(name):
     """Convert a snake_case task name to a CamelCase display name.
