@@ -188,6 +188,7 @@ Renderer: `delivery_results`. The body shows counts-by-outcome, per-outcome tabl
 | `BuildkiteAnnotations`   | [feature/buildkite_annotations.axl](feature/buildkite_annotations.axl)     | `enabled = True` (default); requires `BUILDKITE` env    | Posts `buildkite-agent annotate --scope=job` annotations with a leading task pill. |
 | `ArtifactUpload`         | [feature/artifacts.axl](feature/artifacts.axl)                             | `args.upload_*` flags per-task                          | Uploads testlogs / profile / BEP / execlog to the host CI; populates `ArtifactsTrait`. |
 | `Telemetry`              | [feature/telemetry.axl](feature/telemetry.axl)                             | `ctx.telemetry.exporters.add(...)` in config            | OTLP traces / logs / metrics export. |
+| `Tips`                   | [feature/tips.axl](feature/tips.axl)                                       | `enabled = True` (default)                              | Collects per-task tips and surfaces them on the terminal, check-runs, and PR comments. Disable or silence ids via `ctx.features[Tips]` in config. |
 
 `GithubStatusChecks` and `BuildkiteAnnotations` delegate per-kind rendering through [`lib/check_dispatch.axl`](lib/check_dispatch.axl) so adding a new task kind is a single dispatch-table entry rather than an N×2 update. `GithubStatusComments` aggregates *across* tasks (one PR comment per run); `GithubLintComments` posts at the diagnostic-anchor level inside the PR's Files Changed view.
 
