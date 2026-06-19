@@ -292,6 +292,11 @@ jobs:
   # the generated workspace. Catches CLI-side breakage of the init renderer
   # against the live template. `--template-ref=main` tests the current template
   # tip; `init`'s default (latest release) is what end users get.
+  #
+  # Every preset is scaffolded on PRs (cheap, exercises the renderer for all of
+  # them), but the slow workspace build runs only for `shell` — the fastest
+  # preset and enough to smoke-test the generated build. Pushes to main build
+  # every preset.
   init-preset:
     runs-on: ubuntu-latest
     needs: [pre-build]
@@ -323,5 +328,6 @@ jobs:
         run: |
           aspect init "$RUNNER_TEMP/proj" --task-key init-${{ matrix.preset }} --preset='${{ matrix.preset }}' --name=my_project --template-ref=main
       - name: Build generated workspace
+        if: ${{ github.event_name != 'pull_request' || matrix.preset == 'shell' }}
         working-directory: ${{ runner.temp }}/proj
         run: aspect build --task-key init-${{ matrix.preset }} -- //...
