@@ -448,7 +448,7 @@ def silence_hint_line(id):
     `TIPS_BLOCK` and PR-comment section so both stay aligned."""
     if not id:
         return ""
-    return '<sub>_Silence by adding `"%s"` to `ctx.features["tips"].args.silence` in `.aspect/config.axl`, or pass `--tips:silence=%s` on the command line._</sub>' % (id, id)
+    return '<sub>_Silence by setting `ctx.features[Tips].args.silence = ["%s", ...]` in `.aspect/config.axl` (load `Tips` from `@aspect//feature/tips.axl`), or pass `--tips:silence=%s` on the command line._</sub>' % (id, id)
 
 def tip_to_payload(t):
     """Project a stored tip into the render-only subset crossing the per-task
@@ -534,7 +534,7 @@ def _print_tip(std, id, severity, title, body):
         for line in cleaned.split("\n"):
             print(bar if line == "" else bar + " " + line)
     print(bar)
-    print(bar + ' (Silence this tip with `--tips:silence=%s` or by adding it to `ctx.features["tips"].args.silence` in `.aspect/config.axl`.)' % id)
+    print(bar + ' (Silence this tip with `--tips:silence=%s`, or in `.aspect/config.axl` set `ctx.features[Tips].args.silence = ["%s", ...]` after `load("@aspect//feature/tips.axl", "Tips")`.)' % (id, id))
 
 def blockquote_body(body):
     """Prefix every body line with `> ` (or `>` for blank) so it renders as a
@@ -707,13 +707,13 @@ def _tips_impl(ctx):
 
 Tips = feature(
     display_name = "Tips",
-    summary = "Collect and surface non-fatal tips (suggestions / warnings / important notices) on each task. Disable with `--tips:enabled=false` or `ctx.features[\"tips\"].enabled = False` in `.aspect/config.axl`.",
+    summary = "Collect and surface non-fatal tips (suggestions / warnings / important notices) on each task. Disable with `--tips:enabled=false`, or in `.aspect/config.axl` set `ctx.features[Tips].enabled = False` after `load(\"@aspect//feature/tips.axl\", \"Tips\")`.",
     implementation = _tips_impl,
     enabled = True,
     args = {
         "silence": args.string_list(
             default = [],
-            description = "Tip ids to suppress for this task. Append from config: `ctx.features[\"tips\"].args.silence.append(\"<id>\")`. Pass on CLI: `--tips:silence=<id>` (repeat for multiple).",
+            description = "Tip ids to suppress for this task. Set from config: `ctx.features[Tips].args.silence = [\"<id>\", ...]` after `load(\"@aspect//feature/tips.axl\", \"Tips\")`. Pass on CLI: `--tips:silence=<id>` (repeat for multiple).",
         ),
         "auto_print": args.boolean(
             default = True,

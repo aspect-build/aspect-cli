@@ -1,0 +1,23 @@
+"""Public re-export of the `Tips` owner feature.
+
+The owner feature lives co-located with its trait + types in
+`lib/tips.axl`. This file exists so user `config.axl` files can reach the
+feature handle with a stable load path symmetric to the other features:
+
+    load("@aspect//feature/tips.axl", "Tips")
+
+    def config(ctx: ConfigContext):
+        # Silence specific tip ids (assign the full list; the arg is not
+        # readable for in-place `.append`).
+        ctx.features[Tips].args.silence = ["add-id-token-permission"]
+        # Or turn tips off entirely.
+        ctx.features[Tips].enabled = False
+
+The authoring API (`add_tip`, severities, surfaces, the `tip_suggestion`
+hook) is on `@aspect//tips.axl`. Internal modules load the feature
+directly from `lib/tips.axl`.
+"""
+
+load("../lib/tips.axl", _Tips = "Tips")
+
+Tips = _Tips
