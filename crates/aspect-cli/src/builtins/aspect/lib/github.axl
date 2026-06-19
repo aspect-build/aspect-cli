@@ -500,17 +500,50 @@ def detect_merge_group_base_sha(std):
         return ""
     return (read_github_event(std).get("merge_group", {}) or {}).get("base_sha", "") or ""
 
-def head_is_synthesized_merge(std, parents):
+def detect_synthesized_merge_sha(std):
+    """The GitHub-synthesized PR merge commit SHA, or `""`.
+
+    On GHA `pull_request`, `GITHUB_SHA` *is* the `refs/pull/<n>/merge` commit
+    GitHub builds (head merged onto the base tip), so its first parent is the
+    base the PR is evaluated against. Returned so change detection can operate
+    on it by SHA, independent of what the user's checkout left at HEAD, of
+    `origin/*` freshness, and of `fetch-depth`.
+
+    `pull_request_target` is excluded: there `GITHUB_SHA` is the base branch
+    tip (the event runs in the base-repo context, not the merge), so it is not
+    a synthesized merge and its `parents[0]` is not the PR base. `""` off
+    `pull_request` (incl. `merge_group`, which carries its base directly via
+    `detect_merge_group_base_sha`)."""
+    env = std.env
+    if not env.var("GITHUB_ACTIONS"):
+        return ""
+    if (env.var("GITHUB_EVENT_NAME") or "") != "pull_request":
+        return ""
+    return env.var("GITHUB_SHA") or ""
+
+def head_is_synthesized_merge(std, parents, head_sha = ""):
     """True when HEAD is a CI-synthesized merge so `parents[0]` is a safe
     diff base. False for a developer's own merge and any non-merge HEAD.
 
     Trust rule differs by source (refs differ in developer-controllability):
 
       - GHA pull_request / pull_request_target: a workflow can checkout
-        `head.sha`, so the event alone doesn't prove a synthesized merge —
-        confirm `parents[0] == pull_request.base.sha` (GitHub merges head
-        onto exactly that base; a developer merge has parents[0] = prior
-        branch tip and falls through).
+        `head.sha`, so the event alone doesn't prove a synthesized merge.
+        HEAD is confirmed to be the GitHub-made `refs/pull/<n>/merge` ref
+        by EITHER:
+          (a) `head_sha` == the synthesized merge SHA
+              (`detect_synthesized_merge_sha`) — proves the default checkout
+              is in place. Holds even when the base branch advanced after the
+              merge ref was synthesized, which leaves `parents[0]` a newer
+              base tip than the event payload's `base.sha`. `pull_request`
+              only: on `pull_request_target` GITHUB_SHA is the base tip, not a
+              merge, so this branch never fires there.
+          (b) `parents[0] == pull_request.base.sha` — exact, but misses the
+              base-advance case above; used when `head_sha` isn't supplied and
+              the sole check on `pull_request_target`.
+        Either way GitHub makes the base the first parent, so `parents[0]`
+        is the base. A developer merge checked out via `ref: head.sha`
+        satisfies neither and falls through.
       - GHA merge_group: HEAD is the queue's `gh-readonly-queue` ref (not
         overridable), so ≥2 parents is always GitHub-made. parents[0] is
         NOT compared to `merge_group.base_sha` (that tracks the target
@@ -524,6 +557,9 @@ def head_is_synthesized_merge(std, parents):
     if env.var("GITHUB_ACTIONS"):
         event_name = env.var("GITHUB_EVENT_NAME") or ""
         if event_name in ("pull_request", "pull_request_target"):
+            merge_sha = detect_synthesized_merge_sha(std)
+            if head_sha and merge_sha and head_sha == merge_sha:
+                return True
             base = _pull_request_event_sha(std, "base")
             return base != "" and parents[0] == base
         return event_name == "merge_group"
@@ -754,10 +790,10 @@ def _git_cwd(ctx, cwd):
     """
     return cwd or ctx.std.env.current_dir()
 
-def _head_parents(ctx, cwd = None):
-    """HEAD's parent SHAs, or `[]` if unresolvable. `len >= 2` ⇒ merge commit.
+def _commit_parents(ctx, rev = "HEAD", cwd = None):
+    """`rev`'s parent SHAs, or `[]` if unresolvable. `len >= 2` ⇒ merge commit.
 
-    Reads via `git cat-file -p HEAD`, not `git log/rev-list --parents`:
+    Reads via `git cat-file -p <rev>`, not `git log/rev-list --parents`:
     those respect the `.git/shallow` overlay and return empty on a shallow
     checkout, though the raw object still encodes the parents. Bypassing the
     overlay makes merge-commit-first work on shallow PR checkouts (a targeted
@@ -769,7 +805,7 @@ def _head_parents(ctx, cwd = None):
     """
     process = ctx.std.process
     cwd = _git_cwd(ctx, cwd)
-    out = process.command("git").args(["cat-file", "-p", "HEAD"]).current_dir(cwd).stdout("piped").stderr("null").spawn().wait_with_output()
+    out = process.command("git").args(["cat-file", "-p", rev]).current_dir(cwd).stdout("piped").stderr("null").spawn().wait_with_output()
     if not out.status.success:
         return []
     parents = []
@@ -781,6 +817,15 @@ def _head_parents(ctx, cwd = None):
         elif line == "":
             break  # end of header block; message follows
     return parents
+
+def _head_parents(ctx, cwd = None):
+    """HEAD's parent SHAs; see `_commit_parents`."""
+    return _commit_parents(ctx, rev = "HEAD", cwd = cwd)
+
+def _head_sha(ctx, cwd = None):
+    """`git rev-parse HEAD`, or `""` if unresolvable."""
+    out = ctx.std.process.command("git").args(["rev-parse", "HEAD"]).current_dir(_git_cwd(ctx, cwd)).stdout("piped").stderr("null").spawn().wait_with_output()
+    return out.stdout.strip() if out.status.success else ""
 
 def _ensure_local_sha(ctx, sha, cwd = None):
     """Ensure `sha` is in the local object store (shallow on-demand fetch
@@ -823,8 +868,7 @@ def _resolve_merge_base(ctx, base_ref, cwd = None):
     process = ctx.std.process
     cwd = _git_cwd(ctx, cwd)
 
-    head_out = process.command("git").args(["rev-parse", "HEAD"]).current_dir(cwd).stdout("piped").stderr("null").spawn().wait_with_output()
-    head_sha = head_out.stdout.strip() if head_out.status.success else ""
+    head_sha = _head_sha(ctx, cwd = cwd)
 
     head_on_base = False
     mb = process.command("git").args(["merge-base", "HEAD", base_ref]).current_dir(cwd).stdout("piped").stderr("piped").spawn().wait_with_output()
@@ -837,7 +881,7 @@ def _resolve_merge_base(ctx, base_ref, cwd = None):
 
     # HEAD^1 path (step 2): synthesized merge, or HEAD confirmed on base.
     parents = _head_parents(ctx, cwd = cwd)
-    synthesized = head_is_synthesized_merge(ctx.std, parents)
+    synthesized = head_is_synthesized_merge(ctx.std, parents, head_sha = head_sha)
     if synthesized or (len(parents) >= 1 and head_on_base):
         parent_sha = parents[0]
         if _ensure_local_sha(ctx, parent_sha, cwd = cwd):
@@ -870,27 +914,37 @@ def resolve_merge_base_for_test(ctx, base_ref, cwd):
     Production goes through `detect_changed_files`."""
     return _resolve_merge_base(ctx, base_ref, cwd = cwd)
 
-def _try_local_git_diff_from_base_sha(ctx, line_level, base_sha):
-    """Run `git diff <base_sha>` → `{files, skipped, source, unscoped}`,
-    or `None` on any failure (unfetchable SHA / `git diff` error).
+def _try_local_git_diff_from_base_sha(ctx, line_level, base_sha, head = "HEAD", cwd = None):
+    """Run `git diff <base_sha> <head>` → `{files, skipped, source,
+    unscoped}`, or `None` on any failure (unfetchable SHA / `git diff`
+    error). Two-dot (tree compare) — no merge-base / common history needed.
+
+    `head` defaults to the working-tree `HEAD`; the synthesized-merge path
+    passes an explicit merge SHA so the diff is independent of what the
+    user's checkout left at HEAD. Both `base_sha` and a non-HEAD `head`
+    are fetched on-demand by SHA (shallow-safe).
 
     `source` is a neutral `"local git diff <base>..<head>"`; callers
     append context. Used by every local-diff path in `detect_changed_files`.
     """
 
     process = ctx.std.process
-    cwd = ctx.std.env.current_dir()
+    cwd = _git_cwd(ctx, cwd)
 
-    # Shallow checkout may lack the SHA; depth-1 fetch on-demand.
-    if not _ensure_local_sha(ctx, base_sha):
+    # Shallow checkout may lack the SHA(s); depth-1 fetch on-demand.
+    if not _ensure_local_sha(ctx, base_sha, cwd = cwd):
+        return None
+    if head != "HEAD" and not _ensure_local_sha(ctx, head, cwd = cwd):
         return None
 
-    head_out = process.command("git").args(["rev-parse", "HEAD"]).current_dir(cwd).stdout("piped").stderr("null").spawn().wait_with_output()
-    head_sha = head_out.stdout.strip() if head_out.status.success else ""
-    source = "local git diff %s..%s" % (base_sha, head_sha) if head_sha else "local git diff %s..HEAD" % base_sha
+    source = "local git diff %s..%s" % (base_sha, head)
+
+    # Bare `git diff <base>` (base vs the working tree) for HEAD; an explicit
+    # `head` pins both diff endpoints.
+    head_args = [] if head == "HEAD" else [head]
 
     if line_level:
-        result = process.command("git").args(["diff", base_sha, "--unified=0"]).current_dir(cwd).stdout("piped").stderr("piped").spawn().wait_with_output()
+        result = process.command("git").args(["diff", base_sha] + head_args + ["--unified=0"]).current_dir(cwd).stdout("piped").stderr("piped").spawn().wait_with_output()
         if not result.status.success:
             return None
         parsed = _parse_local_diff_output(result.stdout)
@@ -898,11 +952,33 @@ def _try_local_git_diff_from_base_sha(ctx, line_level, base_sha):
             entry["hunk_lines"] = _widen_lines(entry["lines"], _HUNK_CONTEXT_LINES)
         return {"files": parsed, "skipped": [], "source": source, "unscoped": False}
 
-    out = process.command("git").args(["diff", "--diff-filter=d", "--name-only", base_sha]).current_dir(cwd).stdout("piped").stderr("piped").spawn().wait_with_output()
+    out = process.command("git").args(["diff", "--diff-filter=d", "--name-only", base_sha] + head_args).current_dir(cwd).stdout("piped").stderr("piped").spawn().wait_with_output()
     if not out.status.success:
         return None
     names = [f for f in out.stdout.strip().split("\n") if f]
     return {"files": names, "skipped": [], "source": source, "unscoped": False}
+
+def _diff_synthesized_merge(ctx, line_level, merge_sha, cwd = None):
+    """Change set from the synthesized PR merge commit `merge_sha`, or `None`.
+
+    Fetches `merge_sha` by SHA, reads its `parents[0]` (the base GitHub merged
+    onto), and diffs `parents[0]` against the merge. Operating by SHA makes
+    this independent of HEAD, `origin/*` freshness, and `fetch-depth`;
+    git-only, so it works on fork PRs too. `None` when `merge_sha` is empty,
+    isn't a ≥2-parent commit, or the diff fails."""
+    if not merge_sha or not _ensure_local_sha(ctx, merge_sha, cwd = cwd):
+        return None
+    parents = _commit_parents(ctx, rev = merge_sha, cwd = cwd)
+    if len(parents) < 2:
+        return None
+    return _try_local_git_diff_from_base_sha(ctx, line_level, parents[0], head = merge_sha, cwd = cwd)
+
+def synthesized_merge_diff_for_test(ctx, line_level, merge_sha, cwd):
+    """Test seam for `_diff_synthesized_merge` against a scratch repo at `cwd`
+    with an explicit `merge_sha` (production reads it from the GHA env via
+    `detect_synthesized_merge_sha`). Production goes through
+    `detect_changed_files`."""
+    return _diff_synthesized_merge(ctx, line_level, merge_sha, cwd = cwd)
 
 def _parse_local_diff_output(output):
     """Parse `git diff --unified=0` into `[{file, lines, additions, deletions}]`:
@@ -1031,10 +1107,16 @@ def detect_changed_files(ctx, line_level = True, base_ref = "", merge_base = Non
       4. `_resolve_merge_base(ctx, base_ref)` → diff against the merge-base.
          Covers Buildkite/CircleCI PR builds, overridden `ref:`, push-to-base,
          local dev.
-      5. PR Files API — only when steps 1-4 failed; costs App quota.
+      5. GHA synthesized merge by SHA (`_diff_synthesized_merge`):
+         deterministic and checkout-independent. The git-only guarantee for
+         GHA PRs; also covers fork PRs that can't reach the App-quota API.
+      6. PR Files API — only when steps 1-5 failed; costs App quota.
 
     Step 2 before 3 because GitLab merged_result/merge_train HEAD includes
     target updates beyond DIFF_BASE_SHA, so `HEAD^1..HEAD` is the right anchor.
+    Step 5 before 6 so fork PRs (no Aspect credentials) still resolve from git.
+    Step 2 is the same merge resolved via HEAD: a fetch-free fast path when the
+    checkout left HEAD at the merge, with step 5 the by-SHA backstop otherwise.
 
     `base_ref` for step 4: non-empty honored verbatim; empty (default
     sentinel) → `detect_ci_base_ref`, then `detect_default_branch_ref`,
@@ -1078,7 +1160,7 @@ def detect_changed_files(ctx, line_level = True, base_ref = "", merge_base = Non
     # (2) merge-commit-first (see `head_is_synthesized_merge`); a developer's
     # own merge is rejected there and falls through to (4).
     parents = _head_parents(ctx)
-    if head_is_synthesized_merge(ctx.std, parents):
+    if head_is_synthesized_merge(ctx.std, parents, head_sha = _head_sha(ctx)):
         local = _try_local_git_diff_from_base_sha(ctx, line_level, parents[0])
         if local:
             local["source"] += " (HEAD is a CI-synthesized merge commit)"
@@ -1103,7 +1185,16 @@ def detect_changed_files(ctx, line_level = True, base_ref = "", merge_base = Non
             local["source"] += " (%s)" % diff_base_source
             return local
 
-    # (5) PR Files API — only when steps 1-4 failed AND a PR context is
+    # (5) GitHub-synthesized merge by SHA — deterministic and
+    # checkout-independent; the git-only guarantee for GHA PRs (see
+    # `_diff_synthesized_merge`). Runs before the App-quota API so fork PRs
+    # resolve from git.
+    local = _diff_synthesized_merge(ctx, line_level, detect_synthesized_merge_sha(ctx.std))
+    if local:
+        local["source"] += " (GITHUB_SHA synthesized merge, fetched by SHA)"
+        return local
+
+    # (6) PR Files API — only when steps 1-5 failed AND a PR context is
     # detectable; otherwise degrade to `--scope=all`.
     pr, _ = detect_github_pr(ctx.std)
     if pr:

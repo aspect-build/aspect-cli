@@ -6,17 +6,21 @@ Covers:
     the PR context), `merge_group` (`detect_merge_group_base_sha`
     returns the queue base SHA), and `push` (neither fires; downstream
     falls back to local `git diff`).
+  - `detect_synthesized_merge_sha` — `GITHUB_SHA` on `pull_request`, `""`
+    elsewhere (notably `pull_request_target`, where it's the base tip).
   - `head_is_synthesized_merge` — the per-source gate that decides
     whether HEAD's first parent is a safe diff base, including the
-    PR-head-checkout and batched-merge_group cases.
+    PR-head-checkout, base-advance-race, `pull_request_target`-base-merge,
+    and batched-merge_group cases.
   - `list_pull_request_files` auth fallback + rate-limit bucketing.
 
 Most cases are env- and event-file-driven, so they stub `std` with a
 fake env (dict-backed) and a fake fs (path → content dict). The
-`_resolve_merge_base` integration section is the exception: it builds
-real scratch git repos with `git` subprocesses to exercise the
-merge-base / HEAD^1 diff-base resolution end to end (notably the
-developer-merge-commit case behind the reported under-scoping bug).
+integration section is the exception: it builds real scratch git repos
+with `git` subprocesses to exercise diff-base resolution end to end —
+`_resolve_merge_base` (merge-base / HEAD^1, incl. the developer-merge
+under-scoping case) and the synthesized-merge-by-SHA path
+(`synthesized_merge_diff_for_test`).
 
 Run with:
   aspect dev test-github-detect
@@ -28,10 +32,12 @@ load(
     "detect_commit_sha",
     "detect_github_pr",
     "detect_merge_group_base_sha",
+    "detect_synthesized_merge_sha",
     "github",
     "head_is_synthesized_merge",
     "read_github_event",
     "resolve_merge_base_for_test",
+    "synthesized_merge_diff_for_test",
 )
 load(
     "./gitlab_detect.axl",
@@ -84,6 +90,12 @@ def _expect_mg_sha(label, vars, files, expected):
     got = detect_merge_group_base_sha(_fake_std(vars, files))
     _eq(label, got, expected)
 
+# ── detect_synthesized_merge_sha ────────────────────────────────────
+
+def _expect_merge_sha(label, vars, expected):
+    got = detect_synthesized_merge_sha(_fake_std(vars, {}))
+    _eq(label, got, expected)
+
 # ── detect_commit_sha ───────────────────────────────────────────────
 
 def _expect_commit_sha(label, vars, files, expected):
@@ -92,8 +104,8 @@ def _expect_commit_sha(label, vars, files, expected):
 
 # ── head_is_synthesized_merge ───────────────────────────────────────
 
-def _expect_head_synthesized(label, vars, files, parents, expected):
-    got = head_is_synthesized_merge(_fake_std(vars, files), parents)
+def _expect_head_synthesized(label, vars, files, parents, expected, head_sha = ""):
+    got = head_is_synthesized_merge(_fake_std(vars, files), parents, head_sha = head_sha)
     _eq(label, got, expected)
 
 # ── read_github_event ───────────────────────────────────────────────
@@ -149,6 +161,37 @@ def _test_impl(ctx):
         pr_vars,
         pr_files,
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    )
+
+    # detect_synthesized_merge_sha returns the GITHUB_SHA merge commit on
+    # `pull_request` (operated on by SHA in step 5), and "" elsewhere.
+    _expect_merge_sha(
+        "pull_request: detect_synthesized_merge_sha is GITHUB_SHA (the merge)",
+        pr_vars,
+        "ccccccccccccccccccccccccccccccccccccccccc",
+    )
+
+    # pull_request_target: GITHUB_SHA is the base branch tip, not a merge —
+    # excluded so a base tip that happens to be a merge isn't mistaken for one.
+    _expect_merge_sha(
+        "pull_request_target: detect_synthesized_merge_sha is empty (GITHUB_SHA is the base tip)",
+        {"GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "pull_request_target", "GITHUB_SHA": "deadbeef"},
+        "",
+    )
+    _expect_merge_sha(
+        "merge_group: detect_synthesized_merge_sha is empty (base carried directly)",
+        {"GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "merge_group", "GITHUB_SHA": "deadbeef"},
+        "",
+    )
+    _expect_merge_sha(
+        "push: detect_synthesized_merge_sha is empty",
+        {"GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "push", "GITHUB_SHA": "deadbeef"},
+        "",
+    )
+    _expect_merge_sha(
+        "off-CI: detect_synthesized_merge_sha is empty",
+        {"GITHUB_EVENT_NAME": "pull_request", "GITHUB_SHA": "deadbeef"},
+        "",
     )
 
     # ── Merge queue — merge_group event ─────────────────────────────
@@ -232,6 +275,56 @@ def _test_impl(ctx):
         pr_files,
         [base],
         False,
+    )
+
+    # Base-advance race: on persistent runners reusing a clone, each job gets a
+    # fresh synthesized merge whose parents[0] is the CURRENT base tip — newer
+    # than the event payload's base.sha (snapshotted at PR-event time). The
+    # base.sha equality check then fails even though HEAD is genuinely the
+    # GitHub merge. `head_sha == GITHUB_SHA` confirms the merge ref directly and
+    # rescues the fast path; parents[0] (the newer base) is the correct diff base.
+    github_sha = pr_vars["GITHUB_SHA"]
+    newer_base = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    _expect_head_synthesized(
+        "pull_request: synthesized merge trusted via HEAD == GITHUB_SHA (parents[0] != stale base.sha)",
+        pr_vars,
+        pr_files,
+        [newer_base, head],
+        True,
+        head_sha = github_sha,
+    )
+
+    # Developer `ref: head.sha` checkout WITH head_sha supplied: HEAD is the PR
+    # head, not GITHUB_SHA's merge (GITHUB_SHA stays the synthesized merge on
+    # pull_request), and parents[0] is the prior tip — both signals reject.
+    _expect_head_synthesized(
+        "pull_request: developer head.sha checkout (HEAD != GITHUB_SHA, parents[0] != base) is rejected",
+        pr_vars,
+        pr_files,
+        [prior_tip, head],
+        False,
+        head_sha = head,
+    )
+
+    # pull_request_target: GITHUB_SHA is the base-branch tip, NOT a merge. When
+    # that tip is itself a merge commit (a prior PR's merge), the default
+    # checkout has HEAD == GITHUB_SHA — but its parents[0] is the prior base
+    # tip, not this PR's base. The `head_sha == GITHUB_SHA` branch must NOT
+    # fire here (detect_synthesized_merge_sha is `pull_request`-only); branch
+    # (b) `parents[0] == base.sha` then correctly rejects it.
+    prt_vars = {
+        "GITHUB_ACTIONS": "true",
+        "GITHUB_EVENT_NAME": "pull_request_target",
+        "GITHUB_SHA": "ffffffffffffffffffffffffffffffffffffffff",
+        "GITHUB_EVENT_PATH": pr_event_path,
+    }
+    _expect_head_synthesized(
+        "pull_request_target: base tip is a merge, HEAD == GITHUB_SHA, parents[0] != base — rejected",
+        prt_vars,
+        pr_files,
+        [prior_tip, head],
+        False,
+        head_sha = "ffffffffffffffffffffffffffffffffffffffff",
     )
 
     # merge_group: the gh-readonly-queue ref is GitHub-controlled (not
@@ -988,6 +1081,43 @@ def _test_resolve_merge_base_integration(ctx):
         _changed_files(ctx, repo, diff_base),
         ["b1.txt"],
     )
+    ctx.std.fs.remove_dir_all(repo)
+
+    # (4) Synthesized-merge-by-SHA (step 5): the base-advance race that drove
+    # the `--scope=all` degradation. feature branches off main@B1, then main
+    # advances to B2 (touching base.txt), then GitHub builds the PR merge
+    # M = merge(B2, feature). The merge's own parents[0] (B2) is the base, so
+    # only the PR's file is in scope; diffing the stale event base.sha (B1)
+    # would wrongly include base.txt. HEAD is moved off M to prove the path
+    # reads parents[0] off M directly — no HEAD, origin/main, or merge-base.
+    repo, b0 = _init_repo(ctx)
+    _commit_file(ctx, repo, "b1.txt", "b1\n", "b1")
+    _git_ok(ctx, repo, ["checkout", "-q", "-b", "feature"])
+    _commit_file(ctx, repo, "feat.txt", "feat\n", "feat")
+    _git_ok(ctx, repo, ["checkout", "-q", "main"])
+    _commit_file(ctx, repo, "base.txt", "advanced\n", "b2")
+    _git_ok(ctx, repo, ["checkout", "-q", "-b", "prmerge"])
+    _git_ok(ctx, repo, ["merge", "-q", "--no-ff", "--no-edit", "feature"])
+    merge_sha = _git_ok(ctx, repo, ["rev-parse", "HEAD"])
+    _git_ok(ctx, repo, ["checkout", "-q", "feature"])
+
+    result = synthesized_merge_diff_for_test(ctx, False, merge_sha, repo)
+    _eq(
+        "synthesized-merge (filename) — only the PR's file in scope, not base.txt",
+        sorted(result["files"]),
+        ["feat.txt"],
+    )
+    line_result = synthesized_merge_diff_for_test(ctx, True, merge_sha, repo)
+    _eq(
+        "synthesized-merge (line-level) — only the PR's file in scope",
+        sorted([e["file"] for e in line_result["files"]]),
+        ["feat.txt"],
+    )
+
+    # A non-merge SHA (single parent) yields None — guards against treating a
+    # squash/rebase checkout's HEAD as a synthesized merge.
+    if synthesized_merge_diff_for_test(ctx, False, b0, repo) != None:
+        fail("synthesized-merge — single-parent SHA must yield None")
     ctx.std.fs.remove_dir_all(repo)
 
 github_detect_tests = task(
