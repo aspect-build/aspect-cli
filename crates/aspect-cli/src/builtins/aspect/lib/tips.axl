@@ -34,7 +34,6 @@ need to probe — the data flow just goes quiet.
 # Severity ordering (highest → lowest urgency)
 
     TIP_IMPORTANT   — action required; key features broken without it.
-                      Cannot be silenced; rendering omits the silence footer.
     TIP_WARNING     — degraded behavior; fix to restore full function.
     TIP_SUGGESTION  — improvement opportunity; works fine without it.
     TIP_INFO        — FYI.
@@ -224,7 +223,7 @@ def tip_replace(
 # `_body_src`, `vars`, `accumulate` (dict<name, list>) for re-rendering on
 # accumulation. Same-`(id, key)` re-emit replaces the stored tip
 # (accumulate unions onto the prior); silenced ids are dropped on
-# `add_tip` (unless TIP_IMPORTANT).
+# `add_tip`.
 #
 # When `Tips` isn't loaded the callable defaults are null-objects: `add` a
 # no-op, `collect` []. Emit sites don't probe — disabled propagates as zero
@@ -443,12 +442,11 @@ def severity_rank(severity):
     Unknown severities sort after `TIP_INFO`."""
     return _SEVERITY_ORDER.get(severity, 999)
 
-def silence_hint_line(id, severity):
+def silence_hint_line(id):
     """Markdown `<sub>` silence-hint footer naming the tip's id and the
-    silence knob. Returns `""` for important tips (can't be silenced) and
-    blank ids. Shared by the check-run `TIPS_BLOCK` and PR-comment section
-    so both stay aligned."""
-    if not id or severity == TIP_IMPORTANT:
+    silence knob. Returns `""` for blank ids. Shared by the check-run
+    `TIPS_BLOCK` and PR-comment section so both stay aligned."""
+    if not id:
         return ""
     return '<sub>_Silence by adding `"%s"` to `ctx.features["tips"].args.silence` in `.aspect/config.axl`, or pass `--tips:silence=%s` on the command line._</sub>' % (id, id)
 
@@ -488,7 +486,7 @@ def decorate_tip(t):
         "severity_label": severity_label(severity),
         "title": t.get("title", ""),
         "body_quoted": blockquote_body(t.get("body", "")),
-        "silence_hint": silence_hint_line(t.get("id", ""), severity),
+        "silence_hint": silence_hint_line(t.get("id", "")),
     }
 
 def strip_code_fences(body):
@@ -518,8 +516,7 @@ def _print_tip(std, id, severity, title, body):
     <LABEL>:` prefix is severity-colored (see `_TERMINAL_TIP_COLOR`), the
     title bold-default so urgency reads without blending. Body + silence
     footer are prefixed with a colored `│ ` so the tip boundary is visible in
-    a stream of WARN/INFO lines. Code fences are stripped; the silence footer
-    is omitted for important tips."""
+    a stream of WARN/INFO lines. Code fences are stripped."""
     code = _TERMINAL_TIP_COLOR.get(severity, "1;36")  # default to INFO's cyan for unknown severities
     color_on = color_enabled(std)
 
@@ -536,9 +533,8 @@ def _print_tip(std, id, severity, title, body):
     if cleaned:
         for line in cleaned.split("\n"):
             print(bar if line == "" else bar + " " + line)
-    if severity != TIP_IMPORTANT:
-        print(bar)
-        print(bar + ' (Silence this tip with `--tips:silence=%s` or by adding it to `ctx.features["tips"].args.silence` in `.aspect/config.axl`.)' % id)
+    print(bar)
+    print(bar + ' (Silence this tip with `--tips:silence=%s` or by adding it to `ctx.features["tips"].args.silence` in `.aspect/config.axl`.)' % id)
 
 def blockquote_body(body):
     """Prefix every body line with `> ` (or `>` for blank) so it renders as a
@@ -651,7 +647,7 @@ def _tips_impl(ctx):
             _print_tip(call_ctx.std, stored["id"], stored["severity"], stored["title"], stored["body"])
 
     def _add(call_ctx, tip):
-        if tip["severity"] != TIP_IMPORTANT and tip["id"] in silenced:
+        if tip["id"] in silenced:
             return
 
         # Run the `tip_suggestion` chain: reject drops, replace rewrites.
@@ -717,7 +713,7 @@ Tips = feature(
     args = {
         "silence": args.string_list(
             default = [],
-            description = "Tip ids to suppress for this task. Important tips (severity=important) ignore this list — they signal key-feature breakages. Append from config: `ctx.features[\"tips\"].args.silence.append(\"<id>\")`. Pass on CLI: `--tips:silence=<id>` (repeat for multiple).",
+            description = "Tip ids to suppress for this task. Append from config: `ctx.features[\"tips\"].args.silence.append(\"<id>\")`. Pass on CLI: `--tips:silence=<id>` (repeat for multiple).",
         ),
         "auto_print": args.boolean(
             default = True,
