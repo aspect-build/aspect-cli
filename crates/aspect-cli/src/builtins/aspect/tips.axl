@@ -108,7 +108,7 @@ def add_tip(
     A tip is identified by `(id, key)`. Re-emitting the same `(id, key)`
     within a task replaces the stored content (accumulate fields ride
     along); a different `key` is a distinct tip. Silencing is always by
-    `id`: no-op if `id` is in the silence list AND `severity != TIP_IMPORTANT`.
+    `id`: no-op if `id` is in the silence list, regardless of severity.
 
     No-op overall when the `Tips` feature is disabled — the trait's
     `add` callable falls back to its null-object default.
@@ -119,8 +119,7 @@ def add_tip(
         with the same `(id, key)` are the same tip (re-emit replaces);
         `id` alone is what `--tips:silence=<id>` and the silence list match.
       severity: One of `TIP_IMPORTANT` / `TIP_WARNING` / `TIP_SUGGESTION` /
-        `TIP_INFO` — drives ordering, the emoji/label, and (for
-        `TIP_IMPORTANT`) immunity from silencing.
+        `TIP_INFO` — drives ordering and the emoji/label.
       title: Short headline, interpreted per `type`.
       body: Markdown body, interpreted per `type`.
       type: The interpolation engine for `title` / `body`:

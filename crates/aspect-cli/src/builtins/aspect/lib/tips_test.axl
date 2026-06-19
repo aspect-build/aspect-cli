@@ -5,8 +5,8 @@ Covers the tip framework primitives directly:
                 replaces; distinct `key` coexists), `type`-driven
                 title/body (RAW / FORMAT `vars` / JINJA2 `vars` +
                 `accumulate`), within-task `accumulate` union,
-                severity guard, and `silenced_tips` short-circuit (by
-                `id`, across keys).
+                and `silenced_tips` short-circuit (by `id`, across keys
+                and severities).
   - `collect_tips_sorted` — severity ordering, insertion-order stability,
                             limit, surface allowlist.
   - `surfaces` / `combine_across_tasks` — storage + defaults on `add_tip`,
@@ -137,9 +137,8 @@ def _test_silenced_tips_short_circuits_add_tip(ctx):
     )
 
 def _test_silenced_tips_blocks_add(ctx):
-    """A non-important tip whose `id` is on the silence list never lands.
-    Mirrors how the suggestion-severity built-ins are gated, without
-    depending on any one built-in."""
+    """A tip whose `id` is on the silence list never lands. Mirrors how
+    the built-ins are gated, without depending on any one built-in."""
     _reset(ctx)
     tips._set_silenced_for_test(ctx, ["some-suggestion"])
     add_tip(ctx, id = "some-suggestion", severity = TIP_SUGGESTION, title = "T", body = "B")
@@ -149,18 +148,18 @@ def _test_silenced_tips_blocks_add(ctx):
         [],
     )
 
-def _test_important_tips_cannot_be_silenced(ctx):
-    """Important tips ignore `silenced_tips` — they signal a key-feature
-    breakage and must always reach the user. Verified both via direct
-    `add_tip(...)` and via the `tip_add_id_token_permission` built-in."""
+def _test_important_tips_can_be_silenced(ctx):
+    """Important tips honor `silenced_tips` like every other severity —
+    silencing is purely by `id`. Verified both via direct `add_tip(...)`
+    and via the `tip_add_id_token_permission` built-in."""
     _reset(ctx)
-    tips._set_silenced_for_test(ctx, ["unsuppressable", "add-id-token-permission"])
-    add_tip(ctx, id = "unsuppressable", severity = TIP_IMPORTANT, title = "T", body = "B")
+    tips._set_silenced_for_test(ctx, ["suppressable", "add-id-token-permission"])
+    add_tip(ctx, id = "suppressable", severity = TIP_IMPORTANT, title = "T", body = "B")
     tip_add_id_token_permission(ctx)
     _eq(
-        "important — silence list ignored",
+        "important — silence list honored",
         _ids(tips._inspect_for_test(ctx)),
-        ["unsuppressable", "add-id-token-permission"],
+        [],
     )
 
 def _test_add_tip_format(ctx):
@@ -452,12 +451,7 @@ def _test_builtin_tips_shape(ctx):
 
 def _test_silence_hint_line(ctx):
     _eq("silence_hint — empty id", silence_hint_line("", TIP_INFO), "")
-    _eq(
-        "silence_hint — important returns empty",
-        silence_hint_line("anything", TIP_IMPORTANT),
-        "",
-    )
-    for sev in (TIP_WARNING, TIP_SUGGESTION, TIP_INFO):
+    for sev in (TIP_IMPORTANT, TIP_WARNING, TIP_SUGGESTION, TIP_INFO):
         line = silence_hint_line("some-tip", sev)
         if "some-tip" not in line:
             fail("silence_hint %s: missing tip id: %r" % (sev, line))
@@ -669,11 +663,12 @@ def _test_decorate_tip(ctx):
     _eq("decorate_tip — title", decorated["title"], "T")
     _eq("decorate_tip — body_quoted prefixes each line", decorated["body_quoted"], "> line1\n> line2")
     if "tips" not in decorated["silence_hint"] or "silence" not in decorated["silence_hint"]:
-        fail("decorate_tip — non-important row missing silence_hint: %r" % decorated["silence_hint"])
+        fail("decorate_tip — row missing silence_hint: %r" % decorated["silence_hint"])
 
-    # Important: silence_hint should be blank.
+    # Important rows are silenceable too, so they carry a silence_hint.
     crit = decorate_tip({"id": "c", "severity": TIP_IMPORTANT, "title": "C", "body": ""})
-    _eq("decorate_tip — important silence_hint blank", crit["silence_hint"], "")
+    if "tips" not in crit["silence_hint"] or "silence" not in crit["silence_hint"]:
+        fail("decorate_tip — important row missing silence_hint: %r" % crit["silence_hint"])
 
 def _test_strip_code_fences(ctx):
     _eq("fences — empty body", strip_code_fences(""), "")
@@ -711,7 +706,7 @@ def _test_impl(ctx):
     _test_key_distinct(ctx)
     _test_silenced_tips_short_circuits_add_tip(ctx)
     _test_silenced_tips_blocks_add(ctx)
-    _test_important_tips_cannot_be_silenced(ctx)
+    _test_important_tips_can_be_silenced(ctx)
     _test_add_tip_format(ctx)
     _test_add_tip_raw_skips_interpolation(ctx)
     _test_add_tip_default_type_is_raw(ctx)

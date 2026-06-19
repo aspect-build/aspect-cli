@@ -412,16 +412,16 @@ def _check_collect_tip_rows(ctx):
     if subordinate_count != 5:
         fail("collect_tip_rows cap: expected 5 subordinate (suggestion+info), got %d" % subordinate_count)
 
-    # silence_hint: empty for important, non-empty for non-important.
-    # The rendered tip carries this `<sub>...</sub>` line as its
-    # silence-hint footer; an empty value suppresses the footer.
+    # silence_hint: non-empty for every severity (silencing is by id,
+    # regardless of severity). The rendered tip carries this
+    # `<sub>...</sub>` line as its silence-hint footer.
     rows = collect_tip_rows(ctx, [{"key": "t1", "tips": [
         {"id": "c", "severity": "important", "title": "C", "body": ""},
         {"id": "s", "severity": "suggestion", "title": "S", "body": ""},
     ]}])
     by_id = {r["id"]: r for r in rows}
-    if by_id["c"]["silence_hint"] != "":
-        fail("collect_tip_rows: important row must have empty silence_hint")
+    if "tips" not in by_id["c"]["silence_hint"] or "silence" not in by_id["c"]["silence_hint"]:
+        fail("collect_tip_rows: important row must reference the tips silence knob in silence_hint")
     if "tips" not in by_id["s"]["silence_hint"] or "silence" not in by_id["s"]["silence_hint"]:
         fail("collect_tip_rows: suggestion row must reference the tips silence knob in silence_hint")
 
@@ -1974,7 +1974,7 @@ def _test_impl(ctx):
                     make_build_passed(),
                     8000,
                     tips = [
-                        # 1 important — always shown, no silence footer.
+                        # 1 important — always shown (above the cap).
                         {
                             "id": "add-id-token-permission",
                             "severity": "important",
