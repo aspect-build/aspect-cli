@@ -108,7 +108,7 @@ def add_tip(
     A tip is identified by `(id, key)`. Re-emitting the same `(id, key)`
     within a task replaces the stored content (accumulate fields ride
     along); a different `key` is a distinct tip. Silencing is always by
-    `id`: no-op if `id` is in the silence list, regardless of severity.
+    `id`: no-op if `id` is in the silence list.
 
     No-op overall when the `Tips` feature is disabled — the trait's
     `add` callable falls back to its null-object default.

@@ -442,11 +442,10 @@ def severity_rank(severity):
     Unknown severities sort after `TIP_INFO`."""
     return _SEVERITY_ORDER.get(severity, 999)
 
-def silence_hint_line(id, severity):
+def silence_hint_line(id):
     """Markdown `<sub>` silence-hint footer naming the tip's id and the
     silence knob. Returns `""` for blank ids. Shared by the check-run
-    `TIPS_BLOCK` and PR-comment section so both stay aligned. `severity` is
-    currently unused but kept for call-site symmetry with `decorate_tip`."""
+    `TIPS_BLOCK` and PR-comment section so both stay aligned."""
     if not id:
         return ""
     return '<sub>_Silence by adding `"%s"` to `ctx.features["tips"].args.silence` in `.aspect/config.axl`, or pass `--tips:silence=%s` on the command line._</sub>' % (id, id)
@@ -487,7 +486,7 @@ def decorate_tip(t):
         "severity_label": severity_label(severity),
         "title": t.get("title", ""),
         "body_quoted": blockquote_body(t.get("body", "")),
-        "silence_hint": silence_hint_line(t.get("id", ""), severity),
+        "silence_hint": silence_hint_line(t.get("id", "")),
     }
 
 def strip_code_fences(body):
@@ -714,7 +713,7 @@ Tips = feature(
     args = {
         "silence": args.string_list(
             default = [],
-            description = "Tip ids to suppress for this task, regardless of severity. Append from config: `ctx.features[\"tips\"].args.silence.append(\"<id>\")`. Pass on CLI: `--tips:silence=<id>` (repeat for multiple).",
+            description = "Tip ids to suppress for this task. Append from config: `ctx.features[\"tips\"].args.silence.append(\"<id>\")`. Pass on CLI: `--tips:silence=<id>` (repeat for multiple).",
         ),
         "auto_print": args.boolean(
             default = True,
