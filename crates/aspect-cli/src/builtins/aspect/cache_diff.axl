@@ -1,0 +1,467 @@
+"""`aspect cache diff` — list the test targets affected by the current working
+tree, diffed against the remote cache, running (almost) nothing.
+
+This is **strictly a remote-cache operation.** It mines a single
+`--experimental_remote_require_cached` test invocation: every action's
+up-to-date check resolves against the remote cache and execution is denied on a
+miss, so the probe runs no actions. The gRPC log records one `GetActionResult`
+per action Bazel probed; a miss anywhere in a test's transitive closure trips at
+that action (the *frontier*), and the affected tests are attributed from there.
+
+Output contract (built for pipes):
+
+  - stdout — the affected test labels, one per line, nothing else. Pipe it:
+        aspect cache diff | xargs bazel test
+  - stderr — progress, per-target reasons, the summary, and errors.
+  - --format=json — one document on stdout instead of bare lines.
+  - --exec="<cmd>" — run `<cmd> <labels...>` instead of writing stdout.
+
+Modes (`--mode`):
+
+  overreport (default) — reverse-deps from each cache-missed target to its
+      dependent tests. Runs nothing; flags a test even when its dependency
+      would rebuild to an identical output.
+  precise — first `bazel build`s + uploads the missing non-test actions, so the
+      probe's test-action lookups reflect only each test's own up-to-dateness;
+      a test is affected iff its own test action misses (a genuine input
+      change). Costs the build of the missing non-test actions.
+
+Execution guarantee: **no test ever runs** (the probe is require-cached, and
+precise builds with `bazel build`, which never executes `TestRunner`). overreport
+executes **nothing** (every action is a cache hit or an EXECUTION_DENIED miss);
+precise executes only the missing **non-test** actions. The lone exception is
+actions tagged `no-remote` / `local` / `no-remote-exec` / `no-cache`: they bypass
+the remote path, so require-cached can't gate them and they run locally (and read
+as affected) in either mode.
+
+Soundness is bounded by baseline cache coverage: a hit means unaffected, but a
+miss means changed *or* never-uploaded/evicted. Against a fully-populated
+baseline this is exact; against a sparse cache, overreport over-reports and
+precise narrows it to genuine input changes.
+
+Requires a writable `--remote_cache` (checked up front). require-cached only
+engages on the remote execution path, so the probe reuses the rc's
+`--remote_executor` if one is wired, else stands up an in-process dummy. The
+probe runs with `--nokeep_state_after_build --nouse_action_cache`, which force a
+fresh remote `GetActionResult` per action by clearing the two short-circuit
+layers — in-memory Skyframe and the persistent action cache — so no separate or
+wiped output base is needed.
+
+No RBE and no seed step: a local `bazel test` and this remote probe compute the
+same action digests **given the same flags**, so a normal CI baseline matches.
+The catch is exactly that — baseline and probe must resolve the same Bazel flags
+(a flag that alters an action's environment, e.g. `--action_env=FOO`, must be on
+both sides or neither). The probe resolves flags from the same rc/config as
+`aspect test`/`build`, so they align by default.
+"""
+
+load("@bazel//proto/remote_logging.axl", "remote_logging")
+load("@std//time.axl", "time")
+load("./bazel.axl", "BazelTrait")
+load(
+    "./lib/bazel_flags.axl",
+    "announce_bazel_args",
+    "resolve_bazel_announce",
+    "resolve_flags",
+    "resolve_startup_flags",
+)
+load("./lib/environment.axl", "color_enabled")
+load("./lib/remote_executor.axl", "start_dummy_executor", "stop_dummy_executor")
+load("./lib/runnable.axl", "apparent_label")
+
+_GRPC_GET_ACTION_RESULT = "build.bazel.remote.execution.v2.ActionCache/GetActionResult"
+_TEST_MNEMONIC = "TestRunner"
+
+_BOLD = "\x1b[1m"
+_DIM = "\x1b[2m"
+_RED = "\x1b[31m"
+_YELLOW = "\x1b[33m"
+_RESET = "\x1b[0m"
+
+GetActionResultEntry = record(
+    label = field(str),
+    mnemonic = field(str),
+    code = field(int),
+)
+
+def _style(ansi: bool, code: str, text: str) -> str:
+    return code + text + _RESET if ansi else text
+
+def _fmt_elapsed(secs) -> str:
+    """`S.Ts` under a minute, else `MmSs` — same shape as delivery.axl."""
+    if secs < 60:
+        return "{}.{}s".format(int(secs), int(secs * 10) % 10)
+    return "{}m{}s".format(int(secs) // 60, int(secs) % 60)
+
+def _err(ctx: TaskContext, line: str) -> None:
+    """Write one diagnostic line to stderr (keeps stdout a clean target list)."""
+    ctx.std.io.stderr.write(line + "\n")
+
+def _emit(ctx: TaskContext, label: str) -> None:
+    """Write one affected label to stdout — the machine-readable channel."""
+    ctx.std.io.stdout.write(label + "\n")
+
+def _probe_has_unexpected_error(ctx: TaskContext, err_path: str) -> bool:
+    """True if the probe's captured stderr holds a Bazel ERROR that is NOT an
+    expected require-cached denial — a real loading/analysis/config failure that
+    must fail the task rather than yield a partial affected set."""
+    if not ctx.std.fs.exists(err_path):
+        return False
+    for line in ctx.std.fs.read_to_string(err_path).split("\n"):
+        if "ERROR:" not in line:
+            continue
+        if "must be cached due to --experimental_remote_require_cached" in line:
+            continue  # expected: require-cached denied a missing action
+        if "Build did NOT complete successfully" in line:
+            continue  # generic summary line that always accompanies denials
+        return True
+    return False
+
+def _run_probe(ctx: TaskContext, patterns: list, rc, announce_version: bool, announce_command: bool, ansi: bool, timing: dict) -> list | None:
+    """Require-cached test probe; return its logged `GetActionResultEntry` rows,
+    or `None` if Bazel failed unexpectedly (no gRPC log — its captured stderr is
+    surfaced first). Bazel's own stdout/stderr are hidden: the expected
+    require-cached denials are noise, the signal is the log."""
+    log_path = "/tmp/aspect-cache-diff-grpc-{}.bin".format(ctx.task.key)
+    err_path = "/tmp/aspect-cache-diff-probe-{}.log".format(ctx.task.key)
+
+    dummy = None
+    flags = [
+        "--experimental_remote_require_cached",
+        # Force every action through a fresh remote GetActionResult instead of a
+        # local short-circuit. Two layers short-circuit unchanged actions: the
+        # in-memory Skyframe graph (dropped by --nokeep_state_after_build) and
+        # the persistent on-disk action cache (ignored by --nouse_action_cache).
+        # Neither flag is part of the action key, so digests still match the
+        # baseline. Runs on the default output base — no separate/wiped base.
+        "--nokeep_state_after_build",
+        "--nouse_action_cache",
+        "--remote_grpc_log=" + log_path,
+        "--keep_going",
+        "--remote_download_outputs=minimal",
+    ]
+    if not rc.flag_value("--remote_executor", command = "test"):
+        dummy = start_dummy_executor()
+        flags.append("--remote_executor=" + dummy.grpc_uri)
+
+    _t = time.monotonic()
+    status = ctx.bazel.test(
+        rc = rc,
+        flags = flags,
+        stdout = None,
+        stderr = ctx.std.fs.create(err_path),
+        announce_version = announce_version,
+        announce_command = announce_command,
+        *patterns
+    ).wait()
+    if dummy:
+        stop_dummy_executor(dummy)
+    timing["probe"] = time.monotonic() - _t
+
+    if not ctx.std.fs.exists(log_path):
+        _err(ctx, _style(ansi, _RED, "ERROR") + ": the cache probe produced no gRPC log; Bazel failed before reaching the remote cache. Its output:")
+        if ctx.std.fs.exists(err_path):
+            ctx.std.io.stderr.write(ctx.std.fs.read_to_string(err_path))
+        return None
+
+    _t = time.monotonic()
+    entries = []
+    log_file = ctx.std.fs.open(log_path)
+    for entry in remote_logging.LogEntry().parse_from_delimited(log_file):
+        if entry.method_name != _GRPC_GET_ACTION_RESULT:
+            continue
+        meta = entry.metadata
+        if not meta or not meta.target_id:
+            continue
+        entries.append(GetActionResultEntry(
+            label = apparent_label(meta.target_id),
+            mnemonic = meta.action_mnemonic,
+            code = entry.status.code if entry.status else 0,
+        ))
+    ctx.std.fs.remove_file(log_path)
+    timing["parse"] = time.monotonic() - _t
+
+    # The probe is *expected* to exit non-zero — require-cached denies every
+    # missing action. But a genuine failure (a load/analysis error, auth, bad
+    # config) must not be reported as a partial affected set with exit 0. If the
+    # probe failed and it isn't solely require-cached denials — no cache lookups
+    # happened at all, or stderr carries a non-denial ERROR — surface it and fail.
+    if status.code != 0 and (not entries or _probe_has_unexpected_error(ctx, err_path)):
+        _err(ctx, _style(ansi, _RED, "ERROR") + ": the cache probe failed for a reason other than require-cached denials (exit {}). Its output:".format(status.code))
+        if ctx.std.fs.exists(err_path):
+            ctx.std.io.stderr.write(ctx.std.fs.read_to_string(err_path))
+        return None
+
+    return entries
+
+def _build_missing_non_test(ctx: TaskContext, patterns: list, rc, announce_version: bool, announce_command: bool, ansi: bool, timing: dict) -> bool:
+    """precise pre-pass: execute + upload the missing non-test actions on the
+    default (incremental) output base. Bazel output hidden; surfaced + False
+    returned on a hard build failure (a real broken target, not a cache miss)."""
+    err_path = "/tmp/aspect-cache-diff-build-{}.log".format(ctx.task.key)
+    _t = time.monotonic()
+    status = ctx.bazel.build(
+        rc = rc,
+        flags = ["--remote_upload_local_results", "--keep_going"],
+        stdout = None,
+        stderr = ctx.std.fs.create(err_path),
+        announce_version = announce_version,
+        announce_command = announce_command,
+        *patterns
+    ).wait()
+    timing["build"] = time.monotonic() - _t
+    if status.code != 0:
+        _err(ctx, _style(ansi, _RED, "ERROR") + ": precise pre-build failed (exit {}); a target does not build. Its output:".format(status.code))
+        if ctx.std.fs.exists(err_path):
+            ctx.std.io.stderr.write(ctx.std.fs.read_to_string(err_path))
+        return False
+    return True
+
+def _reason_text(test_label: str, cause: dict) -> str:
+    """Human phrasing of one structured cause for the stderr reason line."""
+    if cause["target"] == test_label:
+        return "own test action not cached (its inputs changed)"
+    return "cache miss in {} ({})".format(cause["target"], cause["mnemonic"])
+
+def _attribute(ctx: TaskContext, causes: dict, test_label: str, cause: dict, stream_stdout: bool, verbose: bool, ansi: bool) -> None:
+    """Record one structured `cause` ({target, mnemonic}) for `test_label` and
+    stream it. On first sighting the label goes to stdout (when `stream_stdout`);
+    when `verbose`, an aligned reason line goes to stderr."""
+    first = test_label not in causes
+    causes.setdefault(test_label, []).append(cause)
+    if first and stream_stdout:
+        _emit(ctx, test_label)
+    if verbose:
+        reason = _reason_text(test_label, cause)
+        head = _style(ansi, _BOLD, test_label) if first else " " * len(test_label)
+        _err(ctx, "  " + head + "  " + _style(ansi, _DIM, "← " + reason))
+
+def _classify_and_stream(ctx: TaskContext, entries: list, test_targets: list, rc, stream_stdout: bool, verbose: bool, ansi: bool, timing: dict) -> dict:
+    """Turn probe entries into affected tests + structured causes, streaming each
+    test the moment it is attributed. Returns `causes`: {test_label: [{target,
+    mnemonic}, ...]} in discovery order. A missed non-test action is attributed
+    to its dependent tests via `rdeps`; a missed test action is the test's own
+    input change (cause target == the test itself). Splits the bazel `rdeps` query
+    time (`timing["attribute"]`) from our own bookkeeping (`timing["classify"]`)."""
+    _t_all = time.monotonic()
+    test_set = {t: None for t in test_targets}
+
+    # Frontier misses, de-duplicated by label (first mnemonic wins).
+    missed = []
+    seen_miss = {}
+    for e in entries:
+        if e.code != 0 and e.label not in seen_miss:
+            seen_miss[e.label] = None
+            missed.append(e)
+
+    causes = {}
+    unattributable = 0
+    rdeps_secs = 0.0
+    for e in missed:
+        if e.mnemonic == _TEST_MNEMONIC and e.label in test_set:
+            _attribute(ctx, causes, e.label, {"target": e.label, "mnemonic": e.mnemonic}, stream_stdout, verbose, ansi)
+            continue
+
+        # Non-test (dependency) miss: which in-scope tests does it reach?
+        # rdeps' universe is the main repo; external/uncacheable misses can't be
+        # attributed this way and are counted instead.
+        if not e.label.startswith("//"):
+            unattributable += 1
+            continue
+        cause = {"target": e.label, "mnemonic": e.mnemonic}
+        _tq = time.monotonic()
+        dep_tests = [apparent_label(t.name) for t in ctx.bazel.query("tests(rdeps(//..., {}))".format(e.label), rc = rc)]
+        rdeps_secs += time.monotonic() - _tq
+        for label in dep_tests:
+            if label in test_set:
+                _attribute(ctx, causes, label, cause, stream_stdout, verbose, ansi)
+
+    if unattributable > 0 and verbose:
+        _err(ctx, _style(ansi, _YELLOW, "WARNING") + ": {} cache miss(es) outside the main repo could not be attributed to a test.".format(unattributable))
+    timing["attribute"] = rdeps_secs
+    timing["classify"] = (time.monotonic() - _t_all) - rdeps_secs
+    return causes
+
+def _emit_json(ctx: TaskContext, mode: str, test_targets: list, affected: list, causes: dict) -> None:
+    """Write the scriptable result document to stdout (the only thing on stdout
+    in --format=json). `caused_by` lists the cache-missed targets that explain
+    each affected test (the test itself, for an own-action miss)."""
+    doc = {
+        "mode": mode,
+        "total_tests": len(test_targets),
+        "affected_count": len(affected),
+        "affected": [{"label": t, "caused_by": causes[t]} for t in affected],
+    }
+    ctx.std.io.stdout.write(json.encode(doc, indent = 2) + "\n")
+
+def _impl(ctx: TaskContext) -> int:
+    ansi = color_enabled(ctx.std)
+    patterns = list(ctx.args.targets)
+    union = " + ".join(patterns)
+    mode = ctx.args.mode
+    timing = {}  # seconds per phase — split bazel work vs our analysis at the end
+
+    bazel_trait = ctx.traits[BazelTrait]
+    startup_flags = resolve_startup_flags(ctx, bazel_trait)
+    flags = resolve_flags(ctx, bazel_trait)
+    announce_version, announce_command = resolve_bazel_announce(ctx)
+
+    # One run command for the queries, the precise pre-build, and the probe — all
+    # on the default output base. The probe forces fresh remote lookups via
+    # `--nokeep_state_after_build --nouse_action_cache` (see `_run_probe`), so it
+    # needs no separate or wiped base.
+    rc = ctx.bazel.parse_rc(startup_flags = startup_flags, flags = flags)
+
+    # Explicit, up-front requirement: no remote cache → nothing to diff against.
+    if not rc.flag_value("--remote_cache", command = "test") and not rc.flag_value("--remote_executor", command = "test"):
+        _err(ctx, _style(ansi, _RED, "ERROR") + ": `aspect cache diff` requires a remote cache. It diffs the working tree against the cache to decide what changed; with no cache there is nothing to compare.")
+        _err(ctx, "  Configure --remote_cache=<uri> (e.g. in .bazelrc), and seed a baseline once with `bazel test //... --remote_upload_local_results`.")
+        return 1
+
+    # Enumerate + reverse-dep under the same resolved flags as the probe/build,
+    # so a `--config`/`--bazel-flag` that changes package loading or the test set
+    # can't make the queries see a different graph than the probe.
+    _t = time.monotonic()
+    test_targets = sorted([apparent_label(t.name) for t in ctx.bazel.query("tests(%s)" % union, rc = rc)])
+    timing["enumerate"] = time.monotonic() - _t
+    if not test_targets:
+        _err(ctx, "No test targets in scope for: " + union)
+        return 0
+
+    _err(ctx, _style(ansi, _BOLD, "Diffing {} test target(s) against the remote cache [--mode={}]…".format(len(test_targets), mode)))
+
+    if mode == "precise":
+        if not _build_missing_non_test(ctx, patterns, rc, announce_version, announce_command, ansi, timing):
+            return 1
+    entries = _run_probe(ctx, patterns, rc, announce_version, announce_command, ansi, timing)
+    if entries == None:
+        return 1
+
+    fmt = ctx.args.format
+    using_exec = bool(ctx.args.exec)
+
+    # stdout carries the result: stream bare labels only for `lines` (and not
+    # when piping into --exec or emitting json). json emits one document at the
+    # end; per-target reasons stay on stderr unless json owns stdout.
+    causes = _classify_and_stream(
+        ctx,
+        entries,
+        test_targets,
+        rc,
+        stream_stdout = fmt == "lines" and not using_exec,
+        verbose = fmt != "json",
+        ansi = ansi,
+        timing = timing,
+    )
+    affected = [t for t in test_targets if t in causes]
+
+    _err(ctx, "")
+    _err(ctx, _style(ansi, _BOLD, "Affected {} of {} test target(s).".format(len(affected), len(test_targets))))
+
+    # Time split: bazel (probe + queries + precise build) vs our analysis (gRPC
+    # log parse + attribution bookkeeping).
+    bazel_secs = timing.get("probe", 0) + timing.get("enumerate", 0) + timing.get("attribute", 0) + timing.get("build", 0)
+    analysis_secs = timing.get("parse", 0) + timing.get("classify", 0)
+    build_part = " · build {}".format(_fmt_elapsed(timing["build"])) if "build" in timing else ""
+    _err(ctx, _style(ansi, _DIM, "  bazel {}: probe {} · enumerate {} · attribute {}{}".format(
+        _fmt_elapsed(bazel_secs),
+        _fmt_elapsed(timing.get("probe", 0)),
+        _fmt_elapsed(timing.get("enumerate", 0)),
+        _fmt_elapsed(timing.get("attribute", 0)),
+        build_part,
+    )))
+    _err(ctx, _style(ansi, _DIM, "  analysis {}: parse {} · classify {}".format(
+        _fmt_elapsed(analysis_secs),
+        _fmt_elapsed(timing.get("parse", 0)),
+        _fmt_elapsed(timing.get("classify", 0)),
+    )))
+
+    # --exec: hand the affected labels to a command instead of writing stdout.
+    if using_exec:
+        if not affected:
+            return 0
+        return ctx.std.process.command("bash").args(["-c", ctx.args.exec + ' "$@"', "bash"] + affected).spawn().wait().code
+
+    if fmt == "json":
+        _emit_json(ctx, mode, test_targets, affected, causes)
+    return 0
+
+diff = task(
+    group = ["cache"],
+    summary = "List the test targets affected by the current working tree, diffed against the remote cache.",
+    description = (
+        "Determines which test targets are affected by the current tree by mining " +
+        "a single `--experimental_remote_require_cached` probe of the remote cache. " +
+        "No test actions run (overreport), or only missing non-test actions are " +
+        "built (precise). This is strictly a remote-cache operation.\n\n" +
+        "Requires a writable `--remote_cache` (checked up front) and a populated " +
+        "baseline: a cache hit means a target is unaffected, so the mainline's " +
+        "action results must already be uploaded (e.g. `bazel test //... " +
+        "--remote_upload_local_results`). Against a sparse cache the result " +
+        "over-reports.\n\n" +
+        "Output: affected labels stream to stdout (one per line, pipeable: " +
+        "`aspect cache diff | xargs bazel test`); progress, per-target reasons, " +
+        "and the summary go to stderr. Pass --exec=\"<cmd>\" to run `<cmd> " +
+        "<labels…>` instead of printing them.\n\n" +
+        "Modes (`--mode`):\n" +
+        "  overreport (default) — reverse-deps from each cache-missed target to " +
+        "its dependent tests. Runs nothing; flags a test even when its dependency " +
+        "would rebuild to an identical output.\n" +
+        "  precise — builds and uploads the missing non-test actions first, then " +
+        "flags a test only when its own test action misses (a genuine input " +
+        "change). Costs the build of the missing actions."
+    ),
+    implementation = _impl,
+    traits = [BazelTrait],
+    args = {
+        "mode": args.string(
+            default = "overreport",
+            values = ["overreport", "precise"],
+            description = (
+                "Attribution strategy. `overreport`: reverse-deps from the " +
+                "cache-missed targets to dependent tests (runs nothing, may " +
+                "over-report a dependency that would rebuild to an identical " +
+                "output). `precise`: build and upload the missing non-test actions " +
+                "first, then flag a test only when its own test action misses (a " +
+                "genuine input change)."
+            ),
+        ),
+        "format": args.string(
+            default = "lines",
+            values = ["lines", "json"],
+            description = (
+                "stdout format. `lines`: affected labels, one per line (pipeable; " +
+                "reasons on stderr). `json`: a single document on stdout with " +
+                "`{mode, total_tests, affected_count, affected:[{label, caused_by:" +
+                "[{target, mnemonic}]}]}` for scripting (parse with jq)."
+            ),
+        ),
+        "exec": args.string(
+            default = "",
+            description = (
+                "Run this command with the affected labels appended as arguments " +
+                "(e.g. --exec=\"bazel test\") instead of writing stdout. No-op when " +
+                "nothing is affected. Overrides --format. For anything fancier, omit " +
+                "it and pipe stdout."
+            ),
+        ),
+        "bazel_flags": args.string_list(
+            description = "Additional Bazel flags forwarded to the probe/build (e.g. --bazel-flag=--config=ci). Repeat to pass multiple.",
+            long = "bazel-flag",
+        ),
+        "bazel_startup_flags": args.string_list(
+            description = "Additional Bazel startup flags. Repeat to pass multiple. Note: changing startup flags restarts the Bazel server.",
+            long = "bazel-startup-flag",
+        ),
+        "targets": args.positional(
+            minimum = 1,
+            maximum = 512,
+            default = ["//..."],
+            description = (
+                "Bazel target patterns scoping the affected set (e.g. " +
+                "`//services/...`). Defaults to `//...` — every test in the " +
+                "workspace. Intersected with `tests(<patterns>)`."
+            ),
+        ),
+    } | announce_bazel_args("the cache-diff probe"),
+)

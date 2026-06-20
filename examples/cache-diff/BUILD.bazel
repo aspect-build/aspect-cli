@@ -1,0 +1,52 @@
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+# Dependency graph for exercising `aspect affected`:
+#
+#   libshared ──► testA, testB        (change it → both tests fall out)
+#   libA ───────► testA, testC        (change it → testA + testC)
+#   libB ───────► testB               (change it → testB only)
+#
+# Each lib is a genrule whose output content is what downstream test actions
+# consume; edit a cmd's output to make that lib (and its dependents) affected.
+
+genrule(
+    name = "libshared",
+    outs = ["libshared.txt"],
+    cmd = "echo shared-v1 > $@",
+)
+
+genrule(
+    name = "libA",
+    outs = ["libA.txt"],
+    cmd = "echo A-v1 > $@",
+)
+
+genrule(
+    name = "libB",
+    outs = ["libB.txt"],
+    cmd = "echo B-v1 > $@",
+)
+
+sh_test(
+    name = "testA",
+    srcs = ["t.sh"],
+    data = [
+        ":libA",
+        ":libshared",
+    ],
+)
+
+sh_test(
+    name = "testB",
+    srcs = ["t.sh"],
+    data = [
+        ":libB",
+        ":libshared",
+    ],
+)
+
+sh_test(
+    name = "testC",
+    srcs = ["t.sh"],
+    data = [":libA"],
+)

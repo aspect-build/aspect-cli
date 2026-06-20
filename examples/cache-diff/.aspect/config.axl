@@ -1,0 +1,6 @@
+# Self-contained example config: no extra Bazel flags, so a plain
+# `bazel test` baseline and `aspect cache diff` probe compute identical action
+# digests (the cache keys must match). The aspect-cli repo's own config.axl
+# injects redaction-test --action_env flags; this isolates the example from them.
+def config(ctx):
+    pass

@@ -34,3 +34,11 @@ common --test_output=errors
 # build-only options from the query expansion. Mirrors the customer rc that
 # surfaced the bug.
 build --show_result=20
+
+
+build --bes_results_url=https://testing.buildbuddy.io/invocation/
+build --bes_backend=grpcs://testing.buildbuddy.io
+common --remote_cache=grpcs://testing.buildbuddy.io
+common --noremote_upload_local_results # Uploads logs & artifacts without writing to cache
+common --remote_timeout=10m
+common --remote_header=x-buildbuddy-api-key=4khRv4n0loTVA0FXID93
