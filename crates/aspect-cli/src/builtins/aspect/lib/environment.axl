@@ -23,6 +23,9 @@ BuildEvents = record(
 
 Runner = record(
     storage_path = field(str, default = DEFAULT_STORAGE_PATH),
+    # Opaque value sent verbatim as the `x-identity` header on the build's
+    # remote connections. "" when unset (no header sent).
+    identity = field(str, default = ""),
     product_version = field(str, default = ""),
     instance_id = field(str, default = ""),
     instance_name = field(str, default = ""),
@@ -266,6 +269,7 @@ def _read_runner(std) -> Runner | None:
     return Runner(
         account = std.env.var("ASPECT_WORKFLOWS_RUNNER_CLOUD_ACCOUNT") or "",
         aspect_launcher_version = std.env.var("ASPECT_WORKFLOWS_RUNNER_ASPECT_LAUNCHER_VERSION") or "",
+        identity = std.env.var("ASPECT_WORKFLOWS_RUNNER_IDENTITY") or "",
         az = std.env.var("ASPECT_WORKFLOWS_RUNNER_AZ") or "",
         bazel_root_dir = std.env.var("ASPECT_WORKFLOWS_RUNNER_BAZEL_ROOT_DIR") or (storage_path + "/bazel"),
         bin_dir = std.env.var("ASPECT_WORKFLOWS_RUNNER_BIN_DIR") or DEFAULT_BIN_DIR,
@@ -370,6 +374,12 @@ def get_bazelrc_flags(environment: WorkflowsEnvironment, aspect_root_dir: str) -
             build_flags.append("--remote_cache=" + remote_cache.endpoint)
         if remote_cache.bytestream_uri_prefix:
             build_flags.append("--remote_bytestream_uri_prefix=" + remote_cache.bytestream_uri_prefix)
+
+    # `--remote_header` is the shared header Bazel applies to both the remote
+    # cache and the executor channel, so gate on the identity alone: this also
+    # covers executor-only setups, and Bazel ignores the flag with no backend.
+    if runner.identity:
+        build_flags.append("--remote_header=x-identity=" + runner.identity)
 
     build_flags.append("--repository_cache=" + runner.repository_cache_dir)
 
