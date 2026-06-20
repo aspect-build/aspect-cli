@@ -331,3 +331,38 @@ jobs:
         if: ${{ github.event_name != 'pull_request' || matrix.preset == 'shell' }}
         working-directory: ${{ runner.temp }}/proj
         run: aspect build --task-key init-${{ matrix.preset }} -- //...
+  # `aspect cache diff` probes the remote cache with --experimental_remote_require_cached
+  # to list the test targets affected by this commit — running nothing. It needs
+  # cache access, so (like build/test) it runs on a self-hosted aspect-workflows
+  # runner, not an ephemeral one.
+  #
+  # Baseline = whatever the remote cache already holds (populated by mainline's
+  # test-task uploads). We `needs: [pre-build]` (NOT test-task) so the probe reads
+  # the pre-PR baseline rather than this run's freshly-uploaded results.
+  #
+  # The probe forces a fresh remote lookup per action via --nokeep_state_after_build
+  # --nouse_action_cache, so it needs no separate or wiped output base.
+  cache-diff-task:
+    runs-on: [self-hosted, aspect-workflows, aspect-default]
+    needs: [pre-build]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+      - uses: aspect-build/setup-aspect@c22a8f64fb38f82f59ce809cd7eb9f8ae096da44 # v2026.23.2
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+      - name: Cache Diff Task
+        run: aspect cache diff --task-key cache-diff-gha
+  cache-diff-debug-task:
+    runs-on: [self-hosted, aspect-workflows, aspect-default]
+    needs: [pre-build]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+      - uses: aspect-build/setup-aspect@c22a8f64fb38f82f59ce809cd7eb9f8ae096da44 # v2026.23.2
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+      - name: Cache Diff Task (ASPECT_DEBUG=1)
+        run: ASPECT_DEBUG=1 aspect cache diff --task-key cache-diff-gha-debug
