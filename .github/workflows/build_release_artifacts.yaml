@@ -1,5 +1,4 @@
 name: Build Release Artifacts
-
 on:
   workflow_dispatch:
   workflow_call:
@@ -13,12 +12,10 @@ on:
       linux:
         description: "Linux and MacOS binaries"
         value: ${{jobs.build.outputs.artifact}}
-
 permissions:
   id-token: write
   attestations: write
   contents: write
-
 jobs:
   build:
     name: Build MacOS and Linux release artifacts
@@ -38,13 +35,11 @@ jobs:
         with:
           ref: ${{ inputs.ref || '' }}
           fetch-depth: 0 # need to see tags (https://github.com/actions/checkout?tab=readme-ov-file#fetch-all-history-for-all-tags-and-branches)
-
       - uses: aspect-build/setup-aspect@c22a8f64fb38f82f59ce809cd7eb9f8ae096da44 # v2026.23.2
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
           disk-cache: ${{ github.workflow }}
           repository-cache: ${{ github.workflow }}
-
       - name: Build release artifacts
         # `release.sh` (genrule output of //bazel/release:release.bzl) cps
         # bazel-out paths directly without declaring the binaries / .sha256
@@ -52,26 +47,28 @@ jobs:
         # leaves cache-hit outputs (notably the unstamped axl-docgen `hashes`
         # actions) remote-only, so the cp step then fails with "cannot stat".
         #
-        # Pre-build `:bins` (the filegroup whose DefaultInfo lists exactly
-        # the binaries + sha256 files) with `toplevel` so those land on
-        # local disk first; the subsequent `bazel run :release` cps from
-        # those already-materialized paths and doesn't need a broader
-        # download policy.
+        # Pre-build the release targets' outputs (the binaries + sha256
+        # files, plus the launcher's Homebrew `brew.rb` formula and bottles)
+        # with `toplevel` so they land on local disk first; the subsequent
+        # `bazel run :release` cps from those already-materialized paths and
+        # doesn't need a broader download policy. `:brew` is part of the
+        # launcher `:release` graph but is NOT under `:bins`, so it must be
+        # listed explicitly — otherwise a remote cache hit leaves `brew.rb`
+        # remote-only and the cp fails with "cannot stat".
         run: |
           mkdir -p upload_root/assets
           bazel build --config=release --config=ci --remote_download_outputs=toplevel \
             //crates/aspect-launcher:bins \
+            //crates/aspect-launcher:brew \
             //crates/aspect-cli:bins \
             //crates/axl-docgen:bins
           bazel run --config=release --config=ci //crates/aspect-launcher:release -- "${PWD}/upload_root/assets"
           bazel run --config=release --config=ci //crates/aspect-cli:release -- "${PWD}/upload_root/assets"
           bazel run --config=release --config=ci //crates/axl-docgen:release -- "${PWD}/upload_root/assets"
-
       - name: Attest build provenance
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-path: "upload_root/assets/*"
-
       - name: Upload release artifacts
         uses: actions/upload-artifact@v7
         with:
