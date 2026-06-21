@@ -3300,9 +3300,9 @@ def test_bazel_render_snippets(ctx: TaskContext, tc: int, temp_dir: str) -> int:
     # producer + hook normally populate these; set directly for the render test.
     r["repro_commands"] = [
         ReproFixCommand(command = "aspect test -- //...", slug = "bazel-repro-aspect"),
-        ReproFixCommand(command = "aspect test -- //pkg:fail_test", slug = "bazel-repro-aspect-failure", target = "//pkg:fail_test"),
-        ReproFixCommand(command = "bazel test -- //pkg:fail_test", description = "vanilla bazel", slug = "bazel-repro-vanilla-bazel-failure", target = "//pkg:fail_test"),
-        ReproFixCommand(command = "aspect build -- //pkg:broken", slug = "bazel-repro-aspect-failure", target = "//pkg:broken"),
+        ReproFixCommand(command = "aspect test -- //pkg:fail_test", slug = "bazel-repro-aspect", target = "//pkg:fail_test"),
+        ReproFixCommand(command = "bazel test -- //pkg:fail_test", description = "vanilla bazel", slug = "bazel-repro-vanilla-bazel", target = "//pkg:fail_test"),
+        ReproFixCommand(command = "aspect build -- //pkg:broken", slug = "bazel-repro-aspect", target = "//pkg:broken"),
     ]
 
     out = render_check_output(ctx, r, "failed", render_ctx, links, snippet_options = opts, max_snippets = max_snips)

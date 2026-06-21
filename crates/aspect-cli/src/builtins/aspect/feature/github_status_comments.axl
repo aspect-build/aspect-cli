@@ -840,7 +840,7 @@ def _collect_repro_fix_rows(sections):
                 for c in e.get(command_field, []) or []:
                     # Per-failure (target-set) commands render inline under their
                     # snippet, not in the combined Reproduce/Fix section.
-                    if not c.command or (getattr(c, "target", "") or ""):
+                    if not c.command or c.target:
                         continue
                     entries.append({
                         "kind": kind,

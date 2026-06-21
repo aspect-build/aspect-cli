@@ -1093,9 +1093,8 @@ def _test_dispatch_skips_hook_when_lists_empty(_ctx):
 
 def _test_is_vanilla_bazel_slug(_ctx):
     _eq("vanilla slug", is_vanilla_bazel_slug("bazel-repro-vanilla-bazel"), True)
-    _eq("vanilla per-failure slug", is_vanilla_bazel_slug("bazel-repro-vanilla-bazel-failure"), True)
+    _eq("format vanilla fix slug", is_vanilla_bazel_slug("format-fix-vanilla-bazel"), True)
     _eq("aspect slug not vanilla", is_vanilla_bazel_slug("bazel-repro-aspect"), False)
-    _eq("aspect per-failure slug not vanilla", is_vanilla_bazel_slug("bazel-repro-aspect-failure"), False)
     _eq("lint-repro not vanilla", is_vanilla_bazel_slug("lint-repro"), False)
 
 def _test_flavor_allows(_ctx):
@@ -1125,10 +1124,22 @@ def _test_filter_by_flavor(_ctx):
     _eq("bazel → only vanilla", [c.slug for c in filter_by_flavor(cmds, "bazel")],
         ["bazel-repro-vanilla-bazel"])
 
+    # A multi-entry fix list (format/gazelle shape): aspect keeps the aspect
+    # fixes, drops the lone vanilla-bazel one; bazel keeps only it.
+    fixes = [
+        ReproFixCommand(command = "aspect format ...", slug = "format-fix"),
+        ReproFixCommand(command = "aspect format ... # rediscover", slug = "format-fix-rediscover"),
+        ReproFixCommand(command = "bazel run //tools/format ...", slug = "format-fix-vanilla-bazel"),
+    ]
+    _eq("aspect fixes → drop vanilla", [c.slug for c in filter_by_flavor(fixes, "aspect")],
+        ["format-fix", "format-fix-rediscover"])
+    _eq("bazel fixes → only vanilla", [c.slug for c in filter_by_flavor(fixes, "bazel")],
+        ["format-fix-vanilla-bazel"])
+
 def _test_target_round_trips_through_rehydrate(_ctx):
     # A per-failure command's target survives the JSON-dict round-trip the PR
     # comment artifact/state-block does (record → dict → rehydrate → record).
-    as_dict = {"command": "aspect test -- //foo:bar", "slug": "bazel-repro-aspect-failure", "target": "//foo:bar"}
+    as_dict = {"command": "aspect test -- //foo:bar", "slug": "bazel-repro-aspect", "target": "//foo:bar"}
     out = rehydrate_commands([as_dict])
     _eq("rehydrate count", len(out), 1)
     _eq("rehydrate preserves target", out[0].target, "//foo:bar")
@@ -1142,14 +1153,14 @@ def _test_hook_preserves_target(_ctx):
         return repro_fix_replace(command = "EDITED " + info.command)
     lifecycle = _fake_lifecycle([hook])
     data = {
-        "repro_commands": [ReproFixCommand(command = "aspect test -- //x", slug = "bazel-repro-aspect-failure", target = "//x")],
+        "repro_commands": [ReproFixCommand(command = "aspect test -- //x", slug = "bazel-repro-aspect", target = "//x")],
         "fix_commands": [],
     }
     apply_repro_fix_hooks(_fake_apply_ctx(), lifecycle, data, kind = "bazel_results", status = "failed")
     out = data["repro_commands"][0]
     _eq("hook rewrote command", out.command, "EDITED aspect test -- //x")
     _eq("hook preserved target", out.target, "//x")
-    _eq("hook preserved slug", out.slug, "bazel-repro-aspect-failure")
+    _eq("hook preserved slug", out.slug, "bazel-repro-aspect")
 
 _UNIT_TESTS = [
     _test_is_vanilla_bazel_slug,

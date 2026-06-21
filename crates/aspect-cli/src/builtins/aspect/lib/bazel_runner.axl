@@ -505,17 +505,18 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
 
     # Per-failure repros: one targeted command per failing label, rendered inline
     # beneath that failure's snippet (correlated by `target`). Single-label target
-    # list — no `repro_targets` collapsing. The `-failure` slugs keep the
-    # `-vanilla-bazel` suffix so flavor gating + suffix-match hooks still fire.
+    # list — no `repro_targets` collapsing. Same slugs as the combined commands:
+    # the `target` field is the per-failure marker, and reusing the slug keeps the
+    # documented `-vanilla-bazel` suffix so flavor gating + hook scoping still fire.
     for _label in failed_labels(data):
         _add_repro(
             repro_prefix(ctx) + build_aspect_command(_cli_path, [], [_label]),
-            "bazel-repro-aspect-failure",
+            "bazel-repro-aspect",
             target = _label,
         )
         _add_repro(
             build_bazel_command(command, [_label]),
-            "bazel-repro-vanilla-bazel-failure",
+            "bazel-repro-vanilla-bazel",
             description = "vanilla bazel",
             target = _label,
         )

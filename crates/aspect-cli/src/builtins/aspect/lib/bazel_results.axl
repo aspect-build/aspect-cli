@@ -952,6 +952,26 @@ def failed_labels(data):
 
     return labels
 
+def _cmd_field(c, name):
+    """Read a ReproFixCommand field whether `c` is a record (producer/live) or a
+    dict (snapshot fixtures / JSON round-trip), defaulting to ""."""
+    if type(c) == "dict":
+        return c.get(name, "") or ""
+    return getattr(c, name, "") or ""
+
+def repro_by_target(repro_commands):
+    """Map untruncated failure label -> its per-failure repro commands
+    (`[{command, description}]`), built from the `target`-set entries in
+    `data["repro_commands"]`. Whole-run entries (`target == ""`) are skipped —
+    they render in the combined Reproduce section, not inline under a snippet.
+    """
+    out = {}
+    for c in repro_commands or []:
+        tgt = _cmd_field(c, "target")
+        if tgt:
+            out.setdefault(tgt, []).append({"command": _cmd_field(c, "command"), "description": _cmd_field(c, "description")})
+    return out
+
 # Above this many failing labels, collapse to a common-root pattern rather than
 # listing each. Tuned to stay under build_aspect_command's ~100-char soft wrap.
 _REPRO_INLINE_MAX = 10
@@ -3702,16 +3722,9 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
     _decorate_snippet_verb(_failed_snippets, "failed", "in")
     _decorate_snippet_verb(_timeout_snippets, "timed out", "after")
 
-    # Per-failure repro commands (target-set entries in repro_commands, after the
-    # repro_fix_suggestion hook) attach to their snippet row, keyed by the
-    # untruncated label, and render inline beneath the snippet. Combined
-    # (target == "") entries stay in the "🔁 Reproduce" section (see
-    # repro_commands filtering below).
-    _repro_by_target = {}
-    for c in data.get("repro_commands", []) or []:
-        tgt = getattr(c, "target", "") or ""
-        if tgt:
-            _repro_by_target.setdefault(tgt, []).append({"command": c.command, "description": c.description})
+    # Attach each failure's per-failure repro commands to its snippet row (keyed
+    # by untruncated label); they render inline beneath the snippet.
+    _repro_by_target = repro_by_target(data.get("repro_commands", []))
 
     def _attach_repros(rows):
         for r in rows:
@@ -3800,8 +3813,8 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
         # emits the "🔁 Reproduce" / "🛠️ Fix" sections. Per-failure entries
         # (target != "") render inline beneath their snippet, so the combined
         # sections show only whole-run (target == "") commands.
-        "repro_commands": [c for c in (data.get("repro_commands", []) or []) if not (getattr(c, "target", "") or "")],
-        "fix_commands": [c for c in (data.get("fix_commands", []) or []) if not (getattr(c, "target", "") or "")],
+        "repro_commands": [c for c in (data.get("repro_commands", []) or []) if not _cmd_field(c, "target")],
+        "fix_commands": [c for c in (data.get("fix_commands", []) or []) if not _cmd_field(c, "target")],
         # Derived failures (dep broke, no own action error); collapsed list under
         # Build Failures. Count stringified (Jinja2 can't compare AXL ints).
         "derived_failures": _derived_table["rows"],
@@ -3998,13 +4011,9 @@ def extract_failure_snippets(std, data, snippet_options, max_per_task):
     target_kinds = bz.get("target_kinds", {}) or {}
     test_details = bz.get("test_details", {}) or {}
 
-    # Per-failure repro commands (target-set entries, post-hook), keyed by label,
-    # shipped with each snippet so the writer renders them inline.
-    repro_by_target = {}
-    for c in data.get("repro_commands", []) or []:
-        tgt = getattr(c, "target", "") or ""
-        if tgt:
-            repro_by_target.setdefault(tgt, []).append({"command": c.command, "description": c.description})
+    # Per-failure repro commands keyed by label, shipped with each snippet so the
+    # PR-comment writer renders them inline.
+    _repros = repro_by_target(data.get("repro_commands", []))
 
     out = []
 
@@ -4022,7 +4031,7 @@ def extract_failure_snippets(std, data, snippet_options, max_per_task):
             # Test wall time (ms); 0 for build actions (BES action timing is
             # unreliable and not captured). Rendered as "failed in <dur>".
             "duration_ms": duration_ms or 0,
-            "repros": repro_by_target.get(label, []),
+            "repros": _repros.get(label, []),
         })
 
     # Build-action stderr first (precedence), then failed tests, then timeouts.

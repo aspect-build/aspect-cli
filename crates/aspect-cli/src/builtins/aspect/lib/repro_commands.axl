@@ -87,15 +87,14 @@ _SHELL_META = " \t\n\"'\\`$&|;<>()*?[]{}#!~"
 
 # `repro_flavors` / `fix_flavors` task-arg values: which command flavor(s) to
 # surface. Every "vanilla bazel for non-Aspect-CLI users" producer tags its
-# entry with a slug ending in `-vanilla-bazel` (or `-vanilla-bazel-failure` for
-# the per-failure variant); the Aspect-CLI entry's slug does not. So flavor can
-# be decided from the slug alone, uniformly across producers and surfaces.
+# entry with a slug ending in `-vanilla-bazel`; the Aspect-CLI entry's slug does
+# not. So flavor is decided from the slug alone, uniformly across producers and
+# surfaces.
 REPRO_FLAVOR_VALUES = ["aspect", "bazel", "both"]
 
 def is_vanilla_bazel_slug(slug):
-    """True for a vanilla-bazel command slug (suffix `-vanilla-bazel`, with or
-    without the `-failure` per-failure tag)."""
-    return slug.endswith("-vanilla-bazel") or slug.endswith("-vanilla-bazel-failure")
+    """True for a vanilla-bazel command slug (suffix `-vanilla-bazel`)."""
+    return slug.endswith("-vanilla-bazel")
 
 def flavor_allows(flavor, slug):
     """Whether a command with `slug` should be emitted under `flavor`

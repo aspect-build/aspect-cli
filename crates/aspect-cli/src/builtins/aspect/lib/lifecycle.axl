@@ -269,7 +269,10 @@ def apply_repro_fix_hooks(
         test):  bazel-repro-aspect
                 bazel-repro-vanilla-bazel
 
-    Every "vanilla bazel for non-Aspect-CLI users" slug ends in
+    The bazel slugs recur once per failing target as PER-FAILURE entries (same
+    slug, `target` set to the label) in addition to the whole-run entry
+    (`target == ""`); a hook scoping by slug catches both, and can read `target`
+    to distinguish. Every "vanilla bazel for non-Aspect-CLI users" slug ends in
     `-vanilla-bazel`, so a hook can suffix-match across all producers.
 
     Args:
