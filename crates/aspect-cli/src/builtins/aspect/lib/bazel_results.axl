@@ -12,7 +12,7 @@ Event kinds consumed:
   "configuration"            — captures cpu arch and compilation_mode (target config only)
   "action_completed"         — accumulates failed build actions (up to MAX_FAILED_ACTIONS)
   "target_completed"         — accumulates failed build targets
-  "test_result"              — captures per-attempt log URI and duration (keyed by label)
+  "test_result"              — captures per-attempt test.log + test.xml paths and duration (keyed by label)
   "test_summary"             — buckets tests into failed / flaky / passed; tracks duration
   "build_metrics"            — captures action/target/package counts and timing
   "aborted"                  — captures build abort reason and description
@@ -23,7 +23,7 @@ Payload fields used:
   BuildMetadata.metadata             — dict[str,str] of --build_metadata/--bes_metadata pairs
   WorkspaceStatus.item               — repeated list of {key, value} structs (proto field is "item")
   Configuration.cpu, .compilation_mode, .is_tool_configuration
-  ActionExecuted.success, .type, .stderr (File)
+  ActionExecuted.success, .type, .stderr (File — uri only, never .contents)
   TargetComplete.success
   TestResult.test_action_output (File list), .test_attempt_duration_millis
   TestSummary.overall_status, .total_num_cached, .total_run_duration_millis (split by cached/executed)
@@ -35,9 +35,13 @@ Payload fields used:
   Aborted.abort_reason, .description
   event.id.label       — target label for all event types
 
-stderr is deliberately NOT captured: BES can inline action stderr (observed
-40+ MB in the wild), too costly on the Starlark heap. We show the failing
-label + action mnemonics; users follow the CI link for the raw log.
+stderr CONTENTS are deliberately not held on the Starlark heap: BES can inline
+action stderr via the File.contents oneof (observed 40+ MB in the wild). We read
+only the File.uri and resolve it to a local path (failed_actions[].stderr_path),
+exactly as test.log is. The path is materialized on demand by lib/log_snippet
+(bounded read) at render time for the inline failure snippet; the raw bytes are
+never copied into a Starlark value here. When no snippet is rendered, the
+surface still shows the failing label + action mnemonics + the CI link.
 """
 
 load("./ci.axl", "detect_ci_host", "resolve_build_url")
@@ -47,6 +51,7 @@ load(
     "display_cloud_provider",
     "is_aspect_workflows_runner",
 )
+load("./log_snippet.axl", "SnippetOptions", "code_fence_for", "extract_junit_failure", "extract_snippet", "has_snippet")
 load("./path_glob.axl", "match_path")
 load("./repro_commands.axl", "ASPECT_CLI_INSTALL_HINT_MARKDOWN")
 load("./result_text.axl", "emoji_for_status")
@@ -75,9 +80,12 @@ MIN_HEARTBEAT_INTERVAL_MS = 5000
 # don't stall the loop.
 BES_DRAIN_TICK_MS = 250
 
-# bb_clientd FUSE mount root for resolving bytestream:// URIs. Must match the
-# Aspect Workflows runner environment.
-_BB_CLIENTD_ROOT = "/var/cache/bb_clientd"
+# bb_clientd FUSE mount root for resolving bytestream:// URIs on Aspect
+# Workflows runners. MUST match lib/artifacts.axl's `_BB_CLIENTD_ROOT` — they
+# resolve the same CAS blobs (artifacts uploads test.log; we read it for
+# snippets), and a mismatch silently breaks reads (path doesn't exist → empty
+# snippet). Can't share via load(): artifacts.axl already loads bazel_results.
+_BB_CLIENTD_ROOT = "/mnt/ephemeral/buildbarn/bb_clientd"
 
 # TestSummary overall_status values from BlazeTestStatus proto enum. starbuf_derive
 # lowercases CamelCase to snake_case: Failed → "failed", FailedToBuild → "failed_to_build".
@@ -194,12 +202,16 @@ def bes_get(obj, field, default = None):
 def _file_uri_to_path(uri):
     """Convert a file:// or bytestream:// URI to a local filesystem path.
 
-    bytestream:// URIs are resolved via the bb_clientd FUSE mount:
+    `file://` (disk-cache / local outputs) is returned verbatim; `bytestream://`
+    (remote cache) is resolved via the bb_clientd FUSE mount:
       bytestream://host:port/blobs/<hash>/<size>
       -> {_BB_CLIENTD_ROOT}/cas/{host}/blobs/sha256/file/{hash}-{size}
+
+    Returns "" for a non-string `uri` — the BES `File.file` oneof yields bytes
+    when contents are inlined (not a URI), which we can't turn into a path.
     """
-    if not uri:
-        return uri
+    if type(uri) != "string" or not uri:
+        return ""
     if uri.startswith("file://"):
         return uri[len("file://"):]
     if uri.startswith("bytestream://"):
@@ -269,8 +281,10 @@ def init_data():
             # in skipped_targets_total.
             "skipped_targets": [],
             "skipped_targets_total": 0,
-            # Failed actions grouped by label: [{label, mnemonics}] (deduped).
-            # Capped at MAX_FAILED_ACTIONS labels. stderr deliberately not captured.
+            # Failed actions grouped by label: [{label, mnemonics, stderr_path}]
+            # (deduped). Capped at MAX_FAILED_ACTIONS labels. stderr_path is the
+            # local path resolved from the BES stderr File.uri ("" when absent),
+            # read on demand for the inline snippet — never the raw bytes.
             "failed_actions": [],
             # May exceed len(failed_actions) due to cap.
             "failed_actions_total": 0,
@@ -293,8 +307,9 @@ def init_data():
             # Cached-test wall time (ms) — time saved by the cache.
             "cached_duration_ms": 0,
             # Per-test detail from test_result (keyed by label, last attempt wins):
-            # {label -> {log_path: str, duration_ms: int}}. log_path is local
-            # (resolved from the BES URI), or "" if remote / unavailable.
+            # {label -> {log_path, xml_path, duration_ms}}. log_path/xml_path are
+            # local (resolved from the BES URI), or "" if remote / unavailable.
+            # Read on demand at render time for the inline failure snippet.
             "test_details": {},
 
             # label -> rule kind (e.g. "cc_library", "py_test") from
@@ -503,9 +518,9 @@ def process_event(data, event):
         success = bes_get(payload, "success", None)
         label = bes_get(event.id, "label", "") or ""
 
-        # Mnemonic is small (unlike payload.stderr, never touched). Build-wide
-        # per-mnemonic totals come authoritatively from build_metrics — counting
-        # here would under-report cached actions on incrementals.
+        # Mnemonic is small. Build-wide per-mnemonic totals come authoritatively
+        # from build_metrics — counting here would under-report cached actions on
+        # incrementals.
         mnemonic = bes_get(payload, "type", "") or ""
         if success == None:
             trace.log("warning: BES action_completed event missing expected field 'success' (label=" + label + ")")
@@ -517,8 +532,14 @@ def process_event(data, event):
             if label and label not in data["bazel"]["failed_action_labels"]:
                 data["bazel"]["failed_action_labels"].append(label)
 
+            # Resolve the stderr File.uri to a local path only (never .contents):
+            # read on demand for the inline snippet, kept off the Starlark heap.
+            stderr_uri = bes_get(bes_get(payload, "stderr", None), "file", "") or ""
+            stderr_path = _file_uri_to_path(stderr_uri)
+
             # One entry per label, deduped mnemonics (a target can fail multiple
-            # actions, e.g. CppCompile + CppLink).
+            # actions, e.g. CppCompile + CppLink). First action's stderr_path
+            # wins (typically the primary failure, e.g. CppCompile before Link).
             entry = None
             for a in data["bazel"]["failed_actions"]:
                 if a.get("label", "") == label:
@@ -527,10 +548,13 @@ def process_event(data, event):
             if entry:
                 if mnemonic and mnemonic not in entry["mnemonics"]:
                     entry["mnemonics"].append(mnemonic)
+                if not entry.get("stderr_path") and stderr_path:
+                    entry["stderr_path"] = stderr_path
             elif len(data["bazel"]["failed_actions"]) < MAX_FAILED_ACTIONS:
                 data["bazel"]["failed_actions"].append({
                     "label": label,
                     "mnemonics": [mnemonic] if mnemonic else [],
+                    "stderr_path": stderr_path,
                 })
                 return True
         return False
@@ -590,14 +614,22 @@ def process_event(data, event):
         label = bes_get(event.id, "label", "") or ""
         payload = event.payload
         log_uri = ""
+        xml_uri = ""
         if payload:
             for output in (bes_get(payload, "test_action_output", None) or []):
-                if output and bes_get(output, "name", "") == "test.log":
+                if not output:
+                    continue
+                name = bes_get(output, "name", "")
+                if name == "test.log":
                     log_uri = bes_get(output, "file", "") or ""
-                    break
+                elif name == "test.xml":
+                    xml_uri = bes_get(output, "file", "") or ""
         duration_ms = (bes_get(payload, "test_attempt_duration_millis", 0) or 0) if payload else 0
         data["bazel"]["test_details"][label] = {
             "log_path": _file_uri_to_path(log_uri),
+            # JUnit XML, when present: lets the snippet prefer structured
+            # <failure>/<error> output over scraping the raw test.log.
+            "xml_path": _file_uri_to_path(xml_uri),
             "duration_ms": duration_ms,
         }
 
@@ -2642,6 +2674,24 @@ FIX_COMMANDS_BLOCK = """{%- if fix_commands %}
 
 {% endif %}"""
 
+# Per-row inline failure snippets: a collapsed code block under a failure table,
+# one per row carrying a `snippet` (attached in build_details_data, budget-gated).
+# Rendered as a Jinja2 macro so each bucket reuses the same markup.
+# Renders a row's failure header (always) + its code block (when `snippet` is
+# still set). The trim ladder can pop `snippet` under the size cap to shed the
+# heavy log while keeping the one-line header visible.
+SNIPPET_MACRO = """{% macro failure_snippets(rows) %}
+{%- for t in rows %}
+❌ {{ t.kind }} `{{ t.label }}` {{ t.snippet_verb }}:
+{%- if t.snippet %}
+{{ t.snippet_fence }}text
+{% if t.snippet_trunc_head %}…
+{% endif %}{{ t.snippet }}
+{% if t.snippet_trunc_tail %}…
+{% endif %}{{ t.snippet_fence }}
+{% endif %}{%- endfor %}
+{%- endmacro %}"""
+
 # Bazel-targets detail block: build failures (root + dep-broken),
 # failed/timeout/flaky tests, optional repro/fix (gated by
 # render_repro_in_targets), built-targets / cached-tests tables. Split out of
@@ -2654,10 +2704,10 @@ BAZEL_TARGETS_TEMPLATE = """### 🎯 Bazel targets ({{ total_targets }})
 :hourglass_flowing_sand: **Build in progress** — target data will appear here as Bazel reports them.
 {% endif %}
 {%- else %}
-{%- if build_failures or derived_failures %}
+{%- if build_failures or build_failures_snippets or derived_failures %}
 <details open>
 <summary>{{ build_failures_icon }} {{ build_failures_header }}</summary>
-
+{{ failure_snippets(build_failures_snippets) }}
 {% if build_failures %}<pre>
 {{- build_failures_table_head }}
 {{ build_failures_table_sep }}
@@ -2681,30 +2731,36 @@ BAZEL_TARGETS_TEMPLATE = """### 🎯 Bazel targets ({{ total_targets }})
 </details>
 
 {% endif %}
-{%- if failed_tests %}
+{%- if failed_tests or failed_tests_snippets %}
 <details open>
 <summary>{{ failed_tests_icon }} {{ failed_tests_header }}</summary>
-
-<pre>
+{{ failure_snippets(failed_tests_snippets) }}
+{% if failed_tests %}<pre>
 {{- failed_tests_table_head }}
 {{ failed_tests_table_sep }}
 {%- for t in failed_tests %}
 {{ t.aligned_label }} | {{ t.aligned_kind }} | {{ t.aligned_duration }}{% if failed_tests_has_artifacts %} | {{ t.aligned_artifacts }}{% endif %}
 {%- endfor %}</pre>
+{% endif %}
 </details>
 
 {% endif %}
-{%- if timeout_tests %}
+{%- if timeout_tests or timeout_tests_snippets %}
 <details open>
 <summary>{{ timeout_tests_icon }} {{ timeout_tests_header }}</summary>
-
-<pre>
+{{ failure_snippets(timeout_tests_snippets) }}
+{% if timeout_tests %}<pre>
 {{- timeout_tests_table_head }}
 {{ timeout_tests_table_sep }}
 {%- for t in timeout_tests %}
 {{ t.aligned_label }} | {{ t.aligned_kind }} | {{ t.aligned_duration }}{% if timeout_tests_has_artifacts %} | {{ t.aligned_artifacts }}{% endif %}
 {%- endfor %}</pre>
+{% endif %}
 </details>
+
+{% endif %}
+{%- if snippets_overflow %}
+_+ {{ snippets_overflow }} more failure{{ snippets_overflow_plural }} — output not shown._
 
 {% endif %}
 {%- if flaky_tests %}
@@ -3000,7 +3056,10 @@ SHARED_DETAILS_BODY_TEMPLATE = """{% if artifacts_browse_url or artifact_links %
 # Build/test detail template: aborted prelude, hoisted Bazel targets as the
 # primary slot, then SHARED (which skips its own Bazel targets via
 # include_bazel_targets=False).
-DETAILS_TEMPLATE = """{% if aborted %}
+# SNIPPET_MACRO is defined once at the top so `failure_snippets(...)` is in scope
+# for every embedded copy of BAZEL_TARGETS_TEMPLATE (hoisted slot + SHARED slot).
+DETAILS_TEMPLATE = SNIPPET_MACRO + """
+{% if aborted %}
 > :warning: **Build aborted**{% if abort_reason %} (`{{ abort_reason }}`){% endif %}{% if abort_description %}: {{ abort_description }}{% endif %}
 
 {% endif %}
@@ -3332,7 +3391,7 @@ def _build_invocation_stats(data):
         "miss_reasons_table": miss_reasons_pre,
     }
 
-def build_details_data(data, links, render_ctx = None, status = "", start_date = "", finish_date = "", std = None, task_phases = None, task_active = None, task_elapsed_ms = 0, include_bazel_targets = True, render_repro_in_targets = False):
+def build_details_data(data, links, render_ctx = None, status = "", start_date = "", finish_date = "", std = None, task_phases = None, task_active = None, task_elapsed_ms = 0, include_bazel_targets = True, render_repro_in_targets = False, snippet_options = None, max_snippets = 0):
     """Build Jinja2 template data for DETAILS_TEMPLATE.
 
     start_date / finish_date are pre-formatted by the caller (format_run_date
@@ -3348,6 +3407,11 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
       render_repro_in_targets: True for build/test (Reproduce/Fix render atop
                                the primary Bazel targets slot); False otherwise
                                (per-task templates render their own).
+      snippet_options:         `SnippetOptions` (per-surface line/byte budget) for
+                               inline failure snippets, or None to disable.
+      max_snippets:            Max failure rows (shared across build-failure and
+                               test-failure buckets, in render order) that get an
+                               inline snippet. 0 disables. Requires `std`.
     """
 
     # Command-line views from options_parsed (not structured_command_line).
@@ -3517,6 +3581,87 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
     derived_failures_overflow = derived_failures_count - len(derived_failures)
     skipped_overflow = skipped_count - len(skipped_for_table)
 
+    # Inline failure snippets. One shared budget (`_snippet_budget[0]`) across all
+    # failure buckets, consumed in render order (build failures → failed tests →
+    # timeouts) so the most-relevant failures get output first. Each attach
+    # mutates `entry["snippet"]`/`["snippet_truncated"]` in place; rows beyond the
+    # budget render plain (the template emits a "more — output not shown" line).
+    _snippets_enabled = std != None and max_snippets > 0 and snippet_options != None
+    _snippet_budget = [max_snippets if _snippets_enabled else 0]
+
+    def _apply_snippet(entry, res):
+        """Set the snippet render fields on a table row from a SnippetResult.
+        `snippet_fence` is sized past any backtick run so log content can't close
+        the code block early; `snippet_trunc_head`/`_tail` drive the `…` markers."""
+        entry["snippet"] = res.text
+        entry["snippet_truncated"] = res.truncated
+        entry["snippet_trunc_head"] = res.trunc_head
+        entry["snippet_trunc_tail"] = res.trunc_tail
+        entry["snippet_fence"] = code_fence_for(res.text)
+        _snippet_budget[0] -= 1
+
+    def _attach_test_snippet(entry):
+        """Read a failed test's snippet, preferring JUnit test.xml over test.log."""
+        if _snippet_budget[0] <= 0:
+            return
+        detail = data["bazel"].get("test_details", {}).get(entry.get("label", ""), {}) or {}
+        res = extract_junit_failure(std, detail.get("xml_path", ""), snippet_options)
+        if not has_snippet(res):
+            res = extract_snippet(std, detail.get("log_path", ""), snippet_options)
+        if not has_snippet(res):
+            return
+        _apply_snippet(entry, res)
+
+    def _attach_action_snippet(action, entry):
+        """Read a failed action's stderr snippet (by path) onto the table row."""
+        if _snippet_budget[0] <= 0:
+            return
+        res = extract_snippet(std, action.get("stderr_path", ""), snippet_options)
+        if not has_snippet(res):
+            return
+        _apply_snippet(entry, res)
+
+    def _without_snippet(rows):
+        """Rows that did NOT get an inline snippet — these go in the <pre> table;
+        the rows that DID are rendered as snippet blocks instead (no duplicate)."""
+        return [r for r in rows if not r.get("snippet")]
+
+    def _with_snippet(rows):
+        """Rows that got an inline snippet (rendered by the snippet macro)."""
+        return [r for r in rows if r.get("snippet")]
+
+    # Failures table: Label | Target Type | Mnemonic (comma-joined when a target
+    # failed multiple actions). Build-failure snippets are attached first so they
+    # win the shared budget over test failures.
+    _build_failures_rows = []
+    for a in data["bazel"].get("failed_actions", []):
+        original_label = a.get("label", "")
+        mnemonics = a.get("mnemonics", []) or []
+        row = {
+            "label": _truncate_label(original_label),
+            "kind": target_kinds_map.get(original_label, ""),
+            "mnemonic": ", ".join(mnemonics),
+        }
+        if _snippets_enabled:
+            _attach_action_snippet(a, row)
+        _build_failures_rows.append(row)
+
+    # Snippet rows render as blocks; the table lists only the rest.
+    _build_failures_snippets = _with_snippet(_build_failures_rows)
+    _build_failures_table = _align_for_pre(
+        _without_snippet(_build_failures_rows),
+        has_duration = False,
+        has_mnemonic = True,
+    )
+
+    def _failed_with_snippets(tests):
+        """`_with_duration` + a snippet on each row (budget permitting)."""
+        rows = _with_duration(tests)
+        if _snippets_enabled:
+            for row in rows:
+                _attach_test_snippet(row)
+        return rows
+
     # Column-aligned <pre> tables.
     _passed_table = _align_for_pre(_with_duration(passed_executed), has_duration = True)
     _cached_table = _align_for_pre(_with_duration(passed_cached), has_duration = True)
@@ -3524,27 +3669,34 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
     _derived_table = _align_for_pre(derived_failures, has_duration = False)
     _skipped_table = _align_for_pre(skipped_for_table, has_duration = False)
 
-    # Failed/timeout/flaky buckets use the same aligned shape as passed/cached.
-    _failed_table = _align_for_pre(_with_duration(failed_by_status["failed"]), has_duration = True)
-    _timeout_table = _align_for_pre(_with_duration(failed_by_status["timeout"]), has_duration = True)
+    # Failed/timeout buckets: rows with a snippet render as blocks, the rest fill
+    # the aligned <pre> table (no duplication). Flaky is transient noise — table
+    # only, no snippets.
+    _failed_rows = _failed_with_snippets(failed_by_status["failed"])
+    _timeout_rows = _failed_with_snippets(failed_by_status["timeout"])
+    _failed_snippets = _with_snippet(_failed_rows)
+    _timeout_snippets = _with_snippet(_timeout_rows)
+    _failed_table = _align_for_pre(_without_snippet(_failed_rows), has_duration = True)
+    _timeout_table = _align_for_pre(_without_snippet(_timeout_rows), has_duration = True)
     _flaky_table = _align_for_pre(_with_duration(data["bazel"].get("flaky_tests", [])), has_duration = True)
 
-    # Failures table: Label | Target Type | Mnemonic (comma-joined when a target
-    # failed multiple actions).
-    _build_failures_for_table = []
-    for a in data["bazel"].get("failed_actions", []):
-        original_label = a.get("label", "")
-        mnemonics = a.get("mnemonics", []) or []
-        _build_failures_for_table.append({
-            "label": _truncate_label(original_label),
-            "kind": target_kinds_map.get(original_label, ""),
-            "mnemonic": ", ".join(mnemonics),
-        })
-    _build_failures_table = _align_for_pre(
-        _build_failures_for_table,
-        has_duration = False,
-        has_mnemonic = True,
-    )
+    # Header verb for inline snippet blocks (consistent with the PR comment):
+    # "failed to build" / "failed [in <dur>]" / "timed out [after <dur>]". `dur`
+    # is the pre-formatted duration string ("" when unknown, e.g. build actions).
+    def _decorate_snippet_verb(rows, base, dur_word):
+        for r in rows:
+            dur = r.get("duration", "")
+            r["snippet_verb"] = (base + " " + dur_word + " " + dur) if (dur_word and dur) else base
+
+    _decorate_snippet_verb(_build_failures_snippets, "failed to build", "")
+    _decorate_snippet_verb(_failed_snippets, "failed", "in")
+    _decorate_snippet_verb(_timeout_snippets, "timed out", "after")
+
+    # One global "more output not shown" note across the snippet-eligible buckets.
+    # Only meaningful once at least one snippet rendered AND more failures remain.
+    _snippets_shown = (max_snippets - _snippet_budget[0]) if _snippets_enabled else 0
+    _snippet_eligible_total = build_failure_count + failed_test_count + timeout_test_count
+    _snippets_overflow = (_snippet_eligible_total - _snippets_shown) if _snippets_shown > 0 else 0
 
     # Task timing: aligned <pre> (Phase | Description | Duration).
     _task_timing_rows_data = _build_task_timing_rows(task_phases, task_active, status)
@@ -3605,10 +3757,16 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
         "build_failures": _build_failures_table["rows"],
         "build_failures_table_head": _build_failures_table["header"],
         "build_failures_table_sep": _build_failures_table["separator"],
+        # Rows that got an inline snippet — rendered as blocks, NOT in the table.
+        "build_failures_snippets": _build_failures_snippets,
         "build_failures_count": build_failure_count,
         "build_failures_header": _bucket_header(_BUCKET_FAILED_TO_BUILD, build_failure_count),
         "build_failures_overflow": str(failed_actions_overflow) if failed_actions_overflow > 0 else "",
         "build_failures_icon": _BUCKET_ICONS[_BUCKET_FAILED_TO_BUILD],
+        # Inline-snippet overflow: failures past the shared snippet budget whose
+        # output isn't shown. "" when snippets are off or all fit.
+        "snippets_overflow": str(_snippets_overflow) if _snippets_overflow > 0 else "",
+        "snippets_overflow_plural": "s" if _snippets_overflow != 1 else "",
         # Producer-authored repro/fix lists (lib/repro_commands.axl); template
         # emits the "🔁 Reproduce" / "🛠️ Fix" sections.
         "repro_commands": list(data.get("repro_commands", []) or []),
@@ -3625,12 +3783,14 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
         "failed_tests_table_head": _failed_table["header"],
         "failed_tests_table_sep": _failed_table["separator"],
         "failed_tests_has_artifacts": _failed_table.get("has_artifacts", False),
+        "failed_tests_snippets": _failed_snippets,
         "failed_tests_header": _bucket_header(_BUCKET_TEST_FAILED, failed_test_count),
         "failed_tests_icon": _BUCKET_ICONS[_BUCKET_TEST_FAILED],
         "timeout_tests": _timeout_table["rows"],
         "timeout_tests_table_head": _timeout_table["header"],
         "timeout_tests_table_sep": _timeout_table["separator"],
         "timeout_tests_has_artifacts": _timeout_table.get("has_artifacts", False),
+        "timeout_tests_snippets": _timeout_snippets,
         "timeout_tests_header": _bucket_header(_BUCKET_TEST_TIMEOUT, timeout_test_count),
         "timeout_tests_icon": _BUCKET_ICONS[_BUCKET_TEST_TIMEOUT],
         "flaky_tests": _flaky_table["rows"],
@@ -3782,20 +3942,97 @@ def _build_task_timing_rows(phases, active, status):
         })
     return rows
 
-def render_check_output(ctx, data, status, render_ctx, links, templates = None, metadata_keys = None):
+def extract_failure_snippets(std, data, snippet_options, max_per_task):
+    """Extract up to `max_per_task` inline failure snippets from a frozen
+    bazel_results `data`, for the PR-summary-comment producer.
+
+    A snippet can only be read by the job that ran the failure (it owns the
+    local test.log / action-stderr paths); sibling jobs can't. So each job
+    extracts its own here on its terminal update and ships the result in its
+    status artifact. Build-action failures take precedence over test failures,
+    matching the check-surface order.
+
+    Returns a list of plain dicts (JSON-round-trippable through the artifact):
+    `[{label, kind, bucket, snippet, truncated, trunc_head, trunc_tail,
+    duration_ms}]` (bucket is "build" | "test" | "timeout"; duration_ms is the
+    test wall time, 0 for build actions), capped at `max_per_task`. Empty when off
+    (max_per_task <= 0 / no options). The writer dedupes identical failures
+    across tasks and computes overflow from what it drops at render.
+    """
+    bz = data.get("bazel", {})
+    if max_per_task <= 0 or snippet_options == None or std == None:
+        return []
+
+    target_kinds = bz.get("target_kinds", {}) or {}
+    test_details = bz.get("test_details", {}) or {}
+    out = []
+
+    def _take(label, kind, bucket, res, duration_ms = 0):
+        if not has_snippet(res):
+            return
+        out.append({
+            "label": label,
+            "kind": kind,
+            "bucket": bucket,
+            "snippet": res.text,
+            "truncated": res.truncated,
+            "trunc_head": res.trunc_head,
+            "trunc_tail": res.trunc_tail,
+            # Test wall time (ms); 0 for build actions (BES action timing is
+            # unreliable and not captured). Rendered as "failed in <dur>".
+            "duration_ms": duration_ms or 0,
+        })
+
+    # Build-action stderr first (precedence), then failed tests, then timeouts.
+    for a in bz.get("failed_actions", []):
+        if len(out) >= max_per_task:
+            break
+        label = a.get("label", "")
+        _take(
+            label,
+            target_kinds.get(label, ""),
+            "build",
+            extract_snippet(std, a.get("stderr_path", ""), snippet_options),
+        )
+
+    for t in bz.get("failed_tests", []):
+        if len(out) >= max_per_task:
+            break
+        s = t.get("status", "failed")
+        bucket = "timeout" if s == "timeout" else "test"
+        label = t.get("label", "")
+        detail = test_details.get(label, {}) or {}
+        res = extract_junit_failure(std, detail.get("xml_path", ""), snippet_options)
+        if not has_snippet(res):
+            res = extract_snippet(std, detail.get("log_path", ""), snippet_options)
+        _take(
+            label,
+            t.get("kind", "") or target_kinds.get(label, ""),
+            bucket,
+            res,
+            duration_ms = t.get("duration_ms", 0) or detail.get("duration_ms", 0),
+        )
+
+    return out
+
+def render_check_output(ctx, data, status, render_ctx, links, templates = None, metadata_keys = None, snippet_options = None, max_snippets = 0):
     """Render {title, summary, text} for a GitHub check run output field.
 
     Public entry point for the "bazel_results" task_update kind; features call it
     from their task_update handler.
 
     Args:
-        ctx:           TaskContext
-        data:          dict from init_data(), updated by process_event
-        status:        "running" | "failing" | "passed" | "failed"
-        render_ctx:    feature display context — see build_summary_data
-        links:         dict with ci_label, ci_url, aspect_url
-        templates:     optional "summary"/"details" Jinja2 overrides
-        metadata_keys: extra BES metadata keys to surface; ["*"] = all
+        ctx:             TaskContext
+        data:            dict from init_data(), updated by process_event
+        status:          "running" | "failing" | "passed" | "failed"
+        render_ctx:      feature display context — see build_summary_data
+        links:           dict with ci_label, ci_url, aspect_url
+        templates:       optional "summary"/"details" Jinja2 overrides
+        metadata_keys:   extra BES metadata keys to surface; ["*"] = all
+        snippet_options: `SnippetOptions` line/byte budget for inline failure
+                         snippets, or None to disable (per-surface, see callers).
+        max_snippets:    max failure rows (shared across build/test buckets) to
+                         show inline output for; 0 disables.
     """
 
     # Render-debug gated on `_ASPECT_DEBUG_STATUS_RENDER_CHECK` (surfaces
@@ -3854,6 +4091,8 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
         include_bazel_targets = False,
         # Bazel targets is the primary slot, so Reproduce/Fix render at its top.
         render_repro_in_targets = True,
+        snippet_options = snippet_options,
+        max_snippets = max_snippets,
     )
 
     if debug_render:
@@ -3876,11 +4115,38 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
     details_text = ctx.template.jinja2(details_tmpl, data = details_data)
 
     # Fit details within the GitHub limit; each step re-renders only if still
-    # over. Drop reference sections (redundant with Aspect Web UI) before the
-    # bucket lists users actually came for:
+    # over. Inline snippets are extra (not the data users primarily came for), so
+    # they shed FIRST — secondary buckets, then all of them — before any of the
+    # established trims below. Reference sections (redundant with Aspect Web UI)
+    # go next, before the failure/target lists themselves:
+    #   0a. snippets in secondary buckets  0b. all snippets
     #   1. Build Metadata  2. Workspace Status  3. Invocation  4. Performance
     #   5. parsed-options lists  6. halve built_targets  7. halve passed_tests
     #   8. drop cached_tests (last resort)
+    # Shed the heavy log body but keep each failure's one-line header (the macro
+    # renders the header whenever the row is present; the code block only when
+    # `snippet` is still set).
+    def _drop_snippets(rows):
+        for r in rows:
+            if "snippet" in r:
+                r.pop("snippet")
+
+    if len(details_text) > _DETAILS_LIMIT and max_snippets > 0:
+        if debug_render:
+            trace.log("debug [render_check_output]   OVER LIMIT (" + str(len(details_text)) +
+                      "), dropping inline snippet bodies from secondary failure buckets")
+        _drop_snippets(details_data.get("failed_tests_snippets", []))
+        _drop_snippets(details_data.get("timeout_tests_snippets", []))
+        details_data["snippets_overflow"] = ""
+        details_text = ctx.template.jinja2(details_tmpl, data = details_data)
+
+    if len(details_text) > _DETAILS_LIMIT and max_snippets > 0:
+        if debug_render:
+            trace.log("debug [render_check_output]   still OVER (" + str(len(details_text)) +
+                      "), dropping all inline snippet bodies")
+        _drop_snippets(details_data.get("build_failures_snippets", []))
+        details_text = ctx.template.jinja2(details_tmpl, data = details_data)
+
     if len(details_text) > _DETAILS_LIMIT:
         if debug_render:
             trace.log("debug [render_check_output]   OVER LIMIT (" + str(len(details_text)) +

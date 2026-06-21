@@ -13,6 +13,7 @@ load(
     "version_gte",
     "version_tuple",
 )
+load("@aspect//lib/check_dispatch.axl", "SURFACE_PR_COMMENT", "SURFACE_STATUS_CHECK", "snippet_budget_for")
 load("@aspect//lib/ci.axl", "detect_build_url")
 load("@aspect//lib/deliveryd.axl", deliveryd_parse_endpoint = "parse_endpoint")
 load("@aspect//lib/environment.axl", "color_enabled", "detect_ci", "parse_git_url_name", "sanitize_filename")
@@ -23,6 +24,7 @@ load(
     "extract_changed_dirs",
 )
 load("@aspect//lib/github.axl", "detect_commit_sha", "github")
+load("@aspect//lib/log_snippet.axl", "SnippetOptions", "code_fence_for", "extract_junit_failure", "extract_snippet")
 load("@aspect//lib/path_glob.axl", "match_any", "match_path")
 load("@aspect//lib/repro_commands.axl", "build_aspect_command", "dedup_and_attribute", "patch_download_cmd", "task_cli_path")
 load("@aspect//lib/result_text.axl", "severity_for_status")
@@ -3130,6 +3132,225 @@ def test_sarif_lib(tc: int) -> int:
 
     return tc
 
+def test_log_snippet(ctx: TaskContext, tc: int, temp_dir: str) -> int:
+    """lib/log_snippet.axl extraction, windowing, ANSI strip, JUnit-first, caps."""
+    d = temp_dir + "/axl_log_snippet_test"
+    if ctx.std.fs.exists(d):
+        ctx.std.fs.remove_dir_all(d)
+    ctx.std.fs.create_dir_all(d)
+
+    # Small log, marker near the end → window anchored on the marker.
+    small = d + "/small.log"
+    ctx.std.fs.write(small, "setup ok\nrunning case_1\nrunning case_2\nFAILED: assertion x == y\n  at foo.py:42\n")
+    r = extract_snippet(ctx.std, small)
+    tc = test_case(tc, r.source.value == "log", "extract_snippet: small log → source=log")
+    tc = test_case(tc, "FAILED: assertion x == y" in r.text, "extract_snippet: keeps the failure marker line")
+    tc = test_case(tc, "at foo.py:42" in r.text, "extract_snippet: keeps post-marker context")
+    tc = test_case(tc, not r.truncated, "extract_snippet: small log not flagged truncated")
+
+    # No marker → tail fallback caps to max_lines and flags truncated.
+    nomark_lines = []
+    for i in range(40):
+        nomark_lines.append("line %d ordinary output" % i)
+    nomark = d + "/nomark.log"
+    ctx.std.fs.write(nomark, "\n".join(nomark_lines) + "\n")
+    r2 = extract_snippet(ctx.std, nomark, SnippetOptions(max_lines = 10))
+    tc = test_case(tc, r2.source.value == "log", "extract_snippet: no-marker log → source=log")
+    tc = test_case(tc, len(r2.text.split("\n")) <= 10, "extract_snippet: no-marker tail capped to max_lines")
+    tc = test_case(tc, "line 39 ordinary output" in r2.text, "extract_snippet: tail keeps the last line")
+    tc = test_case(tc, "line 0 ordinary output" not in r2.text, "extract_snippet: tail drops the head")
+    tc = test_case(tc, r2.truncated, "extract_snippet: windowed log flagged truncated")
+
+    # ANSI escapes and \r progress spam are stripped before line counting.
+    ansi = d + "/ansi.log"
+    ctx.std.fs.write(ansi, "\033[32mok\033[0m\nprogress 10%\rprogress 99%\rprogress 100%\n\033[31mError: boom\033[0m\n")
+    r3 = extract_snippet(ctx.std, ansi)
+    tc = test_case(tc, "\033" not in r3.text, "extract_snippet: ANSI escapes stripped")
+    tc = test_case(tc, "Error: boom" in r3.text, "extract_snippet: text after ANSI strip preserved")
+    tc = test_case(tc, "progress 100%" in r3.text and "progress 10%" not in r3.text, "extract_snippet: \\r progress collapsed to last segment")
+
+    # Byte cap: a log larger than max_read_bytes is sliced and flagged truncated.
+    big = d + "/big.log"
+    ctx.std.fs.write(big, "x" * 5000 + "\nError: tail marker\n")
+    r4 = extract_snippet(ctx.std, big, SnippetOptions(max_read_bytes = 1000))
+    tc = test_case(tc, r4.truncated, "extract_snippet: over-cap read flagged truncated")
+
+    # Heap safety: only the capped prefix is read, never the whole file — the
+    # marker past byte 1000 must NOT appear (would mean we read it all).
+    tc = test_case(tc, "tail marker" not in r4.text, "extract_snippet: capped read stops before the tail (no full-file read)")
+
+    # The capped fs primitive returns at most max_bytes chars.
+    capped = ctx.std.fs.try_read_to_string_capped(big, 100)
+    tc = test_case(tc, len(capped) == 100, "try_read_to_string_capped: reads exactly the cap on a larger file")
+    tc = test_case(tc, ctx.std.fs.try_read_to_string_capped(d + "/missing.log", 100) == "", "try_read_to_string_capped: missing path → empty")
+
+    # Multi-byte char split at the cap: the partial trailing char is dropped, not
+    # emitted as a replacement char, and the valid prefix is intact.
+    mb = d + "/mb.log"
+    ctx.std.fs.write(mb, "ab" + "€" + "cd")  # '€' is 3 bytes (e2 82 ac)
+    mb_capped = ctx.std.fs.try_read_to_string_capped(mb, 3)  # "ab" + first byte of €
+    tc = test_case(tc, mb_capped == "ab", "try_read_to_string_capped: drops a cap-split multi-byte char")
+    tc = test_case(tc, "�" not in mb_capped, "try_read_to_string_capped: no replacement char on split")
+
+    # code_fence_for: widens past the longest backtick run so log content can't
+    # close the fence early.
+    tc = test_case(tc, code_fence_for("plain text") == "```", "code_fence_for: default 3 backticks")
+    tc = test_case(tc, code_fence_for("a ``` b") == "````", "code_fence_for: widens past a 3-backtick run")
+    tc = test_case(tc, code_fence_for("`````` huge") == "```````", "code_fence_for: widens past a 6-backtick run")
+
+    # Missing path → source=none (graceful degrade, no fail).
+    r5 = extract_snippet(ctx.std, d + "/does_not_exist.log")
+    tc = test_case(tc, r5.source.value == "none", "extract_snippet: missing path → source=none")
+    tc = test_case(tc, r5.text == "", "extract_snippet: missing path → empty text")
+    r5b = extract_snippet(ctx.std, "")
+    tc = test_case(tc, r5b.source.value == "none", "extract_snippet: empty path → source=none")
+
+    # JUnit XML preferred: <failure> message + body extracted, entities unescaped.
+    xml = d + "/test.xml"
+    ctx.std.fs.write(xml, "<testsuites><testsuite><testcase name=\"t1\">" +
+                          "<failure message=\"x &lt; y was false\" type=\"AssertionError\">" +
+                          "Traceback:\n  assert x &lt; y\n</failure></testcase></testsuite></testsuites>")
+    r6 = extract_junit_failure(ctx.std, xml)
+    tc = test_case(tc, r6.source.value == "xml", "extract_junit_failure: <failure> → source=xml")
+    tc = test_case(tc, "AssertionError: x < y was false" in r6.text, "extract_junit_failure: type+message header, unescaped")
+    tc = test_case(tc, "assert x < y" in r6.text, "extract_junit_failure: body text included + unescaped")
+
+    # Self-closing <error/> with only a message attr.
+    xml2 = d + "/err.xml"
+    ctx.std.fs.write(xml2, "<testsuite><testcase><error message=\"segfault\" type=\"Crash\"/></testcase></testsuite>")
+    r7 = extract_junit_failure(ctx.std, xml2)
+    tc = test_case(tc, r7.source.value == "xml", "extract_junit_failure: self-closing <error/> → source=xml")
+    tc = test_case(tc, "Crash: segfault" in r7.text, "extract_junit_failure: self-closing error header")
+
+    # No <failure>/<error> in the XML → none (caller falls back to the log).
+    xml3 = d + "/pass.xml"
+    ctx.std.fs.write(xml3, "<testsuite><testcase name=\"ok\"/></testsuite>")
+    r8 = extract_junit_failure(ctx.std, xml3)
+    tc = test_case(tc, r8.source.value == "none", "extract_junit_failure: no failure element → source=none")
+
+    # Bazel-SYNTHESIZED XML (sh_test/cc_test without native JUnit): a generic
+    # empty <error message="exited with error code 1"> with the real output in
+    # <system-out>. The JUnit path must MISS so the caller falls back to test.log
+    # — else the snippet reads the useless "exited with error code 1".
+    synth = d + "/synth.xml"
+    ctx.std.fs.write(synth, "<testsuites><testsuite><testcase name=\"t\">" +
+                            "<error message=\"exited with error code 1\"></error>" +
+                            "<system-out>real pytest output here</system-out></testcase></testsuite></testsuites>")
+    r9 = extract_junit_failure(ctx.std, synth)
+    tc = test_case(tc, r9.source.value == "none", "extract_junit_failure: synthesized 'exited with error code' → none (fall back to log)")
+
+    # A real <failure> whose message happens to start similarly but HAS a body is
+    # kept (only empty low-signal elements are rejected).
+    real = d + "/real.xml"
+    ctx.std.fs.write(real, "<testsuite><testcase><failure message=\"exited with error code 1\">" +
+                           "assert 5 == 6\n</failure></testcase></testsuite>")
+    r10 = extract_junit_failure(ctx.std, real)
+    tc = test_case(tc, r10.source.value == "xml", "extract_junit_failure: low-signal message WITH body kept")
+    tc = test_case(tc, "assert 5 == 6" in r10.text, "extract_junit_failure: body retained when present")
+
+    ctx.std.fs.remove_dir_all(d)
+    return tc
+
+def test_bazel_render_snippets(ctx: TaskContext, tc: int, temp_dir: str) -> int:
+    """End-to-end: render_check_output inlines test/action snippets, budgets,
+    overflow note, and snippet-first trimming under the size cap."""
+    d = temp_dir + "/axl_render_snippet_test"
+    if ctx.std.fs.exists(d):
+        ctx.std.fs.remove_dir_all(d)
+    ctx.std.fs.create_dir_all(d)
+
+    links = {
+        "ci_label": "GitHub Actions",
+        "ci_url": "https://github.com/example/repo/actions/runs/123",
+        "aspect_url": "",
+        "results_base_url": "",
+        "artifacts_browse_url": "",
+        "artifact_urls": {},
+        "testlogs_label_urls": {},
+    }
+    render_ctx = {
+        "triggered_by": "tester",
+        "subject": "//...",
+        "started_ms": 1744630000000,
+        "ended_ms": 1744630002000,
+        "progress": "",
+    }
+
+    log1 = d + "/fail1.log"
+    ctx.std.fs.write(log1, "running case\nFAILED: expected 1 got 2\n  at t.py:7\n")
+    stderr1 = d + "/stderr1.txt"
+    ctx.std.fs.write(stderr1, "t.cc:9:3: error: no member named 'foo'\n")
+
+    opts, max_snips = snippet_budget_for(SURFACE_PR_COMMENT)
+
+    # A failed test with a resolved log_path + a failed action with stderr_path.
+    r = init_data()
+    r["bazel"]["build_command"] = "test"
+    r["bazel"]["failed_test_total"] = 1
+    r["bazel"]["failed_tests"] = [{"label": "//pkg:fail_test", "cached": False, "duration_ms": 3000, "status": "failed"}]
+    r["bazel"]["test_details"] = {"//pkg:fail_test": {"log_path": log1, "xml_path": "", "duration_ms": 3000}}
+    r["bazel"]["failed_actions_total"] = 1
+    r["bazel"]["failed_actions"] = [{"label": "//pkg:broken", "mnemonics": ["CppCompile"], "stderr_path": stderr1}]
+    r["bazel"]["failed_action_labels"] = ["//pkg:broken"]
+    r["bazel"]["failed_targets"] = [{"label": "//pkg:broken"}]
+    r["bazel"]["target_kinds"] = {"//pkg:fail_test": "py_test", "//pkg:broken": "cc_library"}
+    r["bazel"]["targets_total"] = 2
+
+    out = render_check_output(ctx, r, "failed", render_ctx, links, snippet_options = opts, max_snippets = max_snips)
+    tc = test_case(tc, "FAILED: expected 1 got 2" in out["text"], "render: inlines failed-test log snippet")
+    tc = test_case(tc, "no member named 'foo'" in out["text"], "render: inlines failed-action stderr snippet")
+
+    # Inline under the bucket's <details> (no nested per-row <details>), with the
+    # PR-comment-style header: "❌ <kind> `<label>` <verb>:" (duration folded in
+    # for tests, "failed to build" for actions).
+    tc = test_case(tc, "❌ py_test `//pkg:fail_test` failed in 3s:" in out["text"], "render: test snippet header (kind + label + duration)")
+    tc = test_case(tc, "❌ cc_library `//pkg:broken` failed to build:" in out["text"], "render: build snippet header (kind + label)")
+
+    # The snippet-shown labels are NOT also listed in the <pre> table (no dup).
+    tc = test_case(tc, "<summary><code>//pkg:fail_test</code> output</summary>" not in out["text"], "render: no nested per-row <details>")
+
+    # max_snippets = 0 (or no options) disables snippets entirely.
+    out_off = render_check_output(ctx, r, "failed", render_ctx, links)
+    tc = test_case(tc, "FAILED: expected 1 got 2" not in out_off["text"], "render: snippets off by default (max_snippets=0)")
+    tc = test_case(tc, "//pkg:fail_test" in out_off["text"], "render: failure label still shown with snippets off")
+
+    # Budget overflow: 3 failed tests, budget of 1 → 1 snippet + "more not shown".
+    log_a = d + "/a.log"
+    ctx.std.fs.write(log_a, "Error: alpha failed\n")
+    r2 = init_data()
+    r2["bazel"]["build_command"] = "test"
+    r2["bazel"]["failed_test_total"] = 3
+    r2["bazel"]["failed_tests"] = [
+        {"label": "//pkg:a_test", "cached": False, "duration_ms": 10, "status": "failed"},
+        {"label": "//pkg:b_test", "cached": False, "duration_ms": 10, "status": "failed"},
+        {"label": "//pkg:c_test", "cached": False, "duration_ms": 10, "status": "failed"},
+    ]
+    r2["bazel"]["test_details"] = {
+        "//pkg:a_test": {"log_path": log_a, "xml_path": "", "duration_ms": 10},
+        "//pkg:b_test": {"log_path": log_a, "xml_path": "", "duration_ms": 10},
+        "//pkg:c_test": {"log_path": log_a, "xml_path": "", "duration_ms": 10},
+    }
+    r2["bazel"]["targets_total"] = 3
+    out2 = render_check_output(ctx, r2, "failed", render_ctx, links, snippet_options = SnippetOptions(max_lines = 15), max_snippets = 1)
+    tc = test_case(tc, "more failure" in out2["text"] and "output not shown" in out2["text"], "render: budget overflow note shown")
+
+    # Truncation markers: a long no-marker log keeps the tail and shows a leading
+    # `…` for the dropped head (max_lines small forces windowing).
+    big = d + "/big.log"
+    ctx.std.fs.write(big, "\n".join(["line %d" % i for i in range(50)]) + "\n")
+    r3 = init_data()
+    r3["bazel"]["build_command"] = "test"
+    r3["bazel"]["failed_test_total"] = 1
+    r3["bazel"]["failed_tests"] = [{"label": "//pkg:big_test", "cached": False, "duration_ms": 10, "status": "failed"}]
+    r3["bazel"]["test_details"] = {"//pkg:big_test": {"log_path": big, "xml_path": "", "duration_ms": 10}}
+    r3["bazel"]["targets_total"] = 1
+    out3 = render_check_output(ctx, r3, "failed", render_ctx, links, snippet_options = SnippetOptions(max_lines = 5), max_snippets = 1)
+    tc = test_case(tc, "…\nline 45" in out3["text"], "render: dropped-head truncation marker (leading …)")
+    tc = test_case(tc, "line 49" in out3["text"], "render: windowed snippet keeps the tail")
+
+    ctx.std.fs.remove_dir_all(d)
+    return tc
+
 def impl(ctx: TaskContext) -> int:
     tc = 0
 
@@ -3211,6 +3432,8 @@ def impl(ctx: TaskContext) -> int:
     tc = test_build_metadata_lib(tc)
     tc = test_severity_for_status(tc)
     tc = test_gazelle_dir_helpers(tc)
+    tc = test_log_snippet(ctx, tc, temp_dir)
+    tc = test_bazel_render_snippets(ctx, tc, temp_dir)
 
     print(tc, "tests passed")
     return 0

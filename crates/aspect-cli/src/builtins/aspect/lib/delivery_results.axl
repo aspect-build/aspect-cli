@@ -474,11 +474,12 @@ def _config_items(data):
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
 
-def render_check_output(ctx, data, status, render_ctx, links, templates = None, metadata_keys = None):
+def render_check_output(ctx, data, status, render_ctx, links, templates = None, metadata_keys = None, snippet_options = None, max_snippets = 0):
     """Render title, summary, and text for a delivery check run.
 
     Matches the bazel_results / lint_results interface so GithubStatusChecks
-    can dispatch by task_update.kind interchangeably.
+    can dispatch by task_update.kind interchangeably. snippet_options/max_snippets
+    are accepted for parity and ignored (delivery has no log snippets).
     """
     t = templates or {}
     run_date = format_run_date(ctx, data.get("start_time_ms", 0))

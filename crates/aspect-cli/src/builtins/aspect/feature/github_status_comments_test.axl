@@ -29,9 +29,12 @@ load(
     "DEFAULT_STATUS_BADGES",
     "MARKER_FMT",
     "bucket_entries",
+    "by_task_overflow",
+    "collect_repro_fix_rows",
     "collect_tip_rows",
     "dedup_by_run_attempt",
     "dedup_for_display",
+    "format_overflow_note",
     "lease_held",
     "max_recent_upsert_epoch",
     "merge_state",
@@ -39,8 +42,11 @@ load(
     "prepare_for_render",
     "render_body",
     "results_subset",
+    "select_snippets",
+    "select_sticky",
     "serialize_state",
     "should_quiet_delete_log",
+    "snippet_key",
 )
 load(
     "./test_fixtures.axl",
@@ -699,7 +705,7 @@ def _check_max_recent_upsert_epoch():
 
 def _check_state_serialize_round_trip():
     """serialize_state → parse_state round-trips head_sha, lease epoch,
-    workflow_runs, and entries."""
+    workflow_runs, entries, and the sticky shown_snippets selection."""
     state = {
         "head_sha": "abc",
         "last_upsert_epoch_s": 1700000000,
@@ -711,6 +717,9 @@ def _check_state_serialize_round_trip():
             {"name": "build", "key": "build", "workflow_run_id": "100"},
             {"name": "lint", "key": "lint", "workflow_run_id": "200"},
         ],
+        "shown_snippets": [snippet_key("//pkg:a", "boom a"), snippet_key("//pkg:b", "boom b")],
+        "shown_repros": ["test\x00aspect test //pkg:a\x00"],
+        "shown_fixes": ["format\x00aspect format\x00"],
     }
     block = serialize_state(state)
     parsed = parse_state("some body content\n\n" + block + "\n")
@@ -720,6 +729,266 @@ def _check_state_serialize_round_trip():
     _eq("round-trip last_upsert_epoch_s", parsed["last_upsert_epoch_s"], 1700000000)
     _eq("round-trip workflow_runs", parsed["workflow_runs"], state["workflow_runs"])
     _eq("round-trip entries", parsed["entries"], state["entries"])
+
+    # Regression: sticky selection sets must survive so stickiness works across PATCHes.
+    _eq("round-trip shown_snippets", parsed["shown_snippets"], state["shown_snippets"])
+    _eq("round-trip shown_repros", parsed["shown_repros"], state["shown_repros"])
+    _eq("round-trip shown_fixes", parsed["shown_fixes"], state["shown_fixes"])
+
+def _snip(label, bucket = "test", text = "boom", truncated = False, kind = "", trunc_head = False, trunc_tail = False, duration_ms = 0):
+    # kind defaults to the bucket word ("build"/"test") used in the header line.
+    return {
+        "label": label,
+        "bucket": bucket,
+        "snippet": text,
+        "truncated": truncated,
+        "trunc_head": trunc_head,
+        "trunc_tail": trunc_tail,
+        "kind": kind or ("build" if bucket == "build" else "test"),
+        "duration_ms": duration_ms,
+    }
+
+def _entry_with_snippets(key, snippets):
+    return {"name": key, "key": key, "failure_snippets": snippets}
+
+def _check_select_snippets(ctx):
+    """_select_snippets: dedup-by-(label,content) across tasks, sticky,
+    deterministic, hard-capped at the global budget."""
+
+    # Deterministic fill from empty: stable (bucket_rank, label) order. build
+    # bucket (rank 0) sorts ahead of test (rank 1).
+    e_a = _entry_with_snippets("a-task", [_snip("//a:t2", "test"), _snip("//a:t1", "build")])
+    e_b = _entry_with_snippets("b-task", [_snip("//b:t1", "test")])
+    rows, shown, overflow = select_snippets([e_b, e_a], [])
+    _eq("select: deterministic order (bucket,label)", [r["label"] for r in rows], ["//a:t1", "//a:t2", "//b:t1"])
+    _eq("select: shown keys mirror rows", shown, [r["_key"] for r in rows])
+    _eq("select: all shown → no overflow", overflow["total"], 0)
+
+    # Cross-task dedup: the SAME (label, content) failing in three jobs collapses
+    # to ONE row attributed to all three (the core fix — no 3× duplicate output).
+    dup = [
+        _entry_with_snippets("build-gha", [_snip("//x:lib", "build", "compile error")]),
+        _entry_with_snippets("build-gha-debug", [_snip("//x:lib", "build", "compile error")]),
+        _entry_with_snippets("test-gha", [_snip("//x:lib", "build", "compile error")]),
+    ]
+    rows_dup, _, overflow_dup = select_snippets(dup, [])
+    _eq("select: identical failure deduped to one row", len(rows_dup), 1)
+    _eq(
+        "select: deduped row attributes all contributing tasks",
+        rows_dup[0]["task_keys"],
+        ["build-gha", "build-gha-debug", "test-gha"],
+    )
+    _eq("select: deduped → no overflow", overflow_dup["total"], 0)
+
+    # Different content for the same label is NOT deduped (distinct failures).
+    diff = [
+        _entry_with_snippets("a", [_snip("//x:t", "test", "boom A")]),
+        _entry_with_snippets("b", [_snip("//x:t", "test", "boom B")]),
+    ]
+    rows_diff, _, _ = select_snippets(diff, [])
+    _eq("select: same label different content stays distinct", len(rows_diff), 2)
+
+    # Hard cap: 6 distinct failures, budget 5 → exactly 5 shown, 1 dropped.
+    many = _entry_with_snippets("z-task", [_snip("//z:t%d" % i, "test", "boom %d" % i) for i in range(6)])
+    rows3, shown3, overflow3 = select_snippets([many], [])
+    _eq("select: hard cap at global budget (5)", len(rows3), 5)
+    _eq("select: shown set also capped at 5", len(shown3), 5)
+    _eq("select: 6 distinct, 5 shown → 1 overflow", overflow3["total"], 1)
+    _eq("select: overflow lists the holding task", overflow3["tasks"], ["z-task"])
+
+    # Stickiness under contention: the already-shown snippet sorts LAST, so
+    # without stickiness it would be evicted when 6 compete for 5 slots. It must
+    # survive; the earlier-sorting-but-unshown candidate is dropped instead.
+    six = _entry_with_snippets("z-task", [_snip("//z:t%d" % i, "test", "boom %d" % i) for i in range(6)])
+    prior_last = [snippet_key("//z:t5", "boom 5")]  # sorts last by label
+    rows_sticky, _, _ = select_snippets([six], prior_last)
+    labels_sticky = [r["label"] for r in rows_sticky]
+    _eq("select: sticky last-sorting survives contention", "//z:t5" in labels_sticky, True)
+    _eq("select: sticky leads the row order", labels_sticky[0], "//z:t5")
+    _eq("select: an unshown candidate is the one dropped", len(rows_sticky), 5)
+    _eq("select: earlier-sorting unshown evicted, not the sticky", "//z:t4" in labels_sticky, False)
+
+    # Multi-task overflow attribution: two distinct dropped failures, each held by
+    # a different task; `tasks` lists both (sorted), `total` counts distinct items.
+    crowd = [_snip("//c:t%d" % i, "test", "boom %d" % i) for i in range(5)]
+    t1 = _entry_with_snippets("task-x", crowd + [_snip("//x:extra", "test", "x boom")])
+    t2 = _entry_with_snippets("task-y", crowd + [_snip("//y:extra", "test", "y boom")])
+    _, _, overflow_multi = select_snippets([t1, t2], [])
+    _eq("select: multi-task overflow total (2 distinct dropped)", overflow_multi["total"], 2)
+    _eq("select: multi-task overflow lists holding tasks", overflow_multi["tasks"], ["task-x", "task-y"])
+
+    # Sticky entries gone (failure no longer present) drop out cleanly.
+    _, shown4, _ = select_snippets([e_a], [snippet_key("//gone:t", "x")])
+    _eq("select: stale shown key dropped when failure absent", snippet_key("//gone:t", "x") in shown4, False)
+
+    # Malformed / empty snippets are ignored.
+    junk = _entry_with_snippets("j", [{"label": "", "snippet": "x"}, {"label": "//j:t", "snippet": ""}])
+    rows5, _, _ = select_snippets([junk], [])
+    _eq("select: malformed/empty snippets skipped", len(rows5), 0)
+
+    # End-to-end: rows render grouped under "Build Failures" / "Test Failures",
+    # no per-row <details>; header reads "❌ <kind> `<label>` <verb>:" (rule kind,
+    # no inline tasks), with the contributing task(s) in a <sub> line BELOW the
+    # snippet and the test duration folded into the verb.
+    failed_entry = _entry("test", "test-task", "test-gha", "bazel_results", "failed", make_test_failed(), 90000)
+    prepared = prepare_for_render([failed_entry])
+    snip_entry = _entry_with_snippets("test-task", [
+        _snip("//pkg:broken", "build", "no member named 'foo'", kind = "genrule"),
+        _snip("//pkg:fail_test", "test", "FAILED: expected 1 got 2", kind = "sh_test", duration_ms = 149),
+        _snip("//pkg:slow_test", "timeout", "timed out after 60s", kind = "sh_test", duration_ms = 60000),
+    ])
+    sel_rows, _, _ = select_snippets([snip_entry], [])
+    body = render_body(
+        ctx,
+        MARKER_FMT % 1,
+        prepared,
+        "",
+        DEFAULT_BODY_TEMPLATE,
+        DEFAULT_STATUS_BADGES,
+        bucket_entries(prepared),
+        snippet_rows = sel_rows,
+    )
+    _eq("select: render emits Build Failures group", "## 💥 Build Failures" in body, True)
+    _eq("select: render emits Test Failures group", "## ❌ Test Failures" in body, True)
+    _eq(
+        "select: build header is kind + label (no inline tasks)",
+        "❌ genrule `//pkg:broken` failed to build:" in body,
+        True,
+    )
+    _eq(
+        "select: test header folds in duration",
+        "❌ sh_test `//pkg:fail_test` failed in 149ms:" in body,
+        True,
+    )
+    _eq(
+        "select: timeout header uses 'timed out after <dur>'",
+        "❌ sh_test `//pkg:slow_test` timed out after 1m:" in body,
+        True,
+    )
+    _eq(
+        "select: contributing task renders 'in task' below the snippet",
+        "<sub>in task test-task</sub>" in body,
+        True,
+    )
+    _eq("select: render includes snippet text", "FAILED: expected 1 got 2" in body, True)
+    _eq("select: no per-row <details>", "<details open><summary>" not in body, True)
+
+    # Overflow note lists the task holding the hidden failure (1 distinct dropped).
+    over_snips = [_snip("//pkg:t%d" % i, "test", "boom %d" % i) for i in range(6)]
+    over_entry = _entry_with_snippets("test-task", over_snips)
+    over_rows, _, over_of = select_snippets([over_entry], [])
+    over_body = render_body(
+        ctx,
+        MARKER_FMT % 1,
+        prepared,
+        "",
+        DEFAULT_BODY_TEMPLATE,
+        DEFAULT_STATUS_BADGES,
+        bucket_entries(prepared),
+        snippet_rows = over_rows,
+        snippet_overflow = over_of,
+    )
+    _eq(
+        "select: overflow note lists holding task with 'across'",
+        "_+ 1 more failure — not shown (across `test-task`)._" in over_body,
+        True,
+    )
+
+    # Fence injection: a snippet containing a ``` run must not break out of the
+    # code block — the fence widens past the longest run so it stays enclosed.
+    evil = _entry_with_snippets("evil-task", [
+        _snip("//evil:t", "test", "before\n```\n# fake heading\n```\nafter", False),
+    ])
+    evil_rows, _, _ = select_snippets([evil], [])
+    _eq("select: fence widened past inner backticks", evil_rows[0]["fence"], "````")
+    evil_body = render_body(
+        ctx,
+        MARKER_FMT % 1,
+        prepared,
+        "",
+        DEFAULT_BODY_TEMPLATE,
+        DEFAULT_STATUS_BADGES,
+        bucket_entries(prepared),
+        snippet_rows = evil_rows,
+    )
+    _eq(
+        "select: injected fence does not escape (heading stays literal)",
+        "````text\nbefore\n```\n# fake heading\n```\nafter\n````" in evil_body,
+        True,
+    )
+
+    # Truncation markers: a head-and-tail-cut snippet renders a `…` line above
+    # and below the body.
+    trunc = _entry_with_snippets("t-task", [
+        _snip("//pkg:t", "test", "middle output", trunc_head = True, trunc_tail = True),
+    ])
+    trunc_rows, _, _ = select_snippets([trunc], [])
+    trunc_body = render_body(
+        ctx,
+        MARKER_FMT % 1,
+        prepared,
+        "",
+        DEFAULT_BODY_TEMPLATE,
+        DEFAULT_STATUS_BADGES,
+        bucket_entries(prepared),
+        snippet_rows = trunc_rows,
+    )
+    _eq(
+        "select: head+tail truncation renders … above and below",
+        "```text\n…\nmiddle output\n…\n```" in trunc_body,
+        True,
+    )
+
+def _check_select_sticky():
+    """_select_sticky: the generic sticky + deterministic + capped core shared
+    by snippets and repro/fix commands."""
+    key_of = lambda r: r["k"]
+
+    # Deterministic fill (candidates presorted) up to the cap; rest dropped.
+    cands = [{"k": "a"}, {"k": "b"}, {"k": "c"}, {"k": "d"}]
+    sel, shown, dropped = select_sticky(cands, [], 2, key_of)
+    _eq("sticky: fills to cap in candidate order", [r["k"] for r in sel], ["a", "b"])
+    _eq("sticky: shown keys mirror selection", shown, ["a", "b"])
+    _eq("sticky: rest dropped", [r["k"] for r in dropped], ["c", "d"])
+
+    # Stickiness: a prior key that now sorts LAST still shows and isn't evicted.
+    sel2, shown2, dropped2 = select_sticky(cands, ["d"], 2, key_of)
+    _eq("sticky: prior key shows first", [r["k"] for r in sel2], ["d", "a"])
+    _eq("sticky: non-sticky overflow dropped", [r["k"] for r in dropped2], ["b", "c"])
+
+    # A stale prior key (no longer a candidate) is skipped, not counted.
+    sel3, shown3, _ = select_sticky(cands, ["gone", "b"], 2, key_of)
+    _eq("sticky: stale prior key skipped", [r["k"] for r in sel3], ["b", "a"])
+
+def _check_by_task_overflow():
+    """_by_task_overflow: total counts DISTINCT dropped items; `tasks` is the set
+    of tasks holding hidden items (no per-task counts — they'd double-count a
+    deduped item shared by N tasks). Shared by snippets and repro/fix commands."""
+    dropped = [
+        {"command": "x", "task_keys": ["task-a", "task-b"]},
+        {"command": "y", "task_keys": ["task-b"]},
+    ]
+    of = by_task_overflow(dropped)
+    _eq("by_task_overflow: total counts distinct dropped items", of["total"], 2)
+
+    # task-a + task-b hold hidden items; listed once each, sorted.
+    _eq("by_task_overflow: tasks deduped + sorted", of["tasks"], ["task-a", "task-b"])
+    _eq("by_task_overflow: empty → zero", by_task_overflow([]), {"total": 0, "tasks": []})
+
+def _check_format_overflow_note():
+    """_format_overflow_note: singular/plural + 'across' task list, "" when empty."""
+    _eq("overflow note: empty → ''", format_overflow_note({"total": 0, "tasks": []}, "x", "xs"), "")
+    _eq("overflow note: None → ''", format_overflow_note(None, "x", "xs"), "")
+    _eq(
+        "overflow note: singular noun",
+        format_overflow_note({"total": 1, "tasks": ["t"]}, "failure", "failures"),
+        "_+ 1 more failure — not shown (across `t`)._",
+    )
+    _eq(
+        "overflow note: plural + multi-task 'across'",
+        format_overflow_note({"total": 5, "tasks": ["a", "b"]}, "failure", "failures"),
+        "_+ 5 more failures — not shown (across `a`, `b`)._",
+    )
 
 def _check_parse_state_absent():
     """parse_state returns None when the body has no state block —
@@ -1312,6 +1581,10 @@ def _test_impl(ctx):
     _check_merge_state_entries_sorted()
     _check_render_body_emits_state_block(ctx)
     _check_render_body_no_state_block_when_state_none(ctx)
+    _check_select_snippets(ctx)
+    _check_select_sticky()
+    _check_by_task_overflow()
+    _check_format_overflow_note()
 
     scenarios = [
         (

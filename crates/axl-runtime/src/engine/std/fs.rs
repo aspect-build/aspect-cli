@@ -571,6 +571,49 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         Ok(heap.alloc_str(s.as_str()))
     }
 
+    /// Reads at most `max_bytes` bytes from the start of a file into a string,
+    /// or returns `""` on any I/O error (missing file, permission denied,
+    /// transient failure). Like `try_read_to_string`, the silent fall-through
+    /// lets callers degrade rather than fail the task.
+    ///
+    /// Only the capped prefix is read into memory — never the whole file — so a
+    /// multi-MB log can be summarized without spiking the heap. Non-UTF-8 bytes
+    /// are replaced (lossy), and the prefix may split a multi-byte sequence at
+    /// the cap; that final partial char is dropped rather than emitted as `\u{FFFD}`.
+    fn try_read_to_string_capped<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        #[starlark(require = pos)] path: values::StringValue,
+        #[starlark(require = pos)] max_bytes: i32,
+        heap: Heap<'v>,
+    ) -> anyhow::Result<values::StringValue<'v>> {
+        use std::io::Read;
+        if max_bytes <= 0 {
+            return Ok(heap.alloc_str(""));
+        }
+        let cap = max_bytes as u64;
+        let s = match fs::File::open(path.as_str()) {
+            Ok(f) => {
+                let mut buf = Vec::new();
+                if f.take(cap).read_to_end(&mut buf).is_ok() {
+                    match String::from_utf8(buf) {
+                        Ok(valid) => valid,
+                        // Lossy decode, then drop a trailing replacement char that
+                        // a cap-split multi-byte sequence would have produced.
+                        Err(e) => {
+                            let valid_up_to = e.utf8_error().valid_up_to();
+                            let bytes = e.into_bytes();
+                            String::from_utf8_lossy(&bytes[..valid_up_to]).into_owned()
+                        }
+                    }
+                } else {
+                    String::new()
+                }
+            }
+            Err(_) => String::new(),
+        };
+        Ok(heap.alloc_str(s.as_str()))
+    }
+
     /// Opens a file for reading and returns it as a readable stream.
     ///
     /// The returned stream can be passed directly as the `data` argument to

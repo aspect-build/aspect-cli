@@ -1,4 +1,4 @@
-"""GitHub Status Comments feature — aggregates per-task status from sibling CI jobs into one PR comment.
+"""GitHub Status Comments feature \342\200\224 aggregates per-task status from sibling CI jobs into one PR comment.
 
 Every job is both a producer (uploads its task identity + data subset as an
 artifact) and a writer (polls own-run + sibling-workflow artifacts and
@@ -11,24 +11,48 @@ across any workflow on the same PR).
 
 Comment shape is precomputed in AXL; the Jinja2 template is a pure
 renderer. `_prepare_for_render` decorates each entry with:
-  - `_severity`     "error"|"warning"|"info"|"success" — badge + row sort.
-  - `_badge_key`    "failed"|"warning"|"running"|"passed"|"aborted" — keys
+  - `_severity`     "error"|"warning"|"info"|"success" \342\200\224 badge + row sort.
+  - `_badge_key`    "failed"|"warning"|"running"|"passed"|"aborted" \342\200\224 keys
                     into `status_badges[...]`.
   - `_links_text`   Multi-link Markdown for the Links cell (omits unset URLs).
   - `_result_text`  Kind-specific Result cell text + elapsed.
 
+Inline failure snippets: each job extracts its own (it owns the local
+test.log / action-stderr paths; sibling writers can't read them) on its
+terminal update and ships them in its status artifact under `failure_snippets`.
+The writer picks which to show across all tasks via `_select_snippets`, which
+first DEDUPES by `(label, snippet)` \342\200\224 the same target failing in several jobs
+collapses to one snippet attributed to all of them (`task_keys`) rather than
+rendering N identical copies \342\200\224 then sticky-selects (an already-shown snippet is
+never evicted by a later-arriving one), deterministic fill, hard-capped at
+`_MAX_COMMENT_SNIPPETS`. The chosen keys persist in the state block so selection
+can't flip-flop as sibling jobs report in. Rows render grouped under "\360\237\222\245 Build
+Failures" / "\342\235\214 Test Failures" (by bucket), each with a Repro/Fix-style header
+(`\342\235\214 <kind> (<tasks>) \302\267 \\`<label>\\` <verb>:`) and a fenced block; a `\342\200\246` line
+marks a head/tail-truncated log. `_split_snippet_rows` does the grouping +
+decoration.
+
+The repro / fix command sections use the same selection (`_select_sticky` over
+deduped, deterministically-sorted rows, capped at `_MAX_COMMENT_REPROS` /
+`_MAX_COMMENT_FIXES`, persisted as `shown_repros` / `shown_fixes`). Each capped
+section ends in an "N more \342\200\224 not shown (M in `task`, \342\200\246)" note that attributes
+the hidden items per contributing task.
+
 Body-template variables:
-    marker         — HTML comment identifying this comment across PATCHes.
-    started_at     — Earliest sibling-task start time, UTC.
-    status_badges  — {badge_key -> label}.
-    rollup         — {error, warning, running, passed, aborted} counts.
-    entries        — per-task entry dicts, alphabetical by (job, name, key).
+    marker         \342\200\224 HTML comment identifying this comment across PATCHes.
+    started_at     \342\200\224 Earliest sibling-task start time, UTC.
+    status_badges  \342\200\224 {badge_key -> label}.
+    rollup         \342\200\224 {error, warning, running, passed, aborted} counts.
+    entries        \342\200\224 per-task entry dicts, alphabetical by (job, name, key).
+    build_snippets / test_snippets / repro_rows / fix_rows \342\200\224 selected items per section.
+    *_overflow_note \342\200\224 "N more not shown" line for each capped section.
 """
 
 load("@std//base64.axl", "base64")
 load("@std//time.axl", "monotonic", "time")
 load(
     "../lib/bazel_results.axl",
+    "extract_failure_snippets",
     "format_duration_ms",
     "format_run_date",
     "init_data",
@@ -36,11 +60,13 @@ load(
     "render_bes_url",
     "resolve_aspect_url",
 )
+load("../lib/check_dispatch.axl", "SURFACE_PR_COMMENT", "snippet_budget_for")
 load("../lib/checkrun.axl", "checkrun")
 load("../lib/ci.axl", "resolve_build_url")
 load("../lib/environment.axl", "feature_logger", "workflows_results_url")
 load("../lib/github.axl", "github")
 load("../lib/lifecycle.axl", "TaskLifecycleTrait")
+load("../lib/log_snippet.axl", "code_fence_for")
 load(
     "../lib/rate_limit.axl",
     "BUCKET_APP",
@@ -77,8 +103,9 @@ _MARKER_FMT = "<!-- aspect-ci-status:pr-%d -->"
 # The PR comment is the canonical cross-workflow source of truth — each
 # workflow's artifact swarm sees only its own run_id's artifacts, so the
 # comment carries `workflow_runs` slots, per-task `entries` snapshot,
-# `head_sha`, and `last_upsert_epoch_s` as base64 JSON in an HTML comment.
-# base64 keeps the literal `-->` terminator out of the payload.
+# `head_sha`, `last_upsert_epoch_s`, and the sticky selection sets
+# `shown_snippets` / `shown_repros` / `shown_fixes` as base64 JSON in an HTML
+# comment. base64 keeps the literal `-->` terminator out of the payload.
 _STATE_BLOCK_OPEN = "<!-- aspect-ci-status-state-v1:"
 _STATE_BLOCK_CLOSE = " -->"
 
@@ -137,6 +164,27 @@ _No tasks have reported yet._
 {{ section("failing",     "❌", sections.failing) -}}
 {{ section("flagged",     "⚠️", sections.flagged) -}}
 {{ section("successful",  "✅", sections.successful) -}}
+{% macro snippet_block(s) %}
+❌ {{ s.kind or (s.bucket if s.bucket != "timeout" else "test") }} `{{ s.label }}` {{ s.verb }}:
+{{ s.fence }}text
+{% if s.trunc_head %}…
+{% endif %}{{ s.snippet }}
+{% if s.trunc_tail %}…
+{% endif %}{{ s.fence }}
+{% if s.task_label %}<sub>in {{ s.task_noun }} {{ s.task_label }}</sub>
+{% endif %}
+{% endmacro -%}
+{% if build_snippets %}
+## 💥 Build Failures
+{% for s in build_snippets %}{{ snippet_block(s) }}{% endfor %}
+{% endif -%}
+{% if test_snippets %}
+## ❌ Test Failures
+{% for s in test_snippets %}{{ snippet_block(s) }}{% endfor %}
+{% endif -%}
+{% if snippet_overflow_note %}
+{{ snippet_overflow_note }}
+{% endif %}
 {% if tip_rows %}
 ## 💡 Tips
 {% for tip in tip_rows %}
@@ -158,6 +206,9 @@ _No tasks have reported yet._
 {% endif %}{{ r.command }}
 ```
 {% endfor %}
+{% if fix_overflow_note %}
+{{ fix_overflow_note }}
+{% endif %}
 """ + ASPECT_CLI_INSTALL_HINT_MARKDOWN + """
 {% endif -%}
 {% if repro_rows %}
@@ -169,6 +220,9 @@ _No tasks have reported yet._
 {% endif %}{{ r.command }}
 ```
 {% endfor %}
+{% if repro_overflow_note %}
+{{ repro_overflow_note }}
+{% endif %}
 """ + ASPECT_CLI_INSTALL_HINT_MARKDOWN + """
 {% endif -%}
 {% endif %}
@@ -506,11 +560,18 @@ def _results_subset(
         current_phase_elapsed_ms,
         progress_styles,
         failed_in_phase,
-        start_time_ms = 0):
+        start_time_ms = 0,
+        failure_snippets = None):
     """Slice `init_data()` + live state to the fields the renderer needs.
     Kind-agnostic (counts ship via `progress.body`; repro/fix pass through,
     deduped at render). `data` is frozen on the final update so fields are
-    copied out; live-state fields come from `_state`."""
+    copied out; live-state fields come from `_state`.
+
+    `failure_snippets` is the producer's own inline failure snippets (plain
+    dicts; only this job can read its log/stderr paths) — extracted on the
+    terminal update by the caller and shipped in the artifact, since sibling
+    writers can't re-derive them. The writer dedupes them across tasks and
+    sticky-selects against the global budget at render."""
     bz = data.get("bazel", {})
     return {
         "elapsed_ms": elapsed_ms,
@@ -526,9 +587,209 @@ def _results_subset(
         # Producer-authored; deduped across siblings by `_collect_repro_fix_rows`.
         "repro_commands": list(data.get("repro_commands", []) or []),
         "fix_commands": list(data.get("fix_commands", []) or []),
+        # Producer-authored inline failure snippets [{label,kind,bucket,snippet,
+        # truncated}]; deduped + sticky-selected against the global budget at render.
+        "failure_snippets": list(failure_snippets or []),
         # abort_reason: human-readable rider (timeout, OOM, ctrl-c, …).
         "abort_reason": bz.get("abort_reason", ""),
     }
+
+# Global cap on inline failure snippets shown in the whole PR comment, across
+# all tasks. The per-task producer cap (SURFACE_PR_COMMENT) bounds what each job
+# ships; this bounds what the aggregate renders. 5 lets one all-failing task
+# fill the comment while still leaving room when failures spread across tasks.
+_MAX_COMMENT_SNIPPETS = 5
+
+# Global caps on the repro / fix command sections (post-dedup, across all
+# tasks). Like snippets, these are sticky-selected so the shown set doesn't
+# flip-flop as sibling jobs report; the rest collapse into an "N more" note.
+_MAX_COMMENT_REPROS = 5
+_MAX_COMMENT_FIXES = 5
+
+# Snippet buckets that may carry an inline snippet, highest precedence first.
+_SNIPPET_BUCKET_RANK = {"build": 0, "test": 1, "timeout": 2}
+
+def _snippet_key(label, snippet):
+    """Stable dedup identity for a failure snippet across tasks + PATCHes: same
+    target AND same output collapse to one row (see `_select_snippets`)."""
+    return label + "\x00" + snippet
+
+def _select_sticky(candidates, shown_keys, max_items, key_of):
+    """Generic sticky + deterministic + hard-capped selection over a presorted
+    `candidates` list. Shared by snippets and repro/fix commands.
+
+    `candidates` must already be in the deterministic fill order the caller
+    wants. `key_of(item)` returns an item's stable identity string (persisted in
+    the state block). `shown_keys` is the prior persisted order.
+
+      1. Re-show every still-present prior key, in persisted order (append-only —
+         never evicted by a newcomer that sorts earlier).
+      2. Fill remaining budget from candidates not yet shown, in their order.
+      3. Hard-cap at `max_items`.
+
+    Returns `(selected, new_shown_keys, dropped)` — `dropped` is the candidates
+    that didn't make the cut (in candidate order), for caller-specific overflow."""
+    by_key = {}
+    for c in candidates:
+        k = key_of(c)
+        if k not in by_key:
+            by_key[k] = c
+
+    selected = []
+    new_shown = []
+    taken = {}
+
+    for k in shown_keys:
+        if len(selected) >= max_items:
+            break
+        if k in by_key and k not in taken:
+            selected.append(by_key[k])
+            new_shown.append(k)
+            taken[k] = True
+
+    for c in candidates:
+        if len(selected) >= max_items:
+            break
+        k = key_of(c)
+        if k not in taken:
+            selected.append(c)
+            new_shown.append(k)
+            taken[k] = True
+
+    dropped = [c for c in candidates if key_of(c) not in taken]
+    return (selected, new_shown, dropped)
+
+def _select_snippets(entries, shown_keys):
+    """Pick which inline failure snippets the comment shows, stably.
+
+    Identical failures are DEDUPED across tasks first: the same target failing
+    in several jobs (e.g. a build target built by build-gha, build-gha-debug and
+    the test task) collapses to ONE snippet attributed to all of them
+    (`task_keys`), rather than rendering the same output N times and crowding out
+    distinct failures. The dedup identity is `(label, snippet)` — same target AND
+    same output.
+
+    Anti-flip-flop contract (see PR-comment design): selection is append-only
+    within a run and hard-capped at `_MAX_COMMENT_SNIPPETS`.
+
+      1. Re-show every already-shown snippet still present, in persisted order. A
+         snippet, once shown, is NEVER evicted by a later-arriving one.
+      2. Fill remaining budget from not-yet-shown candidates in a DETERMINISTIC
+         order — (bucket_rank, label) — so the same inputs pick the same rows.
+      3. Never exceed the budget.
+
+    `entries` are merged per-task dicts (each may carry `failure_snippets`).
+    `shown_keys` is the persisted list of dedup keys shown so
+    far. Returns `(snippet_rows, new_shown_keys, overflow)` where snippet_rows are
+    render dicts `{label, kind, bucket, snippet, truncated, fence, task_keys}` and
+    `overflow` is `{total, by_task}` over DISTINCT (deduped) failures not shown —
+    `total` is the global count, `by_task` attributes the not-shown to the tasks
+    that hold them (a hidden failure shared by N tasks counts once per task)."""
+
+    # Dedup available snippets by (label, snippet) across tasks, unioning the
+    # contributing task_keys (first-seen order).
+    available = {}
+    order = []
+    for e in entries:
+        task_key = e.get("key", "") or e.get("name", "")
+        for s in e.get("failure_snippets", []) or []:
+            if type(s) != "dict":
+                continue
+            label = s.get("label", "")
+            snippet_text = s.get("snippet", "")
+            if not label or not snippet_text:
+                continue
+            key = _snippet_key(label, snippet_text)
+            slot = available.get(key)
+            if slot == None:
+                available[key] = {
+                    "label": label,
+                    "kind": s.get("kind", ""),
+                    "bucket": s.get("bucket", "test"),
+                    "duration_ms": s.get("duration_ms", 0) or 0,
+                    "snippet": snippet_text,
+                    "truncated": bool(s.get("truncated", False)),
+                    "trunc_head": bool(s.get("trunc_head", False)),
+                    "trunc_tail": bool(s.get("trunc_tail", False)),
+                    # Fence sized past any backtick run so log content can't close
+                    # the code block early (CommonMark fence-injection guard).
+                    "fence": code_fence_for(snippet_text),
+                    "task_keys": [task_key] if task_key else [],
+                    "_key": key,
+                }
+                order.append(key)
+            elif task_key and task_key not in slot["task_keys"]:
+                slot["task_keys"].append(task_key)
+
+    # Deterministic candidate order — (bucket_rank, label) — fed to the shared
+    # sticky+capped core. Dedup key (label+content) is the sticky identity.
+    candidates = sorted(
+        [available[k] for k in order],
+        key = lambda v: (_SNIPPET_BUCKET_RANK.get(v["bucket"], 9), v["label"]),
+    )
+    rows, new_shown, dropped = _select_sticky(
+        candidates,
+        shown_keys,
+        _MAX_COMMENT_SNIPPETS,
+        lambda v: v["_key"],
+    )
+
+    # Overflow over DISTINCT failures not shown, attributed to the tasks holding
+    # them (a dropped failure shared by N tasks counts once per task).
+    overflow = _by_task_overflow(dropped)
+    return (rows, new_shown, overflow)
+
+def _by_task_overflow(dropped):
+    """Build `{total, tasks}` for dropped rows that each carry `task_keys`.
+    `total` = number of distinct dropped (deduped) items; `tasks` = the set of
+    tasks that hold at least one hidden item, sorted. Per-task COUNTS would
+    double-count a deduped item shared by N tasks (sum > total), so we list the
+    tasks ("across a, b, …") without counts — see `_format_overflow_note`."""
+    seen = {}
+    tasks = []
+    total = 0
+    for r in dropped:
+        total += 1
+        for tk in r.get("task_keys", []) or []:
+            if tk and tk not in seen:
+                seen[tk] = True
+                tasks.append(tk)
+    return {"total": total, "tasks": sorted(tasks)}
+
+def _split_snippet_rows(rows):
+    """Partition selected snippet rows into (build, test) groups, decorating each
+    with the render fields the template needs:
+
+      `task_label` — `task_keys` joined; rendered "in <task_noun> <task_label>"
+                     small below the snippet.
+      `task_noun`  — "task" / "tasks" for the small-text line.
+      `verb`       — the header tail: "failed to build" (build), "failed" /
+                     "failed in <dur>" (test), "timed out" / "timed out after
+                     <dur>" (timeout). Duration is omitted when 0 (build actions
+                     have no reliable duration).
+
+    The "build" bucket is action-stderr failures; "test"/"timeout" are test
+    failures."""
+    build_rows = []
+    test_rows = []
+    for r in rows:
+        row = dict(r)
+        tks = r.get("task_keys", []) or []
+        row["task_label"] = ", ".join(tks)
+        row["task_noun"] = "task" if len(tks) == 1 else "tasks"
+        dur = r.get("duration_ms", 0) or 0
+        dur_str = (" in " + format_duration_ms(dur)) if dur > 0 else ""
+        bucket = r.get("bucket")
+        if bucket == "build":
+            row["verb"] = "failed to build"
+            build_rows.append(row)
+        elif bucket == "timeout":
+            row["verb"] = "timed out" + ((" after " + format_duration_ms(dur)) if dur > 0 else "")
+            test_rows.append(row)
+        else:
+            row["verb"] = "failed" + dur_str
+            test_rows.append(row)
+    return (build_rows, test_rows)
 
 # Per-bucket severity rank (highest first). Drives the per-row emoji and
 # in-section ordering.
@@ -581,20 +842,34 @@ def _collect_repro_fix_rows(sections):
             r["_rank"] = max(ranks)
             r["severity_emoji"] = _RANK_EMOJI.get(r["_rank"], "")
 
-        sorted_rows = sorted(rows, key = lambda r: -r["_rank"])
+            # Stable identity for sticky selection — the dedup triple, persisted
+            # in the state block (independent of which tasks contributed).
+            r["_key"] = _command_key(r["kind"], r["command"], r["description"])
 
-        # Collapse consecutive repeated (kind, task_keys) headings — a task
-        # may contribute multiple commands (e.g. `aspect …` + `bazel …`).
-        prev_heading_key = None
-        for r in sorted_rows:
-            heading_key = (r["kind"], tuple(r["task_keys"]))
-            r["show_heading"] = heading_key != prev_heading_key
-            prev_heading_key = heading_key
+        # Deterministic order: severity desc, then kind/command/description, so
+        # the same inputs always pick the same rows regardless of arrival order
+        # (the old `-_rank`-only sort left ties to churn across PATCHes).
+        sorted_rows = sorted(rows, key = lambda r: (-r["_rank"], r["kind"], r["command"], r["description"]))
         return sorted_rows
 
     repro_rows = _gather(("failed", "failing", "flagged"), "repro_commands")
     fix_rows = _gather(("running", "failed", "failing", "flagged", "successful"), "fix_commands")
     return (repro_rows, fix_rows)
+
+def _command_key(kind, command, description):
+    """Stable identity for a deduped repro/fix command across PATCHes."""
+    return (kind or "") + "\x00" + (command or "") + "\x00" + (description or "")
+
+def _finalize_command_rows(rows):
+    """Set `show_heading` on the FINAL (post-selection) row order: collapse
+    consecutive repeated `(kind, task_keys)` headings — a task may contribute
+    multiple commands (e.g. `aspect …` + `bazel …`)."""
+    prev_heading_key = None
+    for r in rows:
+        heading_key = (r["kind"], tuple(r["task_keys"]))
+        r["show_heading"] = heading_key != prev_heading_key
+        prev_heading_key = heading_key
+    return rows
 
 # Cap on suggestion+info tips combined (important/warning always render
 # in full). See `_collect_tip_rows`.
@@ -697,7 +972,22 @@ def _collect_tip_rows(ctx, entries):
         out.append(decorated)
     return out
 
-def _render_body(ctx, marker, entries, started_at, body_template, status_badges, sections, last_updated_at = "", api_usage = "", state = None):
+def _format_overflow_note(overflow, noun_singular, noun_plural):
+    """Human-readable "N more <noun> — not shown (across `task-a`, …)" line, or
+    "" when nothing overflowed. `overflow` is `{total, tasks}` from a selector.
+    Lists the tasks holding hidden items WITHOUT per-task counts — a deduped
+    item shared by N tasks would make per-task counts sum past the total."""
+    if not overflow:
+        return ""
+    total = overflow.get("total", 0)
+    if total <= 0:
+        return ""
+    noun = noun_singular if total == 1 else noun_plural
+    tasks = [tk for tk in (overflow.get("tasks", []) or []) if tk]
+    suffix = " (across %s)" % ", ".join(["`%s`" % tk for tk in tasks]) if tasks else ""
+    return "_+ %d more %s — not shown%s._" % (total, noun, suffix)
+
+def _render_body(ctx, marker, entries, started_at, body_template, status_badges, sections, last_updated_at = "", api_usage = "", state = None, snippet_rows = None, snippet_overflow = None, repro_rows = None, fix_rows = None, repro_overflow = None, fix_overflow = None):
     """Render the comment body via the (possibly overridden) Jinja2 template.
 
     `entries` must be `_prepare_for_render`-d so the template is a pure
@@ -709,14 +999,20 @@ def _render_body(ctx, marker, entries, started_at, body_template, status_badges,
     renders twice — once with both `""` (deterministic diff baseline for
     the PATCH short-circuit) and once live for the upsert.
 
-    `repro_rows` / `fix_rows` / `tip_rows` are the deduped + attributed
-    outputs of `_collect_repro_fix_rows` / `_collect_tip_rows`.
+    `repro_rows` / `fix_rows` are the sticky-selected + finalized command rows
+    (with `*_overflow` notes); when `None` they're computed unselected from
+    `sections` (snapshot tests / non-merge callers that don't carry state).
+    `tip_rows` is `_collect_tip_rows`'s output.
 
     `state` — when set, appends the cross-workflow state block (the
     canonical source of truth across PR workflows). `None` omits it
     (snapshot tests / non-merge callers)."""
-    repro_rows, fix_rows = _collect_repro_fix_rows(sections)
+    if repro_rows == None and fix_rows == None:
+        repro_rows, fix_rows = _collect_repro_fix_rows(sections)
+        _finalize_command_rows(repro_rows)
+        _finalize_command_rows(fix_rows)
     tip_rows = _collect_tip_rows(ctx, entries)
+    build_snippets, test_snippets = _split_snippet_rows(snippet_rows or [])
     body = ctx.template.jinja2(body_template, data = {
         "marker": marker,
         "entries": entries,
@@ -725,7 +1021,14 @@ def _render_body(ctx, marker, entries, started_at, body_template, status_badges,
         "sections": sections,
         "repro_rows": repro_rows,
         "fix_rows": fix_rows,
+        "repro_overflow_note": _format_overflow_note(repro_overflow, "reproduce command", "reproduce commands"),
+        "fix_overflow_note": _format_overflow_note(fix_overflow, "fix command", "fix commands"),
         "tip_rows": tip_rows,
+        # Snippets grouped by bucket so the template renders a "Build Failures" /
+        # "Test Failures" section; each row decorated with `task_label` + `verb`.
+        "build_snippets": build_snippets,
+        "test_snippets": test_snippets,
+        "snippet_overflow_note": _format_overflow_note(snippet_overflow, "failure", "failures"),
         "api_usage": api_usage,
         "last_updated_at": last_updated_at,
         "cli_version": ctx.std.env.aspect_cli_version(),
@@ -741,7 +1044,8 @@ def _serialize_state(state):
     base64-wraps the JSON so the literal `-->` terminator can't appear
     inside. Round-tripped via `_parse_state`. `state`: `head_sha`,
     `last_upsert_epoch_s`, `workflow_runs` (`[{run_id, workflow_name}]`),
-    `entries` (snapshots; TTL/race fallback)."""
+    `entries` (snapshots; TTL/race fallback), and the sticky selection sets
+    `shown_snippets` / `shown_repros` / `shown_fixes`."""
     encoded = base64.encode(json.encode(state))
     return _STATE_BLOCK_OPEN + encoded + _STATE_BLOCK_CLOSE
 
@@ -760,11 +1064,11 @@ def _is_standard_base64(s):
 def _parse_state(body):
     """Extract the cross-workflow state block from a comment body.
 
-    Returns `{head_sha, last_upsert_epoch_s, workflow_runs, entries}`, or
-    `None` when absent/malformed (caller falls back to current-workflow-
-    only). Wrong-typed fields (e.g. after a manual edit) normalize to
-    defaults; list fields drop non-dict elements so downstream can assume
-    dict rows."""
+    Returns `{head_sha, last_upsert_epoch_s, workflow_runs, entries,
+    shown_snippets, shown_repros, shown_fixes}`, or `None` when absent/malformed
+    (caller falls back to current-workflow-only). Wrong-typed fields (e.g. after
+    a manual edit) normalize to defaults; list fields drop non-dict / non-string
+    elements so downstream can assume well-typed rows."""
     if not body:
         return None
     start = body.find(_STATE_BLOCK_OPEN)
@@ -786,6 +1090,9 @@ def _parse_state(body):
     entries = decoded.get("entries")
     parsed_entries = [e for e in entries if type(e) == "dict"] if type(entries) == "list" else []
 
+    def _string_list(v):
+        return [k for k in v if type(k) == "string"] if type(v) == "list" else []
+
     # JSON round-trip flattens ReproFixCommand records to dicts; rehydrate
     # so `_collect_repro_fix_rows` can do `c.command`/`c.description`.
     # Only touch present keys so older-release entries round-trip unchanged.
@@ -799,6 +1106,10 @@ def _parse_state(body):
         "last_upsert_epoch_s": epoch if type(epoch) == "int" else 0,
         "workflow_runs": [r for r in workflow_runs if type(r) == "dict"] if type(workflow_runs) == "list" else [],
         "entries": parsed_entries,
+        # Sticky selection state (lists of opaque keys); drop non-strings.
+        "shown_snippets": _string_list(decoded.get("shown_snippets")),
+        "shown_repros": _string_list(decoded.get("shown_repros")),
+        "shown_fixes": _string_list(decoded.get("shown_fixes")),
     }
 
 def _live_runs(workflow_runs, my_run_id, my_workflow_name):
@@ -1292,6 +1603,44 @@ def _github_status_comments(ctx: FeatureContext):
         prepared = _prepare_for_render(_dedup_for_display(new_state["entries"]))
         sections = _bucket_entries(prepared)
 
+        # Sticky + deterministic selection for snippets and repro/fix commands,
+        # across siblings. Computed once so both renders agree; the chosen keys
+        # persist in the state block so a later sibling can't evict an
+        # already-shown item. Only reuse a prior sticky set on the SAME head_sha
+        # — a new commit starts fresh (matching the entry-refresh guard above),
+        # so a stale key from the previous commit can't consume a slot.
+        same_head = parsed and parsed.get("head_sha") == head_sha
+
+        def _prior(key):
+            if not same_head:
+                return []
+            return [k for k in (parsed.get(key) or []) if type(k) == "string"]
+
+        snippet_rows, shown_keys, snippet_overflow = _select_snippets(prepared, _prior("shown_snippets"))
+        new_state["shown_snippets"] = shown_keys
+
+        # Repro / fix commands: dedup + deterministic-sort, then sticky-select
+        # against the global cap; the rest collapse into an "N more" note.
+        all_repro_rows, all_fix_rows = _collect_repro_fix_rows(sections)
+        repro_rows, repro_shown, repro_dropped = _select_sticky(
+            all_repro_rows,
+            _prior("shown_repros"),
+            _MAX_COMMENT_REPROS,
+            lambda r: r["_key"],
+        )
+        fix_rows, fix_shown, fix_dropped = _select_sticky(
+            all_fix_rows,
+            _prior("shown_fixes"),
+            _MAX_COMMENT_FIXES,
+            lambda r: r["_key"],
+        )
+        _finalize_command_rows(repro_rows)
+        _finalize_command_rows(fix_rows)
+        repro_overflow = _by_task_overflow(repro_dropped)
+        fix_overflow = _by_task_overflow(fix_dropped)
+        new_state["shown_repros"] = repro_shown
+        new_state["shown_fixes"] = fix_shown
+
         # Earliest start across all siblings, pinned so it doesn't wobble.
         earliest_ms = _earliest_start_ms(prepared)
         started_at = format_run_date(ctx, earliest_ms)
@@ -1311,6 +1660,12 @@ def _github_status_comments(ctx: FeatureContext):
             status_badges,
             sections,
             state = stable_state,
+            snippet_rows = snippet_rows,
+            snippet_overflow = snippet_overflow,
+            repro_rows = repro_rows,
+            fix_rows = fix_rows,
+            repro_overflow = repro_overflow,
+            fix_overflow = fix_overflow,
         )
         if _state.get("_last_stable_body") == stable_body:
             return
@@ -1327,6 +1682,12 @@ def _github_status_comments(ctx: FeatureContext):
             last_updated_at = format_run_date(ctx, now_ms(ctx)),
             api_usage = usage_footer(ctx),
             state = final_state,
+            snippet_rows = snippet_rows,
+            snippet_overflow = snippet_overflow,
+            repro_rows = repro_rows,
+            fix_rows = fix_rows,
+            repro_overflow = repro_overflow,
+            fix_overflow = fix_overflow,
         )
         if not _upsert_comment(ctx, token, final_body):
             # Skip stamping — the swarm should retry, not honor a stale
@@ -1409,6 +1770,14 @@ def _github_status_comments(ctx: FeatureContext):
             # Generic BES link from `--bes_results_url` + invocation_id.
             bes_url = render_bes_url(data)
 
+            # Inline failure snippets: bazel_results only, and only on the
+            # terminal update (data frozen, log/stderr paths materialized).
+            # Each job ships its own; sibling writers can't read its files.
+            failure_snippets = None
+            if update.final and update.kind == "bazel_results":
+                _snip_opts, _max_per_task = snippet_budget_for(SURFACE_PR_COMMENT)
+                failure_snippets = extract_failure_snippets(ctx.std, data, _snip_opts, _max_per_task)
+
             cur = ctx.task.current_phase()
             _state["_results_subset"] = _results_subset(
                 data,
@@ -1421,6 +1790,7 @@ def _github_status_comments(ctx: FeatureContext):
                 _state.get("_progress_styles"),
                 _state.get("_failed_in_phase", ""),
                 start_time_ms = data.get("start_time_ms", 0) or 0,
+                failure_snippets = failure_snippets,
             )
 
         # Bypass throttle on `update.final` (all terminal verdicts) and the
@@ -1473,6 +1843,30 @@ def bucket_entries(entries):
     """Public test hook; see `_bucket_entries`."""
     return _bucket_entries(entries)
 
+def select_snippets(entries, shown_keys):
+    """Public test hook; see `_select_snippets`."""
+    return _select_snippets(entries, shown_keys)
+
+def snippet_key(label, snippet):
+    """Public test hook; see `_snippet_key`."""
+    return _snippet_key(label, snippet)
+
+def select_sticky(candidates, shown_keys, max_items, key_of):
+    """Public test hook; see `_select_sticky`."""
+    return _select_sticky(candidates, shown_keys, max_items, key_of)
+
+def collect_repro_fix_rows(sections):
+    """Public test hook; see `_collect_repro_fix_rows`."""
+    return _collect_repro_fix_rows(sections)
+
+def by_task_overflow(dropped):
+    """Public test hook; see `_by_task_overflow`."""
+    return _by_task_overflow(dropped)
+
+def format_overflow_note(overflow, noun_singular, noun_plural):
+    """Public test hook; see `_format_overflow_note`."""
+    return _format_overflow_note(overflow, noun_singular, noun_plural)
+
 def dedup_by_run_attempt(entries):
     """Public test hook; see `_dedup_by_run_attempt`."""
     return _dedup_by_run_attempt(entries)
@@ -1485,7 +1879,7 @@ def should_quiet_delete_log(last_upload_at, now):
     """Public test hook; see `_should_quiet_delete_log`."""
     return _should_quiet_delete_log(last_upload_at, now)
 
-def render_body(ctx, marker, entries, started_at, body_template, status_badges, sections, state = None):
+def render_body(ctx, marker, entries, started_at, body_template, status_badges, sections, state = None, snippet_rows = None, snippet_overflow = None):
     """Public test hook; see `_render_body`."""
     return _render_body(
         ctx,
@@ -1496,6 +1890,8 @@ def render_body(ctx, marker, entries, started_at, body_template, status_badges, 
         status_badges,
         sections,
         state = state,
+        snippet_rows = snippet_rows,
+        snippet_overflow = snippet_overflow,
     )
 
 def serialize_state(state):

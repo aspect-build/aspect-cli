@@ -405,6 +405,14 @@ def config(ctx: ConfigContext):
         "--build_metadata=ASPECT_WORKFLOWS_LINKS=[Docs](https://aspect.build/docs),[Website](https://aspect.build/)",
     ])
 
+    # On CI, run with `--config=ci` (see .bazelrc) — notably `--keep_going`, so a
+    # failed build action surfaces every failing target/test in one run instead
+    # of aborting the test phase before any test executes.
+    if bool(ctx.std.env.var("CI")):
+        ctx.traits[BazelTrait].extra_flags.extend([
+            "--config=ci",
+        ])
+
     # Configure user_task's attrs by path (group/name).
     t = ctx.tasks["user/nested/user-task"]
     t.args.message = "hello axl"
