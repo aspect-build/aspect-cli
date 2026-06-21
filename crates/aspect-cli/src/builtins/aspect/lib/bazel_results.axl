@@ -3918,8 +3918,9 @@ def extract_failure_snippets(std, data, snippet_options, max_per_task):
     matching the check-surface order.
 
     Returns a list of plain dicts (JSON-round-trippable through the artifact):
-    `[{label, kind, bucket, snippet, truncated}]` (bucket is
-    "build" | "test" | "timeout"), capped at `max_per_task`. Empty when off
+    `[{label, kind, bucket, snippet, truncated, trunc_head, trunc_tail,
+    duration_ms}]` (bucket is "build" | "test" | "timeout"; duration_ms is the
+    test wall time, 0 for build actions), capped at `max_per_task`. Empty when off
     (max_per_task <= 0 / no options). The writer dedupes identical failures
     across tasks and computes overflow from what it drops at render.
     """
@@ -3931,7 +3932,7 @@ def extract_failure_snippets(std, data, snippet_options, max_per_task):
     test_details = bz.get("test_details", {}) or {}
     out = []
 
-    def _take(label, kind, bucket, res):
+    def _take(label, kind, bucket, res, duration_ms = 0):
         if not has_snippet(res):
             return
         out.append({
@@ -3942,6 +3943,9 @@ def extract_failure_snippets(std, data, snippet_options, max_per_task):
             "truncated": res.truncated,
             "trunc_head": res.trunc_head,
             "trunc_tail": res.trunc_tail,
+            # Test wall time (ms); 0 for build actions (BES action timing is
+            # unreliable and not captured). Rendered as "failed in <dur>".
+            "duration_ms": duration_ms or 0,
         })
 
     # Build-action stderr first (precedence), then failed tests, then timeouts.
@@ -3966,7 +3970,13 @@ def extract_failure_snippets(std, data, snippet_options, max_per_task):
         res = extract_junit_failure(std, detail.get("xml_path", ""), snippet_options)
         if not has_snippet(res):
             res = extract_snippet(std, detail.get("log_path", ""), snippet_options)
-        _take(label, t.get("kind", "") or target_kinds.get(label, ""), bucket, res)
+        _take(
+            label,
+            t.get("kind", "") or target_kinds.get(label, ""),
+            bucket,
+            res,
+            duration_ms = t.get("duration_ms", 0) or detail.get("duration_ms", 0),
+        )
 
     return out
 

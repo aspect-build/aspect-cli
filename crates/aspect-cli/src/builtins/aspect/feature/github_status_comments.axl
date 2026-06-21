@@ -165,12 +165,14 @@ _No tasks have reported yet._
 {{ section("flagged",     "⚠️", sections.flagged) -}}
 {{ section("successful",  "✅", sections.successful) -}}
 {% macro snippet_block(s) %}
-❌ {{ s.kind or (s.bucket if s.bucket != "timeout" else "test") }}{% if s.task_label %} ({{ s.task_label }}){% endif %} · `{{ s.label }}` {{ s.verb }}:
+❌ {{ s.kind or (s.bucket if s.bucket != "timeout" else "test") }} `{{ s.label }}` {{ s.verb }}:
 {{ s.fence }}text
 {% if s.trunc_head %}…
 {% endif %}{{ s.snippet }}
 {% if s.trunc_tail %}…
 {% endif %}{{ s.fence }}
+{% if s.task_label %}<sub>{{ s.task_label }}</sub>
+{% endif %}
 {% endmacro -%}
 {% if build_snippets %}
 ## 💥 Build Failures
@@ -704,6 +706,7 @@ def _select_snippets(entries, shown_keys):
                     "label": label,
                     "kind": s.get("kind", ""),
                     "bucket": s.get("bucket", "test"),
+                    "duration_ms": s.get("duration_ms", 0) or 0,
                     "snippet": snippet_text,
                     "truncated": bool(s.get("truncated", False)),
                     "trunc_head": bool(s.get("trunc_head", False)),
@@ -753,21 +756,30 @@ def _split_snippet_rows(rows):
     """Partition selected snippet rows into (build, test) groups, decorating each
     with the render fields the template needs:
 
-      `task_label` — `task_keys` joined for the header (matches Repro/Fix).
-      `verb`       — "failed to build" (build bucket) / "failed" (test/timeout).
+      `task_label` — `task_keys` joined; rendered small below the snippet.
+      `verb`       — the header tail: "failed to build" (build), "failed" /
+                     "failed in <dur>" (test), "timed out" / "timed out after
+                     <dur>" (timeout). Duration is omitted when 0 (build actions
+                     have no reliable duration).
 
     The "build" bucket is action-stderr failures; "test"/"timeout" are test
-    failures (timeout adds a "(timed out)" rider, kept on the row's `bucket`)."""
+    failures."""
     build_rows = []
     test_rows = []
     for r in rows:
         row = dict(r)
         row["task_label"] = ", ".join(r.get("task_keys", []) or [])
-        if r.get("bucket") == "build":
+        dur = r.get("duration_ms", 0) or 0
+        dur_str = (" in " + format_duration_ms(dur)) if dur > 0 else ""
+        bucket = r.get("bucket")
+        if bucket == "build":
             row["verb"] = "failed to build"
             build_rows.append(row)
+        elif bucket == "timeout":
+            row["verb"] = "timed out" + ((" after " + format_duration_ms(dur)) if dur > 0 else "")
+            test_rows.append(row)
         else:
-            row["verb"] = "timed out" if r.get("bucket") == "timeout" else "failed"
+            row["verb"] = "failed" + dur_str
             test_rows.append(row)
     return (build_rows, test_rows)
 

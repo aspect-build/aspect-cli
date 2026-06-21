@@ -735,7 +735,7 @@ def _check_state_serialize_round_trip():
     _eq("round-trip shown_repros", parsed["shown_repros"], state["shown_repros"])
     _eq("round-trip shown_fixes", parsed["shown_fixes"], state["shown_fixes"])
 
-def _snip(label, bucket = "test", text = "boom", truncated = False, kind = "", trunc_head = False, trunc_tail = False):
+def _snip(label, bucket = "test", text = "boom", truncated = False, kind = "", trunc_head = False, trunc_tail = False, duration_ms = 0):
     # kind defaults to the bucket word ("build"/"test") used in the header line.
     return {
         "label": label,
@@ -745,6 +745,7 @@ def _snip(label, bucket = "test", text = "boom", truncated = False, kind = "", t
         "trunc_head": trunc_head,
         "trunc_tail": trunc_tail,
         "kind": kind or ("build" if bucket == "build" else "test"),
+        "duration_ms": duration_ms,
     }
 
 def _entry_with_snippets(key, snippets):
@@ -824,14 +825,15 @@ def _check_select_snippets(ctx):
     _eq("select: malformed/empty snippets skipped", len(rows5), 0)
 
     # End-to-end: rows render grouped under "Build Failures" / "Test Failures",
-    # no per-row <details>, header matching the Repro/Fix treatment, with the
-    # contributing task(s) and a fenced block.
+    # no per-row <details>; header reads "❌ <kind> `<label>` <verb>:" (rule kind,
+    # no inline tasks), with the contributing task(s) in a <sub> line BELOW the
+    # snippet and the test duration folded into the verb.
     failed_entry = _entry("test", "test-task", "test-gha", "bazel_results", "failed", make_test_failed(), 90000)
     prepared = prepare_for_render([failed_entry])
     snip_entry = _entry_with_snippets("test-task", [
-        _snip("//pkg:broken", "build", "no member named 'foo'"),
-        _snip("//pkg:fail_test", "test", "FAILED: expected 1 got 2"),
-        _snip("//pkg:slow_test", "timeout", "timed out after 60s"),
+        _snip("//pkg:broken", "build", "no member named 'foo'", kind = "genrule"),
+        _snip("//pkg:fail_test", "test", "FAILED: expected 1 got 2", kind = "sh_test", duration_ms = 149),
+        _snip("//pkg:slow_test", "timeout", "timed out after 60s", kind = "sh_test", duration_ms = 60000),
     ])
     sel_rows, _, _ = select_snippets([snip_entry], [])
     body = render_body(
@@ -840,12 +842,14 @@ def _check_select_snippets(ctx):
     )
     _eq("select: render emits Build Failures group", "## 💥 Build Failures" in body, True)
     _eq("select: render emits Test Failures group", "## ❌ Test Failures" in body, True)
-    _eq("select: build header matches repro/fix treatment",
-        "❌ build (test-task) · `//pkg:broken` failed to build:" in body, True)
-    _eq("select: test header matches repro/fix treatment",
-        "❌ test (test-task) · `//pkg:fail_test` failed:" in body, True)
-    _eq("select: timeout header uses 'timed out' verb",
-        "❌ test (test-task) · `//pkg:slow_test` timed out:" in body, True)
+    _eq("select: build header is kind + label (no inline tasks)",
+        "❌ genrule `//pkg:broken` failed to build:" in body, True)
+    _eq("select: test header folds in duration",
+        "❌ sh_test `//pkg:fail_test` failed in 149ms:" in body, True)
+    _eq("select: timeout header uses 'timed out after <dur>'",
+        "❌ sh_test `//pkg:slow_test` timed out after 1m:" in body, True)
+    _eq("select: contributing tasks render in a <sub> line below the snippet",
+        "<sub>test-task</sub>" in body, True)
     _eq("select: render includes snippet text", "FAILED: expected 1 got 2" in body, True)
     _eq("select: no per-row <details>", "<details open><summary>" not in body, True)
 
