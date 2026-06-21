@@ -115,6 +115,13 @@ ReproFixCommand = record(
     # Stable kebab-case id ("lint-repro", …). Lets hooks scope by suggestion
     # type without parsing the command. Required.
     slug = field(str),
+    # Failure label this command targets, for the PER-FAILURE repro/fix commands
+    # rendered inline beneath a failure's snippet ("" for the whole-run / combined
+    # commands). Like `slug` it's identity: hooks rewrite command/description, never
+    # `target`, and `_apply_chain` carries it through. The combined Reproduce/Fix
+    # sections render only `target == ""` entries; `target`-set ones render only
+    # inline, correlated by label.
+    target = field(str, default = ""),
     # Idempotence flag flipped by `apply_repro_fix_hooks` after the entry
     # passes through `lifecycle.repro_fix_suggestion`, so each entry hooks at
     # most once. Producers leave `False`; user hooks must not read it.
@@ -317,9 +324,9 @@ def _apply_chain(ctx, info_base, command_kind, entry, handlers):
     """Run a `ReproFixCommand` entry through every handler in order.
 
     Returns the post-chain `ReproFixCommand` (`_hooked = True`), or `None`
-    on reject. Slug is carried through `replace` unchanged (hooks rewrite
-    commands, not identity). A fresh `ReproFixInfo` per handler so each sees
-    the prior's post-verdict state.
+    on reject. Slug and target are carried through `replace` unchanged (hooks
+    rewrite commands, not identity). A fresh `ReproFixInfo` per handler so each
+    sees the prior's post-verdict state.
     """
     command = entry.command
     description = entry.description
@@ -341,7 +348,7 @@ def _apply_chain(ctx, info_base, command_kind, entry, handlers):
                 command = verdict.command
             if verdict.description != None:
                 description = verdict.description
-    return ReproFixCommand(command = command, description = description, slug = slug, _hooked = True)
+    return ReproFixCommand(command = command, description = description, slug = slug, target = entry.target, _hooked = True)
 
 def dispatch_task_update(ctx, lifecycle, update):
     """Run any un-hooked repro/fix entries through

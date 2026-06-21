@@ -30,7 +30,7 @@ load("./lib/health_check.axl", "HealthCheckTrait")
 load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "pick_task_status", "resolve_severity", "setup_phase", "task_update")
 load("./lib/path_glob.axl", "match_any")
 load("./lib/path_normalize.axl", "normalize_files_for_cwd")
-load("./lib/repro_commands.axl", "build_aspect_command", "build_bazel_command", "explicit_flags", "has_tools_bazel_wrapper", "print_repro_and_fix", "repro_prefix", "task_cli_path")
+load("./lib/repro_commands.axl", "build_aspect_command", "build_bazel_command", "explicit_flags", "filter_by_flavor", "has_tools_bazel_wrapper", "print_repro_and_fix", "repro_flavor_args", "repro_prefix", "task_cli_path")
 load("./lib/runnable.axl", "LOCAL_SPAWN_BASE_FLAGS", "LOCAL_SPAWN_FLAGS", "RUN_IN_DESCRIPTION", "resolve_run_in", "runnable")
 load("./lib/text.axl", "pluralize")
 load("./lib/tips.axl", "tips")
@@ -248,6 +248,9 @@ def _emit_final(ctx, lifecycle, data, exit_code):
 
     _append_repro_command(ctx, data)
     _append_fix_commands(ctx, data)
+    # Honor the repro_flavors / fix_flavors controls (aspect | bazel | both).
+    data["repro_commands"] = filter_by_flavor(data["repro_commands"], ctx.args.repro_flavors)
+    data["fix_commands"] = filter_by_flavor(data["fix_commands"], ctx.args.fix_flavors)
 
     bookend = format_conclusion(status, data)
 
@@ -707,7 +710,7 @@ format = task(
             maximum = 4096,
             minimum = 0,
         ),
-    } | announce_bazel_args("the formatter build"),
+    } | announce_bazel_args("the formatter build") | repro_flavor_args(include_fix = True),
     traits = [
         BazelTrait,
         HealthCheckTrait,

@@ -17,7 +17,7 @@ load("./bazel_flags.axl", "resolve_bazel_announce")
 load("./bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "failed_labels", "init_data", "now_ms", "process_event", "repro_targets", bazel_conclusion = "conclusion")
 load("./health_check.axl", "HealthCheckTrait")
 load("./lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "setup_phase", "task_update")
-load("./repro_commands.axl", "build_aspect_command", "build_bazel_command", "print_repro_and_fix", "task_cli_path")
+load("./repro_commands.axl", "build_aspect_command", "build_bazel_command", "flavor_allows", "print_repro_and_fix", "repro_prefix", "task_cli_path")
 load("./text.axl", "pluralize")
 load("../bazel.axl", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
 
@@ -484,20 +484,40 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
     if data.get("bazel_attempts"):
         archive_bazel_attempt(data, attempt + 1, invocation_status.code)
 
-    _repro_targets = repro_targets(data, targets)
-    _repro_cmd = build_aspect_command(task_cli_path(ctx.task), [], _repro_targets)
-    if _repro_cmd:
-        data["repro_commands"].append(ReproFixCommand(
-            command = _repro_cmd,
-            slug = "bazel-repro-aspect",
-        ))
+    _flavors = ctx.args.repro_flavors
+    _cli_path = task_cli_path(ctx.task)
 
-        # Alternate vanilla-bazel repro for users who don't have the Aspect CLI
-        # installed. Flags are intentionally omitted — best-effort, not faithful.
-        data["repro_commands"].append(ReproFixCommand(
-            command = build_bazel_command(command, _repro_targets),
+    def _add_repro(cmd, slug, description = "", target = ""):
+        """Append a repro command unless its flavor is suppressed (slug-derived)."""
+        if cmd and flavor_allows(_flavors, slug):
+            data["repro_commands"].append(ReproFixCommand(
+                command = cmd,
+                description = description,
+                slug = slug,
+                target = target,
+            ))
+
+    # Combined whole-run repro (Aspect CLI + vanilla-bazel alternate for users
+    # without it; vanilla flags intentionally omitted — best-effort, not faithful).
+    _repro_targets = repro_targets(data, targets)
+    _add_repro(build_aspect_command(_cli_path, [], _repro_targets), "bazel-repro-aspect")
+    _add_repro(build_bazel_command(command, _repro_targets), "bazel-repro-vanilla-bazel", description = "vanilla bazel")
+
+    # Per-failure repros: one targeted command per failing label, rendered inline
+    # beneath that failure's snippet (correlated by `target`). Single-label target
+    # list — no `repro_targets` collapsing. The `-failure` slugs keep the
+    # `-vanilla-bazel` suffix so flavor gating + suffix-match hooks still fire.
+    for _label in failed_labels(data):
+        _add_repro(
+            repro_prefix(ctx) + build_aspect_command(_cli_path, [], [_label]),
+            "bazel-repro-aspect-failure",
+            target = _label,
+        )
+        _add_repro(
+            build_bazel_command(command, [_label]),
+            "bazel-repro-vanilla-bazel-failure",
             description = "vanilla bazel",
-            slug = "bazel-repro-vanilla-bazel",
-        ))
+            target = _label,
+        )
 
     return _emit_terminal(ctx, lifecycle, command, data, invocation_status.code, targets = _repro_targets)

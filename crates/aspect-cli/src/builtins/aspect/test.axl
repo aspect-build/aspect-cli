@@ -8,6 +8,7 @@ load("./lib/bazel_flags.axl", "announce_bazel_args")
 load("./lib/bazel_runner.axl", "run_bazel_task")
 load("./lib/health_check.axl", "HealthCheckTrait")
 load("./lib/lifecycle.axl", "TaskLifecycleTrait")
+load("./lib/repro_commands.axl", "repro_flavor_args")
 load("./lib/tips.axl", "tips")
 
 # Where `--combined_report=lcov` writes the merged LCOV report, relative to
@@ -149,7 +150,7 @@ test = task(
             default = False,
             description = "Cancel any running Bazel invocation before starting the test.",
         ),
-    } | announce_bazel_args("the test"),
+    } | announce_bazel_args("the test") | repro_flavor_args(),
     traits = [
         BazelTrait,
         HealthCheckTrait,

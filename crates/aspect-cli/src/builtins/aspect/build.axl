@@ -6,6 +6,7 @@ load("./bazel.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_B
 load("./lib/artifacts.axl", "artifacts")
 load("./lib/bazel_flags.axl", "announce_bazel_args")
 load("./lib/bazel_runner.axl", "run_bazel_task")
+load("./lib/repro_commands.axl", "repro_flavor_args")
 load("./lib/health_check.axl", "HealthCheckTrait")
 load("./lib/lifecycle.axl", "TaskLifecycleTrait")
 load("./lib/tips.axl", "tips")
@@ -50,7 +51,7 @@ build = task(
             default = False,
             description = "Cancel any running Bazel invocation before starting the build.",
         ),
-    } | announce_bazel_args("the build"),
+    } | announce_bazel_args("the build") | repro_flavor_args(),
     traits = [
         BazelTrait,
         HealthCheckTrait,

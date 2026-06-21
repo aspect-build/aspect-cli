@@ -26,6 +26,7 @@ load(
 load("@aspect//lib/github.axl", "detect_commit_sha", "github")
 load("@aspect//lib/log_snippet.axl", "SnippetOptions", "code_fence_for", "extract_junit_failure", "extract_snippet")
 load("@aspect//lib/path_glob.axl", "match_any", "match_path")
+load("@aspect//lib/lifecycle.axl", "ReproFixCommand")
 load("@aspect//lib/repro_commands.axl", "build_aspect_command", "dedup_and_attribute", "patch_download_cmd", "task_cli_path")
 load("@aspect//lib/result_text.axl", "severity_for_status")
 load("@aspect//lib/runnable.axl", "apparent_label", "runnable")
@@ -3295,6 +3296,14 @@ def test_bazel_render_snippets(ctx: TaskContext, tc: int, temp_dir: str) -> int:
     r["bazel"]["failed_targets"] = [{"label": "//pkg:broken"}]
     r["bazel"]["target_kinds"] = {"//pkg:fail_test": "py_test", "//pkg:broken": "cc_library"}
     r["bazel"]["targets_total"] = 2
+    # Combined repro (target == "") + per-failure repros (target set). The
+    # producer + hook normally populate these; set directly for the render test.
+    r["repro_commands"] = [
+        ReproFixCommand(command = "aspect test -- //...", slug = "bazel-repro-aspect"),
+        ReproFixCommand(command = "aspect test -- //pkg:fail_test", slug = "bazel-repro-aspect-failure", target = "//pkg:fail_test"),
+        ReproFixCommand(command = "bazel test -- //pkg:fail_test", description = "vanilla bazel", slug = "bazel-repro-vanilla-bazel-failure", target = "//pkg:fail_test"),
+        ReproFixCommand(command = "aspect build -- //pkg:broken", slug = "bazel-repro-aspect-failure", target = "//pkg:broken"),
+    ]
 
     out = render_check_output(ctx, r, "failed", render_ctx, links, snippet_options = opts, max_snippets = max_snips)
     tc = test_case(tc, "FAILED: expected 1 got 2" in out["text"], "render: inlines failed-test log snippet")
@@ -3305,6 +3314,17 @@ def test_bazel_render_snippets(ctx: TaskContext, tc: int, temp_dir: str) -> int:
     # for tests, "failed to build" for actions).
     tc = test_case(tc, "❌ py_test `//pkg:fail_test` failed in 3s:" in out["text"], "render: test snippet header (kind + label + duration)")
     tc = test_case(tc, "❌ cc_library `//pkg:broken` failed to build:" in out["text"], "render: build snippet header (kind + label)")
+
+    # Per-failure repro commands render inline beneath their failure's snippet,
+    # correlated by label (both flavors for the test, aspect for the action).
+    tc = test_case(tc, "aspect test -- //pkg:fail_test" in out["text"], "render: per-failure aspect repro inline")
+    tc = test_case(tc, "bazel test -- //pkg:fail_test" in out["text"], "render: per-failure vanilla repro inline")
+    tc = test_case(tc, "aspect build -- //pkg:broken" in out["text"], "render: per-failure action repro inline")
+    # The combined "🔁 Reproduce" section shows only the whole-run (target == "")
+    # command; the per-failure ones don't double-render there.
+    _repro_section = out["text"][out["text"].find("🔁 Reproduce"):] if "🔁 Reproduce" in out["text"] else ""
+    tc = test_case(tc, "aspect test -- //..." in _repro_section, "render: combined Reproduce shows whole-run command")
+    tc = test_case(tc, "//pkg:fail_test" not in _repro_section, "render: combined Reproduce excludes per-failure commands")
 
     # The snippet-shown labels are NOT also listed in the <pre> table (no dup).
     tc = test_case(tc, "<summary><code>//pkg:fail_test</code> output</summary>" not in out["text"], "render: no nested per-row <details>")

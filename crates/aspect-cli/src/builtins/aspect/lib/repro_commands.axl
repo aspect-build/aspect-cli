@@ -85,6 +85,58 @@ _DEFAULT_WRAP_AT = 100
 # contain spaces / parens / etc.
 _SHELL_META = " \t\n\"'\\`$&|;<>()*?[]{}#!~"
 
+# `repro_flavors` / `fix_flavors` task-arg values: which command flavor(s) to
+# surface. Every "vanilla bazel for non-Aspect-CLI users" producer tags its
+# entry with a slug ending in `-vanilla-bazel` (or `-vanilla-bazel-failure` for
+# the per-failure variant); the Aspect-CLI entry's slug does not. So flavor can
+# be decided from the slug alone, uniformly across producers and surfaces.
+REPRO_FLAVOR_VALUES = ["aspect", "bazel", "both"]
+
+def is_vanilla_bazel_slug(slug):
+    """True for a vanilla-bazel command slug (suffix `-vanilla-bazel`, with or
+    without the `-failure` per-failure tag)."""
+    return slug.endswith("-vanilla-bazel") or slug.endswith("-vanilla-bazel-failure")
+
+def flavor_allows(flavor, slug):
+    """Whether a command with `slug` should be emitted under `flavor`
+    (`"aspect"` | `"bazel"` | `"both"`). `"both"` keeps everything; otherwise
+    keep only the matching flavor. Unknown `flavor` (mis-set arg) → keep, so a
+    typo degrades to showing everything rather than hiding all repros."""
+    if flavor == "both" or flavor not in REPRO_FLAVOR_VALUES:
+        return True
+    return (flavor == "bazel") == is_vanilla_bazel_slug(slug)
+
+def _flavor_arg(long, noun):
+    return args.string(
+        default = "both",
+        values = REPRO_FLAVOR_VALUES,
+        long = long,
+        description = ("Which %s command flavor(s) to surface on the CLI and CI " +
+                       "status surfaces: `aspect` (Aspect CLI only), `bazel` (vanilla " +
+                       "bazel only), or `both` (default). Set from config: " +
+                       "`ctx.tasks[\"<task>\"].args.%s = \"aspect\"` in `.aspect/config.axl`; " +
+                       "pass on CLI: `--%s=aspect`.") % (noun, long.replace("-", "_"), long),
+    )
+
+def filter_by_flavor(commands, flavor):
+    """Return `commands` keeping only entries `flavor_allows` permits (by slug).
+    Convenience for producers that append many entries before gating; equivalent
+    to gating each `.append`. No-op for `flavor == "both"`."""
+    if flavor == "both" or flavor not in REPRO_FLAVOR_VALUES:
+        return commands
+    return [c for c in commands if flavor_allows(flavor, c.slug)]
+
+def repro_flavor_args(include_fix = False):
+    """`repro_flavors` (always) + `fix_flavors` (when `include_fix`) task args,
+    as a dict to splat into a task's `args = {...}`. Reuse on every repro/fix
+    producer so the control is identical task-to-task; the producer gates each
+    command append on `flavor_allows(ctx.args.repro_flavors, slug)` (and
+    `fix_flavors` for fix entries)."""
+    out = {"repro_flavors": _flavor_arg("repro-flavors", "reproduce")}
+    if include_fix:
+        out["fix_flavors"] = _flavor_arg("fix-flavors", "fix")
+    return out
+
 def _shell_quote(s):
     """Single-quote `s` for POSIX shells when it carries any shell-
     meta character; otherwise return it untouched so bazel labels
@@ -638,8 +690,8 @@ def rehydrate_commands(commands):
 
     Schema-tolerant: drops entries that aren't dicts or records, and
     falls back to `""` for missing optional fields (`description`,
-    `slug`) so a state block written by an older aspect-cli release
-    (predating the `slug` field) still round-trips cleanly. Entries
+    `slug`, `target`) so a state block written by an older aspect-cli
+    release (predating those fields) still round-trips cleanly. Entries
     that lack the required `command` field are also dropped.
 
     `None` / empty input → `[]`.
@@ -660,6 +712,7 @@ def rehydrate_commands(commands):
             command = cmd,
             description = c.get("description") or "",
             slug = c.get("slug") or "",
+            target = c.get("target") or "",
             _hooked = bool(c.get("_hooked", False)),
         ))
     return out

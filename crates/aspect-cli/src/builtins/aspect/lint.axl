@@ -28,7 +28,7 @@ load("./lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_ch
 load("./lib/health_check.axl", "HealthCheckTrait")
 load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "setup_phase", "task_update")
 load("./lib/lint_results.axl", "detect_lint_tool", lint_accumulate = "accumulate", lint_conclusion = "conclusion", lint_init_data = "init_data")
-load("./lib/repro_commands.axl", "build_aspect_command", "explicit_flags", "print_repro_and_fix", "repro_prefix", "task_cli_path")
+load("./lib/repro_commands.axl", "build_aspect_command", "explicit_flags", "flavor_allows", "print_repro_and_fix", "repro_flavor_args", "repro_prefix", "task_cli_path")
 load("./lib/sarif.axl", "get_sarif_summary", "parse_sarif", "parse_sarif_diagnostics")
 load("./lib/tar.axl", "tar_create")
 load("./lib/text.axl", "pluralize")
@@ -1001,11 +1001,12 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     targets = list(ctx.args.targets)
     task_path = task_cli_path(ctx.task)
     prefix = repro_prefix(ctx)
-    data["repro_commands"].append(ReproFixCommand(
-        command = prefix + build_aspect_command(task_path, repro_flags, targets),
-        slug = "lint-repro",
-    ))
-    if data["lint"]["suggestions"]:
+    if flavor_allows(ctx.args.repro_flavors, "lint-repro"):
+        data["repro_commands"].append(ReproFixCommand(
+            command = prefix + build_aspect_command(task_path, repro_flags, targets),
+            slug = "lint-repro",
+        ))
+    if data["lint"]["suggestions"] and flavor_allows(ctx.args.fix_flavors, "lint-fix"):
         data["fix_commands"].append(ReproFixCommand(
             command = prefix + build_aspect_command(task_path, [("--fix", None)] + repro_flags, targets),
             slug = "lint-fix",
@@ -1104,7 +1105,7 @@ lint = task(
             default = ["..."],
             description = "Bazel target patterns to lint. Defaults to '...' which expands to all rule targets in the package at and beneath the current directory. Pass multiple patterns to combine includes and excludes; when any pattern is hyphen-led, separate them from flags with `--` (e.g. `aspect lint -- //... -//experimental/...`).",
         ),
-    } | announce_bazel_args("the lint build"),
+    } | announce_bazel_args("the lint build") | repro_flavor_args(include_fix = True),
     traits = [
         BazelTrait,
         HealthCheckTrait,

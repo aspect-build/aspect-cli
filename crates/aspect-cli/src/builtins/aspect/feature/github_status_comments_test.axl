@@ -735,7 +735,7 @@ def _check_state_serialize_round_trip():
     _eq("round-trip shown_repros", parsed["shown_repros"], state["shown_repros"])
     _eq("round-trip shown_fixes", parsed["shown_fixes"], state["shown_fixes"])
 
-def _snip(label, bucket = "test", text = "boom", truncated = False, kind = "", trunc_head = False, trunc_tail = False, duration_ms = 0):
+def _snip(label, bucket = "test", text = "boom", truncated = False, kind = "", trunc_head = False, trunc_tail = False, duration_ms = 0, repros = None):
     # kind defaults to the bucket word ("build"/"test") used in the header line.
     return {
         "label": label,
@@ -746,6 +746,7 @@ def _snip(label, bucket = "test", text = "boom", truncated = False, kind = "", t
         "trunc_tail": trunc_tail,
         "kind": kind or ("build" if bucket == "build" else "test"),
         "duration_ms": duration_ms,
+        "repros": repros or [],
     }
 
 def _entry_with_snippets(key, snippets):
@@ -834,7 +835,9 @@ def _check_select_snippets(ctx):
     prepared = prepare_for_render([failed_entry])
     snip_entry = _entry_with_snippets("test-task", [
         _snip("//pkg:broken", "build", "no member named 'foo'", kind = "genrule"),
-        _snip("//pkg:fail_test", "test", "FAILED: expected 1 got 2", kind = "sh_test", duration_ms = 149),
+        _snip("//pkg:fail_test", "test", "FAILED: expected 1 got 2", kind = "sh_test", duration_ms = 149,
+              repros = [{"command": "aspect test -- //pkg:fail_test", "description": ""},
+                        {"command": "bazel test -- //pkg:fail_test", "description": "vanilla bazel"}]),
         _snip("//pkg:slow_test", "timeout", "timed out after 60s", kind = "sh_test", duration_ms = 60000),
     ])
     sel_rows, _, _ = select_snippets([snip_entry], [])
@@ -872,6 +875,15 @@ def _check_select_snippets(ctx):
     )
     _eq("select: render includes snippet text", "FAILED: expected 1 got 2" in body, True)
     _eq("select: no per-row <details>", "<details open><summary>" not in body, True)
+    # Per-failure repros render inline beneath the snippet, both flavors, and
+    # before the contributing-task <sub> line.
+    _eq("select: per-failure aspect repro inline", "aspect test -- //pkg:fail_test" in body, True)
+    _eq("select: per-failure vanilla repro inline", "bazel test -- //pkg:fail_test" in body, True)
+    # The test snippet's repros sit between its fence-close and its <sub> line —
+    # the vanilla repro precedes the FIRST <sub> that follows the test snippet.
+    _ts = body.find("`//pkg:fail_test` failed in 149ms:")
+    _eq("select: repros render above the snippet's <sub> task line",
+        body.find("bazel test -- //pkg:fail_test", _ts) < body.find("<sub>in task test-task</sub>", _ts), True)
 
     # Overflow note lists the task holding the hidden failure (1 distinct dropped).
     over_snips = [_snip("//pkg:t%d" % i, "test", "boom %d" % i) for i in range(6)]
