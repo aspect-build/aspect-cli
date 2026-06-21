@@ -847,10 +847,51 @@ def _ensure_local_sha(ctx, sha, cwd = None):
     recheck = process.command("git").args(["cat-file", "-e", sha]).current_dir(cwd).stdout("null").stderr("null").spawn().wait_with_output()
     return recheck.status.success
 
+def _remote_branch_of(base_ref):
+    """The `origin/<branch>` → `<branch>` name `git fetch origin` wants, or
+    `""` for a bare local ref (nothing on a remote to fetch). `origin/` with
+    no branch also yields `""`."""
+    if not base_ref.startswith("origin/"):
+        return ""
+    return base_ref[len("origin/"):]
+
+def _is_shallow_repo(ctx, cwd):
+    """True when `cwd` is a shallow clone (`git rev-parse
+    --is-shallow-repository`). False on full clones and on any error."""
+    out = ctx.std.process.command("git").args(["rev-parse", "--is-shallow-repository"]).current_dir(cwd).stdout("piped").stderr("null").spawn().wait_with_output()
+    return out.status.success and out.stdout.strip() == "true"
+
+def _refresh_remote_ref(ctx, base_ref, cwd):
+    """Best-effort refresh of the `origin/<branch>` remote-tracking ref
+    BEFORE merge-base resolution, so a persistent runner reusing a clone
+    doesn't compute the merge-base against a stale base tip — a stale
+    `origin/main` is a valid-but-old ancestor, so `git merge-base` succeeds
+    and the diff sweeps in every commit the base advanced past since the
+    last fetch (the over-detection bug).
+
+    Full clones only. The refresh is a plain `git fetch origin <branch>`
+    that advances the ref while pulling the connecting history a correct
+    merge-base needs. Shallow clones are skipped entirely: a `--depth=1`
+    fetch would move the ref to a tip with no ancestry, breaking the
+    merge-base walk and discarding a stale-but-still-usable base — worse
+    than leaving the ref alone. Shallow checkouts fall through to the
+    existing `_resolve_merge_base` fallbacks unchanged.
+
+    Non-fatal: a failed fetch (offline, no `origin`, unknown branch) leaves
+    whatever refs are already local and resolution proceeds against them."""
+    remote_ref = _remote_branch_of(base_ref)
+    if not remote_ref or _is_shallow_repo(ctx, cwd):
+        return
+    ctx.std.process.command("git").args(["fetch", "origin", remote_ref]).current_dir(cwd).stdout("null").stderr("null").spawn().wait_with_output()
+
 def _resolve_merge_base(ctx, base_ref, cwd = None):
     """Resolve a diff-base SHA for local-git change detection, layered
     fallbacks. Returns `(sha, source)` or `("", reason)`.
 
+    0. `_refresh_remote_ref` — refresh `origin/<branch>` up-front (full
+       clones only) so step 1 computes the merge-base against the CURRENT
+       base tip, not a stale remote-tracking ref left over on a reused
+       (persistent-runner) clone.
     1. `git merge-base HEAD <base_ref>` — result gates step 2:
          - distinct SHA → use it.
          - == HEAD → HEAD is on `base_ref`; set `head_on_base`, fall through
@@ -867,6 +908,8 @@ def _resolve_merge_base(ctx, base_ref, cwd = None):
     """
     process = ctx.std.process
     cwd = _git_cwd(ctx, cwd)
+
+    _refresh_remote_ref(ctx, base_ref, cwd)
 
     head_sha = _head_sha(ctx, cwd = cwd)
 
@@ -889,9 +932,9 @@ def _resolve_merge_base(ctx, base_ref, cwd = None):
                 return parent_sha, "git rev-parse HEAD^1 (CI-synthesized merge commit first parent)"
             return parent_sha, "git rev-parse HEAD^1 (HEAD on %s)" % base_ref
 
-    # `git fetch origin <ref>` wants the remote ref name; strip the
-    # `origin/` prefix off the local remote-tracking `base_ref`.
-    remote_ref = base_ref[len("origin/"):] if base_ref.startswith("origin/") else base_ref
+    # `git fetch origin <ref>` wants the branch name; a bare local `base_ref`
+    # is itself the branch name to try.
+    remote_ref = _remote_branch_of(base_ref) or base_ref
     fetch = process.command("git").args(["fetch", "--depth=1", "origin", remote_ref]).current_dir(cwd).stdout("null").stderr("piped").spawn().wait_with_output()
     if fetch.status.success:
         retry = process.command("git").args(["merge-base", "HEAD", base_ref]).current_dir(cwd).stdout("piped").stderr("piped").spawn().wait_with_output()
@@ -913,6 +956,12 @@ def resolve_merge_base_for_test(ctx, base_ref, cwd):
     """Test seam for `_resolve_merge_base` against a scratch repo at `cwd`.
     Production goes through `detect_changed_files`."""
     return _resolve_merge_base(ctx, base_ref, cwd = cwd)
+
+def refresh_remote_ref_for_test(ctx, base_ref, cwd):
+    """Test seam for `_refresh_remote_ref` against a scratch repo at `cwd`,
+    to assert the step-0 refresh in isolation from the rest of
+    `_resolve_merge_base`."""
+    _refresh_remote_ref(ctx, base_ref, cwd)
 
 def _try_local_git_diff_from_base_sha(ctx, line_level, base_sha, head = "HEAD", cwd = None):
     """Run `git diff <base_sha> <head>` → `{files, skipped, source,
@@ -1208,7 +1257,7 @@ def detect_changed_files(ctx, line_level = True, base_ref = "", merge_base = Non
         else:
             warn(ctx.std, "%s — falling back to the GitHub PR Files API (consumes GitHub App API quota). To avoid this on future runs, ensure `origin/%s` is fetchable from the working tree (e.g. `fetch-depth: 2` in `actions/checkout`, or `git fetch origin <base>` on Buildkite / CircleCI)." % (
                 _local_diff_exhausted_prefix(diff_base_source),
-                base_ref[len("origin/"):] if base_ref.startswith("origin/") else base_ref,
+                _remote_branch_of(base_ref) or base_ref,
             ))
             result = list_pull_request_files(ctx, token, pr["owner"], pr["repo"], pr["pr_number"], fallback_token = fallback, token_class = token_class)
             if result["success"]:

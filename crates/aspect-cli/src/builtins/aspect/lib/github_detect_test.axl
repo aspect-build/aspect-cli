@@ -19,7 +19,8 @@ fake env (dict-backed) and a fake fs (path → content dict). The
 integration section is the exception: it builds real scratch git repos
 with `git` subprocesses to exercise diff-base resolution end to end —
 `_resolve_merge_base` (merge-base / HEAD^1, incl. the developer-merge
-under-scoping case) and the synthesized-merge-by-SHA path
+under-scoping case and the stale-`origin/<base>` over-detection case on
+reused persistent-runner clones) and the synthesized-merge-by-SHA path
 (`synthesized_merge_diff_for_test`).
 
 Run with:
@@ -36,6 +37,7 @@ load(
     "github",
     "head_is_synthesized_merge",
     "read_github_event",
+    "refresh_remote_ref_for_test",
     "resolve_merge_base_for_test",
     "synthesized_merge_diff_for_test",
 )
@@ -1015,6 +1017,46 @@ def _init_repo(ctx):
     base_sha = _commit_file(ctx, repo, "base.txt", "base\n", "base")
     return repo, base_sha
 
+def _clone_with_stale_origin(ctx, depth = None):
+    """Build an `upstream` repo, advance its `main` one commit past the
+    clone point, then clone it so the clone's `origin/main` is pinned at
+    that tip. The caller advances `upstream` further (and forks the PR)
+    without re-fetching, leaving `origin/main` stale — the persistent-runner
+    state. `depth` (e.g. 1) makes a shallow clone. Returns
+    `(repo, upstream, stale_tip)`; both dirs are the caller's to remove."""
+    upstream, _ = _init_repo(ctx)
+    stale_tip = _commit_file(ctx, upstream, "old.txt", "old\n", "stale origin/main tip")
+    repo = ctx.std.fs.mkdtemp(prefix = "axl-github-detect-stale-base-test-")
+
+    # `--depth` is ignored for local-path clones; the `file://` transport is
+    # required to actually produce a shallow clone.
+    args = ["clone", "-q"]
+    source = upstream
+    if depth != None:
+        args += ["--depth=%d" % depth]
+        source = "file://" + upstream
+    _git_ok(ctx, repo, args + [source, "."])
+    if _git_ok(ctx, repo, ["rev-parse", "origin/main"]) != stale_tip:
+        fail("stale-base — clone's origin/main should start at the stale tip")
+    return repo, upstream, stale_tip
+
+def _branch_off_and_checkout(ctx, repo, upstream, branch, name, content):
+    """In `upstream`, fork `branch` off the current `main` tip, commit one
+    file, then check that PR head out in `repo` by SHA (fetched on demand) —
+    mirroring a runner that checks out the PR head without refreshing
+    `origin/main`. The PR-head fetch preserves `repo`'s shallowness (a
+    shallow runner checkout stays shallow). Returns the PR head SHA."""
+    _git_ok(ctx, upstream, ["checkout", "-q", "-b", branch])
+    _commit_file(ctx, upstream, name, content, "the PR's only change")
+    pr_tip = _git_ok(ctx, upstream, ["rev-parse", "HEAD"])
+    _git_ok(ctx, upstream, ["checkout", "-q", "main"])
+    fetch = ["fetch", "-q"]
+    if _git_ok(ctx, repo, ["rev-parse", "--is-shallow-repository"]) == "true":
+        fetch += ["--depth=1"]
+    _git_ok(ctx, repo, fetch + ["origin", pr_tip])
+    _git_ok(ctx, repo, ["checkout", "-q", pr_tip])
+    return pr_tip
+
 def _test_resolve_merge_base_integration(ctx):
     # (1) The reported bug: a developer's own merge of the base branch
     # into a feature branch. main: B0 → B1 (advances after branching).
@@ -1118,6 +1160,66 @@ def _test_resolve_merge_base_integration(ctx):
     # squash/rebase checkout's HEAD as a synthesized merge.
     if synthesized_merge_diff_for_test(ctx, False, b0, repo) != None:
         fail("synthesized-merge — single-parent SHA must yield None")
+    ctx.std.fs.remove_dir_all(repo)
+
+    # (5) Stale `origin/<base>` on a reused full-clone (persistent-runner) —
+    # the over-detection bug. The runner keeps `origin/main` from an earlier
+    # job; between jobs the base advances and the PR forks off the NEW tip.
+    # Without the up-front refresh, `git merge-base HEAD origin/main`
+    # "succeeds" against the stale tip (a valid-but-old ancestor), so the diff
+    # sweeps in every base commit landed since the last fetch.
+    # `_refresh_remote_ref` re-fetches `origin/main` first, so the merge-base
+    # is the real fork point and only the PR's file is in scope.
+    repo, upstream, stale_tip = _clone_with_stale_origin(ctx)
+    new_base = _commit_file(ctx, upstream, "moved.txt", "moved\n", "base advances past stale tip")
+    pr_tip = _branch_off_and_checkout(ctx, repo, upstream, "feature", "pr.txt", "pr\n")
+    if _git_ok(ctx, repo, ["rev-parse", "origin/main"]) != stale_tip:
+        fail("stale-base — origin/main must still be stale before resolution")
+
+    diff_base, _source = resolve_merge_base_for_test(ctx, "origin/main", repo)
+    _eq("stale-base (full clone) — diff base is the refreshed fork point, not the stale tip", diff_base, new_base)
+    _eq(
+        "stale-base (full clone) — only the PR's file in scope (not the base-advance commits)",
+        _changed_files(ctx, repo, diff_base),
+        ["pr.txt"],
+    )
+    if _git_ok(ctx, repo, ["rev-parse", "--is-shallow-repository"]) != "false":
+        fail("stale-base (full clone) — refresh must not convert a full clone to shallow")
+    ctx.std.fs.remove_dir_all(repo)
+    ctx.std.fs.remove_dir_all(upstream)
+
+    # (6) The step-0 refresh itself, in isolation (`_refresh_remote_ref`).
+    #  - Full clone: advances a stale `origin/main` to the current tip while
+    #    staying full, so merge-base keeps a connected base.
+    #  - Shallow clone: skipped. A `--depth=1` fetch would move `origin/main`
+    #    to a tip with no connecting history, breaking the merge-base walk and
+    #    discarding the stale-but-still-usable base — so the ref is left alone
+    #    (the existing `_resolve_merge_base` fallbacks handle shallow as before).
+    repo, upstream, stale_tip = _clone_with_stale_origin(ctx)
+    moved = _commit_file(ctx, upstream, "moved.txt", "moved\n", "base advances")
+    refresh_remote_ref_for_test(ctx, "origin/main", repo)
+    _eq("refresh (full clone) — advances stale origin/main to the current tip", _git_ok(ctx, repo, ["rev-parse", "origin/main"]), moved)
+    if _git_ok(ctx, repo, ["rev-parse", "--is-shallow-repository"]) != "false":
+        fail("refresh (full clone) — must not convert a full clone to shallow")
+    ctx.std.fs.remove_dir_all(repo)
+    ctx.std.fs.remove_dir_all(upstream)
+
+    repo, upstream, stale_tip = _clone_with_stale_origin(ctx, depth = 1)
+    if _git_ok(ctx, repo, ["rev-parse", "--is-shallow-repository"]) != "true":
+        fail("refresh (shallow) — clone should be shallow")
+    _commit_file(ctx, upstream, "moved.txt", "moved\n", "base advances")
+    refresh_remote_ref_for_test(ctx, "origin/main", repo)
+    _eq("refresh (shallow) — skipped, origin/main left at the stale tip", _git_ok(ctx, repo, ["rev-parse", "origin/main"]), stale_tip)
+    ctx.std.fs.remove_dir_all(repo)
+    ctx.std.fs.remove_dir_all(upstream)
+
+    # (7) Bare local base ref (no `origin/` prefix) — refresh is a no-op
+    # (nothing on a remote to fetch) and resolution still finds the fork point.
+    repo, b0 = _init_repo(ctx)
+    _git_ok(ctx, repo, ["checkout", "-q", "-b", "feature"])
+    _commit_file(ctx, repo, "c1.txt", "c1\n", "c1")
+    diff_base, _source = resolve_merge_base_for_test(ctx, "main", repo)
+    _eq("bare-local-ref — diff base is the fork point", diff_base, b0)
     ctx.std.fs.remove_dir_all(repo)
 
 github_detect_tests = task(
