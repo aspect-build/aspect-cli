@@ -3228,6 +3228,25 @@ def test_log_snippet(ctx: TaskContext, tc: int, temp_dir: str) -> int:
     r8 = extract_junit_failure(ctx.std, xml3)
     tc = test_case(tc, r8.source.value == "none", "extract_junit_failure: no failure element → source=none")
 
+    # Bazel-SYNTHESIZED XML (sh_test/cc_test without native JUnit): a generic
+    # empty <error message="exited with error code 1"> with the real output in
+    # <system-out>. The JUnit path must MISS so the caller falls back to test.log
+    # — else the snippet reads the useless "exited with error code 1".
+    synth = d + "/synth.xml"
+    ctx.std.fs.write(synth, "<testsuites><testsuite><testcase name=\"t\">" +
+                            "<error message=\"exited with error code 1\"></error>" +
+                            "<system-out>real pytest output here</system-out></testcase></testsuite></testsuites>")
+    r9 = extract_junit_failure(ctx.std, synth)
+    tc = test_case(tc, r9.source.value == "none", "extract_junit_failure: synthesized 'exited with error code' → none (fall back to log)")
+    # A real <failure> whose message happens to start similarly but HAS a body is
+    # kept (only empty low-signal elements are rejected).
+    real = d + "/real.xml"
+    ctx.std.fs.write(real, "<testsuite><testcase><failure message=\"exited with error code 1\">" +
+                           "assert 5 == 6\n</failure></testcase></testsuite>")
+    r10 = extract_junit_failure(ctx.std, real)
+    tc = test_case(tc, r10.source.value == "xml", "extract_junit_failure: low-signal message WITH body kept")
+    tc = test_case(tc, "assert 5 == 6" in r10.text, "extract_junit_failure: body retained when present")
+
     ctx.std.fs.remove_dir_all(d)
     return tc
 

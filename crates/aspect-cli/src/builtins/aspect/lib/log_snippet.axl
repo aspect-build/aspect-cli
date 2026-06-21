@@ -251,6 +251,30 @@ def _xml_unescape(s):
         .replace("&apos;", "'")
         .replace("&amp;", "&"))
 
+# Low-signal `<error>`/`<failure>` messages that Bazel SYNTHESIZES for tests
+# without native JUnit output (sh_test, cc_test, …) via tools/test/generate-xml.sh.
+# The real output lives in <system-out>, not the element — so when the JUnit
+# message is one of these AND the element has no body, we treat the XML as a miss
+# and fall back to the raw test.log (matched as a lowercased prefix).
+_SYNTHESIZED_JUNIT_PREFIXES = [
+    "exited with error code",
+    "test exited with",
+    "test did not complete",
+    "test was not completed",
+]
+
+def _is_low_signal_junit(header, body):
+    """True when a JUnit failure/error carries only a generic Bazel-synthesized
+    message and no body — the real diagnostic is in <system-out>, so the caller
+    should fall back to test.log."""
+    if body:
+        return False
+    low = header.lower().strip()
+    for p in _SYNTHESIZED_JUNIT_PREFIXES:
+        if low.startswith(p):
+            return True
+    return False
+
 def extract_junit_failure_from_text(xml, options):
     """Pure: emit the first JUnit `<failure>`/`<error>` message + body as a
     SnippetResult, or `none` on any parse miss (caller falls back to the log).
@@ -258,6 +282,10 @@ def extract_junit_failure_from_text(xml, options):
     Lightweight scan, not a real parser: find the first `<failure`/`<error`
     start-tag, read its `message`/`type` attrs, then capture body text up to the
     matching close tag (or self-closing `/>`). Windowed/capped like a log snippet.
+
+    Returns `none` for Bazel-synthesized low-signal failures (a generic "exited
+    with error code N" and an empty element) so the caller falls back to the raw
+    test.log, where the real output is — see `_is_low_signal_junit`.
     """
     if not xml:
         return _EMPTY
@@ -292,10 +320,13 @@ def extract_junit_failure_from_text(xml, options):
     else:
         header = message or typ
 
+    body = _xml_unescape(body).strip()
+    if _is_low_signal_junit(header, body):
+        return _EMPTY
+
     parts = []
     if header:
         parts.append(_xml_unescape(header.strip()))
-    body = _xml_unescape(body).strip()
     if body:
         parts.append(body)
     if not parts:

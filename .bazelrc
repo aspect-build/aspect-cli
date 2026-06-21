@@ -17,6 +17,12 @@ common:release --workspace_status_command "${PWD}/bazel/workspace_status.sh"
 common:release --compilation_mode=opt
 common:release --@rules_rust//rust/settings:lto=fat
 
+# Don't stop at the first failure on CI — surface every failing target/test in
+# one run (a failed build action otherwise aborts the test phase before any
+# test executes). Applied via `--config=ci`, injected by .aspect/config.axl when
+# CI is set.
+common:ci --keep_going
+
 # Use Go's internal linker rather than the cc_toolchain — required when
 # building gazelle from source on Linux because toolchains_llvm_bootstrapped's
 # lld can't accept Go's non-PIC relocations (relocation R_X86_64_64 ...

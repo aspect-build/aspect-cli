@@ -329,13 +329,13 @@ jobs:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Test Task (ephemeral)
-        # --keep_going so a build-action failure (demo_build_fail genrule)
-        # doesn't abort the test phase — both the failed test (test.log snippet)
-        # and the failed action (stderr snippet) then surface together.
+        # --keep_going comes from `--config=ci` (injected by .aspect/config.axl on
+        # CI), so a build-action failure (demo_build_fail genrule) doesn't abort
+        # the test phase — both the failed test (test.log snippet) and the failed
+        # action (stderr snippet) surface together.
         run: |
           aspect test --task-key test-gha-ephemeral \
             --bazel-flag=--remote_cache= \
-            --bazel-flag=--keep_going \
             --bazel-flag=--disk_cache="$RUNNER_TEMP/aspect-disk-cache" \
             -- //examples/...
   # Render each template preset with the freshly-built `aspect init` and build
