@@ -791,7 +791,7 @@ def _check_select_snippets(ctx):
     _eq("select: hard cap at global budget (5)", len(rows3), 5)
     _eq("select: shown set also capped at 5", len(shown3), 5)
     _eq("select: 6 distinct, 5 shown → 1 overflow", overflow3["total"], 1)
-    _eq("select: overflow attributed to the holding task", overflow3["by_task"], [{"task_key": "z-task", "count": 1}])
+    _eq("select: overflow lists the holding task", overflow3["tasks"], ["z-task"])
 
     # Stickiness under contention: the already-shown snippet sorts LAST, so
     # without stickiness it would be evicted when 6 compete for 5 slots. It must
@@ -806,14 +806,13 @@ def _check_select_snippets(ctx):
     _eq("select: earlier-sorting unshown evicted, not the sticky", "//z:t4" in labels_sticky, False)
 
     # Multi-task overflow attribution: two distinct dropped failures, each held by
-    # a different task, sorted by count desc.
+    # a different task; `tasks` lists both (sorted), `total` counts distinct items.
     crowd = [_snip("//c:t%d" % i, "test", "boom %d" % i) for i in range(5)]
     t1 = _entry_with_snippets("task-x", crowd + [_snip("//x:extra", "test", "x boom")])
     t2 = _entry_with_snippets("task-y", crowd + [_snip("//y:extra", "test", "y boom")])
     _, _, overflow_multi = select_snippets([t1, t2], [])
     _eq("select: multi-task overflow total (2 distinct dropped)", overflow_multi["total"], 2)
-    _eq("select: multi-task overflow attributes each holder",
-        overflow_multi["by_task"], [{"task_key": "task-x", "count": 1}, {"task_key": "task-y", "count": 1}])
+    _eq("select: multi-task overflow lists holding tasks", overflow_multi["tasks"], ["task-x", "task-y"])
 
     # Sticky entries gone (failure no longer present) drop out cleanly.
     _, shown4, _ = select_snippets([e_a], [snippet_key("//gone:t", "x")])
@@ -853,7 +852,7 @@ def _check_select_snippets(ctx):
     _eq("select: render includes snippet text", "FAILED: expected 1 got 2" in body, True)
     _eq("select: no per-row <details>", "<details open><summary>" not in body, True)
 
-    # Overflow note renders with per-task attribution (1 distinct dropped failure).
+    # Overflow note lists the task holding the hidden failure (1 distinct dropped).
     over_snips = [_snip("//pkg:t%d" % i, "test", "boom %d" % i) for i in range(6)]
     over_entry = _entry_with_snippets("test-task", over_snips)
     over_rows, _, over_of = select_snippets([over_entry], [])
@@ -861,8 +860,8 @@ def _check_select_snippets(ctx):
         ctx, MARKER_FMT % 1, prepared, "", DEFAULT_BODY_TEMPLATE, DEFAULT_STATUS_BADGES,
         bucket_entries(prepared), snippet_rows = over_rows, snippet_overflow = over_of,
     )
-    _eq("select: overflow note rendered with per-task attribution",
-        "_+ 1 more failure — not shown (1 in `test-task`)._" in over_body, True)
+    _eq("select: overflow note lists holding task with 'across'",
+        "_+ 1 more failure — not shown (across `test-task`)._" in over_body, True)
 
     # Fence injection: a snippet containing a ``` run must not break out of the
     # code block — the fence widens past the longest run so it stays enclosed.
@@ -916,29 +915,29 @@ def _check_select_sticky():
     _eq("sticky: stale prior key skipped", [r["k"] for r in sel3], ["b", "a"])
 
 def _check_by_task_overflow():
-    """_by_task_overflow: dropped rows attribute per contributing task (shared by
-    snippets and repro/fix commands)."""
+    """_by_task_overflow: total counts DISTINCT dropped items; `tasks` is the set
+    of tasks holding hidden items (no per-task counts — they'd double-count a
+    deduped item shared by N tasks). Shared by snippets and repro/fix commands."""
     dropped = [
         {"command": "x", "task_keys": ["task-a", "task-b"]},
         {"command": "y", "task_keys": ["task-b"]},
     ]
     of = by_task_overflow(dropped)
-    _eq("by_task_overflow: total counts rows", of["total"], 2)
-    # task-b in both dropped rows (2), task-a in one (1) → sorted desc.
-    _eq("by_task_overflow: per-task attribution sorted desc",
-        of["by_task"], [{"task_key": "task-b", "count": 2}, {"task_key": "task-a", "count": 1}])
-    _eq("by_task_overflow: empty → zero", by_task_overflow([]), {"total": 0, "by_task": []})
+    _eq("by_task_overflow: total counts distinct dropped items", of["total"], 2)
+    # task-a + task-b hold hidden items; listed once each, sorted.
+    _eq("by_task_overflow: tasks deduped + sorted", of["tasks"], ["task-a", "task-b"])
+    _eq("by_task_overflow: empty → zero", by_task_overflow([]), {"total": 0, "tasks": []})
 
 def _check_format_overflow_note():
-    """_format_overflow_note: singular/plural + per-task suffix, "" when empty."""
-    _eq("overflow note: empty → ''", format_overflow_note({"total": 0, "by_task": []}, "x", "xs"), "")
+    """_format_overflow_note: singular/plural + 'across' task list, "" when empty."""
+    _eq("overflow note: empty → ''", format_overflow_note({"total": 0, "tasks": []}, "x", "xs"), "")
     _eq("overflow note: None → ''", format_overflow_note(None, "x", "xs"), "")
     _eq("overflow note: singular noun",
-        format_overflow_note({"total": 1, "by_task": [{"task_key": "t", "count": 1}]}, "failure", "failures"),
-        "_+ 1 more failure — not shown (1 in `t`)._")
-    _eq("overflow note: plural + multi-task",
-        format_overflow_note({"total": 5, "by_task": [{"task_key": "a", "count": 3}, {"task_key": "b", "count": 2}]}, "failure", "failures"),
-        "_+ 5 more failures — not shown (3 in `a`, 2 in `b`)._")
+        format_overflow_note({"total": 1, "tasks": ["t"]}, "failure", "failures"),
+        "_+ 1 more failure — not shown (across `t`)._")
+    _eq("overflow note: plural + multi-task 'across'",
+        format_overflow_note({"total": 5, "tasks": ["a", "b"]}, "failure", "failures"),
+        "_+ 5 more failures — not shown (across `a`, `b`)._")
 
 def _check_parse_state_absent():
     """parse_state returns None when the body has no state block —

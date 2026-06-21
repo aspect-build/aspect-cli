@@ -737,20 +737,21 @@ def _select_snippets(entries, shown_keys):
     return (rows, new_shown, overflow)
 
 def _by_task_overflow(dropped):
-    """Build `{total, by_task}` for dropped rows that each carry `task_keys`.
-    `total` = number of dropped rows; `by_task` attributes each to every task in
-    its `task_keys`, sorted by count desc then name."""
-    by_task = {}
+    """Build `{total, tasks}` for dropped rows that each carry `task_keys`.
+    `total` = number of distinct dropped (deduped) items; `tasks` = the set of
+    tasks that hold at least one hidden item, sorted. Per-task COUNTS would
+    double-count a deduped item shared by N tasks (sum > total), so we list the
+    tasks ("across a, b, …") without counts — see `_format_overflow_note`."""
+    seen = {}
+    tasks = []
     total = 0
     for r in dropped:
         total += 1
         for tk in r.get("task_keys", []) or []:
-            by_task[tk] = by_task.get(tk, 0) + 1
-    rows = sorted(
-        [{"task_key": tk, "count": n} for tk, n in by_task.items()],
-        key = lambda x: (-x["count"], x["task_key"]),
-    )
-    return {"total": total, "by_task": rows}
+            if tk and tk not in seen:
+                seen[tk] = True
+                tasks.append(tk)
+    return {"total": total, "tasks": sorted(tasks)}
 
 def _split_snippet_rows(rows):
     """Partition selected snippet rows into (build, test) groups, decorating each
@@ -964,18 +965,18 @@ def _collect_tip_rows(ctx, entries):
     return out
 
 def _format_overflow_note(overflow, noun_singular, noun_plural):
-    """Human-readable "N more <noun> — not shown (M in `task-a`, …)" line, or ""
-    when nothing overflowed. `overflow` is `{total, by_task}` from a selector.
-    Per-task attribution lets a reviewer see which jobs hold the hidden items."""
+    """Human-readable "N more <noun> — not shown (across `task-a`, …)" line, or
+    "" when nothing overflowed. `overflow` is `{total, tasks}` from a selector.
+    Lists the tasks holding hidden items WITHOUT per-task counts — a deduped
+    item shared by N tasks would make per-task counts sum past the total."""
     if not overflow:
         return ""
     total = overflow.get("total", 0)
     if total <= 0:
         return ""
-    by_task = overflow.get("by_task", []) or []
     noun = noun_singular if total == 1 else noun_plural
-    parts = ["%d in `%s`" % (e["count"], e["task_key"]) for e in by_task if e.get("task_key")]
-    suffix = " (%s)" % ", ".join(parts) if parts else ""
+    tasks = [tk for tk in (overflow.get("tasks", []) or []) if tk]
+    suffix = " (across %s)" % ", ".join(["`%s`" % tk for tk in tasks]) if tasks else ""
     return "_+ %d more %s — not shown%s._" % (total, noun, suffix)
 
 def _render_body(ctx, marker, entries, started_at, body_template, status_badges, sections, last_updated_at = "", api_usage = "", state = None, snippet_rows = None, snippet_overflow = None, repro_rows = None, fix_rows = None, repro_overflow = None, fix_overflow = None):
