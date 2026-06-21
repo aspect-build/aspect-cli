@@ -226,6 +226,7 @@ def extract_snippet_from_text(text, hit_cap, options):
     window, trunc_head, trunc_tail = _window(lines, options)
     if not window:
         return _EMPTY
+
     # A byte-cap read drops the file's tail, so the window's tail is cut too.
     trunc_tail = trunc_tail or hit_cap
     return SnippetResult(

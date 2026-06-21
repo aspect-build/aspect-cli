@@ -1,4 +1,4 @@
-"""GitHub Status Comments feature — aggregates per-task status from sibling CI jobs into one PR comment.
+"""GitHub Status Comments feature \342\200\224 aggregates per-task status from sibling CI jobs into one PR comment.
 
 Every job is both a producer (uploads its task identity + data subset as an
 artifact) and a writer (polls own-run + sibling-workflow artifacts and
@@ -11,8 +11,8 @@ across any workflow on the same PR).
 
 Comment shape is precomputed in AXL; the Jinja2 template is a pure
 renderer. `_prepare_for_render` decorates each entry with:
-  - `_severity`     "error"|"warning"|"info"|"success" — badge + row sort.
-  - `_badge_key`    "failed"|"warning"|"running"|"passed"|"aborted" — keys
+  - `_severity`     "error"|"warning"|"info"|"success" \342\200\224 badge + row sort.
+  - `_badge_key`    "failed"|"warning"|"running"|"passed"|"aborted" \342\200\224 keys
                     into `status_badges[...]`.
   - `_links_text`   Multi-link Markdown for the Links cell (omits unset URLs).
   - `_result_text`  Kind-specific Result cell text + elapsed.
@@ -21,31 +21,31 @@ Inline failure snippets: each job extracts its own (it owns the local
 test.log / action-stderr paths; sibling writers can't read them) on its
 terminal update and ships them in its status artifact under `failure_snippets`.
 The writer picks which to show across all tasks via `_select_snippets`, which
-first DEDUPES by `(label, snippet)` — the same target failing in several jobs
+first DEDUPES by `(label, snippet)` \342\200\224 the same target failing in several jobs
 collapses to one snippet attributed to all of them (`task_keys`) rather than
-rendering N identical copies — then sticky-selects (an already-shown snippet is
+rendering N identical copies \342\200\224 then sticky-selects (an already-shown snippet is
 never evicted by a later-arriving one), deterministic fill, hard-capped at
 `_MAX_COMMENT_SNIPPETS`. The chosen keys persist in the state block so selection
-can't flip-flop as sibling jobs report in. Rows render grouped under "💥 Build
-Failures" / "❌ Test Failures" (by bucket), each with a Repro/Fix-style header
-(`❌ <kind> (<tasks>) · \`<label>\` <verb>:`) and a fenced block; a `…` line
+can't flip-flop as sibling jobs report in. Rows render grouped under "\360\237\222\245 Build
+Failures" / "\342\235\214 Test Failures" (by bucket), each with a Repro/Fix-style header
+(`\342\235\214 <kind> (<tasks>) \302\267 \\`<label>\\` <verb>:`) and a fenced block; a `\342\200\246` line
 marks a head/tail-truncated log. `_split_snippet_rows` does the grouping +
 decoration.
 
 The repro / fix command sections use the same selection (`_select_sticky` over
 deduped, deterministically-sorted rows, capped at `_MAX_COMMENT_REPROS` /
 `_MAX_COMMENT_FIXES`, persisted as `shown_repros` / `shown_fixes`). Each capped
-section ends in an "N more — not shown (M in `task`, …)" note that attributes
+section ends in an "N more \342\200\224 not shown (M in `task`, \342\200\246)" note that attributes
 the hidden items per contributing task.
 
 Body-template variables:
-    marker         — HTML comment identifying this comment across PATCHes.
-    started_at     — Earliest sibling-task start time, UTC.
-    status_badges  — {badge_key -> label}.
-    rollup         — {error, warning, running, passed, aborted} counts.
-    entries        — per-task entry dicts, alphabetical by (job, name, key).
-    build_snippets / test_snippets / repro_rows / fix_rows — selected items per section.
-    *_overflow_note — "N more not shown" line for each capped section.
+    marker         \342\200\224 HTML comment identifying this comment across PATCHes.
+    started_at     \342\200\224 Earliest sibling-task start time, UTC.
+    status_badges  \342\200\224 {badge_key -> label}.
+    rollup         \342\200\224 {error, warning, running, passed, aborted} counts.
+    entries        \342\200\224 per-task entry dicts, alphabetical by (job, name, key).
+    build_snippets / test_snippets / repro_rows / fix_rows \342\200\224 selected items per section.
+    *_overflow_note \342\200\224 "N more not shown" line for each capped section.
 """
 
 load("@std//base64.axl", "base64")
@@ -171,7 +171,7 @@ _No tasks have reported yet._
 {% endif %}{{ s.snippet }}
 {% if s.trunc_tail %}…
 {% endif %}{{ s.fence }}
-{% if s.task_label %}<sub>{{ s.task_label }}</sub>
+{% if s.task_label %}<sub>in {{ s.task_noun }} {{ s.task_label }}</sub>
 {% endif %}
 {% endmacro -%}
 {% if build_snippets %}
@@ -728,7 +728,10 @@ def _select_snippets(entries, shown_keys):
         key = lambda v: (_SNIPPET_BUCKET_RANK.get(v["bucket"], 9), v["label"]),
     )
     rows, new_shown, dropped = _select_sticky(
-        candidates, shown_keys, _MAX_COMMENT_SNIPPETS, lambda v: v["_key"],
+        candidates,
+        shown_keys,
+        _MAX_COMMENT_SNIPPETS,
+        lambda v: v["_key"],
     )
 
     # Overflow over DISTINCT failures not shown, attributed to the tasks holding
@@ -757,7 +760,9 @@ def _split_snippet_rows(rows):
     """Partition selected snippet rows into (build, test) groups, decorating each
     with the render fields the template needs:
 
-      `task_label` — `task_keys` joined; rendered small below the snippet.
+      `task_label` — `task_keys` joined; rendered "in <task_noun> <task_label>"
+                     small below the snippet.
+      `task_noun`  — "task" / "tasks" for the small-text line.
       `verb`       — the header tail: "failed to build" (build), "failed" /
                      "failed in <dur>" (test), "timed out" / "timed out after
                      <dur>" (timeout). Duration is omitted when 0 (build actions
@@ -769,7 +774,9 @@ def _split_snippet_rows(rows):
     test_rows = []
     for r in rows:
         row = dict(r)
-        row["task_label"] = ", ".join(r.get("task_keys", []) or [])
+        tks = r.get("task_keys", []) or []
+        row["task_label"] = ", ".join(tks)
+        row["task_noun"] = "task" if len(tks) == 1 else "tasks"
         dur = r.get("duration_ms", 0) or 0
         dur_str = (" in " + format_duration_ms(dur)) if dur > 0 else ""
         bucket = r.get("bucket")
@@ -834,6 +841,7 @@ def _collect_repro_fix_rows(sections):
             ranks = [task_rank.get(tk, 0) for tk in r["task_keys"]] or [0]
             r["_rank"] = max(ranks)
             r["severity_emoji"] = _RANK_EMOJI.get(r["_rank"], "")
+
             # Stable identity for sticky selection — the dedup triple, persisted
             # in the state block (independent of which tasks contributed).
             r["_key"] = _command_key(r["kind"], r["command"], r["description"])
@@ -1615,9 +1623,17 @@ def _github_status_comments(ctx: FeatureContext):
         # against the global cap; the rest collapse into an "N more" note.
         all_repro_rows, all_fix_rows = _collect_repro_fix_rows(sections)
         repro_rows, repro_shown, repro_dropped = _select_sticky(
-            all_repro_rows, _prior("shown_repros"), _MAX_COMMENT_REPROS, lambda r: r["_key"])
+            all_repro_rows,
+            _prior("shown_repros"),
+            _MAX_COMMENT_REPROS,
+            lambda r: r["_key"],
+        )
         fix_rows, fix_shown, fix_dropped = _select_sticky(
-            all_fix_rows, _prior("shown_fixes"), _MAX_COMMENT_FIXES, lambda r: r["_key"])
+            all_fix_rows,
+            _prior("shown_fixes"),
+            _MAX_COMMENT_FIXES,
+            lambda r: r["_key"],
+        )
         _finalize_command_rows(repro_rows)
         _finalize_command_rows(fix_rows)
         repro_overflow = _by_task_overflow(repro_dropped)

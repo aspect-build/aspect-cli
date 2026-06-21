@@ -3238,6 +3238,7 @@ def test_log_snippet(ctx: TaskContext, tc: int, temp_dir: str) -> int:
                             "<system-out>real pytest output here</system-out></testcase></testsuite></testsuites>")
     r9 = extract_junit_failure(ctx.std, synth)
     tc = test_case(tc, r9.source.value == "none", "extract_junit_failure: synthesized 'exited with error code' → none (fall back to log)")
+
     # A real <failure> whose message happens to start similarly but HAS a body is
     # kept (only empty low-signal elements are rejected).
     real = d + "/real.xml"
@@ -3292,14 +3293,20 @@ def test_bazel_render_snippets(ctx: TaskContext, tc: int, temp_dir: str) -> int:
     r["bazel"]["failed_actions"] = [{"label": "//pkg:broken", "mnemonics": ["CppCompile"], "stderr_path": stderr1}]
     r["bazel"]["failed_action_labels"] = ["//pkg:broken"]
     r["bazel"]["failed_targets"] = [{"label": "//pkg:broken"}]
+    r["bazel"]["target_kinds"] = {"//pkg:fail_test": "py_test", "//pkg:broken": "cc_library"}
     r["bazel"]["targets_total"] = 2
 
     out = render_check_output(ctx, r, "failed", render_ctx, links, snippet_options = opts, max_snippets = max_snips)
     tc = test_case(tc, "FAILED: expected 1 got 2" in out["text"], "render: inlines failed-test log snippet")
     tc = test_case(tc, "no member named 'foo'" in out["text"], "render: inlines failed-action stderr snippet")
-    # Inline under the bucket's <details> (no nested per-row <details>), labeled
-    # by `code` span, in a fenced block.
-    tc = test_case(tc, "`//pkg:fail_test`:" in out["text"], "render: snippet labeled by code span")
+
+    # Inline under the bucket's <details> (no nested per-row <details>), with the
+    # PR-comment-style header: "❌ <kind> `<label>` <verb>:" (duration folded in
+    # for tests, "failed to build" for actions).
+    tc = test_case(tc, "❌ py_test `//pkg:fail_test` failed in 3s:" in out["text"], "render: test snippet header (kind + label + duration)")
+    tc = test_case(tc, "❌ cc_library `//pkg:broken` failed to build:" in out["text"], "render: build snippet header (kind + label)")
+
+    # The snippet-shown labels are NOT also listed in the <pre> table (no dup).
     tc = test_case(tc, "<summary><code>//pkg:fail_test</code> output</summary>" not in out["text"], "render: no nested per-row <details>")
 
     # max_snippets = 0 (or no options) disables snippets entirely.

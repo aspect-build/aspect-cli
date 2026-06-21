@@ -29,17 +29,17 @@ load(
     "DEFAULT_STATUS_BADGES",
     "MARKER_FMT",
     "bucket_entries",
+    "by_task_overflow",
+    "collect_repro_fix_rows",
     "collect_tip_rows",
     "dedup_by_run_attempt",
     "dedup_for_display",
+    "format_overflow_note",
     "lease_held",
     "max_recent_upsert_epoch",
     "merge_state",
     "parse_state",
     "prepare_for_render",
-    "collect_repro_fix_rows",
-    "by_task_overflow",
-    "format_overflow_note",
     "render_body",
     "results_subset",
     "select_snippets",
@@ -773,8 +773,11 @@ def _check_select_snippets(ctx):
     ]
     rows_dup, _, overflow_dup = select_snippets(dup, [])
     _eq("select: identical failure deduped to one row", len(rows_dup), 1)
-    _eq("select: deduped row attributes all contributing tasks",
-        rows_dup[0]["task_keys"], ["build-gha", "build-gha-debug", "test-gha"])
+    _eq(
+        "select: deduped row attributes all contributing tasks",
+        rows_dup[0]["task_keys"],
+        ["build-gha", "build-gha-debug", "test-gha"],
+    )
     _eq("select: deduped → no overflow", overflow_dup["total"], 0)
 
     # Different content for the same label is NOT deduped (distinct failures).
@@ -836,19 +839,37 @@ def _check_select_snippets(ctx):
     ])
     sel_rows, _, _ = select_snippets([snip_entry], [])
     body = render_body(
-        ctx, MARKER_FMT % 1, prepared, "", DEFAULT_BODY_TEMPLATE, DEFAULT_STATUS_BADGES,
-        bucket_entries(prepared), snippet_rows = sel_rows,
+        ctx,
+        MARKER_FMT % 1,
+        prepared,
+        "",
+        DEFAULT_BODY_TEMPLATE,
+        DEFAULT_STATUS_BADGES,
+        bucket_entries(prepared),
+        snippet_rows = sel_rows,
     )
     _eq("select: render emits Build Failures group", "## 💥 Build Failures" in body, True)
     _eq("select: render emits Test Failures group", "## ❌ Test Failures" in body, True)
-    _eq("select: build header is kind + label (no inline tasks)",
-        "❌ genrule `//pkg:broken` failed to build:" in body, True)
-    _eq("select: test header folds in duration",
-        "❌ sh_test `//pkg:fail_test` failed in 149ms:" in body, True)
-    _eq("select: timeout header uses 'timed out after <dur>'",
-        "❌ sh_test `//pkg:slow_test` timed out after 1m:" in body, True)
-    _eq("select: contributing tasks render in a <sub> line below the snippet",
-        "<sub>test-task</sub>" in body, True)
+    _eq(
+        "select: build header is kind + label (no inline tasks)",
+        "❌ genrule `//pkg:broken` failed to build:" in body,
+        True,
+    )
+    _eq(
+        "select: test header folds in duration",
+        "❌ sh_test `//pkg:fail_test` failed in 149ms:" in body,
+        True,
+    )
+    _eq(
+        "select: timeout header uses 'timed out after <dur>'",
+        "❌ sh_test `//pkg:slow_test` timed out after 1m:" in body,
+        True,
+    )
+    _eq(
+        "select: contributing task renders 'in task' below the snippet",
+        "<sub>in task test-task</sub>" in body,
+        True,
+    )
     _eq("select: render includes snippet text", "FAILED: expected 1 got 2" in body, True)
     _eq("select: no per-row <details>", "<details open><summary>" not in body, True)
 
@@ -857,11 +878,21 @@ def _check_select_snippets(ctx):
     over_entry = _entry_with_snippets("test-task", over_snips)
     over_rows, _, over_of = select_snippets([over_entry], [])
     over_body = render_body(
-        ctx, MARKER_FMT % 1, prepared, "", DEFAULT_BODY_TEMPLATE, DEFAULT_STATUS_BADGES,
-        bucket_entries(prepared), snippet_rows = over_rows, snippet_overflow = over_of,
+        ctx,
+        MARKER_FMT % 1,
+        prepared,
+        "",
+        DEFAULT_BODY_TEMPLATE,
+        DEFAULT_STATUS_BADGES,
+        bucket_entries(prepared),
+        snippet_rows = over_rows,
+        snippet_overflow = over_of,
     )
-    _eq("select: overflow note lists holding task with 'across'",
-        "_+ 1 more failure — not shown (across `test-task`)._" in over_body, True)
+    _eq(
+        "select: overflow note lists holding task with 'across'",
+        "_+ 1 more failure — not shown (across `test-task`)._" in over_body,
+        True,
+    )
 
     # Fence injection: a snippet containing a ``` run must not break out of the
     # code block — the fence widens past the longest run so it stays enclosed.
@@ -871,8 +902,14 @@ def _check_select_snippets(ctx):
     evil_rows, _, _ = select_snippets([evil], [])
     _eq("select: fence widened past inner backticks", evil_rows[0]["fence"], "````")
     evil_body = render_body(
-        ctx, MARKER_FMT % 1, prepared, "", DEFAULT_BODY_TEMPLATE, DEFAULT_STATUS_BADGES,
-        bucket_entries(prepared), snippet_rows = evil_rows,
+        ctx,
+        MARKER_FMT % 1,
+        prepared,
+        "",
+        DEFAULT_BODY_TEMPLATE,
+        DEFAULT_STATUS_BADGES,
+        bucket_entries(prepared),
+        snippet_rows = evil_rows,
     )
     _eq(
         "select: injected fence does not escape (heading stays literal)",
@@ -887,11 +924,20 @@ def _check_select_snippets(ctx):
     ])
     trunc_rows, _, _ = select_snippets([trunc], [])
     trunc_body = render_body(
-        ctx, MARKER_FMT % 1, prepared, "", DEFAULT_BODY_TEMPLATE, DEFAULT_STATUS_BADGES,
-        bucket_entries(prepared), snippet_rows = trunc_rows,
+        ctx,
+        MARKER_FMT % 1,
+        prepared,
+        "",
+        DEFAULT_BODY_TEMPLATE,
+        DEFAULT_STATUS_BADGES,
+        bucket_entries(prepared),
+        snippet_rows = trunc_rows,
     )
-    _eq("select: head+tail truncation renders … above and below",
-        "```text\n…\nmiddle output\n…\n```" in trunc_body, True)
+    _eq(
+        "select: head+tail truncation renders … above and below",
+        "```text\n…\nmiddle output\n…\n```" in trunc_body,
+        True,
+    )
 
 def _check_select_sticky():
     """_select_sticky: the generic sticky + deterministic + capped core shared
@@ -924,6 +970,7 @@ def _check_by_task_overflow():
     ]
     of = by_task_overflow(dropped)
     _eq("by_task_overflow: total counts distinct dropped items", of["total"], 2)
+
     # task-a + task-b hold hidden items; listed once each, sorted.
     _eq("by_task_overflow: tasks deduped + sorted", of["tasks"], ["task-a", "task-b"])
     _eq("by_task_overflow: empty → zero", by_task_overflow([]), {"total": 0, "tasks": []})
@@ -932,12 +979,16 @@ def _check_format_overflow_note():
     """_format_overflow_note: singular/plural + 'across' task list, "" when empty."""
     _eq("overflow note: empty → ''", format_overflow_note({"total": 0, "tasks": []}, "x", "xs"), "")
     _eq("overflow note: None → ''", format_overflow_note(None, "x", "xs"), "")
-    _eq("overflow note: singular noun",
+    _eq(
+        "overflow note: singular noun",
         format_overflow_note({"total": 1, "tasks": ["t"]}, "failure", "failures"),
-        "_+ 1 more failure — not shown (across `t`)._")
-    _eq("overflow note: plural + multi-task 'across'",
+        "_+ 1 more failure — not shown (across `t`)._",
+    )
+    _eq(
+        "overflow note: plural + multi-task 'across'",
         format_overflow_note({"total": 5, "tasks": ["a", "b"]}, "failure", "failures"),
-        "_+ 5 more failures — not shown (across `a`, `b`)._")
+        "_+ 5 more failures — not shown (across `a`, `b`)._",
+    )
 
 def _check_parse_state_absent():
     """parse_state returns None when the body has no state block —

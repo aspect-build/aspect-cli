@@ -2677,10 +2677,13 @@ FIX_COMMANDS_BLOCK = """{%- if fix_commands %}
 # Per-row inline failure snippets: a collapsed code block under a failure table,
 # one per row carrying a `snippet` (attached in build_details_data, budget-gated).
 # Rendered as a Jinja2 macro so each bucket reuses the same markup.
+# Renders a row's failure header (always) + its code block (when `snippet` is
+# still set). The trim ladder can pop `snippet` under the size cap to shed the
+# heavy log while keeping the one-line header visible.
 SNIPPET_MACRO = """{% macro failure_snippets(rows) %}
-{%- for t in rows %}{% if t.snippet %}
-
-`{{ t.label }}`:
+{%- for t in rows %}
+❌ {{ t.kind }} `{{ t.label }}` {{ t.snippet_verb }}:
+{%- if t.snippet %}
 {{ t.snippet_fence }}text
 {% if t.snippet_trunc_head %}…
 {% endif %}{{ t.snippet }}
@@ -2701,10 +2704,10 @@ BAZEL_TARGETS_TEMPLATE = """### 🎯 Bazel targets ({{ total_targets }})
 :hourglass_flowing_sand: **Build in progress** — target data will appear here as Bazel reports them.
 {% endif %}
 {%- else %}
-{%- if build_failures or derived_failures %}
+{%- if build_failures or build_failures_snippets or derived_failures %}
 <details open>
 <summary>{{ build_failures_icon }} {{ build_failures_header }}</summary>
-
+{{ failure_snippets(build_failures_snippets) }}
 {% if build_failures %}<pre>
 {{- build_failures_table_head }}
 {{ build_failures_table_sep }}
@@ -2712,7 +2715,6 @@ BAZEL_TARGETS_TEMPLATE = """### 🎯 Bazel targets ({{ total_targets }})
 {{ t.aligned_label }} | {{ t.aligned_kind }} | {{ t.aligned_mnemonic }}
 {%- endfor %}
 {% if build_failures_overflow %}_{{ build_failures_overflow }} more root failure(s) not shown._{% endif %}</pre>
-{{ failure_snippets(build_failures) }}
 {% endif %}
 {% if derived_failures %}
 <details><summary>{{ derived_failures_count }} more target{{ derived_failures_plural }} blocked by a failed dependency</summary>
@@ -2729,31 +2731,31 @@ BAZEL_TARGETS_TEMPLATE = """### 🎯 Bazel targets ({{ total_targets }})
 </details>
 
 {% endif %}
-{%- if failed_tests %}
+{%- if failed_tests or failed_tests_snippets %}
 <details open>
 <summary>{{ failed_tests_icon }} {{ failed_tests_header }}</summary>
-
-<pre>
+{{ failure_snippets(failed_tests_snippets) }}
+{% if failed_tests %}<pre>
 {{- failed_tests_table_head }}
 {{ failed_tests_table_sep }}
 {%- for t in failed_tests %}
 {{ t.aligned_label }} | {{ t.aligned_kind }} | {{ t.aligned_duration }}{% if failed_tests_has_artifacts %} | {{ t.aligned_artifacts }}{% endif %}
 {%- endfor %}</pre>
-{{ failure_snippets(failed_tests) }}
+{% endif %}
 </details>
 
 {% endif %}
-{%- if timeout_tests %}
+{%- if timeout_tests or timeout_tests_snippets %}
 <details open>
 <summary>{{ timeout_tests_icon }} {{ timeout_tests_header }}</summary>
-
-<pre>
+{{ failure_snippets(timeout_tests_snippets) }}
+{% if timeout_tests %}<pre>
 {{- timeout_tests_table_head }}
 {{ timeout_tests_table_sep }}
 {%- for t in timeout_tests %}
 {{ t.aligned_label }} | {{ t.aligned_kind }} | {{ t.aligned_duration }}{% if timeout_tests_has_artifacts %} | {{ t.aligned_artifacts }}{% endif %}
 {%- endfor %}</pre>
-{{ failure_snippets(timeout_tests) }}
+{% endif %}
 </details>
 
 {% endif %}
@@ -3619,10 +3621,19 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
             return
         _apply_snippet(entry, res)
 
+    def _without_snippet(rows):
+        """Rows that did NOT get an inline snippet — these go in the <pre> table;
+        the rows that DID are rendered as snippet blocks instead (no duplicate)."""
+        return [r for r in rows if not r.get("snippet")]
+
+    def _with_snippet(rows):
+        """Rows that got an inline snippet (rendered by the snippet macro)."""
+        return [r for r in rows if r.get("snippet")]
+
     # Failures table: Label | Target Type | Mnemonic (comma-joined when a target
     # failed multiple actions). Build-failure snippets are attached first so they
     # win the shared budget over test failures.
-    _build_failures_for_table = []
+    _build_failures_rows = []
     for a in data["bazel"].get("failed_actions", []):
         original_label = a.get("label", "")
         mnemonics = a.get("mnemonics", []) or []
@@ -3633,9 +3644,12 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
         }
         if _snippets_enabled:
             _attach_action_snippet(a, row)
-        _build_failures_for_table.append(row)
+        _build_failures_rows.append(row)
+
+    # Snippet rows render as blocks; the table lists only the rest.
+    _build_failures_snippets = _with_snippet(_build_failures_rows)
     _build_failures_table = _align_for_pre(
-        _build_failures_for_table,
+        _without_snippet(_build_failures_rows),
         has_duration = False,
         has_mnemonic = True,
     )
@@ -3655,11 +3669,28 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
     _derived_table = _align_for_pre(derived_failures, has_duration = False)
     _skipped_table = _align_for_pre(skipped_for_table, has_duration = False)
 
-    # Failed/timeout/flaky buckets use the same aligned shape as passed/cached.
-    # Failed + timeout get snippets (flaky is transient noise — labels only).
-    _failed_table = _align_for_pre(_failed_with_snippets(failed_by_status["failed"]), has_duration = True)
-    _timeout_table = _align_for_pre(_failed_with_snippets(failed_by_status["timeout"]), has_duration = True)
+    # Failed/timeout buckets: rows with a snippet render as blocks, the rest fill
+    # the aligned <pre> table (no duplication). Flaky is transient noise — table
+    # only, no snippets.
+    _failed_rows = _failed_with_snippets(failed_by_status["failed"])
+    _timeout_rows = _failed_with_snippets(failed_by_status["timeout"])
+    _failed_snippets = _with_snippet(_failed_rows)
+    _timeout_snippets = _with_snippet(_timeout_rows)
+    _failed_table = _align_for_pre(_without_snippet(_failed_rows), has_duration = True)
+    _timeout_table = _align_for_pre(_without_snippet(_timeout_rows), has_duration = True)
     _flaky_table = _align_for_pre(_with_duration(data["bazel"].get("flaky_tests", [])), has_duration = True)
+
+    # Header verb for inline snippet blocks (consistent with the PR comment):
+    # "failed to build" / "failed [in <dur>]" / "timed out [after <dur>]". `dur`
+    # is the pre-formatted duration string ("" when unknown, e.g. build actions).
+    def _decorate_snippet_verb(rows, base, dur_word):
+        for r in rows:
+            dur = r.get("duration", "")
+            r["snippet_verb"] = (base + " " + dur_word + " " + dur) if (dur_word and dur) else base
+
+    _decorate_snippet_verb(_build_failures_snippets, "failed to build", "")
+    _decorate_snippet_verb(_failed_snippets, "failed", "in")
+    _decorate_snippet_verb(_timeout_snippets, "timed out", "after")
 
     # One global "more output not shown" note across the snippet-eligible buckets.
     # Only meaningful once at least one snippet rendered AND more failures remain.
@@ -3726,6 +3757,8 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
         "build_failures": _build_failures_table["rows"],
         "build_failures_table_head": _build_failures_table["header"],
         "build_failures_table_sep": _build_failures_table["separator"],
+        # Rows that got an inline snippet — rendered as blocks, NOT in the table.
+        "build_failures_snippets": _build_failures_snippets,
         "build_failures_count": build_failure_count,
         "build_failures_header": _bucket_header(_BUCKET_FAILED_TO_BUILD, build_failure_count),
         "build_failures_overflow": str(failed_actions_overflow) if failed_actions_overflow > 0 else "",
@@ -3750,12 +3783,14 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
         "failed_tests_table_head": _failed_table["header"],
         "failed_tests_table_sep": _failed_table["separator"],
         "failed_tests_has_artifacts": _failed_table.get("has_artifacts", False),
+        "failed_tests_snippets": _failed_snippets,
         "failed_tests_header": _bucket_header(_BUCKET_TEST_FAILED, failed_test_count),
         "failed_tests_icon": _BUCKET_ICONS[_BUCKET_TEST_FAILED],
         "timeout_tests": _timeout_table["rows"],
         "timeout_tests_table_head": _timeout_table["header"],
         "timeout_tests_table_sep": _timeout_table["separator"],
         "timeout_tests_has_artifacts": _timeout_table.get("has_artifacts", False),
+        "timeout_tests_snippets": _timeout_snippets,
         "timeout_tests_header": _bucket_header(_BUCKET_TEST_TIMEOUT, timeout_test_count),
         "timeout_tests_icon": _BUCKET_ICONS[_BUCKET_TEST_TIMEOUT],
         "flaky_tests": _flaky_table["rows"],
@@ -4088,6 +4123,9 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
     #   1. Build Metadata  2. Workspace Status  3. Invocation  4. Performance
     #   5. parsed-options lists  6. halve built_targets  7. halve passed_tests
     #   8. drop cached_tests (last resort)
+    # Shed the heavy log body but keep each failure's one-line header (the macro
+    # renders the header whenever the row is present; the code block only when
+    # `snippet` is still set).
     def _drop_snippets(rows):
         for r in rows:
             if "snippet" in r:
@@ -4096,17 +4134,17 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
     if len(details_text) > _DETAILS_LIMIT and max_snippets > 0:
         if debug_render:
             trace.log("debug [render_check_output]   OVER LIMIT (" + str(len(details_text)) +
-                      "), dropping inline snippets from secondary failure buckets")
-        _drop_snippets(details_data.get("failed_tests", []))
-        _drop_snippets(details_data.get("timeout_tests", []))
+                      "), dropping inline snippet bodies from secondary failure buckets")
+        _drop_snippets(details_data.get("failed_tests_snippets", []))
+        _drop_snippets(details_data.get("timeout_tests_snippets", []))
         details_data["snippets_overflow"] = ""
         details_text = ctx.template.jinja2(details_tmpl, data = details_data)
 
     if len(details_text) > _DETAILS_LIMIT and max_snippets > 0:
         if debug_render:
             trace.log("debug [render_check_output]   still OVER (" + str(len(details_text)) +
-                      "), dropping all inline snippets")
-        _drop_snippets(details_data.get("build_failures", []))
+                      "), dropping all inline snippet bodies")
+        _drop_snippets(details_data.get("build_failures_snippets", []))
         details_text = ctx.template.jinja2(details_tmpl, data = details_data)
 
     if len(details_text) > _DETAILS_LIMIT:
