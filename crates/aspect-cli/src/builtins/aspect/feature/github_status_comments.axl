@@ -26,8 +26,11 @@ collapses to one snippet attributed to all of them (`task_keys`) rather than
 rendering N identical copies — then sticky-selects (an already-shown snippet is
 never evicted by a later-arriving one), deterministic fill, hard-capped at
 `_MAX_COMMENT_SNIPPETS`. The chosen keys persist in the state block so selection
-can't flip-flop as sibling jobs report in. Snippet blocks render expanded
-(`<details open>`); the reader collapses what they're done with.
+can't flip-flop as sibling jobs report in. Rows render grouped under "💥 Build
+Failures" / "❌ Test Failures" (by bucket), each with a Repro/Fix-style header
+(`❌ <kind> (<tasks>) · \`<label>\` <verb>:`) and a fenced block; a `…` line
+marks a head/tail-truncated log. `_split_snippet_rows` does the grouping +
+decoration.
 
 The repro / fix command sections use the same selection (`_select_sticky` over
 deduped, deterministically-sorted rows, capped at `_MAX_COMMENT_REPROS` /
@@ -41,7 +44,7 @@ Body-template variables:
     status_badges  — {badge_key -> label}.
     rollup         — {error, warning, running, passed, aborted} counts.
     entries        — per-task entry dicts, alphabetical by (job, name, key).
-    snippet_rows / repro_rows / fix_rows — globally-selected items per section.
+    build_snippets / test_snippets / repro_rows / fix_rows — selected items per section.
     *_overflow_note — "N more not shown" line for each capped section.
 """
 
@@ -161,21 +164,25 @@ _No tasks have reported yet._
 {{ section("failing",     "❌", sections.failing) -}}
 {{ section("flagged",     "⚠️", sections.flagged) -}}
 {{ section("successful",  "✅", sections.successful) -}}
-{% if snippet_rows %}
-## 🔎 Failure output
-{% for s in snippet_rows %}
-<details open><summary><code>{{ s.label }}</code>{% if s.bucket == "timeout" %} (timed out){% endif %} output{% if s.task_keys %} · {{ s.task_keys|join(", ") }}{% endif %}</summary>
-
+{% macro snippet_block(s) %}
+❌ {{ s.kind or (s.bucket if s.bucket != "timeout" else "test") }}{% if s.task_label %} ({{ s.task_label }}){% endif %} · `{{ s.label }}` {{ s.verb }}:
 {{ s.fence }}text
-{{ s.snippet }}
-{{ s.fence }}
-{% if s.truncated %}_…output truncated_{% endif %}
-</details>
-{% endfor %}
+{% if s.trunc_head %}…
+{% endif %}{{ s.snippet }}
+{% if s.trunc_tail %}…
+{% endif %}{{ s.fence }}
+{% endmacro -%}
+{% if build_snippets %}
+## 💥 Build Failures
+{% for s in build_snippets %}{{ snippet_block(s) }}{% endfor %}
+{% endif -%}
+{% if test_snippets %}
+## ❌ Test Failures
+{% for s in test_snippets %}{{ snippet_block(s) }}{% endfor %}
+{% endif -%}
 {% if snippet_overflow_note %}
 {{ snippet_overflow_note }}
 {% endif %}
-{% endif -%}
 {% if tip_rows %}
 ## 💡 Tips
 {% for tip in tip_rows %}
@@ -699,6 +706,8 @@ def _select_snippets(entries, shown_keys):
                     "bucket": s.get("bucket", "test"),
                     "snippet": snippet_text,
                     "truncated": bool(s.get("truncated", False)),
+                    "trunc_head": bool(s.get("trunc_head", False)),
+                    "trunc_tail": bool(s.get("trunc_tail", False)),
                     # Fence sized past any backtick run so log content can't close
                     # the code block early (CommonMark fence-injection guard).
                     "fence": code_fence_for(snippet_text),
@@ -739,6 +748,28 @@ def _by_task_overflow(dropped):
         key = lambda x: (-x["count"], x["task_key"]),
     )
     return {"total": total, "by_task": rows}
+
+def _split_snippet_rows(rows):
+    """Partition selected snippet rows into (build, test) groups, decorating each
+    with the render fields the template needs:
+
+      `task_label` — `task_keys` joined for the header (matches Repro/Fix).
+      `verb`       — "failed to build" (build bucket) / "failed" (test/timeout).
+
+    The "build" bucket is action-stderr failures; "test"/"timeout" are test
+    failures (timeout adds a "(timed out)" rider, kept on the row's `bucket`)."""
+    build_rows = []
+    test_rows = []
+    for r in rows:
+        row = dict(r)
+        row["task_label"] = ", ".join(r.get("task_keys", []) or [])
+        if r.get("bucket") == "build":
+            row["verb"] = "failed to build"
+            build_rows.append(row)
+        else:
+            row["verb"] = "timed out" if r.get("bucket") == "timeout" else "failed"
+            test_rows.append(row)
+    return (build_rows, test_rows)
 
 # Per-bucket severity rank (highest first). Drives the per-row emoji and
 # in-section ordering.
@@ -960,6 +991,7 @@ def _render_body(ctx, marker, entries, started_at, body_template, status_badges,
         _finalize_command_rows(repro_rows)
         _finalize_command_rows(fix_rows)
     tip_rows = _collect_tip_rows(ctx, entries)
+    build_snippets, test_snippets = _split_snippet_rows(snippet_rows or [])
     body = ctx.template.jinja2(body_template, data = {
         "marker": marker,
         "entries": entries,
@@ -971,7 +1003,10 @@ def _render_body(ctx, marker, entries, started_at, body_template, status_badges,
         "repro_overflow_note": _format_overflow_note(repro_overflow, "reproduce command", "reproduce commands"),
         "fix_overflow_note": _format_overflow_note(fix_overflow, "fix command", "fix commands"),
         "tip_rows": tip_rows,
-        "snippet_rows": snippet_rows or [],
+        # Snippets grouped by bucket so the template renders a "Build Failures" /
+        # "Test Failures" section; each row decorated with `task_label` + `verb`.
+        "build_snippets": build_snippets,
+        "test_snippets": test_snippets,
         "snippet_overflow_note": _format_overflow_note(snippet_overflow, "failure", "failures"),
         "api_usage": api_usage,
         "last_updated_at": last_updated_at,

@@ -735,8 +735,17 @@ def _check_state_serialize_round_trip():
     _eq("round-trip shown_repros", parsed["shown_repros"], state["shown_repros"])
     _eq("round-trip shown_fixes", parsed["shown_fixes"], state["shown_fixes"])
 
-def _snip(label, bucket = "test", text = "boom", truncated = False, kind = ""):
-    return {"label": label, "bucket": bucket, "snippet": text, "truncated": truncated, "kind": kind}
+def _snip(label, bucket = "test", text = "boom", truncated = False, kind = "", trunc_head = False, trunc_tail = False):
+    # kind defaults to the bucket word ("build"/"test") used in the header line.
+    return {
+        "label": label,
+        "bucket": bucket,
+        "snippet": text,
+        "truncated": truncated,
+        "trunc_head": trunc_head,
+        "trunc_tail": trunc_tail,
+        "kind": kind or ("build" if bucket == "build" else "test"),
+    }
 
 def _entry_with_snippets(key, snippets):
     return {"name": key, "key": key, "failure_snippets": snippets}
@@ -814,25 +823,31 @@ def _check_select_snippets(ctx):
     rows5, _, _ = select_snippets([junk], [])
     _eq("select: malformed/empty snippets skipped", len(rows5), 0)
 
-    # End-to-end: selected rows render a "Failure output" section with a labeled,
-    # task-attributed, OPEN-by-default collapsible block + the truncated hint.
+    # End-to-end: rows render grouped under "Build Failures" / "Test Failures",
+    # no per-row <details>, header matching the Repro/Fix treatment, with the
+    # contributing task(s) and a fenced block.
     failed_entry = _entry("test", "test-task", "test-gha", "bazel_results", "failed", make_test_failed(), 90000)
     prepared = prepare_for_render([failed_entry])
     snip_entry = _entry_with_snippets("test-task", [
-        _snip("//pkg:fail_test", "test", "FAILED: expected 1 got 2", True),
-        _snip("//pkg:slow_test", "timeout", "timed out after 60s", False),
+        _snip("//pkg:broken", "build", "no member named 'foo'"),
+        _snip("//pkg:fail_test", "test", "FAILED: expected 1 got 2"),
+        _snip("//pkg:slow_test", "timeout", "timed out after 60s"),
     ])
     sel_rows, _, _ = select_snippets([snip_entry], [])
     body = render_body(
         ctx, MARKER_FMT % 1, prepared, "", DEFAULT_BODY_TEMPLATE, DEFAULT_STATUS_BADGES,
         bucket_entries(prepared), snippet_rows = sel_rows,
     )
-    _eq("select: render emits Failure output section", "## 🔎 Failure output" in body, True)
-    _eq("select: render details default to open",
-        "<details open><summary><code>//pkg:fail_test</code> output · test-task</summary>" in body, True)
+    _eq("select: render emits Build Failures group", "## 💥 Build Failures" in body, True)
+    _eq("select: render emits Test Failures group", "## ❌ Test Failures" in body, True)
+    _eq("select: build header matches repro/fix treatment",
+        "❌ build (test-task) · `//pkg:broken` failed to build:" in body, True)
+    _eq("select: test header matches repro/fix treatment",
+        "❌ test (test-task) · `//pkg:fail_test` failed:" in body, True)
+    _eq("select: timeout header uses 'timed out' verb",
+        "❌ test (test-task) · `//pkg:slow_test` timed out:" in body, True)
     _eq("select: render includes snippet text", "FAILED: expected 1 got 2" in body, True)
-    _eq("select: render flags truncation", "_…output truncated_" in body, True)
-    _eq("select: render marks timeout bucket", "(timed out) output · test-task</summary>" in body, True)
+    _eq("select: no per-row <details>", "<details open><summary>" not in body, True)
 
     # Overflow note renders with per-task attribution (1 distinct dropped failure).
     over_snips = [_snip("//pkg:t%d" % i, "test", "boom %d" % i) for i in range(6)]
@@ -861,6 +876,19 @@ def _check_select_snippets(ctx):
         "````text\nbefore\n```\n# fake heading\n```\nafter\n````" in evil_body,
         True,
     )
+
+    # Truncation markers: a head-and-tail-cut snippet renders a `…` line above
+    # and below the body.
+    trunc = _entry_with_snippets("t-task", [
+        _snip("//pkg:t", "test", "middle output", trunc_head = True, trunc_tail = True),
+    ])
+    trunc_rows, _, _ = select_snippets([trunc], [])
+    trunc_body = render_body(
+        ctx, MARKER_FMT % 1, prepared, "", DEFAULT_BODY_TEMPLATE, DEFAULT_STATUS_BADGES,
+        bucket_entries(prepared), snippet_rows = trunc_rows,
+    )
+    _eq("select: head+tail truncation renders … above and below",
+        "```text\n…\nmiddle output\n…\n```" in trunc_body, True)
 
 def _check_select_sticky():
     """_select_sticky: the generic sticky + deterministic + capped core shared

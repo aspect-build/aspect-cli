@@ -2679,13 +2679,13 @@ FIX_COMMANDS_BLOCK = """{%- if fix_commands %}
 # Rendered as a Jinja2 macro so each bucket reuses the same markup.
 SNIPPET_MACRO = """{% macro failure_snippets(rows) %}
 {%- for t in rows %}{% if t.snippet %}
-<details open><summary><code>{{ t.label }}</code> output</summary>
 
+`{{ t.label }}`:
 {{ t.snippet_fence }}text
-{{ t.snippet }}
-{{ t.snippet_fence }}
-{% if t.snippet_truncated %}_…output truncated_{% endif %}
-</details>
+{% if t.snippet_trunc_head %}…
+{% endif %}{{ t.snippet }}
+{% if t.snippet_trunc_tail %}…
+{% endif %}{{ t.snippet_fence }}
 {% endif %}{%- endfor %}
 {%- endmacro %}"""
 
@@ -3587,6 +3587,17 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
     _snippets_enabled = std != None and max_snippets > 0 and snippet_options != None
     _snippet_budget = [max_snippets if _snippets_enabled else 0]
 
+    def _apply_snippet(entry, res):
+        """Set the snippet render fields on a table row from a SnippetResult.
+        `snippet_fence` is sized past any backtick run so log content can't close
+        the code block early; `snippet_trunc_head`/`_tail` drive the `…` markers."""
+        entry["snippet"] = res.text
+        entry["snippet_truncated"] = res.truncated
+        entry["snippet_trunc_head"] = res.trunc_head
+        entry["snippet_trunc_tail"] = res.trunc_tail
+        entry["snippet_fence"] = code_fence_for(res.text)
+        _snippet_budget[0] -= 1
+
     def _attach_test_snippet(entry):
         """Read a failed test's snippet, preferring JUnit test.xml over test.log."""
         if _snippet_budget[0] <= 0:
@@ -3597,13 +3608,7 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
             res = extract_snippet(std, detail.get("log_path", ""), snippet_options)
         if not has_snippet(res):
             return
-        entry["snippet"] = res.text
-        entry["snippet_truncated"] = res.truncated
-
-        # Fence sized past any backtick run in the body so log content can't
-        # close the code block early (CommonMark fence-injection guard).
-        entry["snippet_fence"] = code_fence_for(res.text)
-        _snippet_budget[0] -= 1
+        _apply_snippet(entry, res)
 
     def _attach_action_snippet(action, entry):
         """Read a failed action's stderr snippet (by path) onto the table row."""
@@ -3612,10 +3617,7 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
         res = extract_snippet(std, action.get("stderr_path", ""), snippet_options)
         if not has_snippet(res):
             return
-        entry["snippet"] = res.text
-        entry["snippet_truncated"] = res.truncated
-        entry["snippet_fence"] = code_fence_for(res.text)
-        _snippet_budget[0] -= 1
+        _apply_snippet(entry, res)
 
     # Failures table: Label | Target Type | Mnemonic (comma-joined when a target
     # failed multiple actions). Build-failure snippets are attached first so they
@@ -3938,6 +3940,8 @@ def extract_failure_snippets(std, data, snippet_options, max_per_task):
             "bucket": bucket,
             "snippet": res.text,
             "truncated": res.truncated,
+            "trunc_head": res.trunc_head,
+            "trunc_tail": res.trunc_tail,
         })
 
     # Build-action stderr first (precedence), then failed tests, then timeouts.

@@ -50,8 +50,12 @@ SnippetResult = record(
     # Cleaned snippet body, newline-joined, no code fence. "" when source=none.
     text = field(str, default = ""),
     # True when lines were elided (windowed/over max_lines) or the read hit the
-    # byte cap — surfaces a "…truncated" hint on the surface.
+    # byte cap. `truncated` is the OR of the two below (back-compat); `trunc_head`
+    # / `trunc_tail` say which end was cut, so the renderer places a `…` marker
+    # only on the side that lost content.
     truncated = field(bool, default = False),
+    trunc_head = field(bool, default = False),
+    trunc_tail = field(bool, default = False),
     source = field(SnippetSource, default = SnippetSource("none")),
 )
 
@@ -187,16 +191,17 @@ def _window(lines, options):
     Anchors on the last failure marker (failures usually report near the end);
     emits `[anchor - context_before, anchor + context_after]`, then caps to
     max_lines keeping the marker. With no marker, returns the tail. Returns
-    (window_lines, elided) where `elided` is True if any line was dropped.
+    (window_lines, trunc_head, trunc_tail) — whether lines were dropped before /
+    after the window (so the renderer can place a `…` marker on each cut side).
     """
     total = len(lines)
     if total <= options.max_lines:
-        return (lines, False)
+        return (lines, False, False)
 
     anchor = _last_marker_index(lines)
     if anchor < 0:
-        # No marker — trust the tail.
-        return (lines[total - options.max_lines:], True)
+        # No marker — trust the tail (head dropped, nothing after).
+        return (lines[total - options.max_lines:], True, False)
 
     start = anchor - options.context_before
     if start < 0:
@@ -204,12 +209,11 @@ def _window(lines, options):
     end = anchor + options.context_after + 1
     if end > total:
         end = total
-    window = lines[start:end]
 
     # Enforce max_lines, biasing toward keeping the marker (drop from the front).
-    if len(window) > options.max_lines:
-        window = window[len(window) - options.max_lines:]
-    return (window, True)
+    if end - start > options.max_lines:
+        start = end - options.max_lines
+    return (lines[start:end], start > 0, end < total)
 
 def extract_snippet_from_text(text, hit_cap, options):
     """Pure: turn raw log `text` into a SnippetResult via tail-with-error-anchor
@@ -219,12 +223,16 @@ def extract_snippet_from_text(text, hit_cap, options):
     lines = _clean_lines(text)
     if not lines:
         return _EMPTY
-    window, elided = _window(lines, options)
+    window, trunc_head, trunc_tail = _window(lines, options)
     if not window:
         return _EMPTY
+    # A byte-cap read drops the file's tail, so the window's tail is cut too.
+    trunc_tail = trunc_tail or hit_cap
     return SnippetResult(
         text = "\n".join(window),
-        truncated = elided or hit_cap,
+        truncated = trunc_head or trunc_tail,
+        trunc_head = trunc_head,
+        trunc_tail = trunc_tail,
         source = SnippetSource("log"),
     )
 
@@ -335,10 +343,12 @@ def extract_junit_failure_from_text(xml, options):
     lines = _clean_lines("\n".join(parts))
     if not lines:
         return _EMPTY
-    window, elided = _window(lines, options)
+    window, trunc_head, trunc_tail = _window(lines, options)
     return SnippetResult(
         text = "\n".join(window),
-        truncated = elided,
+        truncated = trunc_head or trunc_tail,
+        trunc_head = trunc_head,
+        trunc_tail = trunc_tail,
         source = SnippetSource("xml"),
     )
 

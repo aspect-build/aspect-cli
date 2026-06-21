@@ -3297,7 +3297,10 @@ def test_bazel_render_snippets(ctx: TaskContext, tc: int, temp_dir: str) -> int:
     out = render_check_output(ctx, r, "failed", render_ctx, links, snippet_options = opts, max_snippets = max_snips)
     tc = test_case(tc, "FAILED: expected 1 got 2" in out["text"], "render: inlines failed-test log snippet")
     tc = test_case(tc, "no member named 'foo'" in out["text"], "render: inlines failed-action stderr snippet")
-    tc = test_case(tc, "<summary><code>//pkg:fail_test</code> output</summary>" in out["text"], "render: snippet wrapped in labeled <details>")
+    # Inline under the bucket's <details> (no nested per-row <details>), labeled
+    # by `code` span, in a fenced block.
+    tc = test_case(tc, "`//pkg:fail_test`:" in out["text"], "render: snippet labeled by code span")
+    tc = test_case(tc, "<summary><code>//pkg:fail_test</code> output</summary>" not in out["text"], "render: no nested per-row <details>")
 
     # max_snippets = 0 (or no options) disables snippets entirely.
     out_off = render_check_output(ctx, r, "failed", render_ctx, links)
@@ -3323,6 +3326,20 @@ def test_bazel_render_snippets(ctx: TaskContext, tc: int, temp_dir: str) -> int:
     r2["bazel"]["targets_total"] = 3
     out2 = render_check_output(ctx, r2, "failed", render_ctx, links, snippet_options = SnippetOptions(max_lines = 15), max_snippets = 1)
     tc = test_case(tc, "more failure" in out2["text"] and "output not shown" in out2["text"], "render: budget overflow note shown")
+
+    # Truncation markers: a long no-marker log keeps the tail and shows a leading
+    # `…` for the dropped head (max_lines small forces windowing).
+    big = d + "/big.log"
+    ctx.std.fs.write(big, "\n".join(["line %d" % i for i in range(50)]) + "\n")
+    r3 = init_data()
+    r3["bazel"]["build_command"] = "test"
+    r3["bazel"]["failed_test_total"] = 1
+    r3["bazel"]["failed_tests"] = [{"label": "//pkg:big_test", "cached": False, "duration_ms": 10, "status": "failed"}]
+    r3["bazel"]["test_details"] = {"//pkg:big_test": {"log_path": big, "xml_path": "", "duration_ms": 10}}
+    r3["bazel"]["targets_total"] = 1
+    out3 = render_check_output(ctx, r3, "failed", render_ctx, links, snippet_options = SnippetOptions(max_lines = 5), max_snippets = 1)
+    tc = test_case(tc, "…\nline 45" in out3["text"], "render: dropped-head truncation marker (leading …)")
+    tc = test_case(tc, "line 49" in out3["text"], "render: windowed snippet keeps the tail")
 
     ctx.std.fs.remove_dir_all(d)
     return tc
