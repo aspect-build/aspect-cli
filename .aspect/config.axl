@@ -32,6 +32,7 @@ load("@aspect//lib/runnable_test.axl", "runnable_tests")
 load("@aspect//lib/runner_job_history_test.axl", "runner_job_history_tests")
 load("@aspect//lib/sandbox_recovery_test.axl", "sandbox_recovery_tests")
 load("@aspect//lib/tar_test.axl", "tar_tests")
+load("@aspect//lib/template_styles_test.axl", "template_styles_tests")
 load("@aspect//lib/tips_test.axl", "tips_tests")
 load("@aspect//lib/wrapper_test.axl", "wrapper_tests")
 load("@aspect//tips.axl", "TASK_SCREENS", "TIP_SUGGESTION", "TIP_TEMPLATE_RAW", "add_tip")
@@ -271,6 +272,11 @@ def config(ctx: ConfigContext):
     # bsdtar platform-key mapping (supported + unsupported hosts).
     # Run with: aspect dev test-tar
     ctx.tasks.add(tar_tests)
+
+    # Template-style machinery: resolve_style selection + override layering,
+    # compute_strata_kpi verdict/thresholds/slow-detection.
+    # Run with: aspect dev test-template-styles
+    ctx.tasks.add(template_styles_tests)
 
     # CircleCI S3 error parsing: expired-credential 400 → legible reason.
     # Run with: aspect dev test-circleci

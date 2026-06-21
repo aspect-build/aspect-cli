@@ -34,6 +34,7 @@ load("../lib/environment.axl", "feature_logger", "workflows_results_url")
 load("../lib/lifecycle.axl", "TaskLifecycleTrait", "TaskUpdate")
 load("../lib/rate_limit.axl", "usage_footer")
 load("../lib/result_text.axl", "severity_for_status")
+load("../lib/template_styles.axl", "STYLE_ARG_DESCRIPTION", "STYLE_NAMES", "resolve_style")
 load("../lib/tips.axl", "SURFACE_BUILDKITE_ANNOTATIONS", "collect_tips_sorted")
 
 # ─── Style selection ──────────────────────────────────────────────────────────
@@ -205,6 +206,10 @@ def _buildkite_annotations(ctx: FeatureContext):
     mode = ctx.args.mode
     is_bk = bool(ctx.std.env.var("BUILDKITE"))
 
+    # Resolve the named style into the {summary, details} the renderer consumes.
+    _style = resolve_style(ctx.args.style, ctx.args.templates or {})
+    _templates = {"summary": _style["summary"], "details": _style["details"]}
+
     _LOG.trace("starting (mode=%s BUILDKITE=%r is_bk=%s)" %
                (mode, ctx.std.env.var("BUILDKITE") or "", is_bk))
 
@@ -322,7 +327,7 @@ def _buildkite_annotations(ctx: FeatureContext):
             status,
             make_render_ctx(_state, tips = collect_tips_sorted(ctx, surface = SURFACE_BUILDKITE_ANNOTATIONS), api_usage = usage_footer(ctx), last_updated_at = format_run_date(ctx, now_ms(ctx))),
             _make_links(data),
-            None,
+            _templates,
             None,
             snippet_options = _snippet_opts,
             max_snippets = _max_snippets,
@@ -356,6 +361,19 @@ BuildkiteAnnotations = feature(
                           "reduce `buildkite-agent annotate` invocations on chatty tasks at the cost of " +
                           "less-responsive live annotations. The task's terminal result and phase " +
                           "boundaries always land immediately regardless of this setting.",
+        ),
+        "style": args.string(
+            default = "kilgore",
+            values = STYLE_NAMES,
+            description = STYLE_ARG_DESCRIPTION,
+        ),
+        "templates": args.custom(
+            dict,
+            default = {},
+            description = "Map of template overrides for the rendered annotation body. " +
+                          "Keys: \"summary\", \"details\". Each value is a Jinja2 template string. " +
+                          "Empty dict (default) uses the selected `style`'s templates. Overrides " +
+                          "layer on top of `style`.",
         ),
     },
 )

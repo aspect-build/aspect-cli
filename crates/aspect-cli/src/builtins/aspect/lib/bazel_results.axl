@@ -3465,6 +3465,177 @@ def _build_invocation_stats(data):
         "miss_reasons_table": miss_reasons_pre,
     }
 
+# Strata KPI thresholds: (green-floor, amber-floor). A value ≥ green-floor is
+# 🟢, ≥ amber-floor is 🟡, else 🔴. Echo the Strata web UI's tile colors, which
+# markdown can't set directly. `_kpi_emoji` maps a value through these.
+_KPI_CACHE_GREEN = 85
+_KPI_CACHE_AMBER = 60
+_KPI_PARALLEL_GREEN = 4.0
+_KPI_PARALLEL_AMBER = 1.5
+
+# Critical-path / analysis SHARE-of-wall thresholds are inverted (lower is
+# better): a share at/under green-ceiling is 🟢, at/under amber-ceiling is 🟡.
+_KPI_CRIT_SHARE_GREEN = 40
+_KPI_CRIT_SHARE_AMBER = 60
+
+def _kpi_emoji_high(value, green_floor, amber_floor):
+    """🟢/🟡/🔴 for a higher-is-better KPI (cache hit %, parallelism)."""
+    if value >= green_floor:
+        return "🟢"
+    if value >= amber_floor:
+        return "🟡"
+    return "🔴"
+
+def _kpi_emoji_low(value, green_ceiling, amber_ceiling):
+    """🟢/🟡/🔴 for a lower-is-better KPI (critical-path share of wall)."""
+    if value <= green_ceiling:
+        return "🟢"
+    if value <= amber_ceiling:
+        return "🟡"
+    return "🔴"
+
+def compute_strata_kpi(data, status):
+    """Compute the Strata KPI strip: a verdict line + the at-a-glance health
+    numbers (cache hit %, parallelism, wall, critical-path share), each paired
+    with a 🟢/🟡/🔴 threshold emoji that stands in for the web UI's tile color.
+
+    Returns a dict the Strata `details`/`body` templates read. Before any
+    build_metrics arrive it carries only the verdict (the heading still renders)
+    with an empty `strip_lines`, so the fenced KPI block is skipped. Shape:
+
+        {
+          "verdict_emoji": "🔴", "verdict_word": "Failed",
+          "slow": bool,                     # green-but-slow → auto-expand perf
+          "cache": {"emoji","value","sub"} | None,
+          "parallelism": {...} | None,
+          "wall": {"emoji","value","sub"} | None,
+          "strip_lines": [str, ...],        # pre-aligned monospace KPI lines
+        }
+
+    `slow` fires when wall is the dominant cost AND there's a legible reason —
+    a low cache hit or low parallelism — so the perf section always has
+    something to point at when it auto-expands. Pure-numeric inputs come from
+    `data["bazel"]`; thresholds are the `_KPI_*` constants.
+    """
+    b = data["bazel"]
+    wall_ms = b.get("wall_time_ms", 0) or 0
+    cpu_ms = b.get("cpu_time_ms", 0) or 0
+    critical_ms = b.get("critical_path_ms", 0) or 0
+
+    executed, cached, total = _effective_action_cache_counts(data)
+    has_metrics = wall_ms > 0 or total > 0
+    if not has_metrics:
+        # No build_metrics yet — surface the verdict heading anyway (computable
+        # from status), with an empty strip so the fenced KPI block is skipped.
+        v_emoji, v_word = _strata_verdict(data, status, False)
+        return {
+            "verdict_emoji": v_emoji,
+            "verdict_word": v_word,
+            "slow": False,
+            "cache": None,
+            "parallelism": None,
+            "wall": None,
+            "strip_lines": [],
+        }
+
+    cache = None
+    if total > 0:
+        pct = (cached * 100) // total
+        cache = {
+            "emoji": _kpi_emoji_high(pct, _KPI_CACHE_GREEN, _KPI_CACHE_AMBER),
+            "value": str(pct) + "%",
+            "sub": format_int_comma(cached) + " / " + format_int_comma(total) + " actions",
+        }
+
+    parallelism = None
+    if wall_ms > 0 and cpu_ms > 0:
+        ratio = float(cpu_ms) / float(wall_ms)
+
+        # One decimal, e.g. "6.2×".
+        tenths = int(ratio * 10 + 0.5)
+        parallelism = {
+            "emoji": _kpi_emoji_high(ratio, _KPI_PARALLEL_GREEN, _KPI_PARALLEL_AMBER),
+            "value": str(tenths // 10) + "." + str(tenths % 10) + "×",
+            "sub": "cpu " + format_duration_ms(cpu_ms),
+        }
+
+    wall = None
+    if wall_ms > 0:
+        crit_sub = ""
+        wall_emoji = "🟢"
+        if critical_ms > 0:
+            share = (critical_ms * 100) // wall_ms
+            wall_emoji = _kpi_emoji_low(share, _KPI_CRIT_SHARE_GREEN, _KPI_CRIT_SHARE_AMBER)
+            crit_sub = "crit path " + format_duration_ms(critical_ms) + " (" + str(share) + "%)"
+        wall = {
+            "emoji": wall_emoji,
+            "value": format_duration_ms(wall_ms),
+            "sub": crit_sub,
+        }
+
+    # Green-but-slow: terminal pass where the build's cost is dominated by a
+    # legible bottleneck (poor cache reuse or poor parallelism). The verdict
+    # then reads "Passed, but slow" and the perf section auto-expands.
+    cache_red = cache != None and cache["emoji"] == "🔴"
+    parallel_red = parallelism != None and parallelism["emoji"] == "🔴"
+    is_pass = status == "passed"
+    slow = is_pass and (cache_red or parallel_red)
+
+    verdict_emoji, verdict_word = _strata_verdict(data, status, slow)
+
+    # Pre-align the strip as one line per KPI: "<emoji> <LABEL>  <value>  <sub>".
+    # Labels are fixed-width ASCII, so they align regardless of how a renderer
+    # sizes the leading emoji glyph (monospace emoji width is unreliable across
+    # GitHub/GitLab/Buildkite). Skip a KPI with no data rather than show "n/a".
+    def _strip_line(emoji, label, value, sub):
+        # Right-pad value only when a sub-line follows, so a KPI with no sub
+        # (e.g. wall with no critical path) carries no trailing whitespace.
+        cell = _pad_right(value, 8) + sub if sub else value
+        return (emoji + " " + _pad_right(label, 12) + cell).rstrip()
+
+    strip_lines = []
+    if cache:
+        strip_lines.append(_strip_line(cache["emoji"], "Cache hit", cache["value"], cache["sub"]))
+    if parallelism:
+        strip_lines.append(_strip_line(parallelism["emoji"], "Parallelism", parallelism["value"], parallelism["sub"]))
+    if wall:
+        strip_lines.append(_strip_line(wall["emoji"], "Wall time", wall["value"], wall["sub"]))
+
+    return {
+        "verdict_emoji": verdict_emoji,
+        "verdict_word": verdict_word,
+        "slow": slow,
+        "cache": cache,
+        "parallelism": parallelism,
+        "wall": wall,
+        # Pre-aligned monospace strip lines for the fenced KPI block.
+        "strip_lines": strip_lines,
+    }
+
+def _strata_verdict(data, status, slow):
+    """(emoji, word) for the Strata verdict line, using the web UI vocabulary:
+    Passed / Failed / Running / Timed out / Flaky / Skipped (+ aborted)."""
+    if data["bazel"].get("aborted", False):
+        return ("🔥", "Aborted")
+    if status == "running" or status == "failing":
+        return ("🔄", "Running")
+    if status == "passed":
+        if slow:
+            return ("🟢", "Passed, but slow")
+        if (data["bazel"].get("flaky_test_total", 0) or 0) > 0:
+            return ("⚠️", "Passed with flakes")
+        return ("✅", "Passed")
+
+    # Any terminal non-pass is a failure; name a timeout specifically.
+    failed_tests = data["bazel"].get("failed_tests", []) or []
+    only_timeouts = len(failed_tests) > 0 and all([
+        t.get("status", "") == _TEST_STATUS_TIMEOUT
+        for t in failed_tests
+    ])
+    if only_timeouts and (data["bazel"].get("failed_actions_total", 0) or 0) == 0:
+        return ("⏱", "Timed out")
+    return ("❌", "Failed")
+
 def build_details_data(data, links, render_ctx = None, status = "", start_date = "", finish_date = "", std = None, task_phases = None, task_active = None, task_elapsed_ms = 0, include_bazel_targets = True, render_repro_in_targets = False, snippet_options = None, max_snippets = 0):
     """Build Jinja2 template data for DETAILS_TEMPLATE.
 
@@ -3847,6 +4018,9 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
         "aborted": data["bazel"].get("aborted", False),
         "abort_reason": data["bazel"].get("abort_reason", ""),
         "abort_description": data["bazel"].get("abort_description", ""),
+        # Strata KPI strip (verdict + cache/parallelism/wall health). None
+        # pre-build_metrics; the Kilgore template ignores this field.
+        "strata_kpi": compute_strata_kpi(data, status),
         # "" (falsy) when any bucket has data; "1" → template shows a
         # "waiting for data" placeholder.
         "no_targets_info": "" if _has_targets_info else "1",

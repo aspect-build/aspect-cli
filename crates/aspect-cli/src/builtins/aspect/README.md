@@ -218,5 +218,6 @@ Behavior notes:
 | [lib/format_results.axl](lib/format_results.axl) | `init_data`, `render_check_output`, `format_summary_title` | format |
 | [lib/gazelle_results.axl](lib/gazelle_results.axl) | `init_data`, `render_check_output`, `gazelle_summary_title` | gazelle |
 | [lib/delivery_results.axl](lib/delivery_results.axl) | `init_data`, `add_result`, `render_check_output`, `delivery_summary_title` | delivery |
+| [lib/template_styles.axl](lib/template_styles.axl) | `resolve_style`, `builtin_style`, `STYLE_NAMES`, `STYLE_ARG_DESCRIPTION` (Strata strings in [lib/strata_templates.axl](lib/strata_templates.axl)) | every status feature (the `style` arg) |
 
 Each `*_results.axl` derives its `init_data()` from `bazel_results.init_data()` (so `process_event` can populate the full bazel state) and appends `SHARED_DETAILS_BODY_TEMPLATE` to its task-specific top section so the rendered details body has the same Targets / Build Metrics / Invocation / Workflows Runner / Workspace Status / Build Metadata / Options-parsed sections everywhere.

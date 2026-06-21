@@ -72,6 +72,7 @@ load(
 load("../lib/bazel_results.axl", "compute_reproducer_command")
 load("../lib/github.axl", "github")
 load("../lib/repro_commands.axl", "rehydrate_commands")
+load("../lib/template_styles.axl", "resolve_style")
 load("../lib/tips.axl", "tips")
 
 def _eq(label, got, want):
@@ -2332,8 +2333,29 @@ def _test_impl(ctx):
         print(body)
         print("")
 
+    # Strata style: render a subset through the Strata body template so any
+    # Jinja/data-shape regression in the aggregated comment surfaces here.
+    strata = resolve_style("strata", {})
+    for (label, raw_entries) in scenarios:
+        prepared = prepare_for_render(raw_entries)
+        sections = bucket_entries(prepared)
+        body = render_body(
+            ctx,
+            MARKER_FMT % 1234,
+            prepared,
+            "Fri May 10 07:16:05 UTC 2024",
+            strata["body"],
+            DEFAULT_STATUS_BADGES,
+            sections,
+        )
+        print(sep)
+        print("SCENARIO: strata · " + label)
+        print(sep)
+        print(body)
+        print("")
+
     print(sep)
-    print("All %d PR-comment scenarios rendered without error." % len(scenarios))
+    print("All %d PR-comment scenarios rendered without error (Kilgore + Strata)." % len(scenarios))
     return 0
 
 def _aborted(data, reason):

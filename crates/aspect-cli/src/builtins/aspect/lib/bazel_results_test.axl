@@ -10,6 +10,7 @@ Two task implementations live here:
 
 load("./bazel_results.axl", "MAX_TEST_TARGETS", "STATUS_ICONS", "STATUS_LABELS", "aspect_web_ui_url", "bes_get", "build_details_data", "common_label_root", "compute_invocation_state", "conclusion", "failed_labels_by_subcommand", "init_data", "process_event", "render_bes_url", "render_check_output", "repro_by_target", "repro_targets")
 load("./lifecycle.axl", "ReproFixCommand")
+load("./template_styles.axl", "resolve_style")
 
 # Fake data builders
 
@@ -624,8 +625,36 @@ def _test_impl(ctx):
         print(out["text"][:8000])
         print("")
 
+    # Strata style: render the same scenarios through the DX-focused templates
+    # so any Jinja/data-shape regression in the Strata layout surfaces here too.
+    strata = resolve_style("strata", {})
+    strata_templates = {"summary": strata["summary"], "details": strata["details"]}
+    strata_scenarios = [
+        ("S1. strata · failed", _make_results_failed(), "failed"),
+        ("S2. strata · all-passed", _make_results_passed(), "passed"),
+        ("S3. strata · flaky", _make_results_flaky(), "passed"),
+        ("S4. strata · failing-live", _make_results_failing_live(), "failing"),
+        ("S5. strata · aborted", _make_results_aborted(), "failed"),
+        ("S6. strata · large", _make_results_large(), "failed"),
+        ("S7. strata · fully-cached", _make_results_fully_cached(), "passed"),
+        ("S8. strata · running", _make_results_passed(), "running"),
+    ]
+    for (label, data, status) in strata_scenarios:
+        rc = _render_ctx(subject = "//...", progress = "")
+        lk = _links(with_artifact = True, ci = "github")
+        out = render_check_output(ctx, data, status, rc, lk, templates = strata_templates)
+        print(sep)
+        print("SCENARIO: " + label)
+        print(sep)
+        print("TITLE:    " + out["title"])
+        print("")
+        print("DETAILS (first 8000 chars):")
+        print(out["text"][:8000])
+        print("")
+
     print(sep)
-    print("All " + str(len(scenarios)) + " scenarios rendered without error.")
+    print("All " + str(len(scenarios)) + " Kilgore + " + str(len(strata_scenarios)) +
+          " Strata scenarios rendered without error.")
     return 0
 
 template_snapshot_tests = task(

@@ -1,0 +1,189 @@
+"""Unit tests for the template-style machinery.
+
+Covers `resolve_style` (style selection + per-key override layering) and
+`compute_strata_kpi` (verdict word, threshold→emoji mapping, slow-but-passing
+detection, missing-metrics → None). The end-to-end Strata rendering is exercised
+by the snapshot suites (test-template-snapshots / test-pr-comment-snapshots).
+"""
+
+load("./bazel_results.axl", "compute_strata_kpi", "init_data")
+load("./template_styles.axl", "STYLE_NAMES", "builtin_style", "resolve_style")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _kpi_data(wall_ms = 0, cpu_ms = 0, critical_ms = 0, actions_total = 0, actions_executed = 0):
+    """A `data` dict with just the build_metrics fields compute_strata_kpi reads."""
+    data = init_data()
+    data["bazel"]["wall_time_ms"] = wall_ms
+    data["bazel"]["cpu_time_ms"] = cpu_ms
+    data["bazel"]["critical_path_ms"] = critical_ms
+    data["bazel"]["actions_total"] = actions_total
+    data["bazel"]["actions_executed"] = actions_executed
+    return data
+
+# resolve_style
+
+def _test_default_is_kilgore(_ctx):
+    b = resolve_style("kilgore", {})
+    k = builtin_style("kilgore")
+    _eq("default summary is kilgore's", b["summary"], k.summary)
+    _eq("default details is kilgore's", b["details"], k.details)
+    _eq("kilgore knobs: not strata", b["knobs"].kpi_strip, False)
+
+def _test_empty_name_degrades_to_kilgore(_ctx):
+    b = resolve_style("", {})
+    _eq("empty name → kilgore details", b["details"], builtin_style("kilgore").details)
+
+def _test_unknown_name_degrades_to_kilgore(_ctx):
+    b = resolve_style("nonsense", {})
+    _eq("unknown name → kilgore details", b["details"], builtin_style("kilgore").details)
+
+def _test_strata_selects_strata_bundle(_ctx):
+    b = resolve_style("strata", {})
+    s = builtin_style("strata")
+    _eq("strata summary", b["summary"], s.summary)
+    _eq("strata details", b["details"], s.details)
+    _eq("strata body non-empty", b["body"] != "", True)
+    _eq("strata knobs: kpi_strip on", b["knobs"].kpi_strip, True)
+    _eq("strata knobs: snippets_open on", b["knobs"].snippets_open, True)
+
+def _test_kilgore_body_empty_for_feature_fallback(_ctx):
+    # The PR-comment body lives in the feature; Kilgore's bundle carries no body
+    # so the feature falls back to its own _DEFAULT_BODY_TEMPLATE.
+    _eq("kilgore body is empty", resolve_style("kilgore", {})["body"], "")
+
+def _test_override_replaces_one_slot(_ctx):
+    b = resolve_style("strata", {"details": "MY DETAILS"})
+    _eq("override wins for details", b["details"], "MY DETAILS")
+
+    # Other slots still come from the named style.
+    _eq("non-overridden summary stays strata", b["summary"], builtin_style("strata").summary)
+
+def _test_override_on_kilgore(_ctx):
+    b = resolve_style("kilgore", {"summary": "X", "body": "Y"})
+    _eq("override summary", b["summary"], "X")
+    _eq("override body", b["body"], "Y")
+    _eq("non-overridden details stays kilgore", b["details"], builtin_style("kilgore").details)
+
+def _test_empty_override_value_ignored(_ctx):
+    # An empty-string override doesn't blank the slot; it falls through.
+    b = resolve_style("strata", {"details": ""})
+    _eq("empty override falls through", b["details"], builtin_style("strata").details)
+
+def _test_style_names_listed(_ctx):
+    _eq("both built-ins listed", STYLE_NAMES, ["kilgore", "strata"])
+
+# compute_strata_kpi
+
+def _test_kpi_verdict_only_without_metrics(_ctx):
+    # Before build_metrics arrive: verdict renders, strip is empty.
+    k = compute_strata_kpi(_kpi_data(), "passed")
+    _eq("no metrics → verdict word still set", k["verdict_word"], "Passed")
+    _eq("no metrics → empty strip", k["strip_lines"], [])
+    _eq("no metrics → no cache cell", k["cache"], None)
+
+def _test_kpi_cache_thresholds(_ctx):
+    # 90% → green, 70% → amber, 40% → red. cached = total - executed.
+    green = compute_strata_kpi(_kpi_data(wall_ms = 1000, actions_total = 100, actions_executed = 10), "passed")
+    _eq("90% cache → green", green["cache"]["emoji"], "🟢")
+    _eq("90% cache value", green["cache"]["value"], "90%")
+    amber = compute_strata_kpi(_kpi_data(wall_ms = 1000, actions_total = 100, actions_executed = 30), "passed")
+    _eq("70% cache → amber", amber["cache"]["emoji"], "🟡")
+    red = compute_strata_kpi(_kpi_data(wall_ms = 1000, actions_total = 100, actions_executed = 60), "passed")
+    _eq("40% cache → red", red["cache"]["emoji"], "🔴")
+
+def _test_kpi_parallelism(_ctx):
+    # cpu/wall = 6.0× → green; 2.0× → amber; 1.0× → red.
+    g = compute_strata_kpi(_kpi_data(wall_ms = 1000, cpu_ms = 6000, actions_total = 1), "passed")
+    _eq("6x parallel → green", g["parallelism"]["emoji"], "🟢")
+    _eq("6x value", g["parallelism"]["value"], "6.0×")
+    a = compute_strata_kpi(_kpi_data(wall_ms = 1000, cpu_ms = 2000, actions_total = 1), "passed")
+    _eq("2x parallel → amber", a["parallelism"]["emoji"], "🟡")
+    r = compute_strata_kpi(_kpi_data(wall_ms = 1000, cpu_ms = 1000, actions_total = 1), "passed")
+    _eq("1x parallel → red", r["parallelism"]["emoji"], "🔴")
+
+def _test_kpi_wall_critical_share(_ctx):
+    # critical/wall: 30% → green wall, 50% → amber, 80% → red.
+    g = compute_strata_kpi(_kpi_data(wall_ms = 1000, critical_ms = 300, actions_total = 1), "passed")
+    _eq("30% crit share → green wall", g["wall"]["emoji"], "🟢")
+    r = compute_strata_kpi(_kpi_data(wall_ms = 1000, critical_ms = 800, actions_total = 1), "passed")
+    _eq("80% crit share → red wall", r["wall"]["emoji"], "🔴")
+
+def _test_kpi_verdict_passed(_ctx):
+    k = compute_strata_kpi(_kpi_data(wall_ms = 1000, actions_total = 100, actions_executed = 5), "passed")
+    _eq("passed verdict emoji", k["verdict_emoji"], "✅")
+    _eq("passed verdict word", k["verdict_word"], "Passed")
+    _eq("healthy build not slow", k["slow"], False)
+
+def _test_kpi_verdict_failed(_ctx):
+    k = compute_strata_kpi(_kpi_data(wall_ms = 1000, actions_total = 100, actions_executed = 5), "failed")
+    _eq("failed verdict word", k["verdict_word"], "Failed")
+
+def _test_kpi_verdict_running(_ctx):
+    k = compute_strata_kpi(_kpi_data(wall_ms = 1000, actions_total = 10), "running")
+    _eq("running verdict word", k["verdict_word"], "Running")
+
+def _test_kpi_passed_but_slow(_ctx):
+    # Green pass, but cache 40% (red) → "Passed, but slow" + slow flag set.
+    data = _kpi_data(wall_ms = 10000, cpu_ms = 12000, actions_total = 100, actions_executed = 60)
+    k = compute_strata_kpi(data, "passed")
+    _eq("slow flag set", k["slow"], True)
+    _eq("slow verdict word", k["verdict_word"], "Passed, but slow")
+
+def _test_kpi_aborted_verdict(_ctx):
+    data = _kpi_data(wall_ms = 1000, actions_total = 10)
+    data["bazel"]["aborted"] = True
+    k = compute_strata_kpi(data, "failed")
+    _eq("aborted verdict word", k["verdict_word"], "Aborted")
+
+def _test_kpi_timeout_verdict(_ctx):
+    data = _kpi_data(wall_ms = 1000, actions_total = 10)
+    data["bazel"]["failed_tests"] = [{"label": "//x:t", "status": "timeout"}]
+    k = compute_strata_kpi(data, "failed")
+    _eq("timeout verdict word", k["verdict_word"], "Timed out")
+
+def _test_kpi_strip_lines_present(_ctx):
+    k = compute_strata_kpi(_kpi_data(wall_ms = 1000, cpu_ms = 4000, actions_total = 100, actions_executed = 10), "passed")
+
+    # cache + parallelism + wall → 3 aligned lines, no trailing whitespace.
+    _eq("three strip lines", len(k["strip_lines"]), 3)
+    for line in k["strip_lines"]:
+        _eq("no trailing whitespace", line, line.rstrip())
+
+_UNIT_TESTS = [
+    _test_default_is_kilgore,
+    _test_empty_name_degrades_to_kilgore,
+    _test_unknown_name_degrades_to_kilgore,
+    _test_strata_selects_strata_bundle,
+    _test_kilgore_body_empty_for_feature_fallback,
+    _test_override_replaces_one_slot,
+    _test_override_on_kilgore,
+    _test_empty_override_value_ignored,
+    _test_style_names_listed,
+    _test_kpi_verdict_only_without_metrics,
+    _test_kpi_cache_thresholds,
+    _test_kpi_parallelism,
+    _test_kpi_wall_critical_share,
+    _test_kpi_verdict_passed,
+    _test_kpi_verdict_failed,
+    _test_kpi_verdict_running,
+    _test_kpi_passed_but_slow,
+    _test_kpi_aborted_verdict,
+    _test_kpi_timeout_verdict,
+    _test_kpi_strip_lines_present,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("template_styles.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+template_styles_tests = task(
+    name = "test-template-styles",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

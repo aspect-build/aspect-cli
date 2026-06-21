@@ -87,6 +87,7 @@ load(
     "effective_throttle_factor",
     "should_emit_phase_change",
 )
+load("../lib/template_styles.axl", "STYLE_ARG_DESCRIPTION", "STYLE_NAMES", "resolve_style")
 
 _LOG = feature_logger("GitLab commit statuses")
 
@@ -152,7 +153,9 @@ def _state_for(status, final):
 def _gitlab_commit_statuses(ctx: FeatureContext):
     lifecycle = ctx.traits[TaskLifecycleTrait]
 
-    templates = ctx.args.templates or {}
+    # Resolve the named style (kilgore default) + per-key `templates` overrides.
+    _style = resolve_style(ctx.args.style, ctx.args.templates or {})
+    templates = {"summary": _style["summary"], "details": _style["details"]}
     metadata_keys = list(ctx.args.metadata_keys or [])
 
     mode = ctx.args.mode
@@ -428,12 +431,18 @@ GitlabCommitStatuses = feature(
                           "or the task runs longer. The task's terminal result always lands immediately " +
                           "so the final state shows up without delay.",
         ),
+        "style": args.string(
+            default = "kilgore",
+            values = STYLE_NAMES,
+            description = STYLE_ARG_DESCRIPTION,
+        ),
         "templates": args.custom(
             dict,
             default = {},
             description = "Map of template overrides for the rendered status output. " +
                           "Keys: \"summary\", \"details\". Each value is a Jinja2 template " +
-                          "string. Empty dict (default) uses the feature's built-in templates. " +
+                          "string. Empty dict (default) uses the selected `style`'s templates; " +
+                          "overrides layer on top of `style`. " +
                           "Note: only the rendered `title` lands on the commit status (in " +
                           "`description`, truncated to 255 chars) — the full body is rendered " +
                           "into the GitlabStatusComments rolling note.",

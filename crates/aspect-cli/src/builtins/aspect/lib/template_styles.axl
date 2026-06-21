@@ -1,0 +1,145 @@
+"""CI status-output template *styles* — named bundles of Markdown templates.
+
+A *style* selects how every status surface (GitHub/GitLab PR-comment, GitHub
+status check, GitLab commit status, Buildkite annotation) renders a task's
+result. Two styles ship built-in:
+
+  - **kilgore** (default) — the original "show everything" layout: every target
+    bucket, the full Bazel-details umbrella, workspace status, parsed options.
+    A faithful report of the whole invocation.
+  - **strata** — a DX-focused layout that answers, in order, *what broke* →
+    *how to fix / reproduce it* → *why it was slow*. Leads with a verdict and a
+    compact KPI strip, shows failure snippets open by default with each
+    failure's repro command beneath it, and collapses or omits the reference
+    sections (recoverable in one click via the Aspect Web UI).
+
+A style is a `TemplateStyle` record carrying the three top-level Jinja2 template
+strings a surface may need — `summary` + `details` (the check surfaces) and
+`body` (the aggregated PR/MR comment) — plus a `StyleKnobs` record of render
+switches the data builders read to shape `details_data` for the chosen layout.
+
+`resolve_style(name, overrides)` is the single entry point a feature calls:
+
+    bundle = resolve_style(ctx.args.style, ctx.args.templates or {})
+    render_check_output(..., templates = {"summary": bundle.summary,
+                                          "details": bundle.details},
+                             style_knobs = bundle.knobs)
+
+The per-key `overrides` dict is the existing `templates` feature arg. It layers
+*on top of* the named style, so a user can pick `strata` and replace just one
+slot (e.g. a custom `details`) without re-authoring the others. This is how
+custom variants are expressed; a fully bespoke style is an `overrides` dict that
+replaces every slot. Overrides always win over the named style's defaults.
+
+The Kilgore bundle references the template constants defined in
+`lib/bazel_results.axl` and `feature/github_status_comments.axl` verbatim, so
+selecting the default style is byte-identical to the pre-style behavior. The
+dependency is one-directional: features → template_styles → bazel_results
+(constants only); `render_check_output` keeps accepting a `templates` dict and
+never imports this module, so there is no load cycle.
+"""
+
+load("./bazel_results.axl", "DETAILS_TEMPLATE", "SUMMARY_TEMPLATE")
+load("./strata_templates.axl", "STRATA_BODY_TEMPLATE", "STRATA_DETAILS_TEMPLATE", "STRATA_SUMMARY_TEMPLATE")
+
+StyleKnobs = record(
+    # Failure snippets render in `<details open>` (visible without a click) and
+    # each failure's repro command renders directly beneath its snippet.
+    snippets_open = field(bool, default = False),
+    # Render the fenced monospace KPI strip (verdict + cache/parallelism/wall).
+    kpi_strip = field(bool, default = False),
+    # The heading carries the verdict; drop the Kilgore preamble + rollup rows.
+    lead_with_verdict = field(bool, default = False),
+    # Fold the aspect + vanilla-bazel flavors of a command into ONE fence with a
+    # `# vanilla bazel: …` comment line, instead of two separate fences.
+    fold_flavors = field(bool, default = False),
+    # Collapse (and on the byte-capped surfaces, drop first) the reference
+    # sections: workspace status, parsed options, build metadata, invocation
+    # detail, performance detail. They are redundant with the Aspect Web UI.
+    demote_reference = field(bool, default = False),
+    # Never depend on `<details>` collapsibility (Buildkite live updates unwrap
+    # it); render section headers flat.
+    flat_no_details = field(bool, default = False),
+)
+
+TemplateStyle = record(
+    name = field(str),
+    summary = field(str),
+    details = field(str),
+    body = field(str),
+    knobs = field(StyleKnobs),
+)
+
+KILGORE_KNOBS = StyleKnobs()
+
+# Strata's render switches. The Strata template strings live in
+# `strata_templates.axl`; this module composes them into the bundle below.
+STRATA_KNOBS = StyleKnobs(
+    snippets_open = True,
+    kpi_strip = True,
+    lead_with_verdict = True,
+    fold_flavors = True,
+    demote_reference = True,
+    flat_no_details = False,
+)
+
+# The PR/MR-comment body template is defined in the github_status_comments
+# feature, not in lib/. To avoid a lib→feature load edge, the Kilgore body slot
+# is left empty here and the comment feature falls back to its own
+# `_DEFAULT_BODY_TEMPLATE` when a bundle carries no `body`. Strata supplies its
+# body from `strata_templates.axl`.
+_KILGORE = TemplateStyle(
+    name = "kilgore",
+    summary = SUMMARY_TEMPLATE,
+    details = DETAILS_TEMPLATE,
+    body = "",
+    knobs = KILGORE_KNOBS,
+)
+
+_STRATA = TemplateStyle(
+    name = "strata",
+    summary = STRATA_SUMMARY_TEMPLATE,
+    details = STRATA_DETAILS_TEMPLATE,
+    body = STRATA_BODY_TEMPLATE,
+    knobs = STRATA_KNOBS,
+)
+
+STYLE_NAMES = ["kilgore", "strata"]
+
+# Shared `description=` for the `style` feature arg, so every status feature
+# documents the choice identically.
+STYLE_ARG_DESCRIPTION = (
+    "Template style for the rendered status output. \"kilgore\" (default) is the " +
+    "full report — every target bucket, the Bazel-details umbrella, workspace " +
+    "status, parsed options. \"strata\" is the DX-focused layout: a verdict + a " +
+    "compact KPI strip (cache hit / parallelism / wall), failure snippets open " +
+    "with each failure's repro command beneath it, and reference sections " +
+    "collapsed. Per-key `templates` overrides still layer on top of the chosen " +
+    "style for custom variants."
+)
+
+def builtin_style(name: str) -> TemplateStyle:
+    """Return the built-in `TemplateStyle` for `name`, defaulting to kilgore for
+    an empty or unknown name (a mis-set arg degrades to the safe default rather
+    than failing the build)."""
+    if name == "strata":
+        return _STRATA
+    return _KILGORE
+
+def resolve_style(name: str, overrides = None) -> dict:
+    """Resolve a style name + per-key overrides into the template bundle a
+    surface consumes.
+
+    Returns a dict: `{summary, details, body, knobs}`. `overrides` is the
+    feature's `templates` arg — a dict whose `summary`/`details`/`body` keys, if
+    present and non-empty, replace the named style's corresponding slot (a
+    custom variant). Overrides win over the named style.
+    """
+    base = builtin_style(name or "kilgore")
+    o = overrides or {}
+    return {
+        "summary": o.get("summary") or base.summary,
+        "details": o.get("details") or base.details,
+        "body": o.get("body") or base.body,
+        "knobs": base.knobs,
+    }
