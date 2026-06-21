@@ -19,7 +19,8 @@ fake env (dict-backed) and a fake fs (path → content dict). The
 integration section is the exception: it builds real scratch git repos
 with `git` subprocesses to exercise diff-base resolution end to end —
 `_resolve_merge_base` (merge-base / HEAD^1, incl. the developer-merge
-under-scoping case) and the synthesized-merge-by-SHA path
+under-scoping case and the stale-`origin/<base>` over-detection case on
+reused persistent-runner clones) and the synthesized-merge-by-SHA path
 (`synthesized_merge_diff_for_test`).
 
 Run with:
@@ -1119,6 +1120,47 @@ def _test_resolve_merge_base_integration(ctx):
     if synthesized_merge_diff_for_test(ctx, False, b0, repo) != None:
         fail("synthesized-merge — single-parent SHA must yield None")
     ctx.std.fs.remove_dir_all(repo)
+
+    # (5) Stale `origin/<base>` on a reused (persistent-runner) clone — the
+    # over-detection bug. A runner keeps `origin/main` from an earlier job;
+    # between jobs the base advances and a PR forks off the NEW tip. Without
+    # the up-front ref refresh, `git merge-base HEAD origin/main` "succeeds"
+    # against the stale tip (a valid-but-old ancestor), so the diff sweeps in
+    # every base commit landed since the last fetch. `_refresh_remote_ref`
+    # re-fetches `origin/main` first, so only the PR's file is in scope.
+    upstream, _u0 = _init_repo(ctx)
+    _commit_file(ctx, upstream, "old.txt", "old\n", "advance to stale tip")
+    stale_tip = _git_ok(ctx, upstream, ["rev-parse", "HEAD"])
+
+    clone = ctx.std.fs.mkdtemp(prefix = "axl-github-detect-stale-base-test-")
+    _git_ok(ctx, clone, ["clone", "-q", upstream, "."])
+    # Pin the local remote-tracking ref to the stale tip, then advance the
+    # upstream past it (and branch the PR off the NEW tip) without re-fetching.
+    if _git_ok(ctx, clone, ["rev-parse", "origin/main"]) != stale_tip:
+        fail("stale-base — clone's origin/main should start at the stale tip")
+    new_base = _commit_file(ctx, upstream, "moved.txt", "moved\n", "base advances past stale tip")
+    _git_ok(ctx, upstream, ["checkout", "-q", "-b", "feature"])
+    _commit_file(ctx, upstream, "pr.txt", "pr\n", "the PR's only change")
+    pr_tip = _git_ok(ctx, upstream, ["rev-parse", "HEAD"])
+
+    # The runner checks out the PR head by SHA (fetched on demand), leaving
+    # origin/main stale — exactly the silo build's state.
+    _git_ok(ctx, clone, ["fetch", "-q", "origin", pr_tip])
+    _git_ok(ctx, clone, ["checkout", "-q", pr_tip])
+    if _git_ok(ctx, clone, ["rev-parse", "origin/main"]) != stale_tip:
+        fail("stale-base — origin/main must still be stale before resolution")
+
+    diff_base, source = resolve_merge_base_for_test(ctx, "origin/main", clone)
+    _eq("stale-base — diff base is the refreshed merge-base (new base), not the stale tip", diff_base, new_base)
+    if diff_base == stale_tip:
+        fail("stale-base — diff base must not be the stale origin/main tip")
+    _eq(
+        "stale-base — only the PR's file in scope (not the base-advance commits)",
+        _changed_files(ctx, clone, diff_base),
+        ["pr.txt"],
+    )
+    ctx.std.fs.remove_dir_all(clone)
+    ctx.std.fs.remove_dir_all(upstream)
 
 github_detect_tests = task(
     name = "test-github-detect",
