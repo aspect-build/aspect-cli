@@ -8,7 +8,7 @@ Two task implementations live here:
     `compute_invocation_state`, `conclusion`, and skipped-bucket plumbing.
 """
 
-load("./bazel_results.axl", "MAX_TEST_TARGETS", "STATUS_ICONS", "STATUS_LABELS", "aspect_web_ui_url", "bes_get", "build_details_data", "common_label_root", "compute_invocation_state", "conclusion", "init_data", "process_event", "render_bes_url", "render_check_output", "repro_targets")
+load("./bazel_results.axl", "MAX_TEST_TARGETS", "STATUS_ICONS", "STATUS_LABELS", "aspect_web_ui_url", "bes_get", "build_details_data", "common_label_root", "compute_invocation_state", "conclusion", "failed_labels_by_subcommand", "init_data", "process_event", "render_bes_url", "render_check_output", "repro_targets")
 
 # Fake data builders
 
@@ -999,6 +999,33 @@ def _test_repro_targets_includes_target_failures(ctx):
         ["//pkg/broken:lib", "//pkg/analysis:bad", "//pkg/consumer:bin"],
     )
 
+def _test_failed_labels_by_subcommand(ctx):
+    """Classifier splits failures by the subcommand that reproduces them:
+    build-action / target failures and FailedToBuild tests → "build"; tests
+    that built then failed/timed out → "test". A `bazel test` on a build-only
+    target errors, so this split keeps build failures off the test repro."""
+    data = init_data()
+    data["bazel"]["failed_actions"] = [{"label": "//pkg:genrule", "mnemonics": ["Genrule"]}]
+    data["bazel"]["failed_targets"] = [{"label": "//pkg:genrule"}, {"label": "//pkg:lib"}]
+    data["bazel"]["failed_tests"] = [
+        {"label": "//pkg:a_test", "status": "failed"},
+        {"label": "//pkg:slow_test", "status": "timeout"},
+        {"label": "//pkg:wont_build_test", "status": "failed_to_build"},
+    ]
+    out = failed_labels_by_subcommand(data)
+    _eq("build bucket = actions + targets + failed_to_build test",
+        out["build"], ["//pkg:genrule", "//pkg:lib", "//pkg:wont_build_test"])
+    _eq("test bucket = built-then-failed tests only", out["test"], ["//pkg:a_test", "//pkg:slow_test"])
+
+def _test_failed_labels_by_subcommand_build_only(ctx):
+    """A build task (no test_summary) → empty test bucket, so no test repro."""
+    data = init_data()
+    data["bazel"]["failed_actions"] = [{"label": "//pkg:broken", "mnemonics": ["CppCompile"]}]
+    data["bazel"]["failed_targets"] = [{"label": "//pkg:broken"}]
+    out = failed_labels_by_subcommand(data)
+    _eq("build-only: build bucket", out["build"], ["//pkg:broken"])
+    _eq("build-only: empty test bucket", out["test"], [])
+
 def _test_repro_targets_preserves_explicit_label_through_collapse(ctx):
     """A failed label that the user named directly in the original
     command stays as an explicit entry alongside the collapse pattern —
@@ -1133,6 +1160,8 @@ _UNIT_TESTS = [
     _test_repro_targets_large_set_falls_back_when_no_common_root,
     _test_repro_targets_no_failures_falls_back,
     _test_repro_targets_includes_target_failures,
+    _test_failed_labels_by_subcommand,
+    _test_failed_labels_by_subcommand_build_only,
     _test_repro_targets_preserves_explicit_label_through_collapse,
     _test_repro_targets_collapse_with_only_wildcard_originals,
     _test_repro_targets_dedups_fallback_input,

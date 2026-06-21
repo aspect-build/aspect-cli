@@ -266,11 +266,14 @@ def apply_repro_fix_hooks(
       delivery: delivery-repro-local-preview
       bazel
        (build /
-        test):  bazel-repro-aspect
-                bazel-repro-vanilla-bazel
+        test):  build-repro-aspect, build-repro-vanilla-bazel
+                test-repro-aspect,  test-repro-vanilla-bazel
 
-    The bazel slugs recur once per failing target as PER-FAILURE entries (same
-    slug, `target` set to the label) in addition to the whole-run entry
+    The bazel slug names the subcommand that REPRODUCES the failure, not the
+    task: a `test` task with a build-action failure emits `build-repro-*` for it
+    (rerunning via `bazel build`, since `bazel test` on a non-test target errors).
+    Each bazel slug recurs once per failing target as a PER-FAILURE entry (same
+    slug, `target` set to the label) alongside the whole-run entry
     (`target == ""`); a hook scoping by slug catches both, and can read `target`
     to distinguish. Every "vanilla bazel for non-Aspect-CLI users" slug ends in
     `-vanilla-bazel`, so a hook can suffix-match across all producers.

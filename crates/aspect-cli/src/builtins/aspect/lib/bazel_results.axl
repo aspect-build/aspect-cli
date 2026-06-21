@@ -1046,23 +1046,15 @@ def _dedup_preserve_order(items):
             out.append(x)
     return out
 
-def repro_targets(data, original_targets):
-    """Pick the target list for a failing build/test task's repro command.
+def collapse_repro_targets(failed, original_targets):
+    """Collapse a failed-label list to a copy-pasteable target list for a repro.
 
-    Small failure sets (≤ `_REPRO_INLINE_MAX`) pass through verbatim. Larger
-    sets collapse to a common-root pattern when one exists, keeping any labels
-    the user named explicitly (wildcard patterns skip manual-tagged rules, so
-    explicit failures must not be lost). No usable collapse → `original_targets`.
-
-    Builds and tests share `failed_labels(data)` (action + target-level +
-    failed-test labels); derived consumers aren't subtracted — rebuilding them
-    is harmless once the root is fixed.
-
-    `original_targets` is the user's positional list (e.g. `ctx.args.targets`).
-    Output is always order-preserving deduped (the fallback is the one place a
-    duplicate can sneak in).
+    Small sets (≤ `_REPRO_INLINE_MAX`) pass through verbatim. Larger sets
+    collapse to a common-root pattern when one exists, keeping any labels the
+    user named explicitly (wildcard patterns skip manual-tagged rules, so
+    explicit failures must not be lost). No labels → `original_targets`; no
+    usable collapse → `original_targets`. Always order-preserving deduped.
     """
-    failed = failed_labels(data)
     if not failed:
         return _dedup_preserve_order(original_targets)
     if len(failed) <= _REPRO_INLINE_MAX:
@@ -1074,6 +1066,53 @@ def repro_targets(data, original_targets):
     explicit_in_original = {t: True for t in original_targets if _is_explicit_label(t)}
     explicit_failed = [l for l in failed if l in explicit_in_original]
     return explicit_failed + [root]
+
+def repro_targets(data, original_targets):
+    """Target list for a failing task's whole-run repro, over all failed labels
+    (action + target-level + failed-test). See `collapse_repro_targets`."""
+    return collapse_repro_targets(failed_labels(data), original_targets)
+
+def failed_labels_by_subcommand(data):
+    """Partition failed labels by the bazel subcommand that reproduces them:
+
+      "test"  — tests that built and then failed/timed out at test time.
+                `bazel test //x` reruns them.
+      "build" — build-action / target failures AND tests that failed to BUILD.
+                `bazel test //x` on these errors ("no test targets found" or a
+                build error with nothing to test), so they rerun with
+                `bazel build //x`.
+
+    Returns `{"build": [labels], "test": [labels]}`, each order-preserving
+    deduped. A label that both failed to build and is a test lands in "build"
+    (build-first precedence — you can't test what won't build)."""
+    build = []
+    test = []
+    build_seen = {}
+
+    def _add_build(lbl):
+        if lbl and lbl not in build_seen:
+            build_seen[lbl] = True
+            build.append(lbl)
+
+    for a in data["bazel"].get("failed_actions", []):
+        _add_build(a.get("label", ""))
+    for t in data["bazel"].get("failed_targets", []):
+        _add_build(t.get("label", ""))
+    for t in data["bazel"].get("failed_tests", []):
+        if t.get("status", "") == _TEST_STATUS_FAILED_TO_BUILD:
+            _add_build(t.get("label", ""))
+
+    test_seen = {}
+    for t in data["bazel"].get("failed_tests", []):
+        lbl = t.get("label", "")
+        # A test that failed to build is a build failure (above); a test also
+        # listed as a failed action/target likewise reruns via build.
+        if (t.get("status", "") != _TEST_STATUS_FAILED_TO_BUILD and
+            lbl and lbl not in build_seen and lbl not in test_seen):
+            test_seen[lbl] = True
+            test.append(lbl)
+
+    return {"build": build, "test": test}
 
 def compute_reproducer_command(data, task_name, max_chars = MAX_REPRO_CHARS):
     """Legacy helper preserved for test fixtures. New code should append
