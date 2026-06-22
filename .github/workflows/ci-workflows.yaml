@@ -489,8 +489,8 @@ jobs:
   # We build via `aspect` (self-configures the runner's output base + remote cache,
   # so the dev tree pre-build already populated is a cache hit), force the binary
   # local with --remote_download_toplevel (the runner defaults to minimal downloads
-  # over a FUSE cache, else it never lands in the workspace), resolve its path with
-  # cquery, and copy to a stable target/ci/ path immediately — a later build can
+  # over a FUSE cache, else it never lands in the workspace), then copy it from the
+  # bazel-bin symlink to a stable target/ci/ path immediately — a later build can
   # redirect bazel-out, which is what makes a raw bazel-out path go stale (Buildkite
   # hit exactly that — a 127 "No such file" on the launcher). The CLI is already
   # stabilized at target/ci/aspect-cli by install-prebuilt-aspect-cli, which is also
@@ -515,12 +515,21 @@ jobs:
           aspect build --task-key axl-tests-gha-bootstrap \
             --bazel-flag=--remote_download_toplevel \
             //crates/aspect-launcher
-          # Resolve the output path with cquery (config-agnostic — k8-fastbuild here,
-          # not the cli's k8-dbg) and copy to a stable target/ci/ path immediately,
-          # before any later build redirects bazel-out. Fail loudly if it's missing.
+          # Copy to a stable target/ci/ path immediately, before any later build
+          # redirects bazel-out. The launcher goes through a config transition, so
+          # we rely on the bazel-bin convenience symlink (which Bazel keeps pointed
+          # at the transitioned output) and fall back to a bazel-out scan. NOTE:
+          # `aspect cquery` does NOT exist (aspect-cli has no cquery verb), so we
+          # resolve the path directly rather than querying.
           mkdir -p target/ci
-          launcher_out=$(aspect cquery --output=files //crates/aspect-launcher)
-          test -f "$launcher_out" || { echo "::error::launcher not materialized locally: '$launcher_out'"; exit 1; }
+          launcher_out=bazel-bin/crates/aspect-launcher/aspect-launcher
+          if [ ! -f "$launcher_out" ]; then
+            # Bazel-out paths are alphanumeric; -t picks the newest transitioned dir.
+            # shellcheck disable=SC2012
+            launcher_out=$(ls -t bazel-out/*/bin/crates/aspect-launcher/aspect-launcher 2>/dev/null | head -n1)
+          fi
+          test -n "$launcher_out" && test -f "$launcher_out" || { echo "::error::dev launcher binary not found locally after build"; exit 1; }
+          echo "launcher binary: $launcher_out"
           cp -f "$launcher_out" target/ci/aspect-launcher
           LAUNCHER="$GITHUB_WORKSPACE/target/ci/aspect-launcher"
           CLI="$GITHUB_WORKSPACE/target/ci/aspect-cli"
