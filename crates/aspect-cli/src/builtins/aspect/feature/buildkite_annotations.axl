@@ -258,16 +258,16 @@ def _buildkite_annotations(ctx: FeatureContext):
         # task_update is the Setup phase mark, which carries a `kind`, so the
         # normal render emits the initial annotation.
         _state["_started_ms"] = now_ms(ctx)
-        _state["_task_name"] = ctx.task.name
+        _state["_task_name"] = ctx.task.kind
         _state["_triggered_by"] = (ctx.std.env.var("BUILDKITE_BUILD_CREATOR") or
                                    ctx.std.env.var("BUILDKITE_PIPELINE_NAME") or "")
-        _state["_context_id"] = "aspect-%s-%s" % (ctx.task.name, ctx.task.key)
-        _state["_task_label"] = _task_label(ctx.task.key)
+        _state["_context_id"] = "aspect-%s" % ctx.task.name
+        _state["_task_label"] = _task_label(ctx.task.name)
 
         subject = _state.get("_subject", "")
         subject_str = (" " + subject) if subject else ""
-        _LOG.trace("aspect/%s (%s)%s (ctx=%s)" %
-                   (ctx.task.name, ctx.task.key, subject_str, _state["_context_id"]))
+        _LOG.trace("aspect/%s%s (ctx=%s)" %
+                   (ctx.task.name, subject_str, _state["_context_id"]))
 
     def _task_update(ctx, update):
         # Latch the subject before init/render: `setup_phase` sets it on the

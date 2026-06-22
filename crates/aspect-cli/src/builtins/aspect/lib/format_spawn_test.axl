@@ -71,7 +71,7 @@ def _test_impl(ctx):
     return 0
 
 format_spawn_tests = task(
-    name = "test-format-spawn",
+    kind = "test-format-spawn",
     group = ["dev"],
     implementation = _test_impl,
     args = {},

@@ -185,7 +185,7 @@ The [`aspect-build/bazel-examples`](https://github.com/aspect-build/bazel-exampl
 `aspect <task>` posts task results to three surfaces:
 
 - **PR task summary comment** — a single comment summarising every task in the pipeline.
-- **GitHub Status Checks** — one check per `aspect <task>` invocation, named by `--task-key`.
+- **GitHub Status Checks** — one check per `aspect <task>` invocation, named by `--task-name`.
 - **Buildkite annotations** _(when running on Buildkite)_ — one annotation per `aspect <task>` invocation, rendered at the top of the build page.
 
 Live links to each, from real runs of this repo's own CI: [What `aspect <task>` reports back](https://aspect.build/docs/cli/tasks-ci#what-aspect-%3Ctask%3E-reports-back).

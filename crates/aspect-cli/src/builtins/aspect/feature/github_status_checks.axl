@@ -186,7 +186,7 @@ def _github_status_checks(ctx: FeatureContext):
 
         # No `task_update.kind` yet — pick by task name, fall back to
         # bazel_results.
-        initial_kind = kind_for_task(ctx.task.name)
+        initial_kind = kind_for_task(ctx.task.kind)
         initial_renderer = renderer_for_kind(initial_kind) or renderer_for_kind("bazel_results")
         initial_output = initial_renderer.render(
             ctx,
@@ -198,9 +198,9 @@ def _github_status_checks(ctx: FeatureContext):
             metadata_keys,
         )
 
-        # Match the CLI invocation name so the Checks-tab row reads as a
-        # command, not a heading.
-        check_name = "aspect / %s (%s)" % (ctx.task.name, ctx.task.key)
+        # Use the per-invocation task name so the Checks-tab row is unique
+        # when the same kind runs more than once in a pipeline.
+        check_name = "aspect / %s" % ctx.task.name
         result = github.status_checks.create(ctx, token, owner, repo, sha, check_name)
         if not result["success"]:
             _LOG.warn(ctx.std, "Failed to create check run: %s" % result.get("error", "unknown error"))
@@ -279,8 +279,8 @@ def _github_status_checks(ctx: FeatureContext):
         # has no .task; `make_render_ctx` reads it), then create the check run.
         subject = _state.get("_subject", "")
         subject_str = (" " + subject) if subject else ""
-        _LOG.trace("aspect/%s (%s)%s" % (ctx.task.name, ctx.task.key, subject_str))
-        _state["_task_name"] = ctx.task.name
+        _LOG.trace("aspect/%s%s" % (ctx.task.name, subject_str))
+        _state["_task_name"] = ctx.task.kind
         _create_check_run(ctx)
 
     def _lint_annotation_plan(ctx):

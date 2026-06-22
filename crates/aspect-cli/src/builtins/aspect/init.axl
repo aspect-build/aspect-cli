@@ -197,7 +197,7 @@ def _impl(ctx):
 # NB: --preset has no static `values=` list — valid presets are read at runtime
 # from the template's template-config.json (preset_flags fails on an unknown name).
 init = task(
-    name = "init",
+    kind = "init",
     summary = "Scaffold a new Bazel project from the Aspect Workflows template.",
     implementation = _impl,
     args = {

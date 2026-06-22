@@ -586,7 +586,7 @@ def _test_overflow_comments_never_carry_continuation(_ctx):
 
 def _fake_apply_ctx():
     """Build a fake `ctx` with the fields `apply_repro_fix_hooks` reads —
-    just `ctx.task.name` and `ctx.task.group`. Std/env are not touched."""
+    just `ctx.task.kind` and `ctx.task.group`. Std/env are not touched."""
     return struct(task = struct(name = "lint", group = ["aspect"]))
 
 def _fake_lifecycle(handlers):
@@ -1283,7 +1283,7 @@ def _test_impl(ctx):
     return 0
 
 repro_commands_tests = task(
-    name = "test-repro-commands",
+    kind = "test-repro-commands",
     group = ["dev"],
     implementation = _test_impl,
     args = {},

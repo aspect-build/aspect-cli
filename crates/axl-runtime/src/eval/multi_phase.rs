@@ -357,14 +357,18 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
     pub fn print_running_task_header(
         &self,
         task_index: usize,
-        task_key: &str,
+        task_name: &str,
     ) -> Result<(), EvalError> {
         let task = *self.tasks().get(task_index).ok_or_else(|| {
             EvalError::UnknownError(anyhow!("task index {} out of range", task_index))
         })?;
         let (verb_seq, reset) = running_verb_color();
-        let key_suffix = if on_recognized_ci() {
-            format!(" [{}]", task_key)
+        // Show the task name only when it differs from the kind — i.e. when a
+        // `--task-name` (or the deprecated `--task-key`) was set or auto-named,
+        // so repeated kinds in one pipeline read distinctly. A bare local run
+        // (name == kind) shows just the kind.
+        let name_suffix = if task_name != task.kind() {
+            format!(" [{}]", task_name)
         } else {
             String::new()
         };
@@ -379,8 +383,8 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
                 "--- :aspect: {}Running{} `{}` task{}",
                 verb_seq,
                 reset,
-                task.name(),
-                key_suffix
+                task.kind(),
+                name_suffix
             );
         } else {
             // 🎬 (clapper board) pairs with the closing ✅ / ⚠️ / ❌ as
@@ -389,8 +393,8 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
                 "→ 🎬 {}Running{} `{}` task{}",
                 verb_seq,
                 reset,
-                task.name(),
-                key_suffix
+                task.kind(),
+                name_suffix
             );
         }
         Ok(())
@@ -454,7 +458,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         skip_all,
         err,
         fields(
-            task_key = %task_key,
+            task_name = %task_name,
             task = tracing::field::Empty,
             task_id = tracing::field::Empty,
             exit_code = tracing::field::Empty,
@@ -463,7 +467,8 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
     pub fn execute_tasks_with_args(
         &mut self,
         task_index: usize,
-        task_key: String,
+        task_name: String,
+        task_display_name: Option<String>,
         task_id: Option<String>,
         timing: TimingMode,
         args_builder: impl FnOnce(&dyn TaskLike<'v>, Heap<'v>) -> Arguments<'v>,
@@ -477,14 +482,25 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         let task_args = args_builder(task, heap);
 
         let span = tracing::Span::current();
-        span.record("task", task.name());
+        span.record("task", task.kind());
         span.record("task_id", task_id.as_str());
 
-        // Capture name early — `task_info` is moved into TaskContext below
+        // Resolve the per-invocation display name: explicit --task-display-name,
+        // else the task name verbatim.
+        let task_display_name = task_display_name.unwrap_or_else(|| task_name.clone());
+
+        // Capture the kind early — `task_info` is moved into TaskContext below
         // and is no longer accessible from the closing announcement after
         // the eval returns.
-        let task_name = task.name();
-        let task_info = TaskInfo::new(task.name(), task.group().clone(), task_key, task_id);
+        let task_kind = task.kind();
+        let task_info = TaskInfo::new(
+            task.kind(),
+            task.display_kind(),
+            task.group().clone(),
+            task_name,
+            task_display_name,
+            task_id,
+        );
 
         // The opening `→ 🎬 Running …` (or BK `--- :aspect: Running …`)
         // header is printed by `print_running_task_header` BEFORE phase
@@ -604,7 +620,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
                 verdict.color,
                 verdict.verb,
                 reset,
-                task_name,
+                task_kind,
                 exit_suffix,
                 duration,
                 conclusion_suffix,
@@ -618,7 +634,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
                 verdict.color,
                 verdict.verb,
                 reset,
-                task_name,
+                task_kind,
                 exit_suffix,
                 duration,
                 conclusion_suffix,

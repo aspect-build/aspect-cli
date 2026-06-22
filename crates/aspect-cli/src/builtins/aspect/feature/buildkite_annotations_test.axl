@@ -166,7 +166,7 @@ def _test_impl(ctx):
         body = format_body(out, kind, status, task_label = task_label, final = final)
         style = severity_for_status(status)
 
-        context_id = "aspect-%s-%s" % (task_name, "local-test")
+        context_id = "aspect-%s" % "local-test"
 
         print(sep)
         print("SCENARIO: " + label)
@@ -186,7 +186,7 @@ def _test_impl(ctx):
     return 0
 
 bk_annotation_snapshot_tests = task(
-    name = "test-bk-annotation-snapshots",
+    kind = "test-bk-annotation-snapshots",
     group = ["dev"],
     implementation = _test_impl,
     args = {},

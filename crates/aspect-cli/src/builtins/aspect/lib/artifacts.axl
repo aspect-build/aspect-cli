@@ -133,7 +133,7 @@ def _upload_file(ctx, kind, name, path):
     if not ctx.std.fs.exists(path):
         warn(ctx.std, "Artifact upload (%s) failed: file not found: %s" % (name, path))
         return ""
-    full_name = artifact_name(detect_ci(ctx.std.env), ctx.task.name, ctx.task.key, name)
+    full_name = artifact_name(detect_ci(ctx.std.env), ctx.task.kind, ctx.task.name, name)
     result = uploader.upload_file(ctx, path, full_name)
     if not result["success"]:
         for err in result.get("errors") or ["unknown error"]:
@@ -158,8 +158,8 @@ def _upload(ctx, kind, name, content):
         return ""
     tmpdir = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_JOB_TMPDIR") or ctx.std.env.temp_dir()
 
-    # ctx.task.key keeps concurrent same-task-different-key runs from colliding.
-    tmppath = tmpdir + "/" + ctx.task.key + "-" + name
+    # ctx.task.name keeps concurrent same-task-different-key runs from colliding.
+    tmppath = tmpdir + "/" + ctx.task.name + "-" + name
     ctx.std.fs.write(tmppath, content)
     url = _upload_file(ctx, kind, name, tmppath)
     ctx.std.fs.remove_file(tmppath)
@@ -188,15 +188,15 @@ artifacts = struct(
 
 # Artifact naming convention per CI platform
 
-def artifact_name(ci, task_name, task_key, filename):
+def artifact_name(ci, task_kind, task_name, filename):
     """Format an artifact name per CI conventions.
 
-    Buildkite/CircleCI/GitLab group via path-style `task_name/task_key/
-    filename`; GitHub Actions needs flat `task_name.task_key.filename`.
+    Buildkite/CircleCI/GitLab group via path-style `task_kind/task_name/
+    filename`; GitHub Actions needs flat `task_kind.task_name.filename`.
     """
     if ci == "github":
-        return task_name + "." + task_key + "." + filename
-    return task_name + "/" + task_key + "/" + filename
+        return task_kind + "." + task_name + "." + filename
+    return task_kind + "/" + task_name + "/" + filename
 
 # GitLab CI uploader (inline — no separate lib needed)
 
@@ -676,7 +676,7 @@ def _artifact_upload_impl(ctx: FeatureContext):
             return
         _collect_test_files(ctx, event, upload_test_logs, test_entries, skipped_files)
         if len(test_entries) >= test_group["last_count"] + _BATCH_SIZE:
-            name = artifact_name(ci, ctx.task.name, ctx.task.key, "testlogs")
+            name = artifact_name(ci, ctx.task.kind, ctx.task.name, "testlogs")
             if uploader.upload_testlogs(ctx, test_group, test_entries, name):
                 _publish_testlogs()
 
@@ -687,7 +687,7 @@ def _artifact_upload_impl(ctx: FeatureContext):
                 info(ctx.std, "Artifact upload skipped: " + reason)
             else:
                 if upload_testlogs:
-                    name = artifact_name(ci, ctx.task.name, ctx.task.key, "testlogs")
+                    name = artifact_name(ci, ctx.task.kind, ctx.task.name, "testlogs")
 
                     # final=True publishes plain `{name}`; rolling-delete
                     # still reaps the prior partial via prev_ref.

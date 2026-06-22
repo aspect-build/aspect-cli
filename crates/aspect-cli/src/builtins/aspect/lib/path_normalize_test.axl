@@ -140,7 +140,7 @@ def _test_impl(ctx):
     return 0
 
 path_normalize_tests = task(
-    name = "test-path-normalize",
+    kind = "test-path-normalize",
     group = ["dev"],
     implementation = _test_impl,
     args = {},

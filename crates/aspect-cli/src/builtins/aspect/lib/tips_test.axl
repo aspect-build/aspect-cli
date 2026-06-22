@@ -735,7 +735,7 @@ def _test_impl(ctx):
     return 0
 
 tips_tests = task(
-    name = "test-tips",
+    kind = "test-tips",
     group = ["dev"],
     implementation = _test_impl,
     args = {},

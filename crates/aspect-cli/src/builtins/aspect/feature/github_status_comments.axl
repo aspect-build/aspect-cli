@@ -1717,8 +1717,8 @@ def _github_status_comments(ctx: FeatureContext):
     def _init(ctx):
         # One-time init on first task_update: cache task identity (FeatureContext
         # has no ctx.task) for the artifact name, then authenticate for `_publish`.
-        _state["_task_name"] = ctx.task.name
-        _state["_task_key"] = ctx.task.key
+        _state["_task_name"] = ctx.task.kind
+        _state["_task_key"] = ctx.task.name
 
         # Anchor for the time-based throttle in `_task_update`.
         _state["_task_started_at"] = monotonic()

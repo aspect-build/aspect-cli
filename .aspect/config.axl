@@ -43,7 +43,7 @@ def _user_task_impl(ctx: TaskContext) -> int:
     return 0
 
 _user_task = task(
-    name = "user-task-added-by-config",
+    kind = "user-task-added-by-config",
     group = ["user"],
     implementation = _user_task_impl,
     args = {},

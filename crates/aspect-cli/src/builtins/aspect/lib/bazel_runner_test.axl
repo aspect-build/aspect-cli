@@ -94,7 +94,7 @@ def _test_impl(ctx):
     return 0
 
 bazel_runner_tests = task(
-    name = "test-bazel-runner",
+    kind = "test-bazel-runner",
     group = ["dev"],
     implementation = _test_impl,
     args = {},

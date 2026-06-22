@@ -2351,7 +2351,7 @@ def _delivery_partial(data, total):
     return data
 
 pr_comment_snapshot_tests = task(
-    name = "test-pr-comment-snapshots",
+    kind = "test-pr-comment-snapshots",
     group = ["dev"],
     implementation = _test_impl,
     args = {},

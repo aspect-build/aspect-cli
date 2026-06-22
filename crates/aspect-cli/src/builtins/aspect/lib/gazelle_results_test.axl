@@ -311,7 +311,7 @@ def _test_impl(ctx):
     return 0
 
 gazelle_template_snapshot_tests = task(
-    name = "test-gazelle-template-snapshots",
+    kind = "test-gazelle-template-snapshots",
     group = ["dev"],
     implementation = _test_impl,
     args = {},

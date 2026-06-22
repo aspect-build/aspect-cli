@@ -274,12 +274,12 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
         # `ctx` is a TaskContext here, so `ctx.task` is in scope.
         subject = _state.get("_subject", "")
         subject_str = (" " + subject) if subject else ""
-        _LOG.trace("aspect/%s (%s)%s" % (ctx.task.name, ctx.task.key, subject_str))
-        _state["_task_name"] = ctx.task.name
+        _LOG.trace("aspect/%s%s" % (ctx.task.name, subject_str))
+        _state["_task_name"] = ctx.task.kind
 
-        # Per-task name shown in the MR's status badge column. Matches
-        # the CLI invocation shape so the row reads as a command.
-        _state["_status_name"] = "aspect / %s (%s)" % (ctx.task.name, ctx.task.key)
+        # Per-invocation name shown in the MR's status badge column; unique
+        # when the same kind runs more than once in a pipeline.
+        _state["_status_name"] = "aspect / %s" % ctx.task.name
         _state["_status"] = "running"
         _state["_started_ms"] = now_ms(ctx)
         _state["_triggered_by"] = _detect_triggered_by(ctx.std.env)
@@ -291,7 +291,7 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
         # Initial "pending" — the task hasn't started producing data
         # yet, so we surface a placeholder rather than waiting for the
         # first BES tick. Reviewers see the row appear immediately.
-        initial_kind = kind_for_task(ctx.task.name)
+        initial_kind = kind_for_task(ctx.task.kind)
         initial_renderer = renderer_for_kind(initial_kind) or renderer_for_kind("bazel_results")
         initial_links = dict(_ci_links_base)
         apply_artifact_links(ctx, initial_links)

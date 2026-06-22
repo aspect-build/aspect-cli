@@ -554,20 +554,20 @@ def _gitlab_lint_impl(ctx: FeatureContext):
         gl["changed_lines"] = {f["file"]: f.get("hunk_lines") or f["lines"] for f in lint_trait.changed_files}
 
     def _lint_report(ctx, filepath):
-        comments = _build_comments(ctx, filepath, run_id, ctx.task.key, destination = destination)
+        comments = _build_comments(ctx, filepath, run_id, ctx.task.name, destination = destination)
         state["all_comments"].extend(comments)
         if "existing_markers" not in gl:
-            gl["existing_markers"] = _get_existing_markers(ctx, gl, ctx.task.key)
+            gl["existing_markers"] = _get_existing_markers(ctx, gl, ctx.task.name)
         errors_in_batch = [c for c in comments if c.get("_severity") == "error"]
         if not errors_in_batch:
             return
         remaining = max_pr_comments - state["posted"]
         if remaining <= 0:
             return
-        new_only = [c for c in errors_in_batch if not (extract_marker(c.get("body", ""), task_key = ctx.task.key) in gl["existing_markers"])]
+        new_only = [c for c in errors_in_batch if not (extract_marker(c.get("body", ""), task_key = ctx.task.name) in gl["existing_markers"])]
         new_only = new_only[:remaining]
         before = len(gl["existing_markers"])
-        errs = _post_comments(ctx, gl, new_only, gl["existing_markers"], ctx.task.key)
+        errs = _post_comments(ctx, gl, new_only, gl["existing_markers"], ctx.task.name)
         state["posted"] += len(gl["existing_markers"]) - before
         state["errors"].extend(errs)
 
@@ -576,24 +576,24 @@ def _gitlab_lint_impl(ctx: FeatureContext):
 
     def _lint_end(ctx, relevant_diagnostics):
         if "existing_markers" not in gl:
-            gl["existing_markers"] = _get_existing_markers(ctx, gl, ctx.task.key)
-        suggestion_comments = [] if destination == "annotations" else _build_suggestion_comments(ctx, run_id, ctx.task.key, relevant_diagnostics, state["pending_patches"])
+            gl["existing_markers"] = _get_existing_markers(ctx, gl, ctx.task.name)
+        suggestion_comments = [] if destination == "annotations" else _build_suggestion_comments(ctx, run_id, ctx.task.name, relevant_diagnostics, state["pending_patches"])
         non_errors = [c for c in state["all_comments"] if c.get("_severity") != "error"] + suggestion_comments
-        non_errors = _dedup_by_marker(non_errors, ctx.task.key)
+        non_errors = _dedup_by_marker(non_errors, ctx.task.name)
         new_only = []
         for c in non_errors:
-            marker = extract_marker(c.get("body", ""), task_key = ctx.task.key)
+            marker = extract_marker(c.get("body", ""), task_key = ctx.task.name)
             if marker and marker in gl["existing_markers"]:
                 continue
             new_only.append(c)
         remaining = max_pr_comments - state["posted"]
         if remaining > 0:
             before = len(gl["existing_markers"])
-            errs = _post_comments(ctx, gl, new_only[:remaining], gl["existing_markers"], ctx.task.key)
+            errs = _post_comments(ctx, gl, new_only[:remaining], gl["existing_markers"], ctx.task.name)
             state["posted"] += len(gl["existing_markers"]) - before
             state["errors"].extend(errs)
-        suggestion_markers = [m for m in [extract_marker(c.get("body", ""), task_key = ctx.task.key) for c in suggestion_comments] if m]
-        _cleanup_and_resolve(ctx, gl, relevant_diagnostics, run_id, ctx.task.key, suggestion_markers, destination)
+        suggestion_markers = [m for m in [extract_marker(c.get("body", ""), task_key = ctx.task.name) for c in suggestion_comments] if m]
+        _cleanup_and_resolve(ctx, gl, relevant_diagnostics, run_id, ctx.task.name, suggestion_markers, destination)
         if trace.enabled:
             trace.log("gitlab lint comment summary:")
             trace.log("posted comments:  %s" % state["posted"])

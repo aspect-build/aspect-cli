@@ -256,12 +256,12 @@ ValidFeature = feature(implementation = _impl)
 "#;
 
     #[test]
-    fn task_valid_explicit_name() {
+    fn task_valid_explicit_kind() {
         assert!(
             eval(
                 r#"
 def _impl(ctx): pass
-T = task(implementation = _impl, args = {}, name = "my-task")
+T = task(implementation = _impl, args = {}, kind = "my-task")
 "#
             )
             .is_ok()
@@ -269,11 +269,11 @@ T = task(implementation = _impl, args = {}, name = "my-task")
     }
 
     #[test]
-    fn task_name_underscore_rejected() {
+    fn task_kind_underscore_rejected() {
         let err = eval_err(
             r#"
 def _impl(ctx): pass
-T = task(implementation = _impl, args = {}, name = "bad_name")
+T = task(implementation = _impl, args = {}, kind = "bad_name")
 "#,
         );
         assert!(
@@ -284,11 +284,11 @@ T = task(implementation = _impl, args = {}, name = "bad_name")
     }
 
     #[test]
-    fn task_name_uppercase_rejected() {
+    fn task_kind_uppercase_rejected() {
         let err = eval_err(
             r#"
 def _impl(ctx): pass
-T = task(implementation = _impl, args = {}, name = "BadName")
+T = task(implementation = _impl, args = {}, kind = "BadName")
 "#,
         );
         assert!(
@@ -299,11 +299,11 @@ T = task(implementation = _impl, args = {}, name = "BadName")
     }
 
     #[test]
-    fn task_name_leading_digit_rejected() {
+    fn task_kind_leading_digit_rejected() {
         let err = eval_err(
             r#"
 def _impl(ctx): pass
-T = task(implementation = _impl, args = {}, name = "1task")
+T = task(implementation = _impl, args = {}, kind = "1task")
 "#,
         );
         assert!(

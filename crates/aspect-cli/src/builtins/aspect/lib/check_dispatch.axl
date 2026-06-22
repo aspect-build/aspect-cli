@@ -11,7 +11,7 @@ Split here, not in the features:
 
   RENDERERS                  Per-kind init + render dispatch table.
   renderer_for_kind(kind)
-  kind_for_task(task_name)   Initial kind to use before the first
+  kind_for_task(task_kind)   Initial kind to use before the first
                              task_update has fired.
   to_display_name(name)      snake_case → CamelCase task display name.
   make_render_ctx(state)     Build the render_ctx dict the per-kind
@@ -103,12 +103,13 @@ def renderer_for_kind(kind):
     """Return the Renderer struct for `kind`, or None if unknown."""
     return RENDERERS.get(kind, None)
 
-def kind_for_task(task_name):
-    """Best-guess initial kind for a task before any task_update has fired.
+def kind_for_task(task_kind):
+    """Best-guess initial renderer kind for a task before any task_update
+    has fired.
 
-    Falls back to "bazel_results" for unknown task names.
+    Falls back to "bazel_results" for unknown task kinds.
     """
-    return _TASK_KIND_DEFAULTS.get(task_name, "bazel_results")
+    return _TASK_KIND_DEFAULTS.get(task_kind, "bazel_results")
 
 # Per-surface inline-snippet budgets (max snippets shown + per-snippet line cap).
 # Status checks / BK annotations are glanceable and bump the surface size caps

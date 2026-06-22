@@ -161,7 +161,7 @@ def gazelle_summary_title(data, status, target_pattern = "", task_name = ""):
     "❌ gazelle //tools/gazelle:gazelle · Apply error"
     "🔄 gazelle //tools/gazelle:gazelle · Running..."
 
-    `task_name` comes from the producer's `task(name=…)`. The leading
+    `task_name` comes from the producer's `task(kind=…)`. The leading
     emoji is the status verdict via `emoji_for_status`. Defaults to
     "gazelle" when no name is provided.
 

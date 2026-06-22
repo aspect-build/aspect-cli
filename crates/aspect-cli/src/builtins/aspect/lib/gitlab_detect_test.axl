@@ -231,7 +231,7 @@ def _test_impl(ctx):
     return 0
 
 gitlab_detect_tests = task(
-    name = "test-gitlab-detect",
+    kind = "test-gitlab-detect",
     group = ["dev"],
     implementation = _test_impl,
     args = {},

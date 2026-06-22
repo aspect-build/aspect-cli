@@ -43,9 +43,13 @@ pub trait TaskLike<'v> {
     fn summary(&self) -> &String;
     /// Extended description shown only in `--help`, after the summary. Empty means omit.
     fn description(&self) -> &String;
-    fn display_name(&self) -> String;
+    /// The task kind's display label (Title-Cased kind, or the `display_kind=`
+    /// kwarg). Distinct from the per-invocation display name set at runtime.
+    fn display_kind(&self) -> String;
     fn group(&self) -> &Vec<String>;
-    fn name(&self) -> String;
+    /// The task kind — the command being run (e.g. `build`, `test`, `lint`),
+    /// derived from the snake_case export variable (or the `kind=` kwarg).
+    fn kind(&self) -> String;
     /// Absolute path to the .axl file the task was defined in.
     fn path(&self) -> &PathBuf;
     /// `Arguments` value carrying config.axl overrides for this task.
@@ -128,9 +132,9 @@ pub struct Task<'v> {
     pub(super) args: SmallMap<String, Arg>,
     pub(super) summary: String,
     pub(super) description: String,
-    pub(super) display_name: RefCell<String>,
+    pub(super) display_kind: RefCell<String>,
     pub(super) group: Vec<String>,
-    pub(super) name: RefCell<String>,
+    pub(super) kind: RefCell<String>,
     pub(super) traits: Vec<values::Value<'v>>,
     pub(super) path: PathBuf,
     /// Mutable override store for `ctx.tasks["k"].args.foo = ...`.
@@ -151,14 +155,14 @@ impl<'v> Task<'v> {
     pub fn description(&self) -> &String {
         &self.description
     }
-    pub fn display_name(&self) -> String {
-        self.display_name.borrow().clone()
+    pub fn display_kind(&self) -> String {
+        self.display_kind.borrow().clone()
     }
     pub fn group(&self) -> &Vec<String> {
         &self.group
     }
-    pub fn name(&self) -> String {
-        self.name.borrow().clone()
+    pub fn kind(&self) -> String {
+        self.kind.borrow().clone()
     }
     pub fn traits(&self) -> &[values::Value<'v>] {
         &self.traits
@@ -195,9 +199,9 @@ impl<'v> Task<'v> {
             args: frozen.args.clone(),
             summary: frozen.summary.clone(),
             description: frozen.description.clone(),
-            display_name: RefCell::new(frozen.display_name.clone()),
+            display_kind: RefCell::new(frozen.display_kind.clone()),
             group: frozen.group.clone(),
-            name: RefCell::new(frozen.name.clone()),
+            kind: RefCell::new(frozen.kind.clone()),
             traits,
             path: frozen.path.clone(),
             overrides,
@@ -215,14 +219,14 @@ impl<'v> TaskLike<'v> for Task<'v> {
     fn description(&self) -> &String {
         &self.description
     }
-    fn display_name(&self) -> String {
-        self.display_name.borrow().clone()
+    fn display_kind(&self) -> String {
+        self.display_kind.borrow().clone()
     }
     fn group(&self) -> &Vec<String> {
         &self.group
     }
-    fn name(&self) -> String {
-        self.name.borrow().clone()
+    fn kind(&self) -> String {
+        self.kind.borrow().clone()
     }
     fn path(&self) -> &PathBuf {
         &self.path
@@ -251,13 +255,13 @@ impl<'v> StarlarkValue<'v> for Task<'v> {
         let kebab = to_command_name(variable_name);
         validate_command_name(&kebab, "task")
             .map_err(|e| starlark::Error::new_other(anyhow::anyhow!(e)))?;
-        let mut name = self.name.borrow_mut();
-        if name.is_empty() {
-            *name = kebab;
+        let mut kind = self.kind.borrow_mut();
+        if kind.is_empty() {
+            *kind = kebab;
         }
-        let mut display_name = self.display_name.borrow_mut();
-        if display_name.is_empty() {
-            *display_name = to_display_name(&name);
+        let mut display_kind = self.display_kind.borrow_mut();
+        if display_kind.is_empty() {
+            *display_kind = to_display_name(&kind);
         }
         Ok(())
     }
@@ -300,9 +304,9 @@ impl<'v> values::Freeze for Task<'v> {
             r#impl: frozen_impl,
             summary: self.summary,
             description: self.description,
-            display_name: self.display_name.into_inner(),
+            display_kind: self.display_kind.into_inner(),
             group: self.group,
-            name: self.name.into_inner(),
+            kind: self.kind.into_inner(),
             traits: frozen_traits?,
             path: self.path,
             overrides: self.overrides.freeze(freezer)?,
@@ -318,9 +322,9 @@ pub struct FrozenTask {
     pub(super) args: SmallMap<String, Arg>,
     pub(super) summary: String,
     pub(super) description: String,
-    pub(super) display_name: String,
+    pub(super) display_kind: String,
     pub(super) group: Vec<String>,
-    pub(super) name: String,
+    pub(super) kind: String,
     pub(super) traits: Vec<values::FrozenValue>,
     pub(super) path: PathBuf,
     pub(super) overrides: values::FrozenValue,
@@ -373,14 +377,14 @@ impl<'v> TaskLike<'v> for FrozenTask {
     fn description(&self) -> &String {
         &self.description
     }
-    fn display_name(&self) -> String {
-        self.display_name.clone()
+    fn display_kind(&self) -> String {
+        self.display_kind.clone()
     }
     fn group(&self) -> &Vec<String> {
         &self.group
     }
-    fn name(&self) -> String {
-        self.name.clone()
+    fn kind(&self) -> String {
+        self.kind.clone()
     }
     fn path(&self) -> &PathBuf {
         &self.path
@@ -411,24 +415,24 @@ impl StarlarkCallableParamSpec for TaskImpl {
     }
 }
 
-/// Validate `name`/`group` and resolve `display_name` per the rules shared by
+/// Validate `kind`/`group` and resolve `display_kind` per the rules shared by
 /// `task()` and `task.alias(...)`.
 ///
 /// - `group` length is capped at `MAX_TASK_GROUPS`.
-/// - `name`, when non-empty, must match `[a-z][a-z0-9-]*`. An empty `name`
+/// - `kind`, when non-empty, must match `[a-z][a-z0-9-]*`. An empty `kind`
 ///   defers naming to `export_as` (which fills from the variable name).
-/// - Each `group` element must match the same pattern as `name`.
-/// - The returned `display_name` is `display_name` verbatim if non-empty,
-///   then a Title-Case derivation of `name` if `name` is non-empty, else
-///   empty (deferred until `export_as` populates `name`).
+/// - Each `group` element must match the same pattern as `kind`.
+/// - The returned `display_kind` is `display_kind` verbatim if non-empty,
+///   then a Title-Case derivation of `kind` if `kind` is non-empty, else
+///   empty (deferred until `export_as` populates `kind`).
 ///
 /// `context` is the user-facing identifier used in error messages — typically
 /// `"task"` or `"task.alias"`.
 fn resolve_task_metadata(
     context: &str,
-    name: &str,
+    kind: &str,
     group: &[String],
-    display_name: String,
+    display_kind: String,
 ) -> anyhow::Result<String> {
     if group.len() > MAX_TASK_GROUPS {
         return Err(anyhow::anyhow!(
@@ -437,16 +441,16 @@ fn resolve_task_metadata(
             MAX_TASK_GROUPS,
         ));
     }
-    if !name.is_empty() {
-        validate_command_name(name, context).map_err(|e| anyhow::anyhow!(e))?;
+    if !kind.is_empty() {
+        validate_command_name(kind, context).map_err(|e| anyhow::anyhow!(e))?;
     }
     for g in group {
         validate_command_name(g, "group").map_err(|e| anyhow::anyhow!(e))?;
     }
-    Ok(if !display_name.is_empty() {
-        display_name
-    } else if !name.is_empty() {
-        to_display_name(name)
+    Ok(if !display_kind.is_empty() {
+        display_kind
+    } else if !kind.is_empty() {
+        to_display_name(kind)
     } else {
         String::new()
     })
@@ -454,7 +458,7 @@ fn resolve_task_metadata(
 
 /// Build a fresh `Task<'v>` that aliases `base`. The alias shares the base's
 /// `implementation` callable and `traits` vector and inherits nothing else —
-/// `name`, `group`, `summary`, `description`, and `display_name` come from
+/// `name`, `group`, `summary`, `description`, and `display_kind` come from
 /// the alias's own kwargs. An empty `name` defers naming to `export_as`.
 ///
 /// `defaults` may overlay new defaults onto any arg present on `base`; see
@@ -464,12 +468,12 @@ fn build_alias<'v>(
     defaults: UnpackDictEntries<String, Value<'v>>,
     summary: String,
     description: String,
-    display_name: String,
+    display_kind: String,
     group: Vec<String>,
-    name: String,
+    kind: String,
     eval: &mut starlark::eval::Evaluator<'v, '_, '_>,
 ) -> anyhow::Result<Task<'v>> {
-    let display_name = resolve_task_metadata("task.alias", &name, &group, display_name)?;
+    let display_kind = resolve_task_metadata("task.alias", &kind, &group, display_kind)?;
 
     let mut overlaid = base.args().clone();
     for (k, v) in defaults.entries {
@@ -477,7 +481,7 @@ fn build_alias<'v>(
             return Err(anyhow::anyhow!(
                 "task.alias defaults[{:?}]: no such arg on aliased task `{}`",
                 k,
-                base.name(),
+                base.kind(),
             ));
         };
         let next = existing.with_default(&k, v, eval.heap())?;
@@ -489,7 +493,7 @@ fn build_alias<'v>(
     // `summary` and stays uncluttered. When the user supplied a `summary` but
     // no `description`, seed the description from the summary so the user's
     // text isn't displaced by the hint in the per-task help view.
-    let alias_hint = format!("(alias of `{}`)", base.name());
+    let alias_hint = format!("(alias of `{}`)", base.kind());
     let description = match (description.is_empty(), summary.is_empty()) {
         (true, true) => alias_hint,
         (true, false) => format!("{}\n\n{}", summary, alias_hint),
@@ -504,9 +508,9 @@ fn build_alias<'v>(
         r#impl: base.implementation(),
         summary,
         description,
-        display_name: RefCell::new(display_name),
+        display_kind: RefCell::new(display_kind),
         group,
-        name: RefCell::new(name),
+        kind: RefCell::new(kind),
         traits: base.trait_values(),
         path: Env::current_script_path(eval)?,
         overrides,
@@ -525,9 +529,9 @@ fn task_methods(builder: &mut MethodsBuilder) {
     ///
     /// ## Naming
     ///
-    /// Assign the result to a **snake_case** variable; the CLI command name is
-    /// derived from the variable. The base task's name is never inherited.
-    /// Use `name = "explicit-name"` to override.
+    /// Assign the result to a **snake_case** variable; the task kind (CLI
+    /// command name) is derived from the variable. The base task's kind is
+    /// never inherited. Use `kind = "explicit-kind"` to override.
     ///
     /// ## Constraints
     ///
@@ -560,9 +564,9 @@ fn task_methods(builder: &mut MethodsBuilder) {
         defaults: UnpackDictEntries<String, Value<'v>>,
         #[starlark(require = named, default = String::new())] summary: String,
         #[starlark(require = named, default = String::new())] description: String,
-        #[starlark(require = named, default = String::new())] display_name: String,
+        #[starlark(require = named, default = String::new())] display_kind: String,
         #[starlark(require = named, default = UnpackList::default())] group: UnpackList<String>,
-        #[starlark(require = named, default = String::new())] name: String,
+        #[starlark(require = named, default = String::new())] kind: String,
         eval: &mut starlark::eval::Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Task<'v>> {
         let base = try_as_task(this).ok_or_else(|| {
@@ -576,9 +580,9 @@ fn task_methods(builder: &mut MethodsBuilder) {
             defaults,
             summary,
             description,
-            display_name,
+            display_kind,
             group.items,
-            name,
+            kind,
             eval,
         )
     }
@@ -590,10 +594,12 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     ///
     /// ## Naming
     ///
-    /// Assign the result to a **snake_case** variable. The CLI command name is derived
-    /// automatically by converting `_` to `-` (`axl_add` → `axl-add`).
-    /// Use `name = "explicit-name"` to override.
-    /// Command names must match `[a-z][a-z0-9-]*`.
+    /// Assign the result to a **snake_case** variable. The task *kind* (the CLI
+    /// command name) is derived automatically by converting `_` to `-`
+    /// (`axl_add` → `axl-add`). Use `kind = "explicit-kind"` to override it.
+    /// Kinds must match `[a-z][a-z0-9-]*`. (The per-invocation task *name* — the
+    /// unique identity of one run — is a separate concept set at runtime via
+    /// `--task-name`; see `ctx.task`.)
     ///
     /// ## Args
     ///
@@ -612,7 +618,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     ///
     /// - `summary` — one-liner shown in the task list; falls back to `"<name> task defined in <file>"`.
     /// - `description` — extended prose shown in `--help` (replaces summary in that view).
-    /// - `display_name` — Title Case name for help section headings; auto-derived from command name.
+    /// - `display_kind` — Title Case label for help section headings; auto-derived from the kind.
     ///
     /// ## Aliases
     ///
@@ -647,13 +653,13 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         args: values::dict::UnpackDictEntries<String, Value<'v>>,
         #[starlark(require = named, default = String::new())] summary: String,
         #[starlark(require = named, default = String::new())] description: String,
-        #[starlark(require = named, default = String::new())] display_name: String,
+        #[starlark(require = named, default = String::new())] display_kind: String,
         #[starlark(require = named, default = UnpackList::default())] group: UnpackList<String>,
-        #[starlark(require = named, default = String::new())] name: String,
+        #[starlark(require = named, default = String::new())] kind: String,
         #[starlark(require = named, default = UnpackList::default())] traits: UnpackList<Value<'v>>,
         eval: &mut starlark::eval::Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Task<'v>> {
-        let display_name = resolve_task_metadata("task", &name, &group.items, display_name)?;
+        let display_kind = resolve_task_metadata("task", &kind, &group.items, display_kind)?;
 
         // Parse and validate args.
         let mut args_ = SmallMap::new();
@@ -699,9 +705,9 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
             r#impl: implementation.0,
             summary,
             description,
-            display_name: RefCell::new(display_name),
+            display_kind: RefCell::new(display_kind),
             group: group.items,
-            name: RefCell::new(name),
+            kind: RefCell::new(kind),
             traits: all_traits,
             path: Env::current_script_path(eval)?,
             overrides,
@@ -898,11 +904,11 @@ buildifier = base.alias(defaults = {"opt": 42})
     }
 
     #[test]
-    fn alias_invalid_name_rejected() {
+    fn alias_invalid_kind_rejected() {
         assert_eval_err_contains(
             r#"
 base = task(implementation = _impl)
-aliased = base.alias(name = "Bad-Name")
+aliased = base.alias(kind = "Bad-Kind")
 "#,
             "task.alias",
         );

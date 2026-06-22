@@ -5,7 +5,7 @@
 //! * [`Cmd`] — value-passing input. Holds task & feature trait objects plus
 //!   filesystem context. `build()` produces the Clap [`Command`]. `dispatch()`
 //!   turns parsed [`ArgMatches`] into a [`Dispatch`].
-//! * [`Dispatch`] — carries `task_id`, `task_key`, `task_uuid`, and the parsed
+//! * [`Dispatch`] — carries `task_id`, `task_name`, `task_display_name`, `task_uuid`, and the parsed
 //!   matches. `task_args(...)` and `feature_args(...)` produce the merged
 //!   runtime [`Arguments`] for a given task or feature.
 //!
@@ -61,7 +61,8 @@ pub struct Cmd<'a, 'v> {
 /// Carries the parsed CLI state needed to execute the selected task and its features.
 pub struct Dispatch {
     pub task_id: usize,
-    pub task_key: String,
+    pub task_name: String,
+    pub task_display_name: Option<String>,
     pub task_uuid: Option<String>,
     pub timing: TimingMode,
     matches: ArgMatches,
@@ -101,12 +102,28 @@ impl<'a, 'v> Cmd<'a, 'v> {
                     .help("Print version"),
             )
             .arg(
+                ClapArg::new("task-name")
+                    .long("task-name")
+                    .value_name("NAME")
+                    .global(true)
+                    .value_parser(parse_task_name)
+                    .help("A short name uniquely identifying this task invocation. Allowed characters: A-Za-z0-9, _, -. Useful when the same task runs multiple times in one pipeline (e.g. 'backend', 'frontend'). Defaults to '<kind>-<suffix>' if not set."),
+            )
+            .arg(
+                ClapArg::new("task-display-name")
+                    .long("task-display-name")
+                    .value_name("DISPLAY_NAME")
+                    .global(true)
+                    .help("A human-readable label for this task invocation, shown on status surfaces. Defaults to --task-name."),
+            )
+            .arg(
                 ClapArg::new("task-key")
                     .long("task-key")
                     .value_name("KEY")
                     .global(true)
-                    .value_parser(parse_task_key)
-                    .help("A short key identifying this task invocation. Allowed characters: A-Za-z0-9, _, -. Useful when the same task runs multiple times in one pipeline (e.g. 'backend', 'frontend'). Auto-generated if not set."),
+                    .hide(true)
+                    .value_parser(parse_task_name)
+                    .help("Deprecated alias for --task-name; will be removed in a future release."),
             )
             .arg(
                 ClapArg::new("task-id")
@@ -144,11 +161,31 @@ impl<'a, 'v> Cmd<'a, 'v> {
         let task_id = *leaf
             .get_one::<usize>(TASK_ID_KEY)
             .ok_or(CmdError::NoTaskSelected)?;
-        let task_key = leaf
+        // Resolution order: --task-name wins; the deprecated --task-key is
+        // accepted as an alias and always warns; otherwise the name defaults
+        // to the task kind (the deepest selected subcommand name).
+        let explicit_name = leaf
+            .get_one::<String>("task-name")
+            .filter(|s| !s.is_empty())
+            .cloned();
+        let deprecated_key = leaf
             .get_one::<String>("task-key")
             .filter(|s| !s.is_empty())
-            .cloned()
-            .unwrap_or_else(generate_task_key);
+            .cloned();
+        if deprecated_key.is_some() {
+            eprintln!(
+                "\x1b[1;33mWARNING:\x1b[0m --task-key is deprecated; use --task-name instead. \
+                 --task-key will be removed in a future release."
+            );
+        }
+        let task_name = explicit_name.or(deprecated_key).unwrap_or_else(|| {
+            // Default to `<kind>-<friendly-suffix>` so repeated invocations of
+            // the same kind in one pipeline don't collide. (PR2 will prefer a
+            // detected CI job name over the random suffix.)
+            let kind = leaf_command_name(&matches).unwrap_or_default();
+            format!("{}-{}", kind, generate_name_suffix())
+        });
+        let task_display_name = leaf.get_one::<String>("task-display-name").cloned();
         let task_uuid = leaf.get_one::<String>("task-id").cloned();
         let timing = leaf
             .get_one::<TimingMode>("timing")
@@ -156,7 +193,8 @@ impl<'a, 'v> Cmd<'a, 'v> {
             .unwrap_or_default();
         Ok(Dispatch {
             task_id,
-            task_key,
+            task_name,
+            task_display_name,
             task_uuid,
             timing,
             matches,
@@ -650,17 +688,17 @@ fn task_command(
     feature_blocks: &[FeatureBlock],
     cli_header: &str,
 ) -> Command {
-    let name = task.name();
-    let display_name = task.display_name();
-    let display = if !display_name.is_empty() {
-        display_name
+    let kind = task.kind();
+    let display_kind = task.display_kind();
+    let display = if !display_kind.is_empty() {
+        display_kind
     } else {
-        to_display_name(&name)
+        to_display_name(&kind)
     };
 
     let context_line = format!(
         "\x1b[3m{}\x1b[0m task defined in \x1b[3m{}\x1b[0m",
-        name, label,
+        kind, label,
     );
     let about = if task.summary().is_empty() {
         context_line.clone()
@@ -678,7 +716,7 @@ fn task_command(
         Some(format!("{}\n\n{}", body, context_line))
     };
 
-    let mut cmd = Command::new(name)
+    let mut cmd = Command::new(kind)
         .about(about)
         .display_order(TASK_COMMAND_DISPLAY_ORDER)
         .arg(
@@ -748,7 +786,7 @@ impl Tree {
         let group = task.group().clone();
         if group.len() > MAX_TASK_GROUPS {
             return Err(CmdError::TooManyGroups(
-                task.name(),
+                task.kind(),
                 label.to_owned(),
                 MAX_TASK_GROUPS,
             ));
@@ -756,14 +794,14 @@ impl Tree {
         // A top-level `get` task is unreachable: `main` routes `aspect get` to
         // the credential helper before task parsing. Reject it rather than let
         // it silently never run. Nested under a group it is reachable and fine.
-        if group.is_empty() && task.name() == crate::credential_helper::GET_COMMAND {
+        if group.is_empty() && task.kind() == crate::credential_helper::GET_COMMAND {
             return Err(CmdError::ReservedName(
-                task.name(),
+                task.kind(),
                 label.to_owned(),
                 crate::credential_helper::GET_COMMAND.to_owned(),
             ));
         }
-        self.insert_at(&task.name(), &group[..], &group[..], label, cmd)
+        self.insert_at(&task.kind(), &group[..], &group[..], label, cmd)
     }
 
     fn insert_at(
@@ -887,7 +925,19 @@ fn deepest_subcommand(matches: &ArgMatches) -> Option<&ArgMatches> {
     Some(leaf)
 }
 
-fn parse_task_key(s: &str) -> Result<String, String> {
+/// The deepest selected subcommand's name — the task kind (`build`, `test`, …),
+/// used as the default task name when neither `--task-name` nor `--task-key`
+/// is given.
+fn leaf_command_name(matches: &ArgMatches) -> Option<String> {
+    let (mut name, mut leaf) = matches.subcommand()?;
+    while let Some((next_name, next)) = leaf.subcommand() {
+        name = next_name;
+        leaf = next;
+    }
+    Some(name.to_owned())
+}
+
+fn parse_task_name(s: &str) -> Result<String, String> {
     if s.chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
     {
@@ -898,6 +948,14 @@ fn parse_task_key(s: &str) -> Result<String, String> {
             s
         ))
     }
+}
+
+/// A friendly random suffix (e.g. "fluffy-parakeet") appended to the task kind
+/// to form a default `--task-name`. Falls back to a short UUID fragment.
+fn generate_name_suffix() -> String {
+    names::Generator::with_naming(names::Name::Plain)
+        .next()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()[..8].to_string())
 }
 
 fn parse_task_uuid(s: &str) -> Result<String, String> {
@@ -913,12 +971,6 @@ fn parse_task_uuid(s: &str) -> Result<String, String> {
 
 fn parse_timing_mode(s: &str) -> Result<TimingMode, String> {
     s.parse::<TimingMode>()
-}
-
-fn generate_task_key() -> String {
-    names::Generator::with_naming(names::Name::Plain)
-        .next()
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()[..8].to_string())
 }
 
 fn help_text(description: &Option<String>) -> Resettable<StyledStr> {
@@ -966,13 +1018,13 @@ mod tests {
         fn description(&self) -> &String {
             empty_string()
         }
-        fn display_name(&self) -> String {
+        fn display_kind(&self) -> String {
             String::new()
         }
         fn group(&self) -> &Vec<String> {
             &self.group
         }
-        fn name(&self) -> String {
+        fn kind(&self) -> String {
             self.name.clone()
         }
         fn path(&self) -> &PathBuf {
@@ -1144,16 +1196,16 @@ mod tests {
         };
         let root = cmd.build("0.0.0").expect("build ok");
         let matches = root
-            .try_get_matches_from(["aspect", "greet", "--task-key=smoke"])
+            .try_get_matches_from(["aspect", "greet", "--task-name=smoke"])
             .expect("parse ok");
         let dispatch = cmd.dispatch(matches).expect("dispatch ok");
         assert_eq!(dispatch.task_id, 0);
-        assert_eq!(dispatch.task_key, "smoke");
+        assert_eq!(dispatch.task_name, "smoke");
         assert!(dispatch.task_uuid.is_none());
     }
 
     #[test]
-    fn dispatch_auto_generates_task_key_when_absent() {
+    fn dispatch_defaults_task_name_to_kind_with_suffix_when_absent() {
         let t = stub_task("greet", &[], SmallMap::new());
         let cmd = Cmd {
             tasks: vec![&t],
@@ -1166,7 +1218,30 @@ mod tests {
             .try_get_matches_from(["aspect", "greet"])
             .expect("parse ok");
         let dispatch = cmd.dispatch(matches).expect("dispatch ok");
-        assert!(!dispatch.task_key.is_empty());
+        // Auto-named as `<kind>-<suffix>`; the suffix is random so assert the prefix.
+        assert!(
+            dispatch.task_name.starts_with("greet-"),
+            "expected greet-<suffix>, got {}",
+            dispatch.task_name
+        );
+        assert!(dispatch.task_name.len() > "greet-".len());
+    }
+
+    #[test]
+    fn dispatch_accepts_deprecated_task_key() {
+        let t = stub_task("greet", &[], SmallMap::new());
+        let cmd = Cmd {
+            tasks: vec![&t],
+            features: vec![],
+            aspect_root: Path::new("/repo"),
+            modules: &[],
+        };
+        let root = cmd.build("0.0.0").expect("build ok");
+        let matches = root
+            .try_get_matches_from(["aspect", "greet", "--task-key=legacy"])
+            .expect("parse ok");
+        let dispatch = cmd.dispatch(matches).expect("dispatch ok");
+        assert_eq!(dispatch.task_name, "legacy");
     }
 
     // ── Override merge (no heap path: no overrides applied) ────────────────

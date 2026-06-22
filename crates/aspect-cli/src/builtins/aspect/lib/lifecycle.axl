@@ -296,8 +296,8 @@ def apply_repro_fix_hooks(
         return
 
     info_base = {
-        "task_path": " ".join(list(ctx.task.group) + [ctx.task.name]),
-        "task_name": ctx.task.name,
+        "task_path": " ".join(list(ctx.task.group) + [ctx.task.kind]),
+        "task_name": ctx.task.kind,
         "task_group": list(ctx.task.group),
         "kind": kind,
         "status": status,

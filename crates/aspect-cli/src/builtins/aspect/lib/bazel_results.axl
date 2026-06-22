@@ -1145,8 +1145,8 @@ def summary_title(data, status, target_pattern = "", task_name = ""):
         data:           dict from init_data()
         status:         "running" | "failing" | "passed" | "failed" | "warning" | "aborted"
         target_pattern: subject (e.g. "//..." for a build/test task)
-        task_name:      raw task identifier (`ctx.task.name`) — the
-                        lowercase string declared on `task(name=...)`.
+        task_name:      raw task kind (`ctx.task.kind`) — the lowercase
+                        string declared on `task(kind=...)`.
 
     Returns:
         str — max 160 chars (GitHub check title limit)

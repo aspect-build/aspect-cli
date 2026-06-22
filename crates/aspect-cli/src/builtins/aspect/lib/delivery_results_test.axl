@@ -383,7 +383,7 @@ def _check_long_subject_title_is_capped(ctx):
         fail("title unexpectedly long (%d chars): %r" % (len(title), title))
 
 delivery_template_snapshot_tests = task(
-    name = "test-delivery-template-snapshots",
+    kind = "test-delivery-template-snapshots",
     group = ["dev"],
     implementation = _test_impl,
     args = {},
@@ -575,7 +575,7 @@ def _unit_test_impl(ctx):
     return 0
 
 delivery_results_unit_tests = task(
-    name = "test-delivery-results",
+    kind = "test-delivery-results",
     group = ["dev"],
     implementation = _unit_test_impl,
     args = {},

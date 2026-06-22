@@ -629,7 +629,7 @@ def _test_impl(ctx):
     return 0
 
 template_snapshot_tests = task(
-    name = "test-template-snapshots",
+    kind = "test-template-snapshots",
     group = ["dev"],
     implementation = _test_impl,
     args = {},
@@ -1212,7 +1212,7 @@ def _unit_test_impl(ctx):
     return 0
 
 bazel_results_unit_tests = task(
-    name = "test-bazel-results",
+    kind = "test-bazel-results",
     group = ["dev"],
     implementation = _unit_test_impl,
     args = {},

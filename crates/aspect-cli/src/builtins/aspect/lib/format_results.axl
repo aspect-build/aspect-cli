@@ -72,8 +72,8 @@ def format_summary_title(data, status, target_pattern = "", task_name = ""):
     "✅ format //tools/format:format · No files to format"
     "🔄 format //tools/format:format · Running..."
 
-    `task_name` is the raw task identifier (`ctx.task.name`) — the
-    lowercase string the user declared on `task(name="...")`. The
+    `task_name` is the raw task kind (`ctx.task.kind`) — the lowercase
+    string the user declared on `task(kind="...")`. The
     leading emoji comes from the task's *current status* via
     `emoji_for_status` so the icon mirrors the verdict at a glance
     (✅/⚠️/❌/🔄/🔥). Defaults to "format" when no name is provided.

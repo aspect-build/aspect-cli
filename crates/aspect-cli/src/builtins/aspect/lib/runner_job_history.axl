@@ -56,8 +56,8 @@ def _task_path(ctx):
     """
     groups = ctx.task.group
     if not groups:
-        return ctx.task.name
-    return ":".join(groups + [ctx.task.name])
+        return ctx.task.kind
+    return ":".join(groups + [ctx.task.kind])
 
 def _format_date(ctx):
     """Human-readable timestamp for the `[<date>]` prefix.
@@ -135,7 +135,7 @@ def append_runner_job_history(ctx):
     if not task_url:
         return False
 
-    dedup_key = "%s %s %s" % (task_url, _task_path(ctx), ctx.task.key)
+    dedup_key = "%s %s %s" % (task_url, _task_path(ctx), ctx.task.name)
     if dedup_key in _existing_dedup_keys(ctx, path):
         return False
 

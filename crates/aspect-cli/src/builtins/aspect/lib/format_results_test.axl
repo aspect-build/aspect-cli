@@ -296,7 +296,7 @@ def _test_impl(ctx):
     return 0
 
 format_template_snapshot_tests = task(
-    name = "test-format-template-snapshots",
+    kind = "test-format-template-snapshots",
     group = ["dev"],
     implementation = _test_impl,
     args = {},

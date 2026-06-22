@@ -52,7 +52,7 @@ Task execution occurs when a user explicitly invokes a task (e.g., `aspect run <
 - `ctx.http()` — HTTP client (get, post, download with integrity checking)
 - `ctx.template` — template rendering
 - `ctx.traits[TraitType]` — frozen trait data (read-only, as configured)
-- `ctx.task` — task metadata (name, group)
+- `ctx.task` — task metadata (kind, display_kind, name, display_name, group, id)
 
 Task execution is inherently non-deterministic. It interacts with the outside world — building code, fetching URLs, writing files, running processes. The determinism guarantee applies only to evaluation; execution is where real work happens.
 
@@ -142,7 +142,7 @@ def _impl(ctx: FeatureContext):
         event = "success" if exit_code == 0 else "failure"
         channel = channels.get(event)
         if channel:
-            slack.post(channel, "Build %s: %s" % (task_ctx.task.name, event))
+            slack.post(channel, "Build %s: %s" % (task_ctx.task.kind, event))
 
     bazel_trait.build_end.append(_on_build_end)
 

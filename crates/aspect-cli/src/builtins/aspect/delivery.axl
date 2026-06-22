@@ -360,7 +360,7 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, use
     `should_surface_phase2_stderr`). The gRPC log uploads per
     `ctx.args.upload_grpc_log`. Uploads no-op off-CI.
     """
-    repo_dir = "/tmp/aspect_delivery_" + ctx.task.key
+    repo_dir = "/tmp/aspect_delivery_" + ctx.task.name
     _write_aspect_repo(ctx, repo_dir)
 
     # `--inject_repository` only registers the repo in the bzlmod graph; under
@@ -410,7 +410,7 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, use
         # flag — used post-wait to tell a declared opt-out from a real
         # phase-2 key drift. Local-action-cache hits aren't logged (per
         # spawn.proto), the same blind spot aquery has; accepted.
-        phase1_execlog_path = _EXECLOG_PATH.format(ctx.task.key)
+        phase1_execlog_path = _EXECLOG_PATH.format(ctx.task.name)
         phase1_execlog_sinks = list(bazel_trait.execution_log_sinks)
         phase1_execlog_sinks.append(bazel.execution_log.file(path = phase1_execlog_path))
 
@@ -518,7 +518,7 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, use
         phase = Phase(name = "checksum", description = "Checksum delivery digests", emoji = "💯"),
     )
     _t_phase2 = time.monotonic()
-    log_path = _GRPC_LOG_PATH.format(ctx.task.key)
+    log_path = _GRPC_LOG_PATH.format(ctx.task.name)
 
     # Phase 2 needs a remote executor endpoint: DeliveryHash is `no-local`, so
     # Bazel requires one even though require-cached means it never executes
@@ -546,7 +546,7 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, use
 
     # Redirect stderr to a file: require-cached failures are noisy-but-expected;
     # the actionable signal is the gRPC log below. The file is the escape hatch.
-    phase2_log_path = _PHASE2_LOG_PATH.format(ctx.task.key)
+    phase2_log_path = _PHASE2_LOG_PATH.format(ctx.task.name)
     phase2_status = ctx.bazel.build(
         flags = phase2_flags,
         stdout = None,
@@ -987,10 +987,10 @@ def _delivery_impl(ctx):
 
     # Change-detection prefix: --task-key, optionally extended by --salt.
     if ctx.args.salt:
-        prefix = ctx.task.key + ":" + ctx.args.salt
+        prefix = ctx.task.name + ":" + ctx.args.salt
         prefix_source = "--task-key + --salt"
     else:
-        prefix = ctx.task.key
+        prefix = ctx.task.name
         prefix_source = "--task-key"
 
     # Surface the salt-augmented prefix so the "KEY" column shows
@@ -1233,7 +1233,7 @@ def _delivery_impl(ctx):
         # Redirect stderr to a file: phase-3 re-materializes artifacts (OCI
         # layers, runfiles) and its progress looks like redundant rebuilds;
         # the log is the escape hatch on real failure.
-        phase3_log_path = _PHASE3_LOG_PATH.format(ctx.task.key)
+        phase3_log_path = _PHASE3_LOG_PATH.format(ctx.task.name)
         phase3_events = bazel.build_events.iterator()
         build = ctx.bazel.build(
             flags = phase3_flags,
@@ -1308,7 +1308,7 @@ def _delivery_impl(ctx):
             pending_count += 1
             mnemonics = non_hermetic_misses.get(apparent_label(label), [])
             if mnemonics:
-                msg = "no digest: non-cacheable upstream action(s) ({}); likely non-hermetic. Phase-2 raw log: {}".format(", ".join(mnemonics), _PHASE2_LOG_PATH.format(ctx.task.key))
+                msg = "no digest: non-cacheable upstream action(s) ({}); likely non-hermetic. Phase-2 raw log: {}".format(", ".join(mnemonics), _PHASE2_LOG_PATH.format(ctx.task.name))
             else:
                 msg = "no output_sha (not in grpc log; target may be an alias — use the actual target label)"
             rows.append((label, "WARN", "warn", msg, "-", "-"))
@@ -1530,7 +1530,7 @@ def _delivery_impl(ctx):
     return _emit_final(ctx, lifecycle, data, exit_code = exit_code)
 
 delivery = task(
-    name = "delivery",
+    kind = "delivery",
     summary = "Build and deliver binary targets. Targets are built with stamping and delivered exactly once per commit unless forced; change detection skips targets whose outputs haven't changed since the last delivery.",
     description = """Build and deliver binary targets. Targets are built with stamping and delivered exactly once per commit unless forced; change detection skips targets whose outputs haven't changed since the last delivery.
 

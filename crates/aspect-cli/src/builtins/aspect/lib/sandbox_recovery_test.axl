@@ -192,7 +192,7 @@ def _test_impl(ctx):
     return 0
 
 sandbox_recovery_tests = task(
-    name = "test-sandbox-recovery",
+    kind = "test-sandbox-recovery",
     group = ["dev"],
     implementation = _test_impl,
     args = {},
