@@ -489,12 +489,14 @@ jobs:
   # We build via `aspect` (self-configures the runner's output base + remote cache,
   # so the dev tree pre-build already populated is a cache hit), force the binary
   # local with --remote_download_toplevel (the runner defaults to minimal downloads
-  # over a FUSE cache, else it never lands in the workspace), then copy it from the
-  # bazel-bin symlink to a stable target/ci/ path immediately — a later build can
-  # redirect bazel-out, which is what makes a raw bazel-out path go stale (Buildkite
-  # hit exactly that — a 127 "No such file" on the launcher). The CLI is already
-  # stabilized at target/ci/aspect-cli by install-prebuilt-aspect-cli, which is also
-  # what the launcher resolves.
+  # over a FUSE cache, else it never lands in the workspace), resolve the HOST
+  # output path with `bazel cquery` (NOT a bazel-out glob — that can grab a
+  # cross-compiled / -opt transitioned variant that won't execute), and copy it to
+  # a stable target/ci/ path immediately — a later build can redirect bazel-out,
+  # which is what makes a raw bazel-out path go stale (Buildkite hit exactly that —
+  # a 127 "No such file" on the launcher). The CLI is already stabilized at
+  # target/ci/aspect-cli by install-prebuilt-aspect-cli, which is also what the
+  # launcher resolves.
   axl-tests:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     needs: [pre-build]
@@ -507,6 +509,22 @@ jobs:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: AXL Tests
         run: |
+          # Recompute the Workflows-runner startup opts (bootstrap.sh didn't run in
+          # this job, so $BAZEL_STARTUP_OPTS isn't set) so the bare `bazel cquery`
+          # below attaches to the SAME output base that `aspect build` uses — else
+          # cquery would query a different server and not see the built binary.
+          STORAGE_PATH="${ASPECT_WORKFLOWS_RUNNER_STORAGE_PATH:-/mnt/ephemeral}"
+          REPO_NAME=$(echo "${GITHUB_REPOSITORY}" | sed 's|.*/||' | sed 's|[^a-zA-Z0-9._-]|_|g')
+          SUBDIR=$(basename "${GITHUB_WORKSPACE}" | sed 's|[^a-zA-Z0-9._-]|_|g')
+          if [ -n "${REPO_NAME}" ]; then
+            OUTPUT_USER_ROOT="${STORAGE_PATH}/bazel/${REPO_NAME}/${SUBDIR}"
+            OUTPUT_BASE="${STORAGE_PATH}/output/${REPO_NAME}/${SUBDIR}"
+          else
+            OUTPUT_USER_ROOT="${STORAGE_PATH}/bazel/${SUBDIR}"
+            OUTPUT_BASE="${STORAGE_PATH}/output/${SUBDIR}"
+          fi
+          STARTUP_OPTS=(--nohome_rc --nosystem_rc "--output_user_root=${OUTPUT_USER_ROOT}" "--output_base=${OUTPUT_BASE}")
+
           echo "--- build the dev launcher (= Buildkite's \$LAUNCHER)"
           # --remote_download_toplevel forces the binary onto local disk: the
           # Workflows runner defaults to --remote_download_outputs=minimal (bb_clientd
@@ -515,20 +533,16 @@ jobs:
           aspect build --task-key axl-tests-gha-bootstrap \
             --bazel-flag=--remote_download_toplevel \
             //crates/aspect-launcher
-          # Copy to a stable target/ci/ path immediately, before any later build
-          # redirects bazel-out. The launcher goes through a config transition, so
-          # we rely on the bazel-bin convenience symlink (which Bazel keeps pointed
-          # at the transitioned output) and fall back to a bazel-out scan. NOTE:
-          # `aspect cquery` does NOT exist (aspect-cli has no cquery verb), so we
-          # resolve the path directly rather than querying.
+          # Resolve the binary with cquery and copy to a stable target/ci/ path
+          # immediately, before any later build redirects bazel-out. cquery returns
+          # the HOST output path (k8-fastbuild) — NOT the cross-compiled / -opt
+          # transitioned variants that also sit in bazel-out (a plain `ls bazel-out`
+          # scan can pick a non-host one → "Exec format error"). `aspect cquery`
+          # does not exist (no such verb); the tools/bazel wrapper forwards `cquery`
+          # to real bazel.
           mkdir -p target/ci
-          launcher_out=bazel-bin/crates/aspect-launcher/aspect-launcher
-          if [ ! -f "$launcher_out" ]; then
-            # Bazel-out paths are alphanumeric; -t picks the newest transitioned dir.
-            # shellcheck disable=SC2012
-            launcher_out=$(ls -t bazel-out/*/bin/crates/aspect-launcher/aspect-launcher 2>/dev/null | head -n1)
-          fi
-          test -n "$launcher_out" && test -f "$launcher_out" || { echo "::error::dev launcher binary not found locally after build"; exit 1; }
+          launcher_out=$(bazel "${STARTUP_OPTS[@]}" cquery --output=files //crates/aspect-launcher)
+          test -f "$launcher_out" || { echo "::error::dev launcher binary not found locally: '$launcher_out'"; exit 1; }
           echo "launcher binary: $launcher_out"
           cp -f "$launcher_out" target/ci/aspect-launcher
           LAUNCHER="$GITHUB_WORKSPACE/target/ci/aspect-launcher"
