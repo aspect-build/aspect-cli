@@ -487,13 +487,14 @@ jobs:
   # THIS commit and invoke it directly — exactly like Buildkite's `$LAUNCHER`.
   #
   # We build via `aspect` (which self-configures the runner's output base + remote
-  # cache, so the dev tree pre-build already populated is a cache hit) and resolve
-  # the binaries with `aspect cquery --output=files` (handles Linux platform
-  # transitions). We copy the launcher to a stable path immediately: a later
-  # `aspect`/`bazel` build can redirect the bazel-out symlink, which is what makes
-  # the raw cquery'd path go stale (Buildkite hit exactly that — a 127 "No such
-  # file" on the launcher). The CLI is already stabilized at target/ci/aspect-cli
-  # by install-prebuilt-aspect-cli, which is also what the launcher resolves.
+  # cache, so the dev tree pre-build already populated is a cache hit), then copy
+  # the launcher from its bazel-bin path to a stable target/ci/ path immediately:
+  # a later `aspect`/`bazel` build can redirect the bazel-out symlink, which is
+  # what makes a raw bazel-out path go stale (Buildkite hit exactly that — a 127
+  # "No such file" on the launcher). The launcher is a host-config binary, so the
+  # bazel-bin convenience symlink resolves it directly (no platform transition for
+  # this target). The CLI is already stabilized at target/ci/aspect-cli by
+  # install-prebuilt-aspect-cli, which is also what the launcher resolves.
   axl-tests:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     needs: [pre-build]
@@ -509,10 +510,11 @@ jobs:
           echo "--- build the dev launcher (= Buildkite's \$LAUNCHER)"
           aspect build --task-key axl-tests-gha-bootstrap //crates/aspect-launcher
           # Copy to a stable path NOW, before any later build redirects bazel-out.
-          # (cquery stdout is just the file path; drop any stderr progress lines.)
+          # The launcher is a host-config binary, so the bazel-bin convenience
+          # symlink resolves it directly (no cquery needed / no platform
+          # transition for this target). Fail loudly if the path moves.
           mkdir -p target/ci
-          launcher_out=$(aspect cquery --output=files //crates/aspect-launcher 2>/dev/null)
-          cp -f "$launcher_out" target/ci/aspect-launcher
+          cp -f bazel-bin/crates/aspect-launcher/aspect-launcher target/ci/aspect-launcher
           LAUNCHER="$GITHUB_WORKSPACE/target/ci/aspect-launcher"
           CLI="$GITHUB_WORKSPACE/target/ci/aspect-cli"
           # Fail loudly if we somehow didn't get the unstamped dev launcher — the
@@ -586,68 +588,13 @@ jobs:
           # which invalidates bazel-out paths. We use the stabilized $LAUNCHER /
           # $CLI copies above, so that's harmless here.
           "$LAUNCHER" tests axl
-  # bazelrc e2e: assert `aspect` and bare `bazel` start the SAME Bazel server
-  # (no server restart between them => identical startup flags). Ported from the
-  # Buildkite `bazelrc-e2e` step.
-  #
-  # The bare `bazel info` calls only target the same server as `aspect` if they
-  # share `aspect`'s computed --output_base/--output_user_root. Buildkite gets
-  # those via bootstrap.sh's $BAZEL_STARTUP_OPTS; here bootstrap.sh did NOT run
-  # (we install the prebuilt CLI instead), so $GITHUB_ENV never received them.
-  # We recompute them inline, mirroring bootstrap.sh + environment.axl's
-  # get_bazelrc_flags. `aspect` itself always injects these on a Workflows runner
-  # regardless, so only the bare `bazel` invocations need the explicit opts.
-  bazelrc-e2e:
-    runs-on: [self-hosted, aspect-workflows, aspect-default]
-    needs: [pre-build]
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v6
-      - uses: ./.github/actions/install-prebuilt-aspect-cli
-      - uses: aspect-build/setup-aspect@c22a8f64fb38f82f59ce809cd7eb9f8ae096da44 # v2026.23.2
-        with:
-          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
-      - name: bazelrc e2e (no server restart)
-        run: |
-          # Recompute the Workflows-runner startup opts that bootstrap.sh would
-          # have exported, so bare `bazel info` hits aspect's output base.
-          # Held in an array so the flags word-split into separate args cleanly.
-          STORAGE_PATH="${ASPECT_WORKFLOWS_RUNNER_STORAGE_PATH:-/mnt/ephemeral}"
-          REPO_NAME=$(echo "${GITHUB_REPOSITORY}" | sed 's|.*/||' | sed 's|[^a-zA-Z0-9._-]|_|g')
-          SUBDIR=$(basename "${GITHUB_WORKSPACE}" | sed 's|[^a-zA-Z0-9._-]|_|g')
-          if [ -n "${REPO_NAME}" ]; then
-            OUTPUT_USER_ROOT="${STORAGE_PATH}/bazel/${REPO_NAME}/${SUBDIR}"
-            OUTPUT_BASE="${STORAGE_PATH}/output/${REPO_NAME}/${SUBDIR}"
-          else
-            OUTPUT_USER_ROOT="${STORAGE_PATH}/bazel/${SUBDIR}"
-            OUTPUT_BASE="${STORAGE_PATH}/output/${SUBDIR}"
-          fi
-          STARTUP_OPTS=(--nohome_rc --nosystem_rc "--output_user_root=${OUTPUT_USER_ROOT}" "--output_base=${OUTPUT_BASE}")
-          echo "Startup opts: ${STARTUP_OPTS[*]}"
-
-          echo "--- Warm up Bazel server"
-          bazel "${STARTUP_OPTS[@]}" test --config=ci -c dbg //crates/bazelrc:bazelrc_test
-          BEFORE_PID=$(bazel "${STARTUP_OPTS[@]}" info server_pid)
-          echo "server_pid: $BEFORE_PID"
-          echo "--- bazel info (before aspect)"
-          bazel "${STARTUP_OPTS[@]}" info
-          echo "--- aspect test //crates/bazelrc:bazelrc_test"
-          aspect test --task-key bazelrc-e2e-gha //crates/bazelrc:bazelrc_test
-          AFTER_PID=$(bazel "${STARTUP_OPTS[@]}" info server_pid)
-          echo "--- bazel info (after aspect)"
-          bazel "${STARTUP_OPTS[@]}" info
-          # Intentionally no $SERVER_LOG cat or $OUTPUT_BASE artifact uploads.
-          # This repo is public, so the job log and artifact tab are
-          # world-readable. java.log / command.log / jvm.out / cmdline can capture
-          # `--announce_rc` output and error messages that quote flag values
-          # verbatim (--remote_header=, --action_env=TOKEN=, URL creds …) — none
-          # of which go through the Rust BES redactor.
-          if [ "$BEFORE_PID" != "$AFTER_PID" ]; then
-            echo "::error::Bazel server was restarted (PID $BEFORE_PID -> $AFTER_PID)"
-            echo "This means aspect produced different startup flags than bazel."
-            exit 1
-          fi
-          echo "OK: server PID unchanged ($BEFORE_PID)"
+  # NOTE: the Buildkite `bazelrc-e2e` step is intentionally NOT ported here. It
+  # asserts that bare `bazel` and `aspect` start the SAME Bazel server (identical
+  # startup flags, no server thrash). On a GitHub Actions Workflows runner `bazel`
+  # resolves to the stable Aspect launcher rather than vanilla bazel, so the
+  # bare-bazel-vs-aspect comparison the test depends on can't be reconstructed
+  # (and the launcher injects BES/remote-cache config that hangs on flush). It
+  # stays a Buildkite-only test on main.
   # Smoke-tests the new test-task flags. Ported from the Buildkite
   # `test-flags-task` step. `--target-pattern-file` is forwarded to Bazel
   # verbatim, so the assertion is just that aspect resolves the file and the run
