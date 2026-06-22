@@ -518,29 +518,44 @@ jobs:
             --bazel-flag=--remote_download_toplevel \
             //crates/aspect-launcher
           # Copy the HOST launcher to a stable target/ci/ path immediately, before
-          # any later build redirects bazel-out. //crates/aspect-launcher is built
-          # in aspect's --config=ci config (some k8-<mode> dir); the per-platform
-          # release variants from multi_platform_rust_binaries are cross-compiled
-          # under Starlark-transition dirs whose config segment carries an `-ST-`
-          # suffix (musl/arm — NOT host-runnable; copying one gives "Exec format
-          # error"). So pick the bazel-out config dir WITHOUT `-ST-` (the host one);
-          # newest wins if more than one. cquery can't help here — it reports a path
-          # under cquery's own config, not aspect's build config.
+          # any later build redirects bazel-out. The `bazel-bin` convenience symlink
+          # is Bazel's canonical pointer to the just-built target's output — for the
+          # plain (non-release) //crates/aspect-launcher that's the HOST binary, so
+          # prefer it. Fall back to scanning bazel-out config dirs, skipping the
+          # `-ST-` Starlark-transition dirs (the multi_platform_rust_binaries
+          # musl/arm cross-compiles — running one gives "Exec format error").
           mkdir -p target/ci
           launcher_out=""
-          for cand in bazel-out/*/bin/crates/aspect-launcher/aspect-launcher; do
-            case "$cand" in *-ST-*) continue ;; esac   # skip cross-compiled release variants
-            [ -f "$cand" ] && { [ -z "$launcher_out" ] || [ "$cand" -nt "$launcher_out" ]; } && launcher_out="$cand"
-          done
-          test -n "$launcher_out" || { echo "::error::host dev launcher binary not found under bazel-out (non -ST- config)"; exit 1; }
+          if [ -f bazel-bin/crates/aspect-launcher/aspect-launcher ]; then
+            launcher_out=bazel-bin/crates/aspect-launcher/aspect-launcher
+          else
+            for cand in bazel-out/*/bin/crates/aspect-launcher/aspect-launcher; do
+              case "$cand" in *-ST-*) continue ;; esac
+              [ -f "$cand" ] && { [ -z "$launcher_out" ] || [ "$cand" -nt "$launcher_out" ]; } && launcher_out="$cand"
+            done
+          fi
+          if [ -z "$launcher_out" ]; then
+            echo "::error::host dev launcher binary not found"
+            echo "--- bazel-out launcher candidates (path : file type) ---"
+            for c in bazel-out/*/bin/crates/aspect-launcher/aspect-launcher; do
+              [ -e "$c" ] && echo "  $c : $(file -b "$c")"
+            done
+            echo "  bazel-bin symlink -> $(readlink bazel-bin 2>/dev/null || echo '(absent)')"
+            exit 1
+          fi
           echo "launcher binary: $launcher_out"
           cp -f "$launcher_out" target/ci/aspect-launcher
           LAUNCHER="$GITHUB_WORKSPACE/target/ci/aspect-launcher"
           CLI="$GITHUB_WORKSPACE/target/ci/aspect-cli"
-          # Fail loudly if we somehow didn't get the unstamped dev launcher — the
-          # `aspect tests axl` suite asserts ASPECT_LAUNCHER_VERSION == 0.0.0-dev,
-          # and a silent fallback to the runner's stable launcher would be cryptic.
-          launcher_version=$("$LAUNCHER" --version)
+          # Verify it's the unstamped dev launcher AND host-runnable (catch a
+          # cross-compiled pick here, not 20 lines downstream). The `aspect tests axl`
+          # suite asserts ASPECT_LAUNCHER_VERSION == 0.0.0-dev; a silent fallback to
+          # the runner's stable launcher, or an Exec-format-error binary, would be cryptic.
+          if ! launcher_version=$("$LAUNCHER" --version 2>&1); then
+            echo "::error::dev launcher did not run (wrong arch? '$launcher_out'): $launcher_version"
+            file -b target/ci/aspect-launcher
+            exit 1
+          fi
           echo "dev launcher: $launcher_version"
           case "$launcher_version" in
             *0.0.0-dev*) ;;
