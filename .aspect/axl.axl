@@ -521,6 +521,15 @@ def test_query_flags(ctx: TaskContext, tc: int) -> int:
     return tc
 
 def test_cancel_invocation(ctx: TaskContext, tc: int) -> int:
+    # Warm up loading/analysis to completion FIRST so the cancelled --nobuild
+    # builds below never get SIGINT'd mid-repository-fetch. On a cold repo cache
+    # (GHA Workflows runners, unlike Buildkite's warm shared cache) a build
+    # cancelled during repo fetching can strand the Bazel 9 "repo contents cache"
+    # lock, so the next invocation hangs on "could not acquire lock on repo
+    # contents cache". Running the same target to completion here fetches the
+    # repos and releases that lock cleanly before any cancellation.
+    ctx.bazel.build("//crates/aspect-cli:aspect-cli", flags = ["--nobuild"]).wait()
+
     # Test 1: Server-wide cancel_invocation when no build is running
     cancellation3 = ctx.bazel.cancel_invocation()
     tc = test_case(tc, type(cancellation3.busy) == "bool", "cancel_invocation().busy should be a bool")
