@@ -416,3 +416,241 @@ jobs:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Cache Diff Task (ASPECT_DEBUG=1)
         run: ASPECT_DEBUG=1 aspect cache diff --task-key cache-diff-gha-debug
+  # Workflows runner smoke test: the freshly-built CLI starts, prints version /
+  # help, and the runner injects the expected ASPECT_WORKFLOWS_* environment.
+  # Runs on a self-hosted runner because the ASPECT_WORKFLOWS_RUNNER_* values it
+  # dumps only exist there. Ported from the Buildkite `runner-smoke` step (which
+  # only runs on main); kept here so PRs catch CLI-startup / env-plumbing breakage.
+  runner-smoke:
+    runs-on: [self-hosted, aspect-workflows, aspect-default]
+    needs: [pre-build]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+      - uses: aspect-build/setup-aspect@c22a8f64fb38f82f59ce809cd7eb9f8ae096da44 # v2026.23.2
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+      - name: Runner smoke test
+        run: |
+          aspect --version
+          aspect version
+          aspect help
+          echo "ASPECT_* env var names present:"
+          env | grep -o '^ASPECT_[^=]*' | sort | sed 's/^/  /'
+          echo "ASPECT_WORKFLOWS_* values:"
+          for var in \
+            ASPECT_WORKFLOWS_BES_BACKEND \
+            ASPECT_WORKFLOWS_BES_RESULTS_URL \
+            ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT \
+            ASPECT_WORKFLOWS_REMOTE_BYTESTREAM_URI_PREFIX \
+            ASPECT_WORKFLOWS_REMOTE_CACHE \
+            ASPECT_WORKFLOWS_RUNNER \
+            ASPECT_WORKFLOWS_RUNNER_ASPECT_LAUNCHER_VERSION \
+            ASPECT_WORKFLOWS_RUNNER_AZ \
+            ASPECT_WORKFLOWS_RUNNER_BAZEL_ROOT_DIR \
+            ASPECT_WORKFLOWS_RUNNER_BIN_DIR \
+            ASPECT_WORKFLOWS_RUNNER_CI_AGENT_VERSION \
+            ASPECT_WORKFLOWS_RUNNER_CLOUD_ACCOUNT \
+            ASPECT_WORKFLOWS_RUNNER_CLOUD_PROVIDER \
+            ASPECT_WORKFLOWS_RUNNER_DATA_DIR \
+            ASPECT_WORKFLOWS_RUNNER_HAS_NVME_STORAGE \
+            ASPECT_WORKFLOWS_RUNNER_IMAGE_ID \
+            ASPECT_WORKFLOWS_RUNNER_INSTANCE_ID \
+            ASPECT_WORKFLOWS_RUNNER_INSTANCE_NAME \
+            ASPECT_WORKFLOWS_RUNNER_INSTANCE_TYPE \
+            ASPECT_WORKFLOWS_RUNNER_GROUP_NAME \
+            ASPECT_WORKFLOWS_RUNNER_GROUP_QUEUE \
+            ASPECT_WORKFLOWS_RUNNER_JOB_HISTORY_FILE \
+            ASPECT_WORKFLOWS_RUNNER_JOB_TMPDIR \
+            ASPECT_WORKFLOWS_RUNNER_LAST_HEALTH_CHECK_FILE \
+            ASPECT_WORKFLOWS_RUNNER_RESOURCE_TYPE \
+            ASPECT_WORKFLOWS_RUNNER_OUTPUT_ROOT_DIR \
+            ASPECT_WORKFLOWS_RUNNER_REGION \
+            ASPECT_WORKFLOWS_RUNNER_REPOSITORY_CACHE_DIR \
+            ASPECT_WORKFLOWS_RUNNER_STORAGE_PATH \
+            ASPECT_WORKFLOWS_RUNNER_VERSION \
+            ASPECT_WORKFLOWS_RUNNER_WARMING_CACHE_VERSION_FILE \
+            ASPECT_WORKFLOWS_RUNNER_WARMING_COMPLETE_MARKER_FILE \
+            ASPECT_WORKFLOWS_RUNNER_WARMING_ENABLED \
+          ; do
+            val=$(printenv "$var") && echo "  $var=$val" || true
+          done
+  # AXL test suite + CLI/launcher end-to-end smoke. Ported from the Buildkite
+  # `axl-tests` step. Unlike Buildkite (which cquery's the just-built launcher /
+  # cli out of bazel-out), the prebuilt CLI is already installed at
+  # `target/ci/aspect-cli` by install-prebuilt-aspect-cli, and the stable
+  # `aspect` launcher on PATH resolves it via .aspect/version.axl. So we invoke
+  # `aspect` directly (= Buildkite's $LAUNCHER) and the raw binary at
+  # target/ci/aspect-cli (= Buildkite's $CLI) without the build + cquery dance.
+  axl-tests:
+    runs-on: [self-hosted, aspect-workflows, aspect-default]
+    needs: [pre-build]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+      - uses: aspect-build/setup-aspect@c22a8f64fb38f82f59ce809cd7eb9f8ae096da44 # v2026.23.2
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+      - name: AXL Tests
+        run: |
+          CLI="$GITHUB_WORKSPACE/target/ci/aspect-cli"
+          echo "--- aspect demo template-demo"
+          aspect demo template-demo
+          echo "--- aspect user nested user-task"
+          aspect user nested user-task --run_count 5
+          echo "--- aspect user user-task-man"
+          aspect user user-task-man
+          echo "--- aspect user user-task-added-by-config"
+          aspect user user-task-added-by-config
+          echo "--- aspect user user-task-subdir (in crates/aspect-cli)"
+          (
+            cd crates/aspect-cli
+            aspect user user-task-subdir
+          )
+          echo "--- aspect run smoke (//examples/deliverable)"
+          aspect run //examples/deliverable:py_deliverable
+          aspect run //examples/deliverable:sh_deliverable -- forwarded-arg
+          echo "--- aspect help"
+          aspect help
+          echo "--- aspect launcher --version"
+          aspect --version
+          echo "--- aspect-cli --version"
+          "$CLI" --version
+          echo "--- aspect version"
+          aspect version
+          echo "--- invalid task-id"
+          aspect build --task-id not-a-uuid //... && echo "ERROR: --task-id should reject non-UUID" && exit 1 || true
+          echo "--- invalid task-key"
+          aspect build --task-key "bad key!" //... && echo "ERROR: --task-key should reject invalid chars" && exit 1 || true
+          echo "--- aspect dev test-template-snapshots"
+          aspect dev test-template-snapshots
+          echo "--- aspect dev test-lint-template-snapshots"
+          aspect dev test-lint-template-snapshots
+          echo "--- aspect dev test-lint-annotation-plan"
+          aspect dev test-lint-annotation-plan
+          echo "--- aspect dev test-format-template-snapshots"
+          aspect dev test-format-template-snapshots
+          echo "--- aspect dev test-gazelle-template-snapshots"
+          aspect dev test-gazelle-template-snapshots
+          echo "--- aspect dev test-delivery-template-snapshots"
+          aspect dev test-delivery-template-snapshots
+          echo "--- aspect dev test-bk-annotation-snapshots"
+          aspect dev test-bk-annotation-snapshots
+          echo "--- aspect dev test-pr-comment-snapshots"
+          aspect dev test-pr-comment-snapshots
+          echo "--- aspect dev test-github-detect"
+          aspect dev test-github-detect
+          echo "--- aspect dev test-gitlab-detect"
+          aspect dev test-gitlab-detect
+          echo "--- aspect dev test-gitlab-client"
+          aspect dev test-gitlab-client
+          echo "--- aspect dev test-tips"
+          aspect dev test-tips
+          echo "--- aspect dev test-rate-limit"
+          aspect dev test-rate-limit
+          echo "--- aspect dev test-runner-job-history"
+          aspect dev test-runner-job-history
+          echo "--- aspect tests axl"
+          # Run AXL tests last — cancel tests may kill the Bazel server,
+          # which invalidates bazel-out paths used above.
+          aspect tests axl
+  # bazelrc e2e: assert `aspect` and bare `bazel` start the SAME Bazel server
+  # (no server restart between them => identical startup flags). Ported from the
+  # Buildkite `bazelrc-e2e` step.
+  #
+  # The bare `bazel info` calls only target the same server as `aspect` if they
+  # share `aspect`'s computed --output_base/--output_user_root. Buildkite gets
+  # those via bootstrap.sh's $BAZEL_STARTUP_OPTS; here bootstrap.sh did NOT run
+  # (we install the prebuilt CLI instead), so $GITHUB_ENV never received them.
+  # We recompute them inline, mirroring bootstrap.sh + environment.axl's
+  # get_bazelrc_flags. `aspect` itself always injects these on a Workflows runner
+  # regardless, so only the bare `bazel` invocations need the explicit opts.
+  bazelrc-e2e:
+    runs-on: [self-hosted, aspect-workflows, aspect-default]
+    needs: [pre-build]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+      - uses: aspect-build/setup-aspect@c22a8f64fb38f82f59ce809cd7eb9f8ae096da44 # v2026.23.2
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+      - name: bazelrc e2e (no server restart)
+        run: |
+          # Recompute the Workflows-runner startup opts that bootstrap.sh would
+          # have exported, so bare `bazel info` hits aspect's output base.
+          # Held in an array so the flags word-split into separate args cleanly.
+          STORAGE_PATH="${ASPECT_WORKFLOWS_RUNNER_STORAGE_PATH:-/mnt/ephemeral}"
+          REPO_NAME=$(echo "${GITHUB_REPOSITORY}" | sed 's|.*/||' | sed 's|[^a-zA-Z0-9._-]|_|g')
+          SUBDIR=$(basename "${GITHUB_WORKSPACE}" | sed 's|[^a-zA-Z0-9._-]|_|g')
+          if [ -n "${REPO_NAME}" ]; then
+            OUTPUT_USER_ROOT="${STORAGE_PATH}/bazel/${REPO_NAME}/${SUBDIR}"
+            OUTPUT_BASE="${STORAGE_PATH}/output/${REPO_NAME}/${SUBDIR}"
+          else
+            OUTPUT_USER_ROOT="${STORAGE_PATH}/bazel/${SUBDIR}"
+            OUTPUT_BASE="${STORAGE_PATH}/output/${SUBDIR}"
+          fi
+          STARTUP_OPTS=(--nohome_rc --nosystem_rc "--output_user_root=${OUTPUT_USER_ROOT}" "--output_base=${OUTPUT_BASE}")
+          echo "Startup opts: ${STARTUP_OPTS[*]}"
+
+          echo "--- Warm up Bazel server"
+          bazel "${STARTUP_OPTS[@]}" test --config=ci -c dbg //crates/bazelrc:bazelrc_test
+          BEFORE_PID=$(bazel "${STARTUP_OPTS[@]}" info server_pid)
+          echo "server_pid: $BEFORE_PID"
+          echo "--- bazel info (before aspect)"
+          bazel "${STARTUP_OPTS[@]}" info
+          echo "--- aspect test //crates/bazelrc:bazelrc_test"
+          aspect test --task-key bazelrc-e2e-gha //crates/bazelrc:bazelrc_test
+          AFTER_PID=$(bazel "${STARTUP_OPTS[@]}" info server_pid)
+          echo "--- bazel info (after aspect)"
+          bazel "${STARTUP_OPTS[@]}" info
+          # Intentionally no $SERVER_LOG cat or $OUTPUT_BASE artifact uploads.
+          # This repo is public, so the job log and artifact tab are
+          # world-readable. java.log / command.log / jvm.out / cmdline can capture
+          # `--announce_rc` output and error messages that quote flag values
+          # verbatim (--remote_header=, --action_env=TOKEN=, URL creds …) — none
+          # of which go through the Rust BES redactor.
+          if [ "$BEFORE_PID" != "$AFTER_PID" ]; then
+            echo "::error::Bazel server was restarted (PID $BEFORE_PID -> $AFTER_PID)"
+            echo "This means aspect produced different startup flags than bazel."
+            exit 1
+          fi
+          echo "OK: server PID unchanged ($BEFORE_PID)"
+  # Smoke-tests the new test-task flags. Ported from the Buildkite
+  # `test-flags-task` step. `--target-pattern-file` is forwarded to Bazel
+  # verbatim, so the assertion is just that aspect resolves the file and the run
+  # completes. `--coverage` is exercised against an sh_test rather than a
+  # rust_test: toolchains_llvm_bootstrapped 0.5.2 (pinned in MODULE.bazel) ships
+  # without libclang_rt.profile.a, so any rust_test under --collect_code_coverage
+  # fails CppLink (upstream hermeticbuild/hermetic-llvm#318, fixed in #468 — not
+  # in 0.5.2 yet). sh_test has no coverage instrumentation so this exercises flag
+  # plumbing + the "report not found" warning path rather than an LCOV payload.
+  test-flags-task:
+    runs-on: [self-hosted, aspect-workflows, aspect-default]
+    needs: [pre-build]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+      - uses: aspect-build/setup-aspect@c22a8f64fb38f82f59ce809cd7eb9f8ae096da44 # v2026.23.2
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+      - name: Test Task — new flags
+        run: |
+          echo "--- aspect test --target-pattern-file"
+          PATTERNS=$(mktemp)
+          echo "# smoke: targets forwarded via --target_pattern_file" > "$PATTERNS"
+          echo "//examples/test_states:always_pass" >> "$PATTERNS"
+          aspect test --task-key test-gha-target-pattern-file --target-pattern-file="$PATTERNS"
+          rm -f "$PATTERNS"
+
+          echo "--- aspect test --coverage (+ --coverage-report + --coverage-tool)"
+          REPORT=$(mktemp)
+          aspect test --task-key test-gha-coverage \
+            --coverage \
+            --coverage-report="$REPORT" \
+            --coverage-tool=cat --coverage-tool-arg='{report}' \
+            //examples/test_states:always_pass
+          rm -f "$REPORT"
