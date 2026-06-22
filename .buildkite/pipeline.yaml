@@ -71,10 +71,18 @@ steps:
     command: |
       echo "--- :bazel: aspect build //crates/aspect-launcher //crates/aspect-cli"
       ASPECT_DEBUG=1 aspect build --task-key build-bk-axl-tests-bootstrap //crates/aspect-launcher //crates/aspect-cli
-      # Use cquery to get the actual output paths (handles platform transitions on Linux)
+      # Use cquery to get the actual output paths (handles platform transitions on Linux),
+      # then copy both binaries to stable target/ci/ paths IMMEDIATELY. A later
+      # build (or the second cquery below) can redirect the bazel-out symlink, so
+      # pointing $$LAUNCHER/$$CLI straight at the cquery'd bazel-out path races and
+      # dies with a 127 "No such file" on first use (mirrors bootstrap.sh, which
+      # stabilizes the cli the same way).
       WORKSPACE_ROOT=$$(pwd)
-      LAUNCHER=$$WORKSPACE_ROOT/$$(bazel $$BAZEL_STARTUP_OPTS cquery $$BAZEL_BUILD_OPTS --output=files //crates/aspect-launcher)
-      CLI=$$WORKSPACE_ROOT/$$(bazel $$BAZEL_STARTUP_OPTS cquery $$BAZEL_BUILD_OPTS --output=files //crates/aspect-cli)
+      mkdir -p target/ci
+      cp -f "$$(bazel $$BAZEL_STARTUP_OPTS cquery $$BAZEL_BUILD_OPTS --output=files //crates/aspect-launcher)" target/ci/aspect-launcher
+      cp -f "$$(bazel $$BAZEL_STARTUP_OPTS cquery $$BAZEL_BUILD_OPTS --output=files //crates/aspect-cli)" target/ci/aspect-cli
+      LAUNCHER=$$WORKSPACE_ROOT/target/ci/aspect-launcher
+      CLI=$$WORKSPACE_ROOT/target/ci/aspect-cli
       echo "--- :aspect: aspect demo template-demo"
       $$LAUNCHER demo template-demo
       echo "--- :aspect: aspect user nested user=task"
@@ -140,8 +148,9 @@ steps:
       echo "--- :aspect: aspect dev test-runner-job-history"
       $$LAUNCHER dev test-runner-job-history
       echo "--- :aspect: aspect tests axl"
-      # Run AXL tests last — cancel tests may kill the Bazel server,
-      # which invalidates bazel-out paths used by $$LAUNCHER above.
+      # Run AXL tests last — cancel tests may kill the Bazel server. $$LAUNCHER /
+      # $$CLI are stable target/ci/ copies (not bazel-out paths), so that's
+      # harmless here.
       $$LAUNCHER tests axl
   - key: bazelrc-e2e
     depends_on:

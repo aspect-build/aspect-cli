@@ -416,3 +416,234 @@ jobs:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Cache Diff Task (ASPECT_DEBUG=1)
         run: ASPECT_DEBUG=1 aspect cache diff --task-key cache-diff-gha-debug
+  # Workflows runner smoke test: the freshly-built CLI starts, prints version /
+  # help, and the runner injects the expected ASPECT_WORKFLOWS_* environment.
+  # Runs on a self-hosted runner because the ASPECT_WORKFLOWS_RUNNER_* values it
+  # dumps only exist there. Ported from the Buildkite `runner-smoke` step (which
+  # only runs on main); kept here so PRs catch CLI-startup / env-plumbing breakage.
+  runner-smoke:
+    runs-on: [self-hosted, aspect-workflows, aspect-default]
+    needs: [pre-build]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+      - uses: aspect-build/setup-aspect@c22a8f64fb38f82f59ce809cd7eb9f8ae096da44 # v2026.23.2
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+      - name: Runner smoke test
+        run: |
+          aspect --version
+          aspect version
+          aspect help
+          echo "ASPECT_* env var names present:"
+          env | grep -o '^ASPECT_[^=]*' | sort | sed 's/^/  /'
+          echo "ASPECT_WORKFLOWS_* values:"
+          for var in \
+            ASPECT_WORKFLOWS_BES_BACKEND \
+            ASPECT_WORKFLOWS_BES_RESULTS_URL \
+            ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT \
+            ASPECT_WORKFLOWS_REMOTE_BYTESTREAM_URI_PREFIX \
+            ASPECT_WORKFLOWS_REMOTE_CACHE \
+            ASPECT_WORKFLOWS_RUNNER \
+            ASPECT_WORKFLOWS_RUNNER_ASPECT_LAUNCHER_VERSION \
+            ASPECT_WORKFLOWS_RUNNER_AZ \
+            ASPECT_WORKFLOWS_RUNNER_BAZEL_ROOT_DIR \
+            ASPECT_WORKFLOWS_RUNNER_BIN_DIR \
+            ASPECT_WORKFLOWS_RUNNER_CI_AGENT_VERSION \
+            ASPECT_WORKFLOWS_RUNNER_CLOUD_ACCOUNT \
+            ASPECT_WORKFLOWS_RUNNER_CLOUD_PROVIDER \
+            ASPECT_WORKFLOWS_RUNNER_DATA_DIR \
+            ASPECT_WORKFLOWS_RUNNER_HAS_NVME_STORAGE \
+            ASPECT_WORKFLOWS_RUNNER_IMAGE_ID \
+            ASPECT_WORKFLOWS_RUNNER_INSTANCE_ID \
+            ASPECT_WORKFLOWS_RUNNER_INSTANCE_NAME \
+            ASPECT_WORKFLOWS_RUNNER_INSTANCE_TYPE \
+            ASPECT_WORKFLOWS_RUNNER_GROUP_NAME \
+            ASPECT_WORKFLOWS_RUNNER_GROUP_QUEUE \
+            ASPECT_WORKFLOWS_RUNNER_JOB_HISTORY_FILE \
+            ASPECT_WORKFLOWS_RUNNER_JOB_TMPDIR \
+            ASPECT_WORKFLOWS_RUNNER_LAST_HEALTH_CHECK_FILE \
+            ASPECT_WORKFLOWS_RUNNER_RESOURCE_TYPE \
+            ASPECT_WORKFLOWS_RUNNER_OUTPUT_ROOT_DIR \
+            ASPECT_WORKFLOWS_RUNNER_REGION \
+            ASPECT_WORKFLOWS_RUNNER_REPOSITORY_CACHE_DIR \
+            ASPECT_WORKFLOWS_RUNNER_STORAGE_PATH \
+            ASPECT_WORKFLOWS_RUNNER_VERSION \
+            ASPECT_WORKFLOWS_RUNNER_WARMING_CACHE_VERSION_FILE \
+            ASPECT_WORKFLOWS_RUNNER_WARMING_COMPLETE_MARKER_FILE \
+            ASPECT_WORKFLOWS_RUNNER_WARMING_ENABLED \
+          ; do
+            val=$(printenv "$var") && echo "  $var=$val" || true
+          done
+  # AXL test suite + CLI/launcher end-to-end smoke. Ported from the Buildkite
+  # `axl-tests` step.
+  #
+  # `aspect tests axl` asserts (under CI) that it was launched by the
+  # just-built, UNSTAMPED launcher: ASPECT_LAUNCHER_VERSION == "0.0.0-dev" and
+  # the launcher resolved the CLI via local("target/ci/aspect-cli")
+  # (.aspect/axl.axl:3393-3405). The stable `aspect` launcher that setup-aspect /
+  # the runner provides is release-stamped, so we must build the launcher from
+  # THIS commit and invoke it directly — exactly like Buildkite's `$LAUNCHER`.
+  #
+  # We build via `aspect` (self-configures the runner's output base + remote cache,
+  # so the dev tree pre-build already populated is a cache hit), force the binary
+  # local with --remote_download_toplevel (the runner defaults to minimal downloads
+  # over a FUSE cache, else it never lands in the workspace), then copy it from the
+  # bazel-bin symlink to a stable target/ci/ path immediately — a later build can
+  # redirect bazel-out, which is what makes a raw bazel-out path go stale (Buildkite
+  # hit exactly that — a 127 "No such file" on the launcher). The CLI is already
+  # stabilized at target/ci/aspect-cli by install-prebuilt-aspect-cli, which is also
+  # what the launcher resolves.
+  axl-tests:
+    runs-on: [self-hosted, aspect-workflows, aspect-default]
+    needs: [pre-build]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+      - uses: aspect-build/setup-aspect@c22a8f64fb38f82f59ce809cd7eb9f8ae096da44 # v2026.23.2
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+      - name: AXL Tests
+        run: |
+          echo "--- build the dev launcher (= Buildkite's \$LAUNCHER)"
+          # --remote_download_toplevel forces the binary onto local disk: the
+          # Workflows runner defaults to --remote_download_outputs=minimal (bb_clientd
+          # FUSE cache), so without it the output stays remote and never lands in the
+          # workspace (mirrors what bootstrap.sh does for //:cli).
+          aspect build --task-key axl-tests-gha-bootstrap \
+            --bazel-flag=--remote_download_toplevel \
+            //crates/aspect-launcher
+          # Copy to a stable target/ci/ path immediately, before any later build
+          # redirects bazel-out. The launcher goes through a config transition, so
+          # we rely on the bazel-bin convenience symlink (which Bazel keeps pointed
+          # at the transitioned output) and fall back to a bazel-out scan. NOTE:
+          # `aspect cquery` does NOT exist (aspect-cli has no cquery verb), so we
+          # resolve the path directly rather than querying.
+          mkdir -p target/ci
+          launcher_out=bazel-bin/crates/aspect-launcher/aspect-launcher
+          if [ ! -f "$launcher_out" ]; then
+            # Bazel-out paths are alphanumeric; -t picks the newest transitioned dir.
+            # shellcheck disable=SC2012
+            launcher_out=$(ls -t bazel-out/*/bin/crates/aspect-launcher/aspect-launcher 2>/dev/null | head -n1)
+          fi
+          test -n "$launcher_out" && test -f "$launcher_out" || { echo "::error::dev launcher binary not found locally after build"; exit 1; }
+          echo "launcher binary: $launcher_out"
+          cp -f "$launcher_out" target/ci/aspect-launcher
+          LAUNCHER="$GITHUB_WORKSPACE/target/ci/aspect-launcher"
+          CLI="$GITHUB_WORKSPACE/target/ci/aspect-cli"
+          # Fail loudly if we somehow didn't get the unstamped dev launcher — the
+          # `aspect tests axl` suite asserts ASPECT_LAUNCHER_VERSION == 0.0.0-dev,
+          # and a silent fallback to the runner's stable launcher would be cryptic.
+          launcher_version=$("$LAUNCHER" --version)
+          echo "dev launcher: $launcher_version"
+          case "$launcher_version" in
+            *0.0.0-dev*) ;;
+            *) echo "::error::expected an unstamped 0.0.0-dev launcher, got: $launcher_version"; exit 1 ;;
+          esac
+
+          echo "--- aspect demo template-demo"
+          "$LAUNCHER" demo template-demo
+          echo "--- aspect user nested user-task"
+          "$LAUNCHER" user nested user-task --run_count 5
+          echo "--- aspect user user-task-man"
+          "$LAUNCHER" user user-task-man
+          echo "--- aspect user user-task-added-by-config"
+          "$LAUNCHER" user user-task-added-by-config
+          echo "--- aspect user user-task-subdir (in crates/aspect-cli)"
+          (
+            cd crates/aspect-cli
+            "$LAUNCHER" user user-task-subdir
+          )
+          echo "--- aspect run smoke (//examples/deliverable)"
+          "$LAUNCHER" run //examples/deliverable:py_deliverable
+          "$LAUNCHER" run //examples/deliverable:sh_deliverable -- forwarded-arg
+          echo "--- aspect help"
+          "$LAUNCHER" help
+          echo "--- aspect-launcher --version"
+          "$LAUNCHER" --version
+          echo "--- aspect-cli --version"
+          "$CLI" --version
+          echo "--- aspect version"
+          "$LAUNCHER" version
+          echo "--- invalid task-id"
+          "$LAUNCHER" build --task-id not-a-uuid //... && echo "ERROR: --task-id should reject non-UUID" && exit 1 || true
+          echo "--- invalid task-key"
+          "$LAUNCHER" build --task-key "bad key!" //... && echo "ERROR: --task-key should reject invalid chars" && exit 1 || true
+          echo "--- aspect dev test-template-snapshots"
+          "$LAUNCHER" dev test-template-snapshots
+          echo "--- aspect dev test-lint-template-snapshots"
+          "$LAUNCHER" dev test-lint-template-snapshots
+          echo "--- aspect dev test-lint-annotation-plan"
+          "$LAUNCHER" dev test-lint-annotation-plan
+          echo "--- aspect dev test-format-template-snapshots"
+          "$LAUNCHER" dev test-format-template-snapshots
+          echo "--- aspect dev test-gazelle-template-snapshots"
+          "$LAUNCHER" dev test-gazelle-template-snapshots
+          echo "--- aspect dev test-delivery-template-snapshots"
+          "$LAUNCHER" dev test-delivery-template-snapshots
+          echo "--- aspect dev test-bk-annotation-snapshots"
+          "$LAUNCHER" dev test-bk-annotation-snapshots
+          echo "--- aspect dev test-pr-comment-snapshots"
+          "$LAUNCHER" dev test-pr-comment-snapshots
+          echo "--- aspect dev test-github-detect"
+          "$LAUNCHER" dev test-github-detect
+          echo "--- aspect dev test-gitlab-detect"
+          "$LAUNCHER" dev test-gitlab-detect
+          echo "--- aspect dev test-gitlab-client"
+          "$LAUNCHER" dev test-gitlab-client
+          echo "--- aspect dev test-tips"
+          "$LAUNCHER" dev test-tips
+          echo "--- aspect dev test-rate-limit"
+          "$LAUNCHER" dev test-rate-limit
+          echo "--- aspect dev test-runner-job-history"
+          "$LAUNCHER" dev test-runner-job-history
+          echo "--- aspect tests axl"
+          # Run AXL tests last — cancel tests may kill the Bazel server,
+          # which invalidates bazel-out paths. We use the stabilized $LAUNCHER /
+          # $CLI copies above, so that's harmless here.
+          "$LAUNCHER" tests axl
+  # NOTE: the Buildkite `bazelrc-e2e` step is intentionally NOT ported here. It
+  # asserts that bare `bazel` and `aspect` start the SAME Bazel server (identical
+  # startup flags, no server thrash). On a GitHub Actions Workflows runner `bazel`
+  # resolves to the stable Aspect launcher rather than vanilla bazel, so the
+  # bare-bazel-vs-aspect comparison the test depends on can't be reconstructed
+  # (and the launcher injects BES/remote-cache config that hangs on flush). It
+  # stays a Buildkite-only test on main.
+  # Smoke-tests the new test-task flags. Ported from the Buildkite
+  # `test-flags-task` step. `--target-pattern-file` is forwarded to Bazel
+  # verbatim, so the assertion is just that aspect resolves the file and the run
+  # completes. `--coverage` is exercised against an sh_test rather than a
+  # rust_test: toolchains_llvm_bootstrapped 0.5.2 (pinned in MODULE.bazel) ships
+  # without libclang_rt.profile.a, so any rust_test under --collect_code_coverage
+  # fails CppLink (upstream hermeticbuild/hermetic-llvm#318, fixed in #468 — not
+  # in 0.5.2 yet). sh_test has no coverage instrumentation so this exercises flag
+  # plumbing + the "report not found" warning path rather than an LCOV payload.
+  test-flags-task:
+    runs-on: [self-hosted, aspect-workflows, aspect-default]
+    needs: [pre-build]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+      - uses: aspect-build/setup-aspect@c22a8f64fb38f82f59ce809cd7eb9f8ae096da44 # v2026.23.2
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+      - name: Test Task — new flags
+        run: |
+          echo "--- aspect test --target-pattern-file"
+          PATTERNS=$(mktemp)
+          echo "# smoke: targets forwarded via --target_pattern_file" > "$PATTERNS"
+          echo "//examples/test_states:always_pass" >> "$PATTERNS"
+          aspect test --task-key test-gha-target-pattern-file --target-pattern-file="$PATTERNS"
+          rm -f "$PATTERNS"
+
+          echo "--- aspect test --coverage (+ --coverage-report + --coverage-tool)"
+          REPORT=$(mktemp)
+          aspect test --task-key test-gha-coverage \
+            --coverage \
+            --coverage-report="$REPORT" \
+            --coverage-tool=cat --coverage-tool-arg='{report}' \
+            //examples/test_states:always_pass
+          rm -f "$REPORT"
