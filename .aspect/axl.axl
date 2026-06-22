@@ -592,9 +592,13 @@ def test_cancel_invocation(ctx: TaskContext, tc: int) -> int:
     ctx.bazel.use_rc(ctx.bazel.new_rc(startup_flags = ["--output_base=" + output_base]))
 
     # Test 7: force() on a running build sends a second SIGINT to the client.
+    # Use a genuinely slow target (not --nobuild): an analysis-only build finishes
+    # near-instantly, so force()/wait() would race against an already-exited client
+    # and flake. --noremote_accept_cached + a per-process CACHEBUST keep it running
+    # on warm runners (same approach as Test 8).
     build9 = ctx.bazel.build(
-        "//crates/aspect-cli:aspect-cli",
-        flags = ["--nobuild"],
+        "//examples/slow_build:slow",
+        flags = ["--noremote_accept_cached", "--action_env=CACHEBUST=" + ctx.std.env.temp_dir()],
         build_events = True,
     )
     cancellation9 = ctx.bazel.cancel_invocation(force_kill_after_ms = 0)
@@ -602,7 +606,7 @@ def test_cancel_invocation(ctx: TaskContext, tc: int) -> int:
     # Manually force-kill and then wait with timeout
     cancellation9.force()
     result9 = cancellation9.wait(timeout_ms = 5000)
-    tc = test_case(tc, result9 == True, "force() + wait(timeout_ms) should succeed on --nobuild target")
+    tc = test_case(tc, result9 == True, "force() + wait(timeout_ms) should succeed on a running build")
     status9 = build9.wait()
     tc = test_case(tc, type(status9.code) == "int", "build.wait() after force() should return a status")
 
