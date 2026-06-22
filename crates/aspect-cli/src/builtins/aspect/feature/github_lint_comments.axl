@@ -775,7 +775,14 @@ def _github_lint_impl(ctx: FeatureContext):
                 # Errors streamed in _lint_report; post remaining warnings/notes
                 # (severity-sorted, capped to leftover budget). Patch suggestion
                 # comments join the same buffer for shared cap/dedup logic.
-                #
+
+                # Lazy-init existing markers for prior-run dedup. _lint_report
+                # only sets this when it streams a batch with errors; a run with
+                # no streamed errors (warnings/notes or patch suggestions only)
+                # reaches here with the key still unset.
+                if "existing_markers" not in gh:
+                    gh["existing_markers"] = _get_existing_markers(ctx, gh, ctx.task.key)
+
                 # "annotations" = no PR comments: patches go through
                 # _build_suggestion_comments independently of the destination
                 # filter, so gate them here too (SARIF comments are already empty).
