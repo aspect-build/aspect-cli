@@ -363,7 +363,7 @@ BuildkiteAnnotations = feature(
                           "boundaries always land immediately regardless of this setting.",
         ),
         "style": args.string(
-            default = "kilgore",
+            default = "strata",
             values = STYLE_NAMES,
             description = STYLE_ARG_DESCRIPTION,
         ),

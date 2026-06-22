@@ -497,7 +497,7 @@ GithubStatusChecks = feature(
             description = "Restrict lint check-run annotations to the displayed hunk regions of changed files (added lines + surrounding context from `detect_changed_files`). When false, off-region annotations are still posted but GitHub only renders them on the check-run detail page and commit page, not in Files Changed. Skipped silently when no changed-files context is available.",
         ),
         "style": args.string(
-            default = "kilgore",
+            default = "strata",
             values = STYLE_NAMES,
             description = STYLE_ARG_DESCRIPTION,
         ),

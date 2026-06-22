@@ -4,14 +4,14 @@ A *style* selects how every status surface (GitHub/GitLab PR-comment, GitHub
 status check, GitLab commit status, Buildkite annotation) renders a task's
 result. Two styles ship built-in:
 
-  - **kilgore** (default) — the original "show everything" layout: every target
-    bucket, the full Bazel-details umbrella, workspace status, parsed options.
-    A faithful report of the whole invocation.
-  - **strata** — a DX-focused layout that answers, in order, *what broke* →
-    *how to fix / reproduce it* → *why it was slow*. Leads with a verdict and a
-    compact KPI strip, shows failure snippets open by default with each
-    failure's repro command beneath it, and collapses or omits the reference
-    sections (recoverable in one click via the Aspect Web UI).
+  - **strata** (default) — a DX-focused layout that answers, in order, *what
+    broke* → *how to fix / reproduce it* → *why it was slow*. Leads with a
+    verdict and a compact KPI strip, shows failure snippets open by default with
+    each failure's repro command beneath it, and collapses or omits the
+    reference sections.
+  - **kilgore** — the original "show everything" layout: every target bucket,
+    the full Bazel-details umbrella, workspace status, parsed options. A faithful
+    report of the whole invocation.
 
 A style is a `TemplateStyle` record carrying the three top-level Jinja2 template
 strings a surface may need — `summary` + `details` (the check surfaces) and
@@ -106,25 +106,30 @@ _STRATA = TemplateStyle(
 
 STYLE_NAMES = ["kilgore", "strata"]
 
+# The default style. Mirrors the `default =` on each feature's `style` arg, and
+# is the fallback `builtin_style` resolves an empty / unknown name to (so a
+# mis-set arg renders the default rather than failing).
+DEFAULT_STYLE = "strata"
+
 # Shared `description=` for the `style` feature arg, so every status feature
 # documents the choice identically.
 STYLE_ARG_DESCRIPTION = (
-    "Template style for the rendered status output. \"kilgore\" (default) is the " +
-    "full report — every target bucket, the Bazel-details umbrella, workspace " +
-    "status, parsed options. \"strata\" is the DX-focused layout: a verdict + a " +
-    "compact KPI strip (cache hit / parallelism / wall), failure snippets open " +
-    "with each failure's repro command beneath it, and reference sections " +
-    "collapsed. Per-key `templates` overrides still layer on top of the chosen " +
-    "style for custom variants."
+    "Template style for the rendered status output. \"strata\" (default) is the " +
+    "DX-focused layout: a verdict + a compact KPI strip (cache hit / parallelism " +
+    "/ wall), failure snippets open with each failure's repro command beneath it, " +
+    "and reference sections collapsed. \"kilgore\" is the full report — every " +
+    "target bucket, the Bazel-details umbrella, workspace status, parsed options. " +
+    "Per-key `templates` overrides still layer on top of the chosen style for " +
+    "custom variants."
 )
 
+_BUILTIN_STYLES = {"kilgore": _KILGORE, "strata": _STRATA}
+
 def builtin_style(name: str) -> TemplateStyle:
-    """Return the built-in `TemplateStyle` for `name`, defaulting to kilgore for
-    an empty or unknown name (a mis-set arg degrades to the safe default rather
-    than failing the build)."""
-    if name == "strata":
-        return _STRATA
-    return _KILGORE
+    """Return the built-in `TemplateStyle` for `name`. An empty or unknown name
+    falls back to `DEFAULT_STYLE` (a mis-set arg renders the default rather than
+    failing the build)."""
+    return _BUILTIN_STYLES.get(name) or _BUILTIN_STYLES[DEFAULT_STYLE]
 
 def resolve_style(name: str, overrides = None) -> dict:
     """Resolve a style name + per-key overrides into the template bundle a
@@ -135,7 +140,7 @@ def resolve_style(name: str, overrides = None) -> dict:
     present and non-empty, replace the named style's corresponding slot (a
     custom variant). Overrides win over the named style.
     """
-    base = builtin_style(name or "kilgore")
+    base = builtin_style(name)
     o = overrides or {}
     return {
         "summary": o.get("summary") or base.summary,

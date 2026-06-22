@@ -1994,7 +1994,7 @@ GithubStatusComments = feature(
         ),
         # Config-only (set via configure(..., feature_args = {...}) in config.axl).
         "style": args.string(
-            default = "kilgore",
+            default = "strata",
             values = STYLE_NAMES,
             description = STYLE_ARG_DESCRIPTION,
         ),

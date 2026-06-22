@@ -432,7 +432,7 @@ GitlabCommitStatuses = feature(
                           "so the final state shows up without delay.",
         ),
         "style": args.string(
-            default = "kilgore",
+            default = "strata",
             values = STYLE_NAMES,
             description = STYLE_ARG_DESCRIPTION,
         ),

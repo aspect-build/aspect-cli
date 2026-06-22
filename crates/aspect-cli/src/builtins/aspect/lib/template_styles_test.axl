@@ -7,7 +7,7 @@ by the snapshot suites (test-template-snapshots / test-pr-comment-snapshots).
 """
 
 load("./bazel_results.axl", "compute_strata_kpi", "init_data")
-load("./template_styles.axl", "STYLE_NAMES", "builtin_style", "resolve_style")
+load("./template_styles.axl", "DEFAULT_STYLE", "STYLE_NAMES", "builtin_style", "resolve_style")
 
 def _eq(label, got, want):
     if got != want:
@@ -25,20 +25,25 @@ def _kpi_data(wall_ms = 0, cpu_ms = 0, critical_ms = 0, actions_total = 0, actio
 
 # resolve_style
 
-def _test_default_is_kilgore(_ctx):
+def _test_explicit_kilgore(_ctx):
     b = resolve_style("kilgore", {})
     k = builtin_style("kilgore")
-    _eq("default summary is kilgore's", b["summary"], k.summary)
-    _eq("default details is kilgore's", b["details"], k.details)
+    _eq("kilgore summary", b["summary"], k.summary)
+    _eq("kilgore details", b["details"], k.details)
     _eq("kilgore knobs: not strata", b["knobs"].kpi_strip, False)
 
-def _test_empty_name_degrades_to_kilgore(_ctx):
-    b = resolve_style("", {})
-    _eq("empty name → kilgore details", b["details"], builtin_style("kilgore").details)
+def _test_default_is_strata(_ctx):
+    # strata is the default; DEFAULT_STYLE names it.
+    _eq("DEFAULT_STYLE is strata", DEFAULT_STYLE, "strata")
+    _eq("default → strata details", builtin_style(DEFAULT_STYLE).details, builtin_style("strata").details)
 
-def _test_unknown_name_degrades_to_kilgore(_ctx):
+def _test_empty_name_degrades_to_default(_ctx):
+    b = resolve_style("", {})
+    _eq("empty name → strata details (the default)", b["details"], builtin_style("strata").details)
+
+def _test_unknown_name_degrades_to_default(_ctx):
     b = resolve_style("nonsense", {})
-    _eq("unknown name → kilgore details", b["details"], builtin_style("kilgore").details)
+    _eq("unknown name → strata details (the default)", b["details"], builtin_style("strata").details)
 
 def _test_strata_selects_strata_bundle(_ctx):
     b = resolve_style("strata", {})
@@ -153,9 +158,10 @@ def _test_kpi_strip_lines_present(_ctx):
         _eq("no trailing whitespace", line, line.rstrip())
 
 _UNIT_TESTS = [
-    _test_default_is_kilgore,
-    _test_empty_name_degrades_to_kilgore,
-    _test_unknown_name_degrades_to_kilgore,
+    _test_explicit_kilgore,
+    _test_default_is_strata,
+    _test_empty_name_degrades_to_default,
+    _test_unknown_name_degrades_to_default,
     _test_strata_selects_strata_bundle,
     _test_kilgore_body_empty_for_feature_fallback,
     _test_override_replaces_one_slot,

@@ -447,7 +447,7 @@ GitlabStatusComments = feature(
                           "verdicts always land immediately.",
         ),
         "style": args.string(
-            default = "kilgore",
+            default = "strata",
             values = STYLE_NAMES,
             description = STYLE_ARG_DESCRIPTION,
         ),
