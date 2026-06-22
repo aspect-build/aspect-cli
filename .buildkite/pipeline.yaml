@@ -72,21 +72,36 @@ steps:
       echo "--- :bazel: aspect build //crates/aspect-launcher //crates/aspect-cli"
       # --remote_download_toplevel materializes the binaries on local disk: the
       # runner defaults to --remote_download_outputs=minimal (bb_clientd FUSE cache),
-      # so without it cquery resolves the right path but the file isn't there to copy
-      # ("cannot stat ... No such file"). Mirrors bootstrap.sh's //:cli build.
+      # so without it the output stays remote and isn't there to copy. Mirrors
+      # bootstrap.sh's //:cli build.
       ASPECT_DEBUG=1 aspect build --task-key build-bk-axl-tests-bootstrap --bazel-flag=--remote_download_toplevel //crates/aspect-launcher //crates/aspect-cli
-      # Use cquery to get the actual output paths (returns the HOST config, handling
-      # the platform/-opt transitions on Linux), then copy both binaries to stable
-      # target/ci/ paths IMMEDIATELY. A later build (or the second cquery below) can
-      # redirect the bazel-out symlink, so pointing $$LAUNCHER/$$CLI straight at the
-      # cquery'd bazel-out path races and dies with a 127 "No such file" on first
-      # use (mirrors bootstrap.sh, which stabilizes the cli the same way).
       WORKSPACE_ROOT=$$(pwd)
       mkdir -p target/ci
-      cp -f "$$(bazel $$BAZEL_STARTUP_OPTS cquery $$BAZEL_BUILD_OPTS --output=files //crates/aspect-launcher)" target/ci/aspect-launcher
+      # The CLI has a single host output, so cquery resolves it directly. Copy to a
+      # stable target/ci/ path so a later build redirecting bazel-out can't make
+      # $$CLI go stale (a 127 "No such file" on first use).
       cp -f "$$(bazel $$BAZEL_STARTUP_OPTS cquery $$BAZEL_BUILD_OPTS --output=files //crates/aspect-cli)" target/ci/aspect-cli
+      # The launcher fans out through multi_platform_rust_binaries, so every output
+      # lands under an `-ST-<hash>` config dir (4 platforms × {fastbuild,opt}) and
+      # cquery can't reliably pick the host one. Probe instead: keep the first
+      # candidate that actually runs and reports the unstamped dev version.
       LAUNCHER=$$WORKSPACE_ROOT/target/ci/aspect-launcher
       CLI=$$WORKSPACE_ROOT/target/ci/aspect-cli
+      launcher_found=
+      for cand in bazel-bin/crates/aspect-launcher/aspect-launcher bazel-out/*/bin/crates/aspect-launcher/aspect-launcher; do
+        [ -f "$$cand" ] || continue
+        cp -f "$$cand" "$$LAUNCHER"
+        if v=$$("$$LAUNCHER" --version 2>/dev/null) && case "$$v" in *0.0.0-dev*) true ;; *) false ;; esac; then
+          echo "host dev launcher: $$cand -> $$v"
+          launcher_found=1
+          break
+        fi
+      done
+      if [ -z "$$launcher_found" ]; then
+        echo "ERROR: no host-runnable 0.0.0-dev launcher among build outputs"
+        for c in bazel-out/*/bin/crates/aspect-launcher/aspect-launcher; do [ -e "$$c" ] && echo "  $$c : $$(file -b "$$c")"; done
+        exit 1
+      fi
       echo "--- :aspect: aspect demo template-demo"
       $$LAUNCHER demo template-demo
       echo "--- :aspect: aspect user nested user=task"
