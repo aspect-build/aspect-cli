@@ -85,6 +85,66 @@ _DEFAULT_WRAP_AT = 100
 # contain spaces / parens / etc.
 _SHELL_META = " \t\n\"'\\`$&|;<>()*?[]{}#!~"
 
+# Known command flavors for the `repro_flavors` / `fix_flavors` controls, and
+# the default (surface both). Every "vanilla bazel for non-Aspect-CLI users"
+# producer tags its entry with a slug ending in `-vanilla-bazel`; the Aspect-CLI
+# entry's slug does not. So a command's flavor is decided from its slug alone,
+# uniformly across producers and surfaces. The set is open — a user can list a
+# flavor name a custom `repro_fix_suggestion` hook understands; unknown names
+# simply don't match the built-in slugs.
+REPRO_FLAVORS = ["aspect", "bazel"]
+
+def is_vanilla_bazel_slug(slug):
+    """True for a vanilla-bazel command slug (suffix `-vanilla-bazel`)."""
+    return slug.endswith("-vanilla-bazel")
+
+def slug_flavor(slug):
+    """The flavor a command slug belongs to: `"bazel"` for the vanilla-bazel
+    variant (suffix `-vanilla-bazel`), else `"aspect"`."""
+    return "bazel" if is_vanilla_bazel_slug(slug) else "aspect"
+
+def flavor_allows(flavors, slug):
+    """Whether a command with `slug` should be emitted given `flavors` — the
+    list of flavors the user opted into (`["aspect", "bazel"]` by default). Keep
+    the command iff its `slug_flavor` is in the list. An empty list (mis-set
+    arg) degrades to keep-all, so a misconfiguration shows everything rather
+    than hiding all repros."""
+    if not flavors:
+        return True
+    return slug_flavor(slug) in flavors
+
+def _flavor_arg(singular, noun):
+    return args.string_list(
+        default = REPRO_FLAVORS,
+        long = singular,
+        description = ("Which %s command flavor(s) to surface on the CLI and CI " +
+                       "status surfaces: `aspect` (Aspect CLI) and/or `bazel` (vanilla " +
+                       "bazel). Defaults to both. Repeat the flag to choose a subset, " +
+                       "e.g. `--%s=aspect`; set from config: " +
+                       "`ctx.tasks[\"<task>\"].args.%s = [\"aspect\"]` in `.aspect/config.axl`.") %
+                      (noun, singular, singular.replace("-", "_") + "s"),
+    )
+
+def filter_by_flavor(commands, flavors):
+    """Return `commands` keeping only entries `flavor_allows` permits (by slug).
+    Convenience for producers that append many entries before gating; equivalent
+    to gating each `.append`. Keeps everything when `flavors` is empty."""
+    if not flavors:
+        return commands
+    return [c for c in commands if flavor_allows(flavors, c.slug)]
+
+def repro_flavor_args(include_fix = False):
+    """`repro_flavors` (always) + `fix_flavors` (when `include_fix`) task args,
+    as a dict to splat into a task's `args = {...}`. Each is a string list of
+    flavors (CLI flag `--repro-flavor` / `--fix-flavor`, repeatable). Reuse on
+    every repro/fix producer so the control is identical task-to-task; the
+    producer gates each command append on `flavor_allows(ctx.args.repro_flavors,
+    slug)` (and `fix_flavors` for fix entries)."""
+    out = {"repro_flavors": _flavor_arg("repro-flavor", "reproduce")}
+    if include_fix:
+        out["fix_flavors"] = _flavor_arg("fix-flavor", "fix")
+    return out
+
 def _shell_quote(s):
     """Single-quote `s` for POSIX shells when it carries any shell-
     meta character; otherwise return it untouched so bazel labels
@@ -638,8 +698,8 @@ def rehydrate_commands(commands):
 
     Schema-tolerant: drops entries that aren't dicts or records, and
     falls back to `""` for missing optional fields (`description`,
-    `slug`) so a state block written by an older aspect-cli release
-    (predating the `slug` field) still round-trips cleanly. Entries
+    `slug`, `target`) so a state block written by an older aspect-cli
+    release (predating those fields) still round-trips cleanly. Entries
     that lack the required `command` field are also dropped.
 
     `None` / empty input → `[]`.
@@ -660,6 +720,7 @@ def rehydrate_commands(commands):
             command = cmd,
             description = c.get("description") or "",
             slug = c.get("slug") or "",
+            target = c.get("target") or "",
             _hooked = bool(c.get("_hooked", False)),
         ))
     return out

@@ -50,7 +50,7 @@ sh_test(
     name = "demo_test_fail",
     size = "small",
     srcs = ["demo_test_fail.sh"],
-    tags = ["manual"],
+    tags = ["manual"],  # opt-in only; don't run with //...
 )
 
 genrule(
@@ -73,5 +73,5 @@ examples/test_states/widget.cc:18:5: note:   no known conversion for argument 1 
 ERR
 exit 1
 )""",
-    tags = ["manual"],
+    tags = ["manual"],  # opt-in only; don't run with //...
 )

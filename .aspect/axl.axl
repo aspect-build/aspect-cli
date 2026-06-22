@@ -24,6 +24,7 @@ load(
     "extract_changed_dirs",
 )
 load("@aspect//lib/github.axl", "detect_commit_sha", "github")
+load("@aspect//lib/lifecycle.axl", "ReproFixCommand")
 load("@aspect//lib/log_snippet.axl", "SnippetOptions", "code_fence_for", "extract_junit_failure", "extract_snippet")
 load("@aspect//lib/path_glob.axl", "match_any", "match_path")
 load("@aspect//lib/repro_commands.axl", "build_aspect_command", "dedup_and_attribute", "patch_download_cmd", "task_cli_path")
@@ -3296,6 +3297,15 @@ def test_bazel_render_snippets(ctx: TaskContext, tc: int, temp_dir: str) -> int:
     r["bazel"]["target_kinds"] = {"//pkg:fail_test": "py_test", "//pkg:broken": "cc_library"}
     r["bazel"]["targets_total"] = 2
 
+    # Combined repro (target == "") + per-failure repros (target set). The
+    # producer + hook normally populate these; set directly for the render test.
+    r["repro_commands"] = [
+        ReproFixCommand(command = "aspect test -- //...", slug = "test-repro-aspect"),
+        ReproFixCommand(command = "aspect test -- //pkg:fail_test", slug = "test-repro-aspect", target = "//pkg:fail_test"),
+        ReproFixCommand(command = "bazel test -- //pkg:fail_test", description = "vanilla bazel", slug = "test-repro-vanilla-bazel", target = "//pkg:fail_test"),
+        ReproFixCommand(command = "aspect build -- //pkg:broken", slug = "build-repro-aspect", target = "//pkg:broken"),
+    ]
+
     out = render_check_output(ctx, r, "failed", render_ctx, links, snippet_options = opts, max_snippets = max_snips)
     tc = test_case(tc, "FAILED: expected 1 got 2" in out["text"], "render: inlines failed-test log snippet")
     tc = test_case(tc, "no member named 'foo'" in out["text"], "render: inlines failed-action stderr snippet")
@@ -3305,6 +3315,20 @@ def test_bazel_render_snippets(ctx: TaskContext, tc: int, temp_dir: str) -> int:
     # for tests, "failed to build" for actions).
     tc = test_case(tc, "❌ py_test `//pkg:fail_test` failed in 3s:" in out["text"], "render: test snippet header (kind + label + duration)")
     tc = test_case(tc, "❌ cc_library `//pkg:broken` failed to build:" in out["text"], "render: build snippet header (kind + label)")
+
+    # Per-failure repro commands render inline beneath their failure's snippet,
+    # under a "Reproduce with:" lead, correlated by label (both flavors for the
+    # test, aspect for the action).
+    tc = test_case(tc, "Reproduce with:" in out["text"], "render: per-failure repros lead with 'Reproduce with:'")
+    tc = test_case(tc, "aspect test -- //pkg:fail_test" in out["text"], "render: per-failure aspect repro inline")
+    tc = test_case(tc, "bazel test -- //pkg:fail_test" in out["text"], "render: per-failure vanilla repro inline")
+    tc = test_case(tc, "aspect build -- //pkg:broken" in out["text"], "render: per-failure action repro inline")
+
+    # The combined "🔁 Reproduce" section shows only the whole-run (target == "")
+    # command; the per-failure ones don't double-render there.
+    _repro_section = out["text"][out["text"].find("🔁 Reproduce"):] if "🔁 Reproduce" in out["text"] else ""
+    tc = test_case(tc, "aspect test -- //..." in _repro_section, "render: combined Reproduce shows whole-run command")
+    tc = test_case(tc, "//pkg:fail_test" not in _repro_section, "render: combined Reproduce excludes per-failure commands")
 
     # The snippet-shown labels are NOT also listed in the <pre> table (no dup).
     tc = test_case(tc, "<summary><code>//pkg:fail_test</code> output</summary>" not in out["text"], "render: no nested per-row <details>")
@@ -3333,6 +3357,12 @@ def test_bazel_render_snippets(ctx: TaskContext, tc: int, temp_dir: str) -> int:
     r2["bazel"]["targets_total"] = 3
     out2 = render_check_output(ctx, r2, "failed", render_ctx, links, snippet_options = SnippetOptions(max_lines = 15), max_snippets = 1)
     tc = test_case(tc, "more failure" in out2["text"] and "output not shown" in out2["text"], "render: budget overflow note shown")
+
+    # The overflow note renders BEFORE the <pre> table that lists the
+    # snippet-less labels (so the reader sees "output not shown" then the rows).
+    _ov = out2["text"].find("output not shown")
+    _tbl = out2["text"].find("<pre>", _ov)
+    tc = test_case(tc, _ov >= 0 and _tbl > _ov, "render: overflow note precedes the failures table")
 
     # Truncation markers: a long no-marker log keeps the tail and shows a leading
     # `…` for the dropped head (max_lines small forces windowing).

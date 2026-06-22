@@ -14,10 +14,10 @@ applies uniformly to both tasks.
 
 load("@std//time.axl", "sleep_iter")
 load("./bazel_flags.axl", "resolve_bazel_announce")
-load("./bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "failed_labels", "init_data", "now_ms", "process_event", "repro_targets", bazel_conclusion = "conclusion")
+load("./bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "collapse_repro_targets", "failed_labels", "failed_labels_by_subcommand", "init_data", "now_ms", "process_event", bazel_conclusion = "conclusion")
 load("./health_check.axl", "HealthCheckTrait")
 load("./lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "setup_phase", "task_update")
-load("./repro_commands.axl", "build_aspect_command", "build_bazel_command", "print_repro_and_fix", "task_cli_path")
+load("./repro_commands.axl", "build_aspect_command", "build_bazel_command", "flavor_allows", "print_repro_and_fix", "repro_prefix")
 load("./text.axl", "pluralize")
 load("../bazel.axl", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
 
@@ -484,20 +484,53 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
     if data.get("bazel_attempts"):
         archive_bazel_attempt(data, attempt + 1, invocation_status.code)
 
-    _repro_targets = repro_targets(data, targets)
-    _repro_cmd = build_aspect_command(task_cli_path(ctx.task), [], _repro_targets)
-    if _repro_cmd:
-        data["repro_commands"].append(ReproFixCommand(
-            command = _repro_cmd,
-            slug = "bazel-repro-aspect",
-        ))
+    _flavors = ctx.args.repro_flavors
 
-        # Alternate vanilla-bazel repro for users who don't have the Aspect CLI
-        # installed. Flags are intentionally omitted — best-effort, not faithful.
-        data["repro_commands"].append(ReproFixCommand(
-            command = build_bazel_command(command, _repro_targets),
+    def _add_repro(cmd, slug, description = "", target = ""):
+        """Append a repro command unless its flavor is suppressed (slug-derived)."""
+        if cmd and flavor_allows(_flavors, slug):
+            data["repro_commands"].append(ReproFixCommand(
+                command = cmd,
+                description = description,
+                slug = slug,
+                target = target,
+            ))
+
+    # Repros are keyed by the subcommand that REPRODUCES each failure, not by the
+    # task: a `test` task that hit a build-action failure (or a test that failed
+    # to build) reruns those via `build` — `bazel test //x` would error with "no
+    # test targets found". So a test run can emit both a `build` and a `test`
+    # combined repro. Slug = "<sub>-repro-aspect" / "<sub>-repro-vanilla-bazel".
+    _prefix = repro_prefix(ctx)
+    _by_sub = failed_labels_by_subcommand(data)
+
+    def _add_pair(subcommand, labels, target = ""):
+        if not labels:
+            return
+        _add_repro(
+            _prefix + build_aspect_command(subcommand, [], labels),
+            subcommand + "-repro-aspect",
+            target = target,
+        )
+        _add_repro(
+            _prefix + build_bazel_command(subcommand, labels),
+            subcommand + "-repro-vanilla-bazel",
             description = "vanilla bazel",
-            slug = "bazel-repro-vanilla-bazel",
-        ))
+            target = target,
+        )
 
-    return _emit_terminal(ctx, lifecycle, command, data, invocation_status.code, targets = _repro_targets)
+    # Combined whole-run repro per subcommand (collapsed like the old single
+    # combined command; vanilla flags intentionally omitted — best-effort). Only
+    # for a subcommand with failures — `collapse_repro_targets` falls back to the
+    # user's whole target list when given none, which would mint a bogus repro.
+    for _sub in ("build", "test"):
+        if _by_sub[_sub]:
+            _add_pair(_sub, collapse_repro_targets(_by_sub[_sub], targets))
+
+    # Per-failure repros: one targeted command per failing label (single-label,
+    # no collapsing), `target` set so it renders inline beneath that snippet.
+    for _sub in ("build", "test"):
+        for _label in _by_sub[_sub]:
+            _add_pair(_sub, [_label], target = _label)
+
+    return _emit_terminal(ctx, lifecycle, command, data, invocation_status.code, targets = targets)

@@ -173,6 +173,15 @@ _No tasks have reported yet._
 {% endif %}{{ s.fence }}
 {% if s.task_label %}<sub>in {{ s.task_noun }} {{ s.task_label }}</sub>
 {% endif %}
+{%- if s.repros %}
+Reproduce with:
+{% for r in s.repros %}
+```
+{% if r.description %}# {{ r.description }}
+{% endif %}{{ r.command }}
+```
+{%- endfor %}
+{% endif %}
 {% endmacro -%}
 {% if build_snippets %}
 ## 💥 Build Failures
@@ -707,6 +716,10 @@ def _select_snippets(entries, shown_keys):
                     "kind": s.get("kind", ""),
                     "bucket": s.get("bucket", "test"),
                     "duration_ms": s.get("duration_ms", 0) or 0,
+                    # Per-failure repro commands [{command, description}] for this
+                    # label; rendered inline under the snippet. First contributor
+                    # wins (same label+content ⇒ same producer's repros).
+                    "repros": s.get("repros", []) or [],
                     "snippet": snippet_text,
                     "truncated": bool(s.get("truncated", False)),
                     "trunc_head": bool(s.get("trunc_head", False)),
@@ -828,7 +841,9 @@ def _collect_repro_fix_rows(sections):
                 kind = e.get("name", "") or ""
                 task_key = e.get("key", "") or kind
                 for c in e.get(command_field, []) or []:
-                    if not c.command:
+                    # Per-failure (target-set) commands render inline under their
+                    # snippet, not in the combined Reproduce/Fix section.
+                    if not c.command or c.target:
                         continue
                     entries.append({
                         "kind": kind,
