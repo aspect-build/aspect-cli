@@ -137,16 +137,16 @@ def _format_body(out, kind, status, task_label = "", final = False):
         body = body[:_ANNOTATION_SIZE_LIMIT - 64] + "\n\n_… annotation truncated (1 MiB limit)._"
     return body
 
-def _task_label(task_key):
-    """`:aspect: task <code>task-key</code>` — the leading pill that
+def _task_label(task_name):
+    """`:aspect: task <code>task-name</code>` — the leading pill that
     prefixes the title.
 
     The `:aspect:` emoji marks the annotation as Aspect's, the literal
-    "task" scopes it to a single task (not the step), and the key
-    disambiguates multi-task steps. Task *name* lives in the title
+    "task" scopes it to a single task (not the step), and the per-invocation
+    name disambiguates multi-task steps. The task *kind* lives in the title
     next to the pill so duplicating it here would add noise.
     """
-    return ":aspect: task <code>%s</code>" % task_key
+    return ":aspect: task <code>%s</code>" % task_name
 
 # ─── Annotation I/O ───────────────────────────────────────────────────────────
 

@@ -1445,7 +1445,7 @@ def _check_rerun_renders_each_task_once(ctx):
         sections,
         state = new,
     )
-    _eq("rerun render — 'test (cpu-test)' appears once", body.count("test (cpu-test)"), 1)
+    _eq("rerun render — 'cpu-test [test]' appears once", body.count("cpu-test [test]"), 1)
     _eq("rerun render — 'lint' row appears once", body.count("✅ lint"), 1)
     _eq("rerun render — two task rows total", body.count("<br>💬"), 2)
 

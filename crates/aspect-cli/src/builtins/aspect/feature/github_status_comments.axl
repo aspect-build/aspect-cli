@@ -44,6 +44,10 @@ Body-template variables:
     status_badges  \342\200\224 {badge_key -> label}.
     rollup         \342\200\224 {error, warning, running, passed, aborted} counts.
     entries        \342\200\224 per-task entry dicts, alphabetical by (job, name, key).
+                     NOTE: for back-compat the wire fields are inverted vs.
+                     today's vocabulary - `entry.name` holds the task *kind*
+                     (the command) and `entry.key` holds the per-invocation
+                     task *name*. Rows render as `<name> [<kind>]`.
     build_snippets / test_snippets / repro_rows / fix_rows \342\200\224 selected items per section.
     *_overflow_note \342\200\224 "N more not shown" line for each capped section.
 """
@@ -155,7 +159,7 @@ _No tasks have reported yet._
 ## {{ icon }} {{ items|length }} {{ label }} task{{ "s" if items|length != 1 else "" }}
 
 {% for e in items -%}
-- {{ status_badges[e._badge_key] }} {{ e.name }}{% if e.key and e.key != e.name %} ({{ e.key }}){% endif %}{% if e._elapsed_text %} · {{ e._elapsed_text }}{% endif %}{% if e._links_text %} · {{ e._links_text }}{% endif %}{% if e._result_text %}<br>💬 {{ e._result_text }}{% endif %}
+- {{ status_badges[e._badge_key] }} {{ e.key or e.name }}{% if e.key and e.key != e.name %} [{{ e.name }}]{% endif %}{% if e._elapsed_text %} · {{ e._elapsed_text }}{% endif %}{% if e._links_text %} · {{ e._links_text }}{% endif %}{% if e._result_text %}<br>💬 {{ e._result_text }}{% endif %}
 {% endfor -%}
 {% endif -%}
 {% endmacro -%}
