@@ -161,6 +161,7 @@ pub fn run(
     expr: &str,
     startup_flags: &[String],
     flags: &[String],
+    current_dir: Option<String>,
     announce: super::build::AnnounceSpawn,
 ) -> anyhow::Result<Query> {
     let mut cmd = super::bazel_command();
@@ -169,6 +170,9 @@ pub fn run(
     cmd.arg(expr);
     cmd.args(flags);
     cmd.arg("--output=streamed_proto");
+    if let Some(dir) = current_dir {
+        cmd.current_dir(dir);
+    }
     let out = temp_dir().join("query.bin");
     let _ = fs::remove_file(&out);
     let errfile_path = temp_dir().join("query.err");
