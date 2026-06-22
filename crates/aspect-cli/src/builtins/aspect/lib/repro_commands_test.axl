@@ -7,7 +7,7 @@ tests on `Arguments`.
 """
 
 load("./lifecycle.axl", "REPRO_FIX_ACCEPT", "REPRO_FIX_REJECT", "ReproFixCommand", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "repro_fix_replace")
-load("./repro_commands.axl", "build_aspect_command", "build_bazel_command", "explicit_flags", "filter_by_flavor", "flavor_allows", "has_tools_bazel_wrapper", "is_vanilla_bazel_slug", "rehydrate_commands", "repro_prefix", "subdir_prefix")
+load("./repro_commands.axl", "build_aspect_command", "build_bazel_command", "explicit_flags", "filter_by_flavor", "flavor_allows", "has_tools_bazel_wrapper", "is_vanilla_bazel_slug", "rehydrate_commands", "repro_prefix", "slug_flavor", "subdir_prefix")
 
 def _eq(label, got, want):
     if got != want:
@@ -1097,23 +1097,29 @@ def _test_is_vanilla_bazel_slug(_ctx):
     _eq("aspect slug not vanilla", is_vanilla_bazel_slug("test-repro-aspect"), False)
     _eq("lint-repro not vanilla", is_vanilla_bazel_slug("lint-repro"), False)
 
+def _test_slug_flavor(_ctx):
+    _eq("vanilla slug → bazel", slug_flavor("test-repro-vanilla-bazel"), "bazel")
+    _eq("aspect slug → aspect", slug_flavor("test-repro-aspect"), "aspect")
+    _eq("plain slug → aspect", slug_flavor("lint-repro"), "aspect")
+
 def _test_flavor_allows(_ctx):
-    # both → keep everything
-    _eq("both keeps aspect", flavor_allows("both", "test-repro-aspect"), True)
-    _eq("both keeps vanilla", flavor_allows("both", "test-repro-vanilla-bazel"), True)
+    # `flavors` is a list of opted-in flavors.
+    both = ["aspect", "bazel"]
+    _eq("both keeps aspect", flavor_allows(both, "test-repro-aspect"), True)
+    _eq("both keeps vanilla", flavor_allows(both, "test-repro-vanilla-bazel"), True)
 
-    # aspect → only non-vanilla
-    _eq("aspect keeps aspect slug", flavor_allows("aspect", "test-repro-aspect"), True)
-    _eq("aspect drops vanilla slug", flavor_allows("aspect", "test-repro-vanilla-bazel"), False)
-    _eq("aspect keeps lint-repro", flavor_allows("aspect", "lint-repro"), True)
+    # ["aspect"] → only non-vanilla
+    _eq("aspect keeps aspect slug", flavor_allows(["aspect"], "test-repro-aspect"), True)
+    _eq("aspect drops vanilla slug", flavor_allows(["aspect"], "test-repro-vanilla-bazel"), False)
+    _eq("aspect keeps lint-repro", flavor_allows(["aspect"], "lint-repro"), True)
 
-    # bazel → only vanilla
-    _eq("bazel drops aspect slug", flavor_allows("bazel", "test-repro-aspect"), False)
-    _eq("bazel keeps vanilla slug", flavor_allows("bazel", "test-repro-vanilla-bazel"), True)
-    _eq("bazel drops lint-repro (no vanilla variant)", flavor_allows("bazel", "lint-repro"), False)
+    # ["bazel"] → only vanilla
+    _eq("bazel drops aspect slug", flavor_allows(["bazel"], "test-repro-aspect"), False)
+    _eq("bazel keeps vanilla slug", flavor_allows(["bazel"], "test-repro-vanilla-bazel"), True)
+    _eq("bazel drops lint-repro (no vanilla variant)", flavor_allows(["bazel"], "lint-repro"), False)
 
-    # unknown flavor (mis-set arg) degrades to keep-all
-    _eq("unknown flavor keeps everything", flavor_allows("nonsense", "test-repro-vanilla-bazel"), True)
+    # Empty list (mis-set arg) degrades to keep-all.
+    _eq("empty list keeps everything", flavor_allows([], "test-repro-vanilla-bazel"), True)
 
 def _test_filter_by_flavor(_ctx):
     cmds = [
@@ -1122,18 +1128,23 @@ def _test_filter_by_flavor(_ctx):
     ]
     _eq(
         "both → unchanged",
-        [c.slug for c in filter_by_flavor(cmds, "both")],
+        [c.slug for c in filter_by_flavor(cmds, ["aspect", "bazel"])],
         ["test-repro-aspect", "test-repro-vanilla-bazel"],
     )
     _eq(
         "aspect → only aspect",
-        [c.slug for c in filter_by_flavor(cmds, "aspect")],
+        [c.slug for c in filter_by_flavor(cmds, ["aspect"])],
         ["test-repro-aspect"],
     )
     _eq(
         "bazel → only vanilla",
-        [c.slug for c in filter_by_flavor(cmds, "bazel")],
+        [c.slug for c in filter_by_flavor(cmds, ["bazel"])],
         ["test-repro-vanilla-bazel"],
+    )
+    _eq(
+        "empty list → unchanged",
+        [c.slug for c in filter_by_flavor(cmds, [])],
+        ["test-repro-aspect", "test-repro-vanilla-bazel"],
     )
 
     # A multi-entry fix list (format/gazelle shape): aspect keeps the aspect
@@ -1145,12 +1156,12 @@ def _test_filter_by_flavor(_ctx):
     ]
     _eq(
         "aspect fixes → drop vanilla",
-        [c.slug for c in filter_by_flavor(fixes, "aspect")],
+        [c.slug for c in filter_by_flavor(fixes, ["aspect"])],
         ["format-fix", "format-fix-rediscover"],
     )
     _eq(
         "bazel fixes → only vanilla",
-        [c.slug for c in filter_by_flavor(fixes, "bazel")],
+        [c.slug for c in filter_by_flavor(fixes, ["bazel"])],
         ["format-fix-vanilla-bazel"],
     )
 
@@ -1184,6 +1195,7 @@ def _test_hook_preserves_target(_ctx):
 
 _UNIT_TESTS = [
     _test_is_vanilla_bazel_slug,
+    _test_slug_flavor,
     _test_flavor_allows,
     _test_filter_by_flavor,
     _test_target_round_trips_through_rehydrate,

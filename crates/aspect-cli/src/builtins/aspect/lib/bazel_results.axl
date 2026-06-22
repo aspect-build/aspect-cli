@@ -2750,12 +2750,15 @@ SNIPPET_MACRO = """{% macro failure_snippets(rows) %}
 {% if t.snippet_trunc_tail %}…
 {% endif %}{{ t.snippet_fence }}
 {% endif %}
-{%- for r in t.repros %}
+{%- if t.repros %}
+Reproduce with:
+{% for r in t.repros %}
 ```
 {% if r.description %}# {{ r.description }}
 {% endif %}{{ r.command }}
 ```
-{%- endfor %}{%- endfor %}
+{%- endfor %}
+{% endif %}{%- endfor %}
 {%- endmacro %}"""
 
 # Bazel-targets detail block: build failures (root + dep-broken),
@@ -2774,7 +2777,10 @@ BAZEL_TARGETS_TEMPLATE = """### 🎯 Bazel targets ({{ total_targets }})
 <details open>
 <summary>{{ build_failures_icon }} {{ build_failures_header }}</summary>
 {{ failure_snippets(build_failures_snippets) }}
-{% if build_failures %}<pre>
+{% if build_failures_snippet_overflow %}_+ {{ build_failures_snippet_overflow }} more failure{{ build_failures_snippet_overflow_plural }} — output not shown._
+
+{% endif %}
+{%- if build_failures %}<pre>
 {{- build_failures_table_head }}
 {{ build_failures_table_sep }}
 {%- for t in build_failures %}
@@ -2801,7 +2807,10 @@ BAZEL_TARGETS_TEMPLATE = """### 🎯 Bazel targets ({{ total_targets }})
 <details open>
 <summary>{{ failed_tests_icon }} {{ failed_tests_header }}</summary>
 {{ failure_snippets(failed_tests_snippets) }}
-{% if failed_tests %}<pre>
+{% if failed_tests_snippet_overflow %}_+ {{ failed_tests_snippet_overflow }} more failure{{ failed_tests_snippet_overflow_plural }} — output not shown._
+
+{% endif %}
+{%- if failed_tests %}<pre>
 {{- failed_tests_table_head }}
 {{ failed_tests_table_sep }}
 {%- for t in failed_tests %}
@@ -2815,7 +2824,10 @@ BAZEL_TARGETS_TEMPLATE = """### 🎯 Bazel targets ({{ total_targets }})
 <details open>
 <summary>{{ timeout_tests_icon }} {{ timeout_tests_header }}</summary>
 {{ failure_snippets(timeout_tests_snippets) }}
-{% if timeout_tests %}<pre>
+{% if timeout_tests_snippet_overflow %}_+ {{ timeout_tests_snippet_overflow }} more failure{{ timeout_tests_snippet_overflow_plural }} — output not shown._
+
+{% endif %}
+{%- if timeout_tests %}<pre>
 {{- timeout_tests_table_head }}
 {{ timeout_tests_table_sep }}
 {%- for t in timeout_tests %}
@@ -2823,10 +2835,6 @@ BAZEL_TARGETS_TEMPLATE = """### 🎯 Bazel targets ({{ total_targets }})
 {%- endfor %}</pre>
 {% endif %}
 </details>
-
-{% endif %}
-{%- if snippets_overflow %}
-_+ {{ snippets_overflow }} more failure{{ snippets_overflow_plural }} — output not shown._
 
 {% endif %}
 {%- if flaky_tests %}
@@ -3775,11 +3783,21 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
     _attach_repros(_failed_snippets)
     _attach_repros(_timeout_snippets)
 
-    # One global "more output not shown" note across the snippet-eligible buckets.
-    # Only meaningful once at least one snippet rendered AND more failures remain.
+    # Per-bucket "more output not shown" note. A failure with a rendered snippet
+    # is dropped from its bucket's <pre> table, so the table rows ARE the
+    # snippet-less failures — each bucket's overflow is just its table row count.
+    # Only framed as "output not shown" once snippets are on AND at least one
+    # rendered (otherwise the table is the normal full listing, not an overflow).
     _snippets_shown = (max_snippets - _snippet_budget[0]) if _snippets_enabled else 0
-    _snippet_eligible_total = build_failure_count + failed_test_count + timeout_test_count
-    _snippets_overflow = (_snippet_eligible_total - _snippets_shown) if _snippets_shown > 0 else 0
+    _overflow_active = _snippets_shown > 0
+
+    def _bucket_overflow(table):
+        n = len(table["rows"])
+        return n if (_overflow_active and n > 0) else 0
+
+    _build_failures_overflow_snip = _bucket_overflow(_build_failures_table)
+    _failed_tests_overflow_snip = _bucket_overflow(_failed_table)
+    _timeout_tests_overflow_snip = _bucket_overflow(_timeout_table)
 
     # Task timing: aligned <pre> (Phase | Description | Duration).
     _task_timing_rows_data = _build_task_timing_rows(task_phases, task_active, status)
@@ -3846,10 +3864,15 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
         "build_failures_header": _bucket_header(_BUCKET_FAILED_TO_BUILD, build_failure_count),
         "build_failures_overflow": str(failed_actions_overflow) if failed_actions_overflow > 0 else "",
         "build_failures_icon": _BUCKET_ICONS[_BUCKET_FAILED_TO_BUILD],
-        # Inline-snippet overflow: failures past the shared snippet budget whose
-        # output isn't shown. "" when snippets are off or all fit.
-        "snippets_overflow": str(_snippets_overflow) if _snippets_overflow > 0 else "",
-        "snippets_overflow_plural": "s" if _snippets_overflow != 1 else "",
+        # Per-bucket inline-snippet overflow: failures in this bucket past the
+        # shared snippet budget (shown as table rows, output not inlined). The
+        # note renders inside the bucket, above its table. "" when none.
+        "build_failures_snippet_overflow": str(_build_failures_overflow_snip) if _build_failures_overflow_snip > 0 else "",
+        "build_failures_snippet_overflow_plural": "s" if _build_failures_overflow_snip != 1 else "",
+        "failed_tests_snippet_overflow": str(_failed_tests_overflow_snip) if _failed_tests_overflow_snip > 0 else "",
+        "failed_tests_snippet_overflow_plural": "s" if _failed_tests_overflow_snip != 1 else "",
+        "timeout_tests_snippet_overflow": str(_timeout_tests_overflow_snip) if _timeout_tests_overflow_snip > 0 else "",
+        "timeout_tests_snippet_overflow_plural": "s" if _timeout_tests_overflow_snip != 1 else "",
         # Producer-authored repro/fix lists (lib/repro_commands.axl); template
         # emits the "🔁 Reproduce" / "🛠️ Fix" sections. Per-failure entries
         # (target != "") render inline beneath their snippet, so the combined
@@ -4229,7 +4252,6 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
                       "), dropping inline snippet bodies from secondary failure buckets")
         _drop_snippets(details_data.get("failed_tests_snippets", []))
         _drop_snippets(details_data.get("timeout_tests_snippets", []))
-        details_data["snippets_overflow"] = ""
         details_text = ctx.template.jinja2(details_tmpl, data = details_data)
 
     if len(details_text) > _DETAILS_LIMIT and max_snippets > 0:

@@ -171,13 +171,16 @@ _No tasks have reported yet._
 {% endif %}{{ s.snippet }}
 {% if s.trunc_tail %}…
 {% endif %}{{ s.fence }}
-{%- for r in s.repros %}
+{% if s.task_label %}<sub>in {{ s.task_noun }} {{ s.task_label }}</sub>
+{% endif %}
+{%- if s.repros %}
+Reproduce with:
+{% for r in s.repros %}
 ```
 {% if r.description %}# {{ r.description }}
 {% endif %}{{ r.command }}
 ```
 {%- endfor %}
-{% if s.task_label %}<sub>in {{ s.task_noun }} {{ s.task_label }}</sub>
 {% endif %}
 {% endmacro -%}
 {% if build_snippets %}

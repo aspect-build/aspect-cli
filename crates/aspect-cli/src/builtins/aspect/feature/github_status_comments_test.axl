@@ -884,17 +884,20 @@ def _check_select_snippets(ctx):
     _eq("select: render includes snippet text", "FAILED: expected 1 got 2" in body, True)
     _eq("select: no per-row <details>", "<details open><summary>" not in body, True)
 
-    # Per-failure repros render inline beneath the snippet, both flavors, and
-    # before the contributing-task <sub> line.
+    # Per-failure repros render inline beneath the snippet, both flavors, under
+    # a "Reproduce with:" lead.
     _eq("select: per-failure aspect repro inline", "aspect test -- //pkg:fail_test" in body, True)
     _eq("select: per-failure vanilla repro inline", "bazel test -- //pkg:fail_test" in body, True)
+    _eq("select: repros lead with 'Reproduce with:'", "Reproduce with:" in body, True)
 
-    # The test snippet's repros sit between its fence-close and its <sub> line —
-    # the vanilla repro precedes the FIRST <sub> that follows the test snippet.
+    # Order within the test snippet block: contributing-task <sub> line first,
+    # then the "Reproduce with:" repros (so attribution sits right under the
+    # snippet and the actionable commands come last).
     _ts = body.find("`//pkg:fail_test` failed in 149ms:")
+    _sub = body.find("<sub>in task test-task</sub>", _ts)
     _eq(
-        "select: repros render above the snippet's <sub> task line",
-        body.find("bazel test -- //pkg:fail_test", _ts) < body.find("<sub>in task test-task</sub>", _ts),
+        "select: <sub> task line precedes the repros",
+        _sub < body.find("Reproduce with:", _ts) and body.find("Reproduce with:", _ts) < body.find("bazel test -- //pkg:fail_test", _ts),
         True,
     )
 

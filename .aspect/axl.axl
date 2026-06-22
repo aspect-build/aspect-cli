@@ -3317,7 +3317,9 @@ def test_bazel_render_snippets(ctx: TaskContext, tc: int, temp_dir: str) -> int:
     tc = test_case(tc, "❌ cc_library `//pkg:broken` failed to build:" in out["text"], "render: build snippet header (kind + label)")
 
     # Per-failure repro commands render inline beneath their failure's snippet,
-    # correlated by label (both flavors for the test, aspect for the action).
+    # under a "Reproduce with:" lead, correlated by label (both flavors for the
+    # test, aspect for the action).
+    tc = test_case(tc, "Reproduce with:" in out["text"], "render: per-failure repros lead with 'Reproduce with:'")
     tc = test_case(tc, "aspect test -- //pkg:fail_test" in out["text"], "render: per-failure aspect repro inline")
     tc = test_case(tc, "bazel test -- //pkg:fail_test" in out["text"], "render: per-failure vanilla repro inline")
     tc = test_case(tc, "aspect build -- //pkg:broken" in out["text"], "render: per-failure action repro inline")
@@ -3355,6 +3357,12 @@ def test_bazel_render_snippets(ctx: TaskContext, tc: int, temp_dir: str) -> int:
     r2["bazel"]["targets_total"] = 3
     out2 = render_check_output(ctx, r2, "failed", render_ctx, links, snippet_options = SnippetOptions(max_lines = 15), max_snippets = 1)
     tc = test_case(tc, "more failure" in out2["text"] and "output not shown" in out2["text"], "render: budget overflow note shown")
+
+    # The overflow note renders BEFORE the <pre> table that lists the
+    # snippet-less labels (so the reader sees "output not shown" then the rows).
+    _ov = out2["text"].find("output not shown")
+    _tbl = out2["text"].find("<pre>", _ov)
+    tc = test_case(tc, _ov >= 0 and _tbl > _ov, "render: overflow note precedes the failures table")
 
     # Truncation markers: a long no-marker log keeps the tail and shows a leading
     # `…` for the dropped head (max_lines small forces windowing).
