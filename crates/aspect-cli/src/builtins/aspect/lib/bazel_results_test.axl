@@ -1013,8 +1013,11 @@ def _test_failed_labels_by_subcommand(ctx):
         {"label": "//pkg:wont_build_test", "status": "failed_to_build"},
     ]
     out = failed_labels_by_subcommand(data)
-    _eq("build bucket = actions + targets + failed_to_build test",
-        out["build"], ["//pkg:genrule", "//pkg:lib", "//pkg:wont_build_test"])
+    _eq(
+        "build bucket = actions + targets + failed_to_build test",
+        out["build"],
+        ["//pkg:genrule", "//pkg:lib", "//pkg:wont_build_test"],
+    )
     _eq("test bucket = built-then-failed tests only", out["test"], ["//pkg:a_test", "//pkg:slow_test"])
 
 def _test_failed_labels_by_subcommand_build_only(ctx):

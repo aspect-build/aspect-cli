@@ -1105,6 +1105,7 @@ def failed_labels_by_subcommand(data):
     test_seen = {}
     for t in data["bazel"].get("failed_tests", []):
         lbl = t.get("label", "")
+
         # A test that failed to build is a build failure (above); a test also
         # listed as a failed action/target likewise reruns via build.
         if (t.get("status", "") != _TEST_STATUS_FAILED_TO_BUILD and
@@ -3550,6 +3551,7 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
             if not entry.get("kind"):
                 entry["kind"] = target_kinds_map.get(original_label, "")
             entry["label"] = _truncate_label(original_label)
+
             # Untruncated label, for correlating per-failure repro commands.
             entry["_orig_label"] = original_label
             out.append(entry)

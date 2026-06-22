@@ -381,6 +381,7 @@ def _emit_final(ctx, lifecycle, data, exit_code):
 
     _append_repro_command(ctx, data)
     _append_fix_commands(ctx, data)
+
     # Honor the repro_flavors / fix_flavors controls (aspect | bazel | both).
     data["repro_commands"] = filter_by_flavor(data["repro_commands"], ctx.args.repro_flavors)
     data["fix_commands"] = filter_by_flavor(data["fix_commands"], ctx.args.fix_flavors)

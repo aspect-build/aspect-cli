@@ -1101,14 +1101,17 @@ def _test_flavor_allows(_ctx):
     # both → keep everything
     _eq("both keeps aspect", flavor_allows("both", "test-repro-aspect"), True)
     _eq("both keeps vanilla", flavor_allows("both", "test-repro-vanilla-bazel"), True)
+
     # aspect → only non-vanilla
     _eq("aspect keeps aspect slug", flavor_allows("aspect", "test-repro-aspect"), True)
     _eq("aspect drops vanilla slug", flavor_allows("aspect", "test-repro-vanilla-bazel"), False)
     _eq("aspect keeps lint-repro", flavor_allows("aspect", "lint-repro"), True)
+
     # bazel → only vanilla
     _eq("bazel drops aspect slug", flavor_allows("bazel", "test-repro-aspect"), False)
     _eq("bazel keeps vanilla slug", flavor_allows("bazel", "test-repro-vanilla-bazel"), True)
     _eq("bazel drops lint-repro (no vanilla variant)", flavor_allows("bazel", "lint-repro"), False)
+
     # unknown flavor (mis-set arg) degrades to keep-all
     _eq("unknown flavor keeps everything", flavor_allows("nonsense", "test-repro-vanilla-bazel"), True)
 
@@ -1117,12 +1120,21 @@ def _test_filter_by_flavor(_ctx):
         ReproFixCommand(command = "aspect test -- //a", slug = "test-repro-aspect"),
         ReproFixCommand(command = "bazel test -- //a", slug = "test-repro-vanilla-bazel"),
     ]
-    _eq("both → unchanged", [c.slug for c in filter_by_flavor(cmds, "both")],
-        ["test-repro-aspect", "test-repro-vanilla-bazel"])
-    _eq("aspect → only aspect", [c.slug for c in filter_by_flavor(cmds, "aspect")],
-        ["test-repro-aspect"])
-    _eq("bazel → only vanilla", [c.slug for c in filter_by_flavor(cmds, "bazel")],
-        ["test-repro-vanilla-bazel"])
+    _eq(
+        "both → unchanged",
+        [c.slug for c in filter_by_flavor(cmds, "both")],
+        ["test-repro-aspect", "test-repro-vanilla-bazel"],
+    )
+    _eq(
+        "aspect → only aspect",
+        [c.slug for c in filter_by_flavor(cmds, "aspect")],
+        ["test-repro-aspect"],
+    )
+    _eq(
+        "bazel → only vanilla",
+        [c.slug for c in filter_by_flavor(cmds, "bazel")],
+        ["test-repro-vanilla-bazel"],
+    )
 
     # A multi-entry fix list (format/gazelle shape): aspect keeps the aspect
     # fixes, drops the lone vanilla-bazel one; bazel keeps only it.
@@ -1131,10 +1143,16 @@ def _test_filter_by_flavor(_ctx):
         ReproFixCommand(command = "aspect format ... # rediscover", slug = "format-fix-rediscover"),
         ReproFixCommand(command = "bazel run //tools/format ...", slug = "format-fix-vanilla-bazel"),
     ]
-    _eq("aspect fixes → drop vanilla", [c.slug for c in filter_by_flavor(fixes, "aspect")],
-        ["format-fix", "format-fix-rediscover"])
-    _eq("bazel fixes → only vanilla", [c.slug for c in filter_by_flavor(fixes, "bazel")],
-        ["format-fix-vanilla-bazel"])
+    _eq(
+        "aspect fixes → drop vanilla",
+        [c.slug for c in filter_by_flavor(fixes, "aspect")],
+        ["format-fix", "format-fix-rediscover"],
+    )
+    _eq(
+        "bazel fixes → only vanilla",
+        [c.slug for c in filter_by_flavor(fixes, "bazel")],
+        ["format-fix-vanilla-bazel"],
+    )
 
 def _test_target_round_trips_through_rehydrate(_ctx):
     # A per-failure command's target survives the JSON-dict round-trip the PR
@@ -1143,6 +1161,7 @@ def _test_target_round_trips_through_rehydrate(_ctx):
     out = rehydrate_commands([as_dict])
     _eq("rehydrate count", len(out), 1)
     _eq("rehydrate preserves target", out[0].target, "//foo:bar")
+
     # Missing target → "" (older release / combined command).
     out2 = rehydrate_commands([{"command": "aspect test", "slug": "test-repro-aspect"}])
     _eq("rehydrate missing target → ''", out2[0].target, "")
@@ -1151,6 +1170,7 @@ def _test_hook_preserves_target(_ctx):
     # A replace verdict rewrites command but keeps target/slug identity.
     def hook(ctx, info):
         return repro_fix_replace(command = "EDITED " + info.command)
+
     lifecycle = _fake_lifecycle([hook])
     data = {
         "repro_commands": [ReproFixCommand(command = "aspect test -- //x", slug = "test-repro-aspect", target = "//x")],

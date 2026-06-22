@@ -24,9 +24,9 @@ load(
     "extract_changed_dirs",
 )
 load("@aspect//lib/github.axl", "detect_commit_sha", "github")
+load("@aspect//lib/lifecycle.axl", "ReproFixCommand")
 load("@aspect//lib/log_snippet.axl", "SnippetOptions", "code_fence_for", "extract_junit_failure", "extract_snippet")
 load("@aspect//lib/path_glob.axl", "match_any", "match_path")
-load("@aspect//lib/lifecycle.axl", "ReproFixCommand")
 load("@aspect//lib/repro_commands.axl", "build_aspect_command", "dedup_and_attribute", "patch_download_cmd", "task_cli_path")
 load("@aspect//lib/result_text.axl", "severity_for_status")
 load("@aspect//lib/runnable.axl", "apparent_label", "runnable")
@@ -3296,6 +3296,7 @@ def test_bazel_render_snippets(ctx: TaskContext, tc: int, temp_dir: str) -> int:
     r["bazel"]["failed_targets"] = [{"label": "//pkg:broken"}]
     r["bazel"]["target_kinds"] = {"//pkg:fail_test": "py_test", "//pkg:broken": "cc_library"}
     r["bazel"]["targets_total"] = 2
+
     # Combined repro (target == "") + per-failure repros (target set). The
     # producer + hook normally populate these; set directly for the render test.
     r["repro_commands"] = [
@@ -3320,6 +3321,7 @@ def test_bazel_render_snippets(ctx: TaskContext, tc: int, temp_dir: str) -> int:
     tc = test_case(tc, "aspect test -- //pkg:fail_test" in out["text"], "render: per-failure aspect repro inline")
     tc = test_case(tc, "bazel test -- //pkg:fail_test" in out["text"], "render: per-failure vanilla repro inline")
     tc = test_case(tc, "aspect build -- //pkg:broken" in out["text"], "render: per-failure action repro inline")
+
     # The combined "🔁 Reproduce" section shows only the whole-run (target == "")
     # command; the per-failure ones don't double-render there.
     _repro_section = out["text"][out["text"].find("🔁 Reproduce"):] if "🔁 Reproduce" in out["text"] else ""
