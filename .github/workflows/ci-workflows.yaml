@@ -477,12 +477,23 @@ jobs:
             val=$(printenv "$var") && echo "  $var=$val" || true
           done
   # AXL test suite + CLI/launcher end-to-end smoke. Ported from the Buildkite
-  # `axl-tests` step. Unlike Buildkite (which cquery's the just-built launcher /
-  # cli out of bazel-out), the prebuilt CLI is already installed at
-  # `target/ci/aspect-cli` by install-prebuilt-aspect-cli, and the stable
-  # `aspect` launcher on PATH resolves it via .aspect/version.axl. So we invoke
-  # `aspect` directly (= Buildkite's $LAUNCHER) and the raw binary at
-  # target/ci/aspect-cli (= Buildkite's $CLI) without the build + cquery dance.
+  # `axl-tests` step.
+  #
+  # `aspect tests axl` asserts (under CI) that it was launched by the
+  # just-built, UNSTAMPED launcher: ASPECT_LAUNCHER_VERSION == "0.0.0-dev" and
+  # the launcher resolved the CLI via local("target/ci/aspect-cli")
+  # (.aspect/axl.axl:3393-3405). The stable `aspect` launcher that setup-aspect /
+  # the runner provides is release-stamped, so we must build the launcher from
+  # THIS commit and invoke it directly — exactly like Buildkite's `$LAUNCHER`.
+  #
+  # We build via `aspect` (which self-configures the runner's output base + remote
+  # cache, so the dev tree pre-build already populated is a cache hit) and resolve
+  # the binaries with `aspect cquery --output=files` (handles Linux platform
+  # transitions). We copy the launcher to a stable path immediately: a later
+  # `aspect`/`bazel` build can redirect the bazel-out symlink, which is what makes
+  # the raw cquery'd path go stale (Buildkite hit exactly that — a 127 "No such
+  # file" on the launcher). The CLI is already stabilized at target/ci/aspect-cli
+  # by install-prebuilt-aspect-cli, which is also what the launcher resolves.
   axl-tests:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     needs: [pre-build]
@@ -495,67 +506,86 @@ jobs:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: AXL Tests
         run: |
+          echo "--- build the dev launcher (= Buildkite's \$LAUNCHER)"
+          aspect build --task-key axl-tests-gha-bootstrap //crates/aspect-launcher
+          # Copy to a stable path NOW, before any later build redirects bazel-out.
+          # (cquery stdout is just the file path; drop any stderr progress lines.)
+          mkdir -p target/ci
+          launcher_out=$(aspect cquery --output=files //crates/aspect-launcher 2>/dev/null)
+          cp -f "$launcher_out" target/ci/aspect-launcher
+          LAUNCHER="$GITHUB_WORKSPACE/target/ci/aspect-launcher"
           CLI="$GITHUB_WORKSPACE/target/ci/aspect-cli"
+          # Fail loudly if we somehow didn't get the unstamped dev launcher — the
+          # `aspect tests axl` suite asserts ASPECT_LAUNCHER_VERSION == 0.0.0-dev,
+          # and a silent fallback to the runner's stable launcher would be cryptic.
+          launcher_version=$("$LAUNCHER" --version)
+          echo "dev launcher: $launcher_version"
+          case "$launcher_version" in
+            *0.0.0-dev*) ;;
+            *) echo "::error::expected an unstamped 0.0.0-dev launcher, got: $launcher_version"; exit 1 ;;
+          esac
+
           echo "--- aspect demo template-demo"
-          aspect demo template-demo
+          "$LAUNCHER" demo template-demo
           echo "--- aspect user nested user-task"
-          aspect user nested user-task --run_count 5
+          "$LAUNCHER" user nested user-task --run_count 5
           echo "--- aspect user user-task-man"
-          aspect user user-task-man
+          "$LAUNCHER" user user-task-man
           echo "--- aspect user user-task-added-by-config"
-          aspect user user-task-added-by-config
+          "$LAUNCHER" user user-task-added-by-config
           echo "--- aspect user user-task-subdir (in crates/aspect-cli)"
           (
             cd crates/aspect-cli
-            aspect user user-task-subdir
+            "$LAUNCHER" user user-task-subdir
           )
           echo "--- aspect run smoke (//examples/deliverable)"
-          aspect run //examples/deliverable:py_deliverable
-          aspect run //examples/deliverable:sh_deliverable -- forwarded-arg
+          "$LAUNCHER" run //examples/deliverable:py_deliverable
+          "$LAUNCHER" run //examples/deliverable:sh_deliverable -- forwarded-arg
           echo "--- aspect help"
-          aspect help
-          echo "--- aspect launcher --version"
-          aspect --version
+          "$LAUNCHER" help
+          echo "--- aspect-launcher --version"
+          "$LAUNCHER" --version
           echo "--- aspect-cli --version"
           "$CLI" --version
           echo "--- aspect version"
-          aspect version
+          "$LAUNCHER" version
           echo "--- invalid task-id"
-          aspect build --task-id not-a-uuid //... && echo "ERROR: --task-id should reject non-UUID" && exit 1 || true
+          "$LAUNCHER" build --task-id not-a-uuid //... && echo "ERROR: --task-id should reject non-UUID" && exit 1 || true
           echo "--- invalid task-key"
-          aspect build --task-key "bad key!" //... && echo "ERROR: --task-key should reject invalid chars" && exit 1 || true
+          "$LAUNCHER" build --task-key "bad key!" //... && echo "ERROR: --task-key should reject invalid chars" && exit 1 || true
           echo "--- aspect dev test-template-snapshots"
-          aspect dev test-template-snapshots
+          "$LAUNCHER" dev test-template-snapshots
           echo "--- aspect dev test-lint-template-snapshots"
-          aspect dev test-lint-template-snapshots
+          "$LAUNCHER" dev test-lint-template-snapshots
           echo "--- aspect dev test-lint-annotation-plan"
-          aspect dev test-lint-annotation-plan
+          "$LAUNCHER" dev test-lint-annotation-plan
           echo "--- aspect dev test-format-template-snapshots"
-          aspect dev test-format-template-snapshots
+          "$LAUNCHER" dev test-format-template-snapshots
           echo "--- aspect dev test-gazelle-template-snapshots"
-          aspect dev test-gazelle-template-snapshots
+          "$LAUNCHER" dev test-gazelle-template-snapshots
           echo "--- aspect dev test-delivery-template-snapshots"
-          aspect dev test-delivery-template-snapshots
+          "$LAUNCHER" dev test-delivery-template-snapshots
           echo "--- aspect dev test-bk-annotation-snapshots"
-          aspect dev test-bk-annotation-snapshots
+          "$LAUNCHER" dev test-bk-annotation-snapshots
           echo "--- aspect dev test-pr-comment-snapshots"
-          aspect dev test-pr-comment-snapshots
+          "$LAUNCHER" dev test-pr-comment-snapshots
           echo "--- aspect dev test-github-detect"
-          aspect dev test-github-detect
+          "$LAUNCHER" dev test-github-detect
           echo "--- aspect dev test-gitlab-detect"
-          aspect dev test-gitlab-detect
+          "$LAUNCHER" dev test-gitlab-detect
           echo "--- aspect dev test-gitlab-client"
-          aspect dev test-gitlab-client
+          "$LAUNCHER" dev test-gitlab-client
           echo "--- aspect dev test-tips"
-          aspect dev test-tips
+          "$LAUNCHER" dev test-tips
           echo "--- aspect dev test-rate-limit"
-          aspect dev test-rate-limit
+          "$LAUNCHER" dev test-rate-limit
           echo "--- aspect dev test-runner-job-history"
-          aspect dev test-runner-job-history
+          "$LAUNCHER" dev test-runner-job-history
           echo "--- aspect tests axl"
           # Run AXL tests last — cancel tests may kill the Bazel server,
-          # which invalidates bazel-out paths used above.
-          aspect tests axl
+          # which invalidates bazel-out paths. We use the stabilized $LAUNCHER /
+          # $CLI copies above, so that's harmless here.
+          "$LAUNCHER" tests axl
   # bazelrc e2e: assert `aspect` and bare `bazel` start the SAME Bazel server
   # (no server restart between them => identical startup flags). Ported from the
   # Buildkite `bazelrc-e2e` step.
