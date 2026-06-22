@@ -486,15 +486,15 @@ jobs:
   # the runner provides is release-stamped, so we must build the launcher from
   # THIS commit and invoke it directly — exactly like Buildkite's `$LAUNCHER`.
   #
-  # We build via `aspect` (which self-configures the runner's output base + remote
-  # cache, so the dev tree pre-build already populated is a cache hit), then copy
-  # the launcher from its bazel-bin path to a stable target/ci/ path immediately:
-  # a later `aspect`/`bazel` build can redirect the bazel-out symlink, which is
-  # what makes a raw bazel-out path go stale (Buildkite hit exactly that — a 127
-  # "No such file" on the launcher). The launcher is a host-config binary, so the
-  # bazel-bin convenience symlink resolves it directly (no platform transition for
-  # this target). The CLI is already stabilized at target/ci/aspect-cli by
-  # install-prebuilt-aspect-cli, which is also what the launcher resolves.
+  # We build via `aspect` (self-configures the runner's output base + remote cache,
+  # so the dev tree pre-build already populated is a cache hit), force the binary
+  # local with --remote_download_toplevel (the runner defaults to minimal downloads
+  # over a FUSE cache, else it never lands in the workspace), resolve its path with
+  # cquery, and copy to a stable target/ci/ path immediately — a later build can
+  # redirect bazel-out, which is what makes a raw bazel-out path go stale (Buildkite
+  # hit exactly that — a 127 "No such file" on the launcher). The CLI is already
+  # stabilized at target/ci/aspect-cli by install-prebuilt-aspect-cli, which is also
+  # what the launcher resolves.
   axl-tests:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     needs: [pre-build]
@@ -508,13 +508,20 @@ jobs:
       - name: AXL Tests
         run: |
           echo "--- build the dev launcher (= Buildkite's \$LAUNCHER)"
-          aspect build --task-key axl-tests-gha-bootstrap //crates/aspect-launcher
-          # Copy to a stable path NOW, before any later build redirects bazel-out.
-          # The launcher is a host-config binary, so the bazel-bin convenience
-          # symlink resolves it directly (no cquery needed / no platform
-          # transition for this target). Fail loudly if the path moves.
+          # --remote_download_toplevel forces the binary onto local disk: the
+          # Workflows runner defaults to --remote_download_outputs=minimal (bb_clientd
+          # FUSE cache), so without it the output stays remote and never lands in the
+          # workspace (mirrors what bootstrap.sh does for //:cli).
+          aspect build --task-key axl-tests-gha-bootstrap \
+            --bazel-flag=--remote_download_toplevel \
+            //crates/aspect-launcher
+          # Resolve the output path with cquery (config-agnostic — k8-fastbuild here,
+          # not the cli's k8-dbg) and copy to a stable target/ci/ path immediately,
+          # before any later build redirects bazel-out. Fail loudly if it's missing.
           mkdir -p target/ci
-          cp -f bazel-bin/crates/aspect-launcher/aspect-launcher target/ci/aspect-launcher
+          launcher_out=$(aspect cquery --output=files //crates/aspect-launcher)
+          test -f "$launcher_out" || { echo "::error::launcher not materialized locally: '$launcher_out'"; exit 1; }
+          cp -f "$launcher_out" target/ci/aspect-launcher
           LAUNCHER="$GITHUB_WORKSPACE/target/ci/aspect-launcher"
           CLI="$GITHUB_WORKSPACE/target/ci/aspect-cli"
           # Fail loudly if we somehow didn't get the unstamped dev launcher — the
