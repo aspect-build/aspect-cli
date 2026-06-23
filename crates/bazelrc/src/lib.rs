@@ -758,6 +758,15 @@ impl BazelRC {
 /// value strands as its own unrecognized option) nor a space-joined `--flag value` override
 /// (rejected as a single unrecognized option) works. Regular flags need no such fold — they
 /// pass through as adjacent argv tokens, which Bazel pairs natively.
+///
+/// Accepted trade-off: a bare token following a boolean flag is folded as if it were the flag's
+/// value, even when it is really a non-option argument. Bazel's bazelrc supports non-option args
+/// in rc lines (e.g. `common --keep_going //:all`, where `//:all` is a default target prepended
+/// to the command line); under this fold that becomes `--keep_going=//:all` and the target is
+/// lost. Telling the two apart needs a per-flag "takes a value" registry we don't have, and the
+/// value-flag case (`--remote_download_outputs minimal`) is by far the common one — so we do not
+/// support non-option arguments in `common`-section rc lines. Put default targets on the command
+/// line or in a `build`-section (non-`common`) rc line, which passes through untouched.
 fn partition_expand_all(
     opts: &[RcOption],
 ) -> (Vec<(String, Option<String>)>, Vec<(String, Option<String>)>) {
@@ -791,6 +800,10 @@ fn partition_expand_all(
 /// the two-token `--flag value` form. Mirrors `flag_value_list`'s next-token pairing: `flag`
 /// must start with `-` and carry no `=`, `value` must not start with `-`, and both must share
 /// the same command section and version condition (i.e. originate from the same rc line).
+///
+/// Purely positional — it cannot tell a value-taking flag from a boolean flag trailed by a
+/// non-option argument, so `--keep_going //:all` also matches. See `partition_expand_all` for
+/// why that trade-off is accepted (non-option args in `common` rc lines are unsupported).
 fn is_two_token_pair(flag: &RcOption, value: &RcOption) -> bool {
     flag.value.starts_with('-')
         && !flag.value.contains('=')
@@ -1205,6 +1218,22 @@ mod runcommand_tests {
                     None
                 ),
             ]
+        );
+    }
+
+    #[test]
+    fn partition_folds_bool_flag_with_trailing_target_accepted_tradeoff() {
+        // Documented limitation: a boolean flag trailed by a non-option target arg
+        // is folded as `--flag=target`, losing the target. Non-option args in
+        // `common` rc lines are unsupported (see `partition_expand_all`). Locks the
+        // behavior in so a future "fix" is a conscious decision, not a surprise.
+        let (overrides, _) = partition_expand_all(&common_ci(&["--keep_going", "//:all"]));
+        assert_eq!(
+            overrides,
+            vec![(
+                "--default_override=0:common=--keep_going=//:all".to_string(),
+                None
+            )]
         );
     }
 
