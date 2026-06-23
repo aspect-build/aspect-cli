@@ -51,6 +51,16 @@ const CI_JOB_NAME_VARS: &[(&str, &[&str])] = &[
     ("GITLAB_CI", &["CI_JOB_NAME"]),
 ];
 
+/// Per-host 0-based shard index for steps using native parallelism. Each shard
+/// shares the job name above but runs on a separate agent, so the local de-dup
+/// claim file can't disambiguate them — the index must go into the name itself.
+/// Set only when the step opted into parallelism; absent otherwise.
+/// (GitHub Actions has no equivalent: matrix values aren't exported to the env.)
+const CI_SHARD_INDEX_VARS: &[(&str, &[&str])] = &[
+    ("BUILDKITE", &["BUILDKITE_PARALLEL_JOB"]),
+    ("CIRCLECI", &["CIRCLE_NODE_INDEX"]),
+];
+
 /// Per-host env vars identifying the current CI run, for the de-dup file scope.
 /// Distinct runs must not share a collision counter; entries are joined with `-`.
 const CI_RUN_SCOPE_VARS: &[(&str, &[&str])] = &[
@@ -67,8 +77,16 @@ pub fn detect_ci_job_name() -> Option<String> {
 }
 
 /// Pure core of [`detect_ci_job_name`], env-injected for testing.
+///
+/// `<job>` from [`CI_JOB_NAME_VARS`], with a `-<shard>` suffix appended when the
+/// step uses native parallelism ([`CI_SHARD_INDEX_VARS`]) so each shard gets a
+/// distinct name (they run on separate agents and can't share the de-dup file).
 fn ci_job_name(get: impl Fn(&str) -> Option<String>) -> Option<String> {
-    first_present_value(CI_JOB_NAME_VARS, &get).and_then(|raw| sanitize_name(&raw))
+    let job = first_present_value(CI_JOB_NAME_VARS, &get).and_then(|raw| sanitize_name(&raw))?;
+    match first_present_value(CI_SHARD_INDEX_VARS, &get).and_then(|raw| sanitize_name(&raw)) {
+        Some(shard) => Some(format!("{job}-{shard}")),
+        None => Some(job),
+    }
 }
 
 /// First non-empty value across the var-lists of the first present host.
@@ -257,7 +275,10 @@ mod tests {
     #[test]
     fn ci_job_name_per_host() {
         assert_eq!(
-            ci_job_name(env(&[("GITHUB_ACTIONS", "true"), ("GITHUB_JOB", "ci-linux")])),
+            ci_job_name(env(&[
+                ("GITHUB_ACTIONS", "true"),
+                ("GITHUB_JOB", "ci-linux")
+            ])),
             Some("ci-linux".to_string())
         );
         assert_eq!(
@@ -303,11 +324,55 @@ mod tests {
     }
 
     #[test]
+    fn ci_job_name_appends_parallel_shard_index() {
+        // Buildkite parallelism: BUILDKITE_PARALLEL_JOB disambiguates shards.
+        assert_eq!(
+            ci_job_name(env(&[
+                ("BUILDKITE", "true"),
+                ("BUILDKITE_STEP_KEY", "unit"),
+                ("BUILDKITE_PARALLEL_JOB", "0"),
+            ])),
+            Some("unit-0".to_string())
+        );
+        // CircleCI parallelism: CIRCLE_NODE_INDEX.
+        assert_eq!(
+            ci_job_name(env(&[
+                ("CIRCLECI", "true"),
+                ("CIRCLE_JOB", "test"),
+                ("CIRCLE_NODE_INDEX", "3"),
+            ])),
+            Some("test-3".to_string())
+        );
+        // No parallelism var → bare job name (non-parallel steps are unaffected).
+        assert_eq!(
+            ci_job_name(env(&[("CIRCLECI", "true"), ("CIRCLE_JOB", "test")])),
+            Some("test".to_string())
+        );
+        // GitHub matrix has no shard env var, so the job name stays bare.
+        assert_eq!(
+            ci_job_name(env(&[
+                ("GITHUB_ACTIONS", "true"),
+                ("GITHUB_JOB", "ci-linux")
+            ])),
+            Some("ci-linux".to_string())
+        );
+    }
+
+    #[test]
     fn sanitize_name_collapses_separators() {
         assert_eq!(sanitize_name("ci-linux"), Some("ci-linux".to_string()));
-        assert_eq!(sanitize_name("Build (linux, x64)"), Some("Build-linux-x64".to_string()));
-        assert_eq!(sanitize_name("  leading/trailing  "), Some("leading-trailing".to_string()));
-        assert_eq!(sanitize_name("keeps_underscore"), Some("keeps_underscore".to_string()));
+        assert_eq!(
+            sanitize_name("Build (linux, x64)"),
+            Some("Build-linux-x64".to_string())
+        );
+        assert_eq!(
+            sanitize_name("  leading/trailing  "),
+            Some("leading-trailing".to_string())
+        );
+        assert_eq!(
+            sanitize_name("keeps_underscore"),
+            Some("keeps_underscore".to_string())
+        );
         assert_eq!(sanitize_name(""), None);
         assert_eq!(sanitize_name("/// ---"), None);
     }
