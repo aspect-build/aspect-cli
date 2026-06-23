@@ -23,6 +23,7 @@ load("@aspect//lib/gitlab_lint_comments_test.axl", "gitlab_lint_comments_tests")
 load("@aspect//lib/gitlab_test.axl", "gitlab_client_tests")
 load("@aspect//lib/health_check_ready_test.axl", "health_check_ready_tests")
 load("@aspect//lib/init_test.axl", "init_tests")
+load("@aspect//lib/lifecycle_test.axl", "lifecycle_tests")
 load("@aspect//lib/lint_comments_test.axl", "lint_comments_tests")
 load("@aspect//lib/lint_results_test.axl", "detect_lint_tool_tests", "lint_annotation_plan_tests", "lint_template_snapshot_tests", "linter_rows_tests")
 load("@aspect//lib/rate_limit_test.axl", "rate_limit_tests")
@@ -205,6 +206,9 @@ def config(ctx: ConfigContext):
     ctx.features[CircleCITestResults].args.upload_test_results = "all"
     ctx.features[CircleCITestResults].args.cached_as_skipped = True
 
+    # Expand test phase by default
+    ctx.features[BuildkiteAnnotations].args.expand_phases = ["test"]
+
     # Silence tips via the Tips feature args (append ids to suppress):
     # ctx.features["tips"].args.silence.append("some-tip-id")
 
@@ -279,6 +283,11 @@ def config(ctx: ConfigContext):
     # Cross-CI URL helpers (lib/ci.axl): host detection, build URL, per-job cache.
     # Run with: aspect dev test-ci
     ctx.tasks.add(ci_tests)
+
+    # Buildkite phase-section expansion (lib/lifecycle.axl): Phase.expanded +
+    # BuildkiteAnnotations.expanded_phases → `+++`/`---` marker resolution.
+    # Run with: aspect dev test-lifecycle
+    ctx.tasks.add(lifecycle_tests)
 
     # @aspect//helpers.axl facade: re-exports resolve to the real helpers.
     # Run with: aspect dev test-helpers
