@@ -45,7 +45,7 @@ def _test_impl(ctx):
     return 0
 
 tar_tests = task(
-    name = "test-tar",
+    kind = "test-tar",
     group = ["dev"],
     implementation = _test_impl,
     args = {},

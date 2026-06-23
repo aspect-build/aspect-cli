@@ -564,7 +564,7 @@ def _github_lint_impl(ctx: FeatureContext):
         # in priority/stable order, not per-file arrival order.
         if gh and gh["stale"]:
             return
-        comments = _build_comments(ctx, filepath, run_id, ctx.task.key, destination = destination)
+        comments = _build_comments(ctx, filepath, run_id, ctx.task.name, destination = destination)
         state["all_comments_count"] += len(comments)
 
         cap_exhausted = bool(gh) and state["posted"] >= max_pr_comments
@@ -580,7 +580,7 @@ def _github_lint_impl(ctx: FeatureContext):
 
         # Lazy-init existing markers on first stream for prior-run dedup.
         if "existing_markers" not in gh:
-            gh["existing_markers"] = _get_existing_markers(ctx, gh, ctx.task.key)
+            gh["existing_markers"] = _get_existing_markers(ctx, gh, ctx.task.name)
 
         # Errors stream now; everything else buffers for _lint_end.
         errors_in_batch = [c for c in comments if c.get("_severity") == "error"]
@@ -596,7 +596,7 @@ def _github_lint_impl(ctx: FeatureContext):
         # dupes don't consume budget; count only new postable comments.
         new_only = []
         for c in ready:
-            marker = lc_extract_marker(c.get("body", ""), task_key = ctx.task.key)
+            marker = lc_extract_marker(c.get("body", ""), task_key = ctx.task.name)
             if marker and marker in gh["existing_markers"]:
                 continue
             new_only.append(c)
@@ -612,7 +612,7 @@ def _github_lint_impl(ctx: FeatureContext):
             new_only = new_only[:remaining_budget]
 
         before = len(gh["existing_markers"])
-        errors = _post_individually(ctx, gh, new_only, gh["existing_markers"], ctx.task.key)
+        errors = _post_individually(ctx, gh, new_only, gh["existing_markers"], ctx.task.name)
         state["posted"] += len(gh["existing_markers"]) - before
         state["errors"].extend(errors)
 
@@ -647,7 +647,7 @@ def _github_lint_impl(ctx: FeatureContext):
         `_tool`, `_file` for the `_lint_end` bookkeeping that fills lint_trait.suggestions.
         """
         comments = []
-        task_key = ctx.task.key
+        task_key = ctx.task.name
 
         # Index diagnostics by (file, line, tool) for correlation. `tool` keeps
         # the match same-linter; case-folded since the BES mnemonic ("ShellCheck")
@@ -781,7 +781,7 @@ def _github_lint_impl(ctx: FeatureContext):
                 # no streamed errors (warnings/notes or patch suggestions only)
                 # reaches here with the key still unset.
                 if "existing_markers" not in gh:
-                    gh["existing_markers"] = _get_existing_markers(ctx, gh, ctx.task.key)
+                    gh["existing_markers"] = _get_existing_markers(ctx, gh, ctx.task.name)
 
                 # "annotations" = no PR comments: patches go through
                 # _build_suggestion_comments independently of the destination
@@ -794,7 +794,7 @@ def _github_lint_impl(ctx: FeatureContext):
 
                 # Intra-run dedup by marker (within-run dupes; the existing-markers
                 # check below handles prior-run dupes).
-                non_errors = _dedup_by_marker(non_errors, ctx.task.key)
+                non_errors = _dedup_by_marker(non_errors, ctx.task.name)
 
                 # No diff-region pre-filter (see _lint_report); out-of-hunk 422s
                 # are tolerated via _post_individually's error collection.
@@ -803,7 +803,7 @@ def _github_lint_impl(ctx: FeatureContext):
                 deduped_skipped = 0
                 new_only = []
                 for c in non_errors:
-                    marker = lc_extract_marker(c.get("body", ""), task_key = ctx.task.key)
+                    marker = lc_extract_marker(c.get("body", ""), task_key = ctx.task.name)
                     if marker and marker in gh["existing_markers"]:
                         deduped_skipped += 1
                         continue
@@ -824,7 +824,7 @@ def _github_lint_impl(ctx: FeatureContext):
                 # 4. Post.
                 if new_only:
                     before = len(gh["existing_markers"])
-                    errors = _post_individually(ctx, gh, new_only, gh["existing_markers"], ctx.task.key)
+                    errors = _post_individually(ctx, gh, new_only, gh["existing_markers"], ctx.task.name)
                     state["posted"] += len(gh["existing_markers"]) - before
                     state["errors"].extend(errors)
                     outcome = "posted %d new comment(s)" % (len(gh["existing_markers"]) - before)
@@ -839,7 +839,7 @@ def _github_lint_impl(ctx: FeatureContext):
                 # keeps them desired.
                 suggestion_markers = []
                 for c in suggestion_comments:
-                    m = lc_extract_marker(c.get("body", ""), task_key = ctx.task.key)
+                    m = lc_extract_marker(c.get("body", ""), task_key = ctx.task.name)
                     if m:
                         suggestion_markers.append(m)
 
@@ -874,7 +874,7 @@ def _github_lint_impl(ctx: FeatureContext):
                     if path and line:
                         lint_trait.comment_urls[(path, line)] = _files_changed_url(url)
 
-                _cleanup_comments(ctx, gh, relevant_diagnostics, run_id, ctx.task.key, suggestion_markers, destination = destination)
+                _cleanup_comments(ctx, gh, relevant_diagnostics, run_id, ctx.task.name, suggestion_markers, destination = destination)
 
                 if state["dropped_due_to_cap"] > 0:
                     # Per-severity breakdown (known levels in priority order, rest "other").

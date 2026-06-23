@@ -40,7 +40,7 @@ commands that faithfully encode the invocation.
 `dedup_and_attribute(entries)` is what status surfaces use to merge
 the per-task lists into a single rolled-up view across tasks: two
 contributions of the same `(command, description)` collapse into one
-row that lists every contributing task_key.
+row that lists every contributing task name.
 
 `apply_repro_fix_hooks` and `dispatch_task_update` live in
 `lib/lifecycle.axl` next to `TaskLifecycleTrait`. The framework runs
@@ -161,12 +161,14 @@ def _shell_quote(s):
     return "'" + s.replace("'", "'\\''") + "'"
 
 def task_cli_path(task):
-    """Return the task's CLI invocation path — `<group...> <name>`.
+    """Return the task's CLI invocation path — `<group...> <kind>`.
 
-    Pass `ctx.task` (or anything with `.group: list[str]` and `.name:
+    Uses the task *kind* (the command name), not the per-invocation
+    `--task:name`, so the rendered `aspect <path>` is actually runnable.
+    Pass `ctx.task` (or anything with `.group: list[str]` and `.kind:
     str`) and feed the result to `build_aspect_command`.
     """
-    return " ".join(list(task.group) + [task.name])
+    return " ".join(list(task.group) + [task.kind])
 
 def explicit_flags(ctx, pairs):
     """Convert `[(arg_name, flag_name), ...]` into the subset of
@@ -523,15 +525,15 @@ def _join_continued(lines):
     return "\n".join(out)
 
 def dedup_and_attribute(entries):
-    """Collapse `{kind, task_key, command, description}` entries across tasks.
+    """Collapse `{kind, task_name, command, description}` entries across tasks.
 
     Two entries dedup when `(kind, command, description)` matches
     exactly. Commands differing only by target subset stay separate;
     different task kinds (build vs test, lint vs format, …) also stay
     separate even when the literal command is the same. Output
-    preserves first-seen order for both rows and their `task_keys`.
+    preserves first-seen order for both rows and their `task_names`.
 
-    Returns one `{"kind", "command", "description", "task_keys"}` dict
+    Returns one `{"kind", "command", "description", "task_names"}` dict
     per unique `(kind, command, description)` triple. `kind` is the
     empty string when no entry provided one.
     """
@@ -541,7 +543,7 @@ def dedup_and_attribute(entries):
         command = e.get("command", "") or ""
         description = e.get("description", "") or ""
         kind = e.get("kind", "") or ""
-        task_key = e.get("task_key", "") or ""
+        task_name = e.get("task_name", "") or ""
         if not command:
             continue
         k = (kind, command, description)
@@ -550,14 +552,14 @@ def dedup_and_attribute(entries):
                 "kind": kind,
                 "command": command,
                 "description": description,
-                "task_keys": [],
+                "task_names": [],
                 "_seen": {},
             }
             order.append(k)
         slot = by_key[k]
-        if task_key and task_key not in slot["_seen"]:
-            slot["_seen"][task_key] = True
-            slot["task_keys"].append(task_key)
+        if task_name and task_name not in slot["_seen"]:
+            slot["_seen"][task_name] = True
+            slot["task_names"].append(task_name)
 
     out = []
     for k in order:
@@ -566,7 +568,7 @@ def dedup_and_attribute(entries):
             "kind": slot["kind"],
             "command": slot["command"],
             "description": slot["description"],
-            "task_keys": slot["task_keys"],
+            "task_names": slot["task_names"],
         })
     return out
 

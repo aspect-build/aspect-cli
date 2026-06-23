@@ -215,7 +215,7 @@ def _test_impl(ctx):
     return 0
 
 ci_tests = task(
-    name = "test-ci",
+    kind = "test-ci",
     group = ["dev"],
     implementation = _test_impl,
     args = {},

@@ -37,7 +37,7 @@ def _test_impl(ctx):
     return 0
 
 helpers_facade_tests = task(
-    name = "test-helpers",
+    kind = "test-helpers",
     group = ["dev"],
     implementation = _test_impl,
     args = {},

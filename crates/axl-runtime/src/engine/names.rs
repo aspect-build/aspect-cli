@@ -232,9 +232,22 @@ mod tests {
     //! End-to-end checks that task(), feature(), and trait() naming validation
     //! fires through the AXL eval stack.
     use crate::axl_check;
+    use crate::engine::names::to_display_name;
 
     fn eval(code: &str) -> Result<(), String> {
         axl_check!(code).map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn to_display_name_title_cases_every_word() {
+        // The default for `ctx.task.friendly_kind` (Title-Cased kind).
+        assert_eq!(to_display_name("axl"), "Axl");
+        assert_eq!(to_display_name("bazel_query"), "Bazel Query");
+        assert_eq!(
+            to_display_name("github-status-checks"),
+            "Github Status Checks"
+        );
+        assert_eq!(to_display_name(""), "");
     }
 
     fn eval_err(code: &str) -> String {
@@ -256,12 +269,12 @@ ValidFeature = feature(implementation = _impl)
 "#;
 
     #[test]
-    fn task_valid_explicit_name() {
+    fn task_valid_explicit_kind() {
         assert!(
             eval(
                 r#"
 def _impl(ctx): pass
-T = task(implementation = _impl, args = {}, name = "my-task")
+T = task(implementation = _impl, args = {}, kind = "my-task")
 "#
             )
             .is_ok()
@@ -269,11 +282,11 @@ T = task(implementation = _impl, args = {}, name = "my-task")
     }
 
     #[test]
-    fn task_name_underscore_rejected() {
+    fn task_kind_underscore_rejected() {
         let err = eval_err(
             r#"
 def _impl(ctx): pass
-T = task(implementation = _impl, args = {}, name = "bad_name")
+T = task(implementation = _impl, args = {}, kind = "bad_name")
 "#,
         );
         assert!(
@@ -284,11 +297,11 @@ T = task(implementation = _impl, args = {}, name = "bad_name")
     }
 
     #[test]
-    fn task_name_uppercase_rejected() {
+    fn task_kind_uppercase_rejected() {
         let err = eval_err(
             r#"
 def _impl(ctx): pass
-T = task(implementation = _impl, args = {}, name = "BadName")
+T = task(implementation = _impl, args = {}, kind = "BadName")
 "#,
         );
         assert!(
@@ -299,11 +312,11 @@ T = task(implementation = _impl, args = {}, name = "BadName")
     }
 
     #[test]
-    fn task_name_leading_digit_rejected() {
+    fn task_kind_leading_digit_rejected() {
         let err = eval_err(
             r#"
 def _impl(ctx): pass
-T = task(implementation = _impl, args = {}, name = "1task")
+T = task(implementation = _impl, args = {}, kind = "1task")
 "#,
         );
         assert!(

@@ -586,8 +586,8 @@ def _test_overflow_comments_never_carry_continuation(_ctx):
 
 def _fake_apply_ctx():
     """Build a fake `ctx` with the fields `apply_repro_fix_hooks` reads —
-    just `ctx.task.name` and `ctx.task.group`. Std/env are not touched."""
-    return struct(task = struct(name = "lint", group = ["aspect"]))
+    just `ctx.task.kind` and `ctx.task.group`. Std/env are not touched."""
+    return struct(task = struct(kind = "lint", group = ["aspect"]))
 
 def _fake_lifecycle(handlers):
     """Build a fake `lifecycle` with the single attribute the helper
@@ -783,7 +783,7 @@ def _test_info_exposes_typed_fields(_ctx):
     def capture(ctx, info):
         seen.append({
             "task_path": info.task_path,
-            "task_name": info.task_name,
+            "task_kind": info.task_kind,
             "kind": info.kind,
             "command_kind": info.command_kind.value,
             "status": info.status,
@@ -810,8 +810,8 @@ def _test_info_exposes_typed_fields(_ctx):
         extras = {"aspects": ["//tools/lint:eslint"]},
     )
     _eq("info: 2 entries seen (1 repro + 1 fix)", len(seen), 2)
-    _eq("info: task_path composed from group+name", seen[0]["task_path"], "aspect lint")
-    _eq("info: task_name", seen[0]["task_name"], "lint")
+    _eq("info: task_path composed from group+kind", seen[0]["task_path"], "aspect lint")
+    _eq("info: task_kind", seen[0]["task_kind"], "lint")
     _eq("info: kind", seen[0]["kind"], "lint_results")
     _eq("info: command_kind for repro", seen[0]["command_kind"], "repro")
     _eq("info: command_kind for fix", seen[1]["command_kind"], "fix")
@@ -1283,7 +1283,7 @@ def _test_impl(ctx):
     return 0
 
 repro_commands_tests = task(
-    name = "test-repro-commands",
+    kind = "test-repro-commands",
     group = ["dev"],
     implementation = _test_impl,
     args = {},

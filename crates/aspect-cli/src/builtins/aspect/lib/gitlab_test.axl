@@ -306,7 +306,7 @@ def _test_impl(ctx):
     return 0
 
 gitlab_client_tests = task(
-    name = "test-gitlab-client",
+    kind = "test-gitlab-client",
     group = ["dev"],
     implementation = _test_impl,
     args = {},

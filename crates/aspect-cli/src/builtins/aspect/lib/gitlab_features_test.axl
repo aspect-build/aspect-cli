@@ -90,7 +90,7 @@ def _test_impl(ctx):
     return 0
 
 gitlab_features_tests = task(
-    name = "test-gitlab-features",
+    kind = "test-gitlab-features",
     group = ["dev"],
     implementation = _test_impl,
     args = {},

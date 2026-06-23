@@ -213,14 +213,14 @@ def _make_failing_with_drift():
 
 # ─── Test harness ─────────────────────────────────────────────────────────────
 
-def _render_ctx(task_name = "gazelle"):
+def _render_ctx(task_kind = "gazelle"):
     return {
         "triggered_by": "Greg Magolan (pull_request)",
         "subject": "",
         "started_ms": 1744630000000,
         "ended_ms": 1744630005800,
         "progress": "",
-        "task_name": task_name,
+        "task_kind": task_kind,
     }
 
 def _links(ci = "github"):
@@ -311,7 +311,7 @@ def _test_impl(ctx):
     return 0
 
 gazelle_template_snapshot_tests = task(
-    name = "test-gazelle-template-snapshots",
+    kind = "test-gazelle-template-snapshots",
     group = ["dev"],
     implementation = _test_impl,
     args = {},

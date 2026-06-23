@@ -279,7 +279,7 @@ def _test_impl(ctx):
     return 0
 
 health_check_ready_tests = task(
-    name = "test-health-check-ready",
+    kind = "test-health-check-ready",
     group = ["dev"],
     implementation = _test_impl,
     args = {},

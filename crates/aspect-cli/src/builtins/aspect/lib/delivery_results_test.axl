@@ -254,14 +254,14 @@ def _make_build_failed():
 
 # ─── Test harness ─────────────────────────────────────────────────────────────
 
-def _render_ctx(subject = "//apps/...", task_name = "delivery", progress = ""):
+def _render_ctx(subject = "//apps/...", task_kind = "delivery", progress = ""):
     return {
         "triggered_by": "Greg Magolan (workflow_dispatch)",
         "subject": subject,
         "started_ms": 1744630000000,
         "ended_ms": 1744630012500,
         "progress": progress,
-        "task_name": task_name,
+        "task_kind": task_kind,
     }
 
 def _links(ci = "buildkite", with_manifest = False):
@@ -383,7 +383,7 @@ def _check_long_subject_title_is_capped(ctx):
         fail("title unexpectedly long (%d chars): %r" % (len(title), title))
 
 delivery_template_snapshot_tests = task(
-    name = "test-delivery-template-snapshots",
+    kind = "test-delivery-template-snapshots",
     group = ["dev"],
     implementation = _test_impl,
     args = {},
@@ -575,7 +575,7 @@ def _unit_test_impl(ctx):
     return 0
 
 delivery_results_unit_tests = task(
-    name = "test-delivery-results",
+    kind = "test-delivery-results",
     group = ["dev"],
     implementation = _unit_test_impl,
     args = {},

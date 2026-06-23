@@ -297,8 +297,8 @@ def _delivery_compact(status, data):
     return ""
 
 def _entry(
-        name,
-        key,
+        task_kind,
+        task_name,
         job,
         kind,
         status,
@@ -330,7 +330,7 @@ def _entry(
     # `rehydrate_commands` so the fixture matches what the production
     # read path would deliver to the renderer (records, not raw dicts).
     if not data.get("repro_commands"):
-        repro, _ = compute_reproducer_command(data, name)
+        repro, _ = compute_reproducer_command(data, task_kind)
         if repro:
             data = dict(data)
             data["repro_commands"] = rehydrate_commands([
@@ -358,8 +358,8 @@ def _entry(
             "body": _body_for(kind, status, data),
             "stream": "",
         }
-    payload["name"] = name
-    payload["key"] = key
+    payload["kind"] = task_kind
+    payload["name"] = task_name
     payload["job"] = job
     payload["run_attempt"] = "1"
     payload["status"] = status
@@ -377,20 +377,20 @@ def _check_collect_tip_rows(ctx):
     # Dedup + attribution: same (id, key) with identical content from two
     # tasks merges into one row with both task keys in alphabetical order.
     rows = collect_tip_rows(ctx, [
-        {"key": "lint-task", "tips": [
+        {"name": "lint-task", "tips": [
             {"id": "x", "severity": "suggestion", "title": "T", "body": "B"},
         ]},
-        {"key": "build-task", "tips": [
+        {"name": "build-task", "tips": [
             {"id": "x", "severity": "suggestion", "title": "T", "body": "B"},
         ]},
     ])
     if len(rows) != 1:
         fail("collect_tip_rows dedup: expected 1 row, got %d" % len(rows))
-    if rows[0]["task_keys"] != ["build-task", "lint-task"]:
-        fail("collect_tip_rows attribution: expected [build-task, lint-task], got %r" % rows[0]["task_keys"])
+    if rows[0]["task_names"] != ["build-task", "lint-task"]:
+        fail("collect_tip_rows attribution: expected [build-task, lint-task], got %r" % rows[0]["task_names"])
 
     # Severity sort: important first, then warning, then suggestion, then info.
-    rows = collect_tip_rows(ctx, [{"key": "t1", "tips": [
+    rows = collect_tip_rows(ctx, [{"name": "t1", "tips": [
         {"id": "i", "severity": "info", "title": "I", "body": ""},
         {"id": "c", "severity": "important", "title": "C", "body": ""},
         {"id": "s", "severity": "suggestion", "title": "S", "body": ""},
@@ -407,7 +407,7 @@ def _check_collect_tip_rows(ctx):
         [{"id": "s%d" % i, "severity": "suggestion", "title": "S", "body": ""} for i in range(4)] +
         [{"id": "i%d" % i, "severity": "info", "title": "I", "body": ""} for i in range(4)]
     )
-    rows = collect_tip_rows(ctx, [{"key": "t1", "tips": big}])
+    rows = collect_tip_rows(ctx, [{"name": "t1", "tips": big}])
     important_count = len([r for r in rows if r["severity_label"] == "Important"])
     warning_count = len([r for r in rows if r["severity_label"] == "Warning"])
     subordinate_count = len([r for r in rows if r["severity_label"] in ("Tip", "Info")])
@@ -420,7 +420,7 @@ def _check_collect_tip_rows(ctx):
 
     # silence_hint: non-empty whenever the tip has an id. The rendered
     # tip carries this `<sub>...</sub>` line as its silence-hint footer.
-    rows = collect_tip_rows(ctx, [{"key": "t1", "tips": [
+    rows = collect_tip_rows(ctx, [{"name": "t1", "tips": [
         {"id": "c", "severity": "important", "title": "C", "body": ""},
         {"id": "s", "severity": "suggestion", "title": "S", "body": ""},
     ]}])
@@ -437,7 +437,7 @@ def _check_collect_tip_rows(ctx):
     title_tmpl = "Grant {% if scopes|length == 1 %}`{{ scopes[0] }}`{% else %}{{ scopes|length }} scopes{% endif %}"
     body_tmpl = "{{ endpoints|length }} calls fell back:\n{% for e in endpoints %}- {{ e }}\n{% endfor %}"
     rows = collect_tip_rows(ctx, [
-        {"key": "build-task", "tips": [{
+        {"name": "build-task", "tips": [{
             "id": "sample-scope-tip",
             "severity": "warning",
             "title": "Grant `actions: read`",
@@ -448,7 +448,7 @@ def _check_collect_tip_rows(ctx):
             "_body_src": body_tmpl,
             "accumulate": {"scopes": ["actions: read"], "endpoints": ["/a/jobs"]},
         }]},
-        {"key": "test-task", "tips": [{
+        {"name": "test-task", "tips": [{
             "id": "sample-scope-tip",
             "severity": "warning",
             "title": "Grant `pull-requests: read`",
@@ -468,15 +468,15 @@ def _check_collect_tip_rows(ctx):
         fail("combine: body missing an endpoint: %r" % rows[0]["body_quoted"])
     if "3 calls" not in rows[0]["body_quoted"]:
         fail("combine: body not re-rendered with merged count: %r" % rows[0]["body_quoted"])
-    if rows[0]["task_keys"] != ["build-task", "test-task"]:
-        fail("combine: task_keys merge wrong: %r" % rows[0]["task_keys"])
+    if rows[0]["task_names"] != ["build-task", "test-task"]:
+        fail("combine: task_names merge wrong: %r" % rows[0]["task_names"])
 
     # ── Surface gate + (id, key) grouping + combine vs latest ─────────
 
     # Surface gate: a tip whose `surfaces` omits the PR summary is
     # dropped from the rollup even though it reached the aggregator.
     rows = collect_tip_rows(ctx, [
-        {"key": "build-task", "tips": [{
+        {"name": "build-task", "tips": [{
             "id": "task-only-tip",
             "severity": "info",
             "title": "Only on task screens",
@@ -490,7 +490,7 @@ def _check_collect_tip_rows(ctx):
 
     # An empty `surfaces` list means all surfaces — eligible for the rollup.
     rows = collect_tip_rows(ctx, [
-        {"key": "build-task", "tips": [{"id": "everywhere-tip", "severity": "info", "title": "Everywhere", "body": "b", "type": "raw", "surfaces": []}]},
+        {"name": "build-task", "tips": [{"id": "everywhere-tip", "severity": "info", "title": "Everywhere", "body": "b", "type": "raw", "surfaces": []}]},
     ])
     if len(rows) != 1:
         fail("surface gate: empty surfaces must be eligible, got %d rows" % len(rows))
@@ -498,44 +498,44 @@ def _check_collect_tip_rows(ctx):
     # combine=False (default), identical content across tasks → one row
     # attributed to both.
     rows = collect_tip_rows(ctx, [
-        {"key": "build-task", "tips": [{"id": "static", "severity": "info", "title": "Same", "body": "Same body", "type": "raw"}]},
-        {"key": "test-task", "tips": [{"id": "static", "severity": "info", "title": "Same", "body": "Same body", "type": "raw"}]},
+        {"name": "build-task", "tips": [{"id": "static", "severity": "info", "title": "Same", "body": "Same body", "type": "raw"}]},
+        {"name": "test-task", "tips": [{"id": "static", "severity": "info", "title": "Same", "body": "Same body", "type": "raw"}]},
     ])
     if len(rows) != 1:
         fail("latest-identical: expected 1 row, got %d" % len(rows))
-    if rows[0]["task_keys"] != ["build-task", "test-task"]:
-        fail("latest-identical: expected both task keys, got %r" % rows[0]["task_keys"])
+    if rows[0]["task_names"] != ["build-task", "test-task"]:
+        fail("latest-identical: expected both task keys, got %r" % rows[0]["task_names"])
 
     # combine=False, divergent content across tasks → latest task's
     # content wins, attributed to that task.
     rows = collect_tip_rows(ctx, [
-        {"key": "build-task", "tips": [{"id": "dyn", "severity": "info", "title": "Built //a", "body": "b1", "type": "raw"}]},
-        {"key": "test-task", "tips": [{"id": "dyn", "severity": "info", "title": "Built //b", "body": "b2", "type": "raw"}]},
+        {"name": "build-task", "tips": [{"id": "dyn", "severity": "info", "title": "Built //a", "body": "b1", "type": "raw"}]},
+        {"name": "test-task", "tips": [{"id": "dyn", "severity": "info", "title": "Built //b", "body": "b2", "type": "raw"}]},
     ])
     if len(rows) != 1:
         fail("latest-divergent: expected 1 row, got %d" % len(rows))
-    if rows[0]["title"] != "Built //b" or rows[0]["task_keys"] != ["test-task"]:
-        fail("latest-divergent: expected latest task to win, got title=%r keys=%r" % (rows[0]["title"], rows[0]["task_keys"]))
+    if rows[0]["title"] != "Built //b" or rows[0]["task_names"] != ["test-task"]:
+        fail("latest-divergent: expected latest task to win, got title=%r keys=%r" % (rows[0]["title"], rows[0]["task_names"]))
 
     # Distinct `key` under the same `id` → separate rows, each attributed
     # to its own task. (The "same tip, different subjects" use case.)
     rows = collect_tip_rows(ctx, [
-        {"key": "build-task", "tips": [{"id": "flaky", "key": "//a", "severity": "warning", "title": "Flaky //a", "body": "b", "type": "raw"}]},
-        {"key": "test-task", "tips": [{"id": "flaky", "key": "//b", "severity": "warning", "title": "Flaky //b", "body": "b", "type": "raw"}]},
+        {"name": "build-task", "tips": [{"id": "flaky", "key": "//a", "severity": "warning", "title": "Flaky //a", "body": "b", "type": "raw"}]},
+        {"name": "test-task", "tips": [{"id": "flaky", "key": "//b", "severity": "warning", "title": "Flaky //b", "body": "b", "type": "raw"}]},
     ])
     if len(rows) != 2:
         fail("distinct-key: expected 2 rows, got %d" % len(rows))
     by_title = {r["title"]: r for r in rows}
-    if by_title["Flaky //a"]["task_keys"] != ["build-task"]:
-        fail("distinct-key: //a mis-attributed: %r" % by_title["Flaky //a"]["task_keys"])
-    if by_title["Flaky //b"]["task_keys"] != ["test-task"]:
-        fail("distinct-key: //b mis-attributed: %r" % by_title["Flaky //b"]["task_keys"])
+    if by_title["Flaky //a"]["task_names"] != ["build-task"]:
+        fail("distinct-key: //a mis-attributed: %r" % by_title["Flaky //a"]["task_names"])
+    if by_title["Flaky //b"]["task_names"] != ["test-task"]:
+        fail("distinct-key: //b mis-attributed: %r" % by_title["Flaky //b"]["task_names"])
 
     # combine=False: same id, same key, different content from two tasks
     # collapses to ONE row (latest), not two — distinctness needs a key.
     rows = collect_tip_rows(ctx, [
-        {"key": "build-task", "tips": [{"id": "nokey", "severity": "info", "title": "Built //a", "body": "b1", "type": "raw"}]},
-        {"key": "test-task", "tips": [{"id": "nokey", "severity": "info", "title": "Built //b", "body": "b2", "type": "raw"}]},
+        {"name": "build-task", "tips": [{"id": "nokey", "severity": "info", "title": "Built //a", "body": "b1", "type": "raw"}]},
+        {"name": "test-task", "tips": [{"id": "nokey", "severity": "info", "title": "Built //b", "body": "b2", "type": "raw"}]},
     ])
     if len(rows) != 1:
         fail("no-key-collapse: same (id, '') must be one row, got %d" % len(rows))
@@ -543,10 +543,10 @@ def _check_collect_tip_rows(ctx):
     # combine=True if ANY contributor opts in: the group merges into one
     # row even when another contributor left it False.
     rows = collect_tip_rows(ctx, [
-        {"key": "build-task", "tips": [{"id": "scope", "severity": "info", "title": "T", "body": "b", "type": "jinja2", "_title_src": "T", "_body_src": "{% for s in scopes %}{{ s }} {% endfor %}", "accumulate": {"scopes": ["a"]}}]},
-        {"key": "test-task", "tips": [{"id": "scope", "severity": "info", "title": "T", "body": "b", "type": "jinja2", "combine_across_tasks": True, "_title_src": "T", "_body_src": "{% for s in scopes %}{{ s }} {% endfor %}", "accumulate": {"scopes": ["b"]}}]},
+        {"name": "build-task", "tips": [{"id": "scope", "severity": "info", "title": "T", "body": "b", "type": "jinja2", "_title_src": "T", "_body_src": "{% for s in scopes %}{{ s }} {% endfor %}", "accumulate": {"scopes": ["a"]}}]},
+        {"name": "test-task", "tips": [{"id": "scope", "severity": "info", "title": "T", "body": "b", "type": "jinja2", "combine_across_tasks": True, "_title_src": "T", "_body_src": "{% for s in scopes %}{{ s }} {% endfor %}", "accumulate": {"scopes": ["b"]}}]},
     ])
-    if len(rows) != 1 or rows[0]["task_keys"] != ["build-task", "test-task"]:
+    if len(rows) != 1 or rows[0]["task_names"] != ["build-task", "test-task"]:
         fail("combine-any: a single combine_across_tasks contributor must merge the group, got %r" % rows)
     if "a" not in rows[0]["body_quoted"] or "b" not in rows[0]["body_quoted"]:
         fail("combine-any: scopes not unioned across tasks: %r" % rows[0]["body_quoted"])
@@ -560,8 +560,8 @@ def _check_dedup_by_run_attempt():
     # 2 is the terminal "passed". One entry per (name, key, job)
     # survives, with the higher run_attempt's payload.
     out = dedup_by_run_attempt([
-        {"name": "format", "key": "format-gha", "job": "format-task", "run_attempt": "1", "status": "running"},
-        {"name": "format", "key": "format-gha", "job": "format-task", "run_attempt": "2", "status": "passed"},
+        {"kind": "format", "name": "format-gha", "job": "format-task", "run_attempt": "1", "status": "running"},
+        {"kind": "format", "name": "format-gha", "job": "format-task", "run_attempt": "2", "status": "passed"},
     ])
     if len(out) != 1:
         fail("dedup_by_run_attempt rerun: expected 1 entry, got %d: %r" % (len(out), out))
@@ -571,24 +571,24 @@ def _check_dedup_by_run_attempt():
     # Different `job` → NOT collapsed (matrix-style: same task surfaced
     # by two distinct yaml jobs is two legitimate rows).
     out = dedup_by_run_attempt([
-        {"name": "test", "key": "test-gha", "job": "cpu-test", "run_attempt": "1", "status": "passed"},
-        {"name": "test", "key": "test-gha", "job": "gpu-test", "run_attempt": "1", "status": "passed"},
+        {"kind": "test", "name": "test-gha", "job": "cpu-test", "run_attempt": "1", "status": "passed"},
+        {"kind": "test", "name": "test-gha", "job": "gpu-test", "run_attempt": "1", "status": "passed"},
     ])
     if len(out) != 2:
         fail("dedup_by_run_attempt matrix: expected 2 distinct rows, got %d: %r" % (len(out), out))
 
     # Numeric ordering, not lexicographic: "10" > "9".
     out = dedup_by_run_attempt([
-        {"name": "x", "key": "x", "job": "j", "run_attempt": "9", "status": "running"},
-        {"name": "x", "key": "x", "job": "j", "run_attempt": "10", "status": "passed"},
+        {"kind": "x", "name": "x", "job": "j", "run_attempt": "9", "status": "running"},
+        {"kind": "x", "name": "x", "job": "j", "run_attempt": "10", "status": "passed"},
     ])
     if out[0]["run_attempt"] != "10":
         fail("dedup_by_run_attempt numeric: expected '10' to win over '9', got %r" % out[0])
 
     # Missing / non-numeric run_attempt defaults to 1.
     out = dedup_by_run_attempt([
-        {"name": "y", "key": "y", "job": "j", "status": "running"},
-        {"name": "y", "key": "y", "job": "j", "run_attempt": "2", "status": "passed"},
+        {"kind": "y", "name": "y", "job": "j", "status": "running"},
+        {"kind": "y", "name": "y", "job": "j", "run_attempt": "2", "status": "passed"},
     ])
     if out[0].get("run_attempt") != "2":
         fail("dedup_by_run_attempt missing-attempt: expected attempt-2 to win, got %r" % out[0])
@@ -714,8 +714,8 @@ def _check_state_serialize_round_trip():
             {"run_id": "200", "workflow_name": "ci-workflows"},
         ],
         "entries": [
-            {"name": "build", "key": "build", "workflow_run_id": "100"},
-            {"name": "lint", "key": "lint", "workflow_run_id": "200"},
+            {"kind": "build", "name": "build", "workflow_run_id": "100"},
+            {"kind": "lint", "name": "lint", "workflow_run_id": "200"},
         ],
         "shown_snippets": [snippet_key("//pkg:a", "boom a"), snippet_key("//pkg:b", "boom b")],
         "shown_repros": ["test\x00aspect test //pkg:a\x00"],
@@ -749,8 +749,8 @@ def _snip(label, bucket = "test", text = "boom", truncated = False, kind = "", t
         "repros": repros or [],
     }
 
-def _entry_with_snippets(key, snippets):
-    return {"name": key, "key": key, "failure_snippets": snippets}
+def _entry_with_snippets(name, snippets):
+    return {"kind": name, "name": name, "failure_snippets": snippets}
 
 def _check_select_snippets(ctx):
     """_select_snippets: dedup-by-(label,content) across tasks, sticky,
@@ -776,7 +776,7 @@ def _check_select_snippets(ctx):
     _eq("select: identical failure deduped to one row", len(rows_dup), 1)
     _eq(
         "select: deduped row attributes all contributing tasks",
-        rows_dup[0]["task_keys"],
+        rows_dup[0]["task_names"],
         ["build-gha", "build-gha-debug", "test-gha"],
     )
     _eq("select: deduped → no overflow", overflow_dup["total"], 0)
@@ -993,8 +993,8 @@ def _check_by_task_overflow():
     of tasks holding hidden items (no per-task counts — they'd double-count a
     deduped item shared by N tasks). Shared by snippets and repro/fix commands."""
     dropped = [
-        {"command": "x", "task_keys": ["task-a", "task-b"]},
-        {"command": "y", "task_keys": ["task-b"]},
+        {"command": "x", "task_names": ["task-a", "task-b"]},
+        {"command": "y", "task_names": ["task-b"]},
     ]
     of = by_task_overflow(dropped)
     _eq("by_task_overflow: total counts distinct dropped items", of["total"], 2)
@@ -1039,7 +1039,7 @@ def _check_parse_state_missing_terminator():
 def _check_merge_state_first_writer():
     """First writer (existing_state=None) → state lists only our slot
     and our entries."""
-    my_entries = [{"name": "build", "key": "build", "workflow_run_id": "100"}]
+    my_entries = [{"kind": "build", "name": "build", "workflow_run_id": "100"}]
     new = merge_state(None, "abc", "100", "ci-gha", my_entries, {})
     _eq("merge — first writer head_sha", new["head_sha"], "abc")
     _eq("merge — first writer workflow_runs", new["workflow_runs"], [{"run_id": "100", "workflow_name": "ci-gha"}])
@@ -1055,13 +1055,13 @@ def _check_merge_state_two_workflows_with_fresh_refresh():
         "last_upsert_epoch_s": 1699999000,
         "workflow_runs": [{"run_id": "200", "workflow_name": "ci-workflows"}],
         "entries": [
-            {"name": "lint", "key": "lint", "workflow_run_id": "200", "status": "running"},
+            {"kind": "lint", "name": "lint", "workflow_run_id": "200", "status": "running"},
         ],
     }
     fresh_b_entries = [
-        {"name": "lint", "key": "lint", "workflow_run_id": "200", "status": "passed"},
+        {"kind": "lint", "name": "lint", "workflow_run_id": "200", "status": "passed"},
     ]
-    a_entries = [{"name": "build", "key": "build", "workflow_run_id": "100"}]
+    a_entries = [{"kind": "build", "name": "build", "workflow_run_id": "100"}]
     new = merge_state(existing, "abc", "100", "ci-gha", a_entries, {"200": fresh_b_entries})
     _eq("merge — two slots count", len(new["workflow_runs"]), 2)
     _eq(
@@ -1081,10 +1081,10 @@ def _check_merge_state_falls_back_to_snapshot_when_refresh_missing():
         "head_sha": "abc",
         "workflow_runs": [{"run_id": "200", "workflow_name": "ci-workflows"}],
         "entries": [
-            {"name": "lint", "key": "lint", "workflow_run_id": "200", "status": "passed"},
+            {"kind": "lint", "name": "lint", "workflow_run_id": "200", "status": "passed"},
         ],
     }
-    a_entries = [{"name": "build", "key": "build", "workflow_run_id": "100"}]
+    a_entries = [{"kind": "build", "name": "build", "workflow_run_id": "100"}]
     new = merge_state(existing, "abc", "100", "ci-gha", a_entries, {})
     _eq("merge — fallback entries count", len(new["entries"]), 2)
     by_name = {e["name"]: e for e in new["entries"]}
@@ -1103,16 +1103,16 @@ def _check_merge_state_per_task_union_with_snapshot():
         "head_sha": "abc",
         "workflow_runs": [{"run_id": "200", "workflow_name": "ci-b"}],
         "entries": [
-            {"name": "lint", "key": "lint", "workflow_run_id": "200", "status": "running"},
-            {"name": "test", "key": "test", "workflow_run_id": "200", "status": "running"},
-            {"name": "build", "key": "build", "workflow_run_id": "200", "status": "running"},
+            {"kind": "lint", "name": "lint", "workflow_run_id": "200", "status": "running"},
+            {"kind": "test", "name": "test", "workflow_run_id": "200", "status": "running"},
+            {"kind": "build", "name": "build", "workflow_run_id": "200", "status": "running"},
         ],
     }
 
     # Refresh returned only `lint` (with updated status). `test` and
     # `build` were briefly invisible in the listing.
     partial_refresh = [
-        {"name": "lint", "key": "lint", "workflow_run_id": "200", "status": "passed"},
+        {"kind": "lint", "name": "lint", "workflow_run_id": "200", "status": "passed"},
     ]
     new = merge_state(existing, "abc", "100", "ci-a", [], {"200": partial_refresh})
     by_name = {e["name"]: e for e in new["entries"]}
@@ -1129,7 +1129,7 @@ def _check_merge_state_empty_refresh_keeps_snapshot():
         "head_sha": "abc",
         "workflow_runs": [{"run_id": "200", "workflow_name": "ci-b"}],
         "entries": [
-            {"name": "lint", "key": "lint", "workflow_run_id": "200", "status": "passed"},
+            {"kind": "lint", "name": "lint", "workflow_run_id": "200", "status": "passed"},
         ],
     }
     new = merge_state(existing, "abc", "100", "ci-a", [], {"200": []})
@@ -1147,7 +1147,7 @@ def _check_merge_state_replaces_own_slot():
         ],
         "entries": [],
     }
-    my_entries = [{"name": "build", "key": "build", "workflow_run_id": "100"}]
+    my_entries = [{"kind": "build", "name": "build", "workflow_run_id": "100"}]
     new = merge_state(existing, "abc", "100", "ci-gha", my_entries, {})
     runs_by_rid = {r["run_id"]: r for r in new["workflow_runs"]}
     _eq("merge — own slot has current workflow_name", runs_by_rid["100"]["workflow_name"], "ci-gha")
@@ -1165,11 +1165,11 @@ def _check_merge_state_drops_orphan_snapshot_entries():
             {"run_id": "200", "workflow_name": "ci-b"},
         ],
         "entries": [
-            {"name": "ghost", "key": "ghost", "workflow_run_id": "999"},
-            {"name": "lint", "key": "lint", "workflow_run_id": "200"},
+            {"kind": "ghost", "name": "ghost", "workflow_run_id": "999"},
+            {"kind": "lint", "name": "lint", "workflow_run_id": "200"},
         ],
     }
-    my_entries = [{"name": "build", "key": "build", "workflow_run_id": "100"}]
+    my_entries = [{"kind": "build", "name": "build", "workflow_run_id": "100"}]
     new = merge_state(existing, "abc", "100", "ci-a", my_entries, {})
     names = sorted([e["name"] for e in new["entries"]])
     _eq("merge — orphan snapshot entry dropped", names, ["build", "lint"])
@@ -1201,13 +1201,13 @@ def _check_merge_state_entries_sorted():
     block is byte-stable across writers — even when each writer
     discovers its swarm in a different artifact-id order."""
     my_entries = [
-        {"name": "z", "key": "z", "job": "j", "workflow_run_id": "100", "run_attempt": "1"},
-        {"name": "a", "key": "a", "job": "j", "workflow_run_id": "100", "run_attempt": "1"},
+        {"kind": "z", "name": "z", "job": "j", "workflow_run_id": "100", "run_attempt": "1"},
+        {"kind": "a", "name": "a", "job": "j", "workflow_run_id": "100", "run_attempt": "1"},
     ]
     refreshed = {
         "200": [
-            {"name": "y", "key": "y", "job": "k", "workflow_run_id": "200", "run_attempt": "1"},
-            {"name": "b", "key": "b", "job": "k", "workflow_run_id": "200", "run_attempt": "1"},
+            {"kind": "y", "name": "y", "job": "k", "workflow_run_id": "200", "run_attempt": "1"},
+            {"kind": "b", "name": "b", "job": "k", "workflow_run_id": "200", "run_attempt": "1"},
         ],
     }
     existing = {
@@ -1216,8 +1216,8 @@ def _check_merge_state_entries_sorted():
         "entries": [],
     }
     new = merge_state(existing, "abc", "100", "ci-a", my_entries, refreshed)
-    keys = [e["key"] for e in new["entries"]]
-    _eq("merge — entries sorted by (run_id, job, key, ...)", keys, ["a", "z", "b", "y"])
+    names = [e["name"] for e in new["entries"]]
+    _eq("merge — entries sorted by (run_id, job, name, ...)", names, ["a", "z", "b", "y"])
 
 def _check_parse_state_validates_field_types():
     """Wrong-shape payload (valid base64 JSON but unexpected field types)
@@ -1249,7 +1249,7 @@ def _check_parse_state_filters_non_dict_rows():
             42,
         ],
         "entries": [
-            {"name": "build", "key": "build"},
+            {"kind": "build", "name": "build"},
             None,
             ["this list element should be dropped"],
         ],
@@ -1263,7 +1263,7 @@ def _check_parse_state_filters_non_dict_rows():
     _eq(
         "parse_state — entries filtered to dicts",
         parsed["entries"],
-        [{"name": "build", "key": "build"}],
+        [{"kind": "build", "name": "build"}],
     )
 
 def _check_merge_state_drops_stale_push():
@@ -1272,9 +1272,9 @@ def _check_merge_state_drops_stale_push():
     existing = {
         "head_sha": "old",
         "workflow_runs": [{"run_id": "200", "workflow_name": "ci-workflows"}],
-        "entries": [{"name": "lint", "key": "lint", "workflow_run_id": "200"}],
+        "entries": [{"kind": "lint", "name": "lint", "workflow_run_id": "200"}],
     }
-    my_entries = [{"name": "build", "key": "build", "workflow_run_id": "100"}]
+    my_entries = [{"kind": "build", "name": "build", "workflow_run_id": "100"}]
     new = merge_state(existing, "new", "100", "ci-gha", my_entries, {})
     _eq("merge — stale-push drops slots", new["workflow_runs"], [{"run_id": "100", "workflow_name": "ci-gha"}])
     _eq("merge — stale-push drops entries", new["entries"], my_entries)
@@ -1294,13 +1294,13 @@ def _check_merge_state_evicts_superseded_workflow_run():
             {"run_id": "500", "workflow_name": "ci-workflows"},
         ],
         "entries": [
-            {"name": "test", "key": "cpu", "job": "test (cpu)", "workflow_run_id": "100", "status": "passed"},
-            {"name": "lint", "key": "lint", "job": "lint", "workflow_run_id": "500", "status": "passed"},
+            {"kind": "test", "name": "cpu", "job": "test (cpu)", "workflow_run_id": "100", "status": "passed"},
+            {"kind": "lint", "name": "lint", "job": "lint", "workflow_run_id": "500", "status": "passed"},
         ],
     }
 
     # We are a newer run (run_id 999) of "ci-gha".
-    my_entries = [{"name": "test", "key": "cpu", "job": "test (cpu)", "workflow_run_id": "999", "status": "running"}]
+    my_entries = [{"kind": "test", "name": "cpu", "job": "test (cpu)", "workflow_run_id": "999", "status": "running"}]
     new = merge_state(existing, "abc", "999", "ci-gha", my_entries, {})
 
     rids = sorted([r["run_id"] for r in new["workflow_runs"]])
@@ -1308,7 +1308,7 @@ def _check_merge_state_evicts_superseded_workflow_run():
 
     # The stale run_id=100 snapshot entry must not survive — only our
     # live row + the distinct sibling workflow's row.
-    keyed = {(e["name"], e["key"], e.get("workflow_run_id", "")): e for e in new["entries"]}
+    keyed = {(e["kind"], e["name"], e.get("workflow_run_id", "")): e for e in new["entries"]}
     if ("test", "cpu", "100") in keyed:
         fail("merge — stale superseded entry should be dropped, got %r" % new["entries"])
     _eq("merge — our live row survives", keyed[("test", "cpu", "999")]["status"], "running")
@@ -1325,8 +1325,8 @@ def _check_merge_state_evicts_superseded_sibling_run():
             {"run_id": "700", "workflow_name": "ci-workflows"},
         ],
         "entries": [
-            {"name": "lint", "key": "lint", "job": "lint", "workflow_run_id": "300", "status": "running"},
-            {"name": "lint", "key": "lint", "job": "lint", "workflow_run_id": "700", "status": "passed"},
+            {"kind": "lint", "name": "lint", "job": "lint", "workflow_run_id": "300", "status": "running"},
+            {"kind": "lint", "name": "lint", "job": "lint", "workflow_run_id": "700", "status": "passed"},
         ],
     }
     new = merge_state(existing, "abc", "999", "ci-gha", [], {})
@@ -1347,12 +1347,12 @@ def _check_merge_state_losing_rerun_does_not_resurrect():
             {"run_id": "999", "workflow_name": "ci-gha"},
         ],
         "entries": [
-            {"name": "test", "key": "cpu", "job": "test (cpu)", "workflow_run_id": "999", "status": "running"},
+            {"kind": "test", "name": "cpu", "job": "test (cpu)", "workflow_run_id": "999", "status": "running"},
         ],
     }
 
     # We are the older run 100; our entries are stale.
-    my_entries = [{"name": "test", "key": "cpu", "job": "test (cpu)", "workflow_run_id": "100", "status": "passed"}]
+    my_entries = [{"kind": "test", "name": "cpu", "job": "test (cpu)", "workflow_run_id": "100", "status": "passed"}]
     new = merge_state(existing, "abc", "100", "ci-gha", my_entries, {})
 
     rids = [r["run_id"] for r in new["workflow_runs"]]
@@ -1382,8 +1382,8 @@ def _check_dedup_for_display_collapses_exact_duplicates():
     guarding against a snapshot that briefly carries two rows for one
     task within a single run_id."""
     out = dedup_for_display([
-        {"name": "test", "key": "cpu", "job": "test (cpu)", "workflow_run_id": "100", "run_attempt": "1", "status": "running"},
-        {"name": "test", "key": "cpu", "job": "test (cpu)", "workflow_run_id": "100", "run_attempt": "2", "status": "passed"},
+        {"kind": "test", "name": "cpu", "job": "test (cpu)", "workflow_run_id": "100", "run_attempt": "1", "status": "running"},
+        {"kind": "test", "name": "cpu", "job": "test (cpu)", "workflow_run_id": "100", "run_attempt": "2", "status": "passed"},
     ])
     if len(out) != 1:
         fail("dedup_for_display: expected 1 row, got %d: %r" % (len(out), out))
@@ -1394,8 +1394,8 @@ def _check_dedup_for_display_keeps_distinct_jobs():
     jobs / distinct workflows with different job names) and must not
     collapse."""
     out = dedup_for_display([
-        {"name": "test", "key": "t", "job": "test (cpu)", "workflow_run_id": "100"},
-        {"name": "test", "key": "t", "job": "test (gpu)", "workflow_run_id": "100"},
+        {"kind": "test", "name": "t", "job": "test (cpu)", "workflow_run_id": "100"},
+        {"kind": "test", "name": "t", "job": "test (gpu)", "workflow_run_id": "100"},
     ])
     _eq("dedup_for_display — distinct jobs kept", len(out), 2)
 
@@ -1405,8 +1405,8 @@ def _check_dedup_for_display_keeps_distinct_workflows():
     render — `workflow_run_id` is part of the display identity, so they
     are not collapsed into one row."""
     out = dedup_for_display([
-        {"name": "test", "key": "test", "job": "test", "workflow_run_id": "100", "status": "passed"},
-        {"name": "test", "key": "test", "job": "test", "workflow_run_id": "200", "status": "running"},
+        {"kind": "test", "name": "test", "job": "test", "workflow_run_id": "100", "status": "passed"},
+        {"kind": "test", "name": "test", "job": "test", "workflow_run_id": "200", "status": "running"},
     ])
     _eq("dedup_for_display — distinct workflows both kept", len(out), 2)
 
@@ -1421,15 +1421,15 @@ def _check_rerun_renders_each_task_once(ctx):
         "head_sha": "abc",
         "workflow_runs": [{"run_id": "100", "workflow_name": "ci-gha"}],
         "entries": [
-            {"name": "test", "key": "cpu-test", "job": "test (cpu-test)", "workflow_run_id": "100", "status": "passed"},
-            {"name": "lint", "key": "lint", "job": "lint", "workflow_run_id": "100", "status": "passed"},
+            {"kind": "test", "name": "cpu-test", "job": "test (cpu-test)", "workflow_run_id": "100", "status": "passed"},
+            {"kind": "lint", "name": "lint", "job": "lint", "workflow_run_id": "100", "status": "passed"},
         ],
     }
 
     # We are a newer run (999) of the same workflow with the same tasks.
     my_entries = [
-        {"name": "test", "key": "cpu-test", "job": "test (cpu-test)", "workflow_run_id": "999", "status": "passed"},
-        {"name": "lint", "key": "lint", "job": "lint", "workflow_run_id": "999", "status": "passed"},
+        {"kind": "test", "name": "cpu-test", "job": "test (cpu-test)", "workflow_run_id": "999", "status": "passed"},
+        {"kind": "lint", "name": "lint", "job": "lint", "workflow_run_id": "999", "status": "passed"},
     ]
     new = merge_state(existing, "abc", "999", "ci-gha", my_entries, {})
 
@@ -1445,7 +1445,7 @@ def _check_rerun_renders_each_task_once(ctx):
         sections,
         state = new,
     )
-    _eq("rerun render — 'test (cpu-test)' appears once", body.count("test (cpu-test)"), 1)
+    _eq("rerun render — 'cpu-test [test]' appears once", body.count("cpu-test [test]"), 1)
     _eq("rerun render — 'lint' row appears once", body.count("✅ lint"), 1)
     _eq("rerun render — two task rows total", body.count("<br>💬"), 2)
 
@@ -1458,8 +1458,8 @@ def _check_render_body_emits_state_block(ctx):
         "workflow_runs": [{"run_id": "100", "workflow_name": "ci-gha"}],
         "entries": [
             {
+                "kind": "build",
                 "name": "build",
-                "key": "build",
                 "job": "ci",
                 "status": "running",
                 "workflow_run_id": "100",
@@ -1492,10 +1492,9 @@ def _check_render_body_no_state_block_when_state_none(ctx):
     that don't need cross-workflow merge) suppresses the state block."""
     entries = [
         {
-            "name": "build",
-            "key": "build",
-            "job": "ci",
             "kind": "build",
+            "name": "build",
+            "job": "ci",
             "status": "running",
             "elapsed_ms": 1000,
         },
@@ -1512,6 +1511,28 @@ def _check_render_body_no_state_block_when_state_none(ctx):
         sections,
     )
     _eq("render_body — no state block when state is None", parse_state(body), None)
+
+def _check_row_renders_name_and_kind(ctx):
+    """Per-task rows lead with the invocation name; the kind is bracketed
+    only when it differs from the name (`<name> [<kind>]`). When name == kind
+    (the common single-invocation case) the bracket is omitted."""
+    entries = [
+        {"kind": "delivery", "name": "delivery-gha-debug", "job": "deliver", "status": "passed", "elapsed_ms": 1000},
+        {"kind": "lint", "name": "lint", "job": "lint", "status": "passed", "elapsed_ms": 1000},
+    ]
+    prepared = prepare_for_render(entries)
+    body = render_body(
+        ctx,
+        MARKER_FMT % 42,
+        prepared,
+        "2026-01-01 00:00:00 UTC",
+        DEFAULT_BODY_TEMPLATE,
+        DEFAULT_STATUS_BADGES,
+        bucket_entries(prepared),
+    )
+    _eq("row — name != kind renders '<name> [<kind>]'", "delivery-gha-debug [delivery]" in body, True)
+    _eq("row — name == kind omits the bracket", "lint [lint]" in body, False)
+    _eq("row — name == kind still renders the name", "✅ lint ·" in body, True)
 
 def _check_repro_dedup_consecutive_headings(ctx):
     """Two fix commands from the same task collapse to one heading.
@@ -1530,10 +1551,9 @@ def _check_repro_dedup_consecutive_headings(ctx):
     # boundary; do the same here so we exercise the production code path.
     entries = [
         {
-            "name": "buildifier",
-            "key": "buildifier-task",
+            "kind": "buildifier",
+            "name": "buildifier-task",
             "job": "ci",
-            "kind": "format",
             "status": "failed",
             "elapsed_ms": 1000,
             "repro_commands": rehydrate_commands([
@@ -1609,6 +1629,7 @@ def _test_impl(ctx):
     _check_merge_state_entries_sorted()
     _check_render_body_emits_state_block(ctx)
     _check_render_body_no_state_block_when_state_none(ctx)
+    _check_row_renders_name_and_kind(ctx)
     _check_select_snippets(ctx)
     _check_select_sticky()
     _check_by_task_overflow()
@@ -2351,7 +2372,7 @@ def _delivery_partial(data, total):
     return data
 
 pr_comment_snapshot_tests = task(
-    name = "test-pr-comment-snapshots",
+    kind = "test-pr-comment-snapshots",
     group = ["dev"],
     implementation = _test_impl,
     args = {},

@@ -166,7 +166,7 @@ def _test_impl(ctx):
     return 0
 
 wrapper_tests = task(
-    name = "test-wrapper",
+    kind = "test-wrapper",
     group = ["dev"],
     implementation = _test_impl,
     args = {},

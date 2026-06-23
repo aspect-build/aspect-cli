@@ -72,7 +72,7 @@ Bazel is the closed set. The wrapper classifies each flag against the embedded B
 The rules:
 
 1. A recognized Bazel flag is wrapped: `--keep_going` → `--bazel-flag=--keep_going`; `--config=ci` → `--bazel-flag=--config=ci`; `--config ci` → `--bazel-flag=--config=ci` (next token consumed and glued with `=`); `-c opt` → `--bazel-flag=-c=opt`.
-2. Anything else passes through unchanged: aspect globals (`--task-key`, `--timing`), feature flags (`--artifact-upload:enabled`), and unrecognized flags — including a typo or a brand-new Bazel flag not yet in the lists, which simply goes to aspect until you add it.
+2. Anything else passes through unchanged: aspect globals (`--task:name`, `--task:timing-summary`), feature flags (`--artifact-upload:enabled`), and unrecognized flags — including a typo or a brand-new Bazel flag not yet in the lists, which simply goes to aspect until you add it.
 3. After `--`, everything passes through verbatim (positional targets, `run` arguments, etc.).
 4. Flags **before the verb** get the same classification, except Bazel flags wrap as `--bazel-startup-flag=…` (which aspect accepts as a post-verb flag, so they're moved after the verb). Aspect global flags stay in front of the verb.
 

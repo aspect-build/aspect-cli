@@ -127,7 +127,7 @@ def _circleci_test_results_impl(ctx: FeatureContext) -> None:
         staging = ctx.std.fs.mkdtemp(prefix = "aspect-circleci-tr-", parent = tmpdir)
         sources = _staged_archive_sources(ctx, entries, staging, cached_as_skipped)
 
-        archive = tmpdir + "/" + ctx.task.key + "-circleci-test-results.tar.gz"
+        archive = tmpdir + "/" + ctx.task.name + "-circleci-test-results.tar.gz"
         if not tar_create(ctx, archive, _build_mtree(sources)):
             warn(ctx.std, "CircleCI test results: failed to build the JUnit archive; skipping upload.")
             ctx.std.fs.remove_dir_all(staging)

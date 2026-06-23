@@ -643,7 +643,7 @@ def _test_impl(ctx):
     return 0
 
 runnable_tests = task(
-    name = "test-runnable",
+    kind = "test-runnable",
     group = ["dev"],
     implementation = _test_impl,
     args = {},

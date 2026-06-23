@@ -89,7 +89,7 @@ def _resolve_artifact_url(ctx, name):
     # `--format "%i\n"` emits one artifact UUID per line. `--build`
     # defaults to BUILDKITE_BUILD_ID so the search is already scoped
     # to this build, and our artifact paths embed
-    # `task_name/task_key/<filename>` so the query is unique per upload.
+    # `task_kind/task_name/<filename>` so the query is unique per upload.
     artifact_id = ""
     for line in out.stdout.split("\n"):
         line = line.strip()

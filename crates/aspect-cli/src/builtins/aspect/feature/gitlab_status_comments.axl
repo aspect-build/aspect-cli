@@ -385,10 +385,9 @@ def _gitlab_status_comments(ctx: FeatureContext):
             _state["_current_phase"] = update.progress.body
 
         base = dict(subset)
+        base["kind"] = ctx.task.kind
         base["name"] = ctx.task.name
-        base["key"] = ctx.task.key
         base["status"] = status
-        base["kind"] = update.kind or ""
         base["ci_run_url"] = ci_run_url
         _state["_own_base"] = base
 

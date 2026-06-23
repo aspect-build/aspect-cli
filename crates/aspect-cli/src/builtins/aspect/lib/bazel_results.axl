@@ -1115,7 +1115,7 @@ def failed_labels_by_subcommand(data):
 
     return {"build": build, "test": test}
 
-def compute_reproducer_command(data, task_name, max_chars = MAX_REPRO_CHARS):
+def compute_reproducer_command(data, task_kind, max_chars = MAX_REPRO_CHARS):
     """Legacy helper preserved for test fixtures. New code should append
     `{"command", "description"}` entries to `data["repro_commands"]`
     directly via `lib/repro_commands.axl::build_aspect_command`.
@@ -1123,14 +1123,14 @@ def compute_reproducer_command(data, task_name, max_chars = MAX_REPRO_CHARS):
     Returns `(command, total)` from the deduped failure-label set.
     """
     labels = failed_labels(data)
-    cmd, _ = _repro_with_prefix("aspect " + task_name, labels, max_chars)
+    cmd, _ = _repro_with_prefix("aspect " + task_kind, labels, max_chars)
     return (cmd, len(labels))
 
 # GitHub check-run title cap. Subject within is capped tighter at SUBJECT_TITLE_MAX.
 _TITLE_MAX_LEN = 160
 
-def summary_title(data, status, target_pattern = "", task_name = ""):
-    """Build the check run title in the form '<status_emoji> <task_name> <subject> · <state>'.
+def summary_title(data, status, target_pattern = "", task_kind = ""):
+    """Build the check run title in the form '<status_emoji> <task_kind> <subject> · <state>'.
 
     Mirrors Aspect Web UI conventions — see _BUCKET_INVOCATION_LABELS
     for the state vocabulary and compute_invocation_state for priority rules.
@@ -1145,8 +1145,8 @@ def summary_title(data, status, target_pattern = "", task_name = ""):
         data:           dict from init_data()
         status:         "running" | "failing" | "passed" | "failed" | "warning" | "aborted"
         target_pattern: subject (e.g. "//..." for a build/test task)
-        task_name:      raw task identifier (`ctx.task.name`) — the
-                        lowercase string declared on `task(name=...)`.
+        task_kind:      the task kind (`ctx.task.kind`) — the lowercase
+                        string declared on `task(kind=...)`.
 
     Returns:
         str — max 160 chars (GitHub check title limit)
@@ -1157,8 +1157,8 @@ def summary_title(data, status, target_pattern = "", task_name = ""):
 
     # `{icon} {task} {subject}` is the "what"; state clause follows after `·`.
     front_parts = []
-    if task_name:
-        front_parts.append(icon + " " + task_name)
+    if task_kind:
+        front_parts.append(icon + " " + task_kind)
     else:
         front_parts.append(icon)
     if subject:
@@ -3158,17 +3158,17 @@ def build_summary_data(ctx, data, status, render_ctx, links, metadata_keys, run_
     if status in ("running", "failing", "failed"):
         last_update = render_ctx.get("progress", "") or ""
     elif status in ("passed", "warning"):
-        name = render_ctx.get("task_name", "") or "task"
+        kind = render_ctx.get("task_kind", "") or "task"
 
-        # "<name> task complete" not "<name> complete": "test complete" reads as
+        # "<kind> task complete" not "<kind> complete": "test complete" reads as
         # "the test passed", but "test task complete" means the task finished.
         # `warning` joins `passed` (terminal, non-fatal) so the row isn't blank.
-        last_update = name + " task complete"
+        last_update = kind + " task complete"
         if complete_suffix:
             last_update = last_update + " · " + complete_suffix
     elif status == "aborted":
-        name = render_ctx.get("task_name", "") or "task"
-        last_update = name + " task aborted"
+        kind = render_ctx.get("task_kind", "") or "task"
+        last_update = kind + " task aborted"
     else:
         last_update = ""
 
@@ -4365,13 +4365,13 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
         trace.log(details_text[:5000])
 
     target_pattern = render_ctx.get("subject", "") if render_ctx else ""
-    task_name = render_ctx.get("task_name", "") if render_ctx else ""
+    task_kind = render_ctx.get("task_kind", "") if render_ctx else ""
     return {
         "title": summary_title(
             data,
             status,
             target_pattern = target_pattern,
-            task_name = task_name,
+            task_kind = task_kind,
         ),
         "summary": summary_text,
         "text": details_text,

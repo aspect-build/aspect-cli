@@ -92,7 +92,7 @@ setup_phase(ctx, lifecycle, subject, …)          # FIRST thing in every _impl
        └─ BuildkiteAnnotations inits → posts the first "info" annotation
   └─ hc_trait.health_check                        # Workflows env table / server health check
 bazel_trait.build_start
-  └─ Workflows prints `--- :bazel: Running bazel <task> [<task-key>] <targets>`
+  └─ Workflows prints `--- :bazel: Running bazel <task> [<task-name>] <targets>`
 events = bazel.build_events.iterator()           # create handle BEFORE the spawn
 ctx.bazel.build(..., build_events = [events])    # runtime subscribes pre-spawn
 data["sink_invocation_id"] = build.sink_invocation_id

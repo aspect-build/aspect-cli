@@ -357,14 +357,14 @@ def _make_results_annotations_changed_regions():
 
 # ─── Test harness ─────────────────────────────────────────────────────────────
 
-def _render_ctx(subject = "//...", task_name = "lint"):
+def _render_ctx(subject = "//...", task_kind = "lint"):
     return {
         "triggered_by": "Greg Magolan (workflow_dispatch)",
         "subject": subject,
         "started_ms": 1744630000000,
         "ended_ms": 1744630004500,
         "progress": "",
-        "task_name": task_name,
+        "task_kind": task_kind,
     }
 
 def _links(with_artifact = False, ci = "github"):
@@ -687,7 +687,7 @@ def _check_fix_renders_before_reproduce(ctx):
         fail("Fix block must render before Reproduce (fix@%d, repro@%d)" % (fix_at, repro_at))
 
 lint_template_snapshot_tests = task(
-    name = "test-lint-template-snapshots",
+    kind = "test-lint-template-snapshots",
     group = ["dev"],
     implementation = _test_impl,
     args = {},
@@ -762,7 +762,7 @@ def _test_lint_annotation_plan(ctx):
     return 0
 
 lint_annotation_plan_tests = task(
-    name = "test-lint-annotation-plan",
+    kind = "test-lint-annotation-plan",
     group = ["dev"],
     implementation = _test_lint_annotation_plan,
     args = {},
@@ -836,7 +836,7 @@ def _test_linter_rows(ctx):
     return 0
 
 linter_rows_tests = task(
-    name = "test-lint-linter-rows",
+    kind = "test-lint-linter-rows",
     group = ["dev"],
     implementation = _test_linter_rows,
     args = {},
@@ -892,7 +892,7 @@ def _test_detect_lint_tool(ctx):
     return 0
 
 detect_lint_tool_tests = task(
-    name = "test-lint-detect-tool",
+    kind = "test-lint-detect-tool",
     group = ["dev"],
     implementation = _test_detect_lint_tool,
     args = {},

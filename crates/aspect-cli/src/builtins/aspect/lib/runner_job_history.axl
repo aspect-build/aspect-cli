@@ -5,18 +5,18 @@ historical Rosetta behavior.
 
 File format (line-per-task, opaque to the consumer):
 
-    [<human-readable date>] <task-URL> <task-path> <task-key>\\n
+    [<human-readable date>] <task-URL> <task-path> <task-name>\\n
 
 Vigor reads the file, counts non-empty lines, and prints the latest 10
 verbatim. The date is rendered for humans (no parsing on the read
 side); we still match Rosetta's `new Date().toString()` shape closely
 so a single status check can mix Rosetta-era and AXL-era entries
 without visual jank. The trailing `<task-path>` (colon-separated
-group + name, e.g. `dev:test-runner-job-history`) and `<task-key>`
-fields are AXL-era additions — Rosetta wrote only `[<date>] <URL>`,
-and its reader regex strips the bracket prefix and treats the rest as
-the dedup key, so the extra trailing fields are forwards-compatible
-on both sides.
+group + kind, e.g. `dev:test-runner-job-history`) and `<task-name>`
+(the per-invocation name) fields are AXL-era additions — Rosetta wrote
+only `[<date>] <URL>`, and its reader regex strips the bracket prefix
+and treats the rest as the dedup key, so the extra trailing fields are
+forwards-compatible on both sides.
 
 Plumbing:
 
@@ -34,7 +34,7 @@ whether or not the runner history file write succeeds.
 
 Dedup: skip the append when the post-`] ` portion already appears as
 a line tail in the file. The dedup key is the full
-`<URL> <task-path> <task-key>` triple, so the same (job, task, key)
+`<URL> <task-path> <task-name>` triple, so the same (job, kind, name)
 tuple appearing across multiple aspect-cli invocations on a warm
 runner won't bloat the file. Different tasks on the same job land as
 distinct rows — an improvement over Rosetta's URL-only dedup, which
@@ -50,14 +50,14 @@ load("./ci.axl", "resolve_build_url")
 _HISTORY_PATH_ENV = "ASPECT_WORKFLOWS_RUNNER_JOB_HISTORY_FILE"
 
 def _task_path(ctx):
-    """Colon-separated invocation path: `<group>:<name>`, or just `<name>`
-    when the task has no group. Mirrors the `aspect <group> <name>` CLI
+    """Colon-separated invocation path: `<group>:<kind>`, or just `<kind>`
+    when the task has no group. Mirrors the `aspect <group> <kind>` CLI
     shape (`aspect build` → `build`, `aspect dev test-foo` → `dev:test-foo`).
     """
     groups = ctx.task.group
     if not groups:
-        return ctx.task.name
-    return ":".join(groups + [ctx.task.name])
+        return ctx.task.kind
+    return ":".join(groups + [ctx.task.kind])
 
 def _format_date(ctx):
     """Human-readable timestamp for the `[<date>]` prefix.
@@ -135,7 +135,7 @@ def append_runner_job_history(ctx):
     if not task_url:
         return False
 
-    dedup_key = "%s %s %s" % (task_url, _task_path(ctx), ctx.task.key)
+    dedup_key = "%s %s %s" % (task_url, _task_path(ctx), ctx.task.name)
     if dedup_key in _existing_dedup_keys(ctx, path):
         return False
 

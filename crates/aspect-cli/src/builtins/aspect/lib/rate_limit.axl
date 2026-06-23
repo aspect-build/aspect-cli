@@ -184,7 +184,7 @@ def _new_state():
 def _path(ctx):
     # `<job-tmpdir>/rate_limit/<pid>.json`. Each task is its own process, so
     # the pid is a per-task id available from any ctx flavor (unlike
-    # `ctx.task.key`). Swarm aggregation flows through
+    # `ctx.task.name`). Swarm aggregation flows through
     # `export_observations` / `ingest_sibling_observations`, not this file.
     base = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_JOB_TMPDIR") or ctx.std.env.temp_dir()
     return base + "/rate_limit/" + str(ctx.std.process.id()) + ".json"

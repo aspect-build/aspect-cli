@@ -455,14 +455,14 @@ def _make_results_large():
 
 # Shared render context and links
 
-def _render_ctx(subject = "//...", task_name = "test", progress = ""):
+def _render_ctx(subject = "//...", task_kind = "test", progress = ""):
     return {
         "triggered_by": "ci-bot (workflow_dispatch)",
         "subject": subject,
         "started_ms": 1744630000000,
         "ended_ms": 1744630002200,
         "progress": progress,
-        "task_name": task_name,
+        "task_kind": task_kind,
     }
 
 def _links(with_artifact = False, ci = "github"):
@@ -629,7 +629,7 @@ def _test_impl(ctx):
     return 0
 
 template_snapshot_tests = task(
-    name = "test-template-snapshots",
+    kind = "test-template-snapshots",
     group = ["dev"],
     implementation = _test_impl,
     args = {},
@@ -1212,7 +1212,7 @@ def _unit_test_impl(ctx):
     return 0
 
 bazel_results_unit_tests = task(
-    name = "test-bazel-results",
+    kind = "test-bazel-results",
     group = ["dev"],
     implementation = _unit_test_impl,
     args = {},

@@ -1168,7 +1168,7 @@ def _test_impl(ctx):
     return 0
 
 rate_limit_tests = task(
-    name = "test-rate-limit",
+    kind = "test-rate-limit",
     group = ["dev"],
     implementation = _test_impl,
     args = {},

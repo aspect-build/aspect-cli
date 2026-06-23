@@ -184,8 +184,13 @@ impl TaskPhase {
 
 /// Per-invocation task metadata exposed to AXL as `ctx.task`.
 ///
-/// In addition to identity fields (name, group, key, id), `TaskInfo`
-/// owns the task's timing state and a phase log. AXL marks phase
+/// In addition to identity fields (kind, friendly_kind, group, name,
+/// friendly_name, id), `TaskInfo` owns the task's timing state and a phase
+/// log. The `kind` is the command being run (`build`, `test`, …) and
+/// `friendly_kind` its human label (from `task(friendly_kind=...)`); the
+/// `name` is the unique identity of *this* invocation (set via
+/// `--task:name`, else auto-named) and `friendly_name` its human label
+/// (from `--task:friendly-name`). AXL marks phase
 /// boundaries via `ctx.task.phase(name, description=, emoji=,
 /// display_name=)` (or via the higher-level `task_update(...,
 /// phase=Phase(...))` wrapper in `lib/lifecycle.axl`); the runtime
@@ -197,9 +202,11 @@ impl TaskPhase {
 #[derive(Debug, ProvidesStaticType, Display, NoSerialize, Allocative)]
 #[display("<TaskInfo>")]
 pub struct TaskInfo {
-    pub name: String,
+    pub kind: String,
+    pub friendly_kind: String,
     pub group: Vec<String>,
-    pub task_key: String,
+    pub name: String,
+    pub friendly_name: String,
     pub task_id: String,
 
     #[allocative(skip)]
@@ -214,11 +221,20 @@ impl TaskInfo {
     /// Construct a fresh TaskInfo, stamping `started_at` to now. The
     /// `started_at` field is the authoritative bookend for total task
     /// wall time and the "init" phase synthesis on first `phase()` call.
-    pub fn new(name: String, group: Vec<String>, task_key: String, task_id: String) -> Self {
+    pub fn new(
+        kind: String,
+        friendly_kind: String,
+        group: Vec<String>,
+        name: String,
+        friendly_name: String,
+        task_id: String,
+    ) -> Self {
         Self {
-            name,
+            kind,
+            friendly_kind,
             group,
-            task_key,
+            name,
+            friendly_name,
             task_id,
             started_at: Instant::now(),
             phases: RefCell::new(Vec::new()),
@@ -273,13 +289,46 @@ impl<'v> StarlarkValue<'v> for TaskInfo {
 
 #[starlark_module]
 fn task_info_methods(registry: &mut MethodsBuilder) {
-    /// The name of the task.
+    /// The kind of task — the command being run (e.g. `build`, `test`, `lint`).
+    /// Derived from the snake_case export variable (or the `task(kind=...)`
+    /// kwarg). Use `name` for the unique identity of this particular invocation.
+    #[starlark(attribute)]
+    fn kind<'v>(this: Value<'v>) -> anyhow::Result<String> {
+        let info = this
+            .downcast_ref::<TaskInfo>()
+            .ok_or_else(|| anyhow::anyhow!("kind: receiver is not a TaskInfo"))?;
+        Ok(info.kind.clone())
+    }
+
+    /// The human-readable display label for the task kind. Set via
+    /// `task(friendly_kind=...)`; defaults to a Title-Cased form of `kind`.
+    #[starlark(attribute)]
+    fn friendly_kind<'v>(this: Value<'v>) -> anyhow::Result<String> {
+        let info = this
+            .downcast_ref::<TaskInfo>()
+            .ok_or_else(|| anyhow::anyhow!("friendly_kind: receiver is not a TaskInfo"))?;
+        Ok(info.friendly_kind.clone())
+    }
+
+    /// A short name uniquely identifying this task invocation. Set via
+    /// `--task:name` on the CLI; defaults to `<kind>-<suffix>` so repeated
+    /// invocations of the same kind in one pipeline stay distinct.
     #[starlark(attribute)]
     fn name<'v>(this: Value<'v>) -> anyhow::Result<String> {
         let info = this
             .downcast_ref::<TaskInfo>()
             .ok_or_else(|| anyhow::anyhow!("name: receiver is not a TaskInfo"))?;
         Ok(info.name.clone())
+    }
+
+    /// The human-readable label for this invocation. Set via
+    /// `--task:friendly-name`; defaults to `name` verbatim.
+    #[starlark(attribute)]
+    fn friendly_name<'v>(this: Value<'v>) -> anyhow::Result<String> {
+        let info = this
+            .downcast_ref::<TaskInfo>()
+            .ok_or_else(|| anyhow::anyhow!("friendly_name: receiver is not a TaskInfo"))?;
+        Ok(info.friendly_name.clone())
     }
 
     /// The group(s) this task belongs to.
@@ -291,18 +340,8 @@ fn task_info_methods(registry: &mut MethodsBuilder) {
         Ok(info.group.clone())
     }
 
-    /// A short human-readable key identifying this task invocation.
-    /// Set via --task-key on the CLI, or auto-generated as a friendly name (e.g. "fluffy-parakeet").
-    #[starlark(attribute)]
-    fn key<'v>(this: Value<'v>) -> anyhow::Result<String> {
-        let info = this
-            .downcast_ref::<TaskInfo>()
-            .ok_or_else(|| anyhow::anyhow!("key: receiver is not a TaskInfo"))?;
-        Ok(info.task_key.clone())
-    }
-
     /// A globally unique UUID v4 for this task invocation.
-    /// Always auto-generated; use key for a short human-readable discriminator.
+    /// Always auto-generated; use name for a short human-readable discriminator.
     #[starlark(attribute)]
     fn id<'v>(this: Value<'v>) -> anyhow::Result<String> {
         let info = this

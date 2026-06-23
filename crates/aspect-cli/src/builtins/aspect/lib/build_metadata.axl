@@ -479,19 +479,9 @@ def version_gte(a, b):
     """Semver-ish '>=' comparison. Handles "5.18.0" >= "5.18.0"."""
     return version_tuple(a) >= version_tuple(b)
 
-def task_display_name(task_name):
-    """Title-Case a raw task name ("my-task"/"my_task" → "My Task"). Used for
-    ASPECT_TASK_DISPLAY_NAME (Web UI task-list). Check-run / BK titles use the
-    raw lowercase name, so this needn't match those surfaces."""
-    if not task_name:
-        return task_name
-    if "/" in task_name:
-        task_name = task_name.rsplit("/", 1)[-1]
-    words = [w.capitalize() for w in task_name.replace("_", "-").split("-") if w]
-    return " ".join(words) if words else task_name
-
-# Runner version at which the Web UI adopts the split DISPLAY_NAME/NAME/KEY/ID
-# schema. Below it we emit the legacy two-field form (NAME=display, ID=key).
+# Runner version at which the Web UI adopts the split
+# KIND/FRIENDLY_KIND/NAME/FRIENDLY_NAME/ID schema. Below it we emit the
+# legacy two-field form (NAME=friendly_kind, ID=UUID).
 _TASK_METADATA_NEW_SCHEMA_MIN_VERSION = "5.18.0"
 
 def get_task_metadata_flags(ctx):
@@ -499,39 +489,49 @@ def get_task_metadata_flags(ctx):
 
     Two schemas by detected runner version:
       pre-5.18 / off-runner (legacy Web UI):
-        ASPECT_TASK_NAME = <display>, ASPECT_TASK_ID = <key>
+        ASPECT_TASK_NAME = <friendly_kind>, ASPECT_TASK_ID = <UUID>
       5.18.0+ (split schema):
-        ASPECT_TASK_DISPLAY_NAME = <display>, ASPECT_TASK_NAME = <raw>,
-        ASPECT_TASK_KEY = <key>, ASPECT_TASK_ID = <UUID>
+        ASPECT_TASK_KIND = <kind>, ASPECT_TASK_FRIENDLY_KIND = <friendly_kind>,
+        ASPECT_TASK_NAME = <name>, ASPECT_TASK_FRIENDLY_NAME = <friendly_name>,
+        ASPECT_TASK_ID = <UUID>
+
+    `ASPECT_TASK_KIND`/`ASPECT_TASK_FRIENDLY_KIND` describe the task kind (the
+    command and its friendly label); `ASPECT_TASK_NAME`/`ASPECT_TASK_FRIENDLY_NAME`
+    describe this particular invocation (`--task:name` / `--task:friendly-name`,
+    explicit or generated). The legacy `ASPECT_TASK_KEY` field is no longer
+    emitted.
 
     Off a Workflows runner (ASPECT_WORKFLOWS_RUNNER_VERSION unset) → legacy form
     so check runs against non-Aspect backends stay readable.
     """
     task = ctx.task
+    kind = task.kind or ""
+    friendly_kind = task.friendly_kind or ""
     name = task.name or ""
-    key = task.key or ""
+    friendly_name = task.friendly_name or ""
     uuid = task.id or ""
-    display_name = task_display_name(name)
 
     runner_version = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_VERSION") or ""
     new_schema = bool(runner_version) and version_gte(runner_version, _TASK_METADATA_NEW_SCHEMA_MIN_VERSION)
 
     flags = []
     if new_schema:
-        if display_name:
-            flags.append("--build_metadata=ASPECT_TASK_DISPLAY_NAME=" + display_name)
+        if kind:
+            flags.append("--build_metadata=ASPECT_TASK_KIND=" + kind)
+        if friendly_kind:
+            flags.append("--build_metadata=ASPECT_TASK_FRIENDLY_KIND=" + friendly_kind)
         if name:
             flags.append("--build_metadata=ASPECT_TASK_NAME=" + name)
-        if key:
-            flags.append("--build_metadata=ASPECT_TASK_KEY=" + key)
+        if friendly_name:
+            flags.append("--build_metadata=ASPECT_TASK_FRIENDLY_NAME=" + friendly_name)
         if uuid:
             flags.append("--build_metadata=ASPECT_TASK_ID=" + uuid)
     else:
-        # Legacy: NAME = display name, ID = task key.
-        if display_name:
-            flags.append("--build_metadata=ASPECT_TASK_NAME=" + display_name)
-        if key:
-            flags.append("--build_metadata=ASPECT_TASK_ID=" + key)
+        # Legacy: NAME = friendly label of the kind, ID = UUID.
+        if friendly_kind:
+            flags.append("--build_metadata=ASPECT_TASK_NAME=" + friendly_kind)
+        if uuid:
+            flags.append("--build_metadata=ASPECT_TASK_ID=" + uuid)
     return flags
 
 # Public entry point

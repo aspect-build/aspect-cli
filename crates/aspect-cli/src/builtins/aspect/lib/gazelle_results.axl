@@ -152,7 +152,7 @@ def dedupe_subtrees(dirs):
 
 # ─── Title ────────────────────────────────────────────────────────────────────
 
-def gazelle_summary_title(data, status, target_pattern = "", task_name = ""):
+def gazelle_summary_title(data, status, target_pattern = "", task_kind = ""):
     """Compute the check-run title.
 
     "❌ gazelle //tools/gazelle:gazelle · 5 BUILD files out of date"
@@ -161,7 +161,7 @@ def gazelle_summary_title(data, status, target_pattern = "", task_name = ""):
     "❌ gazelle //tools/gazelle:gazelle · Apply error"
     "🔄 gazelle //tools/gazelle:gazelle · Running..."
 
-    `task_name` comes from the producer's `task(name=…)`. The leading
+    `task_kind` comes from the producer's `task(kind=…)`. The leading
     emoji is the status verdict via `emoji_for_status`. Defaults to
     "gazelle" when no name is provided.
 
@@ -170,7 +170,7 @@ def gazelle_summary_title(data, status, target_pattern = "", task_name = ""):
     their target in the title and lets multiple gazelle tasks in one
     build (e.g. prebuilt + from-source) render distinct titles.
     """
-    display = emoji_for_status(status) + " " + (task_name or "gazelle")
+    display = emoji_for_status(status) + " " + (task_kind or "gazelle")
     target = target_pattern or data["gazelle"].get("gazelle_target", "") or ""
     base = display + ((" " + target) if target else "")
 
@@ -433,14 +433,14 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
             details_data["has_overflow"] = missing > 0
             details_text = ctx.template.jinja2(details_tmpl, data = details_data)
 
-    task_name = render_ctx.get("task_name", "") if render_ctx else ""
+    task_kind = render_ctx.get("task_kind", "") if render_ctx else ""
     target_pattern = render_ctx.get("subject", "") if render_ctx else ""
     return {
         "title": gazelle_summary_title(
             data,
             status,
             target_pattern = target_pattern,
-            task_name = task_name,
+            task_kind = task_kind,
         ),
         "summary": summary_text,
         "text": details_text,

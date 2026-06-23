@@ -319,7 +319,7 @@ def _test_impl(ctx):
     return 0
 
 circleci_tests = task(
-    name = "test-circleci",
+    kind = "test-circleci",
     group = ["dev"],
     implementation = _test_impl,
     args = {},

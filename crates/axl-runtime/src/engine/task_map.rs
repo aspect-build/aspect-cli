@@ -36,11 +36,11 @@ pub fn task_key(group: &[String], name: &str) -> String {
 
 fn task_key_of(value: Value<'_>) -> Option<String> {
     if let Some(t) = value.downcast_ref::<Task>() {
-        Some(task_key(t.group(), &t.name()))
+        Some(task_key(t.group(), &t.kind()))
     } else {
         value
             .downcast_ref::<FrozenTask>()
-            .map(|t| task_key(&t.group, &t.name))
+            .map(|t| task_key(&t.group, &t.kind))
     }
 }
 

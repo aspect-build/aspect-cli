@@ -122,8 +122,8 @@ def _run_probe(ctx: TaskContext, patterns: list, rc, announce_version: bool, ann
     or `None` if Bazel failed unexpectedly (no gRPC log — its captured stderr is
     surfaced first). Bazel's own stdout/stderr are hidden: the expected
     require-cached denials are noise, the signal is the log."""
-    log_path = "/tmp/aspect-cache-diff-grpc-{}.bin".format(ctx.task.key)
-    err_path = "/tmp/aspect-cache-diff-probe-{}.log".format(ctx.task.key)
+    log_path = "/tmp/aspect-cache-diff-grpc-{}.bin".format(ctx.task.name)
+    err_path = "/tmp/aspect-cache-diff-probe-{}.log".format(ctx.task.name)
 
     dummy = None
     flags = [
@@ -198,7 +198,7 @@ def _build_missing_non_test(ctx: TaskContext, patterns: list, rc, announce_versi
     """precise pre-pass: execute + upload the missing non-test actions on the
     default (incremental) output base. Bazel output hidden; surfaced + False
     returned on a hard build failure (a real broken target, not a cache miss)."""
-    err_path = "/tmp/aspect-cache-diff-build-{}.log".format(ctx.task.key)
+    err_path = "/tmp/aspect-cache-diff-build-{}.log".format(ctx.task.name)
     _t = time.monotonic()
     status = ctx.bazel.build(
         rc = rc,

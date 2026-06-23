@@ -9,7 +9,6 @@ load(
     "@aspect//lib/build_metadata.axl",
     "detect_vcs_from_host",
     "parse_git_remote_url",
-    "task_display_name",
     "version_gte",
     "version_tuple",
 )
@@ -300,18 +299,25 @@ def test_stream(ctx: TaskContext, tc: int, temp_dir: str) -> int:
 def test_task_info(ctx: TaskContext, tc: int) -> int:
     info = ctx.task
 
-    # name should be the symbol name "axl" (no explicit name= was given)
-    tc = test_case(tc, type(info.name) == "string", "ctx.task.name should be a string")
-    tc = test_case(tc, info.name == "axl", "ctx.task.name should equal the symbol name 'axl'")
+    # kind should be the symbol name "axl" (no explicit kind= was given)
+    tc = test_case(tc, type(info.kind) == "string", "ctx.task.kind should be a string")
+    tc = test_case(tc, info.kind == "axl", "ctx.task.kind should equal the symbol name 'axl'")
+
+    # friendly_kind: Title-Cased kind ("axl" → "Axl") unless friendly_kind= given
+    tc = test_case(tc, type(info.friendly_kind) == "string", "ctx.task.friendly_kind should be a string")
+    tc = test_case(tc, info.friendly_kind == "Axl", "ctx.task.friendly_kind should be Title-Cased kind 'Axl'")
 
     # group should be the list declared in task(group=[...])
     tc = test_case(tc, type(info.group) == "list", "ctx.task.group should be a list")
     tc = test_case(tc, len(info.group) == 1, "ctx.task.group should have one entry")
     tc = test_case(tc, info.group[0] == "tests", "ctx.task.group[0] should be 'tests'")
 
-    # key: non-empty string (auto-generated when --task-key not set)
-    tc = test_case(tc, type(info.key) == "string", "ctx.task.key should be a string")
-    tc = test_case(tc, len(info.key) > 0, "ctx.task.key should be non-empty")
+    # name: non-empty string (defaults to "<kind>-<suffix>" when --task:name not set)
+    tc = test_case(tc, type(info.name) == "string", "ctx.task.name should be a string")
+    tc = test_case(tc, len(info.name) > 0, "ctx.task.name should be non-empty")
+
+    # friendly_name: defaults to the name verbatim (no --task:friendly-name set)
+    tc = test_case(tc, info.friendly_name == info.name, "ctx.task.friendly_name should default to the name")
 
     # id: UUID v4 format (36 chars, dashes at positions 8/13/18/23)
     tc = test_case(tc, type(info.id) == "string", "ctx.task.id should be a string")
@@ -729,8 +735,8 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
     tc = test_case(tc, "summary" in out, "render_check_output returns a dict with 'summary'")
     tc = test_case(tc, "text" in out, "render_check_output returns a dict with 'text'")
 
-    # New title format: "<status_emoji> <task_name> <subject> · <state>"
-    # (task name optional). In these tests no render_ctx["task_name"]
+    # Title format: "<status_emoji> <task_kind> <subject> · <state>"
+    # (kind optional). In these tests no render_ctx["task_kind"]
     # is set, so title is "<emoji> <subject> · <state>".
     tc = test_case(tc, "Tests passed" in out["title"], "passed title has Tests passed state: " + out["title"])
     tc = test_case(tc, "//..." in out["title"], "passed title contains target pattern: " + out["title"])
@@ -801,7 +807,7 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
     tc = test_case(tc, "Tests passed (cached)" in title_cached, "all-cached title: " + title_cached)
 
     # With target pattern + task name
-    title_tn = summary_title(r5, "passed", target_pattern = "//foo/...", task_name = "test")
+    title_tn = summary_title(r5, "passed", target_pattern = "//foo/...", task_kind = "test")
     tc = test_case(tc, "test //foo/..." in title_tn, "title contains task name and subject: " + title_tn)
 
     # Long target pattern is truncated
@@ -1979,19 +1985,6 @@ def test_build_metadata_lib(tc: int) -> int:
     tc = test_case(tc, not version_gte("5.17.99", "5.18.0"), "version_gte: less")
     tc = test_case(tc, version_gte("5.18.0-rc1", "5.18.0"), "version_gte: pre-release tolerant (treated equal)")
 
-    # task_display_name
-    cases = [
-        ("test", "Test", "single-word"),
-        ("build", "Build", "single-word"),
-        ("my-task", "My Task", "kebab → Title Case"),
-        ("my_task", "My Task", "snake → Title Case"),
-        ("github-status", "Github Status", "kebab title-case"),
-        ("", "", "empty"),
-    ]
-    for (input, expected, desc) in cases:
-        got = task_display_name(input)
-        tc = test_case(tc, got == expected, "task_display_name: %s → %r (got %r)" % (desc, expected, got))
-
     return tc
 
 def test_gazelle_dir_helpers(tc: int) -> int:
@@ -2278,15 +2271,15 @@ def test_detect_ci(ctx: TaskContext, tc: int) -> int:
 def test_artifacts_lib(ctx: TaskContext, tc: int) -> int:
     """Coverage for lib/artifacts.axl: artifact_name."""
     cases = [
-        # (ci, task_name, task_key, filename, expected, desc)
+        # (ci, task_kind, task_name, filename, expected, desc)
         ("github", "test", "my-build", "profile.gz", "test.my-build.profile.gz", "github → flat dotted"),
         ("buildkite", "test", "my-build", "profile.gz", "test/my-build/profile.gz", "buildkite → path"),
         ("gitlab", "test", "my-build", "profile.gz", "test/my-build/profile.gz", "gitlab → path"),
         ("circleci", "test", "my-build", "profile.gz", "test/my-build/profile.gz", "circleci → path"),
         ("github", "lint", "lint-gha", "format.patch", "lint.lint-gha.format.patch", "github format.patch"),
     ]
-    for (ci, task_name, task_key, filename, expected, desc) in cases:
-        got = artifact_name(ci, task_name, task_key, filename)
+    for (ci, task_kind, task_name, filename, expected, desc) in cases:
+        got = artifact_name(ci, task_kind, task_name, filename)
         tc = test_case(tc, got == expected, "artifact_name: %s → %r (got %r)" % (desc, expected, got))
 
     # testlog_dest_dir — runs_per_test / sharding / retries must not collide.
@@ -2512,71 +2505,71 @@ def test_fmt_elapsed(tc: int) -> int:
 def test_summary_title(tc: int) -> int:
     """Coverage for bazel_results.summary_title — GitHub check title.
 
-    Title shape: "<status_emoji> <task_name> <subject> · <state>".
+    Title shape: "<status_emoji> <task_kind> <subject> · <state>".
     Leading emoji is derived from `status` via `emoji_for_status`.
     """
 
     # status="passed" + no buckets → state empty → emoji + task + subject
     r = init_data()
-    title = summary_title(r, "passed", target_pattern = "//...", task_name = "build")
+    title = summary_title(r, "passed", target_pattern = "//...", task_kind = "build")
     tc = test_case(tc, title == "✅ build //...", "summary_title: empty data, passed → emoji+task+subject (got %r)" % title)
 
     # status="running" → "Running..." with running emoji
     r = init_data()
-    title = summary_title(r, "running", target_pattern = "//...", task_name = "test")
+    title = summary_title(r, "running", target_pattern = "//...", task_kind = "test")
     tc = test_case(tc, title == "🔄 test //... · Running...", "summary_title: running → Running... (got %r)" % title)
 
     # status="failing" also counts as in-progress.
-    title = summary_title(r, "failing", target_pattern = "//foo", task_name = "test")
+    title = summary_title(r, "failing", target_pattern = "//foo", task_kind = "test")
     tc = test_case(tc, title == "❌ test //foo · Running...", "summary_title: failing → Running... + ❌ (got %r)" % title)
 
     # passed_test_total > 0, all cached → "Tests passed (cached)"
     r = init_data()
     r["bazel"]["passed_test_total"] = 5
     r["bazel"]["cached_test_total"] = 5
-    title = summary_title(r, "passed", target_pattern = "//...", task_name = "test")
+    title = summary_title(r, "passed", target_pattern = "//...", task_kind = "test")
     tc = test_case(tc, title == "✅ test //... · Tests passed (cached)", "summary_title: all cached (got %r)" % title)
 
     # Not all cached → "Tests passed".
     r = init_data()
     r["bazel"]["passed_test_total"] = 5
     r["bazel"]["cached_test_total"] = 2
-    title = summary_title(r, "passed", target_pattern = "//...", task_name = "test")
+    title = summary_title(r, "passed", target_pattern = "//...", task_kind = "test")
     tc = test_case(tc, title == "✅ test //... · Tests passed", "summary_title: partial cached (got %r)" % title)
 
     # failed_tests with status=failed → "Tests failed", and emoji is failed
     r = init_data()
     r["bazel"]["failed_tests"] = [{"label": "//a:t", "status": "failed"}]
-    title = summary_title(r, "failed", target_pattern = "//...", task_name = "test")
+    title = summary_title(r, "failed", target_pattern = "//...", task_kind = "test")
     tc = test_case(tc, title == "❌ test //... · Tests failed", "summary_title: failed test (got %r)" % title)
 
     # flaky_test_total + status="warning" → warning emoji + "Tests flaky"
     r = init_data()
     r["bazel"]["flaky_test_total"] = 1
-    title = summary_title(r, "warning", target_pattern = "//...", task_name = "test")
+    title = summary_title(r, "warning", target_pattern = "//...", task_kind = "test")
     tc = test_case(tc, title == "⚠️ test //... · Tests flaky", "summary_title: flaky terminal (got %r)" % title)
 
     # failed_targets (build failure) → "Failed to build"
     r = init_data()
     r["bazel"]["failed_targets"] = [{"label": "//a:b"}]
-    title = summary_title(r, "failed", target_pattern = "//...", task_name = "build")
+    title = summary_title(r, "failed", target_pattern = "//...", task_kind = "build")
     tc = test_case(tc, title == "❌ build //... · Failed to build", "summary_title: failed target (got %r)" % title)
 
     # aborted status uses the 🔥 emoji.
     r = init_data()
     r["bazel"]["aborted"] = True
     r["bazel"]["passed_test_total"] = 99
-    title = summary_title(r, "aborted", target_pattern = "//...", task_name = "test")
+    title = summary_title(r, "aborted", target_pattern = "//...", task_kind = "test")
     tc = test_case(tc, title == "🔥 test //... · Invocation disconnected", "summary_title: aborted (got %r)" % title)
 
-    # Empty task_name → leading emoji + subject only.
+    # Empty task_kind → leading emoji + subject only.
     r = init_data()
     r["bazel"]["passed_test_total"] = 1
     title = summary_title(r, "passed", target_pattern = "//foo")
     tc = test_case(tc, title == "✅ //foo · Tests passed", "summary_title: empty task name → emoji + subject (got %r)" % title)
 
     # Empty target_pattern → no subject; emoji + task + state.
-    title = summary_title(r, "passed", task_name = "test")
+    title = summary_title(r, "passed", task_kind = "test")
     tc = test_case(tc, title == "✅ test · Tests passed", "summary_title: empty subject (got %r)" % title)
 
     # Both empty → emoji + state.
@@ -2585,7 +2578,7 @@ def test_summary_title(tc: int) -> int:
 
     # Long subject is truncated.
     long_target = "//" + "x" * 200
-    title = summary_title(r, "passed", target_pattern = long_target, task_name = "build")
+    title = summary_title(r, "passed", target_pattern = long_target, task_kind = "build")
     tc = test_case(tc, "…" in title, "summary_title: long subject gets ellipsis truncation (got %r)" % title)
     tc = test_case(tc, title.startswith("✅ build //"), "summary_title: still starts with emoji+task+subject prefix")
     tc = test_case(tc, len(title) <= 160, "summary_title: respects 160 char hard limit (len=%d)" % len(title))
@@ -2683,11 +2676,11 @@ def test_compute_repro(tc: int) -> int:
     tc = test_case(tc, cmd == "aspect test //a:t1 //b:t2", "compute_reproducer_command: joins failed test labels (got %r)" % cmd)
     tc = test_case(tc, total == 2, "compute_reproducer_command: total = failed test count")
 
-    # task_name is the user's task name — non-{build,test} names are surfaced verbatim.
+    # task_kind is the task's command — non-{build,test} kinds are surfaced verbatim.
     r = init_data()
     r["bazel"]["failed_targets"] = [{"label": "//x:y"}]
     cmd, _ = compute_reproducer_command(r, "ci")
-    tc = test_case(tc, cmd == "aspect ci //x:y", "compute_reproducer_command: uses task_name as the subcommand (got %r)" % cmd)
+    tc = test_case(tc, cmd == "aspect ci //x:y", "compute_reproducer_command: uses task_kind as the subcommand (got %r)" % cmd)
 
     # Long label list is truncated at MAX_REPRO_CHARS but total still reflects all.
     r = init_data()
@@ -2798,44 +2791,45 @@ def test_repro_commands_lib(tc: int) -> int:
     tc = test_case(tc, lines[0] == "aspect lint \\", "build_aspect_command: no-targets flag-overflow wraps head (got %r)" % lines[0])
     tc = test_case(tc, not lines[-1].endswith("\\"), "build_aspect_command: no-targets last flag has no trailing ` \\` (got %r)" % lines[-1])
 
-    # task_cli_path: bare task (no group).
-    bare = struct(group = [], name = "lint")
+    # task_cli_path uses the task kind (the runnable command), not the
+    # per-invocation --task:name.
+    bare = struct(group = [], kind = "lint")
     tc = test_case(tc, task_cli_path(bare) == "lint", "task_cli_path: bare task")
 
     # task_cli_path: single group level.
-    nested = struct(group = ["utils"], name = "format")
+    nested = struct(group = ["utils"], kind = "format")
     tc = test_case(tc, task_cli_path(nested) == "utils format", "task_cli_path: single group")
 
     # task_cli_path: multi-level group nesting.
-    deep = struct(group = ["utils", "frontend"], name = "format")
+    deep = struct(group = ["utils", "frontend"], kind = "format")
     tc = test_case(tc, task_cli_path(deep) == "utils frontend format", "task_cli_path: nested groups")
 
     # dedup_and_attribute: same (kind, command, description) → one row,
-    # both task_keys listed; first-seen order preserved.
+    # both task_names listed; first-seen order preserved.
     rows = dedup_and_attribute([
-        {"kind": "build", "task_key": "build-gha", "command": "aspect build -- //...", "description": ""},
-        {"kind": "build", "task_key": "build-gha-debug", "command": "aspect build -- //...", "description": ""},
+        {"kind": "build", "task_name": "build-gha", "command": "aspect build -- //...", "description": ""},
+        {"kind": "build", "task_name": "build-gha-debug", "command": "aspect build -- //...", "description": ""},
     ])
     tc = test_case(tc, len(rows) == 1, "dedup_and_attribute: identical (kind,cmd,desc) collapse to one row")
-    tc = test_case(tc, rows[0]["task_keys"] == ["build-gha", "build-gha-debug"], "dedup_and_attribute: task_keys preserve first-seen order")
+    tc = test_case(tc, rows[0]["task_names"] == ["build-gha", "build-gha-debug"], "dedup_and_attribute: task_names preserve first-seen order")
 
     # dedup_and_attribute: different kinds with same command stay split.
     rows = dedup_and_attribute([
-        {"kind": "build", "task_key": "a", "command": "aspect build -- //...", "description": ""},
-        {"kind": "test", "task_key": "b", "command": "aspect build -- //...", "description": ""},
+        {"kind": "build", "task_name": "a", "command": "aspect build -- //...", "description": ""},
+        {"kind": "test", "task_name": "b", "command": "aspect build -- //...", "description": ""},
     ])
     tc = test_case(tc, len(rows) == 2, "dedup_and_attribute: different kinds stay split even with same command")
 
     # dedup_and_attribute: different descriptions stay split.
     rows = dedup_and_attribute([
-        {"kind": "format", "task_key": "a", "command": "aspect format ...", "description": "First 20 of 47"},
-        {"kind": "format", "task_key": "a", "command": "aspect format ...", "description": ""},
+        {"kind": "format", "task_name": "a", "command": "aspect format ...", "description": "First 20 of 47"},
+        {"kind": "format", "task_name": "a", "command": "aspect format ...", "description": ""},
     ])
     tc = test_case(tc, len(rows) == 2, "dedup_and_attribute: different descriptions stay split")
 
     # dedup_and_attribute: empty command rows are dropped.
     rows = dedup_and_attribute([
-        {"kind": "build", "task_key": "a", "command": "", "description": ""},
+        {"kind": "build", "task_name": "a", "command": "", "description": ""},
     ])
     tc = test_case(tc, rows == [], "dedup_and_attribute: empty commands are dropped")
 

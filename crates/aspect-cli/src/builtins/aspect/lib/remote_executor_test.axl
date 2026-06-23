@@ -48,7 +48,7 @@ def _test_impl(ctx):
     return 0
 
 remote_executor_tests = task(
-    name = "test-remote-executor",
+    kind = "test-remote-executor",
     group = ["dev"],
     implementation = _test_impl,
     args = {},

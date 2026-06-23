@@ -165,9 +165,10 @@ TipAction = enum("accept", "reject", "replace")
 # + content + policy so the hook can scope and rewrite. Fires on every
 # `add_tip`, including accumulate re-emits.
 TipInfo = record(
-    # Task identity for hooks that scope by task.
+    # Task identity for hooks that scope by task. `task_kind` is the task
+    # kind (the command); `task_path` is the joined group + kind.
     task_path = field(str),
-    task_name = field(str),
+    task_kind = field(str),
     task_group = field(list[str]),
 
     # The tip about to be stored. For JINJA2 tips `title`/`body` are EMPTY
@@ -476,7 +477,7 @@ def decorate_tip(t):
     """Project a stored tip into the render-shape consumed by the surface
     templates (`TIPS_BLOCK` in `bazel_results.axl`, the `## 💡 Tips` section
     in `feature/github_status_comments.axl`) — single source of truth so both
-    stay aligned. The PR-comment aggregator adds a `task_keys` list for its
+    stay aligned. The PR-comment aggregator adds a `task_names` list for its
     "Surfaced by:" footer."""
     severity = t.get("severity")
     return {
@@ -574,8 +575,8 @@ def apply_tip_suggestion_hooks(ctx, tip: dict) -> dict | None:
 
     out = dict(tip)
     info_base = {
-        "task_path": " ".join(list(ctx.task.group) + [ctx.task.name]),
-        "task_name": ctx.task.name,
+        "task_path": " ".join(list(ctx.task.group) + [ctx.task.kind]),
+        "task_kind": ctx.task.kind,
         "task_group": list(ctx.task.group),
     }
     for handler in handlers:

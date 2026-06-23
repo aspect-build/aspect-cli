@@ -639,7 +639,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             phase = Phase(name = "apply", description = "Apply gazelle patch", emoji = "📦"),
         )
         tmp = ctx.std.env.temp_dir()
-        patch_path = tmp + "/gazelle-" + ctx.task.key + ".patch"
+        patch_path = tmp + "/gazelle-" + ctx.task.name + ".patch"
         ctx.std.fs.write(patch_path, diff_stdout)
         apply_result = ctx.std.process.command("git").args(["apply", "-p0", patch_path]) \
             .current_dir(ctx.std.env.aspect_root_dir()) \

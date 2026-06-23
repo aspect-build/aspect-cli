@@ -174,6 +174,7 @@ impl EvalBuilder {
                     task_index,
                     "_test".to_string(),
                     None,
+                    None,
                     crate::eval::TimingMode::default(),
                     |_t, _h| Arguments::new(),
                 )

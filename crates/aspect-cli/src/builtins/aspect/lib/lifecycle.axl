@@ -141,10 +141,11 @@ ReproFixAction = enum("accept", "reject", "replace")
 # returns a `ReproFixSuggestion` verdict. Typed fields cover most
 # decisions; `extras` / `data` are escape hatches.
 ReproFixInfo = record(
-    # Task identity. `task_path` is the joined `<group...> <name>`
-    # ("aspect lint"); `task_name` / `task_group` are the parts.
+    # Task identity. `task_path` is the joined `<group...> <kind>`
+    # ("aspect lint"); `task_kind` is the task kind (the command) and
+    # `task_group` the group segments.
     task_path = field(str),
-    task_name = field(str),
+    task_kind = field(str),
     task_group = field(list[str]),
     # Task result kind ("lint_results" | "bazel_results" | …). Matches
     # `TaskUpdate.kind` so hooks route by the surface-template key.
@@ -296,8 +297,8 @@ def apply_repro_fix_hooks(
         return
 
     info_base = {
-        "task_path": " ".join(list(ctx.task.group) + [ctx.task.name]),
-        "task_name": ctx.task.name,
+        "task_path": " ".join(list(ctx.task.group) + [ctx.task.kind]),
+        "task_kind": ctx.task.kind,
         "task_group": list(ctx.task.group),
         "kind": kind,
         "status": status,
