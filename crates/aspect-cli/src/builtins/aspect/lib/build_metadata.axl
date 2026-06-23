@@ -489,39 +489,47 @@ def get_task_metadata_flags(ctx):
 
     Two schemas by detected runner version:
       pre-5.18 / off-runner (legacy Web UI):
-        ASPECT_TASK_NAME = <display>, ASPECT_TASK_ID = <UUID>
+        ASPECT_TASK_NAME = <friendly_kind>, ASPECT_TASK_ID = <UUID>
       5.18.0+ (split schema):
-        ASPECT_TASK_DISPLAY_NAME = <display>, ASPECT_TASK_NAME = <kind>,
-        ASPECT_TASK_KIND = <kind>, ASPECT_TASK_ID = <UUID>
+        ASPECT_TASK_KIND = <kind>, ASPECT_TASK_FRIENDLY_KIND = <friendly_kind>,
+        ASPECT_TASK_NAME = <name>, ASPECT_TASK_FRIENDLY_NAME = <friendly_name>,
+        ASPECT_TASK_ID = <UUID>
 
-    `ASPECT_TASK_NAME` carries the task *kind* (the command) for Web UI
-    back-compat; `ASPECT_TASK_KIND` is the explicit kind alias. The legacy
-    `ASPECT_TASK_KEY` field is no longer emitted.
+    `ASPECT_TASK_KIND`/`ASPECT_TASK_FRIENDLY_KIND` describe the task kind (the
+    command and its friendly label); `ASPECT_TASK_NAME`/`ASPECT_TASK_FRIENDLY_NAME`
+    describe this particular invocation (`--task:name` / `--task:friendly-name`,
+    explicit or generated). The legacy `ASPECT_TASK_KEY` field is no longer
+    emitted.
 
     Off a Workflows runner (ASPECT_WORKFLOWS_RUNNER_VERSION unset) → legacy form
     so check runs against non-Aspect backends stay readable.
     """
     task = ctx.task
     kind = task.kind or ""
+    friendly_kind = task.friendly_kind or ""
+    name = task.name or ""
+    friendly_name = task.friendly_name or ""
     uuid = task.id or ""
-    display_name = task.display_name or ""
 
     runner_version = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_VERSION") or ""
     new_schema = bool(runner_version) and version_gte(runner_version, _TASK_METADATA_NEW_SCHEMA_MIN_VERSION)
 
     flags = []
     if new_schema:
-        if display_name:
-            flags.append("--build_metadata=ASPECT_TASK_DISPLAY_NAME=" + display_name)
         if kind:
-            flags.append("--build_metadata=ASPECT_TASK_NAME=" + kind)
             flags.append("--build_metadata=ASPECT_TASK_KIND=" + kind)
+        if friendly_kind:
+            flags.append("--build_metadata=ASPECT_TASK_FRIENDLY_KIND=" + friendly_kind)
+        if name:
+            flags.append("--build_metadata=ASPECT_TASK_NAME=" + name)
+        if friendly_name:
+            flags.append("--build_metadata=ASPECT_TASK_FRIENDLY_NAME=" + friendly_name)
         if uuid:
             flags.append("--build_metadata=ASPECT_TASK_ID=" + uuid)
     else:
-        # Legacy: NAME = display name, ID = UUID.
-        if display_name:
-            flags.append("--build_metadata=ASPECT_TASK_NAME=" + display_name)
+        # Legacy: NAME = friendly label of the kind, ID = UUID.
+        if friendly_kind:
+            flags.append("--build_metadata=ASPECT_TASK_NAME=" + friendly_kind)
         if uuid:
             flags.append("--build_metadata=ASPECT_TASK_ID=" + uuid)
     return flags

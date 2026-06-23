@@ -303,9 +303,9 @@ def test_task_info(ctx: TaskContext, tc: int) -> int:
     tc = test_case(tc, type(info.kind) == "string", "ctx.task.kind should be a string")
     tc = test_case(tc, info.kind == "axl", "ctx.task.kind should equal the symbol name 'axl'")
 
-    # display_kind: Title-Cased kind ("axl" → "Axl") unless display_kind= given
-    tc = test_case(tc, type(info.display_kind) == "string", "ctx.task.display_kind should be a string")
-    tc = test_case(tc, info.display_kind == "Axl", "ctx.task.display_kind should be Title-Cased kind 'Axl'")
+    # friendly_kind: Title-Cased kind ("axl" → "Axl") unless friendly_kind= given
+    tc = test_case(tc, type(info.friendly_kind) == "string", "ctx.task.friendly_kind should be a string")
+    tc = test_case(tc, info.friendly_kind == "Axl", "ctx.task.friendly_kind should be Title-Cased kind 'Axl'")
 
     # group should be the list declared in task(group=[...])
     tc = test_case(tc, type(info.group) == "list", "ctx.task.group should be a list")
@@ -316,9 +316,9 @@ def test_task_info(ctx: TaskContext, tc: int) -> int:
     tc = test_case(tc, type(info.name) == "string", "ctx.task.name should be a string")
     tc = test_case(tc, len(info.name) > 0, "ctx.task.name should be non-empty")
 
-    # display_name: non-empty string (defaults to the name verbatim)
-    tc = test_case(tc, type(info.display_name) == "string", "ctx.task.display_name should be a string")
-    tc = test_case(tc, len(info.display_name) > 0, "ctx.task.display_name should be non-empty")
+    # friendly_name: non-empty string (defaults to the name verbatim)
+    tc = test_case(tc, type(info.friendly_name) == "string", "ctx.task.friendly_name should be a string")
+    tc = test_case(tc, len(info.friendly_name) > 0, "ctx.task.friendly_name should be non-empty")
 
     # id: UUID v4 format (36 chars, dashes at positions 8/13/18/23)
     tc = test_case(tc, type(info.id) == "string", "ctx.task.id should be a string")

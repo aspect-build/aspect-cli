@@ -5,7 +5,7 @@
 //! * [`Cmd`] — value-passing input. Holds task & feature trait objects plus
 //!   filesystem context. `build()` produces the Clap [`Command`]. `dispatch()`
 //!   turns parsed [`ArgMatches`] into a [`Dispatch`].
-//! * [`Dispatch`] — carries `task_id`, `task_name`, `task_display_name`, `task_uuid`, and the parsed
+//! * [`Dispatch`] — carries `task_id`, `task_name`, `task_friendly_name`, `task_uuid`, and the parsed
 //!   matches. `task_args(...)` and `feature_args(...)` produce the merged
 //!   runtime [`Arguments`] for a given task or feature.
 //!
@@ -62,7 +62,7 @@ pub struct Cmd<'a, 'v> {
 pub struct Dispatch {
     pub task_id: usize,
     pub task_name: String,
-    pub task_display_name: Option<String>,
+    pub task_friendly_name: Option<String>,
     pub task_uuid: Option<String>,
     pub timing: TimingMode,
     matches: ArgMatches,
@@ -102,19 +102,19 @@ impl<'a, 'v> Cmd<'a, 'v> {
                     .help("Print version"),
             )
             .arg(
-                ClapArg::new("task-name")
-                    .long("task-name")
+                ClapArg::new("task:name")
+                    .long("task:name")
                     .value_name("NAME")
                     .global(true)
                     .value_parser(parse_task_name)
                     .help("A short name uniquely identifying this task invocation. Allowed characters: A-Za-z0-9, _, -. Useful when the same task runs multiple times in one pipeline (e.g. 'backend', 'frontend'). Defaults to '<kind>-<suffix>' if not set."),
             )
             .arg(
-                ClapArg::new("task-display-name")
-                    .long("task-display-name")
-                    .value_name("DISPLAY_NAME")
+                ClapArg::new("task:friendly-name")
+                    .long("task:friendly-name")
+                    .value_name("FRIENDLY_NAME")
                     .global(true)
-                    .help("A human-readable label for this task invocation, shown on status surfaces. Defaults to --task-name."),
+                    .help("A human-readable label for this task invocation, shown on status surfaces. Defaults to --task:name."),
             )
             .arg(
                 ClapArg::new("task-key")
@@ -123,24 +123,24 @@ impl<'a, 'v> Cmd<'a, 'v> {
                     .global(true)
                     .hide(true)
                     .value_parser(parse_task_name)
-                    .help("Deprecated alias for --task-name; will be removed in a future release."),
+                    .help("Deprecated alias for --task:name; will be removed in a future release."),
             )
             .arg(
-                ClapArg::new("task-id")
-                    .long("task-id")
+                ClapArg::new("task:id")
+                    .long("task:id")
                     .value_name("UUID")
                     .global(true)
                     .value_parser(parse_task_uuid)
                     .help("A UUID uniquely identifying this task invocation. Auto-generated if not set."),
             )
             .arg(
-                ClapArg::new("timing")
-                    .long("timing")
+                ClapArg::new("task:timing-summary")
+                    .long("task:timing-summary")
                     .value_name("LEVEL")
                     .global(true)
                     .value_parser(parse_timing_mode)
                     .default_value("detailed")
-                    .help("Verbosity of the phase-timing breakdown trailing the task completion line: 'total' (no breakdown — total only), 'summary' (inline phases), or 'detailed' (multi-line with descriptions; default). Tasks that don't opt into phases see only the total regardless of this setting."),
+                    .help("Verbosity of the phase-timing breakdown trailing the task completion line: 'none' (no timing summary), 'total' (total only), 'short' (inline phases), or 'detailed' (multi-line with descriptions; default). Tasks that don't opt into phases see only the total regardless of this setting."),
             )
             .subcommand(Command::new("version").about("Print version").hide(true))
             .subcommand(
@@ -161,11 +161,11 @@ impl<'a, 'v> Cmd<'a, 'v> {
         let task_id = *leaf
             .get_one::<usize>(TASK_ID_KEY)
             .ok_or(CmdError::NoTaskSelected)?;
-        // Resolution order: --task-name wins; the deprecated --task-key is
+        // Resolution order: --task:name wins; the deprecated --task-key is
         // accepted as an alias and always warns; otherwise the name defaults
         // to the task kind (the deepest selected subcommand name).
         let explicit_name = leaf
-            .get_one::<String>("task-name")
+            .get_one::<String>("task:name")
             .filter(|s| !s.is_empty())
             .cloned();
         let deprecated_key = leaf
@@ -174,7 +174,7 @@ impl<'a, 'v> Cmd<'a, 'v> {
             .cloned();
         if deprecated_key.is_some() {
             eprintln!(
-                "\x1b[1;33mWARNING:\x1b[0m --task-key is deprecated; use --task-name instead. \
+                "\x1b[1;33mWARNING:\x1b[0m --task-key is deprecated; use --task:name instead. \
                  --task-key will be removed in a future release."
             );
         }
@@ -185,16 +185,16 @@ impl<'a, 'v> Cmd<'a, 'v> {
             let kind = leaf_command_name(&matches).unwrap_or_default();
             format!("{}-{}", kind, generate_name_suffix())
         });
-        let task_display_name = leaf.get_one::<String>("task-display-name").cloned();
-        let task_uuid = leaf.get_one::<String>("task-id").cloned();
+        let task_friendly_name = leaf.get_one::<String>("task:friendly-name").cloned();
+        let task_uuid = leaf.get_one::<String>("task:id").cloned();
         let timing = leaf
-            .get_one::<TimingMode>("timing")
+            .get_one::<TimingMode>("task:timing-summary")
             .copied()
             .unwrap_or_default();
         Ok(Dispatch {
             task_id,
             task_name,
-            task_display_name,
+            task_friendly_name,
             task_uuid,
             timing,
             matches,
@@ -689,9 +689,9 @@ fn task_command(
     cli_header: &str,
 ) -> Command {
     let kind = task.kind();
-    let display_kind = task.display_kind();
-    let display = if !display_kind.is_empty() {
-        display_kind
+    let friendly_kind = task.friendly_kind();
+    let display = if !friendly_kind.is_empty() {
+        friendly_kind
     } else {
         to_display_name(&kind)
     };
@@ -926,7 +926,7 @@ fn deepest_subcommand(matches: &ArgMatches) -> Option<&ArgMatches> {
 }
 
 /// The deepest selected subcommand's name — the task kind (`build`, `test`, …),
-/// used as the default task name when neither `--task-name` nor `--task-key`
+/// used as the default task name when neither `--task:name` nor `--task-key`
 /// is given.
 fn leaf_command_name(matches: &ArgMatches) -> Option<String> {
     let (mut name, mut leaf) = matches.subcommand()?;
@@ -951,7 +951,7 @@ fn parse_task_name(s: &str) -> Result<String, String> {
 }
 
 /// A friendly random suffix (e.g. "fluffy-parakeet") appended to the task kind
-/// to form a default `--task-name`. Falls back to a short UUID fragment.
+/// to form a default `--task:name`. Falls back to a short UUID fragment.
 fn generate_name_suffix() -> String {
     names::Generator::with_naming(names::Name::Plain)
         .next()
@@ -1018,7 +1018,7 @@ mod tests {
         fn description(&self) -> &String {
             empty_string()
         }
-        fn display_kind(&self) -> String {
+        fn friendly_kind(&self) -> String {
             String::new()
         }
         fn group(&self) -> &Vec<String> {
@@ -1196,7 +1196,7 @@ mod tests {
         };
         let root = cmd.build("0.0.0").expect("build ok");
         let matches = root
-            .try_get_matches_from(["aspect", "greet", "--task-name=smoke"])
+            .try_get_matches_from(["aspect", "greet", "--task:name=smoke"])
             .expect("parse ok");
         let dispatch = cmd.dispatch(matches).expect("dispatch ok");
         assert_eq!(dispatch.task_id, 0);

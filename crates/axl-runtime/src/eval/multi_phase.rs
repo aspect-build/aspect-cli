@@ -468,7 +468,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         &mut self,
         task_index: usize,
         task_name: String,
-        task_display_name: Option<String>,
+        task_friendly_name: Option<String>,
         task_id: Option<String>,
         timing: TimingMode,
         args_builder: impl FnOnce(&dyn TaskLike<'v>, Heap<'v>) -> Arguments<'v>,
@@ -485,9 +485,9 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         span.record("task", task.kind());
         span.record("task_id", task_id.as_str());
 
-        // Resolve the per-invocation display name: explicit --task-display-name,
+        // Resolve the per-invocation friendly name: explicit --task:friendly-name,
         // else the task name verbatim.
-        let task_display_name = task_display_name.unwrap_or_else(|| task_name.clone());
+        let task_friendly_name = task_friendly_name.unwrap_or_else(|| task_name.clone());
 
         // Capture the kind early — `task_info` is moved into TaskContext below
         // and is no longer accessible from the closing announcement after
@@ -495,10 +495,10 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         let task_kind = task.kind();
         let task_info = TaskInfo::new(
             task.kind(),
-            task.display_kind(),
+            task.friendly_kind(),
             task.group().clone(),
             task_name,
-            task_display_name,
+            task_friendly_name,
             task_id,
         );
 
@@ -576,9 +576,15 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             tracing::error!(exit_code = code as i64, "task exited with non-zero status");
         }
 
-        let duration = format_duration(elapsed);
         let failed = matches!(exit_code, Some(code) if code != 0);
         let breakdown = render_phase_breakdown(&phases, timing, failed);
+        // `--task:timing-summary=none` drops the timing entirely (no "in 46.8s"
+        // and no breakdown); every other level keeps the total.
+        let timing_segment = if timing == TimingMode::None {
+            String::new()
+        } else {
+            format!(" in {}", format_duration(elapsed))
+        };
         let conclusion_suffix = if conclusion.is_empty() {
             String::new()
         } else {
@@ -614,7 +620,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             }
             let bookend_marker = if unclean { "+++" } else { "---" };
             eprintln!(
-                "{} {} {}{}{} · `{}` task{} in {}{}{}",
+                "{} {} {}{}{} · `{}` task{}{}{}{}",
                 bookend_marker,
                 verdict.bk_shortcode,
                 verdict.color,
@@ -622,21 +628,21 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
                 reset,
                 task_kind,
                 exit_suffix,
-                duration,
+                timing_segment,
                 conclusion_suffix,
                 breakdown,
             );
         } else {
             eprintln!();
             eprintln!(
-                "→ {} {}{}{} `{}` task{} in {}{}{}",
+                "→ {} {}{}{} `{}` task{}{}{}{}",
                 verdict.glyph,
                 verdict.color,
                 verdict.verb,
                 reset,
                 task_kind,
                 exit_suffix,
-                duration,
+                timing_segment,
                 conclusion_suffix,
                 breakdown,
             );
@@ -773,17 +779,20 @@ fn format_duration(d: std::time::Duration) -> String {
 /// even at 0ms — those are intentional boundaries.
 const INIT_PHASE_HIDE_THRESHOLD_MS: u128 = 50;
 
-/// Verbosity for the phase breakdown trailing the runtime's
+/// Verbosity for the timing summary trailing the runtime's
 /// "→ ✅ Passed" / "→ ⚠️ Flagged" / "→ ❌ Failed" line. Driven by the
-/// top-level `--timing` CLI flag.
+/// top-level `--task:timing-summary` CLI flag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimingMode {
-    /// Total only. Same as the pre-phase output.
+    /// No timing summary at all — not even the total.
+    /// `→ ✅ Passed `lint` task`
+    None,
+    /// Total only.
     /// `→ ✅ Passed `lint` task in 46.8s`
     Total,
     /// Total + inline phase breakdown.
     /// `→ ✅ Passed `lint` task in 46.8s — 🌱 Init 0.2s · 🔍 Detect 1.2s · ...`
-    Summary,
+    Short,
     /// Total + multi-line breakdown with descriptions. Default.
     Detailed,
 }
@@ -798,11 +807,12 @@ impl std::str::FromStr for TimingMode {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
+            "none" => Ok(TimingMode::None),
             "total" => Ok(TimingMode::Total),
-            "summary" => Ok(TimingMode::Summary),
+            "short" => Ok(TimingMode::Short),
             "detailed" => Ok(TimingMode::Detailed),
             other => Err(format!(
-                "invalid timing mode {:?}; expected one of: total, summary, detailed",
+                "invalid timing mode {:?}; expected one of: none, total, short, detailed",
                 other
             )),
         }
@@ -812,10 +822,10 @@ impl std::str::FromStr for TimingMode {
 /// Render the phase breakdown that trails the runtime's "→ Completed"
 /// / "→ Failed" line.
 ///
-/// Returns `""` for `Total` mode, or for any mode when `phases` is
-/// empty (task didn't opt into phases).
+/// Returns `""` for `None`/`Total` mode, or for any mode when `phases`
+/// is empty (task didn't opt into phases).
 ///
-/// `Summary` returns a leading-space-and-em-dash inline form so it
+/// `Short` returns a leading-space-and-em-dash inline form so it
 /// concatenates cleanly after the duration. `Detailed` returns a
 /// leading newline plus indented per-phase lines.
 ///
@@ -826,7 +836,7 @@ impl std::str::FromStr for TimingMode {
 /// On success or a non-failed exit, `interrupted` is treated as a
 /// normal completed entry.
 fn render_phase_breakdown(phases: &[PhaseRecord], mode: TimingMode, failed: bool) -> String {
-    if phases.is_empty() || mode == TimingMode::Total {
+    if phases.is_empty() || mode == TimingMode::None || mode == TimingMode::Total {
         return String::new();
     }
     // Suppress the synthetic `init` phase when it's negligible. The
@@ -843,7 +853,7 @@ fn render_phase_breakdown(phases: &[PhaseRecord], mode: TimingMode, failed: bool
     }
     // Prefix the caller-supplied `Phase(emoji=...)` when present; an empty
     // emoji stays bare. The Detailed branch aligns columns by `display_width`
-    // (which counts the emoji as two cells); Summary mode has no columns.
+    // (which counts the emoji as two cells); Short mode has no columns.
     let phase_label = |p: &PhaseRecord| -> String {
         let name = if p.display_name.is_empty() {
             titlecase(&p.name)
@@ -866,8 +876,8 @@ fn render_phase_breakdown(phases: &[PhaseRecord], mode: TimingMode, failed: bool
         }
     };
     match mode {
-        TimingMode::Total => unreachable!(),
-        TimingMode::Summary => {
+        TimingMode::None | TimingMode::Total => unreachable!(),
+        TimingMode::Short => {
             let parts: Vec<String> = visible.iter().map(|p| format_phase(p)).collect();
             format!(" — {}", parts.join(" · "))
         }

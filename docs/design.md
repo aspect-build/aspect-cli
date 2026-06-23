@@ -52,7 +52,7 @@ Task execution occurs when a user explicitly invokes a task (e.g., `aspect run <
 - `ctx.http()` — HTTP client (get, post, download with integrity checking)
 - `ctx.template` — template rendering
 - `ctx.traits[TraitType]` — frozen trait data (read-only, as configured)
-- `ctx.task` — task metadata (kind, display_kind, name, display_name, group, id)
+- `ctx.task` — task metadata (kind, friendly_kind, name, friendly_name, group, id)
 
 Task execution is inherently non-deterministic. It interacts with the outside world — building code, fetching URLs, writing files, running processes. The determinism guarantee applies only to evaluation; execution is where real work happens.
 
@@ -109,7 +109,7 @@ Use `name = "explicit-name"` to override the derived command name. Command names
 |---|---|---|
 | `summary` | Task list and `--help` header | One line. Falls back to `"<name> task defined in <file>"`. |
 | `description` | `--help` header only | Extended prose. Replaces `summary` in `--help` when set. |
-| `display_name` | Help section headings | Title Case. Auto-derived from command name (`axl-add` → `Axl Add`). |
+| `friendly_kind` | Help section headings | Title Case. Auto-derived from the kind (`axl-add` → `Axl Add`). |
 
 #### CLI arguments
 

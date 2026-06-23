@@ -186,7 +186,7 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                 .execute_tasks_with_args(
                     dispatch.task_id,
                     dispatch.task_name.clone(),
-                    dispatch.task_display_name.clone(),
+                    dispatch.task_friendly_name.clone(),
                     dispatch.task_uuid.clone(),
                     dispatch.timing,
                     |t, h| dispatch.task_args(t, h),
