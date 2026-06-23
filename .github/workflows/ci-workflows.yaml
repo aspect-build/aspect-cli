@@ -157,6 +157,26 @@ jobs:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Format Task (ASPECT_DEBUG=1)
         run: ASPECT_DEBUG=1 bazel format --task:name format-gha-debug
+  format-repeat-task:
+    runs-on: ubuntu-latest
+    needs: [pre-build]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+      - uses: aspect-build/setup-aspect@c22a8f64fb38f82f59ce809cd7eb9f8ae096da44 # v2026.23.2
+        with:
+          launcher-install: false
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+      # Test repeat tasks without --task:name flags
+      - name: Format Task
+        run: bazel format
+      - name: Format Task 2
+        run: bazel format
+      - name: Format Task 3
+        run: bazel format
+      - name: Format Task 4
+        run: bazel format
   gazelle-task:
     runs-on: ubuntu-latest
     needs: [pre-build]
