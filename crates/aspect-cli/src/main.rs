@@ -245,9 +245,10 @@ const SIGINT_TICK: Duration = Duration::from_millis(150);
 ///
 /// Only used off-CI: on CI we never self-SIGKILL (see `run_shutdown_sequence`),
 /// so this grace window only governs the interactive/local path, where SIGKILL
-/// is the backstop for a hung client. 12s gives bazel's graceful cancel ample
-/// room to finish on a developer's machine.
-const SIGINT_GRACE: Duration = Duration::from_secs(12);
+/// is the backstop for a hung client. Kept short — a developer pressing Ctrl-C
+/// wants their prompt back promptly, and bazel's graceful cancel usually lands
+/// well inside this window; the SIGKILL is just the backstop for a hung client.
+const SIGINT_GRACE: Duration = Duration::from_secs(3);
 
 /// Time we wait after SIGKILL for the kernel to deliver the signal
 /// and the process accounting to settle before we exit. SIGKILL
@@ -257,15 +258,21 @@ const SIGINT_GRACE: Duration = Duration::from_secs(12);
 const POST_KILL_GRACE: Duration = Duration::from_secs(1);
 
 /// Total wall time between receiving the OS signal and `exit()`:
+///   - **No live bazel client** (e.g. an interactive prompt like `init`): we
+///     recheck the registry after 1 × SIGINT_TICK (≈ 0.15s, to close the
+///     spawn/register race) and, if still empty, exit — no SIGINT burst, no
+///     grace window. There's nothing to cancel, so there's nothing to wait for.
 ///   - **On CI:** 1 × SIGINT_TICK (≈ 0.15s) — two graceful SIGINTs, then exit.
-///   - **Off CI:** 2 × SIGINT_TICK (≈ 0.3s) + SIGINT_GRACE (12s) +
-///     POST_KILL_GRACE (1s) ≈ 13.3s.
-/// Both well under typical CI cancel grace periods; the long off-CI window is
-/// just developer-machine headroom and never runs on a CI runner.
+///   - **Off CI:** 2 × SIGINT_TICK (≈ 0.3s) + SIGINT_GRACE (3s) +
+///     POST_KILL_GRACE (1s) ≈ 4.3s, and only when a client is actually live.
+/// All well under typical CI cancel grace periods.
 
-/// Watch for SIGINT / SIGTERM. On first signal we send bazel a SIGINT burst.
-/// Bazel responds the same way it would to repeated Ctrl-Cs from a terminal
-/// (see https://bazel.build/run/cancellation):
+/// Watch for SIGINT / SIGTERM. If no bazel client is live when the signal
+/// arrives (an interactive prompt like `init`, or any non-bazel command) we
+/// exit promptly — there's nothing to cancel (we recheck once after a tick to
+/// avoid racing a just-spawned client; see `run_shutdown_sequence`). Otherwise
+/// we send bazel a SIGINT burst; bazel responds the same way it would to
+/// repeated Ctrl-Cs from a terminal (see https://bazel.build/run/cancellation):
 ///
 ///   1st  →  graceful cancel of the running command.
 ///   2nd  →  still graceful (bazel allows a short cleanup window).
@@ -370,6 +377,25 @@ fn install_shutdown_handler() {
 }
 
 async fn run_shutdown_sequence(signal_name: &str, exit_code: i32) {
+    // Nothing to cancel — no bazel client is live (e.g. an interactive prompt
+    // like `init`, or any command not currently running bazel). Skip the SIGINT
+    // burst, the messaging, and every grace window, and just exit. This keeps
+    // Ctrl-C snappy and avoids the misleading "cancelling bazel subprocesses…"
+    // line when no bazel is running.
+    //
+    // Recheck after one tick before exiting: a bazel child can be spawned but
+    // not yet registered (there's a synchronous gap between `cmd.spawn()` and
+    // `live::register()` in `Build::spawn`). A signal landing in that window
+    // would see an empty registry; the tick lets the registration complete so
+    // we don't orphan a just-spawned client on CI cancellation. The 150ms is
+    // imperceptible at an interactive prompt.
+    if bazel_live::live_pids().is_empty() {
+        tokio::time::sleep(SIGINT_TICK).await;
+        if bazel_live::live_pids().is_empty() {
+            std::process::exit(exit_code);
+        }
+    }
+
     eprintln!("aspect-cli: received {signal_name}, cancelling bazel subprocesses…");
 
     // Two graceful SIGINTs; the CI/off-CI split below decides what follows.
