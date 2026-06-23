@@ -2777,16 +2777,17 @@ def test_repro_commands_lib(tc: int) -> int:
     tc = test_case(tc, lines[0] == "aspect lint \\", "build_aspect_command: no-targets flag-overflow wraps head (got %r)" % lines[0])
     tc = test_case(tc, not lines[-1].endswith("\\"), "build_aspect_command: no-targets last flag has no trailing ` \\` (got %r)" % lines[-1])
 
-    # task_cli_path: bare task (no group).
-    bare = struct(group = [], name = "lint")
+    # task_cli_path uses the task kind (the runnable command), not the
+    # per-invocation --task:name.
+    bare = struct(group = [], kind = "lint")
     tc = test_case(tc, task_cli_path(bare) == "lint", "task_cli_path: bare task")
 
     # task_cli_path: single group level.
-    nested = struct(group = ["utils"], name = "format")
+    nested = struct(group = ["utils"], kind = "format")
     tc = test_case(tc, task_cli_path(nested) == "utils format", "task_cli_path: single group")
 
     # task_cli_path: multi-level group nesting.
-    deep = struct(group = ["utils", "frontend"], name = "format")
+    deep = struct(group = ["utils", "frontend"], kind = "format")
     tc = test_case(tc, task_cli_path(deep) == "utils frontend format", "task_cli_path: nested groups")
 
     # dedup_and_attribute: same (kind, command, description) → one row,

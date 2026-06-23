@@ -161,12 +161,14 @@ def _shell_quote(s):
     return "'" + s.replace("'", "'\\''") + "'"
 
 def task_cli_path(task):
-    """Return the task's CLI invocation path — `<group...> <name>`.
+    """Return the task's CLI invocation path — `<group...> <kind>`.
 
-    Pass `ctx.task` (or anything with `.group: list[str]` and `.name:
+    Uses the task *kind* (the command name), not the per-invocation
+    `--task:name`, so the rendered `aspect <path>` is actually runnable.
+    Pass `ctx.task` (or anything with `.group: list[str]` and `.kind:
     str`) and feed the result to `build_aspect_command`.
     """
-    return " ".join(list(task.group) + [task.name])
+    return " ".join(list(task.group) + [task.kind])
 
 def explicit_flags(ctx, pairs):
     """Convert `[(arg_name, flag_name), ...]` into the subset of
