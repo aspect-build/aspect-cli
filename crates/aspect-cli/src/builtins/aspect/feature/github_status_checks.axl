@@ -499,6 +499,7 @@ GithubStatusChecks = feature(
         ),
         "metadata_keys": args.string_list(
             default = [],
+            long = "github-status-checks:metadata-key",
             description = "Additional BES build_metadata keys to surface in the check run summary, " +
                           "beyond the built-in set (BRANCH, COMMIT_SHA, TAG, COMMIT_MESSAGE). Use " +
                           "[\"*\"] to show ALL metadata keys from the BES stream. Users inject " +

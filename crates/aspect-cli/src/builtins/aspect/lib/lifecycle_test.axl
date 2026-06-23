@@ -1,0 +1,73 @@
+"""Tests for `lib/lifecycle.axl`'s Buildkite phase-section expansion.
+
+Covers `bk_phase_section_marker` + `publish_expanded_phases` — the logic
+deciding whether a phase's BK section header is emitted expanded (`+++`) or
+collapsed (`---`):
+
+  - `Phase.expanded = True` → `+++`.
+  - A `--buildkite-annotations:expand-phase` entry (published via
+    `publish_expanded_phases`) → `+++`, matched on the phase id.
+  - Neither → `---`.
+  - The two are a union: config can force a phase open, but cannot force one
+    that the producer marked `expanded = True` back to collapsed.
+
+These exercise real `ctx.std.env` (no env-mocking layer in AXL), so the
+subtest snapshots and restores the channel env var it touches.
+
+Run with:
+  aspect dev test-lifecycle
+"""
+
+load("./lifecycle.axl", "Phase", "bk_phase_section_marker", "publish_expanded_phases")
+
+_ENV_KEY = "ASPECT_BK_EXPANDED_PHASES"
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _test_marker(ctx):
+    prior = ctx.std.env.var(_ENV_KEY)
+    ctx.std.env.remove_var(_ENV_KEY)
+
+    build = Phase(name = "build")
+    test = Phase(name = "test")
+    build_expanded = Phase(name = "build", expanded = True)
+
+    # No config, no Phase.expanded → collapsed.
+    _eq("default collapsed", bk_phase_section_marker(ctx, build), "---")
+
+    # Phase.expanded wins on its own.
+    _eq("Phase.expanded → expanded", bk_phase_section_marker(ctx, build_expanded), "+++")
+
+    # Config names the phase → expanded; an unnamed phase stays collapsed.
+    publish_expanded_phases(ctx, ["build"])
+    _eq("config match → expanded", bk_phase_section_marker(ctx, build), "+++")
+    _eq("config miss → collapsed", bk_phase_section_marker(ctx, test), "---")
+
+    # Whitespace around configured ids is tolerated.
+    publish_expanded_phases(ctx, [" build ", "test"])
+    _eq("config whitespace tolerated", bk_phase_section_marker(ctx, build), "+++")
+    _eq("config second entry matches", bk_phase_section_marker(ctx, test), "+++")
+
+    # Empty list clears the channel → back to Phase.expanded only.
+    publish_expanded_phases(ctx, [])
+    _eq("cleared config → collapsed", bk_phase_section_marker(ctx, build), "---")
+    _eq("cleared config, Phase.expanded still wins", bk_phase_section_marker(ctx, build_expanded), "+++")
+
+    if prior == None:
+        ctx.std.env.remove_var(_ENV_KEY)
+    else:
+        ctx.std.env.set_var(_ENV_KEY, prior)
+
+def _test_impl(ctx):
+    _test_marker(ctx)
+    print("lifecycle.axl: OK (1 section)")
+    return 0
+
+lifecycle_tests = task(
+    kind = "test-lifecycle",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

@@ -440,6 +440,7 @@ GitlabCommitStatuses = feature(
         ),
         "metadata_keys": args.string_list(
             default = [],
+            long = "gitlab-commit-statuses:metadata-key",
             description = "Additional BES build_metadata keys to surface in the render-context (used " +
                           "by sibling features like GitlabStatusComments). Use [\"*\"] for all keys.",
         ),

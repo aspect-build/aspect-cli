@@ -99,7 +99,22 @@ Phase = record(
 
     # Display-label override; wins over titlecase(name) when non-empty.
     display_name = field(str, default = ""),
+
+    # When True, this phase's Buildkite section header is emitted expanded
+    # (`+++`) instead of collapsed (`---`), so the section is open by default
+    # in the BK log. The `--buildkite-annotations:expand-phase` user flag can
+    # force a phase expanded regardless of this field — see
+    # `_emit_bk_phase_section`. No effect off Buildkite.
+    expanded = field(bool, default = False),
 )
+
+# Env channel by which the `BuildkiteAnnotations` feature publishes its
+# user-configured expanded phases (the repeatable
+# `--buildkite-annotations:expand-phase` flag) to `_emit_bk_phase_section`,
+# which runs later in the task `_impl`. Comma-separated phase ids. The feature
+# evaluates before `_impl`, so an env var is the process-wide channel (same
+# pattern as `ci.axl`'s job-URL cache). Empty / unset → no overrides.
+_BK_EXPANDED_PHASES_ENV = "ASPECT_BK_EXPANDED_PHASES"
 
 # A single repro / fix command suggestion. Stored in
 # `data["repro_commands"]` / `data["fix_commands"]` and surfaced to every
@@ -433,11 +448,46 @@ def _strip_ansi(text):
 # emoji still get a section marker.
 _ASPECT_BK_SHORTCODE = ":aspect:"
 
+def publish_expanded_phases(ctx, phase_names: list) -> None:
+    """Record `phase_names` as the phases whose Buildkite section headers should
+    be emitted expanded (`+++`), read later by `_emit_bk_phase_section` during the
+    task `_impl`. Called by the `BuildkiteAnnotations` feature from its config.
+
+    Stored in `_BK_EXPANDED_PHASES_ENV` (comma-separated) since the feature runs
+    before `_impl` and an env var is the process-wide channel between the two.
+    The list is written verbatim each call (an empty list clears the channel)
+    so the value always reflects the current run's resolved config."""
+    ctx.std.env.set_var(_BK_EXPANDED_PHASES_ENV, ",".join([n for n in phase_names if n]))
+
+def bk_phase_section_marker(ctx, phase) -> str:
+    """Resolve `phase`'s Buildkite section-header marker: `"+++"` (expanded) or
+    `"---"` (collapsed).
+
+    Expanded when the producer set `Phase.expanded = True`, OR when the phase id
+    (`phase.name`) was passed to `--buildkite-annotations:expand-phase` (published
+    via `_BK_EXPANDED_PHASES_ENV`). The flag can thus force a phase open even when
+    the task left `Phase.expanded = False`; neither can force a phase *collapsed*
+    against the other (it's a union)."""
+    if phase.expanded:
+        return "+++"
+    configured = ctx.std.env.var(_BK_EXPANDED_PHASES_ENV) or ""
+    if configured:
+        for name in configured.split(","):
+            if name.strip() == phase.name:
+                return "+++"
+    return "---"
+
 def _emit_bk_phase_section(ctx, phase, progress_styles = None):
-    """Emit a per-phase BK section header `--- <emoji> <Phase> · <cli>`
+    """Emit a per-phase BK section header `<marker> <emoji> <Phase> · <cli>`
     (1:1 AXL-phase → BK collapsible section). The `<cli>` mirrors the live
     `→` print (`progress_styles.stream`, falling back to `.body`).
-    `phase.emoji` → `:aspect:`, `phase.display_name` → titlecase(name)."""
+    `phase.emoji` → `:aspect:`, `phase.display_name` → titlecase(name).
+
+    `<marker>` is `+++` (expanded) when `bk_phase_section_marker` resolves it for
+    this phase — either `Phase.expanded` or a `--buildkite-annotations:expand-phase`
+    entry — else `---` (collapsed). Note BK only auto-expands the last collapsed
+    `---` group when no group is explicitly expanded, so a `+++` here suppresses
+    that auto-expansion of a later section (e.g. the closing bookend)."""
     if not ctx.std.env.var("BUILDKITE"):
         return
     label = phase.display_name or _titlecase_phase(phase.name)
@@ -449,7 +499,8 @@ def _emit_bk_phase_section(ctx, phase, progress_styles = None):
         cli = progress_styles.stream or progress_styles.body
         if cli:
             suffix = " · " + cli
-    print("--- " + (phase.emoji or _ASPECT_BK_SHORTCODE) + " " + label + suffix)
+    marker = bk_phase_section_marker(ctx, phase)
+    print(marker + " " + (phase.emoji or _ASPECT_BK_SHORTCODE) + " " + label + suffix)
 
 def _titlecase_phase(phase):
     """Title-case a phase id (underscores → spaces, first char upper).
