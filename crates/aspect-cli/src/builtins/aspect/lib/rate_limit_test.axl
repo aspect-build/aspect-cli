@@ -337,7 +337,7 @@ def _test_throttle_factor_burn_rate_inference(ctx):
     _eq("burn rate — low burn under safe-burn yields 1.0", factor_low, 1.0)
 
 def _test_threshold_warn_fires_once(ctx):
-    """Crossing the LOW threshold (≤ 20% of limit) bumps the bucket's
+    """Crossing the LOW threshold (≤ 15% of limit) bumps the bucket's
     `threshold_warned_tier` to 1; further LOW-zone observations don't
     re-fire. Crossing IMPORTANT (≤ 5%) bumps to 2. The WARN line
     itself is a CLI-log side effect; the tier int is the dedup state."""

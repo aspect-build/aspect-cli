@@ -13,9 +13,10 @@ response.headers)` after every response (parsing `X-RateLimit-*`). State
 keeps, per bucket: an `observations` ring buffer of
 `(epoch_s, remaining, limit, reset_epoch)`, ingested `sibling_observations`,
 the `watermark` (lowest remaining, drives `% used`), last-seen `limits`,
-`last_effective_factor`, and `threshold_warned_tier`. Each bucket
-self-announces on its first observation; until then the cold-start factor
-governs.
+`last_effective_factor`, and `threshold_warned_tier`. On its first
+observation a bucket announces its quota as an `ASPECT_DEBUG`-gated
+`trace.log` line (low-quota runs surface via the threshold WARNs instead);
+until then the cold-start factor governs.
 
 # Swarm-shared observations
 
@@ -63,10 +64,11 @@ re-baselines instead of computing across the boundary.
 
 # Threshold warnings
 
-`_check_thresholds` emits one CLI `WARN` per bucket at ≤ 20% and again at
-≤ 5%, deduped via `threshold_warned_tier`. Operator-log only (nothing a
-reviewer can act on mid-run); the `📊 GitHub API quota …` footer is the
-reviewer surface.
+`_check_thresholds` emits one CLI `WARN` per bucket at ≤ 15% and again at
+≤ 5%, deduped via `threshold_warned_tier` — the sole user-facing low-quota
+signal (the per-bucket quota announcement is DEBUG-only). Operator-log only
+(nothing a reviewer can act on mid-run); the `📊 GitHub API quota …` footer
+is the reviewer surface.
 
 # Safety
 
@@ -75,7 +77,7 @@ best-effort: malformed headers skipped, absent trait / empty buffer → 1.0.
 No `fail()` calls.
 """
 
-load("./environment.axl", "detect_ci", "info", "warn")
+load("./environment.axl", "detect_ci", "warn")
 
 # ── Public bucket keys ───────────────────────────────────────────────
 
@@ -84,7 +86,7 @@ BUCKET_ENV = "env"
 
 _VALID_BUCKETS = [BUCKET_APP, BUCKET_ENV]
 
-# Label per bucket id, shown in INFO/WARN lines. Co-located with
+# Label per bucket id, shown in the quota WARN / debug lines. Co-located with
 # `_VALID_BUCKETS` so a new bucket lands its label in the same edit.
 _BUCKET_LABEL = {
     BUCKET_APP: "Aspect Workflows GitHub App",
@@ -105,20 +107,24 @@ _RESET_JUMP_S = 600
 # emit is effectively never.
 _TERMINAL_ONLY_FACTOR = 999999.0
 
-# Fractions at which the LOW / IMPORTANT WARN lines fire (user-visible
-# boundaries; the ladder below is finer-grained).
-_THRESHOLD_LOW_FRACTION = 0.20
+# Remaining fractions at which the LOW / IMPORTANT WARN lines fire — the sole
+# user-facing low-quota signal (the per-bucket quota announcement is
+# DEBUG-only). These fire on a tier crossing AND on a first observation that's
+# already below the tier, so a run that starts low is still surfaced.
+_THRESHOLD_LOW_FRACTION = 0.15
 _THRESHOLD_IMPORTANT_FRACTION = 0.05
 
 # Throttle-factor table for the `< 2 observations` case; first row the
 # bucket fraction exceeds wins. Pinned for swarms: 20-30% → 5×, 10-20% →
 # 20×, 5-10% → 50× — at that pressure only spawn-label flips and terminal
 # verdicts matter (both bypass the throttle), so 50× stretches every
-# heartbeat past any realistic task lifetime.
+# heartbeat past any realistic task lifetime. The 5× boundary is the
+# cadence knob and stays at 20%, decoupled from the LOW *WARN* fraction.
+_THROTTLE_LADDER_HIGH_FRACTION = 0.20
 _THRESHOLD_LADDER = [
     (0.50, 1.0),
     (0.30, 2.0),
-    (_THRESHOLD_LOW_FRACTION, 5.0),
+    (_THROTTLE_LADDER_HIGH_FRACTION, 5.0),
     (0.10, 20.0),
     (_THRESHOLD_IMPORTANT_FRACTION, 50.0),
     (0.00, _TERMINAL_ONLY_FACTOR),
@@ -360,7 +366,7 @@ _THRESHOLD_TIER_LOW = 1
 _THRESHOLD_TIER_IMPORTANT = 2
 
 def _check_thresholds_in_state(ctx, state, bucket, remaining, limit, reset_epoch):
-    """Emit a CLI `WARN` the first time a bucket crosses LOW (≤ 20%) and
+    """Emit a CLI `WARN` the first time a bucket crosses LOW (≤ 15%) and
     again at IMPORTANT (≤ 5%), deduped via `threshold_warned_tier`. A first
     observation already below 5% fires both tiers at once. Mutates `state`;
     caller saves. Logs only (nothing a reviewer can act on mid-run); the
@@ -684,9 +690,10 @@ def effective_throttle_factor(ctx, bucket, elapsed_s, min_interval_s):
     one multiplier ≥ 1.0. Callers multiply it into their heartbeat interval.
 
     Side-effects: records the factor on `last_effective_factor[bucket]` (for
-    `usage_footer`); emits a one-shot `INFO: GitHub API throttle …` on a step
-    crossing (step-bucketed so the linear ramp doesn't spam per heartbeat).
-    See the docstring "Cold-start window" for the swarm-defensive floor."""
+    `usage_footer`); emits a one-shot `ASPECT_DEBUG`-gated `trace.log` throttle
+    line on a step crossing (step-bucketed so the linear ramp doesn't spam per
+    heartbeat). See the docstring "Cold-start window" for the swarm-defensive
+    floor."""
     state = _load(ctx)
     factor = max(
         _throttle_factor_from_state(state, bucket, None, ctx.std),
@@ -722,7 +729,7 @@ def _factor_step(factor):
 
 def _record_effective_factor_in_state(ctx, state, bucket, factor, elapsed_s):
     """Update `last_effective_factor[bucket]` (for `usage_footer`) and emit
-    the transition INFO on a step change. Mutates `state`; caller saves."""
+    the debug transition line on a step change. Mutates `state`; caller saves."""
     fac_dict = dict(state["last_effective_factor"])
     fac_dict[bucket] = factor
     state["last_effective_factor"] = fac_dict
@@ -737,8 +744,10 @@ def _record_effective_factor_in_state(ctx, state, bucket, factor, elapsed_s):
     _log_throttle_transition_from_state(ctx, state, bucket, factor, elapsed_s)
 
 def _log_throttle_transition_from_state(ctx, state, bucket, factor, elapsed_s):
-    """Emit `INFO: GitHub API throttle — <label>: factor=<F>× (quota=<U>% used,
-    elapsed=<T>)` on each step crossing."""
+    """Emit `GitHub API throttle — <label>: factor=<F>× (quota=<U>% used,
+    elapsed=<T>)` on each step crossing, as an `ASPECT_DEBUG`-gated `trace.log`
+    line — a throttle-factor change is internal cadence detail, not something a
+    reviewer acts on, so it stays out of the default user-facing log."""
     wm = state["watermark"] or {}
     lims = state["limits"] or {}
     cur = wm.get(bucket)
@@ -748,7 +757,7 @@ def _log_throttle_transition_from_state(ctx, state, bucket, factor, elapsed_s):
         quota_str = "quota=%d%% used" % used_pct
     else:
         quota_str = "quota=unknown"
-    info(ctx.std, "GitHub API throttle — %s: factor=%s (%s, elapsed=%s)" % (
+    trace.log("GitHub API throttle — %s: factor=%s (%s, elapsed=%s)" % (
         _bucket_label(bucket),
         _format_factor(factor),
         quota_str,
@@ -763,12 +772,17 @@ def _format_factor(factor):
     return "%d×" % int(factor + 0.5)
 
 def _log_rate_limit_quota(ctx, bucket, remaining, limit, reset_epoch):
-    """Emit `INFO: GitHub API quota — <label>: …` on the first observation per
-    bucket. Carries the bucket label (unlike `usage_footer`) so operators tell
-    App and env apart. `used` clamped ≥ 0 against a stale `remaining` > `limit`."""
+    """Report `GitHub API quota — <label>: …` on the first observation per
+    bucket as an `ASPECT_DEBUG`-gated `trace.log` line. Carries the bucket
+    label (unlike `usage_footer`) so operators tell App and env apart. `used`
+    clamped ≥ 0 against a stale `remaining` > `limit`.
+
+    Never WARNs: a first observation that's already low is surfaced by the
+    LOW/IMPORTANT threshold WARNs (which fire on the first observation too), so
+    this announcement stays out of the default log to avoid a duplicate line."""
     used = max(0, limit - remaining)
     used_pct = int(used * 100.0 / float(limit) + 0.5)
-    info(ctx.std, "GitHub API quota — %s: %s/%s (%d%% used%s)" % (
+    trace.log("GitHub API quota — %s: %s/%s (%d%% used%s)" % (
         _bucket_label(bucket),
         _format_int(used),
         _format_int(limit),
