@@ -116,29 +116,37 @@ def _prompt_project(ctx):
     """Prompt for the project name on a TTY, returning the entered string.
 
     The entered name doubles as the output directory: a bare name scaffolds into
-    a new subdirectory of that name; "." targets the current directory. Fails on
-    empty input rather than silently defaulting to the current directory.
+    a new subdirectory of that name; "." targets the current directory. Returns
+    None on empty input rather than silently defaulting to the current directory
+    — _resolve_target turns that into a clean message and a non-zero exit.
     """
     ctx.std.io.stdout.write("Project name (or '.' for the current directory): ")
     ctx.std.io.stdout.flush()
     raw = str(ctx.std.io.stdin.read(256)).strip()
-    if not raw:
-        fail("no project name entered")
-    return raw
+    return raw or None
 
 def _resolve_target(ctx):
     """Resolve the output directory from the positional argument.
 
     The positional doubles as the project name and the output directory. When
     omitted, prompt on a TTY (entering "." targets the current directory); off a
-    TTY the argument is required, so fail with a hint rather than silently
-    scaffolding into the current directory.
+    TTY the argument is required, so the command never silently scaffolds into
+    the current directory.
+
+    Returns the target directory, or None when the user supplied no name (empty
+    prompt input, or no argument off a TTY). A clean message is printed here and
+    the caller exits non-zero — a bad invocation shouldn't surface as an AXL
+    traceback.
     """
     if ctx.args.directory:
         return ctx.args.directory[0]
     if ctx.std.io.stdout.is_tty:
-        return _prompt_project(ctx)
-    fail("no project name given; pass a name (e.g. 'aspect init my-project') or '.' to scaffold into the current directory")
+        target = _prompt_project(ctx)
+        if not target:
+            print("No project name entered.")
+        return target
+    print("No project name given; pass a name (e.g. 'aspect init my-project') or '.' to scaffold into the current directory.")
+    return None
 
 def _latest_release_ref(ctx, repo):
     """Return the tag of `repo`'s latest GitHub release.
@@ -182,6 +190,8 @@ def _fetch_template(ctx, repo, ref):
 
 def _impl(ctx):
     out_dir = _resolve_target(ctx)
+    if not out_dir:
+        return 1
 
     if _is_bazel_workspace(ctx, out_dir):
         ctx.std.io.stdout.write(
