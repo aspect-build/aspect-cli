@@ -165,7 +165,8 @@ TipAction = enum("accept", "reject", "replace")
 # + content + policy so the hook can scope and rewrite. Fires on every
 # `add_tip`, including accumulate re-emits.
 TipInfo = record(
-    # Task identity for hooks that scope by task.
+    # Task identity for hooks that scope by task. `task_name` carries the
+    # task *kind* (the command); `task_path` is the joined group + kind.
     task_path = field(str),
     task_name = field(str),
     task_group = field(list[str]),

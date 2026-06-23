@@ -480,8 +480,8 @@ def version_gte(a, b):
     return version_tuple(a) >= version_tuple(b)
 
 # Runner version at which the Web UI adopts the split
-# DISPLAY_NAME/NAME/KIND/ID schema. Below it we emit the legacy two-field
-# form (NAME=display, ID=UUID).
+# KIND/FRIENDLY_KIND/NAME/FRIENDLY_NAME/ID schema. Below it we emit the
+# legacy two-field form (NAME=friendly_kind, ID=UUID).
 _TASK_METADATA_NEW_SCHEMA_MIN_VERSION = "5.18.0"
 
 def get_task_metadata_flags(ctx):

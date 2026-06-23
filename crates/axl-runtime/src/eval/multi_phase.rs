@@ -363,11 +363,11 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             EvalError::UnknownError(anyhow!("task index {} out of range", task_index))
         })?;
         let (verb_seq, reset) = running_verb_color();
-        // Show the task name only when it differs from the kind — i.e. when a
-        // `--task-name` (or the deprecated `--task-key`) was set or auto-named,
-        // so repeated kinds in one pipeline read distinctly. A bare local run
-        // (name == kind) shows just the kind.
-        let name_suffix = if task_name != task.kind() {
+        // On CI, append the per-invocation name so repeated kinds in one
+        // pipeline read distinctly and the header matches the check name. A
+        // bare local run shows just the kind — the auto `<kind>-<suffix>` name
+        // would be noise there.
+        let name_suffix = if on_recognized_ci() && task_name != task.kind() {
             format!(" [{}]", task_name)
         } else {
             String::new()
@@ -578,13 +578,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
 
         let failed = matches!(exit_code, Some(code) if code != 0);
         let breakdown = render_phase_breakdown(&phases, timing, failed);
-        // `--task:timing-summary=none` drops the timing entirely (no "in 46.8s"
-        // and no breakdown); every other level keeps the total.
-        let timing_segment = if timing == TimingMode::None {
-            String::new()
-        } else {
-            format!(" in {}", format_duration(elapsed))
-        };
+        let timing_segment = render_timing_segment(timing, elapsed);
         let conclusion_suffix = if conclusion.is_empty() {
             String::new()
         } else {
@@ -819,6 +813,19 @@ impl std::str::FromStr for TimingMode {
     }
 }
 
+/// Render the `" in <duration>"` segment of the task completion line.
+///
+/// Empty for `TimingMode::None` (no timing summary at all); every other
+/// level keeps the total. The leading space lets it concatenate after the
+/// `task` token.
+fn render_timing_segment(mode: TimingMode, elapsed: std::time::Duration) -> String {
+    if mode == TimingMode::None {
+        String::new()
+    } else {
+        format!(" in {}", format_duration(elapsed))
+    }
+}
+
 /// Render the phase breakdown that trails the runtime's "→ Completed"
 /// / "→ Failed" line.
 ///
@@ -974,7 +981,9 @@ fn display_width(s: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{TimingMode, display_width, render_phase_breakdown};
+    use super::{
+        TimingMode, display_width, format_duration, render_phase_breakdown, render_timing_segment,
+    };
     use crate::engine::task_info::PhaseRecord;
     use std::time::Duration;
 
@@ -987,6 +996,51 @@ mod tests {
             emoji: emoji.to_string(),
             display_name: String::new(),
         }
+    }
+
+    #[test]
+    fn timing_mode_from_str_parses_all_levels() {
+        assert_eq!("none".parse::<TimingMode>(), Ok(TimingMode::None));
+        assert_eq!("total".parse::<TimingMode>(), Ok(TimingMode::Total));
+        assert_eq!("short".parse::<TimingMode>(), Ok(TimingMode::Short));
+        assert_eq!("detailed".parse::<TimingMode>(), Ok(TimingMode::Detailed));
+    }
+
+    #[test]
+    fn timing_mode_from_str_rejects_invalid() {
+        let err = "verbose".parse::<TimingMode>().unwrap_err();
+        assert!(
+            err.contains("none, total, short, detailed"),
+            "error should list valid levels, got: {err}"
+        );
+    }
+
+    #[test]
+    fn timing_segment_suppressed_for_none() {
+        let d = Duration::from_secs(5);
+        assert_eq!(render_timing_segment(TimingMode::None, d), "");
+        for mode in [TimingMode::Total, TimingMode::Short, TimingMode::Detailed] {
+            assert_eq!(
+                render_timing_segment(mode, d),
+                format!(" in {}", format_duration(d)),
+                "{mode:?} should keep the total"
+            );
+        }
+    }
+
+    #[test]
+    fn phase_breakdown_empty_for_none_and_total() {
+        let phases = [phase("setup", "🔧", 2), phase("build", "🔨", 3)];
+        assert_eq!(render_phase_breakdown(&phases, TimingMode::None, false), "");
+        assert_eq!(render_phase_breakdown(&phases, TimingMode::Total, false), "");
+    }
+
+    #[test]
+    fn phase_breakdown_short_is_inline() {
+        let phases = [phase("setup", "🔧", 2), phase("build", "🔨", 3)];
+        let out = render_phase_breakdown(&phases, TimingMode::Short, false);
+        assert!(out.starts_with(" — "), "Short form is inline; got: {out}");
+        assert!(out.contains(" · "), "Short form joins phases with ·; got: {out}");
     }
 
     #[test]

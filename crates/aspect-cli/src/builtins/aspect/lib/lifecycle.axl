@@ -141,8 +141,9 @@ ReproFixAction = enum("accept", "reject", "replace")
 # returns a `ReproFixSuggestion` verdict. Typed fields cover most
 # decisions; `extras` / `data` are escape hatches.
 ReproFixInfo = record(
-    # Task identity. `task_path` is the joined `<group...> <name>`
-    # ("aspect lint"); `task_name` / `task_group` are the parts.
+    # Task identity. `task_path` is the joined `<group...> <kind>`
+    # ("aspect lint"); `task_name` carries the task *kind* (the command)
+    # and `task_group` the group segments.
     task_path = field(str),
     task_name = field(str),
     task_group = field(list[str]),

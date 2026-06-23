@@ -129,7 +129,7 @@ _TERMINAL_SETTLE_DELAY_MS = 5000
 #   "running" — in flight, no warning
 #   "passed"  — terminal clean
 #   "aborted" — Bazel aborted (timeout, OOM, ctrl-c)
-# Emoji-only, prefixed to the task name (`✅ build (build-gha)`),
+# Emoji-only, prefixed to the task row (`✅ build-gha [build]`),
 # effectively replacing the per-kind icon; the rollup line spells out
 # counts in words for screen readers.
 _DEFAULT_STATUS_BADGES = {

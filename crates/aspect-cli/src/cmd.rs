@@ -1244,6 +1244,70 @@ mod tests {
         assert_eq!(dispatch.task_name, "legacy");
     }
 
+    #[test]
+    fn dispatch_task_name_wins_over_deprecated_task_key() {
+        let t = stub_task("greet", &[], SmallMap::new());
+        let cmd = Cmd {
+            tasks: vec![&t],
+            features: vec![],
+            aspect_root: Path::new("/repo"),
+            modules: &[],
+        };
+        let root = cmd.build("0.0.0").expect("build ok");
+        let matches = root
+            .try_get_matches_from(["aspect", "greet", "--task:name=winner", "--task-key=loser"])
+            .expect("parse ok");
+        let dispatch = cmd.dispatch(matches).expect("dispatch ok");
+        assert_eq!(dispatch.task_name, "winner");
+    }
+
+    #[test]
+    fn dispatch_extracts_friendly_name() {
+        let t = stub_task("greet", &[], SmallMap::new());
+        let cmd = Cmd {
+            tasks: vec![&t],
+            features: vec![],
+            aspect_root: Path::new("/repo"),
+            modules: &[],
+        };
+        let root = cmd.build("0.0.0").expect("build ok");
+        let with = root
+            .clone()
+            .try_get_matches_from(["aspect", "greet", "--task:friendly-name=My Build"])
+            .expect("parse ok");
+        assert_eq!(
+            cmd.dispatch(with).expect("dispatch ok").task_friendly_name,
+            Some("My Build".to_owned())
+        );
+        let without = root
+            .try_get_matches_from(["aspect", "greet"])
+            .expect("parse ok");
+        assert!(
+            cmd.dispatch(without)
+                .expect("dispatch ok")
+                .task_friendly_name
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn dispatch_extracts_task_uuid() {
+        let t = stub_task("greet", &[], SmallMap::new());
+        let cmd = Cmd {
+            tasks: vec![&t],
+            features: vec![],
+            aspect_root: Path::new("/repo"),
+            modules: &[],
+        };
+        let uuid = "12345678-1234-1234-1234-123456789abc";
+        let root = cmd.build("0.0.0").expect("build ok");
+        let matches = root
+            .try_get_matches_from(["aspect", "greet", "--task:id", uuid])
+            .expect("parse ok");
+        let dispatch = cmd.dispatch(matches).expect("dispatch ok");
+        assert_eq!(dispatch.task_uuid.as_deref(), Some(uuid));
+    }
+
     // ── Override merge (no heap path: no overrides applied) ────────────────
 
     #[test]

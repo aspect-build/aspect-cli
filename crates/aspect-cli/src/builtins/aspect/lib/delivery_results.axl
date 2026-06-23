@@ -84,7 +84,7 @@ def init_data():
         "ci_host": "",  # deliveryd CI label: "bk" | "gh" | "circle" | …
         "build_url": "",  # CI job URL the delivery was performed from
         "commit_sha": "",  # commit being delivered
-        "prefix": "",  # task.key — delivery namespace
+        "prefix": "",  # task name — delivery namespace
         "deliveries": [],  # see add_result() for the per-entry schema.
 
         # Run-shape flags surfaced in the check-run / annotation summary so a
