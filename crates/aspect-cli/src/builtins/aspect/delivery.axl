@@ -139,7 +139,7 @@ load("@aspect//lib/health_check.axl", "HealthCheckTrait")
 load("@aspect//lib/lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "setup_phase", "task_update")
 load("@aspect//lib/remote_executor.axl", "start_dummy_executor", "stop_dummy_executor")
 load("@aspect//lib/repro_commands.axl", "build_aspect_command", "print_repro_and_fix", "repro_prefix", "task_cli_path")
-load("@aspect//lib/runnable.axl", "LOCAL_SPAWN_BASE_FLAGS", "LOCAL_SPAWN_FLAGS", "apparent_label", "runnable")
+load("@aspect//lib/runnable.axl", "LOCAL_SPAWN_BASE_FLAGS", "LOCAL_SPAWN_FLAGS", "apparent_label", "download_outputs_sufficient", "effective_download_outputs", "runnable")
 load("@aspect//lib/text.axl", "pluralize")
 load("@aspect//lib/tips.axl", "tips")
 load("@bazel//proto/remote_logging.axl", "remote_logging")
@@ -349,6 +349,20 @@ def _surface_phase_stderr(ctx, phase, log_path):
         return
     ctx.std.io.stderr.write(ctx.std.fs.read_to_string(log_path))
     artifacts.upload_file(ctx, "delivery_phase{}_log".format(phase), "phase{}-stderr.log".format(phase), log_path)
+
+def _base_flag_satisfied(rc, flag: str) -> bool:
+    """Whether the active run command already satisfies a `LOCAL_SPAWN_BASE_FLAGS`
+    default, so phase 3 need not inject it.
+
+    `--remote_download_outputs=toplevel` carries the only non-trivial policy:
+    phase 3 must materialize the top-level binary on disk, so the default is
+    satisfied only when the rc resolves to a sufficient mode (`toplevel`/`all`)
+    — across every flag form, including the `--remote_download_*` aliases. A
+    user `=minimal` is not sufficient, so the `=toplevel` default still applies.
+    Any other base flag is satisfied once the rc sets it at all."""
+    if flag.startswith("--remote_download_outputs="):
+        return download_outputs_sufficient(effective_download_outputs(rc.expand(command = "build")))
+    return rc.flag_value(flag.split("=", 1)[0], command = "build") != None
 
 def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, user_remote_executor_uri, ansi, data):
     """Run phase 1 (build) + phase 2 (digest extraction); return
@@ -1208,15 +1222,14 @@ def _delivery_impl(ctx):
         # defined" (the task's own expanded_flags already went through this).
         release_flags = expand_config_flags(ctx, bazel_trait, ctx.args.release_bazel_flags)
 
-        # LOCAL_SPAWN_BASE_FLAGS are delivery defaults the rc/user override (a
-        # repo's `build --remote_download_outputs=all` must win over the default
-        # `toplevel`). Per-call extras win over the rc, so apply each base flag
-        # only when the active run command doesn't already set it — that's a
-        # default the rc overrides, not an override of the rc.
+        # LOCAL_SPAWN_BASE_FLAGS are delivery defaults the active run command
+        # may override (a repo's `--remote_download_outputs=all` must win over
+        # the default `toplevel`); inject only those the rc doesn't already
+        # satisfy. See `_base_flag_satisfied` for the download-outputs policy.
         base_defaults = [
             f
             for f in LOCAL_SPAWN_BASE_FLAGS
-            if rc.flag_value(f.split("=", 1)[0], command = "build") == None
+            if not _base_flag_satisfied(rc, f)
         ]
 
         # Phase 3 flag order (last-wins): active run command, then the per-call

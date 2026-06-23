@@ -1,7 +1,8 @@
 """Unit tests for lib/runnable.axl: apparent_label normalization, BES matching,
-entrypoint selection (passes 1–3), and runfiles directory detection."""
+entrypoint selection (passes 1–3), runfiles directory detection, `--run-in`
+cwd resolution, and `--remote_download_outputs` resolution/sufficiency."""
 
-load("./runnable.axl", "apparent_label", "resolve_run_in", "runnable")
+load("./runnable.axl", "apparent_label", "download_outputs_sufficient", "effective_download_outputs", "resolve_run_in", "runnable")
 
 def _eq(label, got, want):
     if got != want:
@@ -575,6 +576,79 @@ def _test_run_in_relative_dotdot(_ctx):
         "/here/../sub",
     )
 
+# download_outputs_sufficient — which user `--remote_download_outputs` values
+# already put the top-level binary on disk (so the spawn/delivery `=toplevel`
+# default need not override them).
+
+def _test_download_outputs_toplevel_sufficient(_ctx):
+    _eq("toplevel is sufficient", download_outputs_sufficient("toplevel"), True)
+
+def _test_download_outputs_all_sufficient(_ctx):
+    _eq("all is sufficient", download_outputs_sufficient("all"), True)
+
+def _test_download_outputs_minimal_insufficient(_ctx):
+    """The regression: `=minimal` leaves the binary remote, so it must be
+    upgraded to the `=toplevel` default, not respected."""
+    _eq("minimal is insufficient", download_outputs_sufficient("minimal"), False)
+
+def _test_download_outputs_unset_insufficient(_ctx):
+    _eq("unset (None) is insufficient", download_outputs_sufficient(None), False)
+
+# effective_download_outputs — resolve the `--remote_download_outputs` mode
+# from an ordered flag list across every form Bazel accepts (canonical `=`,
+# two-token, and `--remote_download_*` aliases), honoring last-wins.
+
+def _test_effective_download_outputs_unset(_ctx):
+    _eq("no download flag → None", effective_download_outputs(["--jobs=4", "--stamp"]), None)
+
+def _test_effective_download_outputs_canonical_eq(_ctx):
+    _eq("--remote_download_outputs=minimal", effective_download_outputs(["--remote_download_outputs=minimal"]), "minimal")
+
+def _test_effective_download_outputs_two_token(_ctx):
+    _eq(
+        "two-token --remote_download_outputs all",
+        effective_download_outputs(["--remote_download_outputs", "all"]),
+        "all",
+    )
+
+def _test_effective_download_outputs_bare_flag_no_value(_ctx):
+    """A bare `--remote_download_outputs` followed by another flag has no value."""
+    _eq(
+        "bare flag then another flag → None",
+        effective_download_outputs(["--remote_download_outputs", "--jobs=4"]),
+        None,
+    )
+
+def _test_effective_download_outputs_alias_all(_ctx):
+    _eq("--remote_download_all alias", effective_download_outputs(["--remote_download_all"]), "all")
+
+def _test_effective_download_outputs_alias_minimal(_ctx):
+    _eq("--remote_download_minimal alias", effective_download_outputs(["--remote_download_minimal"]), "minimal")
+
+def _test_effective_download_outputs_alias_beats_earlier_canonical(_ctx):
+    """The Codex regression: a later `--remote_download_all` alias must beat an
+    earlier canonical `--remote_download_outputs=minimal`."""
+    _eq(
+        "alias wins last over canonical",
+        effective_download_outputs(["--remote_download_outputs=minimal", "--remote_download_all"]),
+        "all",
+    )
+
+def _test_effective_download_outputs_canonical_beats_earlier_alias(_ctx):
+    _eq(
+        "canonical wins last over alias",
+        effective_download_outputs(["--remote_download_all", "--remote_download_outputs=minimal"]),
+        "minimal",
+    )
+
+def _test_effective_download_outputs_version_tuple(_ctx):
+    """`expand` may yield `(flag, version_condition)` tuples — read the flag."""
+    _eq(
+        "tuple-form flag",
+        effective_download_outputs([("--remote_download_outputs=toplevel", ">=8")]),
+        "toplevel",
+    )
+
 _UNIT_TESTS = [
     _test_local_label_with_colon,
     _test_local_label_without_colon,
@@ -626,6 +700,19 @@ _UNIT_TESTS = [
     _test_run_in_absolute_path,
     _test_run_in_relative_dot,
     _test_run_in_relative_dotdot,
+    _test_download_outputs_toplevel_sufficient,
+    _test_download_outputs_all_sufficient,
+    _test_download_outputs_minimal_insufficient,
+    _test_download_outputs_unset_insufficient,
+    _test_effective_download_outputs_unset,
+    _test_effective_download_outputs_canonical_eq,
+    _test_effective_download_outputs_two_token,
+    _test_effective_download_outputs_bare_flag_no_value,
+    _test_effective_download_outputs_alias_all,
+    _test_effective_download_outputs_alias_minimal,
+    _test_effective_download_outputs_alias_beats_earlier_canonical,
+    _test_effective_download_outputs_canonical_beats_earlier_alias,
+    _test_effective_download_outputs_version_tuple,
     _test_runfiles_workspace_dir_uses_bes_workspace_name,
     _test_runfiles_workspace_dir_non_default_workspace,
     _test_runfiles_workspace_dir_default_when_no_workspace_config,
