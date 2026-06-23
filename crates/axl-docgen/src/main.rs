@@ -1,3 +1,4 @@
+mod api_surface;
 mod highlight;
 mod renderer;
 mod traversal;
@@ -23,6 +24,12 @@ struct Args {
     /// Defaults to empty, producing absolute paths like `/types/str`.
     #[arg(long, default_value = "")]
     base_url: String,
+
+    /// Print the flat, signature-only public API surface to stdout and exit,
+    /// instead of generating documentation pages. Consumed by the
+    /// `axl-api-watch` CI job to snapshot the surface and alert on drift.
+    #[arg(long)]
+    api_surface: bool,
 }
 
 #[tokio::main]
@@ -31,6 +38,15 @@ async fn main() -> Result<()> {
     let base_url = args.base_url.trim_end_matches('/').to_string();
 
     let documentation = docs::documentation()?;
+
+    if args.api_surface {
+        print!(
+            "{}",
+            api_surface::render_api_surface(&documentation.types, &documentation.builtins)
+        );
+        return Ok(());
+    }
+
     let result = traversal::traverse_all(&documentation.types, &documentation.builtins);
 
     let linker = type_linker::TypeLinker::new(&result.registry, &base_url);

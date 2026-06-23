@@ -1,0 +1,85 @@
+name: axl-api-watch
+# Watches the public AXL API surface for drift. Non-blocking: it never fails a
+# build. When the surface changes (a builtin removed/renamed, a parameter made
+# required, a return type changed — the class of break that took down the `rbe`
+# extension), it pings #aspect-cli and refreshes the committed snapshot so the
+# golden file doubles as a dated changelog of the API contract.
+on:
+  push:
+    branches: [main]
+    # The surface is contributed by many crates — not just axl-runtime: e.g.
+    # `bazel.RunCommand` (crates/bazelrc) and `std.io.Readable` (crates/axl-types)
+    # appear in the snapshot. A narrow path filter would miss a signature change
+    # in one of those, so watch every crate plus the renderer/workflow itself.
+    paths:
+      - "crates/**"
+      - ".github/workflows/axl-api-watch.yml"
+  workflow_dispatch: {}
+permissions:
+  contents: write
+concurrency:
+  group: axl-api-watch
+  cancel-in-progress: false
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        run: rustup show
+      - name: Dump current API surface
+        run: cargo run -q -p axl-docgen -- --api-surface > /tmp/surface.new
+      - name: Diff against committed snapshot
+        id: diff
+        run: |
+          golden="crates/axl-docgen/api_surface.golden"
+          if [ -f "$golden" ] && diff -u "$golden" /tmp/surface.new > /tmp/surface.diff; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            cp /tmp/surface.new "$golden"
+            # Cap the diff so the Slack payload stays well under limits.
+            head -c 2500 /tmp/surface.diff > /tmp/surface.slack || true
+          fi
+      - name: Notify #aspect-cli
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_API_SURFACE_WEBHOOK_URL }}
+        run: |
+          if [ -z "${SLACK_WEBHOOK_URL:-}" ]; then
+            echo "::warning::SLACK_API_SURFACE_WEBHOOK_URL not set; skipping Slack notification"
+            exit 0
+          fi
+          DIFF_BODY="$(cat /tmp/surface.slack 2>/dev/null || echo '(diff unavailable)')"
+          jq -n \
+            --arg diff "$DIFF_BODY" \
+            --arg sha "$GITHUB_SHA" \
+            --arg repo "$GITHUB_REPOSITORY" \
+            --arg run "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            '{
+              text: ":rotating_light: axl public API surface changed",
+              blocks: [
+                { type: "section", text: { type: "mrkdwn", text:
+                  ("*axl public API surface changed* in `\($repo)`\n"
+                   + "Commit <https://github.com/\($repo)/commit/\($sha)|\($sha[0:7])> · <\($run)|run log>\n"
+                   + "Downstream extensions (e.g. `rbe`) may break — review the diff.") } },
+                { type: "section", text: { type: "mrkdwn", text: ("```\($diff)```") } }
+              ]
+            }' \
+          | curl -sS -X POST -H 'Content-type: application/json' --data @- "$SLACK_WEBHOOK_URL"
+      # Pushes made with the automatic GITHUB_TOKEN do NOT trigger new workflow
+      # runs (GitHub's built-in anti-recursion guard), so this commit can't loop
+      # the watcher. `[skip ci]` is belt-and-suspenders. FOOTGUN: if this push is
+      # ever switched to a PAT or deploy key, the GITHUB_TOKEN guard no longer
+      # applies — the loop is then prevented only by `[skip ci]`, which also
+      # suppresses every other workflow on the commit.
+      - name: Commit refreshed snapshot
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          git config user.name "axl-api-watch[bot]"
+          git config user.email "axl-api-watch@users.noreply.github.com"
+          git add crates/axl-docgen/api_surface.golden
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(axl): refresh API surface snapshot [skip ci]"
+            git push
+          fi

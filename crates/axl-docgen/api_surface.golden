@@ -1,0 +1,590 @@
+@bazel//grpc.Code: struct(ABORTED = int, ALREADY_EXISTS = int, CANCELLED = int, DATA_LOSS = int, DEADLINE_EXCEEDED = int, FAILED_PRECONDITION = int, INTERNAL = int, INVALID_ARGUMENT = int, NOT_FOUND = int, OK = int, OUT_OF_RANGE = int, PERMISSION_DENIED = int, RESOURCE_EXHAUSTED = int, UNAUTHENTICATED = int, UNAVAILABLE = int, UNIMPLEMENTED = int, UNKNOWN = int)
+@bazel//grpc.Server(*, endpoint: str) -> grpc.Server
+@bazel//grpc.Status(*, code: int, message: str) -> grpc.Status
+@bazel//grpc.grpc: struct(Code = struct(ABORTED = int, ALREADY_EXISTS = int, CANCELLED = int, DATA_LOSS = int, DEADLINE_EXCEEDED = int, FAILED_PRECONDITION = int, INTERNAL = int, INVALID_ARGUMENT = int, NOT_FOUND = int, OK = int, OUT_OF_RANGE = int, PERMISSION_DENIED = int, RESOURCE_EXHAUSTED = int, UNAUTHENTICATED = int, UNAVAILABLE = int, UNIMPLEMENTED = int, UNKNOWN = int), Server = function, Status = function)
+@std//base64.base64: struct(decode = function, decode_url = function, encode = function, encode_url = function)
+@std//hash.blake2b() -> typing.Any
+@std//hash.blake2s() -> typing.Any
+@std//hash.md5() -> typing.Any
+@std//hash.sha1() -> typing.Any
+@std//hash.sha224() -> typing.Any
+@std//hash.sha256() -> typing.Any
+@std//hash.sha384() -> typing.Any
+@std//hash.sha512() -> typing.Any
+@std//time.monotonic() -> float
+@std//time.monotonic_ns() -> int
+@std//time.sleep(ms: int) -> None
+@std//time.sleep_iter(ms: int) -> typing.Iterable[int]
+@std//time.time: struct(monotonic = function, monotonic_ns = function, sleep = function, sleep_iter = function)
+type types.Arg
+type types.Arguments
+type types.ConfigContext
+type types.ExporterSpec
+type types.Exporters
+type types.FeatureContext
+type types.Future
+type types.GrpcRpc
+type types.GrpcServer
+type types.GrpcServerHandle
+type types.GrpcService
+type types.GrpcStatus
+type types.GrpcStream
+type types.Hash
+type types.Http
+type types.HttpResponse
+type types.Task
+type types.TaskConclusion
+type types.TaskContext
+type types.TaskInfo
+type types.Telemetry
+type types.Template
+type types.args.Args
+type types.aspect.Aspect
+type types.aspect.auth.Auth
+type types.aspect.auth.AuthCredentials
+type types.aspect.auth.AuthSession
+type types.bazel.Bazel
+type types.bazel.HealthCheckResult
+type types.bazel.RunCommand
+type types.bazel.SandboxRecoveryResult
+type types.bazel.build.Build
+type types.bazel.build.BuildEventIter
+type types.bazel.build.BuildEventSink
+type types.bazel.build.BuildStatus
+type types.bazel.build.Cancellation
+type types.bazel.build.ExecutionLogIterator
+type types.bazel.build.WorkspaceEventIterator
+type types.bazel.build_events.grpc
+type types.bazel.build_events.iterator
+type types.bazel.execution_log.ExecLogSink
+type types.bazel.execution_log.file
+type types.bazel.query.Query
+type types.bool
+type types.bytes
+type types.dict
+type types.float
+type types.int
+type types.list
+type types.namespace
+type types.range
+type types.set
+type types.std.Env
+type types.std.FileSystem
+type types.std.Net
+type types.std.Std
+type types.std.io.Readable
+type types.std.io.Stdio
+type types.std.io.Writable
+type types.std.process.Child
+type types.std.process.Command
+type types.std.process.ExitStatus
+type types.std.process.Output
+type types.std.process.Process
+type types.str
+type types.struct
+type types.tuple
+type types.type
+type types.wasm.Callable
+type types.wasm.Exports
+type types.wasm.Instance
+type types.wasm.Memory
+type types.wasm.Wasm
+types.Arguments.is_explicit(name: str, /) -> bool
+types.ConfigContext.features: typing.Any
+types.ConfigContext.http() -> Http
+types.ConfigContext.std: std.Std
+types.ConfigContext.tasks: typing.Any
+types.ConfigContext.telemetry: typing.Any
+types.ConfigContext.template: Template
+types.ConfigContext.traits: typing.Any
+types.ConfigContext.wasm: wasm.Wasm
+types.Exporters.add(*, url: None | str = None, file: None | str = None, protocol: None | str = None, format: None | str = None, headers: dict[str, str] = ..., signals: list[str] = [], resource_attributes: dict[str, str] = ...) -> None
+types.False: bool
+types.FeatureContext.args: typing.Any
+types.FeatureContext.aspect: aspect.Aspect
+types.FeatureContext.http() -> Http
+types.FeatureContext.std: std.Std
+types.FeatureContext.telemetry: typing.Any
+types.FeatureContext.traits: typing.Any
+types.Future.block() -> typing.Any
+types.Future.map_err(callable: typing.Any) -> Future
+types.Future.map_ok(callable: typing.Any) -> Future
+types.Future.map_ok_or_else(*, map_ok: typing.Any, map_err: typing.Any) -> Future
+types.GrpcRpc.abort(code: typing.Any = ..., message: str = ..., /, *, status: typing.Any = ...) -> None
+types.GrpcRpc.cancelled() -> bool
+types.GrpcRpc.metadata() -> typing.Any
+types.GrpcServer.add(service: typing.Any) -> None
+types.GrpcServer.serve() -> grpc.ServerHandle
+types.GrpcServerHandle.drain_and_quit(*, timeout: typing.Any = ...) -> None
+types.GrpcStream.cancelled() -> bool
+types.GrpcStream.complete(*, status: typing.Any = ...) -> None
+types.GrpcStream.push(msg: typing.Any) -> None
+types.Hash.digest() -> typing.Any
+types.Hash.hexdigest() -> str
+types.Hash.update(data: typing.Any, /) -> None
+types.Http.delete(*, url: str, headers: dict[str, str] = ..., unix_socket: None | str = None) -> Future
+types.Http.download(*, url: str, output: str, mode: int, headers: dict[str, str] = ..., integrity: str = ..., sha256: str = ...) -> Future
+types.Http.get(*, url: str, headers: dict[str, str] = ..., unix_socket: None | str = None) -> Future
+types.Http.patch(*, url: str, headers: dict[str, str] = ..., data: typing.Any = None, unix_socket: None | str = None) -> Future
+types.Http.post(*, url: str, headers: dict[str, str] = ..., data: typing.Any = None, unix_socket: None | str = None) -> Future
+types.Http.put(*, url: str, headers: dict[str, str] = ..., data: typing.Any = None, unix_socket: None | str = None) -> Future
+types.HttpResponse.body: str
+types.HttpResponse.headers: list[(str, str)]
+types.HttpResponse.status: int
+types.None: None
+types.Task.alias(*, defaults: dict[str, typing.Any] = ..., summary: str = ..., description: str = ..., friendly_kind: str = ..., group: list[str] = [], kind: str = ...) -> Task
+types.TaskConclusion.exit_code: int
+types.TaskConclusion.flagged: bool
+types.TaskConclusion.text: str
+types.TaskContext.args: Arguments
+types.TaskContext.aspect: aspect.Aspect
+types.TaskContext.bazel: bazel.Bazel
+types.TaskContext.defer(callable: typing.Any, /, *args: typing.Any, **kwargs: typing.Any) -> None
+types.TaskContext.http() -> Http
+types.TaskContext.std: std.Std
+types.TaskContext.task: TaskInfo
+types.TaskContext.template: Template
+types.TaskContext.traits: TraitMap
+types.TaskContext.wasm: wasm.Wasm
+types.TaskInfo.current_phase() -> typing.Any
+types.TaskInfo.elapsed_ms: int
+types.TaskInfo.friendly_kind: str
+types.TaskInfo.friendly_name: str
+types.TaskInfo.group: list[str]
+types.TaskInfo.id: str
+types.TaskInfo.kind: str
+types.TaskInfo.name: str
+types.TaskInfo.phase(name: str, /, description: str = ..., emoji: str = ..., display_name: str = ...) -> None
+types.TaskInfo.phases() -> typing.Any
+types.Telemetry.exporters: typing.Any
+types.Template.handlebars(template: str, /, *, data: dict[str, typing.Any] = ...) -> str
+types.Template.jinja2(template: str, /, *, data: dict[str, typing.Any] = ...) -> str
+types.Template.liquid(template: str, /, *, data: dict[str, typing.Any] = ...) -> str
+types.True: bool
+types.abs(x: float | int, /) -> float | int
+types.all(x: typing.Iterable, /) -> bool
+types.any(x: typing.Iterable, /) -> bool
+types.args.boolean(*, required: bool = False, default: bool = ..., short: None | str = None, long: None | str = None, description: None | str = None) -> args.Arg
+types.args.boolean_list(*, required: bool = False, default: None | list[bool] = None, short: None | str = None, long: None | str = None, description: None | str = None) -> args.Arg
+types.args.custom(typ: typing.Any, /, *, default: typing.Any = ..., description: None | str = None) -> args.Arg
+types.args.int(*, required: bool = False, default: int = ..., short: None | str = None, long: None | str = None, description: None | str = None) -> args.Arg
+types.args.int_list(*, required: bool = False, default: None | list[int] = None, short: None | str = None, long: None | str = None, description: None | str = None) -> args.Arg
+types.args.positional(*, minimum: int = 0, maximum: int = 1, default: None | list[str] = None, description: None | str = None) -> args.Arg
+types.args.string(*, required: bool = False, default: str = ..., short: None | str = None, long: None | str = None, values: None | list[str] = None, description: None | str = None) -> args.Arg
+types.args.string_list(*, required: bool = False, default: None | list[str] = None, short: None | str = None, long: None | str = None, description: None | str = None) -> args.Arg
+types.args.trailing_var_args(*, description: None | str = None) -> args.Arg
+types.args.uint(*, required: bool = False, default: int = ..., short: None | str = None, long: None | str = None, description: None | str = None) -> args.Arg
+types.args.uint_list(*, required: bool = False, default: None | list[int] = None, short: None | str = None, long: None | str = None, description: None | str = None) -> args.Arg
+types.aspect.Aspect.auth: aspect.Auth
+types.aspect.auth.Auth.api_url: str
+types.aspect.auth.Auth.credentials(*, profile: None | str = None) -> typing.Any
+types.aspect.auth.Auth.login(*, token: str = ..., api_token: str = ...) -> typing.Any
+types.aspect.auth.Auth.logout(*, profile: None | str = None) -> typing.Any
+types.aspect.auth.Auth.persist(creds: typing.Any, *, profile: None | str = None) -> typing.Any
+types.aspect.auth.AuthCredentials.access_token: str
+types.aspect.auth.AuthCredentials.email: str
+types.aspect.auth.AuthCredentials.name: str
+types.aspect.auth.AuthCredentials.tenant_id: str
+types.aspect.auth.AuthCredentials.token_status: str
+types.aspect.auth.AuthSession.url: str
+types.aspect.auth.AuthSession.wait() -> aspect.AuthCredentials
+types.attr(typ: typing.Any, /, *, default: typing.Any = ..., description: None | str = None) -> attr
+types.bazel.Bazel.active_rc() -> typing.Any
+types.bazel.Bazel.announce_rc(rc: bazel.RunCommand, /, *, command: str, ansi: bool = False, max_width: int = 120) -> str
+types.bazel.Bazel.build(*targets: str, build_events: bool | list[bazel.build.BuildEventIter | bazel.build.BuildEventSink] = ..., workspace_events: bool = False, execution_log: bool | list[bazel.execlog.ExecLogSink] = ..., flags: list[str | (str, str)] = [], rc: typing.Any = None, stdout: None | std.io.Writable = ..., stderr: None | std.io.Writable = ..., stdio: None | std.io.Stdio = None, current_dir: None | str = None, announce_version: bool = False, announce_command: bool = False) -> bazel.build.Build
+types.bazel.Bazel.cancel_invocation(*, force_kill_after_ms: int = 5000) -> bazel.build.Cancellation
+types.bazel.Bazel.health_check() -> bazel.HealthCheckResult
+types.bazel.Bazel.info() -> dict[str, str]
+types.bazel.Bazel.new_rc(*, startup_flags: list[str] = [], flags: list[tuple[str, ...]] = [], version: None | str = None) -> bazel.RunCommand
+types.bazel.Bazel.parse_rc(*, root: None | str = None, startup_flags: list[str] = [], flags: list[tuple[str, ...]] = [], skip_config_if_missing: list[str] = [], version: None | str = None) -> bazel.RunCommand
+types.bazel.Bazel.query(expr: str, /, *, rc: typing.Any = None, flags: list[str | (str, str)] = [], announce_version: bool = False, announce_command: bool = False) -> typing.Iterable[generated_file | package_group | rule | source_file]
+types.bazel.Bazel.recover_poisoned_sandbox() -> bazel.SandboxRecoveryResult
+types.bazel.Bazel.test(*targets: str, build_events: bool | list[bazel.build.BuildEventIter | bazel.build.BuildEventSink] = ..., workspace_events: bool = False, execution_log: bool | list[bazel.execlog.ExecLogSink] = ..., flags: list[str | (str, str)] = [], rc: typing.Any = None, stdout: None | std.io.Writable = ..., stderr: None | std.io.Writable = ..., stdio: None | std.io.Stdio = None, current_dir: None | str = None, announce_version: bool = False, announce_command: bool = False) -> bazel.build.Build
+types.bazel.Bazel.use_rc(rc: typing.Any, /) -> None
+types.bazel.HealthCheckResult.exit_code: None | int
+types.bazel.HealthCheckResult.message: None | str
+types.bazel.HealthCheckResult.outcome: str
+types.bazel.RunCommand.bool_flag(name: str, /, *, command: str, version: None | str = None) -> None | bool
+types.bazel.RunCommand.expand(*, command: str) -> list
+types.bazel.RunCommand.expand_all(*, command: str) -> (list, list)
+types.bazel.RunCommand.flag_value(name: str, /, *, command: str, version: None | str = None) -> None | str
+types.bazel.RunCommand.flag_values(name: str, /, *, command: str, version: None | str = None) -> list
+types.bazel.RunCommand.merge(other: bazel.RunCommand, /) -> bazel.RunCommand
+types.bazel.RunCommand.options_for(*, command: str) -> list
+types.bazel.RunCommand.sources() -> list
+types.bazel.RunCommand.startup_flags() -> list
+types.bazel.SandboxRecoveryResult.outcome: str
+types.bazel.SandboxRecoveryResult.remaining: list[str]
+types.bazel.SandboxRecoveryResult.removed: list[str]
+types.bazel.build.Build.execution_logs() -> typing.Iterable[exec_log_entry]
+types.bazel.build.Build.try_wait() -> None | bazel.build.BuildStatus
+types.bazel.build.Build.wait() -> bazel.build.BuildStatus
+types.bazel.build.Build.workspace_events() -> typing.Iterable[workspace_event]
+types.bazel.build.BuildEventIter.drain() -> None | bool
+types.bazel.build.BuildEventIter.try_pop() -> None | build_event
+types.bazel.build.BuildEventSink.wait() -> None | bool
+types.bazel.build.BuildStatus.code: None | int
+types.bazel.build.BuildStatus.success: bool
+types.bazel.build.Cancellation.busy: bool
+types.bazel.build.Cancellation.force() -> bool
+types.bazel.build.Cancellation.wait(*, poll_ms: int = 200, timeout_ms: int = 0) -> bool
+types.bazel.build.ExecutionLogIterator.done() -> bool
+types.bazel.build.ExecutionLogIterator.try_pop() -> None | exec_log_entry
+types.bazel.build.WorkspaceEventIterator.done() -> bool
+types.bazel.build.WorkspaceEventIterator.try_pop() -> None | workspace_event
+types.bazel.build.build_event.Aborted(**kwargs: typing.Any) -> aborted
+types.bazel.build.build_event.ActionExecuted(**kwargs: typing.Any) -> action_executed
+types.bazel.build.build_event.BuildEvent(**kwargs: typing.Any) -> build_event
+types.bazel.build.build_event.BuildEventId(**kwargs: typing.Any) -> build_event_id
+types.bazel.build.build_event.BuildFinished(**kwargs: typing.Any) -> build_finished
+types.bazel.build.build_event.BuildMetadata(**kwargs: typing.Any) -> build_metadata
+types.bazel.build.build_event.BuildMetrics(**kwargs: typing.Any) -> build_metrics
+types.bazel.build.build_event.BuildStarted(**kwargs: typing.Any) -> build_started
+types.bazel.build.build_event.BuildToolLogs(**kwargs: typing.Any) -> build_tool_logs
+types.bazel.build.build_event.Configuration(**kwargs: typing.Any) -> configuration
+types.bazel.build.build_event.ConvenienceSymlink(**kwargs: typing.Any) -> convenience_symlink
+types.bazel.build.build_event.ConvenienceSymlinksIdentified(**kwargs: typing.Any) -> convenience_symlinks_identified
+types.bazel.build.build_event.EnvironmentVariable(**kwargs: typing.Any) -> environment_variable
+types.bazel.build.build_event.ExecRequestConstructed(**kwargs: typing.Any) -> exec_request_constructed
+types.bazel.build.build_event.Fetch(**kwargs: typing.Any) -> fetch
+types.bazel.build.build_event.File(**kwargs: typing.Any) -> file
+types.bazel.build.build_event.NamedSetOfFiles(**kwargs: typing.Any) -> named_set_of_files
+types.bazel.build.build_event.OptionsParsed(**kwargs: typing.Any) -> options_parsed
+types.bazel.build.build_event.OutputGroup(**kwargs: typing.Any) -> output_group
+types.bazel.build.build_event.PatternExpanded(**kwargs: typing.Any) -> pattern_expanded
+types.bazel.build.build_event.Progress(**kwargs: typing.Any) -> progress
+types.bazel.build.build_event.TargetComplete(**kwargs: typing.Any) -> target_complete
+types.bazel.build.build_event.TargetConfigured(**kwargs: typing.Any) -> target_configured
+types.bazel.build.build_event.TargetSummary(**kwargs: typing.Any) -> target_summary
+types.bazel.build.build_event.TestProgress(**kwargs: typing.Any) -> test_progress
+types.bazel.build.build_event.TestResult(**kwargs: typing.Any) -> test_result
+types.bazel.build.build_event.TestSize: test_size_members
+types.bazel.build.build_event.TestStatus: test_status_members
+types.bazel.build.build_event.TestSummary(**kwargs: typing.Any) -> test_summary
+types.bazel.build.build_event.UnstructuredCommandLine(**kwargs: typing.Any) -> unstructured_command_line
+types.bazel.build.build_event.WorkspaceConfig(**kwargs: typing.Any) -> workspace_config
+types.bazel.build.build_event.WorkspaceStatus(**kwargs: typing.Any) -> workspace_status
+types.bazel.build.build_event.aborted.AbortReason: abort_reason_members
+types.bazel.build.build_event.build_event_id.ActionCompletedId(**kwargs: typing.Any) -> action_completed_id
+types.bazel.build.build_event.build_event_id.BuildFinishedId(**kwargs: typing.Any) -> build_finished_id
+types.bazel.build.build_event.build_event_id.BuildMetadataId(**kwargs: typing.Any) -> build_metadata_id
+types.bazel.build.build_event.build_event_id.BuildMetricsId(**kwargs: typing.Any) -> build_metrics_id
+types.bazel.build.build_event.build_event_id.BuildStartedId(**kwargs: typing.Any) -> build_started_id
+types.bazel.build.build_event.build_event_id.BuildToolLogsId(**kwargs: typing.Any) -> build_tool_logs_id
+types.bazel.build.build_event.build_event_id.ConfigurationId(**kwargs: typing.Any) -> configuration_id
+types.bazel.build.build_event.build_event_id.ConfiguredLabelId(**kwargs: typing.Any) -> configured_label_id
+types.bazel.build.build_event.build_event_id.ConvenienceSymlinksIdentifiedId(**kwargs: typing.Any) -> convenience_symlinks_identified_id
+types.bazel.build.build_event.build_event_id.ExecRequestId(**kwargs: typing.Any) -> exec_request_id
+types.bazel.build.build_event.build_event_id.FetchId(**kwargs: typing.Any) -> fetch_id
+types.bazel.build.build_event.build_event_id.NamedSetOfFilesId(**kwargs: typing.Any) -> named_set_of_files_id
+types.bazel.build.build_event.build_event_id.OptionsParsedId(**kwargs: typing.Any) -> options_parsed_id
+types.bazel.build.build_event.build_event_id.PatternExpandedId(**kwargs: typing.Any) -> pattern_expanded_id
+types.bazel.build.build_event.build_event_id.ProgressId(**kwargs: typing.Any) -> progress_id
+types.bazel.build.build_event.build_event_id.StructuredCommandLineId(**kwargs: typing.Any) -> structured_command_line_id
+types.bazel.build.build_event.build_event_id.TargetCompletedId(**kwargs: typing.Any) -> target_completed_id
+types.bazel.build.build_event.build_event_id.TargetConfiguredId(**kwargs: typing.Any) -> target_configured_id
+types.bazel.build.build_event.build_event_id.TargetSummaryId(**kwargs: typing.Any) -> target_summary_id
+types.bazel.build.build_event.build_event_id.TestProgressId(**kwargs: typing.Any) -> test_progress_id
+types.bazel.build.build_event.build_event_id.TestResultId(**kwargs: typing.Any) -> test_result_id
+types.bazel.build.build_event.build_event_id.TestSummaryId(**kwargs: typing.Any) -> test_summary_id
+types.bazel.build.build_event.build_event_id.UnconfiguredLabelId(**kwargs: typing.Any) -> unconfigured_label_id
+types.bazel.build.build_event.build_event_id.UnknownBuildEventId(**kwargs: typing.Any) -> unknown_build_event_id
+types.bazel.build.build_event.build_event_id.UnstructuredCommandLineId(**kwargs: typing.Any) -> unstructured_command_line_id
+types.bazel.build.build_event.build_event_id.WorkspaceConfigId(**kwargs: typing.Any) -> workspace_config_id
+types.bazel.build.build_event.build_event_id.WorkspaceStatusId(**kwargs: typing.Any) -> workspace_status_id
+types.bazel.build.build_event.build_finished.AnomalyReport(**kwargs: typing.Any) -> anomaly_report
+types.bazel.build.build_event.build_finished.ExitCode(**kwargs: typing.Any) -> exit_code
+types.bazel.build.build_event.build_metrics.ActionSummary(**kwargs: typing.Any) -> action_summary
+types.bazel.build.build_event.build_metrics.ArtifactMetrics(**kwargs: typing.Any) -> artifact_metrics
+types.bazel.build.build_event.build_metrics.BuildGraphMetrics(**kwargs: typing.Any) -> build_graph_metrics
+types.bazel.build.build_event.build_metrics.CumulativeMetrics(**kwargs: typing.Any) -> cumulative_metrics
+types.bazel.build.build_event.build_metrics.DynamicExecutionMetrics(**kwargs: typing.Any) -> dynamic_execution_metrics
+types.bazel.build.build_event.build_metrics.EvaluationStat(**kwargs: typing.Any) -> evaluation_stat
+types.bazel.build.build_event.build_metrics.MemoryMetrics(**kwargs: typing.Any) -> memory_metrics
+types.bazel.build.build_event.build_metrics.NetworkMetrics(**kwargs: typing.Any) -> network_metrics
+types.bazel.build.build_event.build_metrics.PackageMetrics(**kwargs: typing.Any) -> package_metrics
+types.bazel.build.build_event.build_metrics.TargetMetrics(**kwargs: typing.Any) -> target_metrics
+types.bazel.build.build_event.build_metrics.TimingMetrics(**kwargs: typing.Any) -> timing_metrics
+types.bazel.build.build_event.build_metrics.WorkerMetrics(**kwargs: typing.Any) -> worker_metrics
+types.bazel.build.build_event.build_metrics.WorkerPoolMetrics(**kwargs: typing.Any) -> worker_pool_metrics
+types.bazel.build.build_event.build_metrics.action_summary.ActionData(**kwargs: typing.Any) -> action_data
+types.bazel.build.build_event.build_metrics.action_summary.RunnerCount(**kwargs: typing.Any) -> runner_count
+types.bazel.build.build_event.build_metrics.artifact_metrics.FilesMetric(**kwargs: typing.Any) -> files_metric
+types.bazel.build.build_event.build_metrics.build_graph_metrics.AspectCount(**kwargs: typing.Any) -> aspect_count
+types.bazel.build.build_event.build_metrics.build_graph_metrics.RuleClassCount(**kwargs: typing.Any) -> rule_class_count
+types.bazel.build.build_event.build_metrics.dynamic_execution_metrics.RaceStatistics(**kwargs: typing.Any) -> race_statistics
+types.bazel.build.build_event.build_metrics.memory_metrics.GarbageMetrics(**kwargs: typing.Any) -> garbage_metrics
+types.bazel.build.build_event.build_metrics.network_metrics.SystemNetworkStats(**kwargs: typing.Any) -> system_network_stats
+types.bazel.build.build_event.build_metrics.worker_metrics.WorkerStats(**kwargs: typing.Any) -> worker_stats
+types.bazel.build.build_event.build_metrics.worker_metrics.WorkerStatus: worker_status_members
+types.bazel.build.build_event.build_metrics.worker_pool_metrics.WorkerPoolStats(**kwargs: typing.Any) -> worker_pool_stats
+types.bazel.build.build_event.convenience_symlink.Action: action_members
+types.bazel.build.build_event.pattern_expanded.TestSuiteExpansion(**kwargs: typing.Any) -> test_suite_expansion
+types.bazel.build.build_event.test_result.ExecutionInfo(**kwargs: typing.Any) -> execution_info
+types.bazel.build.build_event.test_result.execution_info.ResourceUsage(**kwargs: typing.Any) -> resource_usage
+types.bazel.build.build_event.test_result.execution_info.TimingBreakdown(**kwargs: typing.Any) -> timing_breakdown
+types.bazel.build.build_event.workspace_status.Item(**kwargs: typing.Any) -> item
+types.bazel.build.execution_log.Digest(**kwargs: typing.Any) -> digest
+types.bazel.build.execution_log.EnvironmentVariable(**kwargs: typing.Any) -> environment_variable
+types.bazel.build.execution_log.ExecLogEntry(**kwargs: typing.Any) -> exec_log_entry
+types.bazel.build.execution_log.File(**kwargs: typing.Any) -> file
+types.bazel.build.execution_log.Platform(**kwargs: typing.Any) -> platform
+types.bazel.build.execution_log.SpawnExec(**kwargs: typing.Any) -> spawn_exec
+types.bazel.build.execution_log.SpawnMetrics(**kwargs: typing.Any) -> spawn_metrics
+types.bazel.build.execution_log.exec_log_entry.Directory(**kwargs: typing.Any) -> directory
+types.bazel.build.execution_log.exec_log_entry.File(**kwargs: typing.Any) -> file
+types.bazel.build.execution_log.exec_log_entry.InputSet(**kwargs: typing.Any) -> input_set
+types.bazel.build.execution_log.exec_log_entry.Invocation(**kwargs: typing.Any) -> invocation
+types.bazel.build.execution_log.exec_log_entry.Output(**kwargs: typing.Any) -> output
+types.bazel.build.execution_log.exec_log_entry.RunfilesTree(**kwargs: typing.Any) -> runfiles_tree
+types.bazel.build.execution_log.exec_log_entry.Spawn(**kwargs: typing.Any) -> spawn
+types.bazel.build.execution_log.exec_log_entry.SymlinkAction(**kwargs: typing.Any) -> symlink_action
+types.bazel.build.execution_log.exec_log_entry.SymlinkEntrySet(**kwargs: typing.Any) -> symlink_entry_set
+types.bazel.build.execution_log.exec_log_entry.UnresolvedSymlink(**kwargs: typing.Any) -> unresolved_symlink
+types.bazel.build.execution_log.platform.Property(**kwargs: typing.Any) -> property
+types.bazel.build.workspace_event.DeleteEvent(**kwargs: typing.Any) -> delete_event
+types.bazel.build.workspace_event.DownloadAndExtractEvent(**kwargs: typing.Any) -> download_and_extract_event
+types.bazel.build.workspace_event.DownloadEvent(**kwargs: typing.Any) -> download_event
+types.bazel.build.workspace_event.ExecuteEvent(**kwargs: typing.Any) -> execute_event
+types.bazel.build.workspace_event.ExtractEvent(**kwargs: typing.Any) -> extract_event
+types.bazel.build.workspace_event.FileEvent(**kwargs: typing.Any) -> file_event
+types.bazel.build.workspace_event.OsEvent(**kwargs: typing.Any) -> os_event
+types.bazel.build.workspace_event.PatchEvent(**kwargs: typing.Any) -> patch_event
+types.bazel.build.workspace_event.ReadEvent(**kwargs: typing.Any) -> read_event
+types.bazel.build.workspace_event.RenameEvent(**kwargs: typing.Any) -> rename_event
+types.bazel.build.workspace_event.SymlinkEvent(**kwargs: typing.Any) -> symlink_event
+types.bazel.build.workspace_event.TemplateEvent(**kwargs: typing.Any) -> template_event
+types.bazel.build.workspace_event.WhichEvent(**kwargs: typing.Any) -> which_event
+types.bazel.build.workspace_event.WorkspaceEvent(**kwargs: typing.Any) -> workspace_event
+types.bazel.build_events.file(*, path: str) -> bazel.build.BuildEventSink
+types.bazel.build_events.grpc.wait() -> None | bool
+types.bazel.build_events.iterator.drain() -> None | bool
+types.bazel.build_events.iterator.try_pop() -> None | build_event
+types.bazel.execution_log.compact_file(*, path: str) -> bazel.execlog.ExecLogSink
+types.bazel.query.AllowedRuleClassInfo(**kwargs: typing.Any) -> allowed_rule_class_info
+types.bazel.query.Attribute(**kwargs: typing.Any) -> attribute
+types.bazel.query.AttributeDefinition(**kwargs: typing.Any) -> attribute_definition
+types.bazel.query.AttributeValue(**kwargs: typing.Any) -> attribute_value
+types.bazel.query.BuildLanguage(**kwargs: typing.Any) -> build_language
+types.bazel.query.ConfiguredRuleInput(**kwargs: typing.Any) -> configured_rule_input
+types.bazel.query.EnvironmentGroup(**kwargs: typing.Any) -> environment_group
+types.bazel.query.FilesetEntry(**kwargs: typing.Any) -> fileset_entry
+types.bazel.query.GeneratedFile(**kwargs: typing.Any) -> generated_file
+types.bazel.query.LabelDictUnaryEntry(**kwargs: typing.Any) -> label_dict_unary_entry
+types.bazel.query.LabelKeyedStringDictEntry(**kwargs: typing.Any) -> label_keyed_string_dict_entry
+types.bazel.query.LabelListDictEntry(**kwargs: typing.Any) -> label_list_dict_entry
+types.bazel.query.License(**kwargs: typing.Any) -> license
+types.bazel.query.PackageGroup(**kwargs: typing.Any) -> package_group
+types.bazel.query.QueryResult(**kwargs: typing.Any) -> query_result
+types.bazel.query.Rule(**kwargs: typing.Any) -> rule
+types.bazel.query.RuleDefinition(**kwargs: typing.Any) -> rule_definition
+types.bazel.query.RuleSummary(**kwargs: typing.Any) -> rule_summary
+types.bazel.query.SourceFile(**kwargs: typing.Any) -> source_file
+types.bazel.query.StringDictEntry(**kwargs: typing.Any) -> string_dict_entry
+types.bazel.query.StringListDictEntry(**kwargs: typing.Any) -> string_list_dict_entry
+types.bazel.query.Target(**kwargs: typing.Any) -> target
+types.bazel.query.allowed_rule_class_info.AllowedRuleClasses: allowed_rule_classes_members
+types.bazel.query.attribute.Discriminator: discriminator_members
+types.bazel.query.attribute.Selector(**kwargs: typing.Any) -> selector
+types.bazel.query.attribute.SelectorEntry(**kwargs: typing.Any) -> selector_entry
+types.bazel.query.attribute.SelectorList(**kwargs: typing.Any) -> selector_list
+types.bazel.query.attribute.Tristate: tristate_members
+types.bazel.query.attribute_value.DictEntry(**kwargs: typing.Any) -> dict_entry
+types.bazel.query.fileset_entry.SymlinkBehavior: symlink_behavior_members
+types.bazel.query.target.Discriminator: discriminator_members
+types.breakpoint() -> None
+types.bytes.elems() -> typing.Iterable[bytes]
+types.call_stack(*, strip_frames: int = 0) -> str
+types.call_stack_frame(n: int, /) -> None | StackFrame
+types.chr(i: int, /) -> str
+types.debug(val: typing.Any, /) -> str
+types.dict.clear() -> None
+types.dict.get(key: typing.Any, default: typing.Any = ..., /) -> typing.Any
+types.dict.items() -> list[(typing.Any, typing.Any)]
+types.dict.keys() -> list
+types.dict.pop(key: typing.Any, default: typing.Any = ..., /) -> typing.Any
+types.dict.popitem() -> (typing.Any, typing.Any)
+types.dict.setdefault(key: typing.Any, default: typing.Any = ..., /) -> typing.Any
+types.dict.update(pairs: typing.Iterable[(typing.Any, typing.Any)] | dict = ..., /, **kwargs: typing.Any) -> None
+types.dict.values() -> list
+types.dir(x: typing.Any, /) -> list[str]
+types.enum(*args: str) -> typing.Any
+types.enumerate(it: typing.Iterable, /, start: int = 0) -> list[(int, typing.Any)]
+types.eval_type(ty: type, /) -> type
+types.fail(*args: typing.Any) -> typing.Never
+types.feature(*, implementation: typing.Callable[[FeatureContext], None], name: str = ..., display_name: str = ..., summary: str = ..., description: str = ..., enabled: bool = True, args: dict[str, typing.Any] = ...) -> feature
+types.field(typ: typing.Any, /, default: typing.Any = ...) -> field
+types.filter(func: None | typing.Callable, seq: typing.Iterable, /) -> list
+types.futures.iter(*futures: Future) -> FutureIterator
+types.getattr(a: typing.Any, attr: str, default: typing.Any = ..., /) -> typing.Any
+types.hasattr(a: typing.Any, attr: str, /) -> bool
+types.hash(a: str, /) -> int
+types.isinstance(value: typing.Any, ty: type, /) -> bool
+types.json.decode(x: str, /) -> typing.Any
+types.json.encode(x: typing.Any, /, *, indent: int = ...) -> str
+types.json.try_decode(x: str, default: typing.Any = ..., /) -> typing.Any
+types.len(a: typing.Any, /) -> int
+types.list.append(el: typing.Any, /) -> None
+types.list.clear() -> None
+types.list.extend(other: typing.Iterable, /) -> None
+types.list.index(needle: typing.Any, start: None | int = None, end: None | int = None, /) -> int
+types.list.insert(index: int, el: typing.Any, /) -> None
+types.list.pop(index: int = ..., /) -> typing.Any
+types.list.remove(needle: typing.Any, /) -> None
+types.map(func: typing.Callable, seq: typing.Iterable, /) -> list
+types.max(*args: typing.Any, key: typing.Any = ...) -> typing.Any
+types.min(*args: typing.Any, key: typing.Any = ...) -> typing.Any
+types.ord(a: typing.Any, /) -> int
+types.partial(func: typing.Any, /, *args: typing.Any, **kwargs: typing.Any) -> function
+types.pprint(*args: typing.Any) -> None
+types.prepr(a: typing.Any, /) -> str
+types.print(*args: typing.Any) -> None
+types.pstr(a: typing.Any, /) -> str
+types.record(**kwargs: typing.Any) -> function
+types.repr(a: typing.Any, /) -> str
+types.reversed(a: typing.Iterable, /) -> list
+types.set.add(value: typing.Any, /) -> None
+types.set.clear() -> None
+types.set.difference(other: typing.Iterable, /) -> set[typing.Any]
+types.set.discard(value: typing.Any, /) -> None
+types.set.intersection(other: typing.Iterable, /) -> set[typing.Any]
+types.set.issubset(other: typing.Iterable, /) -> bool
+types.set.issuperset(other: typing.Iterable, /) -> bool
+types.set.pop() -> typing.Any
+types.set.remove(value: typing.Any, /) -> None
+types.set.symmetric_difference(other: typing.Iterable, /) -> set[typing.Any]
+types.set.union(other: typing.Iterable, /) -> set[typing.Any]
+types.set.update(other: typing.Iterable, /) -> None
+types.sorted(x: typing.Iterable, /, *, key: typing.Any = ..., reverse: bool = False) -> list
+types.std.Env.arch() -> str
+types.std.Env.aspect_cli_version() -> str
+types.std.Env.aspect_root_dir() -> str
+types.std.Env.bazel_root_dir() -> str
+types.std.Env.current_dir() -> str
+types.std.Env.current_exe() -> str
+types.std.Env.git_root_dir() -> None | str
+types.std.Env.home_dir() -> None | str
+types.std.Env.os() -> str
+types.std.Env.remove_var(key: str, /) -> None
+types.std.Env.set_var(key: str, value: str, /) -> None
+types.std.Env.temp_dir() -> str
+types.std.Env.var(key: str, /) -> None | str
+types.std.Env.vars() -> list[tuple[str, ...]]
+types.std.FileSystem.copy(from: str, to: str, /) -> int
+types.std.FileSystem.create(path: str, /) -> std.io.Writable
+types.std.FileSystem.create_dir(path: str, /) -> None
+types.std.FileSystem.create_dir_all(path: str, /) -> None
+types.std.FileSystem.exists(path: str, /) -> bool
+types.std.FileSystem.hard_link(original: str, link: str, /) -> None
+types.std.FileSystem.is_dir(path: str, /) -> bool
+types.std.FileSystem.is_file(path: str, /) -> bool
+types.std.FileSystem.metadata(path: str, /) -> fs.Metadata
+types.std.FileSystem.mkdtemp(*, prefix: str = "", parent: str = "") -> str
+types.std.FileSystem.open(path: str, /) -> std.io.Readable
+types.std.FileSystem.read_dir(path: str, /) -> list[fs.DirEntry]
+types.std.FileSystem.read_link(path: str, /) -> str
+types.std.FileSystem.read_to_string(path: str, /) -> str
+types.std.FileSystem.remove_dir(path: str, /) -> None
+types.std.FileSystem.remove_dir_all(path: str, /) -> None
+types.std.FileSystem.remove_file(path: str, /) -> None
+types.std.FileSystem.rename(from: str, to: str, /) -> None
+types.std.FileSystem.set_permissions(path: str, mode: int, /) -> None
+types.std.FileSystem.symlink_metadata(path: str, /) -> fs.Metadata
+types.std.FileSystem.try_append(path: str, content: str, /) -> bool
+types.std.FileSystem.try_read_to_string(path: str, /) -> str
+types.std.FileSystem.try_read_to_string_capped(path: str, max_bytes: int, /) -> str
+types.std.FileSystem.write(path: str, content: str, /) -> None
+types.std.Net.try_unix_request(path: str, /, *, send: None | str = None) -> str
+types.std.Std.env: std.Env
+types.std.Std.fs: std.Filesystem
+types.std.Std.io: std.io.Stdio
+types.std.Std.net: std.Net
+types.std.Std.process: std.process.Process
+types.std.io.Readable.is_tty: bool
+types.std.io.Readable.read(size: int = ..., /) -> bytes
+types.std.io.Readable.read_to_string() -> str
+types.std.io.Stdio.stderr: std.io.Writable
+types.std.io.Stdio.stdin: std.io.Readable
+types.std.io.Stdio.stdout: std.io.Writable
+types.std.io.Writable.close() -> None
+types.std.io.Writable.flush() -> None
+types.std.io.Writable.is_tty: bool
+types.std.io.Writable.write(buf: typing.Any, /) -> int
+types.std.process.Child.id: int
+types.std.process.Child.kill() -> None
+types.std.process.Child.stderr() -> std.io.Readable
+types.std.process.Child.stdin() -> std.io.Writable
+types.std.process.Child.stdout() -> std.io.Readable
+types.std.process.Child.try_wait() -> typing.Any
+types.std.process.Child.wait() -> std.process.ExitStatus
+types.std.process.Child.wait_with_output() -> std.process.Output
+types.std.process.Command.arg(arg: str, /) -> typing.Any
+types.std.process.Command.args(args: list[str], /) -> typing.Any
+types.std.process.Command.current_dir(dir: str, /) -> typing.Any
+types.std.process.Command.env(key: str, value: None | str, /) -> typing.Any
+types.std.process.Command.spawn() -> std.process.Child
+types.std.process.Command.status() -> std.process.ExitStatus
+types.std.process.Command.stderr(io: str, /) -> typing.Any
+types.std.process.Command.stdin(io: str, /) -> typing.Any
+types.std.process.Command.stdout(io: str, /) -> typing.Any
+types.std.process.ExitStatus.code: None | int
+types.std.process.ExitStatus.signal: None | int
+types.std.process.ExitStatus.stopped_signal: None | int
+types.std.process.ExitStatus.success: bool
+types.std.process.Output.status: std.process.ExitStatus
+types.std.process.Output.stderr: str
+types.std.process.Output.stdout: str
+types.std.process.Process.command(program: str, /) -> std.process.Command
+types.std.process.Process.id() -> int
+types.str.capitalize() -> str
+types.str.codepoints() -> typing.Iterable[str]
+types.str.count(needle: str, start: None | int = None, end: None | int = None, /) -> int
+types.str.elems() -> typing.Iterable[str]
+types.str.endswith(suffix: str | tuple[str, ...], /) -> bool
+types.str.find(needle: str, start: None | int = None, end: None | int = None, /) -> int
+types.str.format(*args: typing.Any, **kwargs: typing.Any) -> str
+types.str.index(needle: str, start: None | int = None, end: None | int = None, /) -> int
+types.str.isalnum() -> bool
+types.str.isalpha() -> bool
+types.str.isdigit() -> bool
+types.str.islower() -> bool
+types.str.isspace() -> bool
+types.str.istitle() -> bool
+types.str.isupper() -> bool
+types.str.join(to_join: typing.Iterable[str], /) -> str
+types.str.lower() -> str
+types.str.lstrip(chars: str = ..., /) -> str
+types.str.partition(needle: str, /) -> (str, str, str)
+types.str.removeprefix(prefix: str, /) -> str
+types.str.removesuffix(suffix: str, /) -> str
+types.str.replace(old: str, new: str, count: int = ..., /) -> str
+types.str.rfind(needle: str, start: None | int = None, end: None | int = None, /) -> int
+types.str.rindex(needle: str, start: None | int = None, end: None | int = None, /) -> int
+types.str.rpartition(needle: str, /) -> (str, str, str)
+types.str.rsplit(sep: None | str = None, maxsplit: None | int = None, /) -> list[str]
+types.str.rstrip(chars: str = ..., /) -> str
+types.str.split(sep: None | str = None, maxsplit: None | int = None, /) -> list[str]
+types.str.splitlines(keepends: bool = False, /) -> list[str]
+types.str.startswith(prefix: str | tuple[str, ...], /) -> bool
+types.str.strip(chars: str = ..., /) -> str
+types.str.title() -> str
+types.str.upper() -> str
+types.task(*, implementation: typing.Callable[[TaskContext], None], args: dict[str, typing.Any] = ..., summary: str = ..., description: str = ..., friendly_kind: str = ..., group: list[str] = [], kind: str = ..., traits: list = []) -> Task
+types.trace: trace
+types.trait(**kwargs: typing.Any) -> trait
+types.typing.Any: typing.Any
+types.typing.Callable: typing.Callable
+types.typing.Iterable: typing.Iterable
+types.typing.Never: typing.Never
+types.wasm.Instance.exports: Exports
+types.wasm.Instance.get_memory(name: str, /) -> Memory
+types.wasm.Instance.list_exports() -> list[str]
+types.wasm.Instance.start() -> bool
+types.wasm.Memory.grow(by: int, /) -> int
+types.wasm.Memory.read(offset: int, length: int, /) -> bytes
+types.wasm.Memory.read_cstring(ptr: int, /, *, max_len: int = 4096) -> str
+types.wasm.Memory.read_string(ptr: int, len: int, /) -> str
+types.wasm.Memory.write(offset: int, buffer: typing.Any, /) -> None
+types.wasm.Memory.write_string(ptr: int, s: str, /) -> int
+types.wasm.Wasm.instantiate(path: str, /, *, args: list[str] = [], env: dict[str, str] = ..., preopened_dirs: dict[str, str] = ..., inherit_stdio: bool = True, imports: dict[str, dict[str, typing.Any]] = ...) -> Instance
+types.zip(*args: typing.Iterable) -> list
