@@ -114,7 +114,20 @@ jobs:
           command: ASPECT_DEBUG=1 aspect buildifier --task:name buildifier-cci-debug
       - run:
           name: Buildifier Task
-          command: aspect buildifier --task:name buildifier-cci
+          command: aspect buildifier --task-key buildifier-cci
+      - run:
+          name: Buildifier Task (scope=tracked, ASPECT_DEBUG=1)
+          command: ASPECT_DEBUG=1 aspect buildifier --scope=tracked --task-key buildifier-cci-tracked-debug
+      - run:
+          name: Buildifier Task (scope=tracked)
+          command: aspect buildifier --scope=tracked --task-key buildifier-cci-tracked
+      - run:
+          name: Buildifier Task (scope=all, ASPECT_DEBUG=1)
+          command: ASPECT_DEBUG=1 aspect buildifier --scope=all --task-key buildifier-cci-all-debug
+      - run:
+          name: Buildifier Task (scope=all)
+          command: aspect buildifier --scope=all --task-key buildifier-cci-all
+
   format-task:
     machine: true
     resource_class: aspect-build/aspect-default
@@ -132,7 +145,20 @@ jobs:
           command: ASPECT_DEBUG=1 aspect format --task:name format-cci-debug
       - run:
           name: Format Task
-          command: aspect format --task:name format-cci
+          command: aspect format --task-key format-cci
+      - run:
+          name: Format Task (scope=tracked, ASPECT_DEBUG=1)
+          command: ASPECT_DEBUG=1 aspect format --scope=tracked --task-key format-cci-tracked-debug
+      - run:
+          name: Format Task (scope=tracked)
+          command: aspect format --scope=tracked --task-key format-cci-tracked
+      - run:
+          name: Format Task (scope=all, ASPECT_DEBUG=1)
+          command: ASPECT_DEBUG=1 aspect format --scope=all --task-key format-cci-all-debug
+      - run:
+          name: Format Task (scope=all)
+          command: aspect format --scope=all --task-key format-cci-all
+
   gazelle-task:
     machine: true
     resource_class: aspect-build/aspect-default
