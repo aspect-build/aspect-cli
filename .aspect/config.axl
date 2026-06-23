@@ -85,7 +85,7 @@ def _buildifier_repro_fix(ctx: TaskContext, info: ReproFixInfo) -> ReproFixSugge
     """Rewrite buildifier `aspect ...` suggestions to `bazel ...`. The
     `tools/bazel` wrapper makes them interchangeable here; suggest the wrapper
     form so contributors use the checked-in Bazel. Buildifier-only."""
-    if info.task_name != "buildifier":
+    if info.task_kind != "buildifier":
         return REPRO_FIX_ACCEPT
     return repro_fix_replace(
         command = info.command.replace("aspect buildifier", "bazel buildifier", 1),

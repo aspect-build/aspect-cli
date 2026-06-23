@@ -232,9 +232,22 @@ mod tests {
     //! End-to-end checks that task(), feature(), and trait() naming validation
     //! fires through the AXL eval stack.
     use crate::axl_check;
+    use crate::engine::names::to_display_name;
 
     fn eval(code: &str) -> Result<(), String> {
         axl_check!(code).map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn to_display_name_title_cases_every_word() {
+        // The default for `ctx.task.friendly_kind` (Title-Cased kind).
+        assert_eq!(to_display_name("axl"), "Axl");
+        assert_eq!(to_display_name("bazel_query"), "Bazel Query");
+        assert_eq!(
+            to_display_name("github-status-checks"),
+            "Github Status Checks"
+        );
+        assert_eq!(to_display_name(""), "");
     }
 
     fn eval_err(code: &str) -> String {

@@ -1308,6 +1308,32 @@ mod tests {
         assert_eq!(dispatch.task_uuid.as_deref(), Some(uuid));
     }
 
+    #[test]
+    fn dispatch_parses_timing_summary() {
+        let t = stub_task("greet", &[], SmallMap::new());
+        let cmd = Cmd {
+            tasks: vec![&t],
+            features: vec![],
+            aspect_root: Path::new("/repo"),
+            modules: &[],
+        };
+        let root = cmd.build("0.0.0").expect("build ok");
+
+        let parse = |args: &[&str]| {
+            let matches = root.clone().try_get_matches_from(args);
+            matches.map(|m| cmd.dispatch(m).expect("dispatch ok").timing)
+        };
+
+        assert_eq!(
+            parse(&["aspect", "greet", "--task:timing-summary=short"]).unwrap(),
+            TimingMode::Short
+        );
+        // Default flows from the flag's default_value, not Default::default().
+        assert_eq!(parse(&["aspect", "greet"]).unwrap(), TimingMode::Detailed);
+        // Invalid level is rejected by the value parser at parse time.
+        assert!(parse(&["aspect", "greet", "--task:timing-summary=verbose"]).is_err());
+    }
+
     // ── Override merge (no heap path: no overrides applied) ────────────────
 
     #[test]

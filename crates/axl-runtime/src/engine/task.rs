@@ -458,8 +458,8 @@ fn resolve_task_metadata(
 
 /// Build a fresh `Task<'v>` that aliases `base`. The alias shares the base's
 /// `implementation` callable and `traits` vector and inherits nothing else —
-/// `name`, `group`, `summary`, `description`, and `friendly_kind` come from
-/// the alias's own kwargs. An empty `name` defers naming to `export_as`.
+/// `kind`, `group`, `summary`, `description`, and `friendly_kind` come from
+/// the alias's own kwargs. An empty `kind` defers naming to `export_as`.
 ///
 /// `defaults` may overlay new defaults onto any arg present on `base`; see
 /// `Arg::with_default` for the per-variant validation rules.
@@ -599,7 +599,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     /// (`axl_add` → `axl-add`). Use `kind = "explicit-kind"` to override it.
     /// Kinds must match `[a-z][a-z0-9-]*`. (The per-invocation task *name* — the
     /// unique identity of one run — is a separate concept set at runtime via
-    /// `--task-name`; see `ctx.task`.)
+    /// `--task:name`; see `ctx.task`.)
     ///
     /// ## Args
     ///

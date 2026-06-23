@@ -312,13 +312,12 @@ def test_task_info(ctx: TaskContext, tc: int) -> int:
     tc = test_case(tc, len(info.group) == 1, "ctx.task.group should have one entry")
     tc = test_case(tc, info.group[0] == "tests", "ctx.task.group[0] should be 'tests'")
 
-    # name: non-empty string (defaults to "<kind>-<suffix>" when --task-name not set)
+    # name: non-empty string (defaults to "<kind>-<suffix>" when --task:name not set)
     tc = test_case(tc, type(info.name) == "string", "ctx.task.name should be a string")
     tc = test_case(tc, len(info.name) > 0, "ctx.task.name should be non-empty")
 
-    # friendly_name: non-empty string (defaults to the name verbatim)
-    tc = test_case(tc, type(info.friendly_name) == "string", "ctx.task.friendly_name should be a string")
-    tc = test_case(tc, len(info.friendly_name) > 0, "ctx.task.friendly_name should be non-empty")
+    # friendly_name: defaults to the name verbatim (no --task:friendly-name set)
+    tc = test_case(tc, info.friendly_name == info.name, "ctx.task.friendly_name should default to the name")
 
     # id: UUID v4 format (36 chars, dashes at positions 8/13/18/23)
     tc = test_case(tc, type(info.id) == "string", "ctx.task.id should be a string")

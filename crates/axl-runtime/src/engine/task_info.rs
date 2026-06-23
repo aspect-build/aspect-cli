@@ -290,7 +290,7 @@ impl<'v> StarlarkValue<'v> for TaskInfo {
 #[starlark_module]
 fn task_info_methods(registry: &mut MethodsBuilder) {
     /// The kind of task — the command being run (e.g. `build`, `test`, `lint`).
-    /// Derived from the snake_case export variable (or the `task(name=...)`
+    /// Derived from the snake_case export variable (or the `task(kind=...)`
     /// kwarg). Use `name` for the unique identity of this particular invocation.
     #[starlark(attribute)]
     fn kind<'v>(this: Value<'v>) -> anyhow::Result<String> {

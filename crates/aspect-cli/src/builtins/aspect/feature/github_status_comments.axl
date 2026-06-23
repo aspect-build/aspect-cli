@@ -1996,9 +1996,9 @@ GithubStatusComments = feature(
             description = "Per-section Jinja2 template overrides. Keys: 'body'. " +
                           "Vars available to 'body': marker, started_at, status_badges, rollup " +
                           "(dict with error/warning/running/passed/aborted counts), entries " +
-                          "(alphabetical by (job, name, key); each decorated with _severity, " +
+                          "(alphabetical by (job, kind, name); each decorated with _severity, " +
                           "_badge_key, _links_text, _elapsed_text, _result_text plus " +
-                          "the raw {name, key, job, run_attempt, status, kind, elapsed_ms, " +
+                          "the raw {kind, name, job, run_attempt, status, elapsed_ms, " +
                           "ci_run_url, aspect_url, check_run_url, current_phase, progress, " +
                           "failed_in_phase, repro_commands, fix_commands, …}), and `repro_rows` / " +
                           "`fix_rows` (deduped across siblings via dedup_and_attribute). " +
