@@ -3,7 +3,6 @@
 @bazel//grpc.Status(*, code: int, message: str) -> grpc.Status
 @bazel//grpc.grpc: struct(Code = struct(ABORTED = int, ALREADY_EXISTS = int, CANCELLED = int, DATA_LOSS = int, DEADLINE_EXCEEDED = int, FAILED_PRECONDITION = int, INTERNAL = int, INVALID_ARGUMENT = int, NOT_FOUND = int, OK = int, OUT_OF_RANGE = int, PERMISSION_DENIED = int, RESOURCE_EXHAUSTED = int, UNAUTHENTICATED = int, UNAVAILABLE = int, UNIMPLEMENTED = int, UNKNOWN = int), Server = function, Status = function)
 @std//base64.base64: struct(decode = function, decode_url = function, encode = function, encode_url = function)
-@std//hash.blake2b() -> typing.Any
 @std//hash.blake2s() -> typing.Any
 @std//hash.md5() -> typing.Any
 @std//hash.sha1() -> typing.Any
