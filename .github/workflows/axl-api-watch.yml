@@ -1,23 +1,27 @@
 name: axl-api-watch
-# Watches the public AXL API surface for drift. Non-blocking: it never fails a
-# build. When the surface changes (a builtin removed/renamed, a parameter made
-# required, a return type changed — the class of break that took down the `rbe`
-# extension), it pings #aspect-cli and refreshes the committed snapshot so the
-# golden file doubles as a dated changelog of the API contract.
+# Watches the public AXL API surface for drift and pings #aspect-cli when it
+# changes (a builtin removed/renamed, a parameter made required, a return type
+# changed — the class of break that took down the `rbe` extension). The
+# baseline lives in the Actions cache, NOT a committed file: each run compares
+# the freshly rendered surface to the surface cached by the previous run, then
+# overwrites the cache. Nothing is committed or pushed, so this never opens a
+# PR and never lands a commit on main — i.e. it can't trigger prerelease/release
+# pipelines. The drift history lives in #aspect-cli.
 on:
   push:
     branches: [main]
-    # The surface is contributed by many crates — not just axl-runtime: e.g.
-    # `bazel.RunCommand` (crates/bazelrc) and `std.io.Readable` (crates/axl-types)
-    # appear in the snapshot. A narrow path filter would miss a signature change
-    # in one of those, so watch every crate plus the renderer/workflow itself.
+    # The surface is contributed by many crates (e.g. bazel.RunCommand from
+    # crates/bazelrc, std.io.Readable from crates/axl-types), so watch all of
+    # them plus the renderer/workflow itself.
     paths:
       - "crates/**"
       - ".github/workflows/axl-api-watch.yml"
   workflow_dispatch: {}
 permissions:
-  contents: write
+  contents: read
 concurrency:
+  # Serialize so the cache baseline advances monotonically (no two runs racing
+  # to save the same key prefix from different commits).
   group: axl-api-watch
   cancel-in-progress: false
 jobs:
@@ -29,15 +33,26 @@ jobs:
         run: rustup show
       - name: Dump current API surface
         run: cargo run -q -p axl-docgen -- --api-surface > /tmp/surface.new
-      - name: Diff against committed snapshot
+      # Restore the most recent previously-cached surface. The exact key
+      # (…-<sha>) never exists yet, so this always falls through to the
+      # restore-keys prefix and loads the latest prior run's surface.
+      - name: Restore previous surface
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/surface.prev
+          key: axl-api-surface-${{ github.sha }}
+          restore-keys: |
+            axl-api-surface-
+      - name: Diff against previous surface
         id: diff
         run: |
-          golden="crates/axl-docgen/api_surface.golden"
-          if [ -f "$golden" ] && diff -u "$golden" /tmp/surface.new > /tmp/surface.diff; then
+          if [ ! -f /tmp/surface.prev ]; then
+            echo "::notice::No cached baseline yet — seeding it; no notification this run."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          elif diff -u /tmp/surface.prev /tmp/surface.new > /tmp/surface.diff; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
-            cp /tmp/surface.new "$golden"
             # Cap the diff so the Slack payload stays well under limits.
             head -c 2500 /tmp/surface.diff > /tmp/surface.slack || true
           fi
@@ -67,19 +82,16 @@ jobs:
               ]
             }' \
           | curl -sS -X POST -H 'Content-type: application/json' --data @- "$SLACK_WEBHOOK_URL"
-      # Pushes made with the automatic GITHUB_TOKEN do NOT trigger new workflow
-      # runs (GitHub's built-in anti-recursion guard), so this commit can't loop
-      # the watcher. `[skip ci]` is belt-and-suspenders. FOOTGUN: if this push is
-      # ever switched to a PAT or deploy key, the GITHUB_TOKEN guard no longer
-      # applies — the loop is then prevented only by `[skip ci]`, which also
-      # suppresses every other workflow on the commit.
-      - name: Commit refreshed snapshot
-        if: steps.diff.outputs.changed == 'true'
-        run: |
-          git config user.name "axl-api-watch[bot]"
-          git config user.email "axl-api-watch@users.noreply.github.com"
-          git add crates/axl-docgen/api_surface.golden
-          if ! git diff --cached --quiet; then
-            git commit -m "chore(axl): refresh API surface snapshot [skip ci]"
-            git push
-          fi
+      # Advance the baseline: cache the surface just rendered so the next run
+      # diffs against it. Saved under the current SHA's key; the next run finds
+      # it via the restore-keys prefix. Runs even when unchanged so the cache
+      # entry's 7-day idle eviction timer keeps resetting.
+      - name: Save current surface as new baseline
+        if: always()
+        run: cp /tmp/surface.new /tmp/surface.prev
+      - name: Cache new baseline
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/surface.prev
+          key: axl-api-surface-${{ github.sha }}
