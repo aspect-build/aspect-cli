@@ -7,10 +7,12 @@ name: axl-api-watch
 on:
   push:
     branches: [main]
-    # Only re-check when something that can move the surface changes.
+    # The surface is contributed by many crates — not just axl-runtime: e.g.
+    # `bazel.RunCommand` (crates/bazelrc) and `std.io.Readable` (crates/axl-types)
+    # appear in the snapshot. A narrow path filter would miss a signature change
+    # in one of those, so watch every crate plus the renderer/workflow itself.
     paths:
-      - "crates/axl-runtime/**"
-      - "crates/axl-docgen/**"
+      - "crates/**"
       - ".github/workflows/axl-api-watch.yml"
   workflow_dispatch: {}
 permissions:
@@ -65,6 +67,12 @@ jobs:
               ]
             }' \
           | curl -sS -X POST -H 'Content-type: application/json' --data @- "$SLACK_WEBHOOK_URL"
+      # Pushes made with the automatic GITHUB_TOKEN do NOT trigger new workflow
+      # runs (GitHub's built-in anti-recursion guard), so this commit can't loop
+      # the watcher. `[skip ci]` is belt-and-suspenders. FOOTGUN: if this push is
+      # ever switched to a PAT or deploy key, the GITHUB_TOKEN guard no longer
+      # applies — the loop is then prevented only by `[skip ci]`, which also
+      # suppresses every other workflow on the commit.
       - name: Commit refreshed snapshot
         if: steps.diff.outputs.changed == 'true'
         run: |

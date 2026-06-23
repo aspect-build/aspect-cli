@@ -62,6 +62,17 @@ fn walk_module(path: &str, module: &DocModule, out: &mut Vec<String>) {
     }
 }
 
+// KNOWN GAP: a property whose value is a method-bearing builtin *type* renders
+// only its `Ty` — e.g. `@std//base64.base64` becomes
+// `struct(decode = function, ...)`. Field add/remove/retype still moves the
+// line, but a param/return change inside `base64.decode` does NOT, because the
+// method signatures live behind `BuiltinsBase64::get_methods()` and that type
+// is only reachable via the `_`-private `__builtins__` entrypoint, so the docs
+// tree never surfaces it. Module-level builtins (`@std//time`, `json`,
+// `grpc.Server`) are exposed as functions/namespaces and ARE captured.
+// Closing this needs `docs::documentation()` to emit a DocType (via
+// `Methods::documentation()`) for method-bearing values — tracked as a
+// follow-up to keep this PR's blast radius small.
 fn render_property(name: &str, prop: &DocProperty) -> String {
     format!("{name}: {}", prop.typ)
 }
