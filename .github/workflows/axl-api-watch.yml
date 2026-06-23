@@ -84,13 +84,20 @@ jobs:
           | curl -sS -X POST -H 'Content-type: application/json' --data @- "$SLACK_WEBHOOK_URL"
       # Advance the baseline: cache the surface just rendered so the next run
       # diffs against it. Saved under the current SHA's key; the next run finds
-      # it via the restore-keys prefix. Runs even when unchanged so the cache
-      # entry's 7-day idle eviction timer keeps resetting.
+      # it via the restore-keys prefix.
+      #
+      # No `always()` — these inherit the default `success()` guard ON PURPOSE.
+      # If the diff or restore step failed, or a drift was detected but the
+      # Notify step failed (cache-service outage, webhook/network error), the
+      # job is in a failed state and these steps are skipped, so the baseline is
+      # NOT advanced. The next run then re-detects the same drift and re-alerts,
+      # rather than silently swallowing the break by moving the baseline past an
+      # un-notified change. An unchanged run leaves Notify skipped (not failed),
+      # so the save still runs and refreshes the cache (resetting its idle
+      # eviction timer).
       - name: Save current surface as new baseline
-        if: always()
         run: cp /tmp/surface.new /tmp/surface.prev
       - name: Cache new baseline
-        if: always()
         uses: actions/cache/save@v4
         with:
           path: /tmp/surface.prev
