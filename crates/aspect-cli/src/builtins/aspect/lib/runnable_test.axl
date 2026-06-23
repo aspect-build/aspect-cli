@@ -1,7 +1,7 @@
 """Unit tests for lib/runnable.axl: apparent_label normalization, BES matching,
 entrypoint selection (passes 1–3), and runfiles directory detection."""
 
-load("./runnable.axl", "apparent_label", "resolve_run_in", "runnable")
+load("./runnable.axl", "apparent_label", "download_outputs_sufficient", "resolve_run_in", "runnable")
 
 def _eq(label, got, want):
     if got != want:
@@ -575,6 +575,24 @@ def _test_run_in_relative_dotdot(_ctx):
         "/here/../sub",
     )
 
+# download_outputs_sufficient — which user `--remote_download_outputs` values
+# already put the top-level binary on disk (so the spawn/delivery `=toplevel`
+# default need not override them).
+
+def _test_download_outputs_toplevel_sufficient(_ctx):
+    _eq("toplevel is sufficient", download_outputs_sufficient("toplevel"), True)
+
+def _test_download_outputs_all_sufficient(_ctx):
+    _eq("all is sufficient", download_outputs_sufficient("all"), True)
+
+def _test_download_outputs_minimal_insufficient(_ctx):
+    """The regression: `=minimal` leaves the binary remote, so it must be
+    upgraded to the `=toplevel` default, not respected."""
+    _eq("minimal is insufficient", download_outputs_sufficient("minimal"), False)
+
+def _test_download_outputs_unset_insufficient(_ctx):
+    _eq("unset (None) is insufficient", download_outputs_sufficient(None), False)
+
 _UNIT_TESTS = [
     _test_local_label_with_colon,
     _test_local_label_without_colon,
@@ -626,6 +644,10 @@ _UNIT_TESTS = [
     _test_run_in_absolute_path,
     _test_run_in_relative_dot,
     _test_run_in_relative_dotdot,
+    _test_download_outputs_toplevel_sufficient,
+    _test_download_outputs_all_sufficient,
+    _test_download_outputs_minimal_insufficient,
+    _test_download_outputs_unset_insufficient,
     _test_runfiles_workspace_dir_uses_bes_workspace_name,
     _test_runfiles_workspace_dir_non_default_workspace,
     _test_runfiles_workspace_dir_default_when_no_workspace_config,

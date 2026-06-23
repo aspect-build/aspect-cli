@@ -139,7 +139,7 @@ load("@aspect//lib/health_check.axl", "HealthCheckTrait")
 load("@aspect//lib/lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "setup_phase", "task_update")
 load("@aspect//lib/remote_executor.axl", "start_dummy_executor", "stop_dummy_executor")
 load("@aspect//lib/repro_commands.axl", "build_aspect_command", "print_repro_and_fix", "repro_prefix", "task_cli_path")
-load("@aspect//lib/runnable.axl", "LOCAL_SPAWN_BASE_FLAGS", "LOCAL_SPAWN_FLAGS", "apparent_label", "runnable")
+load("@aspect//lib/runnable.axl", "LOCAL_SPAWN_BASE_FLAGS", "LOCAL_SPAWN_FLAGS", "apparent_label", "download_outputs_sufficient", "runnable")
 load("@aspect//lib/text.axl", "pluralize")
 load("@aspect//lib/tips.axl", "tips")
 load("@bazel//proto/remote_logging.axl", "remote_logging")
@@ -349,6 +349,22 @@ def _surface_phase_stderr(ctx, phase, log_path):
         return
     ctx.std.io.stderr.write(ctx.std.fs.read_to_string(log_path))
     artifacts.upload_file(ctx, "delivery_phase{}_log".format(phase), "phase{}-stderr.log".format(phase), log_path)
+
+def _base_flag_overridden(rc, flag: str) -> bool:
+    """Whether the active run command already sets `flag` such that the
+    delivery base default should be dropped.
+
+    For most flags any user-set value overrides the default. The exception is
+    `--remote_download_outputs`: only `toplevel`/`all` put the top-level binary
+    on disk, so a user `=minimal` is treated as not overriding (the `=toplevel`
+    default still wins) to keep the phase-3 runfiles download working."""
+    name = flag.split("=", 1)[0]
+    value = rc.flag_value(name, command = "build")
+    if value == None:
+        return False
+    if name == "--remote_download_outputs":
+        return download_outputs_sufficient(value)
+    return True
 
 def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, user_remote_executor_uri, ansi, data):
     """Run phase 1 (build) + phase 2 (digest extraction); return
@@ -1213,10 +1229,17 @@ def _delivery_impl(ctx):
         # `toplevel`). Per-call extras win over the rc, so apply each base flag
         # only when the active run command doesn't already set it — that's a
         # default the rc overrides, not an override of the rc.
+        #
+        # `--remote_download_outputs` is the exception: a user value is honored
+        # only when it's sufficient to put the top-level binary on disk
+        # (`toplevel`/`all`). A user `=minimal` leaves the binary remote and
+        # breaks the runfiles download, so the `=toplevel` default must still
+        # win — drop the base flag only for the sufficient values, not for any
+        # user-set value.
         base_defaults = [
             f
             for f in LOCAL_SPAWN_BASE_FLAGS
-            if rc.flag_value(f.split("=", 1)[0], command = "build") == None
+            if not _base_flag_overridden(rc, f)
         ]
 
         # Phase 3 flag order (last-wins): active run command, then the per-call
