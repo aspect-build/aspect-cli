@@ -179,11 +179,11 @@ impl<'a, 'v> Cmd<'a, 'v> {
             );
         }
         let task_name = explicit_name.or(deprecated_key).unwrap_or_else(|| {
-            // Default to `<kind>-<friendly-suffix>` so repeated invocations of
-            // the same kind in one pipeline don't collide. (PR2 will prefer a
-            // detected CI job name over the random suffix.)
+            // Auto-name so repeated invocations of the same kind in one pipeline
+            // stay distinct: `<kind>-<ci-job>` on CI (de-duped per run/machine),
+            // else `<kind>-<random-suffix>`.
             let kind = leaf_command_name(&matches).unwrap_or_default();
-            format!("{}-{}", kind, generate_name_suffix())
+            axl_runtime::ci::auto_task_name(&kind, generate_name_suffix)
         });
         let task_friendly_name = leaf.get_one::<String>("task:friendly-name").cloned();
         let task_uuid = leaf.get_one::<String>("task:id").cloned();
