@@ -259,8 +259,9 @@ const POST_KILL_GRACE: Duration = Duration::from_secs(1);
 
 /// Total wall time between receiving the OS signal and `exit()`:
 ///   - **No live bazel client** (e.g. an interactive prompt like `init`): we
-///     exit immediately — no SIGINT burst, no grace window. There's nothing to
-///     cancel, so there's nothing to wait for.
+///     recheck the registry after 1 × SIGINT_TICK (≈ 0.15s, to close the
+///     spawn/register race) and, if still empty, exit — no SIGINT burst, no
+///     grace window. There's nothing to cancel, so there's nothing to wait for.
 ///   - **On CI:** 1 × SIGINT_TICK (≈ 0.15s) — two graceful SIGINTs, then exit.
 ///   - **Off CI:** 2 × SIGINT_TICK (≈ 0.3s) + SIGINT_GRACE (3s) +
 ///     POST_KILL_GRACE (1s) ≈ 4.3s, and only when a client is actually live.
@@ -268,9 +269,10 @@ const POST_KILL_GRACE: Duration = Duration::from_secs(1);
 
 /// Watch for SIGINT / SIGTERM. If no bazel client is live when the signal
 /// arrives (an interactive prompt like `init`, or any non-bazel command) we
-/// exit immediately — there's nothing to cancel. Otherwise we send bazel a
-/// SIGINT burst; bazel responds the same way it would to repeated Ctrl-Cs from
-/// a terminal (see https://bazel.build/run/cancellation):
+/// exit promptly — there's nothing to cancel (we recheck once after a tick to
+/// avoid racing a just-spawned client; see `run_shutdown_sequence`). Otherwise
+/// we send bazel a SIGINT burst; bazel responds the same way it would to
+/// repeated Ctrl-Cs from a terminal (see https://bazel.build/run/cancellation):
 ///
 ///   1st  →  graceful cancel of the running command.
 ///   2nd  →  still graceful (bazel allows a short cleanup window).
@@ -380,8 +382,18 @@ async fn run_shutdown_sequence(signal_name: &str, exit_code: i32) {
     // burst, the messaging, and every grace window, and just exit. This keeps
     // Ctrl-C snappy and avoids the misleading "cancelling bazel subprocesses…"
     // line when no bazel is running.
+    //
+    // Recheck after one tick before exiting: a bazel child can be spawned but
+    // not yet registered (there's a synchronous gap between `cmd.spawn()` and
+    // `live::register()` in `Build::spawn`). A signal landing in that window
+    // would see an empty registry; the tick lets the registration complete so
+    // we don't orphan a just-spawned client on CI cancellation. The 150ms is
+    // imperceptible at an interactive prompt.
     if bazel_live::live_pids().is_empty() {
-        std::process::exit(exit_code);
+        tokio::time::sleep(SIGINT_TICK).await;
+        if bazel_live::live_pids().is_empty() {
+            std::process::exit(exit_code);
+        }
     }
 
     eprintln!("aspect-cli: received {signal_name}, cancelling bazel subprocesses…");
