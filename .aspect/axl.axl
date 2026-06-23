@@ -2290,14 +2290,15 @@ def test_artifacts_lib(ctx: TaskContext, tc: int) -> int:
         tc = test_case(tc, got == expected, "artifact_name: %s → %r (got %r)" % (desc, expected, got))
 
     # testlog_dest_dir — runs_per_test / sharding / retries must not collide.
+    # Bazel numbers run/shard/attempt one-based; (1, 1, 1) is the lone result.
     dest_cases = [
         # (label, run, shard, attempt, expected, desc)
-        ("//pkg:net_test", 0, 0, 0, "pkg/net_test", "single run → label path unchanged"),
-        ("//pkg:net_test", 1, 0, 0, "pkg/net_test/run_1", "runs_per_test → run subdir"),
-        ("//pkg:net_test", 2, 0, 0, "pkg/net_test/run_2", "second run distinct from first"),
-        ("//pkg:net_test", 0, 3, 0, "pkg/net_test/shard_3", "sharded test → shard subdir"),
-        ("//pkg:net_test", 0, 0, 2, "pkg/net_test/attempt_2", "flaky retry → attempt subdir"),
-        ("//pkg:net_test", 2, 3, 1, "pkg/net_test/run_2_shard_3_attempt_1", "run+shard+attempt combined"),
+        ("//pkg:net_test", 1, 1, 1, "pkg/net_test", "single run → label path unchanged"),
+        ("//pkg:net_test", 0, 0, 0, "pkg/net_test", "unset ids → label path unchanged"),
+        ("//pkg:net_test", 2, 1, 1, "pkg/net_test/run_2", "runs_per_test → run subdir"),
+        ("//pkg:net_test", 1, 3, 1, "pkg/net_test/shard_3", "sharded test → shard subdir"),
+        ("//pkg:net_test", 1, 1, 2, "pkg/net_test/attempt_2", "flaky retry → attempt subdir"),
+        ("//pkg:net_test", 2, 3, 4, "pkg/net_test/run_2_shard_3_attempt_4", "run+shard+attempt combined"),
     ]
     for (label, run, shard, attempt, expected, desc) in dest_cases:
         got = testlog_dest_dir(label, run, shard, attempt)

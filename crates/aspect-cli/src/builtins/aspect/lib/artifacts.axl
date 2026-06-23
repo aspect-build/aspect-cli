@@ -531,20 +531,23 @@ def testlog_dest_dir(label, run, shard, attempt):
     (run, shard, attempt), each carrying its own test.log/test.xml under the
     same label. Without a distinguishing dest segment they collide — an
     archive entry overwrites, a per-file URL overwrites, a symlink fails — and
-    only one run's logs survive. Append a `run_N`/`shard_N`/`attempt_N` subdir
-    whenever any is set (>0); a lone run/shard/attempt leaves the path
-    unchanged so single-run uploads keep their historical layout.
+    only one run's logs survive.
+
+    Bazel numbers these one-based, so the single / first / unsharded result
+    arrives as (1, 1, 1). Append a `run_N`/`shard_N`/`attempt_N` subdir only
+    for the components that exceed 1, leaving the common single-run test at
+    its historical flat `<label>/` path.
     """
     label_path = label.lstrip("/").replace(":", "/")
-    if not (run or shard or attempt):
-        return label_path
     parts = []
-    if run:
+    if run > 1:
         parts.append("run_" + str(run))
-    if shard:
+    if shard > 1:
         parts.append("shard_" + str(shard))
-    if attempt:
+    if attempt > 1:
         parts.append("attempt_" + str(attempt))
+    if not parts:
+        return label_path
     return label_path + "/" + "_".join(parts)
 
 def _collect_test_files(ctx, event, strategy, test_entries, skipped_files):
