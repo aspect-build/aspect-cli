@@ -2,7 +2,6 @@ workflow:
   rules:
     # Run for everything except tag pushes
     - if: "$CI_COMMIT_TAG == null"
-
 variables:
   # Mirrored setup: the repo lives on GitHub and is mirrored to GitLab for CI.
   # One URL drives both status-check posting (GithubStatusChecks picks the
@@ -15,10 +14,8 @@ variables:
   FORCE_TARGETS:
     value: ""
     description: "Bazel targets to force-deliver (space-separated). Example: //examples/deliverable. Leave empty for normal selective delivery."
-
 stages:
   - CI
-
 pre-build:
   stage: CI
   script:
@@ -27,7 +24,6 @@ pre-build:
   tags:
     - aspect-workflows
     - aspect-default
-
 build-task:
   stage: CI
   needs: [pre-build]
@@ -36,9 +32,8 @@ build-task:
     - aspect-default
   script:
     - .aspect/bootstrap.sh
-    - ASPECT_DEBUG=1 aspect build --task-key build-gl-debug
-    - aspect build --task-key build-gl
-
+    - ASPECT_DEBUG=1 aspect build --task:name build-gl-debug
+    - aspect build --task:name build-gl
 test-task:
   stage: CI
   needs: [pre-build]
@@ -47,9 +42,8 @@ test-task:
     - aspect-default
   script:
     - .aspect/bootstrap.sh
-    - ASPECT_DEBUG=1 aspect test --task-key test-gl-debug
-    - aspect test --task-key test-gl
-
+    - ASPECT_DEBUG=1 aspect test --task:name test-gl-debug
+    - aspect test --task:name test-gl
 lint-task:
   stage: CI
   needs: [pre-build]
@@ -58,15 +52,14 @@ lint-task:
     - aspect-default
   script:
     - .aspect/bootstrap.sh
-    - ASPECT_DEBUG=1 aspect lint --task-key lint-gl-debug --fix --aspect=//tools/lint:linters.bzl%shellcheck -- //examples/lint/... -//exclude/...
+    - ASPECT_DEBUG=1 aspect lint --task:name lint-gl-debug --fix --aspect=//tools/lint:linters.bzl%shellcheck -- //examples/lint/... -//exclude/...
     # Revert applied --fix edits before next run. Use git restore (tracked
     # mods only) + git clean -fd (untracked non-ignored files); do NOT use
     # -x because that wipes bazel-out/ and target/ — including the
     # pre-built CLI dropped there by .aspect/bootstrap.sh.
     - git restore .
     - git clean -fd
-    - aspect lint --task-key lint-gl --fix --aspect=//tools/lint:linters.bzl%shellcheck -- //examples/lint/... -//exclude/...
-
+    - aspect lint --task:name lint-gl --fix --aspect=//tools/lint:linters.bzl%shellcheck -- //examples/lint/... -//exclude/...
 # Dedicated buildifier-only step that runs in parallel with format-task.
 buildifier-task:
   stage: CI
@@ -76,9 +69,8 @@ buildifier-task:
     - aspect-default
   script:
     - .aspect/bootstrap.sh
-    - ASPECT_DEBUG=1 aspect buildifier --task-key buildifier-gl-debug
-    - aspect buildifier --task-key buildifier-gl
-
+    - ASPECT_DEBUG=1 aspect buildifier --task:name buildifier-gl-debug
+    - aspect buildifier --task:name buildifier-gl
 format-task:
   stage: CI
   needs: [pre-build]
@@ -89,9 +81,8 @@ format-task:
   # two steps don't do duplicate work.
   script:
     - .aspect/bootstrap.sh
-    - ASPECT_DEBUG=1 aspect format --task-key format-gl-debug 
-    - aspect format --task-key format-gl
-
+    - ASPECT_DEBUG=1 aspect format --task:name format-gl-debug
+    - aspect format --task:name format-gl
 gazelle-task:
   stage: CI
   needs: [pre-build]
@@ -100,9 +91,8 @@ gazelle-task:
     - aspect-default
   script:
     - .aspect/bootstrap.sh
-    - ASPECT_DEBUG=1 aspect gazelle --task-key gazelle-gl-debug
-    - aspect gazelle --task-key gazelle-gl
-
+    - ASPECT_DEBUG=1 aspect gazelle --task:name gazelle-gl-debug
+    - aspect gazelle --task:name gazelle-gl
 # Regression test for the build-from-source gazelle path — upstream
 # `gazelle()` macro + rules_go toolchain. Most users will adopt the
 # prebuilt binary; this job catches breakage on the alternate path.
@@ -116,9 +106,8 @@ gazelle-from-source-task:
     - aspect-default
   script:
     - .aspect/bootstrap.sh
-    - ASPECT_DEBUG=1 aspect gazelle --gazelle-target=//tools/gazelle:gazelle_from_source --bazel-flag=--config=pure_go --task-key gazelle-from-source-gl-debug
-    - aspect gazelle --gazelle-target=//tools/gazelle:gazelle_from_source --bazel-flag=--config=pure_go --task-key gazelle-from-source-gl
-
+    - ASPECT_DEBUG=1 aspect gazelle --gazelle-target=//tools/gazelle:gazelle_from_source --bazel-flag=--config=pure_go --task:name gazelle-from-source-gl-debug
+    - aspect gazelle --gazelle-target=//tools/gazelle:gazelle_from_source --bazel-flag=--config=pure_go --task:name gazelle-from-source-gl
 delivery-task:
   stage: CI
   needs: [pre-build]
@@ -129,5 +118,5 @@ delivery-task:
     ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS: $FORCE_TARGETS
   script:
     - .aspect/bootstrap.sh
-    - ASPECT_DEBUG=1 aspect delivery --task-key delivery-gl-debug
-    - aspect delivery --task-key delivery-gl
+    - ASPECT_DEBUG=1 aspect delivery --task:name delivery-gl-debug
+    - aspect delivery --task:name delivery-gl

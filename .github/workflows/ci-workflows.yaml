@@ -117,7 +117,7 @@ jobs:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Buildifier Task
-        run: aspect buildifier --task-key buildifier-gha
+        run: aspect buildifier --task:name buildifier-gha
   buildifier-debug-task:
     runs-on: ubuntu-latest
     needs: [pre-build]
@@ -130,7 +130,7 @@ jobs:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Buildifier Task (ASPECT_DEBUG=1)
-        run: ASPECT_DEBUG=1 aspect buildifier --task-key buildifier-gha-debug
+        run: ASPECT_DEBUG=1 aspect buildifier --task:name buildifier-gha-debug
   format-task:
     runs-on: ubuntu-latest
     needs: [pre-build]
@@ -143,7 +143,7 @@ jobs:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Format Task
-        run: bazel format --task-key format-gha
+        run: bazel format --task:name format-gha
   format-debug-task:
     runs-on: ubuntu-latest
     needs: [pre-build]
@@ -156,7 +156,7 @@ jobs:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Format Task (ASPECT_DEBUG=1)
-        run: ASPECT_DEBUG=1 bazel format --task-key format-gha-debug
+        run: ASPECT_DEBUG=1 bazel format --task:name format-gha-debug
   gazelle-task:
     runs-on: ubuntu-latest
     needs: [pre-build]
@@ -169,7 +169,7 @@ jobs:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Gazelle Task
-        run: aspect gazelle --task-key gazelle-gha
+        run: aspect gazelle --task:name gazelle-gha
   gazelle-debug-task:
     runs-on: ubuntu-latest
     needs: [pre-build]
@@ -182,7 +182,7 @@ jobs:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Gazelle Task (ASPECT_DEBUG=1)
-        run: ASPECT_DEBUG=1 aspect gazelle --task-key gazelle-gha-debug
+        run: ASPECT_DEBUG=1 aspect gazelle --task:name gazelle-gha-debug
   gazelle-from-source-task:
     runs-on: ubuntu-latest
     needs: [pre-build]
@@ -200,7 +200,7 @@ jobs:
       # `--config=pure_go` is required on Linux: toolchains_llvm_bootstrapped's
       # lld can't accept Go's non-PIC relocations on x86_64.
       - name: Gazelle Task — from-source
-        run: aspect gazelle --gazelle-target=//tools/gazelle:gazelle_from_source --bazel-flag=--config=pure_go --task-key gazelle-from-source-gha
+        run: aspect gazelle --gazelle-target=//tools/gazelle:gazelle_from_source --bazel-flag=--config=pure_go --task:name gazelle-from-source-gha
   gazelle-from-source-debug-task:
     runs-on: ubuntu-latest
     needs: [pre-build]
@@ -213,7 +213,7 @@ jobs:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Gazelle Task — from-source (ASPECT_DEBUG=1)
-        run: ASPECT_DEBUG=1 aspect gazelle --gazelle-target=//tools/gazelle:gazelle_from_source --bazel-flag=--config=pure_go --task-key gazelle-from-source-gha-debug
+        run: ASPECT_DEBUG=1 aspect gazelle --gazelle-target=//tools/gazelle:gazelle_from_source --bazel-flag=--config=pure_go --task:name gazelle-from-source-gha-debug
   lint-task:
     runs-on: ubuntu-latest
     needs: [pre-build]
@@ -226,7 +226,7 @@ jobs:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Lint Task
-        run: aspect lint --task-key lint-gha
+        run: aspect lint --task:name lint-gha
   lint-debug-task:
     runs-on: ubuntu-latest
     needs: [pre-build]
@@ -239,7 +239,7 @@ jobs:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Lint Task (ASPECT_DEBUG=1)
-        run: ASPECT_DEBUG=1 aspect lint --task-key lint-gha-debug
+        run: ASPECT_DEBUG=1 aspect lint --task:name lint-gha-debug
   build-task:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     needs: [pre-build]
@@ -251,7 +251,7 @@ jobs:
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Build Task
-        run: bazel --aspect:disable_plugins --aspect:lock_version build --task-key build-gha
+        run: bazel --aspect:disable_plugins --aspect:lock_version build --task:name build-gha
   build-debug-task:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     needs: [pre-build]
@@ -263,7 +263,7 @@ jobs:
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Build Task (ASPECT_DEBUG=1)
-        run: ASPECT_DEBUG=1 bazel --aspect:disable_plugins --aspect:lock_version build --task-key build-gha-debug
+        run: ASPECT_DEBUG=1 bazel --aspect:disable_plugins --aspect:lock_version build --task:name build-gha-debug
   test-task:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     needs: [pre-build]
@@ -275,7 +275,7 @@ jobs:
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Test Task
-        run: aspect test --task-key test-gha
+        run: aspect test --task:name test-gha
   test-debug-task:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     needs: [pre-build]
@@ -287,7 +287,7 @@ jobs:
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Test Task (ASPECT_DEBUG=1)
-        run: ASPECT_DEBUG=1 aspect test --task-key test-gha-debug
+        run: ASPECT_DEBUG=1 aspect test --task:name test-gha-debug
   # Build/test on an EPHEMERAL GitHub-hosted runner (no Aspect Workflows
   # bb_clientd FUSE mount). Scoped to //examples/... so it's fast. The remote
   # cache is disabled (--remote_cache=) so Bazel keeps outputs local and BES
@@ -313,7 +313,7 @@ jobs:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Build Task (ephemeral)
         run: |
-          aspect build --task-key build-gha-ephemeral \
+          aspect build --task:name build-gha-ephemeral \
             --bazel-flag=--remote_cache= \
             --bazel-flag=--disk_cache="$RUNNER_TEMP/aspect-disk-cache" \
             -- //examples/...
@@ -334,7 +334,7 @@ jobs:
         # the test phase — both the failed test (test.log snippet) and the failed
         # action (stderr snippet) surface together.
         run: |
-          aspect test --task-key test-gha-ephemeral \
+          aspect test --task:name test-gha-ephemeral \
             --bazel-flag=--remote_cache= \
             --bazel-flag=--disk_cache="$RUNNER_TEMP/aspect-disk-cache" \
             -- //examples/...
@@ -376,11 +376,11 @@ jobs:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Scaffold preset
         run: |
-          aspect init "$RUNNER_TEMP/proj" --task-key init-${{ matrix.preset }} --preset='${{ matrix.preset }}' --name=my_project --template-ref=main
+          aspect init "$RUNNER_TEMP/proj" --task:name init-${{ matrix.preset }} --preset='${{ matrix.preset }}' --name=my_project --template-ref=main
       - name: Build generated workspace
         if: ${{ github.event_name != 'pull_request' || matrix.preset == 'shell' }}
         working-directory: ${{ runner.temp }}/proj
-        run: aspect build --task-key init-${{ matrix.preset }} -- //...
+        run: aspect build --task:name init-${{ matrix.preset }} -- //...
   # `aspect cache diff` probes the remote cache with --experimental_remote_require_cached
   # to list the test targets affected by this commit — running nothing. It needs
   # cache access, so (like build/test) it runs on a self-hosted aspect-workflows
@@ -403,7 +403,7 @@ jobs:
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Cache Diff Task
-        run: aspect cache diff --task-key cache-diff-gha
+        run: aspect cache diff --task:name cache-diff-gha
   cache-diff-debug-task:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     needs: [pre-build]
@@ -415,7 +415,7 @@ jobs:
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Cache Diff Task (ASPECT_DEBUG=1)
-        run: ASPECT_DEBUG=1 aspect cache diff --task-key cache-diff-gha-debug
+        run: ASPECT_DEBUG=1 aspect cache diff --task:name cache-diff-gha-debug
   # Workflows runner smoke test: the freshly-built CLI starts, prints version /
   # help, and the runner injects the expected ASPECT_WORKFLOWS_* environment.
   # Runs on a self-hosted runner because the ASPECT_WORKFLOWS_RUNNER_* values it
@@ -515,7 +515,7 @@ jobs:
           # Workflows runner defaults to --remote_download_outputs=minimal (bb_clientd
           # FUSE cache), so without it the output stays remote and never lands in the
           # workspace (mirrors what bootstrap.sh does for //:cli).
-          aspect build --task-key axl-tests-gha-bootstrap \
+          aspect build --task:name axl-tests-gha-bootstrap \
             --bazel-flag=--remote_download_toplevel \
             //crates/aspect-launcher
           # Pick the HOST launcher and copy it to a stable target/ci/ path, before any
@@ -578,7 +578,7 @@ jobs:
           echo "--- invalid task-id"
           "$LAUNCHER" build --task-id not-a-uuid //... && echo "ERROR: --task-id should reject non-UUID" && exit 1 || true
           echo "--- invalid task-key"
-          "$LAUNCHER" build --task-key "bad key!" //... && echo "ERROR: --task-key should reject invalid chars" && exit 1 || true
+          "$LAUNCHER" build --task:name "bad key!" //... && echo "ERROR: --task:name should reject invalid chars" && exit 1 || true
           echo "--- aspect dev test-template-snapshots"
           "$LAUNCHER" dev test-template-snapshots
           echo "--- aspect dev test-lint-template-snapshots"
@@ -644,12 +644,12 @@ jobs:
           PATTERNS=$(mktemp)
           echo "# smoke: targets forwarded via --target_pattern_file" > "$PATTERNS"
           echo "//examples/test_states:always_pass" >> "$PATTERNS"
-          aspect test --task-key test-gha-target-pattern-file --target-pattern-file="$PATTERNS"
+          aspect test --task:name test-gha-target-pattern-file --target-pattern-file="$PATTERNS"
           rm -f "$PATTERNS"
 
           echo "--- aspect test --coverage (+ --coverage-report + --coverage-tool)"
           REPORT=$(mktemp)
-          aspect test --task-key test-gha-coverage \
+          aspect test --task:name test-gha-coverage \
             --coverage \
             --coverage-report="$REPORT" \
             --coverage-tool=cat --coverage-tool-arg='{report}' \

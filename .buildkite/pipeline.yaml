@@ -74,7 +74,7 @@ steps:
       # runner defaults to --remote_download_outputs=minimal (bb_clientd FUSE cache),
       # so without it the output stays remote and isn't there to copy. Mirrors
       # bootstrap.sh's //:cli build.
-      ASPECT_DEBUG=1 aspect build --task-key build-bk-axl-tests-bootstrap --bazel-flag=--remote_download_toplevel //crates/aspect-launcher //crates/aspect-cli
+      ASPECT_DEBUG=1 aspect build --task:name build-bk-axl-tests-bootstrap --bazel-flag=--remote_download_toplevel //crates/aspect-launcher //crates/aspect-cli
       WORKSPACE_ROOT=$$(pwd)
       mkdir -p target/ci
       # The CLI has a single host output, so cquery resolves it directly. Copy to a
@@ -137,7 +137,7 @@ steps:
       echo "--- :aspect: invalid task-id"
       $$LAUNCHER build --task-id not-a-uuid //... && echo "ERROR: --task-id should reject non-UUID" && exit 1 || true
       echo "--- :aspect: invalid task-key"
-      $$LAUNCHER build --task-key "bad key!" //... && echo "ERROR: --task-key should reject invalid chars" && exit 1 || true
+      $$LAUNCHER build --task:name "bad key!" //... && echo "ERROR: --task:name should reject invalid chars" && exit 1 || true
       echo "--- :aspect: aspect dev test-template-snapshots"
       $$LAUNCHER dev test-template-snapshots
       echo "--- :aspect: aspect dev test-lint-template-snapshots"
@@ -194,7 +194,7 @@ steps:
       echo "--- :bazel: bazel info (before aspect)"
       bazel $$BAZEL_STARTUP_OPTS info
       echo "--- :aspect: aspect test //crates/bazelrc:bazelrc_test"
-      aspect test --task-key build-bk-bazelrc-e2e //crates/bazelrc:bazelrc_test
+      aspect test --task:name build-bk-bazelrc-e2e //crates/bazelrc:bazelrc_test
       AFTER_PID=$$(bazel $$BAZEL_STARTUP_OPTS info server_pid)
       echo "--- :bazel: bazel info (after aspect)"
       bazel $$BAZEL_STARTUP_OPTS info
@@ -226,8 +226,8 @@ steps:
         - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
           limit: 1
     command: |
-      ASPECT_DEBUG=1 aspect buildifier --task-key buildifier-bk-debug
-      aspect buildifier --task-key buildifier-bk
+      ASPECT_DEBUG=1 aspect buildifier --task:name buildifier-bk-debug
+      aspect buildifier --task:name buildifier-bk
   - key: format-task
     label: ":aspect: Format Task"
     depends_on:
@@ -242,8 +242,8 @@ steps:
     # Starlark patterns are handled by buildifier-task; ignore them here so
     # the two steps don't do duplicate work.
     command: |
-      ASPECT_DEBUG=1 aspect format --task-key format-bk-debug
-      aspect format --task-key format-bk
+      ASPECT_DEBUG=1 aspect format --task:name format-bk-debug
+      aspect format --task:name format-bk
   - key: gazelle-task
     label: ":aspect: Gazelle Task"
     depends_on:
@@ -256,8 +256,8 @@ steps:
         - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
           limit: 1
     command: |
-      ASPECT_DEBUG=1 aspect gazelle --task-key gazelle-bk-debug
-      aspect gazelle --task-key gazelle-bk
+      ASPECT_DEBUG=1 aspect gazelle --task:name gazelle-bk-debug
+      aspect gazelle --task:name gazelle-bk
   - key: gazelle-from-source-task
     label: ":aspect: Gazelle Task (from-source)"
     depends_on:
@@ -279,8 +279,8 @@ steps:
       # `--config=pure_go` is required on Linux: toolchains_llvm_bootstrapped's
       # lld can't accept Go's non-PIC relocations on x86_64. Pure Go skips the
       # cc-toolchain link step entirely. See .bazelrc for the config definition.
-      ASPECT_DEBUG=1 aspect gazelle --gazelle-target=//tools/gazelle:gazelle_from_source --bazel-flag=--config=pure_go --task-key gazelle-from-source-bk-debug
-      aspect gazelle --gazelle-target=//tools/gazelle:gazelle_from_source --bazel-flag=--config=pure_go --task-key gazelle-from-source-bk
+      ASPECT_DEBUG=1 aspect gazelle --gazelle-target=//tools/gazelle:gazelle_from_source --bazel-flag=--config=pure_go --task:name gazelle-from-source-bk-debug
+      aspect gazelle --gazelle-target=//tools/gazelle:gazelle_from_source --bazel-flag=--config=pure_go --task:name gazelle-from-source-bk
   - key: build-task
     depends_on:
       - pre-build
@@ -293,8 +293,8 @@ steps:
         - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
           limit: 1
     command: |
-      ASPECT_DEBUG=1 aspect build --task-key build-bk-debug
-      aspect build --task-key build-bk
+      ASPECT_DEBUG=1 aspect build --task:name build-bk-debug
+      aspect build --task:name build-bk
   - key: test-task
     depends_on:
       - pre-build
@@ -307,8 +307,8 @@ steps:
         - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
           limit: 1
     command: |
-      ASPECT_DEBUG=1 aspect test --task-key test-bk-debug
-      aspect test --task-key test-bk
+      ASPECT_DEBUG=1 aspect test --task:name test-bk-debug
+      aspect test --task:name test-bk
   # Smoke-tests the new test-task flags. `--target-pattern-file` is forwarded
   # to Bazel verbatim, so the assertion is just that aspect resolves the file
   # and the run completes. `--coverage` is exercised against an sh_test rather
@@ -335,12 +335,12 @@ steps:
       PATTERNS=$$(mktemp)
       echo "# smoke: targets forwarded via --target_pattern_file" > $$PATTERNS
       echo "//examples/test_states:always_pass" >> $$PATTERNS
-      aspect test --task-key test-bk-target-pattern-file --target-pattern-file=$$PATTERNS
+      aspect test --task:name test-bk-target-pattern-file --target-pattern-file=$$PATTERNS
       rm -f $$PATTERNS
 
       echo "--- :aspect: aspect test --coverage (+ --coverage-report + --coverage-tool)"
       REPORT=$$(mktemp)
-      aspect test --task-key test-bk-coverage \
+      aspect test --task:name test-bk-coverage \
         --coverage \
         --coverage-report=$$REPORT \
         --coverage-tool=cat --coverage-tool-arg={report} \
@@ -358,14 +358,14 @@ steps:
         - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
           limit: 1
     command: |
-      ASPECT_DEBUG=1 aspect lint --task-key lint-bk-debug --fix --aspect=//tools/lint:linters.bzl%shellcheck -- //examples/lint/... -//exclude/...
+      ASPECT_DEBUG=1 aspect lint --task:name lint-bk-debug --fix --aspect=//tools/lint:linters.bzl%shellcheck -- //examples/lint/... -//exclude/...
       # Revert applied --fix edits before next run. Use git restore (tracked
       # mods only) + git clean -fd (untracked non-ignored files); do NOT use
       # -x because that wipes bazel-out/ and target/ — including the
       # pre-built CLI dropped there by .aspect/bootstrap.sh.
       git restore .
       git clean -fd
-      aspect lint --task-key lint-bk --fix --aspect=//tools/lint:linters.bzl%shellcheck -- //examples/lint/... -//exclude/...
+      aspect lint --task:name lint-bk --fix --aspect=//tools/lint:linters.bzl%shellcheck -- //examples/lint/... -//exclude/...
   # Manual break-glass input — only shown on UI-triggered builds. Users
   # can fill this to force-deliver specific targets without editing the
   # pipeline. The delivery step reads it via meta-data and pipes the value
@@ -402,5 +402,5 @@ steps:
           limit: 1
     command: |
       export ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS=$$(buildkite-agent meta-data get force_targets --default '')
-      ASPECT_DEBUG=1 aspect delivery --task-key delivery-bk-debug
-      aspect delivery --task-key delivery-bk
+      ASPECT_DEBUG=1 aspect delivery --task:name delivery-bk-debug
+      aspect delivery --task:name delivery-bk
