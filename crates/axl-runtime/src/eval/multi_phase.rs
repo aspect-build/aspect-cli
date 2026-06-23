@@ -1032,7 +1032,10 @@ mod tests {
     fn phase_breakdown_empty_for_none_and_total() {
         let phases = [phase("setup", "🔧", 2), phase("build", "🔨", 3)];
         assert_eq!(render_phase_breakdown(&phases, TimingMode::None, false), "");
-        assert_eq!(render_phase_breakdown(&phases, TimingMode::Total, false), "");
+        assert_eq!(
+            render_phase_breakdown(&phases, TimingMode::Total, false),
+            ""
+        );
     }
 
     #[test]
@@ -1040,7 +1043,10 @@ mod tests {
         let phases = [phase("setup", "🔧", 2), phase("build", "🔨", 3)];
         let out = render_phase_breakdown(&phases, TimingMode::Short, false);
         assert!(out.starts_with(" — "), "Short form is inline; got: {out}");
-        assert!(out.contains(" · "), "Short form joins phases with ·; got: {out}");
+        assert!(
+            out.contains(" · "),
+            "Short form joins phases with ·; got: {out}"
+        );
     }
 
     #[test]
