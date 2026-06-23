@@ -360,7 +360,12 @@ def _upload_testlogs_buildkite(ctx, group, entries, name):
 
 def _upload_testlogs_per_file(ctx, provider, group, entries, name):
     """Per-file upload — CircleCI. Records each per-(label, filename) URL
-    into group['label_urls'] so output can link files separately."""
+    into group['label_urls'] so output can link files separately.
+
+    The results table renders one log/xml link per test label, so for
+    runs_per_test / sharded targets (many files share a basename) the first
+    uploaded URL wins; all runs are still uploaded under distinct dest paths.
+    """
     count = len(entries)
     if count == 0 or count == group["last_count"]:
         return False
@@ -381,7 +386,7 @@ def _upload_testlogs_per_file(ctx, provider, group, entries, name):
             if url and url.startswith("http"):
                 fname = entry["dest"].rsplit("/", 1)[-1]
                 files = label_urls.setdefault(entry["label"], {})
-                files[fname] = url
+                files.setdefault(fname, url)
             group["last_count"] += 1
             any_success = True
         else:
@@ -519,6 +524,29 @@ def _should_collect_test(strategy, status, cached_locally):
         return status in _NOT_PASSED_STATUSES
     return False
 
+def testlog_dest_dir(label, run, shard, attempt):
+    """Destination directory for a test_result's output files.
+
+    runs_per_test / sharding / flaky retries emit one test_result event per
+    (run, shard, attempt), each carrying its own test.log/test.xml under the
+    same label. Without a distinguishing dest segment they collide — an
+    archive entry overwrites, a per-file URL overwrites, a symlink fails — and
+    only one run's logs survive. Append a `run_N`/`shard_N`/`attempt_N` subdir
+    whenever any is set (>0); a lone run/shard/attempt leaves the path
+    unchanged so single-run uploads keep their historical layout.
+    """
+    label_path = label.lstrip("/").replace(":", "/")
+    if not (run or shard or attempt):
+        return label_path
+    parts = []
+    if run:
+        parts.append("run_" + str(run))
+    if shard:
+        parts.append("shard_" + str(shard))
+    if attempt:
+        parts.append("attempt_" + str(attempt))
+    return label_path + "/" + "_".join(parts)
+
 def _collect_test_files(ctx, event, strategy, test_entries, skipped_files):
     """Append testlog entries (+ skip reasons) from a test_result BES
     event into the closure-private lists.
@@ -537,7 +565,12 @@ def _collect_test_files(ctx, event, strategy, test_entries, skipped_files):
         return
 
     label = event.id.label
-    label_path = label.lstrip("/").replace(":", "/")
+    dest_dir = testlog_dest_dir(
+        label,
+        bes_get(event.id, "run", 0) or 0,
+        bes_get(event.id, "shard", 0) or 0,
+        bes_get(event.id, "attempt", 0) or 0,
+    )
 
     for file in (bes_get(payload, "test_action_output", None) or []):
         raw_uri = file.file
@@ -550,7 +583,7 @@ def _collect_test_files(ctx, event, strategy, test_entries, skipped_files):
         if not ctx.std.fs.exists(src):
             skipped_files.append({"label": label, "name": file.name, "reason": "not found", "raw": src})
             continue
-        test_entries.append({"src": src, "dest": label_path + "/" + file.name, "label": label})
+        test_entries.append({"src": src, "dest": dest_dir + "/" + file.name, "label": label})
 
 def _new_test_group():
     """Fresh per-group upload state. Field semantics: see the upload

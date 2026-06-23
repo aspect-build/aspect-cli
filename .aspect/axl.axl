@@ -3,7 +3,7 @@ Exercise axl
 """
 
 load("@aspect//delivery.axl", delivery_count_unexplained_unresolved = "count_unexplained_unresolved", delivery_fmt_elapsed = "fmt_elapsed", delivery_should_surface_phase2_stderr = "should_surface_phase2_stderr", delivery_should_upload_grpc_log = "should_upload_grpc_log")
-load("@aspect//lib/artifacts.axl", "artifact_name")
+load("@aspect//lib/artifacts.axl", "artifact_name", "testlog_dest_dir")
 load("@aspect//lib/bazel_results.axl", "compute_reproducer_command", "init_data", "render_check_output", "resolve_aspect_url", "summary_title")
 load(
     "@aspect//lib/build_metadata.axl",
@@ -2288,6 +2288,20 @@ def test_artifacts_lib(ctx: TaskContext, tc: int) -> int:
     for (ci, task_name, task_key, filename, expected, desc) in cases:
         got = artifact_name(ci, task_name, task_key, filename)
         tc = test_case(tc, got == expected, "artifact_name: %s → %r (got %r)" % (desc, expected, got))
+
+    # testlog_dest_dir — runs_per_test / sharding / retries must not collide.
+    dest_cases = [
+        # (label, run, shard, attempt, expected, desc)
+        ("//pkg:net_test", 0, 0, 0, "pkg/net_test", "single run → label path unchanged"),
+        ("//pkg:net_test", 1, 0, 0, "pkg/net_test/run_1", "runs_per_test → run subdir"),
+        ("//pkg:net_test", 2, 0, 0, "pkg/net_test/run_2", "second run distinct from first"),
+        ("//pkg:net_test", 0, 3, 0, "pkg/net_test/shard_3", "sharded test → shard subdir"),
+        ("//pkg:net_test", 0, 0, 2, "pkg/net_test/attempt_2", "flaky retry → attempt subdir"),
+        ("//pkg:net_test", 2, 3, 1, "pkg/net_test/run_2_shard_3_attempt_1", "run+shard+attempt combined"),
+    ]
+    for (label, run, shard, attempt, expected, desc) in dest_cases:
+        got = testlog_dest_dir(label, run, shard, attempt)
+        tc = test_case(tc, got == expected, "testlog_dest_dir: %s → %r (got %r)" % (desc, expected, got))
     return tc
 
 def test_detect_build_url(ctx: TaskContext, tc: int) -> int:
