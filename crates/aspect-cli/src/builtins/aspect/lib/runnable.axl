@@ -63,8 +63,10 @@ def effective_download_outputs(flags: list) -> str | None:
 
     Resolves every form Bazel accepts — the canonical
     `--remote_download_outputs=<mode>`, its two-token `--remote_download_outputs
-    <mode>`, and the no-value aliases (`--remote_download_all`, …) — honoring
-    last-wins across them, so a later `--remote_download_all` beats an earlier
+    <mode>` (a `.bazelrc` line shell-tokenizes into two options; `--bazel-flag`
+    stores its value verbatim so the CLI can't produce this form), and the
+    no-value aliases (`--remote_download_all`, …) — honoring last-wins across
+    them, so a later `--remote_download_all` beats an earlier
     `--remote_download_outputs=minimal` and vice versa. `flags` items are the
     `str` / `(flag, version_condition)` shapes `RunCommand.expand` yields."""
     mode = None
