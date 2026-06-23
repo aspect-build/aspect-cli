@@ -914,7 +914,7 @@ if contains "$verb" "${ASPECT_VERBS_WITH_BAZEL_FLAGS[@]}"; then
     fi
     # Aspect accepts --bazel-startup-flag as a POST-verb flag. Move pre-verb
     # startup-flag forwards into the post-verb position; aspect global flags
-    # (--task-key, --timing, …) stay in front of the verb.
+    # (--task:name, --task:timing-summary, …) stay in front of the verb.
     #
     # The `${arr[@]+"${arr[@]}"}` form expands to nothing when the array is
     # empty without tripping `set -u` on the bash 3.2 that macOS ships.

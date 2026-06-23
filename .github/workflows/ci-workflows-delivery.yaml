@@ -73,7 +73,7 @@ jobs:
         # enrichment hook in //.aspect/config.axl. Additional force
         # targets (via the workflow_dispatch input or the
         # ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS env var) merge in.
-        run: aspect delivery --task-key delivery-gha --warn-not-runnable --force-target=//examples/deliverable:deliverable_with_digest
+        run: aspect delivery --task:name delivery-gha --warn-not-runnable --force-target=//examples/deliverable:deliverable_with_digest
   delivery-debug-task:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     timeout-minutes: 10
@@ -93,4 +93,4 @@ jobs:
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Delivery Task (ASPECT_DEBUG=1)
-        run: ASPECT_DEBUG=1 aspect delivery --task-key delivery-gha-debug --force-target=//examples/deliverable:deliverable_with_digest
+        run: ASPECT_DEBUG=1 aspect delivery --task:name delivery-gha-debug --force-target=//examples/deliverable:deliverable_with_digest
