@@ -584,14 +584,22 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             // it here (before the closing bookend opens its own section) targets
             // that phase. We can't know a phase will fail/flag when its `---`
             // header is printed, so this is the only point where the verdict is
-            // known and the offending section is still current. The closing
-            // bookend below then opens the timing-summary section, which BK
-            // leaves expanded as the last one.
-            if failed || flagged {
+            // known and the offending section is still current.
+            //
+            // `^^^ +++` counts as an explicit expansion, which defeats BK's
+            // "auto-expand the last collapsed `---` group when nothing is
+            // explicitly expanded" rule — so the timing-summary bookend below
+            // would collapse. Open it with `+++` on this path so both the
+            // failing phase and the summary stay expanded. On a clean run we
+            // keep `---` and let the auto-expand handle the summary.
+            let unclean = failed || flagged;
+            if unclean {
                 eprintln!("^^^ +++");
             }
+            let bookend_marker = if unclean { "+++" } else { "---" };
             eprintln!(
-                "--- {} {}{}{} · `{}` task{} in {}{}{}",
+                "{} {} {}{}{} · `{}` task{} in {}{}{}",
+                bookend_marker,
                 verdict.bk_shortcode,
                 verdict.color,
                 verdict.verb,
@@ -646,8 +654,11 @@ fn run_deferred<'v>(context: Value<'v>, eval: &mut Evaluator<'v, '_, '_>) {
 ///   exit non-0       → ❌ Failed   (bold red)
 ///
 /// Off Buildkite the runtime emits `→ <glyph> <verb> …`; on BK it
-/// emits `--- <bk_shortcode> <verb> · …` so the closing line lands as
-/// its own collapsible section header.
+/// emits `<marker> <bk_shortcode> <verb> · …` so the closing line lands
+/// as its own collapsible section header — `+++` (expanded) on a
+/// failed/flagged verdict so the timing summary stays open alongside the
+/// expanded failing phase, else `---` (collapsed, auto-expanded by BK as
+/// the last group).
 struct Verdict<'a> {
     /// BK emoji shortcode (e.g. `:white_check_mark:`); used in the
     /// `--- :<shortcode>: <verb> …` BK section header.
