@@ -225,16 +225,32 @@ fn reserve_task_name(base: &str, claim: impl Fn(&str) -> ClaimResult) -> String 
     base.to_owned()
 }
 
+/// An auto-generated task name plus whether it carries real meaning.
+///
+/// `meaningful` is true when the name derives from the CI job (worth surfacing
+/// next to the kind on status lines), false for the local random fallback (a
+/// throwaway placeholder that reads as noise — callers show just the kind).
+pub struct AutoTaskName {
+    pub name: String,
+    pub meaningful: bool,
+}
+
 /// The auto-generated task name for `kind` when `--task:name` is unset.
 ///
 /// On a recognized CI host with a detectable job name: `<kind>-<job>`, made
-/// unique on the local machine via [`reserve_task_name_in_tmpdir`]. Otherwise
-/// `<kind>-<fallback_suffix>` (the caller supplies a random friendly suffix),
-/// which is already unique and needs no de-dup file.
-pub fn auto_task_name(kind: &str, fallback_suffix: impl FnOnce() -> String) -> String {
+/// unique on the local machine via [`reserve_task_name_in_tmpdir`] (meaningful).
+/// Otherwise `<kind>-<fallback_suffix>` (the caller supplies a random friendly
+/// suffix) — unique, no de-dup file, but a throwaway placeholder.
+pub fn auto_task_name(kind: &str, fallback_suffix: impl FnOnce() -> String) -> AutoTaskName {
     match detect_ci_job_name() {
-        Some(job) => reserve_task_name_in_tmpdir(&format!("{kind}-{job}")),
-        None => format!("{kind}-{}", fallback_suffix()),
+        Some(job) => AutoTaskName {
+            name: reserve_task_name_in_tmpdir(&format!("{kind}-{job}")),
+            meaningful: true,
+        },
+        None => AutoTaskName {
+            name: format!("{kind}-{}", fallback_suffix()),
+            meaningful: false,
+        },
     }
 }
 
@@ -426,12 +442,11 @@ mod tests {
     }
 
     #[test]
-    fn auto_task_name_uses_fallback_off_ci() {
-        // Off CI, detect_ci_job_name() is None → fallback suffix path.
-        // (detect_ci_job_name reads the real env; in the test harness no CI
-        // markers are set, so this exercises the None branch deterministically
-        // only when run outside CI. Guard by asserting the shape.)
-        let name = auto_task_name("greet", || "fluffy-parakeet".to_string());
-        assert!(name.starts_with("greet-"), "got {name}");
+    fn auto_task_name_prefixes_kind() {
+        // `detect_ci_job_name` reads the real env, so the `meaningful` flag
+        // depends on whether the test runs on CI; the `<kind>-…` shape holds
+        // in both branches.
+        let auto = auto_task_name("greet", || "fluffy-parakeet".to_string());
+        assert!(auto.name.starts_with("greet-"), "got {}", auto.name);
     }
 }

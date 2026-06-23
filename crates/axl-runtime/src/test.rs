@@ -173,6 +173,7 @@ impl EvalBuilder {
                 .execute_tasks_with_args(
                     task_index,
                     "_test".to_string(),
+                    false,
                     None,
                     None,
                     crate::eval::TimingMode::default(),

@@ -65,6 +65,30 @@ fn running_verb_color() -> (String, &'static str) {
     (verb_seq, reset)
 }
 
+/// The task label for the runtime's opening "Running …" and closing
+/// "Passed/Failed …" bookend lines. Reads the CI environment; see
+/// [`task_label_for`] for the pure decision.
+fn task_label(kind: &str, name: &str, name_meaningful: bool) -> String {
+    task_label_for(kind, name, name_meaningful, on_recognized_ci())
+}
+
+/// Pure core of [`task_label`], env-injected for testing.
+///
+/// When the name carries information beyond the kind, mirror the CI status
+/// surfaces: lead with the name and bracket the kind as extra context
+/// (`<name> [<kind>]`). That's the case when the name differs from the kind
+/// AND either it's meaningful (an explicit `--task:name` / CI-job-derived name)
+/// or we're on CI (where the name is part of the status-check identity). For a
+/// bare local run the name is a `<kind>-<random-suffix>` placeholder that reads
+/// as noise, so show just `<kind> task`.
+fn task_label_for(kind: &str, name: &str, name_meaningful: bool, on_ci: bool) -> String {
+    if name != kind && (name_meaningful || on_ci) {
+        format!("{name} [{kind}]")
+    } else {
+        format!("{kind} task")
+    }
+}
+
 /// Wrapper around a live Starlark Module heap.
 ///
 /// All three evaluation phases share this heap so `Value<'v>` references
@@ -358,20 +382,13 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         &self,
         task_index: usize,
         task_name: &str,
+        task_name_meaningful: bool,
     ) -> Result<(), EvalError> {
         let task = *self.tasks().get(task_index).ok_or_else(|| {
             EvalError::UnknownError(anyhow!("task index {} out of range", task_index))
         })?;
         let (verb_seq, reset) = running_verb_color();
-        // On CI, append the per-invocation name so repeated kinds in one
-        // pipeline read distinctly and the header matches the check name. A
-        // bare local run shows just the kind — the auto `<kind>-<suffix>` name
-        // would be noise there.
-        let name_suffix = if on_recognized_ci() && task_name != task.kind() {
-            format!(" [{}]", task_name)
-        } else {
-            String::new()
-        };
+        let label = task_label(&task.kind(), task_name, task_name_meaningful);
         // Identity banner above the task header — see `crate::banner`.
         if banner::show_runtime_banner() {
             eprintln!("{}\n", banner::line_from_pkg());
@@ -379,23 +396,11 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         if std::env::var_os("BUILDKITE").is_some() {
             // The BK section header replaces the `→` line on BK (avoids
             // duplicating the same text in the BK log viewer).
-            eprintln!(
-                "--- :aspect: {}Running{} `{}` task{}",
-                verb_seq,
-                reset,
-                task.kind(),
-                name_suffix
-            );
+            eprintln!("--- :aspect: {}Running{} {}", verb_seq, reset, label);
         } else {
             // 🎬 (clapper board) pairs with the closing ✅ / ⚠️ / ❌ as
             // the task's bookend.
-            eprintln!(
-                "→ 🎬 {}Running{} `{}` task{}",
-                verb_seq,
-                reset,
-                task.kind(),
-                name_suffix
-            );
+            eprintln!("→ 🎬 {}Running{} {}", verb_seq, reset, label);
         }
         Ok(())
     }
@@ -468,6 +473,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         &mut self,
         task_index: usize,
         task_name: String,
+        task_name_meaningful: bool,
         task_friendly_name: Option<String>,
         task_id: Option<String>,
         timing: TimingMode,
@@ -497,7 +503,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             task.kind(),
             task.friendly_kind(),
             task.group().clone(),
-            task_name,
+            task_name.clone(),
             task_friendly_name,
             task_id,
         );
@@ -591,6 +597,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         let on_bk = std::env::var_os("BUILDKITE")
             .map(|v| !v.is_empty())
             .unwrap_or(false);
+        let label = task_label(&task_kind, &task_name, task_name_meaningful);
         let verdict = Verdict::pick(exit_code, flagged, &bold_green, &bold_yellow, &bold_red);
         if on_bk {
             // On a non-clean verdict, retroactively expand the section that is
@@ -614,13 +621,13 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             }
             let bookend_marker = if unclean { "+++" } else { "---" };
             eprintln!(
-                "{} {} {}{}{} · `{}` task{}{}{}{}",
+                "{} {} {}{}{} · {}{}{}{}{}",
                 bookend_marker,
                 verdict.bk_shortcode,
                 verdict.color,
                 verdict.verb,
                 reset,
-                task_kind,
+                label,
                 exit_suffix,
                 timing_segment,
                 conclusion_suffix,
@@ -629,12 +636,12 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         } else {
             eprintln!();
             eprintln!(
-                "→ {} {}{}{} `{}` task{}{}{}{}",
+                "→ {} {}{}{} {}{}{}{}{}",
                 verdict.glyph,
                 verdict.color,
                 verdict.verb,
                 reset,
-                task_kind,
+                label,
                 exit_suffix,
                 timing_segment,
                 conclusion_suffix,
@@ -983,9 +990,32 @@ fn display_width(s: &str) -> usize {
 mod tests {
     use super::{
         TimingMode, display_width, format_duration, render_phase_breakdown, render_timing_segment,
+        task_label_for,
     };
     use crate::engine::task_info::PhaseRecord;
     use std::time::Duration;
+
+    #[test]
+    fn task_label_brackets_kind_when_name_carries_info() {
+        // Meaningful name (explicit --task:name or CI-derived) → `<name> [<kind>]`,
+        // on or off CI.
+        assert_eq!(
+            task_label_for("format", "format-repeat-2", true, false),
+            "format-repeat-2 [format]"
+        );
+        // On CI, any distinct name is bracketed even if not flagged meaningful.
+        assert_eq!(
+            task_label_for("test", "test-ci-linux", false, true),
+            "test-ci-linux [test]"
+        );
+        // Local autogenerated placeholder (not meaningful, off CI) → just the kind.
+        assert_eq!(
+            task_label_for("format", "format-brash-cherries", false, false),
+            "format task"
+        );
+        // name == kind → no redundant bracket, even meaningful or on CI.
+        assert_eq!(task_label_for("lint", "lint", true, true), "lint task");
+    }
 
     fn phase(name: &str, emoji: &str, secs: u64) -> PhaseRecord {
         PhaseRecord {
