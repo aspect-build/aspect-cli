@@ -4,27 +4,33 @@ Run with:
   aspect dev test-format-template-snapshots
 
 Scenarios:
-  1. clean-passed        — no files need formatting
-  2. files-need-format   — 3 files need formatting (scope=changed)
-  3. scope-all-many      — 15 files need formatting (scope=all)
-  4. severity-warn       — status=warning + drift; body must show files list
-  5. formatter-error     — formatter binary crashed
-  6. no-git              — no initial commit / not in git repo
-  7. no-files-to-format  — scope=changed, no changed files found
-  8. with-patch-url      — patch artifact uploaded; check run shows download link
-  9. non-default-target  — custom formatter target label in repro command
- 10. large               — 250 files to exercise the trim cascade
- 11. in-progress         — status=running with affected_files (placeholder body)
- 12. metadata-all        — GitHubStatusChecksTrait.metadata_keys = ["*"]
- 13. applied             — formatter rewrote files (--severity=info path)
- 14. early-fail          — status=failed, no specific failure mode (body says "Failed")
- 15. aborted             — bazel aborted mid-build, no recorded affected files
- 16. failing-with-drift  — status=failing (mid-stream --severity=fail): drift
-                           detected, body must show files list (not placeholder)
+  1. clean-passed              — no files need formatting
+  2. files-need-format         — 3 files need formatting (scope=changed)
+  3. scope-all-many            — 15 files need formatting (scope=all)
+  4. severity-warn             — status=warning + drift; body must show files list
+  5. formatter-error           — formatter binary crashed
+  6. no-git                    — no initial commit / not in git repo
+  7. no-files-to-format        — scope=changed, no changed files found
+  8. with-patch-url            — patch artifact uploaded; check run shows download link
+  9. non-default-target        — custom formatter target label in repro command
+ 10. large                     — 250 files to exercise the trim cascade
+ 11. in-progress               — status=running with affected_files (placeholder body)
+ 12. metadata-all              — GitHubStatusChecksTrait.metadata_keys = ["*"]
+ 13. applied                   — formatter rewrote files (--severity=info path)
+ 14. early-fail                — status=failed, no specific failure mode (body says "Failed")
+ 15. aborted                   — bazel aborted mid-build, no recorded affected files
+ 16. failing-with-drift        — status=failing (mid-stream --severity=fail): drift
+                                 detected, body must show files list (not placeholder)
+ 17. scope-tracked-many        — 15 files need formatting (scope=tracked)
+ 18. scope-tracked-no-files    — scope=tracked, no files matched after pattern filter;
+                                 template must say "--scope=tracked" not "--scope=changed"
 
 Body-content invariant (asserted in the loop): the "Format task in progress…"
 placeholder renders IFF status == "running". A regression where `warning` or
 `failing` short-circuits to the placeholder fails the suite.
+
+no-files-to-format invariant (asserted in the loop): the rendered body must
+contain the actual scope value, not the hardcoded string "--scope=changed".
 """
 
 load("./format_results.axl", "init_data", "render_check_output")
@@ -159,6 +165,39 @@ def _make_no_files_to_format():
     r["format"]["no_files_to_format"] = True
     return r
 
+def _make_scope_tracked_many():
+    r = _make_base()
+    r["format"]["scope"] = "tracked"
+    r["format"]["affected_files"] = [
+        "apps/web/src/auth/login.ts",
+        "apps/web/src/auth/logout.ts",
+        "apps/web/src/api/client.ts",
+        "apps/web/src/api/types.ts",
+        "apps/web/src/utils/helpers.go",
+        "apps/web/src/utils/date.go",
+        "tools/deploy/deploy.py",
+        "tools/deploy/config.py",
+        "tools/ci/validate.py",
+        "tools/ci/report.py",
+        "services/api/main.go",
+        "services/api/handler.go",
+        "services/api/middleware.go",
+        "services/worker/main.go",
+        "services/worker/queue.go",
+    ]
+    return r
+
+def _make_scope_tracked_no_files():
+    """scope=tracked with no files after --include-pattern filtering.
+
+    Exercises the template bug fix: the "no files" message must say
+    "--scope=tracked", not the previously hardcoded "--scope=changed".
+    """
+    r = _make_base()
+    r["format"]["scope"] = "tracked"
+    r["format"]["no_files_to_format"] = True
+    return r
+
 def _make_with_patch_url():
     r = _make_base()
     r["format"]["affected_files"] = [
@@ -257,6 +296,8 @@ def _test_impl(ctx):
         # placeholder.
         ("15. aborted · GH", _make_aborted(), "aborted", "github", None),
         ("16. failing-with-drift · GH", _make_failing_with_drift(), "failing", "github", None),
+        ("17. scope-tracked-many · GH", _make_scope_tracked_many(), "failed", "github", None),
+        ("18. scope-tracked-no-files · GH", _make_scope_tracked_no_files(), "passed", "github", None),
     ]
 
     sep = "=" * 70
@@ -286,6 +327,14 @@ def _test_impl(ctx):
         if status != "running" and has_placeholder:
             errors.append("%s: status=%s rendered the in-progress placeholder" % (label, status))
 
+        # Invariant: when no_files_to_format is set, the rendered body must
+        # reference the actual scope value, not the hardcoded "--scope=changed".
+        actual_scope = data["format"].get("scope", "")
+        if data["format"].get("no_files_to_format") and actual_scope and actual_scope != "changed":
+            expected_scope_str = "--scope=" + actual_scope
+            if expected_scope_str not in out["text"]:
+                errors.append("%s: no_files_to_format body missing '%s' (scope mismatch)" % (label, expected_scope_str))
+
     if errors:
         for e in errors:
             print("FAIL: " + e)
@@ -294,7 +343,7 @@ def _test_impl(ctx):
     _check_failed_actions_invoke_snippet_macro(ctx)
 
     print(sep)
-    print("All " + str(len(scenarios)) + " format scenarios rendered without error.")
+    print("All %d format scenarios rendered without error." % len(scenarios))
     return 0
 
 def _check_failed_actions_invoke_snippet_macro(ctx):

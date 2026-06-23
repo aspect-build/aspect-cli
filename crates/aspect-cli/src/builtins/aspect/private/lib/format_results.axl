@@ -50,7 +50,7 @@ def init_data():
     r["format"] = {
         "affected_files": [],  # file paths that need formatting
         "filtered_count": 0,  # files hidden by --include-pattern / --exclude-pattern
-        "scope": "",  # "changed" | "all"
+        "scope": "",  # "changed" | "tracked" | "all"
         "formatter_target": "",  # Bazel label of the formatter binary
         # Resolved `--severity` policy: "info" | "warn" | "fail".
         # Stamped by `_impl` after resolving `auto`.
@@ -58,7 +58,7 @@ def init_data():
         "formatter_error": False,  # formatter binary itself crashed
         "formatter_error_code": 0,  # exit code when formatter_error is True
         "no_git": False,  # no initial git commit / not in a git repo
-        "no_files_to_format": False,  # scope=changed but no changed files found
+        "no_files_to_format": False,  # no files in scope to format
         "patch_url": "",  # download URL for the format.patch artifact (optional)
     }
     return r
@@ -187,7 +187,7 @@ _DETAILS_TEMPLATE = """{% if is_running %}
 > ⚠️ No initial git commit (or not in a git repository). The formatter ran but change detection was skipped.
 
 {% elif no_files_to_format %}
-> ℹ️ No changed files found for `--scope=changed`. Nothing to format.
+> ℹ️ No files to format for `--scope={{ scope }}`.
 
 {% elif is_clean %}
 ### ✅ All {% if checked_count %}{{ checked_count }} {% endif %}files {% if checked_count %}in scope {% endif %}are properly formatted.
@@ -313,6 +313,7 @@ def _build_details_data(data, status):
         "formatter_error_code": str(data["format"].get("formatter_error_code", 0) or 0),
         "no_git": bool(data["format"].get("no_git")),
         "no_files_to_format": bool(data["format"].get("no_files_to_format")),
+        "scope": data["format"].get("scope", "") or "",
         "patch_url": data["format"].get("patch_url", "") or "",
         "patch_download_cmd": patch_download_cmd(
             data["format"].get("patch_url", "") or "",
