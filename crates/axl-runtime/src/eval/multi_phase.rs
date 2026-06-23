@@ -65,6 +65,21 @@ fn running_verb_color() -> (String, &'static str) {
     (verb_seq, reset)
 }
 
+/// The task label for the runtime's opening "Running …" and closing
+/// "Passed/Failed …" bookend lines.
+///
+/// Mirrors the CI status surfaces: leads with the per-invocation name and
+/// brackets the kind as extra context (`<name> [<kind>]`). When the name is
+/// just the kind (no `--task:name`, off CI) the bracket is redundant, so it
+/// falls back to `` `<name>` task ``.
+fn task_label(kind: &str, name: &str) -> String {
+    if name != kind {
+        format!("{name} [{kind}]")
+    } else {
+        format!("`{name}` task")
+    }
+}
+
 /// Wrapper around a live Starlark Module heap.
 ///
 /// All three evaluation phases share this heap so `Value<'v>` references
@@ -363,15 +378,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             EvalError::UnknownError(anyhow!("task index {} out of range", task_index))
         })?;
         let (verb_seq, reset) = running_verb_color();
-        // On CI, append the per-invocation name so repeated kinds in one
-        // pipeline read distinctly and the header matches the check name. A
-        // bare local run shows just the kind — the auto `<kind>-<suffix>` name
-        // would be noise there.
-        let name_suffix = if on_recognized_ci() && task_name != task.kind() {
-            format!(" [{}]", task_name)
-        } else {
-            String::new()
-        };
+        let label = task_label(&task.kind(), task_name);
         // Identity banner above the task header — see `crate::banner`.
         if banner::show_runtime_banner() {
             eprintln!("{}\n", banner::line_from_pkg());
@@ -379,23 +386,11 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         if std::env::var_os("BUILDKITE").is_some() {
             // The BK section header replaces the `→` line on BK (avoids
             // duplicating the same text in the BK log viewer).
-            eprintln!(
-                "--- :aspect: {}Running{} `{}` task{}",
-                verb_seq,
-                reset,
-                task.kind(),
-                name_suffix
-            );
+            eprintln!("--- :aspect: {}Running{} {}", verb_seq, reset, label);
         } else {
             // 🎬 (clapper board) pairs with the closing ✅ / ⚠️ / ❌ as
             // the task's bookend.
-            eprintln!(
-                "→ 🎬 {}Running{} `{}` task{}",
-                verb_seq,
-                reset,
-                task.kind(),
-                name_suffix
-            );
+            eprintln!("→ 🎬 {}Running{} {}", verb_seq, reset, label);
         }
         Ok(())
     }
@@ -497,7 +492,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             task.kind(),
             task.friendly_kind(),
             task.group().clone(),
-            task_name,
+            task_name.clone(),
             task_friendly_name,
             task_id,
         );
@@ -591,6 +586,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         let on_bk = std::env::var_os("BUILDKITE")
             .map(|v| !v.is_empty())
             .unwrap_or(false);
+        let label = task_label(&task_kind, &task_name);
         let verdict = Verdict::pick(exit_code, flagged, &bold_green, &bold_yellow, &bold_red);
         if on_bk {
             // On a non-clean verdict, retroactively expand the section that is
@@ -614,13 +610,13 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             }
             let bookend_marker = if unclean { "+++" } else { "---" };
             eprintln!(
-                "{} {} {}{}{} · `{}` task{}{}{}{}",
+                "{} {} {}{}{} · {}{}{}{}{}",
                 bookend_marker,
                 verdict.bk_shortcode,
                 verdict.color,
                 verdict.verb,
                 reset,
-                task_kind,
+                label,
                 exit_suffix,
                 timing_segment,
                 conclusion_suffix,
@@ -629,12 +625,12 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         } else {
             eprintln!();
             eprintln!(
-                "→ {} {}{}{} `{}` task{}{}{}{}",
+                "→ {} {}{}{} {}{}{}{}{}",
                 verdict.glyph,
                 verdict.color,
                 verdict.verb,
                 reset,
-                task_kind,
+                label,
                 exit_suffix,
                 timing_segment,
                 conclusion_suffix,
@@ -983,9 +979,18 @@ fn display_width(s: &str) -> usize {
 mod tests {
     use super::{
         TimingMode, display_width, format_duration, render_phase_breakdown, render_timing_segment,
+        task_label,
     };
     use crate::engine::task_info::PhaseRecord;
     use std::time::Duration;
+
+    #[test]
+    fn task_label_brackets_kind_when_name_differs() {
+        assert_eq!(task_label("format", "format-repeat-2"), "format-repeat-2 [format]");
+        assert_eq!(task_label("test", "test-ci-linux"), "test-ci-linux [test]");
+        // No `--task:name`: name == kind → no redundant bracket.
+        assert_eq!(task_label("lint", "lint"), "`lint` task");
+    }
 
     fn phase(name: &str, emoji: &str, secs: u64) -> PhaseRecord {
         PhaseRecord {
