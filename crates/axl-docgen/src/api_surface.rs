@@ -70,9 +70,8 @@ fn walk_module(path: &str, module: &DocModule, out: &mut Vec<String>) {
 // is only reachable via the `_`-private `__builtins__` entrypoint, so the docs
 // tree never surfaces it. Module-level builtins (`@std//time`, `json`,
 // `grpc.Server`) are exposed as functions/namespaces and ARE captured.
-// Closing this needs `docs::documentation()` to emit a DocType (via
-// `Methods::documentation()`) for method-bearing values — tracked as a
-// follow-up to keep this PR's blast radius small.
+// Accepted limitation: closing it would require `docs::documentation()` to
+// emit a DocType (via `Methods::documentation()`) for method-bearing values.
 fn render_property(name: &str, prop: &DocProperty) -> String {
     format!("{name}: {}", prop.typ)
 }
