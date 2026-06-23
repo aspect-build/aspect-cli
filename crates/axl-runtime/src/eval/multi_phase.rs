@@ -577,6 +577,19 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             .unwrap_or(false);
         let verdict = Verdict::pick(exit_code, flagged, &bold_green, &bold_yellow, &bold_red);
         if on_bk {
+            // On a non-clean verdict, retroactively expand the section that is
+            // still open — the last phase the task emitted, i.e. the one that
+            // failed or got flagged. BK's `^^^ +++` expands the currently-open
+            // section regardless of how its `---` header declared it; emitting
+            // it here (before the closing bookend opens its own section) targets
+            // that phase. We can't know a phase will fail/flag when its `---`
+            // header is printed, so this is the only point where the verdict is
+            // known and the offending section is still current. The closing
+            // bookend below then opens the timing-summary section, which BK
+            // leaves expanded as the last one.
+            if failed || flagged {
+                eprintln!("^^^ +++");
+            }
             eprintln!(
                 "--- {} {}{}{} · `{}` task{} in {}{}{}",
                 verdict.bk_shortcode,
