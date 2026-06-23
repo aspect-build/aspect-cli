@@ -1,6 +1,5 @@
 """Unit tests for lib/runnable.axl: apparent_label normalization, BES matching,
-entrypoint selection (passes 1–3), runfiles directory detection, `--run-in`
-cwd resolution, and `--remote_download_outputs` resolution/sufficiency."""
+entrypoint selection (passes 1–3), and runfiles directory detection."""
 
 load("./runnable.axl", "apparent_label", "download_outputs_sufficient", "effective_download_outputs", "resolve_run_in", "runnable")
 
@@ -343,15 +342,18 @@ def _test_pass3_skips_non_executable(ctx):
 # Filesystem detection tests — exercise `<entrypoint>.runfiles` discovery on
 # disk with a minimal mock ctx.
 
-def _make_mock_ctx(existing_paths, executable_paths = None):
+def _make_mock_ctx(existing_paths, executable_paths = None, file_contents = None):
     """Minimal TaskContext mock for filesystem detection tests.
 
     existing_paths: absolute paths that `std.fs.exists()` returns True for.
     executable_paths: absolute paths that `std.fs.metadata().executable` is True
         for. None means "every path is executable" — the right default for tests
         that don't exercise pass-3's executable-bit check.
+    file_contents: path → contents for `std.fs.read_to_string()` (the runinfo
+        JSON reads). None / missing path → empty string.
     """
     is_executable = (lambda path: True) if executable_paths == None else (lambda path: path in executable_paths)
+    contents = file_contents or {}
     return struct(
         std = struct(
             env = struct(
@@ -361,7 +363,22 @@ def _make_mock_ctx(existing_paths, executable_paths = None):
             fs = struct(
                 exists = lambda path: path in existing_paths,
                 metadata = lambda path: struct(executable = is_executable(path)),
+                read_to_string = lambda path: contents.get(path, ""),
             ),
+        ),
+    )
+
+def _make_runinfo_target_event(bes_label, default_set_id, runinfo_set_id):
+    """target_completed event carrying both the `default` and `aspect_runinfo`
+    output groups (the latter written by the injected runinfo aspect)."""
+    return struct(
+        kind = "target_completed",
+        id = struct(label = bes_label),
+        payload = struct(
+            output_group = [
+                struct(name = "default", file_sets = [struct(id = default_set_id)]),
+                struct(name = "aspect_runinfo", file_sets = [struct(id = runinfo_set_id)]),
+            ],
         ),
     )
 
@@ -576,9 +593,154 @@ def _test_run_in_relative_dotdot(_ctx):
         "/here/../sub",
     )
 
+# runinfo aspect integration — when the injected aspect's JSON is present,
+# `determine_entrypoint` selects the exact `files_to_run` executable (pass 0)
+# and attaches the replayed `args` / `environment`.
+
+_RUNINFO_JSON = '{"executable": "_main/tools/format/format_real", "args": ["--config", "x"], "environment": {"FOO": "1"}, "inherited_environment": ["HOME"]}'
+
+def _test_runinfo_selects_executable_over_heuristic(ctx):
+    """Pass 0 picks the file whose basename matches the aspect's executable
+    short_path, even when a different file matches the target name (pass 1)."""
+    mock = _make_mock_ctx(
+        existing_paths = [],
+        file_contents = {"/out/bin/tools/format/format.aspect_runinfo.json": _RUNINFO_JSON},
+    )
+    r = runnable(mock, ["//tools/format:format"])
+
+    # `format` matches the target name (pass 1), `format_real` matches the
+    # aspect's executable — pass 0 must win.
+    r.event(_make_fileset_event("def", [
+        "/out/bin/tools/format/format",
+        "/out/bin/tools/format/format_real",
+    ]))
+    r.event(_make_fileset_event("ri", ["/out/bin/tools/format/format.aspect_runinfo.json"]))
+    r.event(_make_runinfo_target_event("//tools/format:format", "def", "ri"))
+    ep = r.determine_entrypoint("//tools/format:format")
+    if ep == None:
+        fail("runinfo-pass0: expected entrypoint, got None")
+    _eq("runinfo-pass0: executable", ep.path, "/out/bin/tools/format/format_real")
+
+def _test_runinfo_attaches_args_and_env(ctx):
+    """The expanded args + RunEnvironmentInfo env flow onto the entrypoint."""
+    mock = _make_mock_ctx(
+        existing_paths = [],
+        file_contents = {"/out/bin/tools/format/format.aspect_runinfo.json": _RUNINFO_JSON},
+    )
+    r = runnable(mock, ["//tools/format:format"])
+    r.event(_make_fileset_event("def", ["/out/bin/tools/format/format_real"]))
+    r.event(_make_fileset_event("ri", ["/out/bin/tools/format/format.aspect_runinfo.json"]))
+    r.event(_make_runinfo_target_event("//tools/format:format", "def", "ri"))
+    ep = r.determine_entrypoint("//tools/format:format")
+    _eq("runinfo-args", ep.args, ["--config", "x"])
+    _eq("runinfo-env", ep.environment, {"FOO": "1"})
+    _eq("runinfo-inherited", ep.inherited_environment, ["HOME"])
+
+def _test_no_runinfo_yields_empty_args_env(ctx):
+    """Without the aspect (no aspect_runinfo group), args/env default to empty
+    and the heuristic still resolves the entrypoint."""
+    r = runnable(None, ["//tools/format:format"])
+    r.event(_make_fileset_event("s1", ["/out/bin/tools/format/format"]))
+    r.event(_make_target_event("//tools/format:format", "s1"))
+    ep = r.determine_entrypoint("//tools/format:format")
+    if ep == None:
+        fail("no-runinfo: expected entrypoint, got None")
+    _eq("no-runinfo: path", ep.path, "/out/bin/tools/format/format")
+    _eq("no-runinfo: args empty", ep.args, [])
+    _eq("no-runinfo: env empty", ep.environment, {})
+    _eq("no-runinfo: inherited empty", ep.inherited_environment, [])
+
+# flags — runinfo injection + the --remote_download_outputs floor.
+# Exercised through `runnable(rc=...).flags`; the helpers are private.
+
+def _make_flags_ctx():
+    """ctx mock sufficient for `runnable().flags`: writes the temp aspect
+    repo (no-op fs) and carries a task key for the repo path."""
+    return struct(
+        task = struct(name = "testkey"),
+        std = struct(
+            env = struct(
+                bazel_root_dir = lambda: "/ws",
+                current_dir = lambda: "/ws",
+            ),
+            fs = struct(
+                create_dir_all = lambda path: None,
+                write = lambda path, content: None,
+            ),
+        ),
+    )
+
+def _make_rc(flags, bzlmod = None):
+    """Mock RunCommand: `expand` returns the ordered build flags, `bool_flag`
+    returns the `--enable_bzlmod` tri-state."""
+    return struct(
+        expand = lambda command = None: flags,
+        bool_flag = lambda name, command = None: bzlmod,
+    )
+
+_FLOOR = "--remote_download_outputs=toplevel"
+
+def _test_download_floor_forced_when_unset(ctx):
+    r = runnable(_make_flags_ctx(), ["//a:b"], rc = _make_rc([]))
+    if _FLOOR not in r.flags:
+        fail("unset → floor forces toplevel; got %r" % r.flags)
+
+def _test_download_floor_forced_when_minimal(ctx):
+    r = runnable(_make_flags_ctx(), ["//a:b"], rc = _make_rc(["--remote_download_outputs=minimal"]))
+    if _FLOOR not in r.flags:
+        fail("minimal → forced up to toplevel; got %r" % r.flags)
+
+def _test_download_floor_forced_when_minimal_alias(ctx):
+    r = runnable(_make_flags_ctx(), ["//a:b"], rc = _make_rc(["--remote_download_minimal"]))
+    if _FLOOR not in r.flags:
+        fail("minimal alias → forced up; got %r" % r.flags)
+
+def _test_download_floor_skips_when_all(ctx):
+    r = runnable(_make_flags_ctx(), ["//a:b"], rc = _make_rc(["--remote_download_outputs=all"]))
+    if _FLOOR in r.flags:
+        fail("all → upward override must stand, no floor flag; got %r" % r.flags)
+
+def _test_download_floor_skips_when_toplevel_alias(ctx):
+    r = runnable(_make_flags_ctx(), ["//a:b"], rc = _make_rc(["--remote_download_toplevel"]))
+    if _FLOOR in r.flags:
+        fail("toplevel alias already satisfies floor; got %r" % r.flags)
+
+def _test_download_floor_two_token_all(ctx):
+    r = runnable(_make_flags_ctx(), ["//a:b"], rc = _make_rc(["--remote_download_outputs", "all"]))
+    if _FLOOR in r.flags:
+        fail("two-token =all → floor skipped; got %r" % r.flags)
+
+def _test_download_floor_alias_last_wins(ctx):
+    # canonical =all, then a later minimal alias → effective minimal → forced up.
+    r = runnable(_make_flags_ctx(), ["//a:b"], rc = _make_rc(["--remote_download_outputs=all", "--remote_download_minimal"]))
+    if _FLOOR not in r.flags:
+        fail("alias last-wins (minimal) → forced up; got %r" % r.flags)
+
+def _test_flags_inject_repo_by_default(ctx):
+    r = runnable(_make_flags_ctx(), ["//a:b"], rc = _make_rc([]))
+    joined = " ".join(r.flags)
+    if "--inject_repository=aspect_runinfo=" not in joined:
+        fail("default → inject_repository; got %r" % r.flags)
+    if "--aspects=@aspect_runinfo//:runinfo.bzl%runinfo" not in r.flags:
+        fail("missing runinfo aspect flag; got %r" % r.flags)
+
+def _test_flags_override_repo_in_workspace_mode(ctx):
+    r = runnable(_make_flags_ctx(), ["//a:b"], rc = _make_rc([], bzlmod = False))
+    if "--override_repository=aspect_runinfo=" not in " ".join(r.flags):
+        fail("workspace mode → override_repository; got %r" % r.flags)
+
+def _test_flags_no_rc_is_spawn_flags_only(ctx):
+    r = runnable(None, ["//a:b"])
+    if _FLOOR in r.flags:
+        fail("no rc → no floor; got %r" % r.flags)
+    if "aspect_runinfo" in " ".join(r.flags):
+        fail("no rc → no aspect injection; got %r" % r.flags)
+    if "--build_runfile_links" not in r.flags:
+        fail("flags must always carry the mandatory spawn flags; got %r" % r.flags)
+
 # download_outputs_sufficient — which user `--remote_download_outputs` values
-# already put the top-level binary on disk (so the spawn/delivery `=toplevel`
-# default need not override them).
+# already put the top-level binary on disk (so the spawn `=toplevel` default
+# need not override them).
 
 def _test_download_outputs_toplevel_sufficient(_ctx):
     _eq("toplevel is sufficient", download_outputs_sufficient("toplevel"), True)
@@ -626,8 +788,8 @@ def _test_effective_download_outputs_alias_minimal(_ctx):
     _eq("--remote_download_minimal alias", effective_download_outputs(["--remote_download_minimal"]), "minimal")
 
 def _test_effective_download_outputs_alias_beats_earlier_canonical(_ctx):
-    """The Codex regression: a later `--remote_download_all` alias must beat an
-    earlier canonical `--remote_download_outputs=minimal`."""
+    """A later `--remote_download_all` alias must beat an earlier canonical
+    `--remote_download_outputs=minimal`."""
     _eq(
         "alias wins last over canonical",
         effective_download_outputs(["--remote_download_outputs=minimal", "--remote_download_all"]),
@@ -700,6 +862,27 @@ _UNIT_TESTS = [
     _test_run_in_absolute_path,
     _test_run_in_relative_dot,
     _test_run_in_relative_dotdot,
+    _test_runfiles_workspace_dir_uses_bes_workspace_name,
+    _test_runfiles_workspace_dir_non_default_workspace,
+    _test_runfiles_workspace_dir_default_when_no_workspace_config,
+    _test_get_default_outputs_unknown_target_returns_empty,
+    _test_get_default_outputs_single_fileset,
+    _test_get_default_outputs_walks_nested_filesets,
+    _test_get_default_outputs_apparent_label_normalization,
+    _test_get_default_outputs_strips_file_uri_prefix,
+    _test_runinfo_selects_executable_over_heuristic,
+    _test_runinfo_attaches_args_and_env,
+    _test_no_runinfo_yields_empty_args_env,
+    _test_download_floor_forced_when_unset,
+    _test_download_floor_forced_when_minimal,
+    _test_download_floor_forced_when_minimal_alias,
+    _test_download_floor_skips_when_all,
+    _test_download_floor_skips_when_toplevel_alias,
+    _test_download_floor_two_token_all,
+    _test_download_floor_alias_last_wins,
+    _test_flags_inject_repo_by_default,
+    _test_flags_override_repo_in_workspace_mode,
+    _test_flags_no_rc_is_spawn_flags_only,
     _test_download_outputs_toplevel_sufficient,
     _test_download_outputs_all_sufficient,
     _test_download_outputs_minimal_insufficient,
@@ -713,14 +896,6 @@ _UNIT_TESTS = [
     _test_effective_download_outputs_alias_beats_earlier_canonical,
     _test_effective_download_outputs_canonical_beats_earlier_alias,
     _test_effective_download_outputs_version_tuple,
-    _test_runfiles_workspace_dir_uses_bes_workspace_name,
-    _test_runfiles_workspace_dir_non_default_workspace,
-    _test_runfiles_workspace_dir_default_when_no_workspace_config,
-    _test_get_default_outputs_unknown_target_returns_empty,
-    _test_get_default_outputs_single_fileset,
-    _test_get_default_outputs_walks_nested_filesets,
-    _test_get_default_outputs_apparent_label_normalization,
-    _test_get_default_outputs_strips_file_uri_prefix,
 ]
 
 def _test_impl(ctx):

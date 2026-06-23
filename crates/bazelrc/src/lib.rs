@@ -978,38 +978,32 @@ fn runcommand_methods(registry: &mut starlark::environment::MethodsBuilder) {
 
     /// Expand all `--config=` flags for `command` into the fully-resolved flag
     /// list, compatible with `ctx.bazel.build(flags=...)`.
+    ///
+    /// Version-gated options are filtered to the run command's resolved Bazel
+    /// version (same as `flag_value` / `resolve_for_command`), so the result
+    /// reflects what Bazel actually receives — an option gated to a different
+    /// version is dropped rather than reported as active.
     fn expand<'v>(
         this: &BazelRC,
         #[starlark(require = named)] command: String,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Vec<Value<'v>>> {
-        let skip: Vec<&str> = this
-            .skip_config_if_missing
-            .iter()
-            .map(String::as_str)
-            .collect();
-        let opts = this
-            .expand_configs(&command, &skip)
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let opts = this.applicable_options(&command, None)?;
         Ok(opts.iter().map(|opt| alloc_flag(eval, opt)).collect())
     }
 
     /// Expand `--config=` flags for `command`, split into
     /// `(startup_flags, flags)` where `common`-section options are rendered as
     /// `--default_override=0:common=...` startup-side entries.
+    ///
+    /// Like `expand`, the command flags are filtered to the resolved Bazel
+    /// version so version-gated options report accurately.
     fn expand_all<'v>(
         this: &BazelRC,
         #[starlark(require = named)] command: String,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<(Vec<Value<'v>>, Vec<Value<'v>>)> {
-        let skip: Vec<&str> = this
-            .skip_config_if_missing
-            .iter()
-            .map(String::as_str)
-            .collect();
-        let opts = this
-            .expand_configs(&command, &skip)
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let opts = this.applicable_options(&command, None)?;
 
         let startup: Vec<Value<'v>> = this
             .raw_options("startup")
