@@ -29,21 +29,19 @@ LOCAL_SPAWN_BASE_FLAGS = [
     "--remote_download_outputs=toplevel",
 ]
 
-# Values of `--remote_download_outputs` that already put the top-level
-# binary on disk, so a user-set value is honored as-is. `minimal` is
-# absent on purpose: it leaves the binary remote and breaks the spawn, so
-# it must be upgraded to the `toplevel` default rather than respected.
+# `--remote_download_outputs` values that already put the top-level binary
+# on disk; `minimal` is excluded on purpose (see `download_outputs_sufficient`).
 _DOWNLOAD_OUTPUTS_SUFFICIENT = ["toplevel", "all"]
 
 def download_outputs_sufficient(value: str | None) -> bool:
-    """Whether a user-set `--remote_download_outputs=<value>` already puts the
-    top-level binary on disk, so the delivery/spawn `=toplevel` default need
-    not override it.
+    """Whether a `--remote_download_outputs=<value>` already puts the top-level
+    binary on disk, so the spawn/delivery `=toplevel` default need not override
+    it.
 
-    `toplevel`/`all` are sufficient; `minimal` is not (it leaves the binary
-    remote and breaks the spawn), so a `=minimal` must be upgraded to
-    `toplevel` rather than respected. None (flag unset) is not sufficient —
-    the default applies."""
+    `toplevel`/`all` are sufficient; `minimal` is not — it leaves the binary
+    remote and breaks the spawn, so a `=minimal` must be upgraded to `toplevel`
+    rather than respected. `None` (flag unset) is not sufficient: the default
+    applies."""
     return value in _DOWNLOAD_OUTPUTS_SUFFICIENT
 
 # Named modes accepted by `--run-in=<choice>` on tasks that spawn a

@@ -351,12 +351,13 @@ def _surface_phase_stderr(ctx, phase, log_path):
     artifacts.upload_file(ctx, "delivery_phase{}_log".format(phase), "phase{}-stderr.log".format(phase), log_path)
 
 def _base_flag_overridden(rc, flag: str) -> bool:
-    """Whether the active run command already sets `flag` such that the
-    delivery base default should be dropped.
+    """Whether the active run command already sets `flag`, so the matching
+    `LOCAL_SPAWN_BASE_FLAGS` default should be dropped.
 
-    For most flags any user-set value overrides the default. The exception is
+    `rc.flag_value` reports the value from either `--flag=v` or `--flag v`, so
+    both CLI/rc forms are handled. Any value counts as an override, except
     `--remote_download_outputs`: only `toplevel`/`all` put the top-level binary
-    on disk, so a user `=minimal` is treated as not overriding (the `=toplevel`
+    on disk, so a user `=minimal` is not treated as an override (the `=toplevel`
     default still wins) to keep the phase-3 runfiles download working."""
     name = flag.split("=", 1)[0]
     value = rc.flag_value(name, command = "build")
@@ -1224,18 +1225,10 @@ def _delivery_impl(ctx):
         # defined" (the task's own expanded_flags already went through this).
         release_flags = expand_config_flags(ctx, bazel_trait, ctx.args.release_bazel_flags)
 
-        # LOCAL_SPAWN_BASE_FLAGS are delivery defaults the rc/user override (a
-        # repo's `build --remote_download_outputs=all` must win over the default
-        # `toplevel`). Per-call extras win over the rc, so apply each base flag
-        # only when the active run command doesn't already set it — that's a
-        # default the rc overrides, not an override of the rc.
-        #
-        # `--remote_download_outputs` is the exception: a user value is honored
-        # only when it's sufficient to put the top-level binary on disk
-        # (`toplevel`/`all`). A user `=minimal` leaves the binary remote and
-        # breaks the runfiles download, so the `=toplevel` default must still
-        # win — drop the base flag only for the sufficient values, not for any
-        # user-set value.
+        # LOCAL_SPAWN_BASE_FLAGS are delivery defaults the active run command
+        # may override (a repo's `build --remote_download_outputs=all` must win
+        # over the default `toplevel`); drop each one the rc already sets. See
+        # `_base_flag_overridden` for the `--remote_download_outputs` carve-out.
         base_defaults = [
             f
             for f in LOCAL_SPAWN_BASE_FLAGS

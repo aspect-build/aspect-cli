@@ -1,5 +1,6 @@
 """Unit tests for lib/runnable.axl: apparent_label normalization, BES matching,
-entrypoint selection (passes 1–3), and runfiles directory detection."""
+entrypoint selection (passes 1–3), runfiles directory detection, `--run-in`
+cwd resolution, and `--remote_download_outputs` sufficiency."""
 
 load("./runnable.axl", "apparent_label", "download_outputs_sufficient", "resolve_run_in", "runnable")
 
