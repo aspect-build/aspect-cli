@@ -750,23 +750,53 @@ impl BazelRC {
 /// `common`-section options become `--default_override=0:common=<value>` strings, returned first
 /// so they precede user flags and lose to them under last-write-wins. Each entry keeps its
 /// `version_condition` so version-gated options aren't silently promoted to unconditional.
+///
+/// A two-token option (`--flag value`, parsed as a bare-flag `RcOption` followed by its value
+/// `RcOption`) is folded into the canonical `--flag=value` form for its single
+/// `--default_override=0:common=--flag=value` entry. Bazel parses each override value as one
+/// option token and does NOT re-split it on whitespace, so neither two separate overrides (the
+/// value strands as its own unrecognized option) nor a space-joined `--flag value` override
+/// (rejected as a single unrecognized option) works. Regular flags need no such fold — they
+/// pass through as adjacent argv tokens, which Bazel pairs natively.
 fn partition_expand_all(
     opts: &[RcOption],
 ) -> (Vec<(String, Option<String>)>, Vec<(String, Option<String>)>) {
     let mut overrides = Vec::new();
     let mut flags = Vec::new();
-    for opt in opts {
+    let mut i = 0;
+    while i < opts.len() {
+        let opt = &opts[i];
         let base = opt.command.split(':').next().unwrap_or(&opt.command);
         if base == "common" {
+            let mut value = opt.value.clone();
+            if let Some(next) = opts.get(i + 1) {
+                if is_two_token_pair(opt, next) {
+                    value = format!("{}={}", opt.value, next.value);
+                    i += 1;
+                }
+            }
             overrides.push((
-                format!("--default_override=0:common={}", opt.value),
+                format!("--default_override=0:common={value}"),
                 opt.version_condition.clone(),
             ));
         } else {
             flags.push((opt.value.clone(), opt.version_condition.clone()));
         }
+        i += 1;
     }
     (overrides, flags)
+}
+
+/// Whether `flag` is a bare option whose value is the immediately following `value` option —
+/// the two-token `--flag value` form. Mirrors `flag_value_list`'s next-token pairing: `flag`
+/// must start with `-` and carry no `=`, `value` must not start with `-`, and both must share
+/// the same command section and version condition (i.e. originate from the same rc line).
+fn is_two_token_pair(flag: &RcOption, value: &RcOption) -> bool {
+    flag.value.starts_with('-')
+        && !flag.value.contains('=')
+        && !value.value.starts_with('-')
+        && flag.command == value.command
+        && flag.version_condition == value.version_condition
 }
 
 /// All values of a repeatable `--name` option among `opts`, in order. Matches
@@ -1107,6 +1137,99 @@ mod runcommand_tests {
         common.command = "common:ci".to_string();
         let (overrides, _) = partition_expand_all(&[common]);
         assert_eq!(overrides.len(), 1, "common:config base routes to overrides");
+    }
+
+    /// Build the two `RcOption`s a `common:ci --flag value` rc line parses into.
+    fn common_ci(values: &[&str]) -> Vec<RcOption> {
+        values
+            .iter()
+            .map(|v| RcOption {
+                value: v.to_string(),
+                command: "common:ci".to_string(),
+                ..RcOption::default()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn partition_folds_two_token_common_override_to_eq_form() {
+        // `common:ci --remote_download_outputs minimal` must become ONE override in
+        // the canonical `=` form — Bazel does not re-split the override value on
+        // whitespace, so two overrides (or a space-joined one) are both rejected.
+        let (overrides, _) =
+            partition_expand_all(&common_ci(&["--remote_download_outputs", "minimal"]));
+        assert_eq!(
+            overrides,
+            vec![(
+                "--default_override=0:common=--remote_download_outputs=minimal".to_string(),
+                None
+            )]
+        );
+    }
+
+    #[test]
+    fn partition_does_not_join_canonical_eq_common_override() {
+        // `--flag=value` carries its own value; the next token is a separate flag.
+        let (overrides, _) = partition_expand_all(&common_ci(&[
+            "--remote_download_outputs=minimal",
+            "--jobs=4",
+        ]));
+        assert_eq!(
+            overrides,
+            vec![
+                (
+                    "--default_override=0:common=--remote_download_outputs=minimal".to_string(),
+                    None
+                ),
+                ("--default_override=0:common=--jobs=4".to_string(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn partition_does_not_join_bool_flag_before_another_flag() {
+        // A bare boolean flag followed by another flag is not a two-token pair.
+        let (overrides, _) = partition_expand_all(&common_ci(&[
+            "--remote_local_fallback",
+            "--remote_timeout=3600",
+        ]));
+        assert_eq!(
+            overrides,
+            vec![
+                (
+                    "--default_override=0:common=--remote_local_fallback".to_string(),
+                    None
+                ),
+                (
+                    "--default_override=0:common=--remote_timeout=3600".to_string(),
+                    None
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn partition_does_not_join_across_version_condition() {
+        // A bare flag and the next value must share a version condition to pair
+        // (same rc line); otherwise they came from different lines.
+        let flag = RcOption {
+            value: "--remote_download_outputs".to_string(),
+            command: "common:ci".to_string(),
+            version_condition: Some(">=8".to_string()),
+            ..RcOption::default()
+        };
+        let value = RcOption {
+            value: "minimal".to_string(),
+            command: "common:ci".to_string(),
+            version_condition: None,
+            ..RcOption::default()
+        };
+        let (overrides, _) = partition_expand_all(&[flag, value]);
+        assert_eq!(
+            overrides.len(),
+            2,
+            "differing version conditions must not join"
+        );
     }
 
     #[test]
@@ -1470,6 +1593,29 @@ build:opt --compilation_mode=opt
         let expanded = rc.expand_configs("build", &[]).unwrap();
         let values: Vec<&str> = expanded.iter().map(|o| o.value.as_str()).collect();
         assert_eq!(values, vec!["--copt=-O2", "--compilation_mode=opt"]);
+    }
+
+    #[test]
+    fn two_token_common_option_folds_into_single_eq_override() {
+        // Regression: `common:ci --remote_download_outputs minimal` was emitted as
+        // two `--default_override` flags, stranding `minimal` as its own
+        // (unrecognized) option. It must fold into one canonical `=`-form override.
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(
+            &root.join(".bazelrc"),
+            "common:ci --remote_download_outputs minimal\n",
+        )
+        .unwrap();
+
+        let rc = BazelRC::new(root, ISOLATE, &flags(&["--config=ci"])).unwrap();
+        let (_startup, command_flags) = rc.resolve_for_command("build").unwrap();
+        assert!(
+            command_flags.contains(
+                &"--default_override=0:common=--remote_download_outputs=minimal".to_string()
+            ),
+            "expected a single `=`-form override, got {command_flags:?}",
+        );
     }
 
     #[test]
