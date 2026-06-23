@@ -94,7 +94,7 @@ def _bk_links():
         "testlogs_label_urls": {},
     }
 
-def _render_ctx(subject, task_name):
+def _render_ctx(subject, task_kind):
     """Build the render_ctx via the real `make_render_ctx` (not hand-rolled)
     so the test exercises the same wiring as the live BK feature. `subject`
     is the task subject (target pattern); pass "" for the empty-subject case,
@@ -106,7 +106,7 @@ def _render_ctx(subject, task_name):
         "_started_ms": 1744630000000,
         "_ended_ms": 1744630004500,
         "_progress": "",
-        "_task_name": task_name,
+        "_task_kind": task_kind,
     }
     return make_render_ctx(state)
 
@@ -120,7 +120,7 @@ _RENDERERS = {
 
 def _test_impl(ctx):
     scenarios = [
-        # (label,                                       kind,                data,                               status,    final, subject,      task_name)
+        # (label,                                       kind,                data,                               status,    final, subject,      task_kind)
         ("1. build-passed", "bazel_results", _make_build_passed(), "passed", True, "//...", "build"),
         ("2. test-failed", "bazel_results", _make_test_failed(), "failed", True, "//...", "test"),
         ("3. lint-passed-clean", "lint_results", _make_lint_passed_clean(), "passed", True, "//...", "lint"),
@@ -154,9 +154,9 @@ def _test_impl(ctx):
 
     sep = "=" * 70
 
-    for (label, kind, data, status, final, subject, task_name) in scenarios:
+    for (label, kind, data, status, final, subject, task_kind) in scenarios:
         renderer = _RENDERERS[kind]
-        rc = _render_ctx(subject, task_name)
+        rc = _render_ctx(subject, task_kind)
         out = renderer(ctx, data, status, rc, _bk_links(), None, None)
 
         # Mirror the live wiring: include a `:aspect: task <code>key</code>`

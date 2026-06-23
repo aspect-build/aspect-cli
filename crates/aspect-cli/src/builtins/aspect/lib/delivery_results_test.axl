@@ -254,14 +254,14 @@ def _make_build_failed():
 
 # ─── Test harness ─────────────────────────────────────────────────────────────
 
-def _render_ctx(subject = "//apps/...", task_name = "delivery", progress = ""):
+def _render_ctx(subject = "//apps/...", task_kind = "delivery", progress = ""):
     return {
         "triggered_by": "Greg Magolan (workflow_dispatch)",
         "subject": subject,
         "started_ms": 1744630000000,
         "ended_ms": 1744630012500,
         "progress": progress,
-        "task_name": task_name,
+        "task_kind": task_kind,
     }
 
 def _links(ci = "buildkite", with_manifest = False):

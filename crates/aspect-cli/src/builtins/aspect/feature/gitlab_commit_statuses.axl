@@ -275,7 +275,7 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
         subject = _state.get("_subject", "")
         subject_str = (" " + subject) if subject else ""
         _LOG.trace("aspect/%s%s" % (ctx.task.name, subject_str))
-        _state["_task_name"] = ctx.task.kind
+        _state["_task_kind"] = ctx.task.kind
 
         # Per-invocation name shown in the MR's status badge column; unique
         # when the same kind runs more than once in a pipeline.

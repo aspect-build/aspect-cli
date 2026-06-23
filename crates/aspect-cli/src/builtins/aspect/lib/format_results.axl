@@ -63,7 +63,7 @@ def init_data():
 
 # ─── Title ────────────────────────────────────────────────────────────────────
 
-def format_summary_title(data, status, target_pattern = "", task_name = ""):
+def format_summary_title(data, status, target_pattern = "", task_kind = ""):
     """Compute the check-run title.
 
     "✅ format //tools/format:format · Passed"
@@ -72,7 +72,7 @@ def format_summary_title(data, status, target_pattern = "", task_name = ""):
     "✅ format //tools/format:format · No files to format"
     "🔄 format //tools/format:format · Running..."
 
-    `task_name` is the raw task kind (`ctx.task.kind`) — the lowercase
+    `task_kind` is the raw task kind (`ctx.task.kind`) — the lowercase
     string the user declared on `task(kind="...")`. The
     leading emoji comes from the task's *current status* via
     `emoji_for_status` so the icon mirrors the verdict at a glance
@@ -84,7 +84,7 @@ def format_summary_title(data, status, target_pattern = "", task_name = ""):
     tasks in one build (e.g. `format` + `buildifier-only` running on
     different `format_multirun`s) collapse to identical titles.
     """
-    display = emoji_for_status(status) + " " + (task_name or "format")
+    display = emoji_for_status(status) + " " + (task_kind or "format")
     target = target_pattern or data["format"].get("formatter_target", "") or ""
     base = display + ((" " + target) if target else "")
 
@@ -377,14 +377,14 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
             details_data["has_overflow"] = missing > 0
             details_text = ctx.template.jinja2(details_tmpl, data = details_data)
 
-    task_name = render_ctx.get("task_name", "") if render_ctx else ""
+    task_kind = render_ctx.get("task_kind", "") if render_ctx else ""
     target_pattern = render_ctx.get("subject", "") if render_ctx else ""
     return {
         "title": format_summary_title(
             data,
             status,
             target_pattern = target_pattern,
-            task_name = task_name,
+            task_kind = task_kind,
         ),
         "summary": summary_text,
         "text": details_text,

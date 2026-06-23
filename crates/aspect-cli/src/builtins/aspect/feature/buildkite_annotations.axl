@@ -258,7 +258,7 @@ def _buildkite_annotations(ctx: FeatureContext):
         # task_update is the Setup phase mark, which carries a `kind`, so the
         # normal render emits the initial annotation.
         _state["_started_ms"] = now_ms(ctx)
-        _state["_task_name"] = ctx.task.kind
+        _state["_task_kind"] = ctx.task.kind
         _state["_triggered_by"] = (ctx.std.env.var("BUILDKITE_BUILD_CREATOR") or
                                    ctx.std.env.var("BUILDKITE_PIPELINE_NAME") or "")
         _state["_context_id"] = "aspect-%s" % ctx.task.name

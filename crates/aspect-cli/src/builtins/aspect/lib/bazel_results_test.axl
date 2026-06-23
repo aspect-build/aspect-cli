@@ -455,14 +455,14 @@ def _make_results_large():
 
 # Shared render context and links
 
-def _render_ctx(subject = "//...", task_name = "test", progress = ""):
+def _render_ctx(subject = "//...", task_kind = "test", progress = ""):
     return {
         "triggered_by": "ci-bot (workflow_dispatch)",
         "subject": subject,
         "started_ms": 1744630000000,
         "ended_ms": 1744630002200,
         "progress": progress,
-        "task_name": task_name,
+        "task_kind": task_kind,
     }
 
 def _links(with_artifact = False, ci = "github"):

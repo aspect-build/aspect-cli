@@ -357,14 +357,14 @@ def _make_results_annotations_changed_regions():
 
 # ─── Test harness ─────────────────────────────────────────────────────────────
 
-def _render_ctx(subject = "//...", task_name = "lint"):
+def _render_ctx(subject = "//...", task_kind = "lint"):
     return {
         "triggered_by": "Greg Magolan (workflow_dispatch)",
         "subject": subject,
         "started_ms": 1744630000000,
         "ended_ms": 1744630004500,
         "progress": "",
-        "task_name": task_name,
+        "task_kind": task_kind,
     }
 
 def _links(with_artifact = False, ci = "github"):

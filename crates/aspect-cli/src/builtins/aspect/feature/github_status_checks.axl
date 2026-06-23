@@ -280,7 +280,7 @@ def _github_status_checks(ctx: FeatureContext):
         subject = _state.get("_subject", "")
         subject_str = (" " + subject) if subject else ""
         _LOG.trace("aspect/%s%s" % (ctx.task.name, subject_str))
-        _state["_task_name"] = ctx.task.kind
+        _state["_task_kind"] = ctx.task.kind
         _create_check_run(ctx)
 
     def _lint_annotation_plan(ctx):

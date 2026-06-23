@@ -167,7 +167,7 @@ def build_manifest(data):
 
 # ─── Title ────────────────────────────────────────────────────────────────────
 
-def delivery_summary_title(data, status, target_pattern = "", task_name = ""):
+def delivery_summary_title(data, status, target_pattern = "", task_kind = ""):
     """Compute the check-run title.
 
     "✅ delivery //apps/... · 12 delivered" — status emoji + raw task
@@ -180,11 +180,11 @@ def delivery_summary_title(data, status, target_pattern = "", task_name = ""):
       - all delivered / skipped → "N delivered, M skipped"
       - "Running..." while running
 
-    `task_name` comes from the producer's `task(kind=…)`. The leading
+    `task_kind` comes from the producer's `task(kind=…)`. The leading
     emoji is the status verdict via `emoji_for_status`. Defaults to
     "delivery" when no name is provided.
     """
-    display = emoji_for_status(status) + " " + (task_name or "delivery")
+    display = emoji_for_status(status) + " " + (task_kind or "delivery")
     target = truncate_for_title(target_pattern or data.get("target_pattern", ""))
     base = display + ((" " + target) if target else "")
 
@@ -313,8 +313,8 @@ def _truncate(s, max_len):
 def _outcome_table(diags, outcome, prefix):
     """Render a small table per outcome: label, key, context.
 
-    `prefix` is the salt-augmented change-detection prefix (`task_key`
-    optionally extended by `:salt`); each row's key is rendered as
+    `prefix` is the salt-augmented change-detection prefix (the task
+    name optionally extended by `:salt`); each row's key is rendered as
     `<prefix>:<output_sha[:12]>` so two runs collide iff they would resolve
     to the same deliveryd record.
 
@@ -544,7 +544,7 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
         details_text = ctx.template.jinja2(details_tmpl, data = details_data)
 
     target_pattern = render_ctx.get("subject", "") if render_ctx else ""
-    task_name = render_ctx.get("task_name", "") if render_ctx else ""
+    task_kind = render_ctx.get("task_kind", "") if render_ctx else ""
     if not target_pattern:
         target_pattern = data.get("target_pattern", "")
     return {
@@ -552,7 +552,7 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
             data,
             status,
             target_pattern = target_pattern,
-            task_name = task_name,
+            task_kind = task_kind,
         ),
         "summary": summary_text,
         "text": details_text,

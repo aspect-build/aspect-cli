@@ -144,7 +144,7 @@ def make_render_ctx(state, tips = None, api_usage = "", last_updated_at = ""):
 
     Reads from `state` — the feature-private dict the caller maintains
     across hook calls. Expected slots: `_triggered_by`, `_subject`,
-    `_started_ms`, `_ended_ms`, `_progress`, `_task_name`.
+    `_started_ms`, `_ended_ms`, `_progress`, `_task_kind`.
 
     `subject` is the task's target patterns / formatter target / etc.,
     rendered in the title. Empty when the task hasn't supplied one (e.g. a
@@ -173,7 +173,7 @@ def make_render_ctx(state, tips = None, api_usage = "", last_updated_at = ""):
         "started_ms": state.get("_started_ms", 0),
         "ended_ms": state.get("_ended_ms", 0),
         "progress": state.get("_progress", ""),
-        "task_name": state.get("_task_name", ""),
+        "task_kind": state.get("_task_kind", ""),
         "tips": tips or [],
         "api_usage": api_usage or "",
         "last_updated_at": last_updated_at or "",

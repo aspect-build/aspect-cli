@@ -22,7 +22,7 @@ test.log / action-stderr paths; sibling writers can't read them) on its
 terminal update and ships them in its status artifact under `failure_snippets`.
 The writer picks which to show across all tasks via `_select_snippets`, which
 first DEDUPES by `(label, snippet)` \342\200\224 the same target failing in several jobs
-collapses to one snippet attributed to all of them (`task_keys`) rather than
+collapses to one snippet attributed to all of them (`task_names`) rather than
 rendering N identical copies \342\200\224 then sticky-selects (an already-shown snippet is
 never evicted by a later-arriving one), deterministic fill, hard-capped at
 `_MAX_COMMENT_SNIPPETS`. The chosen keys persist in the state block so selection
@@ -43,11 +43,9 @@ Body-template variables:
     started_at     \342\200\224 Earliest sibling-task start time, UTC.
     status_badges  \342\200\224 {badge_key -> label}.
     rollup         \342\200\224 {error, warning, running, passed, aborted} counts.
-    entries        \342\200\224 per-task entry dicts, alphabetical by (job, name, key).
-                     NOTE: for back-compat the wire fields are inverted vs.
-                     today's vocabulary - `entry.name` holds the task *kind*
-                     (the command) and `entry.key` holds the per-invocation
-                     task *name*. Rows render as `<name> [<kind>]`.
+    entries        \342\200\224 per-task entry dicts, alphabetical by (job, kind, name).
+                     `entry.kind` is the task kind (the command); `entry.name`
+                     is the per-invocation name. Rows render as `<name> [<kind>]`.
     build_snippets / test_snippets / repro_rows / fix_rows \342\200\224 selected items per section.
     *_overflow_note \342\200\224 "N more not shown" line for each capped section.
 """
@@ -159,7 +157,7 @@ _No tasks have reported yet._
 ## {{ icon }} {{ items|length }} {{ label }} task{{ "s" if items|length != 1 else "" }}
 
 {% for e in items -%}
-- {{ status_badges[e._badge_key] }} {{ e.key or e.name }}{% if e.key and e.key != e.name %} [{{ e.name }}]{% endif %}{% if e._elapsed_text %} · {{ e._elapsed_text }}{% endif %}{% if e._links_text %} · {{ e._links_text }}{% endif %}{% if e._result_text %}<br>💬 {{ e._result_text }}{% endif %}
+- {{ status_badges[e._badge_key] }} {{ e.name or e.kind }}{% if e.name and e.name != e.kind %} [{{ e.kind }}]{% endif %}{% if e._elapsed_text %} · {{ e._elapsed_text }}{% endif %}{% if e._links_text %} · {{ e._links_text }}{% endif %}{% if e._result_text %}<br>💬 {{ e._result_text }}{% endif %}
 {% endfor -%}
 {% endif -%}
 {% endmacro -%}
@@ -205,7 +203,7 @@ Reproduce with:
 >
 {{ tip.body_quoted }}
 >
-> <sub>_Surfaced by: {{ tip.task_keys|join(", ") }}_</sub>{% if tip.silence_hint %}
+> <sub>_Surfaced by: {{ tip.task_names|join(", ") }}_</sub>{% if tip.silence_hint %}
 >
 > {{ tip.silence_hint }}{% endif %}
 
@@ -213,7 +211,7 @@ Reproduce with:
 {% if fix_rows %}
 ## 🛠️ Fix
 {% for r in fix_rows %}{% if r.show_heading %}
-#### {% if r.severity_emoji %}{{ r.severity_emoji }} {% endif %}{% if r.kind %}{{ r.kind }}{% endif %}{% if r.task_keys %} ({{ r.task_keys|join(" · ") }}){% endif %}{% endif %}
+#### {% if r.severity_emoji %}{{ r.severity_emoji }} {% endif %}{% if r.kind %}{{ r.kind }}{% endif %}{% if r.task_names %} ({{ r.task_names|join(" · ") }}){% endif %}{% endif %}
 ```
 {% if r.description %}# {{ r.description }}
 {% endif %}{{ r.command }}
@@ -227,7 +225,7 @@ Reproduce with:
 {% if repro_rows %}
 ## 🔁 Reproduce
 {% for r in repro_rows %}{% if r.show_heading %}
-#### {% if r.severity_emoji %}{{ r.severity_emoji }} {% endif %}{% if r.kind %}{{ r.kind }}{% endif %}{% if r.task_keys %} ({{ r.task_keys|join(" · ") }}){% endif %}{% endif %}
+#### {% if r.severity_emoji %}{{ r.severity_emoji }} {% endif %}{% if r.kind %}{{ r.kind }}{% endif %}{% if r.task_names %} ({{ r.task_names|join(" · ") }}){% endif %}{% endif %}
 ```
 {% if r.description %}# {{ r.description }}
 {% endif %}{{ r.command }}
@@ -358,8 +356,8 @@ def _prepare_for_render(entries):
         e["_result_text"] = _result_cell_text(e)
     return sorted(entries, key = lambda e: (
         e.get("job", ""),
+        e.get("kind", ""),
         e.get("name", ""),
-        e.get("key", ""),
     ))
 
 def _run_attempt_int(entry):
@@ -391,18 +389,18 @@ def _collapse_by(entries, key_of, rank_of):
             best[k] = e
     return list(best.values())
 
-def _union_entries_by_name_key(primary, fallback):
-    """`primary` plus `fallback` entries whose `(name, key)` isn't in
+def _union_entries_by_kind_name(primary, fallback):
+    """`primary` plus `fallback` entries whose `(kind, name)` isn't in
     `primary` (primary wins; fallback fills gaps), preserving order."""
-    primary_keys = {(e.get("name", ""), e.get("key", "")): True for e in primary}
+    primary_keys = {(e.get("kind", ""), e.get("name", "")): True for e in primary}
     return list(primary) + [
         e
         for e in fallback
-        if (e.get("name", ""), e.get("key", "")) not in primary_keys
+        if (e.get("kind", ""), e.get("name", "")) not in primary_keys
     ]
 
 def _dedup_by_run_attempt(entries):
-    """Collapse `(name, key, job)` to the highest `run_attempt`.
+    """Collapse `(kind, name, job)` to the highest `run_attempt`.
 
     The artifacts API has no `attempt_number` filter, so a re-run's
     listing returns every prior attempt; without this a task that
@@ -412,7 +410,7 @@ def _dedup_by_run_attempt(entries):
     upstream order when callers feed newest-first)."""
     return _collapse_by(
         entries,
-        lambda e: (e.get("name", ""), e.get("key", ""), e.get("job", "")),
+        lambda e: (e.get("kind", ""), e.get("name", ""), e.get("job", "")),
         _run_attempt_int,
     )
 
@@ -423,11 +421,11 @@ def _dedup_for_display(entries):
     Defense-in-depth: `_merge_state` already produces unique rows. Guards
     a snapshot briefly carrying two rows for one task in one run_id
     (eventual-consistency blip). `workflow_run_id` is in the key so
-    distinct concurrent workflows sharing a `(job, name, key)` survive.
+    distinct concurrent workflows sharing a `(job, kind, name)` survive.
     Display copy only; persisted state untouched."""
     return _collapse_by(
         entries,
-        lambda e: (e.get("workflow_run_id", ""), e.get("job", ""), e.get("name", ""), e.get("key", "")),
+        lambda e: (e.get("workflow_run_id", ""), e.get("job", ""), e.get("kind", ""), e.get("name", "")),
         _run_attempt_int,
     )
 
@@ -678,7 +676,7 @@ def _select_snippets(entries, shown_keys):
     Identical failures are DEDUPED across tasks first: the same target failing
     in several jobs (e.g. a build target built by build-gha, build-gha-debug and
     the test task) collapses to ONE snippet attributed to all of them
-    (`task_keys`), rather than rendering the same output N times and crowding out
+    (`task_names`), rather than rendering the same output N times and crowding out
     distinct failures. The dedup identity is `(label, snippet)` — same target AND
     same output.
 
@@ -694,17 +692,17 @@ def _select_snippets(entries, shown_keys):
     `entries` are merged per-task dicts (each may carry `failure_snippets`).
     `shown_keys` is the persisted list of dedup keys shown so
     far. Returns `(snippet_rows, new_shown_keys, overflow)` where snippet_rows are
-    render dicts `{label, kind, bucket, snippet, truncated, fence, task_keys}` and
+    render dicts `{label, kind, bucket, snippet, truncated, fence, task_names}` and
     `overflow` is `{total, by_task}` over DISTINCT (deduped) failures not shown —
     `total` is the global count, `by_task` attributes the not-shown to the tasks
     that hold them (a hidden failure shared by N tasks counts once per task)."""
 
     # Dedup available snippets by (label, snippet) across tasks, unioning the
-    # contributing task_keys (first-seen order).
+    # contributing task names (first-seen order).
     available = {}
     order = []
     for e in entries:
-        task_key = e.get("key", "") or e.get("name", "")
+        task_name = e.get("name", "") or e.get("kind", "")
         for s in e.get("failure_snippets", []) or []:
             if type(s) != "dict":
                 continue
@@ -731,12 +729,12 @@ def _select_snippets(entries, shown_keys):
                     # Fence sized past any backtick run so log content can't close
                     # the code block early (CommonMark fence-injection guard).
                     "fence": code_fence_for(snippet_text),
-                    "task_keys": [task_key] if task_key else [],
+                    "task_names": [task_name] if task_name else [],
                     "_key": key,
                 }
                 order.append(key)
-            elif task_key and task_key not in slot["task_keys"]:
-                slot["task_keys"].append(task_key)
+            elif task_name and task_name not in slot["task_names"]:
+                slot["task_names"].append(task_name)
 
     # Deterministic candidate order — (bucket_rank, label) — fed to the shared
     # sticky+capped core. Dedup key (label+content) is the sticky identity.
@@ -757,7 +755,7 @@ def _select_snippets(entries, shown_keys):
     return (rows, new_shown, overflow)
 
 def _by_task_overflow(dropped):
-    """Build `{total, tasks}` for dropped rows that each carry `task_keys`.
+    """Build `{total, tasks}` for dropped rows that each carry `task_names`.
     `total` = number of distinct dropped (deduped) items; `tasks` = the set of
     tasks that hold at least one hidden item, sorted. Per-task COUNTS would
     double-count a deduped item shared by N tasks (sum > total), so we list the
@@ -767,17 +765,17 @@ def _by_task_overflow(dropped):
     total = 0
     for r in dropped:
         total += 1
-        for tk in r.get("task_keys", []) or []:
-            if tk and tk not in seen:
-                seen[tk] = True
-                tasks.append(tk)
+        for tn in r.get("task_names", []) or []:
+            if tn and tn not in seen:
+                seen[tn] = True
+                tasks.append(tn)
     return {"total": total, "tasks": sorted(tasks)}
 
 def _split_snippet_rows(rows):
     """Partition selected snippet rows into (build, test) groups, decorating each
     with the render fields the template needs:
 
-      `task_label` — `task_keys` joined; rendered "in <task_noun> <task_label>"
+      `task_label` — `task_names` joined; rendered "in <task_noun> <task_label>"
                      small below the snippet.
       `task_noun`  — "task" / "tasks" for the small-text line.
       `verb`       — the header tail: "failed to build" (build), "failed" /
@@ -791,9 +789,9 @@ def _split_snippet_rows(rows):
     test_rows = []
     for r in rows:
         row = dict(r)
-        tks = r.get("task_keys", []) or []
-        row["task_label"] = ", ".join(tks)
-        row["task_noun"] = "task" if len(tks) == 1 else "tasks"
+        tns = r.get("task_names", []) or []
+        row["task_label"] = ", ".join(tns)
+        row["task_noun"] = "task" if len(tns) == 1 else "tasks"
         dur = r.get("duration_ms", 0) or 0
         dur_str = (" in " + format_duration_ms(dur)) if dur > 0 else ""
         bucket = r.get("bucket")
@@ -822,7 +820,7 @@ _RANK_EMOJI = {3: "❌", 2: "⚠️", 1: "🔄", 0: "✅"}
 
 def _collect_repro_fix_rows(sections):
     """Return `(repro_rows, fix_rows)` for the template, each row
-    `{"kind", "command", "description", "task_keys": [...], "severity_emoji"}`.
+    `{"kind", "command", "description", "task_names": [...], "severity_emoji"}`.
 
     Scope: repro = non-passing (failed/failing/flagged); fix = every
     contributor (so format/gazelle advertise fixes even on green). Dedup
@@ -830,20 +828,20 @@ def _collect_repro_fix_rows(sections):
     contributors. Sorted most-severe first, first-seen tiebreak.
     """
 
-    # task_key → highest severity rank across buckets it appears in.
+    # task name → highest severity rank across buckets it appears in.
     task_rank = {}
     for bucket, rank in _BUCKET_SEVERITY_RANK.items():
         for e in sections.get(bucket, []) or []:
-            tk = e.get("key", "") or e.get("name", "")
-            if tk:
-                task_rank[tk] = max(task_rank.get(tk, -1), rank)
+            tn = e.get("name", "") or e.get("kind", "")
+            if tn:
+                task_rank[tn] = max(task_rank.get(tn, -1), rank)
 
     def _gather(buckets, command_field):
         entries = []
         for bucket in buckets:
             for e in sections.get(bucket, []) or []:
-                kind = e.get("name", "") or ""
-                task_key = e.get("key", "") or kind
+                kind = e.get("kind", "") or ""
+                task_name = e.get("name", "") or kind
                 for c in e.get(command_field, []) or []:
                     # Per-failure (target-set) commands render inline under their
                     # snippet, not in the combined Reproduce/Fix section.
@@ -851,13 +849,13 @@ def _collect_repro_fix_rows(sections):
                         continue
                     entries.append({
                         "kind": kind,
-                        "task_key": task_key,
+                        "task_name": task_name,
                         "command": c.command,
                         "description": c.description,
                     })
         rows = dedup_and_attribute(entries)
         for r in rows:
-            ranks = [task_rank.get(tk, 0) for tk in r["task_keys"]] or [0]
+            ranks = [task_rank.get(tn, 0) for tn in r["task_names"]] or [0]
             r["_rank"] = max(ranks)
             r["severity_emoji"] = _RANK_EMOJI.get(r["_rank"], "")
 
@@ -881,11 +879,11 @@ def _command_key(kind, command, description):
 
 def _finalize_command_rows(rows):
     """Set `show_heading` on the FINAL (post-selection) row order: collapse
-    consecutive repeated `(kind, task_keys)` headings — a task may contribute
+    consecutive repeated `(kind, task_names)` headings — a task may contribute
     multiple commands (e.g. `aspect …` + `bazel …`)."""
     prev_heading_key = None
     for r in rows:
-        heading_key = (r["kind"], tuple(r["task_keys"]))
+        heading_key = (r["kind"], tuple(r["task_names"]))
         r["show_heading"] = heading_key != prev_heading_key
         prev_heading_key = heading_key
     return rows
@@ -909,7 +907,7 @@ def _ordered_unique(values):
 def _combine_across(ctx, contributors):
     """Collapse a same-`(id, key)` group into one row, unioning across tasks.
 
-    `contributors` is `[(tip, task_key)]`. JINJA2 `accumulate` fields are
+    `contributors` is `[(tip, task_name)]`. JINJA2 `accumulate` fields are
     unioned (first-seen) and re-rendered against `vars` + merged lists;
     title/body are newest-wins (last contributor); attributed to all."""
     tips_ = [t for t, _ in contributors]
@@ -926,7 +924,7 @@ def _combine_across(ctx, contributors):
             row["title"] = ctx.template.jinja2(row["_title_src"], data = data)
         if row.get("_body_src"):
             row["body"] = ctx.template.jinja2(row["_body_src"], data = data)
-    row["_task_keys"] = _ordered_unique([k for _, k in contributors])
+    row["_task_names"] = _ordered_unique([n for _, n in contributors])
     return row
 
 def _latest(contributors):
@@ -936,11 +934,11 @@ def _latest(contributors):
     distinct = _ordered_unique([(t.get("title", ""), t.get("body", "")) for t, _ in contributors])
     if len(distinct) == 1:
         row = dict(contributors[0][0])
-        row["_task_keys"] = _ordered_unique([k for _, k in contributors])
+        row["_task_names"] = _ordered_unique([n for _, n in contributors])
         return row
-    tip, task_key = contributors[-1]
+    tip, task_name = contributors[-1]
     row = dict(tip)
-    row["_task_keys"] = [task_key] if task_key else []
+    row["_task_names"] = [task_name] if task_name else []
     return row
 
 def _collect_tip_rows(ctx, entries):
@@ -957,11 +955,11 @@ def _collect_tip_rows(ctx, entries):
 
     Caps: important/warning always surface; suggestion+info capped at
     `_MAX_SUBORDINATE_TIPS`. Returns `decorate_tip` rows + sorted
-    `task_keys`."""
+    `task_names`."""
     groups = {}
     insertion_order = []
     for e in entries:
-        task_key = e.get("key", "") or e.get("name", "")
+        task_name = e.get("name", "") or e.get("kind", "")
         for tip in e.get("tips", []) or []:
             if not tip.get("id"):
                 continue
@@ -971,7 +969,7 @@ def _collect_tip_rows(ctx, entries):
             if identity not in groups:
                 groups[identity] = []
                 insertion_order.append(identity)
-            groups[identity].append((tip, task_key))
+            groups[identity].append((tip, task_name))
 
     rows = []
     for identity in insertion_order:
@@ -987,7 +985,7 @@ def _collect_tip_rows(ctx, entries):
     out = []
     for r in selected:
         decorated = decorate_tip(r)
-        decorated["task_keys"] = sorted(r["_task_keys"])
+        decorated["task_names"] = sorted(r["_task_names"])
         out.append(decorated)
     return out
 
@@ -1207,7 +1205,7 @@ def _merge_state(existing_state, head_sha, my_run_id, my_workflow_name, my_entri
         if refreshed == None:
             entries.extend(snapshot)
         else:
-            entries.extend(_union_entries_by_name_key(refreshed, snapshot))
+            entries.extend(_union_entries_by_kind_name(refreshed, snapshot))
 
     # Deterministic order so the serialized block is byte-stable across
     # writers; else alternating ownership flips order each cycle and
@@ -1216,8 +1214,8 @@ def _merge_state(existing_state, head_sha, my_run_id, my_workflow_name, my_entri
     entries = sorted(entries, key = lambda e: (
         str(e.get("workflow_run_id", "")),
         str(e.get("job", "")),
-        str(e.get("key", "")),
         str(e.get("name", "")),
+        str(e.get("kind", "")),
         str(e.get("run_attempt", "")),
     ))
 
@@ -1310,8 +1308,8 @@ def _github_status_comments(ctx: FeatureContext):
         # Prefer the per-job URL to drop the reviewer on the failing job's logs.
         link_url = _state.get("_ci_link_url") or ci_run_url
         payload = {
+            "kind": _state["_task_kind"],
             "name": _state["_task_name"],
-            "key": _state["_task_key"],
             "job": job_name,
             "run_attempt": run_attempt,
             "status": _state.get("_status", "running"),
@@ -1340,7 +1338,7 @@ def _github_status_comments(ctx: FeatureContext):
         `delete_artifact` quiets benign 404s via `_should_quiet_delete_log`."""
         if "_workdir" not in _state:
             _state["_workdir"] = ctx.std.fs.mkdtemp(prefix = "aspect-ci-status-")
-        _state["_my_artifact_name"] = _ARTIFACT_PREFIX + job_name + "-" + _state["_task_key"] + "-" + run_attempt
+        _state["_my_artifact_name"] = _ARTIFACT_PREFIX + job_name + "-" + _state["_task_name"] + "-" + run_attempt
 
         payload = _own_payload(ctx)
         payload_str = json.encode(payload)
@@ -1442,7 +1440,7 @@ def _github_status_comments(ctx: FeatureContext):
             seen[aname] = entry
 
             if is_own_swarm:
-                # Artifact name (stable per `(job, task_key, run_attempt)`)
+                # Artifact name (stable per `(job, task_name, run_attempt)`)
                 # is the `sibling_id`, so a re-upload overwrites its prior
                 # slice. Absent field (older producers) → ingest no-ops.
                 ingest_sibling_observations(
@@ -1721,8 +1719,8 @@ def _github_status_comments(ctx: FeatureContext):
     def _init(ctx):
         # One-time init on first task_update: cache task identity (FeatureContext
         # has no ctx.task) for the artifact name, then authenticate for `_publish`.
-        _state["_task_name"] = ctx.task.kind
-        _state["_task_key"] = ctx.task.name
+        _state["_task_kind"] = ctx.task.kind
+        _state["_task_name"] = ctx.task.name
 
         # Anchor for the time-based throttle in `_task_update`.
         _state["_task_started_at"] = monotonic()

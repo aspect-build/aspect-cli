@@ -200,14 +200,14 @@ def _make_failing_with_drift():
 
 # ─── Test harness ─────────────────────────────────────────────────────────────
 
-def _render_ctx(task_name = "format"):
+def _render_ctx(task_kind = "format"):
     return {
         "triggered_by": "Greg Magolan (pull_request)",
         "subject": "",
         "started_ms": 1744630000000,
         "ended_ms": 1744630003200,
         "progress": "",
-        "task_name": task_name,
+        "task_kind": task_kind,
     }
 
 def _links(ci = "github"):

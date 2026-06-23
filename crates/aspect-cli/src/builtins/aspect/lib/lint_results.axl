@@ -151,14 +151,14 @@ def _recount(data):
     data["lint"]["counts_by_severity"] = by_sev
     data["lint"]["counts_by_tool"] = by_tool
 
-def lint_summary_title(data, status, target_pattern = "", task_name = ""):
+def lint_summary_title(data, status, target_pattern = "", task_kind = ""):
     """Compute the check-run title, e.g. "⚠️ lint //... · 3 errors, 8 warnings",
     "✅ lint //... · Passed", "❌ lint //... · Build failed", "🔄 ... · Running...".
 
-    Leading emoji is the status verdict (emoji_for_status). `task_name` defaults
+    Leading emoji is the status verdict (emoji_for_status). `task_kind` defaults
     to "lint".
     """
-    display = emoji_for_status(status) + " " + (task_name or "lint")
+    display = emoji_for_status(status) + " " + (task_kind or "lint")
     target = target_pattern or data.get("target_pattern", "")
     base = display + ((" " + target) if target else "")
 
@@ -865,7 +865,7 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
         details_text = ctx.template.jinja2(details_tmpl, data = details_data)
 
     target_pattern = render_ctx.get("subject", "") if render_ctx else ""
-    task_name = render_ctx.get("task_name", "") if render_ctx else ""
+    task_kind = render_ctx.get("task_kind", "") if render_ctx else ""
     if not target_pattern:
         target_pattern = data.get("target_pattern", "")
     return {
@@ -873,7 +873,7 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
             data,
             status,
             target_pattern = target_pattern,
-            task_name = task_name,
+            task_kind = task_kind,
         ),
         "summary": summary_text,
         "text": details_text,
