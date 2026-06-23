@@ -30,6 +30,7 @@ load("@aspect//lib/repro_commands.axl", "build_aspect_command", "dedup_and_attri
 load("@aspect//lib/result_text.axl", "severity_for_status")
 load("@aspect//lib/runnable.axl", "apparent_label", "runnable")
 load("@aspect//lib/sarif.axl", "get_sarif_summary", "parse_sarif", "parse_sarif_diagnostics", "sarif_to_review_comments")
+load("@aspect//lib/template_styles.axl", "resolve_style")
 load("@aspect//lib/tips.axl", "tips")
 load("@aspect//lint.axl", "file_uri_to_path", "filter_all", "filter_changeset", "linter_error_message")
 load("@demo//answer.axl", "ANSWER")
@@ -3399,6 +3400,22 @@ def test_bazel_render_snippets(ctx: TaskContext, tc: int, temp_dir: str) -> int:
     out3 = render_check_output(ctx, r3, "failed", render_ctx, links, snippet_options = SnippetOptions(max_lines = 5), max_snippets = 1)
     tc = test_case(tc, "…\nline 45" in out3["text"], "render: dropped-head truncation marker (leading …)")
     tc = test_case(tc, "line 49" in out3["text"], "render: windowed snippet keeps the tail")
+
+    # Strata style: same fixture `r` (snippets + per-failure repros), rendered
+    # through the Strata templates. The DX layout leads with a verdict heading +
+    # KPI strip, shows each failure snippet open with its repro beneath it, and
+    # keeps the whole-run command out of the combined Reproduce section.
+    _strata = resolve_style("strata", {})
+    _st = {"summary": _strata["summary"], "details": _strata["details"]}
+    out_s = render_check_output(ctx, r, "failed", render_ctx, links, templates = _st, snippet_options = opts, max_snippets = max_snips)
+    tc = test_case(tc, "### ❌ Failed" in out_s["text"], "strata: verdict heading")
+    tc = test_case(tc, "### 💥 What broke" in out_s["text"], "strata: what-broke section")
+    tc = test_case(tc, "FAILED: expected 1 got 2" in out_s["text"], "strata: inlines failed-test snippet")
+    tc = test_case(tc, "no member named 'foo'" in out_s["text"], "strata: inlines failed-action snippet")
+    tc = test_case(tc, "aspect test -- //pkg:fail_test" in out_s["text"], "strata: per-failure aspect repro inline")
+    tc = test_case(tc, "aspect build -- //pkg:broken" in out_s["text"], "strata: per-failure action repro inline")
+    _s_repro = out_s["text"][out_s["text"].find("🔁 Reproduce"):] if "🔁 Reproduce" in out_s["text"] else ""
+    tc = test_case(tc, "//pkg:fail_test" not in _s_repro, "strata: combined Reproduce excludes per-failure commands")
 
     ctx.std.fs.remove_dir_all(d)
     return tc

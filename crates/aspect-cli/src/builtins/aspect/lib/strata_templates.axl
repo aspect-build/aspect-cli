@@ -1,0 +1,295 @@
+"""Strata template strings — the DX-focused CI status layout.
+
+Three Jinja2 templates, one per surface slot, consuming the *same* data the
+Kilgore templates do (so no data-layer fork is needed):
+
+  - `STRATA_SUMMARY_TEMPLATE` / `STRATA_DETAILS_TEMPLATE` — the check-run output
+    `{summary, text}` (GitHub status check, GitLab commit status, Buildkite
+    annotation). Built from `build_summary_data` / `build_details_data`.
+  - `STRATA_BODY_TEMPLATE` — the aggregated PR/MR comment body, built from the
+    github_status_comments `_render_body` data dict.
+
+Layout philosophy (answer in order: what broke → how to fix/repro → why slow):
+
+  1. A verdict heading carrying the status word (no preamble).
+  2. The KPI strip — a fenced, monospace, threshold-emoji health line
+     (`strata_kpi`): cache hit %, parallelism, wall + critical-path share. It is
+     cheap, incompressible signal, so on the byte-capped status check it is the
+     last thing the trim ladder touches.
+  3. Failures — each failure's snippet, OPEN by default, with that failure's
+     repro command directly beneath it (per-failure `repros`).
+  4. Reproduce / Fix for the whole run (Fix first — it's the action).
+  5. Everything else (passed/cached rollups, performance detail, invocation
+     metadata, build graph) collapsed behind a single `<details>`, recoverable
+     in one click via the Aspect Web UI. The performance block AUTO-EXPANDS on a
+     "Passed, but slow" verdict (`strata_kpi.slow`).
+
+These strings are composed into a `TemplateStyle` by `lib/template_styles.axl`;
+the data they read is documented there and in `build_details_data` /
+`_render_body`. Reused emoji vocabulary matches the Strata web UI: ✅ Passed,
+❌ Failed, 🔄 Running, ⏱ Timed out, ⚠️ flaky, 🔥 aborted, ✨ Aspect, 🔁 Reproduce,
+🛠️ Fix.
+"""
+
+load("./repro_commands.axl", "ASPECT_CLI_INSTALL_HINT_MARKDOWN")
+
+# The KPI strip: a fenced, monospace, threshold-emoji health block, one
+# pre-aligned line per KPI (`strip_lines`, built by `compute_strata_kpi`).
+# Rendered as a macro so the details + body templates share one definition.
+# `kpi` is the `strata_kpi` dict (or None pre-build_metrics → strip skipped).
+STRATA_KPI_MACRO = """{% macro kpi_strip(kpi) %}
+{%- if kpi and kpi.strip_lines %}```text
+{% for line in kpi.strip_lines %}{{ line }}
+{% endfor %}```
+{% endif %}
+{%- endmacro %}"""
+
+# Failure snippet (OPEN) + per-failure repro command beneath it. `rows` is the
+# budget-gated snippet list (build_failures_snippets / failed_tests_snippets /
+# timeout_tests_snippets). The header survives even when the trim ladder pops
+# `snippet`; the repro fence then still pairs the failing label with its command.
+STRATA_SNIPPET_MACRO = """{% macro strata_snippets(rows) %}
+{%- for t in rows %}
+**❌ `{{ t.label }}`** — {{ t.kind }} {{ t.snippet_verb }}
+{%- if t.snippet %}
+{{ t.snippet_fence }}text
+{% if t.snippet_trunc_head %}…
+{% endif %}{{ t.snippet }}
+{% if t.snippet_trunc_tail %}…
+{% endif %}{{ t.snippet_fence }}
+{% endif %}
+{%- if t.repros %}
+Reproduce with:
+{% for r in t.repros %}
+```
+{% if r.description %}# {{ r.description }}
+{% endif %}{{ r.command }}
+```
+{%- endfor %}
+{% endif %}{%- endfor %}
+{%- endmacro %}"""
+
+# Whole-run Reproduce / Fix (target == "" entries). Fix first — it's the action.
+STRATA_REPRO_FIX_BLOCK = """{%- if fix_commands %}
+### 🛠️ Fix
+{% for c in fix_commands %}
+```
+{% if c.description %}# {{ c.description }}
+{% endif %}{{ c.command }}
+```
+{% endfor %}{% endif %}
+{%- if repro_commands %}
+### 🔁 Reproduce
+{% for c in repro_commands %}
+```
+{% if c.description %}# {{ c.description }}
+{% endif %}{{ c.command }}
+```
+{% endfor %}""" + ASPECT_CLI_INSTALL_HINT_MARKDOWN + """
+{% endif %}"""
+
+# The collapsed reference block: performance detail, invocation, build-graph
+# stats. Recoverable in one click; auto-expands only when the run is slow.
+STRATA_REFERENCE_BLOCK = """{%- if invocation_stats %}
+<details{% if strata_kpi and strata_kpi.slow %} open{% endif %}>
+<summary>⏱ Why it ran this way{% if strata_kpi and strata_kpi.slow %} — slow{% endif %}</summary>
+
+<pre>
+{%- if invocation_stats.elapsed_time %}
+Elapsed time:        {{ invocation_stats.elapsed_time }}
+{%- endif %}
+{%- if invocation_stats.analysis_time %}
+Analysis time:       {{ invocation_stats.analysis_time }}
+{%- endif %}
+{%- if invocation_stats.execution_time %}
+Execution time:      {{ invocation_stats.execution_time }}
+{%- endif %}
+{%- if invocation_stats.critical_path %}
+Critical path:       {{ invocation_stats.critical_path }}
+{%- endif %}
+{%- if invocation_stats.cache_actions_line %}
+Action cache:        {{ invocation_stats.cache_actions_line }}
+{%- endif %}
+{%- if invocation_stats.cache_tests_line %}
+Test cache:          {{ invocation_stats.cache_tests_line }}
+{%- endif %}
+{%- if invocation_stats.cached_tests_time_saved %}
+Cached tests saved:  {{ invocation_stats.cached_tests_time_saved }}
+{%- endif %}
+{%- if invocation_stats.targets_line %}
+Targets:             {{ invocation_stats.targets_line }}
+{%- endif %}
+{%- if invocation_stats.actions_line %}
+Actions:             {{ invocation_stats.actions_line }}
+{%- endif %}
+</pre>
+{%- if invocation_stats.runner_table %}
+
+{{ invocation_stats.runner_table }}
+{%- endif %}
+{%- if invocation_stats.mnemonic_table %}
+
+{{ invocation_stats.mnemonic_table }}
+{%- endif %}
+</details>
+{% endif %}"""
+
+STRATA_SUMMARY_TEMPLATE = """{% if detail_rows %}{% for row in detail_rows %}
+{% for item in row %}{{ item.icon }} {{ item.value }}{% if not loop.last %} · {% endif %}{% endfor %}{% if not loop.last %}  {% endif %}
+{%- endfor %}{% endif %}"""
+
+# Check-run body (status check / commit status / Buildkite annotation). Verdict
+# heading, KPI strip, failures (open), repro/fix, collapsed reference.
+STRATA_DETAILS_TEMPLATE = STRATA_KPI_MACRO + STRATA_SNIPPET_MACRO + """
+{% if aborted %}> 🔥 **Build aborted**{% if abort_reason %} (`{{ abort_reason }}`){% endif %}{% if abort_description %}: {{ abort_description }}{% endif %}
+
+{% endif -%}
+{% if strata_kpi %}### {{ strata_kpi.verdict_emoji }} {{ strata_kpi.verdict_word }}
+{{ kpi_strip(strata_kpi) }}
+{% endif -%}
+{% if build_failures_snippets or failed_tests_snippets or timeout_tests_snippets or build_failures or derived_failures %}
+### 💥 What broke
+{{ strata_snippets(build_failures_snippets) }}{{ strata_snippets(failed_tests_snippets) }}{{ strata_snippets(timeout_tests_snippets) }}
+{%- if build_failures %}
+<pre>
+{{- build_failures_table_head }}
+{{ build_failures_table_sep }}
+{%- for t in build_failures %}
+{{ t.aligned_label }} | {{ t.aligned_kind }} | {{ t.aligned_mnemonic }}
+{%- endfor %}
+{% if build_failures_overflow %}_{{ build_failures_overflow }} more root failure(s) not shown._{% endif %}</pre>
+{% endif %}
+{%- if derived_failures %}
+<details><summary>{{ derived_failures_count }} more target{{ derived_failures_plural }} blocked by a failed dependency</summary>
+
+<pre>
+{{- derived_failures_table_head }}
+{{ derived_failures_table_sep }}
+{%- for t in derived_failures %}
+{{ t.aligned_label }} | {{ t.aligned_kind }}
+{%- endfor %}
+{% if derived_failures_overflow %}_{{ derived_failures_overflow }} more not shown._{% endif %}</pre>
+</details>
+{% endif %}
+{%- if snippets_overflow %}
+_+ {{ snippets_overflow }} more failure{{ snippets_overflow_plural }} — output not shown._
+{% endif %}
+{% endif -%}
+""" + STRATA_REPRO_FIX_BLOCK + """
+{% if flaky_tests %}
+<details>
+<summary>⚠️ {{ flaky_tests_header }}</summary>
+
+<pre>
+{{- flaky_tests_table_head }}
+{{ flaky_tests_table_sep }}
+{%- for t in flaky_tests %}
+{{ t.aligned_label }} | {{ t.aligned_kind }} | {{ t.aligned_duration }}
+{%- endfor %}</pre>
+</details>
+{% endif -%}
+{% if passed_tests_count or cached_tests_count or built_targets_count %}
+<details>
+<summary>✅ Passed{% if passed_tests_count %} · {{ passed_tests_count }} tests{% endif %}{% if cached_tests_count %} · ⚡ {{ cached_tests_count }} cached{% endif %}{% if built_targets_count %} · {{ built_targets_count }} built{% endif %}</summary>
+
+<sub>Full per-target breakdown in the Aspect Web UI{% if aspect_url %} — [open ✨]({{ aspect_url }}){% endif %}.</sub>
+</details>
+{% endif -%}
+""" + STRATA_REFERENCE_BLOCK + """
+{% if aspect_url or bes_invocation_url or ci_url %}
+{% if aspect_url %}[Aspect ✨]({{ aspect_url }}){% endif %}{% if bes_invocation_url %}{% if aspect_url %} · {% endif %}[BES 🔗]({{ bes_invocation_url }}){% endif %}{% if ci_url %}{% if aspect_url or bes_invocation_url %} · {% endif %}[{{ ci_label or "CI" }}]({{ ci_url }}){% endif %}
+{% endif %}"""
+
+# Aggregated PR/MR comment. Verdict heading carries the cross-task tally; a
+# compact per-task list; deduped failure cards (open) with per-failure repros;
+# whole-run fix/repro; collapsed footer.
+STRATA_BODY_TEMPLATE = """{{ marker }}
+
+## ✨ Aspect Workflows
+{% if not entries -%}
+_No tasks have reported yet._
+{% else -%}
+{%- set fail_n = (sections.failed|length) + (sections.failing|length) -%}
+{%- set run_n = sections.running|length -%}
+{%- set flag_n = sections.flagged|length -%}
+{%- if fail_n > 0 %}### ❌ {{ fail_n }} task{{ "s" if fail_n != 1 else "" }} failed
+{% elif run_n > 0 %}### 🔄 Running…
+{% elif flag_n > 0 %}### ⚠️ Passed with warnings
+{% else %}### ✅ All {{ entries|length }} task{{ "s" if entries|length != 1 else "" }} passed
+{% endif %}
+{% macro task_row(e) -%}
+- {{ status_badges[e._badge_key] }} {{ e.name }}{% if e.key and e.key != e.name %} ({{ e.key }}){% endif %}{% if e._elapsed_text %} · {{ e._elapsed_text }}{% endif %}{% if e._links_text %} · {{ e._links_text }}{% endif %}{% if e._result_text %}<br>💬 {{ e._result_text }}{% endif %}
+{% endmacro -%}
+{% for e in sections.failed %}{{ task_row(e) }}{% endfor -%}
+{% for e in sections.failing %}{{ task_row(e) }}{% endfor -%}
+{% for e in sections.running %}{{ task_row(e) }}{% endfor -%}
+{% for e in sections.flagged %}{{ task_row(e) }}{% endfor -%}
+{% for e in sections.successful %}{{ task_row(e) }}{% endfor -%}
+{% macro snippet_block(s) %}
+**❌ `{{ s.label }}`** — {{ s.kind or (s.bucket if s.bucket != "timeout" else "test") }} {{ s.verb }}
+{{ s.fence }}text
+{% if s.trunc_head %}…
+{% endif %}{{ s.snippet }}
+{% if s.trunc_tail %}…
+{% endif %}{{ s.fence }}
+{%- for r in s.repros %}
+```
+{% if r.description %}# {{ r.description }}
+{% endif %}{{ r.command }}
+```
+{%- endfor %}
+{% if s.task_label %}<sub>in {{ s.task_noun }} {{ s.task_label }}</sub>
+{% endif %}
+{% endmacro -%}
+{% if build_snippets or test_snippets %}
+### 💥 What broke
+{% for s in build_snippets %}{{ snippet_block(s) }}{% endfor -%}
+{% for s in test_snippets %}{{ snippet_block(s) }}{% endfor -%}
+{% if snippet_overflow_note %}
+{{ snippet_overflow_note }}
+{% endif %}
+{% endif -%}
+{% if fix_rows %}
+### 🛠️ Fix
+{% for r in fix_rows %}{% if r.show_heading %}
+#### {% if r.severity_emoji %}{{ r.severity_emoji }} {% endif %}{% if r.kind %}{{ r.kind }}{% endif %}{% if r.task_keys %} ({{ r.task_keys|join(" · ") }}){% endif %}{% endif %}
+```
+{% if r.description %}# {{ r.description }}
+{% endif %}{{ r.command }}
+```
+{% endfor %}
+{% if fix_overflow_note %}
+{{ fix_overflow_note }}
+{% endif %}
+""" + ASPECT_CLI_INSTALL_HINT_MARKDOWN + """
+{% endif -%}
+{% if repro_rows %}
+### 🔁 Reproduce
+{% for r in repro_rows %}{% if r.show_heading %}
+#### {% if r.severity_emoji %}{{ r.severity_emoji }} {% endif %}{% if r.kind %}{{ r.kind }}{% endif %}{% if r.task_keys %} ({{ r.task_keys|join(" · ") }}){% endif %}{% endif %}
+```
+{% if r.description %}# {{ r.description }}
+{% endif %}{{ r.command }}
+```
+{% endfor %}
+{% if repro_overflow_note %}
+{{ repro_overflow_note }}
+{% endif %}
+""" + ASPECT_CLI_INSTALL_HINT_MARKDOWN + """
+{% endif -%}
+{% if tip_rows %}
+<details>
+<summary>💡 {{ tip_rows|length }} tip{{ "s" if tip_rows|length != 1 else "" }}</summary>
+{% for tip in tip_rows %}
+> {{ tip.severity_emoji }} **{{ tip.severity_label|upper }}: {{ tip.title }}**
+>
+{{ tip.body_quoted }}
+{% endfor %}
+</details>
+{% endif -%}
+{% endif %}
+---
+
+{% if last_updated_at or api_usage %}<sub>{% if last_updated_at %}⏱ Last updated {{ last_updated_at }}{% endif %}{% if last_updated_at and api_usage %} · {% endif %}{% if api_usage %}{{ api_usage }}{% endif %}</sub><br>
+{%- endif %}<sub>🚀 Powered by [Aspect CLI](https://github.com/aspect-build/aspect-cli){% if cli_version %} (v{{ cli_version }}){% endif %}</sub>
+"""

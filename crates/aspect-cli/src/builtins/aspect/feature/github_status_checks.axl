@@ -56,6 +56,7 @@ load(
     "should_emit_phase_change",
     "usage_footer",
 )
+load("../lib/template_styles.axl", "STYLE_ARG_DESCRIPTION", "STYLE_NAMES", "resolve_style")
 load("../lib/tips.axl", "SURFACE_GITHUB_STATUS_CHECKS", "collect_tips_sorted")
 load("../lint.axl", "LintTrait")
 
@@ -93,7 +94,12 @@ def _collect_ci_links(ctx, results_base_url):
 def _github_status_checks(ctx: FeatureContext):
     lifecycle = ctx.traits[TaskLifecycleTrait]
 
-    templates = ctx.args.templates or {}
+    # Resolve the named style (kilgore default) into its template bundle, then
+    # layer the per-key `templates` overrides on top (a custom variant). The
+    # resolved {summary, details} pair is what the renderer consumes; selecting
+    # the default style is byte-identical to the pre-style behavior.
+    _style = resolve_style(ctx.args.style, ctx.args.templates or {})
+    templates = {"summary": _style["summary"], "details": _style["details"]}
     metadata_keys = list(ctx.args.metadata_keys or [])
 
     # Check-run URL is published below via `checkrun.set_url`; siblings
@@ -490,12 +496,19 @@ GithubStatusChecks = feature(
             default = True,
             description = "Restrict lint check-run annotations to the displayed hunk regions of changed files (added lines + surrounding context from `detect_changed_files`). When false, off-region annotations are still posted but GitHub only renders them on the check-run detail page and commit page, not in Files Changed. Skipped silently when no changed-files context is available.",
         ),
+        "style": args.string(
+            default = "strata",
+            values = STYLE_NAMES,
+            description = STYLE_ARG_DESCRIPTION,
+        ),
         "templates": args.custom(
             dict,
             default = {},
             description = "Map of template overrides for the rendered check-run output. " +
                           "Keys: \"summary\", \"details\". Each value is a Jinja2 template " +
-                          "string. Empty dict (default) uses the feature's built-in templates.",
+                          "string. Empty dict (default) uses the selected `style`'s templates. " +
+                          "Overrides layer on top of `style`, so you can pick a style and replace " +
+                          "just one slot.",
         ),
         "metadata_keys": args.string_list(
             default = [],

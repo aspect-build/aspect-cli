@@ -84,6 +84,7 @@ load(
 load("../lib/repro_commands.axl", "ASPECT_CLI_INSTALL_HINT_MARKDOWN", "dedup_and_attribute", "rehydrate_commands")
 load("../lib/result_text.axl", "severity_for_status")
 load("../lib/tar.axl", "bsdtar")
+load("../lib/template_styles.axl", "STYLE_ARG_DESCRIPTION", "STYLE_NAMES", "resolve_style")
 load(
     "../lib/tips.axl",
     "SURFACE_GITHUB_PR_SUMMARY",
@@ -1266,9 +1267,13 @@ def _github_status_comments(ctx: FeatureContext):
     min_poll_interval_seconds = ctx.args.min_poll_interval_seconds
     artifact_expires_minutes = ctx.args.artifact_expires_minutes
 
+    # Resolve the named style (kilgore default), then layer the per-key
+    # `templates` overrides. The Kilgore bundle carries no `body` (the body
+    # template lives in this feature), so it falls back to _DEFAULT_BODY_TEMPLATE;
+    # Strata supplies its own body; a `templates["body"]` override wins over both.
     # args.custom(dict, ...) hands None at runtime, not the declared default.
-    templates = ctx.args.templates or {}
-    body_template = templates.get("body") or _DEFAULT_BODY_TEMPLATE
+    _style = resolve_style(ctx.args.style, ctx.args.templates or {})
+    body_template = _style["body"] or _DEFAULT_BODY_TEMPLATE
     status_badges = dict(_DEFAULT_STATUS_BADGES)
     status_badges.update(ctx.args.status_badges or {})
 
@@ -1990,6 +1995,11 @@ GithubStatusComments = feature(
                           "Set to 0 to disable (no expiry).",
         ),
         # Config-only (set via configure(..., feature_args = {...}) in config.axl).
+        "style": args.string(
+            default = "strata",
+            values = STYLE_NAMES,
+            description = STYLE_ARG_DESCRIPTION,
+        ),
         "templates": args.custom(
             dict,
             default = {},

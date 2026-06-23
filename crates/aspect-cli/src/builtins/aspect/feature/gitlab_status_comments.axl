@@ -76,6 +76,7 @@ load(
     "epoch_now_s",
     "usage_footer",
 )
+load("../lib/template_styles.axl", "STYLE_ARG_DESCRIPTION", "STYLE_NAMES", "resolve_style")
 
 _LOG = feature_logger("GitLab status comments")
 
@@ -153,8 +154,11 @@ def _gitlab_status_comments(ctx: FeatureContext):
     ci_run_url = _ci_run_url(env)
     min_poll_interval_seconds = max(1, ctx.args.min_poll_interval_seconds)
 
-    templates = ctx.args.templates or {}
-    body_template = templates.get("body") or DEFAULT_BODY_TEMPLATE
+    # Resolve the named style, then layer per-key `templates` overrides. Kilgore
+    # carries no body (falls back to the shared GitHub body template); Strata
+    # supplies its own; a `templates["body"]` override wins over both.
+    _style = resolve_style(ctx.args.style, ctx.args.templates or {})
+    body_template = _style["body"] or DEFAULT_BODY_TEMPLATE
     status_badges = dict(DEFAULT_STATUS_BADGES)
     status_badges.update(ctx.args.status_badges or {})
 
@@ -441,13 +445,18 @@ GitlabStatusComments = feature(
                           "the cost stays flat regardless of how many run in parallel. Terminal task " +
                           "verdicts always land immediately.",
         ),
+        "style": args.string(
+            default = "strata",
+            values = STYLE_NAMES,
+            description = STYLE_ARG_DESCRIPTION,
+        ),
         "templates": args.custom(
             dict,
             default = {},
             description = "Per-section Jinja2 template overrides. Keys: 'body'. " +
                           "Vars available match the GithubStatusComments template contract " +
-                          "(see feature/github_status_comments.axl). Empty dict → built-in default. " +
-                          "config.axl only.",
+                          "(see feature/github_status_comments.axl). Empty dict → selected `style`'s " +
+                          "body. Overrides layer on top of `style`. config.axl only.",
         ),
         "status_badges": args.custom(
             dict,
