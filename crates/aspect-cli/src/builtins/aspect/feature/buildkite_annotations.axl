@@ -31,7 +31,7 @@ load(
 )
 load("../lib/ci.axl", "resolve_build_url")
 load("../lib/environment.axl", "feature_logger", "workflows_results_url")
-load("../lib/lifecycle.axl", "TaskLifecycleTrait", "TaskUpdate")
+load("../lib/lifecycle.axl", "TaskLifecycleTrait", "TaskUpdate", "publish_expanded_phases")
 load("../lib/rate_limit.axl", "usage_footer")
 load("../lib/result_text.axl", "severity_for_status")
 load("../lib/tips.axl", "SURFACE_BUILDKITE_ANNOTATIONS", "collect_tips_sorted")
@@ -217,6 +217,13 @@ def _buildkite_annotations(ctx: FeatureContext):
 
     # mode == "always" falls through
 
+    # Publish which phases should render as expanded (`+++`) BK sections.
+    # Independent of the `buildkite-agent annotate` probe below — phase section
+    # headers are printed by the task lifecycle, not by this feature — so set it
+    # before the probe can early-return. No-op off Buildkite (the section
+    # emitter is itself BK-gated), so it's safe under any `mode`.
+    publish_expanded_phases(ctx, ctx.args.expanded_phases)
+
     # Probe buildkite-agent — on a Workflows runner it always exists,
     # so this is a clean rc check; elsewhere `.spawn()` raises before
     # we ever get the rc.
@@ -356,6 +363,15 @@ BuildkiteAnnotations = feature(
                           "reduce `buildkite-agent annotate` invocations on chatty tasks at the cost of " +
                           "less-responsive live annotations. The task's terminal result and phase " +
                           "boundaries always land immediately regardless of this setting.",
+        ),
+        "expanded_phases": args.string_list(
+            default = [],
+            description = "Phase ids (e.g. \"build\", \"test\") whose Buildkite log section is open by " +
+                          "default. A named phase's `--- ` collapsed header is emitted as an expanded " +
+                          "`+++` header instead, regardless of the task's own `Phase.expanded`. Note BK " +
+                          "auto-expands only the last collapsed section when none is explicitly expanded, " +
+                          "so expanding an earlier phase suppresses that auto-expansion of the closing " +
+                          "timing-summary section. Empty (default) leaves each phase's own `Phase.expanded`.",
         ),
     },
 )
