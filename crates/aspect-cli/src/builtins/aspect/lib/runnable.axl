@@ -17,14 +17,16 @@ LOCAL_SPAWN_FLAGS = [
     "--build_runfile_links",
 ]
 
-# Default `--remote_download_outputs` value for a task that immediately
-# spawns the built binary. Inject these via the `bazel_base_flags` path
-# (i.e. BEFORE user flags / rc expansion) so a user who needs `=all` —
-# e.g. an older Bazel version or a misbehaving rule set that won't run
-# without dependency outputs materialized — can override via the command
-# line or `.bazelrc`. `=toplevel` is the minimum that puts the binary
-# itself on disk so we can spawn it; `=minimal` would leave it remote
-# and break the spawn.
+# Default `--remote_download_outputs` value for a task that immediately spawns
+# the built binary. `=toplevel` is the minimum that puts the binary itself on
+# disk so we can spawn it; `=minimal` would leave it remote and break the spawn.
+# A user who needs `=all` — an older Bazel, or a rule set that won't run without
+# dependency outputs materialized — can still override.
+#
+# run/format/gazelle inject these via `bazel_base_flags` (BEFORE user flags), so
+# Bazel's last-wins lets the user override. Delivery injects them per-call
+# (AFTER the rc) and instead gates each on `_base_flag_satisfied`, so a user
+# `=minimal` is upgraded to `=toplevel` rather than silently winning.
 LOCAL_SPAWN_BASE_FLAGS = [
     "--remote_download_outputs=toplevel",
 ]
@@ -33,16 +35,56 @@ LOCAL_SPAWN_BASE_FLAGS = [
 # on disk; `minimal` is excluded on purpose (see `download_outputs_sufficient`).
 _DOWNLOAD_OUTPUTS_SUFFICIENT = ["toplevel", "all"]
 
+# Bazel's no-value expansion aliases for `--remote_download_outputs`, mapped to
+# the value they expand to. Bazel expands these internally, so they never reach
+# `rc.flag_value("--remote_download_outputs")` — `effective_download_outputs`
+# must match them directly to see a user's mode. (Per the Bazel command-line
+# reference: https://bazel.build/reference/command-line-reference.)
+_DOWNLOAD_OUTPUTS_ALIASES = {
+    "--remote_download_minimal": "minimal",
+    "--remote_download_toplevel": "toplevel",
+    "--remote_download_all": "all",
+}
+
 def download_outputs_sufficient(value: str | None) -> bool:
-    """Whether a `--remote_download_outputs=<value>` already puts the top-level
+    """Whether a `--remote_download_outputs` value already puts the top-level
     binary on disk, so the spawn/delivery `=toplevel` default need not override
     it.
 
     `toplevel`/`all` are sufficient; `minimal` is not — it leaves the binary
     remote and breaks the spawn, so a `=minimal` must be upgraded to `toplevel`
-    rather than respected. `None` (flag unset) is not sufficient: the default
+    rather than respected. `None` (mode unset) is not sufficient: the default
     applies."""
     return value in _DOWNLOAD_OUTPUTS_SUFFICIENT
+
+def effective_download_outputs(flags: list) -> str | None:
+    """The `--remote_download_outputs` mode an ordered Bazel flag list resolves
+    to (`minimal`/`toplevel`/`all`), or `None` if unset.
+
+    Resolves every form Bazel accepts — the canonical
+    `--remote_download_outputs=<mode>`, its two-token `--remote_download_outputs
+    <mode>`, and the no-value aliases (`--remote_download_all`, …) — honoring
+    last-wins across them, so a later `--remote_download_all` beats an earlier
+    `--remote_download_outputs=minimal` and vice versa. `flags` items are the
+    `str` / `(flag, version_condition)` shapes `RunCommand.expand` yields."""
+    mode = None
+    expect_value = False
+    for f in flags:
+        flag = f[0] if type(f) == "tuple" else f
+        if expect_value:
+            # Token after a bare `--remote_download_outputs`; a leading `-`
+            # means the flag had no value (next is its own flag).
+            expect_value = False
+            if not flag.startswith("-"):
+                mode = flag
+                continue
+        if flag == "--remote_download_outputs":
+            expect_value = True
+        elif flag.startswith("--remote_download_outputs="):
+            mode = flag.split("=", 1)[1]
+        elif flag in _DOWNLOAD_OUTPUTS_ALIASES:
+            mode = _DOWNLOAD_OUTPUTS_ALIASES[flag]
+    return mode
 
 # Named modes accepted by `--run-in=<choice>` on tasks that spawn a
 # built binary.
