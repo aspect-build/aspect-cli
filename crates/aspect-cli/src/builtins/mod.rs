@@ -340,7 +340,10 @@ mod tests {
         let mut violations = Vec::new();
         for f in ASPECT_DIR.find("**/*.axl").unwrap() {
             let rel = f.path();
-            let file_dir = rel.parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+            let file_dir = rel
+                .parent()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
             let Some(contents) = f.as_file().and_then(|file| file.contents_utf8()) else {
                 continue;
             };
