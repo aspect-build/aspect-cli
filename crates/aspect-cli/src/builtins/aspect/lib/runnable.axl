@@ -2,33 +2,19 @@ load("./bazel_results.axl", "bes_get")
 
 _DEFAULT_WORKSPACE_NAME = "_main"
 
-# Mandatory Bazel flags for a task that immediately spawns the built binary
-# (format, gazelle, run, delivery phase 3). Append these LAST so they win
-# over any user rc / `--bazel-flag` value that would flip them: the spawn
-# cannot work without them.
+# Mandatory Bazel flags every spawn build needs: BES must report artifacts as
+# local paths and the runfiles tree must be materialized so the binary runs.
+# Private — callers never assemble spawn flags by hand; `runnable().flags`
+# bundles these with the runinfo aspect and the download floor.
 #
 #   --experimental_build_event_upload_strategy=local: BES reports artifacts
 #       as local file:// paths so we can locate the binary on disk;
 #       the remote strategy yields bytestream:// URIs, which aren't paths.
 #   --build_runfile_links: materializes the runfiles tree so the binary's
 #       wrappers and data deps resolve at runtime.
-LOCAL_SPAWN_FLAGS = [
+_LOCAL_SPAWN_FLAGS = [
     "--experimental_build_event_upload_strategy=local",
     "--build_runfile_links",
-]
-
-# Default `--remote_download_outputs` value for a task that immediately spawns
-# the built binary. `=toplevel` is the minimum that puts the binary itself on
-# disk so we can spawn it; `=minimal` would leave it remote and break the spawn.
-# A user who needs `=all` — an older Bazel, or a rule set that won't run without
-# dependency outputs materialized — can still override.
-#
-# run/format/gazelle inject these via `bazel_base_flags` (BEFORE user flags), so
-# Bazel's last-wins lets the user override. Delivery injects them per-call
-# (AFTER the rc) and instead gates each on `_base_flag_satisfied`, so a user
-# `=minimal` is upgraded to `=toplevel` rather than silently winning.
-LOCAL_SPAWN_BASE_FLAGS = [
-    "--remote_download_outputs=toplevel",
 ]
 
 # `--remote_download_outputs` values that already put the top-level binary
@@ -46,10 +32,159 @@ _DOWNLOAD_OUTPUTS_ALIASES = {
     "--remote_download_all": "all",
 }
 
+# Injected-aspect repo / output-group / file-suffix names. The aspect writes
+# one `<name>.aspect_runinfo.json` per runnable target carrying everything
+# `bazel run` reconstructs but no provider exposes: the executable
+# (runfiles-relative short_path), the expanded+tokenized `args` attribute, and
+# the `RunEnvironmentInfo` env. `determine_entrypoint` reads it back.
+_RUNINFO_REPO = "aspect_runinfo"
+_RUNINFO_OUTPUT_GROUP = "aspect_runinfo"
+_RUNINFO_JSON_SUFFIX = ".aspect_runinfo.json"
+
+# The injected aspect, materialized verbatim into a temp repo. `_tokenize` is a
+# Starlark port of Bazel's ShellUtils.tokenize (ShellUtils.java:90-143); the
+# args pipeline mirrors RunfilesSupport.java:608 — location-expand over `data`,
+# Make-var expand, then shell-tokenize — so the captured argv matches `bazel
+# run` byte-for-byte. Backslashes are doubled for the AXL string literal.
+_RUNINFO_BZL = """_BS = '\\\\'
+
+def _tokenize(s):
+    tokens = []
+    token = ""
+    active = False
+    i = 0
+    n = len(s)
+    for _ in range(n + 1):
+        if i >= n:
+            break
+        c = s[i]
+        i += 1
+        if c == "'":
+            active = True
+            closed = False
+            for _ in range(n + 1):
+                if i >= n:
+                    break
+                d = s[i]
+                i += 1
+                if d == "'":
+                    closed = True
+                    break
+                token += d
+            if not closed:
+                fail("tokenize: unterminated single quote in: " + s)
+        elif c == '"':
+            active = True
+            closed = False
+            for _ in range(n + 1):
+                if i >= n:
+                    break
+                d = s[i]
+                i += 1
+                if d == '"':
+                    closed = True
+                    break
+                if d == _BS:
+                    if i >= n:
+                        fail("tokenize: trailing backslash in: " + s)
+                    e = s[i]
+                    i += 1
+                    if e == '"' or e == _BS:
+                        token += e
+                    else:
+                        token += _BS + e
+                else:
+                    token += d
+            if not closed:
+                fail("tokenize: unterminated double quote in: " + s)
+        elif c == " " or c == "\\t":
+            if active:
+                tokens.append(token)
+                token = ""
+                active = False
+        elif c == _BS:
+            if i >= n:
+                fail("tokenize: trailing backslash in: " + s)
+            token += s[i]
+            i += 1
+            active = True
+        else:
+            token += c
+            active = True
+    if active:
+        tokens.append(token)
+    return tokens
+
+def _expand_and_tokenize_args(ctx, target):
+    raw = getattr(ctx.rule.attr, "args", None)
+    if not raw:
+        return []
+    lookup = getattr(ctx.rule.attr, "data", []) + [target]
+    out = []
+    for a in raw:
+        a = ctx.expand_location(a, lookup)
+        a = ctx.expand_make_variables("args", a, {})
+        out.extend(_tokenize(a))
+    return out
+
+def _runinfo_aspect_impl(target, ctx):
+    files_to_run = target[DefaultInfo].files_to_run
+    if files_to_run == None or files_to_run.executable == None:
+        return []
+
+    env = {}
+    inherited = []
+    if RunEnvironmentInfo in target:
+        rei = target[RunEnvironmentInfo]
+        env = rei.environment
+        inherited = rei.inherited_environment
+
+    info = struct(
+        executable = files_to_run.executable.short_path,
+        args = _expand_and_tokenize_args(ctx, target),
+        environment = env,
+        inherited_environment = inherited,
+    )
+
+    out = ctx.actions.declare_file(target.label.name + ".aspect_runinfo.json")
+    ctx.actions.write(out, json.encode(info))
+    return [OutputGroupInfo(aspect_runinfo = depset([out]))]
+
+runinfo = aspect(implementation = _runinfo_aspect_impl)
+"""
+
+def _write_runinfo_repo(ctx, repo_dir: str):
+    ctx.std.fs.create_dir_all(repo_dir)
+    ctx.std.fs.write(repo_dir + "/REPO.bazel", "")
+    ctx.std.fs.write(repo_dir + "/BUILD.bazel", "")
+    ctx.std.fs.write(repo_dir + "/runinfo.bzl", _RUNINFO_BZL)
+
+def _runinfo_aspect_flags(ctx, rc) -> list[str]:
+    """Materialize the runinfo aspect into a temp injectable repo and return the
+    Bazel flags that apply it to the top-level run target(s).
+
+    Folded into `runnable(rc=...)` so spawn tasks never assemble it by hand.
+    The temp repo is namespaced by `ctx.task.name`. `rc` selects the injection
+    flag: `--inject_repository` only registers the repo in the bzlmod graph, so
+    under WORKSPACE mode (`--enable_bzlmod=false`) the repo is invisible and
+    `@aspect_runinfo` fails to resolve — `--override_repository` injects in both
+    modes. Mirrors `delivery._get_output_shas`.
+    """
+    repo_dir = "/tmp/aspect_runinfo_" + ctx.task.name
+    _write_runinfo_repo(ctx, repo_dir)
+    if rc.bool_flag("--enable_bzlmod", command = "build") == False:
+        inject = "--override_repository=" + _RUNINFO_REPO + "=" + repo_dir
+    else:
+        inject = "--inject_repository=" + _RUNINFO_REPO + "=" + repo_dir
+    return [
+        "--aspects=@" + _RUNINFO_REPO + "//:runinfo.bzl%runinfo",
+        "--output_groups=+" + _RUNINFO_OUTPUT_GROUP,
+        inject,
+    ]
+
 def download_outputs_sufficient(value: str | None) -> bool:
     """Whether a `--remote_download_outputs` value already puts the top-level
-    binary on disk, so the spawn/delivery `=toplevel` default need not override
-    it.
+    binary on disk, so the spawn `=toplevel` default need not override it.
 
     `toplevel`/`all` are sufficient; `minimal` is not — it leaves the binary
     remote and breaks the spawn, so a `=minimal` must be upgraded to `toplevel`
@@ -87,6 +222,15 @@ def effective_download_outputs(flags: list) -> str | None:
         elif flag in _DOWNLOAD_OUTPUTS_ALIASES:
             mode = _DOWNLOAD_OUTPUTS_ALIASES[flag]
     return mode
+
+def _download_floor_flags(rc) -> list[str]:
+    """`--remote_download_outputs=toplevel` when `rc` resolves below `toplevel`
+    (unset or `minimal`), else empty. Bundled into `runnable().flags` so it wins
+    last; skipped when the user already asked for `toplevel`/`all` so an upward
+    override stands."""
+    if download_outputs_sufficient(effective_download_outputs(rc.expand(command = "build"))):
+        return []
+    return ["--remote_download_outputs=toplevel"]
 
 # Named modes accepted by `--run-in=<choice>` on tasks that spawn a
 # built binary.
@@ -241,6 +385,8 @@ def _process_bes(state: struct, event):
             for og in (bes_get(event.payload, "output_group", None) or []):
                 if og.name == "default":
                     state.target_fileset[label_key] = og.file_sets
+                elif og.name == _RUNINFO_OUTPUT_GROUP:
+                    state.runinfo_fileset[label_key] = og.file_sets
     elif event.kind == "workspace_config":
         # WorkspaceConfig.local_exec_root is "<output_base>/execroot/<workspace_name>".
         # Its basename is the canonical repo name Bazel uses inside runfiles trees.
@@ -292,12 +438,44 @@ def _get_default_outputs(state: struct, target: str) -> list[str]:
         return []
     return _collect_fileset_paths(state, state.target_fileset[target])
 
+def _read_runinfo(state: struct, target_key: str) -> struct | None:
+    """Parse the `aspect_runinfo` JSON the injected aspect wrote for `target_key`.
+
+    Returns `struct(executable, args, environment, inherited_environment)` —
+    `executable` the runfiles-relative short_path of the binary, `args` the
+    expanded+tokenized `args` attribute, and the `RunEnvironmentInfo` env split.
+    `None` when the aspect didn't run for this target (no injection, or a
+    non-runnable target the aspect skipped) or when `ctx` is absent (unit tests).
+    """
+    if state.ctx == None or target_key not in state.runinfo_fileset:
+        return None
+    for path in _collect_fileset_paths(state, state.runinfo_fileset[target_key]):
+        if not path.endswith(_RUNINFO_JSON_SUFFIX):
+            continue
+        parsed = json.try_decode(state.ctx.std.fs.read_to_string(path), None)
+        if parsed == None:
+            continue
+        return struct(
+            executable = parsed.get("executable", ""),
+            args = parsed.get("args", []),
+            environment = parsed.get("environment", {}),
+            inherited_environment = parsed.get("inherited_environment", []),
+        )
+    return None
+
 def _determine_entrypoint(state: struct, target: str) -> struct | None:
     """Resolve `target` to an executable path and runfiles directory.
 
-    Returns `struct(path, runfiles_dir, runfiles_workspace_dir)` or
-    `None` when the target produced no BES `target_completed` event or
-    its default output group has no selectable executable.
+    Returns `struct(path, runfiles_dir, runfiles_workspace_dir, args,
+    environment, inherited_environment)` or `None` when the target produced no
+    BES `target_completed` event or its default output group has no selectable
+    executable.
+
+    `args` / `environment` / `inherited_environment` come from the injected
+    `runinfo` aspect (see `runinfo_aspect_flags`): the expanded+tokenized `args`
+    attribute and the target's `RunEnvironmentInfo` env, for `_spawn` to replay
+    the way `bazel run` does. They are empty when the aspect didn't run — e.g.
+    `delivery`, which doesn't inject it, and the unit tests.
 
     `runfiles_dir` is the resolved runfiles directory path (e.g.
     `…/format.runfiles`), or `None` when no `<entrypoint>.runfiles`
@@ -308,12 +486,15 @@ def _determine_entrypoint(state: struct, target: str) -> struct | None:
     or `None` when `runfiles_dir` is `None`. Pre-joined here so consumers
     don't have to know the canonical workspace name.
 
-    Entrypoint selection — three passes over the default-output-group files:
+    Entrypoint selection:
+      0. When the `runinfo` aspect ran, match its `files_to_run.executable`
+         short_path basename — authoritative, so it supersedes the heuristics.
       1. Exact match on `target_name`.
       2. `target_name + EXT` for each extension in `_SCRIPT_EXTENSIONS`
          (.sh, .bash, .exe, .bat).
       3. First file with the executable bit set —
          last-resort for any remaining non-standard output name.
+    Passes 1–3 are the fallback for callers that don't inject the aspect.
 
     Runfiles detection — Bazel names the runfiles dir after the
     executable FILE (including any extension), not the target label:
@@ -323,7 +504,7 @@ def _determine_entrypoint(state: struct, target: str) -> struct | None:
     https://github.com/bazelbuild/bazel/blob/9.0.0rc1/src/main/java/com/google/devtools/build/lib/analysis/RunfilesSupport.java#L83-L84
 
     Detection checks `<entrypoint>.runfiles` on disk, materialized
-    by `--build_runfile_links` (included in `LOCAL_SPAWN_FLAGS`).
+    by `--build_runfile_links` (included in `r.flags`).
     """
     target = apparent_label(target, state.current_package)
     if target not in state.target_fileset:
@@ -335,11 +516,20 @@ def _determine_entrypoint(state: struct, target: str) -> struct | None:
     if not candidates:
         return None
 
+    runinfo = _read_runinfo(state, target)
+
     entrypoint = None
-    for c in candidates:
-        if c.rsplit("/", 1)[-1] == target_name:
-            entrypoint = c
-            break
+    if runinfo != None and runinfo.executable:
+        exe_name = runinfo.executable.rsplit("/", 1)[-1]
+        for c in candidates:
+            if c.rsplit("/", 1)[-1] == exe_name:
+                entrypoint = c
+                break
+    if entrypoint == None:
+        for c in candidates:
+            if c.rsplit("/", 1)[-1] == target_name:
+                entrypoint = c
+                break
     if entrypoint == None:
         for ext in _SCRIPT_EXTENSIONS:
             for c in candidates:
@@ -368,10 +558,22 @@ def _determine_entrypoint(state: struct, target: str) -> struct | None:
         path = entrypoint,
         runfiles_dir = runfiles_dir,
         runfiles_workspace_dir = runfiles_workspace_dir,
+        args = runinfo.args if runinfo != None else [],
+        environment = runinfo.environment if runinfo != None else {},
+        inherited_environment = runinfo.inherited_environment if runinfo != None else [],
     )
 
 def _spawn(ctx: TaskContext, state: struct, ep: struct, args: list[str], capture: bool = False, cwd: str | None = None) -> std.process.Child:
-    """Spawn `ep.path` with `args` in the Bazel runfiles environment.
+    """Spawn `ep.path` in the Bazel runfiles environment.
+
+    The argv is `ep.args + args`: the target's `args` attribute (expanded and
+    tokenized by the `runinfo` aspect) precedes the caller's forwarded args,
+    matching `bazel run` (RunCommand.java:913-914). `ep.args` is empty when the
+    aspect didn't run, so this is a no-op for those callers.
+
+    Applies the target's `RunEnvironmentInfo` env (`ep.environment`) first so the
+    runfiles/BUILD_* vars below win on conflict; `ep.inherited_environment` names
+    are already covered by the spawned process inheriting our environment.
 
     Always sets BUILD_WORKSPACE_DIRECTORY / BUILD_WORKING_DIRECTORY so tool
     wrappers can locate the workspace, and the four ASPECT_* variables for
@@ -393,15 +595,17 @@ def _spawn(ctx: TaskContext, state: struct, ep: struct, args: list[str], capture
     arguments against the user's cwd.
     """
     effective_cwd = cwd or ep.runfiles_workspace_dir or ctx.std.env.current_dir()
-    cmd = ctx.std.process.command(ep.path) \
-        .current_dir(effective_cwd) \
+    cmd = ctx.std.process.command(ep.path).current_dir(effective_cwd)
+    for k, v in (getattr(ep, "environment", {}) or {}).items():
+        cmd = cmd.env(k, v)
+    cmd = cmd \
         .env("BUILD_WORKSPACE_DIRECTORY", ctx.std.env.bazel_root_dir()) \
         .env("BUILD_WORKING_DIRECTORY", ctx.std.env.current_dir()) \
         .env("ASPECT_WORKING_DIRECTORY", ctx.std.env.current_dir()) \
         .env("ASPECT_ROOT_DIRECTORY", ctx.std.env.aspect_root_dir()) \
         .env("ASPECT_BAZEL_ROOT_DIRECTORY", ctx.std.env.bazel_root_dir()) \
         .env("ASPECT_GIT_ROOT_DIRECTORY", ctx.std.env.git_root_dir() or "") \
-        .args(args)
+        .args(getattr(ep, "args", []) + list(args))
     if ep.runfiles_dir:
         cmd = cmd \
             .env("RUNFILES_DIR", ep.runfiles_dir) \
@@ -412,20 +616,38 @@ def _spawn(ctx: TaskContext, state: struct, ep: struct, args: list[str], capture
         cmd = cmd.stdout("piped").stderr("piped")
     return cmd.spawn()
 
-def runnable(ctx, targets: list[str]) -> struct:
+def runnable(ctx, targets: list[str], rc = None) -> struct:
     """Build a BES event tracker that resolves entrypoints for `targets`.
+
+    Pass the active `RunCommand` as `rc` (the value `setup_phase` returns) to opt
+    into the `runinfo` aspect: `flags` then carries the aspect injection too. Omit
+    `rc` (unit tests) for the BES-only heuristic with no aspect.
 
     Feed BES events via `.event(event)` as they arrive from the build. Once the
     build completes, query results per target through the returned struct:
 
-      determine_entrypoint(target) → struct(path, runfiles_dir, runfiles_workspace_dir) | None
+      flags → list[str]
+          The single, complete `flags=` to pass to `ctx.bazel.build` — every
+          load-bearing flag for building-then-running the targets: the mandatory
+          spawn flags, plus (when `rc` is given) the `runinfo` aspect injection
+          and the `--remote_download_outputs` floor (forced up to `toplevel` only
+          when `rc` resolves below it, so the binary lands on disk while an upward
+          `=all` override still stands). Callers pass `flags = r.flags` and
+          assemble no spawn constants by hand. A caller with its own non-spawn
+          extras (e.g. `delivery`'s release flags) places those before `r.flags`
+          so the load-bearing flags win.
+
+      determine_entrypoint(target) → struct(path, runfiles_dir, runfiles_workspace_dir, args, environment, inherited_environment) | None
           Best executable output for `target` from its BES default output group,
           or None if no BES data was received for it. `runfiles_dir` is the
           resolved runfiles directory (e.g. `…/format.runfiles`), or `None`
           when no `<entrypoint>.runfiles` directory exists on disk.
           `runfiles_workspace_dir` is `runfiles_dir + "/" + <workspace>` (the
           cwd `bazel run` uses; usually `…/format.runfiles/_main`), or `None`
-          when `runfiles_dir` is `None`.
+          when `runfiles_dir` is `None`. `args` / `environment` /
+          `inherited_environment` carry the `runinfo` aspect's capture (empty
+          when the caller didn't inject it — i.e. constructed `runnable` without
+          `rc`, or built without `r.flags`).
 
       get_default_outputs(target) → list[str]
           Absolute paths of every file in `target`'s default output group,
@@ -436,10 +658,12 @@ def runnable(ctx, targets: list[str]) -> struct:
           responsible for materializing what it intends to read.
 
       spawn(ep, args, capture=False, cwd=None) → Child
-          Spawn `ep.path` with Bazel runfiles environment variables set.
-          `cwd` defaults to `ep.runfiles_dir/<workspace>` when a runfiles tree
-          is present (matching `bazel run`), falling back to the aspect
-          invocation directory when there is no runfiles tree. Pass an
+          Spawn `ep.path` with Bazel runfiles environment variables set. The
+          target's `args` attribute (`ep.args`) is prepended before `args`, and
+          its `RunEnvironmentInfo` env (`ep.environment`) is applied, matching
+          `bazel run`. `cwd` defaults to `ep.runfiles_dir/<workspace>` when a
+          runfiles tree is present (matching `bazel run`), falling back to the
+          aspect invocation directory when there is no runfiles tree. Pass an
           explicit `cwd` to override — e.g. the resolved value from `--run-in=<choice>`.
     """
     current_package = _current_package(ctx) if ctx else ""
@@ -449,12 +673,18 @@ def runnable(ctx, targets: list[str]) -> struct:
         targets = {apparent_label(t, current_package): t for t in targets},
         filesets = {},
         target_fileset = {},
+        runinfo_fileset = {},
         # Single-element list so `_process_bes` can mutate it (struct fields are
         # otherwise read-only after construction).
         workspace_name = [""],
     )
 
+    flags = list(_LOCAL_SPAWN_FLAGS)
+    if rc != None:
+        flags = flags + _runinfo_aspect_flags(ctx, rc) + _download_floor_flags(rc)
+
     return struct(
+        flags = flags,
         event = lambda event: _process_bes(state, event),
         determine_entrypoint = lambda target: _determine_entrypoint(state, target),
         get_default_outputs = lambda target: _get_default_outputs(state, target),

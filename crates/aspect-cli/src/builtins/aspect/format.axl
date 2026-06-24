@@ -31,7 +31,7 @@ load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskL
 load("./lib/path_glob.axl", "match_any")
 load("./lib/path_normalize.axl", "normalize_files_for_cwd")
 load("./lib/repro_commands.axl", "build_aspect_command", "build_bazel_command", "explicit_flags", "filter_by_flavor", "has_tools_bazel_wrapper", "print_repro_and_fix", "repro_flavor_args", "repro_prefix", "task_cli_path")
-load("./lib/runnable.axl", "LOCAL_SPAWN_BASE_FLAGS", "LOCAL_SPAWN_FLAGS", "RUN_IN_DESCRIPTION", "resolve_run_in", "runnable")
+load("./lib/runnable.axl", "RUN_IN_DESCRIPTION", "resolve_run_in", "runnable")
 load("./lib/text.axl", "pluralize")
 load("./lib/tips.axl", "tips")
 
@@ -308,10 +308,13 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
     # Single pre-task setup phase (status surface, rc parse, health checks);
     # returns resolved flags (a failed health check fails the task inside).
-    setup_phase(ctx, lifecycle, ctx.args.formatter_target, "format_results", data, hc_trait, bazel_trait, bazel_base_flags = LOCAL_SPAWN_BASE_FLAGS)
+    rc = setup_phase(ctx, lifecycle, ctx.args.formatter_target, "format_results", data, hc_trait, bazel_trait)
     announce_version, announce_command = resolve_bazel_announce(ctx)
 
-    r = runnable(ctx, [ctx.args.formatter_target])
+    # `rc=` opts into the runinfo aspect: `r.flags` captures the formatter's
+    # executable + `args` attribute + env so `r.spawn` replays them ahead of the
+    # changed-file list.
+    r = runnable(ctx, [ctx.args.formatter_target], rc = rc)
 
     # Pass build_event_sinks (carries the Aspect backend gRPC sink in CI) so the
     # "✨ Aspect Workflows" link resolves to a real record, not a 404.
@@ -340,7 +343,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     build = ctx.bazel.build(
         ctx.args.formatter_target,
         build_events = build_events,
-        flags = LOCAL_SPAWN_FLAGS,
+        flags = r.flags,
         current_dir = ctx.std.env.aspect_root_dir(),
         announce_version = announce_version,
         announce_command = announce_command,

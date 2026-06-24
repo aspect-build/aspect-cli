@@ -139,7 +139,7 @@ load("@aspect//lib/health_check.axl", "HealthCheckTrait")
 load("@aspect//lib/lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "setup_phase", "task_update")
 load("@aspect//lib/remote_executor.axl", "start_dummy_executor", "stop_dummy_executor")
 load("@aspect//lib/repro_commands.axl", "build_aspect_command", "print_repro_and_fix", "repro_prefix", "task_cli_path")
-load("@aspect//lib/runnable.axl", "LOCAL_SPAWN_BASE_FLAGS", "LOCAL_SPAWN_FLAGS", "apparent_label", "download_outputs_sufficient", "effective_download_outputs", "runnable")
+load("@aspect//lib/runnable.axl", "apparent_label", "runnable")
 load("@aspect//lib/text.axl", "pluralize")
 load("@aspect//lib/tips.axl", "tips")
 load("@bazel//proto/remote_logging.axl", "remote_logging")
@@ -349,20 +349,6 @@ def _surface_phase_stderr(ctx, phase, log_path):
         return
     ctx.std.io.stderr.write(ctx.std.fs.read_to_string(log_path))
     artifacts.upload_file(ctx, "delivery_phase{}_log".format(phase), "phase{}-stderr.log".format(phase), log_path)
-
-def _base_flag_satisfied(rc, flag: str) -> bool:
-    """Whether the active run command already satisfies a `LOCAL_SPAWN_BASE_FLAGS`
-    default, so phase 3 need not inject it.
-
-    `--remote_download_outputs=toplevel` carries the only non-trivial policy:
-    phase 3 must materialize the top-level binary on disk, so the default is
-    satisfied only when the rc resolves to a sufficient mode (`toplevel`/`all`)
-    — across every flag form, including the `--remote_download_*` aliases. A
-    user `=minimal` is not sufficient, so the `=toplevel` default still applies.
-    Any other base flag is satisfied once the rc sets it at all."""
-    if flag.startswith("--remote_download_outputs="):
-        return download_outputs_sufficient(effective_download_outputs(rc.expand(command = "build")))
-    return rc.flag_value(flag.split("=", 1)[0], command = "build") != None
 
 def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, user_remote_executor_uri, ansi, data):
     """Run phase 1 (build) + phase 2 (digest extraction); return
@@ -1114,7 +1100,10 @@ def _delivery_impl(ctx):
 
     _print_header(ansi, endpoint, ci_host, commit_sha, prefix, prefix_source, build_url, rc.expand(command = "build"), targets, forced_targets, mode, dry_run, track_state)
 
-    run_tracker = runnable(ctx, targets)
+    # `rc=` opts into the runinfo aspect so the deliverables spawned in phase 3
+    # replay their `args` attribute + env the way `bazel run` does. The aspect
+    # rides phase 3 (the build feeding `.event`) via `run_tracker.flags`.
+    run_tracker = runnable(ctx, targets, rc = rc)
 
     _t_total = time.monotonic()
 
@@ -1222,23 +1211,18 @@ def _delivery_impl(ctx):
         # defined" (the task's own expanded_flags already went through this).
         release_flags = expand_config_flags(ctx, bazel_trait, ctx.args.release_bazel_flags)
 
-        # LOCAL_SPAWN_BASE_FLAGS are delivery defaults the active run command
-        # may override (a repo's `--remote_download_outputs=all` must win over
-        # the default `toplevel`); inject only those the rc doesn't already
-        # satisfy. See `_base_flag_satisfied` for the download-outputs policy.
-        base_defaults = [
-            f
-            for f in LOCAL_SPAWN_BASE_FLAGS
-            if not _base_flag_satisfied(rc, f)
-        ]
-
-        # Phase 3 flag order (last-wins): active run command, then the per-call
-        # extras below. release_flags are `--release-bazel-flag`s (e.g. `--stamp`,
-        # `--config=release`) rc-config-expanded; LOCAL_SPAWN_FLAGS are mandatory
-        # and last; `--noremote_upload_local_results` keeps release artifacts out
-        # of the shared remote cache (delivery-specific). base_defaults lead so a
-        # release flag could still override them.
-        phase3_flags = base_defaults + list(release_flags) + LOCAL_SPAWN_FLAGS + [
+        # Phase 3 flag order (last-wins): active run command, then these per-call
+        # extras. `run_tracker.flags` carries every flag needed to build-then-spawn
+        # the deliverables (mandatory spawn flags, the runinfo aspect so each
+        # deliverable's `args`/env replay like `bazel run`, and the
+        # `--remote_download_outputs=toplevel` floor that upgrades a user `=minimal`).
+        # release_flags (`--release-bazel-flag`s like `--stamp`, `--config=release`)
+        # come AFTER so a release that *raises* the floor — e.g. `=all` for a rule
+        # set that won't run without dependency outputs materialized — still wins
+        # over `=toplevel` (the floor is a minimum, not a ceiling).
+        # `--noremote_upload_local_results` keeps release artifacts out of the
+        # shared remote cache (delivery-specific).
+        phase3_flags = run_tracker.flags + list(release_flags) + [
             "--noremote_upload_local_results",
         ]
         _t_download = time.monotonic()

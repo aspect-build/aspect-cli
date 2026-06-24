@@ -95,7 +95,7 @@ load("./lib/health_check.axl", "HealthCheckTrait")
 load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "pick_task_status", "resolve_severity", "setup_phase", "task_update")
 load("./lib/path_glob.axl", "match_any")
 load("./lib/repro_commands.axl", "build_aspect_command", "build_bazel_command", "explicit_flags", "filter_by_flavor", "has_tools_bazel_wrapper", "print_repro_and_fix", "repro_flavor_args", "repro_prefix", "task_cli_path")
-load("./lib/runnable.axl", "LOCAL_SPAWN_BASE_FLAGS", "LOCAL_SPAWN_FLAGS", "runnable")
+load("./lib/runnable.axl", "runnable")
 load("./lib/text.axl", "pluralize")
 load("./lib/tips.axl", "tips")
 
@@ -442,7 +442,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
     # Single pre-task setup phase (status surface, rc parse, health checks);
     # returns resolved flags (a failed health check fails the task inside).
-    setup_phase(ctx, lifecycle, ctx.args.gazelle_target, "gazelle_results", data, hc_trait, bazel_trait, bazel_base_flags = LOCAL_SPAWN_BASE_FLAGS)
+    rc = setup_phase(ctx, lifecycle, ctx.args.gazelle_target, "gazelle_results", data, hc_trait, bazel_trait)
     announce_version, announce_command = resolve_bazel_announce(ctx)
 
     # Resolve dirs before the build: gazelle needs them when spawned, the no-op
@@ -454,7 +454,10 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         data["gazelle"]["no_changed_dirs"] = True
         return _emit_final(ctx, lifecycle, data, 0)
 
-    r = runnable(ctx, [ctx.args.gazelle_target])
+    # `rc=` opts into the runinfo aspect: `r.flags` captures the gazelle
+    # target's executable (the sh_binary, not its `-runner.bash` helper), its
+    # `args` attribute, and its env so `r.spawn` resolves and replays them.
+    r = runnable(ctx, [ctx.args.gazelle_target], rc = rc)
 
     # See format.axl for why the trait sinks need to be plumbed in.
     events = bazel.build_events.iterator()
@@ -482,7 +485,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     build = ctx.bazel.build(
         ctx.args.gazelle_target,
         build_events = build_events,
-        flags = LOCAL_SPAWN_FLAGS,
+        flags = r.flags,
         current_dir = ctx.std.env.bazel_root_dir(),
         announce_version = announce_version,
         announce_command = announce_command,
@@ -548,14 +551,6 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     if not ep:
         _emit_final(ctx, lifecycle, data, 1)
         fail("Failed to determine the gazelle target's entrypoint.")
-
-    # Upstream gazelle() (from-source) emits both a `<name>` sh_binary and an
-    # inner `<name>-runner.bash`; determine_entrypoint may surface either (BES
-    # ordering). The runner script's $0-relative runfiles lookup wants
-    # `<name>-runner.bash.runfiles`, but bazel creates `<name>.runfiles`.
-    # Stripping the suffix points at the sh_binary, whose runfiles resolve.
-    if ep.path.endswith("-runner.bash"):
-        ep = struct(path = ep.path[:-len("-runner.bash")], runfiles_dir = ep.runfiles_dir)
 
     # Diff phase: -mode=diff yields the verdict + patch without touching the
     # tree. The wrapper hardcodes `-mode fix`; our appended `-mode=diff` wins

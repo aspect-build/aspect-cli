@@ -9,7 +9,7 @@ load("./lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_bui
 load("./lib/environment.axl", "error")
 load("./lib/health_check.axl", "HealthCheckTrait")
 load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "dispatch_task_update", "setup_phase", "task_update")
-load("./lib/runnable.axl", "LOCAL_SPAWN_BASE_FLAGS", "LOCAL_SPAWN_FLAGS", "RUN_IN_DESCRIPTION", "resolve_run_in", "runnable")
+load("./lib/runnable.axl", "RUN_IN_DESCRIPTION", "resolve_run_in", "runnable")
 load("./lib/tips.axl", "tips")
 
 def _terminal_status(data, exit_code):
@@ -79,10 +79,13 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # ultimately invokes `ctx.bazel.build`, which spawns a literal `bazel
     # build`. The `run:` rc section can contain options Bazel's `build` command
     # rejects as unrecognized (e.g. `--script_path`).
-    setup_phase(ctx, lifecycle, target, "bazel_results", data, hc_trait, bazel_trait, "build", bazel_base_flags = LOCAL_SPAWN_BASE_FLAGS)
+    rc = setup_phase(ctx, lifecycle, target, "bazel_results", data, hc_trait, bazel_trait, "build")
     announce_version, announce_command = resolve_bazel_announce(ctx)
 
-    r = runnable(ctx, [target])
+    # `rc=` opts into the runinfo aspect: `r.flags` then carries the spawn
+    # flags + aspect injection that capture the executable, the `args` attribute,
+    # and the target env so `r.spawn` replays them the way `bazel run` does.
+    r = runnable(ctx, [target], rc = rc)
     events = bazel.build_events.iterator()
     build_events = [events] + list(bazel_trait.build_event_sinks)
 
@@ -105,7 +108,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     build = ctx.bazel.build(
         target,
         build_events = build_events,
-        flags = LOCAL_SPAWN_FLAGS,
+        flags = r.flags,
         announce_version = announce_version,
         announce_command = announce_command,
     )
