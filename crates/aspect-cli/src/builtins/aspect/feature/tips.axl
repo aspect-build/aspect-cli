@@ -18,6 +18,6 @@ hook) is on `@aspect//tips.axl`. Internal modules load the feature
 directly from `lib/tips.axl`.
 """
 
-load("../lib/tips.axl", _Tips = "Tips")
+load("../private/lib/tips.axl", _Tips = "Tips")
 
 Tips = _Tips

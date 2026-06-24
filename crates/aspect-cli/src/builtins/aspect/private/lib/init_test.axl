@@ -11,6 +11,7 @@ Run with:
   aspect dev test-init
 """
 
+load("@aspect//init.axl", "parse_template", "project_name")
 load(
     "./init_render.axl",
     "glob_match",
@@ -21,7 +22,6 @@ load(
     "render",
     "should_render",
 )
-load("../init.axl", "parse_template", "project_name")
 
 # A miniature template config, same schema as a real template-config.json. The
 # `{"all": [...]}` rule exercises the AND predicate and `{"any": [...]}` the OR.

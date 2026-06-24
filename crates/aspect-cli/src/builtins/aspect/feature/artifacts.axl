@@ -3,10 +3,10 @@
 The owner feature now lives co-located with its trait + types in
 `lib/artifacts.axl`. This file remains so existing user `config.axl`
 loads (`load("@aspect//feature/artifacts.axl", "ArtifactUpload")`)
-keep working. New code should `load("@aspect//lib/artifacts.axl",
+keep working. New code should `load("@aspect//private/lib/artifacts.axl",
 "ArtifactUpload", "artifacts")` directly.
 """
 
-load("../lib/artifacts.axl", _ArtifactUpload = "ArtifactUpload")
+load("../private/lib/artifacts.axl", _ArtifactUpload = "ArtifactUpload")
 
 ArtifactUpload = _ArtifactUpload

@@ -3,13 +3,13 @@ A default 'test' task that wraps a 'bazel test' command.
 """
 
 load("./bazel.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
-load("./lib/artifacts.axl", "artifacts")
-load("./lib/bazel_flags.axl", "announce_bazel_args")
-load("./lib/bazel_runner.axl", "run_bazel_task")
-load("./lib/health_check.axl", "HealthCheckTrait")
-load("./lib/lifecycle.axl", "TaskLifecycleTrait")
-load("./lib/repro_commands.axl", "repro_flavor_args")
-load("./lib/tips.axl", "tips")
+load("./private/lib/artifacts.axl", "artifacts")
+load("./private/lib/bazel_flags.axl", "announce_bazel_args")
+load("./private/lib/bazel_runner.axl", "run_bazel_task")
+load("./private/lib/health_check.axl", "HealthCheckTrait")
+load("./private/lib/lifecycle.axl", "TaskLifecycleTrait")
+load("./private/lib/repro_commands.axl", "repro_flavor_args")
+load("./private/lib/tips.axl", "tips")
 
 # Where `--combined_report=lcov` writes the merged LCOV report, relative to
 # `bazel info output_path`. Bazel has no flag to redirect this, so

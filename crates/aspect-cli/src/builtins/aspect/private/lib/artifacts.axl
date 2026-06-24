@@ -12,7 +12,7 @@ CI platforms: GitHub Actions, Buildkite, CircleCI, GitLab.
 
 Task registration:
 
-    load("@aspect//lib/artifacts.axl", "artifacts")
+    load("@aspect//private/lib/artifacts.axl", "artifacts")
 
     def task():
         return Task(
@@ -22,7 +22,7 @@ Task registration:
 
 Producer:
 
-    load("@aspect//lib/artifacts.axl", "artifacts")
+    load("@aspect//private/lib/artifacts.axl", "artifacts")
     artifacts.append(ctx, artifacts.Artifact(
         kind = "format_diff",
         url  = uploaded_url,
@@ -37,6 +37,7 @@ Consumer:
     artifacts.browse_url(ctx)  # → CI artifacts page URL (env-derived)
 """
 
+load("@aspect//bazel.axl", "BazelTrait")
 load("./bazel_results.axl", "bes_get")
 load("./buildkite.axl", "buildkite")
 load("./ci.axl", "detect_artifacts_browse_url", "detect_ci_host")
@@ -44,7 +45,6 @@ load("./circleci.axl", "circleci")
 load("./environment.axl", "detect_ci", "info", "warn")
 load("./github.axl", "github")
 load("./tar.axl", "tar_create", "zip_create")
-load("../bazel.axl", "BazelTrait")
 
 # Public types
 

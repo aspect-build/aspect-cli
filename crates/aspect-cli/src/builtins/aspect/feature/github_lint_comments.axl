@@ -46,12 +46,12 @@ CIRCLE_BUILD_NUM): siblings in separate jobs would then see each other as
 "different runs" and reap each other.
 """
 
-load("../lib/environment.axl", "color_enabled", "feature_logger")
-load("../lib/github.axl", "github")
-load("../lib/lint_comments.axl", lc_build_marker = "build_marker", lc_extract_marker = "extract_marker", lc_parse_marker = "parse_marker", lc_suggestion_block = "suggestion_block")
-load("../lib/patch.axl", patch_hunk_edit_blocks = "hunk_edit_blocks", patch_parse = "parse")
-load("../lib/sarif.axl", "parse_sarif", "parse_sarif_diagnostics", "sarif_to_review_comments")
 load("../lint.axl", "LintTrait")
+load("../private/lib/environment.axl", "color_enabled", "feature_logger")
+load("../private/lib/github.axl", "github")
+load("../private/lib/lint_comments.axl", lc_build_marker = "build_marker", lc_extract_marker = "extract_marker", lc_parse_marker = "parse_marker", lc_suggestion_block = "suggestion_block")
+load("../private/lib/patch.axl", patch_hunk_edit_blocks = "hunk_edit_blocks", patch_parse = "parse")
+load("../private/lib/sarif.axl", "parse_sarif", "parse_sarif_diagnostics", "sarif_to_review_comments")
 
 # ANSI codes (matching delivery.axl/lint.axl)
 _LOG = feature_logger("GitHub lint comments")

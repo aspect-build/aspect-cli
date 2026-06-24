@@ -25,7 +25,7 @@ facade is purely a user-facing convenience. The tip authoring API
 in its own facade: `@aspect//tips.axl`.
 
 Note: artifact URLs are no longer exposed via a trait. Use the
-`artifacts` struct from `@aspect//lib/artifacts.axl` instead — it
+`artifacts` struct from `@aspect//private/lib/artifacts.axl` instead — it
 carries `append` / `list` / `by_kind` / `by_label` / `browse_url`
 and `TRAITS` for task registration (splat `+ artifacts.TRAITS` into
 the task's trait list).
@@ -33,9 +33,10 @@ the task's trait list).
 
 load("./bazel.axl", _BazelTrait = "BazelTrait")
 load("./delivery.axl", _DeliveryTrait = "DeliveryTrait")
-load("./lib/health_check.axl", _HealthCheckTrait = "HealthCheckTrait")
+load("./lint.axl", _LintTrait = "LintTrait")
+load("./private/lib/health_check.axl", _HealthCheckTrait = "HealthCheckTrait")
 load(
-    "./lib/lifecycle.axl",
+    "./private/lib/lifecycle.axl",
     _REPRO_FIX_ACCEPT = "REPRO_FIX_ACCEPT",
     _REPRO_FIX_REJECT = "REPRO_FIX_REJECT",
     _ReproFixAction = "ReproFixAction",
@@ -47,7 +48,6 @@ load(
     _TaskUpdate = "TaskUpdate",
     _repro_fix_replace = "repro_fix_replace",
 )
-load("./lint.axl", _LintTrait = "LintTrait")
 
 BazelTrait = _BazelTrait
 DeliveryTrait = _DeliveryTrait

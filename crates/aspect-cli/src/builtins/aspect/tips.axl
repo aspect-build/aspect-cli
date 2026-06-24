@@ -33,7 +33,7 @@ This is the customer-facing surface; internal modules load directly from
 """
 
 load(
-    "./lib/tips.axl",
+    "./private/lib/tips.axl",
     _AGGREGATE_SCREENS = "AGGREGATE_SCREENS",
     _SURFACE_ALL = "SURFACE_ALL",
     _SURFACE_BUILDKITE_ANNOTATIONS = "SURFACE_BUILDKITE_ANNOTATIONS",

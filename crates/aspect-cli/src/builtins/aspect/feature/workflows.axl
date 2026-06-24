@@ -1,15 +1,15 @@
 load("../bazel.axl", "BazelTrait")
-load("../lib/build_metadata.axl", "get_build_metadata_flags", "get_task_metadata_flags")
+load("../private/lib/build_metadata.axl", "get_build_metadata_flags", "get_task_metadata_flags")
 load(
-    "../lib/environment.axl",
+    "../private/lib/environment.axl",
     "color_enabled",
     "get_bazelrc_flags",
     "get_workflows_environment",
     "print_environment_info",
 )
-load("../lib/health_check.axl", "HealthCheckTrait", "agent_health_check")
+load("../private/lib/health_check.axl", "HealthCheckTrait", "agent_health_check")
 load(
-    "../lib/sandbox_recovery.axl",
+    "../private/lib/sandbox_recovery.axl",
     "make_attempt_end_hook",
     "make_final_status_hook",
 )

@@ -59,28 +59,28 @@ and posted to the commit status; the full summary lives in the
 """
 
 load(
-    "../lib/bazel_results.axl",
+    "../private/lib/bazel_results.axl",
     "format_run_date",
     "now_ms",
     "render_bes_url",
     "resolve_aspect_url",
 )
 load(
-    "../lib/check_dispatch.axl",
+    "../private/lib/check_dispatch.axl",
     "apply_artifact_links",
     "kind_for_task",
     "make_render_ctx",
     "renderer_for_kind",
     "should_emit_update",
 )
-load("../lib/ci.axl", "detect_ci_host", "resolve_build_url")
-load("../lib/environment.axl", "feature_logger", "workflows_results_url")
-load("../lib/gitlab.axl", "gitlab")
-load("../lib/gitlab_detect.axl", "detect_gitlab_mr")
-load("../lib/gitlab_token_cache.axl", "gitlab_token_cache")
-load("../lib/lifecycle.axl", "TaskLifecycleTrait", "TaskUpdate")
+load("../private/lib/ci.axl", "detect_ci_host", "resolve_build_url")
+load("../private/lib/environment.axl", "feature_logger", "workflows_results_url")
+load("../private/lib/gitlab.axl", "gitlab")
+load("../private/lib/gitlab_detect.axl", "detect_gitlab_mr")
+load("../private/lib/gitlab_token_cache.axl", "gitlab_token_cache")
+load("../private/lib/lifecycle.axl", "TaskLifecycleTrait", "TaskUpdate")
 load(
-    "../lib/rate_limit.axl",
+    "../private/lib/rate_limit.axl",
     "BUCKET_APP",
     "PHASE_FALL_THROUGH",
     "PHASE_SUPPRESS",

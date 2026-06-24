@@ -26,7 +26,7 @@ After rendering, `tools/repin` regenerates the language lockfiles the template
 ships as placeholders (unless `--skip-repin`).
 """
 
-load("./lib/init_render.axl", "load_config", "preset_flags", "preset_names", "render")
+load("./private/lib/init_render.axl", "load_config", "preset_flags", "preset_names", "render")
 
 # Default template source: the latest published release of this GitHub repo.
 # `--template-ref` overrides the ref (branch, tag, or commit), e.g.

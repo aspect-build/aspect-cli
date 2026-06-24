@@ -59,15 +59,15 @@ load("@bazel//proto/remote_logging.axl", "remote_logging")
 load("@std//time.axl", "time")
 load("./bazel.axl", "BazelTrait")
 load(
-    "./lib/bazel_flags.axl",
+    "./private/lib/bazel_flags.axl",
     "announce_bazel_args",
     "resolve_bazel_announce",
     "resolve_flags",
     "resolve_startup_flags",
 )
-load("./lib/environment.axl", "color_enabled")
-load("./lib/remote_executor.axl", "start_dummy_executor", "stop_dummy_executor")
-load("./lib/runnable.axl", "apparent_label")
+load("./private/lib/environment.axl", "color_enabled")
+load("./private/lib/remote_executor.axl", "start_dummy_executor", "stop_dummy_executor")
+load("./private/lib/runnable.axl", "apparent_label")
 
 _GRPC_GET_ACTION_RESULT = "build.bazel.remote.execution.v2.ActionCache/GetActionResult"
 _TEST_MNEMONIC = "TestRunner"

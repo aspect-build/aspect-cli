@@ -158,10 +158,10 @@ mod tests {
         vec![
             (
                 PathBuf::from("feature/github_status_checks.axl"),
-                b"load(\"../lib/artifacts.axl\", \"ArtifactsTrait\")\n" as &[u8],
+                b"load(\"../private/lib/artifacts.axl\", \"ArtifactsTrait\")\n" as &[u8],
             ),
             (
-                PathBuf::from("lib/artifacts.axl"),
+                PathBuf::from("private/lib/artifacts.axl"),
                 b"artifacts = struct()\n",
             ),
             (PathBuf::from("format.axl"), b"format = task()\n"),
@@ -170,7 +170,7 @@ mod tests {
 
     fn assert_full_tree(aspect_dir: &Path) {
         assert!(aspect_dir.join("feature/github_status_checks.axl").exists());
-        assert!(aspect_dir.join("lib/artifacts.axl").exists());
+        assert!(aspect_dir.join("private/lib/artifacts.axl").exists());
         assert!(aspect_dir.join("format.axl").exists());
     }
 
@@ -227,7 +227,7 @@ mod tests {
         assert!(tmp.path().join("abc123").join(COMPLETE_MARKER).exists());
         assert_eq!(
             fs::read(aspect_dir.join("feature/github_status_checks.axl")).unwrap(),
-            b"load(\"../lib/artifacts.axl\", \"ArtifactsTrait\")\n"
+            b"load(\"../private/lib/artifacts.axl\", \"ArtifactsTrait\")\n"
         );
         assert_no_debris(tmp.path());
     }
@@ -285,5 +285,53 @@ mod tests {
     fn evict_stale_dir_no_op_when_absent() {
         let tmp = tempfile::tempdir().unwrap();
         evict_stale_dir(&tmp.path().join("never-existed"));
+    }
+
+    /// Recursively collect every `.axl` file under `dir`, returned as
+    /// (path-relative-to-`root`, contents).
+    fn collect_axl(dir: &Path, root: &Path) -> Vec<(PathBuf, String)> {
+        let mut out = Vec::new();
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                out.extend(collect_axl(&path, root));
+            } else if path.extension().and_then(|e| e.to_str()) == Some("axl") {
+                let rel = path.strip_prefix(root).unwrap().to_path_buf();
+                out.push((rel, fs::read_to_string(&path).unwrap()));
+            }
+        }
+        out
+    }
+
+    /// The `private/` convention is the public-API boundary: implementation
+    /// modules live under `@aspect//private/…` and only files already inside
+    /// `private/` may reach the `lib/` tree without the prefix (those resolve
+    /// private→private). This guard fails if any public file (outside
+    /// `private/`) reintroduces a bare `lib/` load — `@aspect//lib/…`,
+    /// `./lib/…`, or `../lib/…` — which would re-expose internals on the
+    /// stable surface. See the docgen API-surface watch for the complementary
+    /// drift check.
+    #[test]
+    fn no_public_file_loads_bare_lib() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/builtins/aspect");
+        let bare_lib_loads = ["@aspect//lib/", "\"./lib/", "\"../lib/"];
+
+        let mut violations = Vec::new();
+        for (rel, contents) in collect_axl(&root, &root) {
+            if rel.starts_with("private/") {
+                continue;
+            }
+            for needle in bare_lib_loads {
+                if contents.contains(needle) {
+                    violations.push(format!("{} contains `{needle}`", rel.display()));
+                }
+            }
+        }
+        assert!(
+            violations.is_empty(),
+            "public @aspect files must load internals via `@aspect//private/lib/…`, not a \
+             bare `lib/` path. Offenders:\n  {}",
+            violations.join("\n  ")
+        );
     }
 }

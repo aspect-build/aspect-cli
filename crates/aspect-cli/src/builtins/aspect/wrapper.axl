@@ -4,9 +4,9 @@ downloaded from a ref of aspect-build/aspect-cli. See the task descriptions
 below for the flags and tools/bazel.md for what the wrapper does.
 """
 
-load("./lib/environment.axl", "error", "info")
+load("./private/lib/environment.axl", "error", "info")
 load(
-    "./lib/wrapper.axl",
+    "./private/lib/wrapper.axl",
     "ALL_SHELLS",
     "InstallAction",
     "WRAPPER_DOC_PATH",

@@ -21,9 +21,9 @@ Usage in `.aspect/config.axl`:
         ctx.features[BuildkiteAnnotations].args.expand_phases = ["build", "test"]
 """
 
-load("../lib/bazel_results.axl", "format_run_date", "html_escape", "now_ms", "render_bes_url", "resolve_aspect_url")
+load("../private/lib/bazel_results.axl", "format_run_date", "html_escape", "now_ms", "render_bes_url", "resolve_aspect_url")
 load(
-    "../lib/check_dispatch.axl",
+    "../private/lib/check_dispatch.axl",
     "SURFACE_BUILDKITE",
     "apply_artifact_links",
     "make_render_ctx",
@@ -31,12 +31,12 @@ load(
     "should_emit_update",
     "snippet_budget_for",
 )
-load("../lib/ci.axl", "resolve_build_url")
-load("../lib/environment.axl", "feature_logger", "workflows_results_url")
-load("../lib/lifecycle.axl", "TaskLifecycleTrait", "TaskUpdate", "publish_expanded_phases")
-load("../lib/rate_limit.axl", "usage_footer")
-load("../lib/result_text.axl", "severity_for_status")
-load("../lib/tips.axl", "SURFACE_BUILDKITE_ANNOTATIONS", "collect_tips_sorted")
+load("../private/lib/ci.axl", "resolve_build_url")
+load("../private/lib/environment.axl", "feature_logger", "workflows_results_url")
+load("../private/lib/lifecycle.axl", "TaskLifecycleTrait", "TaskUpdate", "publish_expanded_phases")
+load("../private/lib/rate_limit.axl", "usage_footer")
+load("../private/lib/result_text.axl", "severity_for_status")
+load("../private/lib/tips.axl", "SURFACE_BUILDKITE_ANNOTATIONS", "collect_tips_sorted")
 
 # ─── Style selection ──────────────────────────────────────────────────────────
 

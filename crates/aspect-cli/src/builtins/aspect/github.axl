@@ -1,5 +1,5 @@
-load("./lib/environment.axl", "error")
-load("./lib/github.axl", "github")
+load("./private/lib/environment.axl", "error")
+load("./private/lib/github.axl", "github")
 
 def _token_impl(ctx: TaskContext) -> int:
     repo_args = ctx.args.repo

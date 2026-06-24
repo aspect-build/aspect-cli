@@ -5,8 +5,8 @@ Run with:
   aspect dev test-gitlab-lint-comments
 """
 
-load("../feature/gitlab_lint_comments.axl", "build_diff_line_map", "build_position", "compute_cleanup", "dedup_discussions_by_marker")
-load("../lib/lint_comments.axl", "build_marker", "suggestion_block")
+load("@aspect//feature/gitlab_lint_comments.axl", "build_diff_line_map", "build_position", "compute_cleanup", "dedup_discussions_by_marker")
+load("./lint_comments.axl", "build_marker", "suggestion_block")
 
 def _eq(label, got, want):
     if got != want:
