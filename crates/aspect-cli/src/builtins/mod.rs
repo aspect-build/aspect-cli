@@ -287,22 +287,6 @@ mod tests {
         evict_stale_dir(&tmp.path().join("never-existed"));
     }
 
-    /// Recursively collect every `.axl` file under `dir`, returned as
-    /// (path-relative-to-`root`, contents).
-    fn collect_axl(dir: &Path, root: &Path) -> Vec<(PathBuf, String)> {
-        let mut out = Vec::new();
-        for entry in fs::read_dir(dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                out.extend(collect_axl(&path, root));
-            } else if path.extension().and_then(|e| e.to_str()) == Some("axl") {
-                let rel = path.strip_prefix(root).unwrap().to_path_buf();
-                out.push((rel, fs::read_to_string(&path).unwrap()));
-            }
-        }
-        out
-    }
-
     /// The `private/` convention is the public-API boundary: implementation
     /// modules live under `@aspect//private/…` and only files already inside
     /// `private/` may reach the `lib/` tree without the prefix (those resolve
@@ -311,16 +295,25 @@ mod tests {
     /// `./lib/…`, or `../lib/…` — which would re-expose internals on the
     /// stable surface. See the docgen API-surface watch for the complementary
     /// drift check.
+    ///
+    /// The tree is read from a compile-time `include_dir!` embed rather than
+    /// the filesystem so the test passes under Bazel's sandbox (where the
+    /// cargo workspace layout isn't on disk).
     #[test]
     fn no_public_file_loads_bare_lib() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/builtins/aspect");
+        use include_dir::{Dir, include_dir};
+        static ASPECT_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/src/builtins/aspect");
         let bare_lib_loads = ["@aspect//lib/", "\"./lib/", "\"../lib/"];
 
         let mut violations = Vec::new();
-        for (rel, contents) in collect_axl(&root, &root) {
+        for f in ASPECT_DIR.find("**/*.axl").unwrap() {
+            let rel = f.path();
             if rel.starts_with("private/") {
                 continue;
             }
+            let Some(contents) = f.as_file().and_then(|file| file.contents_utf8()) else {
+                continue;
+            };
             for needle in bare_lib_loads {
                 if contents.contains(needle) {
                     violations.push(format!("{} contains `{needle}`", rel.display()));
