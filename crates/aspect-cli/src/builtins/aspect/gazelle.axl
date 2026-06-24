@@ -81,8 +81,8 @@ incompatible with non-recursive mode — test first.
 https://github.com/bazel-contrib/bazel-gazelle#lazy-indexing-in-fix-and-update
 """
 
+load("@aspect//bazel.axl", "BazelTrait")
 load("@std//time.axl", "sleep_iter")
-load("./bazel.axl", "BazelTrait")
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_flags.axl", "announce_bazel_args", "resolve_bazel_announce")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event")

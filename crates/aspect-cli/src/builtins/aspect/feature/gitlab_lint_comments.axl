@@ -16,7 +16,7 @@ API requires. Lint findings sit on the new (added/changed) side, so
 omitted.
 """
 
-load("../lint.axl", "LintTrait")
+load("@aspect//lint.axl", "LintTrait")
 load("../private/lib/environment.axl", "feature_logger")
 load("../private/lib/gitlab.axl", "gitlab")
 load("../private/lib/gitlab_detect.axl", "detect_gitlab_mr")

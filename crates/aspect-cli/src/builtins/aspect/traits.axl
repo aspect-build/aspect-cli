@@ -31,9 +31,9 @@ and `TRAITS` for task registration (splat `+ artifacts.TRAITS` into
 the task's trait list).
 """
 
-load("./bazel.axl", _BazelTrait = "BazelTrait")
-load("./delivery.axl", _DeliveryTrait = "DeliveryTrait")
-load("./lint.axl", _LintTrait = "LintTrait")
+load("@aspect//bazel.axl", _BazelTrait = "BazelTrait")
+load("@aspect//delivery.axl", _DeliveryTrait = "DeliveryTrait")
+load("@aspect//lint.axl", _LintTrait = "LintTrait")
 load("./private/lib/health_check.axl", _HealthCheckTrait = "HealthCheckTrait")
 load(
     "./private/lib/lifecycle.axl",

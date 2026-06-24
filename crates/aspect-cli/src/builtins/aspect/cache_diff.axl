@@ -55,9 +55,9 @@ both sides or neither). The probe resolves flags from the same rc/config as
 `aspect test`/`build`, so they align by default.
 """
 
+load("@aspect//bazel.axl", "BazelTrait")
 load("@bazel//proto/remote_logging.axl", "remote_logging")
 load("@std//time.axl", "time")
-load("./bazel.axl", "BazelTrait")
 load(
     "./private/lib/bazel_flags.axl",
     "announce_bazel_args",

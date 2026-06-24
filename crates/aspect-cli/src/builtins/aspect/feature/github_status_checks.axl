@@ -18,7 +18,7 @@ Templates and metadata_keys are feature args:
         # Or ["*"] to show everything.
 """
 
-load("../lint.axl", "LintTrait")
+load("@aspect//lint.axl", "LintTrait")
 load(
     "../private/lib/bazel_results.axl",
     "format_run_date",

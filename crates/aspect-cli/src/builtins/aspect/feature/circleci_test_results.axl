@@ -7,7 +7,7 @@ independently. Opt-in (`upload_test_results = "none"` by default); only acts
 on CircleCI.
 """
 
-load("../bazel.axl", "BazelTrait")
+load("@aspect//bazel.axl", "BazelTrait")
 load("../private/lib/bazel_results.axl", "bes_get")
 load("../private/lib/circleci.axl", "circleci")
 load("../private/lib/environment.axl", "detect_ci", "info", "warn")

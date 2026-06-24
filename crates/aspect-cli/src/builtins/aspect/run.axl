@@ -1,7 +1,7 @@
 """A default 'run' task that builds a target with `bazel build` and runs the resulting binary."""
 
+load("@aspect//bazel.axl", "BazelTrait")
 load("@std//time.axl", "sleep_iter")
-load("./bazel.axl", "BazelTrait")
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_flags.axl", "announce_bazel_args", "resolve_bazel_announce")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "init_data", "process_event", bazel_conclusion = "conclusion")
