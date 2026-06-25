@@ -1,77 +1,69 @@
-//! Cold-start warming gate.
+//! Warming gate for Aspect Workflows runners.
 //!
-//! On Aspect Workflows CI runners the launcher's download cache
-//! (`ASPECT_LAUNCHER_CACHE`, i.e. `${storage}/caches/aspect-launcher`) lives
-//! under the ephemeral mount that the *warming* bootstrap stage restores from a
-//! cloud-storage archive. Warming runs asynchronously and the runner agent
-//! begins accepting jobs before it finishes (the bootstrap only blocks on
-//! warming at the very end, after the agent is started). During the restore the
-//! cache directory is `rm -rf`'d and re-extracted via `sudo tar` owned by
-//! `root`; ownership is handed back to the `aspect-runner` user only once the
-//! whole restore completes. The completion marker file is written *after* that
-//! final chown.
+//! The launcher's download cache (`ASPECT_LAUNCHER_CACHE`) lives under the
+//! runner's ephemeral storage, which the *warming* bootstrap stage restores
+//! from a cloud-storage archive. Warming runs concurrently with the first jobs
+//! the runner accepts and only finishes populating and taking ownership of the
+//! cache directory once it is done. Using the cache before then races that
+//! restore, so the launcher blocks until warming signals completion.
 //!
-//! So if the launcher touches the cache during that window it hits
-//! `Permission denied (os error 13)` — the directory is transiently root-owned
-//! while the job runs as `aspect-runner`. To avoid the race entirely we treat
-//! the warming-complete marker as the signal that the cache directory is
-//! settled and owned by `aspect-runner`, and block until it appears before
-//! provisioning the CLI.
+//! The runner agent communicates warming state through environment variables it
+//! sets on every job. This module reads them and is a no-op anywhere they are
+//! absent (off-runner, or a runner with warming disabled), leaving local usage
+//! unaffected.
 //!
-//! This is a no-op anywhere the warming env vars are absent (any non-Workflows
-//! machine, or a runner with warming disabled), so it has zero effect on local
-//! or non-warmed usage.
+//! The behavior mirrors the CLI's own `_wait_for_warming` health-check step: a
+//! 1s poll with no timeout, since the bootstrap terminates the instance if the
+//! concurrent restore hits a critical error, so the loop cannot hang forever.
 
 use std::env::var;
 use std::path::Path;
 use std::thread::sleep;
 use std::time::Duration;
 
-/// Set to `1` by the runner bootstrap only when warming is enabled for the
-/// runner's queue. Absent means warming is disabled (or we are not on a
-/// Workflows runner) and there is nothing to wait for.
+/// Set by the runner bootstrap only when warming is enabled for the runner's
+/// queue. Absence means there is nothing to wait for.
 const WARMING_ENABLED_ENV: &str = "ASPECT_WORKFLOWS_RUNNER_WARMING_ENABLED";
 
 /// Path to the marker file the warming stage writes once the restore has
-/// finished and the cache directories have been chowned back to the runner
-/// user. Always set by the bootstrap; the file itself appears only on
-/// completion.
+/// finished and the cache directory has been handed back to the runner user.
+/// The path is set by the bootstrap; the file itself appears only on completion.
 const WARMING_COMPLETE_MARKER_ENV: &str = "ASPECT_WORKFLOWS_RUNNER_WARMING_COMPLETE_MARKER_FILE";
 
-/// How often to re-check for the completion marker. Matches the 1s poll in the
-/// runner's `agent_health_check.sh` `wait_for_warming`.
+/// Re-check interval for the completion marker, matching the CLI health check.
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
-/// If warming is enabled but has not yet completed, block until the completion
-/// marker appears so the on-disk cache is settled (and runner-owned) before the
-/// launcher touches it.
+/// Whether warming is enabled for this runner.
+fn warming_enabled() -> bool {
+    var(WARMING_ENABLED_ENV).is_ok_and(|v| !v.is_empty())
+}
+
+/// The completion-marker path, or `None` when the bootstrap did not publish one.
 ///
-/// There is intentionally no timeout: a warming restore can legitimately take
-/// minutes, and the surrounding CI job has its own timeout that will terminate
-/// the build if warming is genuinely stuck. We mirror the health-check step's
-/// indefinite poll rather than racing the cache.
+/// Without a path, completion can never be observed, so callers must not wait.
+fn marker_path() -> Option<String> {
+    var(WARMING_COMPLETE_MARKER_ENV)
+        .ok()
+        .filter(|p| !p.is_empty())
+}
+
+/// Block until warming completes so the on-disk cache is fully restored and
+/// owned by the runner user before the launcher touches it.
 ///
-/// No-ops (returns immediately) when:
-/// - warming is not enabled (`WARMING_ENABLED_ENV` unset/empty), or
-/// - the marker path is unset/empty (misconfiguration — we do not wedge on it), or
-/// - the marker already exists (warming already finished).
+/// Returns immediately when warming is not enabled, when the completion marker
+/// has already appeared, or — to avoid waiting on a signal that can never
+/// arrive — when warming is enabled but no marker path was published.
 pub fn wait_for_warming() {
-    if var(WARMING_ENABLED_ENV).map(|v| v != "1").unwrap_or(true) {
+    if !warming_enabled() {
         return;
     }
 
-    let marker = match var(WARMING_COMPLETE_MARKER_ENV) {
-        Ok(p) if !p.is_empty() => p,
-        _ => {
-            // Warming is enabled but we were not told where the marker is. Don't
-            // block forever on a misconfiguration; proceed and let the cache
-            // operations succeed or report their own error.
-            eprintln!(
-                "warming is enabled but {} is not set; not waiting for warming",
-                WARMING_COMPLETE_MARKER_ENV
-            );
-            return;
-        }
+    let Some(marker) = marker_path() else {
+        eprintln!(
+            "warming is enabled but {WARMING_COMPLETE_MARKER_ENV} is not set; \
+             not waiting for warming to complete"
+        );
+        return;
     };
 
     let marker_path = Path::new(&marker);
@@ -79,10 +71,7 @@ pub fn wait_for_warming() {
         return;
     }
 
-    eprintln!(
-        "waiting for warming to complete before using the aspect cache (marker: {})...",
-        marker
-    );
+    eprintln!("waiting for warming to complete before using the aspect cache...");
     while !marker_path.exists() {
         sleep(POLL_INTERVAL);
     }
@@ -95,8 +84,8 @@ mod tests {
     use std::sync::{Mutex, MutexGuard, OnceLock};
     use std::time::Instant;
 
-    // `wait_for_warming` reads process-global env vars, so the tests that set
-    // them must not run concurrently. Serialize them on a shared lock.
+    /// `warming_enabled`/`marker_path` read process-global env vars, so tests
+    /// that set them must run serially.
     fn env_guard() -> MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
@@ -104,79 +93,86 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner())
     }
 
-    fn clear_env() {
+    fn set_enabled(value: Option<&str>) {
         unsafe {
-            std::env::remove_var(WARMING_ENABLED_ENV);
-            std::env::remove_var(WARMING_COMPLETE_MARKER_ENV);
+            match value {
+                Some(v) => std::env::set_var(WARMING_ENABLED_ENV, v),
+                None => std::env::remove_var(WARMING_ENABLED_ENV),
+            }
         }
     }
 
-    /// A path under the per-process temp dir that does not exist, unique per
-    /// label so parallel-built test binaries don't collide.
+    fn set_marker(value: Option<&str>) {
+        unsafe {
+            match value {
+                Some(v) => std::env::set_var(WARMING_COMPLETE_MARKER_ENV, v),
+                None => std::env::remove_var(WARMING_COMPLETE_MARKER_ENV),
+            }
+        }
+    }
+
+    fn clear_env() {
+        set_enabled(None);
+        set_marker(None);
+    }
+
+    /// A unique, non-existent path under the per-process temp dir.
     fn missing_marker(label: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
+        let p = std::env::temp_dir().join(format!(
             "aspect-launcher-warming-test-{}-{}",
             std::process::id(),
             label
-        ))
+        ));
+        let _ = std::fs::remove_file(&p);
+        p
     }
 
     #[test]
-    fn no_op_when_warming_disabled() {
+    fn warming_enabled_is_true_only_for_a_nonempty_value() {
         let _g = env_guard();
         clear_env();
-        // Marker points at a path that will never exist; if we wrongly waited,
-        // the test would hang. WARMING_ENABLED is unset, so it must return.
-        unsafe {
-            std::env::set_var(
-                WARMING_COMPLETE_MARKER_ENV,
-                missing_marker("disabled").to_str().unwrap(),
-            );
-        }
-        wait_for_warming();
-        clear_env();
-    }
-
-    #[test]
-    fn no_op_when_marker_already_present() {
-        let _g = env_guard();
-        clear_env();
-        // Any path that exists works as a present marker; the temp dir itself does.
-        let existing = std::env::temp_dir();
-        unsafe {
-            std::env::set_var(WARMING_ENABLED_ENV, "1");
-            std::env::set_var(WARMING_COMPLETE_MARKER_ENV, existing.to_str().unwrap());
-        }
-        wait_for_warming();
+        assert!(!warming_enabled(), "unset should be disabled");
+        set_enabled(Some(""));
+        assert!(!warming_enabled(), "empty should be disabled");
+        set_enabled(Some("1"));
+        assert!(warming_enabled());
         clear_env();
     }
 
     #[test]
-    fn no_op_when_enabled_but_marker_path_empty() {
+    fn marker_path_is_none_when_unset_or_empty() {
         let _g = env_guard();
         clear_env();
-        // Enabled but no marker path => must not block (misconfiguration guard).
-        unsafe {
-            std::env::set_var(WARMING_ENABLED_ENV, "1");
-            std::env::set_var(WARMING_COMPLETE_MARKER_ENV, "");
-        }
-        wait_for_warming();
+        assert_eq!(marker_path(), None, "unset");
+        set_marker(Some(""));
+        assert_eq!(marker_path(), None, "empty");
+        set_marker(Some("/tmp/marker"));
+        assert_eq!(marker_path(), Some("/tmp/marker".to_string()));
         clear_env();
     }
 
+    /// All three early-return paths must return without blocking. The marker is
+    /// pointed at a path that never appears, so a wrongful wait would hang.
     #[test]
-    fn no_op_when_enabled_value_is_not_one() {
+    fn returns_immediately_without_blocking() {
         let _g = env_guard();
+
+        // Warming disabled.
         clear_env();
-        // Only the literal "1" enables the wait.
-        unsafe {
-            std::env::set_var(WARMING_ENABLED_ENV, "true");
-            std::env::set_var(
-                WARMING_COMPLETE_MARKER_ENV,
-                missing_marker("not-one").to_str().unwrap(),
-            );
-        }
+        set_marker(Some(missing_marker("disabled").to_str().unwrap()));
         wait_for_warming();
+
+        // Enabled with no marker path published.
+        clear_env();
+        set_enabled(Some("1"));
+        wait_for_warming();
+
+        // Marker already present (the temp dir itself exists).
+        clear_env();
+        set_enabled(Some("1"));
+        set_marker(Some(std::env::temp_dir().to_str().unwrap()));
+        wait_for_warming();
+
         clear_env();
     }
 
@@ -186,13 +182,8 @@ mod tests {
         clear_env();
 
         let marker = missing_marker("appears");
-        let _ = std::fs::remove_file(&marker);
-        assert!(!marker.exists());
-
-        unsafe {
-            std::env::set_var(WARMING_ENABLED_ENV, "1");
-            std::env::set_var(WARMING_COMPLETE_MARKER_ENV, marker.to_str().unwrap());
-        }
+        set_enabled(Some("1"));
+        set_marker(Some(marker.to_str().unwrap()));
 
         // Create the marker shortly after the wait begins, from another thread.
         let marker_for_thread = marker.clone();
@@ -207,13 +198,10 @@ mod tests {
 
         writer.join().unwrap();
 
-        // It must have actually blocked (the 1s poll means it returns ~2s after
-        // the 1.5s write), and only returned once the marker existed.
-        assert!(marker.exists());
+        assert!(marker.exists(), "must only return once the marker exists");
         assert!(
-            waited >= Duration::from_secs(1),
-            "expected to block until the marker appeared, waited {:?}",
-            waited
+            waited >= POLL_INTERVAL,
+            "expected to block until the marker appeared, waited {waited:?}"
         );
 
         let _ = std::fs::remove_file(&marker);

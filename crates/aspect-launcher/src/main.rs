@@ -656,10 +656,8 @@ fn main() -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Fork::Parent(_) => {
-            // On a cold Workflows runner the warming stage may still be
-            // restoring (and re-owning) the cache directory in the background.
-            // Block until it completes so we don't touch a transiently
-            // root-owned cache and fail with EACCES. No-op off-runner.
+            // On a Workflows runner, wait for cache warming to finish before
+            // touching the download cache it restores. No-op off-runner.
             warming::wait_for_warming();
 
             // Deal with the config bits
