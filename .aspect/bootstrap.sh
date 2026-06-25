@@ -302,7 +302,11 @@ export DISABLE_PLUGINS_FLAG
 export LOCK_VERSION_FLAG
 
 echo "Startup opts: ${BAZEL_STARTUP_OPTS}"
-echo "Build opts: ${BAZEL_BUILD_OPTS}"
+# Redact x-identity header values before echoing — the runner identity is an
+# auth credential, and the CLI's own log redaction treats remote_header/
+# bes_header values as secrets (crates/axl-runtime/src/engine/bazel/stream/
+# redaction.rs). The exported BAZEL_BUILD_OPTS keeps the real value.
+echo "Build opts: $(printf '%s' "${BAZEL_BUILD_OPTS}" | sed 's/x-identity=[^ ]*/x-identity=<REDACTED>/g')"
 
 if [ -f /etc/bazel.bazelrc ]; then
     echo "/etc/bazel.bazelrc exists ($(wc -l </etc/bazel.bazelrc) lines)"
