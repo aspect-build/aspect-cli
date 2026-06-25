@@ -926,6 +926,7 @@ def _github_lint_impl(ctx: FeatureContext):
     lint_trait.lint_end.append(_lint_end)
 
 GithubLintComments = feature(
+    summary = "Post lint diagnostics as GitHub PR review comments.",
     implementation = _github_lint_impl,
     args = {
         "max_pr_comments": args.int(

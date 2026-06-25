@@ -216,9 +216,7 @@ def _telemetry_impl(ctx: FeatureContext):
 
 Telemetry = feature(
     display_name = "Telemetry",
-    summary = "Register OTLP exporters. Imports endpoints from OTEL_EXPORTER_OTLP_* " +
-              "env vars by default and accepts additional endpoints (with optional " +
-              "headers) via the --telemetry:endpoint flag.",
+    summary = "Register OTLP exporters for traces and metrics.",
     implementation = _telemetry_impl,
     args = {
         # Toggles the env-var import. Kept separate from `enabled` so when

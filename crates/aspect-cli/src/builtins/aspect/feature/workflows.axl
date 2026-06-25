@@ -102,12 +102,7 @@ def _workflows_impl(ctx: FeatureContext):
 
 Workflows = feature(
     display_name = "Aspect Workflows",
-    summary = "CI-aware Bazel configuration for Aspect Workflows. Wires BES " +
-              "forwarding, build metadata, health checks, and CI-host quirks " +
-              "(GitHub runner tracking, Buildkite section markers, color " +
-              "forcing). Today this only fully works on Aspect Workflows " +
-              "runners; the CI-host branches for buildkite/github are partial " +
-              "and may grow into general-CI support later.",
+    summary = "CI-aware Bazel configuration for Aspect Workflows runners.",
     implementation = _workflows_impl,
     args = {
         # BES sink retry/buffer/timeout knobs. Forwarded verbatim to

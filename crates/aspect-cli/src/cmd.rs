@@ -851,7 +851,7 @@ fn task_command(
         "\x1b[2mFeature flags are accepted here but hidden. \
          Run `aspect feature` to list features and their flags.\x1b[0m";
     cmd = cmd.help_template(format!(
-        "{cli_header}\n\n{about_block}\n{{usage-heading}} {{usage}}\n\n{{all-args}}\n{feature_footer}"
+        "{cli_header}\n\n{about_block}\n{{usage-heading}} {{usage}}\n\n{{all-args}}\n\n{feature_footer}"
     ));
     cmd
 }

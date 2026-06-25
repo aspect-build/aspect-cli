@@ -349,6 +349,7 @@ def _buildkite_annotations(ctx: FeatureContext):
     lifecycle.task_update.append(_task_update)
 
 BuildkiteAnnotations = feature(
+    summary = "Post live task status as Buildkite annotations.",
     implementation = _buildkite_annotations,
     # Gated on BUILDKITE at runtime; safe to enable everywhere.
     enabled = True,

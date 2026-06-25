@@ -1963,6 +1963,7 @@ DEFAULT_STATUS_BADGES = _DEFAULT_STATUS_BADGES
 MARKER_FMT = _MARKER_FMT
 
 GithubStatusComments = feature(
+    summary = "Post live task status as a GitHub PR comment.",
     implementation = _github_status_comments,
     enabled = True,
     args = {

@@ -411,6 +411,7 @@ def truncate_description(text):
 DESCRIPTION_MAX = _DESCRIPTION_MAX
 
 GitlabCommitStatuses = feature(
+    summary = "Report live task status as GitLab commit statuses.",
     implementation = _gitlab_commit_statuses,
     enabled = True,
     args = {

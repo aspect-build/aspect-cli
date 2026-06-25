@@ -467,6 +467,7 @@ def _github_status_checks(ctx: FeatureContext):
     lifecycle.task_update.append(_task_update)
 
 GithubStatusChecks = feature(
+    summary = "Report live task status as GitHub check runs.",
     implementation = _github_status_checks,
     enabled = True,
     args = {

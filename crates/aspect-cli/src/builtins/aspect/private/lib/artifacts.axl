@@ -753,7 +753,7 @@ def _artifact_upload_impl(ctx: FeatureContext):
 
 ArtifactUpload = feature(
     display_name = "Artifact Upload",
-    summary = "Automatically upload build artifacts to CI. Supports GitHub Actions, Buildkite, CircleCI, and GitLab.",
+    summary = "Upload build artifacts to CI (GitHub, Buildkite, CircleCI, GitLab).",
     implementation = _artifact_upload_impl,
     args = {
         # All uploads opt-in: a CI artifact is downloadable by anyone with
