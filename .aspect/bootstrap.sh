@@ -20,6 +20,11 @@ BAZEL_REMOTE_FLAGS=""
 [ -n "${ASPECT_WORKFLOWS_BES_RESULTS_URL:-}" ] && BAZEL_REMOTE_FLAGS="${BAZEL_REMOTE_FLAGS} --bes_results_url=${ASPECT_WORKFLOWS_BES_RESULTS_URL}"
 [ -n "${ASPECT_WORKFLOWS_REMOTE_CACHE:-}" ] && BAZEL_REMOTE_FLAGS="${BAZEL_REMOTE_FLAGS} --remote_cache=${ASPECT_WORKFLOWS_REMOTE_CACHE}"
 [ -n "${ASPECT_WORKFLOWS_REMOTE_BYTESTREAM_URI_PREFIX:-}" ] && BAZEL_REMOTE_FLAGS="${BAZEL_REMOTE_FLAGS} --remote_bytestream_uri_prefix=${ASPECT_WORKFLOWS_REMOTE_BYTESTREAM_URI_PREFIX}"
+# x-identity authenticates the runner to the remote cache, executor, AND BES
+# backend — without it the pre-build's BES stream is rejected. Bazel applies
+# --remote_header to all three channels, so gate on the identity alone (mirrors
+# get_bazelrc_flags in crates/aspect-cli/src/builtins/aspect/lib/environment.axl).
+[ -n "${ASPECT_WORKFLOWS_RUNNER_IDENTITY:-}" ] && BAZEL_REMOTE_FLAGS="${BAZEL_REMOTE_FLAGS} --remote_header=x-identity=${ASPECT_WORKFLOWS_RUNNER_IDENTITY}"
 
 # --build_metadata flags for the pre-build invocation. Only set when we're
 # forwarding events to a BES backend (the Aspect Web UI or similar) —
