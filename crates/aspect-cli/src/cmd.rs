@@ -235,11 +235,12 @@ impl<'a, 'v> Cmd<'a, 'v> {
     /// feature's flags — the section that used to live inline in each task's
     /// `--help`. An unknown name lists the valid ones on stderr and exits 2.
     pub fn print_feature_help(&self, version: &str, name: Option<&str>) -> ExitCode {
-        let blocks: Vec<(&dyn FeatureLike<'_>, FeatureBlock)> = self
+        let mut blocks: Vec<(&dyn FeatureLike<'_>, FeatureBlock)> = self
             .features
             .iter()
             .filter_map(|f| feature_block(*f).map(|b| (*f, b)))
             .collect();
+        blocks.sort_by(|(a, _), (b, _)| a.name().cmp(&b.name()));
 
         match name {
             None => {
