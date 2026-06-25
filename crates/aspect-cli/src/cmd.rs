@@ -154,13 +154,26 @@ impl<'a, 'v> Cmd<'a, 'v> {
                     .help("Verbosity of the phase-timing breakdown trailing the task completion line: 'none' (no timing summary), 'total' (total only), 'short' (inline phases), or 'detailed' (multi-line with descriptions; default). Tasks that don't opt into phases see only the total regardless of this setting."),
             )
             .subcommand(
+                // `feature` is not a task: its parsing exists only so `main`
+                // can route to `Cmd::print_feature_help`. Disable clap's auto
+                // help flag (otherwise `feature --help` renders clap's own
+                // help, leaking the global `--task:*` args) and accept a no-op
+                // `-h`/`--help` so it falls through to our renderer instead.
                 Command::new("feature")
                     .about("List features and show a feature's flags")
                     .hide(true)
+                    .disable_help_flag(true)
                     .arg(
                         ClapArg::new("name")
                             .value_name("NAME")
                             .required(false),
+                    )
+                    .arg(
+                        ClapArg::new("help")
+                            .short('h')
+                            .long("help")
+                            .action(ArgAction::SetTrue)
+                            .hide(true),
                     ),
             )
             .subcommand(Command::new("version").about("Print version").hide(true))
