@@ -20,6 +20,16 @@ BAZEL_REMOTE_FLAGS=""
 [ -n "${ASPECT_WORKFLOWS_BES_RESULTS_URL:-}" ] && BAZEL_REMOTE_FLAGS="${BAZEL_REMOTE_FLAGS} --bes_results_url=${ASPECT_WORKFLOWS_BES_RESULTS_URL}"
 [ -n "${ASPECT_WORKFLOWS_REMOTE_CACHE:-}" ] && BAZEL_REMOTE_FLAGS="${BAZEL_REMOTE_FLAGS} --remote_cache=${ASPECT_WORKFLOWS_REMOTE_CACHE}"
 [ -n "${ASPECT_WORKFLOWS_REMOTE_BYTESTREAM_URI_PREFIX:-}" ] && BAZEL_REMOTE_FLAGS="${BAZEL_REMOTE_FLAGS} --remote_bytestream_uri_prefix=${ASPECT_WORKFLOWS_REMOTE_BYTESTREAM_URI_PREFIX}"
+# x-identity authenticates the runner to the backend. Bazel scopes headers per
+# channel: --remote_header covers the remote cache and executor gRPC channels
+# but NOT the BES channel, which needs its own --bes_header. Set both so the
+# cache/executor and the pre-build's BES stream all authenticate. Gate on the
+# identity alone (mirrors get_bazelrc_flags in
+# crates/aspect-cli/src/builtins/aspect/lib/environment.axl).
+if [ -n "${ASPECT_WORKFLOWS_RUNNER_IDENTITY:-}" ]; then
+    BAZEL_REMOTE_FLAGS="${BAZEL_REMOTE_FLAGS} --remote_header=x-identity=${ASPECT_WORKFLOWS_RUNNER_IDENTITY}"
+    BAZEL_REMOTE_FLAGS="${BAZEL_REMOTE_FLAGS} --bes_header=x-identity=${ASPECT_WORKFLOWS_RUNNER_IDENTITY}"
+fi
 
 # --build_metadata flags for the pre-build invocation. Only set when we're
 # forwarding events to a BES backend (the Aspect Web UI or similar) —
@@ -292,7 +302,11 @@ export DISABLE_PLUGINS_FLAG
 export LOCK_VERSION_FLAG
 
 echo "Startup opts: ${BAZEL_STARTUP_OPTS}"
-echo "Build opts: ${BAZEL_BUILD_OPTS}"
+# Redact x-identity header values before echoing — the runner identity is an
+# auth credential, and the CLI's own log redaction treats remote_header/
+# bes_header values as secrets (crates/axl-runtime/src/engine/bazel/stream/
+# redaction.rs). The exported BAZEL_BUILD_OPTS keeps the real value.
+echo "Build opts: $(printf '%s' "${BAZEL_BUILD_OPTS}" | sed 's/x-identity=[^ ]*/x-identity=<REDACTED>/g')"
 
 if [ -f /etc/bazel.bazelrc ]; then
     echo "/etc/bazel.bazelrc exists ($(wc -l </etc/bazel.bazelrc) lines)"
