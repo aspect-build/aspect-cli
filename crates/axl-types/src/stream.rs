@@ -176,6 +176,91 @@ impl Readable {
     }
 }
 
+// --- Writer wrapper for to_boxed_write ---
+
+/// A `Write + Send` view over a `Writable`, used by background threads (e.g.
+/// the captured-output forwarder in `axl-runtime`) that need to write to the
+/// parent's real stdout/stderr off the Starlark eval thread.
+///
+/// Each `write`/`flush` re-acquires the lock and re-checks the `Option`, so a
+/// concurrent `close()` from Starlark turns subsequent writes into a
+/// `BrokenPipe` error rather than a panic. Writing to a closed handle is a
+/// soft failure: the forwarder is expected to stop, not crash.
+pub struct WritableWriter(Writable);
+
+impl Write for WritableWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let closed = || std::io::Error::new(std::io::ErrorKind::BrokenPipe, "stream is closed");
+        match &self.0 {
+            Writable::ChildStdin(arc) => {
+                let guard = arc.lock().unwrap();
+                let mut borrowed = guard.borrow_mut();
+                borrowed.as_mut().ok_or_else(closed)?.write(buf)
+            }
+            Writable::Stdout(arc) => {
+                let guard = arc.lock().unwrap();
+                let mut borrowed = guard.borrow_mut();
+                borrowed.as_mut().ok_or_else(closed)?.lock().write(buf)
+            }
+            Writable::Stderr(arc) => {
+                let guard = arc.lock().unwrap();
+                let mut borrowed = guard.borrow_mut();
+                borrowed.as_mut().ok_or_else(closed)?.lock().write(buf)
+            }
+            Writable::File(arc) => {
+                let mut guard = arc.lock().unwrap();
+                guard.as_mut().ok_or_else(closed)?.write(buf)
+            }
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match &self.0 {
+            Writable::ChildStdin(arc) => {
+                let guard = arc.lock().unwrap();
+                let mut borrowed = guard.borrow_mut();
+                if let Some(inner) = borrowed.as_mut() {
+                    inner.flush()?;
+                }
+            }
+            Writable::Stdout(arc) => {
+                let guard = arc.lock().unwrap();
+                let mut borrowed = guard.borrow_mut();
+                if let Some(inner) = borrowed.as_mut() {
+                    inner.lock().flush()?;
+                }
+            }
+            Writable::Stderr(arc) => {
+                let guard = arc.lock().unwrap();
+                let mut borrowed = guard.borrow_mut();
+                if let Some(inner) = borrowed.as_mut() {
+                    inner.lock().flush()?;
+                }
+            }
+            Writable::File(arc) => {
+                if let Some(inner) = arc.lock().unwrap().as_mut() {
+                    inner.flush()?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+// The Arc<Mutex<…>> interiors are Send; the RefCell is only ever touched
+// under the Mutex, matching the existing `ArcMutex*Reader` Send asserts above.
+unsafe impl Send for WritableWriter {}
+
+impl Writable {
+    /// Produce a boxed `Write + Send` from this `Writable`, for use by
+    /// background threads that forward captured child output to the parent's
+    /// real stdout/stderr. Shares the underlying handle (Arc-backed), so a
+    /// Starlark-side `close()` is observed as a `BrokenPipe` on the next write.
+    pub fn to_boxed_write(&self) -> Box<dyn Write + Send> {
+        Box::new(WritableWriter(self.dupe()))
+    }
+}
+
 #[starlark_value(type = "std.io.Readable")]
 impl<'v> values::StarlarkValue<'v> for Readable {
     fn get_methods() -> Option<&'static Methods> {

@@ -77,6 +77,17 @@ BazelTrait = trait(
     # each task's impl for lint/delivery.
     task_flags = attr(list[typing.Callable[[TaskContext], list[str]]], default = [], description = "Hooks returning additional flags; called with TaskContext at invocation time"),
 
+    # Captured-output opt-in. When True, the Bazel child's stderr is captured
+    # by the runtime, run through a processing pipeline, and forwarded to the
+    # real stderr instead of being inherited directly. Phase 1 forwards
+    # verbatim (a plain pipe in non-TTY contexts, a PTY interactively so the
+    # live progress UI is preserved). This is the foundation for later
+    # output cleanup (dedup repeated lines + count) and pattern-matched
+    # hooks / hung-server detection — those will add a reserved `output_match`
+    # hook list and dedup config here, and act on detection state from the
+    # existing `bazel_attempt_end` hook. Default off → behavior unchanged.
+    capture_output = attr(bool, default = False, description = "Capture the Bazel child's stderr, run it through the output processing pipeline, and forward it to the real stderr (instead of inheriting it directly)"),
+
     # Lifecycle hooks — lists of callables; callers close over their own state
     build_start = attr(list[typing.Callable[[TaskContext], None]], default = [], description = "Hooks called once before the Bazel invocation starts"),
     build_event = attr(list[typing.Callable[[TaskContext, dict], None]], default = [], description = "Hooks called for each Build Event Protocol event received during the build"),
