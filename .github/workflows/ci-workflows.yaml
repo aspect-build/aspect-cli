@@ -496,28 +496,22 @@ jobs:
           ; do
             val=$(printenv "$var") && echo "  $var=$val" || true
           done
-  # AXL test suite + CLI/launcher end-to-end smoke. Ported from the Buildkite
-  # `axl-tests` step.
+  # The AXL suite + the CLI/launcher smoke commands were a single Buildkite
+  # `axl-tests` step. On GitHub Actions they are split into two jobs that run in
+  # parallel — `axl-tests` (the ~3min `aspect tests axl` suite) and `axl-smoke`
+  # (the demo/user/run/dev-snapshot end-to-end checks) — so the smoke commands
+  # are no longer serialized behind the test suite. Both jobs build the same
+  # dev launcher from THIS commit via the build-dev-launcher composite action;
+  # see that action for why the launcher must be built (rather than reused from
+  # the prebuilt CLI) and how the host-native binary is probed.
   #
-  # `aspect tests axl` asserts (under CI) that it was launched by the
-  # just-built, UNSTAMPED launcher: ASPECT_LAUNCHER_VERSION == "0.0.0-dev" and
-  # the launcher resolved the CLI via local("target/ci/aspect-cli")
-  # (.aspect/axl.axl:3393-3405). The stable `aspect` launcher that setup-aspect /
-  # the runner provides is release-stamped, so we must build the launcher from
-  # THIS commit and invoke it directly — exactly like Buildkite's `$LAUNCHER`.
-  #
-  # We build via `aspect` (self-configures the runner's output base + remote cache,
-  # so the dev tree pre-build already populated is a cache hit), force the binary
-  # local with --remote_download_toplevel (the runner defaults to minimal downloads
-  # over a FUSE cache, else it never lands in the workspace), and copy the HOST
-  # output to a stable target/ci/ path immediately — a later build can redirect
-  # bazel-out (Buildkite hit a 127 "No such file" from a stale path). The launcher
-  # fans out through the multi_platform_rust_binaries transitions, so every output
-  # lands under an `-ST-<hash>` config dir (4 platforms × {fastbuild,opt}) and the
-  # plain bazel-bin path may be absent — so rather than guess a path/config we PROBE
-  # the candidates: the host build is the one that actually runs and reports the
-  # dev version. The CLI is already stabilized at target/ci/aspect-cli by
-  # install-prebuilt-aspect-cli, which is also what the launcher resolves.
+  # `aspect tests axl` asserts (under CI) that it was launched by the just-built,
+  # UNSTAMPED launcher: ASPECT_LAUNCHER_VERSION == "0.0.0-dev" and the launcher
+  # resolved the CLI via local("target/ci/aspect-cli") (.aspect/axl.axl). The
+  # stable `aspect` launcher that setup-aspect / the runner provides is
+  # release-stamped, so the dev launcher is built and invoked directly — exactly
+  # like Buildkite's `$LAUNCHER`. The composite action exports $LAUNCHER and $CLI
+  # into $GITHUB_ENV for the steps below.
   axl-tests:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     needs: [pre-build]
@@ -528,49 +522,31 @@ jobs:
       - uses: aspect-build/setup-aspect@c22a8f64fb38f82f59ce809cd7eb9f8ae096da44 # v2026.23.2
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+      - uses: ./.github/actions/build-dev-launcher
+        with:
+          task-name: axl-tests-gha-bootstrap
       - name: AXL Tests
         run: |
-          echo "--- build the dev launcher (= Buildkite's \$LAUNCHER)"
-          # --remote_download_toplevel forces the binary onto local disk: the
-          # Workflows runner defaults to --remote_download_outputs=minimal (bb_clientd
-          # FUSE cache), so without it the output stays remote and never lands in the
-          # workspace (mirrors what bootstrap.sh does for //:cli).
-          aspect build --task:name axl-tests-gha-bootstrap \
-            --bazel-flag=--remote_download_toplevel \
-            //crates/aspect-launcher
-          # Pick the HOST launcher and copy it to a stable target/ci/ path, before any
-          # later build redirects bazel-out. //crates/aspect-launcher fans out through
-          # the multi_platform_rust_binaries / with_cfg transitions, so EVERY output
-          # sits under an `-ST-<hash>` config dir (4 platforms × {fastbuild,opt}) and
-          # the plain `bazel-bin` (k8-fastbuild) path doesn't exist. Path/arch
-          # heuristics are brittle here, so we probe by running each candidate and
-          # keep the first that executes AND reports the unstamped dev version — that
-          # is, by construction, the host-native build.
-          mkdir -p target/ci
-          LAUNCHER="$GITHUB_WORKSPACE/target/ci/aspect-launcher"
-          CLI="$GITHUB_WORKSPACE/target/ci/aspect-cli"
-          launcher_version=""
-          for cand in bazel-bin/crates/aspect-launcher/aspect-launcher bazel-out/*/bin/crates/aspect-launcher/aspect-launcher; do
-            [ -f "$cand" ] || continue
-            cp -f "$cand" target/ci/aspect-launcher
-            # 2>/dev/null: a cross-compiled candidate dies with "Exec format error";
-            # we just move on to the next one.
-            if v=$("$LAUNCHER" --version 2>/dev/null) && case "$v" in *0.0.0-dev*) true ;; *) false ;; esac; then
-              echo "host dev launcher: $cand -> $v"
-              launcher_version="$v"
-              break
-            fi
-          done
-          if [ -z "$launcher_version" ]; then
-            echo "::error::no host-runnable 0.0.0-dev launcher found among build outputs"
-            echo "--- bazel-out launcher candidates (path : file type) ---"
-            for c in bazel-out/*/bin/crates/aspect-launcher/aspect-launcher; do
-              [ -e "$c" ] && echo "  $c : $(file -b "$c")"
-            done
-            echo "  bazel-bin symlink -> $(readlink bazel-bin 2>/dev/null || echo '(absent)')"
-            exit 1
-          fi
-
+          echo "--- aspect tests axl"
+          "$LAUNCHER" tests axl
+  # CLI/launcher end-to-end smoke. Split from `axl-tests` so it runs in parallel
+  # with the AXL suite rather than serialized ahead of it. Builds its own dev
+  # launcher (cheap — a remote-cache hit on the pre-built tree).
+  axl-smoke:
+    runs-on: [self-hosted, aspect-workflows, aspect-default]
+    needs: [pre-build]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+      - uses: aspect-build/setup-aspect@c22a8f64fb38f82f59ce809cd7eb9f8ae096da44 # v2026.23.2
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+      - uses: ./.github/actions/build-dev-launcher
+        with:
+          task-name: axl-smoke-gha-bootstrap
+      - name: CLI/launcher smoke
+        run: |
           echo "--- aspect demo template-demo"
           "$LAUNCHER" demo template-demo
           echo "--- aspect user nested user-task"
@@ -627,11 +603,6 @@ jobs:
           "$LAUNCHER" dev test-rate-limit
           echo "--- aspect dev test-runner-job-history"
           "$LAUNCHER" dev test-runner-job-history
-          echo "--- aspect tests axl"
-          # Run AXL tests last — cancel tests may kill the Bazel server,
-          # which invalidates bazel-out paths. We use the stabilized $LAUNCHER /
-          # $CLI copies above, so that's harmless here.
-          "$LAUNCHER" tests axl
   # NOTE: the Buildkite `bazelrc-e2e` step is intentionally NOT ported here. It
   # asserts that bare `bazel` and `aspect` start the SAME Bazel server (identical
   # startup flags, no server thrash). On a GitHub Actions Workflows runner `bazel`

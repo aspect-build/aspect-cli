@@ -1,0 +1,85 @@
+name: Build the dev launcher
+description: |
+  Internal-only. Builds the UNSTAMPED dev launcher (= Buildkite's $LAUNCHER)
+  from THIS commit and copies the host-native binary to a stable
+  `target/ci/aspect-launcher`, alongside the prebuilt `target/ci/aspect-cli`
+  that `install-prebuilt-aspect-cli` installed.
+
+  `aspect tests axl` (and the launcher smoke commands) assert under CI that
+  they were launched by the just-built, UNSTAMPED launcher:
+  ASPECT_LAUNCHER_VERSION == "0.0.0-dev" resolving the CLI via
+  local("target/ci/aspect-cli") (.aspect/axl.axl). The stable `aspect`
+  launcher that setup-aspect / the runner provides is release-stamped, so we
+  must build the launcher from source and invoke it directly.
+
+  We build via `aspect` (self-configures the runner's output base + remote
+  cache, so the dev-tree pre-build already populated is a cache hit), force the
+  binary local with --remote_download_toplevel (the runner defaults to minimal
+  downloads over a FUSE cache, else the output stays remote and never lands in
+  the workspace), and copy the HOST output to a stable target/ci/ path
+  immediately — a later build can redirect bazel-out (Buildkite hit a 127 "No
+  such file" from a stale path). //crates/aspect-launcher fans out through the
+  multi_platform_rust_binaries / with_cfg transitions, so EVERY output sits
+  under an `-ST-<hash>` config dir (4 platforms × {fastbuild,opt}) and the plain
+  `bazel-bin` (k8-fastbuild) path may be absent — so rather than guess a
+  path/config we PROBE the candidates: the host build is the one that actually
+  runs and reports the unstamped dev version.
+
+  Exposes the resolved binaries to later steps via $GITHUB_ENV:
+    LAUNCHER -> $GITHUB_WORKSPACE/target/ci/aspect-launcher
+    CLI      -> $GITHUB_WORKSPACE/target/ci/aspect-cli
+inputs:
+  task-name:
+    description: |
+      Value forwarded to `aspect build --task:name` so the bootstrap build is
+      attributed per consuming job (e.g. axl-tests-gha-bootstrap).
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Build dev launcher
+      shell: bash
+      run: |
+        echo "--- build the dev launcher (= Buildkite's \$LAUNCHER)"
+        # --remote_download_toplevel forces the binary onto local disk: the
+        # Workflows runner defaults to --remote_download_outputs=minimal (bb_clientd
+        # FUSE cache), so without it the output stays remote and never lands in the
+        # workspace (mirrors what bootstrap.sh does for //:cli).
+        aspect build --task:name "${{ inputs.task-name }}" \
+          --bazel-flag=--remote_download_toplevel \
+          //crates/aspect-launcher
+        # Pick the HOST launcher and copy it to a stable target/ci/ path, before any
+        # later build redirects bazel-out. //crates/aspect-launcher fans out through
+        # the multi_platform_rust_binaries / with_cfg transitions, so EVERY output
+        # sits under an `-ST-<hash>` config dir (4 platforms × {fastbuild,opt}) and
+        # the plain `bazel-bin` (k8-fastbuild) path doesn't exist. Path/arch
+        # heuristics are brittle here, so we probe by running each candidate and
+        # keep the first that executes AND reports the unstamped dev version — that
+        # is, by construction, the host-native build.
+        mkdir -p target/ci
+        LAUNCHER="$GITHUB_WORKSPACE/target/ci/aspect-launcher"
+        CLI="$GITHUB_WORKSPACE/target/ci/aspect-cli"
+        launcher_version=""
+        for cand in bazel-bin/crates/aspect-launcher/aspect-launcher bazel-out/*/bin/crates/aspect-launcher/aspect-launcher; do
+          [ -f "$cand" ] || continue
+          cp -f "$cand" target/ci/aspect-launcher
+          # 2>/dev/null: a cross-compiled candidate dies with "Exec format error";
+          # we just move on to the next one.
+          if v=$("$LAUNCHER" --version 2>/dev/null) && case "$v" in *0.0.0-dev*) true ;; *) false ;; esac; then
+            echo "host dev launcher: $cand -> $v"
+            launcher_version="$v"
+            break
+          fi
+        done
+        if [ -z "$launcher_version" ]; then
+          echo "::error::no host-runnable 0.0.0-dev launcher found among build outputs"
+          echo "--- bazel-out launcher candidates (path : file type) ---"
+          for c in bazel-out/*/bin/crates/aspect-launcher/aspect-launcher; do
+            [ -e "$c" ] && echo "  $c : $(file -b "$c")"
+          done
+          echo "  bazel-bin symlink -> $(readlink bazel-bin 2>/dev/null || echo '(absent)')"
+          exit 1
+        fi
+        # Hand the resolved, stable paths to subsequent steps in the job.
+        echo "LAUNCHER=$LAUNCHER" >> "$GITHUB_ENV"
+        echo "CLI=$CLI" >> "$GITHUB_ENV"
