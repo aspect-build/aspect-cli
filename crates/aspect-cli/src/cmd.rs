@@ -35,10 +35,13 @@ use starlark::values::{Heap, Value, ValueLike};
 use thiserror::Error;
 
 const TASK_ID_KEY: &str = "@@@$'__AXL_TASK_ID__'$@@@";
-/// Reserved top-level command: `main` routes `aspect feature ...` to the
-/// feature-help renderer before task parsing, so a top-level task of this kind
-/// would be unreachable.
+/// `aspect feature [<name>]`: routed to the feature-help renderer in `main`.
 const FEATURE_COMMAND: &str = "feature";
+/// Top-level command names `main` intercepts before task parsing; a top-level
+/// task of any of these kinds would be unreachable, so it is rejected at build
+/// time (see `Tree::insert`). Reachable when nested under a group.
+const RESERVED_TOP_LEVEL_COMMANDS: &[&str] =
+    &[FEATURE_COMMAND, crate::credential_helper::GET_COMMAND];
 const TASK_COMMAND_DISPLAY_ORDER: usize = 0;
 const TASK_GROUP_DISPLAY_ORDER: usize = 1;
 
@@ -244,9 +247,8 @@ impl<'a, 'v> Cmd<'a, 'v> {
     /// Render `aspect feature [<name>]` and return the process exit code.
     ///
     /// With no name, lists every active feature (keyed by the kebab slug the
-    /// user passes back in) and its summary. With a name, prints just that
-    /// feature's flags — the section that used to live inline in each task's
-    /// `--help`. An unknown name lists the valid ones on stderr and exits 2.
+    /// user passes back in). With a name, prints just that feature's flags. An
+    /// unknown name lists the valid ones on stderr and exits 2.
     pub fn print_feature_help(&self, version: &str, name: Option<&str>) -> ExitCode {
         let mut blocks: Vec<(&dyn FeatureLike<'_>, FeatureBlock)> = self
             .features
@@ -257,69 +259,25 @@ impl<'a, 'v> Cmd<'a, 'v> {
 
         match name {
             None => {
-                let header = banner::line(version);
-                let width = blocks
-                    .iter()
-                    .map(|(f, _)| f.name().len())
-                    .max()
-                    .unwrap_or(0);
-                let mut out = format!("{header}\n\n\x1b[1;4mFeatures:\x1b[0m\n");
-                for (feat, _) in &blocks {
-                    let slug = feat.name();
-                    let pad = " ".repeat(width - slug.len() + 2);
-                    out.push_str(&format!(
-                        "  \x1b[1m{}\x1b[0m{}{}\n",
-                        slug,
-                        pad,
-                        feat.summary()
-                    ));
-                }
-                out.push_str("\nRun `aspect feature <NAME>` to see a feature's flags.\n");
-                print!("{out}");
+                print!("{}", render_feature_list(version, &blocks));
                 ExitCode::SUCCESS
             }
-            Some(name) => {
-                let Some((feat, block)) = blocks.iter().find(|(f, _)| f.name() == name) else {
+            Some(name) => match blocks.iter().find(|(f, _)| f.name() == name) {
+                Some((feat, block)) => {
+                    render_feature_detail(version, *feat, block, self.aspect_root, self.modules)
+                        .print_help()
+                        .ok();
+                    ExitCode::SUCCESS
+                }
+                None => {
                     let valid: Vec<String> = blocks.iter().map(|(f, _)| f.name()).collect();
                     eprintln!(
-                        "\x1b[1;31merror:\x1b[0m unknown feature {name:?}. \
-                         Valid features: {}",
+                        "\x1b[1;31merror:\x1b[0m unknown feature {name:?}. Valid features: {}",
                         valid.join(", ")
                     );
-                    return ExitCode::from(2);
-                };
-                let header = banner::line(version);
-                let label = defined_in_label(feat.path(), self.aspect_root, self.modules);
-                let context = format!(
-                    "\x1b[3m{}\x1b[0m feature defined in \x1b[3m{}\x1b[0m",
-                    feat.export_name().unwrap_or_default(),
-                    label
-                );
-                let body = if !feat.description().is_empty() {
-                    feat.description().clone()
-                } else if !feat.summary().is_empty() {
-                    feat.summary().clone()
-                } else {
-                    String::new()
-                };
-                let about = if body.is_empty() {
-                    context
-                } else {
-                    format!("{body}\n\n{context}")
-                };
-                let mut cmd = Command::new(format!("feature {name}"))
-                    .no_binary_name(true)
-                    .disable_help_flag(true)
-                    .help_template(format!("{header}\n\n{about}\n\n{{all-args}}"));
-                for (arg_name, arg) in block.args.iter() {
-                    cmd = cmd.arg(
-                        arg_to_clap(Scope::Feature(&block.prefix), arg_name, arg)
-                            .help_heading(block.heading.clone()),
-                    );
+                    ExitCode::from(2)
                 }
-                cmd.print_help().ok();
-                ExitCode::SUCCESS
-            }
+            },
         }
     }
 }
@@ -780,6 +738,72 @@ fn feature_block(feat: &dyn FeatureLike<'_>) -> Option<FeatureBlock> {
     })
 }
 
+// ── `aspect feature` rendering ─────────────────────────────────────────────
+
+/// Render the `aspect feature` listing: one row per feature, keyed by the
+/// kebab slug the user passes to `aspect feature <name>`, with its summary.
+fn render_feature_list(version: &str, blocks: &[(&dyn FeatureLike<'_>, FeatureBlock)]) -> String {
+    let width = blocks
+        .iter()
+        .map(|(f, _)| f.name().len())
+        .max()
+        .unwrap_or(0);
+    let mut out = format!("{}\n\n\x1b[1;4mFeatures:\x1b[0m\n", banner::line(version));
+    for (feat, _) in blocks {
+        let slug = feat.name();
+        let pad = " ".repeat(width - slug.len() + 2);
+        out.push_str(&format!(
+            "  \x1b[1m{}\x1b[0m{}{}\n",
+            slug,
+            pad,
+            feat.summary()
+        ));
+    }
+    out.push_str("\nRun `aspect feature <NAME>` to see a feature's flags.\n");
+    out
+}
+
+/// Build the `aspect feature <name>` help command: the feature's prose (or its
+/// "defined in" line when it has none) above its flags, rendered with the same
+/// clap formatting the flags used to get inline in each task's `--help`.
+fn render_feature_detail(
+    version: &str,
+    feat: &dyn FeatureLike<'_>,
+    block: &FeatureBlock,
+    aspect_root: &Path,
+    modules: &[Mod],
+) -> Command {
+    let context = format!(
+        "\x1b[3m{}\x1b[0m feature defined in \x1b[3m{}\x1b[0m",
+        feat.export_name().unwrap_or_default(),
+        defined_in_label(feat.path(), aspect_root, modules),
+    );
+    let body = if !feat.description().is_empty() {
+        feat.description()
+    } else {
+        feat.summary()
+    };
+    let about = if body.is_empty() {
+        context
+    } else {
+        format!("{body}\n\n{context}")
+    };
+    let mut cmd = Command::new(format!("feature {}", feat.name()))
+        .no_binary_name(true)
+        .disable_help_flag(true)
+        .help_template(format!(
+            "{}\n\n{about}\n\n{{all-args}}",
+            banner::line(version)
+        ));
+    for (arg_name, arg) in block.args.iter() {
+        cmd = cmd.arg(
+            arg_to_clap(Scope::Feature(&block.prefix), arg_name, arg)
+                .help_heading(block.heading.clone()),
+        );
+    }
+    cmd
+}
+
 // ── Per-task subcommand assembly ───────────────────────────────────────────
 
 fn task_command(
@@ -891,24 +915,14 @@ impl Tree {
                 MAX_TASK_GROUPS,
             ));
         }
-        // A top-level `get` task is unreachable: `main` routes `aspect get` to
-        // the credential helper before task parsing. Reject it rather than let
-        // it silently never run. Nested under a group it is reachable and fine.
-        if group.is_empty() && task.kind() == crate::credential_helper::GET_COMMAND {
+        // `main` routes these top-level commands before task parsing, so a
+        // top-level task of the same kind would never run. Reject it rather than
+        // let it silently disappear; nested under a group it is reachable.
+        if group.is_empty() && RESERVED_TOP_LEVEL_COMMANDS.contains(&task.kind().as_str()) {
             return Err(CmdError::ReservedName(
                 task.kind(),
                 label.to_owned(),
-                crate::credential_helper::GET_COMMAND.to_owned(),
-            ));
-        }
-        // A top-level `feature` task is unreachable: `main` routes
-        // `aspect feature ...` to the feature-help renderer before task parsing.
-        // Nested under a group it is reachable and fine.
-        if group.is_empty() && task.kind() == FEATURE_COMMAND {
-            return Err(CmdError::ReservedName(
                 task.kind(),
-                label.to_owned(),
-                FEATURE_COMMAND.to_owned(),
             ));
         }
         self.insert_at(&task.kind(), &group[..], &group[..], label, cmd)
@@ -1178,6 +1192,7 @@ mod tests {
         name: String,
         export_name: String,
         display_name: String,
+        summary: String,
         args: SmallMap<String, Arg>,
         path: PathBuf,
     }
@@ -1190,7 +1205,7 @@ mod tests {
             Some(self.export_name.clone())
         }
         fn summary(&self) -> &String {
-            empty_string()
+            &self.summary
         }
         fn description(&self) -> &String {
             empty_string()
@@ -1216,6 +1231,10 @@ mod tests {
     /// the CamelCase export name (e.g. `"ArtifactUpload"`); name/display_name are
     /// derived to match production (`artifact-upload` / `Artifact Upload`).
     fn stub_feature(identifier: &str) -> StubFeature {
+        stub_feature_with_summary(identifier, "")
+    }
+
+    fn stub_feature_with_summary(identifier: &str, summary: &str) -> StubFeature {
         let mut args: SmallMap<String, Arg> = SmallMap::new();
         args.insert(
             "enabled".to_owned(),
@@ -1231,6 +1250,7 @@ mod tests {
             name: axl_runtime::engine::names::to_command_name(identifier),
             export_name: identifier.to_owned(),
             display_name: axl_runtime::engine::names::camel_to_display_name(identifier),
+            summary: summary.to_owned(),
             args,
             path: PathBuf::from("/repo/feature/artifact_upload.axl"),
         }
@@ -1430,7 +1450,40 @@ mod tests {
     }
 
     #[test]
-    fn print_feature_help_renders_named_feature() {
+    fn feature_list_is_sorted_by_slug_with_summaries() {
+        let tips = stub_feature_with_summary("Tips", "Collect tips.");
+        let au = stub_feature_with_summary("ArtifactUpload", "Upload artifacts.");
+        let blocks: Vec<(&dyn FeatureLike, FeatureBlock)> = [&au, &tips]
+            .iter()
+            .map(|f| (*f as &dyn FeatureLike, feature_block(*f).unwrap()))
+            .collect();
+        let mut sorted = blocks;
+        sorted.sort_by(|(a, _), (b, _)| a.name().cmp(&b.name()));
+        let out = render_feature_list("1.2.3", &sorted);
+        let au_at = out.find("artifact-upload").expect("artifact-upload listed");
+        let tips_at = out.find("tips").expect("tips listed");
+        assert!(au_at < tips_at, "rows should be alphabetical by slug");
+        assert!(out.contains("Upload artifacts."), "summary missing");
+        assert!(out.contains("aspect feature <NAME>"), "footer missing");
+    }
+
+    #[test]
+    fn feature_detail_renders_flags_and_defined_in_line() {
+        let f = stub_feature("ArtifactUpload");
+        let block = feature_block(&f).unwrap();
+        let help = render_feature_detail("1.2.3", &f, &block, Path::new("/repo"), &[])
+            .render_help()
+            .to_string();
+        assert!(help.contains("Artifact Upload Options"), "heading missing");
+        assert!(help.contains("artifact-upload:enabled"), "flag missing");
+        assert!(
+            help.contains("ArtifactUpload feature defined in"),
+            "defined-in line missing"
+        );
+    }
+
+    #[test]
+    fn print_feature_help_exit_codes() {
         let f = stub_feature("ArtifactUpload");
         let cmd = Cmd {
             tasks: vec![],
@@ -1438,11 +1491,14 @@ mod tests {
             aspect_root: Path::new("/repo"),
             modules: &[],
         };
-        // No panic; lists the feature when unnamed and renders flags when named.
         assert_eq!(cmd.print_feature_help("0.0.0", None), ExitCode::SUCCESS);
         assert_eq!(
             cmd.print_feature_help("0.0.0", Some("artifact-upload")),
             ExitCode::SUCCESS
+        );
+        assert_eq!(
+            cmd.print_feature_help("0.0.0", Some("nope")),
+            ExitCode::from(2)
         );
     }
 
