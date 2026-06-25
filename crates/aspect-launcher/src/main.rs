@@ -1,5 +1,6 @@
 mod cache;
 mod config;
+mod warming;
 
 use std::collections::HashMap;
 use std::env;
@@ -655,6 +656,10 @@ fn main() -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Fork::Parent(_) => {
+            // On a Workflows runner, wait for cache warming to finish before
+            // touching the download cache it restores. No-op off-runner.
+            warming::wait_for_warming();
+
             // Deal with the config bits
             let (root_dir, config) = autoconf()?;
             let cache: AspectCache = AspectCache::default()?;
