@@ -834,8 +834,7 @@ fn task_command(
     // appended to the help template below).
     for block in feature_blocks {
         for (arg_name, arg) in block.args.iter() {
-            let clap_arg =
-                arg_to_clap(Scope::Feature(&block.prefix), arg_name, arg).hide(true);
+            let clap_arg = arg_to_clap(Scope::Feature(&block.prefix), arg_name, arg).hide(true);
             cmd = cmd.arg(clap_arg);
         }
     }
@@ -848,8 +847,7 @@ fn task_command(
         Some(h) => format!("{h}\n"),
         None => "{about-with-newline}".to_string(),
     };
-    let feature_footer =
-        "\x1b[2mFeature flags are accepted here but hidden. \
+    let feature_footer = "\x1b[2mFeature flags are accepted here but hidden. \
          Run `aspect feature` to list features and their flags.\x1b[0m";
     cmd = cmd.help_template(format!(
         "{cli_header}\n\n{about_block}\n{{usage-heading}} {{usage}}\n\n{{all-args}}\n\n{feature_footer}"
