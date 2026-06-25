@@ -1,5 +1,6 @@
 mod cache;
 mod config;
+mod warming;
 
 use std::collections::HashMap;
 use std::env;
@@ -655,6 +656,12 @@ fn main() -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Fork::Parent(_) => {
+            // On a cold Workflows runner the warming stage may still be
+            // restoring (and re-owning) the cache directory in the background.
+            // Block until it completes so we don't touch a transiently
+            // root-owned cache and fail with EACCES. No-op off-runner.
+            warming::wait_for_warming();
+
             // Deal with the config bits
             let (root_dir, config) = autoconf()?;
             let cache: AspectCache = AspectCache::default()?;
