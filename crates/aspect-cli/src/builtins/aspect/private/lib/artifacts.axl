@@ -12,7 +12,7 @@ CI platforms: GitHub Actions, Buildkite, CircleCI, GitLab.
 
 Task registration:
 
-    load("@aspect//private/lib/artifacts.axl", "artifacts")
+    load("./private/lib/artifacts.axl", "artifacts")
 
     def task():
         return Task(
@@ -22,7 +22,7 @@ Task registration:
 
 Producer:
 
-    load("@aspect//private/lib/artifacts.axl", "artifacts")
+    load("./private/lib/artifacts.axl", "artifacts")
     artifacts.append(ctx, artifacts.Artifact(
         kind = "format_diff",
         url  = uploaded_url,

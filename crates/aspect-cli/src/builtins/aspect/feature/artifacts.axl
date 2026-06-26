@@ -1,10 +1,10 @@
-"""Backwards-compat re-export.
+"""Public entry point for the artifact-upload feature.
 
-The owner feature now lives co-located with its trait + types in
-`lib/artifacts.axl`. This file remains so existing user `config.axl`
-loads (`load("@aspect//feature/artifacts.axl", "ArtifactUpload")`)
-keep working. New code should `load("@aspect//private/lib/artifacts.axl",
-"ArtifactUpload", "artifacts")` directly.
+`ArtifactUpload` is implemented co-located with its trait + types in the
+internal `private/lib/artifacts.axl`; this file re-exports it at the
+stable public path so user `config.axl` files load it as
+`load("@aspect//feature/artifacts.axl", "ArtifactUpload")`. Load it from
+here — the `private/` tree is internal and may change without notice.
 """
 
 load("../private/lib/artifacts.axl", _ArtifactUpload = "ArtifactUpload")

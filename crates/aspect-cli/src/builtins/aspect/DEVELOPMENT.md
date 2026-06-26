@@ -313,7 +313,7 @@ tips_feature = feature(_impl)
 Consumers anywhere — they never touch the trait, only the wrapper struct:
 
 ```python
-load("@aspect//private/lib/tips.axl", "tips")
+load("./private/lib/tips.axl", "tips")
 
 tips.append(ctx, tips.Tip(id = "...", severity = "suggestion", body = "..."))
 for t in tips.collect(ctx):
@@ -324,8 +324,8 @@ Tasks register **only the trait surface** — never the owner feature:
 
 ```python
 # build.axl, lint.axl, etc.
-load("@aspect//private/lib/tips.axl", "tips")
-load("@aspect//private/lib/artifacts.axl", "artifacts")
+load("./private/lib/tips.axl", "tips")
+load("./private/lib/artifacts.axl", "artifacts")
 
 def task():
     return Task(
@@ -693,7 +693,7 @@ For these to fire, the task **must** iterate `bazel_trait.build_event` inside it
 The artifact uploader publishes URLs via the [Pattern 2](#pattern-2-feature-owned--callable-trait) wrapper API:
 
 ```python
-load("@aspect//private/lib/artifacts.axl", "artifacts")
+load("./private/lib/artifacts.axl", "artifacts")
 
 # Producers (the upload feature, format's diff-upload hook, gazelle's diff-upload hook)
 # register their artifacts as they're uploaded:

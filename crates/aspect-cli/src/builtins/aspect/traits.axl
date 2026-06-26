@@ -25,7 +25,7 @@ facade is purely a user-facing convenience. The tip authoring API
 in its own facade: `@aspect//tips.axl`.
 
 Note: artifact URLs are no longer exposed via a trait. Use the
-`artifacts` struct from `@aspect//private/lib/artifacts.axl` instead — it
+`artifacts` struct from `./private/lib/artifacts.axl` instead — it
 carries `append` / `list` / `by_kind` / `by_label` / `browse_url`
 and `TRAITS` for task registration (splat `+ artifacts.TRAITS` into
 the task's trait list).
