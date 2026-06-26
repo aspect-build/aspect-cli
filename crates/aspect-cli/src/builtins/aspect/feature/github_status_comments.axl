@@ -118,6 +118,11 @@ _MARKER_FMT = "<!-- aspect-ci-status:pr-%d -->"
 _STATE_BLOCK_OPEN = "<!-- aspect-ci-status-state-v1:"
 _STATE_BLOCK_CLOSE = " -->"
 
+# How often a long-running task refreshes its budget-derived cadence from the
+# Aspect API (`/github/budget`). Coarser than the cadence itself — the shared
+# installation quota shifts on the minutes scale, not seconds.
+_BUDGET_REFRESH_S = 180
+
 # Badges keyed by the precomputed `_badge_key`, not raw status:
 #   "failed"  — terminal failed / live failing (error)
 #   "warning" — passed/running with non-fatal signal
@@ -1598,10 +1603,40 @@ def _github_status_comments(ctx: FeatureContext):
         if auth_extra.get("desired_cadence_s"):
             _state["_cadence_s"] = auth_extra["desired_cadence_s"]
 
+        # Installation identity + ownership proof for the periodic
+        # `/github/budget` refresh (see `_refresh_budget`).
+        _state["_installation_id"] = auth_extra.get("installation_id", "")
+        _state["_installation_proof"] = auth_extra.get("installation_proof", "")
+
         # Re-resolve with the App token; cache-hits if a sibling already did.
         upgraded = resolve_build_url(ctx, existing_app_token = token)
         if upgraded:
             _state["_ci_link_url"] = upgraded
+
+    def _refresh_budget(ctx, now):
+        """Periodically refresh `_cadence_s` from the Aspect API so a
+        long-running task adapts to shifting installation quota mid-run (other
+        consumers share the GitHub rate limit). Reads the installation's own
+        `/rate_limit` with our token and reports it to `/github/budget`, proving
+        installation ownership with the mint-time HMAC. Best-effort: any miss
+        leaves the prior cadence in place. Throttled to `_BUDGET_REFRESH_S`."""
+        if not _state.get("_installation_id") or not _state.get("_installation_proof"):
+            return
+        if now - _state.get("_last_budget_refresh_s", 0.0) < _BUDGET_REFRESH_S:
+            return
+        _state["_last_budget_refresh_s"] = now
+
+        headroom = github.read_rate_limit(ctx, _state["_github_token"])
+        if headroom == None:
+            return
+        result = github.status_comment_budget(ctx, {
+            "installation_id": _state["_installation_id"],
+            "installation_proof": _state["_installation_proof"],
+            "remaining": headroom["remaining"],
+            "reset": headroom["reset"],
+        })
+        if result.get("success") and result.get("desired_cadence_s"):
+            _state["_cadence_s"] = result["desired_cadence_s"]
 
     def _task_update(ctx, update):
         if not _state.get("_initialized"):
@@ -1689,13 +1724,17 @@ def _github_status_comments(ctx: FeatureContext):
             if phase_result == PHASE_SUPPRESS:
                 return
             if phase_result == PHASE_FALL_THROUGH:
-                # Budget-derived cadence from the Aspect API (mint-time), floored
-                # by the configured min; falls back to the floor before the first
-                # mint or when the API didn't return one.
+                # Budget-derived cadence from the Aspect API (refreshed
+                # periodically below), floored by the configured min; falls back
+                # to the floor before the first mint or when none was returned.
                 interval = max(min_poll_interval_seconds, _state.get("_cadence_s", min_poll_interval_seconds))
                 if now - _state.get("_last_publish_s", 0.0) < interval:
                     return
                 _state["_last_publish_s"] = now
+
+        # Refresh the budget-derived cadence on its own slow timer (self-gated
+        # to `_BUDGET_REFRESH_S`); only reached when we're about to publish.
+        _refresh_budget(ctx, monotonic())
         _publish(ctx, final = update.final)
 
     lifecycle.task_update.append(_task_update)

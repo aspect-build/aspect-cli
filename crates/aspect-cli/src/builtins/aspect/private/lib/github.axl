@@ -315,10 +315,10 @@ def _authenticate(ctx, owner, repo, profile = None, roles = None, _reason = None
     Returns the token, or None with `_reason` populated on failure
     (stable `kind` from `_AUTH_KIND_*` + human-readable `reason`).
 
-    `_extra`, if a dict, is populated on success with any non-token fields
-    the mint response carries (currently `desired_cadence_s`, the
-    budget-derived comment-refresh cadence) for callers that want them;
-    other callers pass nothing and ignore it.
+    `_extra`, if a dict, is populated on success with non-token fields the
+    mint response carries — `desired_cadence_s` (budget-derived comment-refresh
+    cadence) and `installation_id` + `installation_proof` (for the
+    `/github/budget` refresh path). Other callers pass nothing and ignore it.
 
     Side-effect: on `_AUTH_KIND_NO_CREDENTIALS`, emits the host-specific
     `add-aspect-api-token-<host>` tip — at this layer so every App-using
@@ -369,8 +369,10 @@ def _authenticate(ctx, owner, repo, profile = None, roles = None, _reason = None
         # `_reason` error path instead of crashing the parent task.
         parsed = json.try_decode(resp.body, None)
         if parsed != None and "token" in parsed:
-            if type(_extra) == "dict" and "desired_cadence_s" in parsed:
-                _extra["desired_cadence_s"] = parsed["desired_cadence_s"]
+            if type(_extra) == "dict":
+                for k in ("desired_cadence_s", "installation_id", "installation_proof"):
+                    if k in parsed:
+                        _extra[k] = parsed[k]
             return parsed["token"]
         snippet = (resp.body or "")[:200].replace("\n", " ")
         _set_auth_reason(
@@ -447,6 +449,51 @@ def _status_comment_contribute(ctx, request, profile = None):
         }
 
     return {"success": False, "error": resp.body or "", "status": resp.status}
+
+def _read_rate_limit(ctx, token, api_base = DEFAULT_GITHUB_API):
+    """Read the installation's GitHub core rate-limit headroom with its
+    installation `token`. Returns `{"remaining": int, "reset": int}` (the
+    `resources.core` bucket; `reset` is absolute Unix seconds), or `None` on
+    any failure. `GET /rate_limit` does not itself consume quota."""
+    success, _status, body = _do_request(ctx, "GET", api_base + "/rate_limit", token, quiet_4xx_auth = True)
+    if not success:
+        return None
+    parsed = json.try_decode(body, None)
+    core = (parsed or {}).get("resources", {}).get("core") if type(parsed) == "dict" else None
+    if type(core) != "dict" or type(core.get("remaining")) != "int" or type(core.get("reset")) != "int":
+        return None
+    return {"remaining": core["remaining"], "reset": core["reset"]}
+
+def _status_comment_budget(ctx, request, profile = None):
+    """Refresh the comment-refresh cadence for a long-running task via
+    `POST /scm/.../github/budget` — the client reports its installation's live
+    rate-limit headroom and gets back an updated `desired_cadence_s`, without
+    re-minting a token.
+
+    `request` is `{installation_id, installation_proof, remaining, reset}` (the
+    proof from the token mint; see the server's RequestSchema). Returns
+    `{"success": True, "desired_cadence_s": int}` on a 2xx, else
+    `{"success": False}`. Never raises — a failure just leaves the caller on
+    its prior cadence."""
+    creds = ctx.aspect.auth.credentials(profile = profile)
+    if not creds:
+        return {"success": False}
+
+    resp = ctx.http().post(
+        url = ctx.aspect.auth.api_url + "/github/budget",
+        headers = {
+            "Authorization": "Bearer " + creds.access_token,
+            "Content-Type": "application/json",
+        },
+        data = json.encode(request),
+    ).map_err(lambda e: str(e)).block()
+
+    if type(resp) == "string" or resp.status < 200 or resp.status >= 300:
+        return {"success": False}
+    parsed = json.try_decode(resp.body, None)
+    if type(parsed) != "dict" or type(parsed.get("desired_cadence_s")) != "int":
+        return {"success": False}
+    return {"success": True, "desired_cadence_s": parsed["desired_cadence_s"]}
 
 # Check Runs
 
@@ -2120,6 +2167,8 @@ github = struct(
     VALID_ROLES = VALID_ROLES,
     authenticate = _authenticate,
     status_comment_contribute = _status_comment_contribute,
+    status_comment_budget = _status_comment_budget,
+    read_rate_limit = _read_rate_limit,
     preferred_token_pair = _preferred_token_pair,
     missing_credentials_reason = _missing_credentials_reason,
     validate_role = validate_role,
