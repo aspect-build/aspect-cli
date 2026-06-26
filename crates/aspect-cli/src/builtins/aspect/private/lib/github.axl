@@ -308,12 +308,17 @@ def _preferred_token_pair(ctx, owner, repo, profile = None, roles = None, existi
 
     return None, None, BUCKET_APP
 
-def _authenticate(ctx, owner, repo, profile = None, roles = None, _reason = None):
+def _authenticate(ctx, owner, repo, profile = None, roles = None, _reason = None, _extra = None):
     """Exchange Aspect credentials for a GitHub token via the App
     (requires owner + repo).
 
     Returns the token, or None with `_reason` populated on failure
     (stable `kind` from `_AUTH_KIND_*` + human-readable `reason`).
+
+    `_extra`, if a dict, is populated on success with any non-token fields
+    the mint response carries (currently `desired_cadence_s`, the
+    budget-derived comment-refresh cadence) for callers that want them;
+    other callers pass nothing and ignore it.
 
     Side-effect: on `_AUTH_KIND_NO_CREDENTIALS`, emits the host-specific
     `add-aspect-api-token-<host>` tip — at this layer so every App-using
@@ -364,6 +369,8 @@ def _authenticate(ctx, owner, repo, profile = None, roles = None, _reason = None
         # `_reason` error path instead of crashing the parent task.
         parsed = json.try_decode(resp.body, None)
         if parsed != None and "token" in parsed:
+            if type(_extra) == "dict" and "desired_cadence_s" in parsed:
+                _extra["desired_cadence_s"] = parsed["desired_cadence_s"]
             return parsed["token"]
         snippet = (resp.body or "")[:200].replace("\n", " ")
         _set_auth_reason(
@@ -386,6 +393,60 @@ def _authenticate(ctx, owner, repo, profile = None, roles = None, _reason = None
     else:
         _set_auth_reason(_reason, _AUTH_KIND_API_ERROR, "API request failed (HTTP %d): %s" % (resp.status, resp.body))
     return None
+
+# Status-comment coordination (Aspect API)
+
+def _status_comment_contribute(ctx, request, profile = None):
+    """Contribute this job's task status for a PR to the Aspect API and get
+    back the merged set of all jobs' contributions + a posting directive.
+
+    Every job POSTs its own contribution to
+    `POST /scm/status-comment/contribute`; the server stores + merges the
+    cross-job state and decides who posts when. Rendering + posting stay
+    client-side.
+
+    `request` is the JSON-encodable body — `{scm, owner, repo, pr_number,
+    head_sha, run_id, workflow_name, entries, shown_snippets, shown_repros,
+    shown_fixes, final, posted?}` (see the server's ContributeRequestSchema).
+
+    Returns a result dict:
+      `{"success": True, "state": {...}, "should_post": bool,
+        "comment_id": str, "next_eligible_epoch_s": int}`
+    on a 2xx, else `{"success": False, "error": str, "status": int}`. Never
+    raises — transport errors and non-2xx responses come back as
+    `success=False` so the caller can fall back to local coordination.
+    """
+    creds = ctx.aspect.auth.credentials(profile = profile)
+    if not creds:
+        _, msg = _classify_missing_credentials(ctx)
+        return {"success": False, "error": msg, "status": 0}
+
+    resp = ctx.http().post(
+        url = ctx.aspect.auth.api_url + "/scm/status-comment/contribute",
+        headers = {
+            "Authorization": "Bearer " + creds.access_token,
+            "Content-Type": "application/json",
+        },
+        data = json.encode(request),
+    ).map_err(lambda e: str(e)).block()
+
+    if type(resp) == "string":
+        return {"success": False, "error": "transport error: %s" % resp, "status": 0}
+
+    if resp.status >= 200 and resp.status < 300:
+        parsed = json.try_decode(resp.body, None)
+        if type(parsed) != "dict" or "state" not in parsed:
+            snippet = (resp.body or "")[:200].replace("\n", " ")
+            return {"success": False, "error": "unusable 2xx body: %s" % snippet, "status": resp.status}
+        return {
+            "success": True,
+            "state": parsed.get("state") or {},
+            "should_post": bool(parsed.get("should_post", False)),
+            "comment_id": parsed.get("comment_id", "") or "",
+            "next_eligible_epoch_s": parsed.get("next_eligible_epoch_s", 0) or 0,
+        }
+
+    return {"success": False, "error": resp.body or "", "status": resp.status}
 
 # Check Runs
 
@@ -2058,6 +2119,7 @@ def delete_review_comment(ctx, token, owner, repo, comment_id, api_base = DEFAUL
 github = struct(
     VALID_ROLES = VALID_ROLES,
     authenticate = _authenticate,
+    status_comment_contribute = _status_comment_contribute,
     preferred_token_pair = _preferred_token_pair,
     missing_credentials_reason = _missing_credentials_reason,
     validate_role = validate_role,

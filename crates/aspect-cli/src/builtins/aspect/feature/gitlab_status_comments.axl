@@ -6,22 +6,18 @@ but uses GitLab Merge Request Notes instead of GitHub Issue Comments.
 
 ## Cross-task coordination
 
-The GH feature coordinates cross-task state via GitHub Actions artifacts
-(each task uploads its payload; sibling tasks download). GitLab CI's
-artifact API isn't conveniently reachable from runner code, so this
-feature uses a simpler design: **the MR note itself is the shared state
-store**. Each task on each `task_update`:
+Coordination goes through the Aspect API, same as `GithubStatusComments`:
+each task POSTs its own entry to `POST /scm/status-comment/contribute`
+(`scm: "gitlab"`) and gets back the merged set of all tasks' entries plus a
+directive on whether *it* should post the note this cycle. The server owns
+the merge + post throttle; this feature only renders the returned state and
+upserts the GitLab MR note (with the GitLab App token).
 
-  1. Fetches the marker note from the MR.
-  2. Parses the state block from the note's footer.
-  3. Merges this task's entry into the state's `entries` list (replacing
-     any prior entry with the same `(workflow_run_id, job, key, name)`).
-  4. Renders + upserts the note.
-
-This keeps the feature stateless across aspect-cli processes — every
-task writes the same view by reading + merging + writing. Lease
-coordination throttles concurrent writers so the App API quota stays
-flat regardless of how many tasks run in parallel.
+When the Aspect API is unreachable, it falls back to coordinating through the
+note's own embedded state block: read the note, merge our entry via
+`merge_comment_only_state` (all tasks in a pipeline share one
+`workflow_run_id` / CI_PIPELINE_ID, so it preserves sibling rows), render, and
+upsert under a time lease.
 
 ## Marker
 
@@ -39,10 +35,8 @@ template's variable contract.
 
 ## Out of scope vs GH counterpart
 
-* No GitLab CI artifact upload/download — uses the note's own state block
-  as the cross-task source of truth instead.
-* No terminal-settle delay — the artifact eventual-consistency window
-  doesn't apply since we don't depend on a listing API.
+* No inline failure-snippet / repro / fix sections — GitLab renders the
+  entries table only.
 * No per-task check-run deep link — the GitlabCommitStatuses feature
   doesn't publish a per-task page URL (commit_status `target_url` points
   at the CI job, not a per-status page). The `check_run_url` field on
@@ -55,27 +49,20 @@ load(
     "DEFAULT_STATUS_BADGES",
     "bucket_entries",
     "lease_held",
-    "max_recent_upsert_epoch",
-    "merge_state",
+    "merge_comment_only_state",
     "parse_state",
     "prepare_for_render",
     "render_body",
     "results_subset",
 )
 load("../private/lib/bazel_results.axl", "format_run_date", "now_ms")
-load("../private/lib/ci.axl", "detect_ci_host")
-load("../private/lib/environment.axl", "feature_logger", "workflows_results_url")
+load("../private/lib/environment.axl", "feature_logger")
+load("../private/lib/github.axl", "github")
 load("../private/lib/gitlab.axl", "gitlab")
 load("../private/lib/gitlab_detect.axl", "detect_gitlab_mr")
 load("../private/lib/gitlab_token_cache.axl", "gitlab_token_cache")
-load("../private/lib/lifecycle.axl", "TaskLifecycleTrait", "TaskUpdate")
-load(
-    "../private/lib/rate_limit.axl",
-    "BUCKET_APP",
-    "effective_throttle_factor",
-    "epoch_now_s",
-    "usage_footer",
-)
+load("../private/lib/lifecycle.axl", "TaskLifecycleTrait")
+load("../private/lib/rate_limit.axl", "epoch_now_s")
 
 _LOG = feature_logger("GitLab status comments")
 
@@ -89,16 +76,16 @@ def _ci_run_url(env):
 
 def _own_entry(ctx, _state, run_id, run_attempt, job_name):
     """Snapshot this task's current state as an entry dict shaped for
-    `merge_state` / `render_body`. Caller refreshes on each publish so
-    `check_run_url` (published asynchronously by GitlabCommitStatuses)
-    and live phase info flow through.
+    `merge_comment_only_state` / `render_body`. Caller refreshes on each
+    publish so `check_run_url` (published asynchronously by
+    GitlabCommitStatuses) and live phase info flow through.
     """
     base = _state.get("_own_base", {})
     snapshot = dict(base)
     snapshot.update(_state.get("_own_live", {}))
 
     # `workflow_run_id` is the pipeline id; mirrors the GH state-block
-    # key so `merge_state` works unchanged. Stringified for byte-stable
+    # key so the shared merge works unchanged. Stringified for byte-stable
     # serialization (matches GH path).
     snapshot["workflow_run_id"] = str(run_id)
     snapshot["workflow_name"] = _state.get("_workflow_name", "")
@@ -145,8 +132,8 @@ def _gitlab_status_comments(ctx: FeatureContext):
     if not run_id:
         # Fall back to the MR IID so single-pipeline coordination still
         # works in the local-sim case where no real pipeline exists. A
-        # synthetic run_id is fine — `merge_state` only uses it as a
-        # slot key, not as something it dereferences against GL.
+        # synthetic run_id is fine — it's only used as a slot key, not
+        # dereferenced against GL.
         run_id = "local-mr-%d" % mr_iid
         _LOG.trace("No CI_PIPELINE_ID; using synthetic run_id=%s for local-sim coordination" % run_id)
 
@@ -280,81 +267,91 @@ def _gitlab_status_comments(ctx: FeatureContext):
                 _LOG.trace("Cleanup of duplicate note %s failed; will retry next cycle" % d["id"])
         return True
 
+    def _render_note(ctx, state, now_epoch):
+        """Render `(stable_body, final_body)` for the MR note from a merged
+        `state` dict. `stable_body` zeros the live-only fields so the
+        unchanged-content short-circuit fires when nothing changed. The
+        embedded state block is the fallback coordination store when the
+        Aspect API is unreachable."""
+        prepared = prepare_for_render(state["entries"])
+        sections = bucket_entries(prepared)
+        started_at = format_run_date(ctx, _earliest_start_ms(prepared) or now_ms(ctx))
+
+        def _body(stable):
+            s = dict(state)
+            s["last_upsert_epoch_s"] = 0 if stable else now_epoch
+            return render_body(ctx, marker, prepared, started_at, body_template, status_badges, sections, state = s)
+
+        return (_body(True), _body(False))
+
+    def _post(ctx, token, state, now_epoch):
+        """Render the merged `state` and upsert the MR note if it changed."""
+        stable_body, final_body = _render_note(ctx, state, now_epoch)
+        if _state.get("_last_stable_body") == stable_body:
+            return
+        if not _upsert_note(ctx, token, final_body):
+            return
+        _state["_last_stable_body"] = stable_body
+
     def _publish(ctx, final = False):
         token = _state.get("_gitlab_token")
         if not token:
             return
 
         own_entry = _own_entry(ctx, _state, run_id, run_attempt, job_name)
+        now_epoch = epoch_now_s(ctx.std)
 
+        # Contribute to the Aspect API, which merges our entry with every
+        # sibling job's and tells us whether to post this cycle (same
+        # coordination path as GitHub; `scm` keeps GitLab's state disjoint).
+        request = {
+            "scm": "gitlab",
+            "owner": project_path,
+            "repo": str(mr_iid),
+            "pr_number": mr_iid,
+            "head_sha": head_sha,
+            "run_id": run_id,
+            "workflow_name": workflow_name,
+            "entries": [own_entry],
+            "final": final,
+            "min_interval_s": min_poll_interval_seconds,
+        }
+        pending = _state.pop("_pending_post", None)
+        if pending:
+            request["posted"] = pending
+
+        result = github.status_comment_contribute(ctx, request)
+        if not result.get("success"):
+            _LOG.trace("status-comment API unavailable (%s); using note-state fallback" % result.get("error", ""))
+            _publish_via_note_state(ctx, token, own_entry, now_epoch, final)
+            return
+
+        if not result.get("should_post"):
+            return
+
+        before = _state.get("_last_stable_body")
+        _post(ctx, token, result["state"], now_epoch)
+        if _state.get("_last_stable_body") != before:
+            # Confirm the post on our next contribution so the server clears
+            # the grant and records the comment id.
+            _state["_pending_post"] = {"comment_id": str(_state.get("_note_id", ""))}
+
+    def _publish_via_note_state(ctx, token, own_entry, now_epoch, final):
+        """Fallback when the Aspect API is unreachable: the MR note's own state
+        block is the shared store. Read the note, merge our entry (preserving
+        sibling rows for our pipeline), render, and post under a time lease so
+        concurrent tasks don't all PATCH at once."""
         existing_body = _fetch_existing_note_body(ctx, token)
         if existing_body == None:
             return
         parsed = parse_state(existing_body)
-        cross_workflow_lease_epoch = parsed["last_upsert_epoch_s"] if parsed else 0
 
-        now_epoch = epoch_now_s(ctx.std)
-        elapsed_s = max(0, now_epoch - _state.get("_task_started_at_s", now_epoch))
-        factor = effective_throttle_factor(ctx, BUCKET_APP, elapsed_s, min_poll_interval_seconds)
-        lease_window_s = min_poll_interval_seconds * factor
-
-        # Terminal updates bypass the lease — the verdict has to land
-        # even if a sibling published seconds ago. The body-diff
-        # short-circuit below still gates the redundant PATCH.
-        if not final and lease_held(now_epoch, cross_workflow_lease_epoch, lease_window_s):
+        lease_epoch = parsed["last_upsert_epoch_s"] if parsed else 0
+        if not final and lease_held(now_epoch, lease_epoch, min_poll_interval_seconds):
             return
 
-        # Merge: my entry + every other entry the comment knows about.
-        # `merge_state` is the GH-feature helper; it slot-overlays
-        # by workflow_run_id (pipeline id) and dedups per-task by
-        # `(name, key)`. Single-pipeline case: only the local pipeline
-        # has a slot; multi-pipeline case: every pipeline contributes.
-        new_state = merge_state(parsed, head_sha, run_id, workflow_name, [own_entry], {})
-        prepared = prepare_for_render(new_state["entries"])
-        sections = bucket_entries(prepared)
-
-        # Earliest start across all entries — pinned to the run's
-        # wall-clock start so the body's headline timestamp doesn't
-        # wobble across PATCHes.
-        earliest_ms = _earliest_start_ms(prepared)
-        started_at = format_run_date(ctx, earliest_ms or now_ms(ctx))
-
-        # Two renders mirroring the GH path: `stable_body` zeros out
-        # the live-only fields so the unchanged-content short-circuit
-        # fires when no task state changed. `final_body` carries the
-        # live timestamp + quota footer + lease-stamped state block.
-        stable_state = dict(new_state)
-        stable_state["last_upsert_epoch_s"] = 0
-        stable_body = render_body(
-            ctx,
-            marker,
-            prepared,
-            started_at,
-            body_template,
-            status_badges,
-            sections,
-            state = stable_state,
-        )
-        if _state.get("_last_stable_body") == stable_body:
-            return
-
-        final_state = dict(new_state)
-        final_state["last_upsert_epoch_s"] = now_epoch
-        final_body = render_body(
-            ctx,
-            marker,
-            prepared,
-            started_at,
-            body_template,
-            status_badges,
-            sections,
-            state = final_state,
-        )
-
-        if not _upsert_note(ctx, token, final_body):
-            return
-        _state["_last_stable_body"] = stable_body
-        _state["_last_upsert_epoch_s"] = now_epoch
+        new_state = merge_comment_only_state(parsed, head_sha, run_id, workflow_name, [own_entry])
+        _post(ctx, token, new_state, now_epoch)
 
     def _earliest_start_ms(entries):
         ms_values = [e.get("start_time_ms", 0) for e in entries if e.get("start_time_ms", 0) > 0]
@@ -434,13 +431,10 @@ GitlabStatusComments = feature(
         ),
         "min_poll_interval_seconds": args.int(
             default = 20,
-            description = "Minimum seconds between MR-note refreshes. Default 20s. Each refresh counts " +
-                          "against the GitLab API rate limit; on busy projects this interval will " +
-                          "automatically stretch further as the remaining quota shrinks or the run goes " +
-                          "on longer. When multiple tasks in the same pipeline write to the same MR note, " +
-                          "they coordinate via a lease so only one task refreshes the note per interval — " +
-                          "the cost stays flat regardless of how many run in parallel. Terminal task " +
-                          "verdicts always land immediately.",
+            description = "Minimum seconds between MR-note refreshes. Default 20s. The Aspect API " +
+                          "decides which task posts each interval so the cost stays flat regardless of " +
+                          "how many tasks run in parallel; this value gates the local fallback lease used " +
+                          "when the API is unreachable. Terminal task verdicts always land immediately.",
         ),
         "templates": args.custom(
             dict,
