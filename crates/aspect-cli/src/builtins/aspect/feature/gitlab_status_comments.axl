@@ -423,6 +423,7 @@ def _gitlab_status_comments(ctx: FeatureContext):
 MARKER_FMT = _MARKER_FMT
 
 GitlabStatusComments = feature(
+    summary = "Post live task status as a GitLab MR comment.",
     implementation = _gitlab_status_comments,
     enabled = True,
     args = {

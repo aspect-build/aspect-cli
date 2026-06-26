@@ -606,6 +606,7 @@ def _gitlab_lint_impl(ctx: FeatureContext):
     lint_trait.lint_end.append(_lint_end)
 
 GitlabLintComments = feature(
+    summary = "Post lint diagnostics as GitLab MR discussions.",
     implementation = _gitlab_lint_impl,
     enabled = True,
     args = {

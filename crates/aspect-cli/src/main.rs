@@ -157,6 +157,13 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                     cmd_for_help.print_help()?;
                     return Ok(ExitCode::SUCCESS);
                 }
+                Some("feature") => {
+                    let name = matches
+                        .subcommand_matches("feature")
+                        .and_then(|m| m.get_one::<String>("name"))
+                        .map(String::as_str);
+                    return Ok(cmd.print_feature_help(&cli_version, name));
+                }
                 _ => {}
             }
 

@@ -708,7 +708,7 @@ def _tips_impl(ctx):
 
 Tips = feature(
     display_name = "Tips",
-    summary = "Collect and surface non-fatal tips (suggestions / warnings / important notices) on each task. Disable with `--tips:enabled=false`, or in `.aspect/config.axl` set `ctx.features[Tips].enabled = False` after `load(\"@aspect//feature/tips.axl\", \"Tips\")`.",
+    summary = "Collect and surface non-fatal tips on each task.",
     implementation = _tips_impl,
     enabled = True,
     args = {

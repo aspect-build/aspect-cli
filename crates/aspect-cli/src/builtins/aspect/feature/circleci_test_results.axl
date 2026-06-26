@@ -158,8 +158,7 @@ def _circleci_test_results_impl(ctx: FeatureContext) -> None:
 
 CircleCITestResults = feature(
     display_name = "CircleCI Test Results",
-    summary = "Upload Bazel JUnit test results to CircleCI's Tests tab and Test Insights. " +
-              "Separate from artifact upload so it can be toggled independently.",
+    summary = "Upload Bazel JUnit results to CircleCI's Tests tab.",
     implementation = _circleci_test_results_impl,
     args = {
         "upload_test_results": args.string(
