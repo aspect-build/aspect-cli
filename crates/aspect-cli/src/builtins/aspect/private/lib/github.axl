@@ -455,10 +455,9 @@ def _read_rate_limit(ctx, token, api_base = DEFAULT_GITHUB_API):
     `resources.core` bucket; `reset` is absolute Unix seconds), or `None` on
     any failure. `GET /rate_limit` does not itself consume quota."""
     success, _status, body = _do_request(ctx, "GET", api_base + "/rate_limit", token, quiet_4xx_auth = True)
-    if not success:
+    if not success or type(body) != "dict":
         return None
-    parsed = json.try_decode(body, None)
-    core = (parsed or {}).get("resources", {}).get("core") if type(parsed) == "dict" else None
+    core = body.get("resources", {}).get("core")
     if type(core) != "dict" or type(core.get("remaining")) != "int" or type(core.get("reset")) != "int":
         return None
     return {"remaining": core["remaining"], "reset": core["reset"]}
