@@ -48,6 +48,7 @@ load(
     "DEFAULT_BODY_TEMPLATE",
     "DEFAULT_STATUS_BADGES",
     "bucket_entries",
+    "dedup_survivor",
     "lease_held",
     "merge_comment_only_state",
     "parse_state",
@@ -56,6 +57,7 @@ load(
     "render_body",
     "results_subset",
 )
+load("@std//time.axl", "sleep")
 load("../private/lib/bazel_results.axl", "format_run_date", "now_ms")
 load("../private/lib/environment.axl", "feature_logger")
 load("../private/lib/github.axl", "github")
@@ -66,6 +68,10 @@ load("../private/lib/lifecycle.axl", "TaskLifecycleTrait")
 load("../private/lib/rate_limit.axl", "epoch_now_s")
 
 _LOG = feature_logger("GitLab status comments")
+
+# One settle delay (seconds) for the create-time duplicate backstop — see the
+# GitHub feature's `_dedup_marker_comments` for the read-after-write rationale.
+_DEDUP_SETTLE_S = 3
 
 _MARKER_FMT = "<!-- aspect-ci-status:mr-%d -->"
 
@@ -213,8 +219,7 @@ def _gitlab_status_comments(ctx: FeatureContext):
 
     def _upsert_note(ctx, token, body):
         """PUT the existing note when its id is known, else POST a fresh
-        one. After a POST, re-list and dedup by marker so concurrent
-        writers converge on the lowest-id survivor."""
+        one (the create-time duplicate backstop runs in `_dedup_notes`)."""
         if _state.get("_note_id") != None:
             res = gitlab.notes.update(
                 ctx,
@@ -242,31 +247,40 @@ def _gitlab_status_comments(ctx: FeatureContext):
             _LOG.warn(ctx.std, "Create note failed: %s" % res.get("error", "unknown"))
             return False
         _state["_note_id"] = res["note_id"]
-
-        # Race mitigation: if two tasks both POSTed within the same
-        # window, keep the lowest note id and delete the rest. Stable
-        # choice across writers so they converge on the same survivor.
-        listed2 = gitlab.notes.list(ctx, token = token, project = project_path, mr_iid = mr_iid, api_base = api_base)
-        if not listed2["success"]:
-            return True
-        dupes = [n for n in listed2["notes"] if marker in (n.get("body") or "")]
-        if len(dupes) <= 1:
-            return True
-        dupes_sorted = sorted(dupes, key = lambda n: n["id"])
-        survivor = dupes_sorted[0]["id"]
-        _state["_note_id"] = survivor
-        for d in dupes_sorted[1:]:
-            del_res = gitlab.notes.delete(
-                ctx,
-                token = token,
-                project = project_path,
-                mr_iid = mr_iid,
-                note_id = d["id"],
-                api_base = api_base,
-            )
-            if not del_res["success"]:
-                _LOG.trace("Cleanup of duplicate note %s failed; will retry next cycle" % d["id"])
+        _dedup_notes(ctx, token)
         return True
+
+    def _dedup_notes(ctx, token):
+        """Converge concurrent first-posters on one note: keep the lowest
+        marker-note id and delete the rest.
+
+        Lists immediately; a confirmed duplicate converges at once. A racing
+        sibling's just-created note can lag in the notes list, so when only our
+        own note is visible it waits `_DEDUP_SETTLE_S` once and re-lists before
+        giving up. Runs only after a create — once `_note_id` is set, every
+        later cycle PUTs and never reaches here."""
+        for attempt in range(2):
+            if attempt:
+                sleep(_DEDUP_SETTLE_S)
+            listed = gitlab.notes.list(ctx, token = token, project = project_path, mr_iid = mr_iid, api_base = api_base)
+            if not listed["success"]:
+                return
+            survivor, losers = dedup_survivor(listed["notes"], marker)
+            if survivor == None:
+                continue
+            _state["_note_id"] = survivor
+            for loser_id in losers:
+                del_res = gitlab.notes.delete(
+                    ctx,
+                    token = token,
+                    project = project_path,
+                    mr_iid = mr_iid,
+                    note_id = loser_id,
+                    api_base = api_base,
+                )
+                if not del_res["success"]:
+                    _LOG.trace("Cleanup of duplicate note %s failed; will retry next cycle" % loser_id)
+            return
 
     def _render_note(ctx, state, now_epoch):
         """Render `(stable_body, final_body)` for the MR note from a merged
@@ -317,6 +331,7 @@ def _gitlab_status_comments(ctx: FeatureContext):
             "final": final,
             "min_interval_s": min_poll_interval_seconds,
         }
+
         # Peek (don't pop) — a failed contribute must not lose the pending
         # confirmation, or the server never learns the post landed.
         pending = _state.get("_pending_post")
@@ -330,7 +345,11 @@ def _gitlab_status_comments(ctx: FeatureContext):
             return
 
         # Contribute succeeded — the confirmation (if any) was delivered.
+        # Record that server coordination works so the note-state fallback only
+        # ever PATCHes (never creates out-of-band), keeping the server's
+        # single-poster election the sole note creator.
         _state.pop("_pending_post", None)
+        _state["_api_ok"] = True
 
         if not result.get("should_post"):
             return
@@ -339,6 +358,13 @@ def _gitlab_status_comments(ctx: FeatureContext):
         # back to records before the render path reads `c.command`/`c.target`.
         state = result["state"]
         rehydrate_entries(state.get("entries", []) or [])
+
+        # Resolve the note id before posting so we PATCH the existing note
+        # rather than create a duplicate: the server only learns the id once a
+        # poster confirms (one cycle after it posts), so a job granted before
+        # that confirmation lands must discover the marker note itself.
+        if _state.get("_note_id") == None:
+            _fetch_existing_note_body(ctx, token)
 
         before = _state.get("_last_stable_body")
         _post(ctx, token, state, now_epoch)
@@ -351,9 +377,16 @@ def _gitlab_status_comments(ctx: FeatureContext):
         """Fallback when the Aspect API is unreachable: the MR note's own state
         block is the shared store. Read the note, merge our entry (preserving
         sibling rows for our pipeline), render, and post under a time lease so
-        concurrent tasks don't all PATCH at once."""
+        concurrent tasks don't all PATCH at once.
+
+        Once server coordination has worked this run (`_api_ok`), this path may
+        only PATCH a note it already knows/discovers — never create one
+        out-of-band — so a transient API blip can't race a second note past the
+        server's single-poster election."""
         existing_body = _fetch_existing_note_body(ctx, token)
         if existing_body == None:
+            return
+        if _state.get("_note_id") == None and _state.get("_api_ok"):
             return
         parsed = parse_state(existing_body)
 

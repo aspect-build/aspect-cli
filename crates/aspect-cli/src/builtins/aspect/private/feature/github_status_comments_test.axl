@@ -33,6 +33,7 @@ load(
     "collect_repro_fix_rows",
     "collect_tip_rows",
     "dedup_for_display",
+    "dedup_survivor",
     "format_overflow_note",
     "lease_held",
     "merge_comment_only_state",
@@ -617,6 +618,34 @@ def _check_lease_held():
     # Floor at 0 → diff < window → lease held (safer than under).
     if not lease_held(now_epoch = 100, last_upsert_epoch = 150, lease_window_s = 10):
         fail("lease_held under clock skew (sibling ahead) should be True")
+
+def _check_dedup_survivor():
+    """dedup_survivor: deterministic lowest-id survivor over marker-bearing
+    items; no-op below two matches. Drives the create-time duplicate backstop
+    in both the GitHub and GitLab features."""
+    marker = "<!-- aspect-ci-status:pr-7 -->"
+    other = "<!-- something-else -->"
+
+    # No items / single match → nothing to converge.
+    _eq("dedup_survivor — empty list", dedup_survivor([], marker), (None, []))
+    only_one = [{"id": 5, "body": "x " + marker}]
+    _eq("dedup_survivor — single match", dedup_survivor(only_one, marker), (None, []))
+
+    # Two markers → lowest id survives, the rest are losers (regardless of list
+    # order, so concurrent writers agree on the same survivor).
+    items = [
+        {"id": 30, "body": "later " + marker},
+        {"id": 10, "body": "first " + marker},
+        {"id": 20, "body": other},
+        {"id": 40, "body": "third " + marker},
+    ]
+    survivor, losers = dedup_survivor(items, marker)
+    _eq("dedup_survivor — lowest marker id survives", survivor, 10)
+    _eq("dedup_survivor — others deleted (non-marker excluded)", losers, [30, 40])
+
+    # Missing/None body is treated as non-matching, not an error.
+    no_body = [{"id": 1}, {"id": 2, "body": None}, {"id": 3, "body": marker}]
+    _eq("dedup_survivor — missing body ignored", dedup_survivor(no_body, marker), (None, []))
 
 def _check_state_serialize_round_trip():
     """serialize_state → parse_state round-trips head_sha, lease epoch,
@@ -1551,6 +1580,7 @@ def _test_impl(ctx):
     _check_repro_dedup_consecutive_headings(ctx)
     _check_format_http_failure_detail()
     _check_lease_held()
+    _check_dedup_survivor()
     _check_state_serialize_round_trip()
     _check_parse_state_absent()
     _check_parse_state_malformed()
