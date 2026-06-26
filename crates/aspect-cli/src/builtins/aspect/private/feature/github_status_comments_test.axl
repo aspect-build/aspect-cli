@@ -4,17 +4,16 @@ Run with:
   aspect dev test-pr-comment-snapshots
 
 Dry-run style — we don't actually invoke the GitHub Issues API. We
-construct artifact-payload-shaped entry dicts (matching what
-`_publish_self` writes to the per-task task.json), pass them through
-`_prepare_for_render` + `_bucket_entries` + `_render_body`, and print
-the resulting Markdown body for each scenario.
+construct contribution-entry dicts (the per-task shape the coordination
+state holds), pass them through `_prepare_for_render` + `_bucket_entries`
++ `_render_body`, and print the resulting Markdown body for each scenario.
 
 Coverage:
   - All-running, mixed running + failed, all-passed clean,
     flake-only-warning, lint-warnings, format-diffs,
     delivery mixed-warn, aborted, all-failed, empty
   - Link availability variants (CI Run only, no Aspect, no Check, all)
-  - Live phase + ProgressStyles round-trip via the artifact-shape dict
+  - Live phase + ProgressStyles round-trip via the entry dict
   - Failed-in-phase prefix
   - Tips aggregation: single-task, multi-task dedup + attribution,
     severity-sort with the `_MAX_SUBORDINATE_TIPS` cap on
@@ -96,14 +95,14 @@ def _with_commands(data, repro = [], fix = []):
     `(command, description)` tuples (description usually `""`). Use
     in scenarios that need to assert the aggregator's repro / fix
     rendering — the producers normally append these at terminal-emit
-    time, but the snapshot tests fabricate the artifact-payload
-    shape directly so the inputs are spelled out here.
+    time, but the snapshot tests fabricate the entry shape directly so
+    the inputs are spelled out here.
 
     Runs the dicts through `rehydrate_commands` so the fixture matches
-    what `_list_and_download_workflow_artifacts` hands the renderer
-    after the JSON round-trip — `ReproFixCommand` records, not raw
-    dicts. Without this the renderer would trip on `c.command`
-    record-attribute access.
+    what the renderer receives after entries round-trip through JSON
+    (the coordination API or the comment state block) — `ReproFixCommand`
+    records, not raw dicts. Without this the renderer would trip on
+    `c.command` record-attribute access.
     """
     out = dict(data)
     out["repro_commands"] = rehydrate_commands(
@@ -313,9 +312,8 @@ def _entry(
         failed_in_phase = "",
         start_time_ms = _DEFAULT_START_MS,
         tips = None):
-    """Build an artifact-payload-shaped entry. Mirrors what
-    `_publish_self` writes to task.json so the test exercises the same
-    on-wire shape sibling jobs would read.
+    """Build a contribution-entry dict — the per-task shape the
+    coordination state holds and the renderer consumes.
 
     Emulates the producer-side composition: `body` is filled from
     `_body_for(kind, status, data)` matching what each real producer
@@ -963,8 +961,8 @@ def _check_format_overflow_note():
     )
 
 def _check_parse_state_absent():
-    """parse_state returns None when the body has no state block —
-    callers fall back to swarm-only behavior."""
+    """parse_state returns None when the body has no state block (e.g.
+    the comment doesn't exist yet, so there's no prior state to merge)."""
     _eq("parse_state — empty body", parse_state(""), None)
     _eq("parse_state — body without marker", parse_state("# heading\n\nsome content\n"), None)
 
@@ -1072,10 +1070,9 @@ def _check_merge_state_falls_back_to_snapshot_when_refresh_missing():
 
 def _check_merge_state_per_task_union_with_snapshot():
     """When the cross-workflow refresh returns a SUBSET of the snapshot's
-    tasks (e.g. an artifact-listing eventual-consistency window briefly
-    hides some artifacts), per-task union keeps the snapshot rows for
-    tasks the refresh didn't return. Without this, the comment would
-    flap between "many tasks" and "few tasks" as the listing converged.
+    tasks, per-task union keeps the snapshot rows for tasks the refresh
+    didn't return. Without this, the comment would flap between "many
+    tasks" and "few tasks" as state converges.
 
     Refresh wins for tasks it does return — status updates on those
     tasks land in this cycle."""
@@ -1089,8 +1086,8 @@ def _check_merge_state_per_task_union_with_snapshot():
         ],
     }
 
-    # Refresh returned only `lint` (with updated status). `test` and
-    # `build` were briefly invisible in the listing.
+    # Refresh returned only `lint` (with updated status); `test` and
+    # `build` were briefly absent from the refresh.
     partial_refresh = [
         {"kind": "lint", "name": "lint", "workflow_run_id": "200", "status": "passed"},
     ]
@@ -1102,8 +1099,7 @@ def _check_merge_state_per_task_union_with_snapshot():
     _eq("merge — per-task union: no rows dropped", len(new["entries"]), 3)
 
 def _check_merge_state_empty_refresh_keeps_snapshot():
-    """An empty refresh result (the listing was authoritative but
-    returned no artifacts) still keeps the snapshot — equivalent to
+    """An empty refresh result still keeps the snapshot — equivalent to
     refresh-missing."""
     existing = {
         "head_sha": "abc",
@@ -1178,8 +1174,8 @@ def _check_merge_state_workflow_runs_sorted():
 def _check_merge_state_entries_sorted():
     """merge_state's entries are sorted deterministically across
     (workflow_run_id, job, key, name, run_attempt) so the serialized
-    block is byte-stable across writers — even when each writer
-    discovers its swarm in a different artifact-id order."""
+    block is byte-stable across writers — even when each writer merges
+    sibling entries in a different order."""
     my_entries = [
         {"kind": "z", "name": "z", "job": "j", "workflow_run_id": "100", "run_attempt": "1"},
         {"kind": "a", "name": "a", "job": "j", "workflow_run_id": "100", "run_attempt": "1"},
@@ -1525,10 +1521,11 @@ def _check_repro_dedup_consecutive_headings(ctx):
     exactly once under the Fix section, not twice.
     """
 
-    # Entries are shaped like what comes back from `_list_and_download_workflow_artifacts`
-    # after `json.try_decode`: plain dicts (records lost their type on JSON
-    # encode). The real read path rehydrates the command lists at the
-    # boundary; do the same here so we exercise the production code path.
+    # Entries are shaped like what the renderer receives after they
+    # round-trip through JSON (the coordination API or the comment state
+    # block): plain dicts (records lost their type on JSON encode). The real
+    # read path rehydrates the command lists at the boundary; do the same
+    # here so we exercise the production code path.
     entries = [
         {
             "kind": "buildifier",

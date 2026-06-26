@@ -30,8 +30,7 @@ per-task identifier. The file is keyed by a hash of
 `(project_path, sorted roles list)` so callers requesting different
 roles get separate cache slots. Each slot stores JSON
 `{token, installation_id, installation_proof}` so the cached
-installation-ownership proof survives across sibling callers (a bare-token
-slot from the pre-proof format still reads, with an empty proof).
+installation-ownership proof survives across sibling callers.
 
 ## Cache invariants
 
@@ -76,10 +75,7 @@ def _read_slot(ctx, path, _extra):
     `_extra` with the stashed installation proof.
 
     The slot is JSON `{token, installation_id, installation_proof}`. A
-    bare-token slot (the pre-proof format) decodes as a plain string and
-    yields an empty proof — harmless for the token-only callers, and the
-    status-comment caller falls back to tenant-grain coordination until the
-    next mint rewrites the slot."""
+    non-JSON slot is read defensively as a bare token (empty proof)."""
     raw = ctx.std.fs.read_to_string(path).strip()
     if not raw:
         return None
@@ -142,4 +138,8 @@ def get_or_mint(ctx, project_path, project_id = None, profile = None, roles = No
 
 gitlab_token_cache = struct(
     get_or_mint = get_or_mint,
+    # Test-only hooks.
+    slot_key = _slot_key,
+    slot_path = _slot_path,
+    read_slot = _read_slot,
 )

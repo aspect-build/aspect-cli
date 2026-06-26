@@ -59,7 +59,7 @@ load(
     "render_body",
     "results_subset",
 )
-load("@std//time.axl", "sleep")
+load("@std//time.axl", "monotonic", "sleep")
 load("../private/lib/bazel_results.axl", "format_run_date", "now_ms")
 load("../private/lib/environment.axl", "feature_logger")
 load("../private/lib/github.axl", "github")
@@ -67,7 +67,14 @@ load("../private/lib/gitlab.axl", "gitlab")
 load("../private/lib/gitlab_detect.axl", "detect_gitlab_mr")
 load("../private/lib/gitlab_token_cache.axl", "gitlab_token_cache")
 load("../private/lib/lifecycle.axl", "TaskLifecycleTrait")
-load("../private/lib/rate_limit.axl", "epoch_now_s")
+load(
+    "../private/lib/rate_limit.axl",
+    "BUCKET_APP",
+    "PHASE_FALL_THROUGH",
+    "PHASE_SUPPRESS",
+    "epoch_now_s",
+    "should_emit_phase_change",
+)
 
 _LOG = feature_logger("GitLab status comments")
 
@@ -465,6 +472,33 @@ def _gitlab_status_comments(ctx: FeatureContext):
             _state["_failed_in_phase"] = _state.get("_current_phase", "")
 
         _refresh_own_base(ctx, status, update, elapsed_ms)
+
+        # Bypass the throttle on terminal verdicts and the first priority event
+        # (spawn-label flip); otherwise pace contributes to the Aspect API by
+        # `min_poll_interval_seconds`, mirroring `GithubStatusComments`. The
+        # server still gates the actual note PATCH. GitLab has no budget-derived
+        # cadence, so the configured floor is the interval.
+        is_initial = update.priority and not _state.get("_saw_priority", False)
+        if update.priority:
+            _state["_saw_priority"] = True
+        if not (final or is_initial):
+            now = monotonic()
+            phase_result = should_emit_phase_change(
+                ctx,
+                BUCKET_APP,
+                update,
+                _state,
+                now,
+                "_last_phase_change_s",
+                "_last_publish_s",
+                scale = 1,
+            )
+            if phase_result == PHASE_SUPPRESS:
+                return
+            if phase_result == PHASE_FALL_THROUGH:
+                if now - _state.get("_last_publish_s", 0.0) < min_poll_interval_seconds:
+                    return
+                _state["_last_publish_s"] = now
 
         _publish(ctx, final = final)
 

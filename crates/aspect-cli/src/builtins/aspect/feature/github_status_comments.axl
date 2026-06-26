@@ -1276,11 +1276,12 @@ def _github_status_comments(ctx: FeatureContext):
         _LOG.info(ctx.std, "Missing CI run id (%s); skipping." % host["marker"])
         return
 
-    # Per-job CI run URL: GHA assembles the run/job URL; other hosts come from
-    # `resolve_build_url` (job-scoped from env). Resolved at init with the App
-    # token for the GHA per-job upgrade.
+    # GHA assembles a run-level URL from env here as a fallback; other hosts
+    # leave this empty. The richer per-job URL is resolved in `_init` via
+    # `resolve_build_url` (App-token-authenticated on GHA) into
+    # `_state["_ci_link_url"]`, which the render path prefers over this value.
     ci_run_url = _ci_run_url(ctx.std.env) if host["marker"] == "GITHUB_ACTIONS" else ""
-    min_poll_interval_seconds = ctx.args.min_poll_interval_seconds
+    min_poll_interval_seconds = max(1, ctx.args.min_poll_interval_seconds)
 
     # args.custom(dict, ...) hands None at runtime, not the declared default.
     templates = ctx.args.templates or {}
@@ -1612,6 +1613,15 @@ def _github_status_comments(ctx: FeatureContext):
             return
 
         new_state = _merge_comment_only_state(parsed, head_sha, run_id, workflow_name, [own_entry])
+
+        # Seed the prior sticky-selection sets from the existing comment so
+        # capped sections don't flip-flop across fallback cycles (the merge
+        # carries only entries/runs). Drop them on a new push, matching the
+        # head_sha reset in `_merge_state`.
+        same_push = bool(parsed) and parsed.get("head_sha") == head_sha
+        for k in ("shown_snippets", "shown_repros", "shown_fixes"):
+            new_state[k] = parsed.get(k, []) if same_push else []
+
         sel = _select_for_render(new_state)
         new_state["shown_snippets"] = sel["shown_snippets"]
         new_state["shown_repros"] = sel["shown_repros"]
