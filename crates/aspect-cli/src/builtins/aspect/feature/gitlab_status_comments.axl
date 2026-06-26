@@ -7,9 +7,11 @@ but uses GitLab Merge Request Notes instead of GitHub Issue Comments.
 ## Cross-task coordination
 
 Coordination goes through the Aspect API, same as `GithubStatusComments`:
-each task POSTs its own entry to `POST /scm/status-comment/contribute`
-(`scm: "gitlab"`) and gets back the merged set of all tasks' entries plus a
-directive on whether *it* should post the note this cycle. The server owns
+each task POSTs its own entry to the provider-agnostic
+`POST /status-comments/contribute` (`scm: "gitlab"` in the body; the endpoint
+stores GitHub PRs and GitLab MRs in disjoint state keyed by `scm`) and gets
+back the merged set of all tasks' entries plus a directive on whether *it*
+should post the note this cycle. The server owns
 the merge + post throttle; this feature only renders the returned state and
 upserts the GitLab MR note (with the GitLab App token).
 
@@ -159,6 +161,7 @@ def _gitlab_status_comments(ctx: FeatureContext):
         if _state.get("_gitlab_token"):
             return True
         auth_reason = {}
+        auth_extra = {}
         token = gitlab_token_cache.get_or_mint(
             ctx,
             project_path = project_path,
@@ -171,6 +174,7 @@ def _gitlab_status_comments(ctx: FeatureContext):
             # `api`-scoped, request `api` here directly.
             roles = ["api"],
             _reason = auth_reason,
+            _extra = auth_extra,
         )
         if not token:
             _LOG.warn(ctx.std, "Authentication failed for %s — %s" % (
@@ -179,6 +183,11 @@ def _gitlab_status_comments(ctx: FeatureContext):
             ))
             return False
         _state["_gitlab_token"] = token
+
+        # Installation-ownership proof echoed to the contribute endpoint so the
+        # server can isolate this installation's coordination state.
+        _state["_installation_id"] = auth_extra.get("installation_id", "")
+        _state["_installation_proof"] = auth_extra.get("installation_proof", "")
         return True
 
     def _fetch_existing_note_body(ctx, token):
@@ -321,6 +330,8 @@ def _gitlab_status_comments(ctx: FeatureContext):
         # coordination path as GitHub; `scm` keeps GitLab's state disjoint).
         request = {
             "scm": "gitlab",
+            "installation_id": _state.get("_installation_id", ""),
+            "installation_proof": _state.get("_installation_proof", ""),
             "owner": project_path,
             "repo": str(mr_iid),
             "pr_number": mr_iid,

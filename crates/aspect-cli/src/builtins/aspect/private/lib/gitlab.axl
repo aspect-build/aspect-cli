@@ -460,13 +460,18 @@ def _missing_credentials_reason(ctx):
     _, msg = _classify_missing_credentials(ctx)
     return msg
 
-def _authenticate(ctx, project_path, project_id = None, profile = None, roles = None, _reason = None):
+def _authenticate(ctx, project_path, project_id = None, profile = None, roles = None, _reason = None, _extra = None):
     """Exchange Aspect credentials for a GitLab token via the Aspect
     GitLab App. Requires `project_path`; optional `project_id` is a
     numeric hint (server treats `project_path` as authoritative).
 
     Returns the token, or None with `_reason` populated on failure
     (stable `kind` from `_AUTH_KIND_*` + human-readable `reason`).
+
+    On success, `_extra` (when provided) is populated with the
+    installation-ownership fields the mint returns — `installation_id` and
+    `installation_proof` — which the status-comment feature echoes to the
+    contribute endpoint as proof of installation ownership.
     """
     if not project_path:
         _set_auth_reason(_reason, _AUTH_KIND_NO_PROJECT_PATH, "project_path not provided")
@@ -515,6 +520,9 @@ def _authenticate(ctx, project_path, project_id = None, profile = None, roles = 
         # `_reason` error path instead of crashing the parent task.
         parsed = json.try_decode(resp.body, None)
         if parsed != None and "token" in parsed:
+            if _extra != None:
+                _extra["installation_id"] = parsed.get("installation_id", "")
+                _extra["installation_proof"] = parsed.get("installation_proof", "")
             return parsed["token"]
         snippet = (resp.body or "")[:200].replace("\n", " ")
         _set_auth_reason(

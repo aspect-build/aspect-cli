@@ -403,7 +403,7 @@ def _status_comment_contribute(ctx, request, profile = None):
     back the merged set of all jobs' contributions + a posting directive.
 
     Every job POSTs its own contribution to
-    `POST /scm/status-comment/contribute`; the server stores + merges the
+    `POST /status-comments/contribute`; the server stores + merges the
     cross-job state and decides who posts when. Rendering + posting stay
     client-side.
 
@@ -424,7 +424,7 @@ def _status_comment_contribute(ctx, request, profile = None):
         return {"success": False, "error": msg, "status": 0}
 
     resp = ctx.http().post(
-        url = ctx.aspect.auth.api_url + "/scm/status-comment/contribute",
+        url = ctx.aspect.auth.api_url + "/status-comments/contribute",
         headers = {
             "Authorization": "Bearer " + creds.access_token,
             "Content-Type": "application/json",
@@ -466,7 +466,7 @@ def _read_rate_limit(ctx, token, api_base = DEFAULT_GITHUB_API):
 
 def _status_comment_budget(ctx, request, profile = None):
     """Refresh the comment-refresh cadence for a long-running task via
-    `POST /scm/.../github/budget` — the client reports its installation's live
+    `POST /github/budget` — the client reports its installation's live
     rate-limit headroom and gets back an updated `desired_cadence_s`, without
     re-minting a token.
 

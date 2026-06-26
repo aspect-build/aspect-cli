@@ -1,7 +1,7 @@
 """GitHub Status Comments feature \342\200\224 aggregates per-task status from sibling CI jobs into one PR comment.
 
 Every job contributes its own task status to the Aspect API
-(`github.status_comment_contribute` → `POST /scm/status-comment/contribute`),
+(`github.status_comment_contribute` → `POST /status-comments/contribute`),
 which merges it with every sibling job's contribution and returns the
 aggregated state plus a directive on whether THIS job should post the comment
 this cycle. The server owns cross-job coordination + the post throttle;
@@ -1514,6 +1514,8 @@ def _github_status_comments(ctx: FeatureContext):
         # + posted hash and measures the next interval from the real post.
         request = {
             "scm": "github",
+            "installation_id": _state.get("_installation_id", ""),
+            "installation_proof": _state.get("_installation_proof", ""),
             "owner": owner,
             "repo": repo,
             "pr_number": pr_number,
