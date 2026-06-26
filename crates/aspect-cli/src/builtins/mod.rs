@@ -158,10 +158,10 @@ mod tests {
         vec![
             (
                 PathBuf::from("feature/github_status_checks.axl"),
-                b"load(\"../lib/artifacts.axl\", \"ArtifactsTrait\")\n" as &[u8],
+                b"load(\"../private/lib/artifacts.axl\", \"ArtifactsTrait\")\n" as &[u8],
             ),
             (
-                PathBuf::from("lib/artifacts.axl"),
+                PathBuf::from("private/lib/artifacts.axl"),
                 b"artifacts = struct()\n",
             ),
             (PathBuf::from("format.axl"), b"format = task()\n"),
@@ -170,7 +170,7 @@ mod tests {
 
     fn assert_full_tree(aspect_dir: &Path) {
         assert!(aspect_dir.join("feature/github_status_checks.axl").exists());
-        assert!(aspect_dir.join("lib/artifacts.axl").exists());
+        assert!(aspect_dir.join("private/lib/artifacts.axl").exists());
         assert!(aspect_dir.join("format.axl").exists());
     }
 
@@ -227,7 +227,7 @@ mod tests {
         assert!(tmp.path().join("abc123").join(COMPLETE_MARKER).exists());
         assert_eq!(
             fs::read(aspect_dir.join("feature/github_status_checks.axl")).unwrap(),
-            b"load(\"../lib/artifacts.axl\", \"ArtifactsTrait\")\n"
+            b"load(\"../private/lib/artifacts.axl\", \"ArtifactsTrait\")\n"
         );
         assert_no_debris(tmp.path());
     }
@@ -285,5 +285,195 @@ mod tests {
     fn evict_stale_dir_no_op_when_absent() {
         let tmp = tempfile::tempdir().unwrap();
         evict_stale_dir(&tmp.path().join("never-existed"));
+    }
+
+    /// Normalize a POSIX-ish path (resolve `.`/`..`, drop redundant `/`)
+    /// without touching the filesystem. Used to resolve a relative load
+    /// against the loading file's directory.
+    fn norm(path: &str) -> String {
+        let mut out: Vec<&str> = Vec::new();
+        for seg in path.split('/') {
+            match seg {
+                "" | "." => {}
+                ".." => {
+                    if matches!(out.last(), Some(&s) if s != "..") {
+                        out.pop();
+                    } else {
+                        out.push("..");
+                    }
+                }
+                s => out.push(s),
+            }
+        }
+        out.join("/")
+    }
+
+    /// Within the @aspect builtin tree, every load must use its canonical
+    /// *form*, which encodes the public/private boundary in the path syntax:
+    ///
+    ///   - a load whose target resolves OUTSIDE `private/` (a public
+    ///     task/facade or `feature/*`) is fully-qualified `@aspect//…`;
+    ///   - a load whose target resolves UNDER `private/` is RELATIVE
+    ///     (`./…` / `../…`) from the loading file.
+    ///
+    /// External namespaces (`@bazel//`, `@std//`, …) are always public and
+    /// left as-is. This makes buildifier's canonical single-block sort group
+    /// public (`@`-prefixed) loads above private (`.`-prefixed) ones with no
+    /// manual blocks. The guard fails on any load written in the wrong form.
+    ///
+    /// The tree is read from a compile-time `include_dir!` embed rather than
+    /// the filesystem so the test passes under Bazel's sandbox (where the
+    /// cargo workspace layout isn't on disk).
+    #[test]
+    fn loads_use_canonical_public_private_form() {
+        use include_dir::{Dir, include_dir};
+        static ASPECT_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/src/builtins/aspect");
+
+        // Real load(...) statements only — skip module docstrings (which may
+        // carry illustrative load() examples). A load line is one whose first
+        // non-space token is `load(` or that is a `"…"` string immediately
+        // following a `load(` opener; we approximate by scanning lines that
+        // start with `load("` plus the multi-line opener `load(` then a quoted
+        // path on the next non-blank line.
+        let load_re = regex_lite_load();
+
+        let mut violations = Vec::new();
+        for f in ASPECT_DIR.find("**/*.axl").unwrap() {
+            let rel = f.path();
+            let file_dir = rel
+                .parent()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let Some(contents) = f.as_file().and_then(|file| file.contents_utf8()) else {
+                continue;
+            };
+            for path in load_re(contents) {
+                let want = canonical_form(&path, &file_dir);
+                if let Some(want) = want {
+                    if want != path {
+                        violations.push(format!(
+                            "{}: load(\"{}\") should be load(\"{}\")",
+                            rel.display(),
+                            path,
+                            want
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(
+            violations.is_empty(),
+            "@aspect builtin loads must use canonical form (public → @aspect//…, \
+             private → relative ./ or ../). Offenders:\n  {}",
+            violations.join("\n  ")
+        );
+    }
+
+    /// Resolve a load path to its module-relative target and return the
+    /// canonical load string, or None for external namespaces (left as-is)
+    /// or unparseable input.
+    fn canonical_form(load_path: &str, file_dir: &str) -> Option<String> {
+        let target = if let Some(sub) = load_path.strip_prefix("@aspect//") {
+            norm(sub.trim_start_matches(':'))
+        } else if load_path.starts_with('@') {
+            return None; // external namespace
+        } else {
+            // relative: resolve against the loading file's dir
+            let joined = if file_dir.is_empty() {
+                load_path.to_string()
+            } else {
+                format!("{file_dir}/{load_path}")
+            };
+            norm(&joined)
+        };
+        let under_private = target == "private" || target.starts_with("private/");
+        if !under_private {
+            return Some(format!("@aspect//{target}"));
+        }
+        // relative form from file_dir to target
+        Some(rel_from(file_dir, &target))
+    }
+
+    /// Compute a relative `./`/`../` path from `from_dir` to `to` (both
+    /// module-relative, normalized). Mirrors posixpath.relpath + ensuring a
+    /// leading `./` for same-or-descendant targets.
+    fn rel_from(from_dir: &str, to: &str) -> String {
+        let from: Vec<&str> = if from_dir.is_empty() {
+            Vec::new()
+        } else {
+            from_dir.split('/').collect()
+        };
+        let to_parts: Vec<&str> = to.split('/').collect();
+        let mut i = 0;
+        while i < from.len() && i < to_parts.len() && from[i] == to_parts[i] {
+            i += 1;
+        }
+        let mut rel: Vec<String> = Vec::new();
+        for _ in i..from.len() {
+            rel.push("..".to_string());
+        }
+        for seg in &to_parts[i..] {
+            rel.push(seg.to_string());
+        }
+        let joined = rel.join("/");
+        if joined.starts_with("..") {
+            joined
+        } else {
+            format!("./{joined}")
+        }
+    }
+
+    /// Tiny load-path extractor: returns the first quoted string of every
+    /// `load(...)` after a module docstring. Avoids a regex-crate dep.
+    fn regex_lite_load() -> impl Fn(&str) -> Vec<String> {
+        |contents: &str| {
+            let mut out = Vec::new();
+            let lines: Vec<&str> = contents.lines().collect();
+            let mut i = 0;
+            // skip leading blank lines
+            while i < lines.len() && lines[i].trim().is_empty() {
+                i += 1;
+            }
+            // skip a module docstring
+            if i < lines.len() {
+                let s = lines[i].trim_start();
+                for q in ["\"\"\"", "'''"] {
+                    if let Some(rest) = s.strip_prefix(q) {
+                        if rest.contains(q) {
+                            i += 1;
+                        } else {
+                            i += 1;
+                            while i < lines.len() && !lines[i].contains(q) {
+                                i += 1;
+                            }
+                            i += 1;
+                        }
+                        break;
+                    }
+                }
+            }
+            while i < lines.len() {
+                let trimmed = lines[i].trim_start();
+                if trimmed.starts_with("load(") {
+                    // path is the first "..." on this or the next non-blank line
+                    let mut j = i;
+                    let mut path: Option<String> = None;
+                    while j < lines.len() && j <= i + 1 {
+                        if let Some(start) = lines[j].find('"') {
+                            if let Some(end) = lines[j][start + 1..].find('"') {
+                                path = Some(lines[j][start + 1..start + 1 + end].to_string());
+                                break;
+                            }
+                        }
+                        j += 1;
+                    }
+                    if let Some(p) = path {
+                        out.push(p);
+                    }
+                }
+                i += 1;
+            }
+            out
+        }
     }
 }

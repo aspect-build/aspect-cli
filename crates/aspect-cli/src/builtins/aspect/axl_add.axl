@@ -9,7 +9,7 @@ Usage:
 
 load("@std//base64.axl", "base64")
 load("@std//hash.axl", "sha512")
-load("./lib/environment.axl", "error")
+load("./private/lib/environment.axl", "error")
 
 # ANSI escape codes for terminal UI
 ORANGE = "\033[38;5;208m"

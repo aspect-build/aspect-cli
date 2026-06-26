@@ -1118,7 +1118,7 @@ def failed_labels_by_subcommand(data):
 def compute_reproducer_command(data, task_kind, max_chars = MAX_REPRO_CHARS):
     """Legacy helper preserved for test fixtures. New code should append
     `{"command", "description"}` entries to `data["repro_commands"]`
-    directly via `lib/repro_commands.axl::build_aspect_command`.
+    directly via `private/lib/repro_commands.axl::build_aspect_command`.
 
     Returns `(command, total)` from the deduped failure-label set.
     """

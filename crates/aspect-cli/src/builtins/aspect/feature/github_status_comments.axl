@@ -53,7 +53,7 @@ Body-template variables:
 load("@std//base64.axl", "base64")
 load("@std//time.axl", "monotonic", "time")
 load(
-    "../lib/bazel_results.axl",
+    "../private/lib/bazel_results.axl",
     "extract_failure_snippets",
     "format_duration_ms",
     "format_run_date",
@@ -62,15 +62,15 @@ load(
     "render_bes_url",
     "resolve_aspect_url",
 )
-load("../lib/check_dispatch.axl", "SURFACE_PR_COMMENT", "snippet_budget_for")
-load("../lib/checkrun.axl", "checkrun")
-load("../lib/ci.axl", "resolve_build_url")
-load("../lib/environment.axl", "feature_logger", "workflows_results_url")
-load("../lib/github.axl", "github")
-load("../lib/lifecycle.axl", "TaskLifecycleTrait")
-load("../lib/log_snippet.axl", "code_fence_for")
+load("../private/lib/check_dispatch.axl", "SURFACE_PR_COMMENT", "snippet_budget_for")
+load("../private/lib/checkrun.axl", "checkrun")
+load("../private/lib/ci.axl", "resolve_build_url")
+load("../private/lib/environment.axl", "feature_logger", "workflows_results_url")
+load("../private/lib/github.axl", "github")
+load("../private/lib/lifecycle.axl", "TaskLifecycleTrait")
+load("../private/lib/log_snippet.axl", "code_fence_for")
 load(
-    "../lib/rate_limit.axl",
+    "../private/lib/rate_limit.axl",
     "BUCKET_APP",
     "PHASE_FALL_THROUGH",
     "PHASE_SUPPRESS",
@@ -81,11 +81,11 @@ load(
     "should_emit_phase_change",
     "usage_footer",
 )
-load("../lib/repro_commands.axl", "ASPECT_CLI_INSTALL_HINT_MARKDOWN", "dedup_and_attribute", "rehydrate_commands")
-load("../lib/result_text.axl", "severity_for_status")
-load("../lib/tar.axl", "bsdtar")
+load("../private/lib/repro_commands.axl", "ASPECT_CLI_INSTALL_HINT_MARKDOWN", "dedup_and_attribute", "rehydrate_commands")
+load("../private/lib/result_text.axl", "severity_for_status")
+load("../private/lib/tar.axl", "bsdtar")
 load(
-    "../lib/tips.axl",
+    "../private/lib/tips.axl",
     "SURFACE_GITHUB_PR_SUMMARY",
     "TIP_IMPORTANT",
     "TIP_TEMPLATE_JINJA2",

@@ -22,8 +22,8 @@ Run with:
   aspect dev test-gitlab-features
 """
 
-load("../feature/gitlab_commit_statuses.axl", "DESCRIPTION_MAX", "state_for", "truncate_description")
-load("../feature/gitlab_status_comments.axl", _MARKER_FMT = "MARKER_FMT")
+load("@aspect//feature/gitlab_commit_statuses.axl", "DESCRIPTION_MAX", "state_for", "truncate_description")
+load("@aspect//feature/gitlab_status_comments.axl", _MARKER_FMT = "MARKER_FMT")
 
 def _eq(label, got, want):
     if got != want:

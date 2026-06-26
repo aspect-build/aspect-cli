@@ -7,11 +7,11 @@ independently. Opt-in (`upload_test_results = "none"` by default); only acts
 on CircleCI.
 """
 
-load("../bazel.axl", "BazelTrait")
-load("../lib/bazel_results.axl", "bes_get")
-load("../lib/circleci.axl", "circleci")
-load("../lib/environment.axl", "detect_ci", "info", "warn")
-load("../lib/tar.axl", "tar_create")
+load("@aspect//bazel.axl", "BazelTrait")
+load("../private/lib/bazel_results.axl", "bes_get")
+load("../private/lib/circleci.axl", "circleci")
+load("../private/lib/environment.axl", "detect_ci", "info", "warn")
+load("../private/lib/tar.axl", "tar_create")
 
 # bb_clientd FUSE mount root for bytestream:// URIs (see lib/artifacts.axl).
 _BB_CLIENTD_ROOT = "/mnt/ephemeral/buildbarn/bb_clientd"

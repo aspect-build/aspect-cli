@@ -16,14 +16,14 @@ API requires. Lint findings sit on the new (added/changed) side, so
 omitted.
 """
 
-load("../lib/environment.axl", "feature_logger")
-load("../lib/gitlab.axl", "gitlab")
-load("../lib/gitlab_detect.axl", "detect_gitlab_mr")
-load("../lib/gitlab_token_cache.axl", "gitlab_token_cache")
-load("../lib/lint_comments.axl", "build_marker", "extract_marker", "parse_marker", "suggestion_block")
-load("../lib/patch.axl", patch_hunk_edit_blocks = "hunk_edit_blocks", patch_parse = "parse")
-load("../lib/sarif.axl", "parse_sarif_diagnostics", "sarif_to_review_comments")
-load("../lint.axl", "LintTrait")
+load("@aspect//lint.axl", "LintTrait")
+load("../private/lib/environment.axl", "feature_logger")
+load("../private/lib/gitlab.axl", "gitlab")
+load("../private/lib/gitlab_detect.axl", "detect_gitlab_mr")
+load("../private/lib/gitlab_token_cache.axl", "gitlab_token_cache")
+load("../private/lib/lint_comments.axl", "build_marker", "extract_marker", "parse_marker", "suggestion_block")
+load("../private/lib/patch.axl", patch_hunk_edit_blocks = "hunk_edit_blocks", patch_parse = "parse")
+load("../private/lib/sarif.axl", "parse_sarif_diagnostics", "sarif_to_review_comments")
 
 _LOG = feature_logger("GitLab lint comments")
 

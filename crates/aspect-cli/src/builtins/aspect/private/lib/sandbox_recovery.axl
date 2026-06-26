@@ -39,7 +39,7 @@ exit; the final code is 1 (build failure), not retryable; the build_end
 hook returns early. The runner is healthy enough to produce a verdict.
 """
 
-load("../bazel.axl", "default_retry")
+load("@aspect//bazel.axl", "default_retry")
 
 def _signal_unhealthy(ctx, environment):
     """Best-effort invoke the Workflows agent's `signal_instance_unhealthy`

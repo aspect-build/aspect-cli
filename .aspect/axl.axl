@@ -3,35 +3,35 @@ Exercise axl
 """
 
 load("@aspect//delivery.axl", delivery_count_unexplained_unresolved = "count_unexplained_unresolved", delivery_fmt_elapsed = "fmt_elapsed", delivery_should_surface_phase2_stderr = "should_surface_phase2_stderr", delivery_should_upload_grpc_log = "should_upload_grpc_log")
-load("@aspect//lib/artifacts.axl", "artifact_name", "testlog_dest_dir")
-load("@aspect//lib/bazel_results.axl", "compute_reproducer_command", "init_data", "render_check_output", "resolve_aspect_url", "summary_title")
+load("@aspect//lint.axl", "file_uri_to_path", "filter_all", "filter_changeset", "linter_error_message")
+load("@aspect//private/lib/artifacts.axl", "artifact_name", "testlog_dest_dir")
+load("@aspect//private/lib/bazel_results.axl", "compute_reproducer_command", "init_data", "render_check_output", "resolve_aspect_url", "summary_title")
 load(
-    "@aspect//lib/build_metadata.axl",
+    "@aspect//private/lib/build_metadata.axl",
     "detect_vcs_from_host",
     "parse_git_remote_url",
     "version_gte",
     "version_tuple",
 )
-load("@aspect//lib/check_dispatch.axl", "SURFACE_PR_COMMENT", "SURFACE_STATUS_CHECK", "snippet_budget_for")
-load("@aspect//lib/ci.axl", "detect_build_url")
-load("@aspect//lib/deliveryd.axl", deliveryd_parse_endpoint = "parse_endpoint")
-load("@aspect//lib/environment.axl", "color_enabled", "detect_ci", "parse_git_url_name", "sanitize_filename")
+load("@aspect//private/lib/check_dispatch.axl", "SURFACE_PR_COMMENT", "SURFACE_STATUS_CHECK", "snippet_budget_for")
+load("@aspect//private/lib/ci.axl", "detect_build_url")
+load("@aspect//private/lib/deliveryd.axl", deliveryd_parse_endpoint = "parse_endpoint")
+load("@aspect//private/lib/environment.axl", "color_enabled", "detect_ci", "parse_git_url_name", "sanitize_filename")
 load(
-    "@aspect//lib/gazelle_results.axl",
+    "@aspect//private/lib/gazelle_results.axl",
     "dedupe_subtrees",
     "dir_at_or_below",
     "extract_changed_dirs",
 )
-load("@aspect//lib/github.axl", "detect_commit_sha", "github")
-load("@aspect//lib/lifecycle.axl", "ReproFixCommand")
-load("@aspect//lib/log_snippet.axl", "SnippetOptions", "code_fence_for", "extract_junit_failure", "extract_snippet")
-load("@aspect//lib/path_glob.axl", "match_any", "match_path")
-load("@aspect//lib/repro_commands.axl", "build_aspect_command", "dedup_and_attribute", "patch_download_cmd", "task_cli_path")
-load("@aspect//lib/result_text.axl", "severity_for_status")
-load("@aspect//lib/runnable.axl", "apparent_label", "runnable")
-load("@aspect//lib/sarif.axl", "get_sarif_summary", "parse_sarif", "parse_sarif_diagnostics", "sarif_to_review_comments")
-load("@aspect//lib/tips.axl", "tips")
-load("@aspect//lint.axl", "file_uri_to_path", "filter_all", "filter_changeset", "linter_error_message")
+load("@aspect//private/lib/github.axl", "detect_commit_sha", "github")
+load("@aspect//private/lib/lifecycle.axl", "ReproFixCommand")
+load("@aspect//private/lib/log_snippet.axl", "SnippetOptions", "code_fence_for", "extract_junit_failure", "extract_snippet")
+load("@aspect//private/lib/path_glob.axl", "match_any", "match_path")
+load("@aspect//private/lib/repro_commands.axl", "build_aspect_command", "dedup_and_attribute", "patch_download_cmd", "task_cli_path")
+load("@aspect//private/lib/result_text.axl", "severity_for_status")
+load("@aspect//private/lib/runnable.axl", "apparent_label", "runnable")
+load("@aspect//private/lib/sarif.axl", "get_sarif_summary", "parse_sarif", "parse_sarif_diagnostics", "sarif_to_review_comments")
+load("@aspect//private/lib/tips.axl", "tips")
 load("@demo//answer.axl", "ANSWER")
 load("./lambda.axl", "lambda_with_global_bind")
 

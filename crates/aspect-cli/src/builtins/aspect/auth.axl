@@ -1,4 +1,4 @@
-load("./lib/environment.axl", "error", "info")
+load("./private/lib/environment.axl", "error", "info")
 
 def _login_impl(ctx: TaskContext) -> int:
     if ctx.args.with_token and ctx.args.with_api_token:

@@ -1,16 +1,16 @@
 """A default 'run' task that builds a target with `bazel build` and runs the resulting binary."""
 
+load("@aspect//bazel.axl", "BazelTrait")
 load("@std//time.axl", "sleep_iter")
-load("./bazel.axl", "BazelTrait")
-load("./lib/artifacts.axl", "artifacts")
-load("./lib/bazel_flags.axl", "announce_bazel_args", "resolve_bazel_announce")
-load("./lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "init_data", "process_event", bazel_conclusion = "conclusion")
-load("./lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
-load("./lib/environment.axl", "error")
-load("./lib/health_check.axl", "HealthCheckTrait")
-load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "dispatch_task_update", "setup_phase", "task_update")
-load("./lib/runnable.axl", "RUN_IN_DESCRIPTION", "resolve_run_in", "runnable")
-load("./lib/tips.axl", "tips")
+load("./private/lib/artifacts.axl", "artifacts")
+load("./private/lib/bazel_flags.axl", "announce_bazel_args", "resolve_bazel_announce")
+load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "init_data", "process_event", bazel_conclusion = "conclusion")
+load("./private/lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
+load("./private/lib/environment.axl", "error")
+load("./private/lib/health_check.axl", "HealthCheckTrait")
+load("./private/lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "dispatch_task_update", "setup_phase", "task_update")
+load("./private/lib/runnable.axl", "RUN_IN_DESCRIPTION", "resolve_run_in", "runnable")
+load("./private/lib/tips.axl", "tips")
 
 def _terminal_status(data, exit_code):
     """Lifecycle status for the run task's terminal emit.

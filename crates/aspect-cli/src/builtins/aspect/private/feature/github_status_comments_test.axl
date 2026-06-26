@@ -24,7 +24,7 @@ Coverage:
 """
 
 load(
-    "./github_status_comments.axl",
+    "@aspect//feature/github_status_comments.axl",
     "DEFAULT_BODY_TEMPLATE",
     "DEFAULT_STATUS_BADGES",
     "MARKER_FMT",

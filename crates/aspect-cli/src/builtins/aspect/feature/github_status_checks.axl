@@ -18,15 +18,16 @@ Templates and metadata_keys are feature args:
         # Or ["*"] to show everything.
 """
 
+load("@aspect//lint.axl", "LintTrait")
 load(
-    "../lib/bazel_results.axl",
+    "../private/lib/bazel_results.axl",
     "format_run_date",
     "now_ms",
     "render_bes_url",
     "resolve_aspect_url",
 )
 load(
-    "../lib/check_dispatch.axl",
+    "../private/lib/check_dispatch.axl",
     "SURFACE_STATUS_CHECK",
     "apply_artifact_links",
     "kind_for_task",
@@ -35,20 +36,20 @@ load(
     "should_emit_update",
     "snippet_budget_for",
 )
-load("../lib/checkrun.axl", "checkrun")
-load("../lib/ci.axl", "detect_ci_host", "resolve_build_url")
-load("../lib/environment.axl", "feature_logger", "workflows_results_url")
-load("../lib/github.axl", "detect_commit_sha", "detect_github_repo", "github")
-load("../lib/lifecycle.axl", "TaskLifecycleTrait", "TaskUpdate")
+load("../private/lib/checkrun.axl", "checkrun")
+load("../private/lib/ci.axl", "detect_ci_host", "resolve_build_url")
+load("../private/lib/environment.axl", "feature_logger", "workflows_results_url")
+load("../private/lib/github.axl", "detect_commit_sha", "detect_github_repo", "github")
+load("../private/lib/lifecycle.axl", "TaskLifecycleTrait", "TaskUpdate")
 load(
-    "../lib/lint_results.axl",
+    "../private/lib/lint_results.axl",
     "lint_annotation_plan",
     LINT_ANNOTATIONS_PER_BATCH = "ANNOTATIONS_PER_BATCH",
     lint_chunk_annotations = "chunk_annotations",
     lint_compute_annotations = "compute_annotations",
 )
 load(
-    "../lib/rate_limit.axl",
+    "../private/lib/rate_limit.axl",
     "BUCKET_APP",
     "PHASE_FALL_THROUGH",
     "PHASE_SUPPRESS",
@@ -56,8 +57,7 @@ load(
     "should_emit_phase_change",
     "usage_footer",
 )
-load("../lib/tips.axl", "SURFACE_GITHUB_STATUS_CHECKS", "collect_tips_sorted")
-load("../lint.axl", "LintTrait")
+load("../private/lib/tips.axl", "SURFACE_GITHUB_STATUS_CHECKS", "collect_tips_sorted")
 
 _LOG = feature_logger("GitHub status checks")
 

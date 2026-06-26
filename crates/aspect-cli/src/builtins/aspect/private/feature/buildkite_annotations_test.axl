@@ -15,7 +15,7 @@ Coverage:
     all-skipped, delivery all-failed, soft-format passing with files.
 """
 
-load("./buildkite_annotations.axl", "format_body")
+load("@aspect//feature/buildkite_annotations.axl", "format_body")
 
 # Shared fixture factories — also consumed by github_status_comments_test.axl.
 load(
