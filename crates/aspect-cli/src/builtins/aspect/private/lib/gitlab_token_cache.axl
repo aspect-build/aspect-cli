@@ -28,7 +28,9 @@ State lives in a per-task file under tmpdir, scoped by
 aspect-cli process is one task, so the process id is naturally a
 per-task identifier. The file is keyed by a hash of
 `(project_path, sorted roles list)` so callers requesting different
-roles get separate cache slots.
+roles get separate cache slots. Each slot stores JSON
+`{token, installation_id, installation_proof}` so the cached
+installation-ownership proof survives across sibling callers.
 
 ## Cache invariants
 
@@ -68,7 +70,24 @@ def _slot_key(project_path, roles):
 def _slot_path(ctx, project_path, roles):
     return _cache_dir(ctx) + "/" + _slot_key(project_path, roles)
 
-def get_or_mint(ctx, project_path, project_id = None, profile = None, roles = None, _reason = None):
+def _read_slot(ctx, path, _extra):
+    """Read a cache slot, returning the token (or None) and populating
+    `_extra` with the stashed installation proof.
+
+    The slot is JSON `{token, installation_id, installation_proof}`. A
+    non-JSON slot is read defensively as a bare token (empty proof)."""
+    raw = ctx.std.fs.read_to_string(path).strip()
+    if not raw:
+        return None
+    parsed = json.try_decode(raw, None)
+    if type(parsed) == "dict" and "token" in parsed:
+        if _extra != None:
+            _extra["installation_id"] = parsed.get("installation_id", "")
+            _extra["installation_proof"] = parsed.get("installation_proof", "")
+        return parsed["token"] or None
+    return raw or None
+
+def get_or_mint(ctx, project_path, project_id = None, profile = None, roles = None, _reason = None, _extra = None):
     """Return a GitLab OAuth access token for `(project_path, roles)`,
     reusing a cached value when present.
 
@@ -79,14 +98,20 @@ def get_or_mint(ctx, project_path, project_id = None, profile = None, roles = No
     result to the slot file. Mint failures populate `_reason` (when
     provided) and return None, exactly like `gitlab.authenticate`.
 
+    `_extra` (when provided) is populated with the mint's
+    `installation_id` + `installation_proof` on both a hit and a miss, so
+    the status-comment feature can prove installation ownership to the
+    contribute endpoint. Token-only callers omit it.
+
     Callers should treat the returned token as opaque — never log it
     or persist it beyond the current operation. The cache itself is
     the only authorized persistence boundary.
     """
     path = _slot_path(ctx, project_path, roles)
     if ctx.std.fs.exists(path):
-        return ctx.std.fs.read_to_string(path).strip() or None
+        return _read_slot(ctx, path, _extra)
 
+    mint_extra = {}
     tok = gitlab.authenticate(
         ctx,
         project_path = project_path,
@@ -94,14 +119,27 @@ def get_or_mint(ctx, project_path, project_id = None, profile = None, roles = No
         profile = profile,
         roles = roles,
         _reason = _reason,
+        _extra = mint_extra,
     )
     if tok == None:
         return None
 
+    if _extra != None:
+        _extra["installation_id"] = mint_extra.get("installation_id", "")
+        _extra["installation_proof"] = mint_extra.get("installation_proof", "")
+
     ctx.std.fs.create_dir_all(_cache_dir(ctx))
-    ctx.std.fs.write(path, tok)
+    ctx.std.fs.write(path, json.encode({
+        "token": tok,
+        "installation_id": mint_extra.get("installation_id", ""),
+        "installation_proof": mint_extra.get("installation_proof", ""),
+    }))
     return tok
 
 gitlab_token_cache = struct(
     get_or_mint = get_or_mint,
+    # Test-only hooks.
+    slot_key = _slot_key,
+    slot_path = _slot_path,
+    read_slot = _read_slot,
 )

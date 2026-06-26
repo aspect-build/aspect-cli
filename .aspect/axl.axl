@@ -24,6 +24,7 @@ load(
     "extract_changed_dirs",
 )
 load("@aspect//private/lib/github.axl", "detect_commit_sha", "github")
+load("@aspect//private/lib/gitlab_token_cache.axl", "gitlab_token_cache")
 load("@aspect//private/lib/lifecycle.axl", "ReproFixCommand")
 load("@aspect//private/lib/log_snippet.axl", "SnippetOptions", "code_fence_for", "extract_junit_failure", "extract_snippet")
 load("@aspect//private/lib/path_glob.axl", "match_any", "match_path")
@@ -3486,9 +3487,85 @@ def impl(ctx: TaskContext) -> int:
     tc = test_gazelle_dir_helpers(tc)
     tc = test_log_snippet(ctx, tc, temp_dir)
     tc = test_bazel_render_snippets(ctx, tc, temp_dir)
+    tc = test_gitlab_token_cache(ctx, tc, temp_dir)
 
     print(tc, "tests passed")
     return 0
+
+def test_gitlab_token_cache(ctx: TaskContext, tc: int, temp_dir: str) -> int:
+    """Covers the installation-proof carriage added to the GitLab token
+    cache: `slot_key` normalization, `read_slot` (JSON + defensive
+    bare-token), and `get_or_mint`'s cache hit filling `_extra`."""
+    base = temp_dir + "/gitlab_token_cache_test"
+    if ctx.std.fs.exists(base):
+        ctx.std.fs.remove_dir_all(base)
+    ctx.std.fs.create_dir_all(base)
+
+    # slot_key: roles sort + dedup so any order shares a slot; no roles → _all.
+    tc = test_case(
+        tc,
+        gitlab_token_cache.slot_key("grp/proj", ["b", "a", "b"]) == gitlab_token_cache.slot_key("grp/proj", ["a", "b"]),
+        "slot_key normalizes role order + dedup",
+    )
+    tc = test_case(
+        tc,
+        gitlab_token_cache.slot_key("a/b/c", ["api"]) == "a__b__c@api.tok",
+        "slot_key encodes path slashes",
+    )
+    tc = test_case(
+        tc,
+        gitlab_token_cache.slot_key("grp/proj", None) == "grp__proj@_all.tok",
+        "slot_key uses _all when no roles",
+    )
+
+    # read_slot: JSON slot returns the token + fills _extra with the proof.
+    json_path = base + "/json.tok"
+    ctx.std.fs.write(json_path, json.encode({
+        "token": "glpat-xyz",
+        "installation_id": "inst-7",
+        "installation_proof": "proof-abc",
+    }))
+    extra = {}
+    tok = gitlab_token_cache.read_slot(ctx, json_path, extra)
+    tc = test_case(tc, tok == "glpat-xyz", "read_slot returns the JSON-slot token")
+    tc = test_case(tc, extra.get("installation_id") == "inst-7", "read_slot fills installation_id")
+    tc = test_case(tc, extra.get("installation_proof") == "proof-abc", "read_slot fills installation_proof")
+
+    # read_slot: a non-JSON slot reads defensively as a bare token, empty proof.
+    bare_path = base + "/bare.tok"
+    ctx.std.fs.write(bare_path, "glpat-plain")
+    bare_extra = {}
+    bare_tok = gitlab_token_cache.read_slot(ctx, bare_path, bare_extra)
+    tc = test_case(tc, bare_tok == "glpat-plain", "read_slot reads a bare-token slot")
+    tc = test_case(tc, bare_extra.get("installation_proof", "") == "", "bare-token slot has no proof")
+
+    # read_slot: empty file → None.
+    empty_path = base + "/empty.tok"
+    ctx.std.fs.write(empty_path, "")
+    tc = test_case(tc, gitlab_token_cache.read_slot(ctx, empty_path, {}) == None, "read_slot returns None for empty file")
+
+    # get_or_mint: a cache hit returns the token + fills _extra without minting.
+    # Point the cache dir at our temp dir and pre-write the slot.
+    prior = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_JOB_TMPDIR")
+    ctx.std.env.set_var("ASPECT_WORKFLOWS_RUNNER_JOB_TMPDIR", base)
+    slot = gitlab_token_cache.slot_path(ctx, "grp/proj", ["api"])
+    ctx.std.fs.create_dir_all(slot[:slot.rfind("/")])
+    ctx.std.fs.write(slot, json.encode({
+        "token": "glpat-cached",
+        "installation_id": "inst-9",
+        "installation_proof": "proof-9",
+    }))
+    hit_extra = {}
+    hit_tok = gitlab_token_cache.get_or_mint(ctx, project_path = "grp/proj", roles = ["api"], _extra = hit_extra)
+    tc = test_case(tc, hit_tok == "glpat-cached", "get_or_mint cache hit returns the token")
+    tc = test_case(tc, hit_extra.get("installation_proof") == "proof-9", "get_or_mint cache hit fills the proof")
+    if prior == None:
+        ctx.std.env.remove_var("ASPECT_WORKFLOWS_RUNNER_JOB_TMPDIR")
+    else:
+        ctx.std.env.set_var("ASPECT_WORKFLOWS_RUNNER_JOB_TMPDIR", prior)
+
+    ctx.std.fs.remove_dir_all(base)
+    return tc
 
 axl = task(
     group = ["tests"],

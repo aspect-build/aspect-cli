@@ -4,17 +4,16 @@ Run with:
   aspect dev test-pr-comment-snapshots
 
 Dry-run style — we don't actually invoke the GitHub Issues API. We
-construct artifact-payload-shaped entry dicts (matching what
-`_publish_self` writes to the per-task task.json), pass them through
-`_prepare_for_render` + `_bucket_entries` + `_render_body`, and print
-the resulting Markdown body for each scenario.
+construct contribution-entry dicts (the per-task shape the coordination
+state holds), pass them through `_prepare_for_render` + `_bucket_entries`
++ `_render_body`, and print the resulting Markdown body for each scenario.
 
 Coverage:
   - All-running, mixed running + failed, all-passed clean,
     flake-only-warning, lint-warnings, format-diffs,
     delivery mixed-warn, aborted, all-failed, empty
   - Link availability variants (CI Run only, no Aspect, no Check, all)
-  - Live phase + ProgressStyles round-trip via the artifact-shape dict
+  - Live phase + ProgressStyles round-trip via the entry dict
   - Failed-in-phase prefix
   - Tips aggregation: single-task, multi-task dedup + attribution,
     severity-sort with the `_MAX_SUBORDINATE_TIPS` cap on
@@ -32,11 +31,11 @@ load(
     "by_task_overflow",
     "collect_repro_fix_rows",
     "collect_tip_rows",
-    "dedup_by_run_attempt",
     "dedup_for_display",
+    "dedup_survivor",
     "format_overflow_note",
     "lease_held",
-    "max_recent_upsert_epoch",
+    "merge_comment_only_state",
     "merge_state",
     "parse_state",
     "prepare_for_render",
@@ -45,7 +44,6 @@ load(
     "select_snippets",
     "select_sticky",
     "serialize_state",
-    "should_quiet_delete_log",
     "snippet_key",
 )
 load(
@@ -97,14 +95,14 @@ def _with_commands(data, repro = [], fix = []):
     `(command, description)` tuples (description usually `""`). Use
     in scenarios that need to assert the aggregator's repro / fix
     rendering — the producers normally append these at terminal-emit
-    time, but the snapshot tests fabricate the artifact-payload
-    shape directly so the inputs are spelled out here.
+    time, but the snapshot tests fabricate the entry shape directly so
+    the inputs are spelled out here.
 
     Runs the dicts through `rehydrate_commands` so the fixture matches
-    what `_list_and_download_workflow_artifacts` hands the renderer
-    after the JSON round-trip — `ReproFixCommand` records, not raw
-    dicts. Without this the renderer would trip on `c.command`
-    record-attribute access.
+    what the renderer receives after entries round-trip through JSON
+    (the coordination API or the comment state block) — `ReproFixCommand`
+    records, not raw dicts. Without this the renderer would trip on
+    `c.command` record-attribute access.
     """
     out = dict(data)
     out["repro_commands"] = rehydrate_commands(
@@ -314,9 +312,8 @@ def _entry(
         failed_in_phase = "",
         start_time_ms = _DEFAULT_START_MS,
         tips = None):
-    """Build an artifact-payload-shaped entry. Mirrors what
-    `_publish_self` writes to task.json so the test exercises the same
-    on-wire shape sibling jobs would read.
+    """Build a contribution-entry dict — the per-task shape the
+    coordination state holds and the renderer consumes.
 
     Emulates the producer-side composition: `body` is filled from
     `_body_for(kind, status, data)` matching what each real producer
@@ -551,72 +548,6 @@ def _check_collect_tip_rows(ctx):
     if "a" not in rows[0]["body_quoted"] or "b" not in rows[0]["body_quoted"]:
         fail("combine-any: scopes not unioned across tasks: %r" % rows[0]["body_quoted"])
 
-def _check_dedup_by_run_attempt():
-    """Functional assertions for `_dedup_by_run_attempt` — collapse
-    `(name, key, job)` duplicates from a re-run workflow's artifact
-    listing to the entry from the latest attempt."""
-
-    # Re-run scenario: attempt 1 left a stale "running" entry; attempt
-    # 2 is the terminal "passed". One entry per (name, key, job)
-    # survives, with the higher run_attempt's payload.
-    out = dedup_by_run_attempt([
-        {"kind": "format", "name": "format-gha", "job": "format-task", "run_attempt": "1", "status": "running"},
-        {"kind": "format", "name": "format-gha", "job": "format-task", "run_attempt": "2", "status": "passed"},
-    ])
-    if len(out) != 1:
-        fail("dedup_by_run_attempt rerun: expected 1 entry, got %d: %r" % (len(out), out))
-    if out[0]["status"] != "passed" or out[0]["run_attempt"] != "2":
-        fail("dedup_by_run_attempt rerun: expected attempt-2 payload to win, got %r" % out[0])
-
-    # Different `job` → NOT collapsed (matrix-style: same task surfaced
-    # by two distinct yaml jobs is two legitimate rows).
-    out = dedup_by_run_attempt([
-        {"kind": "test", "name": "test-gha", "job": "cpu-test", "run_attempt": "1", "status": "passed"},
-        {"kind": "test", "name": "test-gha", "job": "gpu-test", "run_attempt": "1", "status": "passed"},
-    ])
-    if len(out) != 2:
-        fail("dedup_by_run_attempt matrix: expected 2 distinct rows, got %d: %r" % (len(out), out))
-
-    # Numeric ordering, not lexicographic: "10" > "9".
-    out = dedup_by_run_attempt([
-        {"kind": "x", "name": "x", "job": "j", "run_attempt": "9", "status": "running"},
-        {"kind": "x", "name": "x", "job": "j", "run_attempt": "10", "status": "passed"},
-    ])
-    if out[0]["run_attempt"] != "10":
-        fail("dedup_by_run_attempt numeric: expected '10' to win over '9', got %r" % out[0])
-
-    # Missing / non-numeric run_attempt defaults to 1.
-    out = dedup_by_run_attempt([
-        {"kind": "y", "name": "y", "job": "j", "status": "running"},
-        {"kind": "y", "name": "y", "job": "j", "run_attempt": "2", "status": "passed"},
-    ])
-    if out[0].get("run_attempt") != "2":
-        fail("dedup_by_run_attempt missing-attempt: expected attempt-2 to win, got %r" % out[0])
-
-def _check_should_quiet_delete_log():
-    """Functional assertions for `_should_quiet_delete_log` — gate for
-    the WARN→INFO downgrade on a pre-upload `DeleteArtifact` failure."""
-
-    # First cycle: no prior upload → benign (delete will 404 because
-    # nothing was ever uploaded). Quiet.
-    if not should_quiet_delete_log(None, 1000.0):
-        fail("should_quiet_delete_log: first cycle (None last_upload_at) must be quiet")
-
-    # Recent upload (within the 15s window): eventual-consistency miss
-    # is the most likely cause of a failure. Quiet.
-    if not should_quiet_delete_log(990.0, 1000.0):
-        fail("should_quiet_delete_log: 10s after upload must be quiet")
-    if not should_quiet_delete_log(985.0, 1000.0):
-        fail("should_quiet_delete_log: exactly 15s after upload must be quiet")
-    if not should_quiet_delete_log(1000.0, 1000.0):
-        fail("should_quiet_delete_log: 0s after upload must be quiet")
-
-    # Past the window: WARN-worthy.
-    if should_quiet_delete_log(984.0, 1000.0):
-        fail("should_quiet_delete_log: 16s after upload must NOT be quiet")
-    if should_quiet_delete_log(0.0, 1000.0):
-        fail("should_quiet_delete_log: 1000s after upload must NOT be quiet")
-
 def _check_format_http_failure_detail():
     """Functional assertions for `github.format_http_failure_detail` —
     one-line failure-detail formatting shared by the WARN and INFO
@@ -686,22 +617,33 @@ def _check_lease_held():
     if not lease_held(now_epoch = 100, last_upsert_epoch = 150, lease_window_s = 10):
         fail("lease_held under clock skew (sibling ahead) should be True")
 
-def _check_max_recent_upsert_epoch():
-    _eq("max_recent_upsert_epoch — empty entries", max_recent_upsert_epoch([]), 0)
-    _eq(
-        "max_recent_upsert_epoch — missing field treated as 0",
-        max_recent_upsert_epoch([{"name": "a"}, {"name": "b"}]),
-        0,
-    )
-    _eq(
-        "max_recent_upsert_epoch — picks the largest",
-        max_recent_upsert_epoch([
-            {"last_pr_comment_upsert_epoch_s": 100},
-            {"last_pr_comment_upsert_epoch_s": 300},
-            {"last_pr_comment_upsert_epoch_s": 200},
-        ]),
-        300,
-    )
+def _check_dedup_survivor():
+    """dedup_survivor: deterministic lowest-id survivor over marker-bearing
+    items; no-op below two matches. Drives the create-time duplicate backstop
+    in both the GitHub and GitLab features."""
+    marker = "<!-- aspect-ci-status:pr-7 -->"
+    other = "<!-- something-else -->"
+
+    # No items / single match → nothing to converge.
+    _eq("dedup_survivor — empty list", dedup_survivor([], marker), (None, []))
+    only_one = [{"id": 5, "body": "x " + marker}]
+    _eq("dedup_survivor — single match", dedup_survivor(only_one, marker), (None, []))
+
+    # Two markers → lowest id survives, the rest are losers (regardless of list
+    # order, so concurrent writers agree on the same survivor).
+    items = [
+        {"id": 30, "body": "later " + marker},
+        {"id": 10, "body": "first " + marker},
+        {"id": 20, "body": other},
+        {"id": 40, "body": "third " + marker},
+    ]
+    survivor, losers = dedup_survivor(items, marker)
+    _eq("dedup_survivor — lowest marker id survives", survivor, 10)
+    _eq("dedup_survivor — others deleted (non-marker excluded)", losers, [30, 40])
+
+    # Missing/None body is treated as non-matching, not an error.
+    no_body = [{"id": 1}, {"id": 2, "body": None}, {"id": 3, "body": marker}]
+    _eq("dedup_survivor — missing body ignored", dedup_survivor(no_body, marker), (None, []))
 
 def _check_state_serialize_round_trip():
     """serialize_state → parse_state round-trips head_sha, lease epoch,
@@ -1019,8 +961,8 @@ def _check_format_overflow_note():
     )
 
 def _check_parse_state_absent():
-    """parse_state returns None when the body has no state block —
-    callers fall back to swarm-only behavior."""
+    """parse_state returns None when the body has no state block (e.g.
+    the comment doesn't exist yet, so there's no prior state to merge)."""
     _eq("parse_state — empty body", parse_state(""), None)
     _eq("parse_state — body without marker", parse_state("# heading\n\nsome content\n"), None)
 
@@ -1044,6 +986,42 @@ def _check_merge_state_first_writer():
     _eq("merge — first writer head_sha", new["head_sha"], "abc")
     _eq("merge — first writer workflow_runs", new["workflow_runs"], [{"run_id": "100", "workflow_name": "ci-gha"}])
     _eq("merge — first writer entries", new["entries"], my_entries)
+
+def _check_merge_comment_only_accretes():
+    """The API-unreachable fallback merges our own entry while preserving a
+    sibling job's row already in the comment (all jobs share one run_id).
+    A new head_sha resets — only our entry survives."""
+    parsed = {
+        "head_sha": "abc",
+        "workflow_runs": [{"run_id": "wf-1", "workflow_name": "ci"}],
+        "entries": [
+            {"kind": "build", "name": "A", "job": "A", "workflow_run_id": "wf-1", "status": "passed"},
+        ],
+    }
+    own_b = {"kind": "test", "name": "B", "job": "B", "workflow_run_id": "wf-1", "status": "running"}
+    new = merge_comment_only_state(parsed, "abc", "wf-1", "ci", [own_b])
+    by_name = {e["name"]: e for e in new["entries"]}
+    _eq("comment-only — A survives B's write", "A" in by_name, True)
+    _eq("comment-only — B added", "B" in by_name, True)
+    _eq("comment-only — A status preserved", by_name["A"]["status"], "passed")
+
+    fresh = merge_comment_only_state(parsed, "def", "wf-1", "ci", [own_b])
+    _eq("comment-only — fresh push drops prior-SHA rows", sorted([e["name"] for e in fresh["entries"]]), ["B"])
+
+    # Matrix: two jobs run the same task kind/name with distinct `job`. The
+    # contributing job must not erase its sibling matrix row (identity is
+    # (job, kind, name), not (kind, name)).
+    matrix = {
+        "head_sha": "abc",
+        "workflow_runs": [{"run_id": "wf-1", "workflow_name": "ci"}],
+        "entries": [
+            {"kind": "test", "name": "test", "job": "cpu", "workflow_run_id": "wf-1", "status": "passed"},
+        ],
+    }
+    own_gpu = {"kind": "test", "name": "test", "job": "gpu", "workflow_run_id": "wf-1", "status": "running"}
+    merged = merge_comment_only_state(matrix, "abc", "wf-1", "ci", [own_gpu])
+    jobs = sorted([e["job"] for e in merged["entries"]])
+    _eq("comment-only — matrix sibling row survives", jobs, ["cpu", "gpu"])
 
 def _check_merge_state_two_workflows_with_fresh_refresh():
     """Cross-workflow: workflow A reads existing comment with B's slot
@@ -1092,10 +1070,9 @@ def _check_merge_state_falls_back_to_snapshot_when_refresh_missing():
 
 def _check_merge_state_per_task_union_with_snapshot():
     """When the cross-workflow refresh returns a SUBSET of the snapshot's
-    tasks (e.g. an artifact-listing eventual-consistency window briefly
-    hides some artifacts), per-task union keeps the snapshot rows for
-    tasks the refresh didn't return. Without this, the comment would
-    flap between "many tasks" and "few tasks" as the listing converged.
+    tasks, per-task union keeps the snapshot rows for tasks the refresh
+    didn't return. Without this, the comment would flap between "many
+    tasks" and "few tasks" as state converges.
 
     Refresh wins for tasks it does return — status updates on those
     tasks land in this cycle."""
@@ -1109,8 +1086,8 @@ def _check_merge_state_per_task_union_with_snapshot():
         ],
     }
 
-    # Refresh returned only `lint` (with updated status). `test` and
-    # `build` were briefly invisible in the listing.
+    # Refresh returned only `lint` (with updated status); `test` and
+    # `build` were briefly absent from the refresh.
     partial_refresh = [
         {"kind": "lint", "name": "lint", "workflow_run_id": "200", "status": "passed"},
     ]
@@ -1122,8 +1099,7 @@ def _check_merge_state_per_task_union_with_snapshot():
     _eq("merge — per-task union: no rows dropped", len(new["entries"]), 3)
 
 def _check_merge_state_empty_refresh_keeps_snapshot():
-    """An empty refresh result (the listing was authoritative but
-    returned no artifacts) still keeps the snapshot — equivalent to
+    """An empty refresh result still keeps the snapshot — equivalent to
     refresh-missing."""
     existing = {
         "head_sha": "abc",
@@ -1198,8 +1174,8 @@ def _check_merge_state_workflow_runs_sorted():
 def _check_merge_state_entries_sorted():
     """merge_state's entries are sorted deterministically across
     (workflow_run_id, job, key, name, run_attempt) so the serialized
-    block is byte-stable across writers — even when each writer
-    discovers its swarm in a different artifact-id order."""
+    block is byte-stable across writers — even when each writer merges
+    sibling entries in a different order."""
     my_entries = [
         {"kind": "z", "name": "z", "job": "j", "workflow_run_id": "100", "run_attempt": "1"},
         {"kind": "a", "name": "a", "job": "j", "workflow_run_id": "100", "run_attempt": "1"},
@@ -1545,10 +1521,11 @@ def _check_repro_dedup_consecutive_headings(ctx):
     exactly once under the Fix section, not twice.
     """
 
-    # Entries are shaped like what comes back from `_list_and_download_workflow_artifacts`
-    # after `json.try_decode`: plain dicts (records lost their type on JSON
-    # encode). The real read path rehydrates the command lists at the
-    # boundary; do the same here so we exercise the production code path.
+    # Entries are shaped like what the renderer receives after they
+    # round-trip through JSON (the coordination API or the comment state
+    # block): plain dicts (records lost their type on JSON encode). The real
+    # read path rehydrates the command lists at the boundary; do the same
+    # here so we exercise the production code path.
     entries = [
         {
             "kind": "buildifier",
@@ -1598,11 +1575,9 @@ def _test_impl(ctx):
 
     _check_collect_tip_rows(ctx)
     _check_repro_dedup_consecutive_headings(ctx)
-    _check_dedup_by_run_attempt()
-    _check_should_quiet_delete_log()
     _check_format_http_failure_detail()
     _check_lease_held()
-    _check_max_recent_upsert_epoch()
+    _check_dedup_survivor()
     _check_state_serialize_round_trip()
     _check_parse_state_absent()
     _check_parse_state_malformed()
@@ -1610,6 +1585,7 @@ def _test_impl(ctx):
     _check_parse_state_validates_field_types()
     _check_parse_state_filters_non_dict_rows()
     _check_merge_state_first_writer()
+    _check_merge_comment_only_accretes()
     _check_merge_state_two_workflows_with_fresh_refresh()
     _check_merge_state_falls_back_to_snapshot_when_refresh_missing()
     _check_merge_state_per_task_union_with_snapshot()
