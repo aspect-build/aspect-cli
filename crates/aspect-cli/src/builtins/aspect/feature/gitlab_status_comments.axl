@@ -52,6 +52,7 @@ load(
     "merge_comment_only_state",
     "parse_state",
     "prepare_for_render",
+    "rehydrate_entries",
     "render_body",
     "results_subset",
 )
@@ -316,7 +317,9 @@ def _gitlab_status_comments(ctx: FeatureContext):
             "final": final,
             "min_interval_s": min_poll_interval_seconds,
         }
-        pending = _state.pop("_pending_post", None)
+        # Peek (don't pop) — a failed contribute must not lose the pending
+        # confirmation, or the server never learns the post landed.
+        pending = _state.get("_pending_post")
         if pending:
             request["posted"] = pending
 
@@ -326,11 +329,19 @@ def _gitlab_status_comments(ctx: FeatureContext):
             _publish_via_note_state(ctx, token, own_entry, now_epoch, final)
             return
 
+        # Contribute succeeded — the confirmation (if any) was delivered.
+        _state.pop("_pending_post", None)
+
         if not result.get("should_post"):
             return
 
+        # Entries arrive as decoded JSON — rehydrate repro/fix command lists
+        # back to records before the render path reads `c.command`/`c.target`.
+        state = result["state"]
+        rehydrate_entries(state.get("entries", []) or [])
+
         before = _state.get("_last_stable_body")
-        _post(ctx, token, result["state"], now_epoch)
+        _post(ctx, token, state, now_epoch)
         if _state.get("_last_stable_body") != before:
             # Confirm the post on our next contribution so the server clears
             # the grant and records the comment id.

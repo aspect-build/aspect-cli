@@ -981,6 +981,21 @@ def _check_merge_comment_only_accretes():
     fresh = merge_comment_only_state(parsed, "def", "wf-1", "ci", [own_b])
     _eq("comment-only — fresh push drops prior-SHA rows", sorted([e["name"] for e in fresh["entries"]]), ["B"])
 
+    # Matrix: two jobs run the same task kind/name with distinct `job`. The
+    # contributing job must not erase its sibling matrix row (identity is
+    # (job, kind, name), not (kind, name)).
+    matrix = {
+        "head_sha": "abc",
+        "workflow_runs": [{"run_id": "wf-1", "workflow_name": "ci"}],
+        "entries": [
+            {"kind": "test", "name": "test", "job": "cpu", "workflow_run_id": "wf-1", "status": "passed"},
+        ],
+    }
+    own_gpu = {"kind": "test", "name": "test", "job": "gpu", "workflow_run_id": "wf-1", "status": "running"}
+    merged = merge_comment_only_state(matrix, "abc", "wf-1", "ci", [own_gpu])
+    jobs = sorted([e["job"] for e in merged["entries"]])
+    _eq("comment-only — matrix sibling row survives", jobs, ["cpu", "gpu"])
+
 def _check_merge_state_two_workflows_with_fresh_refresh():
     """Cross-workflow: workflow A reads existing comment with B's slot
     and snapshot entries, fetches B's fresh data via

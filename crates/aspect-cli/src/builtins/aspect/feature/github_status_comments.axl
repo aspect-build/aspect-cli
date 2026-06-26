@@ -386,15 +386,16 @@ def _collapse_by(entries, key_of, rank_of):
             best[k] = e
     return list(best.values())
 
-def _union_entries_by_kind_name(primary, fallback):
-    """`primary` plus `fallback` entries whose `(kind, name)` isn't in
-    `primary` (primary wins; fallback fills gaps), preserving order."""
-    primary_keys = {(e.get("kind", ""), e.get("name", "")): True for e in primary}
-    return list(primary) + [
-        e
-        for e in fallback
-        if (e.get("kind", ""), e.get("name", "")) not in primary_keys
-    ]
+def _union_entries_by_task(primary, fallback):
+    """`primary` plus `fallback` entries whose `(job, kind, name)` isn't in
+    `primary` (primary wins; fallback fills gaps), preserving order. `job` is
+    in the identity so matrix rows — the same task kind/name run by distinct
+    jobs in one run — stay distinct (matching the display dedup key)."""
+    def _key(e):
+        return (e.get("job", ""), e.get("kind", ""), e.get("name", ""))
+
+    primary_keys = {_key(e): True for e in primary}
+    return list(primary) + [e for e in fallback if _key(e) not in primary_keys]
 
 def _dedup_for_display(entries):
     """Collapse exact-duplicate `(workflow_run_id, job, name, key)` rows
@@ -1039,6 +1040,17 @@ def _is_standard_base64(s):
             return False
     return True
 
+def _rehydrate_entries(entries):
+    """Rehydrate each entry's `repro_commands` / `fix_commands` in place after a
+    JSON round-trip (API response or comment state block), so the render path
+    can access `c.command`/`c.target` on `ReproFixCommand` records. Only touches
+    present keys, so older-release entries round-trip unchanged."""
+    for e in entries:
+        if "repro_commands" in e:
+            e["repro_commands"] = rehydrate_commands(e["repro_commands"])
+        if "fix_commands" in e:
+            e["fix_commands"] = rehydrate_commands(e["fix_commands"])
+
 def _parse_state(body):
     """Extract the cross-workflow state block from a comment body.
 
@@ -1071,14 +1083,7 @@ def _parse_state(body):
     def _string_list(v):
         return [k for k in v if type(k) == "string"] if type(v) == "list" else []
 
-    # JSON round-trip flattens ReproFixCommand records to dicts; rehydrate
-    # so `_collect_repro_fix_rows` can do `c.command`/`c.description`.
-    # Only touch present keys so older-release entries round-trip unchanged.
-    for e in parsed_entries:
-        if "repro_commands" in e:
-            e["repro_commands"] = rehydrate_commands(e["repro_commands"])
-        if "fix_commands" in e:
-            e["fix_commands"] = rehydrate_commands(e["fix_commands"])
+    _rehydrate_entries(parsed_entries)
     return {
         "head_sha": head_sha if type(head_sha) == "string" else "",
         "last_upsert_epoch_s": epoch if type(epoch) == "int" else 0,
@@ -1165,7 +1170,7 @@ def _merge_state(existing_state, head_sha, my_run_id, my_workflow_name, my_entri
         if refreshed == None:
             entries.extend(snapshot)
         else:
-            entries.extend(_union_entries_by_kind_name(refreshed, snapshot))
+            entries.extend(_union_entries_by_task(refreshed, snapshot))
 
     # Deterministic order so the serialized block is byte-stable across
     # writers; else alternating ownership flips order each cycle and
@@ -1198,7 +1203,7 @@ def _merge_comment_only_state(existing_state, head_sha, run_id, workflow_name, o
             for e in (existing_state.get("entries", []) or [])
             if str(e.get("workflow_run_id", "")) == str(run_id)
         ]
-        my_entries = _union_entries_by_kind_name(own_entries, snapshot_mine)
+        my_entries = _union_entries_by_task(own_entries, snapshot_mine)
     return _merge_state(existing_state, head_sha, run_id, workflow_name, my_entries, {})
 
 def _github_status_comments(ctx: FeatureContext):
@@ -1482,7 +1487,9 @@ def _github_status_comments(ctx: FeatureContext):
             "final": final,
             "min_interval_s": max(min_poll_interval_seconds, _state.get("_cadence_s", min_poll_interval_seconds)),
         }
-        pending = _state.pop("_pending_post", None)
+        # Peek (don't pop) the pending confirmation — a failed contribute must
+        # not lose it, or the server never learns the post landed.
+        pending = _state.get("_pending_post")
         if pending:
             request["posted"] = pending
 
@@ -1495,8 +1502,14 @@ def _github_status_comments(ctx: FeatureContext):
             _publish_via_comment_state(ctx, token, own_entry, now_epoch, final)
             return
 
-        # Render the server's merged state, then post only if granted.
+        # Contribute succeeded — the confirmation (if any) was delivered.
+        _state.pop("_pending_post", None)
+
+        # Render the server's merged state, then post only if granted. Entries
+        # arrive as decoded JSON, so rehydrate the repro/fix command lists back
+        # to records (the render path accesses `c.command`/`c.target`).
         state = result["state"]
+        _rehydrate_entries(state.get("entries", []) or [])
         sel = _select_for_render(state)
         # Carry our chosen sticky keys into the next contribution so the server
         # accretes them (append-only) across the swarm.
@@ -1695,6 +1708,12 @@ def _github_status_comments(ctx: FeatureContext):
 def prepare_for_render(entries):
     """Public test hook; see `_prepare_for_render`."""
     return _prepare_for_render(entries)
+
+def rehydrate_entries(entries):
+    """Rehydrate API/state-block entries' command lists in place; see
+    `_rehydrate_entries`. Used by sibling features (e.g. GitLab) that render
+    entries decoded from the coordination API."""
+    _rehydrate_entries(entries)
 
 def collect_tip_rows(ctx, entries):
     """Public test hook; see `_collect_tip_rows`."""
