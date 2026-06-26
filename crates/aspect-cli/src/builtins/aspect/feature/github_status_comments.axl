@@ -13,7 +13,7 @@ of truth on every host; the per-host artifact transport is only a
 freshness optimization layered on top:
   - GitHub Actions — the Actions artifact swarm (Twirp upload + REST
     list/download, run-scoped). Cross-workflow refresh by run_id, too.
-  - Buildkite      — `buildkite-agent artifact search`/`download`
+  - Buildkite      — `buildkite-agent artifact upload`/`download`
     (build-scoped, so it spans sibling jobs in the build).
   - CircleCI       — none. A running CircleCI job can't enumerate sibling
     jobs' artifacts without a separate CIRCLE_TOKEN, so it coordinates
@@ -98,7 +98,7 @@ load(
     "should_emit_phase_change",
     "usage_footer",
 )
-load("../private/lib/repro_commands.axl", "ASPECT_CLI_INSTALL_HINT_MARKDOWN", "dedup_and_attribute", "rehydrate_commands")
+load("../private/lib/repro_commands.axl", "ASPECT_CLI_INSTALL_HINT_MARKDOWN", "dedup_and_attribute", "rehydrate_entry_commands")
 load("../private/lib/result_text.axl", "severity_for_status")
 load("../private/lib/tar.axl", "bsdtar")
 load(
@@ -1133,14 +1133,8 @@ def _parse_state(body):
     def _string_list(v):
         return [k for k in v if type(k) == "string"] if type(v) == "list" else []
 
-    # JSON round-trip flattens ReproFixCommand records to dicts; rehydrate
-    # so `_collect_repro_fix_rows` can do `c.command`/`c.description`.
-    # Only touch present keys so older-release entries round-trip unchanged.
     for e in parsed_entries:
-        if "repro_commands" in e:
-            e["repro_commands"] = rehydrate_commands(e["repro_commands"])
-        if "fix_commands" in e:
-            e["fix_commands"] = rehydrate_commands(e["fix_commands"])
+        rehydrate_entry_commands(e)
     return {
         "head_sha": head_sha if type(head_sha) == "string" else "",
         "last_upsert_epoch_s": epoch if type(epoch) == "int" else 0,
@@ -1247,6 +1241,27 @@ def _merge_state(existing_state, head_sha, my_run_id, my_workflow_name, my_entri
         "workflow_runs": workflow_runs,
         "entries": entries,
     }
+
+def _merge_comment_only_state(existing_state, head_sha, run_id, workflow_name, own_entries):
+    """`_merge_state` for a host with no cross-job artifact discovery
+    (CircleCI, GitLab), where the comment/note is the only place siblings
+    are recorded.
+
+    All jobs in such a run share one run_id, and `_merge_state` replaces
+    the whole own slot with what it's passed — so passing only our own
+    entries would erase siblings. Union our own entries over the snapshot
+    entries for our run_id first (ours wins per `(kind, name)`; siblings
+    survive), then merge. On a fresh push (head_sha mismatch / no prior
+    state) there's nothing to preserve, so we pass our entries through."""
+    my_entries = own_entries
+    if existing_state and existing_state.get("head_sha") == head_sha:
+        snapshot_mine = [
+            e
+            for e in (existing_state.get("entries", []) or [])
+            if str(e.get("workflow_run_id", "")) == str(run_id)
+        ]
+        my_entries = _union_entries_by_kind_name(own_entries, snapshot_mine)
+    return _merge_state(existing_state, head_sha, run_id, workflow_name, my_entries, {})
 
 def _github_status_comments(ctx: FeatureContext):
     lifecycle = ctx.traits[TaskLifecycleTrait]
@@ -1367,17 +1382,16 @@ def _github_status_comments(ctx: FeatureContext):
         return payload
 
     def _publish_self(ctx, token):
-        """Publish this task's status payload via the host transport,
-        replacing the prior artifact. Skips the round-trip when the payload
-        is unchanged.
+        """Publish this task's status payload via the host transport. Skips
+        the round-trip when the payload is unchanged since last cycle.
 
         GitHub Actions / Buildkite upload an artifact (the cross-job
-        transport); a pre-upload delete quiets benign 404s via
-        `_should_quiet_delete_log` (Buildkite has no delete API → no-op).
-        CircleCI (`uses_artifacts == False`) has no usable cross-job
-        artifact transport, so it skips upload entirely and coordinates
-        through the comment state block alone — the payload still flows in
-        as our own entry via `_collect_sibling_entries`."""
+        transport), replacing the prior one; on GHA a pre-upload delete
+        quiets benign 404s via `_should_quiet_delete_log` (Buildkite has no
+        delete API). CircleCI (`uses_artifacts == False`) has no usable
+        cross-job artifact transport, so it skips upload entirely and
+        coordinates through the comment state block alone — the payload
+        still flows in as our own entry via `_collect_sibling_entries`."""
         if "_workdir" not in _state:
             _state["_workdir"] = ctx.std.fs.mkdtemp(prefix = "aspect-ci-status-")
         _state["_my_artifact_name"] = _ARTIFACT_PREFIX + job_name + "-" + _state["_task_name"] + "-" + run_attempt
@@ -1399,7 +1413,7 @@ def _github_status_comments(ctx: FeatureContext):
         if transport.host == "buildkite":
             # Buildkite has no per-artifact TTL (build retention bounds it)
             # and no delete API; upload under the artifact name so sibling
-            # writers find it via `artifact search`.
+            # writers find it via `artifact download`.
             up = buildkite.upload_artifact(ctx, payload_path, _state["_my_artifact_name"])
         else:
             quiet = _should_quiet_delete_log(_state.get("_last_upload_at"), monotonic())
@@ -1482,14 +1496,7 @@ def _github_status_comments(ctx: FeatureContext):
             entry = json.try_decode(ctx.std.fs.read_to_string(json_path), None)
             if not entry:
                 continue
-
-            # JSON round-trip flattens ReproFixCommand records to dicts;
-            # rehydrate for `c.command`/`c.description`. Only touch present
-            # keys so older-release entries pass through unchanged.
-            if "repro_commands" in entry:
-                entry["repro_commands"] = rehydrate_commands(entry["repro_commands"])
-            if "fix_commands" in entry:
-                entry["fix_commands"] = rehydrate_commands(entry["fix_commands"])
+            rehydrate_entry_commands(entry)
             cache[aid] = entry
             seen[aname] = entry
 
@@ -1511,39 +1518,33 @@ def _github_status_comments(ctx: FeatureContext):
         return _dedup_by_run_attempt(list(seen.values()))
 
     def _collect_buildkite_siblings(ctx):
-        """Own-swarm entries on Buildkite via `buildkite-agent artifact
-        search`/`download` (build-scoped → spans sibling jobs).
+        """Own-swarm entries on Buildkite.
 
-        Mirrors the GHA own-swarm path: substitutes our own freshly-rendered
-        payload for our artifact, ingests sibling rate-limit observations,
-        and `_dedup_by_run_attempt`. Best-effort — a search/download failure
-        degrades to our own entry only; the comment state block backfills the
-        rest. Returns the entry list (never `None`; Buildkite has no
-        list-transport-failure sentinel — failures fall back to comment
+        `buildkite-agent artifact download` is build-scoped, so the glob
+        pulls every sibling job's status artifact into a temp dir in one
+        call; each is read back from disk. Substitutes our own
+        freshly-rendered payload for our artifact, ingests sibling
+        rate-limit observations, and `_dedup_by_run_attempt`. Best-effort —
+        a download failure degrades to our own entry only; the comment
+        state block backfills the rest. Never returns `None` (Buildkite has
+        no list-transport-failure sentinel — failures fall back to comment
         state)."""
-        workdir = _state["_workdir"]
         own_name = _state.get("_my_artifact_name", "")
         own = _own_payload(ctx)
 
-        dest = workdir + "/bk-siblings"
+        dest = _state["_workdir"] + "/bk-siblings"
         if not buildkite.download_artifacts(ctx, _ARTIFACT_PREFIX + "*", dest):
             return [own]
 
         seen = {own_name: own}
-        for found in buildkite.search_artifacts(ctx, _ARTIFACT_PREFIX + "*"):
-            aname = found.get("path", "")
-            if not aname or aname in seen:
+        for entry_file in ctx.std.fs.read_dir(dest):
+            aname = entry_file.path
+            if not entry_file.is_file or aname in seen:
                 continue
-            json_path = dest + "/" + aname
-            if not ctx.std.fs.exists(json_path):
-                continue
-            entry = json.try_decode(ctx.std.fs.read_to_string(json_path), None)
+            entry = json.try_decode(ctx.std.fs.read_to_string(dest + "/" + aname), None)
             if not entry:
                 continue
-            if "repro_commands" in entry:
-                entry["repro_commands"] = rehydrate_commands(entry["repro_commands"])
-            if "fix_commands" in entry:
-                entry["fix_commands"] = rehydrate_commands(entry["fix_commands"])
+            rehydrate_entry_commands(entry)
             seen[aname] = entry
             ingest_sibling_observations(ctx, aname, entry.get("rate_limit_observations", {}) or {})
 
@@ -1553,10 +1554,11 @@ def _github_status_comments(ctx: FeatureContext):
         """Own-swarm entries for the running host.
 
         GitHub Actions → the artifact swarm (`list_run_artifacts` +
-        download). Buildkite → `buildkite-agent artifact search`/`download`.
-        CircleCI → just our own entry (no cross-job transport); siblings
-        come from the comment snapshot in `_merge_state`. Returns `None`
-        only on a GHA list-transport failure (the caller skips the cycle)."""
+        download). Buildkite → `buildkite-agent artifact download` (build-
+        scoped). CircleCI → just our own entry (no cross-job transport);
+        siblings come from the comment snapshot in `merge_comment_only_state`.
+        Returns `None` only on a GHA list-transport failure (the caller
+        skips the cycle)."""
         if transport.host == "github":
             return _list_and_download_workflow_artifacts(ctx, token, run_id, is_own_swarm = True)
         if transport.host == "buildkite":
@@ -1721,23 +1723,13 @@ def _github_status_comments(ctx: FeatureContext):
                     refreshed_others[other_run_id] = other_entries
 
         # Comment-only hosts (CircleCI) can't discover siblings, so
-        # `raw_entries` is just our own entry. Every job in the run shares
-        # one run_id (the CircleCI workflow id), and `_merge_state` replaces
-        # the whole own slot with what we pass — so union our own entry over
-        # the comment snapshot for our run_id, else each writer would erase
-        # its siblings' rows. Our entry wins per `(kind, name)`; siblings
-        # already in the comment survive. (Artifact hosts skip this — their
-        # `raw_entries` already carries the full swarm.)
-        my_entries = raw_entries
-        if not transport.uses_artifacts and parsed and parsed.get("head_sha") == head_sha:
-            snapshot_mine = [
-                e
-                for e in (parsed.get("entries", []) or [])
-                if str(e.get("workflow_run_id", "")) == str(run_id)
-            ]
-            my_entries = _union_entries_by_kind_name(raw_entries, snapshot_mine)
-
-        new_state = _merge_state(parsed, head_sha, run_id, workflow_name, my_entries, refreshed_others)
+        # `raw_entries` is just our own entry; preserve sibling rows already
+        # in the comment. Artifact hosts carry the full swarm in
+        # `raw_entries`, so they merge directly.
+        if transport.uses_artifacts:
+            new_state = _merge_state(parsed, head_sha, run_id, workflow_name, raw_entries, refreshed_others)
+        else:
+            new_state = _merge_comment_only_state(parsed, head_sha, run_id, workflow_name, raw_entries)
 
         # Drop exact-duplicate rows before rendering (defense-in-depth;
         # persisted `new_state["entries"]` untouched).
@@ -2053,9 +2045,10 @@ def merge_state(existing_state, head_sha, my_run_id, my_workflow_name, my_entrie
     """Public test hook; see `_merge_state`."""
     return _merge_state(existing_state, head_sha, my_run_id, my_workflow_name, my_entries, refreshed_other_entries)
 
-def union_entries_by_kind_name(primary, fallback):
-    """Public test hook; see `_union_entries_by_kind_name`."""
-    return _union_entries_by_kind_name(primary, fallback)
+def merge_comment_only_state(existing_state, head_sha, run_id, workflow_name, own_entries):
+    """Comment-only state merge for hosts without cross-job artifact
+    discovery (CircleCI, GitLab). See `_merge_comment_only_state`."""
+    return _merge_comment_only_state(existing_state, head_sha, run_id, workflow_name, own_entries)
 
 def lease_held(now_epoch, last_upsert_epoch, lease_window_s):
     """Public test hook; see `_lease_held`."""

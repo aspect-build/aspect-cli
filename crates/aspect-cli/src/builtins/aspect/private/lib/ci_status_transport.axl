@@ -9,7 +9,7 @@ siblings' payloads more freshly than the comment alone:
 
   - GitHub Actions — the GitHub Actions artifact swarm (Twirp upload +
     REST list/download, run-scoped).
-  - Buildkite      — `buildkite-agent artifact search`/`download`
+  - Buildkite      — `buildkite-agent artifact upload`/`download`
     (build-scoped, so it spans sibling jobs).
   - CircleCI       — none. A running CircleCI job can't enumerate sibling
     jobs' artifacts without a separate `CIRCLE_TOKEN` (the runner output

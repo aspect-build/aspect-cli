@@ -727,6 +727,23 @@ def rehydrate_commands(commands):
         ))
     return out
 
+def rehydrate_entry_commands(entry):
+    """Rehydrate a status entry's `repro_commands` / `fix_commands` in
+    place after a JSON round-trip, returning the entry.
+
+    The PR-comment publisher round-trips entries through JSON (per-task
+    artifacts + the in-comment state block), flattening `ReproFixCommand`
+    records to plain dicts; `rehydrate_commands` converts them back so
+    downstream `c.command` access works. Only present keys are touched, so
+    entries from older releases (predating these fields) pass through
+    unchanged. `entry` is mutated and returned for call-site convenience.
+    """
+    if "repro_commands" in entry:
+        entry["repro_commands"] = rehydrate_commands(entry["repro_commands"])
+    if "fix_commands" in entry:
+        entry["fix_commands"] = rehydrate_commands(entry["fix_commands"])
+    return entry
+
 # ── CLI rendering ─────────────────────────────────────────────────────
 
 def print_repro_and_fix(std, data, status):

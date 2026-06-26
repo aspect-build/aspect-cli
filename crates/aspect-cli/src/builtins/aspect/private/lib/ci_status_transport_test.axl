@@ -1,5 +1,4 @@
-"""Tests for `lib/ci_status_transport.axl` and the Buildkite cross-job
-search-parse helper.
+"""Tests for `lib/ci_status_transport.axl`.
 
 `build_status_transport(env)` is pure + env-only, but there's no
 env-mocking layer in AXL, so each subtest snapshots/restores the CI env
@@ -10,7 +9,6 @@ Run with:
   aspect dev test-ci-status-transport
 """
 
-load("./buildkite.axl", "buildkite")
 load("./ci_status_transport.axl", "build_status_transport")
 
 _ENV_KEYS = [
@@ -132,28 +130,12 @@ def _test_transport_circleci(ctx):
     _eq("circleci auth_roles", t.auth_roles, ["prs.write"])
     _restore_env(ctx, snapshot)
 
-def _test_buildkite_search_parse():
-    rows = buildkite.parse_search_lines(
-        "aspect-ci-status-build-build-1\t11111111-1111\n" +
-        "\n" +
-        "aspect-ci-status-test-test-1\t22222222-2222\n" +
-        "malformed-no-tab\n" +
-        "   \t   \n",
-    )
-    _eq("bk parse — row count", len(rows), 2)
-    _eq("bk parse — row0 path", rows[0]["path"], "aspect-ci-status-build-build-1")
-    _eq("bk parse — row0 id", rows[0]["id"], "11111111-1111")
-    _eq("bk parse — row1 path", rows[1]["path"], "aspect-ci-status-test-test-1")
-    _eq("bk parse — row1 id", rows[1]["id"], "22222222-2222")
-    _eq("bk parse — empty input", buildkite.parse_search_lines(""), [])
-
 def _test_impl(ctx):
     _test_transport_none_off_host(ctx)
     _test_transport_github(ctx)
     _test_transport_buildkite(ctx)
     _test_transport_circleci(ctx)
-    _test_buildkite_search_parse()
-    print("ci_status_transport.axl: OK (5 sections)")
+    print("ci_status_transport.axl: OK (4 sections)")
     return 0
 
 ci_status_transport_tests = task(

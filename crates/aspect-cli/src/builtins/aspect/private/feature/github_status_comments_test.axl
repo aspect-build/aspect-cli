@@ -38,6 +38,7 @@ load(
     "lease_held",
     "links_cell_text",
     "max_recent_upsert_epoch",
+    "merge_comment_only_state",
     "merge_state",
     "parse_state",
     "prepare_for_render",
@@ -48,7 +49,6 @@ load(
     "serialize_state",
     "should_quiet_delete_log",
     "snippet_key",
-    "union_entries_by_kind_name",
 )
 load(
     "./test_fixtures.axl",
@@ -1402,12 +1402,9 @@ def _check_links_cell_text_host_label():
 
 def _check_circleci_comment_only_accretes():
     """Comment-only coordination (CircleCI): every job in the workflow
-    shares one run_id, and `_merge_state` replaces the whole own slot with
-    what's passed. So the feature unions our own entry over the comment
-    snapshot for our run_id BEFORE merging — `union_entries_by_kind_name`
-    + `merge_state`. This check replicates that composition and asserts a
-    second job (B) doesn't erase the first job's row (A) from the shared
-    comment."""
+    shares one run_id, so `merge_comment_only_state` must preserve a
+    sibling job's row (A) when a later job (B) publishes only its own entry
+    (CircleCI has no sibling discovery)."""
     # Comment already holds job A for our CircleCI workflow (run_id "wf-1").
     parsed = {
         "head_sha": "abc",
@@ -1416,12 +1413,8 @@ def _check_circleci_comment_only_accretes():
             {"kind": "build", "name": "A", "job": "A", "workflow_run_id": "wf-1", "status": "passed"},
         ],
     }
-    # Job B publishes its own entry only (no sibling discovery on CircleCI).
     own_b = {"kind": "test", "name": "B", "job": "B", "workflow_run_id": "wf-1", "status": "running"}
-
-    snapshot_mine = [e for e in parsed["entries"] if str(e.get("workflow_run_id")) == "wf-1"]
-    my_entries = union_entries_by_kind_name([own_b], snapshot_mine)
-    new = merge_state(parsed, "abc", "wf-1", "aspect-cli", my_entries, {})
+    new = merge_comment_only_state(parsed, "abc", "wf-1", "aspect-cli", [own_b])
 
     by_name = {e["name"]: e for e in new["entries"]}
     _eq("circleci accrete — A survives B's write", "A" in by_name, True)

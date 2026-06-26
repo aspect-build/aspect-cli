@@ -14,11 +14,10 @@ store**. Each task on each `task_update`:
 
   1. Fetches the marker note from the MR.
   2. Parses the state block from the note's footer.
-  3. Merges this task's entry into the state's `entries` list. All jobs in
-     a pipeline share one `workflow_run_id` (CI_PIPELINE_ID) and
-     `merge_state` replaces the whole own slot, so the task first unions
-     its own entry over the snapshot entries for that run_id — its own
-     entry wins per `(kind, name)`, sibling jobs' rows survive.
+  3. Merges this task's entry into the state via `merge_comment_only_state`
+     — all jobs in a pipeline share one `workflow_run_id` (CI_PIPELINE_ID),
+     so it preserves sibling jobs' rows in the shared slot rather than
+     overwriting them.
   4. Renders + upserts the note.
 
 This keeps the feature stateless across aspect-cli processes — every
@@ -59,12 +58,11 @@ load(
     "bucket_entries",
     "lease_held",
     "max_recent_upsert_epoch",
-    "merge_state",
+    "merge_comment_only_state",
     "parse_state",
     "prepare_for_render",
     "render_body",
     "results_subset",
-    "union_entries_by_kind_name",
 )
 load("../private/lib/bazel_results.axl", "format_run_date", "now_ms")
 load("../private/lib/ci.axl", "detect_ci_host")
@@ -93,9 +91,9 @@ def _ci_run_url(env):
 
 def _own_entry(ctx, _state, run_id, run_attempt, job_name):
     """Snapshot this task's current state as an entry dict shaped for
-    `merge_state` / `render_body`. Caller refreshes on each publish so
-    `check_run_url` (published asynchronously by GitlabCommitStatuses)
-    and live phase info flow through.
+    `merge_comment_only_state` / `render_body`. Caller refreshes on each
+    publish so `check_run_url` (published asynchronously by
+    GitlabCommitStatuses) and live phase info flow through.
     """
     base = _state.get("_own_base", {})
     snapshot = dict(base)
@@ -308,28 +306,12 @@ def _gitlab_status_comments(ctx: FeatureContext):
         if not final and lease_held(now_epoch, cross_workflow_lease_epoch, lease_window_s):
             return
 
-        # Merge: my entry + every other entry the comment knows about.
-        # `merge_state` is the GH-feature helper; it slot-overlays by
-        # workflow_run_id (pipeline id), filling sibling pipelines' slots
-        # from the snapshot.
-        #
-        # Within OUR pipeline every job shares one run_id (CI_PIPELINE_ID),
-        # and `merge_state` replaces the whole own slot with what we pass —
-        # so we must union our own entry over the snapshot entries for our
-        # run_id, else each job would erase its siblings' rows from the
-        # shared note. Our entry wins per `(kind, name)`; siblings already
-        # in the note survive. (GitLab has no cross-job artifact discovery,
-        # so the note is the only place siblings are recorded — mirrors the
-        # CircleCI comment-only path in `github_status_comments`.)
-        my_entries = [own_entry]
-        if parsed and parsed.get("head_sha") == head_sha:
-            snapshot_mine = [
-                e
-                for e in (parsed.get("entries", []) or [])
-                if str(e.get("workflow_run_id", "")) == str(run_id)
-            ]
-            my_entries = union_entries_by_kind_name([own_entry], snapshot_mine)
-        new_state = merge_state(parsed, head_sha, run_id, workflow_name, my_entries, {})
+        # Merge our entry into what the note already knows. GitLab has no
+        # cross-job artifact discovery, so the note is the only place
+        # siblings are recorded and every job in a pipeline shares one
+        # run_id — `merge_comment_only_state` preserves siblings' rows in
+        # our slot (see its docstring).
+        new_state = merge_comment_only_state(parsed, head_sha, run_id, workflow_name, [own_entry])
         prepared = prepare_for_render(new_state["entries"])
         sections = bucket_entries(prepared)
 

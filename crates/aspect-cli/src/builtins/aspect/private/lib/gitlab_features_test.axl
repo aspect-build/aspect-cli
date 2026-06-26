@@ -23,7 +23,7 @@ Run with:
 """
 
 load("@aspect//feature/gitlab_commit_statuses.axl", "DESCRIPTION_MAX", "state_for", "truncate_description")
-load("@aspect//feature/github_status_comments.axl", "merge_state", "union_entries_by_kind_name")
+load("@aspect//feature/github_status_comments.axl", "merge_comment_only_state")
 load("@aspect//feature/gitlab_status_comments.axl", _MARKER_FMT = "MARKER_FMT")
 
 def _eq(label, got, want):
@@ -89,11 +89,9 @@ def _test_impl(ctx):
 
     # ── single-pipeline coordination ──────────────────────────────
     #
-    # Every job in a GitLab pipeline shares one run_id (CI_PIPELINE_ID),
-    # and `merge_state` replaces the whole own slot with what it's passed.
-    # The feature unions its own entry over the snapshot for that run_id
-    # before merging so a second job (B) doesn't erase the first job's row
-    # (A) from the shared note. This replicates that composition.
+    # Every job in a GitLab pipeline shares one run_id (CI_PIPELINE_ID).
+    # `merge_comment_only_state` must preserve a sibling job's row (A) when
+    # a later job (B) publishes only its own entry into the shared note.
     parsed = {
         "head_sha": "abc",
         "workflow_runs": [{"run_id": "pipe-1", "workflow_name": "aspect-cli"}],
@@ -102,14 +100,18 @@ def _test_impl(ctx):
         ],
     }
     own_b = {"kind": "test", "name": "B", "job": "B", "workflow_run_id": "pipe-1", "status": "running"}
-    snapshot_mine = [e for e in parsed["entries"] if str(e.get("workflow_run_id")) == "pipe-1"]
-    my_entries = union_entries_by_kind_name([own_b], snapshot_mine)
-    new = merge_state(parsed, "abc", "pipe-1", "aspect-cli", my_entries, {})
+    new = merge_comment_only_state(parsed, "abc", "pipe-1", "aspect-cli", [own_b])
     by_name = {e["name"]: e for e in new["entries"]}
     _eq("single-pipeline / A survives B's write", "A" in by_name, True)
     _eq("single-pipeline / B added", "B" in by_name, True)
     _eq("single-pipeline / A status preserved", by_name["A"]["status"], "passed")
     _eq("single-pipeline / total rows", len(new["entries"]), 2)
+
+    # Fresh push (head_sha mismatch) starts clean — the stale snapshot for
+    # the prior SHA is discarded, only our own entry remains.
+    fresh = merge_comment_only_state(parsed, "def", "pipe-1", "aspect-cli", [own_b])
+    fresh_names = sorted([e["name"] for e in fresh["entries"]])
+    _eq("single-pipeline / fresh push drops prior-SHA rows", fresh_names, ["B"])
 
     print("gitlab features test: OK")
     return 0

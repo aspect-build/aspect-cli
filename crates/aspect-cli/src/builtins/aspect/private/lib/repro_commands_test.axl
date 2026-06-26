@@ -7,7 +7,7 @@ tests on `Arguments`.
 """
 
 load("./lifecycle.axl", "REPRO_FIX_ACCEPT", "REPRO_FIX_REJECT", "ReproFixCommand", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "repro_fix_replace")
-load("./repro_commands.axl", "build_aspect_command", "build_bazel_command", "explicit_flags", "filter_by_flavor", "flavor_allows", "has_tools_bazel_wrapper", "is_vanilla_bazel_slug", "rehydrate_commands", "repro_prefix", "slug_flavor", "subdir_prefix")
+load("./repro_commands.axl", "build_aspect_command", "build_bazel_command", "explicit_flags", "filter_by_flavor", "flavor_allows", "has_tools_bazel_wrapper", "is_vanilla_bazel_slug", "rehydrate_commands", "rehydrate_entry_commands", "repro_prefix", "slug_flavor", "subdir_prefix")
 
 def _eq(label, got, want):
     if got != want:
@@ -322,6 +322,26 @@ def _test_rehydrate_preserves_hooked_flag(_ctx):
     already-hooked entries."""
     out = rehydrate_commands([{"command": "aspect lint", "slug": "lint-fix", "_hooked": True}])
     _eq("_hooked carried through", out[0]._hooked, True)
+
+def _test_rehydrate_entry_commands(_ctx):
+    """`rehydrate_entry_commands` rehydrates both command lists in place,
+    leaves absent keys untouched, and returns the entry."""
+    entry = {
+        "name": "lint",
+        "repro_commands": [{"command": "aspect lint", "slug": "lint-repro"}],
+        "fix_commands": [{"command": "aspect lint --fix", "slug": "lint-fix"}],
+    }
+    out = rehydrate_entry_commands(entry)
+    _eq("returns the same entry", out, entry)
+    _eq("repro_commands → records", type(entry["repro_commands"][0]), "record")
+    _eq("repro command value", entry["repro_commands"][0].command, "aspect lint")
+    _eq("fix_commands → records", type(entry["fix_commands"][0]), "record")
+
+    # Absent keys are not introduced (older producers omit them entirely).
+    bare = {"name": "build"}
+    rehydrate_entry_commands(bare)
+    _eq("no repro_commands key added", "repro_commands" in bare, False)
+    _eq("no fix_commands key added", "fix_commands" in bare, False)
 
 def _test_bazel_build_with_targets(_ctx):
     _eq(
@@ -1235,6 +1255,7 @@ _UNIT_TESTS = [
     _test_rehydrate_drops_missing_command,
     _test_rehydrate_defaults_missing_optional_fields,
     _test_rehydrate_preserves_hooked_flag,
+    _test_rehydrate_entry_commands,
     _test_bazel_build_with_targets,
     _test_bazel_test_with_targets,
     _test_bazel_run_single_target,
