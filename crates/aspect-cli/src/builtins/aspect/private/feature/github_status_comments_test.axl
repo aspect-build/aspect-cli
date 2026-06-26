@@ -36,6 +36,7 @@ load(
     "dedup_for_display",
     "format_overflow_note",
     "lease_held",
+    "links_cell_text",
     "max_recent_upsert_epoch",
     "merge_state",
     "parse_state",
@@ -47,6 +48,7 @@ load(
     "serialize_state",
     "should_quiet_delete_log",
     "snippet_key",
+    "union_entries_by_kind_name",
 )
 load(
     "./test_fixtures.axl",
@@ -1376,6 +1378,57 @@ def _check_merge_state_keeps_empty_workflow_name_slots():
     rids = sorted([r["run_id"] for r in new["workflow_runs"]])
     _eq("merge — empty-name slots both kept", rids, ["100", "200", "999"])
 
+def _check_links_cell_text_host_label():
+    """The CI link cell labels each row by the producing job's CI host
+    (`ci_host_icon`/`ci_host_label`), so a mixed-host PR shows the right
+    provider per row; missing fields default to GitHub Actions (older
+    producers that didn't stamp them)."""
+    gha = links_cell_text({"ci_run_url": "https://gha/run", "ci_host_icon": "🐙", "ci_host_label": "GitHub Actions"})
+    if "🐙 [GitHub Actions](https://gha/run)" not in gha:
+        fail("links — GHA label: %r" % gha)
+
+    bk = links_cell_text({"ci_run_url": "https://bk/job", "ci_host_icon": "🏗", "ci_host_label": "Buildkite"})
+    if "🏗 [Buildkite](https://bk/job)" not in bk:
+        fail("links — Buildkite label: %r" % bk)
+
+    cci = links_cell_text({"ci_run_url": "https://cci/job", "ci_host_icon": "⭕", "ci_host_label": "CircleCI"})
+    if "⭕ [CircleCI](https://cci/job)" not in cci:
+        fail("links — CircleCI label: %r" % cci)
+
+    # Older producer (no host fields) → defaults to GitHub Actions.
+    legacy = links_cell_text({"ci_run_url": "https://gha/run"})
+    if "🐙 [GitHub Actions](https://gha/run)" not in legacy:
+        fail("links — legacy default: %r" % legacy)
+
+def _check_circleci_comment_only_accretes():
+    """Comment-only coordination (CircleCI): every job in the workflow
+    shares one run_id, and `_merge_state` replaces the whole own slot with
+    what's passed. So the feature unions our own entry over the comment
+    snapshot for our run_id BEFORE merging — `union_entries_by_kind_name`
+    + `merge_state`. This check replicates that composition and asserts a
+    second job (B) doesn't erase the first job's row (A) from the shared
+    comment."""
+    # Comment already holds job A for our CircleCI workflow (run_id "wf-1").
+    parsed = {
+        "head_sha": "abc",
+        "workflow_runs": [{"run_id": "wf-1", "workflow_name": "aspect-cli"}],
+        "entries": [
+            {"kind": "build", "name": "A", "job": "A", "workflow_run_id": "wf-1", "status": "passed"},
+        ],
+    }
+    # Job B publishes its own entry only (no sibling discovery on CircleCI).
+    own_b = {"kind": "test", "name": "B", "job": "B", "workflow_run_id": "wf-1", "status": "running"}
+
+    snapshot_mine = [e for e in parsed["entries"] if str(e.get("workflow_run_id")) == "wf-1"]
+    my_entries = union_entries_by_kind_name([own_b], snapshot_mine)
+    new = merge_state(parsed, "abc", "wf-1", "aspect-cli", my_entries, {})
+
+    by_name = {e["name"]: e for e in new["entries"]}
+    _eq("circleci accrete — A survives B's write", "A" in by_name, True)
+    _eq("circleci accrete — B added", "B" in by_name, True)
+    _eq("circleci accrete — A status preserved", by_name["A"]["status"], "passed")
+    _eq("circleci accrete — total rows", len(new["entries"]), 2)
+
 def _check_dedup_for_display_collapses_exact_duplicates():
     """`_dedup_for_display` collapses an exact-duplicate row — same
     `(workflow_run_id, job, name, key)` — to the higher `run_attempt`,
@@ -1621,6 +1674,8 @@ def _test_impl(ctx):
     _check_merge_state_evicts_superseded_sibling_run()
     _check_merge_state_losing_rerun_does_not_resurrect()
     _check_merge_state_keeps_empty_workflow_name_slots()
+    _check_links_cell_text_host_label()
+    _check_circleci_comment_only_accretes()
     _check_dedup_for_display_collapses_exact_duplicates()
     _check_dedup_for_display_keeps_distinct_jobs()
     _check_dedup_for_display_keeps_distinct_workflows()

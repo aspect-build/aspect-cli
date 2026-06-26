@@ -121,7 +121,75 @@ def _delete_artifact(ctx, name):
     """Buildkite has no artifact deletion API — no-op."""
     return {"success": True}
 
+def _parse_search_lines(stdout):
+    """Parse `buildkite-agent artifact search --format "%p\\t%i\\n"` output
+    into `[{path, id}]`.
+
+    Each non-blank line is `<path>\\t<artifact-id>`; blank lines and lines
+    missing the tab are skipped. Pure (no process) so it's unit-testable
+    against captured agent output.
+    """
+    out = []
+    for line in stdout.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        path = parts[0].strip()
+        artifact_id = parts[1].strip()
+        if path and artifact_id:
+            out.append({"path": path, "id": artifact_id})
+    return out
+
+def _search_artifacts(ctx, query):
+    """List build-scoped artifacts matching `query` as `[{path, id}]`.
+
+    `buildkite-agent artifact search` defaults `--build` to
+    `BUILDKITE_BUILD_ID`, so the search spans every job in the build —
+    the cross-job discovery primitive sibling status writers need.
+    `query` is a path glob (e.g. `aspect-ci-status-*`). Returns `[]` on
+    any failure (best-effort; the caller falls back to the comment state
+    block). The `\\t`/`\\n` escapes must reach the agent as the literal
+    2-char sequences — it runs `strings.Replace(format, "\\t", "\t", -1)`
+    internally; in Starlark `"%p\\t%i\\n"` is the 8-char string `%p\t%i\n`.
+    """
+    out = ctx.std.process.command("buildkite-agent") \
+        .args(["artifact", "search", query, "--format", "%p\\t%i\\n", "--log-level=error"]) \
+        .stdout("piped") \
+        .stderr("piped") \
+        .spawn() \
+        .wait_with_output()
+    trace.log("artifact search: query=" + query +
+              " exit=" + str(out.status.code) +
+              " stdout=" + repr(out.stdout or "") +
+              " stderr=" + repr(out.stderr or ""))
+    if out.status.code != 0:
+        return []
+    return _parse_search_lines(out.stdout or "")
+
+def _download_artifacts(ctx, query, dest_dir):
+    """Download every build-scoped artifact matching `query` into
+    `dest_dir`, preserving the artifact's relative path (== its upload
+    name). Build-scoped like `_search_artifacts`. Returns True on success.
+
+    Buildkite stores the uploaded file directly (no zip wrapper), so each
+    downloaded file is the original JSON payload at `dest_dir/<name>`.
+    """
+    ctx.std.fs.create_dir_all(dest_dir)
+    status = ctx.std.process.command("buildkite-agent") \
+        .args(["artifact", "download", query, dest_dir, "--log-level=error"]) \
+        .stdout("piped") \
+        .stderr("piped") \
+        .spawn() \
+        .wait()
+    return status.code == 0
+
 buildkite = struct(
     upload_artifact = _upload_artifact,
     delete_artifact = _delete_artifact,
+    search_artifacts = _search_artifacts,
+    download_artifacts = _download_artifacts,
+    parse_search_lines = _parse_search_lines,
 )

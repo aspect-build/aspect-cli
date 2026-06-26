@@ -11,6 +11,7 @@ load("@aspect//private/lib/bazel_flags_test.axl", "bazel_flags_tests")
 load("@aspect//private/lib/bazel_results_test.axl", "bazel_results_unit_tests", "template_snapshot_tests")
 load("@aspect//private/lib/bazel_runner_test.axl", "bazel_runner_tests")
 load("@aspect//private/lib/ci_test.axl", "ci_tests")
+load("@aspect//private/lib/ci_status_transport_test.axl", "ci_status_transport_tests")
 load("@aspect//private/lib/circleci_test.axl", "circleci_tests")
 load("@aspect//private/lib/delivery_results_test.axl", "delivery_results_unit_tests", "delivery_template_snapshot_tests")
 load("@aspect//private/lib/format_results_test.axl", "format_template_snapshot_tests")
@@ -283,6 +284,11 @@ def config(ctx: ConfigContext):
     # Cross-CI URL helpers (lib/ci.axl): host detection, build URL, per-job cache.
     # Run with: aspect dev test-ci
     ctx.tasks.add(ci_tests)
+
+    # PR-comment CI transport (lib/ci_status_transport.axl): per-host identity +
+    # transport selection, and the Buildkite artifact-search parser.
+    # Run with: aspect dev test-ci-status-transport
+    ctx.tasks.add(ci_status_transport_tests)
 
     # Buildkite phase-section expansion (lib/lifecycle.axl): Phase.expanded +
     # BuildkiteAnnotations.expanded_phases → `+++`/`---` marker resolution.

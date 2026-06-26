@@ -1,0 +1,119 @@
+"""CI identity + cross-job transport selection for the aggregated PR-comment
+status surface (`feature/github_status_comments.axl`).
+
+A GitHub PR can be built on GitHub Actions, Buildkite, or CircleCI. The PR
+comment itself — and its base64-JSON state block — is the canonical
+cross-workflow source of truth on every host; what differs is only the
+*transport* a job uses to publish its own status payload and discover
+siblings' payloads more freshly than the comment alone:
+
+  - GitHub Actions — the GitHub Actions artifact swarm (Twirp upload +
+    REST list/download, run-scoped).
+  - Buildkite      — `buildkite-agent artifact search`/`download`
+    (build-scoped, so it spans sibling jobs).
+  - CircleCI       — none. A running CircleCI job can't enumerate sibling
+    jobs' artifacts without a separate `CIRCLE_TOKEN` (the runner output
+    socket is upload-and-self-scoped), so it coordinates purely through
+    the comment state block, exactly like `GitlabStatusComments`.
+
+`build_status_transport(env)` resolves the per-host identity (run id, job
+name, attempt, workflow name) and these flags, dispatching on
+`detect_ci_host`. It is pure and `env`-only so the feature reads process
+env exactly once and tests can pass a fixture env. The transport's actual
+upload/discover *operations* are wired in the feature, keyed on
+`transport.host`, since they capture `ctx` and the per-host libraries.
+"""
+
+load("./ci.axl", "detect_ci_host")
+
+# prs.write is enough to create/update the PR comment on every host;
+# actions.read is needed only for the GitHub Actions artifact REST calls.
+_ROLES_GITHUB = ["prs.write", "actions.read"]
+_ROLES_COMMENT_ONLY = ["prs.write"]
+
+StatusTransport = record(
+    # CI host id: "github" | "buildkite" | "circleci". Mirrors the marker
+    # in `_CI_HOSTS`; the feature dispatches transport ops on it.
+    host = field(str),
+    # Human-readable host name + icon, for the row's CI link cell.
+    host_label = field(str),
+    host_icon = field(str),
+    # Cross-workflow slot key + per-task identity. `run_id` is the broadest
+    # scope sibling jobs in one logical run share (GHA run, BK build, CCI
+    # workflow); `workflow_name` keys `_live_runs` re-trigger eviction.
+    run_id = field(str),
+    workflow_name = field(str),
+    job_name = field(str),
+    run_attempt = field(str),
+    # True when the host has a cross-job artifact transport (GitHub,
+    # Buildkite). False (CircleCI) → the feature skips produce/discover and
+    # relies on the comment state block alone.
+    uses_artifacts = field(bool),
+    # GitHub App roles to request at auth time.
+    auth_roles = field(list),
+)
+
+def _github_transport(host, env) -> StatusTransport:
+    return StatusTransport(
+        host = "github",
+        host_label = host["label"],
+        host_icon = host["icon"],
+        run_id = env.var("GITHUB_RUN_ID") or "",
+        workflow_name = env.var("GITHUB_WORKFLOW") or "",
+        job_name = env.var("GITHUB_JOB") or "unknown-job",
+        run_attempt = env.var("GITHUB_RUN_ATTEMPT") or "1",
+        uses_artifacts = True,
+        auth_roles = _ROLES_GITHUB,
+    )
+
+def _buildkite_transport(host, env) -> StatusTransport:
+    # BUILDKITE_RETRY_COUNT is 0 on the first attempt; +1 to match GHA's
+    # 1-based GITHUB_RUN_ATTEMPT so the run-attempt dedup keys line up.
+    retry = env.var("BUILDKITE_RETRY_COUNT") or "0"
+    run_attempt = str(int(retry) + 1) if retry.isdigit() else "1"
+    return StatusTransport(
+        host = "buildkite",
+        host_label = host["label"],
+        host_icon = host["icon"],
+        run_id = env.var("BUILDKITE_BUILD_ID") or "",
+        workflow_name = env.var("BUILDKITE_PIPELINE_SLUG") or "",
+        job_name = env.var("BUILDKITE_STEP_KEY") or env.var("BUILDKITE_LABEL") or "unknown-job",
+        run_attempt = run_attempt,
+        uses_artifacts = True,
+        auth_roles = _ROLES_COMMENT_ONLY,
+    )
+
+def _circleci_transport(host, env) -> StatusTransport:
+    return StatusTransport(
+        host = "circleci",
+        host_label = host["label"],
+        host_icon = host["icon"],
+        run_id = env.var("CIRCLE_WORKFLOW_ID") or "",
+        workflow_name = env.var("CIRCLE_PROJECT_REPONAME") or "",
+        job_name = env.var("CIRCLE_JOB") or "unknown-job",
+        run_attempt = "1",
+        uses_artifacts = False,
+        auth_roles = _ROLES_COMMENT_ONLY,
+    )
+
+_BUILDERS = {
+    "GITHUB_ACTIONS": _github_transport,
+    "BUILDKITE": _buildkite_transport,
+    "CIRCLECI": _circleci_transport,
+}
+
+def build_status_transport(env: std.Env) -> StatusTransport | None:
+    """Resolve the CI identity + transport selection for the running host,
+    or `None` off a host the PR-comment surface supports.
+
+    Supports GitHub Actions, Buildkite, and CircleCI (the hosts on which a
+    GitHub PR can be built). GitLab is intentionally excluded — it has its
+    own `GitlabStatusComments` feature posting to an MR note.
+    """
+    host = detect_ci_host(env)
+    if host == None:
+        return None
+    builder = _BUILDERS.get(host["marker"])
+    if builder == None:
+        return None
+    return builder(host, env)
