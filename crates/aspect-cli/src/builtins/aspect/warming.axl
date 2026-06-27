@@ -70,8 +70,8 @@ def _impl(ctx: TaskContext) -> int:
 
 warming = task(
     group = ["ci"],
-    summary = "Pre-populate Bazel caches on a CI runner.",
-    description = "Cleans prior Bazel state under ${ASPECT__STORAGE_PATH}, then runs `bazel build --nobuild` against the given targets so subsequent jobs on the same runner pool start with hot caches. Intended to run on Aspect Workflows warming runners; the populated caches are captured by the warming archive.",
+    summary = "Pre-populate Bazel caches on a CI runner (and archive them on Aspect Workflows runners).",
+    description = "Cleans prior Bazel state under ${ASPECT__STORAGE_PATH}, then runs `bazel build --nobuild` against the given targets so subsequent jobs on the same runner pool start with hot caches. On an Aspect Workflows runner it then creates and uploads the warming archives by invoking /etc/aspect/workflows/bin/warming_archive, so a warming pipeline only needs to call `aspect ci warming`. Off a Workflows runner the cache-populate step still runs and the archive step is skipped.",
     implementation = _impl,
     traits = [BazelTrait],
     args = {
