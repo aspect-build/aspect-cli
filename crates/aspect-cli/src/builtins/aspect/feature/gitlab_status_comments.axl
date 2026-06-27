@@ -82,6 +82,15 @@ _LOG = feature_logger("GitLab status comments")
 # GitHub feature's `_dedup_marker_comments` for the read-after-write rationale.
 _DEDUP_SETTLE_S = 3
 
+# Window for re-checking duplicates on later cycles after a create — see the
+# GitHub feature's `_DEDUP_RECHECK_WINDOW_S`.
+_DEDUP_RECHECK_WINDOW_S = 60
+
+# Grace before the note-state fallback will CREATE a note when the Aspect API
+# has never succeeded and no marker note exists — see the GitHub feature's
+# `_FALLBACK_CREATE_GRACE_S` (prevents a cold-start duplicate stampede).
+_FALLBACK_CREATE_GRACE_S = 45
+
 _MARKER_FMT = "<!-- aspect-ci-status:mr-%d -->"
 
 def _ci_run_url(env):
@@ -249,6 +258,7 @@ def _gitlab_status_comments(ctx: FeatureContext):
             if not res["success"]:
                 _LOG.warn(ctx.std, "Update note failed: %s" % res.get("error", "unknown"))
                 return False
+            _dedup_recheck(ctx, token)
             return True
 
         res = gitlab.notes.create(
@@ -263,40 +273,52 @@ def _gitlab_status_comments(ctx: FeatureContext):
             _LOG.warn(ctx.std, "Create note failed: %s" % res.get("error", "unknown"))
             return False
         _state["_note_id"] = res["note_id"]
+        _state["_dedup_recheck_until"] = monotonic() + _DEDUP_RECHECK_WINDOW_S
         _dedup_notes(ctx, token)
         return True
 
-    def _dedup_notes(ctx, token):
-        """Converge concurrent first-posters on one note: keep the lowest
-        marker-note id and delete the rest.
+    def _converge_notes(ctx, token):
+        """List the MR's marker notes and converge on the lowest-id survivor,
+        deleting the rest. Returns True once a single marker note is observed."""
+        listed = gitlab.notes.list(ctx, token = token, project = project_path, mr_iid = mr_iid, api_base = api_base)
+        if not listed["success"]:
+            return False
+        survivor, losers = dedup_survivor(listed["notes"], marker)
+        if survivor == None:
+            marker_count = len([n for n in listed["notes"] if marker in (n.get("body") or "")])
+            return marker_count == 1
+        _state["_note_id"] = survivor
+        for loser_id in losers:
+            del_res = gitlab.notes.delete(
+                ctx,
+                token = token,
+                project = project_path,
+                mr_iid = mr_iid,
+                note_id = loser_id,
+                api_base = api_base,
+            )
+            if not del_res["success"]:
+                _LOG.trace("Cleanup of duplicate note %s failed; will retry next cycle" % loser_id)
+        return False
 
-        Lists immediately; a confirmed duplicate converges at once. A racing
-        sibling's just-created note can lag in the notes list, so when only our
-        own note is visible it waits `_DEDUP_SETTLE_S` once and re-lists before
-        giving up. Runs only after a create — once `_note_id` is set, every
-        later cycle PUTs and never reaches here."""
+    def _dedup_notes(ctx, token):
+        """Create-time duplicate backstop: list immediately and converge; if no
+        sibling is visible yet, wait `_DEDUP_SETTLE_S` once and re-list.
+        Stragglers beyond this are handled by `_dedup_recheck` on later cycles."""
         for attempt in range(2):
             if attempt:
                 sleep(_DEDUP_SETTLE_S)
-            listed = gitlab.notes.list(ctx, token = token, project = project_path, mr_iid = mr_iid, api_base = api_base)
-            if not listed["success"]:
+            if _converge_notes(ctx, token):
                 return
-            survivor, losers = dedup_survivor(listed["notes"], marker)
-            if survivor == None:
-                continue
-            _state["_note_id"] = survivor
-            for loser_id in losers:
-                del_res = gitlab.notes.delete(
-                    ctx,
-                    token = token,
-                    project = project_path,
-                    mr_iid = mr_iid,
-                    note_id = loser_id,
-                    api_base = api_base,
-                )
-                if not del_res["success"]:
-                    _LOG.trace("Cleanup of duplicate note %s failed; will retry next cycle" % loser_id)
+
+    def _dedup_recheck(ctx, token):
+        """No-sleep convergence on later cycles until stable once or the recheck
+        window lapses; clears the deadline so steady-state PUTs pay nothing."""
+        until = _state.get("_dedup_recheck_until", 0.0)
+        if until <= 0.0:
             return
+        if monotonic() >= until or _converge_notes(ctx, token):
+            _state.pop("_dedup_recheck_until", None)
 
     def _render_note(ctx, state, now_epoch):
         """Render `(stable_body, final_body)` for the MR note from a merged
@@ -397,15 +419,19 @@ def _gitlab_status_comments(ctx: FeatureContext):
         sibling rows for our pipeline), render, and post under a time lease so
         concurrent tasks don't all PATCH at once.
 
-        Once server coordination has worked this run (`_api_ok`), this path may
-        only PATCH a note it already knows/discovers — never create one
-        out-of-band — so a transient API blip can't race a second note past the
-        server's single-poster election."""
+        To avoid duplicate notes, this path creates one only as a last resort:
+        when no marker note is known or discoverable, it creates only if the
+        Aspect API has never worked this run AND the task has run past
+        `_FALLBACK_CREATE_GRACE_S` (a sustained outage, not a cold-start blip).
+        Otherwise it defers. Once the API has worked (`_api_ok`), it never
+        creates out-of-band."""
         existing_body = _fetch_existing_note_body(ctx, token)
         if existing_body == None:
             return
-        if _state.get("_note_id") == None and _state.get("_api_ok"):
-            return
+        if _state.get("_note_id") == None:
+            grace_elapsed = now_epoch - _state.get("_task_started_at_s", 0) >= _FALLBACK_CREATE_GRACE_S
+            if _state.get("_api_ok") or not grace_elapsed:
+                return
         parsed = parse_state(existing_body)
 
         lease_epoch = parsed["last_upsert_epoch_s"] if parsed else 0
