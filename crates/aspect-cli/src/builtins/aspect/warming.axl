@@ -10,11 +10,10 @@ running on an Aspect Workflows runner, this task also invokes
 caches to the warming bucket — so the customer's CI workflow only
 needs to call `aspect ci warming`.
 """
+
 load("@aspect//traits.axl", "BazelTrait")
 
-
 WARMING_ARCHIVE_BIN = "/etc/aspect/workflows/bin/warming_archive"
-
 
 def _impl(ctx: TaskContext) -> int:
     on_workflows_runner = bool(ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER"))
@@ -48,7 +47,7 @@ def _impl(ctx: TaskContext) -> int:
 
     invocation = ctx.bazel.build(
         flags = flags,
-        *ctx.args.targets,
+        *ctx.args.targets
     )
     code = invocation.wait().code
     if code != 0:
@@ -65,10 +64,9 @@ def _impl(ctx: TaskContext) -> int:
         "archive upload step. The bazel cache populate step ran successfully. " +
         "On an Aspect Workflows runner this task also invokes " +
         WARMING_ARCHIVE_BIN + " to upload the populated caches to the warming " +
-        "bucket.\n"
+        "bucket.\n",
     )
     return 0
-
 
 warming = task(
     group = ["ci"],
