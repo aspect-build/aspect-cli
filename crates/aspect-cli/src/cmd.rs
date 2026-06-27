@@ -154,7 +154,7 @@ impl<'a, 'v> Cmd<'a, 'v> {
                     .global(true)
                     .value_parser(parse_timing_mode)
                     .default_value("detailed")
-                    .help("Verbosity of the phase-timing breakdown trailing the task completion line: 'none' (no timing summary), 'total' (total only), 'short' (inline phases), or 'detailed' (multi-line with descriptions; default). Tasks that don't opt into phases see only the total regardless of this setting."),
+                    .help("Verbosity of the phase-timing breakdown trailing the task completion line: 'none' (no timing summary), 'total' (total only), 'short' (inline phases), or 'detailed' (multi-line with descriptions; default)."),
             )
             .subcommand(
                 // `feature` is not a task: its parsing exists only so `main`
