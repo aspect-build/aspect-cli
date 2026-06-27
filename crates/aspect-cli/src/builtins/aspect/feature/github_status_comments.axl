@@ -127,9 +127,22 @@ _BUDGET_REFRESH_S = 180
 # job creates a comment it lists once immediately; if no sibling is visible yet
 # it waits this long once more (GitHub read-after-write lag can hide a racing
 # sibling's just-created comment) and re-lists before giving up. Paid only on
-# create; a confirmed duplicate converges without waiting, and updates (PATCH)
-# never run the backstop at all.
+# create; a confirmed duplicate converges without waiting.
 _DEDUP_SETTLE_S = 3
+
+# After a create, keep re-running the (no-sleep) dedup on subsequent publish
+# cycles for this long so a sibling whose comment was still invisible at create
+# time is collapsed promptly rather than lingering. Covers the read-after-write
+# lag plus the spread between sibling workflows' first posts.
+_DEDUP_RECHECK_WINDOW_S = 60
+
+# How long the comment-state fallback waits before it will CREATE a comment when
+# the Aspect API has never succeeded this run and no marker comment exists yet.
+# At CI startup many jobs hit a cold Lambda at once; without this grace each
+# would create its own comment out-of-band (a duplicate stampede). Waiting lets
+# the API recover so the server's single-poster election creates the one comment;
+# only a sustained outage falls through to a client-created comment.
+_FALLBACK_CREATE_GRACE_S = 45
 
 # Badges keyed by the precomputed `_badge_key`, not raw status:
 #   "failed"  — terminal failed / live failing (error)
@@ -1349,6 +1362,11 @@ def _github_status_comments(ctx: FeatureContext):
             if not res.get("success"):
                 _LOG.warn(ctx.std, "Update failed: %s" % res.get("error", "unknown"))
                 return False
+
+            # A sibling whose comment was invisible at our create time can still
+            # surface within the recheck window; collapse it without re-listing
+            # forever.
+            _dedup_recheck(ctx, token)
             return True
 
         res = github.issues.create_comment(ctx, token, owner, repo, pr_number, body)
@@ -1356,32 +1374,52 @@ def _github_status_comments(ctx: FeatureContext):
             _LOG.warn(ctx.std, "Create failed: %s" % res.get("error", "unknown"))
             return False
         _state["_comment_id"] = res["comment_id"]
+
+        # Re-check on the next cycles too: a racing sibling may not be visible
+        # yet, and the spread between sibling workflows' first posts can exceed
+        # one settle.
+        _state["_dedup_recheck_until"] = monotonic() + _DEDUP_RECHECK_WINDOW_S
         _dedup_marker_comments(ctx, token)
         return True
 
-    def _dedup_marker_comments(ctx, token):
-        """Converge concurrent first-posters on one comment: keep the lowest
-        marker-comment id and delete the rest.
+    def _converge_marker_comments(ctx, token):
+        """List the PR's marker comments and converge on the lowest-id
+        survivor, deleting the rest. Returns True once a single comment is
+        observed (stable), False otherwise."""
+        listed = github.issues.list_comments(ctx, token, owner, repo, pr_number)
+        if not listed.get("success"):
+            return False
+        survivor, losers = _dedup_survivor(listed["comments"], marker)
+        if survivor == None:
+            # 0 or 1 marker comment visible. Stable only when one is actually
+            # present (a 0-count means read-after-write lag, not stable).
+            marker_count = len([c for c in listed["comments"] if marker in (c.get("body") or "")])
+            return marker_count == 1
+        _state["_comment_id"] = survivor
+        for loser_id in losers:
+            github.issues.delete_comment(ctx, token, owner, repo, loser_id)
+        return False
 
-        Lists immediately; a confirmed duplicate converges at once. A racing
-        sibling's just-created comment can lag in `list_comments` (GitHub
-        read-after-write), so when only our own comment is visible it waits
-        `_DEDUP_SETTLE_S` once and re-lists before giving up. Runs only after a
-        create — once `_comment_id` is set, every later cycle PATCHes and never
-        reaches here."""
+    def _dedup_marker_comments(ctx, token):
+        """Create-time duplicate backstop: list immediately and converge; if no
+        sibling is visible yet, wait `_DEDUP_SETTLE_S` once and re-list (GitHub
+        read-after-write lag). Stragglers beyond this are handled by
+        `_dedup_recheck` on later cycles."""
         for attempt in range(2):
             if attempt:
                 sleep(_DEDUP_SETTLE_S)
-            listed = github.issues.list_comments(ctx, token, owner, repo, pr_number)
-            if not listed.get("success"):
+            if _converge_marker_comments(ctx, token):
                 return
-            survivor, losers = _dedup_survivor(listed["comments"], marker)
-            if survivor == None:
-                continue
-            _state["_comment_id"] = survivor
-            for loser_id in losers:
-                github.issues.delete_comment(ctx, token, owner, repo, loser_id)
+
+    def _dedup_recheck(ctx, token):
+        """No-sleep convergence on later publish cycles, until the comment set
+        has been stable once or the recheck window lapses. Clears the deadline
+        when done so steady-state publishes pay nothing."""
+        until = _state.get("_dedup_recheck_until", 0.0)
+        if until <= 0.0:
             return
+        if monotonic() >= until or _converge_marker_comments(ctx, token):
+            _state.pop("_dedup_recheck_until", None)
 
     def _fetch_existing_comment_body(ctx, token):
         """Read the PR's marker comment body so the render can merge other
@@ -1597,15 +1635,24 @@ def _github_status_comments(ctx: FeatureContext):
         our entry (preserving sibling rows for our run), render, and post under
         a simple time lease so concurrent jobs don't all PATCH at once.
 
-        Once server coordination has worked this run (`_api_ok`), this path may
-        only PATCH a comment it already knows/discovers — never create one
-        out-of-band — so the server's single-poster election stays the sole
-        creator and a transient API blip can't race a second comment."""
+        To avoid duplicate comments, this path creates one only as a last
+        resort. When no marker comment is known or discoverable yet, it will
+        *create* one only if the Aspect API has never worked this run AND
+        either this is the terminal (`final`) update or the task has been
+        running past `_FALLBACK_CREATE_GRACE_S` — i.e. a sustained outage, not a
+        cold-start blip. The `final` exemption matters: it's the last lifecycle
+        emit (no later retry), so a quick job during a full outage must surface
+        its completed status even before the grace elapses; the convergent dedup
+        collapses any rare duplicate. Otherwise it defers (a sibling's server
+        grant, or this job's own recovered API call, creates the one comment).
+        Once the API has worked (`_api_ok`), it never creates out-of-band."""
         existing_body = _fetch_existing_comment_body(ctx, token)
         if existing_body == None:
             return
-        if "_comment_id" not in _state and _state.get("_api_ok"):
-            return
+        if "_comment_id" not in _state:
+            grace_elapsed = final or monotonic() - _state.get("_task_started_at", 0.0) >= _FALLBACK_CREATE_GRACE_S
+            if _state.get("_api_ok") or not grace_elapsed:
+                return
         parsed = _parse_state(existing_body)
 
         lease_epoch = parsed["last_upsert_epoch_s"] if parsed else 0
