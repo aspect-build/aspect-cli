@@ -54,15 +54,21 @@ _PRE_COMMON_COMMANDS = ["build", "query"]
 
 def _detect_bazel_version(ctx: TaskContext) -> str | None:
     """Best-effort Bazel release version (e.g. "7.4.1") from `bazel --version`,
-    passed to `new_rc` so the runtime filters version-gated flags against it.
-    None when `bazel` is absent/errors or prints no X.Y.Z (e.g. the Aspect CLI's
-    own `bazel --version`); the runtime then assumes latest."""
+    passed to `new_rc` so the runtime filters version-gated flags against it and
+    used to pick the rc command sections. None when `bazel` is absent/errors or
+    prints no X.Y.Z (e.g. the Aspect CLI's own `bazel --version`); the runtime
+    then assumes latest.
+
+    The pre-release suffix is dropped (`8.0.0-rc2` -> `8.0.0`), mirroring the
+    runtime's own `bazel info release` parsing: semver `VersionReq` matching
+    treats a pre-release specially, so a literal `8.0.0-rc2` would NOT satisfy
+    `>=8.0.0` and would wrongly drop the Bazel-8 flags on a release candidate."""
     result = ctx.std.process.command("bazel").arg("--version").stdout("piped").stderr("null").spawn().wait_with_output()
     if result.status.code != 0:
         return None
     for token in result.stdout.split():
         if token and token[0].isdigit() and "." in token:
-            return token
+            return token.split("-")[0]
     return None
 
 def _flag_str(flag) -> str:
