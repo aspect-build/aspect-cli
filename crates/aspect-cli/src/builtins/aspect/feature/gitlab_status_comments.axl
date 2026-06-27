@@ -421,15 +421,18 @@ def _gitlab_status_comments(ctx: FeatureContext):
 
         To avoid duplicate notes, this path creates one only as a last resort:
         when no marker note is known or discoverable, it creates only if the
-        Aspect API has never worked this run AND the task has run past
-        `_FALLBACK_CREATE_GRACE_S` (a sustained outage, not a cold-start blip).
-        Otherwise it defers. Once the API has worked (`_api_ok`), it never
-        creates out-of-band."""
+        Aspect API has never worked this run AND either this is the terminal
+        (`final`) update or the task has run past `_FALLBACK_CREATE_GRACE_S` (a
+        sustained outage, not a cold-start blip). The `final` exemption ensures
+        a quick job's completed status still surfaces during an outage — it's
+        the last lifecycle emit, so there's no later retry; the convergent dedup
+        collapses any rare duplicate. Otherwise it defers. Once the API has
+        worked (`_api_ok`), it never creates out-of-band."""
         existing_body = _fetch_existing_note_body(ctx, token)
         if existing_body == None:
             return
         if _state.get("_note_id") == None:
-            grace_elapsed = now_epoch - _state.get("_task_started_at_s", 0) >= _FALLBACK_CREATE_GRACE_S
+            grace_elapsed = final or now_epoch - _state.get("_task_started_at_s", 0) >= _FALLBACK_CREATE_GRACE_S
             if _state.get("_api_ok") or not grace_elapsed:
                 return
         parsed = parse_state(existing_body)

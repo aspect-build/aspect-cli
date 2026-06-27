@@ -1637,16 +1637,20 @@ def _github_status_comments(ctx: FeatureContext):
 
         To avoid duplicate comments, this path creates one only as a last
         resort. When no marker comment is known or discoverable yet, it will
-        *create* one only if the Aspect API has never worked this run AND the
-        task has been running past `_FALLBACK_CREATE_GRACE_S` — i.e. a sustained
-        outage, not a cold-start blip. Otherwise it defers (a sibling's server
+        *create* one only if the Aspect API has never worked this run AND
+        either this is the terminal (`final`) update or the task has been
+        running past `_FALLBACK_CREATE_GRACE_S` — i.e. a sustained outage, not a
+        cold-start blip. The `final` exemption matters: it's the last lifecycle
+        emit (no later retry), so a quick job during a full outage must surface
+        its completed status even before the grace elapses; the convergent dedup
+        collapses any rare duplicate. Otherwise it defers (a sibling's server
         grant, or this job's own recovered API call, creates the one comment).
         Once the API has worked (`_api_ok`), it never creates out-of-band."""
         existing_body = _fetch_existing_comment_body(ctx, token)
         if existing_body == None:
             return
         if "_comment_id" not in _state:
-            grace_elapsed = monotonic() - _state.get("_task_started_at", 0.0) >= _FALLBACK_CREATE_GRACE_S
+            grace_elapsed = final or monotonic() - _state.get("_task_started_at", 0.0) >= _FALLBACK_CREATE_GRACE_S
             if _state.get("_api_ok") or not grace_elapsed:
                 return
         parsed = _parse_state(existing_body)
