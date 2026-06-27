@@ -1290,6 +1290,32 @@ def _check_merge_state_evicts_superseded_workflow_run():
     _eq("merge — our live row survives", keyed[("test", "cpu", "999")]["status"], "running")
     _eq("merge — distinct sibling workflow row survives", keyed[("lint", "lint", "500")]["status"], "passed")
 
+def _check_merge_state_distinct_hosts_same_raw_name_coexist():
+    """Two CI hosts on one PR can share a raw pipeline/repo name (e.g.
+    CircleCI's `CIRCLE_PROJECT_REPONAME` and Buildkite's
+    `BUILDKITE_PIPELINE_SLUG` both "myrepo"). `_ci_identity` host-prefixes
+    `workflow_name`, so the slots stay distinct and neither host's run evicts
+    the other's — the cause of a CI host's tasks vanishing from the comment."""
+    existing = {
+        "head_sha": "abc",
+        "workflow_runs": [
+            {"run_id": "circle-wf-1", "workflow_name": "CIRCLECI:myrepo"},
+        ],
+        "entries": [
+            {"kind": "test", "name": "test-cci", "job": "test", "workflow_run_id": "circle-wf-1", "status": "passed"},
+        ],
+    }
+
+    # A Buildkite run of the same repo — same raw name, different host prefix.
+    my_entries = [{"kind": "test", "name": "test-bk", "job": "test", "workflow_run_id": "bk-build-1", "status": "passed"}]
+    new = merge_state(existing, "abc", "bk-build-1", "BUILDKITE:myrepo", my_entries, {})
+
+    rids = sorted([r["run_id"] for r in new["workflow_runs"]])
+    _eq("merge — distinct-host slots both kept", rids, ["bk-build-1", "circle-wf-1"])
+    names = [e["name"] for e in new["entries"]]
+    _eq("merge — CircleCI task survives", "test-cci" in names, True)
+    _eq("merge — Buildkite task survives", "test-bk" in names, True)
+
 def _check_merge_state_evicts_superseded_sibling_run():
     """Two slots for the same SIBLING workflow (a re-run of a workflow
     that isn't ours) collapse to the newest run_id — the eviction isn't
@@ -1634,6 +1660,7 @@ def _test_impl(ctx):
     _check_merge_state_drops_stale_push()
     _check_merge_state_drops_orphan_snapshot_entries()
     _check_merge_state_evicts_superseded_workflow_run()
+    _check_merge_state_distinct_hosts_same_raw_name_coexist()
     _check_merge_state_evicts_superseded_sibling_run()
     _check_merge_state_losing_rerun_does_not_resurrect()
     _check_merge_state_keeps_empty_workflow_name_slots()

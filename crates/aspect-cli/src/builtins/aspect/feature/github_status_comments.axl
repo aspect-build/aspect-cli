@@ -530,7 +530,11 @@ def _ci_run_url(env):
 
 # Per-host CI identity for the status-comment coordination key. `run_id` is the
 # broadest scope sibling jobs in one logical run share (GHA run, BK build, CCI
-# workflow); `workflow_name` keys the server's per-workflow re-trigger eviction.
+# workflow); `workflow_name` keys the per-workflow re-trigger eviction. The
+# resolved `workflow_name` is prefixed with the host marker (see `_ci_identity`)
+# so two CI hosts that share a raw pipeline/repo name (e.g. CircleCI's
+# `CIRCLE_PROJECT_REPONAME` and Buildkite's `BUILDKITE_PIPELINE_SLUG` both
+# "myrepo") aren't mistaken for re-triggers of each other and evicted.
 _CI_IDENTITY = {
     "GITHUB_ACTIONS": {
         "run_id": "GITHUB_RUN_ID",
@@ -554,13 +558,18 @@ _CI_IDENTITY = {
 
 def _ci_identity(env, marker):
     """Resolve `(run_id, workflow_name, job_name, run_attempt)` for the host
-    identified by `marker`, or `None` for an unsupported host."""
+    identified by `marker`, or `None` for an unsupported host.
+
+    `workflow_name` is prefixed with `marker` so the re-trigger eviction key is
+    unique per CI host — two hosts sharing a raw pipeline/repo name don't
+    collapse each other's slots (see `_CI_IDENTITY`)."""
     spec = _CI_IDENTITY.get(marker)
     if spec == None:
         return None
+    raw_workflow_name = env.var(spec["workflow_name"]) or ""
     return {
         "run_id": env.var(spec["run_id"]) or "",
-        "workflow_name": env.var(spec["workflow_name"]) or "",
+        "workflow_name": "%s:%s" % (marker, raw_workflow_name),
         "job_name": env.var(spec["job_name"]) or "unknown-job",
         "run_attempt": (env.var(spec["run_attempt"]) if spec["run_attempt"] else "") or "1",
     }

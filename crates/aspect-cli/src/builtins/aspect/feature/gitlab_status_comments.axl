@@ -154,7 +154,11 @@ def _gitlab_status_comments(ctx: FeatureContext):
     run_id = env.var("ASPECT_GITLAB_PIPELINE_ID") or env.var("CI_PIPELINE_ID") or ""
     job_name = env.var("ASPECT_GITLAB_JOB_NAME") or env.var("CI_JOB_NAME") or "aspect-cli"
     run_attempt = env.var("CI_JOB_RETRY_INDEX") or "0"
-    workflow_name = env.var("CI_PIPELINE_NAME") or env.var("CI_PROJECT_NAME") or ""
+
+    # Host-prefixed so the re-trigger eviction key can't collide with another CI
+    # host that shares a raw pipeline/project name (matches the GitHub feature's
+    # `_ci_identity`).
+    workflow_name = "GITLAB_CI:%s" % (env.var("CI_PIPELINE_NAME") or env.var("CI_PROJECT_NAME") or "")
     if not run_id:
         # Fall back to the MR IID so single-pipeline coordination still
         # works in the local-sim case where no real pipeline exists. A
