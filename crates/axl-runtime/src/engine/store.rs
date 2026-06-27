@@ -1,8 +1,27 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use starlark::{eval::Evaluator, values::ProvidesStaticType};
 
 use super::r#async::rt::AsyncRuntime;
+
+/// In-memory environment-variable overlay shared between a test's harness
+/// (`t.env`) and the `std.env` backend reachable through `t.std.env` /
+/// `t.ctx.std.env`.
+///
+/// Shared via a handle so a mutation through one view (e.g. `t.env.set(...)`)
+/// is observed through the others (`t.ctx.std.env.var(...)`) — they all hold
+/// clones of the same handle onto one map. A `BTreeMap` keeps `vars()`
+/// iteration deterministic for snapshot-style assertions.
+///
+/// `Arc<Mutex<…>>` (not `Rc<RefCell<…>>`) so the handle is `Send + Sync`: the
+/// `std.Env` / `Std` Starlark values that now *carry* it must satisfy the
+/// `Send + Sync` bound that frozen Starlark values require. Each test's
+/// overlay is only ever touched on that test's own worker thread, so the
+/// `Mutex` is never actually contended — it is correctness insurance for the
+/// parallel runner, not a hot path.
+pub type TestEnvMap = Arc<Mutex<BTreeMap<String, String>>>;
 
 /// Process-wide environment passed to every Starlark evaluator via `eval.extra`.
 ///

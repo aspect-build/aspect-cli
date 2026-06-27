@@ -747,6 +747,7 @@ impl Build {
     // TODO: this should return a thiserror::Error
     pub fn spawn(
         verb: &str,
+        backend: super::backend::BazelBackend,
         targets: impl IntoIterator<Item = String>,
         (build_events, sinks, iters): (bool, Vec<BuildEventSink>, Vec<BuildEventIter>),
         (execution_logs, execlog_sinks): (bool, Vec<ExecLogSink>),
@@ -759,7 +760,10 @@ impl Build {
         announce: AnnounceSpawn,
         rt: AsyncRuntime,
     ) -> Result<Build, std::io::Error> {
-        let (pid, version) = super::info::server_info()?;
+        // `Real` probes the live daemon for its pid + version; `Fake` has no
+        // daemon and returns `(0, None)` — its per-invocation server pid is
+        // the child we spawn below (see `bes_server_pid`).
+        let (pid, version) = backend.build_server_info(&[])?;
 
         let span = tracing::info_span!(
             "ctx.bazel.build",
@@ -772,7 +776,9 @@ impl Build {
 
         let targets: Vec<String> = targets.into_iter().collect();
 
-        let mut cmd = super::bazel_command();
+        // `Real` → `bazel_command()` (sets the anti-inception env, honors
+        // BAZEL_REAL). `Fake` → the fake binary directly, NO global env.
+        let mut cmd = backend.command();
         cmd.args(startup_flags);
         cmd.arg(verb);
         cmd.args(flags);
@@ -859,9 +865,33 @@ impl Build {
         cmd.stderr(stderr);
         cmd.stdin(Stdio::null());
 
+        // Fake backend: open a per-invocation control channel (socketpair),
+        // arrange for the fake child to inherit the read end, and remember
+        // the expectation to send once the child is alive. Each spawn mints
+        // its own channel, so concurrent test workers never collide.
+        let mut control: Option<Box<dyn super::backend::ControlChannel>> = None;
+        let fake_expectation =
+            if let super::backend::BazelBackend::Fake { expectation, .. } = &backend {
+                let chan = super::backend::open_control_channel()?;
+                super::backend::prepare_command(&mut cmd, chan.child_fd());
+                control = Some(chan);
+                Some(expectation.clone())
+            } else {
+                None
+            };
+
         let child = cmd
             .spawn()
             .map_err(|e| io::Error::other(format!("failed to spawn bazel: {e}")))?;
+
+        // Hand the declared expectation to the fake over the control channel
+        // now that it's running. Dropping the parent end (inside
+        // `send_expectation`) closes the write half so the fake's
+        // `read_to_end` returns and it can synthesize the BES stream.
+        if let (Some(mut chan), Some(exp)) = (control.take(), fake_expectation) {
+            chan.send_expectation(&exp)
+                .map_err(|e| io::Error::other(format!("failed to send fake expectation: {e}")))?;
+        }
 
         // Register the bazel client with the live-subprocess registry so
         // aspect-cli's OS-signal handler can forward SIGINT to it on
@@ -875,8 +905,16 @@ impl Build {
         // REMOTE_CACHE_EVICTED state. The server (daemon) pid passed to
         // galvanize stays alive across invocations and cannot signal
         // end-of-build, which is why we want a separate per-invocation pid.
+        // The backend decides which pid plays the BES-writer role: the daemon
+        // for `Real`, the fake child itself for `Fake` (it has no daemon).
+        let server_pid = backend.bes_server_pid(child.id(), pid);
         let build_event_stream = match bes_path {
-            Some(p) => Some(BuildEventStream::spawn(p, pid, child.id(), file_sinks)?),
+            Some(p) => Some(BuildEventStream::spawn(
+                p,
+                server_pid,
+                child.id(),
+                file_sinks,
+            )?),
             None => None,
         };
 
@@ -1100,7 +1138,10 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
 #[cfg(test)]
 mod tests {
     //! End-to-end coverage of `ctx.bazel.build` via the `basil` fake-bazel
-    //! binary, selected per-test via `--scenario=<name>`.
+    //! binary. Each test mints `ctx.bazel` with a `Fake` backend
+    //! (`.with_fake_bazel()` / `.with_fake_bazel_expectation(...)`) that
+    //! fork+execs basil and feeds it a declared `BazelExpectation` over the
+    //! socketpair control channel; basil synthesizes the BES stream + exit.
 
     /// Iter handle subscribed pre-spawn receives every event from a clean
     /// build, even on the warm-daemon path that drops late subscribers.
@@ -1111,7 +1152,6 @@ mod tests {
 def _impl(ctx):
     iter = bazel.build_events.iterator()
     build = ctx.bazel.build(
-        flags = ["--scenario=success"],
         build_events = [iter],
         stderr = None,
     )
@@ -1157,7 +1197,6 @@ Test = task(implementation = _impl)
 def _impl(ctx):
     iter = bazel.build_events.iterator()
     build = ctx.bazel.build(
-        flags = ["--scenario=cache_evicted_no_retry"],
         build_events = [iter],
         stderr = None,
     )
@@ -1169,7 +1208,11 @@ def _impl(ctx):
 Test = task(implementation = _impl)
 "#,
             )
-            .with_fake_bazel()
+            .with_fake_bazel_expectation(basil_core::BazelExpectation::new(
+                Vec::new(),
+                basil_core::BuildResult::CacheEvicted,
+                None,
+            ))
             .run_task(0)
         });
 
@@ -1190,7 +1233,6 @@ Test = task(implementation = _impl)
 def _impl(ctx):
     iter = bazel.build_events.iterator()
     first = ctx.bazel.build(
-        flags = ["--scenario=success"],
         build_events = [iter],
         stderr = None,
     )
@@ -1198,7 +1240,6 @@ def _impl(ctx):
         pass
     first.wait()
     second = ctx.bazel.build(
-        flags = ["--scenario=success"],
         build_events = [iter],
         stderr = None,
     )
@@ -1310,7 +1351,6 @@ Test = task(implementation = _impl)
 def _impl(ctx):
     iter = bazel.build_events.iterator(kinds = ["build_finished"])
     build = ctx.bazel.build(
-        flags = ["--scenario=success"],
         build_events = [iter],
         stderr = None,
     )
@@ -1342,7 +1382,6 @@ Test = task(implementation = _impl)
 def _impl(ctx):
     iter = bazel.build_events.iterator()
     build = ctx.bazel.build(
-        flags = ["--scenario=success"],
         build_events = [iter],
         stderr = None,
     )
@@ -1407,7 +1446,6 @@ def _impl(ctx):
         retry_min_delay = "0s",
     )
     build = ctx.bazel.build(
-        flags = ["--scenario=success"],
         build_events = [iter, sink],
         stderr = None,
     )
@@ -1440,13 +1478,11 @@ def _impl(ctx):
     sink = bazel.build_events.grpc(uri = "not a uri", max_retries = 0, retry_min_delay = "0s")
     iter = bazel.build_events.iterator()
     first = ctx.bazel.build(
-        flags = ["--scenario=success"],
         build_events = [iter, sink],
         stderr = None,
     )
     iter2 = bazel.build_events.iterator()
     second = ctx.bazel.build(
-        flags = ["--scenario=success"],
         build_events = [iter2, sink],
         stderr = None,
     )

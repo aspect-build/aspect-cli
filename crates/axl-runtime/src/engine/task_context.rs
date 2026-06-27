@@ -27,6 +27,7 @@ use super::aspect::Aspect;
 use super::bazel::{Bazel, FrozenBazel};
 use super::http::Http;
 use super::std::Std;
+use super::store::TestEnvMap;
 use super::task_info::TaskInfo;
 use super::template::Template;
 use super::trait_map::{FrozenTraitMap, TraitMap};
@@ -61,6 +62,12 @@ pub struct TaskContext<'v> {
     bazel: values::Value<'v>,
     #[allocative(skip)]
     pub defers: RefCell<Vec<Defer<'v>>>,
+    /// When `Some`, `ctx.std.env` reads/writes this in-memory overlay instead
+    /// of the real process env. Carried on the value (not pulled ambiently
+    /// from `eval.extra`), so the test runner's `t.ctx` shares one overlay
+    /// `Rc` with `t.std`/`t.env`. Production leaves this `None`.
+    #[allocative(skip)]
+    pub env_overlay: Option<TestEnvMap>,
 }
 
 unsafe impl<'v> Trace<'v> for TaskContext<'v> {
@@ -88,7 +95,16 @@ impl<'v> TaskContext<'v> {
             task,
             bazel,
             defers: RefCell::new(Vec::new()),
+            env_overlay: None,
         }
+    }
+
+    /// Attach an in-memory env overlay so `ctx.std.env` reads/writes it instead
+    /// of the real process env. Used by the test runner to give `t.ctx` the
+    /// same overlay `Rc` as `t.std`/`t.env`.
+    pub fn with_env_overlay(mut self, overlay: TestEnvMap) -> Self {
+        self.env_overlay = Some(overlay);
+        self
     }
 
     pub fn drain_defers(&self) -> Vec<Defer<'v>> {
@@ -137,8 +153,12 @@ pub(crate) fn task_context_methods(registry: &mut MethodsBuilder) {
     /// The standard library. Gives access to common utilities such as
     /// filesystem, process execution, environment variables, and IO streams.
     #[starlark(attribute)]
-    fn std<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Std> {
-        Ok(Std {})
+    fn std<'v>(this: values::Value<'v>) -> starlark::Result<Std> {
+        let ctx = this.downcast_ref_err::<TaskContext>()?;
+        Ok(match &ctx.env_overlay {
+            Some(overlay) => Std::with_env_overlay(overlay.clone()),
+            None => Std::new(),
+        })
     }
 
     /// Identity of the currently running task — its name, group(s),
@@ -248,9 +268,13 @@ fn frozen_task_context_methods(registry: &mut MethodsBuilder) {
 
     /// The standard library. Gives access to common utilities such as
     /// filesystem, process execution, environment variables, and IO streams.
+    ///
+    /// Frozen contexts are a production-only artifact (the config phase freezes
+    /// them); the env overlay only lives on the live, test-minted context, so
+    /// the frozen path always hands out the real-process-env `std`.
     #[starlark(attribute)]
     fn std<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Std> {
-        Ok(Std {})
+        Ok(Std::new())
     }
 
     /// Identity of the currently running task — its name, group(s),

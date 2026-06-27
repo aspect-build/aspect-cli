@@ -9,12 +9,15 @@ use starlark::starlark_simple_value;
 use starlark::values;
 use starlark::values::NoSerialize;
 use starlark::values::ProvidesStaticType;
+use starlark::values::ValueLike;
 use starlark::values::starlark_value;
 
 use starlark::{
     environment::GlobalsBuilder, starlark_module,
     values::starlark_value_as_type::StarlarkValueAsType,
 };
+
+use crate::engine::store::TestEnvMap;
 
 mod env;
 mod fs;
@@ -23,9 +26,29 @@ mod net;
 mod process;
 pub mod stream;
 
-#[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
+#[derive(Clone, Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
 #[display("<std.Std>")]
-pub struct Std {}
+pub struct Std {
+    /// When `Some`, the `std.Env` minted by `std.env` carries this in-memory
+    /// overlay (the mock route is value-carried, not ambient). Production
+    /// leaves this `None`; the test runner mints `Std` carrying the test's
+    /// shared overlay `Rc` so `t.std.env` and `t.ctx.std.env` observe one map.
+    pub env_overlay: Option<TestEnvMap>,
+}
+
+impl Std {
+    /// Production constructor: no env overlay (real process env).
+    pub fn new() -> Self {
+        Self { env_overlay: None }
+    }
+
+    /// Test constructor: the `std.env` it hands out reads/writes `overlay`.
+    pub fn with_env_overlay(overlay: TestEnvMap) -> Self {
+        Self {
+            env_overlay: Some(overlay),
+        }
+    }
+}
 
 starlark_simple_value!(Std);
 
@@ -40,8 +63,14 @@ impl<'v> values::StarlarkValue<'v> for Std {
 #[starlark_module]
 pub(crate) fn std_methods(registry: &mut MethodsBuilder) {
     #[starlark(attribute)]
-    fn env<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<env::Env> {
-        Ok(env::Env::new())
+    fn env<'v>(this: values::Value<'v>) -> anyhow::Result<env::Env> {
+        let std = this
+            .downcast_ref::<Std>()
+            .ok_or_else(|| anyhow::anyhow!("std.env accessed on a non-std.Std value"))?;
+        Ok(match &std.env_overlay {
+            Some(overlay) => env::Env::with_overlay(overlay.clone()),
+            None => env::Env::new(),
+        })
     }
 
     #[starlark(attribute)]

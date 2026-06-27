@@ -20,6 +20,7 @@ rust_library(
         "//crates/aspect-telemetry",
         "//crates/axl-proto",
         "//crates/axl-types",
+        "//crates/basil-core",
         "//crates/bazelrc",
         "//crates/build-event-stream",
         "//crates/galvanize",

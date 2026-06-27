@@ -65,6 +65,7 @@ bazelrc = { path = "../bazelrc" }
 axl-types = { path = "../axl-types" }
 axl-proto = { path = "../axl-proto" }
 starbuf-derive = { path = "../starbuf-derive" }
+basil-core = { path = "../basil-core" }
 build-event-stream = { path = "../build-event-stream" }
 galvanize = { path = "../galvanize" }
 

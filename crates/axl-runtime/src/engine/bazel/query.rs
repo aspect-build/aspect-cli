@@ -154,17 +154,18 @@ fn query_failure_error(expr: &str, exit_code: Option<i32>, stderr: &str) -> anyh
 }
 
 /// Run `bazel query <expr>` with the given startup + command flags and decode
-/// the streamed-proto result into a `TargetSet`. Fails with Bazel's own stderr
+/// the streamed-proto result into a `Query`. Fails with Bazel's own stderr
 /// on a non-zero exit — a failed query is not the same as one that matched
-/// nothing. Used by `ctx.bazel.query(expr, rc=…)`.
+/// nothing. Used by `ctx.bazel.query(expr, rc=…)`. Forking goes through the
+/// `BazelBackend` so the fake backend can answer queries in tests.
 pub fn run(
+    backend: &super::backend::BazelBackend,
     expr: &str,
     startup_flags: &[String],
     flags: &[String],
     announce: super::build::AnnounceSpawn,
 ) -> anyhow::Result<Query> {
-    let mut cmd = super::bazel_command();
-    cmd.args(startup_flags);
+    let mut cmd = backend.base_command(startup_flags);
     cmd.arg("query");
     cmd.arg(expr);
     cmd.args(flags);
@@ -188,7 +189,8 @@ pub fn run(
     // extra `bazel info`, so only pay for it when actually announcing.
     if announce.version || announce.command {
         let version = if announce.version {
-            super::info::server_info_with_startup_flags(startup_flags)
+            backend
+                .server_info(startup_flags)
                 .ok()
                 .and_then(|(_pid, version)| version)
         } else {

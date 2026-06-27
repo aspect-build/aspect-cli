@@ -8,7 +8,6 @@ rust_binary(
         "//crates/axl-runtime:__pkg__",
     ],
     deps = [
-        "//crates/axl-proto",
-        "@crates//:prost",
+        "//crates/basil-core",
     ],
 )

@@ -35,6 +35,7 @@ pub mod task_context;
 pub mod task_info;
 pub mod task_map;
 pub mod telemetry;
+pub mod testing;
 pub mod trait_map;
 pub mod util;
 

@@ -131,6 +131,11 @@ pub struct MultiPhaseEval<'v, 'l> {
     /// ConfigContext and FeatureContext as `ctx.telemetry`. The runtime
     /// drains exporter specs out of it (via `drain_exporters`) after phase 3.
     telemetry_value: Value<'v>,
+    /// Optional bazel backend override for the contexts this evaluator mints.
+    /// `None` → production `Real`. Tests set a `Fake` so `ctx.bazel.build`
+    /// fork+execs the fake-bazel binary with a declared expectation, carried
+    /// on the value (no `BAZEL_REAL` global).
+    bazel_backend: Option<crate::engine::bazel::backend::BazelBackend>,
 }
 
 impl<'v, 'l> MultiPhaseEval<'v, 'l> {
@@ -144,7 +149,18 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             features: heap.alloc(FeatureMap::new()),
             trait_map_value: None,
             telemetry_value,
+            bazel_backend: None,
         }
+    }
+
+    /// Override the bazel backend for the contexts this evaluator mints
+    /// (test-only; production leaves it `None` = `Real`).
+    pub fn with_bazel_backend(
+        mut self,
+        backend: crate::engine::bazel::backend::BazelBackend,
+    ) -> Self {
+        self.bazel_backend = Some(backend);
+        self
     }
 
     /// Drain exporter specs collected from `ctx.telemetry.exporters.add(...)`
@@ -542,6 +558,10 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
 
         let bazel = heap.alloc(Bazel {
             active_rc: std::cell::RefCell::new(None),
+            backend: self
+                .bazel_backend
+                .clone()
+                .unwrap_or(crate::engine::bazel::backend::BazelBackend::Real),
         });
         // Allocate `task_info` on the heap and keep the resulting Value
         // so we can read back timing + phases after `_impl` returns.

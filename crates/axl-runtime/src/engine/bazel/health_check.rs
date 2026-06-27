@@ -77,10 +77,12 @@ struct CheckResult {
 }
 
 /// Runs `bazel [startup_flags] --noblock_for_lock info server_pid` and returns the result.
-fn check_bazel_server(startup_flags: &[String]) -> CheckResult {
-    let mut cmd = super::bazel_command();
-    cmd.args(startup_flags)
-        .arg("--noblock_for_lock")
+fn check_bazel_server(
+    backend: &super::backend::BazelBackend,
+    startup_flags: &[String],
+) -> CheckResult {
+    let mut cmd = backend.base_command(startup_flags);
+    cmd.arg("--noblock_for_lock")
         .arg("info")
         .arg("server_pid")
         .stdout(Stdio::piped())
@@ -123,10 +125,12 @@ fn extract_server_pid(server_pid_file: Option<&Path>) -> Option<u32> {
 }
 
 /// Tries to determine the Bazel output base by running `bazel [startup_flags] info output_base`.
-fn get_output_base(startup_flags: &[String]) -> Option<PathBuf> {
-    let mut cmd = super::bazel_command();
-    cmd.args(startup_flags)
-        .arg("info")
+fn get_output_base(
+    backend: &super::backend::BazelBackend,
+    startup_flags: &[String],
+) -> Option<PathBuf> {
+    let mut cmd = backend.base_command(startup_flags);
+    cmd.arg("info")
         .arg("output_base")
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -239,11 +243,11 @@ fn output_base_from_flags(startup_flags: &[String]) -> Option<PathBuf> {
 /// On success, best-effort cleans up stranded sandbox state from a prior
 /// SIGKILL'd invocation (bazelbuild/bazel#23880) before the next bazel
 /// command runs.
-pub fn run(startup_flags: &[String]) -> HealthCheckResult {
-    let result = check_bazel_server(startup_flags);
+pub fn run(backend: &super::backend::BazelBackend, startup_flags: &[String]) -> HealthCheckResult {
+    let result = check_bazel_server(backend, startup_flags);
 
     if result.success {
-        if let Some(base) = get_output_base(startup_flags) {
+        if let Some(base) = get_output_base(backend, startup_flags) {
             let _ = cleanup_stranded_sandbox_state(&base);
         }
         return HealthCheckResult {
@@ -297,7 +301,7 @@ pub fn run(startup_flags: &[String]) -> HealthCheckResult {
         super::process::sigkill(pid);
     }
 
-    let retry = check_bazel_server(startup_flags);
+    let retry = check_bazel_server(backend, startup_flags);
 
     if retry.success {
         let _ = cleanup_stranded_sandbox_state(&output_base);

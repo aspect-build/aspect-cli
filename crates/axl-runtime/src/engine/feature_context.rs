@@ -124,7 +124,7 @@ fn feature_context_methods(builder: &mut MethodsBuilder) {
     /// Standard library — same as `ctx.std` in config and task functions.
     #[starlark(attribute)]
     fn std<'v>(#[allow(unused)] this: Value<'v>) -> anyhow::Result<Std> {
-        Ok(Std {})
+        Ok(Std::new())
     }
 
     /// Aspect platform APIs (auth, etc.).
