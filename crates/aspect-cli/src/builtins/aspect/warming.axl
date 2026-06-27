@@ -43,9 +43,15 @@ def _impl(ctx: TaskContext) -> int:
         startup_flags.insert(0, "--output_base=" + ctx.args.output_base)
     if bazel_trait.startup_flags:
         startup_flags = bazel_trait.startup_flags(startup_flags)
-    ctx.bazel.startup_flags.extend(startup_flags)
+
+    # The runtime resolves startup flags from the build's RunCommand, not a
+    # mutable ctx.bazel attribute, so carry them on a blank rc (reads no on-disk
+    # .bazelrc — only these flags) passed via `rc=`. Command flags stay in
+    # `flags=`, which `build` appends to the rc's resolved options.
+    rc = ctx.bazel.new_rc(startup_flags = startup_flags)
 
     invocation = ctx.bazel.build(
+        rc = rc,
         flags = flags,
         *ctx.args.targets
     )
