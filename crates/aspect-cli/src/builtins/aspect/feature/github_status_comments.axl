@@ -7,9 +7,12 @@ aggregated state plus a directive on whether THIS job should post the comment
 this cycle. The server owns cross-job coordination + the post throttle;
 rendering (the Jinja2 template, customizable via config) and posting (the
 GitHub issue-comment API) stay client-side. Contribution is event-paced (ticks
-on BES events), throttled by min_poll_interval_seconds. Works on any supported
-CI host (GitHub Actions, Buildkite, CircleCI) since coordination no longer
-depends on CI artifacts.
+on BES events), throttled to the server's budget-derived `desired_cadence_s`
+(floored by min_poll_interval_seconds) widened by the live client-side
+`effective_throttle_factor` (burn-rate / swarm cold-start / elapsed-time) so a
+fresh swarm can't drain the shared App bucket between budget refreshes. Works on
+any supported CI host (GitHub Actions, Buildkite, CircleCI) since coordination no
+longer depends on CI artifacts.
 
 When the Aspect API is unreachable, the feature falls back to coordinating
 through the comment's own embedded state block (read → merge own entry →
@@ -85,6 +88,7 @@ load(
     "BUCKET_APP",
     "PHASE_FALL_THROUGH",
     "PHASE_SUPPRESS",
+    "effective_throttle_factor",
     "epoch_now_s",
     "should_emit_phase_change",
     "usage_footer",
@@ -1765,12 +1769,19 @@ def _github_status_comments(ctx: FeatureContext):
         headroom = github.read_rate_limit(ctx, _state["_github_token"])
         if headroom == None:
             return
-        result = github.status_comment_budget(ctx, {
+        budget_request = {
             "installation_id": _state["_installation_id"],
             "installation_proof": _state["_installation_proof"],
             "remaining": headroom["remaining"],
             "reset": headroom["reset"],
-        })
+        }
+
+        # Forward the window ceiling when the `/rate_limit` read carried it, so
+        # the budget service sizes its reserve floor against the real `limit`
+        # rather than the default fallback.
+        if "limit" in headroom:
+            budget_request["limit"] = headroom["limit"]
+        result = github.status_comment_budget(ctx, budget_request)
         if result.get("success") and result.get("desired_cadence_s"):
             _state["_cadence_s"] = result["desired_cadence_s"]
 
@@ -1860,10 +1871,20 @@ def _github_status_comments(ctx: FeatureContext):
             if phase_result == PHASE_SUPPRESS:
                 return
             if phase_result == PHASE_FALL_THROUGH:
-                # Budget-derived cadence from the Aspect API (refreshed
-                # periodically below), floored by the configured min; falls back
-                # to the floor before the first mint or when none was returned.
-                interval = max(min_poll_interval_seconds, _state.get("_cadence_s", min_poll_interval_seconds))
+                # Disabled surface (auth failed → no token): nothing will publish,
+                # so skip the throttle entirely. `effective_throttle_factor` has
+                # side effects (it records the factor other surfaces' usage_footer
+                # reads); a non-posting job must not stamp one.
+                if not _state.get("_github_token"):
+                    return
+
+                # Budget-derived cadence from the Aspect API, floored by the
+                # configured min, then widened by the live client-side throttle to
+                # cover quota drain the periodic budget can't see yet.
+                base_interval = max(min_poll_interval_seconds, _state.get("_cadence_s", min_poll_interval_seconds))
+                elapsed_s = now - _state.get("_task_started_at", now)
+                factor = effective_throttle_factor(ctx, BUCKET_APP, elapsed_s, base_interval)
+                interval = base_interval * factor
                 if now - _state.get("_last_publish_s", 0.0) < interval:
                     return
                 _state["_last_publish_s"] = now

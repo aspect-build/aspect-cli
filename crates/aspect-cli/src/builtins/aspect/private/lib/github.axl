@@ -451,16 +451,21 @@ def _status_comment_contribute(ctx, request, profile = None):
 
 def _read_rate_limit(ctx, token, api_base = DEFAULT_GITHUB_API):
     """Read the installation's GitHub core rate-limit headroom with its
-    installation `token`. Returns `{"remaining": int, "reset": int}` (the
-    `resources.core` bucket; `reset` is absolute Unix seconds), or `None` on
-    any failure. `GET /rate_limit` does not itself consume quota."""
+    installation `token`. Returns `{"remaining": int, "reset": int}` from the
+    `resources.core` bucket (`reset` is absolute Unix seconds), plus `"limit":
+    int` when the response carries it — the budget service sizes its reserve
+    floor against that ceiling. `None` on any failure. `GET /rate_limit` does
+    not itself consume quota."""
     success, _status, body = _do_request(ctx, "GET", api_base + "/rate_limit", token, quiet_4xx_auth = True)
     if not success or type(body) != "dict":
         return None
     core = body.get("resources", {}).get("core")
     if type(core) != "dict" or type(core.get("remaining")) != "int" or type(core.get("reset")) != "int":
         return None
-    return {"remaining": core["remaining"], "reset": core["reset"]}
+    result = {"remaining": core["remaining"], "reset": core["reset"]}
+    if type(core.get("limit")) == "int":
+        result["limit"] = core["limit"]
+    return result
 
 def _status_comment_budget(ctx, request, profile = None):
     """Refresh the comment-refresh cadence for a long-running task via
@@ -468,11 +473,11 @@ def _status_comment_budget(ctx, request, profile = None):
     rate-limit headroom and gets back an updated `desired_cadence_s`, without
     re-minting a token.
 
-    `request` is `{installation_id, installation_proof, remaining, reset}` (the
-    proof from the token mint; see the server's RequestSchema). Returns
-    `{"success": True, "desired_cadence_s": int}` on a 2xx, else
-    `{"success": False}`. Never raises — a failure just leaves the caller on
-    its prior cadence."""
+    `request` is `{installation_id, installation_proof, remaining, reset}` with
+    an optional `limit` (the proof comes from the token mint; see the server's
+    RequestSchema). Returns `{"success": True, "desired_cadence_s": int}` on a
+    2xx, else `{"success": False}`. Never raises — a failure just leaves the
+    caller on its prior cadence."""
     creds = ctx.aspect.auth.credentials(profile = profile)
     if not creds:
         return {"success": False}
