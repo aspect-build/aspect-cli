@@ -61,6 +61,7 @@ load(
 )
 load("@std//time.axl", "monotonic", "sleep")
 load("../private/lib/bazel_results.axl", "format_run_date", "now_ms")
+load("../private/lib/ci.axl", "detect_ci_host")
 load("../private/lib/environment.axl", "feature_logger")
 load("../private/lib/github.axl", "github")
 load("../private/lib/gitlab.axl", "gitlab")
@@ -153,7 +154,11 @@ def _gitlab_status_comments(ctx: FeatureContext):
     run_id = env.var("ASPECT_GITLAB_PIPELINE_ID") or env.var("CI_PIPELINE_ID") or ""
     job_name = env.var("ASPECT_GITLAB_JOB_NAME") or env.var("CI_JOB_NAME") or "aspect-cli"
     run_attempt = env.var("CI_JOB_RETRY_INDEX") or "0"
-    workflow_name = env.var("CI_PIPELINE_NAME") or env.var("CI_PROJECT_NAME") or ""
+
+    # Host-prefixed so the re-trigger eviction key can't collide with another CI
+    # host that shares a raw pipeline/project name (matches the GitHub feature's
+    # `_ci_identity`).
+    workflow_name = "GITLAB_CI:%s" % (env.var("CI_PIPELINE_NAME") or env.var("CI_PROJECT_NAME") or "")
     if not run_id:
         # Fall back to the MR IID so single-pipeline coordination still
         # works in the local-sim case where no real pipeline exists. A
@@ -163,6 +168,10 @@ def _gitlab_status_comments(ctx: FeatureContext):
         _LOG.trace("No CI_PIPELINE_ID; using synthetic run_id=%s for local-sim coordination" % run_id)
 
     ci_run_url = _ci_run_url(env)
+
+    # Label the CI link for the host that ran; default to GitLab CI (the natural
+    # host for an MR note) when off a recognized host (e.g. local-sim).
+    ci_host = detect_ci_host(env) or {"label": "GitLab CI", "icon": "🦊"}
     min_poll_interval_seconds = max(1, ctx.args.min_poll_interval_seconds)
 
     templates = ctx.args.templates or {}
@@ -477,6 +486,8 @@ def _gitlab_status_comments(ctx: FeatureContext):
         base["name"] = ctx.task.name
         base["status"] = status
         base["ci_run_url"] = ci_run_url
+        base["ci_host_label"] = ci_host["label"]
+        base["ci_host_icon"] = ci_host["icon"]
         _state["_own_base"] = base
 
     def _task_update(ctx, update):
