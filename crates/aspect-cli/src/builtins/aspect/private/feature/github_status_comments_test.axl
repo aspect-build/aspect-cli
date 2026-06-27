@@ -1510,6 +1510,46 @@ def _check_row_renders_name_and_kind(ctx):
     _eq("row — name == kind omits the bracket", "lint [lint]" in body, False)
     _eq("row — name == kind still renders the name", "✅ lint ·" in body, True)
 
+def _check_ci_host_link_label(ctx):
+    """The CI build/job link is labelled + iconed for the host that produced
+    the entry (carried as `ci_host_label` / `ci_host_icon`), and falls back to
+    GitHub Actions for entries serialized without host metadata."""
+    bk_url = "https://buildkite.com/acme/repo/builds/1#job"
+    gha_url = "https://github.com/acme/repo/actions/runs/1"
+    entries = [
+        {
+            "kind": "test",
+            "name": "test-bk",
+            "job": "a",
+            "status": "passed",
+            "elapsed_ms": 1000,
+            "ci_run_url": bk_url,
+            "ci_host_label": "Buildkite",
+            "ci_host_icon": "🏗",
+        },
+        {
+            "kind": "test",
+            "name": "test-old",
+            "job": "b",
+            "status": "passed",
+            "elapsed_ms": 1000,
+            "ci_run_url": gha_url,
+        },
+    ]
+    prepared = prepare_for_render(entries)
+    body = render_body(
+        ctx,
+        MARKER_FMT % 42,
+        prepared,
+        "2026-01-01 00:00:00 UTC",
+        DEFAULT_BODY_TEMPLATE,
+        DEFAULT_STATUS_BADGES,
+        bucket_entries(prepared),
+    )
+    _eq("ci-host — Buildkite label + icon", ("🏗 [Buildkite](%s)" % bk_url) in body, True)
+    _eq("ci-host — no GitHub Actions mislabel for the BK url", ("[GitHub Actions](%s)" % bk_url) in body, False)
+    _eq("ci-host — missing metadata falls back to GitHub Actions", ("🐙 [GitHub Actions](%s)" % gha_url) in body, True)
+
 def _check_repro_dedup_consecutive_headings(ctx):
     """Two fix commands from the same task collapse to one heading.
 
@@ -1606,6 +1646,7 @@ def _test_impl(ctx):
     _check_render_body_emits_state_block(ctx)
     _check_render_body_no_state_block_when_state_none(ctx)
     _check_row_renders_name_and_kind(ctx)
+    _check_ci_host_link_label(ctx)
     _check_select_snippets(ctx)
     _check_select_sticky()
     _check_by_task_overflow()
