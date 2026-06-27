@@ -1,5 +1,6 @@
 use std::io;
 use std::process::Stdio;
+use std::sync::OnceLock;
 
 use anyhow::anyhow;
 
@@ -10,11 +11,13 @@ use anyhow::anyhow;
 /// number — `development version` (built from source) or `no_version` —
 /// and return `None` rather than erroring, so a non-release Bazel doesn't
 /// abort the task. Callers treat `None` as "version unknown".
+///
+/// The full version is preserved, **including** any pre-release suffix (so
+/// `ctx.bazel.version(strip=False)` can surface `9.0.0-rc1`). Flag gating
+/// ignores the suffix at the comparison site (see `constraint_matches`), so an
+/// rc still matches the same constraints its release will.
 fn parse_release(value: &str) -> Option<semver::Version> {
     let ver_str = value.trim().trim_start_matches("release ").trim();
-    // Drop any pre-release suffix so an rc/pre build (`9.0.0-rc1`) matches the
-    // same constraints its eventual release will.
-    let ver_str = ver_str.split('-').next().unwrap_or(ver_str);
     semver::Version::parse(ver_str).ok()
 }
 
@@ -89,6 +92,23 @@ pub fn server_info_with_startup_flags(
         pid.ok_or_else(|| io::Error::other(anyhow!("bazel info did not return server_pid")))?;
 
     Ok((pid, version))
+}
+
+/// Process-wide cache of the Bazel release version, populated on first use.
+static RELEASE_VERSION: OnceLock<Option<semver::Version>> = OnceLock::new();
+
+/// The Bazel release version, probed once per process via [`server_info`] and
+/// memoized. `None` when Bazel reports a non-release build or the probe fails —
+/// callers treat that as "version unknown" (assume latest for version-gated
+/// flags).
+///
+/// The version is stable for the lifetime of an `aspect` invocation, so the
+/// single probe is shared by every caller (flag-gating, rc-section selection,
+/// …) instead of each shelling out to Bazel independently.
+pub fn release_version() -> Option<semver::Version> {
+    RELEASE_VERSION
+        .get_or_init(|| server_info().ok().and_then(|(_pid, version)| version))
+        .clone()
 }
 
 /// Determine the real bazel client PID by running `bazel --noblock_for_lock info`.
@@ -175,14 +195,16 @@ mod tests {
     }
 
     #[test]
-    fn strips_rc_and_pre_suffixes() {
+    fn preserves_rc_and_pre_suffixes() {
+        // The full version is kept (including the pre-release); gating strips it
+        // at the comparison site, not here.
         assert_eq!(
             parse_release("release 9.0.0-rc1"),
-            Some(semver::Version::new(9, 0, 0))
+            semver::Version::parse("9.0.0-rc1").ok()
         );
         assert_eq!(
             parse_release("release 8.0.0-pre.20251201.1"),
-            Some(semver::Version::new(8, 0, 0))
+            semver::Version::parse("8.0.0-pre.20251201.1").ok()
         );
     }
 

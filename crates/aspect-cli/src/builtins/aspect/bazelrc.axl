@@ -52,25 +52,6 @@ _COMMON_PSEUDO_COMMAND_MIN_VERSION = "6.3.0"
 # newer versions, where we use `common` instead and never reach this path.
 _PRE_COMMON_COMMANDS = ["build", "query"]
 
-def _detect_bazel_version(ctx: TaskContext) -> str | None:
-    """Best-effort Bazel release version (e.g. "7.4.1") from `bazel --version`,
-    passed to `new_rc` so the runtime filters version-gated flags against it and
-    used to pick the rc command sections. None when `bazel` is absent/errors or
-    prints no X.Y.Z (e.g. the Aspect CLI's own `bazel --version`); the runtime
-    then assumes latest.
-
-    The pre-release suffix is dropped (`8.0.0-rc2` -> `8.0.0`), mirroring the
-    runtime's own `bazel info release` parsing: semver `VersionReq` matching
-    treats a pre-release specially, so a literal `8.0.0-rc2` would NOT satisfy
-    `>=8.0.0` and would wrongly drop the Bazel-8 flags on a release candidate."""
-    result = ctx.std.process.command("bazel").arg("--version").stdout("piped").stderr("null").spawn().wait_with_output()
-    if result.status.code != 0:
-        return None
-    for token in result.stdout.split():
-        if token and token[0].isdigit() and "." in token:
-            return token.split("-")[0]
-    return None
-
 def _flag_str(flag) -> str:
     """A flag is either a plain string or, for a surviving version-gated option,
     a `(flag, version_condition)` tuple from `rc.expand` — take the flag text."""
@@ -129,7 +110,10 @@ def _bazelrc_impl(ctx: TaskContext) -> int:
         aspect_root_dir = ctx.std.env.aspect_root_dir(),
     )
 
-    bazel_version = _detect_bazel_version(ctx)
+    # Probed once and memoized by the runtime; shared with flag gating below.
+    # Pre-release suffix dropped (the default) so an rc matches its release's
+    # constraints and the 6.3.0 section threshold compares cleanly.
+    bazel_version = ctx.bazel.version()
 
     # `build_flags` carries version-gated `(flag, constraint)` tuples. Let the
     # bazelrc runtime resolve them the same way every other Bazel invocation

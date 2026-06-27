@@ -190,11 +190,21 @@ fn resolve_flags_for_running_bazel<'v>(
 /// shape) match and upper-bound gates (`<N`) don't.
 ///
 /// An unparseable constraint is a hard error naming the offending value.
+///
+/// The version's pre-release suffix is ignored: semver `VersionReq` matching
+/// treats a pre-release specially (e.g. `8.0.0-rc2` does NOT satisfy `>=8.0.0`),
+/// but for flag gating a release candidate should match the same constraints its
+/// release will. So `8.0.0-rc2` is compared as `8.0.0`.
 fn constraint_matches(constraint: &str, version: Option<&semver::Version>) -> anyhow::Result<bool> {
     let req = semver::VersionReq::parse(constraint)
         .map_err(|e| anyhow::anyhow!("invalid version constraint '{}': {}", constraint, e))?;
     let assumed_latest = semver::Version::new(u64::MAX, u64::MAX, u64::MAX);
-    Ok(req.matches(version.unwrap_or(&assumed_latest)))
+    let probe = match version {
+        Some(v) if !v.pre.is_empty() => semver::Version::new(v.major, v.minor, v.patch),
+        Some(v) => v.clone(),
+        None => assumed_latest,
+    };
+    Ok(req.matches(&probe))
 }
 
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
@@ -682,6 +692,41 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         Ok(map)
     }
 
+    /// The Bazel release version as a `str` (e.g. `"7.4.1"`), or `None` for a
+    /// non-release build (`development version` / `no_version`) or when the
+    /// probe fails.
+    ///
+    /// Probed once per process (via `bazel info release`) and memoized, so
+    /// repeated calls — and other callers that need the version — share a single
+    /// probe rather than each shelling out to Bazel.
+    ///
+    /// By default the pre-release suffix is dropped (`8.0.0-rc2` → `"8.0.0"`),
+    /// which is what version-gating wants — a release candidate should match the
+    /// same constraints its release will. Pass `strip = False` for the exact
+    /// reported version (`"8.0.0-rc2"`) when you need to distinguish an rc.
+    ///
+    /// **Examples**
+    ///
+    /// ```python
+    /// def _impl(ctx):
+    ///     v = ctx.bazel.version()             # "8.0.0"  (rc suffix dropped)
+    ///     exact = ctx.bazel.version(strip = False)  # "8.0.0-rc2"
+    ///     if v == None:
+    ///         print("non-release or unknown Bazel")
+    /// ```
+    fn version<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        #[starlark(require = named, default = true)] strip: bool,
+    ) -> anyhow::Result<NoneOr<String>> {
+        Ok(match info::release_version() {
+            Some(v) if strip => {
+                NoneOr::Other(format!("{}.{}.{}", v.major, v.minor, v.patch))
+            }
+            Some(v) => NoneOr::Other(v.to_string()),
+            None => NoneOr::None,
+        })
+    }
+
     /// Probe the Bazel server to determine whether it is responsive.
     ///
     /// Runs `bazel --noblock_for_lock info server_pid`. If the server is
@@ -1129,6 +1174,18 @@ mod tests {
         assert!(constraint_matches(">=9", None).unwrap());
         assert!(!constraint_matches("<7", None).unwrap());
         assert!(!constraint_matches(">=8, <9", None).unwrap());
+    }
+
+    #[test]
+    fn pre_release_matches_its_release_constraints() {
+        // A release candidate is gated as its eventual release: the pre-release
+        // suffix is ignored, so `8.0.0-rc2` satisfies `>=8` (plain semver
+        // VersionReq would NOT match a bare pre-release against `>=8`).
+        let rc = version("8.0.0-rc2");
+        assert!(constraint_matches(">=8", Some(&rc)).unwrap());
+        assert!(constraint_matches(">=8.0.0", Some(&rc)).unwrap());
+        assert!(!constraint_matches("<8", Some(&rc)).unwrap());
+        assert!(!constraint_matches("<7", Some(&rc)).unwrap());
     }
 
     #[test]
