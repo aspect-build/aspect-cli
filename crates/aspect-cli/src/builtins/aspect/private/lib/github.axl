@@ -18,7 +18,10 @@ load(
     "./rate_limit.axl",
     "BUCKET_APP",
     "BUCKET_ENV",
+    "apply_budget_refresh",
+    "budget_exhausted",
     "record_from_headers",
+    "record_token_budget",
 )
 load("./tar.axl", "zip_create")
 load("./text.axl", "pluralize")
@@ -145,7 +148,18 @@ def _do_request_once(ctx, method, url, token, payload = None, token_class = BUCK
 # after the server processed the first would duplicate the resource).
 _IDEMPOTENT_METHODS = ["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
 
-def _do_request(ctx, method, url, token, payload = None, quiet_4xx_auth = False, token_class = BUCKET_APP):
+# Synthetic result for a call dropped by the budget gate — a distinct shape so
+# callers tell a budget skip from a real failure (status 0, never a GitHub
+# status) and quietly no-op the cycle rather than entering an error/fallback
+# path.
+_BUDGET_SKIPPED = (False, 0, "budget-exhausted: skipped")
+
+def _is_budget_skip(success, status, body):
+    """True iff `(success, status, body)` is the budget-gate skip sentinel —
+    lets callers tell an intentional skip from a real failure (and stay quiet)."""
+    return not success and status == 0 and body == _BUDGET_SKIPPED[2]
+
+def _do_request(ctx, method, url, token, payload = None, quiet_4xx_auth = False, token_class = BUCKET_APP, skippable = False):
     """HTTP call, retried for idempotent methods; POST runs once. Returns
     `(success, status, body)`.
 
@@ -153,7 +167,15 @@ def _do_request(ctx, method, url, token, payload = None, quiet_4xx_auth = False,
     log — use where a token fallback will transparently retry.
 
     `token_class` → `_do_request_once` (rate-limit bucket; see
-    [lib/rate_limit.axl](./rate_limit.axl))."""
+    [lib/rate_limit.axl](./rate_limit.axl)).
+
+    `skippable=True` marks a non-essential call (a mid-run heartbeat refresh):
+    when the App token's per-task budget is exhausted, the call is dropped and
+    `_BUDGET_SKIPPED` returned instead of spending quota. Defaults False — a
+    must-succeed call (terminal verdicts, comment/check-run creation) always
+    proceeds. Only the App bucket has a budget; Env calls ignore the gate."""
+    if skippable and token_class == BUCKET_APP and budget_exhausted(ctx, BUCKET_APP):
+        return _BUDGET_SKIPPED
     if method in _IDEMPOTENT_METHODS:
         success, status, body, attempts = _retry_http(lambda: _do_request_once(ctx, method, url, token, payload, token_class = token_class))
     else:
@@ -373,6 +395,10 @@ def _authenticate(ctx, owner, repo, profile = None, roles = None, _reason = None
                 for k in ("desired_cadence_s", "installation_id", "installation_proof"):
                     if k in parsed:
                         _extra[k] = parsed[k]
+            # Seed the App-bucket per-token budget: a mint resets the spend
+            # counter, so the freshly minted token starts its allowance over.
+            if type(parsed.get("api_call_budget")) == "int":
+                record_token_budget(ctx, BUCKET_APP, parsed["api_call_budget"])
             return parsed["token"]
         snippet = (resp.body or "")[:200].replace("\n", " ")
         _set_auth_reason(
@@ -468,10 +494,13 @@ def _read_rate_limit(ctx, token, api_base = DEFAULT_GITHUB_API):
     return result
 
 def _status_comment_budget(ctx, request, profile = None):
-    """Refresh the comment-refresh cadence for a long-running task via
-    `POST /github/budget` — the client reports its installation's live
-    rate-limit headroom and gets back an updated `desired_cadence_s`, without
-    re-minting a token.
+    """Refresh a long-running task's budget via `POST /github/budget` — the
+    client reports its installation's live rate-limit headroom and gets back an
+    updated `desired_cadence_s` + `api_call_budget`, without re-minting a token.
+
+    Side-effect: applies `api_call_budget` to the App bucket via
+    `apply_budget_refresh` (floor-DOWN only — a refresh re-measures the same
+    token's slice and can shrink but never renew it).
 
     `request` is `{installation_id, installation_proof, remaining, reset}` with
     an optional `limit` (the proof comes from the token mint; see the server's
@@ -496,6 +525,8 @@ def _status_comment_budget(ctx, request, profile = None):
     parsed = json.try_decode(resp.body, None)
     if type(parsed) != "dict" or type(parsed.get("desired_cadence_s")) != "int":
         return {"success": False}
+    if type(parsed.get("api_call_budget")) == "int":
+        apply_budget_refresh(ctx, BUCKET_APP, parsed["api_call_budget"])
     return {"success": True, "desired_cadence_s": parsed["desired_cadence_s"]}
 
 # Check Runs
@@ -518,8 +549,10 @@ def create_check_run(ctx, token, owner, repo, name, head_sha, status = None, out
         error_msg = error_msg + " - " + body["message"]
     return {"success": False, "error": error_msg, "status": status_code}
 
-def update_check_run(ctx, token, owner, repo, check_run_id, status = None, conclusion = None, output = None, details_url = None, api_base = DEFAULT_GITHUB_API):
-    """Update an existing check run."""
+def update_check_run(ctx, token, owner, repo, check_run_id, status = None, conclusion = None, output = None, details_url = None, api_base = DEFAULT_GITHUB_API, skippable = False):
+    """Update an existing check run. `skippable=True` (a mid-run progress
+    update) lets the budget gate drop the call when the App token is over
+    budget; pass `skippable=False` for the terminal conclusion so it lands."""
     url = api_base + "/repos/" + owner + "/" + repo + "/check-runs/" + str(check_run_id)
     payload = {}
     if status:
@@ -530,7 +563,7 @@ def update_check_run(ctx, token, owner, repo, check_run_id, status = None, concl
         payload["output"] = output
     if details_url:
         payload["details_url"] = details_url
-    success, status_code, body = _do_request(ctx, "PATCH", url, token, payload)
+    success, status_code, body = _do_request(ctx, "PATCH", url, token, payload, skippable = skippable)
     if success:
         return {"success": True, "check_run_id": body.get("id"), "html_url": body.get("html_url")}
     error_msg = "request failed: " + str(status_code)
@@ -1703,11 +1736,18 @@ def _issues_create_comment(ctx, token, owner, repo, issue_number, body, api_base
         return {"success": True, "comment_id": resp.get("id"), "html_url": resp.get("html_url")}
     return {"success": False, "error": "HTTP %d: %s" % (status_code, resp)}
 
-def _issues_update_comment(ctx, token, owner, repo, comment_id, body, api_base = DEFAULT_GITHUB_API):
+def _issues_update_comment(ctx, token, owner, repo, comment_id, body, api_base = DEFAULT_GITHUB_API, skippable = False):
+    """PATCH a comment body. `skippable=True` (a mid-run heartbeat refresh)
+    lets the budget gate drop the call when the App token is over budget; the
+    result then carries `"skipped": True` so the caller distinguishes it from a
+    real failure (no WARN). The terminal verdict passes `skippable=False` so the
+    final state always lands."""
     url = api_base + "/repos/" + owner + "/" + repo + "/issues/comments/" + str(comment_id)
-    success, status_code, resp = _do_request(ctx, "PATCH", url, token, {"body": body})
+    success, status_code, resp = _do_request(ctx, "PATCH", url, token, {"body": body}, skippable = skippable)
     if success:
         return {"success": True, "comment_id": resp.get("id")}
+    if _is_budget_skip(success, status_code, resp):
+        return {"success": False, "skipped": True}
     return {"success": False, "error": "HTTP %d: %s" % (status_code, resp)}
 
 def _issues_delete_comment(ctx, token, owner, repo, comment_id, api_base = DEFAULT_GITHUB_API):
@@ -1758,8 +1798,8 @@ def _actions_download_artifact_zip(ctx, token, owner, repo, artifact_id, output_
 def _status_checks_create(ctx, token, owner, repo, sha, name, api_base = DEFAULT_GITHUB_API):
     return create_check_run(ctx, token, owner, repo, name, sha, status = "in_progress", api_base = api_base)
 
-def _status_checks_update(ctx, token, owner, repo, check_run_id, output = None, details_url = None, api_base = DEFAULT_GITHUB_API):
-    return update_check_run(ctx, token, owner, repo, check_run_id, status = "in_progress", output = output, details_url = details_url, api_base = api_base)
+def _status_checks_update(ctx, token, owner, repo, check_run_id, output = None, details_url = None, api_base = DEFAULT_GITHUB_API, skippable = False):
+    return update_check_run(ctx, token, owner, repo, check_run_id, status = "in_progress", output = output, details_url = details_url, api_base = api_base, skippable = skippable)
 
 def _status_checks_complete(ctx, token, owner, repo, check_run_id, output = None, api_base = DEFAULT_GITHUB_API):
     return complete_check_run(ctx, token, owner, repo, check_run_id, conclusion = "success", output = output, api_base = api_base)

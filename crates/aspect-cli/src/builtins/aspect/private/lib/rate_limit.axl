@@ -8,8 +8,9 @@ auth. These are independent buckets, tracked separately under `BUCKET_APP`
 
 # Observation flow
 
-`github._do_request_once` calls `record_from_headers(ctx, bucket,
-response.headers)` after every response (parsing `X-RateLimit-*`). State
+`github._do_request_once` (and `gitlab._do_request`) call
+`record_from_headers(ctx, bucket, response.headers)` after every response
+(parsing GitHub's `X-RateLimit-*` or GitLab's `RateLimit-*`). State
 keeps, per bucket: an `observations` ring buffer of
 `(epoch_s, remaining, limit, reset_epoch)`, ingested `sibling_observations`,
 the `watermark` (lowest remaining, drives `% used`), last-seen `limits`,
@@ -61,6 +62,19 @@ early phases stay visible without burning quota at the heartbeat floor.
 When a fresh `reset_epoch` jumps forward by > `_RESET_JUMP_S`, the window
 rolled mid-task: flush the ring + reset the watermark so burn-rate
 re-baselines instead of computing across the boundary.
+
+# Token budget
+
+Separate from the reactive throttle factor: the Aspect API issues a per-token
+API-call budget (`record_token_budget`) — the calls this task may spend on the
+App token — and re-measures it on each `/github/budget` refresh
+(`apply_budget_refresh`, floor-DOWN only; a refresh never renews or raises the
+cap). The client meters its *own* calls (`record_from_headers` counts one per
+GitHub response) into `token_spent`. `budget_exhausted` reports `spent >=
+budget`; `github._do_request` reads it to drop skippable (non-terminal) App
+calls once the cap is hit. The budget is the hard cap; the contribute cadence
+(`desired_cadence_s`) does the spacing. No budget yet (cold start) → not
+exhausted, caller falls back to the cadence / cold-start floor.
 
 # Threshold warnings
 
@@ -185,6 +199,12 @@ def _new_state():
         "last_effective_factor": {"app": 1.0, "env": 1.0},
         "last_logged_factor_step": {"app": 1, "env": 1},
         "threshold_warned_tier": {"app": 0, "env": 0},
+        # Per-token API-call budget (see "Token budget" in the docstring).
+        # `token_budget` is None until the server issues one; `token_spent`
+        # counts this task's own calls against it. Once spent reaches budget,
+        # skippable calls are dropped (the cap; cadence does the spacing).
+        "token_budget": {"app": None, "env": None},
+        "token_spent": {"app": 0, "env": 0},
     }
 
 def _path(ctx):
@@ -343,19 +363,103 @@ def _reset_bucket_state(state, bucket):
     state["threshold_warned_tier"] = tiers
 
 def record_from_headers(ctx, bucket, headers, epoch_s = None):
-    """Parse `X-RateLimit-*` headers and forward to `record_observation`.
-    Called after every API response; no-ops on non-GitHub responses (no
-    `X-RateLimit-Remaining`) so callers needn't gate on endpoint type.
-    `headers` is the runtime's `HttpResponse.headers` 2-tuple list."""
+    """Parse the response's rate-limit headers (GitHub's `X-RateLimit-*` or
+    GitLab's un-prefixed `RateLimit-*`), forward to `record_observation`, and
+    meter this as one of *our own* calls against the token budget. Called after
+    every API response; no-ops on responses without rate-limit headers so
+    callers needn't gate on endpoint type. `headers` is the runtime's
+    `HttpResponse.headers` 2-tuple list.
+
+    Presence of the headers means a real call landed, so each response — one
+    per HTTP attempt, retries included (each burns real quota) — is one call
+    this task made: the per-task spend signal (siblings' drain shows only in
+    `remaining`, never our counter). The quota-free `GET /rate_limit` is
+    counted too; the slight over-count is conservative."""
     if not headers:
         return
-    remaining_s = _header_value(headers, "X-RateLimit-Remaining")
+    # GitHub sends `X-RateLimit-*`; GitLab sends the un-prefixed `RateLimit-*`.
+    # `_ratelimit_header` tries both so one code path covers both hosts.
+    remaining_s = _ratelimit_header(headers, "Remaining")
     if not remaining_s:
         return
-    limit = _parse_int(_header_value(headers, "X-RateLimit-Limit"))
-    reset = _parse_int(_header_value(headers, "X-RateLimit-Reset"))
+    limit = _parse_int(_ratelimit_header(headers, "Limit"))
+    reset = _parse_int(_ratelimit_header(headers, "Reset"))
     remaining = _parse_int(remaining_s)
     record_observation(ctx, bucket, remaining, limit, reset, epoch_s = epoch_s)
+    _increment_token_spent(ctx, bucket)
+
+def _ratelimit_header(headers, suffix):
+    """Value of the rate-limit header `suffix` (`Remaining`/`Limit`/`Reset`),
+    trying the GitHub `X-RateLimit-<suffix>` spelling first, then the GitLab
+    `RateLimit-<suffix>` one. `""` if neither is present."""
+    return (
+        _header_value(headers, "X-RateLimit-" + suffix) or
+        _header_value(headers, "RateLimit-" + suffix)
+    )
+
+# ── Token budget ─────────────────────────────────────────────────────
+#
+# The server (Aspect API) issues a per-token API-call budget at mint and
+# re-measures it on each `/github/budget` refresh. The client meters its own
+# spend (`record_from_headers`) against it and paces over the token lifetime.
+# See "Token budget" in the module docstring.
+
+def record_token_budget(ctx, bucket, budget):
+    """Seed the per-token budget on a fresh mint: set `budget` and zero the
+    spend counter. No-op on an unknown bucket or a negative budget."""
+    if bucket not in _VALID_BUCKETS or budget < 0:
+        return
+    state = _load(ctx)
+    _set_bucket_field(state, "token_budget", bucket, budget)
+    _set_bucket_field(state, "token_spent", bucket, 0)
+    _save(ctx, state)
+
+def apply_budget_refresh(ctx, bucket, budget):
+    """Apply a mid-token `/github/budget` re-measurement: floor the budget DOWN
+    only (`min(current, budget)`). A refresh re-measures the same token's slice
+    — more concurrent mints can shrink it, but it never renews, so it can only
+    lower the cap, never raise it or reset spend. No-op without a prior budget
+    (a refresh before any mint has nothing to lower) or on a bad bucket/value."""
+    if bucket not in _VALID_BUCKETS or budget < 0:
+        return
+    state = _load(ctx)
+    current = (state.get("token_budget") or {}).get(bucket)
+    if current == None:
+        return
+    _set_bucket_field(state, "token_budget", bucket, min(current, budget))
+    _save(ctx, state)
+
+def budget_exhausted(ctx, bucket):
+    """True iff `bucket`'s token budget is set and fully spent (`spent >=
+    budget`). False when no budget has been issued yet (cold start) — the
+    caller falls back to cadence / the cold-start floor there, not to a hard
+    skip. Drives the skippable-call gate in `github._do_request`."""
+    state = _load(ctx)
+    budget = (state.get("token_budget") or {}).get(bucket)
+    if budget == None:
+        return False
+    spent = (state.get("token_spent") or {}).get(bucket, 0)
+    return spent >= budget
+
+def _increment_token_spent(ctx, bucket):
+    """Count one of our own calls against `bucket`'s spend. Loads + saves its
+    own state (separate from the observation write in `record_observation`) to
+    keep the recording path's read-modify-write contained. No-op on an unknown
+    bucket."""
+    if bucket not in _VALID_BUCKETS:
+        return
+    state = _load(ctx)
+    spent = (state.get("token_spent") or {}).get(bucket, 0)
+    _set_bucket_field(state, "token_spent", bucket, spent + 1)
+    _save(ctx, state)
+
+def _set_bucket_field(state, field, bucket, value):
+    """Set `state[field][bucket] = value`, copying the inner dict (AXL dicts the
+    JSON round-trip hands back are mutable, but copy to match the rest of the
+    file's immutable-update style). Mutates `state`; caller saves."""
+    inner = dict(state.get(field) or {})
+    inner[bucket] = value
+    state[field] = inner
 
 # ── Threshold warnings ───────────────────────────────────────────────
 

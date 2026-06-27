@@ -8,11 +8,11 @@ this cycle. The server owns cross-job coordination + the post throttle;
 rendering (the Jinja2 template, customizable via config) and posting (the
 GitHub issue-comment API) stay client-side. Contribution is event-paced (ticks
 on BES events), throttled to the server's budget-derived `desired_cadence_s`
-(floored by min_poll_interval_seconds) widened by the live client-side
-`effective_throttle_factor` (burn-rate / swarm cold-start / elapsed-time) so a
-fresh swarm can't drain the shared App bucket between budget refreshes. Works on
-any supported CI host (GitHub Actions, Buildkite, CircleCI) since coordination no
-longer depends on CI artifacts.
+(floored by min_poll_interval_seconds). That cadence paces the Aspect-API
+contribute rate; the GitHub API spend (the elected poster's comment PATCH) is
+bounded separately by the per-token call budget enforced in
+`github._do_request`. Works on any supported CI host (GitHub Actions, Buildkite,
+CircleCI) since coordination no longer depends on CI artifacts.
 
 When the Aspect API is unreachable, the feature falls back to coordinating
 through the comment's own embedded state block (read → merge own entry →
@@ -88,7 +88,6 @@ load(
     "BUCKET_APP",
     "PHASE_FALL_THROUGH",
     "PHASE_SUPPRESS",
-    "effective_throttle_factor",
     "epoch_now_s",
     "should_emit_phase_change",
     "usage_footer",
@@ -1376,17 +1375,24 @@ def _github_status_comments(ctx: FeatureContext):
             payload["check_run_url"] = check_run_url
         return payload
 
-    def _upsert_comment(ctx, token, body):
+    def _upsert_comment(ctx, token, body, skippable = False):
         """PATCH the existing comment when its id is known, else POST a
         fresh one (the unchanged-content short-circuit is in `_publish`).
+
+        `skippable=True` (a mid-run heartbeat) lets the per-token budget gate
+        drop the PATCH when over budget — it returns `False` like any other
+        non-post, so the caller skips the lease stamp and retries next cycle.
+        The create is always must-succeed (it establishes the comment).
 
         Returns `True` on success so the caller stamps the lease; `False`
         on failure so the caller skips the stamp and a sibling can take
         over rather than honor a stale lease behind a broken upsert."""
         if "_comment_id" in _state:
-            res = github.issues.update_comment(ctx, token, owner, repo, _state["_comment_id"], body)
+            res = github.issues.update_comment(ctx, token, owner, repo, _state["_comment_id"], body, skippable = skippable)
             if not res.get("success"):
-                _LOG.warn(ctx.std, "Update failed: %s" % res.get("error", "unknown"))
+                # A budget skip is intentional, not a failure — stay quiet.
+                if not res.get("skipped"):
+                    _LOG.warn(ctx.std, "Update failed: %s" % res.get("error", "unknown"))
                 return False
 
             # A sibling whose comment was invisible at our create time can still
@@ -1650,7 +1656,9 @@ def _github_status_comments(ctx: FeatureContext):
         stable_body, final_body = _render_comment(ctx, state, sel, now_epoch)
         if _state.get("_last_stable_body") == stable_body:
             return
-        if not _upsert_comment(ctx, token, final_body):
+        # Mid-run PATCHes are skippable under budget pressure; the terminal
+        # verdict (final) always lands.
+        if not _upsert_comment(ctx, token, final_body, skippable = not final):
             return
         _state["_last_stable_body"] = stable_body
         _state["_pending_post"] = {"comment_id": str(_state.get("_comment_id", ""))}
@@ -1871,20 +1879,13 @@ def _github_status_comments(ctx: FeatureContext):
             if phase_result == PHASE_SUPPRESS:
                 return
             if phase_result == PHASE_FALL_THROUGH:
-                # Disabled surface (auth failed → no token): nothing will publish,
-                # so skip the throttle entirely. `effective_throttle_factor` has
-                # side effects (it records the factor other surfaces' usage_footer
-                # reads); a non-posting job must not stamp one.
-                if not _state.get("_github_token"):
-                    return
-
-                # Budget-derived cadence from the Aspect API, floored by the
-                # configured min, then widened by the live client-side throttle to
-                # cover quota drain the periodic budget can't see yet.
-                base_interval = max(min_poll_interval_seconds, _state.get("_cadence_s", min_poll_interval_seconds))
-                elapsed_s = now - _state.get("_task_started_at", now)
-                factor = effective_throttle_factor(ctx, BUCKET_APP, elapsed_s, base_interval)
-                interval = base_interval * factor
+                # Budget-derived cadence from the Aspect API (refreshed
+                # periodically below), floored by the configured min; falls back
+                # to the floor before the first mint or when none was returned.
+                # This paces the Aspect-API *contribute* rate; the App-bucket
+                # GitHub spend is bounded separately by the per-token budget gate
+                # in `github._do_request` (see `_publish`).
+                interval = max(min_poll_interval_seconds, _state.get("_cadence_s", min_poll_interval_seconds))
                 if now - _state.get("_last_publish_s", 0.0) < interval:
                     return
                 _state["_last_publish_s"] = now
