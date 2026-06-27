@@ -719,9 +719,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = true)] strip: bool,
     ) -> anyhow::Result<NoneOr<String>> {
         Ok(match info::release_version() {
-            Some(v) if strip => {
-                NoneOr::Other(format!("{}.{}.{}", v.major, v.minor, v.patch))
-            }
+            Some(v) if strip => NoneOr::Other(format!("{}.{}.{}", v.major, v.minor, v.patch)),
             Some(v) => NoneOr::Other(v.to_string()),
             None => NoneOr::None,
         })
