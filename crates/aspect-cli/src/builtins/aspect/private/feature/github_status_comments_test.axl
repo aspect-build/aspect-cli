@@ -35,6 +35,7 @@ load(
     "dedup_survivor",
     "format_overflow_note",
     "lease_held",
+    "markers_stable",
     "merge_comment_only_state",
     "merge_state",
     "parse_state",
@@ -44,6 +45,7 @@ load(
     "select_snippets",
     "select_sticky",
     "serialize_state",
+    "should_create_fallback",
     "snippet_key",
 )
 load(
@@ -644,6 +646,35 @@ def _check_dedup_survivor():
     # Missing/None body is treated as non-matching, not an error.
     no_body = [{"id": 1}, {"id": 2, "body": None}, {"id": 3, "body": marker}]
     _eq("dedup_survivor — missing body ignored", dedup_survivor(no_body, marker), (None, []))
+
+def _check_markers_stable():
+    """markers_stable: converged iff exactly one marker item is visible. Zero
+    (read-after-write lag) and two-or-more (duplicate to collapse) are not."""
+    marker = "<!-- aspect-ci-status:pr-7 -->"
+    other = "<!-- other -->"
+    _eq("markers_stable — none visible (lag)", markers_stable([], marker), False)
+    _eq("markers_stable — none matching", markers_stable([{"id": 1, "body": other}], marker), False)
+    _eq("markers_stable — exactly one", markers_stable([{"id": 1, "body": "x " + marker}, {"id": 2, "body": other}], marker), True)
+    _eq("markers_stable — duplicate", markers_stable([{"id": 1, "body": marker}, {"id": 2, "body": marker}], marker), False)
+    _eq("markers_stable — missing body ignored", markers_stable([{"id": 1}, {"id": 2, "body": marker}], marker), True)
+
+def _check_should_create_fallback():
+    """should_create_fallback: the out-of-band create gate. Never creates once
+    the API has worked; otherwise only on the terminal `final` emit or past the
+    grace window."""
+    grace = 45
+
+    # API has worked → never create out-of-band, even final / past grace.
+    _eq("fallback — api_ok blocks final", should_create_fallback(True, True, 999, grace), False)
+    _eq("fallback — api_ok blocks past-grace", should_create_fallback(True, False, 999, grace), False)
+
+    # API never worked: final always creates (last emit, no retry).
+    _eq("fallback — final creates immediately", should_create_fallback(False, True, 0, grace), True)
+
+    # API never worked, non-final: defer until grace elapses.
+    _eq("fallback — non-final before grace defers", should_create_fallback(False, False, 10, grace), False)
+    _eq("fallback — non-final at grace creates", should_create_fallback(False, False, 45, grace), True)
+    _eq("fallback — non-final past grace creates", should_create_fallback(False, False, 60, grace), True)
 
 def _check_state_serialize_round_trip():
     """serialize_state → parse_state round-trips head_sha, lease epoch,
@@ -1578,6 +1609,8 @@ def _test_impl(ctx):
     _check_format_http_failure_detail()
     _check_lease_held()
     _check_dedup_survivor()
+    _check_markers_stable()
+    _check_should_create_fallback()
     _check_state_serialize_round_trip()
     _check_parse_state_absent()
     _check_parse_state_malformed()

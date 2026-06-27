@@ -52,12 +52,14 @@ load(
     "bucket_entries",
     "dedup_survivor",
     "lease_held",
+    "markers_stable",
     "merge_comment_only_state",
     "parse_state",
     "prepare_for_render",
     "rehydrate_entries",
     "render_body",
     "results_subset",
+    "should_create_fallback",
 )
 load("@std//time.axl", "monotonic", "sleep")
 load("../private/lib/bazel_results.axl", "format_run_date", "now_ms")
@@ -243,8 +245,9 @@ def _gitlab_status_comments(ctx: FeatureContext):
         return ""
 
     def _upsert_note(ctx, token, body):
-        """PUT the existing note when its id is known, else POST a fresh
-        one (the create-time duplicate backstop runs in `_dedup_notes`)."""
+        """PUT the existing note when its id is known, else POST a fresh one.
+        The create-time duplicate backstop runs in `_dedup_notes`; later update
+        cycles run a bounded no-sleep recheck via `_dedup_recheck`."""
         if _state.get("_note_id") != None:
             res = gitlab.notes.update(
                 ctx,
@@ -285,8 +288,7 @@ def _gitlab_status_comments(ctx: FeatureContext):
             return False
         survivor, losers = dedup_survivor(listed["notes"], marker)
         if survivor == None:
-            marker_count = len([n for n in listed["notes"] if marker in (n.get("body") or "")])
-            return marker_count == 1
+            return markers_stable(listed["notes"], marker)
         _state["_note_id"] = survivor
         for loser_id in losers:
             del_res = gitlab.notes.delete(
@@ -432,8 +434,8 @@ def _gitlab_status_comments(ctx: FeatureContext):
         if existing_body == None:
             return
         if _state.get("_note_id") == None:
-            grace_elapsed = final or now_epoch - _state.get("_task_started_at_s", 0) >= _FALLBACK_CREATE_GRACE_S
-            if _state.get("_api_ok") or not grace_elapsed:
+            secs = now_epoch - _state.get("_task_started_at_s", 0)
+            if not should_create_fallback(_state.get("_api_ok", False), final, secs, _FALLBACK_CREATE_GRACE_S):
                 return
         parsed = parse_state(existing_body)
 
