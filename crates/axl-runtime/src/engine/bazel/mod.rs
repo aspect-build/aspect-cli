@@ -692,6 +692,39 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         Ok(map)
     }
 
+    /// Shut down the Bazel server for the active run command (`bazel shutdown`),
+    /// returning the exit code. Best-effort: a missing or already-stopped server
+    /// is not an error, so callers can run this before mutating the output base
+    /// (e.g. wiping it) without first checking whether a server is live.
+    ///
+    /// Goes through the same launcher resolution as `build` / `info` /
+    /// `health_check` (honors `BAZEL_REAL` and the `tools/bazel` wrapper via
+    /// `bazel_command`, sets `ASPECT_CLI_RUNNING`) and replays the active run
+    /// command's startup flags (`--output_base`, …), so it targets exactly the
+    /// server those calls started — not whatever a bare `bazel` on PATH would.
+    ///
+    /// **Examples**
+    ///
+    /// ```python
+    /// def _impl(ctx):
+    ///     ctx.bazel.health_check()   # may start a server in the runner output base
+    ///     ctx.bazel.shutdown()       # stop it before wiping that output base
+    /// ```
+    fn shutdown<'v>(this: values::Value<'v>) -> anyhow::Result<i32> {
+        let startup_flags = read_startup_flags(this)?;
+
+        let mut cmd = bazel_command();
+        cmd.args(&startup_flags);
+        cmd.arg("shutdown");
+        cmd.stdin(Stdio::null());
+        let (mut child, _guard) = live::spawn_registered(&mut cmd)
+            .map_err(|e| anyhow::anyhow!("failed to spawn bazel: {}", e))?;
+        let status = child
+            .wait()
+            .map_err(|e| anyhow::anyhow!("failed to wait on bazel: {}", e))?;
+        Ok(status.code().unwrap_or(-1))
+    }
+
     /// The Bazel release version as a `str` (e.g. `"7.4.1"`), or `None` for a
     /// non-release build (`development version` / `no_version`) or when the
     /// probe fails.

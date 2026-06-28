@@ -79,22 +79,6 @@ def _emit_final(ctx, lifecycle, data, exit_code):
         exit_code = exit_code,
     )
 
-def _shutdown_bazel_server(ctx):
-    """Stop the Bazel server holding the runner `--output_base` so the storage
-    cleanup that follows doesn't wipe state out from under a live server. The
-    health check (run in `setup_phase`) starts a server in the runner output
-    base; we target that same server by replaying the resolved RunCommand's
-    startup flags (`--output_base`, `--output_user_root`, …). Best-effort: a
-    missing server or `bazel` exits non-zero and is tolerated (the cleanup runs
-    regardless)."""
-    rc = ctx.bazel.active_rc()
-    startup_flags = rc.startup_flags() if rc else []
-
-    # `--ignore_all_rc_files` (carried by the RunCommand) is a startup flag and
-    # is fine to pass to `shutdown`; we just need the `--output_base` to land on
-    # the right server.
-    ctx.std.process.command("bazel").args(startup_flags + ["shutdown"]).spawn().wait()
-
 def _clean_storage_mount(ctx, mount: str):
     """Remove prior Bazel state under the runner storage `mount`. Match
     rosetta's pre-warming cleanup. Best-effort throughout: bazel may have left
@@ -135,16 +119,17 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # `setup_phase` — the health check must run first (the Workflows
     # `agent_health_check` validates the runner before warming touches its
     # state). The health check (`ctx.bazel.health_check()`) starts/uses the
-    # Bazel server in the runner `--output_base` under this same mount, so we
-    # `bazel shutdown` that server before wiping `<mount>/output/*`; otherwise
-    # the removal would race a live server and poison it. The shutdown targets
-    # the resolved RunCommand's startup flags (incl. `--output_base`).
-    # Best-effort throughout — logged for the CLI and recorded in
-    # `data["warming"]`, no surface emit of its own.
+    # Bazel server in the runner `--output_base` under this same mount, so
+    # `ctx.bazel.shutdown()` stops that server before wiping `<mount>/output/*`;
+    # otherwise the removal would race a live server and poison it. shutdown
+    # goes through the same launcher resolution as the health check (honoring
+    # BAZEL_REAL / the tools/bazel wrapper) and replays the active run command's
+    # startup flags, so it targets exactly that server. Best-effort throughout —
+    # logged for the CLI and recorded in `data["warming"]`, no surface emit.
     mount = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_STORAGE_PATH")
     if mount:
         print("Cleaning prior Bazel state under " + mount + "...")
-        _shutdown_bazel_server(ctx)
+        ctx.bazel.shutdown()
         _clean_storage_mount(ctx, mount)
         data["warming"]["cleaned"] = True
 
