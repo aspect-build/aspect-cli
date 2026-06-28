@@ -1,3 +1,6 @@
+include:
+  - component: $CI_SERVER_FQDN/aspect-build/setup-aspect-gitlab-component/setup@2026.26.5
+
 workflow:
   rules:
     # Run for everything except tag pushes
@@ -27,6 +30,7 @@ pre-build:
 build-task:
   stage: CI
   needs: [pre-build]
+  extends: .setup-aspect
   tags:
     - aspect-workflows
     - aspect-default
@@ -37,6 +41,7 @@ build-task:
 test-task:
   stage: CI
   needs: [pre-build]
+  extends: .setup-aspect
   tags:
     - aspect-workflows
     - aspect-default
@@ -47,6 +52,7 @@ test-task:
 lint-task:
   stage: CI
   needs: [pre-build]
+  extends: .setup-aspect
   tags:
     - aspect-workflows
     - aspect-default
@@ -64,6 +70,7 @@ lint-task:
 buildifier-task:
   stage: CI
   needs: [pre-build]
+  extends: .setup-aspect
   tags:
     - aspect-workflows
     - aspect-default
@@ -74,6 +81,7 @@ buildifier-task:
 format-task:
   stage: CI
   needs: [pre-build]
+  extends: .setup-aspect
   tags:
     - aspect-workflows
     - aspect-default
@@ -86,6 +94,7 @@ format-task:
 gazelle-task:
   stage: CI
   needs: [pre-build]
+  extends: .setup-aspect
   tags:
     - aspect-workflows
     - aspect-default
@@ -101,6 +110,7 @@ gazelle-task:
 gazelle-from-source-task:
   stage: CI
   needs: [pre-build]
+  extends: .setup-aspect
   tags:
     - aspect-workflows
     - aspect-default
@@ -111,6 +121,7 @@ gazelle-from-source-task:
 delivery-task:
   stage: CI
   needs: [pre-build]
+  extends: .setup-aspect
   tags:
     - aspect-workflows
     - aspect-default

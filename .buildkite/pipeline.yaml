@@ -3,6 +3,8 @@ steps:
     label: ":aspect: Workflows Runner Smoke Test"
     agents:
       queue: aspect-default
+    plugins:
+      - aspect-build/setup-aspect#63f7af7bde5d378934d54edf0978edc02791375a: ~ # v2026.26.5
     command: |
       aspect --version
       aspect version
@@ -63,6 +65,8 @@ steps:
     label: ":aspect: AXL Tests"
     agents:
       queue: aspect-default
+    plugins:
+      - aspect-build/setup-aspect#63f7af7bde5d378934d54edf0978edc02791375a: ~ # v2026.26.5
     timeout_in_minutes: 10
     retry:
       automatic:
@@ -177,6 +181,8 @@ steps:
     label: ":bazel: bazelrc e2e (no server restart)"
     agents:
       queue: aspect-default
+    plugins:
+      - aspect-build/setup-aspect#63f7af7bde5d378934d54edf0978edc02791375a: ~ # v2026.26.5
     timeout_in_minutes: 10
     retry:
       automatic:
@@ -220,6 +226,8 @@ steps:
       - pre-build
     agents:
       queue: aspect-default
+    plugins:
+      - aspect-build/setup-aspect#63f7af7bde5d378934d54edf0978edc02791375a: ~ # v2026.26.5
     timeout_in_minutes: 20
     retry:
       automatic:
@@ -234,6 +242,8 @@ steps:
       - pre-build
     agents:
       queue: aspect-default
+    plugins:
+      - aspect-build/setup-aspect#63f7af7bde5d378934d54edf0978edc02791375a: ~ # v2026.26.5
     timeout_in_minutes: 10
     retry:
       automatic:
@@ -250,6 +260,8 @@ steps:
       - pre-build
     agents:
       queue: aspect-default
+    plugins:
+      - aspect-build/setup-aspect#63f7af7bde5d378934d54edf0978edc02791375a: ~ # v2026.26.5
     timeout_in_minutes: 10
     retry:
       automatic:
@@ -264,6 +276,8 @@ steps:
       - pre-build
     agents:
       queue: aspect-default
+    plugins:
+      - aspect-build/setup-aspect#63f7af7bde5d378934d54edf0978edc02791375a: ~ # v2026.26.5
     timeout_in_minutes: 10
     retry:
       automatic:
@@ -287,6 +301,8 @@ steps:
     label: ":aspect: Build Task"
     agents:
       queue: aspect-default
+    plugins:
+      - aspect-build/setup-aspect#63f7af7bde5d378934d54edf0978edc02791375a: ~ # v2026.26.5
     timeout_in_minutes: 10
     retry:
       automatic:
@@ -301,6 +317,8 @@ steps:
     label: ":aspect: Test Task"
     agents:
       queue: aspect-default
+    plugins:
+      - aspect-build/setup-aspect#63f7af7bde5d378934d54edf0978edc02791375a: ~ # v2026.26.5
     timeout_in_minutes: 10
     retry:
       automatic:
@@ -325,6 +343,8 @@ steps:
     label: ":aspect: Test Task – new flags"
     agents:
       queue: aspect-default
+    plugins:
+      - aspect-build/setup-aspect#63f7af7bde5d378934d54edf0978edc02791375a: ~ # v2026.26.5
     timeout_in_minutes: 10
     retry:
       automatic:
@@ -352,6 +372,8 @@ steps:
     label: ":aspect: Lint Task"
     agents:
       queue: aspect-default
+    plugins:
+      - aspect-build/setup-aspect#63f7af7bde5d378934d54edf0978edc02791375a: ~ # v2026.26.5
     timeout_in_minutes: 20
     retry:
       automatic:
@@ -395,6 +417,8 @@ steps:
         allow_failure: true
     agents:
       queue: aspect-default
+    plugins:
+      - aspect-build/setup-aspect#63f7af7bde5d378934d54edf0978edc02791375a: ~ # v2026.26.5
     timeout_in_minutes: 10
     retry:
       automatic:
