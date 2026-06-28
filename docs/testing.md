@@ -75,7 +75,7 @@ All in `crates/axl-runtime`:
 
 | Piece | Location |
 |---|---|
-| `asserts` namespace (`eq`, `ne`, `is_true`, `is_false`, `contains`, `fails`) | `src/engine/testing.rs` |
+| `asserts` namespace (`eq`, `ne`, `is_true`, `is_false`, `contains`, `not_contains`, `gt`, `ge`, `lt`, `le`, `fails`) | `src/engine/testing.rs` |
 | `Test` harness value (`t.env`, `t.std`, `t.ctx`) | `src/engine/testing.rs` |
 | `test_*` discovery + parallel (thread-per-shard) runner + summary | `src/engine/testing.rs` (`run_test_source`) |
 | In-memory env overlay handle (`TestEnvMap`) carried on the harness values | `src/engine/store.rs` (`TestEnvMap`); minted in `src/engine/testing.rs` |
@@ -119,8 +119,13 @@ change:
    (`parametrize`, fixtures), so we keep it and free-standing `asserts.eq`
    reads cleaner than threading `t.` through every check.
 
-3. **`contains` is string-only in the POC.** Collection membership
-   (`needle in haystack`) is stubbed out with a clear error. Trivial to extend.
+3. **`contains` covers every container.** Backed by the `in` operator, so it
+   works for a substring of a string, an element of a list/tuple/set, or a key
+   of a dict; `not_contains` is its inverse. The ordering family (`gt`, `ge`,
+   `lt`, `le`) is backed by Starlark comparison, and `asserts.fails` takes an
+   optional `contains = "substr"` to assert a raise happened *for the right
+   reason* (matched against the bare error message, not the rendered
+   diagnostic).
 
 4. **`is_true`/`is_false`, not `true`/`false`.** Rust reserved words; also
    clearer.

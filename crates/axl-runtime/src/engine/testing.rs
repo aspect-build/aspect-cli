@@ -43,6 +43,7 @@
 //! an AXL task, snapshot golden files, fs/process/http mock backends, and the
 //! LSP knowing about the `_test.axl` surface.
 
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -132,43 +133,136 @@ fn assert_namespace(globals: &mut GlobalsBuilder) {
         }
     }
 
-    /// Fails the test unless the `needle` substring appears in `haystack`.
+    /// Fails the test unless `needle` is a member of `haystack`.
     ///
-    /// POC scope: string containment only. Collection membership
-    /// (`needle in haystack` for lists/dicts) is a planned extension.
+    /// Backed by the `in` operator, so it works for any container Starlark
+    /// supports: a substring of a string, an element of a list/tuple/set, or a
+    /// key of a dict.
     fn contains<'v>(
         #[starlark(require = pos)] haystack: Value<'v>,
         #[starlark(require = pos)] needle: Value<'v>,
     ) -> anyhow::Result<NoneType> {
-        let h = haystack
-            .unpack_str()
-            .ok_or_else(|| anyhow::anyhow!("asserts.contains (POC): haystack must be a string"))?;
-        let n = needle
-            .unpack_str()
-            .ok_or_else(|| anyhow::anyhow!("asserts.contains (POC): needle must be a string"))?;
-        if h.contains(n) {
+        let present = haystack
+            .is_in(needle)
+            .map_err(|e| anyhow::anyhow!("asserts.contains: membership test failed: {e}"))?;
+        if present {
             Ok(NoneType)
         } else {
             Err(anyhow::anyhow!(
-                "asserts.contains failed: {:?} not found in {:?}",
-                n,
-                h
+                "asserts.contains failed: {} not found in {}",
+                needle.to_repr(),
+                haystack.to_repr()
             ))
         }
     }
 
+    /// Fails the test unless `needle` is *absent* from `haystack` — the inverse
+    /// of `contains`, over the same containers.
+    fn not_contains<'v>(
+        #[starlark(require = pos)] haystack: Value<'v>,
+        #[starlark(require = pos)] needle: Value<'v>,
+    ) -> anyhow::Result<NoneType> {
+        let present = haystack
+            .is_in(needle)
+            .map_err(|e| anyhow::anyhow!("asserts.not_contains: membership test failed: {e}"))?;
+        if present {
+            Err(anyhow::anyhow!(
+                "asserts.not_contains failed: {} unexpectedly found in {}",
+                needle.to_repr(),
+                haystack.to_repr()
+            ))
+        } else {
+            Ok(NoneType)
+        }
+    }
+
+    /// Fails the test unless `got > want` (Starlark ordering).
+    fn gt<'v>(
+        #[starlark(require = pos)] got: Value<'v>,
+        #[starlark(require = pos)] want: Value<'v>,
+    ) -> anyhow::Result<NoneType> {
+        compare_assert(got, want, "gt", &[Ordering::Greater])
+    }
+
+    /// Fails the test unless `got >= want` (Starlark ordering).
+    fn ge<'v>(
+        #[starlark(require = pos)] got: Value<'v>,
+        #[starlark(require = pos)] want: Value<'v>,
+    ) -> anyhow::Result<NoneType> {
+        compare_assert(got, want, "ge", &[Ordering::Greater, Ordering::Equal])
+    }
+
+    /// Fails the test unless `got < want` (Starlark ordering).
+    fn lt<'v>(
+        #[starlark(require = pos)] got: Value<'v>,
+        #[starlark(require = pos)] want: Value<'v>,
+    ) -> anyhow::Result<NoneType> {
+        compare_assert(got, want, "lt", &[Ordering::Less])
+    }
+
+    /// Fails the test unless `got <= want` (Starlark ordering).
+    fn le<'v>(
+        #[starlark(require = pos)] got: Value<'v>,
+        #[starlark(require = pos)] want: Value<'v>,
+    ) -> anyhow::Result<NoneType> {
+        compare_assert(got, want, "le", &[Ordering::Less, Ordering::Equal])
+    }
+
     /// Fails the test unless calling `f()` raises. The pytest `raises` analogue
-    /// for the common no-argument case.
+    /// for the common no-argument case. Pass `contains = "substr"` to also
+    /// require the raised error's message to contain that substring — the
+    /// common "it failed *for the right reason*" check.
     fn fails<'v>(
         #[starlark(require = pos)] f: Value<'v>,
+        #[starlark(require = named, default = NoneOr::None)] contains: NoneOr<&str>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         match eval.eval_function(f, &[], &[]) {
             Ok(_) => Err(anyhow::anyhow!(
                 "asserts.fails: expected the callable to raise, but it returned normally"
             )),
-            Err(_) => Ok(NoneType),
+            Err(e) => match contains {
+                NoneOr::Other(sub) => {
+                    // Match against the bare error message, not the rendered
+                    // diagnostic — the full `Display` embeds the source frame
+                    // (including this very `asserts.fails(...)` call), which
+                    // would let the call's own text spuriously satisfy the
+                    // substring check.
+                    let msg = e.without_diagnostic().to_string();
+                    if msg.contains(sub) {
+                        Ok(NoneType)
+                    } else {
+                        Err(anyhow::anyhow!(
+                            "asserts.fails: raised error did not contain {sub:?}\n  error: {msg}"
+                        ))
+                    }
+                }
+                NoneOr::None => Ok(NoneType),
+            },
         }
+    }
+}
+
+/// Shared body for the ordering asserts (`gt`/`ge`/`lt`/`le`). Compares `got`
+/// against `want` and passes only when the resulting [`Ordering`] is in
+/// `allowed`; otherwise raises a message naming the failed `op`.
+fn compare_assert<'v>(
+    got: Value<'v>,
+    want: Value<'v>,
+    op: &str,
+    allowed: &[Ordering],
+) -> anyhow::Result<NoneType> {
+    let ord = got
+        .compare(want)
+        .map_err(|e| anyhow::anyhow!("asserts.{op}: comparison failed: {e}"))?;
+    if allowed.contains(&ord) {
+        Ok(NoneType)
+    } else {
+        Err(anyhow::anyhow!(
+            "asserts.{op} failed:\n  got:  {}\n  want: {}",
+            got.to_repr(),
+            want.to_repr()
+        ))
     }
 }
 
@@ -879,6 +973,80 @@ def helper_not_discovered(t):
             expected.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
             "outcomes must be in definition order, not completion order"
         );
+    }
+
+    #[test]
+    fn expanded_assertion_vocabulary() {
+        let rt = Runtime::new().unwrap();
+        let _g = rt.enter();
+        // Exercises the assertions beyond eq/ne/is_true: container membership
+        // over every supported shape, its inverse, the ordering family, and
+        // message-matching on `fails`. Each test is written to pass; a single
+        // regression in any assertion would flip its test to failed.
+        let src = r#"
+def test_contains_over_containers(t):
+    asserts.contains("hello world", "world")   # substring
+    asserts.contains([1, 2, 3], 2)              # list element
+    asserts.contains((1, 2, 3), 3)              # tuple element
+    asserts.contains({"a": 1, "b": 2}, "a")     # dict key
+
+def test_not_contains(t):
+    asserts.not_contains("hello", "z")
+    asserts.not_contains([1, 2, 3], 9)
+    asserts.not_contains({"a": 1}, "b")
+
+def test_ordering(t):
+    asserts.gt(2, 1)
+    asserts.ge(2, 2)
+    asserts.lt(1, 2)
+    asserts.le(2, 2)
+    asserts.lt("abc", "abd")
+
+def test_fails_with_message_match(t):
+    asserts.fails(lambda: fail("boom: bad input"), contains = "bad input")
+    asserts.fails(lambda: fail("boom"))
+"#;
+        let summary = run_test_source(src, &base_env()).expect("runner ok");
+        assert_eq!(
+            summary.failed(),
+            0,
+            "all expanded-assertion tests should pass; report:\n{}",
+            summary.report()
+        );
+        assert_eq!(summary.passed(), 4, "report:\n{}", summary.report());
+    }
+
+    #[test]
+    fn assertions_fail_when_expected() {
+        let rt = Runtime::new().unwrap();
+        let _g = rt.enter();
+        // The mirror image: each test drives one assertion into its failure
+        // path, proving the failure branches actually raise (a no-op assert
+        // would let these pass and break the framework silently).
+        let src = r#"
+def test_contains_fails(t):
+    asserts.contains([1, 2], 3)
+
+def test_not_contains_fails(t):
+    asserts.not_contains([1, 2], 1)
+
+def test_gt_fails(t):
+    asserts.gt(1, 2)
+
+def test_fails_wrong_message(t):
+    asserts.fails(lambda: fail("boom"), contains = "not-present")
+
+def test_fails_when_no_raise(t):
+    asserts.fails(lambda: 1 + 1)
+"#;
+        let summary = run_test_source(src, &base_env()).expect("runner ok");
+        assert_eq!(
+            summary.passed(),
+            0,
+            "every assertion should reach its failure path; report:\n{}",
+            summary.report()
+        );
+        assert_eq!(summary.failed(), 5, "report:\n{}", summary.report());
     }
 
     #[test]
