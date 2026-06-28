@@ -518,6 +518,25 @@ def _dedup_survivor(items, marker):
     dupes_sorted = sorted(dupes, key = lambda it: it["id"])
     return (dupes_sorted[0]["id"], [it["id"] for it in dupes_sorted[1:]])
 
+def _markers_stable(items, marker):
+    """True when exactly one marker comment/note is visible — the converged
+    steady state. Zero visible means read-after-write lag (keep rechecking),
+    two or more means a duplicate still to collapse."""
+    return len([it for it in items if marker in (it.get("body") or "")]) == 1
+
+def _should_create_fallback(api_ok, final, secs_since_start, grace_s):
+    """Whether the comment-state fallback may CREATE a comment/note out-of-band
+    when none is known or discoverable.
+
+    Only as a last resort: the Aspect API must never have worked this run
+    (`api_ok` False), and either this is the terminal `final` emit (its status
+    must surface — no later retry) or the task has run past `grace_s` (a
+    sustained outage, not a cold-start blip). The convergent recheck collapses
+    any rare duplicate this admits."""
+    if api_ok:
+        return False
+    return final or secs_since_start >= grace_s
+
 def _ci_run_url(env):
     """Return the GitHub Actions run URL, or "" if it can't be assembled."""
     server = env.var("GITHUB_SERVER_URL") or "https://github.com"
@@ -1403,9 +1422,7 @@ def _github_status_comments(ctx: FeatureContext):
             return False
         _state["_comment_id"] = res["comment_id"]
 
-        # Re-check on the next cycles too: a racing sibling may not be visible
-        # yet, and the spread between sibling workflows' first posts can exceed
-        # one settle.
+        # Arm the later-cycle recheck (see `_DEDUP_RECHECK_WINDOW_S`).
         _state["_dedup_recheck_until"] = monotonic() + _DEDUP_RECHECK_WINDOW_S
         _dedup_marker_comments(ctx, token)
         return True
@@ -1419,10 +1436,7 @@ def _github_status_comments(ctx: FeatureContext):
             return False
         survivor, losers = _dedup_survivor(listed["comments"], marker)
         if survivor == None:
-            # 0 or 1 marker comment visible. Stable only when one is actually
-            # present (a 0-count means read-after-write lag, not stable).
-            marker_count = len([c for c in listed["comments"] if marker in (c.get("body") or "")])
-            return marker_count == 1
+            return _markers_stable(listed["comments"], marker)
         _state["_comment_id"] = survivor
         for loser_id in losers:
             github.issues.delete_comment(ctx, token, owner, repo, loser_id)
@@ -1681,8 +1695,8 @@ def _github_status_comments(ctx: FeatureContext):
         if existing_body == None:
             return
         if "_comment_id" not in _state:
-            grace_elapsed = final or monotonic() - _state.get("_task_started_at", 0.0) >= _FALLBACK_CREATE_GRACE_S
-            if _state.get("_api_ok") or not grace_elapsed:
+            secs = monotonic() - _state.get("_task_started_at", 0.0)
+            if not _should_create_fallback(_state.get("_api_ok", False), final, secs, _FALLBACK_CREATE_GRACE_S):
                 return
         parsed = _parse_state(existing_body)
 
@@ -1720,7 +1734,8 @@ def _github_status_comments(ctx: FeatureContext):
         _state["_task_kind"] = ctx.task.kind
         _state["_task_name"] = ctx.task.name
 
-        # Anchor for the time-based throttle in `_task_update`.
+        # Anchor for the fallback-create grace (`_FALLBACK_CREATE_GRACE_S`) in
+        # `_publish_via_comment_state`.
         _state["_task_started_at"] = monotonic()
 
         auth_reason = {}
@@ -1943,6 +1958,14 @@ def lease_held(now_epoch, last_upsert_epoch, lease_window_s):
 def dedup_survivor(items, marker):
     """Public test hook + shared helper for GitLab; see `_dedup_survivor`."""
     return _dedup_survivor(items, marker)
+
+def markers_stable(items, marker):
+    """Public test hook + shared helper for GitLab; see `_markers_stable`."""
+    return _markers_stable(items, marker)
+
+def should_create_fallback(api_ok, final, secs_since_start, grace_s):
+    """Public test hook + shared helper for GitLab; see `_should_create_fallback`."""
+    return _should_create_fallback(api_ok, final, secs_since_start, grace_s)
 
 def results_subset(
         data,
