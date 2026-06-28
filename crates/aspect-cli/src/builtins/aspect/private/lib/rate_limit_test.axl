@@ -22,13 +22,22 @@ load(
     "PHASE_EMIT",
     "PHASE_FALL_THROUGH",
     "PHASE_SUPPRESS",
+    "apply_budget_refresh",
+    "budget_exhausted",
+    "budget_should_skip",
+    "cadence_seconds",
+    "claim_budget_refresh",
     "cold_start_phase_change_gate_seconds",
     "effective_throttle_factor",
+    "end_budget_refresh",
     "export_observations",
     "ingest_sibling_observations",
     "inspect_for_test",
+    "record_cadence",
     "record_from_headers",
     "record_observation",
+    "record_refresh_creds",
+    "record_token_budget",
     "reset_for_test",
     "set_state_for_test",
     "should_emit_phase_change",
@@ -1117,6 +1126,351 @@ def _test_cold_start_floor_re_engages_after_reset_crossing(ctx):
         10.0,
     )
 
+def _budget(ctx, bucket = BUCKET_APP):
+    """Project the `(token_budget, token_spent)` pair for `bucket`."""
+    s = inspect_for_test(ctx)
+    return (
+        (s.get("token_budget") or {}).get(bucket),
+        (s.get("token_spent") or {}).get(bucket, 0),
+    )
+
+# Fixed clock for `budget_should_skip` tests; `reset_epoch` is set relative to
+# it so `time_to_reset` (hence the budget pace line) is deterministic. Window
+# length is 3600s, gap horizon 300s, critical band 0.90 — see rate_limit.axl.
+_NOW = 100000
+
+def _setup_skip(ctx, budget, spent, ttr, gap, surface = "comments"):
+    """Seed budget state for a `budget_should_skip` call: `budget`/`spent`, an
+    observation whose `reset_epoch` is `ttr` seconds ahead of `_NOW`, and a
+    `last_call_epoch[surface]` `gap` seconds before `_NOW` (gap None → never
+    called)."""
+    last = {} if gap == None else {surface: _NOW - gap}
+    set_state_for_test(
+        ctx,
+        observations = {BUCKET_APP: [[float(_NOW), 1, 5000, _NOW + ttr]], "env": []},
+        token_budget = {BUCKET_APP: budget, "env": None},
+        token_spent = {BUCKET_APP: spent, "env": 0},
+        skippable_seen = {BUCKET_APP: 0, "env": 0},
+        last_call_epoch = last,
+    )
+
+def _skip(ctx, surface = "comments"):
+    return budget_should_skip(ctx, BUCKET_APP, surface, now_epoch_s = _NOW)
+
+def _test_budget_skip_cold_start_never_skips(ctx):
+    _reset(ctx)
+
+    # No budget issued → cadence governs, gate never skips.
+    _assert("skip — cold start allows", not _skip(ctx))
+
+def _test_budget_skip_zero_budget_always(ctx):
+    _reset(ctx)
+    _setup_skip(ctx, budget = 0, spent = 0, ttr = 1800, gap = 0)
+    _assert("skip — zero budget skips", _skip(ctx))
+
+def _test_budget_skip_hard_cap(ctx):
+    _reset(ctx)
+    _setup_skip(ctx, budget = 100, spent = 100, ttr = 1800, gap = 0)
+    _assert("skip — at cap skips", _skip(ctx))
+
+def _test_budget_skip_critical_band_ignores_gap(ctx):
+    _reset(ctx)
+
+    # 92% spent: past the 0.90 critical band → skip even after a long quiet gap.
+    _setup_skip(ctx, budget = 100, spent = 92, ttr = 1800, gap = 600)
+    _assert("skip — critical band skips despite earned silence", _skip(ctx))
+
+def _test_budget_skip_under_pace_never_skips(ctx):
+    _reset(ctx)
+
+    # Halfway through the window (ttr 1800) → expected 50; spent 40 is under
+    # pace → no skip even at gap 0.
+    _setup_skip(ctx, budget = 100, spent = 40, ttr = 1800, gap = 0)
+    _assert("skip — under pace allows", not _skip(ctx))
+
+def _test_budget_skip_long_gap_earns_silence(ctx):
+    _reset(ctx)
+
+    # Ahead of pace (expected 50, spent 80) but quiet ≥ horizon → damping 0 → allow.
+    _setup_skip(ctx, budget = 100, spent = 80, ttr = 1800, gap = 300)
+    _assert("skip — long quiet gap allows despite over-pace", not _skip(ctx))
+
+def _test_budget_skip_first_call_never_skips(ctx):
+    _reset(ctx)
+
+    # Surface never called (no last_call_epoch) → treated as maximally quiet →
+    # the first update lands even when ahead of pace.
+    _setup_skip(ctx, budget = 100, spent = 80, ttr = 1800, gap = None)
+    _assert("skip — first-ever surface call allowed", not _skip(ctx))
+
+def _test_budget_skip_burst_over_pace_tapers(ctx):
+    _reset(ctx)
+
+    # Ahead of pace (expected 50, spent 80 → pace 0.30), gap 0 → damping 1 →
+    # skip_frac 0.30 → skip_every round(1/0.30)=3 → skip every 3rd gated call.
+    # Seed a recent last-call so the surface is bursty (gap 0), then probe; the
+    # counter persists and allowed calls re-stamp to _NOW (gap stays 0).
+    _setup_skip(ctx, budget = 100, spent = 80, ttr = 1800, gap = 0)
+    results = [_skip(ctx) for _ in range(6)]
+    skipped = len([r for r in results if r])
+
+    # skip_every 3 → skip at seen 3 and 6 → 2 of 6 skipped (~30%).
+    _eq("skip — burst tapers toward the pace fraction", skipped, 2)
+
+def _test_budget_skip_partial_gap_damping(ctx):
+    # Pace 0.30 (spent 80, expected 50), gap 150 → damping 0.5 → skip_frac 0.15
+    # → skip_every round(1/0.15)=7: only the 7th gated call (seen % 7 == 0)
+    # skips. Probe the boundary by seeding the counter just below it.
+    _reset(ctx)
+    _setup_skip(ctx, budget = 100, spent = 80, ttr = 1800, gap = 150)
+    set_state_for_test(ctx, skippable_seen = {BUCKET_APP: 5, "env": 0})
+    _assert("skip — partial damping allows 6th call", not _skip(ctx))
+
+    _setup_skip(ctx, budget = 100, spent = 80, ttr = 1800, gap = 150)
+    set_state_for_test(ctx, skippable_seen = {BUCKET_APP: 6, "env": 0})
+    _assert("skip — partial damping skips 7th call", _skip(ctx))
+
+def _test_budget_skip_only_allowed_stamps_surface(ctx):
+    _reset(ctx)
+    _setup_skip(ctx, budget = 100, spent = 40, ttr = 1800, gap = 0)
+
+    # Under pace → allowed → stamps last_call_epoch[comments] to _NOW.
+    _assert("skip — allowed call passes", not _skip(ctx))
+    _eq(
+        "skip — allowed call stamps surface",
+        (inspect_for_test(ctx).get("last_call_epoch") or {}).get("comments"),
+        _NOW,
+    )
+
+def _test_budget_skip_per_surface_gap(ctx):
+    _reset(ctx)
+
+    # checks has a fresh burst gap (0), comments has earned silence (gap 300).
+    # Both over pace (skip_frac 0.30 → skip_every 3 for checks). The quiet
+    # surface's skip_frac is 0 (early return, doesn't advance the shared
+    # per-bucket counter), so seeding seen=2 lands the checks call on seen 3 → skip.
+    set_state_for_test(
+        ctx,
+        observations = {BUCKET_APP: [[float(_NOW), 1, 5000, _NOW + 1800]], "env": []},
+        token_budget = {BUCKET_APP: 100, "env": None},
+        token_spent = {BUCKET_APP: 80, "env": 0},
+        skippable_seen = {BUCKET_APP: 2, "env": 0},
+        last_call_epoch = {"comments": _NOW - 300, "checks": _NOW},
+    )
+    _assert("skip — quiet surface allowed (earned silence)", not _skip(ctx, surface = "comments"))
+    _assert("skip — bursty surface skips on its Nth", _skip(ctx, surface = "checks"))
+
+def _test_budget_record_seeds_and_zeroes(ctx):
+    _reset(ctx)
+
+    # No budget issued yet → not exhausted (caller falls back to cadence).
+    _assert("budget — unset is not exhausted", not budget_exhausted(ctx, BUCKET_APP))
+    record_token_budget(ctx, BUCKET_APP, 100)
+    _eq("budget — recorded, spend zeroed", _budget(ctx), (100, 0))
+    _assert("budget — fresh budget not exhausted", not budget_exhausted(ctx, BUCKET_APP))
+
+def _test_budget_zero_is_exhausted(ctx):
+    _reset(ctx)
+
+    # A drained bucket yields budget 0 → exhausted from the first call, with
+    # zero spend (the design's "back off entirely" boundary).
+    record_token_budget(ctx, BUCKET_APP, 0)
+    _eq("budget — zero recorded", _budget(ctx), (0, 0))
+    _assert("budget — zero budget is exhausted", budget_exhausted(ctx, BUCKET_APP))
+
+def _test_budget_spend_counts_per_call(ctx):
+    _reset(ctx)
+    record_token_budget(ctx, BUCKET_APP, 2)
+    headers = [("X-RateLimit-Remaining", "4999"), ("X-RateLimit-Limit", "5000"), ("X-RateLimit-Reset", str(_FAR_FUTURE))]
+    record_from_headers(ctx, BUCKET_APP, headers, epoch_s = 1.0)
+    _eq("budget — one call counted", _budget(ctx)[1], 1)
+    _assert("budget — 1/2 not exhausted", not budget_exhausted(ctx, BUCKET_APP))
+    record_from_headers(ctx, BUCKET_APP, headers, epoch_s = 2.0)
+    _eq("budget — two calls counted", _budget(ctx)[1], 2)
+    _assert("budget — 2/2 exhausted", budget_exhausted(ctx, BUCKET_APP))
+
+def _test_budget_counts_gitlab_headers(ctx):
+    _reset(ctx)
+    record_token_budget(ctx, BUCKET_APP, 5)
+
+    # GitLab spells the headers without the `X-` prefix.
+    headers = [("RateLimit-Remaining", "900"), ("RateLimit-Limit", "1000"), ("RateLimit-Reset", str(_FAR_FUTURE))]
+    record_from_headers(ctx, BUCKET_APP, headers, epoch_s = 1.0)
+    _eq("budget — gitlab header counted as spend", _budget(ctx)[1], 1)
+    _eq("budget — gitlab observation recorded", len(inspect_for_test(ctx)["observations"][BUCKET_APP]), 1)
+
+def _test_budget_no_headers_no_spend(ctx):
+    _reset(ctx)
+    record_token_budget(ctx, BUCKET_APP, 5)
+
+    # Non-GitHub/GitLab response (no rate-limit headers) → no spend counted.
+    record_from_headers(ctx, BUCKET_APP, [("Content-Type", "application/json")], epoch_s = 1.0)
+    _eq("budget — non-rate-limit response not counted", _budget(ctx)[1], 0)
+
+def _test_budget_refresh_floors_down_only(ctx):
+    _reset(ctx)
+    record_token_budget(ctx, BUCKET_APP, 100)
+
+    # Spend some, then a refresh that would RAISE the budget — must be ignored.
+    record_from_headers(ctx, BUCKET_APP, [("X-RateLimit-Remaining", "1"), ("X-RateLimit-Limit", "5000"), ("X-RateLimit-Reset", str(_FAR_FUTURE))], epoch_s = 1.0)
+    apply_budget_refresh(ctx, BUCKET_APP, 500)
+    _eq("budget — refresh never raises", _budget(ctx), (100, 1))
+
+    # A lower refresh shrinks the cap but keeps the spend counter.
+    apply_budget_refresh(ctx, BUCKET_APP, 40)
+    _eq("budget — refresh floors down, spend kept", _budget(ctx), (40, 1))
+
+def _test_budget_refresh_seeds_when_unset(ctx):
+    _reset(ctx)
+
+    # With no budget set (none issued, or a window roll cleared it), a refresh
+    # seeds the value rather than no-opping — so a fresh window's budget lands.
+    apply_budget_refresh(ctx, BUCKET_APP, 50)
+    _eq("budget — refresh seeds when unset", _budget(ctx), (50, 0))
+
+def _test_budget_window_roll_reseeds(ctx):
+    _reset(ctx)
+    record_token_budget(ctx, BUCKET_APP, 10)
+    near = 1000
+    for i in range(10):
+        record_from_headers(ctx, BUCKET_APP, [("X-RateLimit-Remaining", "1"), ("X-RateLimit-Limit", "5000"), ("X-RateLimit-Reset", str(near))], epoch_s = float(i))
+    _assert("budget — exhausted before roll", budget_exhausted(ctx, BUCKET_APP))
+
+    # A window roll (`reset_epoch` jumps forward) clears the budget and zeroes
+    # spend, so the task isn't stuck exhausted on the old window's allowance.
+    # The roll observation is itself a call, so spend lands at 1 (it increments
+    # after the roll reset within the same `record_from_headers`).
+    record_from_headers(ctx, BUCKET_APP, [("X-RateLimit-Remaining", "5000"), ("X-RateLimit-Limit", "5000"), ("X-RateLimit-Reset", str(near + 4000))], epoch_s = 11.0)
+    _eq("budget — roll clears the budget", _budget(ctx), (None, 1))
+    _assert("budget — not exhausted after roll", not budget_exhausted(ctx, BUCKET_APP))
+
+    # The next refresh seeds the fresh window's (larger) allowance.
+    apply_budget_refresh(ctx, BUCKET_APP, 200)
+    _eq("budget — fresh window allowance seeded", _budget(ctx), (200, 1))
+
+def _test_budget_exhausted_shrink_below_spent(ctx):
+    _reset(ctx)
+    record_token_budget(ctx, BUCKET_APP, 10)
+    for i in range(5):
+        record_from_headers(ctx, BUCKET_APP, [("X-RateLimit-Remaining", "1"), ("X-RateLimit-Limit", "5000"), ("X-RateLimit-Reset", str(_FAR_FUTURE))], epoch_s = float(i))
+    _assert("budget — 5/10 not exhausted", not budget_exhausted(ctx, BUCKET_APP))
+
+    # A refresh shrinks the cap below what's already spent → exhausted.
+    apply_budget_refresh(ctx, BUCKET_APP, 4)
+    _assert("budget — shrunk below spend → exhausted", budget_exhausted(ctx, BUCKET_APP))
+
+def _test_budget_mint_resets_spend(ctx):
+    _reset(ctx)
+    record_token_budget(ctx, BUCKET_APP, 2)
+    record_from_headers(ctx, BUCKET_APP, [("X-RateLimit-Remaining", "1"), ("X-RateLimit-Limit", "5000"), ("X-RateLimit-Reset", str(_FAR_FUTURE))], epoch_s = 1.0)
+    record_from_headers(ctx, BUCKET_APP, [("X-RateLimit-Remaining", "1"), ("X-RateLimit-Limit", "5000"), ("X-RateLimit-Reset", str(_FAR_FUTURE))], epoch_s = 2.0)
+    _assert("budget — exhausted before re-mint", budget_exhausted(ctx, BUCKET_APP))
+
+    # A fresh mint resets the spend counter against the new allowance.
+    record_token_budget(ctx, BUCKET_APP, 50)
+    _eq("budget — re-mint zeroes spend", _budget(ctx), (50, 0))
+    _assert("budget — re-mint clears exhaustion", not budget_exhausted(ctx, BUCKET_APP))
+
+def _test_budget_env_bucket_independent(ctx):
+    _reset(ctx)
+    record_token_budget(ctx, BUCKET_APP, 1)
+
+    # Env-bucket spend must not exhaust the App budget (separate counters).
+    record_from_headers(ctx, BUCKET_ENV, [("X-RateLimit-Remaining", "1"), ("X-RateLimit-Limit", "1000"), ("X-RateLimit-Reset", str(_FAR_FUTURE))], epoch_s = 1.0)
+    _eq("budget — env spend isolated from app", _budget(ctx, BUCKET_APP)[1], 0)
+    _assert("budget — app not exhausted by env spend", not budget_exhausted(ctx, BUCKET_APP))
+
+def _test_cadence_round_trip(ctx):
+    _reset(ctx)
+    _eq("cadence — 0 before any record", cadence_seconds(ctx), 0)
+    record_cadence(ctx, 45)
+    _eq("cadence — recorded value read back", cadence_seconds(ctx), 45)
+    record_cadence(ctx, 0)  # non-positive is a no-op
+    _eq("cadence — non-positive ignored", cadence_seconds(ctx), 45)
+
+def _test_refresh_mint_anchors_start_once(ctx):
+    _reset(ctx)
+    record_token_budget(ctx, BUCKET_APP, 100, now_epoch_s = 5000)
+    _eq("refresh — first mint anchors start", inspect_for_test(ctx)["refresh_epoch_start"], 5000)
+
+    # A later mint must not move the anchor (the backoff clock is task-wide).
+    record_token_budget(ctx, BUCKET_APP, 80, now_epoch_s = 5100)
+    _eq("refresh — later mint keeps anchor", inspect_for_test(ctx)["refresh_epoch_start"], 5000)
+
+def _test_refresh_claim_requires_creds(ctx):
+    _reset(ctx)
+    record_token_budget(ctx, BUCKET_APP, 100, now_epoch_s = 5000)
+
+    # Anchored + past the first interval, but no creds stashed → nothing to claim.
+    _eq("refresh — no creds, no claim", claim_budget_refresh(ctx, now_epoch_s = 5010), None)
+
+def _test_refresh_claim_backoff_and_reentrancy(ctx):
+    _reset(ctx)
+    record_token_budget(ctx, BUCKET_APP, 100, now_epoch_s = 5000)
+    record_refresh_creds(ctx, "tok", "proof", "inst-1")
+
+    # Too soon (< 5s base interval after the anchor) → not due.
+    _eq("refresh — not due before base interval", claim_budget_refresh(ctx, now_epoch_s = 5003), None)
+
+    # 5s in → first refresh due; claim returns creds and marks in-flight.
+    claimed = claim_budget_refresh(ctx, now_epoch_s = 5005)
+    _assert("refresh — due at base interval", claimed != None)
+    _eq("refresh — claim returns creds", claimed["installation_id"], "inst-1")
+    _assert("refresh — in-flight set", inspect_for_test(ctx)["refresh_in_flight"])
+
+    # While in-flight, a re-claim (e.g. the refresh's own App call) is blocked.
+    _eq("refresh — reentrancy blocked", claim_budget_refresh(ctx, now_epoch_s = 5006), None)
+
+    end_budget_refresh(ctx)
+    _assert("refresh — in-flight cleared", not inspect_for_test(ctx)["refresh_in_flight"])
+
+    # Next step's interval has doubled to 10s: not due 6s after the last refresh,
+    # due at 10s.
+    _eq("refresh — second interval not yet due", claim_budget_refresh(ctx, now_epoch_s = 5011), None)
+    _assert("refresh — second interval due at 10s", claim_budget_refresh(ctx, now_epoch_s = 5015) != None)
+
+def _test_refresh_not_due_without_anchor(ctx):
+    _reset(ctx)
+
+    # Creds but no mint anchor (no App budget recorded) → never due.
+    record_refresh_creds(ctx, "tok", "proof", "inst-1")
+    _eq("refresh — no anchor, never due", claim_budget_refresh(ctx, now_epoch_s = 9999), None)
+
+def _test_refresh_creds_partial_rejected_and_overwritten(ctx):
+    _reset(ctx)
+
+    # A mint missing the proof/id (passed as "") must NOT stash partial creds —
+    # else a refresh would POST without a valid proof.
+    record_refresh_creds(ctx, "tok", "", "inst-1")
+    _eq("refresh — partial creds rejected", inspect_for_test(ctx)["refresh_creds"], None)
+
+    # A complete mint stashes; a later mint overwrites with the fresher token.
+    record_refresh_creds(ctx, "tok1", "proof1", "inst-1")
+    record_refresh_creds(ctx, "tok2", "proof2", "inst-1")
+    _eq(
+        "refresh — later mint overwrites creds",
+        inspect_for_test(ctx)["refresh_creds"]["token"],
+        "tok2",
+    )
+
+def _test_refresh_stale_in_flight_self_heals(ctx):
+    _reset(ctx)
+    record_token_budget(ctx, BUCKET_APP, 100, now_epoch_s = 5000)
+    record_refresh_creds(ctx, "tok", "proof", "inst-1")
+
+    # Claim, then never call end_budget_refresh (simulate a dropped claimer).
+    _assert("refresh — initial claim", claim_budget_refresh(ctx, now_epoch_s = 5005) != None)
+    _assert("refresh — in-flight held", inspect_for_test(ctx)["refresh_in_flight"])
+
+    # A re-claim within the stale window is still blocked.
+    _eq("refresh — fresh in-flight blocks", claim_budget_refresh(ctx, now_epoch_s = 5060), None)
+
+    # Past _REFRESH_STALE_S (120s) the flag is treated as stale and reclaimed.
+    _assert(
+        "refresh — stale in-flight reclaimed",
+        claim_budget_refresh(ctx, now_epoch_s = 5005 + 121) != None,
+    )
+
 def _test_impl(ctx):
     _test_record_basic(ctx)
     _test_record_buffer_truncation(ctx)
@@ -1164,7 +1518,36 @@ def _test_impl(ctx):
     _test_should_emit_phase_change_within_debounce_suppresses(ctx)
     _test_should_emit_phase_change_after_debounce_emits(ctx)
     _test_should_emit_phase_change_scale_seconds(ctx)
-    print("rate_limit.axl: OK (48 sections)")
+    _test_budget_record_seeds_and_zeroes(ctx)
+    _test_budget_zero_is_exhausted(ctx)
+    _test_budget_spend_counts_per_call(ctx)
+    _test_budget_counts_gitlab_headers(ctx)
+    _test_budget_no_headers_no_spend(ctx)
+    _test_budget_refresh_floors_down_only(ctx)
+    _test_budget_refresh_seeds_when_unset(ctx)
+    _test_budget_window_roll_reseeds(ctx)
+    _test_budget_exhausted_shrink_below_spent(ctx)
+    _test_budget_mint_resets_spend(ctx)
+    _test_budget_env_bucket_independent(ctx)
+    _test_budget_skip_cold_start_never_skips(ctx)
+    _test_budget_skip_zero_budget_always(ctx)
+    _test_budget_skip_hard_cap(ctx)
+    _test_budget_skip_critical_band_ignores_gap(ctx)
+    _test_budget_skip_under_pace_never_skips(ctx)
+    _test_budget_skip_long_gap_earns_silence(ctx)
+    _test_budget_skip_first_call_never_skips(ctx)
+    _test_budget_skip_burst_over_pace_tapers(ctx)
+    _test_budget_skip_partial_gap_damping(ctx)
+    _test_budget_skip_only_allowed_stamps_surface(ctx)
+    _test_budget_skip_per_surface_gap(ctx)
+    _test_cadence_round_trip(ctx)
+    _test_refresh_mint_anchors_start_once(ctx)
+    _test_refresh_claim_requires_creds(ctx)
+    _test_refresh_claim_backoff_and_reentrancy(ctx)
+    _test_refresh_not_due_without_anchor(ctx)
+    _test_refresh_creds_partial_rejected_and_overwritten(ctx)
+    _test_refresh_stale_in_flight_self_heals(ctx)
+    print("rate_limit.axl: OK (78 sections)")
     return 0
 
 rate_limit_tests = task(

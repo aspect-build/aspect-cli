@@ -7,9 +7,12 @@ aggregated state plus a directive on whether THIS job should post the comment
 this cycle. The server owns cross-job coordination + the post throttle;
 rendering (the Jinja2 template, customizable via config) and posting (the
 GitHub issue-comment API) stay client-side. Contribution is event-paced (ticks
-on BES events), throttled by min_poll_interval_seconds. Works on any supported
-CI host (GitHub Actions, Buildkite, CircleCI) since coordination no longer
-depends on CI artifacts.
+on BES events), throttled to the server's budget-derived `desired_cadence_s`
+(floored by min_poll_interval_seconds). That cadence paces the Aspect-API
+contribute rate; the GitHub API spend (the elected poster's comment PATCH) is
+bounded separately by the per-token call budget enforced in
+`github._do_request`. Works on any supported CI host (GitHub Actions, Buildkite,
+CircleCI) since coordination no longer depends on CI artifacts.
 
 When the Aspect API is unreachable, the feature falls back to coordinating
 through the comment's own embedded state block (read → merge own entry →
@@ -85,6 +88,7 @@ load(
     "BUCKET_APP",
     "PHASE_FALL_THROUGH",
     "PHASE_SUPPRESS",
+    "cadence_seconds",
     "epoch_now_s",
     "should_emit_phase_change",
     "usage_footer",
@@ -123,11 +127,6 @@ _DEFAULT_CI_HOST_ICON = "🐙"
 # terminator out of the payload.
 _STATE_BLOCK_OPEN = "<!-- aspect-ci-status-state-v1:"
 _STATE_BLOCK_CLOSE = " -->"
-
-# How often a long-running task refreshes its budget-derived cadence from the
-# Aspect API (`/github/budget`). Coarser than the cadence itself — the shared
-# installation quota shifts on the minutes scale, not seconds.
-_BUDGET_REFRESH_S = 180
 
 # One settle delay (seconds) for the create-time duplicate backstop. After this
 # job creates a comment it lists once immediately; if no sibling is visible yet
@@ -1372,17 +1371,24 @@ def _github_status_comments(ctx: FeatureContext):
             payload["check_run_url"] = check_run_url
         return payload
 
-    def _upsert_comment(ctx, token, body):
+    def _upsert_comment(ctx, token, body, skippable = False):
         """PATCH the existing comment when its id is known, else POST a
         fresh one (the unchanged-content short-circuit is in `_publish`).
+
+        `skippable=True` (a mid-run heartbeat) lets the per-token budget gate
+        drop the PATCH when over budget — it returns `False` like any other
+        non-post, so the caller skips the lease stamp and retries next cycle.
+        The create is always must-succeed (it establishes the comment).
 
         Returns `True` on success so the caller stamps the lease; `False`
         on failure so the caller skips the stamp and a sibling can take
         over rather than honor a stale lease behind a broken upsert."""
         if "_comment_id" in _state:
-            res = github.issues.update_comment(ctx, token, owner, repo, _state["_comment_id"], body)
+            res = github.issues.update_comment(ctx, token, owner, repo, _state["_comment_id"], body, skippable = skippable)
             if not res.get("success"):
-                _LOG.warn(ctx.std, "Update failed: %s" % res.get("error", "unknown"))
+                # A budget skip is intentional, not a failure — stay quiet.
+                if not res.get("skipped"):
+                    _LOG.warn(ctx.std, "Update failed: %s" % res.get("error", "unknown"))
                 return False
 
             # A sibling whose comment was invisible at our create time can still
@@ -1588,7 +1594,7 @@ def _github_status_comments(ctx: FeatureContext):
             "shown_repros": _state.get("_shown_repros", []),
             "shown_fixes": _state.get("_shown_fixes", []),
             "final": final,
-            "min_interval_s": max(min_poll_interval_seconds, _state.get("_cadence_s", min_poll_interval_seconds)),
+            "min_interval_s": max(min_poll_interval_seconds, cadence_seconds(ctx)),
         }
 
         # Peek (don't pop) the pending confirmation — a failed contribute must
@@ -1646,7 +1652,10 @@ def _github_status_comments(ctx: FeatureContext):
         stable_body, final_body = _render_comment(ctx, state, sel, now_epoch)
         if _state.get("_last_stable_body") == stable_body:
             return
-        if not _upsert_comment(ctx, token, final_body):
+
+        # Mid-run PATCHes are skippable under budget pressure; the terminal
+        # verdict (final) always lands.
+        if not _upsert_comment(ctx, token, final_body, skippable = not final):
             return
         _state["_last_stable_body"] = stable_body
         _state["_pending_post"] = {"comment_id": str(_state.get("_comment_id", ""))}
@@ -1734,13 +1743,9 @@ def _github_status_comments(ctx: FeatureContext):
             return
         _state["_github_token"] = token
 
-        # Budget-derived comment-refresh cadence from the token mint; the
-        # `_task_update` throttle floors it by `min_poll_interval_seconds`.
-        if auth_extra.get("desired_cadence_s"):
-            _state["_cadence_s"] = auth_extra["desired_cadence_s"]
-
-        # Installation identity + ownership proof for the periodic
-        # `/github/budget` refresh (see `_refresh_budget`).
+        # Installation identity + ownership proof for the `contribute` call (see
+        # `_publish`). The budget refresh that also uses them is centralized in
+        # `github._do_request`, seeded from the same mint.
         _state["_installation_id"] = auth_extra.get("installation_id", "")
         _state["_installation_proof"] = auth_extra.get("installation_proof", "")
 
@@ -1748,31 +1753,6 @@ def _github_status_comments(ctx: FeatureContext):
         upgraded = resolve_build_url(ctx, existing_app_token = token)
         if upgraded:
             _state["_ci_link_url"] = upgraded
-
-    def _refresh_budget(ctx, now):
-        """Periodically refresh `_cadence_s` from the Aspect API so a
-        long-running task adapts to shifting installation quota mid-run (other
-        consumers share the GitHub rate limit). Reads the installation's own
-        `/rate_limit` with our token and reports it to `/github/budget`, proving
-        installation ownership with the mint-time HMAC. Best-effort: any miss
-        leaves the prior cadence in place. Throttled to `_BUDGET_REFRESH_S`."""
-        if not _state.get("_installation_id") or not _state.get("_installation_proof"):
-            return
-        if now - _state.get("_last_budget_refresh_s", 0.0) < _BUDGET_REFRESH_S:
-            return
-        _state["_last_budget_refresh_s"] = now
-
-        headroom = github.read_rate_limit(ctx, _state["_github_token"])
-        if headroom == None:
-            return
-        result = github.status_comment_budget(ctx, {
-            "installation_id": _state["_installation_id"],
-            "installation_proof": _state["_installation_proof"],
-            "remaining": headroom["remaining"],
-            "reset": headroom["reset"],
-        })
-        if result.get("success") and result.get("desired_cadence_s"):
-            _state["_cadence_s"] = result["desired_cadence_s"]
 
     def _task_update(ctx, update):
         if not _state.get("_initialized"):
@@ -1860,17 +1840,16 @@ def _github_status_comments(ctx: FeatureContext):
             if phase_result == PHASE_SUPPRESS:
                 return
             if phase_result == PHASE_FALL_THROUGH:
-                # Budget-derived cadence from the Aspect API (refreshed
-                # periodically below), floored by the configured min; falls back
-                # to the floor before the first mint or when none was returned.
-                interval = max(min_poll_interval_seconds, _state.get("_cadence_s", min_poll_interval_seconds))
+                # Server budget-derived cadence (kept fresh by the centralized
+                # refresh in `github._do_request`), floored by the configured
+                # min. Paces the Aspect-API *contribute* rate; the App-bucket
+                # GitHub spend is bounded separately by the per-token budget gate
+                # (see `_publish`).
+                interval = max(min_poll_interval_seconds, cadence_seconds(ctx))
                 if now - _state.get("_last_publish_s", 0.0) < interval:
                     return
                 _state["_last_publish_s"] = now
 
-        # Refresh the budget-derived cadence on its own slow timer (self-gated
-        # to `_BUDGET_REFRESH_S`); only reached when we're about to publish.
-        _refresh_budget(ctx, monotonic())
         _publish(ctx, final = update.final)
 
     lifecycle.task_update.append(_task_update)

@@ -53,7 +53,6 @@ load(
     "BUCKET_APP",
     "PHASE_FALL_THROUGH",
     "PHASE_SUPPRESS",
-    "effective_throttle_factor",
     "should_emit_phase_change",
     "usage_footer",
 )
@@ -269,8 +268,9 @@ def _github_status_checks(ctx: FeatureContext):
                 _LOG.warn(ctx.std, "Complete/fail API call failed: %s" % result.get("error", "unknown"))
             return
 
-        # PATCH on a completed run keeps the existing conclusion.
-        github.status_checks.update(ctx, token, owner, repo, check_run_id, output = output)
+        # Mid-run progress PATCH (keeps the existing conclusion) — skippable
+        # under budget pressure; the conclusion-setting calls above always land.
+        github.status_checks.update(ctx, token, owner, repo, check_run_id, output = output, skippable = True)
 
     # TaskLifecycleTrait hooks
 
@@ -405,9 +405,10 @@ def _github_status_checks(ctx: FeatureContext):
             if phase_result == PHASE_SUPPRESS:
                 return
             if phase_result == PHASE_FALL_THROUGH:
-                elapsed_s = float(now - _state.get("_started_ms", now)) / 1000.0
-                factor = effective_throttle_factor(ctx, BUCKET_APP, elapsed_s, min_update_interval_s)
-                if not should_emit_update(_state, now, int(min_update_interval_ms * factor), final):
+                # Space updates at the configured interval; the per-token budget
+                # gate in `github._do_request` caps total App spend (the PATCH
+                # below is skippable). No reactive factor — the budget is the cap.
+                if not should_emit_update(_state, now, min_update_interval_ms, final):
                     return
         elif final:
             _state["_ended_ms"] = now_ms(ctx)  # terminal render needs it for duration

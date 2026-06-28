@@ -360,9 +360,9 @@ BuildkiteAnnotations = feature(
             description = "When to create Buildkite annotations: ci-only (default), local-only, or always.",
         ),
         "min_update_interval_seconds": args.int(
-            default = 1,
+            default = 5,
             description = "Minimum seconds between live Buildkite annotation refreshes during a task. " +
-                          "Default 1s, minimum 1s (smaller values are silently raised to 1). Higher values " +
+                          "Default 5s, minimum 1s (smaller values are silently raised to 1). Higher values " +
                           "reduce `buildkite-agent annotate` invocations on chatty tasks at the cost of " +
                           "less-responsive live annotations. The task's terminal result and phase " +
                           "boundaries always land immediately regardless of this setting.",
