@@ -1433,6 +1433,31 @@ def _test_refresh_not_due_without_anchor(ctx):
     record_refresh_creds(ctx, "tok", "proof", "inst-1")
     _eq("refresh — no anchor, never due", claim_budget_refresh(ctx, now_epoch_s = 9999), None)
 
+def _test_refresh_creds_partial_rejected_and_overwritten(ctx):
+    _reset(ctx)
+    # A mint missing the proof/id (passed as "") must NOT stash partial creds —
+    # else a refresh would POST without a valid proof.
+    record_refresh_creds(ctx, "tok", "", "inst-1")
+    _eq("refresh — partial creds rejected", inspect_for_test(ctx)["refresh_creds"], None)
+    # A complete mint stashes; a later mint overwrites with the fresher token.
+    record_refresh_creds(ctx, "tok1", "proof1", "inst-1")
+    record_refresh_creds(ctx, "tok2", "proof2", "inst-1")
+    _eq("refresh — later mint overwrites creds",
+        inspect_for_test(ctx)["refresh_creds"]["token"], "tok2")
+
+def _test_refresh_stale_in_flight_self_heals(ctx):
+    _reset(ctx)
+    record_token_budget(ctx, BUCKET_APP, 100, now_epoch_s = 5000)
+    record_refresh_creds(ctx, "tok", "proof", "inst-1")
+    # Claim, then never call end_budget_refresh (simulate a dropped claimer).
+    _assert("refresh — initial claim", claim_budget_refresh(ctx, now_epoch_s = 5005) != None)
+    _assert("refresh — in-flight held", inspect_for_test(ctx)["refresh_in_flight"])
+    # A re-claim within the stale window is still blocked.
+    _eq("refresh — fresh in-flight blocks", claim_budget_refresh(ctx, now_epoch_s = 5060), None)
+    # Past _REFRESH_STALE_S (120s) the flag is treated as stale and reclaimed.
+    _assert("refresh — stale in-flight reclaimed",
+        claim_budget_refresh(ctx, now_epoch_s = 5005 + 121) != None)
+
 def _test_impl(ctx):
     _test_record_basic(ctx)
     _test_record_buffer_truncation(ctx)
@@ -1507,7 +1532,9 @@ def _test_impl(ctx):
     _test_refresh_claim_requires_creds(ctx)
     _test_refresh_claim_backoff_and_reentrancy(ctx)
     _test_refresh_not_due_without_anchor(ctx)
-    print("rate_limit.axl: OK (76 sections)")
+    _test_refresh_creds_partial_rejected_and_overwritten(ctx)
+    _test_refresh_stale_in_flight_self_heals(ctx)
+    print("rate_limit.axl: OK (78 sections)")
     return 0
 
 rate_limit_tests = task(

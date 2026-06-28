@@ -155,7 +155,8 @@ _IDEMPOTENT_METHODS = ["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
 # Synthetic result for a call dropped by the budget gate — a distinct shape so
 # callers tell a budget skip from a real failure (status 0, never a GitHub
 # status) and quietly no-op the cycle rather than entering an error/fallback
-# path. Matched by identity in `_is_budget_skip`, never parsed.
+# path. Recognized by value in `_is_budget_skip` (status 0 + this sentinel body,
+# which a real response never produces), never parsed.
 _BUDGET_SKIPPED = (False, 0, "budget-throttled: skipped")
 
 # Surface ids for the budget gate's per-surface quiet-gap damping — each
@@ -530,11 +531,16 @@ def _maybe_refresh_budget(ctx):
     the backoff schedule + reentrancy guard, using creds stashed at mint), reads
     the installation's live `/rate_limit`, reports it to `POST /github/budget`,
     and applies the returned budget + cadence. Best-effort and self-contained:
-    no feature drives it, and any miss just leaves the prior budget in place.
+    no feature drives it, and any miss just leaves the prior budget in place. A
+    failed attempt still consumes its backoff slot (the next retries one interval
+    later) since `claim_budget_refresh` stamps before the work.
 
-    The reentrancy guard is essential — this makes App calls (`/rate_limit`, and
-    the credentials read), which re-enter `_do_request`; the in-flight flag stops
-    those from claiming a nested refresh."""
+    The reentrancy guard matters because this makes its own App call (the
+    `GET /rate_limit`) which re-enters `_do_request`; the in-flight flag stops
+    that from claiming a nested refresh. Everything between the claim and
+    `end_budget_refresh` must stay non-raising (AXL has no `try/finally`); the
+    HTTP/JSON paths here all return sentinels rather than raise, and a leaked
+    flag self-heals via `_REFRESH_STALE_S`."""
     claimed = claim_budget_refresh(ctx)
     if not claimed:
         return
@@ -551,7 +557,7 @@ def _maybe_refresh_budget(ctx):
         _post_budget(ctx, request)
     end_budget_refresh(ctx)
 
-def _post_budget(ctx, request, profile = None):
+def _post_budget(ctx, request):
     """`POST /github/budget` — report the installation's live rate-limit headroom
     and apply the returned `api_call_budget` + `desired_cadence_s`.
 
@@ -561,7 +567,7 @@ def _post_budget(ctx, request, profile = None):
     installation_proof, remaining, reset}` + optional `limit` (the proof comes
     from the token mint; see the server's RequestSchema). Never raises — a
     failure just leaves the prior budget/cadence in place."""
-    creds = ctx.aspect.auth.credentials(profile = profile)
+    creds = ctx.aspect.auth.credentials()
     if not creds:
         return
 

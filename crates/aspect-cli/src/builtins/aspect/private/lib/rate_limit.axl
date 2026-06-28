@@ -189,6 +189,11 @@ _BUDGET_CRITICAL_FRACTION = 0.90
 _BUDGET_REFRESH_BASE_S = 5
 _BUDGET_REFRESH_MAX_S = 180
 
+# An in-flight refresh flag older than this is treated as stale and reclaimed
+# (the claimer must have died before clearing it — AXL has no `try/finally`).
+# Far longer than two HTTP round-trips, so it never preempts a live refresh.
+_REFRESH_STALE_S = 120
+
 # ── Cold-start window ────────────────────────────────────────────────
 #
 # Tunes the window's boundaries; rationale in the docstring.
@@ -629,13 +634,24 @@ def claim_budget_refresh(ctx, now_epoch_s = None):
     `refresh_last` and return the creds for the caller to POST `/github/budget`.
     Else return None. The caller MUST call `end_budget_refresh` when done — the
     in-flight flag is the reentrancy guard that stops the refresh's own App calls
-    from re-claiming. Single load+save so the claim is race-free."""
+    from re-claiming. Single load+save so the claim is race-free.
+
+    Self-healing: AXL has no `try/finally`, so if a claimer dies before
+    `end_budget_refresh` the flag would otherwise stick forever. An in-flight
+    flag older than `_REFRESH_STALE_S` (far longer than two HTTP calls) is
+    treated as stale and reclaimed, so a dropped refresh can't permanently block
+    future ones."""
     state = _load(ctx)
     creds = state.get("refresh_creds")
-    if not creds or state.get("refresh_in_flight"):
+    if not creds:
         return None
     now = now_epoch_s if now_epoch_s != None else epoch_now_s(std = ctx.std)
-    if not _budget_refresh_due(state, now):
+    if state.get("refresh_in_flight"):
+        # `refresh_last` is stamped when in-flight is set, so it is also the
+        # in-flight start; a stale flag means the prior claimer never finished.
+        if now - (state.get("refresh_last") or 0) < _REFRESH_STALE_S:
+            return None
+    elif not _budget_refresh_due(state, now):
         return None
     state["refresh_in_flight"] = True
     state["refresh_last"] = now
