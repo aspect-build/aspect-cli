@@ -1,6 +1,5 @@
 include:
-  - component: $CI_SERVER_FQDN/aspect-build/setup-aspect-gitlab-component/setup@2026.26.5
-
+  - component: $CI_SERVER_FQDN/aspect-build/setup-aspect-gitlab-component/setup@2026.26.6
 workflow:
   rules:
     # Run for everything except tag pushes
