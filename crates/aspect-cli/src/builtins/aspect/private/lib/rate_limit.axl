@@ -706,6 +706,7 @@ def _refresh_interval(elapsed_s):
     cumulative span covers `elapsed_s`."""
     interval = _BUDGET_REFRESH_BASE_S
     consumed = 0
+
     # Walk the doubling steps until the cumulative span covers `elapsed_s` or the
     # interval saturates at the cap (further doublings are no-ops, so we stop).
     # The bound just needs to exceed the doublings-to-cap count; the cap check is
