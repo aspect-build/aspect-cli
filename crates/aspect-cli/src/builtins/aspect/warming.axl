@@ -1,7 +1,7 @@
 """`aspect ci warming` — pre-populate Bazel caches on a CI runner.
 
-Cleans the prior Bazel state under the runner's storage mount
-(`ASPECT_WORKFLOWS_RUNNER_STORAGE_PATH`), then runs `bazel build --nobuild`
+Runs the health checks, cleans the prior Bazel state under the runner's storage
+mount (`ASPECT_WORKFLOWS_RUNNER_STORAGE_PATH`), then runs `bazel build --nobuild`
 against the given targets so the repository, output, and bazel caches under that
 mount are populated and ready for the warming archive. On an Aspect Workflows
 runner it then runs the warming archiver
@@ -21,8 +21,9 @@ The whole run surfaces as a single status check / Buildkite annotation
 spanning the 🔨 populate and 📦 archive phases, so the check reflects the
 archive-upload outcome, not just the build. Off a Workflows runner the archive
 step is reported as skipped and the task still passes. (The prior-state cleanup
-runs before `setup_phase` — see `_impl` — so it precedes the surface and isn't
-a surface phase of its own.)
+runs after `setup_phase` — so the health check runs first — but before the
+populate build; it shuts down the health check's Bazel server before wiping the
+output base, and isn't a surface phase of its own. See `_impl`.)
 """
 
 load("@aspect//bazel.axl", "BazelTrait")
@@ -78,6 +79,22 @@ def _emit_final(ctx, lifecycle, data, exit_code):
         exit_code = exit_code,
     )
 
+def _shutdown_bazel_server(ctx):
+    """Stop the Bazel server holding the runner `--output_base` so the storage
+    cleanup that follows doesn't wipe state out from under a live server. The
+    health check (run in `setup_phase`) starts a server in the runner output
+    base; we target that same server by replaying the resolved RunCommand's
+    startup flags (`--output_base`, `--output_user_root`, …). Best-effort: a
+    missing server or `bazel` exits non-zero and is tolerated (the cleanup runs
+    regardless)."""
+    rc = ctx.bazel.active_rc()
+    startup_flags = rc.startup_flags() if rc else []
+
+    # `--ignore_all_rc_files` (carried by the RunCommand) is a startup flag and
+    # is fine to pass to `shutdown`; we just need the `--output_base` to land on
+    # the right server.
+    ctx.std.process.command("bazel").args(startup_flags + ["shutdown"]).spawn().wait()
+
 def _clean_storage_mount(ctx, mount: str):
     """Remove prior Bazel state under the runner storage `mount`. Match
     rosetta's pre-warming cleanup. Best-effort throughout: bazel may have left
@@ -107,25 +124,29 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     data["target_pattern"] = " ".join(targets)
     data["warming"]["on_runner"] = on_workflows_runner
 
-    # Clean the prior Bazel state under the runner storage mount BEFORE
-    # `setup_phase`. The Workflows `agent_health_check` (run inside `setup_phase`)
-    # calls `ctx.bazel.health_check()`, which starts/uses the Bazel server in the
-    # runner `--output_base` under this same mount. Cleaning afterwards would
-    # delete `<mount>/output/*` out from under that live server and poison it, so
-    # the cleanup must run first. Best-effort, no surface emit (the surface isn't
-    # open yet); it's logged for the CLI and recorded in `data["warming"]`.
-    mount = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_STORAGE_PATH")
-    if mount:
-        print("Cleaning prior Bazel state under " + mount + "...")
-        _clean_storage_mount(ctx, mount)
-        data["warming"]["cleaned"] = True
-
     # Single pre-task setup phase: opens the status surface + renders the first
     # body, resolves Bazel flags + parses the workspace .bazelrc (folding in the
     # runner metadata, incl. --output_base), and runs the health_check hooks (a
     # failed check concludes the surface and fails the task inside).
     setup_phase(ctx, lifecycle, data["target_pattern"], _KIND, data, hc_trait, bazel_trait, "build")
     announce_version, announce_command = resolve_bazel_announce(ctx)
+
+    # Clean the prior Bazel state under the runner storage mount AFTER
+    # `setup_phase` — the health check must run first (the Workflows
+    # `agent_health_check` validates the runner before warming touches its
+    # state). The health check (`ctx.bazel.health_check()`) starts/uses the
+    # Bazel server in the runner `--output_base` under this same mount, so we
+    # `bazel shutdown` that server before wiping `<mount>/output/*`; otherwise
+    # the removal would race a live server and poison it. The shutdown targets
+    # the resolved RunCommand's startup flags (incl. `--output_base`).
+    # Best-effort throughout — logged for the CLI and recorded in
+    # `data["warming"]`, no surface emit of its own.
+    mount = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_STORAGE_PATH")
+    if mount:
+        print("Cleaning prior Bazel state under " + mount + "...")
+        _shutdown_bazel_server(ctx)
+        _clean_storage_mount(ctx, mount)
+        data["warming"]["cleaned"] = True
 
     # Populate phase: `bazel build --nobuild`. Pass build_event_sinks (the Aspect
     # backend gRPC sink in CI) so the "✨ Aspect Workflows" link resolves to a
