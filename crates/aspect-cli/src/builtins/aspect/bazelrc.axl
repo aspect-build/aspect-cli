@@ -23,8 +23,8 @@ What it writes depends on where it runs:
     the remote-cache endpoint when its env vars are set) — nothing tied to a
     runner's mounts or identity. Useful when an Aspect remote cache / BES is
     configured via env vars off a Workflows runner.
-  - Locally with no `--output`: refuses, so it doesn't stomp the developer's
-    `~/.bazelrc`.
+  - Off a runner and off CI with no `--output`: writes nothing, so it doesn't
+    clobber the developer's `~/.bazelrc`.
 
 On Bazel >= 6.3.0 the build flags are emitted under a single `common` section
 (applies to every command); older Bazel has no `common` pseudo-command, so
@@ -125,11 +125,10 @@ def _bazelrc_impl(ctx: TaskContext) -> int:
     on_runner = is_aspect_workflows_runner(ctx.std.env)
     explicit_output = bool(ctx.args.output)
 
-    # Locally (not on a Workflows runner and not on CI), default-writing the
-    # user's ~/.bazelrc would stomp their config. Refuse unless they opted into
-    # an explicit --output. On CI, or on a runner, writing is expected.
+    # Off a runner and off CI, don't write ~/.bazelrc by default — it's the
+    # developer's own. Require an explicit --output there. On CI/runner, expected.
     if not on_runner and detect_ci(ctx.std.env) == None and not explicit_output:
-        error(ctx.std, "Not on an Aspect Workflows runner or other CI. Refusing to overwrite your ~/.bazelrc; pass --output=<path> to write somewhere explicit.")
+        error(ctx.std, "Not on an Aspect Workflows runner or other CI. Not writing ~/.bazelrc by default off CI; pass --output=<path> to write somewhere explicit.")
         return 1
 
     if on_runner:
@@ -177,7 +176,7 @@ def _bazelrc_impl(ctx: TaskContext) -> int:
 bazelrc = task(
     group = ["ci"],
     summary = "Write a Bazel rc that configures vanilla `bazel` calls to use Aspect Workflows services and optimizations.",
-    description = "Write a Bazel rc so vanilla `bazel` calls pick up the same Aspect Workflows configuration that `aspect <task>` injects. On a Workflows runner this is the full set (remote cache, repository cache, per-runner output paths); on other CI it's the generic flags plus any remote cache configured via env vars. Defaults to `~/.bazelrc`; refuses to overwrite it locally unless `--output` is given.",
+    description = "Write a Bazel rc so vanilla `bazel` calls pick up the same Aspect Workflows configuration that `aspect <task>` injects. On a Workflows runner this is the full set (remote cache, repository cache, per-runner output paths); on other CI it's the generic flags plus any remote cache configured via env vars. Defaults to `~/.bazelrc`; off a runner and off CI it writes nothing unless `--output` is given, so it won't clobber your local `~/.bazelrc`.",
     implementation = _bazelrc_impl,
     args = {
         "output": args.string(
