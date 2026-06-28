@@ -70,17 +70,21 @@ def _flag_str(flag) -> str:
     return flag[0] if type(flag) == "tuple" else flag
 
 def startup_flags_for_rc(startup_flags: list) -> list:
-    """Drop startup flags that don't belong in the generated home rc.
+    """Drop the rc-suppression startup flags, which are illegal inside an rc file.
 
-    `get_bazelrc_flags` includes `--nohome_rc` because the workflows feature
-    passes these as *command-line* startup flags to `aspect <task>`. Here we
-    write them into the home rc itself (~/.bazelrc), so `--nohome_rc` would be
-    self-defeating — Bazel reads ~/.bazelrc, then that flag tells it to ignore
-    the very file it's reading. (`--nosystem_rc` stays: it suppresses the
-    separate /etc/bazel.bazelrc, e.g. a stale rc from a prior rosetta run.)
+    `get_bazelrc_flags` includes `--nohome_rc` and `--nosystem_rc` because the
+    workflows feature passes these as *command-line* startup flags to
+    `aspect <task>`. Here we write the flags into the home rc itself
+    (~/.bazelrc), and Bazel rejects any `--no*_rc` option that appears inside a
+    bazelrc with a fatal `Can't specify --nosystem_rc in the .bazelrc file`
+    (likewise `--nohome_rc`, which would also be self-defeating — Bazel would be
+    told to ignore the very file it's reading). These flags only suppress *other*
+    rc files (`/etc/bazel.bazelrc`, `~/.bazelrc`); that's a command-line concern
+    and there's nothing the generated rc can do about it, so we drop them here.
 
     Public (not `_`-prefixed) so `bazelrc_test.axl` can load it."""
-    return [f for f in startup_flags if f != "--nohome_rc"]
+    _RC_SUPPRESSION_FLAGS = ["--nohome_rc", "--nosystem_rc", "--noworkspace_rc"]
+    return [f for f in startup_flags if f not in _RC_SUPPRESSION_FLAGS]
 
 def command_sections(bazel_version: str | None) -> list:
     """The rc command sections the build flags go under. `common` (one section,

@@ -23,13 +23,19 @@ def _impl(ctx: TaskContext) -> int:
     on_workflows_runner = bool(ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER"))
     mount = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_STORAGE_PATH")
     if mount:
-        # Match rosetta's pre-warming cleanup. Best-effort: bazel may have
-        # left output dirs read-only, so chmod first; spawn errors are
-        # tolerated since the dirs may not exist yet on a fresh runner.
+        # Match rosetta's pre-warming cleanup. Best-effort throughout: bazel may
+        # have left output dirs read-only, so chmod first; spawn errors are
+        # tolerated since the dirs/server may not exist yet on a fresh runner.
         for sub in ["bazel", "output", "caches/repository"]:
             d = mount + "/" + sub
             ctx.std.process.command("find").args([d, "-type", "d", "-exec", "chmod", "u+w", "{}", "+"]).spawn().wait()
-            ctx.std.process.command("rm").args(["-rf", d]).spawn().wait()
+
+            # Remove the directories' *contents*, not the directories
+            # themselves: the storage-mount subdirs are created (and owned) by
+            # the runner bootstrap, so `rm -rf <dir>` fails with "Permission
+            # denied" on the mount entry while `rm -rf <dir>/*` clears what we
+            # actually need to. Use a shell so the glob expands.
+            ctx.std.process.command("sh").args(["-c", "rm -rf -- '%s'/* '%s'/.[!.]* 2>/dev/null || true" % (d, d)]).spawn().wait()
 
     bazel_trait = ctx.traits[BazelTrait]
 
@@ -48,11 +54,16 @@ def _impl(ctx: TaskContext) -> int:
     if bazel_trait.startup_flags:
         startup_flags = bazel_trait.startup_flags(startup_flags)
 
-    # The runtime resolves startup flags from the build's RunCommand, not a
-    # mutable ctx.bazel attribute, so carry them on a blank rc (reads no on-disk
-    # .bazelrc — only these flags) passed via `rc=`. Command flags stay in
-    # `flags=`, which `build` appends to the rc's resolved options.
-    rc = ctx.bazel.new_rc(startup_flags = startup_flags)
+    # Carry the startup flags (e.g. --output_base) on a RunCommand passed via
+    # `rc=`, since the runtime resolves startup flags from the build's
+    # RunCommand rather than a mutable ctx.bazel attribute. Use `parse_rc` (not
+    # `new_rc`): it reads the workspace `.bazelrc` from the Bazel root, so a
+    # user `--config=<group>` forwarded via `--bazel-flag` resolves against the
+    # config groups defined there. A blank rc (`new_rc`) carries
+    # `--ignore_all_rc_files`, which would make `bazel build --config=ci` fail
+    # with "Config value 'ci' is not defined in any .rc file". Command flags
+    # stay in `flags=`, which `build` appends to the rc's resolved options.
+    rc = ctx.bazel.parse_rc(startup_flags = startup_flags)
 
     invocation = ctx.bazel.build(
         rc = rc,
