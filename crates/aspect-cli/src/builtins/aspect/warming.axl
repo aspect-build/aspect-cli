@@ -1,24 +1,27 @@
-"""A 'warming' task: pre-populate Bazel caches on a CI runner.
+"""`aspect ci warming` — pre-populate Bazel caches on a CI runner.
 
-Cleans the prior Bazel state under ${ASPECT__STORAGE_PATH}, then runs
-`bazel build --nobuild` against the given targets so the repository,
-output, and bazel caches under that mount (and the aspect-launcher /
-aspect-cli caches under ${ASPECT__STORAGE_PATH}/caches/{aspect-launcher,
-aspect-cli}) are populated and ready for the warming archive. When
-running on an Aspect Workflows runner, this task also invokes
-/etc/aspect/workflows/bin/warming_archive to upload the populated
-caches to the warming bucket — so the customer's CI workflow only
-needs to call `aspect ci warming`.
+Cleans the prior Bazel state under the runner's storage mount
+(`ASPECT_WORKFLOWS_RUNNER_STORAGE_PATH`), then runs `bazel build --nobuild`
+against the given targets so the repository, output, and bazel caches under that
+mount are populated and ready for the warming archive. On an Aspect Workflows
+runner it then runs the warming archiver
+(`ASPECT_WORKFLOWS_RUNNER_WARMING_ARCHIVER`, defaulting to
+`/etc/aspect/workflows/bin/warming_archive`) to upload the populated caches to
+the warming bucket — so a CI workflow only needs to call `aspect ci warming`.
 """
 
 load("@aspect//traits.axl", "BazelTrait")
-load("./private/lib/environment.axl", "warn")
+load("./private/lib/environment.axl", "error", "warn")
 
-WARMING_ARCHIVE_BIN = "/etc/aspect/workflows/bin/warming_archive"
+ASPECT_CLI_RELEASES_URL = "https://github.com/aspect-build/aspect-cli/releases"
+
+# Path to the warming-archive uploader, overridable by the runner via
+# ASPECT_WORKFLOWS_RUNNER_WARMING_ARCHIVER; falls back to its default location.
+_DEFAULT_WARMING_ARCHIVER = "/etc/aspect/workflows/bin/warming_archive"
 
 def _impl(ctx: TaskContext) -> int:
     on_workflows_runner = bool(ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER"))
-    mount = ctx.std.env.var("ASPECT__STORAGE_PATH")
+    mount = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_STORAGE_PATH")
     if mount:
         # Match rosetta's pre-warming cleanup. Best-effort: bazel may have
         # left output dirs read-only, so chmod first; spawn errors are
@@ -61,9 +64,17 @@ def _impl(ctx: TaskContext) -> int:
         return code
 
     if on_workflows_runner:
+        archiver = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_WARMING_ARCHIVER") or _DEFAULT_WARMING_ARCHIVER
+        if not ctx.std.fs.exists(archiver):
+            error(
+                ctx.std,
+                "Cannot upload the warming archive: the warming archiver was not found at %s. Upgrade to the latest aspect-cli to enable warming: %s" % (archiver, ASPECT_CLI_RELEASES_URL),
+            )
+            return 1
+
         # Upload the populated caches to the warming bucket. Inherits the
         # script's stdout/stderr so the user sees its progress in real time.
-        archive = ctx.std.process.command(WARMING_ARCHIVE_BIN).spawn().wait()
+        archive = ctx.std.process.command(archiver).spawn().wait()
         return archive.code
 
     warn(
@@ -78,7 +89,7 @@ def _impl(ctx: TaskContext) -> int:
 warming = task(
     group = ["ci"],
     summary = "Pre-populate Bazel caches on a CI runner (and archive them on Aspect Workflows runners).",
-    description = "Cleans prior Bazel state under ${ASPECT__STORAGE_PATH}, then runs `bazel build --nobuild` against the given targets so subsequent jobs on the same runner pool start with hot caches. On an Aspect Workflows runner it then creates and uploads the warming archives to the warming bucket, so a warming pipeline only needs to call `aspect ci warming`. Off a Workflows runner the cache-populate step still runs and the archive step is skipped.",
+    description = "Cleans prior Bazel state under the runner's storage mount, then runs `bazel build --nobuild` against the given targets so subsequent jobs on the same runner pool start with hot caches. On an Aspect Workflows runner it then creates and uploads the warming archives to the warming bucket, so a warming pipeline only needs to call `aspect ci warming`. Off a Workflows runner the cache-populate step still runs and the archive step is skipped.",
     implementation = _impl,
     traits = [BazelTrait],
     args = {

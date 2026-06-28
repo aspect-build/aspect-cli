@@ -349,7 +349,7 @@ def get_generic_bazelrc_flags(environment: WorkflowsEnvironment) -> list:
     (`--repository_cache`, output base/root), the runner identity header, the
     `--nosystem_rc` startup flag, and the cache-compression gates (Aspect
     Workflows' own remote cache does not support compression, so those only
-    apply when talking to it on a runner). See `get_runner_bazelrc_flags`.
+    apply when talking to it on a runner). `get_bazelrc_flags` adds those.
 
     Returns a flat list of build flags (no version-gated tuples — none of the
     generic flags are version-conditional).
