@@ -1,6 +1,6 @@
 version: 2.1
 orbs:
-  setup-aspect: aspect-build/setup-aspect@2026.26.8
+  setup-aspect: aspect-build/setup-aspect@2026.26.10
 # Manual break-glass override for `aspect delivery`. Settable via the
 # CircleCI "Trigger Pipeline" UI or API; default empty means normal
 # selective delivery on every other build.

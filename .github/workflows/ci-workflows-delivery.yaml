@@ -64,7 +64,7 @@ jobs:
       - name: Bootstrap
         if: inputs.prebuild_run_id == ''
         run: .aspect/bootstrap.sh
-      - uses: aspect-build/setup-aspect@b7443e6f0b4a72507d73fcc49c16eecaf28786f9 # v2026.26.7
+      - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Delivery Task
@@ -89,7 +89,7 @@ jobs:
       - name: Bootstrap
         if: inputs.prebuild_run_id == ''
         run: .aspect/bootstrap.sh
-      - uses: aspect-build/setup-aspect@b7443e6f0b4a72507d73fcc49c16eecaf28786f9 # v2026.26.7
+      - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Delivery Task (ASPECT_DEBUG=1)
