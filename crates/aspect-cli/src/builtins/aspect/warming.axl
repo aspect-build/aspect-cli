@@ -18,9 +18,11 @@ from the runner metadata.
 
 The whole run surfaces as a single status check / Buildkite annotation
 (`kind = "warming_results"`, rendered by `private/lib/warming_results.axl`)
-spanning three phases — 🧹 clean, 🔨 populate, 📦 archive — so the check
-reflects the archive-upload outcome, not just the build. Off a Workflows runner
-the archive step is reported as skipped and the task still passes.
+spanning the 🔨 populate and 📦 archive phases, so the check reflects the
+archive-upload outcome, not just the build. Off a Workflows runner the archive
+step is reported as skipped and the task still passes. (The prior-state cleanup
+runs before `setup_phase` — see `_impl` — so it precedes the surface and isn't
+a surface phase of its own.)
 """
 
 load("@aspect//bazel.axl", "BazelTrait")
@@ -105,29 +107,25 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     data["target_pattern"] = " ".join(targets)
     data["warming"]["on_runner"] = on_workflows_runner
 
+    # Clean the prior Bazel state under the runner storage mount BEFORE
+    # `setup_phase`. The Workflows `agent_health_check` (run inside `setup_phase`)
+    # calls `ctx.bazel.health_check()`, which starts/uses the Bazel server in the
+    # runner `--output_base` under this same mount. Cleaning afterwards would
+    # delete `<mount>/output/*` out from under that live server and poison it, so
+    # the cleanup must run first. Best-effort, no surface emit (the surface isn't
+    # open yet); it's logged for the CLI and recorded in `data["warming"]`.
+    mount = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_STORAGE_PATH")
+    if mount:
+        print("Cleaning prior Bazel state under " + mount + "...")
+        _clean_storage_mount(ctx, mount)
+        data["warming"]["cleaned"] = True
+
     # Single pre-task setup phase: opens the status surface + renders the first
     # body, resolves Bazel flags + parses the workspace .bazelrc (folding in the
     # runner metadata, incl. --output_base), and runs the health_check hooks (a
     # failed check concludes the surface and fails the task inside).
     setup_phase(ctx, lifecycle, data["target_pattern"], _KIND, data, hc_trait, bazel_trait, "build")
     announce_version, announce_command = resolve_bazel_announce(ctx)
-
-    mount = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_STORAGE_PATH")
-    if mount:
-        task_update(
-            ctx,
-            lifecycle,
-            "running",
-            ProgressStyles(
-                body = "Cleaning prior Bazel state...",
-                stream = "Cleaning prior Bazel state",
-            ),
-            kind = _KIND,
-            data = data,
-            phase = Phase(name = "clean", description = "Clean prior Bazel state", emoji = "🧹"),
-        )
-        _clean_storage_mount(ctx, mount)
-        data["warming"]["cleaned"] = True
 
     # Populate phase: `bazel build --nobuild`. Pass build_event_sinks (the Aspect
     # backend gRPC sink in CI) so the "✨ Aspect Workflows" link resolves to a
