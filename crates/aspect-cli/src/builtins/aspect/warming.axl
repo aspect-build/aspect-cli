@@ -54,20 +54,24 @@ def _impl(ctx: TaskContext) -> int:
     if bazel_trait.startup_flags:
         startup_flags = bazel_trait.startup_flags(startup_flags)
 
-    # Carry the startup flags (e.g. --output_base) on a RunCommand passed via
-    # `rc=`, since the runtime resolves startup flags from the build's
-    # RunCommand rather than a mutable ctx.bazel attribute. Use `parse_rc` (not
-    # `new_rc`): it reads the workspace `.bazelrc` from the Bazel root, so a
-    # user `--config=<group>` forwarded via `--bazel-flag` resolves against the
-    # config groups defined there. A blank rc (`new_rc`) carries
-    # `--ignore_all_rc_files`, which would make `bazel build --config=ci` fail
-    # with "Config value 'ci' is not defined in any .rc file". Command flags
-    # stay in `flags=`, which `build` appends to the rc's resolved options.
-    rc = ctx.bazel.parse_rc(startup_flags = startup_flags)
+    # Build a RunCommand that carries BOTH the command flags and the startup
+    # flags (e.g. --output_base), since the runtime resolves a build's flags and
+    # startup flags from its RunCommand rather than a mutable ctx.bazel
+    # attribute. Use `parse_rc` (not `new_rc`): it reads the workspace `.bazelrc`
+    # from the Bazel root, and the `flags` we pass become synthetic options that
+    # are expanded *against* that rc — so a user `--config=<group>` forwarded via
+    # `--bazel-flag` resolves against the config groups defined there.
+    #
+    # The flags MUST go through `parse_rc`, not the per-call `flags=` on `build`:
+    # `build`'s `flags=` are appended raw *after* the rc is resolved, and the
+    # resolved invocation also carries `--ignore_all_rc_files`, so a raw
+    # `--config=ci` would reach a Bazel told to ignore the very `.bazelrc` that
+    # defines `ci` — failing with "Config value 'ci' is not defined in any .rc
+    # file". Passing them to `parse_rc` makes them part of the resolved command.
+    rc = ctx.bazel.parse_rc(flags = flags, startup_flags = startup_flags)
 
     invocation = ctx.bazel.build(
         rc = rc,
-        flags = flags,
         *ctx.args.targets
     )
     code = invocation.wait().code
