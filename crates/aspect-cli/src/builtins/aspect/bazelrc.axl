@@ -97,7 +97,7 @@ def _default_output(ctx: TaskContext) -> str | None:
 
 def _bazelrc_impl(ctx: TaskContext) -> int:
     if not is_aspect_workflows_runner(ctx.std.env):
-        error(ctx.std, "Not on an Aspect Workflows runner (ASPECT_WORKFLOWS_RUNNER unset). `aspect ci bazelrc` generates runner-specific cache flags and has nothing to write off a runner.")
+        error(ctx.std, "Not on an Aspect Workflows runner. `aspect ci bazelrc` generates runner-specific cache flags and has nothing to write off a runner.")
         return 1
 
     environment = get_workflows_environment(ctx.std)

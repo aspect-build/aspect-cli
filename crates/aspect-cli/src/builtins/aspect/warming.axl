@@ -66,18 +66,17 @@ def _impl(ctx: TaskContext) -> int:
         return archive.code
 
     ctx.std.io.stderr.write(
-        "warning: ASPECT_WORKFLOWS_RUNNER is not set; skipping the warming " +
+        "warning: not on an Aspect Workflows runner; skipping the warming " +
         "archive upload step. The bazel cache populate step ran successfully. " +
-        "On an Aspect Workflows runner this task also invokes " +
-        WARMING_ARCHIVE_BIN + " to upload the populated caches to the warming " +
-        "bucket.\n",
+        "On an Aspect Workflows runner this task also uploads the populated " +
+        "caches to the warming bucket.\n",
     )
     return 0
 
 warming = task(
     group = ["ci"],
     summary = "Pre-populate Bazel caches on a CI runner (and archive them on Aspect Workflows runners).",
-    description = "Cleans prior Bazel state under ${ASPECT__STORAGE_PATH}, then runs `bazel build --nobuild` against the given targets so subsequent jobs on the same runner pool start with hot caches. On an Aspect Workflows runner it then creates and uploads the warming archives by invoking /etc/aspect/workflows/bin/warming_archive, so a warming pipeline only needs to call `aspect ci warming`. Off a Workflows runner the cache-populate step still runs and the archive step is skipped.",
+    description = "Cleans prior Bazel state under ${ASPECT__STORAGE_PATH}, then runs `bazel build --nobuild` against the given targets so subsequent jobs on the same runner pool start with hot caches. On an Aspect Workflows runner it then creates and uploads the warming archives to the warming bucket, so a warming pipeline only needs to call `aspect ci warming`. Off a Workflows runner the cache-populate step still runs and the archive step is skipped.",
     implementation = _impl,
     traits = [BazelTrait],
     args = {
