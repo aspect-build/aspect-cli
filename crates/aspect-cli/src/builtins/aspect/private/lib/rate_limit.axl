@@ -194,6 +194,10 @@ _BUDGET_REFRESH_MAX_S = 180
 # Far longer than two HTTP round-trips, so it never preempts a live refresh.
 _REFRESH_STALE_S = 120
 
+# Loop bound for `_refresh_interval`'s doubling walk — just needs to exceed the
+# BASE→MAX doublings (6 at 5s→180s); the cap check terminates the walk.
+_BUDGET_REFRESH_DOUBLINGS = 16
+
 # ── Cold-start window ────────────────────────────────────────────────
 #
 # Tunes the window's boundaries; rationale in the docstring.
@@ -421,7 +425,12 @@ def _reset_bucket_state(state, bucket):
     so a window roll starts a fresh allowance: zero the spend counter and clear
     the budget. Clearing (not flooring) is what lets the next `/github/budget`
     refresh re-seed the larger post-reset budget — `apply_budget_refresh` floors
-    down only *within* a window, but seeds when the budget is unset."""
+    down only *within* a window, but seeds when the budget is unset.
+
+    Left alone on purpose: the refresh-backoff state (`refresh_epoch_start` /
+    `refresh_last` — the schedule is task-wide, not per-window) and the taper
+    counters (`skippable_seen` / `last_call_epoch` — a rolling phase / wall-clock
+    quiet, both window-independent)."""
     wm = dict(state["watermark"])
     wm[bucket] = None
     state["watermark"] = wm
@@ -580,13 +589,11 @@ def _budget_skip_fraction(state, bucket, surface, spent, budget, now):
         return 0.0
     time_to_reset = max(0, reset_epoch - now)
     expected = float(budget) * (1.0 - float(time_to_reset) / float(_BUDGET_WINDOW_S))
-    pace = (float(spent) - expected) / float(budget)
-    pace = max(0.0, min(1.0, pace))
+    pace = _clamp01((float(spent) - expected) / float(budget))
 
     last = (state.get("last_call_epoch") or {}).get(surface, 0)
     gap = now - last if last else _BUDGET_GAP_HORIZON_S
-    damping = (float(_BUDGET_GAP_HORIZON_S) - float(gap)) / float(_BUDGET_GAP_HORIZON_S)
-    damping = max(0.0, min(1.0, damping))
+    damping = _clamp01((float(_BUDGET_GAP_HORIZON_S) - float(gap)) / float(_BUDGET_GAP_HORIZON_S))
     return pace * damping
 
 def _stamp_surface_call(state, surface, now):
@@ -600,6 +607,10 @@ def _round_half_up(x):
     """`x` rounded to the nearest int, ties up (Starlark has no `round`/`math`).
     Callers pass `x ≥ 1`, so the result is always ≥ 1."""
     return int(x + 0.5)
+
+def _clamp01(x):
+    """Clamp `x` into `[0.0, 1.0]`."""
+    return max(0.0, min(1.0, x))
 
 def _increment_token_spent(ctx, bucket):
     """Count one of our own calls against `bucket`'s spend. Loads + saves its
@@ -695,8 +706,12 @@ def _refresh_interval(elapsed_s):
     cumulative span covers `elapsed_s`."""
     interval = _BUDGET_REFRESH_BASE_S
     consumed = 0
-    for _ in range(10):
-        if consumed + interval >= elapsed_s:
+    # Walk the doubling steps until the cumulative span covers `elapsed_s` or the
+    # interval saturates at the cap (further doublings are no-ops, so we stop).
+    # The bound just needs to exceed the doublings-to-cap count; the cap check is
+    # what actually terminates the walk.
+    for _ in range(_BUDGET_REFRESH_DOUBLINGS):
+        if consumed + interval >= elapsed_s or interval >= _BUDGET_REFRESH_MAX_S:
             break
         consumed += interval
         interval = min(_BUDGET_REFRESH_MAX_S, interval * 2)

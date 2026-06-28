@@ -357,10 +357,11 @@ def _authenticate(ctx, owner, repo, profile = None, roles = None, _reason = None
     Returns the token, or None with `_reason` populated on failure
     (stable `kind` from `_AUTH_KIND_*` + human-readable `reason`).
 
-    `_extra`, if a dict, is populated on success with non-token fields the
-    mint response carries — `desired_cadence_s` (budget-derived comment-refresh
-    cadence) and `installation_id` + `installation_proof` (for the
-    `/github/budget` refresh path). Other callers pass nothing and ignore it.
+    `_extra`, if a dict, is populated on success with `installation_id` +
+    `installation_proof` (the comment surface forwards them on the `contribute`
+    call). The budget, cadence, and refresh creds the mint also carries are
+    recorded centrally here (see below), not via `_extra`. Other callers pass
+    nothing and ignore it.
 
     Side-effect: on `_AUTH_KIND_NO_CREDENTIALS`, emits the host-specific
     `add-aspect-api-token-<host>` tip — at this layer so every App-using
@@ -412,7 +413,7 @@ def _authenticate(ctx, owner, repo, profile = None, roles = None, _reason = None
         parsed = json.try_decode(resp.body, None)
         if parsed != None and "token" in parsed:
             if type(_extra) == "dict":
-                for k in ("desired_cadence_s", "installation_id", "installation_proof"):
+                for k in ("installation_id", "installation_proof"):
                     if k in parsed:
                         _extra[k] = parsed[k]
 
