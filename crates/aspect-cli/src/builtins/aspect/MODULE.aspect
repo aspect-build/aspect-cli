@@ -14,6 +14,8 @@ use_task("gazelle.axl", "gazelle")
 use_task("wrapper.axl", "install")
 use_task("wrapper.axl", "uninstall")
 use_task("init.axl", "init")
+use_task("bazelrc.axl", "bazelrc")
+use_task("warming.axl", "warming")
 
 use_feature("feature/artifacts.axl", "ArtifactUpload")
 use_feature("feature/circleci_test_results.axl", "CircleCITestResults")

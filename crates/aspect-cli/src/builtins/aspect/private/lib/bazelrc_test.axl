@@ -1,0 +1,159 @@
+"""Unit tests for `bazelrc.axl`'s pure rendering helpers: `command_sections`
+(which rc command sections to use for a Bazel version) and `render_bazelrc` (the
+rc text rendering).
+
+Version-gating of the `(flag, constraint)` tuples from `get_bazelrc_flags` is
+delegated to the bazelrc runtime (`ctx.bazel.new_rc(...).expand(...)`), so it's
+covered by the runtime's own tests rather than here. Run with:
+aspect dev test-bazelrc
+"""
+
+load("@aspect//bazelrc.axl", "command_sections", "render_bazelrc", "startup_flags_for_rc")
+load(
+    "./environment.axl",
+    "RemoteCache",
+    "WorkflowsEnvironment",
+    "get_generic_bazelrc_flags",
+)
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+# Runner-specific flag fragments that must NEVER appear in the generic set —
+# they depend on a runner's mounts, identity, or the Workflows cache.
+_RUNNER_ONLY_FRAGMENTS = [
+    "--repository_cache=",
+    "--output_base=",
+    "--output_user_root=",
+    "--remote_header=",
+    "--nosystem_rc",
+    "_remote_cache_compression",
+]
+
+def _test_generic_flags_are_runner_independent(_ctx):
+    flags = get_generic_bazelrc_flags(WorkflowsEnvironment())
+
+    # The generic profiling/remote tuning flags are present...
+    for want in ["--remote_upload_local_results", "--disk_cache=", "--remote_timeout=3600"]:
+        _eq("generic has " + want, want in flags, True)
+
+    # ...and nothing runner-specific leaks in.
+    for frag in _RUNNER_ONLY_FRAGMENTS:
+        _eq("no runner-only " + frag, any([frag in f for f in flags]), False)
+
+    # No remote-cache endpoint without the env (no RemoteCache on the environment).
+    _eq("no remote_cache", any(["--remote_cache=" in f for f in flags]), False)
+
+def _test_generic_flags_include_remote_cache_env(_ctx):
+    # When the remote-cache env vars are set (surfaced as environment.remote_cache),
+    # the endpoint flags are emitted — even off a runner.
+    env = WorkflowsEnvironment(remote_cache = RemoteCache(
+        endpoint = "unix:///x/grpc",
+        bytestream_uri_prefix = "aw-remote.example",
+    ))
+    flags = get_generic_bazelrc_flags(env)
+    _eq("remote_cache", "--remote_cache=unix:///x/grpc" in flags, True)
+    _eq("bytestream prefix", "--remote_bytestream_uri_prefix=aw-remote.example" in flags, True)
+
+def _test_startup_flags_for_rc(_ctx):
+    # --nohome_rc must be dropped: the generated file IS the home rc, so keeping
+    # it would tell Bazel to ignore the rc it's reading. --nosystem_rc stays
+    # (suppresses the separate /etc/bazel.bazelrc), as do the output paths.
+    got = startup_flags_for_rc([
+        "--nohome_rc",
+        "--nosystem_rc",
+        "--output_user_root=/mnt/ephemeral/bazel/x",
+        "--output_base=/mnt/ephemeral/output/x",
+    ])
+    _eq("nohome_rc dropped", "--nohome_rc" in got, False)
+    _eq("nosystem_rc kept", "--nosystem_rc" in got, True)
+    _eq("output_user_root kept", "--output_user_root=/mnt/ephemeral/bazel/x" in got, True)
+    _eq("output_base kept", "--output_base=/mnt/ephemeral/output/x" in got, True)
+
+def _test_command_sections(_ctx):
+    # >= 6.3.0 and the unknown-version (assume latest) case use `common`.
+    _eq("unknown -> common", command_sections(None), ["common"])
+    _eq("6.3.0 -> common", command_sections("6.3.0"), ["common"])
+    _eq("7.4.1 -> common", command_sections("7.4.1"), ["common"])
+    _eq("8.0.0 -> common", command_sections("8.0.0"), ["common"])
+
+    # < 6.3.0 has no `common`; spell out build (inherited) + query (not inherited).
+    _eq("6.2.1 -> build/query", command_sections("6.2.1"), ["build", "query"])
+    _eq("6.0.0 -> build/query", command_sections("6.0.0"), ["build", "query"])
+    _eq("5.4.0 -> build/query", command_sections("5.4.0"), ["build", "query"])
+
+def _test_render_common_section(_ctx):
+    out = render_bazelrc(
+        ["--nohome_rc", "--output_base=/mnt/output"],
+        ["--remote_cache=grpcs://c:443", "--disk_cache="],
+        ["common"],
+    )
+    lines = out.split("\n")
+
+    # Startup flags get a `startup ` prefix; build flags get a `common ` prefix.
+    _eq("startup line", "startup --nohome_rc" in lines, True)
+    _eq("startup output_base", "startup --output_base=/mnt/output" in lines, True)
+    _eq("common remote_cache", "common --remote_cache=grpcs://c:443" in lines, True)
+    _eq("common disk_cache", "common --disk_cache=" in lines, True)
+
+    # No build flag leaks into a startup line and vice versa.
+    _eq("no common startup_flag", "common --nohome_rc" in lines, False)
+    _eq("no startup build_flag", "startup --remote_cache=grpcs://c:443" in lines, False)
+
+    # Trailing newline so the file ends cleanly.
+    _eq("trailing newline", out.endswith("\n"), True)
+
+def _test_render_pre_common_sections(_ctx):
+    # < 6.3.0: each build flag is emitted once per section (build + query);
+    # startup flags are emitted once regardless of the command sections.
+    out = render_bazelrc(
+        ["--nohome_rc"],
+        ["--remote_cache=grpcs://c:443"],
+        ["build", "query"],
+    )
+    lines = out.split("\n")
+
+    _eq("build section", "build --remote_cache=grpcs://c:443" in lines, True)
+    _eq("query section", "query --remote_cache=grpcs://c:443" in lines, True)
+    _eq("no common", "common --remote_cache=grpcs://c:443" in lines, False)
+
+    # startup flag appears exactly once (not multiplied by the command sections).
+    _eq("startup once", len([ln for ln in lines if ln == "startup --nohome_rc"]), 1)
+
+def _test_render_unwraps_version_gated_tuple(_ctx):
+    # `rc.expand` yields surviving version-gated options as (flag, condition)
+    # tuples; render writes only the flag text.
+    out = render_bazelrc([], [("--noremote_cache_compression", ">=8.0.0"), "--disk_cache="], ["common"])
+    lines = out.split("\n")
+    _eq("tuple flag unwrapped", "common --noremote_cache_compression" in lines, True)
+    _eq("no condition leaked", any([">=8.0.0" in ln for ln in lines]), False)
+
+def _test_render_empty(_ctx):
+    # With no flags, the header is still written.
+    out = render_bazelrc([], [], ["common"])
+    _eq("header present", out.startswith("# Generated by `aspect ci bazelrc`"), True)
+
+_UNIT_TESTS = [
+    _test_generic_flags_are_runner_independent,
+    _test_generic_flags_include_remote_cache_env,
+    _test_startup_flags_for_rc,
+    _test_command_sections,
+    _test_render_common_section,
+    _test_render_pre_common_sections,
+    _test_render_unwraps_version_gated_tuple,
+    _test_render_empty,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("bazelrc.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+bazelrc_tests = task(
+    kind = "test-bazelrc",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

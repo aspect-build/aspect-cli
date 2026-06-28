@@ -335,8 +335,53 @@ def sanitize_filename(name: str) -> str:
             result += "_"
     return result
 
+def get_generic_bazelrc_flags(environment: WorkflowsEnvironment) -> list:
+    """Build flags that are safe on ANY CI, not just an Aspect Workflows runner.
+
+    These tune Bazel's remote/cache/profiling behavior in ways that don't depend
+    on the runner's mounts, identity, or the Workflows cache implementation, so
+    they can be written into a CI bazelrc even off a Workflows runner. Includes
+    the remote-cache endpoint flags when the `ASPECT_WORKFLOWS_REMOTE_CACHE` /
+    `ASPECT_WORKFLOWS_REMOTE_BYTESTREAM_URI_PREFIX` env vars are set (they can be
+    set off a runner too), surfaced via `environment.remote_cache`.
+
+    Excludes runner-specific flags — the per-runner mount paths
+    (`--repository_cache`, output base/root), the runner identity header, the
+    `--nosystem_rc` startup flag, and the cache-compression gates (Aspect
+    Workflows' own remote cache does not support compression, so those only
+    apply when talking to it on a runner). `get_bazelrc_flags` adds those.
+
+    Returns a flat list of build flags (no version-gated tuples — none of the
+    generic flags are version-conditional).
+    """
+    build_flags = [
+        "--remote_upload_local_results",
+        "--heap_dump_on_oom",
+        "--generate_json_trace_profile",
+        "--experimental_repository_cache_hardlinks",
+        "--remote_accept_cached",
+        "--disk_cache=",
+        "--remote_timeout=3600",
+        "--remote_retries=360",
+        "--grpc_keepalive_timeout=30s",
+    ]
+
+    remote_cache = environment.remote_cache
+    if remote_cache:
+        if remote_cache.endpoint:
+            build_flags.append("--remote_cache=" + remote_cache.endpoint)
+        if remote_cache.bytestream_uri_prefix:
+            build_flags.append("--remote_bytestream_uri_prefix=" + remote_cache.bytestream_uri_prefix)
+
+    return build_flags
+
 def get_bazelrc_flags(environment: WorkflowsEnvironment, aspect_root_dir: str) -> (list, list):
-    """Generate bazelrc flags from platform configuration.
+    """Generate the full bazelrc flag set for an Aspect Workflows runner.
+
+    The generic CI flags (`get_generic_bazelrc_flags`) plus the runner-specific
+    ones: the cache-compression gates (the Workflows remote cache doesn't support
+    compression), the runner identity header, the per-runner repository cache and
+    output paths, and `--nohome_rc`/`--nosystem_rc`.
 
     Args:
         environment: WorkflowsEnvironment. Caller must have verified
@@ -344,7 +389,8 @@ def get_bazelrc_flags(environment: WorkflowsEnvironment, aspect_root_dir: str) -
         aspect_root_dir: absolute path to the Aspect project root.
 
     Returns:
-        (startup_flags, build_flags): two lists of flag strings
+        (startup_flags, build_flags): two lists; build_flags may contain
+        version-gated `(flag, constraint)` tuples.
     """
     runner = environment.runner
     if runner == None:
@@ -353,27 +399,13 @@ def get_bazelrc_flags(environment: WorkflowsEnvironment, aspect_root_dir: str) -
     repo_name = environment.ci.scm_repo_name if environment.ci else ""
     subdir = sanitize_filename(aspect_root_dir.rstrip("/").split("/")[-1]) if aspect_root_dir else "__main__"
 
-    build_flags = []
+    build_flags = get_generic_bazelrc_flags(environment)
 
-    build_flags.append("--remote_upload_local_results")
-    build_flags.append("--heap_dump_on_oom")
-    build_flags.append("--generate_json_trace_profile")
-    build_flags.append("--experimental_repository_cache_hardlinks")
-    build_flags.append("--remote_accept_cached")
-    build_flags.append("--disk_cache=")
-    build_flags.append("--remote_timeout=3600")
-    build_flags.append("--remote_retries=360")
-    build_flags.append("--grpc_keepalive_timeout=30s")
+    # Aspect Workflows' remote cache does not support compression, so disable it
+    # (the flag name changed in Bazel 8). The disk-results gate is a <7 quirk.
     build_flags.append(("--noexperimental_remote_cache_compression", "<8.0.0"))
     build_flags.append(("--noremote_cache_compression", ">=8.0.0"))
     build_flags.append(("--incompatible_remote_results_ignore_disk", "<7.0.0"))
-
-    remote_cache = environment.remote_cache
-    if remote_cache:
-        if remote_cache.endpoint:
-            build_flags.append("--remote_cache=" + remote_cache.endpoint)
-        if remote_cache.bytestream_uri_prefix:
-            build_flags.append("--remote_bytestream_uri_prefix=" + remote_cache.bytestream_uri_prefix)
 
     # `--remote_header` is the shared header Bazel applies to both the remote
     # cache and the executor channel, so gate on the identity alone: this also

@@ -10,6 +10,7 @@ load("@aspect//private/helpers_test.axl", "helpers_facade_tests")
 load("@aspect//private/lib/bazel_flags_test.axl", "bazel_flags_tests")
 load("@aspect//private/lib/bazel_results_test.axl", "bazel_results_unit_tests", "template_snapshot_tests")
 load("@aspect//private/lib/bazel_runner_test.axl", "bazel_runner_tests")
+load("@aspect//private/lib/bazelrc_test.axl", "bazelrc_tests")
 load("@aspect//private/lib/ci_test.axl", "ci_tests")
 load("@aspect//private/lib/circleci_test.axl", "circleci_tests")
 load("@aspect//private/lib/delivery_results_test.axl", "delivery_results_unit_tests", "delivery_template_snapshot_tests")
@@ -310,6 +311,12 @@ def config(ctx: ConfigContext):
     # canonical_label normalization (local/external/bzlmod @@module+version → @module).
     # Run with: aspect dev test-runnable
     ctx.tasks.add(runnable_tests)
+
+    # `aspect ci bazelrc` pure helpers — version-constraint gating
+    # (assumed-latest when the Bazel version is unknown), mixed plain/tuple
+    # flag resolution, and rc rendering (startup vs common sections).
+    # Run with: aspect dev test-bazelrc
+    ctx.tasks.add(bazelrc_tests)
 
     # tools/bazel wrapper helpers — workspace-root detection, raw-URL
     # building, wrapper-version parsing, install classification, shell
