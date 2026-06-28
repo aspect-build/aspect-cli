@@ -68,13 +68,19 @@ re-baselines instead of computing across the boundary.
 Separate from the reactive throttle factor: the Aspect API issues a per-token
 API-call budget (`record_token_budget`) — the calls this task may spend on the
 App token — and re-measures it on each `/github/budget` refresh
-(`apply_budget_refresh`, floor-DOWN only; a refresh never renews or raises the
-cap). The client meters its *own* calls (`record_from_headers` counts one per
-GitHub response) into `token_spent`. `budget_exhausted` reports `spent >=
-budget`; `github._do_request` reads it to drop skippable (non-terminal) App
-calls once the cap is hit. The budget is the hard cap; the contribute cadence
-(`desired_cadence_s`) does the spacing. No budget yet (cold start) → not
-exhausted, caller falls back to the cadence / cold-start floor.
+(`apply_budget_refresh`, floor-DOWN within a window; seeds fresh across a roll).
+The client meters its *own* calls (`record_from_headers` counts one per GitHub
+response) into `token_spent`.
+
+`budget_should_skip` is the gate `github._do_request` calls for skippable
+(non-terminal) App calls. It tapers rather than cliff-edges: skip a fraction
+`pace × gap_damping`, where `pace` is how far spend is ahead of the straight-line
+budget line and `gap_damping` falls to 0 as the calling surface's quiet gap
+approaches `_BUDGET_GAP_HORIZON_S` — so bursts get skipped while genuine
+after-a-pause updates get through. Past `_BUDGET_CRITICAL_FRACTION` of budget it
+skips unconditionally; at the cap it skips all. No budget yet (cold start) → no
+skip, the cadence / cold-start floor governs. The fraction is realized with a
+deterministic every-Nth counter (no RNG).
 
 # Threshold warnings
 
@@ -154,6 +160,27 @@ _TIME_TO_RESET_FLOOR_S = 60
 # converges.
 _RESERVE_FRACTION = 0.30
 
+# ── Budget pace taper ────────────────────────────────────────────────
+#
+# The skippable-call gate (`budget_should_skip`) tapers skipping by how far
+# spend is ahead of the straight-line budget pace, damped by how long this
+# surface has been quiet — so bursts get skipped while genuine after-a-pause
+# updates get through. Rationale in `budget_should_skip`.
+
+# GitHub core rate-limit window length. Used to project the expected spend by
+# now (`budget × elapsed/window`); the absolute `reset` epoch is the only
+# window timing GitHub reports, so the fixed length is assumed.
+_BUDGET_WINDOW_S = 3600
+
+# Inter-call gap (since this surface's last spent call) at which gap damping
+# reaches 0 — past it a call is never skipped below the critical band, as an
+# update after this long a pause is genuine, not bursty. Full pace-skip at gap 0.
+_BUDGET_GAP_HORIZON_S = 300
+
+# Spend fraction past which skipping is unconditional (gap/pace ignored) — the
+# budget is nearly gone, so even an after-a-pause update must yield to the cap.
+_BUDGET_CRITICAL_FRACTION = 0.90
+
 # ── Cold-start window ────────────────────────────────────────────────
 #
 # Tunes the window's boundaries; rationale in the docstring.
@@ -171,13 +198,13 @@ _COLD_START_OVERRIDE_VAR = "ASPECT_WORKFLOWS_GITHUB_API_RATE_LIMIT_COLD_START"
 # Rate-limit state has no single feature owner (every HTTP caller is a
 # peer) and swarm aggregation is intrinsic — the file-pattern (Pattern 3
 # in DEVELOPMENT.md): tmpdir + record + json. Each public function loads at
-# entry, mutates, and saves at exit; internal helpers take the loaded state
-# so one API call is one read + one write.
+# entry, mutates, and saves at exit; internal helpers take the loaded state.
 #
-# Performance: every response funnels through `record_from_headers`, so a
-# long task loads+saves hundreds of times. File is ~KB, page cache warm,
-# eval single-threaded — negligible. If it ever profiles hot, cache
-# in-memory keyed by task identity.
+# Performance: every response funnels through `record_from_headers` (and a
+# skippable App call also hits the budget gate first), so a long task does a
+# few load+save pairs per call and hundreds over its life. File is ~KB, page
+# cache warm, eval single-threaded — negligible. If it ever profiles hot,
+# cache in-memory keyed by task identity.
 
 # State is a plain dict, not a `record`, because the code reassigns many
 # fields per call and AXL records are immutable. Schema:
@@ -191,6 +218,8 @@ _COLD_START_OVERRIDE_VAR = "ASPECT_WORKFLOWS_GITHUB_API_RATE_LIMIT_COLD_START"
 #   threshold_warned_tier    {bucket: int}          — 0 / LOW / IMPORTANT
 #   token_budget             {bucket: int | None}   — server-issued call budget
 #   token_spent              {bucket: int}          — our own calls this window
+#   skippable_seen           {bucket: int}          — gated calls (every-Nth taper)
+#   last_call_epoch          {surface: int}         — per-surface last-spent time
 
 def _new_state():
     return {
@@ -203,10 +232,13 @@ def _new_state():
         "threshold_warned_tier": {"app": 0, "env": 0},
         # Per-token API-call budget (see "Token budget" in the docstring).
         # `token_budget` is None until the server issues one; `token_spent`
-        # counts this task's own calls against it. Once spent reaches budget,
-        # skippable calls are dropped (the cap; cadence does the spacing).
+        # counts this task's own calls against it. `skippable_seen` counts gated
+        # calls for the deterministic every-Nth taper; `last_call_epoch` is the
+        # per-surface last-spent timestamp the gap damping reads.
         "token_budget": {"app": None, "env": None},
         "token_spent": {"app": 0, "env": 0},
+        "skippable_seen": {"app": 0, "env": 0},
+        "last_call_epoch": {},
     }
 
 def _path(ctx):
@@ -413,8 +445,8 @@ def _ratelimit_header(headers, suffix):
 #
 # The server (Aspect API) issues a per-token API-call budget at mint and
 # re-measures it on each `/github/budget` refresh. The client meters its own
-# spend (`record_from_headers`) against it and paces over the token lifetime.
-# See "Token budget" in the module docstring.
+# spend (`record_from_headers`) against it and tapers skipping over the
+# rate-limit window. See "Token budget" in the module docstring.
 
 def record_token_budget(ctx, bucket, budget):
     """Seed the per-token budget on a fresh mint: set `budget` and zero the
@@ -444,15 +476,98 @@ def apply_budget_refresh(ctx, bucket, budget):
 
 def budget_exhausted(ctx, bucket):
     """True iff `bucket`'s token budget is set and fully spent (`spent >=
-    budget`). False when no budget has been issued yet (cold start) — the
-    caller falls back to cadence / the cold-start floor there, not to a hard
-    skip. Drives the skippable-call gate in `github._do_request`."""
+    budget`). False when no budget has been issued yet (cold start). A pure
+    read; `budget_should_skip` is the gate `github._do_request` actually calls."""
     state = _load(ctx)
     budget = (state.get("token_budget") or {}).get(bucket)
     if budget == None:
         return False
     spent = (state.get("token_spent") or {}).get(bucket, 0)
     return spent >= budget
+
+def budget_should_skip(ctx, bucket, surface, now_epoch_s = None):
+    """Decide whether to drop one skippable App call, tapering by budget pace and
+    how long `surface` has been quiet. The gate `github._do_request` calls for
+    `skippable=True` calls.
+
+    Regimes, given `spent`/`budget` and the gap since this surface's last spent
+    call:
+      - no budget yet (cold start)           → don't skip (cadence governs)
+      - spent ≥ budget                        → skip (hard cap)
+      - spent/budget ≥ `_BUDGET_CRITICAL_FRACTION` → skip (near-empty, unconditional)
+      - else skip a fraction `pace × gap_damping`:
+          pace        = clamp((spent − expected) / budget, 0, 1),
+                        expected = budget × (1 − time_to_reset/`_BUDGET_WINDOW_S`)
+          gap_damping = clamp((`_BUDGET_GAP_HORIZON_S` − gap) / horizon, 0, 1)
+        realized deterministically (no RNG): skip every `round(1/frac)`-th gated
+        call (frac 0.5 → every 2nd, 0.25 → every 4th, 0.1 → every 10th).
+
+    A long quiet gap drives damping → 0 so an after-a-pause update gets through;
+    a burst (gap ≈ 0) keeps damping ≈ 1 so the pace taper bites. Only a call that
+    goes through stamps `last_call_epoch[surface]`, so skips let the gap grow —
+    self-correcting, no surface is starved. Side-effects (counter + stamp) are
+    saved; mirrors `_increment_token_spent`'s contained read-modify-write."""
+    if bucket not in _VALID_BUCKETS:
+        return False
+    state = _load(ctx)
+    budget = (state.get("token_budget") or {}).get(bucket)
+    if budget == None:
+        return False  # cold start — cadence governs, no budget to pace against
+    if budget <= 0:
+        return True  # drained bucket (budget 0) — hard cap from the first call
+    spent = (state.get("token_spent") or {}).get(bucket, 0)
+    if spent >= budget:
+        return True
+    if float(spent) / float(budget) >= _BUDGET_CRITICAL_FRACTION:
+        return True
+
+    now = now_epoch_s if now_epoch_s != None else epoch_now_s(std = ctx.std)
+    skip_frac = _budget_skip_fraction(state, bucket, surface, spent, budget, now)
+    if skip_frac <= 0.0:
+        _stamp_surface_call(state, surface, now)
+        _save(ctx, state)
+        return False
+
+    # Skip every Nth gated call; rounding `1/skip_frac` (not floor/ceil) keeps the
+    # realized rate near the target at small fractions instead of flooring to zero.
+    skip_every = _round_half_up(1.0 / skip_frac)
+    seen = (state.get("skippable_seen") or {}).get(bucket, 0) + 1
+    _set_bucket_field(state, "skippable_seen", bucket, seen)
+    skip = seen % skip_every == 0
+    if not skip:
+        _stamp_surface_call(state, surface, now)
+    _save(ctx, state)
+    return skip
+
+def _budget_skip_fraction(state, bucket, surface, spent, budget, now):
+    """Pace skip-fraction (`(spent − expected)/budget`) damped by this surface's
+    quiet gap, both clamped to [0, 1]. Pure over loaded `state`."""
+    obs = state["observations"].get(bucket, []) or []
+    reset_epoch = obs[-1][3] if obs else 0
+    if not reset_epoch:
+        return 0.0
+    time_to_reset = max(0, reset_epoch - now)
+    expected = float(budget) * (1.0 - float(time_to_reset) / float(_BUDGET_WINDOW_S))
+    pace = (float(spent) - expected) / float(budget)
+    pace = max(0.0, min(1.0, pace))
+
+    last = (state.get("last_call_epoch") or {}).get(surface, 0)
+    gap = now - last if last else _BUDGET_GAP_HORIZON_S
+    damping = (float(_BUDGET_GAP_HORIZON_S) - float(gap)) / float(_BUDGET_GAP_HORIZON_S)
+    damping = max(0.0, min(1.0, damping))
+    return pace * damping
+
+def _stamp_surface_call(state, surface, now):
+    """Record `now` as `surface`'s last spent-call time (resets its quiet gap).
+    Mutates `state`; caller saves."""
+    stamps = dict(state.get("last_call_epoch") or {})
+    stamps[surface] = now
+    state["last_call_epoch"] = stamps
+
+def _round_half_up(x):
+    """`x` rounded to the nearest int, ties up (Starlark has no `round`/`math`).
+    Callers pass `x ≥ 1`, so the result is always ≥ 1."""
+    return int(x + 0.5)
 
 def _increment_token_spent(ctx, bucket):
     """Count one of our own calls against `bucket`'s spend. Loads + saves its
@@ -996,7 +1111,11 @@ def set_state_for_test(
         sibling_observations = None,
         last_effective_factor = None,
         last_logged_factor_step = None,
-        threshold_warned_tier = None):
+        threshold_warned_tier = None,
+        token_budget = None,
+        token_spent = None,
+        skippable_seen = None,
+        last_call_epoch = None):
     """Overwrite individual fields on the state for test setup. Each
     arg is optional — unset fields keep their current value."""
     state = _load(ctx)
@@ -1014,4 +1133,12 @@ def set_state_for_test(
         state["last_logged_factor_step"] = last_logged_factor_step
     if threshold_warned_tier != None:
         state["threshold_warned_tier"] = threshold_warned_tier
+    if token_budget != None:
+        state["token_budget"] = token_budget
+    if token_spent != None:
+        state["token_spent"] = token_spent
+    if skippable_seen != None:
+        state["skippable_seen"] = skippable_seen
+    if last_call_epoch != None:
+        state["last_call_epoch"] = last_call_epoch
     _save(ctx, state)

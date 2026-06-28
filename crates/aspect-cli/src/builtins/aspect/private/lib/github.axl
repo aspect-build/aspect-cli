@@ -19,7 +19,7 @@ load(
     "BUCKET_APP",
     "BUCKET_ENV",
     "apply_budget_refresh",
-    "budget_exhausted",
+    "budget_should_skip",
     "record_from_headers",
     "record_token_budget",
 )
@@ -151,15 +151,21 @@ _IDEMPOTENT_METHODS = ["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
 # Synthetic result for a call dropped by the budget gate — a distinct shape so
 # callers tell a budget skip from a real failure (status 0, never a GitHub
 # status) and quietly no-op the cycle rather than entering an error/fallback
-# path.
-_BUDGET_SKIPPED = (False, 0, "budget-exhausted: skipped")
+# path. Matched by identity in `_is_budget_skip`, never parsed.
+_BUDGET_SKIPPED = (False, 0, "budget-throttled: skipped")
+
+# Surface ids for the budget gate's per-surface quiet-gap damping — each
+# repeating App-bucket writer is its own surface so a quiet one isn't skipped
+# because a chatty sibling kept the shared spend high.
+_SURFACE_COMMENTS = "comments"
+_SURFACE_CHECKS = "checks"
 
 def _is_budget_skip(success, status, body):
     """True iff `(success, status, body)` is the budget-gate skip sentinel —
     lets callers tell an intentional skip from a real failure (and stay quiet)."""
     return (success, status, body) == _BUDGET_SKIPPED
 
-def _do_request(ctx, method, url, token, payload = None, quiet_4xx_auth = False, token_class = BUCKET_APP, skippable = False):
+def _do_request(ctx, method, url, token, payload = None, quiet_4xx_auth = False, token_class = BUCKET_APP, skippable = False, surface = ""):
     """HTTP call, retried for idempotent methods; POST runs once. Returns
     `(success, status, body)`.
 
@@ -170,11 +176,13 @@ def _do_request(ctx, method, url, token, payload = None, quiet_4xx_auth = False,
     [lib/rate_limit.axl](./rate_limit.axl)).
 
     `skippable=True` marks a non-essential call (a mid-run heartbeat refresh):
-    when the App token's per-task budget is exhausted, the call is dropped and
-    `_BUDGET_SKIPPED` returned instead of spending quota. Defaults False — a
-    must-succeed call (terminal verdicts, comment/check-run creation) always
-    proceeds. Only the App bucket has a budget; Env calls ignore the gate."""
-    if skippable and token_class == BUCKET_APP and budget_exhausted(ctx, BUCKET_APP):
+    the per-token budget gate (`budget_should_skip`) may drop it under quota
+    pressure, returning `_BUDGET_SKIPPED` instead of spending. `surface`
+    identifies the caller (e.g. "comments", "checks") so the gate damps skipping
+    when that surface has been quiet. Defaults False — a must-succeed call
+    (terminal verdicts, comment/check-run creation) always proceeds. Only the
+    App bucket has a budget; Env calls ignore the gate."""
+    if skippable and token_class == BUCKET_APP and budget_should_skip(ctx, BUCKET_APP, surface):
         return _BUDGET_SKIPPED
     if method in _IDEMPOTENT_METHODS:
         success, status, body, attempts = _retry_http(lambda: _do_request_once(ctx, method, url, token, payload, token_class = token_class))
@@ -565,7 +573,7 @@ def update_check_run(ctx, token, owner, repo, check_run_id, status = None, concl
         payload["output"] = output
     if details_url:
         payload["details_url"] = details_url
-    success, status_code, body = _do_request(ctx, "PATCH", url, token, payload, skippable = skippable)
+    success, status_code, body = _do_request(ctx, "PATCH", url, token, payload, skippable = skippable, surface = _SURFACE_CHECKS)
     if success:
         return {"success": True, "check_run_id": body.get("id"), "html_url": body.get("html_url")}
     if _is_budget_skip(success, status_code, body):
@@ -1747,7 +1755,7 @@ def _issues_update_comment(ctx, token, owner, repo, comment_id, body, api_base =
     real failure (no WARN). The terminal verdict passes `skippable=False` so the
     final state always lands."""
     url = api_base + "/repos/" + owner + "/" + repo + "/issues/comments/" + str(comment_id)
-    success, status_code, resp = _do_request(ctx, "PATCH", url, token, {"body": body}, skippable = skippable)
+    success, status_code, resp = _do_request(ctx, "PATCH", url, token, {"body": body}, skippable = skippable, surface = _SURFACE_COMMENTS)
     if success:
         return {"success": True, "comment_id": resp.get("id")}
     if _is_budget_skip(success, status_code, resp):
