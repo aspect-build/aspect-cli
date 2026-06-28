@@ -1,0 +1,206 @@
+"""Warming task status-check rendering.
+
+Parallel to `format_results.axl` / `gazelle_results.axl` for the `warming`
+task (`aspect ci warming`). Warming runs a real `bazel build --nobuild`, so it
+streams BES events into `data["bazel"]` like build/test and reuses the shared
+summary + details renderers (Targets / Build Metrics / Invocation / Runner
+metadata / Task timing). On top of that it surfaces the two warming-specific
+steps the shared renderer doesn't model:
+
+  - the prior-state cleanup under the runner's storage mount, and
+  - the warming-archive upload (the actual point of the task) — attempted only
+    on an Aspect Workflows runner; off-runner it's reported as skipped.
+
+Public API (matches the bazel_results / format_results interface so
+GithubStatusChecks and BuildkiteAnnotations dispatch by `task_update.kind`):
+
+  init_data()                                  → dict
+  render_check_output(ctx, data, status, …)    → {title, summary, text}
+  conclusion(status, data)                     → str
+"""
+
+load(
+    "./bazel_results.axl",
+    "REPRO_COMMANDS_BLOCK",
+    "SHARED_DETAILS_BODY_TEMPLATE",
+    "TIPS_BLOCK",
+    "active_phase_data",
+    "build_details_data",
+    "build_summary_data",
+    "format_run_date",
+    bazel_init_data = "init_data",
+)
+load("./result_text.axl", "emoji_for_status")
+
+_DETAILS_LIMIT = 65000  # GitHub check-run `output.text` hard limit
+
+def init_data():
+    """Return a fresh warming-data dict.
+
+    Starts from bazel_results.init_data() so process_event can populate the
+    full bazel state the shared summary + details renderers consume, plus the
+    warming-specific fields layered on top.
+    """
+    r = bazel_init_data()
+    r["warming"] = {
+        "cleaned": False,  # prior storage-mount state was cleaned
+        "on_runner": False,  # running on an Aspect Workflows runner
+        "build_failed": False,  # the `bazel build --nobuild` populate step failed
+        "archive_attempted": False,  # the warming archiver was invoked
+        "archive_succeeded": False,  # the archiver exited 0
+        "archiver_path": "",  # resolved path of the archiver binary
+        "archive_error": "",  # non-empty when the archive step failed
+        "archive_skipped_reason": "",  # why the archive step was skipped (off-runner)
+    }
+    return r
+
+def _title(data, status, target_pattern = "", task_kind = ""):
+    """Compute the check-run title.
+
+    "✅ warming //... · Warming complete"
+    "✅ warming //... · Caches populated (archive skipped)"
+    "❌ warming //... · Archive upload failed"
+    "❌ warming //... · Populate failed"
+    "🔄 warming //... · Running..."
+    """
+    display = emoji_for_status(status) + " " + (task_kind or "warming")
+    base = display + ((" " + target_pattern) if target_pattern else "")
+    w = data.get("warming", {}) or {}
+
+    if status == "running":
+        return base + " · Running..."
+    if status == "failing":
+        return base + " · Failing..."
+    if status == "aborted":
+        return base + " · Aborted"
+    if w.get("build_failed"):
+        return base + " · Populate failed"
+    if w.get("archive_error"):
+        return base + " · Archive upload failed"
+    if status == "failed":
+        return base + " · Failed"
+    if w.get("archive_succeeded"):
+        return base + " · Warming complete"
+    if w.get("archive_skipped_reason"):
+        return base + " · Caches populated (archive skipped)"
+    return base + " · Passed"
+
+def conclusion(status, data):
+    """Terminal bookend conclusion. See `lifecycle.task_update` for the
+    contract; returns the trailing `· <conclusion>` text, or "".
+    """
+    w = data.get("warming", {}) or {}
+    if w.get("build_failed"):
+        return "Cache populate failed"
+    if w.get("archive_error"):
+        return "Archive upload failed"
+    if status == "failed" or status == "failing":
+        return ""
+    if w.get("archive_succeeded"):
+        return "Caches populated and archived"
+    if w.get("archive_skipped_reason"):
+        return "Caches populated (archive skipped)"
+    if status == "passed":
+        return "Caches populated"
+    return ""
+
+_SUMMARY_TEMPLATE = """{% if detail_rows %}{% for row in detail_rows %}
+{% for item in row %}{{ item.icon }} {{ item.value }}{% if not loop.last %} · {% endif %}{% endfor %}{% if not loop.last %}  {% endif %}
+{%- endfor %}{% endif %}
+{% if config_items %}
+:gear: {% for item in config_items %}**{{ item.key }}:** `{{ item.value }}`{% if not loop.last %} · {% endif %}{% endfor %}{% if last_update %}  {% endif %}{% endif %}{% if last_update %}
+:speech_balloon: **Last update:** `{{ last_update }}`{% endif %}""" + TIPS_BLOCK
+
+_DETAILS_TEMPLATE = """{% if is_running %}
+> 🔄 Warming task in progress...
+
+{% elif is_aborted %}
+> ⚠️ Warming task was aborted before completing. Check the task log for details.
+
+{% elif build_failed %}
+> ❌ The `bazel build --nobuild` cache-populate step failed. Check the task log for details.
+
+{% elif archive_error %}
+> ❌ The warming archive upload failed: {{ archive_error }}
+
+{% else %}
+### ✅ {% if archive_succeeded %}Warming complete{% else %}Caches populated{% endif %}
+
+{% if cleaned %}- 🧹 Cleaned prior Bazel state under the runner storage mount.
+{% endif %}- 🔨 Populated the repository, output, and Bazel caches (`bazel build --nobuild`).
+{% if archive_succeeded %}- 📦 Uploaded the warming archive to the warming bucket.
+{% elif archive_skipped_reason %}- ℹ️ Archive upload skipped — {{ archive_skipped_reason }}.
+{% endif %}
+{% endif %}
+""" + REPRO_COMMANDS_BLOCK + SHARED_DETAILS_BODY_TEMPLATE
+
+def _build_details_data(data, status):
+    w = data.get("warming", {}) or {}
+    return {
+        "is_running": status == "running",
+        "is_aborted": status == "aborted",
+        "build_failed": bool(w.get("build_failed")),
+        "archive_error": w.get("archive_error", "") or "",
+        "archive_succeeded": bool(w.get("archive_succeeded")),
+        "archive_skipped_reason": w.get("archive_skipped_reason", "") or "",
+        "cleaned": bool(w.get("cleaned")),
+    }
+
+def render_check_output(ctx, data, status, render_ctx, links, templates = None, metadata_keys = None, snippet_options = None, max_snippets = 0):
+    """Render title, summary, and text for a warming check run.
+
+    Matches the bazel_results / format_results interface so GithubStatusChecks
+    and BuildkiteAnnotations can dispatch by task_update.kind interchangeably.
+    snippet_options/max_snippets are accepted for parity and ignored.
+    """
+    t = templates or {}
+    run_date = format_run_date(ctx, data.get("start_time_ms", 0))
+    summary_data = build_summary_data(
+        ctx,
+        data,
+        status,
+        render_ctx,
+        links,
+        metadata_keys,
+        run_date = run_date,
+    )
+    finish_date = format_run_date(ctx, data.get("finish_time_ms", 0))
+    shared_data = build_details_data(
+        data,
+        links,
+        render_ctx = render_ctx,
+        status = status,
+        start_date = run_date,
+        finish_date = finish_date,
+        std = ctx.std,
+        task_phases = ctx.task.phases(),
+        task_active = active_phase_data(ctx),
+        task_elapsed_ms = ctx.task.elapsed_ms,
+        include_bazel_targets = True,
+    )
+    details_data = dict(shared_data)
+    details_data.update(_build_details_data(data, status))
+
+    summary_tmpl = t.get("summary") or _SUMMARY_TEMPLATE
+    details_tmpl = t.get("details") or _DETAILS_TEMPLATE
+
+    summary_text = ctx.template.jinja2(summary_tmpl, data = summary_data)
+    details_text = ctx.template.jinja2(details_tmpl, data = details_data)
+
+    # Hard cap on the details body (GitHub limit). The warming body is bounded
+    # by construction (no per-file list), so truncate rather than cascade.
+    if len(details_text) > _DETAILS_LIMIT:
+        details_text = details_text[:_DETAILS_LIMIT]
+
+    task_kind = render_ctx.get("task_kind", "") if render_ctx else ""
+    target_pattern = render_ctx.get("subject", "") if render_ctx else ""
+    return {
+        "title": _title(
+            data,
+            status,
+            target_pattern = target_pattern,
+            task_kind = task_kind,
+        ),
+        "summary": summary_text,
+        "text": details_text,
+    }

@@ -18,7 +18,7 @@ Usage:
 load("@aspect//bazel.axl", "BazelTrait")
 load("@std//time.axl", "sleep_iter")
 load("./private/lib/artifacts.axl", "artifacts")
-load("./private/lib/bazel_flags.axl", "announce_bazel_args", "resolve_bazel_announce")
+load("./private/lib/bazel_flags.axl", "announce_bazel_args", "bazel_flag_args", "resolve_bazel_announce")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event")
 load("./private/lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
 load("./private/lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
@@ -696,14 +696,6 @@ format = task(
             long = "formatter-arg-for-tree-walk",
             description = "Extra positional arguments appended to the formatter binary's argv only when no positional files would otherwise reach it — i.e. when `aspect format` is invoked without explicit file args AND change-detection produced no file list (typically `--scope=all`, but also `--scope=changed` runs where the change-detection source returned no matches or degraded to scope-all). Appended after the (empty) file list and after `formatter_args`. Designed for bare formatter binaries that need an explicit tree-walk flag to do anything useful when the task delegates discovery to them. Example: `formatter_args_for_tree_walk = [\"-r\", \".\"]` for `@buildifier_prebuilt//buildifier`. Has no effect when the formatter receives at least one file (positionally or via `--scope=changed`), so it cannot accidentally turn a per-file invocation into a whole-tree rewrite. Wrapper targets like `format_multirun` from rules_lint walk on their own and don't need this.",
         ),
-        "bazel_flags": args.string_list(
-            long = "bazel-flag",
-            description = "Additional Bazel flags forwarded to the formatter build. Repeat the flag to pass multiple — e.g. `--bazel-flag=--config=ci --bazel-flag=--keep_going`.",
-        ),
-        "bazel_startup_flags": args.string_list(
-            long = "bazel-startup-flag",
-            description = "Additional Bazel startup flags. Repeat the flag to pass multiple. Note: changing startup flags restarts the Bazel server.",
-        ),
         # Positional file list: when non-empty the formatter gets these directly
         # (change-detection + --scope/--base-ref/--merge-base/--include-/
         # --exclude-pattern skipped). Empty → change-detection via --scope.
@@ -714,7 +706,7 @@ format = task(
             maximum = 4096,
             minimum = 0,
         ),
-    } | announce_bazel_args("the formatter build") | repro_flavor_args(include_fix = True),
+    } | bazel_flag_args("the formatter build") | announce_bazel_args("the formatter build") | repro_flavor_args(include_fix = True),
     traits = [
         BazelTrait,
         HealthCheckTrait,

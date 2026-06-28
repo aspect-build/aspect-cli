@@ -9,7 +9,7 @@ helpers directly and print what *would* be sent to BK for each scenario.
 
 Coverage:
   - Each task kind (bazel_results, lint_results, delivery_results,
-    format_results, gazelle_results)
+    format_results, gazelle_results, warming_results)
   - Each terminal status (passed, failed)
   - Style selection edge cases: soft-lint passing with warnings, delivery
     all-skipped, delivery all-failed, soft-format passing with files.
@@ -63,6 +63,11 @@ load(
     lint_render_check_output = "render_check_output",
 )
 load("../lib/result_text.axl", "severity_for_status")
+load(
+    "../lib/warming_results.axl",
+    warming_init_data = "init_data",
+    warming_render_check_output = "render_check_output",
+)
 
 # ─── Test harness ─────────────────────────────────────────────────────────────
 
@@ -116,7 +121,26 @@ _RENDERERS = {
     "delivery_results": delivery_render_check_output,
     "format_results": format_render_check_output,
     "gazelle_results": gazelle_render_check_output,
+    "warming_results": warming_render_check_output,
 }
+
+def _make_warming_complete():
+    r = warming_init_data()
+    r["start_time_ms"] = 1744630000000
+    r["finish_time_ms"] = 1744630004500
+    r["bazel"]["wall_time_ms"] = 4500
+    r["bazel"]["targets_total"] = 1284
+    r["warming"]["on_runner"] = True
+    r["warming"]["cleaned"] = True
+    r["warming"]["archive_attempted"] = True
+    r["warming"]["archive_succeeded"] = True
+    return r
+
+def _make_warming_archive_failed():
+    r = _make_warming_complete()
+    r["warming"]["archive_succeeded"] = False
+    r["warming"]["archive_error"] = "the warming archiver exited with code 3"
+    return r
 
 def _test_impl(ctx):
     scenarios = [
@@ -150,6 +174,8 @@ def _test_impl(ctx):
         # Empty subject (query-driven task with no explicit target list): the
         # title omits the subject entirely — there is no synthetic placeholder.
         ("22. build-passed (empty subject)", "bazel_results", _make_build_passed(), "passed", True, "", "build"),
+        ("23. warming-complete", "warming_results", _make_warming_complete(), "passed", True, "//...", "warming"),
+        ("24. warming-archive-failed", "warming_results", _make_warming_archive_failed(), "failed", True, "//...", "warming"),
     ]
 
     sep = "=" * 70

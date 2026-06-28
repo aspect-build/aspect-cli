@@ -61,6 +61,7 @@ load("@std//time.axl", "time")
 load(
     "./private/lib/bazel_flags.axl",
     "announce_bazel_args",
+    "bazel_flag_args",
     "resolve_bazel_announce",
     "resolve_flags",
     "resolve_startup_flags",
@@ -445,14 +446,6 @@ diff = task(
                 "it and pipe stdout."
             ),
         ),
-        "bazel_flags": args.string_list(
-            description = "Additional Bazel flags forwarded to the probe/build (e.g. --bazel-flag=--config=ci). Repeat to pass multiple.",
-            long = "bazel-flag",
-        ),
-        "bazel_startup_flags": args.string_list(
-            description = "Additional Bazel startup flags. Repeat to pass multiple. Note: changing startup flags restarts the Bazel server.",
-            long = "bazel-startup-flag",
-        ),
         "targets": args.positional(
             minimum = 1,
             maximum = 512,
@@ -463,5 +456,5 @@ diff = task(
                 "workspace. Intersected with `tests(<patterns>)`."
             ),
         ),
-    } | announce_bazel_args("the cache-diff probe"),
+    } | bazel_flag_args("the cache-diff probe") | announce_bazel_args("the cache-diff probe"),
 )

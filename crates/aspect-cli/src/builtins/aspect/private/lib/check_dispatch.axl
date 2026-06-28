@@ -56,6 +56,11 @@ load(
     lint_render_check_output = "render_check_output",
 )
 load("./log_snippet.axl", "SnippetOptions")
+load(
+    "./warming_results.axl",
+    warming_init_data = "init_data",
+    warming_render_check_output = "render_check_output",
+)
 
 # Dispatch table: `task_update.kind` → struct(init, render). Adding a
 # new kind: implement `init_data()` + `render_check_output()` in a
@@ -86,6 +91,10 @@ RENDERERS = {
         init = gazelle_init_data,
         render = gazelle_render_check_output,
     ),
+    "warming_results": struct(
+        init = warming_init_data,
+        render = warming_render_check_output,
+    ),
 }
 
 # Used before the first `task_update` has fired (initial / "running"
@@ -97,6 +106,7 @@ _TASK_KIND_DEFAULTS = {
     "delivery": "delivery_results",
     "format": "format_results",
     "gazelle": "gazelle_results",
+    "warming": "warming_results",
 }
 
 def renderer_for_kind(kind):

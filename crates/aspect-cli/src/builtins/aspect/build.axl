@@ -4,7 +4,7 @@ A default 'build' task that wraps a 'bazel build' command.
 
 load("@aspect//bazel.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
 load("./private/lib/artifacts.axl", "artifacts")
-load("./private/lib/bazel_flags.axl", "announce_bazel_args")
+load("./private/lib/bazel_flags.axl", "announce_bazel_args", "bazel_flag_args")
 load("./private/lib/bazel_runner.axl", "run_bazel_task")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "TaskLifecycleTrait")
@@ -27,14 +27,6 @@ build = task(
             default = "",
             description = "Read newline-separated target patterns from this file instead of the command line (mirrors Bazel's --target_pattern_file). Blank lines and `#` comments are ignored. Cannot be combined with command-line target patterns.",
         ),
-        "bazel_flags": args.string_list(
-            description = "Additional Bazel flags forwarded to the build (e.g. --bazel-flag=--config=ci --bazel-flag=--keep_going). Repeat the flag to pass multiple.",
-            long = "bazel-flag",
-        ),
-        "bazel_startup_flags": args.string_list(
-            description = "Additional Bazel startup flags (e.g. --bazel-startup-flag=--host_jvm_args=-Xmx2g). Repeat the flag to pass multiple. Note: changing startup flags restarts the Bazel server.",
-            long = "bazel-startup-flag",
-        ),
         "bazel_retry_attempts": args.int(
             default = DEFAULT_BAZEL_RETRY_ATTEMPTS,
             description = BAZEL_RETRY_ATTEMPTS_DESCRIPTION,
@@ -51,7 +43,7 @@ build = task(
             default = False,
             description = "Cancel any running Bazel invocation before starting the build.",
         ),
-    } | announce_bazel_args("the build") | repro_flavor_args(),
+    } | bazel_flag_args("the build") | announce_bazel_args("the build") | repro_flavor_args(),
     traits = [
         BazelTrait,
         HealthCheckTrait,
