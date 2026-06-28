@@ -25,13 +25,18 @@ load(
     "apply_budget_refresh",
     "budget_exhausted",
     "budget_should_skip",
+    "cadence_seconds",
+    "claim_budget_refresh",
     "cold_start_phase_change_gate_seconds",
     "effective_throttle_factor",
+    "end_budget_refresh",
     "export_observations",
     "ingest_sibling_observations",
     "inspect_for_test",
+    "record_cadence",
     "record_from_headers",
     "record_observation",
+    "record_refresh_creds",
     "record_token_budget",
     "reset_for_test",
     "set_state_for_test",
@@ -1375,6 +1380,59 @@ def _test_budget_env_bucket_independent(ctx):
     _eq("budget — env spend isolated from app", _budget(ctx, BUCKET_APP)[1], 0)
     _assert("budget — app not exhausted by env spend", not budget_exhausted(ctx, BUCKET_APP))
 
+def _test_cadence_round_trip(ctx):
+    _reset(ctx)
+    _eq("cadence — 0 before any record", cadence_seconds(ctx), 0)
+    record_cadence(ctx, 45)
+    _eq("cadence — recorded value read back", cadence_seconds(ctx), 45)
+    record_cadence(ctx, 0)  # non-positive is a no-op
+    _eq("cadence — non-positive ignored", cadence_seconds(ctx), 45)
+
+def _test_refresh_mint_anchors_start_once(ctx):
+    _reset(ctx)
+    record_token_budget(ctx, BUCKET_APP, 100, now_epoch_s = 5000)
+    _eq("refresh — first mint anchors start", inspect_for_test(ctx)["refresh_epoch_start"], 5000)
+    # A later mint must not move the anchor (the backoff clock is task-wide).
+    record_token_budget(ctx, BUCKET_APP, 80, now_epoch_s = 5100)
+    _eq("refresh — later mint keeps anchor", inspect_for_test(ctx)["refresh_epoch_start"], 5000)
+
+def _test_refresh_claim_requires_creds(ctx):
+    _reset(ctx)
+    record_token_budget(ctx, BUCKET_APP, 100, now_epoch_s = 5000)
+    # Anchored + past the first interval, but no creds stashed → nothing to claim.
+    _eq("refresh — no creds, no claim", claim_budget_refresh(ctx, now_epoch_s = 5010), None)
+
+def _test_refresh_claim_backoff_and_reentrancy(ctx):
+    _reset(ctx)
+    record_token_budget(ctx, BUCKET_APP, 100, now_epoch_s = 5000)
+    record_refresh_creds(ctx, "tok", "proof", "inst-1")
+
+    # Too soon (< 5s base interval after the anchor) → not due.
+    _eq("refresh — not due before base interval", claim_budget_refresh(ctx, now_epoch_s = 5003), None)
+
+    # 5s in → first refresh due; claim returns creds and marks in-flight.
+    claimed = claim_budget_refresh(ctx, now_epoch_s = 5005)
+    _assert("refresh — due at base interval", claimed != None)
+    _eq("refresh — claim returns creds", claimed["installation_id"], "inst-1")
+    _assert("refresh — in-flight set", inspect_for_test(ctx)["refresh_in_flight"])
+
+    # While in-flight, a re-claim (e.g. the refresh's own App call) is blocked.
+    _eq("refresh — reentrancy blocked", claim_budget_refresh(ctx, now_epoch_s = 5006), None)
+
+    end_budget_refresh(ctx)
+    _assert("refresh — in-flight cleared", not inspect_for_test(ctx)["refresh_in_flight"])
+
+    # Next step's interval has doubled to 10s: not due 6s after the last refresh,
+    # due at 10s.
+    _eq("refresh — second interval not yet due", claim_budget_refresh(ctx, now_epoch_s = 5011), None)
+    _assert("refresh — second interval due at 10s", claim_budget_refresh(ctx, now_epoch_s = 5015) != None)
+
+def _test_refresh_not_due_without_anchor(ctx):
+    _reset(ctx)
+    # Creds but no mint anchor (no App budget recorded) → never due.
+    record_refresh_creds(ctx, "tok", "proof", "inst-1")
+    _eq("refresh — no anchor, never due", claim_budget_refresh(ctx, now_epoch_s = 9999), None)
+
 def _test_impl(ctx):
     _test_record_basic(ctx)
     _test_record_buffer_truncation(ctx)
@@ -1444,7 +1502,12 @@ def _test_impl(ctx):
     _test_budget_skip_partial_gap_damping(ctx)
     _test_budget_skip_only_allowed_stamps_surface(ctx)
     _test_budget_skip_per_surface_gap(ctx)
-    print("rate_limit.axl: OK (71 sections)")
+    _test_cadence_round_trip(ctx)
+    _test_refresh_mint_anchors_start_once(ctx)
+    _test_refresh_claim_requires_creds(ctx)
+    _test_refresh_claim_backoff_and_reentrancy(ctx)
+    _test_refresh_not_due_without_anchor(ctx)
+    print("rate_limit.axl: OK (76 sections)")
     return 0
 
 rate_limit_tests = task(

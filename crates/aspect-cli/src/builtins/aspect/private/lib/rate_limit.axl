@@ -181,6 +181,14 @@ _BUDGET_GAP_HORIZON_S = 300
 # budget is nearly gone, so even an after-a-pause update must yield to the cap.
 _BUDGET_CRITICAL_FRACTION = 0.90
 
+# Budget-refresh backoff: the interval between `/github/budget` refreshes is
+# `min(_BUDGET_REFRESH_MAX_S, _BUDGET_REFRESH_BASE_S × 2^step)`, doubling from
+# `BASE` (5s, 10s, 20s, 40s, 80s, 160s) and settling at `MAX` (≈3min). Front-
+# loaded so a fresh swarm re-measures its shrinking per-task slice fast, then
+# relaxes once concurrency stabilizes. `step` = refreshes done so far.
+_BUDGET_REFRESH_BASE_S = 5
+_BUDGET_REFRESH_MAX_S = 180
+
 # ── Cold-start window ────────────────────────────────────────────────
 #
 # Tunes the window's boundaries; rationale in the docstring.
@@ -220,6 +228,11 @@ _COLD_START_OVERRIDE_VAR = "ASPECT_WORKFLOWS_GITHUB_API_RATE_LIMIT_COLD_START"
 #   token_spent              {bucket: int}          — our own calls this window
 #   skippable_seen           {bucket: int}          — gated calls (every-Nth taper)
 #   last_call_epoch          {surface: int}         — per-surface last-spent time
+#   refresh_creds            {token, proof, installation_id} | None — for refresh
+#   refresh_epoch_start      int                    — first-mint time (backoff t=0)
+#   refresh_last             int                    — last budget-refresh time
+#   refresh_in_flight        bool                   — reentrancy guard
+#   desired_cadence_s        int                    — latest server cadence
 
 def _new_state():
     return {
@@ -239,6 +252,16 @@ def _new_state():
         "token_spent": {"app": 0, "env": 0},
         "skippable_seen": {"app": 0, "env": 0},
         "last_call_epoch": {},
+        # Centralized budget refresh (see "Token budget" in the docstring).
+        # Creds stashed at first App mint; the backoff schedule measures elapsed
+        # from `refresh_epoch_start`; `refresh_in_flight` guards reentrancy.
+        "refresh_creds": None,
+        "refresh_epoch_start": 0,
+        "refresh_last": 0,
+        "refresh_in_flight": False,
+        # Latest server `desired_cadence_s` (mint + refresh), 0 until first set —
+        # the comment surface reads it to pace its contribute rate.
+        "desired_cadence_s": 0,
     }
 
 def _path(ctx):
@@ -448,14 +471,18 @@ def _ratelimit_header(headers, suffix):
 # spend (`record_from_headers`) against it and tapers skipping over the
 # rate-limit window. See "Token budget" in the module docstring.
 
-def record_token_budget(ctx, bucket, budget):
+def record_token_budget(ctx, bucket, budget, now_epoch_s = None):
     """Seed the per-token budget on a fresh mint: set `budget` and zero the
-    spend counter. No-op on an unknown bucket or a negative budget."""
+    spend counter. The first App mint also anchors the refresh-backoff clock
+    (`refresh_epoch_start`). No-op on an unknown bucket or a negative budget."""
     if bucket not in _VALID_BUCKETS or budget < 0:
         return
     state = _load(ctx)
     _set_bucket_field(state, "token_budget", bucket, budget)
     _set_bucket_field(state, "token_spent", bucket, 0)
+    if bucket == BUCKET_APP and not state.get("refresh_epoch_start"):
+        now = now_epoch_s if now_epoch_s != None else epoch_now_s(std = ctx.std)
+        state["refresh_epoch_start"] = now
     _save(ctx, state)
 
 def apply_budget_refresh(ctx, bucket, budget):
@@ -580,6 +607,84 @@ def _increment_token_spent(ctx, bucket):
     spent = (state.get("token_spent") or {}).get(bucket, 0)
     _set_bucket_field(state, "token_spent", bucket, spent + 1)
     _save(ctx, state)
+
+def record_refresh_creds(ctx, token, proof, installation_id):
+    """Stash the App token, installation proof, and id so the centralized budget
+    refresh (`claim_budget_refresh`) can call `/github/budget` without a feature
+    handing it credentials. Called at App mint. Later mints overwrite (a fresher
+    token). No-op if any field is empty."""
+    if not token or not proof or not installation_id:
+        return
+    state = _load(ctx)
+    state["refresh_creds"] = {
+        "token": token,
+        "proof": proof,
+        "installation_id": installation_id,
+    }
+    _save(ctx, state)
+
+def claim_budget_refresh(ctx, now_epoch_s = None):
+    """Atomically claim a due budget refresh: if creds are stashed, a refresh is
+    due per the backoff schedule, and none is in flight, mark in-flight + stamp
+    `refresh_last` and return the creds for the caller to POST `/github/budget`.
+    Else return None. The caller MUST call `end_budget_refresh` when done — the
+    in-flight flag is the reentrancy guard that stops the refresh's own App calls
+    from re-claiming. Single load+save so the claim is race-free."""
+    state = _load(ctx)
+    creds = state.get("refresh_creds")
+    if not creds or state.get("refresh_in_flight"):
+        return None
+    now = now_epoch_s if now_epoch_s != None else epoch_now_s(std = ctx.std)
+    if not _budget_refresh_due(state, now):
+        return None
+    state["refresh_in_flight"] = True
+    state["refresh_last"] = now
+    _save(ctx, state)
+    return creds
+
+def end_budget_refresh(ctx):
+    """Clear the in-flight guard set by `claim_budget_refresh`."""
+    state = _load(ctx)
+    state["refresh_in_flight"] = False
+    _save(ctx, state)
+
+def record_cadence(ctx, cadence_s):
+    """Stash the server's latest `desired_cadence_s` (from a mint or refresh) so
+    the comment surface can read it via `cadence_seconds`. No-op on non-positive."""
+    if cadence_s <= 0:
+        return
+    state = _load(ctx)
+    state["desired_cadence_s"] = cadence_s
+    _save(ctx, state)
+
+def cadence_seconds(ctx):
+    """Latest server `desired_cadence_s`, or 0 if none recorded yet."""
+    return _load(ctx).get("desired_cadence_s") or 0
+
+def _budget_refresh_due(state, now):
+    """True iff at least `_refresh_interval(elapsed)` has passed since the last
+    refresh, where `elapsed` is time since the mint anchor. Before the first
+    refresh the reference is the anchor itself (so the first refresh waits one
+    base interval after mint, not since epoch 0). No anchor yet → not due."""
+    start = state.get("refresh_epoch_start") or 0
+    if not start:
+        return False
+    since = max(state.get("refresh_last") or 0, start)
+    return now - since >= _refresh_interval(max(0, now - start))
+
+def _refresh_interval(elapsed_s):
+    """Backoff interval at `elapsed_s` into the task's budget life: the doubling
+    schedule `_BUDGET_REFRESH_BASE_S × 2^step` (5,10,20,40,80,160) clamped at
+    `_BUDGET_REFRESH_MAX_S` (≈3min). Returns the interval of the step whose
+    cumulative span covers `elapsed_s`."""
+    interval = _BUDGET_REFRESH_BASE_S
+    consumed = 0
+    for _ in range(10):
+        if consumed + interval >= elapsed_s:
+            break
+        consumed += interval
+        interval = min(_BUDGET_REFRESH_MAX_S, interval * 2)
+    return interval
 
 def _set_bucket_field(state, field, bucket, value):
     """Set `state[field][bucket] = value`, copying the inner dict (AXL dicts the

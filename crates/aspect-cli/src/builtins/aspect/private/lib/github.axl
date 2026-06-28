@@ -20,7 +20,11 @@ load(
     "BUCKET_ENV",
     "apply_budget_refresh",
     "budget_should_skip",
+    "claim_budget_refresh",
+    "end_budget_refresh",
+    "record_cadence",
     "record_from_headers",
+    "record_refresh_creds",
     "record_token_budget",
 )
 load("./tar.axl", "zip_create")
@@ -191,6 +195,13 @@ def _do_request(ctx, method, url, token, payload = None, quiet_4xx_auth = False,
         attempts = 1
     if not success and not (quiet_4xx_auth and _is_4xx_auth(status)):
         _warn_http_failure(ctx, "GitHub API %s %s" % (method, url), attempts, status, body)
+
+    # Centralized budget refresh: every App call is the trigger point, so any
+    # surface keeps the shared budget fresh without its own refresh code. Self-
+    # throttled to the backoff schedule and reentrancy-guarded (the refresh's own
+    # App calls won't recurse). Only off a successful App response.
+    if success and token_class == BUCKET_APP:
+        _maybe_refresh_budget(ctx)
     return (success, status, body)
 
 # Authentication
@@ -408,6 +419,17 @@ def _authenticate(ctx, owner, repo, profile = None, roles = None, _reason = None
             # counter, so the freshly minted token starts its allowance over.
             if type(parsed.get("api_call_budget")) == "int":
                 record_token_budget(ctx, BUCKET_APP, parsed["api_call_budget"])
+            if type(parsed.get("desired_cadence_s")) == "int":
+                record_cadence(ctx, parsed["desired_cadence_s"])
+
+            # Stash creds for the centralized mid-run budget refresh, so no
+            # feature has to drive it (see `_maybe_refresh_budget`).
+            record_refresh_creds(
+                ctx,
+                parsed["token"],
+                parsed.get("installation_proof", ""),
+                parsed.get("installation_id", ""),
+            )
             return parsed["token"]
         snippet = (resp.body or "")[:200].replace("\n", " ")
         _set_auth_reason(
@@ -502,23 +524,46 @@ def _read_rate_limit(ctx, token, api_base = DEFAULT_GITHUB_API):
         result["limit"] = core["limit"]
     return result
 
-def _status_comment_budget(ctx, request, profile = None):
-    """Refresh a long-running task's budget via `POST /github/budget` — the
-    client reports its installation's live rate-limit headroom and gets back an
-    updated `desired_cadence_s` + `api_call_budget`, without re-minting a token.
+def _maybe_refresh_budget(ctx):
+    """Centralized mid-run budget refresh, triggered from `_do_request` after a
+    successful App call. Claims a due refresh (`claim_budget_refresh` — honors
+    the backoff schedule + reentrancy guard, using creds stashed at mint), reads
+    the installation's live `/rate_limit`, reports it to `POST /github/budget`,
+    and applies the returned budget + cadence. Best-effort and self-contained:
+    no feature drives it, and any miss just leaves the prior budget in place.
 
-    Side-effect: applies `api_call_budget` to the App bucket via
-    `apply_budget_refresh` (floors the current window's budget DOWN; seeds the
-    fresh value after a window roll cleared it — see that function).
+    The reentrancy guard is essential — this makes App calls (`/rate_limit`, and
+    the credentials read), which re-enter `_do_request`; the in-flight flag stops
+    those from claiming a nested refresh."""
+    claimed = claim_budget_refresh(ctx)
+    if not claimed:
+        return
+    headroom = _read_rate_limit(ctx, claimed["token"])
+    if headroom != None:
+        request = {
+            "installation_id": claimed["installation_id"],
+            "installation_proof": claimed["proof"],
+            "remaining": headroom["remaining"],
+            "reset": headroom["reset"],
+        }
+        if "limit" in headroom:
+            request["limit"] = headroom["limit"]
+        _post_budget(ctx, request)
+    end_budget_refresh(ctx)
 
-    `request` is `{installation_id, installation_proof, remaining, reset}` with
-    an optional `limit` (the proof comes from the token mint; see the server's
-    RequestSchema). Returns `{"success": True, "desired_cadence_s": int}` on a
-    2xx, else `{"success": False}`. Never raises — a failure just leaves the
-    caller on its prior cadence."""
+def _post_budget(ctx, request, profile = None):
+    """`POST /github/budget` — report the installation's live rate-limit headroom
+    and apply the returned `api_call_budget` + `desired_cadence_s`.
+
+    `api_call_budget` flows to the App bucket via `apply_budget_refresh` (floors
+    the current window's budget DOWN; seeds the fresh value after a window roll);
+    `desired_cadence_s` to `record_cadence`. `request` is `{installation_id,
+    installation_proof, remaining, reset}` + optional `limit` (the proof comes
+    from the token mint; see the server's RequestSchema). Never raises — a
+    failure just leaves the prior budget/cadence in place."""
     creds = ctx.aspect.auth.credentials(profile = profile)
     if not creds:
-        return {"success": False}
+        return
 
     resp = ctx.http().post(
         url = ctx.aspect.auth.api_url + "/github/budget",
@@ -530,13 +575,14 @@ def _status_comment_budget(ctx, request, profile = None):
     ).map_err(lambda e: str(e)).block()
 
     if type(resp) == "string" or resp.status < 200 or resp.status >= 300:
-        return {"success": False}
+        return
     parsed = json.try_decode(resp.body, None)
-    if type(parsed) != "dict" or type(parsed.get("desired_cadence_s")) != "int":
-        return {"success": False}
+    if type(parsed) != "dict":
+        return
     if type(parsed.get("api_call_budget")) == "int":
         apply_budget_refresh(ctx, BUCKET_APP, parsed["api_call_budget"])
-    return {"success": True, "desired_cadence_s": parsed["desired_cadence_s"]}
+    if type(parsed.get("desired_cadence_s")) == "int":
+        record_cadence(ctx, parsed["desired_cadence_s"])
 
 # Check Runs
 
@@ -2222,8 +2268,6 @@ github = struct(
     VALID_ROLES = VALID_ROLES,
     authenticate = _authenticate,
     status_comment_contribute = _status_comment_contribute,
-    status_comment_budget = _status_comment_budget,
-    read_rate_limit = _read_rate_limit,
     preferred_token_pair = _preferred_token_pair,
     missing_credentials_reason = _missing_credentials_reason,
     validate_role = validate_role,
