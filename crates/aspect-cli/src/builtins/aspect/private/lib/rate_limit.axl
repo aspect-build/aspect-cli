@@ -388,6 +388,7 @@ def record_from_headers(ctx, bucket, headers, epoch_s = None):
     counted too; the slight over-count is conservative."""
     if not headers:
         return
+
     # GitHub sends `X-RateLimit-*`; GitLab sends the un-prefixed `RateLimit-*`.
     # `_ratelimit_header` tries both so one code path covers both hosts.
     remaining_s = _ratelimit_header(headers, "Remaining")

@@ -1130,6 +1130,7 @@ def _budget(ctx, bucket = BUCKET_APP):
 
 def _test_budget_record_seeds_and_zeroes(ctx):
     _reset(ctx)
+
     # No budget issued yet → not exhausted (caller falls back to cadence).
     _assert("budget — unset is not exhausted", not budget_exhausted(ctx, BUCKET_APP))
     record_token_budget(ctx, BUCKET_APP, 100)
@@ -1138,6 +1139,7 @@ def _test_budget_record_seeds_and_zeroes(ctx):
 
 def _test_budget_zero_is_exhausted(ctx):
     _reset(ctx)
+
     # A drained bucket yields budget 0 → exhausted from the first call, with
     # zero spend (the design's "back off entirely" boundary).
     record_token_budget(ctx, BUCKET_APP, 0)
@@ -1158,6 +1160,7 @@ def _test_budget_spend_counts_per_call(ctx):
 def _test_budget_counts_gitlab_headers(ctx):
     _reset(ctx)
     record_token_budget(ctx, BUCKET_APP, 5)
+
     # GitLab spells the headers without the `X-` prefix.
     headers = [("RateLimit-Remaining", "900"), ("RateLimit-Limit", "1000"), ("RateLimit-Reset", str(_FAR_FUTURE))]
     record_from_headers(ctx, BUCKET_APP, headers, epoch_s = 1.0)
@@ -1167,6 +1170,7 @@ def _test_budget_counts_gitlab_headers(ctx):
 def _test_budget_no_headers_no_spend(ctx):
     _reset(ctx)
     record_token_budget(ctx, BUCKET_APP, 5)
+
     # Non-GitHub/GitLab response (no rate-limit headers) → no spend counted.
     record_from_headers(ctx, BUCKET_APP, [("Content-Type", "application/json")], epoch_s = 1.0)
     _eq("budget — non-rate-limit response not counted", _budget(ctx)[1], 0)
@@ -1174,16 +1178,19 @@ def _test_budget_no_headers_no_spend(ctx):
 def _test_budget_refresh_floors_down_only(ctx):
     _reset(ctx)
     record_token_budget(ctx, BUCKET_APP, 100)
+
     # Spend some, then a refresh that would RAISE the budget — must be ignored.
     record_from_headers(ctx, BUCKET_APP, [("X-RateLimit-Remaining", "1"), ("X-RateLimit-Limit", "5000"), ("X-RateLimit-Reset", str(_FAR_FUTURE))], epoch_s = 1.0)
     apply_budget_refresh(ctx, BUCKET_APP, 500)
     _eq("budget — refresh never raises", _budget(ctx), (100, 1))
+
     # A lower refresh shrinks the cap but keeps the spend counter.
     apply_budget_refresh(ctx, BUCKET_APP, 40)
     _eq("budget — refresh floors down, spend kept", _budget(ctx), (40, 1))
 
 def _test_budget_refresh_seeds_when_unset(ctx):
     _reset(ctx)
+
     # With no budget set (none issued, or a window roll cleared it), a refresh
     # seeds the value rather than no-opping — so a fresh window's budget lands.
     apply_budget_refresh(ctx, BUCKET_APP, 50)
@@ -1204,6 +1211,7 @@ def _test_budget_window_roll_reseeds(ctx):
     record_from_headers(ctx, BUCKET_APP, [("X-RateLimit-Remaining", "5000"), ("X-RateLimit-Limit", "5000"), ("X-RateLimit-Reset", str(near + 4000))], epoch_s = 11.0)
     _eq("budget — roll clears the budget", _budget(ctx), (None, 1))
     _assert("budget — not exhausted after roll", not budget_exhausted(ctx, BUCKET_APP))
+
     # The next refresh seeds the fresh window's (larger) allowance.
     apply_budget_refresh(ctx, BUCKET_APP, 200)
     _eq("budget — fresh window allowance seeded", _budget(ctx), (200, 1))
@@ -1214,6 +1222,7 @@ def _test_budget_exhausted_shrink_below_spent(ctx):
     for i in range(5):
         record_from_headers(ctx, BUCKET_APP, [("X-RateLimit-Remaining", "1"), ("X-RateLimit-Limit", "5000"), ("X-RateLimit-Reset", str(_FAR_FUTURE))], epoch_s = float(i))
     _assert("budget — 5/10 not exhausted", not budget_exhausted(ctx, BUCKET_APP))
+
     # A refresh shrinks the cap below what's already spent → exhausted.
     apply_budget_refresh(ctx, BUCKET_APP, 4)
     _assert("budget — shrunk below spend → exhausted", budget_exhausted(ctx, BUCKET_APP))
@@ -1224,6 +1233,7 @@ def _test_budget_mint_resets_spend(ctx):
     record_from_headers(ctx, BUCKET_APP, [("X-RateLimit-Remaining", "1"), ("X-RateLimit-Limit", "5000"), ("X-RateLimit-Reset", str(_FAR_FUTURE))], epoch_s = 1.0)
     record_from_headers(ctx, BUCKET_APP, [("X-RateLimit-Remaining", "1"), ("X-RateLimit-Limit", "5000"), ("X-RateLimit-Reset", str(_FAR_FUTURE))], epoch_s = 2.0)
     _assert("budget — exhausted before re-mint", budget_exhausted(ctx, BUCKET_APP))
+
     # A fresh mint resets the spend counter against the new allowance.
     record_token_budget(ctx, BUCKET_APP, 50)
     _eq("budget — re-mint zeroes spend", _budget(ctx), (50, 0))
@@ -1232,6 +1242,7 @@ def _test_budget_mint_resets_spend(ctx):
 def _test_budget_env_bucket_independent(ctx):
     _reset(ctx)
     record_token_budget(ctx, BUCKET_APP, 1)
+
     # Env-bucket spend must not exhaust the App budget (separate counters).
     record_from_headers(ctx, BUCKET_ENV, [("X-RateLimit-Remaining", "1"), ("X-RateLimit-Limit", "1000"), ("X-RateLimit-Reset", str(_FAR_FUTURE))], epoch_s = 1.0)
     _eq("budget — env spend isolated from app", _budget(ctx, BUCKET_APP)[1], 0)

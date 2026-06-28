@@ -395,6 +395,7 @@ def _authenticate(ctx, owner, repo, profile = None, roles = None, _reason = None
                 for k in ("desired_cadence_s", "installation_id", "installation_proof"):
                     if k in parsed:
                         _extra[k] = parsed[k]
+
             # Seed the App-bucket per-token budget: a mint resets the spend
             # counter, so the freshly minted token starts its allowance over.
             if type(parsed.get("api_call_budget")) == "int":

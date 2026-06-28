@@ -1656,6 +1656,7 @@ def _github_status_comments(ctx: FeatureContext):
         stable_body, final_body = _render_comment(ctx, state, sel, now_epoch)
         if _state.get("_last_stable_body") == stable_body:
             return
+
         # Mid-run PATCHes are skippable under budget pressure; the terminal
         # verdict (final) always lands.
         if not _upsert_comment(ctx, token, final_body, skippable = not final):
