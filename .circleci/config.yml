@@ -1,4 +1,6 @@
 version: 2.1
+orbs:
+  setup-aspect: aspect-build/setup-aspect@2026.26.8
 # Manual break-glass override for `aspect delivery`. Settable via the
 # CircleCI "Trigger Pipeline" UI or API; default empty means normal
 # selective delivery on every other build.
@@ -48,6 +50,7 @@ jobs:
       - run:
           name: Bootstrap
           command: .aspect/bootstrap.sh
+      - setup-aspect/setup
       - run:
           name: Build Task (ASPECT_DEBUG=1)
           command: ASPECT_DEBUG=1 aspect build --task:name build-cci-debug
@@ -63,6 +66,7 @@ jobs:
       - run:
           name: Bootstrap
           command: .aspect/bootstrap.sh
+      - setup-aspect/setup
       - run:
           name: Test Task (ASPECT_DEBUG=1)
           command: ASPECT_DEBUG=1 aspect test --task:name test-cci-debug
@@ -78,6 +82,7 @@ jobs:
       - run:
           name: Bootstrap
           command: .aspect/bootstrap.sh
+      - setup-aspect/setup
       - run:
           name: Lint Task (ASPECT_DEBUG=1)
           command: |
@@ -103,6 +108,7 @@ jobs:
       - run:
           name: Bootstrap
           command: .aspect/bootstrap.sh
+      - setup-aspect/setup
       - run:
           name: Buildifier Task (ASPECT_DEBUG=1)
           command: ASPECT_DEBUG=1 aspect buildifier --task:name buildifier-cci-debug
@@ -118,6 +124,7 @@ jobs:
       - run:
           name: Bootstrap
           command: .aspect/bootstrap.sh
+      - setup-aspect/setup
       # Starlark patterns are handled by buildifier-task; ignore them here so
       # the two steps don't do duplicate work.
       - run:
@@ -135,6 +142,7 @@ jobs:
       - run:
           name: Bootstrap
           command: .aspect/bootstrap.sh
+      - setup-aspect/setup
       - run:
           name: Gazelle Task (ASPECT_DEBUG=1)
           command: ASPECT_DEBUG=1 aspect gazelle --task:name gazelle-cci-debug
@@ -153,6 +161,7 @@ jobs:
       - run:
           name: Bootstrap
           command: .aspect/bootstrap.sh
+      - setup-aspect/setup
       # `--config=pure_go` is required on Linux: toolchains_llvm_bootstrapped's
       # lld can't accept Go's non-PIC relocations on x86_64. See .bazelrc.
       - run:
@@ -172,6 +181,7 @@ jobs:
       - run:
           name: Bootstrap
           command: .aspect/bootstrap.sh
+      - setup-aspect/setup
       - run:
           name: Delivery Task (ASPECT_DEBUG=1)
           command: ASPECT_DEBUG=1 aspect delivery --task:name delivery-cci-debug
