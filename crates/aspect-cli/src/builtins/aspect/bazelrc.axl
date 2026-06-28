@@ -57,6 +57,19 @@ def _flag_str(flag) -> str:
     a `(flag, version_condition)` tuple from `rc.expand` — take the flag text."""
     return flag[0] if type(flag) == "tuple" else flag
 
+def startup_flags_for_rc(startup_flags: list) -> list:
+    """Drop startup flags that don't belong in the generated home rc.
+
+    `get_bazelrc_flags` includes `--nohome_rc` because the workflows feature
+    passes these as *command-line* startup flags to `aspect <task>`. Here we
+    write them into the home rc itself (~/.bazelrc), so `--nohome_rc` would be
+    self-defeating — Bazel reads ~/.bazelrc, then that flag tells it to ignore
+    the very file it's reading. (`--nosystem_rc` stays: it suppresses the
+    separate /etc/bazel.bazelrc, e.g. a stale rc from a prior rosetta run.)
+
+    Public (not `_`-prefixed) so `bazelrc_test.axl` can load it."""
+    return [f for f in startup_flags if f != "--nohome_rc"]
+
 def command_sections(bazel_version: str | None) -> list:
     """The rc command sections the build flags go under. `common` (one section,
     applies to every command) on Bazel >= 6.3.0 or when the version is unknown
@@ -109,6 +122,8 @@ def _bazelrc_impl(ctx: TaskContext) -> int:
         environment = environment,
         aspect_root_dir = ctx.std.env.aspect_root_dir(),
     )
+
+    startup_flags = startup_flags_for_rc(startup_flags)
 
     # Probed once and memoized by the runtime; shared with flag gating below.
     # Pre-release suffix dropped (the default) so an rc matches its release's
