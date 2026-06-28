@@ -35,6 +35,7 @@ load("@aspect//private/lib/runner_job_history_test.axl", "runner_job_history_tes
 load("@aspect//private/lib/sandbox_recovery_test.axl", "sandbox_recovery_tests")
 load("@aspect//private/lib/tar_test.axl", "tar_tests")
 load("@aspect//private/lib/tips_test.axl", "tips_tests")
+load("@aspect//private/lib/warming_results_test.axl", "warming_template_snapshot_tests")
 load("@aspect//private/lib/wrapper_test.axl", "wrapper_tests")
 load("@aspect//tips.axl", "TASK_SCREENS", "TIP_SUGGESTION", "TIP_TEMPLATE_RAW", "add_tip")
 load("@aspect//traits.axl", "BazelTrait", "DeliveryTrait", "LintTrait", "REPRO_FIX_ACCEPT", "REPRO_FIX_REJECT", "ReproFixInfo", "ReproFixSuggestion", "TaskLifecycleTrait", "TaskUpdate", "repro_fix_replace")
@@ -373,6 +374,10 @@ def config(ctx: ConfigContext):
     # gazelle_results template snapshots.
     # Run with: aspect dev test-gazelle-template-snapshots
     ctx.tasks.add(gazelle_template_snapshot_tests)
+
+    # warming_results template snapshots.
+    # Run with: aspect dev test-warming-template-snapshots
+    ctx.tasks.add(warming_template_snapshot_tests)
 
     # Buildkite annotations: snapshots the annotate body per kind × status.
     # Run with: aspect dev test-bk-annotation-snapshots

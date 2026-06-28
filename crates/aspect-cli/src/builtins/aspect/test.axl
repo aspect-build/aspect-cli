@@ -4,7 +4,7 @@ A default 'test' task that wraps a 'bazel test' command.
 
 load("@aspect//bazel.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
 load("./private/lib/artifacts.axl", "artifacts")
-load("./private/lib/bazel_flags.axl", "announce_bazel_args")
+load("./private/lib/bazel_flags.axl", "announce_bazel_args", "bazel_flag_args")
 load("./private/lib/bazel_runner.axl", "run_bazel_task")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "TaskLifecycleTrait")
@@ -126,14 +126,6 @@ test = task(
             long = "coverage-tool-arg",
             description = "Argument forwarded to --coverage-tool. Repeat the flag to pass multiple. The `{report}` (or `{lcov}`) placeholder is replaced with the absolute path of the merged LCOV report. Example: `--coverage-tool=codecov --coverage-tool-arg=-f --coverage-tool-arg={report}`.",
         ),
-        "bazel_flags": args.string_list(
-            long = "bazel-flag",
-            description = "Additional Bazel flags forwarded to the test invocation (e.g. --bazel-flag=--config=ci --bazel-flag=--test_filter=foo). Repeat the flag to pass multiple.",
-        ),
-        "bazel_startup_flags": args.string_list(
-            long = "bazel-startup-flag",
-            description = "Additional Bazel startup flags. Repeat the flag to pass multiple. Note: changing startup flags restarts the Bazel server.",
-        ),
         "bazel_retry_attempts": args.int(
             default = DEFAULT_BAZEL_RETRY_ATTEMPTS,
             description = BAZEL_RETRY_ATTEMPTS_DESCRIPTION,
@@ -150,7 +142,7 @@ test = task(
             default = False,
             description = "Cancel any running Bazel invocation before starting the test.",
         ),
-    } | announce_bazel_args("the test") | repro_flavor_args(),
+    } | bazel_flag_args("the test invocation") | announce_bazel_args("the test") | repro_flavor_args(),
     traits = [
         BazelTrait,
         HealthCheckTrait,

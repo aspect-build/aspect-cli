@@ -8,10 +8,32 @@ runner it then runs the warming archiver
 (`ASPECT_WORKFLOWS_RUNNER_WARMING_ARCHIVER`, defaulting to
 `/etc/aspect/workflows/bin/warming_archive`) to upload the populated caches to
 the warming bucket — so a CI workflow only needs to call `aspect ci warming`.
+
+Like every other task that calls Bazel, it resolves its flags through
+`setup_phase` (which folds in the Workflows runner metadata — the per-runner
+`--output_base`, repository cache, and identity header — and runs the
+`HealthCheckTrait` health checks before building). It is therefore not given an
+`--output-base` flag of its own; on a Workflows runner the output base comes
+from the runner metadata.
+
+The whole run surfaces as a single status check / Buildkite annotation
+(`kind = "warming_results"`, rendered by `private/lib/warming_results.axl`)
+spanning three phases — 🧹 clean, 🔨 populate, 📦 archive — so the check
+reflects the archive-upload outcome, not just the build. Off a Workflows runner
+the archive step is reported as skipped and the task still passes.
 """
 
-load("@aspect//traits.axl", "BazelTrait")
+load("@aspect//bazel.axl", "BazelTrait")
+load("@std//time.axl", "sleep_iter")
+load("./private/lib/artifacts.axl", "artifacts")
+load("./private/lib/bazel_flags.axl", "announce_bazel_args", "bazel_flag_args", "resolve_bazel_announce")
+load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event")
+load("./private/lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
 load("./private/lib/environment.axl", "error", "warn")
+load("./private/lib/health_check.axl", "HealthCheckTrait")
+load("./private/lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "dispatch_task_update", "setup_phase", "task_update")
+load("./private/lib/tips.axl", "tips")
+load("./private/lib/warming_results.axl", warming_conclusion = "conclusion", warming_init_data = "init_data")
 
 ASPECT_CLI_RELEASES_URL = "https://github.com/aspect-build/aspect-cli/releases"
 
@@ -19,94 +41,231 @@ ASPECT_CLI_RELEASES_URL = "https://github.com/aspect-build/aspect-cli/releases"
 # ASPECT_WORKFLOWS_RUNNER_WARMING_ARCHIVER; falls back to its default location.
 _DEFAULT_WARMING_ARCHIVER = "/etc/aspect/workflows/bin/warming_archive"
 
-def _impl(ctx: TaskContext) -> int:
+_KIND = "warming_results"
+
+def _pick_status(data, had_failure, terminal):
+    """Lifecycle status for the warming surface. A recorded failure (build or
+    archive) → failed/failing; otherwise running while in-flight, passed at
+    the terminal."""
+    w = data.get("warming", {}) or {}
+    if data.get("bazel", {}).get("aborted"):
+        return "aborted"
+    if had_failure or w.get("build_failed") or w.get("archive_error"):
+        return "failed" if terminal else "failing"
+    return "passed" if terminal else "running"
+
+def _emit_final(ctx, lifecycle, data, exit_code):
+    """Emit the terminal task_update for status-check consumers and return the
+    TaskConclusion `_impl` returns."""
+    status = _pick_status(data, had_failure = exit_code != 0, terminal = True)
+    if not data.get("finish_time_ms"):
+        data["finish_time_ms"] = now_ms(ctx)
+    if data.get("start_time_ms") and not data["bazel"].get("wall_time_ms"):
+        data["bazel"]["wall_time_ms"] = data["finish_time_ms"] - data["start_time_ms"]
+
+    bookend = warming_conclusion(status, data)
+    return task_update(
+        ctx,
+        lifecycle,
+        status,
+        ProgressStyles(body = bookend),
+        kind = _KIND,
+        data = data,
+        final = True,
+        conclusion = bookend,
+        exit_code = exit_code,
+    )
+
+def _clean_storage_mount(ctx, mount: str):
+    """Remove prior Bazel state under the runner storage `mount`. Match
+    rosetta's pre-warming cleanup. Best-effort throughout: bazel may have left
+    output dirs read-only, so chmod first; spawn errors are tolerated since the
+    dirs/server may not exist yet on a fresh runner."""
+    for sub in ["bazel", "output", "caches/repository"]:
+        d = mount + "/" + sub
+        ctx.std.process.command("find").args([d, "-type", "d", "-exec", "chmod", "u+w", "{}", "+"]).spawn().wait()
+
+        # Remove the directories' *contents*, not the directories themselves:
+        # the storage-mount subdirs are created (and owned) by the runner
+        # bootstrap, so `rm -rf <dir>` fails with "Permission denied" on the
+        # mount entry while `rm -rf <dir>/*` clears what we actually need to.
+        # Use a shell so the glob expands.
+        ctx.std.process.command("sh").args(["-c", "rm -rf -- '%s'/* '%s'/.[!.]* 2>/dev/null || true" % (d, d)]).spawn().wait()
+
+def _impl(ctx: TaskContext) -> int | TaskConclusion:
+    bazel_trait = ctx.traits[BazelTrait]
+    hc_trait = ctx.traits[HealthCheckTrait]
+    lifecycle = ctx.traits[TaskLifecycleTrait]
+
     on_workflows_runner = bool(ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER"))
+    targets = list(ctx.args.targets)
+
+    data = warming_init_data()
+    data["start_time_ms"] = now_ms(ctx)
+    data["target_pattern"] = " ".join(targets)
+    data["warming"]["on_runner"] = on_workflows_runner
+
+    # Single pre-task setup phase: opens the status surface + renders the first
+    # body, resolves Bazel flags + parses the workspace .bazelrc (folding in the
+    # runner metadata, incl. --output_base), and runs the health_check hooks (a
+    # failed check concludes the surface and fails the task inside).
+    setup_phase(ctx, lifecycle, data["target_pattern"], _KIND, data, hc_trait, bazel_trait, "build")
+    announce_version, announce_command = resolve_bazel_announce(ctx)
+
     mount = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_STORAGE_PATH")
     if mount:
-        # Match rosetta's pre-warming cleanup. Best-effort throughout: bazel may
-        # have left output dirs read-only, so chmod first; spawn errors are
-        # tolerated since the dirs/server may not exist yet on a fresh runner.
-        for sub in ["bazel", "output", "caches/repository"]:
-            d = mount + "/" + sub
-            ctx.std.process.command("find").args([d, "-type", "d", "-exec", "chmod", "u+w", "{}", "+"]).spawn().wait()
+        task_update(
+            ctx,
+            lifecycle,
+            "running",
+            ProgressStyles(
+                body = "Cleaning prior Bazel state...",
+                stream = "Cleaning prior Bazel state",
+            ),
+            kind = _KIND,
+            data = data,
+            phase = Phase(name = "clean", description = "Clean prior Bazel state", emoji = "🧹"),
+        )
+        _clean_storage_mount(ctx, mount)
+        data["warming"]["cleaned"] = True
 
-            # Remove the directories' *contents*, not the directories
-            # themselves: the storage-mount subdirs are created (and owned) by
-            # the runner bootstrap, so `rm -rf <dir>` fails with "Permission
-            # denied" on the mount entry while `rm -rf <dir>/*` clears what we
-            # actually need to. Use a shell so the glob expands.
-            ctx.std.process.command("sh").args(["-c", "rm -rf -- '%s'/* '%s'/.[!.]* 2>/dev/null || true" % (d, d)]).spawn().wait()
+    # Populate phase: `bazel build --nobuild`. Pass build_event_sinks (the Aspect
+    # backend gRPC sink in CI) so the "✨ Aspect Workflows" link resolves to a
+    # real record. The local iterator drains BES into `data["bazel"]`.
+    events = bazel.build_events.iterator()
+    build_events = [events] + list(bazel_trait.build_event_sinks)
 
-    bazel_trait = ctx.traits[BazelTrait]
+    for hook in bazel_trait.build_start:
+        hook(ctx)
 
-    flags = ["--nobuild"]
-    flags.extend(ctx.args.bazel_flags)
-    flags.extend(bazel_trait.extra_flags)
-    for hook in bazel_trait.task_flags:
-        flags.extend(hook(ctx))
-    if bazel_trait.flags:
-        flags = bazel_trait.flags(flags)
-
-    startup_flags = list(ctx.args.bazel_startup_flags)
-    startup_flags.extend(bazel_trait.extra_startup_flags)
-    if ctx.args.output_base:
-        startup_flags.insert(0, "--output_base=" + ctx.args.output_base)
-    if bazel_trait.startup_flags:
-        startup_flags = bazel_trait.startup_flags(startup_flags)
-
-    # Build a RunCommand that carries BOTH the command flags and the startup
-    # flags (e.g. --output_base), since the runtime resolves a build's flags and
-    # startup flags from its RunCommand rather than a mutable ctx.bazel
-    # attribute. Use `parse_rc` (not `new_rc`): it reads the workspace `.bazelrc`
-    # from the Bazel root, and the `flags` we pass become synthetic options that
-    # are expanded *against* that rc — so a user `--config=<group>` forwarded via
-    # `--bazel-flag` resolves against the config groups defined there.
-    #
-    # The flags MUST go through `parse_rc`, not the per-call `flags=` on `build`:
-    # `build`'s `flags=` are appended raw *after* the rc is resolved, and the
-    # resolved invocation also carries `--ignore_all_rc_files`, so a raw
-    # `--config=ci` would reach a Bazel told to ignore the very `.bazelrc` that
-    # defines `ci` — failing with "Config value 'ci' is not defined in any .rc
-    # file". Passing them to `parse_rc` makes them part of the resolved command.
-    rc = ctx.bazel.parse_rc(flags = flags, startup_flags = startup_flags)
-
-    invocation = ctx.bazel.build(
-        rc = rc,
-        *ctx.args.targets
+    task_update(
+        ctx,
+        lifecycle,
+        "running",
+        ProgressStyles(
+            body = "Populating caches... (bazel build --nobuild)",
+            stream = "Populating caches (bazel build --nobuild)",
+        ),
+        kind = _KIND,
+        data = data,
+        phase = Phase(name = "populate", description = "Populate Bazel caches", emoji = "🔨"),
     )
-    code = invocation.wait().code
-    if code != 0:
-        return code
 
-    if on_workflows_runner:
-        archiver = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_WARMING_ARCHIVER") or _DEFAULT_WARMING_ARCHIVER
-        if not ctx.std.fs.exists(archiver):
-            error(
-                ctx.std,
-                "Cannot upload the warming archive: the warming archiver was not found at %s. Upgrade to the latest aspect-cli to enable warming: %s" % (archiver, ASPECT_CLI_RELEASES_URL),
-            )
-            return 1
-
-        # Upload the populated caches to the warming bucket. Inherits the
-        # script's stdout/stderr so the user sees its progress in real time.
-        archive = ctx.std.process.command(archiver).spawn().wait()
-        return archive.code
-
-    warn(
-        ctx.std,
-        "not on an Aspect Workflows runner; skipping the warming archive upload " +
-        "step. The bazel cache populate step ran successfully. On an Aspect " +
-        "Workflows runner this task also uploads the populated caches to the " +
-        "warming bucket.",
+    build = ctx.bazel.build(
+        flags = ["--nobuild"],
+        build_events = build_events,
+        announce_version = announce_version,
+        announce_command = announce_command,
+        *targets
     )
-    return 0
+
+    # sink_invocation_id is minted in Build::spawn before it returns. Populate +
+    # re-emit (status-surface only, empty stream) so the Workflows link surfaces
+    # at spawn rather than at build.wait().
+    data["sink_invocation_id"] = build.sink_invocation_id
+    task_update(
+        ctx,
+        lifecycle,
+        "running",
+        ProgressStyles(body = "Populating caches... (bazel build --nobuild)"),
+        kind = _KIND,
+        data = data,
+    )
+
+    # Tick-driven drain: heartbeat refresh every MIN_HEARTBEAT_INTERVAL_MS even
+    # when bazel is silent. Per event: build_event hooks (artifact recording) +
+    # process_event (populate the bazel state for the rendered sections).
+    last_emit_ms = now_ms(ctx)
+    for _tick in sleep_iter(BES_DRAIN_TICK_MS):
+        interesting = False
+        for _ in range(10000):
+            event = events.try_pop()
+            if event == None:
+                break
+            for handler in bazel_trait.build_event:
+                handler(ctx, event)
+            if process_event(data, event):
+                interesting = True
+        if interesting or now_ms(ctx) - last_emit_ms >= MIN_HEARTBEAT_INTERVAL_MS:
+            dispatch_task_update(ctx, lifecycle, TaskUpdate(
+                kind = _KIND,
+                status = _pick_status(data, had_failure = False, terminal = False),
+                data = data,
+                progress = ProgressStyles(),
+            ))
+            last_emit_ms = now_ms(ctx)
+        if events.done:
+            break
+
+    build_status = build.wait()
+    for sink in bazel_trait.build_event_sinks:
+        sink.wait()
+
+    # Fire the attempt-end + build-end hooks the `workflows` feature registers
+    # (sandbox-state repair, runner-unhealthy signaling on server-internal-error
+    # exits). Warming runs a single attempt, so both fire exactly once.
+    dispatch_bazel_attempt_end(ctx, bazel_trait, build_status.code)
+    dispatch_bazel_build_end(ctx, bazel_trait, build_status.code)
+
+    if not build_status.success:
+        data["warming"]["build_failed"] = True
+        return _emit_final(ctx, lifecycle, data, build_status.code or 1)
+
+    # Archive phase: upload the populated caches to the warming bucket. Only on
+    # an Aspect Workflows runner; off-runner it's reported as skipped.
+    if not on_workflows_runner:
+        reason = "not on an Aspect Workflows runner"
+        data["warming"]["archive_skipped_reason"] = reason
+        warn(
+            ctx.std,
+            "not on an Aspect Workflows runner; skipping the warming archive upload " +
+            "step. The bazel cache populate step ran successfully. On an Aspect " +
+            "Workflows runner this task also uploads the populated caches to the " +
+            "warming bucket.",
+        )
+        return _emit_final(ctx, lifecycle, data, 0)
+
+    task_update(
+        ctx,
+        lifecycle,
+        "running",
+        ProgressStyles(
+            body = "Uploading warming archive...",
+            stream = "Uploading warming archive",
+        ),
+        kind = _KIND,
+        data = data,
+        phase = Phase(name = "archive", description = "Upload warming archive", emoji = "📦"),
+    )
+
+    archiver = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_WARMING_ARCHIVER") or _DEFAULT_WARMING_ARCHIVER
+    data["warming"]["archiver_path"] = archiver
+    data["warming"]["archive_attempted"] = True
+    if not ctx.std.fs.exists(archiver):
+        msg = "the warming archiver was not found at %s. Upgrade to the latest aspect-cli to enable warming: %s" % (archiver, ASPECT_CLI_RELEASES_URL)
+        error(ctx.std, "Cannot upload the warming archive: " + msg)
+        data["warming"]["archive_error"] = msg
+        return _emit_final(ctx, lifecycle, data, 1)
+
+    # Inherits the script's stdout/stderr so the user sees its progress in real time.
+    archive = ctx.std.process.command(archiver).spawn().wait()
+    if archive.code != 0:
+        data["warming"]["archive_error"] = "the warming archiver exited with code %d" % archive.code
+        return _emit_final(ctx, lifecycle, data, archive.code)
+
+    data["warming"]["archive_succeeded"] = True
+    return _emit_final(ctx, lifecycle, data, 0)
 
 warming = task(
     group = ["ci"],
     summary = "Pre-populate Bazel caches on a CI runner (and archive them on Aspect Workflows runners).",
     description = "Cleans prior Bazel state under the runner's storage mount, then runs `bazel build --nobuild` against the given targets so subsequent jobs on the same runner pool start with hot caches. On an Aspect Workflows runner it then creates and uploads the warming archives to the warming bucket, so a warming pipeline only needs to call `aspect ci warming`. Off a Workflows runner the cache-populate step still runs and the archive step is skipped.",
     implementation = _impl,
-    traits = [BazelTrait],
+    traits = [
+        BazelTrait,
+        HealthCheckTrait,
+        TaskLifecycleTrait,
+    ] + artifacts.TRAITS + tips.TRAITS,
     args = {
         "targets": args.positional(
             minimum = 1,
@@ -114,17 +273,5 @@ warming = task(
             default = ["..."],
             description = "Bazel target patterns to warm. Defaults to '...' which expands to all rule targets in the package at and beneath the current directory.",
         ),
-        "bazel_flags": args.string_list(
-            long = "bazel-flag",
-            description = "Additional Bazel flags forwarded to the build (e.g. --bazel-flag=--config=ci). Repeat the flag to pass multiple.",
-        ),
-        "bazel_startup_flags": args.string_list(
-            long = "bazel-startup-flag",
-            description = "Additional Bazel startup flags. Repeat the flag to pass multiple.",
-        ),
-        "output_base": args.string(
-            default = "",
-            description = "Bazel output base path. Use to target a specific Bazel server instance.",
-        ),
-    },
+    } | bazel_flag_args("the warming build") | announce_bazel_args("the warming build"),
 )

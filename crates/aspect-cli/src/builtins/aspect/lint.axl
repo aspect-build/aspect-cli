@@ -19,7 +19,7 @@ Usage:
 load("@aspect//bazel.axl", "BazelTrait")
 load("@std//time.axl", "sleep", "sleep_iter")
 load("./private/lib/artifacts.axl", "artifacts")
-load("./private/lib/bazel_flags.axl", "announce_bazel_args", "resolve_bazel_announce")
+load("./private/lib/bazel_flags.axl", "announce_bazel_args", "bazel_flag_args", "resolve_bazel_announce")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event")
 load("./private/lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
 load("./private/lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
@@ -1056,14 +1056,6 @@ lint = task(
             long = "aspect",
             description = "Bazel aspect label(s) to apply for linting (e.g. //tools/lint:linters.bzl%eslint). Repeat the flag to run multiple aspects in a single invocation. Aspects may also be supplied via `--bazel-flag=--aspects=…` or a bazelrc `--config`; at least one rules_lint aspect must reach Bazel one way or another.",
         ),
-        "bazel_flags": args.string_list(
-            description = "Additional Bazel flags forwarded to the build (e.g. --bazel-flag=--config=ci --bazel-flag=--keep_going). Repeat the flag to pass multiple.",
-            long = "bazel-flag",
-        ),
-        "bazel_startup_flags": args.string_list(
-            description = "Additional Bazel startup flags (e.g. --bazel-startup-flag=--host_jvm_args=-Xmx2g). Repeat the flag to pass multiple. Note: changing startup flags restarts the Bazel server.",
-            long = "bazel-startup-flag",
-        ),
         "fix": args.boolean(
             description = (
                 "Apply auto-fixes from rules_lint to the working tree. " +
@@ -1105,7 +1097,7 @@ lint = task(
             default = ["..."],
             description = "Bazel target patterns to lint. Defaults to '...' which expands to all rule targets in the package at and beneath the current directory. Pass multiple patterns to combine includes and excludes; when any pattern is hyphen-led, separate them from flags with `--` (e.g. `aspect lint -- //... -//experimental/...`).",
         ),
-    } | announce_bazel_args("the lint build") | repro_flavor_args(include_fix = True),
+    } | bazel_flag_args("the lint build") | announce_bazel_args("the lint build") | repro_flavor_args(include_fix = True),
     traits = [
         BazelTrait,
         HealthCheckTrait,

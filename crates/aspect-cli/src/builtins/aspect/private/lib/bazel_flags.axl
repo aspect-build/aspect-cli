@@ -10,6 +10,10 @@ enforce this with a clear error if a task forgets):
   - `announce_bazel_version`  (read by `resolve_bazel_announce`)
   - `announce_bazel_command`  (read by `resolve_bazel_announce`)
 
+Declare the first two via `bazel_flag_args(<noun>)` and the three
+`announce_bazel_*` via `announce_bazel_args(<noun>)` so every task carries
+the same canonical descriptions.
+
 The three `announce_bazel_*` args are `"auto" | "true" | "false"`
 enums; `resolve_announce` maps `"auto"` to on-under-CI. `_rc` gates the
 parsed-rc disclosure here; `_version` / `_command` gate the per-spawn
@@ -115,6 +119,28 @@ def announce_bazel_args(rc_phrase):
             values = enum,
             long = "announce-bazel-command",
             description = "Print the exact bazel command line before each bazel spawn. %s" % _ANNOUNCE_AUTO,
+        ),
+    }
+
+def bazel_flag_args(build_phrase: str) -> dict:
+    """The `bazel_flags` / `bazel_startup_flags` CLI args every Bazel-spawning
+    task declares, with one canonical description each.
+
+    Returns a dict to splat into a task's `args = {...}`, mirroring
+    `announce_bazel_args`. Identical across tasks except for the noun naming
+    the bazel invocation — pass `build_phrase` as the thing being run, e.g.
+    `"the build"`, `"the test invocation"`, `"the gazelle build"`. The resolved
+    values are read back by `resolve_flags` / `resolve_startup_flags` /
+    `setup_bazel_command`.
+    """
+    return {
+        "bazel_flags": args.string_list(
+            long = "bazel-flag",
+            description = "Additional Bazel flags forwarded to %s (e.g. --bazel-flag=--config=ci --bazel-flag=--keep_going). Repeat the flag to pass multiple." % build_phrase,
+        ),
+        "bazel_startup_flags": args.string_list(
+            long = "bazel-startup-flag",
+            description = "Additional Bazel startup flags (e.g. --bazel-startup-flag=--host_jvm_args=-Xmx2g). Repeat the flag to pass multiple. Note: changing startup flags restarts the Bazel server.",
         ),
     }
 
