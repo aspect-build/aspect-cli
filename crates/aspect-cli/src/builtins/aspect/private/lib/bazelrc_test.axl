@@ -57,9 +57,9 @@ def _test_generic_flags_include_remote_cache_env(_ctx):
     _eq("bytestream prefix", "--remote_bytestream_uri_prefix=aw-remote.example" in flags, True)
 
 def _test_startup_flags_for_rc(_ctx):
-    # --nohome_rc must be dropped: the generated file IS the home rc, so keeping
-    # it would tell Bazel to ignore the rc it's reading. --nosystem_rc stays
-    # (suppresses the separate /etc/bazel.bazelrc), as do the output paths.
+    # The `--no*_rc` suppression flags must all be dropped: Bazel fatals on any of
+    # them appearing inside a bazelrc ("Can't specify --nosystem_rc in the
+    # .bazelrc file"), and the generated file IS the home rc. Output paths stay.
     got = startup_flags_for_rc([
         "--nohome_rc",
         "--nosystem_rc",
@@ -67,7 +67,7 @@ def _test_startup_flags_for_rc(_ctx):
         "--output_base=/mnt/ephemeral/output/x",
     ])
     _eq("nohome_rc dropped", "--nohome_rc" in got, False)
-    _eq("nosystem_rc kept", "--nosystem_rc" in got, True)
+    _eq("nosystem_rc dropped", "--nosystem_rc" in got, False)
     _eq("output_user_root kept", "--output_user_root=/mnt/ephemeral/bazel/x" in got, True)
     _eq("output_base kept", "--output_base=/mnt/ephemeral/output/x" in got, True)
 
