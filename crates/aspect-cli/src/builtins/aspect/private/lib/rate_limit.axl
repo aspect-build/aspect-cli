@@ -189,6 +189,8 @@ _COLD_START_OVERRIDE_VAR = "ASPECT_WORKFLOWS_GITHUB_API_RATE_LIMIT_COLD_START"
 #   last_effective_factor    {bucket: float}
 #   last_logged_factor_step  {bucket: int}          — for log dedup
 #   threshold_warned_tier    {bucket: int}          — 0 / LOW / IMPORTANT
+#   token_budget             {bucket: int | None}   — server-issued call budget
+#   token_spent              {bucket: int}          — our own calls this window
 
 def _new_state():
     return {
@@ -350,10 +352,16 @@ def record_observation(ctx, bucket, remaining, limit, reset_epoch, epoch_s = Non
         _log_rate_limit_quota(ctx, bucket, remaining, limit, reset_epoch)
 
 def _reset_bucket_state(state, bucket):
-    """Reset the window-scoped per-bucket state (watermark, threshold tier)
-    on a reset crossing. Mutates `state`; caller saves. Leaves
+    """Reset the window-scoped per-bucket state on a reset crossing: watermark,
+    threshold tier, and the token budget. Mutates `state`; caller saves. Leaves
     `last_effective_factor` / `last_logged_factor_step` alone — they
-    self-correct on the next `effective_throttle_factor`."""
+    self-correct on the next `effective_throttle_factor`.
+
+    The budget is per-window (the server sizes it off the window's `remaining`),
+    so a window roll starts a fresh allowance: zero the spend counter and clear
+    the budget. Clearing (not flooring) is what lets the next `/github/budget`
+    refresh re-seed the larger post-reset budget — `apply_budget_refresh` floors
+    down only *within* a window, but seeds when the budget is unset."""
     wm = dict(state["watermark"])
     wm[bucket] = None
     state["watermark"] = wm
@@ -361,6 +369,9 @@ def _reset_bucket_state(state, bucket):
     tiers = dict(state["threshold_warned_tier"] or {})
     tiers[bucket] = _THRESHOLD_TIER_NONE
     state["threshold_warned_tier"] = tiers
+
+    _set_bucket_field(state, "token_budget", bucket, None)
+    _set_bucket_field(state, "token_spent", bucket, 0)
 
 def record_from_headers(ctx, bucket, headers, epoch_s = None):
     """Parse the response's rate-limit headers (GitHub's `X-RateLimit-*` or
@@ -415,18 +426,19 @@ def record_token_budget(ctx, bucket, budget):
     _save(ctx, state)
 
 def apply_budget_refresh(ctx, bucket, budget):
-    """Apply a mid-token `/github/budget` re-measurement: floor the budget DOWN
-    only (`min(current, budget)`). A refresh re-measures the same token's slice
-    — more concurrent mints can shrink it, but it never renews, so it can only
-    lower the cap, never raise it or reset spend. No-op without a prior budget
-    (a refresh before any mint has nothing to lower) or on a bad bucket/value."""
+    """Apply a `/github/budget` re-measurement. Within the current window
+    (budget already set) it floors DOWN only (`min(current, budget)`): a refresh
+    re-measures the same window's slice — more concurrent mints can shrink it,
+    but it never raises the cap or resets spend. When the budget is unset (a
+    window roll cleared it, see `_reset_bucket_state`) it SEEDS the fresh
+    post-reset value, so a long task crossing a window boundary picks up its new
+    allowance. No-op on a bad bucket/value."""
     if bucket not in _VALID_BUCKETS or budget < 0:
         return
     state = _load(ctx)
     current = (state.get("token_budget") or {}).get(bucket)
-    if current == None:
-        return
-    _set_bucket_field(state, "token_budget", bucket, min(current, budget))
+    new_budget = budget if current == None else min(current, budget)
+    _set_bucket_field(state, "token_budget", bucket, new_budget)
     _save(ctx, state)
 
 def budget_exhausted(ctx, bucket):

@@ -1182,12 +1182,31 @@ def _test_budget_refresh_floors_down_only(ctx):
     apply_budget_refresh(ctx, BUCKET_APP, 40)
     _eq("budget — refresh floors down, spend kept", _budget(ctx), (40, 1))
 
-def _test_budget_refresh_without_prior_is_noop(ctx):
+def _test_budget_refresh_seeds_when_unset(ctx):
     _reset(ctx)
-    # A refresh before any mint has no budget to lower → stays unset.
+    # With no budget set (none issued, or a window roll cleared it), a refresh
+    # seeds the value rather than no-opping — so a fresh window's budget lands.
     apply_budget_refresh(ctx, BUCKET_APP, 50)
-    _eq("budget — refresh before mint is a no-op", _budget(ctx)[0], None)
-    _assert("budget — still not exhausted", not budget_exhausted(ctx, BUCKET_APP))
+    _eq("budget — refresh seeds when unset", _budget(ctx), (50, 0))
+
+def _test_budget_window_roll_reseeds(ctx):
+    _reset(ctx)
+    record_token_budget(ctx, BUCKET_APP, 10)
+    near = 1000
+    for i in range(10):
+        record_from_headers(ctx, BUCKET_APP, [("X-RateLimit-Remaining", "1"), ("X-RateLimit-Limit", "5000"), ("X-RateLimit-Reset", str(near))], epoch_s = float(i))
+    _assert("budget — exhausted before roll", budget_exhausted(ctx, BUCKET_APP))
+
+    # A window roll (`reset_epoch` jumps forward) clears the budget and zeroes
+    # spend, so the task isn't stuck exhausted on the old window's allowance.
+    # The roll observation is itself a call, so spend lands at 1 (it increments
+    # after the roll reset within the same `record_from_headers`).
+    record_from_headers(ctx, BUCKET_APP, [("X-RateLimit-Remaining", "5000"), ("X-RateLimit-Limit", "5000"), ("X-RateLimit-Reset", str(near + 4000))], epoch_s = 11.0)
+    _eq("budget — roll clears the budget", _budget(ctx), (None, 1))
+    _assert("budget — not exhausted after roll", not budget_exhausted(ctx, BUCKET_APP))
+    # The next refresh seeds the fresh window's (larger) allowance.
+    apply_budget_refresh(ctx, BUCKET_APP, 200)
+    _eq("budget — fresh window allowance seeded", _budget(ctx), (200, 1))
 
 def _test_budget_exhausted_shrink_below_spent(ctx):
     _reset(ctx)
@@ -1271,11 +1290,12 @@ def _test_impl(ctx):
     _test_budget_counts_gitlab_headers(ctx)
     _test_budget_no_headers_no_spend(ctx)
     _test_budget_refresh_floors_down_only(ctx)
-    _test_budget_refresh_without_prior_is_noop(ctx)
+    _test_budget_refresh_seeds_when_unset(ctx)
+    _test_budget_window_roll_reseeds(ctx)
     _test_budget_exhausted_shrink_below_spent(ctx)
     _test_budget_mint_resets_spend(ctx)
     _test_budget_env_bucket_independent(ctx)
-    print("rate_limit.axl: OK (58 sections)")
+    print("rate_limit.axl: OK (60 sections)")
     return 0
 
 rate_limit_tests = task(

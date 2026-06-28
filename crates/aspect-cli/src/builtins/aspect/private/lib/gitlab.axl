@@ -51,8 +51,11 @@ def _do_request(ctx, method, url, token, auth_kind = "bearer", payload = None):
     if type(response) == "string":
         return (False, 0, "transport error: " + response)
 
-    # Record GitLab's `RateLimit-*` headers so burn-rate throttling has data
-    # (GitLab calls run on the App bucket; see `gitlab_commit_statuses`).
+    # Record GitLab's `RateLimit-*` headers so `effective_throttle_factor` has
+    # burn-rate data (GitLab calls run on the App bucket; see
+    # `gitlab_commit_statuses`). This also increments the token-spend counter,
+    # but GitLab has no server-issued budget and tags no call `skippable`, so the
+    # budget gate never fires — the spend count is inert here, by design.
     record_from_headers(ctx, BUCKET_APP, response.headers)
 
     success = response.status >= 200 and response.status < 300

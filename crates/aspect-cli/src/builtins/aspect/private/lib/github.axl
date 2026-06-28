@@ -157,7 +157,7 @@ _BUDGET_SKIPPED = (False, 0, "budget-exhausted: skipped")
 def _is_budget_skip(success, status, body):
     """True iff `(success, status, body)` is the budget-gate skip sentinel —
     lets callers tell an intentional skip from a real failure (and stay quiet)."""
-    return not success and status == 0 and body == _BUDGET_SKIPPED[2]
+    return (success, status, body) == _BUDGET_SKIPPED
 
 def _do_request(ctx, method, url, token, payload = None, quiet_4xx_auth = False, token_class = BUCKET_APP, skippable = False):
     """HTTP call, retried for idempotent methods; POST runs once. Returns
@@ -499,8 +499,8 @@ def _status_comment_budget(ctx, request, profile = None):
     updated `desired_cadence_s` + `api_call_budget`, without re-minting a token.
 
     Side-effect: applies `api_call_budget` to the App bucket via
-    `apply_budget_refresh` (floor-DOWN only — a refresh re-measures the same
-    token's slice and can shrink but never renew it).
+    `apply_budget_refresh` (floors the current window's budget DOWN; seeds the
+    fresh value after a window roll cleared it — see that function).
 
     `request` is `{installation_id, installation_proof, remaining, reset}` with
     an optional `limit` (the proof comes from the token mint; see the server's
@@ -552,7 +552,8 @@ def create_check_run(ctx, token, owner, repo, name, head_sha, status = None, out
 def update_check_run(ctx, token, owner, repo, check_run_id, status = None, conclusion = None, output = None, details_url = None, api_base = DEFAULT_GITHUB_API, skippable = False):
     """Update an existing check run. `skippable=True` (a mid-run progress
     update) lets the budget gate drop the call when the App token is over
-    budget; pass `skippable=False` for the terminal conclusion so it lands."""
+    budget — the result then carries `"skipped": True` (not an error); pass
+    `skippable=False` for the terminal conclusion so it lands."""
     url = api_base + "/repos/" + owner + "/" + repo + "/check-runs/" + str(check_run_id)
     payload = {}
     if status:
@@ -566,6 +567,8 @@ def update_check_run(ctx, token, owner, repo, check_run_id, status = None, concl
     success, status_code, body = _do_request(ctx, "PATCH", url, token, payload, skippable = skippable)
     if success:
         return {"success": True, "check_run_id": body.get("id"), "html_url": body.get("html_url")}
+    if _is_budget_skip(success, status_code, body):
+        return {"success": False, "skipped": True}
     error_msg = "request failed: " + str(status_code)
     if body and type(body) == "dict" and body.get("message"):
         error_msg = error_msg + " - " + body["message"]
