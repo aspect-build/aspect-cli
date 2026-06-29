@@ -10,7 +10,7 @@ Run with:
   aspect dev test-bazel-runner
 """
 
-load("./bazel_runner.axl", "bes_backend_host", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end", "is_aspect_bes_host", "needs_aspect_bes_token")
+load("./bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
 
 def _eq(label, got, want):
     if got != want:
@@ -84,50 +84,13 @@ def _test_attempt_dispatch_does_not_fire_build_end(_):
     _eq("attempt fired", recorder["attempt"], [("a", 0)])
     _eq("build_end not fired", recorder["build_end"], [])
 
-def _test_bes_backend_host(_):
-    """Host extraction strips scheme, port, path, and userinfo, and lowercases."""
-    _eq("grpcs + path", bes_backend_host("grpcs://bes.aws.awd-gha-test-dev.aspect.build/x"), "bes.aws.awd-gha-test-dev.aspect.build")
-    _eq("grpc + port", bes_backend_host("grpc://bes.aspect.build:443"), "bes.aspect.build")
-    _eq("bare host:port", bes_backend_host("remote.buildbuddy.io:443"), "remote.buildbuddy.io")
-    _eq("userinfo stripped", bes_backend_host("grpcs://user@bes.aspect.build"), "bes.aspect.build")
-    _eq("uppercase lowered", bes_backend_host("GRPCS://BES.ASPECT.BUILD"), "bes.aspect.build")
-
-def _test_is_aspect_bes_host(_):
-    """Suffix matching is dot-anchored so lookalike domains do not match."""
-    suffixes = [".aspect.build"]
-    _eq("subdomain matches", is_aspect_bes_host("bes.aws.awd-gha-test-dev.aspect.build", suffixes), True)
-    _eq("apex matches", is_aspect_bes_host("aspect.build", suffixes), True)
-    _eq("third-party rejected", is_aspect_bes_host("remote.buildbuddy.io", suffixes), False)
-    _eq("lookalike rejected", is_aspect_bes_host("evil-aspect.build", suffixes), False)
-    _eq("substring rejected", is_aspect_bes_host("aspect.build.evil.com", suffixes), False)
-    vanity = [".aspect.build", "bes.ci.acme.com"]
-    _eq("vanity exact matches", is_aspect_bes_host("bes.ci.acme.com", vanity), True)
-    _eq("vanity subdomain matches", is_aspect_bes_host("mirror.bes.ci.acme.com", vanity), True)
-
-def _test_needs_aspect_bes_token(_):
-    """Credentials are resolved only for an Aspect backend lacking a user
-    `authorization` header — the gate that keeps a stale login from aborting
-    builds whose token would never be used."""
-    suffixes = [".aspect.build"]
-    _eq("aspect backend, no user auth", needs_aspect_bes_token(["grpcs://bes.aspect.build"], {}, suffixes), True)
-    _eq("third-party backend", needs_aspect_bes_token(["grpcs://remote.buildbuddy.io"], {}, suffixes), False)
-    _eq("no backends", needs_aspect_bes_token([], {}, suffixes), False)
-    # The Codex-flagged bug: an explicit authorization header for an Aspect host
-    # must NOT trigger credential resolution.
-    _eq("user authorization header (lowercase)", needs_aspect_bes_token(["grpcs://bes.aspect.build"], {"authorization": "Bearer x"}, suffixes), False)
-    _eq("user Authorization header (titlecase)", needs_aspect_bes_token(["grpcs://bes.aspect.build"], {"Authorization": "Bearer x"}, suffixes), False)
-    _eq("mixed: one aspect backend still triggers", needs_aspect_bes_token(["grpcs://remote.buildbuddy.io", "grpcs://bes.aspect.build"], {}, suffixes), True)
-
 def _test_impl(ctx):
     _test_attempt_dispatch_empty_is_noop(ctx)
     _test_build_end_dispatch_empty_is_noop(ctx)
     _test_attempt_dispatch_invokes_in_order(ctx)
     _test_build_end_dispatch_invokes_in_order(ctx)
     _test_attempt_dispatch_does_not_fire_build_end(ctx)
-    _test_bes_backend_host(ctx)
-    _test_is_aspect_bes_host(ctx)
-    _test_needs_aspect_bes_token(ctx)
-    print("bazel_runner_test.axl: OK (8 sections)")
+    print("bazel_runner_test.axl: OK (5 sections)")
     return 0
 
 bazel_runner_tests = task(

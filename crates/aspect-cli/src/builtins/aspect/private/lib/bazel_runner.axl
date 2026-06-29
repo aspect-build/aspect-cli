@@ -16,6 +16,7 @@ load("@aspect//bazel.axl", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
 load("@std//time.axl", "sleep_iter")
 load("./bazel_flags.axl", "resolve_bazel_announce")
 load("./bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "collapse_repro_targets", "failed_labels", "failed_labels_by_subcommand", "init_data", "now_ms", "process_event", bazel_conclusion = "conclusion")
+load("./bes_auth.axl", "aspect_auth_host_suffixes", "bes_backend_host", "is_aspect_bes_host", "needs_aspect_bes_token")
 load("./health_check.axl", "HealthCheckTrait")
 load("./lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "setup_phase", "task_update")
 load("./repro_commands.axl", "build_aspect_command", "build_bazel_command", "flavor_allows", "print_repro_and_fix", "repro_prefix")
@@ -161,97 +162,23 @@ def _live_progress(data, command, status):
         stream = "",
     )
 
-# Built-in host suffix whose `--bes-backend` endpoints are Aspect-owned and so
-# receive the login JWT automatically. Extended at runtime by $ASPECT_AUTH_HOSTS
-# and `BazelTrait.bes_auth_hosts` (the latter for self-hosted vanity domains).
-_DEFAULT_ASPECT_AUTH_HOST_SUFFIX = ".aspect.build"
-
-def bes_backend_host(uri: str) -> str:
-    """Extract the lowercased host from a BES backend URI.
-
-    Handles `grpc(s)://host[:port][/path]` and a bare `host[:port]`. The scheme,
-    port, path, and any userinfo are stripped so the result is just the host for
-    suffix matching.
-    """
-    rest = uri
-    sep = rest.find("://")
-    if sep != -1:
-        rest = rest[sep + 3:]
-    rest = rest.split("/")[0]
-    if "@" in rest:
-        rest = rest.split("@")[-1]
-    # Strip the port. IPv6 literals are not an Aspect concern, so the last colon
-    # rule is sufficient for the host[:port] case.
-    if ":" in rest:
-        rest = rest.rsplit(":", 1)[0]
-    return rest.lower()
-
-def _aspect_auth_host_suffixes(ctx, bazel_trait) -> list[str]:
-    """Host suffixes whose BES backends should receive the Aspect login JWT:
-    the built-in `.aspect.build`, comma-separated entries from
-    $ASPECT_AUTH_HOSTS, and `BazelTrait.bes_auth_hosts` (config.axl, for
-    self-hosted vanity domains). Entries are lowercased; empties dropped.
-    """
-    suffixes = [_DEFAULT_ASPECT_AUTH_HOST_SUFFIX]
-    env_hosts = ctx.std.env.var("ASPECT_AUTH_HOSTS") or ""
-    for h in env_hosts.split(","):
-        h = h.strip().lower()
-        if h:
-            suffixes.append(h)
-    for h in bazel_trait.bes_auth_hosts:
-        h = h.strip().lower()
-        if h:
-            suffixes.append(h)
-    return suffixes
-
-def is_aspect_bes_host(host: str, suffixes: list[str]) -> bool:
-    """Whether `host` is an Aspect-owned BES host: an exact match or a dot-suffix
-    match (so `evil-aspect.build` does not match `.aspect.build`)."""
-    for suffix in suffixes:
-        bare = suffix[1:] if suffix.startswith(".") else suffix
-        if host == bare or host.endswith("." + bare):
-            return True
-    return False
-
-def needs_aspect_bes_token(bes_backends: list[str], metadata: dict[str, str], suffixes: list[str]) -> bool:
-    """Whether the Aspect login JWT must be resolved for these backends.
-
-    True only when no `--bes-header=authorization=...` was supplied AND at least
-    one backend is Aspect-owned. Gating credential resolution on this is what
-    keeps a stale/expired local login (which makes `credentials()` raise) from
-    aborting a build whose backends are all third-party or already carry a user
-    `authorization` header.
-    """
-    user_set_auth = any([k.lower() == "authorization" for k in metadata])
-    return not user_set_auth and any([
-        is_aspect_bes_host(bes_backend_host(b), suffixes)
-        for b in bes_backends
-    ])
-
 def _collect_bes_from_args(ctx, bazel_trait):
     """Collect BES sinks from CLI args (--bes-backend/--bes-header).
 
-    The aspect-cli streams BES itself (not via Bazel's `--bes_backend`), so it
-    must attach auth to Aspect-owned backends itself. When a `--bes-backend`
-    host is Aspect-owned (see `_aspect_auth_host_suffixes`) and the user has not
-    already supplied an `authorization` header, the resolved Aspect login JWT is
-    attached to each Aspect-owned backend as `Authorization: Bearer <jwt>`.
-    Non-Aspect backends are left untouched so a user-supplied token (or none) is
-    honored.
+    Attaches the Aspect login JWT as `Authorization: Bearer <jwt>` to each
+    Aspect-owned backend (see `bes_auth.axl`) when the user has not supplied
+    their own `authorization` header. Other backends are left untouched so a
+    user token (or none) is honored. A missing credential is not an error — the
+    stream proceeds unauthenticated and the server's own rejection surfaces,
+    matching the vanilla-Bazel path.
     """
-    suffixes = _aspect_auth_host_suffixes(ctx, bazel_trait)
+    suffixes = aspect_auth_host_suffixes(ctx.std, bazel_trait)
 
-    # Shared per-backend header set (the same `--bes-header`s apply to every
-    # backend). A user-supplied `authorization` header means we never attach the
-    # Aspect token to any backend.
     metadata = {}
     for bes_header in ctx.args.bes_headers:
         (k, _, v) = bes_header.partition("=")
         metadata[k] = v
 
-    # Resolve credentials lazily, only when actually needed: a missing
-    # credential is not an error — the stream proceeds unauthenticated and the
-    # server's own rejection surfaces, matching the vanilla-Bazel path.
     aspect_token = ""
     if needs_aspect_bes_token(ctx.args.bes_backends, metadata, suffixes):
         creds = ctx.aspect.auth.credentials()

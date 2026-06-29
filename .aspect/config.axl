@@ -11,6 +11,7 @@ load("@aspect//private/lib/bazel_flags_test.axl", "bazel_flags_tests")
 load("@aspect//private/lib/bazel_results_test.axl", "bazel_results_unit_tests", "template_snapshot_tests")
 load("@aspect//private/lib/bazel_runner_test.axl", "bazel_runner_tests")
 load("@aspect//private/lib/bazelrc_test.axl", "bazelrc_tests")
+load("@aspect//private/lib/bes_auth_test.axl", "bes_auth_tests")
 load("@aspect//private/lib/ci_test.axl", "ci_tests")
 load("@aspect//private/lib/circleci_test.axl", "circleci_tests")
 load("@aspect//private/lib/delivery_results_test.axl", "delivery_results_unit_tests", "delivery_template_snapshot_tests")
@@ -354,6 +355,10 @@ def config(ctx: ConfigContext):
     # bazel_runner.axl dispatch helpers: the bazel_attempt_end/build_end seam.
     # Run with: aspect dev test-bazel-runner
     ctx.tasks.add(bazel_runner_tests)
+
+    # bes_auth.axl: host parsing, suffix matching, credential-resolution gate.
+    # Run with: aspect dev test-bes-auth
+    ctx.tasks.add(bes_auth_tests)
 
     # delivery_results template snapshots.
     # Run with: aspect dev test-delivery-template-snapshots
