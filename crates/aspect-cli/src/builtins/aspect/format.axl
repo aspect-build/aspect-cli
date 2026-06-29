@@ -344,7 +344,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         ctx.args.formatter_target,
         build_events = build_events,
         flags = r.flags,
-        current_dir = ctx.std.env.aspect_root_dir(),
+        directory = ctx.std.env.aspect_root_dir(),
         announce_version = announce_version,
         announce_command = announce_command,
     )
