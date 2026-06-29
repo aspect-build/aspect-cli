@@ -213,43 +213,60 @@ def is_aspect_bes_host(host: str, suffixes: list[str]) -> bool:
             return True
     return False
 
+def needs_aspect_bes_token(bes_backends: list[str], metadata: dict[str, str], suffixes: list[str]) -> bool:
+    """Whether the Aspect login JWT must be resolved for these backends.
+
+    True only when no `--bes-header=authorization=...` was supplied AND at least
+    one backend is Aspect-owned. Gating credential resolution on this is what
+    keeps a stale/expired local login (which makes `credentials()` raise) from
+    aborting a build whose backends are all third-party or already carry a user
+    `authorization` header.
+    """
+    user_set_auth = any([k.lower() == "authorization" for k in metadata])
+    return not user_set_auth and any([
+        is_aspect_bes_host(bes_backend_host(b), suffixes)
+        for b in bes_backends
+    ])
+
 def _collect_bes_from_args(ctx, bazel_trait):
     """Collect BES sinks from CLI args (--bes-backend/--bes-header).
 
     The aspect-cli streams BES itself (not via Bazel's `--bes_backend`), so it
     must attach auth to Aspect-owned backends itself. When a `--bes-backend`
     host is Aspect-owned (see `_aspect_auth_host_suffixes`) and the user has not
-    already supplied an `authorization` header for that backend, the resolved
-    Aspect login JWT is attached as `Authorization: Bearer <jwt>`. Non-Aspect
-    backends are left untouched so a user-supplied token (or none) is honored.
+    already supplied an `authorization` header, the resolved Aspect login JWT is
+    attached to each Aspect-owned backend as `Authorization: Bearer <jwt>`.
+    Non-Aspect backends are left untouched so a user-supplied token (or none) is
+    honored.
     """
     suffixes = _aspect_auth_host_suffixes(ctx, bazel_trait)
-    aspect_backends = [b for b in ctx.args.bes_backends if is_aspect_bes_host(bes_backend_host(b), suffixes)]
 
-    # Resolve the login JWT once, only when at least one backend is Aspect-owned.
-    # A missing credential is not an error here — the stream proceeds
-    # unauthenticated and the server's own rejection surfaces, matching the
-    # vanilla-Bazel path.
+    # Shared per-backend header set (the same `--bes-header`s apply to every
+    # backend). A user-supplied `authorization` header means we never attach the
+    # Aspect token to any backend.
+    metadata = {}
+    for bes_header in ctx.args.bes_headers:
+        (k, _, v) = bes_header.partition("=")
+        metadata[k] = v
+
+    # Resolve credentials lazily, only when actually needed: a missing
+    # credential is not an error — the stream proceeds unauthenticated and the
+    # server's own rejection surfaces, matching the vanilla-Bazel path.
     aspect_token = ""
-    if aspect_backends:
+    if needs_aspect_bes_token(ctx.args.bes_backends, metadata, suffixes):
         creds = ctx.aspect.auth.credentials()
         aspect_token = creds.access_token if creds != None else ""
 
     sinks = []
     for bes_backend in ctx.args.bes_backends:
-        metadata = {}
-        for bes_header in ctx.args.bes_headers:
-            (k, _, v) = bes_header.partition("=")
-            metadata[k] = v
-
-        user_set_auth = any([k.lower() == "authorization" for k in metadata])
-        if aspect_token and not user_set_auth and bes_backend in aspect_backends:
-            metadata["Authorization"] = "Bearer " + aspect_token
+        backend_metadata = dict(metadata)
+        if aspect_token and is_aspect_bes_host(bes_backend_host(bes_backend), suffixes):
+            backend_metadata["Authorization"] = "Bearer " + aspect_token
 
         sinks.append(
             bazel.build_events.grpc(
                 uri = bes_backend,
-                metadata = metadata,
+                metadata = backend_metadata,
             ),
         )
     return sinks

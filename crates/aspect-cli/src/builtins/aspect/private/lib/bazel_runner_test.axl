@@ -10,7 +10,7 @@ Run with:
   aspect dev test-bazel-runner
 """
 
-load("./bazel_runner.axl", "bes_backend_host", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end", "is_aspect_bes_host")
+load("./bazel_runner.axl", "bes_backend_host", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end", "is_aspect_bes_host", "needs_aspect_bes_token")
 
 def _eq(label, got, want):
     if got != want:
@@ -104,6 +104,20 @@ def _test_is_aspect_bes_host(_):
     _eq("vanity exact matches", is_aspect_bes_host("bes.ci.acme.com", vanity), True)
     _eq("vanity subdomain matches", is_aspect_bes_host("mirror.bes.ci.acme.com", vanity), True)
 
+def _test_needs_aspect_bes_token(_):
+    """Credentials are resolved only for an Aspect backend lacking a user
+    `authorization` header — the gate that keeps a stale login from aborting
+    builds whose token would never be used."""
+    suffixes = [".aspect.build"]
+    _eq("aspect backend, no user auth", needs_aspect_bes_token(["grpcs://bes.aspect.build"], {}, suffixes), True)
+    _eq("third-party backend", needs_aspect_bes_token(["grpcs://remote.buildbuddy.io"], {}, suffixes), False)
+    _eq("no backends", needs_aspect_bes_token([], {}, suffixes), False)
+    # The Codex-flagged bug: an explicit authorization header for an Aspect host
+    # must NOT trigger credential resolution.
+    _eq("user authorization header (lowercase)", needs_aspect_bes_token(["grpcs://bes.aspect.build"], {"authorization": "Bearer x"}, suffixes), False)
+    _eq("user Authorization header (titlecase)", needs_aspect_bes_token(["grpcs://bes.aspect.build"], {"Authorization": "Bearer x"}, suffixes), False)
+    _eq("mixed: one aspect backend still triggers", needs_aspect_bes_token(["grpcs://remote.buildbuddy.io", "grpcs://bes.aspect.build"], {}, suffixes), True)
+
 def _test_impl(ctx):
     _test_attempt_dispatch_empty_is_noop(ctx)
     _test_build_end_dispatch_empty_is_noop(ctx)
@@ -112,7 +126,8 @@ def _test_impl(ctx):
     _test_attempt_dispatch_does_not_fire_build_end(ctx)
     _test_bes_backend_host(ctx)
     _test_is_aspect_bes_host(ctx)
-    print("bazel_runner_test.axl: OK (7 sections)")
+    _test_needs_aspect_bes_token(ctx)
+    print("bazel_runner_test.axl: OK (8 sections)")
     return 0
 
 bazel_runner_tests = task(
