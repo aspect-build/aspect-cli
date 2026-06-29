@@ -388,7 +388,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// * `stdio` - Shorthand: set both `stdout` and `stderr` from a single
     ///   `Stdio` bundle (typically `ctx.std.io`). Cannot be combined with
     ///   `stdout`/`stderr`.
-    /// * `current_dir` - Working directory for the Bazel invocation.
+    /// * `directory` - Working directory for the Bazel invocation; selects
+    ///   the workspace / server (used for git-worktree execution).
     /// * `announce_version` - Print an `INFO: Bazel <version>` line before
     ///   spawning. Resolved from the `--announce-bazel-version` task flag.
     /// * `announce_command` - Print an `INFO: Spawning: <command>` line (the
@@ -442,7 +443,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named)] stdout: Option<NoneOr<Writable>>,
         #[starlark(require = named)] stderr: Option<NoneOr<Writable>>,
         #[starlark(require = named, default = NoneOr::None)] stdio: NoneOr<StdStdio>,
-        #[starlark(require = named, default = NoneOr::None)] current_dir: NoneOr<String>,
+        #[starlark(require = named, default = NoneOr::None)] directory: NoneOr<String>,
         #[starlark(require = named, default = false)] announce_version: bool,
         #[starlark(require = named, default = false)] announce_command: bool,
         eval: &mut Evaluator<'v, '_, '_>,
@@ -466,7 +467,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             resolved_startup_flags,
             stdout,
             stderr,
-            current_dir.into_option(),
+            directory.into_option(),
             build::AnnounceSpawn {
                 version: announce_version,
                 command: announce_command,
@@ -502,7 +503,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// * `stdio` - Shorthand: set both `stdout` and `stderr` from a single
     ///   `Stdio` bundle (typically `ctx.std.io`). Cannot be combined with
     ///   `stdout`/`stderr`.
-    /// * `current_dir` - Working directory for the Bazel invocation.
+    /// * `directory` - Working directory for the Bazel invocation; selects
+    ///   the workspace / server (used for git-worktree execution).
     /// * `announce_version` - Print an `INFO: Bazel <version>` line before
     ///   spawning. Resolved from the `--announce-bazel-version` task flag.
     /// * `announce_command` - Print an `INFO: Spawning: <command>` line (the
@@ -554,7 +556,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named)] stdout: Option<NoneOr<Writable>>,
         #[starlark(require = named)] stderr: Option<NoneOr<Writable>>,
         #[starlark(require = named, default = NoneOr::None)] stdio: NoneOr<StdStdio>,
-        #[starlark(require = named, default = NoneOr::None)] current_dir: NoneOr<String>,
+        #[starlark(require = named, default = NoneOr::None)] directory: NoneOr<String>,
         #[starlark(require = named, default = false)] announce_version: bool,
         #[starlark(require = named, default = false)] announce_command: bool,
         eval: &mut Evaluator<'v, '_, '_>,
@@ -578,7 +580,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             resolved_startup_flags,
             stdout,
             stderr,
-            current_dir.into_option(),
+            directory.into_option(),
             build::AnnounceSpawn {
                 version: announce_version,
                 command: announce_command,
@@ -603,6 +605,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///   its own `.bazelrc`.
     /// * `flags` - Per-call command extras appended after the rc expansion.
     ///   Same `str | (str, version-constraint)` shape as `build` / `test`.
+    /// * `directory` - Working directory for the query; selects the
+    ///   workspace / server. Used for git-worktree-scoped discovery.
     /// * `announce_version` / `announce_command` - Mirror the build/test
     ///   spawn disclosure.
     ///
@@ -619,6 +623,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = UnpackList::default())] flags: UnpackList<
             Either<values::StringValue<'v>, (values::StringValue<'v>, values::StringValue<'v>)>,
         >,
+        #[starlark(require = named, default = NoneOr::None)] directory: NoneOr<String>,
         #[starlark(require = named, default = false)] announce_version: bool,
         #[starlark(require = named, default = false)] announce_command: bool,
     ) -> anyhow::Result<query::Query> {
@@ -635,6 +640,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             &expr,
             &startup,
             &command_flags,
+            directory.into_option(),
             build::AnnounceSpawn {
                 version: announce_version,
                 command: announce_command,
@@ -648,7 +654,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// with a non-zero code.
     ///
     /// # Arguments
-    /// * `workdir`: workspace root to run `bazel info` in (default: inferred from ctx)
+    /// * `directory`: working directory to run `bazel info` in; selects the
+    ///   workspace / server (default: the parent process cwd).
     ///
     /// **Examples**
     ///
@@ -658,12 +665,18 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///     print(info["output_base"])
     ///     print(info["execution_root"])
     /// ```
-    fn info<'v>(this: values::Value<'v>) -> anyhow::Result<SmallMap<String, String>> {
+    fn info<'v>(
+        this: values::Value<'v>,
+        #[starlark(require = named, default = NoneOr::None)] directory: NoneOr<String>,
+    ) -> anyhow::Result<SmallMap<String, String>> {
         let startup_flags = read_startup_flags(this)?;
 
         let mut cmd = bazel_command();
         cmd.args(&startup_flags);
         cmd.arg("info");
+        if let Some(dir) = directory.into_option() {
+            cmd.current_dir(dir);
+        }
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::null());
         cmd.stdin(Stdio::null());

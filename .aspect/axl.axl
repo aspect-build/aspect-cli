@@ -365,7 +365,7 @@ def test_large_bes(ctx: TaskContext, tc: int, temp_dir: str) -> int:
         "//...",
         flags = ["--noremote_accept_cached"],
         build_events = [iter],
-        current_dir = "./examples/large_bes",
+        directory = "./examples/large_bes",
     )
 
     # Iterate through all build events - this would hang before the fix

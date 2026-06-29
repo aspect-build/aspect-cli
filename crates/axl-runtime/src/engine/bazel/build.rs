@@ -755,7 +755,7 @@ impl Build {
         startup_flags: Vec<String>,
         stdout: Stdio,
         stderr: Stdio,
-        current_dir: Option<String>,
+        directory: Option<String>,
         announce: AnnounceSpawn,
         rt: AsyncRuntime,
     ) -> Result<Build, std::io::Error> {
@@ -777,8 +777,8 @@ impl Build {
         cmd.arg(verb);
         cmd.args(flags);
 
-        if let Some(current_dir) = current_dir {
-            cmd.current_dir(current_dir);
+        if let Some(directory) = directory {
+            cmd.current_dir(directory);
         }
 
         // File sinks share the BES reader's raw-bytes path (preserves
