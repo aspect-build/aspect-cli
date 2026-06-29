@@ -161,7 +161,7 @@ pub fn run(
     expr: &str,
     startup_flags: &[String],
     flags: &[String],
-    current_dir: Option<String>,
+    directory: Option<String>,
     announce: super::build::AnnounceSpawn,
 ) -> anyhow::Result<Query> {
     let mut cmd = super::bazel_command();
@@ -170,7 +170,7 @@ pub fn run(
     cmd.arg(expr);
     cmd.args(flags);
     cmd.arg("--output=streamed_proto");
-    if let Some(dir) = current_dir {
+    if let Some(dir) = directory {
         cmd.current_dir(dir);
     }
     let out = temp_dir().join("query.bin");
