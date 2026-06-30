@@ -5,7 +5,7 @@ Run with:
   aspect dev test-aspect-endpoint-auth
 """
 
-load("./aspect_endpoint_auth.axl", "aspect_auth_host_suffixes", "endpoint_host", "is_aspect_host", "needs_aspect_token")
+load("./aspect_endpoint_auth.axl", "aspect_auth_host_suffixes", "endpoint_host", "is_aspect_host", "needs_aspect_token", "remote_headers_have_auth")
 
 def _eq(label, got, want):
     if got != want:
@@ -37,9 +37,9 @@ def _test_is_aspect_host(_):
     _eq("third-party rejected", is_aspect_host("remote.buildbuddy.io", suffixes), False)
     _eq("lookalike rejected", is_aspect_host("evil-aspect.build", suffixes), False)
     _eq("substring rejected", is_aspect_host("aspect.build.evil.com", suffixes), False)
-    vanity = [".aspect.build", "bes.ci.acme.com"]
-    _eq("vanity exact matches", is_aspect_host("bes.ci.acme.com", vanity), True)
-    _eq("vanity subdomain matches", is_aspect_host("mirror.bes.ci.acme.com", vanity), True)
+    vanity = [".aspect.build", "aspect.ci.acme.com"]
+    _eq("vanity exact matches", is_aspect_host("aspect.ci.acme.com", vanity), True)
+    _eq("vanity subdomain matches", is_aspect_host("mirror.aspect.ci.acme.com", vanity), True)
 
 def _test_aspect_auth_host_suffixes(_):
     """The built-in suffix is always present; $ASPECT_AUTH_HOSTS and the trait
@@ -48,10 +48,10 @@ def _test_aspect_auth_host_suffixes(_):
     _eq(
         "env + trait, lowercased, empties dropped",
         aspect_auth_host_suffixes(
-            _fake_std({"ASPECT_AUTH_HOSTS": "Bes.Ci.Acme.com, ,foo.test"}),
+            _fake_std({"ASPECT_AUTH_HOSTS": "aspect.ci.acme.com, ,foo.test"}),
             _fake_trait(["Vanity.Example.COM"]),
         ),
-        [".aspect.build", "bes.ci.acme.com", "foo.test", "vanity.example.com"],
+        [".aspect.build", "aspect.ci.acme.com", "foo.test", "vanity.example.com"],
     )
 
 def _test_needs_aspect_token(_):
@@ -67,12 +67,23 @@ def _test_needs_aspect_token(_):
     # resolution even for an Aspect host, so a stale login cannot abort the build.
     _eq("user auth suppresses", needs_aspect_token(["grpcs://bes.aspect.build"], True, suffixes), False)
 
+def _test_remote_headers_have_auth(_):
+    """`--remote_header` authorization detection is case-insensitive and matches
+    the header name exactly (not a value that happens to contain it)."""
+    _eq("empty", remote_headers_have_auth([]), False)
+    _eq("unrelated headers", remote_headers_have_auth(["x-foo=bar", "x-token=abc"]), False)
+    _eq("lowercase", remote_headers_have_auth(["authorization=Bearer x"]), True)
+    _eq("titlecase", remote_headers_have_auth(["Authorization=Bearer x"]), True)
+    _eq("amongst others", remote_headers_have_auth(["x-foo=bar", "AUTHORIZATION=Bearer x"]), True)
+    _eq("value mentioning auth not matched", remote_headers_have_auth(["x-note=authorization=no"]), False)
+
 def _test_impl(ctx):
     _test_endpoint_host(ctx)
     _test_is_aspect_host(ctx)
     _test_aspect_auth_host_suffixes(ctx)
     _test_needs_aspect_token(ctx)
-    print("aspect_endpoint_auth_test.axl: OK (4 sections)")
+    _test_remote_headers_have_auth(ctx)
+    print("aspect_endpoint_auth_test.axl: OK (5 sections)")
     return 0
 
 aspect_endpoint_auth_tests = task(

@@ -16,7 +16,7 @@ load("@aspect//bazel.axl", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
 load("@std//time.axl", "sleep_iter")
 load("./bazel_flags.axl", "resolve_bazel_announce")
 load("./bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "collapse_repro_targets", "failed_labels", "failed_labels_by_subcommand", "init_data", "now_ms", "process_event", bazel_conclusion = "conclusion")
-load("./aspect_endpoint_auth.axl", "aspect_auth_host_suffixes", "endpoint_host", "is_aspect_host", "needs_aspect_token", "resolve_aspect_token")
+load("./aspect_endpoint_auth.axl", "aspect_auth_host_suffixes", "endpoint_host", "is_aspect_host", "needs_aspect_token", "remote_headers_have_auth", "resolve_aspect_bearer")
 load("./health_check.axl", "HealthCheckTrait")
 load("./lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "setup_phase", "task_update")
 load("./repro_commands.axl", "build_aspect_command", "build_bazel_command", "flavor_allows", "print_repro_and_fix", "repro_prefix")
@@ -178,15 +178,15 @@ def _collect_bes_from_args(ctx, bazel_trait, suffixes):
         metadata[k] = v
 
     user_set_auth = any([k.lower() == "authorization" for k in metadata])
-    aspect_token = ""
+    bearer = ""
     if needs_aspect_token(ctx.args.bes_backends, user_set_auth, suffixes):
-        aspect_token = resolve_aspect_token(ctx, "build events")
+        bearer = resolve_aspect_bearer(ctx, "build events")
 
     sinks = []
     for bes_backend in ctx.args.bes_backends:
         backend_metadata = dict(metadata)
-        if aspect_token and is_aspect_host(endpoint_host(bes_backend), suffixes):
-            backend_metadata["Authorization"] = "Bearer " + aspect_token
+        if bearer and is_aspect_host(endpoint_host(bes_backend), suffixes):
+            backend_metadata["Authorization"] = bearer
 
         sinks.append(
             bazel.build_events.grpc(
@@ -209,16 +209,13 @@ def _remote_cache_auth_flags(ctx, rc, command, suffixes):
     cache = rc.flag_value("--remote_cache", command = command)
     if not cache:
         return []
-    user_set_auth = any([
-        h.lower().startswith("authorization=")
-        for h in rc.flag_values("--remote_header", command = command)
-    ])
+    user_set_auth = remote_headers_have_auth(rc.flag_values("--remote_header", command = command))
     if not needs_aspect_token([cache], user_set_auth, suffixes):
         return []
-    token = resolve_aspect_token(ctx, "the remote cache")
-    if not token:
+    bearer = resolve_aspect_bearer(ctx, "the remote cache")
+    if not bearer:
         return []
-    return ["--remote_header=authorization=Bearer " + token]
+    return ["--remote_header=authorization=" + bearer]
 
 def _emit_terminal(ctx, lifecycle, command, data, exit_code, targets = []):
     """Fire the terminal `task_update(final=True)` and return a

@@ -6,7 +6,8 @@ For both, the Aspect login JWT is attached only to Aspect-owned endpoints, so a
 backend or cache pointed at a third party never receives Aspect credentials. An
 endpoint is Aspect-owned when its host matches a configured suffix: the built-in
 `.aspect.build`, comma-separated entries from `$ASPECT_AUTH_HOSTS`, or
-`BazelTrait.aspect_auth_hosts` (for self-hosted endpoints on a vanity domain).
+`BazelTrait.aspect_auth_hosts` (for self-hosted endpoints on a vanity domain,
+e.g. `aspect.ci.acme.com`).
 
 This module owns the host parsing, suffix matching, and the
 credential-resolution gate. Auth is best-effort: callers that find an
@@ -77,18 +78,24 @@ def needs_aspect_token(uris: list[str], have_user_auth: bool, suffixes: list[str
         for u in uris
     ])
 
-def resolve_aspect_token(ctx, what: str) -> str:
-    """Best-effort resolution of the Aspect login JWT, for an endpoint described
-    by `what` (e.g. "build events", "the remote cache").
+def remote_headers_have_auth(headers: list[str]) -> bool:
+    """Whether a `--remote_header` value list already carries an `authorization`
+    header (case-insensitive). Values are `name=value` strings, so an exact
+    `authorization` name is matched by the `authorization=` prefix."""
+    return any([h.lower().startswith("authorization=") for h in headers])
 
-    Returns the access token, or `""` if the user is not authenticated (never
+def resolve_aspect_bearer(ctx, what: str) -> str:
+    """Best-effort resolution of the `Bearer <jwt>` Authorization value, for an
+    endpoint described by `what` (e.g. "build events", "the remote cache").
+
+    Returns `"Bearer <jwt>"`, or `""` if the user is not authenticated (never
     logged in, or an expired session that cannot be refreshed). In the
     unauthenticated case a warning is printed; the caller proceeds without auth.
     Callers must gate this on `needs_aspect_token` so the warning fires only when
     an Aspect-owned endpoint actually lacks credentials.
     """
     creds = ctx.aspect.auth.credentials(required = False)
-    token = creds.access_token if creds != None else ""
-    if not token:
+    if creds == None or not creds.access_token:
         warn(ctx.std, _NOT_AUTHENTICATED_MSG % what)
-    return token
+        return ""
+    return "Bearer " + creds.access_token

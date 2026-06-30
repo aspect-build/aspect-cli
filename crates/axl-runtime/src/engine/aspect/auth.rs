@@ -973,8 +973,8 @@ fn auth_methods(registry: &mut MethodsBuilder) {
                 }
                 // Expired and the refresh failed. By default this is an error so
                 // a command that needs auth fails loudly; `required = False`
-                // callers (e.g. best-effort BES auth) get `None` and decide for
-                // themselves whether to proceed unauthenticated.
+                // callers (e.g. best-effort endpoint auth) get `None` and decide
+                // for themselves whether to proceed unauthenticated.
                 Err(_) if !required => return Ok(values::Value::new_none()),
                 Err(_) => {
                     return Err(anyhow::anyhow!(
