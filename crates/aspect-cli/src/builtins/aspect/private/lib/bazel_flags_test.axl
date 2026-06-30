@@ -4,21 +4,22 @@ Run with:
   aspect dev test-bazel-flags
 """
 
-load("./bazel_flags.axl", "announce_bazel_args", "requested_config_names", "resolve_announce", "resolve_bazel_announce", "resolve_flags", "resolve_startup_flags", "setup_bazel_command")
+load("./bazel_flags.axl", "announce_bazel_args", "remote_cache_auth_flags", "requested_config_names", "resolve_announce", "resolve_bazel_announce", "resolve_flags", "resolve_startup_flags", "setup_bazel_command")
 
 def _eq(label, got, want):
     if got != want:
         fail("%s: got %r, want %r" % (label, got, want))
 
-def _fake_trait(extra_startup = [], startup_transform = None, extra = [], task_flags = [], transform = None):
-    """Stand-in for `BazelTrait` covering both startup-flag and
-    command-flag fields."""
+def _fake_trait(extra_startup = [], startup_transform = None, extra = [], task_flags = [], transform = None, aspect_auth_hosts = []):
+    """Stand-in for `BazelTrait` covering the startup-flag, command-flag, and
+    endpoint-auth fields the helpers read."""
     return struct(
         extra_startup_flags = extra_startup,
         startup_flags = startup_transform,
         extra_flags = extra,
         task_flags = task_flags,
         flags = transform,
+        aspect_auth_hosts = aspect_auth_hosts,
     )
 
 def _fake_ctx(bazel_startup_flags = [], bazel_flags = []):
@@ -184,6 +185,63 @@ def _test_requested_config_names(ctx):
         ["a", "b", "c"],
     )
 
+# ── remote_cache_auth_flags ──────────────────────────────────────────────
+
+def _fake_rc(remote_cache = None, remote_headers = []):
+    """Stand-in `RunCommand` exposing the two reads `remote_cache_auth_flags`
+    makes. `command`/`version` kwargs are accepted and ignored."""
+    return struct(
+        flag_value = lambda name, command = None, version = None: remote_cache if name == "--remote_cache" else None,
+        flag_values = lambda name, command = None, version = None: remote_headers if name == "--remote_header" else [],
+    )
+
+def _fake_auth_ctx(access_token = ""):
+    """Stand-in `ctx` for the auth path: `std` reports no env / non-TTY (so
+    suffix resolution sees only the built-in and `warn` stays quiet-but-valid),
+    and `aspect.auth.credentials` returns a fake login (or None when no token)."""
+    creds = struct(access_token = access_token) if access_token else None
+    return struct(
+        std = struct(
+            io = struct(stdout = struct(is_tty = False)),
+            env = struct(var = lambda name: None),
+        ),
+        aspect = struct(auth = struct(credentials = lambda required = True: creds)),
+    )
+
+def _test_remote_cache_auth_flags(_):
+    """Injects `--remote_header` auth only for an Aspect-owned cache lacking a
+    user authorization header, and only when a credential resolves."""
+    trait = _fake_trait()
+    tok = "_fake_auth_ctx with this token"
+    ctx = _fake_auth_ctx(access_token = tok)
+
+    _eq("no --remote_cache", remote_cache_auth_flags(ctx, _fake_rc(), "build", trait), [])
+    _eq(
+        "third-party cache",
+        remote_cache_auth_flags(ctx, _fake_rc(remote_cache = "grpcs://remote.buildbuddy.io"), "build", trait),
+        [],
+    )
+    _eq(
+        "aspect cache + creds",
+        remote_cache_auth_flags(ctx, _fake_rc(remote_cache = "grpcs://remote.aspect.build"), "build", trait),
+        ["--remote_header=authorization=Bearer " + tok],
+    )
+    _eq(
+        "aspect cache + user authorization header",
+        remote_cache_auth_flags(
+            ctx,
+            _fake_rc(remote_cache = "grpcs://remote.aspect.build", remote_headers = ["authorization=Bearer user"]),
+            "build",
+            trait,
+        ),
+        [],
+    )
+    _eq(
+        "aspect cache + not logged in",
+        remote_cache_auth_flags(_fake_auth_ctx(), _fake_rc(remote_cache = "grpcs://remote.aspect.build"), "build", trait),
+        [],
+    )
+
 # ── contract enforcement ─────────────────────────────────────────────────
 #
 # The helpers fail with a clear message when a calling task omits the
@@ -205,11 +263,12 @@ def _test_impl(ctx):
     _test_resolve_bazel_announce_maps_args_to_tuple(ctx)
     _test_announce_bazel_args_shape(ctx)
     _test_requested_config_names(ctx)
+    _test_remote_cache_auth_flags(ctx)
 
     # Run last: `setup_bazel_command` registers a real active rc on `ctx.bazel`,
     # so keeping it after the pure subtests prevents bleed-through.
     _test_setup_bazel_command_applies_to_ctx_bazel(ctx)
-    print("bazel_flags_test.axl: OK (13 sections)")
+    print("bazel_flags_test.axl: OK (14 sections)")
     return 0
 
 bazel_flags_tests = task(

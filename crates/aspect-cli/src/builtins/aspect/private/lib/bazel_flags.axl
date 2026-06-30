@@ -48,8 +48,14 @@ also checked at runtime by `assert_ctx_bazel_ready_for_health_check` (see
     `announce_bazel_*` flag values (`"auto"|"true"|"false"`) to bools;
     `auto` is on under CI. `resolve_bazel_announce` returns the
     `(version, command)` pair tasks pass to `ctx.bazel.build` / `.test`.
+
+  - `remote_cache_auth_flags` — per-invocation `--remote_header` flags that
+    attach the Aspect login JWT when the effective `--remote_cache` is an
+    Aspect-owned endpoint. Passed as `flags = [...]` to `ctx.bazel.build` /
+    `test` by every bazel-spawning task.
 """
 
+load("./aspect_endpoint_auth.axl", "aspect_auth_host_suffixes", "needs_aspect_token", "remote_headers_have_auth", "resolve_aspect_bearer")
 load("./environment.axl", "color_enabled", "detect_ci")
 
 def _require_arg(ctx, name):
@@ -292,3 +298,29 @@ def expand_config_flags(ctx, bazel_trait, extra_flags, command = "build"):
     # expand_all lists base options first, then the passed flags' expansion; the
     # tail beyond the base length is the extra_flags' contribution.
     return full_flags[len(base_flags):]
+
+def remote_cache_auth_flags(ctx, rc, command, bazel_trait):
+    """Per-invocation Bazel flags injecting the Aspect login JWT for an
+    Aspect-owned remote cache, or `[]`.
+
+    Reads the effective `--remote_cache` (from `--bazel-flag`, a first-class
+    flag, or `.bazelrc` — all resolved through `rc`). When it is Aspect-owned
+    (see `aspect_endpoint_auth.axl`) and the user has not already set
+    `--remote_header=authorization=…`, returns
+    `["--remote_header=authorization=Bearer <jwt>"]`. Best-effort: an
+    Aspect-owned cache with no usable credential warns and returns `[]`.
+
+    Pass the result as `flags = [...]` to `ctx.bazel.build` / `test`; every
+    bazel-spawning task can call this regardless of how it drives Bazel.
+    """
+    cache = rc.flag_value("--remote_cache", command = command)
+    if not cache:
+        return []
+    suffixes = aspect_auth_host_suffixes(ctx.std, bazel_trait)
+    user_set_auth = remote_headers_have_auth(rc.flag_values("--remote_header", command = command))
+    if not needs_aspect_token([cache], user_set_auth, suffixes):
+        return []
+    bearer = resolve_aspect_bearer(ctx, "the remote cache")
+    if not bearer:
+        return []
+    return ["--remote_header=authorization=" + bearer]
