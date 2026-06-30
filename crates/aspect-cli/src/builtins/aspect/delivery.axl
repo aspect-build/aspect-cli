@@ -124,6 +124,7 @@ load("@bazel//proto/remote_logging.axl", "remote_logging")
 load("@std//time.axl", "sleep_iter", "time")
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_flags.axl", "announce_bazel_args", "aspect_endpoint_auth_flags", "expand_config_flags", "resolve_bazel_announce")
+load("./private/lib/bes_sinks.axl", "bes_args", "collect_bes_from_args")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "now_ms", "process_event", bazel_init_data = "init_data")
 load("./private/lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
 load("./private/lib/ci.axl", "resolve_build_url")
@@ -1000,8 +1001,10 @@ def _delivery_impl(ctx):
     # identical across salt namespaces, hiding the per-salt separation.
     data["delivery"]["prefix"] = prefix
 
-    # iter handles are created per attempt inside the retry loop.
-    build_events = list(bazel_trait.build_event_sinks)
+    # iter handles are created per attempt inside the retry loop. The
+    # CLI-streamed `--bes-backend` sinks stream phase-1 events and are waited
+    # alongside the trait sinks (see `_get_output_shas`).
+    build_events = collect_bes_from_args(ctx, bazel_trait) + list(bazel_trait.build_event_sinks)
 
     for handler in bazel_trait.build_start:
         handler(ctx)
@@ -1620,7 +1623,7 @@ Currently \x1b[3monly\x1b[23m supported on Aspect Workflows CI runners. Support 
             maximum = 1000000000,
             description = "Bazel target labels to deliver.",
         ),
-    } | announce_bazel_args("the delivery build phases"),
+    } | announce_bazel_args("the delivery build phases") | bes_args(),
     traits = [
         BazelTrait,
         DeliveryTrait,

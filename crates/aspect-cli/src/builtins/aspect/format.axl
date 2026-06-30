@@ -19,6 +19,7 @@ load("@aspect//bazel.axl", "BazelTrait")
 load("@std//time.axl", "sleep_iter")
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_flags.axl", "announce_bazel_args", "aspect_endpoint_auth_flags", "bazel_flag_args", "resolve_bazel_announce")
+load("./private/lib/bes_sinks.axl", "bes_args", "collect_bes_from_args")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event")
 load("./private/lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
 load("./private/lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
@@ -319,8 +320,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
     # Pass build_event_sinks (carries the Aspect backend gRPC sink in CI) so the
     # "✨ Aspect Workflows" link resolves to a real record, not a 404.
+    bes_sinks = collect_bes_from_args(ctx, bazel_trait)
     events = bazel.build_events.iterator()
-    build_events = [events] + list(bazel_trait.build_event_sinks)
+    build_events = [events] + bes_sinks + list(bazel_trait.build_event_sinks)
 
     # Fire build_start hooks before spawning — Workflows registers the BK
     # `--- :bazel: Running bazel …` marker; other features hook pre-spawn work.
@@ -397,7 +399,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             break
 
     build_status = build.wait()
-    for sink in bazel_trait.build_event_sinks:
+    for sink in bes_sinks + list(bazel_trait.build_event_sinks):
         sink.wait()
     dispatch_bazel_attempt_end(ctx, bazel_trait, build_status.code)
     dispatch_bazel_build_end(ctx, bazel_trait, build_status.code)
@@ -707,7 +709,7 @@ format = task(
             maximum = 4096,
             minimum = 0,
         ),
-    } | bazel_flag_args("the formatter build") | announce_bazel_args("the formatter build") | repro_flavor_args(include_fix = True),
+    } | bazel_flag_args("the formatter build") | announce_bazel_args("the formatter build") | bes_args() | repro_flavor_args(include_fix = True),
     traits = [
         BazelTrait,
         HealthCheckTrait,

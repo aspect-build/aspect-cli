@@ -16,7 +16,7 @@ load("@aspect//bazel.axl", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
 load("@std//time.axl", "sleep_iter")
 load("./bazel_flags.axl", "aspect_endpoint_auth_flags", "resolve_bazel_announce")
 load("./bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "collapse_repro_targets", "failed_labels", "failed_labels_by_subcommand", "init_data", "now_ms", "process_event", bazel_conclusion = "conclusion")
-load("./aspect_endpoint_auth.axl", "aspect_auth_host_suffixes", "endpoint_host", "is_aspect_host", "needs_aspect_token", "resolve_aspect_bearer")
+load("./bes_sinks.axl", "collect_bes_from_args")
 load("./health_check.axl", "HealthCheckTrait")
 load("./lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "setup_phase", "task_update")
 load("./repro_commands.axl", "build_aspect_command", "build_bazel_command", "flavor_allows", "print_repro_and_fix", "repro_prefix")
@@ -162,41 +162,6 @@ def _live_progress(data, command, status):
         stream = "",
     )
 
-def _collect_bes_from_args(ctx, bazel_trait):
-    """Collect BES sinks from CLI args (--bes-backend/--bes-header).
-
-    Attaches the Aspect login JWT as `Authorization: Bearer <jwt>` to each
-    Aspect-owned backend (see `aspect_endpoint_auth.axl`) when the user has not
-    supplied their own `authorization` header. Other backends are left untouched
-    so a user token (or none) is honored. Best-effort: an Aspect backend with no
-    usable credential warns and streams unauthenticated rather than failing.
-    """
-    suffixes = aspect_auth_host_suffixes(ctx.std, bazel_trait)
-
-    metadata = {}
-    for bes_header in ctx.args.bes_headers:
-        (k, _, v) = bes_header.partition("=")
-        metadata[k] = v
-
-    user_set_auth = any([k.lower() == "authorization" for k in metadata])
-    bearer = ""
-    if needs_aspect_token(ctx.args.bes_backends, user_set_auth, suffixes):
-        bearer = resolve_aspect_bearer(ctx, "build events")
-
-    sinks = []
-    for bes_backend in ctx.args.bes_backends:
-        backend_metadata = dict(metadata)
-        if bearer and is_aspect_host(endpoint_host(bes_backend), suffixes):
-            backend_metadata["Authorization"] = bearer
-
-        sinks.append(
-            bazel.build_events.grpc(
-                uri = bes_backend,
-                metadata = backend_metadata,
-            ),
-        )
-    return sinks
-
 def _emit_terminal(ctx, lifecycle, command, data, exit_code, targets = []):
     """Fire the terminal `task_update(final=True)` and return a
     `TaskConclusion` for `run_bazel_task` to return, so status surfaces
@@ -323,7 +288,7 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
     rc = setup_phase(ctx, lifecycle, " ".join(targets), "bazel_results", data, hc_trait, bazel_trait, command, bazel_base_flags = base_flags)
     announce_version, announce_command = resolve_bazel_announce(ctx)
 
-    bes_sinks = _collect_bes_from_args(ctx, bazel_trait)
+    bes_sinks = collect_bes_from_args(ctx, bazel_trait)
     if bazel_trait.build_event_sinks:
         bes_sinks.extend(bazel_trait.build_event_sinks)
     need_bes = bool(bazel_trait.build_event) or bool(lifecycle.task_update)
