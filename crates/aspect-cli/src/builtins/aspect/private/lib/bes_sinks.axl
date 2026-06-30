@@ -14,7 +14,7 @@ resolution. (The companion case — BES routed through Bazel via
 `bazel_flags.axl` instead.)
 """
 
-load("./aspect_endpoint_auth.axl", "aspect_auth_host_suffixes", "endpoint_host", "is_aspect_host", "needs_aspect_token", "resolve_aspect_bearer")
+load("./aspect_endpoint_auth.axl", "aspect_auth_host_suffixes", "endpoint_host", "headers_have_auth", "is_aspect_host", "needs_aspect_token", "resolve_aspect_bearer")
 
 def bes_args() -> dict:
     """The `bes_backends` / `bes_headers` CLI args every BES-capable task
@@ -50,9 +50,8 @@ def collect_bes_from_args(ctx, bazel_trait) -> list:
         (k, _, v) = bes_header.partition("=")
         metadata[k] = v
 
-    user_set_auth = any([k.lower() == "authorization" for k in metadata])
     bearer = ""
-    if needs_aspect_token(ctx.args.bes_backends, user_set_auth, suffixes):
+    if needs_aspect_token(ctx.args.bes_backends, headers_have_auth(ctx.args.bes_headers), suffixes):
         bearer = resolve_aspect_bearer(ctx, "build events")
 
     sinks = []

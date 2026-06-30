@@ -326,9 +326,7 @@ def _endpoint_auth_flags(ctx, rc, command, bazel_trait, endpoint_flag, header_fl
 def remote_cache_auth_flags(ctx, rc, command, bazel_trait):
     """Per-invocation flags attaching the Aspect login JWT to an Aspect-owned
     `--remote_cache` via `--remote_header`, or `[]`. See `_endpoint_auth_flags`.
-
-    Pass the result as `flags = [...]` to `ctx.bazel.build` / `test`; every
-    bazel-spawning task can call this regardless of how it drives Bazel.
+    Most callers want the combined `aspect_endpoint_auth_flags`.
     """
     return _endpoint_auth_flags(ctx, rc, command, bazel_trait, "--remote_cache", "--remote_header", "the remote cache")
 

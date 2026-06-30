@@ -5,7 +5,7 @@ Run with:
   aspect dev test-aspect-endpoint-auth
 """
 
-load("./aspect_endpoint_auth.axl", "aspect_auth_host_suffixes", "endpoint_host", "is_aspect_host", "needs_aspect_token", "headers_have_auth")
+load("./aspect_endpoint_auth.axl", "aspect_auth_host_suffixes", "endpoint_host", "headers_have_auth", "is_aspect_host", "needs_aspect_token")
 
 def _eq(label, got, want):
     if got != want:
@@ -24,6 +24,7 @@ def _test_endpoint_host(_):
     """Host extraction strips scheme, userinfo, port, and path, and lowercases."""
     _eq("grpcs + path", endpoint_host("grpcs://bes.aws.awd-gha-test-dev.aspect.build/x"), "bes.aws.awd-gha-test-dev.aspect.build")
     _eq("grpc + port", endpoint_host("grpc://bes.aspect.build:443"), "bes.aspect.build")
+    _eq("bare host", endpoint_host("bes.aspect.build"), "bes.aspect.build")
     _eq("bare host:port", endpoint_host("remote.buildbuddy.io:443"), "remote.buildbuddy.io")
     _eq("userinfo stripped", endpoint_host("grpcs://user@bes.aspect.build"), "bes.aspect.build")
     _eq("userinfo + port", endpoint_host("grpcs://user:pw@bes.aspect.build:443/x"), "bes.aspect.build")
@@ -63,6 +64,7 @@ def _test_needs_aspect_token(_):
     _eq("third-party endpoint", needs_aspect_token(["grpcs://remote.buildbuddy.io"], False, suffixes), False)
     _eq("no endpoints", needs_aspect_token([], False, suffixes), False)
     _eq("mixed: one aspect endpoint triggers", needs_aspect_token(["grpcs://remote.buildbuddy.io", "grpcs://bes.aspect.build"], False, suffixes), True)
+
     # User-supplied auth (a --bes-header / --remote_header authorization) suppresses
     # resolution even for an Aspect host, so a stale login cannot abort the build.
     _eq("user auth suppresses", needs_aspect_token(["grpcs://bes.aspect.build"], True, suffixes), False)

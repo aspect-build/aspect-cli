@@ -6,6 +6,7 @@ load("@aspect//bazel.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DE
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_flags.axl", "announce_bazel_args", "bazel_flag_args")
 load("./private/lib/bazel_runner.axl", "run_bazel_task")
+load("./private/lib/bes_sinks.axl", "bes_args")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "TaskLifecycleTrait")
 load("./private/lib/repro_commands.axl", "repro_flavor_args")
@@ -31,19 +32,11 @@ build = task(
             default = DEFAULT_BAZEL_RETRY_ATTEMPTS,
             description = BAZEL_RETRY_ATTEMPTS_DESCRIPTION,
         ),
-        "bes_backends": args.string_list(
-            description = "Build Event Service backend(s) to stream BEP events to. Repeat the flag to pass multiple. Translated to --bes_backend=<value> on the Bazel command.",
-            long = "bes-backend",
-        ),
-        "bes_headers": args.string_list(
-            description = "HTTP header(s) attached to BES streams (e.g. --bes-header=x-token=abc). Repeat the flag to pass multiple. Translated to --bes_header=<value> on the Bazel command.",
-            long = "bes-header",
-        ),
         "cancel": args.boolean(
             default = False,
             description = "Cancel any running Bazel invocation before starting the build.",
         ),
-    } | bazel_flag_args("the build") | announce_bazel_args("the build") | repro_flavor_args(),
+    } | bazel_flag_args("the build") | announce_bazel_args("the build") | bes_args() | repro_flavor_args(),
     traits = [
         BazelTrait,
         HealthCheckTrait,

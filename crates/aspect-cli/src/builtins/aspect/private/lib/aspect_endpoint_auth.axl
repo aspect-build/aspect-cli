@@ -1,18 +1,20 @@
-"""Auth for Aspect endpoints the CLI talks to directly: the Build Event Protocol
-backend (`--bes-backend`, the CLI's own gRPC sink) and the Bazel remote cache
-(`--remote_cache`, injected onto the Bazel command via `--remote_header`).
+"""Shared host gate + credential resolution for attaching the Aspect login JWT
+to the Bazel-facing endpoints the CLI authenticates: the BES backend (CLI-streamed
+`--bes-backend` or Bazel-streamed `--bes_backend`) and the remote cache
+(`--remote_cache`).
 
-For both, the Aspect login JWT is attached only to Aspect-owned endpoints, so a
-backend or cache pointed at a third party never receives Aspect credentials. An
-endpoint is Aspect-owned when its host matches a configured suffix: the built-in
-`.aspect.build`, comma-separated entries from `$ASPECT_AUTH_HOSTS`, or
-`BazelTrait.aspect_auth_hosts` (for self-hosted endpoints on a vanity domain,
-e.g. `aspect.ci.acme.com`).
+The JWT is attached only to Aspect-owned endpoints, so an endpoint pointed at a
+third party never receives Aspect credentials. An endpoint is Aspect-owned when
+its host matches a configured suffix: the built-in `.aspect.build`, comma-separated
+entries from `$ASPECT_AUTH_HOSTS`, or `BazelTrait.aspect_auth_hosts` (for
+self-hosted endpoints on a vanity domain, e.g. `aspect.ci.acme.com`).
 
-This module owns the host parsing, suffix matching, and the
-credential-resolution gate. Auth is best-effort: callers that find an
-Aspect-owned endpoint but no usable credential warn and proceed unauthenticated
-rather than failing (the server's own rejection then surfaces downstream).
+This module owns the host parsing, suffix matching, header-auth detection, and
+the best-effort bearer resolution; the consumers attach the result —
+`bes_sinks.axl` to the CLI sink's metadata, `bazel_flags.axl` to a
+`--bes_header` / `--remote_header` flag. Best-effort: an Aspect-owned endpoint
+with no usable credential warns and proceeds unauthenticated rather than failing
+(the server's own rejection then surfaces downstream).
 """
 
 load("./environment.axl", "warn")
