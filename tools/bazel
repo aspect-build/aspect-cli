@@ -644,7 +644,7 @@ trace_exec() {
     local suffix=""
     if [[ "$category" == "aspect" ]]; then
         if [[ "$shadow" == "shadow" ]]; then
-            suffix+=" — set ASPECT_WRAPPER_SKIP=1 to skip the forward to \`aspect\`"
+            suffix+=" | set ASPECT_WRAPPER_SKIP=1 to skip the forward to \`aspect\`"
         fi
         suffix+=" — docs: $ASPECT_WRAPPER_DOCS_URL"
     fi

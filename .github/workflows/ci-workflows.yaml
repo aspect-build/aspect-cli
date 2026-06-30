@@ -27,7 +27,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: tools/bazel wrapper tests
-        run: ./tools/bazel-test.sh
+        run: ./tools/wrapper-test.sh
   pre-build:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     timeout-minutes: 30
