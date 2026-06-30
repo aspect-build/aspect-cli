@@ -1,0 +1,69 @@
+"""CLI-streamed Build Event Protocol sinks from `--bes-backend` / `--bes-header`.
+
+`--bes-backend` makes the aspect-cli stream BEP to the backend through its own
+gRPC sink (distinct from Bazel's `--bes_backend`, which makes Bazel upload). Every
+bazel-spawning task that exposes the flags (`bes_args`) builds the sinks here
+(`collect_bes_from_args`), splices them into its `build_events` list, and
+`wait()`s them after the build.
+
+The Aspect login JWT is attached to an Aspect-owned backend's sink metadata when
+the user has not supplied their own `authorization` header — see
+`aspect_endpoint_auth.axl` for the host gate and best-effort credential
+resolution. (The companion case — BES routed through Bazel via
+`--bazel-flag=--bes_backend` — is handled by `bes_backend_auth_flags` in
+`bazel_flags.axl` instead.)
+"""
+
+load("./aspect_endpoint_auth.axl", "aspect_auth_host_suffixes", "endpoint_host", "headers_have_auth", "is_aspect_host", "needs_aspect_token", "resolve_aspect_bearer")
+
+def bes_args() -> dict:
+    """The `bes_backends` / `bes_headers` CLI args every BES-capable task
+    declares, with one canonical description each. Splat into a task's
+    `args = {...}`; read back by `collect_bes_from_args`."""
+    return {
+        "bes_backends": args.string_list(
+            long = "bes-backend",
+            description = "Build Event Service backend(s) the CLI streams BEP events to (e.g. --bes-backend=grpcs://bes.example.com). Repeat to pass multiple. The Aspect login JWT is attached automatically for Aspect-owned backends.",
+        ),
+        "bes_headers": args.string_list(
+            long = "bes-header",
+            description = "Header(s) attached to every CLI-streamed BES stream (e.g. --bes-header=x-token=abc). Repeat to pass multiple. A user-supplied `authorization` header suppresses the automatic Aspect JWT.",
+        ),
+    }
+
+def collect_bes_from_args(ctx, bazel_trait) -> list:
+    """Build the CLI-streamed BES sinks from `--bes-backend` / `--bes-header`.
+
+    Attaches the Aspect login JWT as `Authorization: Bearer <jwt>` to each
+    Aspect-owned backend when the user has not supplied their own `authorization`
+    header; other backends are left untouched so a user token (or none) is
+    honored. Best-effort: an Aspect backend with no usable credential warns and
+    streams unauthenticated rather than failing.
+
+    Returns a list of sinks to splice into a task's `build_events`; the caller
+    `wait()`s them after the build.
+    """
+    suffixes = aspect_auth_host_suffixes(ctx.std, bazel_trait)
+
+    metadata = {}
+    for bes_header in ctx.args.bes_headers:
+        (k, _, v) = bes_header.partition("=")
+        metadata[k] = v
+
+    bearer = ""
+    if needs_aspect_token(ctx.args.bes_backends, headers_have_auth(ctx.args.bes_headers), suffixes):
+        bearer = resolve_aspect_bearer(ctx, "build events")
+
+    sinks = []
+    for bes_backend in ctx.args.bes_backends:
+        backend_metadata = dict(metadata)
+        if bearer and is_aspect_host(endpoint_host(bes_backend), suffixes):
+            backend_metadata["Authorization"] = bearer
+
+        sinks.append(
+            bazel.build_events.grpc(
+                uri = bes_backend,
+                metadata = backend_metadata,
+            ),
+        )
+    return sinks

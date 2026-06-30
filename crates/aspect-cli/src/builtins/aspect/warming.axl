@@ -29,9 +29,10 @@ output base, and isn't a surface phase of its own. See `_impl`.)
 load("@aspect//bazel.axl", "BazelTrait")
 load("@std//time.axl", "sleep_iter")
 load("./private/lib/artifacts.axl", "artifacts")
-load("./private/lib/bazel_flags.axl", "announce_bazel_args", "bazel_flag_args", "resolve_bazel_announce")
+load("./private/lib/bazel_flags.axl", "announce_bazel_args", "aspect_endpoint_auth_flags", "bazel_flag_args", "resolve_bazel_announce")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event")
 load("./private/lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
+load("./private/lib/bes_sinks.axl", "bes_args", "collect_bes_from_args")
 load("./private/lib/environment.axl", "error", "warn")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "dispatch_task_update", "setup_phase", "task_update")
@@ -112,8 +113,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # body, resolves Bazel flags + parses the workspace .bazelrc (folding in the
     # runner metadata, incl. --output_base), and runs the health_check hooks (a
     # failed check concludes the surface and fails the task inside).
-    setup_phase(ctx, lifecycle, data["target_pattern"], _KIND, data, hc_trait, bazel_trait, "build")
+    rc = setup_phase(ctx, lifecycle, data["target_pattern"], _KIND, data, hc_trait, bazel_trait, "build")
     announce_version, announce_command = resolve_bazel_announce(ctx)
+    endpoint_auth_flags = aspect_endpoint_auth_flags(ctx, rc, "build", bazel_trait)
 
     # Clean the prior Bazel state under the runner storage mount AFTER
     # `setup_phase` — the health check must run first (the Workflows
@@ -136,8 +138,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # Populate phase: `bazel build --nobuild`. Pass build_event_sinks (the Aspect
     # backend gRPC sink in CI) so the "✨ Aspect Workflows" link resolves to a
     # real record. The local iterator drains BES into `data["bazel"]`.
+    bes_sinks = collect_bes_from_args(ctx, bazel_trait)
     events = bazel.build_events.iterator()
-    build_events = [events] + list(bazel_trait.build_event_sinks)
+    build_events = [events] + bes_sinks + list(bazel_trait.build_event_sinks)
 
     for hook in bazel_trait.build_start:
         hook(ctx)
@@ -156,7 +159,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     )
 
     build = ctx.bazel.build(
-        flags = ["--nobuild"],
+        flags = ["--nobuild"] + endpoint_auth_flags,
         build_events = build_events,
         announce_version = announce_version,
         announce_command = announce_command,
@@ -202,7 +205,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             break
 
     build_status = build.wait()
-    for sink in bazel_trait.build_event_sinks:
+    for sink in bes_sinks + list(bazel_trait.build_event_sinks):
         sink.wait()
 
     # Fire the attempt-end + build-end hooks the `workflows` feature registers
@@ -277,5 +280,5 @@ warming = task(
             default = ["..."],
             description = "Bazel target patterns to warm. Defaults to '...' which expands to all rule targets in the package at and beneath the current directory.",
         ),
-    } | bazel_flag_args("the warming build") | announce_bazel_args("the warming build"),
+    } | bazel_flag_args("the warming build") | announce_bazel_args("the warming build") | bes_args(),
 )

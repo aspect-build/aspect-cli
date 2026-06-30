@@ -951,6 +951,7 @@ fn auth_methods(registry: &mut MethodsBuilder) {
     fn credentials<'v>(
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = named, default = NoneOr::None)] profile: NoneOr<String>,
+        #[starlark(require = named, default = true)] required: bool,
         heap: values::Heap<'v>,
     ) -> anyhow::Result<values::Value<'v>> {
         let profile = resolve_profile(profile.into_option().as_deref());
@@ -970,6 +971,11 @@ fn auth_methods(registry: &mut MethodsBuilder) {
                     save_all_credentials(&map)?;
                     refreshed
                 }
+                // Expired and the refresh failed. By default this is an error so
+                // a command that needs auth fails loudly; `required = False`
+                // callers (e.g. best-effort endpoint auth) get `None` and decide
+                // for themselves whether to proceed unauthenticated.
+                Err(_) if !required => return Ok(values::Value::new_none()),
                 Err(_) => {
                     return Err(anyhow::anyhow!(
                         "session expired\n\nRun `aspect auth login` to re-authenticate."
