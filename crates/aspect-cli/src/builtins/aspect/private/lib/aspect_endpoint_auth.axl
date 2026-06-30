@@ -6,7 +6,7 @@ For both, the Aspect login JWT is attached only to Aspect-owned endpoints, so a
 backend or cache pointed at a third party never receives Aspect credentials. An
 endpoint is Aspect-owned when its host matches a configured suffix: the built-in
 `.aspect.build`, comma-separated entries from `$ASPECT_AUTH_HOSTS`, or
-`BazelTrait.bes_auth_hosts` (for self-hosted endpoints on a vanity domain).
+`BazelTrait.aspect_auth_hosts` (for self-hosted endpoints on a vanity domain).
 
 This module owns the host parsing, suffix matching, and the
 credential-resolution gate. Auth is best-effort: callers that find an
@@ -44,12 +44,12 @@ def endpoint_host(uri: str) -> str:
 
 def aspect_auth_host_suffixes(std, bazel_trait) -> list[str]:
     """Resolve the host suffixes whose endpoints receive the Aspect login JWT:
-    the built-in suffix, `$ASPECT_AUTH_HOSTS`, and `BazelTrait.bes_auth_hosts`.
+    the built-in suffix, `$ASPECT_AUTH_HOSTS`, and `BazelTrait.aspect_auth_hosts`.
     Entries are lowercased and empties dropped.
     """
     suffixes = [_DEFAULT_HOST_SUFFIX]
     env_hosts = std.env.var(_HOSTS_ENV) or ""
-    for h in env_hosts.split(",") + bazel_trait.bes_auth_hosts:
+    for h in env_hosts.split(",") + bazel_trait.aspect_auth_hosts:
         h = h.strip().lower()
         if h:
             suffixes.append(h)

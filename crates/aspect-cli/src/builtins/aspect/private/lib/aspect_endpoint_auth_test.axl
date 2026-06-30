@@ -16,9 +16,9 @@ def _fake_std(env = {}):
     `std.env.var(name)`, returning None for unset keys."""
     return struct(env = struct(var = lambda name: env.get(name)))
 
-def _fake_trait(bes_auth_hosts = []):
-    """Stand-in for `BazelTrait`: only `.bes_auth_hosts` is read."""
-    return struct(bes_auth_hosts = bes_auth_hosts)
+def _fake_trait(aspect_auth_hosts = []):
+    """Stand-in for `BazelTrait`: only `.aspect_auth_hosts` is read."""
+    return struct(aspect_auth_hosts = aspect_auth_hosts)
 
 def _test_endpoint_host(_):
     """Host extraction strips scheme, userinfo, port, and path, and lowercases."""
