@@ -1,0 +1,83 @@
+"""Tests for `lib/aspect_endpoint_auth.axl` — host parsing, suffix matching, and
+the credential-resolution gate for Aspect endpoints (BES backend, remote cache).
+
+Run with:
+  aspect dev test-aspect-endpoint-auth
+"""
+
+load("./aspect_endpoint_auth.axl", "aspect_auth_host_suffixes", "endpoint_host", "is_aspect_host", "needs_aspect_token")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _fake_std(env = {}):
+    """Stand-in for `ctx.std`: `aspect_auth_host_suffixes` reads only
+    `std.env.var(name)`, returning None for unset keys."""
+    return struct(env = struct(var = lambda name: env.get(name)))
+
+def _fake_trait(bes_auth_hosts = []):
+    """Stand-in for `BazelTrait`: only `.bes_auth_hosts` is read."""
+    return struct(bes_auth_hosts = bes_auth_hosts)
+
+def _test_endpoint_host(_):
+    """Host extraction strips scheme, userinfo, port, and path, and lowercases."""
+    _eq("grpcs + path", endpoint_host("grpcs://bes.aws.awd-gha-test-dev.aspect.build/x"), "bes.aws.awd-gha-test-dev.aspect.build")
+    _eq("grpc + port", endpoint_host("grpc://bes.aspect.build:443"), "bes.aspect.build")
+    _eq("bare host:port", endpoint_host("remote.buildbuddy.io:443"), "remote.buildbuddy.io")
+    _eq("userinfo stripped", endpoint_host("grpcs://user@bes.aspect.build"), "bes.aspect.build")
+    _eq("userinfo + port", endpoint_host("grpcs://user:pw@bes.aspect.build:443/x"), "bes.aspect.build")
+    _eq("uppercase lowered", endpoint_host("GRPCS://BES.ASPECT.BUILD"), "bes.aspect.build")
+
+def _test_is_aspect_host(_):
+    """Suffix matching is dot-anchored so lookalike domains do not match."""
+    suffixes = [".aspect.build"]
+    _eq("subdomain matches", is_aspect_host("bes.aws.awd-gha-test-dev.aspect.build", suffixes), True)
+    _eq("apex matches", is_aspect_host("aspect.build", suffixes), True)
+    _eq("third-party rejected", is_aspect_host("remote.buildbuddy.io", suffixes), False)
+    _eq("lookalike rejected", is_aspect_host("evil-aspect.build", suffixes), False)
+    _eq("substring rejected", is_aspect_host("aspect.build.evil.com", suffixes), False)
+    vanity = [".aspect.build", "bes.ci.acme.com"]
+    _eq("vanity exact matches", is_aspect_host("bes.ci.acme.com", vanity), True)
+    _eq("vanity subdomain matches", is_aspect_host("mirror.bes.ci.acme.com", vanity), True)
+
+def _test_aspect_auth_host_suffixes(_):
+    """The built-in suffix is always present; $ASPECT_AUTH_HOSTS and the trait
+    extend it. Entries are lowercased and empties dropped."""
+    _eq("default only", aspect_auth_host_suffixes(_fake_std(), _fake_trait()), [".aspect.build"])
+    _eq(
+        "env + trait, lowercased, empties dropped",
+        aspect_auth_host_suffixes(
+            _fake_std({"ASPECT_AUTH_HOSTS": "Bes.Ci.Acme.com, ,foo.test"}),
+            _fake_trait(["Vanity.Example.COM"]),
+        ),
+        [".aspect.build", "bes.ci.acme.com", "foo.test", "vanity.example.com"],
+    )
+
+def _test_needs_aspect_token(_):
+    """Resolution is gated on an Aspect endpoint lacking user-supplied auth —
+    the gate that keeps a stale login from aborting builds whose token would
+    never be used."""
+    suffixes = [".aspect.build"]
+    _eq("aspect endpoint, no user auth", needs_aspect_token(["grpcs://bes.aspect.build"], False, suffixes), True)
+    _eq("third-party endpoint", needs_aspect_token(["grpcs://remote.buildbuddy.io"], False, suffixes), False)
+    _eq("no endpoints", needs_aspect_token([], False, suffixes), False)
+    _eq("mixed: one aspect endpoint triggers", needs_aspect_token(["grpcs://remote.buildbuddy.io", "grpcs://bes.aspect.build"], False, suffixes), True)
+    # User-supplied auth (a --bes-header / --remote_header authorization) suppresses
+    # resolution even for an Aspect host, so a stale login cannot abort the build.
+    _eq("user auth suppresses", needs_aspect_token(["grpcs://bes.aspect.build"], True, suffixes), False)
+
+def _test_impl(ctx):
+    _test_endpoint_host(ctx)
+    _test_is_aspect_host(ctx)
+    _test_aspect_auth_host_suffixes(ctx)
+    _test_needs_aspect_token(ctx)
+    print("aspect_endpoint_auth_test.axl: OK (4 sections)")
+    return 0
+
+aspect_endpoint_auth_tests = task(
+    kind = "test-aspect-endpoint-auth",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

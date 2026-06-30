@@ -1,0 +1,94 @@
+"""Auth for Aspect endpoints the CLI talks to directly: the Build Event Protocol
+backend (`--bes-backend`, the CLI's own gRPC sink) and the Bazel remote cache
+(`--remote_cache`, injected onto the Bazel command via `--remote_header`).
+
+For both, the Aspect login JWT is attached only to Aspect-owned endpoints, so a
+backend or cache pointed at a third party never receives Aspect credentials. An
+endpoint is Aspect-owned when its host matches a configured suffix: the built-in
+`.aspect.build`, comma-separated entries from `$ASPECT_AUTH_HOSTS`, or
+`BazelTrait.bes_auth_hosts` (for self-hosted endpoints on a vanity domain).
+
+This module owns the host parsing, suffix matching, and the
+credential-resolution gate. Auth is best-effort: callers that find an
+Aspect-owned endpoint but no usable credential warn and proceed unauthenticated
+rather than failing (the server's own rejection then surfaces downstream).
+"""
+
+load("./environment.axl", "warn")
+
+# Built-in suffix matched before any user-supplied override.
+_DEFAULT_HOST_SUFFIX = ".aspect.build"
+
+# Env var holding extra comma-separated host suffixes.
+_HOSTS_ENV = "ASPECT_AUTH_HOSTS"
+
+_NOT_AUTHENTICATED_MSG = "Not authenticated with Aspect; talking to %s without auth. Run `aspect auth login` to authenticate."
+
+def endpoint_host(uri: str) -> str:
+    """Extract the lowercased host from an endpoint URI.
+
+    Handles `scheme://host[:port][/path]` and a bare `host[:port]`. Scheme,
+    userinfo, port, and path are stripped so the result is just the host for
+    suffix matching. IPv6 literals are not handled (Aspect hosts are DNS names).
+    """
+    rest = uri
+    sep = rest.find("://")
+    if sep != -1:
+        rest = rest[sep + 3:]
+    rest = rest.split("/")[0]
+    if "@" in rest:
+        rest = rest.split("@")[-1]
+    if ":" in rest:
+        rest = rest.rsplit(":", 1)[0]
+    return rest.lower()
+
+def aspect_auth_host_suffixes(std, bazel_trait) -> list[str]:
+    """Resolve the host suffixes whose endpoints receive the Aspect login JWT:
+    the built-in suffix, `$ASPECT_AUTH_HOSTS`, and `BazelTrait.bes_auth_hosts`.
+    Entries are lowercased and empties dropped.
+    """
+    suffixes = [_DEFAULT_HOST_SUFFIX]
+    env_hosts = std.env.var(_HOSTS_ENV) or ""
+    for h in env_hosts.split(",") + bazel_trait.bes_auth_hosts:
+        h = h.strip().lower()
+        if h:
+            suffixes.append(h)
+    return suffixes
+
+def is_aspect_host(host: str, suffixes: list[str]) -> bool:
+    """Whether `host` is Aspect-owned: an exact match or a dot-anchored suffix
+    match (so `evil-aspect.build` does not match `.aspect.build`)."""
+    for suffix in suffixes:
+        bare = suffix[1:] if suffix.startswith(".") else suffix
+        if host == bare or host.endswith("." + bare):
+            return True
+    return False
+
+def needs_aspect_token(uris: list[str], have_user_auth: bool, suffixes: list[str]) -> bool:
+    """Whether the Aspect login JWT must be resolved for these endpoints.
+
+    True only when the user did not already supply their own auth AND at least
+    one endpoint is Aspect-owned. Gating credential resolution on this keeps a
+    stale/expired local login (which makes `credentials()` raise) from aborting
+    a build whose endpoints are all third-party or already carry user auth.
+    """
+    return not have_user_auth and any([
+        is_aspect_host(endpoint_host(u), suffixes)
+        for u in uris
+    ])
+
+def resolve_aspect_token(ctx, what: str) -> str:
+    """Best-effort resolution of the Aspect login JWT, for an endpoint described
+    by `what` (e.g. "build events", "the remote cache").
+
+    Returns the access token, or `""` if the user is not authenticated (never
+    logged in, or an expired session that cannot be refreshed). In the
+    unauthenticated case a warning is printed; the caller proceeds without auth.
+    Callers must gate this on `needs_aspect_token` so the warning fires only when
+    an Aspect-owned endpoint actually lacks credentials.
+    """
+    creds = ctx.aspect.auth.credentials(required = False)
+    token = creds.access_token if creds != None else ""
+    if not token:
+        warn(ctx.std, _NOT_AUTHENTICATED_MSG % what)
+    return token

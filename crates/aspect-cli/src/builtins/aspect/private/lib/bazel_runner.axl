@@ -16,8 +16,7 @@ load("@aspect//bazel.axl", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
 load("@std//time.axl", "sleep_iter")
 load("./bazel_flags.axl", "resolve_bazel_announce")
 load("./bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "collapse_repro_targets", "failed_labels", "failed_labels_by_subcommand", "init_data", "now_ms", "process_event", bazel_conclusion = "conclusion")
-load("./bes_auth.axl", "aspect_auth_host_suffixes", "bes_backend_host", "is_aspect_bes_host", "needs_aspect_bes_token")
-load("./environment.axl", "warn")
+load("./aspect_endpoint_auth.axl", "aspect_auth_host_suffixes", "endpoint_host", "is_aspect_host", "needs_aspect_token", "resolve_aspect_token")
 load("./health_check.axl", "HealthCheckTrait")
 load("./lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "setup_phase", "task_update")
 load("./repro_commands.axl", "build_aspect_command", "build_bazel_command", "flavor_allows", "print_repro_and_fix", "repro_prefix")
@@ -163,37 +162,30 @@ def _live_progress(data, command, status):
         stream = "",
     )
 
-def _collect_bes_from_args(ctx, bazel_trait):
+def _collect_bes_from_args(ctx, bazel_trait, suffixes):
     """Collect BES sinks from CLI args (--bes-backend/--bes-header).
 
     Attaches the Aspect login JWT as `Authorization: Bearer <jwt>` to each
-    Aspect-owned backend (see `bes_auth.axl`) when the user has not supplied
-    their own `authorization` header. Other backends are left untouched so a
-    user token (or none) is honored.
-
-    Auth is best-effort: if an Aspect backend needs the token but the user is
-    not logged in (or the session expired), we warn and stream unauthenticated
-    rather than fail the build — the server's own rejection then surfaces as a
-    non-fatal sink warning, matching the vanilla-Bazel path.
+    Aspect-owned backend (see `aspect_endpoint_auth.axl`) when the user has not
+    supplied their own `authorization` header. Other backends are left untouched
+    so a user token (or none) is honored. `suffixes` is the resolved
+    Aspect-host suffix list. Best-effort: an Aspect backend with no usable
+    credential warns and streams unauthenticated rather than failing.
     """
-    suffixes = aspect_auth_host_suffixes(ctx.std, bazel_trait)
-
     metadata = {}
     for bes_header in ctx.args.bes_headers:
         (k, _, v) = bes_header.partition("=")
         metadata[k] = v
 
+    user_set_auth = any([k.lower() == "authorization" for k in metadata])
     aspect_token = ""
-    if needs_aspect_bes_token(ctx.args.bes_backends, metadata, suffixes):
-        creds = ctx.aspect.auth.credentials(required = False)
-        aspect_token = creds.access_token if creds != None else ""
-        if not aspect_token:
-            warn(ctx.std, "Not authenticated with Aspect; streaming build events without auth. Run `aspect auth login` to authenticate.")
+    if needs_aspect_token(ctx.args.bes_backends, user_set_auth, suffixes):
+        aspect_token = resolve_aspect_token(ctx, "build events")
 
     sinks = []
     for bes_backend in ctx.args.bes_backends:
         backend_metadata = dict(metadata)
-        if aspect_token and is_aspect_bes_host(bes_backend_host(bes_backend), suffixes):
+        if aspect_token and is_aspect_host(endpoint_host(bes_backend), suffixes):
             backend_metadata["Authorization"] = "Bearer " + aspect_token
 
         sinks.append(
@@ -203,6 +195,30 @@ def _collect_bes_from_args(ctx, bazel_trait):
             ),
         )
     return sinks
+
+def _remote_cache_auth_flags(ctx, rc, command, suffixes):
+    """Bazel flags injecting the Aspect login JWT for an Aspect-owned remote
+    cache, or `[]`.
+
+    Reads the effective `--remote_cache` (from `--bazel-flag`, a first-class
+    flag, or `.bazelrc` — all resolved through `rc`). When it is Aspect-owned
+    and the user has not already set `--remote_header=authorization=…`, returns
+    `["--remote_header=authorization=Bearer <jwt>"]`. Best-effort: an
+    Aspect-owned cache with no usable credential warns and returns `[]`.
+    """
+    cache = rc.flag_value("--remote_cache", command = command)
+    if not cache:
+        return []
+    user_set_auth = any([
+        h.lower().startswith("authorization=")
+        for h in rc.flag_values("--remote_header", command = command)
+    ])
+    if not needs_aspect_token([cache], user_set_auth, suffixes):
+        return []
+    token = resolve_aspect_token(ctx, "the remote cache")
+    if not token:
+        return []
+    return ["--remote_header=authorization=Bearer " + token]
 
 def _emit_terminal(ctx, lifecycle, command, data, exit_code, targets = []):
     """Fire the terminal `task_update(final=True)` and return a
@@ -327,13 +343,21 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
     # parse + `use_rc`, health checks. The active run command drives the
     # build/test below (a failed health check concludes the surface and fails
     # the task inside setup_phase).
-    setup_phase(ctx, lifecycle, " ".join(targets), "bazel_results", data, hc_trait, bazel_trait, command, bazel_base_flags = base_flags)
+    rc = setup_phase(ctx, lifecycle, " ".join(targets), "bazel_results", data, hc_trait, bazel_trait, command, bazel_base_flags = base_flags)
     announce_version, announce_command = resolve_bazel_announce(ctx)
 
-    bes_sinks = _collect_bes_from_args(ctx, bazel_trait)
+    # Aspect-host suffixes drive auth for both the CLI's BES stream and the
+    # Bazel remote cache; resolve once and share.
+    auth_suffixes = aspect_auth_host_suffixes(ctx.std, bazel_trait)
+
+    bes_sinks = _collect_bes_from_args(ctx, bazel_trait, auth_suffixes)
     if bazel_trait.build_event_sinks:
         bes_sinks.extend(bazel_trait.build_event_sinks)
     need_bes = bool(bazel_trait.build_event) or bool(lifecycle.task_update)
+
+    # Per-invocation extras: inject `--remote_header` auth for an Aspect-owned
+    # remote cache (appended after rc expansion on each bazel build/test call).
+    invocation_flags = _remote_cache_auth_flags(ctx, rc, command, auth_suffixes)
 
     for handler in bazel_trait.build_start:
         handler(ctx)
@@ -414,6 +438,7 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
                 execution_log = bazel_trait.execution_log_sinks or False,
                 announce_version = announce_version,
                 announce_command = announce_command,
+                flags = invocation_flags,
                 *targets
             )
         else:
@@ -422,6 +447,7 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
                 execution_log = bazel_trait.execution_log_sinks or False,
                 announce_version = announce_version,
                 announce_command = announce_command,
+                flags = invocation_flags,
                 *targets
             )
 
