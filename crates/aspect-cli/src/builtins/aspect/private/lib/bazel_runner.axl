@@ -17,6 +17,7 @@ load("@std//time.axl", "sleep_iter")
 load("./bazel_flags.axl", "resolve_bazel_announce")
 load("./bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "collapse_repro_targets", "failed_labels", "failed_labels_by_subcommand", "init_data", "now_ms", "process_event", bazel_conclusion = "conclusion")
 load("./bes_auth.axl", "aspect_auth_host_suffixes", "bes_backend_host", "is_aspect_bes_host", "needs_aspect_bes_token")
+load("./environment.axl", "warn")
 load("./health_check.axl", "HealthCheckTrait")
 load("./lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "setup_phase", "task_update")
 load("./repro_commands.axl", "build_aspect_command", "build_bazel_command", "flavor_allows", "print_repro_and_fix", "repro_prefix")
@@ -168,9 +169,12 @@ def _collect_bes_from_args(ctx, bazel_trait):
     Attaches the Aspect login JWT as `Authorization: Bearer <jwt>` to each
     Aspect-owned backend (see `bes_auth.axl`) when the user has not supplied
     their own `authorization` header. Other backends are left untouched so a
-    user token (or none) is honored. A missing credential is not an error — the
-    stream proceeds unauthenticated and the server's own rejection surfaces,
-    matching the vanilla-Bazel path.
+    user token (or none) is honored.
+
+    Auth is best-effort: if an Aspect backend needs the token but the user is
+    not logged in (or the session expired), we warn and stream unauthenticated
+    rather than fail the build — the server's own rejection then surfaces as a
+    non-fatal sink warning, matching the vanilla-Bazel path.
     """
     suffixes = aspect_auth_host_suffixes(ctx.std, bazel_trait)
 
@@ -181,8 +185,10 @@ def _collect_bes_from_args(ctx, bazel_trait):
 
     aspect_token = ""
     if needs_aspect_bes_token(ctx.args.bes_backends, metadata, suffixes):
-        creds = ctx.aspect.auth.credentials()
+        creds = ctx.aspect.auth.credentials(required = False)
         aspect_token = creds.access_token if creds != None else ""
+        if not aspect_token:
+            warn(ctx.std, "Not authenticated with Aspect; streaming build events without auth. Run `aspect auth login` to authenticate.")
 
     sinks = []
     for bes_backend in ctx.args.bes_backends:
