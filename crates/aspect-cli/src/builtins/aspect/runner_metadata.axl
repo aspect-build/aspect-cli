@@ -1,0 +1,34 @@
+"""`aspect ci runner-metadata` — print the Aspect Workflows runner metadata table.
+
+Every Bazel-calling task already prints this table during its Setup phase: the
+`Workflows` feature registers `print_environment_info` as a `HealthCheckTrait`
+diagnostic hook (see `feature/workflows.axl`), and `lib/lifecycle.axl::setup_phase`
+runs it. This command runs just that step on demand — useful for inspecting the
+runner (cloud/region/instance, cache and storage paths, warming status, the
+bootstrap-logs command) without kicking off a build.
+
+Off an Aspect Workflows runner there is no runner metadata to show, so it prints
+an informational line and exits 0.
+"""
+
+load(
+    "./private/lib/environment.axl",
+    "get_workflows_environment",
+    "info",
+    "print_environment_info",
+)
+
+def _impl(ctx: TaskContext) -> int:
+    environment = get_workflows_environment(ctx.std)
+    if environment.runner == None:
+        info(ctx.std, "Not on an Aspect Workflows runner; no runner metadata available.")
+        return 0
+    print_environment_info(ctx.std, environment)
+    return 0
+
+runner_metadata = task(
+    group = ["ci"],
+    summary = "Print the Aspect Workflows runner metadata.",
+    description = "Print the Aspect Workflows runner metadata table — cloud/region/instance, cache and storage paths, warming status, and the cloud bootstrap-logs command. This is the same table shown during a task's Setup phase; this command runs just that step. Off a Workflows runner there is nothing to show, so it prints an informational line and exits 0.",
+    implementation = _impl,
+)
