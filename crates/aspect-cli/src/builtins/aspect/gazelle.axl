@@ -84,7 +84,7 @@ https://github.com/bazel-contrib/bazel-gazelle#lazy-indexing-in-fix-and-update
 load("@aspect//bazel.axl", "BazelTrait")
 load("@std//time.axl", "sleep_iter")
 load("./private/lib/artifacts.axl", "artifacts")
-load("./private/lib/bazel_flags.axl", "announce_bazel_args", "bazel_flag_args", "remote_cache_auth_flags", "resolve_bazel_announce")
+load("./private/lib/bazel_flags.axl", "announce_bazel_args", "aspect_endpoint_auth_flags", "bazel_flag_args", "resolve_bazel_announce")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event")
 load("./private/lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
 load("./private/lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
@@ -444,7 +444,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # returns resolved flags (a failed health check fails the task inside).
     rc = setup_phase(ctx, lifecycle, ctx.args.gazelle_target, "gazelle_results", data, hc_trait, bazel_trait)
     announce_version, announce_command = resolve_bazel_announce(ctx)
-    cache_auth_flags = remote_cache_auth_flags(ctx, rc, "build", bazel_trait)
+    endpoint_auth_flags = aspect_endpoint_auth_flags(ctx, rc, "build", bazel_trait)
 
     # Resolve dirs before the build: gazelle needs them when spawned, the no-op
     # short-circuit skips the build entirely, and the repro/fix builders read
@@ -486,7 +486,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     build = ctx.bazel.build(
         ctx.args.gazelle_target,
         build_events = build_events,
-        flags = r.flags + cache_auth_flags,
+        flags = r.flags + endpoint_auth_flags,
         directory = ctx.std.env.bazel_root_dir(),
         announce_version = announce_version,
         announce_command = announce_command,

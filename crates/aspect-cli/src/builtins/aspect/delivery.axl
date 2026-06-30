@@ -123,7 +123,7 @@ load("@aspect//bazel.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DE
 load("@bazel//proto/remote_logging.axl", "remote_logging")
 load("@std//time.axl", "sleep_iter", "time")
 load("./private/lib/artifacts.axl", "artifacts")
-load("./private/lib/bazel_flags.axl", "announce_bazel_args", "expand_config_flags", "remote_cache_auth_flags", "resolve_bazel_announce")
+load("./private/lib/bazel_flags.axl", "announce_bazel_args", "aspect_endpoint_auth_flags", "expand_config_flags", "resolve_bazel_announce")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "now_ms", "process_event", bazel_init_data = "init_data")
 load("./private/lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
 load("./private/lib/ci.axl", "resolve_build_url")
@@ -379,11 +379,11 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, use
         inject_flag,
     ]
 
-    cache_auth_flags = remote_cache_auth_flags(ctx, rc, "build", bazel_trait)
+    endpoint_auth_flags = aspect_endpoint_auth_flags(ctx, rc, "build", bazel_trait)
 
     # Phase-1 extras layered on the active run command. Force `=minimal`:
     # phase 1 reads outputs via BES, never from disk.
-    phase1_flags = ["--nokeep_state_after_build", "--remote_download_outputs=minimal"] + cache_auth_flags
+    phase1_flags = ["--nokeep_state_after_build", "--remote_download_outputs=minimal"] + endpoint_auth_flags
     _t_phase1 = time.monotonic()
     announce_version, announce_command = resolve_bazel_announce(ctx)
 
@@ -538,7 +538,7 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, use
 
     # Phase-2 extras on the active run command. Force `=minimal`: phase 2 reads
     # digests from the gRPC log, not disk.
-    phase2_flags = aspect_flags + cache_auth_flags + [
+    phase2_flags = aspect_flags + endpoint_auth_flags + [
         "--remote_executor=" + phase2_executor_uri,
         "--experimental_remote_require_cached",
         "--remote_grpc_log=" + log_path,
@@ -1224,7 +1224,7 @@ def _delivery_impl(ctx):
         # over `=toplevel` (the floor is a minimum, not a ceiling).
         # `--noremote_upload_local_results` keeps release artifacts out of the
         # shared remote cache (delivery-specific).
-        phase3_flags = run_tracker.flags + list(release_flags) + remote_cache_auth_flags(ctx, rc, "build", bazel_trait) + [
+        phase3_flags = run_tracker.flags + list(release_flags) + aspect_endpoint_auth_flags(ctx, rc, "build", bazel_trait) + [
             "--noremote_upload_local_results",
         ]
         _t_download = time.monotonic()

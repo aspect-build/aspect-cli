@@ -4,7 +4,7 @@ Run with:
   aspect dev test-bazel-flags
 """
 
-load("./bazel_flags.axl", "announce_bazel_args", "remote_cache_auth_flags", "requested_config_names", "resolve_announce", "resolve_bazel_announce", "resolve_flags", "resolve_startup_flags", "setup_bazel_command")
+load("./bazel_flags.axl", "announce_bazel_args", "aspect_endpoint_auth_flags", "bes_backend_auth_flags", "remote_cache_auth_flags", "requested_config_names", "resolve_announce", "resolve_bazel_announce", "resolve_flags", "resolve_startup_flags", "setup_bazel_command")
 
 def _eq(label, got, want):
     if got != want:
@@ -185,14 +185,16 @@ def _test_requested_config_names(ctx):
         ["a", "b", "c"],
     )
 
-# ── remote_cache_auth_flags ──────────────────────────────────────────────
+# ── endpoint auth flags ──────────────────────────────────────────────────
 
-def _fake_rc(remote_cache = None, remote_headers = []):
-    """Stand-in `RunCommand` exposing the two reads `remote_cache_auth_flags`
-    makes. `command`/`version` kwargs are accepted and ignored."""
+def _fake_rc(values = {}):
+    """Stand-in `RunCommand` over a `{flag: value}` map for single-value flags
+    (`--remote_cache`/`--bes_backend`) and a `{flag: [values]}` map for
+    repeatable flags (`--remote_header`/`--bes_header`). `command`/`version`
+    kwargs are accepted and ignored."""
     return struct(
-        flag_value = lambda name, command = None, version = None: remote_cache if name == "--remote_cache" else None,
-        flag_values = lambda name, command = None, version = None: remote_headers if name == "--remote_header" else [],
+        flag_value = lambda name, command = None, version = None: values.get(name),
+        flag_values = lambda name, command = None, version = None: values.get(name, []),
     )
 
 def _fake_auth_ctx(access_token = ""):
@@ -208,29 +210,30 @@ def _fake_auth_ctx(access_token = ""):
         aspect = struct(auth = struct(credentials = lambda required = True: creds)),
     )
 
+_TOK = "fake-access-token"
+
 def _test_remote_cache_auth_flags(_):
-    """Injects `--remote_header` auth only for an Aspect-owned cache lacking a
-    user authorization header, and only when a credential resolves."""
+    """`--remote_header` auth only for an Aspect-owned cache lacking a user
+    authorization header, and only when a credential resolves."""
     trait = _fake_trait()
-    tok = "_fake_auth_ctx with this token"
-    ctx = _fake_auth_ctx(access_token = tok)
+    ctx = _fake_auth_ctx(access_token = _TOK)
 
     _eq("no --remote_cache", remote_cache_auth_flags(ctx, _fake_rc(), "build", trait), [])
     _eq(
         "third-party cache",
-        remote_cache_auth_flags(ctx, _fake_rc(remote_cache = "grpcs://remote.buildbuddy.io"), "build", trait),
+        remote_cache_auth_flags(ctx, _fake_rc({"--remote_cache": "grpcs://remote.buildbuddy.io"}), "build", trait),
         [],
     )
     _eq(
         "aspect cache + creds",
-        remote_cache_auth_flags(ctx, _fake_rc(remote_cache = "grpcs://remote.aspect.build"), "build", trait),
-        ["--remote_header=authorization=Bearer " + tok],
+        remote_cache_auth_flags(ctx, _fake_rc({"--remote_cache": "grpcs://remote.aspect.build"}), "build", trait),
+        ["--remote_header=authorization=Bearer " + _TOK],
     )
     _eq(
         "aspect cache + user authorization header",
         remote_cache_auth_flags(
             ctx,
-            _fake_rc(remote_cache = "grpcs://remote.aspect.build", remote_headers = ["authorization=Bearer user"]),
+            _fake_rc({"--remote_cache": "grpcs://remote.aspect.build", "--remote_header": ["authorization=Bearer user"]}),
             "build",
             trait,
         ),
@@ -238,8 +241,46 @@ def _test_remote_cache_auth_flags(_):
     )
     _eq(
         "aspect cache + not logged in",
-        remote_cache_auth_flags(_fake_auth_ctx(), _fake_rc(remote_cache = "grpcs://remote.aspect.build"), "build", trait),
+        remote_cache_auth_flags(_fake_auth_ctx(), _fake_rc({"--remote_cache": "grpcs://remote.aspect.build"}), "build", trait),
         [],
+    )
+
+def _test_bes_backend_auth_flags(_):
+    """`--bes_header` auth for a Bazel-streamed Aspect-owned `--bes_backend`,
+    same gate as the cache path but on the BES flag pair."""
+    trait = _fake_trait()
+    ctx = _fake_auth_ctx(access_token = _TOK)
+
+    _eq("third-party bes", bes_backend_auth_flags(ctx, _fake_rc({"--bes_backend": "grpcs://bes.buildbuddy.io"}), "build", trait), [])
+    _eq(
+        "aspect bes + creds",
+        bes_backend_auth_flags(ctx, _fake_rc({"--bes_backend": "grpcs://bes.aspect.build"}), "build", trait),
+        ["--bes_header=authorization=Bearer " + _TOK],
+    )
+    _eq(
+        "aspect bes + user authorization header",
+        bes_backend_auth_flags(
+            ctx,
+            _fake_rc({"--bes_backend": "grpcs://bes.aspect.build", "--bes_header": ["Authorization=Bearer user"]}),
+            "build",
+            trait,
+        ),
+        [],
+    )
+
+def _test_aspect_endpoint_auth_flags(_):
+    """The combined helper concatenates cache + BES auth; an Aspect cache and an
+    Aspect bes backend in the same invocation each get their header."""
+    ctx = _fake_auth_ctx(access_token = _TOK)
+    _eq(
+        "cache + bes together",
+        aspect_endpoint_auth_flags(
+            ctx,
+            _fake_rc({"--remote_cache": "grpcs://remote.aspect.build", "--bes_backend": "grpcs://bes.aspect.build"}),
+            "build",
+            _fake_trait(),
+        ),
+        ["--remote_header=authorization=Bearer " + _TOK, "--bes_header=authorization=Bearer " + _TOK],
     )
 
 # ── contract enforcement ─────────────────────────────────────────────────
@@ -264,11 +305,13 @@ def _test_impl(ctx):
     _test_announce_bazel_args_shape(ctx)
     _test_requested_config_names(ctx)
     _test_remote_cache_auth_flags(ctx)
+    _test_bes_backend_auth_flags(ctx)
+    _test_aspect_endpoint_auth_flags(ctx)
 
     # Run last: `setup_bazel_command` registers a real active rc on `ctx.bazel`,
     # so keeping it after the pure subtests prevents bleed-through.
     _test_setup_bazel_command_applies_to_ctx_bazel(ctx)
-    print("bazel_flags_test.axl: OK (14 sections)")
+    print("bazel_flags_test.axl: OK (16 sections)")
     return 0
 
 bazel_flags_tests = task(

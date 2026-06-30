@@ -3,7 +3,7 @@
 load("@aspect//bazel.axl", "BazelTrait")
 load("@std//time.axl", "sleep_iter")
 load("./private/lib/artifacts.axl", "artifacts")
-load("./private/lib/bazel_flags.axl", "announce_bazel_args", "bazel_flag_args", "remote_cache_auth_flags", "resolve_bazel_announce")
+load("./private/lib/bazel_flags.axl", "announce_bazel_args", "aspect_endpoint_auth_flags", "bazel_flag_args", "resolve_bazel_announce")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "init_data", "process_event", bazel_conclusion = "conclusion")
 load("./private/lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
 load("./private/lib/environment.axl", "error")
@@ -81,7 +81,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # rejects as unrecognized (e.g. `--script_path`).
     rc = setup_phase(ctx, lifecycle, target, "bazel_results", data, hc_trait, bazel_trait, "build")
     announce_version, announce_command = resolve_bazel_announce(ctx)
-    cache_auth_flags = remote_cache_auth_flags(ctx, rc, "build", bazel_trait)
+    endpoint_auth_flags = aspect_endpoint_auth_flags(ctx, rc, "build", bazel_trait)
 
     # `rc=` opts into the runinfo aspect: `r.flags` then carries the spawn
     # flags + aspect injection that capture the executable, the `args` attribute,
@@ -109,7 +109,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     build = ctx.bazel.build(
         target,
         build_events = build_events,
-        flags = r.flags + cache_auth_flags,
+        flags = r.flags + endpoint_auth_flags,
         announce_version = announce_version,
         announce_command = announce_command,
     )

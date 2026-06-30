@@ -61,8 +61,8 @@ load("@std//time.axl", "time")
 load(
     "./private/lib/bazel_flags.axl",
     "announce_bazel_args",
+    "aspect_endpoint_auth_flags",
     "bazel_flag_args",
-    "remote_cache_auth_flags",
     "resolve_bazel_announce",
     "resolve_flags",
     "resolve_startup_flags",
@@ -119,7 +119,7 @@ def _probe_has_unexpected_error(ctx: TaskContext, err_path: str) -> bool:
         return True
     return False
 
-def _run_probe(ctx: TaskContext, patterns: list, rc, cache_auth_flags: list, announce_version: bool, announce_command: bool, ansi: bool, timing: dict) -> list | None:
+def _run_probe(ctx: TaskContext, patterns: list, rc, endpoint_auth_flags: list, announce_version: bool, announce_command: bool, ansi: bool, timing: dict) -> list | None:
     """Require-cached test probe; return its logged `GetActionResultEntry` rows,
     or `None` if Bazel failed unexpectedly (no gRPC log — its captured stderr is
     surfaced first). Bazel's own stdout/stderr are hidden: the expected
@@ -128,7 +128,7 @@ def _run_probe(ctx: TaskContext, patterns: list, rc, cache_auth_flags: list, ann
     err_path = "/tmp/aspect-cache-diff-probe-{}.log".format(ctx.task.name)
 
     dummy = None
-    flags = cache_auth_flags + [
+    flags = endpoint_auth_flags + [
         "--experimental_remote_require_cached",
         # Force every action through a fresh remote GetActionResult instead of a
         # local short-circuit. Two layers short-circuit unchanged actions: the
@@ -196,7 +196,7 @@ def _run_probe(ctx: TaskContext, patterns: list, rc, cache_auth_flags: list, ann
 
     return entries
 
-def _build_missing_non_test(ctx: TaskContext, patterns: list, rc, cache_auth_flags: list, announce_version: bool, announce_command: bool, ansi: bool, timing: dict) -> bool:
+def _build_missing_non_test(ctx: TaskContext, patterns: list, rc, endpoint_auth_flags: list, announce_version: bool, announce_command: bool, ansi: bool, timing: dict) -> bool:
     """precise pre-pass: execute + upload the missing non-test actions on the
     default (incremental) output base. Bazel output hidden; surfaced + False
     returned on a hard build failure (a real broken target, not a cache miss)."""
@@ -204,7 +204,7 @@ def _build_missing_non_test(ctx: TaskContext, patterns: list, rc, cache_auth_fla
     _t = time.monotonic()
     status = ctx.bazel.build(
         rc = rc,
-        flags = cache_auth_flags + ["--remote_upload_local_results", "--keep_going"],
+        flags = endpoint_auth_flags + ["--remote_upload_local_results", "--keep_going"],
         stdout = None,
         stderr = ctx.std.fs.create(err_path),
         announce_version = announce_version,
@@ -322,7 +322,7 @@ def _impl(ctx: TaskContext) -> int:
 
     # Attach the Aspect login JWT when the cache is an Aspect-owned endpoint;
     # the probe and pre-build below both hit it.
-    cache_auth_flags = remote_cache_auth_flags(ctx, rc, "test", bazel_trait)
+    endpoint_auth_flags = aspect_endpoint_auth_flags(ctx, rc, "test", bazel_trait)
 
     # Enumerate + reverse-dep under the same resolved flags as the probe/build,
     # so a `--config`/`--bazel-flag` that changes package loading or the test set
@@ -337,9 +337,9 @@ def _impl(ctx: TaskContext) -> int:
     _err(ctx, _style(ansi, _BOLD, "Diffing {} test target(s) against the remote cache [--mode={}]…".format(len(test_targets), mode)))
 
     if mode == "precise":
-        if not _build_missing_non_test(ctx, patterns, rc, cache_auth_flags, announce_version, announce_command, ansi, timing):
+        if not _build_missing_non_test(ctx, patterns, rc, endpoint_auth_flags, announce_version, announce_command, ansi, timing):
             return 1
-    entries = _run_probe(ctx, patterns, rc, cache_auth_flags, announce_version, announce_command, ansi, timing)
+    entries = _run_probe(ctx, patterns, rc, endpoint_auth_flags, announce_version, announce_command, ansi, timing)
     if entries == None:
         return 1
 

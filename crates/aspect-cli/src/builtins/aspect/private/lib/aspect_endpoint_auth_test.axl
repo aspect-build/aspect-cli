@@ -5,7 +5,7 @@ Run with:
   aspect dev test-aspect-endpoint-auth
 """
 
-load("./aspect_endpoint_auth.axl", "aspect_auth_host_suffixes", "endpoint_host", "is_aspect_host", "needs_aspect_token", "remote_headers_have_auth")
+load("./aspect_endpoint_auth.axl", "aspect_auth_host_suffixes", "endpoint_host", "is_aspect_host", "needs_aspect_token", "headers_have_auth")
 
 def _eq(label, got, want):
     if got != want:
@@ -67,22 +67,23 @@ def _test_needs_aspect_token(_):
     # resolution even for an Aspect host, so a stale login cannot abort the build.
     _eq("user auth suppresses", needs_aspect_token(["grpcs://bes.aspect.build"], True, suffixes), False)
 
-def _test_remote_headers_have_auth(_):
-    """`--remote_header` authorization detection is case-insensitive and matches
-    the header name exactly (not a value that happens to contain it)."""
-    _eq("empty", remote_headers_have_auth([]), False)
-    _eq("unrelated headers", remote_headers_have_auth(["x-foo=bar", "x-token=abc"]), False)
-    _eq("lowercase", remote_headers_have_auth(["authorization=Bearer x"]), True)
-    _eq("titlecase", remote_headers_have_auth(["Authorization=Bearer x"]), True)
-    _eq("amongst others", remote_headers_have_auth(["x-foo=bar", "AUTHORIZATION=Bearer x"]), True)
-    _eq("value mentioning auth not matched", remote_headers_have_auth(["x-note=authorization=no"]), False)
+def _test_headers_have_auth(_):
+    """`--remote_header`/`--bes_header` authorization detection is
+    case-insensitive and matches the header name exactly (not a value that
+    happens to contain it)."""
+    _eq("empty", headers_have_auth([]), False)
+    _eq("unrelated headers", headers_have_auth(["x-foo=bar", "x-token=abc"]), False)
+    _eq("lowercase", headers_have_auth(["authorization=Bearer x"]), True)
+    _eq("titlecase", headers_have_auth(["Authorization=Bearer x"]), True)
+    _eq("amongst others", headers_have_auth(["x-foo=bar", "AUTHORIZATION=Bearer x"]), True)
+    _eq("value mentioning auth not matched", headers_have_auth(["x-note=authorization=no"]), False)
 
 def _test_impl(ctx):
     _test_endpoint_host(ctx)
     _test_is_aspect_host(ctx)
     _test_aspect_auth_host_suffixes(ctx)
     _test_needs_aspect_token(ctx)
-    _test_remote_headers_have_auth(ctx)
+    _test_headers_have_auth(ctx)
     print("aspect_endpoint_auth_test.axl: OK (5 sections)")
     return 0
 

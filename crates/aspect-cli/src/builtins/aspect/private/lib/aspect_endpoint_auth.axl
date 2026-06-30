@@ -78,10 +78,11 @@ def needs_aspect_token(uris: list[str], have_user_auth: bool, suffixes: list[str
         for u in uris
     ])
 
-def remote_headers_have_auth(headers: list[str]) -> bool:
-    """Whether a `--remote_header` value list already carries an `authorization`
-    header (case-insensitive). Values are `name=value` strings, so an exact
-    `authorization` name is matched by the `authorization=` prefix."""
+def headers_have_auth(headers: list[str]) -> bool:
+    """Whether a header value list (`--remote_header` / `--bes_header`) already
+    carries an `authorization` header (case-insensitive). Values are `name=value`
+    strings, so an exact `authorization` name is matched by the `authorization=`
+    prefix."""
     return any([h.lower().startswith("authorization=") for h in headers])
 
 def resolve_aspect_bearer(ctx, what: str) -> str:
