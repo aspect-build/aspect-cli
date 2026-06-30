@@ -5,9 +5,9 @@
 # line, prefixed with `INVOKED:<name>`. Dispatch/flag assertions capture the
 # stub's stdout (via run()); trace assertions capture stderr (Section 9).
 #
-# Run: ./tools/bazel-test.sh
+# Run: ./tools/wrapper-test.sh
 # Run under macOS's bash 3.2 (the wrapper's compatibility floor):
-#   WRAPPER_BASH=/bin/bash ./tools/bazel-test.sh
+#   WRAPPER_BASH=/bin/bash ./tools/wrapper-test.sh
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -598,11 +598,11 @@ check "trace: aspect-only verb traces by default (non-TTY), docs but no nudge" \
 # Shadowing verb (build): also a real bazel command, so the SKIP nudge fires.
 # Also asserts bazel flags are shown rewritten in the trace.
 check "trace: shadowing verb shows rewritten flags + SKIP nudge + docs" \
-    "[tools/bazel] aspect build --bazel-flag=--keep_going --bazel-flag=--config=ci //... — $SKIP_NUDGE — $DOCS" \
+    "[tools/bazel] aspect build --bazel-flag=--keep_going --bazel-flag=--config=ci //... | $SKIP_NUDGE — $DOCS" \
     "$(trace build --keep_going --config=ci //...)"
 
 check "trace: shadow nudge fires on 'test' too (verb in both lists)" \
-    "[tools/bazel] aspect test //... — $SKIP_NUDGE — $DOCS" \
+    "[tools/bazel] aspect test //... | $SKIP_NUDGE — $DOCS" \
     "$(trace test //...)"
 
 # Custom .axl task (unknown verb): routes to aspect, no shadow (bazel has no
