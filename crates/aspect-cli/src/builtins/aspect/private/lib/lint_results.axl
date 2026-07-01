@@ -859,6 +859,7 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
                 if len(rows) > 2:
                     half = max(1, len(rows) // 2)
                     kept = rows[:half]
+
                     # `count` is stringified for the template (_groups_for_template);
                     # parse it back for the arithmetic, and re-stringify overflow
                     # to match the field's rendered shape ("" when none).
