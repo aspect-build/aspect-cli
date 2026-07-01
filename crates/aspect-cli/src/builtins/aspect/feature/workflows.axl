@@ -67,10 +67,21 @@ def _workflows_impl(ctx: FeatureContext):
         bazel_trait.extra_startup_flags.extend(startup_flags)
         bazel_trait.extra_flags.extend(build_flags)
 
-        # On older runners, `bazel` on the PATH is the legacy CLI so we disable
-        # the plugin feature on all calls
-        bazel_version_output = ctx.std.process.command("bazel").arg("--version").stdout("piped").spawn().wait_with_output()
-        if "aspect" in bazel_version_output.stdout:
+        # On older runners, `bazel` on the PATH is the legacy CLI, which we
+        # disable the plugin feature on. `ASPECT_WORKFLOWS_RUNNER_NO_LEGACY_CLI`
+        # is set on runners that are known to be past the legacy CLI, letting us
+        # skip the (spawn-a-subprocess) version probe entirely. When it's unset
+        # we still probe, as a safety net against a regression that reintroduces
+        # the legacy CLI. Ephemeral (non-Workflows) runners never have it, which
+        # is why this whole block is runner-only. Once every customer is past the
+        # legacy CLI, this probe and its code path go away for good.
+        if ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_NO_LEGACY_CLI"):
+            is_legacy_cli = False
+        else:
+            bazel_version_output = ctx.std.process.command("bazel").arg("--version").stdout("piped").spawn().wait_with_output()
+            is_legacy_cli = "aspect" in bazel_version_output.stdout
+
+        if is_legacy_cli:
             bazel_trait.extra_startup_flags.extend(["--aspect:disable_plugins", "--aspect:lock_version"])
 
     if environment.build_events != None:
