@@ -1199,7 +1199,29 @@ def _test_render_summary_or_fallback_degrades(ctx):
     if "Status summary unavailable" not in text:
         fail("summary fallback body missing marker: %r" % text)
 
+def _test_try_template_engines_return_ok_text_tuple(ctx):
+    """Each try_* engine returns (True, rendered) on success and (False, error)
+    on a malformed template, never raising. The fallback helpers key off this
+    (ok, text) contract."""
+    for (engine, render) in [
+        ("handlebars", ctx.template.try_handlebars),
+        ("jinja2", ctx.template.try_jinja2),
+        ("liquid", ctx.template.try_liquid),
+    ]:
+        (ok, text) = render("Hi {{ name }}", data = {"name": "there"})
+        _eq("%s try render ok" % engine, ok, True)
+        if "there" not in text:
+            fail("%s try render dropped data: %r" % (engine, text))
+
+    (hb_ok, _) = ctx.template.try_handlebars("Hi {{name", data = {})
+    _eq("handlebars malformed not ok", hb_ok, False)
+    (lq_ok, _) = ctx.template.try_liquid("Hi {% if %}", data = {})
+    _eq("liquid malformed not ok", lq_ok, False)
+    (jj_ok, _) = ctx.template.try_jinja2("{{ undefined_macro(x) }}", data = {})
+    _eq("jinja2 undefined call not ok", jj_ok, False)
+
 _UNIT_TESTS = [
+    _test_try_template_engines_return_ok_text_tuple,
     _test_render_or_fallback_passthrough,
     _test_render_details_or_fallback_degrades,
     _test_render_summary_or_fallback_degrades,
