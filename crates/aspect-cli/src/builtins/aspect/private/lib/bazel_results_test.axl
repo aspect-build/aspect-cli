@@ -8,7 +8,7 @@ Two task implementations live here:
     `compute_invocation_state`, `conclusion`, and skipped-bucket plumbing.
 """
 
-load("./bazel_results.axl", "MAX_TEST_TARGETS", "STATUS_ICONS", "STATUS_LABELS", "aspect_web_ui_url", "bes_get", "build_details_data", "common_label_root", "compute_invocation_state", "conclusion", "failed_labels_by_subcommand", "init_data", "process_event", "render_bes_url", "render_check_output", "repro_by_target", "repro_targets")
+load("./bazel_results.axl", "MAX_TEST_TARGETS", "STATUS_ICONS", "STATUS_LABELS", "aspect_web_ui_url", "bes_get", "build_details_data", "common_label_root", "compute_invocation_state", "conclusion", "failed_labels_by_subcommand", "init_data", "process_event", "render_bes_url", "render_check_output", "render_details_or_fallback", "render_summary_or_fallback", "repro_by_target", "repro_targets")
 load("./lifecycle.axl", "ReproFixCommand")
 
 # Fake data builders
@@ -1167,7 +1167,64 @@ def _test_render_bes_url(ctx):
         "",
     )
 
+def _test_render_or_fallback_passthrough(ctx):
+    """A template that renders cleanly returns (text, True) unchanged."""
+    (text, ok) = render_details_or_fallback(ctx, "hello {{ name }}", {"name": "world"}, surface = "lint")
+    _eq("details passthrough ok", ok, True)
+    _eq("details passthrough text", text, "hello world")
+
+    (text, ok) = render_summary_or_fallback(ctx, "hi {{ name }}", {"name": "there"}, surface = "lint")
+    _eq("summary passthrough ok", ok, True)
+    _eq("summary passthrough text", text, "hi there")
+
+def _test_render_details_or_fallback_degrades(ctx):
+    """A broken details template returns (fallback, False) instead of raising.
+
+    The fallback embeds the surface and the error, and stays well under
+    _DETAILS_LIMIT so the caller's trim cascade is a no-op on it. Guard against
+    the crash class where an undefined macro aborts the whole invocation."""
+    (text, ok) = render_details_or_fallback(ctx, "{{ undefined_macro(x) }}", {}, surface = "lint")
+    _eq("details fallback not ok", ok, False)
+    if "Details unavailable" not in text:
+        fail("details fallback body missing marker: %r" % text)
+    if "lint details" not in text:
+        fail("details fallback should name the surface: %r" % text)
+    if "undefined_macro" not in text:
+        fail("details fallback should embed the render error: %r" % text)
+
+def _test_render_summary_or_fallback_degrades(ctx):
+    """A broken summary template returns (fallback, False) instead of raising."""
+    (text, ok) = render_summary_or_fallback(ctx, "{{ undefined_macro(x) }}", {}, surface = "lint")
+    _eq("summary fallback not ok", ok, False)
+    if "Status summary unavailable" not in text:
+        fail("summary fallback body missing marker: %r" % text)
+
+def _test_try_template_engines_return_ok_text_tuple(ctx):
+    """Each try_* engine returns (True, rendered) on success and (False, error)
+    on a malformed template, never raising. The fallback helpers key off this
+    (ok, text) contract."""
+    for (engine, render) in [
+        ("handlebars", ctx.template.try_handlebars),
+        ("jinja2", ctx.template.try_jinja2),
+        ("liquid", ctx.template.try_liquid),
+    ]:
+        (ok, text) = render("Hi {{ name }}", data = {"name": "there"})
+        _eq("%s try render ok" % engine, ok, True)
+        if "there" not in text:
+            fail("%s try render dropped data: %r" % (engine, text))
+
+    (hb_ok, _) = ctx.template.try_handlebars("Hi {{name", data = {})
+    _eq("handlebars malformed not ok", hb_ok, False)
+    (lq_ok, _) = ctx.template.try_liquid("Hi {% if %}", data = {})
+    _eq("liquid malformed not ok", lq_ok, False)
+    (jj_ok, _) = ctx.template.try_jinja2("{{ undefined_macro(x) }}", data = {})
+    _eq("jinja2 undefined call not ok", jj_ok, False)
+
 _UNIT_TESTS = [
+    _test_try_template_engines_return_ok_text_tuple,
+    _test_render_or_fallback_passthrough,
+    _test_render_details_or_fallback_degrades,
+    _test_render_summary_or_fallback_degrades,
     _test_status_maps_cover_every_terminal_status,
     _test_aspect_web_ui_url,
     _test_render_bes_url,

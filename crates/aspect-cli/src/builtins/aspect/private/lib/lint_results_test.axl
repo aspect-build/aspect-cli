@@ -688,9 +688,57 @@ def _test_impl(ctx):
 
     _check_failed_actions_invoke_snippet_macro(ctx)
 
+    _check_broken_template_degrades_gracefully(ctx)
+
+    _check_trim_induced_render_error_degrades_gracefully(ctx)
+
     print(sep)
     print("All " + str(len(scenarios)) + " lint scenarios + annotation pipeline rendered without error.")
     return 0
+
+def _check_broken_template_degrades_gracefully(ctx):
+    """End-to-end: a broken details template routed through render_check_output
+    degrades to a fallback instead of crashing the invocation.
+
+    The shared fallback helpers are unit-tested in bazel_results_test; this
+    covers the surface wiring — that the status/title (computed outside the
+    template) survive and the trim cascade tolerates the fallback body."""
+    data = _make_results_mixed()
+    broken = {"details": "### findings\n{{ not_a_real_macro(rows) }}"}
+    out = render_check_output(ctx, data, "failed", _render_ctx(), _links(), templates = broken)
+
+    if "Details unavailable" not in out["text"]:
+        fail("broken template did not fall back — body: %r" % out["text"][:400])
+    if "lint //..." not in out["title"]:
+        fail("status/title lost on fallback: %r" % out["title"])
+
+def _check_trim_induced_render_error_degrades_gracefully(ctx):
+    """A template that renders fine at first but errors only after the trim
+    cascade mutates the data must still degrade, not crash.
+
+    The cascade re-renders with the same template on progressively trimmed
+    `details_data`; a template whose error is gated on a trimmed shape (here:
+    an undefined call reached once a group carries `overflow` from row-halving)
+    would abort the invocation if the re-renders used the throwing render path.
+    Uses the large fixture so the initial body exceeds _DETAILS_LIMIT and the
+    cascade runs."""
+    data = _make_results_large()
+
+    # A huge line per row pushes the initial body past _DETAILS_LIMIT so the
+    # cascade runs and trims rows (setting `overflow` on a group). The undefined
+    # call is gated on that trimmed shape, so it fires on a re-render, not the
+    # first render — the case that would crash if re-renders used the throwing
+    # path.
+    broken = {"details": (
+        "{% for g in groups %}{% if g.overflow %}{{ boom_after_trim() }}{% endif %}" +
+        "{% for r in g.rows %}{{ r.file }} " + ("x" * 9000) + "\n{% endfor %}{% endfor %}"
+    )}
+    out = render_check_output(ctx, data, "failed", _render_ctx(), _links(), templates = broken)
+
+    if "Details unavailable" not in out["text"]:
+        fail("trim-induced render error did not fall back — body: %r" % out["text"][:400])
+    if "lint //..." not in out["title"]:
+        fail("status/title lost on trim-induced fallback: %r" % out["title"])
 
 def _check_failed_actions_invoke_snippet_macro(ctx):
     """A failed Bazel action drives the embedded Bazel-targets block to call the

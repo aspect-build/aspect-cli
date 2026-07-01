@@ -24,6 +24,8 @@ load(
     "build_details_data",
     "build_summary_data",
     "format_run_date",
+    "render_details_or_fallback",
+    "render_summary_or_fallback",
     bazel_init_data = "init_data",
 )
 load("./repro_commands.axl", "patch_download_cmd")
@@ -359,8 +361,17 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
     summary_tmpl = t.get("summary") or _SUMMARY_TEMPLATE
     details_tmpl = t.get("details") or _DETAILS_TEMPLATE
 
-    summary_text = ctx.template.jinja2(summary_tmpl, data = summary_data)
-    details_text = ctx.template.jinja2(details_tmpl, data = details_data)
+    (summary_text, _summary_ok) = render_summary_or_fallback(ctx, summary_tmpl, summary_data, surface = "format")
+
+    # Re-render via the fallback helper: the trim cascade mutates details_data,
+    # so a template that only errors on a trimmed shape must still degrade
+    # rather than abort. A fallback body is far under _DETAILS_LIMIT, so the
+    # trim guards go false and the cascade stops on its own.
+    def _render_details():
+        (text, _ok) = render_details_or_fallback(ctx, details_tmpl, details_data, surface = "format")
+        return text
+
+    details_text = _render_details()
 
     # Trim cascade: if file list overflows the limit, drop files progressively.
     if len(details_text) > _DETAILS_LIMIT:
@@ -375,7 +386,7 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
             details_data["file_list"] = "\n".join(files)
             details_data["overflow"] = str(missing) if missing > 0 else ""
             details_data["has_overflow"] = missing > 0
-            details_text = ctx.template.jinja2(details_tmpl, data = details_data)
+            details_text = _render_details()
 
     task_kind = render_ctx.get("task_kind", "") if render_ctx else ""
     target_pattern = render_ctx.get("subject", "") if render_ctx else ""

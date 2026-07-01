@@ -10,7 +10,10 @@ use starlark::starlark_module;
 use starlark::starlark_simple_value;
 use starlark::values::StringValue;
 use starlark::values::dict::UnpackDictEntries;
-use starlark::values::{NoSerialize, ProvidesStaticType, StarlarkValue, Value, starlark_value};
+use starlark::values::tuple::AllocTuple;
+use starlark::values::{
+    Heap, NoSerialize, ProvidesStaticType, StarlarkValue, Value, starlark_value,
+};
 
 use crate::engine::template::handlebars::handlebars_render;
 // use crate::engine::template::jinja2::jinja2_render;
@@ -63,6 +66,31 @@ fn json_to_minijinja(value: &JsonValue) -> MinijinjaValue {
             MinijinjaValue::from_iter(entries)
         }
     }
+}
+
+/// Build a JSON object from AXL template `data` kwargs. Each value is
+/// converted via its `to_json_value`, which can fail on an unserializable
+/// value (that error is a caller bug, so it propagates).
+fn template_data_to_json<'v>(
+    data: UnpackDictEntries<String, Value<'v>>,
+) -> anyhow::Result<JsonValue> {
+    let mut json_map: Map<String, JsonValue> = Map::new();
+    for (k, v) in data.entries {
+        json_map.insert(k, v.to_json_value()?);
+    }
+    Ok(JsonValue::Object(json_map))
+}
+
+/// Map a render `Result` to the `(ok, text)` tuple the `try_*` methods return:
+/// `(True, rendered)` on success, `(False, error_message)` on failure. The
+/// failure never propagates — that's the whole point of the `try_*` variants.
+fn render_result_to_tuple(heap: Heap<'_>, result: anyhow::Result<String>) -> Value<'_> {
+    let (ok, text) = match result {
+        Ok(rendered) => (true, rendered),
+        Err(e) => (false, e.to_string()),
+    };
+    let items = [heap.alloc(ok), heap.alloc_str(&text).to_value()];
+    heap.alloc(AllocTuple(items))
 }
 
 pub(super) fn jinja2_render(template: &str, data: &JsonValue) -> anyhow::Result<String> {
@@ -155,12 +183,24 @@ pub(crate) fn template_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = UnpackDictEntries::default())]
         data: UnpackDictEntries<String, Value<'v>>,
     ) -> anyhow::Result<String> {
-        let mut json_map: Map<String, JsonValue> = Map::new();
-        for (k, v) in data.entries {
-            json_map.insert(k, v.to_json_value()?);
-        }
-        let json_data = JsonValue::Object(json_map);
-        handlebars_render(template.as_str(), &json_data)
+        handlebars_render(template.as_str(), &template_data_to_json(data)?)
+    }
+
+    /// Renders a Handlebars template like `handlebars`, but never fails the
+    /// evaluation — see `try_jinja2` for the `(ok, text)` contract and when to
+    /// prefer this over the raising variant.
+    fn try_handlebars<'v>(
+        #[allow(unused)] this: Value<'v>,
+        #[starlark(require = pos)] template: StringValue<'v>,
+        #[starlark(require = named, default = UnpackDictEntries::default())]
+        data: UnpackDictEntries<String, Value<'v>>,
+        heap: Heap<'v>,
+    ) -> anyhow::Result<Value<'v>> {
+        let json = template_data_to_json(data)?;
+        Ok(render_result_to_tuple(
+            heap,
+            handlebars_render(template.as_str(), &json),
+        ))
     }
 
     /// Renders a Jinja2 template with the provided data.
@@ -182,12 +222,41 @@ pub(crate) fn template_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = UnpackDictEntries::default())]
         data: UnpackDictEntries<String, Value<'v>>,
     ) -> anyhow::Result<String> {
-        let mut json_map: Map<String, JsonValue> = Map::new();
-        for (k, v) in data.entries {
-            json_map.insert(k, v.to_json_value()?);
-        }
-        let json_data = JsonValue::Object(json_map);
-        jinja2_render(template.as_str(), &json_data)
+        jinja2_render(template.as_str(), &template_data_to_json(data)?)
+    }
+
+    /// Renders a Jinja2 template like `jinja2`, but never fails the evaluation:
+    /// a render error is returned to the caller as a value instead of
+    /// propagating and aborting the whole invocation.
+    ///
+    /// **Returns** a 2-tuple `(ok, text)`:
+    /// - `(True, rendered)` on success.
+    /// - `(False, error_message)` on any parse/render error.
+    ///
+    /// Callers use this where a template bug in one surface must degrade to a
+    /// fallback body rather than crash the process (e.g. status-check
+    /// renderers). Prefer `jinja2` for internal templates whose failure is a
+    /// programming error that should surface loudly.
+    ///
+    /// **Example**
+    /// ```starlark
+    /// ok, text = ctx.template.try_jinja2(tmpl, data = d)
+    /// if not ok:
+    ///     # `text` holds the render error; fall back instead of raising.
+    ///     text = "unavailable"
+    /// ```
+    fn try_jinja2<'v>(
+        #[allow(unused)] this: Value<'v>,
+        #[starlark(require = pos)] template: StringValue<'v>,
+        #[starlark(require = named, default = UnpackDictEntries::default())]
+        data: UnpackDictEntries<String, Value<'v>>,
+        heap: Heap<'v>,
+    ) -> anyhow::Result<Value<'v>> {
+        let json = template_data_to_json(data)?;
+        Ok(render_result_to_tuple(
+            heap,
+            jinja2_render(template.as_str(), &json),
+        ))
     }
 
     /// Renders a Liquid template with the provided data.
@@ -209,11 +278,89 @@ pub(crate) fn template_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = UnpackDictEntries::default())]
         data: UnpackDictEntries<String, Value<'v>>,
     ) -> anyhow::Result<String> {
-        let mut json_map: Map<String, JsonValue> = Map::new();
-        for (k, v) in data.entries {
-            json_map.insert(k, v.to_json_value()?);
-        }
-        let json_data = JsonValue::Object(json_map);
-        liquid_render(template.as_str(), &json_data)
+        liquid_render(template.as_str(), &template_data_to_json(data)?)
+    }
+
+    /// Renders a Liquid template like `liquid`, but never fails the evaluation
+    /// — see `try_jinja2` for the `(ok, text)` contract and when to prefer this
+    /// over the raising variant.
+    fn try_liquid<'v>(
+        #[allow(unused)] this: Value<'v>,
+        #[starlark(require = pos)] template: StringValue<'v>,
+        #[starlark(require = named, default = UnpackDictEntries::default())]
+        data: UnpackDictEntries<String, Value<'v>>,
+        heap: Heap<'v>,
+    ) -> anyhow::Result<Value<'v>> {
+        let json = template_data_to_json(data)?;
+        Ok(render_result_to_tuple(
+            heap,
+            liquid_render(template.as_str(), &json),
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jinja2_render_ok() {
+        let data = JsonValue::Object(Map::from_iter([(
+            "name".to_string(),
+            JsonValue::String("World".to_string()),
+        )]));
+        assert_eq!(
+            jinja2_render("Hello, {{ name }}!", &data).unwrap(),
+            "Hello, World!"
+        );
+    }
+
+    // The `try_*` methods rely on the underlying `*_render` returning Err (not
+    // panicking, not silently emitting "") so the tuple mapping can report
+    // (False, msg). One error-path test per engine pins that contract.
+
+    #[test]
+    fn jinja2_render_undefined_call_errors() {
+        let err = jinja2_render("{{ not_a_real_macro(x) }}", &JsonValue::Object(Map::new()))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("not_a_real_macro") || err.contains("unknown"),
+            "error should name the undefined call: {err}"
+        );
+    }
+
+    #[test]
+    fn handlebars_render_ok() {
+        let data = JsonValue::Object(Map::from_iter([(
+            "name".to_string(),
+            JsonValue::String("World".to_string()),
+        )]));
+        assert_eq!(
+            handlebars_render("Hello, {{name}}!", &data).unwrap(),
+            "Hello, World!"
+        );
+    }
+
+    #[test]
+    fn handlebars_render_malformed_template_errors() {
+        assert!(handlebars_render("Hello, {{name", &JsonValue::Object(Map::new())).is_err());
+    }
+
+    #[test]
+    fn liquid_render_ok() {
+        let data = JsonValue::Object(Map::from_iter([(
+            "name".to_string(),
+            JsonValue::String("World".to_string()),
+        )]));
+        assert_eq!(
+            liquid_render("Hello, {{ name }}!", &data).unwrap(),
+            "Hello, World!"
+        );
+    }
+
+    #[test]
+    fn liquid_render_malformed_template_errors() {
+        assert!(liquid_render("Hello, {% if %}", &JsonValue::Object(Map::new())).is_err());
     }
 }
