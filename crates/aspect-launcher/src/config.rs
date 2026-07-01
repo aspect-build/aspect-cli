@@ -28,10 +28,20 @@ const BAZEL_BOUNDARY_FILES: &[&str] = &[
     "WORKSPACE.bazel",
 ];
 
-/// Walk ancestors of `start` and return the deepest one containing any of `markers`.
-fn find_ancestor_with_any(start: &Path, markers: &[&str]) -> Option<PathBuf> {
+/// Walk ancestors of `start` and return the deepest one containing any of
+/// `markers`, skipping any ancestor equal to `except`.
+///
+/// `except` guards against the user-level `~/.aspect/version.axl` being mistaken
+/// for a project boundary: it shares the [`AXL_VERSION_AXL_REL`] path with a
+/// project marker but must only supply config, never define the root.
+fn find_ancestor_with_any(
+    start: &Path,
+    markers: &[&str],
+    except: Option<&Path>,
+) -> Option<PathBuf> {
     start
         .ancestors()
+        .filter(|dir| except != Some(*dir))
         .find(|dir| markers.iter().any(|m| dir.join(m).exists()))
         .map(Path::to_path_buf)
 }
@@ -326,30 +336,6 @@ pub fn load_config(path: &PathBuf) -> Result<AspectLauncherConfig> {
     parse_version_axl(&content)
 }
 
-/// Automatically determines the project root directory and loads the Aspect configuration.
-///
-/// Two-pass walk over the ancestors of the current working directory, deepest
-/// to shallowest:
-/// 1. Returns the first ancestor containing any [`ASPECT_BOUNDARY_FILES`] entry
-///    (`MODULE.aspect` or `.aspect/version.axl`).
-/// 2. If none found, returns the first ancestor containing any [`BAZEL_BOUNDARY_FILES`] entry.
-/// 3. If still none found, the current working directory is used.
-///
-/// The Aspect-first ordering lets a nested Aspect workspace inside a Bazel
-/// monorepo opt out of the surrounding Bazel root by dropping a `.aspect/`
-/// directory or a `MODULE.aspect` file at its boundary.
-///
-/// After resolving the root, `.aspect/version.axl` is loaded via `load_config`.
-///
-/// **Returns**
-///
-/// A `Result` containing a tuple `(PathBuf, AspectLauncherConfig)` where:
-/// - The first element is the determined root directory.
-/// - The second element is the loaded `AspectLauncherConfig`.
-///
-/// **Errors**
-///
-/// Returns an error if the current working directory cannot be obtained or if loading the config fails.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -608,10 +594,11 @@ version(
 
     /// Resolve the project root from `start`, replicating `autoconf`'s
     /// two-pass walk without touching the process cwd or filesystem read of
-    /// `.aspect/version.axl`.
-    fn resolve_root(start: &Path) -> PathBuf {
-        find_ancestor_with_any(start, ASPECT_BOUNDARY_FILES)
-            .or_else(|| find_ancestor_with_any(start, BAZEL_BOUNDARY_FILES))
+    /// `.aspect/version.axl`. `home` is excluded from the Aspect pass, mirroring
+    /// how `autoconf` keeps `~/.aspect/version.axl` out of root discovery.
+    fn resolve_root(start: &Path, home: Option<&Path>) -> PathBuf {
+        find_ancestor_with_any(start, ASPECT_BOUNDARY_FILES, home)
+            .or_else(|| find_ancestor_with_any(start, BAZEL_BOUNDARY_FILES, None))
             .unwrap_or_else(|| start.to_path_buf())
     }
 
@@ -628,7 +615,7 @@ version(
         let cwd = nested.join("src");
         std::fs::create_dir_all(&cwd).unwrap();
 
-        assert_eq!(resolve_root(&cwd), nested);
+        assert_eq!(resolve_root(&cwd, None), nested);
     }
 
     /// MODULE.aspect is a valid Aspect marker too.
@@ -640,7 +627,7 @@ version(
         let cwd = root.join("sub/dir");
         std::fs::create_dir_all(&cwd).unwrap();
 
-        assert_eq!(resolve_root(&cwd), root);
+        assert_eq!(resolve_root(&cwd, None), root);
     }
 
     /// Pure Bazel monorepo with no Aspect markers: fall back to Bazel markers.
@@ -652,7 +639,22 @@ version(
         let cwd = root.join("sub/dir");
         std::fs::create_dir_all(&cwd).unwrap();
 
-        assert_eq!(resolve_root(&cwd), root);
+        assert_eq!(resolve_root(&cwd, None), root);
+    }
+
+    /// The home directory's `~/.aspect/version.axl` must not act as a project
+    /// root: a Bazel repo under `$HOME` still resolves to the repo, not `$HOME`.
+    #[test]
+    fn root_ignores_home_version_axl_for_a_repo_under_home() {
+        let home = tempfile::tempdir().unwrap();
+        write_version_axl(home.path(), "9.9.9");
+        let repo = home.path().join("work/repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join("MODULE.bazel"), "").unwrap();
+        let cwd = repo.join("sub/dir");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        assert_eq!(resolve_root(&cwd, Some(home.path())), repo);
     }
 
     /// No markers anywhere → fall back to the starting directory itself.
@@ -662,19 +664,123 @@ version(
         let cwd = tmp.path().join("sub/dir");
         std::fs::create_dir_all(&cwd).unwrap();
 
-        assert_eq!(resolve_root(&cwd), cwd);
+        assert_eq!(resolve_root(&cwd, None), cwd);
+    }
+
+    fn write_version_axl(dir: &Path, version: &str) {
+        let path = dir.join(AXL_VERSION_AXL_REL);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, format!("version(\"{version}\")\n")).unwrap();
+    }
+
+    /// The root's `.aspect/version.axl` wins over the home fallback.
+    #[test]
+    fn config_prefers_root_over_home() {
+        let root = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        write_version_axl(root.path(), "1.0.0");
+        write_version_axl(home.path(), "9.9.9");
+
+        let config = resolve_config(root.path(), Some(home.path())).unwrap();
+        assert_eq!(config.aspect_cli.version(), Some("1.0.0"));
+    }
+
+    /// Missing root config falls back to `~/.aspect/version.axl`.
+    #[test]
+    fn config_falls_back_to_home() {
+        let root = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        write_version_axl(home.path(), "9.9.9");
+
+        let config = resolve_config(root.path(), Some(home.path())).unwrap();
+        assert_eq!(config.aspect_cli.version(), Some("9.9.9"));
+    }
+
+    /// No root config and no home config → default config.
+    #[test]
+    fn config_defaults_when_nothing_found() {
+        let root = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+
+        let config = resolve_config(root.path(), Some(home.path())).unwrap();
+        assert_eq!(
+            config.aspect_cli.version(),
+            default_config().aspect_cli.version()
+        );
+    }
+
+    /// A missing home directory is tolerated and yields the default config.
+    #[test]
+    fn config_defaults_when_home_unknown() {
+        let root = tempfile::tempdir().unwrap();
+
+        let config = resolve_config(root.path(), None).unwrap();
+        assert_eq!(
+            config.aspect_cli.version(),
+            default_config().aspect_cli.version()
+        );
     }
 }
 
+/// Automatically determines the project root directory and loads the Aspect configuration.
+///
+/// Two-pass walk over the ancestors of the current working directory, deepest
+/// to shallowest:
+/// 1. Returns the first ancestor containing any [`ASPECT_BOUNDARY_FILES`] entry
+///    (`MODULE.aspect` or `.aspect/version.axl`), excluding the home directory
+///    so the user-level `~/.aspect/version.axl` never acts as a project root.
+/// 2. If none found, returns the first ancestor containing any [`BAZEL_BOUNDARY_FILES`] entry.
+/// 3. If still none found, the current working directory is used.
+///
+/// The Aspect-first ordering lets a nested Aspect workspace inside a Bazel
+/// monorepo opt out of the surrounding Bazel root by dropping a `.aspect/`
+/// directory or a `MODULE.aspect` file at its boundary.
+///
+/// The config for the resolved root is loaded via [`resolve_config`], which
+/// falls back to `~/.aspect/version.axl` and then the built-in default. The
+/// returned root directory is unaffected by that fallback.
+///
+/// **Returns**
+///
+/// A `Result` containing a tuple `(PathBuf, AspectLauncherConfig)` where:
+/// - The first element is the determined root directory.
+/// - The second element is the loaded `AspectLauncherConfig`.
+///
+/// **Errors**
+///
+/// Returns an error if the current working directory cannot be obtained or if loading the config fails.
 pub fn autoconf() -> Result<(PathBuf, AspectLauncherConfig)> {
     let current_dir =
         current_dir().map_err(|e| miette!("failed to get current directory: {}", e))?;
 
-    let root_dir = find_ancestor_with_any(&current_dir, ASPECT_BOUNDARY_FILES)
-        .or_else(|| find_ancestor_with_any(&current_dir, BAZEL_BOUNDARY_FILES))
+    let home_dir = dirs::home_dir();
+
+    let root_dir = find_ancestor_with_any(&current_dir, ASPECT_BOUNDARY_FILES, home_dir.as_deref())
+        .or_else(|| find_ancestor_with_any(&current_dir, BAZEL_BOUNDARY_FILES, None))
         .unwrap_or(current_dir);
 
-    let version_axl = root_dir.join(PathBuf::from(AXL_VERSION_AXL_REL));
-    let config = load_config(&version_axl)?;
+    let config = resolve_config(&root_dir, home_dir.as_deref())?;
     Ok((root_dir, config))
+}
+
+/// Load the launcher config for a resolved `root_dir`, falling back to the
+/// user-level home directory before defaulting.
+///
+/// Resolution order:
+/// 1. `.aspect/version.axl` under `root_dir`, if it exists.
+/// 2. `.aspect/version.axl` under `home_dir`, if a home dir is known and it exists.
+/// 3. [`default_config`].
+fn resolve_config(root_dir: &Path, home_dir: Option<&Path>) -> Result<AspectLauncherConfig> {
+    let version_axl = root_dir.join(AXL_VERSION_AXL_REL);
+    if version_axl.exists() {
+        return load_config(&version_axl);
+    }
+
+    if let Some(home_version_axl) = home_dir.map(|h| h.join(AXL_VERSION_AXL_REL))
+        && home_version_axl.exists()
+    {
+        return load_config(&home_version_axl);
+    }
+
+    Ok(default_config())
 }
