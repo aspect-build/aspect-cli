@@ -140,6 +140,28 @@ def _make_results_build_failed():
     accumulate(r, diags)
     return r
 
+def _make_results_failed_actions():
+    """A failed Bazel action (e.g. Clippy) in the underlying lint build.
+
+    lint's details template embeds SHARED_DETAILS_BODY_TEMPLATE with
+    include_bazel_targets=True, so a non-empty `failed_actions` list makes the
+    Bazel-targets block invoke the `failure_snippets` Jinja2 macro. Regression
+    guard for the macro being out of scope in non-bazel details templates.
+    """
+    r = _make_base()
+    r["lint"]["build_failed"] = True
+    r["bazel"]["failed_actions"] = [{
+        "label": "//workflows/telemetry/telemetry-rs:telemetry-rs",
+        "mnemonics": ["Clippy"],
+        "stderr_path": "",
+    }]
+    r["bazel"]["failed_actions_total"] = 1
+    diags = [
+        {"tool": "clippy", "file": "workflows/telemetry/telemetry-rs/src/lib.rs", "line": 309, "rule_id": "E0433", "severity": "error", "message": "failed to resolve: use of unresolved module or unlinked crate `opentelemetry_appender_tracing`"},
+    ]
+    accumulate(r, diags)
+    return r
+
 def _make_results_large():
     """200+ findings to exercise the group-table trim cascade."""
     r = _make_base()
@@ -633,6 +655,7 @@ def _test_impl(ctx):
         ("3. errors-only · Buildkite", _make_results_errors_only(), "failed", "//...", True, "buildkite", None),
         ("4. warnings-only · GitHub", _make_results_warnings_only(), "passed", "//...", True, "github", None),
         ("5. build-failed · GitHub", _make_results_build_failed(), "failed", "//...", False, "github", None),
+        ("5b. failed-actions · GitHub", _make_results_failed_actions(), "failed", "//...", False, "github", None),
         ("6. large-trim · GitHub", _make_results_large(), "failed", "//...", True, "github", None),
         ("7. hold-the-line · GitHub", _make_results_hold_the_line(), "failed", "//...", True, "github", None),
         # Exercise GitHubStatusChecksTrait.metadata_keys through the shared summary renderer.
@@ -663,9 +686,32 @@ def _test_impl(ctx):
 
     _check_fix_renders_before_reproduce(ctx)
 
+    _check_failed_actions_invoke_snippet_macro(ctx)
+
     print(sep)
     print("All " + str(len(scenarios)) + " lint scenarios + annotation pipeline rendered without error.")
     return 0
+
+def _check_failed_actions_invoke_snippet_macro(ctx):
+    """A failed Bazel action drives the embedded Bazel-targets block to call the
+    `failure_snippets` macro.
+
+    The macro lives in bazel_results.SNIPPET_MACRO; SHARED_DETAILS_BODY_TEMPLATE
+    prepends it so it's in scope wherever SHARED is composed. Before that fix the
+    lint details template rendered fine for every findings-only scenario (the
+    macro call is guarded by `build_failures`), then crashed in production the
+    moment a Clippy action failed. This asserts the branch is actually taken so
+    the macro is exercised, not merely present."""
+    data = _make_results_failed_actions()
+    out = render_check_output(ctx, data, "failed", _render_ctx(), _links())
+    body = out["text"]
+
+    # The failed action populates the Bazel-targets "Failed to build" block,
+    # which is the sole caller of failure_snippets in this template.
+    if "🎯 Bazel targets" not in body:
+        fail("Bazel-targets block missing — failed_actions did not render: %r" % body[:600])
+    if "//workflows/telemetry/telemetry-rs:telemetry-rs" not in body:
+        fail("failed action label missing from rendered body: %r" % body[:600])
 
 def _check_fix_renders_before_reproduce(ctx):
     """The Fix block renders before the Reproduce block in the details body.
