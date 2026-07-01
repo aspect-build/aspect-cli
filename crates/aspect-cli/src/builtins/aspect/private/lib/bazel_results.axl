@@ -2921,7 +2921,15 @@ BAZEL_TARGETS_TEMPLATE = """### 🎯 Bazel targets ({{ total_targets }})
 # Mirrors the Aspect UI tabs (Bazel targets ↔ Targets, Bazel details ↔ Details).
 # `include_bazel_targets` is True for non-bazel tasks; False for build/test
 # (which hoist Bazel targets to slot 1).
-SHARED_DETAILS_BODY_TEMPLATE = """{% if artifacts_browse_url or artifact_links %}
+#
+# Leads with SNIPPET_MACRO so `failure_snippets(...)` — used by the embedded
+# BAZEL_TARGETS_TEMPLATE — is in scope wherever SHARED is composed into a
+# details template. Non-bazel surfaces (lint, format, gazelle, delivery,
+# warming) embed SHARED with include_bazel_targets=True but don't hoist their
+# own copy of BAZEL_TARGETS_TEMPLATE, so this is their only macro definition.
+# Redefining it (build/test also prepend SNIPPET_MACRO for their hoisted slot)
+# is harmless in minijinja: last definition wins and macro blocks emit nothing.
+SHARED_DETAILS_BODY_TEMPLATE = SNIPPET_MACRO + """{% if artifacts_browse_url or artifact_links %}
 ### 📎 Artifacts
 
 {% if artifacts_browse_url %}[Artifacts]({{ artifacts_browse_url }}){% endif %}{% if artifact_links %}{% if artifacts_browse_url %} · {% endif %}{% for a in artifact_links %}[{{ a.label }}]({{ a.url }}){% if not loop.last %} · {% endif %}{% endfor %}{% endif %}
@@ -3130,8 +3138,9 @@ SHARED_DETAILS_BODY_TEMPLATE = """{% if artifacts_browse_url or artifact_links %
 # Build/test detail template: aborted prelude, hoisted Bazel targets as the
 # primary slot, then SHARED (which skips its own Bazel targets via
 # include_bazel_targets=False).
-# SNIPPET_MACRO is defined once at the top so `failure_snippets(...)` is in scope
-# for every embedded copy of BAZEL_TARGETS_TEMPLATE (hoisted slot + SHARED slot).
+# SNIPPET_MACRO is prepended so `failure_snippets(...)` is in scope for the
+# hoisted BAZEL_TARGETS_TEMPLATE, which precedes SHARED. (SHARED prepends its
+# own copy too; the redefinition is harmless — see the note there.)
 DETAILS_TEMPLATE = SNIPPET_MACRO + """
 {% if aborted %}
 > :warning: **Build aborted**{% if abort_reason %} (`{{ abort_reason }}`){% endif %}{% if abort_description %}: {{ abort_description }}{% endif %}

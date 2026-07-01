@@ -170,9 +170,30 @@ def _test_impl(ctx):
             print("FAIL: " + e)
         fail("Body-content invariant violations: %d" % len(errors))
 
+    _check_failed_actions_invoke_snippet_macro(ctx)
+
     print(sep)
     print("All " + str(len(scenarios)) + " warming scenarios rendered without error.")
     return 0
+
+def _check_failed_actions_invoke_snippet_macro(ctx):
+    """A failed Bazel action drives the embedded Bazel-targets block to call the
+    `failure_snippets` macro (bazel_results.SNIPPET_MACRO).
+
+    This details template embeds SHARED_DETAILS_BODY_TEMPLATE with
+    include_bazel_targets=True, so a non-empty `failed_actions` list takes the
+    branch that invokes the macro. The macro must be in scope — regression guard
+    for the crash when it wasn't (findings-only scenarios never hit the branch)."""
+    data = _make_base()
+    data["bazel"]["failed_actions"] = [{
+        "label": "//pkg:target",
+        "mnemonics": ["Warming"],
+        "stderr_path": "",
+    }]
+    data["bazel"]["failed_actions_total"] = 1
+    out = render_check_output(ctx, data, "failed", _render_ctx(), _links())
+    if "//pkg:target" not in out["text"]:
+        fail("failed action label missing — Bazel-targets block did not render: %r" % out["text"][:600])
 
 warming_template_snapshot_tests = task(
     kind = "test-warming-template-snapshots",
