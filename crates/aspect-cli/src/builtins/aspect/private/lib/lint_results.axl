@@ -836,7 +836,16 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
     details_tmpl = t.get("details") or _DETAILS_TEMPLATE
 
     (summary_text, _summary_ok) = render_summary_or_fallback(ctx, summary_tmpl, summary_data, surface = "lint")
-    (details_text, _rendered_ok) = render_details_or_fallback(ctx, details_tmpl, details_data, surface = "lint")
+
+    # Re-render via the fallback helper: the trim cascade mutates details_data,
+    # so a template that only errors on a trimmed shape must still degrade
+    # rather than abort. A fallback body is far under _DETAILS_LIMIT, so the
+    # trim guards go false and the cascade stops on its own.
+    def _render_details():
+        (text, _ok) = render_details_or_fallback(ctx, details_tmpl, details_data, surface = "lint")
+        return text
+
+    details_text = _render_details()
 
     # Trim cascade on overflow: keep the summaries, halve per-group rows first.
     if len(details_text) > _DETAILS_LIMIT:
@@ -850,21 +859,24 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
                 if len(rows) > 2:
                     half = max(1, len(rows) // 2)
                     kept = rows[:half]
-                    missing = g["count"] - len(kept)
+                    # `count` is stringified for the template (_groups_for_template);
+                    # parse it back for the arithmetic, and re-stringify overflow
+                    # to match the field's rendered shape ("" when none).
+                    missing = int(g["count"]) - len(kept)
                     g = dict(g)
                     g["rows"] = kept
-                    g["overflow"] = missing if missing > 0 else 0
+                    g["overflow"] = str(missing) if missing > 0 else ""
                     trimmed = True
                 new_groups.append(g)
             if not trimmed:
                 break
             details_data["groups"] = new_groups
-            details_text = ctx.template.jinja2(details_tmpl, data = details_data)
+            details_text = _render_details()
 
     if len(details_text) > _DETAILS_LIMIT:
         # Last resort: drop the group tables entirely; keep summary counts.
         details_data["groups"] = []
-        details_text = ctx.template.jinja2(details_tmpl, data = details_data)
+        details_text = _render_details()
 
     target_pattern = render_ctx.get("subject", "") if render_ctx else ""
     task_kind = render_ctx.get("task_kind", "") if render_ctx else ""

@@ -4295,7 +4295,17 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
 
     details_tmpl = t.get("details") or DETAILS_TEMPLATE
     (summary_text, _summary_ok) = render_summary_or_fallback(ctx, t.get("summary") or SUMMARY_TEMPLATE, summary_data, surface = "build/test")
-    (details_text, _rendered_ok) = render_details_or_fallback(ctx, details_tmpl, details_data, surface = "build/test")
+
+    # Re-render the details body after a trim step, degrading to the fallback on
+    # any render error. Trimming mutates details_data, so a template that only
+    # errors on a trimmed shape must still fall back rather than abort — and the
+    # fallback is far under _DETAILS_LIMIT, so the remaining trim guards go false
+    # and the cascade stops on its own.
+    def _render_details():
+        (text, _ok) = render_details_or_fallback(ctx, details_tmpl, details_data, surface = "build/test")
+        return text
+
+    details_text = _render_details()
 
     # Fit details within the GitHub limit; each step re-renders only if still
     # over. Inline snippets are extra (not the data users primarily came for), so
@@ -4320,49 +4330,49 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
                       "), dropping inline snippet bodies from secondary failure buckets")
         _drop_snippets(details_data.get("failed_tests_snippets", []))
         _drop_snippets(details_data.get("timeout_tests_snippets", []))
-        details_text = ctx.template.jinja2(details_tmpl, data = details_data)
+        details_text = _render_details()
 
     if len(details_text) > _DETAILS_LIMIT and max_snippets > 0:
         if debug_render:
             trace.log("debug [render_check_output]   still OVER (" + str(len(details_text)) +
                       "), dropping all inline snippet bodies")
         _drop_snippets(details_data.get("build_failures_snippets", []))
-        details_text = ctx.template.jinja2(details_tmpl, data = details_data)
+        details_text = _render_details()
 
     if len(details_text) > _DETAILS_LIMIT:
         if debug_render:
             trace.log("debug [render_check_output]   OVER LIMIT (" + str(len(details_text)) +
                       "), dropping build_metadata sub-block from Bazel details")
         details_data["build_metadata_rows"] = []
-        details_text = ctx.template.jinja2(details_tmpl, data = details_data)
+        details_text = _render_details()
 
     if len(details_text) > _DETAILS_LIMIT:
         if debug_render:
             trace.log("debug [render_check_output]   still OVER (" + str(len(details_text)) +
                       "), dropping workspace_status sub-block from Bazel details")
         details_data["workspace_status_rows"] = []
-        details_text = ctx.template.jinja2(details_tmpl, data = details_data)
+        details_text = _render_details()
 
     if len(details_text) > _DETAILS_LIMIT:
         if debug_render:
             trace.log("debug [render_check_output]   still OVER (" + str(len(details_text)) +
                       "), dropping invocation sub-block from Bazel details")
         details_data["invocation_rows"] = []
-        details_text = ctx.template.jinja2(details_tmpl, data = details_data)
+        details_text = _render_details()
 
     if len(details_text) > _DETAILS_LIMIT:
         if debug_render:
             trace.log("debug [render_check_output]   still OVER (" + str(len(details_text)) +
                       "), dropping Runner metadata section")
         details_data["aspect_runner_rows"] = []
-        details_text = ctx.template.jinja2(details_tmpl, data = details_data)
+        details_text = _render_details()
 
     if len(details_text) > _DETAILS_LIMIT:
         if debug_render:
             trace.log("debug [render_check_output]   still OVER (" + str(len(details_text)) +
                       "), dropping Performance")
         details_data["invocation_stats"] = None
-        details_text = ctx.template.jinja2(details_tmpl, data = details_data)
+        details_text = _render_details()
 
     if len(details_text) > _DETAILS_LIMIT:
         if debug_render:
@@ -4370,7 +4380,7 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
                       "), dropping parsed-options lists")
         details_data["startup_options"] = []
         details_data["cmd_line_options"] = []
-        details_text = ctx.template.jinja2(details_tmpl, data = details_data)
+        details_text = _render_details()
 
     if len(details_text) > _DETAILS_LIMIT:
         built = details_data.get("built_targets", [])
@@ -4384,7 +4394,7 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
             overflow = built_total - len(built)
             details_data["built_targets"] = built
             details_data["built_targets_overflow"] = str(overflow) if overflow > 0 else ""
-            details_text = ctx.template.jinja2(details_tmpl, data = details_data)
+            details_text = _render_details()
         if debug_render:
             trace.log("debug [render_check_output]   after target trim: details len=" + str(len(details_text)) +
                       " built_targets=" + str(len(built)))
@@ -4399,7 +4409,7 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
             overflow = passed_total - len(passed)
             details_data["passed_tests"] = passed
             details_data["passed_tests_overflow"] = str(overflow) if overflow > 0 else ""
-            details_text = ctx.template.jinja2(details_tmpl, data = details_data)
+            details_text = _render_details()
         if debug_render:
             trace.log("debug [render_check_output]   after test trim: details len=" + str(len(details_text)) +
                       " passed_tests=" + str(len(passed)))
@@ -4414,7 +4424,7 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
             overflow = skipped_total - len(skipped)
             details_data["skipped_targets"] = skipped
             details_data["skipped_targets_overflow"] = str(overflow) if overflow > 0 else ""
-            details_text = ctx.template.jinja2(details_tmpl, data = details_data)
+            details_text = _render_details()
         if debug_render:
             trace.log("debug [render_check_output]   after skipped trim: details len=" + str(len(details_text)) +
                       " skipped_targets=" + str(len(skipped)))
@@ -4422,7 +4432,7 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
     if len(details_text) > _DETAILS_LIMIT:
         # Last resort.
         details_data["cached_tests"] = []
-        details_text = ctx.template.jinja2(details_tmpl, data = details_data)
+        details_text = _render_details()
 
     if debug_render:
         trace.log("debug [render_check_output]   summary len=" + str(len(summary_text)))
