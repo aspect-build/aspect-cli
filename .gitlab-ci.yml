@@ -75,8 +75,12 @@ buildifier-task:
     - aspect-default
   script:
     - .aspect/bootstrap.sh
-    - ASPECT_DEBUG=1 aspect buildifier --task:name buildifier-gl-debug
-    - aspect buildifier --task:name buildifier-gl
+    - ASPECT_DEBUG=1 aspect buildifier --task-key buildifier-gl-debug
+    - aspect buildifier --task-key buildifier-gl
+    - ASPECT_DEBUG=1 aspect buildifier --scope=tracked --task-key buildifier-gl-tracked-debug
+    - aspect buildifier --scope=tracked --task-key buildifier-gl-tracked
+    - ASPECT_DEBUG=1 aspect buildifier --scope=all --task-key buildifier-gl-all-debug
+    - aspect buildifier --scope=all --task-key buildifier-gl-all
 format-task:
   stage: CI
   needs: [pre-build]
@@ -88,8 +92,12 @@ format-task:
   # two steps don't do duplicate work.
   script:
     - .aspect/bootstrap.sh
-    - ASPECT_DEBUG=1 aspect format --task:name format-gl-debug
-    - aspect format --task:name format-gl
+    - ASPECT_DEBUG=1 aspect format --task-key format-gl-debug
+    - aspect format --task-key format-gl
+    - ASPECT_DEBUG=1 aspect format --scope=tracked --task-key format-gl-tracked-debug
+    - aspect format --scope=tracked --task-key format-gl-tracked
+    - ASPECT_DEBUG=1 aspect format --scope=all --task-key format-gl-all-debug
+    - aspect format --scope=all --task-key format-gl-all
 gazelle-task:
   stage: CI
   needs: [pre-build]
