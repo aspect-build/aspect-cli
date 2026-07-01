@@ -3173,7 +3173,10 @@ _SUMMARY_FALLBACK_TEMPLATE = """⚠️ Status summary unavailable — the {{ sur
 def _render_or_fallback(ctx, template, data, fallback_template, surface):
     """Shared try/warn/fallback for a status body. On render error, logs a
     WARNING to CLI output with the message and renders `fallback_template`
-    (macro-free, so it can't itself fail). Returns (text, ok)."""
+    (macro-free, so it can't itself fail).
+
+    Returns (text, ok): `ok` is False when the fallback was used.
+    """
     ok, text = ctx.template.try_jinja2(template, data = data)
     if ok:
         return (text, True)
@@ -3187,10 +3190,11 @@ def render_details_or_fallback(ctx, template, data, surface = "check"):
     A template bug in one status surface must not abort the whole invocation
     (see anchor: SNIPPET_MACRO / failure_snippets). On render error this logs a
     WARNING to CLI output with the error and returns a minimal fallback body
-    embedding the same message; the caller keeps the correct status/title.
+    embedding the same message; the caller keeps the correct status/title. The
+    fallback body is far under _DETAILS_LIMIT, so the caller's size-trim cascade
+    is a no-op on it.
 
-    Returns (text, ok): `ok` is False when the fallback was used, so callers can
-    skip the size-trim cascade (the fallback is already tiny).
+    Returns (text, ok); ok is False when the fallback was used.
     """
     return _render_or_fallback(ctx, template, data, _DETAILS_FALLBACK_TEMPLATE, surface + " details")
 
@@ -4294,8 +4298,7 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
     (details_text, _rendered_ok) = render_details_or_fallback(ctx, details_tmpl, details_data, surface = "build/test")
 
     # Fit details within the GitHub limit; each step re-renders only if still
-    # over. On a render fallback the body is tiny, so every size guard below is
-    # already false and the cascade is a natural no-op. Inline snippets are extra (not the data users primarily came for), so
+    # over. Inline snippets are extra (not the data users primarily came for), so
     # they shed FIRST — secondary buckets, then all of them — before any of the
     # established trims below. Reference sections (redundant with Aspect Web UI)
     # go next, before the failure/target lists themselves:

@@ -68,6 +68,19 @@ fn json_to_minijinja(value: &JsonValue) -> MinijinjaValue {
     }
 }
 
+/// Build a JSON object from AXL template `data` kwargs. Each value is
+/// converted via its `to_json_value`, which can fail on an unserializable
+/// value (that error is a caller bug, so it propagates).
+fn template_data_to_json<'v>(
+    data: UnpackDictEntries<String, Value<'v>>,
+) -> anyhow::Result<JsonValue> {
+    let mut json_map: Map<String, JsonValue> = Map::new();
+    for (k, v) in data.entries {
+        json_map.insert(k, v.to_json_value()?);
+    }
+    Ok(JsonValue::Object(json_map))
+}
+
 pub(super) fn jinja2_render(template: &str, data: &JsonValue) -> anyhow::Result<String> {
     let mut env = MinijinjaEnvironment::new();
     env.add_template("template", template)
@@ -158,12 +171,7 @@ pub(crate) fn template_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = UnpackDictEntries::default())]
         data: UnpackDictEntries<String, Value<'v>>,
     ) -> anyhow::Result<String> {
-        let mut json_map: Map<String, JsonValue> = Map::new();
-        for (k, v) in data.entries {
-            json_map.insert(k, v.to_json_value()?);
-        }
-        let json_data = JsonValue::Object(json_map);
-        handlebars_render(template.as_str(), &json_data)
+        handlebars_render(template.as_str(), &template_data_to_json(data)?)
     }
 
     /// Renders a Jinja2 template with the provided data.
@@ -185,12 +193,7 @@ pub(crate) fn template_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = UnpackDictEntries::default())]
         data: UnpackDictEntries<String, Value<'v>>,
     ) -> anyhow::Result<String> {
-        let mut json_map: Map<String, JsonValue> = Map::new();
-        for (k, v) in data.entries {
-            json_map.insert(k, v.to_json_value()?);
-        }
-        let json_data = JsonValue::Object(json_map);
-        jinja2_render(template.as_str(), &json_data)
+        jinja2_render(template.as_str(), &template_data_to_json(data)?)
     }
 
     /// Renders a Jinja2 template like `jinja2`, but never fails the evaluation:
@@ -210,8 +213,8 @@ pub(crate) fn template_methods(registry: &mut MethodsBuilder) {
     /// ```starlark
     /// ok, text = ctx.template.try_jinja2(tmpl, data = d)
     /// if not ok:
-    ///     _LOG.warn(ctx.std, "render failed: %s" % text)
-    ///     text = fallback_body(text)
+    ///     # `text` holds the render error; fall back instead of raising.
+    ///     text = "unavailable"
     /// ```
     fn try_jinja2<'v>(
         #[allow(unused)] this: Value<'v>,
@@ -220,12 +223,7 @@ pub(crate) fn template_methods(registry: &mut MethodsBuilder) {
         data: UnpackDictEntries<String, Value<'v>>,
         heap: Heap<'v>,
     ) -> anyhow::Result<Value<'v>> {
-        let mut json_map: Map<String, JsonValue> = Map::new();
-        for (k, v) in data.entries {
-            json_map.insert(k, v.to_json_value()?);
-        }
-        let json_data = JsonValue::Object(json_map);
-        let (ok, text) = match jinja2_render(template.as_str(), &json_data) {
+        let (ok, text) = match jinja2_render(template.as_str(), &template_data_to_json(data)?) {
             Ok(rendered) => (true, rendered),
             Err(e) => (false, e.to_string()),
         };
@@ -252,12 +250,7 @@ pub(crate) fn template_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = UnpackDictEntries::default())]
         data: UnpackDictEntries<String, Value<'v>>,
     ) -> anyhow::Result<String> {
-        let mut json_map: Map<String, JsonValue> = Map::new();
-        for (k, v) in data.entries {
-            json_map.insert(k, v.to_json_value()?);
-        }
-        let json_data = JsonValue::Object(json_map);
-        liquid_render(template.as_str(), &json_data)
+        liquid_render(template.as_str(), &template_data_to_json(data)?)
     }
 }
 

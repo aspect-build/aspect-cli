@@ -839,8 +839,6 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
     (details_text, _rendered_ok) = render_details_or_fallback(ctx, details_tmpl, details_data, surface = "lint")
 
     # Trim cascade on overflow: keep the summaries, halve per-group rows first.
-    # A render fallback yields a tiny body, so the size guard below is already
-    # false and the cascade is a natural no-op.
     if len(details_text) > _DETAILS_LIMIT:
         for _ in range(10):
             if len(details_text) <= _DETAILS_LIMIT:
