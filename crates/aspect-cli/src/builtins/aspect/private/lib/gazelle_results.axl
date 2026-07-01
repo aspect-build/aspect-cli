@@ -23,6 +23,8 @@ load(
     "build_details_data",
     "build_summary_data",
     "format_run_date",
+    "render_details_or_fallback",
+    "render_summary_or_fallback",
     bazel_init_data = "init_data",
 )
 load("./repro_commands.axl", "patch_download_cmd")
@@ -415,8 +417,8 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
     summary_tmpl = t.get("summary") or _SUMMARY_TEMPLATE
     details_tmpl = t.get("details") or _DETAILS_TEMPLATE
 
-    summary_text = ctx.template.jinja2(summary_tmpl, data = summary_data)
-    details_text = ctx.template.jinja2(details_tmpl, data = details_data)
+    (summary_text, _summary_ok) = render_summary_or_fallback(ctx, summary_tmpl, summary_data, surface = "gazelle")
+    (details_text, _rendered_ok) = render_details_or_fallback(ctx, details_tmpl, details_data, surface = "gazelle")
 
     # Trim cascade: if file list overflows the limit, trim progressively.
     if len(details_text) > _DETAILS_LIMIT:

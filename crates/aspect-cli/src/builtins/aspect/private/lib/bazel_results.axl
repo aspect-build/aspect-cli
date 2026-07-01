@@ -49,6 +49,7 @@ load(
     "./environment.axl",
     "build_aspect_runner_rows",
     "display_cloud_provider",
+    "feature_logger",
     "is_aspect_workflows_runner",
 )
 load("./log_snippet.axl", "SnippetOptions", "code_fence_for", "extract_junit_failure", "extract_snippet", "has_snippet")
@@ -3148,6 +3149,60 @@ DETAILS_TEMPLATE = SNIPPET_MACRO + """
 {% endif %}
 """ + BAZEL_TARGETS_TEMPLATE + SHARED_DETAILS_BODY_TEMPLATE
 
+_RENDER_LOG = feature_logger("Status render")
+
+# Fallback body when a details template fails to render. Rendered with
+# `try_jinja2` (macro-free, no data refs beyond `error`/`surface`) so it cannot
+# itself fail. Keeps the check updating with the correct status/title (both
+# computed outside the template) while surfacing the bug to reviewers.
+_DETAILS_FALLBACK_TEMPLATE = """> ⚠️ **Details unavailable** — the {{ surface }} status body failed to render.
+> This is a bug in aspect-cli; the task status above is still accurate.
+>
+> ```
+> {{ error }}
+> ```
+"""
+
+# Fallback for a summary render failure. The status/title/conclusion are all
+# computed in AXL outside the template, so the check state stays correct; only
+# this one-line body is degraded. Deliberately terse — the summary is the first
+# thing reviewers read, so we don't dump a stack trace into it (the WARNING and
+# the details fallback carry the message).
+_SUMMARY_FALLBACK_TEMPLATE = """⚠️ Status summary unavailable — the {{ surface }} summary body failed to render (see task log)."""
+
+def _render_or_fallback(ctx, template, data, fallback_template, surface):
+    """Shared try/warn/fallback for a status body. On render error, logs a
+    WARNING to CLI output with the message and renders `fallback_template`
+    (macro-free, so it can't itself fail). Returns (text, ok)."""
+    ok, text = ctx.template.try_jinja2(template, data = data)
+    if ok:
+        return (text, True)
+    _RENDER_LOG.warn(ctx.std, "%s body failed to render: %s" % (surface, text))
+    fallback = ctx.template.jinja2(fallback_template, data = {"surface": surface, "error": text})
+    return (fallback, False)
+
+def render_details_or_fallback(ctx, template, data, surface = "check"):
+    """Render a details body, degrading to a fallback instead of crashing.
+
+    A template bug in one status surface must not abort the whole invocation
+    (see anchor: SNIPPET_MACRO / failure_snippets). On render error this logs a
+    WARNING to CLI output with the error and returns a minimal fallback body
+    embedding the same message; the caller keeps the correct status/title.
+
+    Returns (text, ok): `ok` is False when the fallback was used, so callers can
+    skip the size-trim cascade (the fallback is already tiny).
+    """
+    return _render_or_fallback(ctx, template, data, _DETAILS_FALLBACK_TEMPLATE, surface + " details")
+
+def render_summary_or_fallback(ctx, template, data, surface = "check"):
+    """Render a summary body, degrading to a one-line fallback instead of
+    crashing. Summary templates carry no macros today, so this is
+    defense-in-depth against future edits — see render_details_or_fallback.
+
+    Returns (text, ok); ok is False when the fallback was used.
+    """
+    return _render_or_fallback(ctx, template, data, _SUMMARY_FALLBACK_TEMPLATE, surface + " summary")
+
 def build_summary_data(ctx, data, status, render_ctx, links, metadata_keys, run_date = "", config_items = None, complete_suffix = ""):
     """Build Jinja2 template data for SUMMARY_TEMPLATE.
 
@@ -4235,11 +4290,12 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
         trace.log("debug [render_check_output]   packages_loaded=" + str(data["bazel"].get("packages_loaded", 0)))
 
     details_tmpl = t.get("details") or DETAILS_TEMPLATE
-    summary_text = ctx.template.jinja2(t.get("summary") or SUMMARY_TEMPLATE, data = summary_data)
-    details_text = ctx.template.jinja2(details_tmpl, data = details_data)
+    (summary_text, _summary_ok) = render_summary_or_fallback(ctx, t.get("summary") or SUMMARY_TEMPLATE, summary_data, surface = "build/test")
+    (details_text, _rendered_ok) = render_details_or_fallback(ctx, details_tmpl, details_data, surface = "build/test")
 
     # Fit details within the GitHub limit; each step re-renders only if still
-    # over. Inline snippets are extra (not the data users primarily came for), so
+    # over. On a render fallback the body is tiny, so every size guard below is
+    # already false and the cascade is a natural no-op. Inline snippets are extra (not the data users primarily came for), so
     # they shed FIRST — secondary buckets, then all of them — before any of the
     # established trims below. Reference sections (redundant with Aspect Web UI)
     # go next, before the failure/target lists themselves:
