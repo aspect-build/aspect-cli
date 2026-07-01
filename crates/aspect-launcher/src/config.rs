@@ -28,10 +28,20 @@ const BAZEL_BOUNDARY_FILES: &[&str] = &[
     "WORKSPACE.bazel",
 ];
 
-/// Walk ancestors of `start` and return the deepest one containing any of `markers`.
-fn find_ancestor_with_any(start: &Path, markers: &[&str]) -> Option<PathBuf> {
+/// Walk ancestors of `start` and return the deepest one containing any of
+/// `markers`, skipping any ancestor equal to `except`.
+///
+/// `except` guards against the user-level `~/.aspect/version.axl` being mistaken
+/// for a project boundary: it shares the [`AXL_VERSION_AXL_REL`] path with a
+/// project marker but must only supply config, never define the root.
+fn find_ancestor_with_any(
+    start: &Path,
+    markers: &[&str],
+    except: Option<&Path>,
+) -> Option<PathBuf> {
     start
         .ancestors()
+        .filter(|dir| except != Some(*dir))
         .find(|dir| markers.iter().any(|m| dir.join(m).exists()))
         .map(Path::to_path_buf)
 }
@@ -584,10 +594,11 @@ version(
 
     /// Resolve the project root from `start`, replicating `autoconf`'s
     /// two-pass walk without touching the process cwd or filesystem read of
-    /// `.aspect/version.axl`.
-    fn resolve_root(start: &Path) -> PathBuf {
-        find_ancestor_with_any(start, ASPECT_BOUNDARY_FILES)
-            .or_else(|| find_ancestor_with_any(start, BAZEL_BOUNDARY_FILES))
+    /// `.aspect/version.axl`. `home` is excluded from the Aspect pass, mirroring
+    /// how `autoconf` keeps `~/.aspect/version.axl` out of root discovery.
+    fn resolve_root(start: &Path, home: Option<&Path>) -> PathBuf {
+        find_ancestor_with_any(start, ASPECT_BOUNDARY_FILES, home)
+            .or_else(|| find_ancestor_with_any(start, BAZEL_BOUNDARY_FILES, None))
             .unwrap_or_else(|| start.to_path_buf())
     }
 
@@ -604,7 +615,7 @@ version(
         let cwd = nested.join("src");
         std::fs::create_dir_all(&cwd).unwrap();
 
-        assert_eq!(resolve_root(&cwd), nested);
+        assert_eq!(resolve_root(&cwd, None), nested);
     }
 
     /// MODULE.aspect is a valid Aspect marker too.
@@ -616,7 +627,7 @@ version(
         let cwd = root.join("sub/dir");
         std::fs::create_dir_all(&cwd).unwrap();
 
-        assert_eq!(resolve_root(&cwd), root);
+        assert_eq!(resolve_root(&cwd, None), root);
     }
 
     /// Pure Bazel monorepo with no Aspect markers: fall back to Bazel markers.
@@ -628,7 +639,22 @@ version(
         let cwd = root.join("sub/dir");
         std::fs::create_dir_all(&cwd).unwrap();
 
-        assert_eq!(resolve_root(&cwd), root);
+        assert_eq!(resolve_root(&cwd, None), root);
+    }
+
+    /// The home directory's `~/.aspect/version.axl` must not act as a project
+    /// root: a Bazel repo under `$HOME` still resolves to the repo, not `$HOME`.
+    #[test]
+    fn root_ignores_home_version_axl_for_a_repo_under_home() {
+        let home = tempfile::tempdir().unwrap();
+        write_version_axl(home.path(), "9.9.9");
+        let repo = home.path().join("work/repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join("MODULE.bazel"), "").unwrap();
+        let cwd = repo.join("sub/dir");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        assert_eq!(resolve_root(&cwd, Some(home.path())), repo);
     }
 
     /// No markers anywhere → fall back to the starting directory itself.
@@ -638,7 +664,7 @@ version(
         let cwd = tmp.path().join("sub/dir");
         std::fs::create_dir_all(&cwd).unwrap();
 
-        assert_eq!(resolve_root(&cwd), cwd);
+        assert_eq!(resolve_root(&cwd, None), cwd);
     }
 
     fn write_version_axl(dir: &Path, version: &str) {
@@ -701,7 +727,8 @@ version(
 /// Two-pass walk over the ancestors of the current working directory, deepest
 /// to shallowest:
 /// 1. Returns the first ancestor containing any [`ASPECT_BOUNDARY_FILES`] entry
-///    (`MODULE.aspect` or `.aspect/version.axl`).
+///    (`MODULE.aspect` or `.aspect/version.axl`), excluding the home directory
+///    so the user-level `~/.aspect/version.axl` never acts as a project root.
 /// 2. If none found, returns the first ancestor containing any [`BAZEL_BOUNDARY_FILES`] entry.
 /// 3. If still none found, the current working directory is used.
 ///
@@ -726,11 +753,13 @@ pub fn autoconf() -> Result<(PathBuf, AspectLauncherConfig)> {
     let current_dir =
         current_dir().map_err(|e| miette!("failed to get current directory: {}", e))?;
 
-    let root_dir = find_ancestor_with_any(&current_dir, ASPECT_BOUNDARY_FILES)
-        .or_else(|| find_ancestor_with_any(&current_dir, BAZEL_BOUNDARY_FILES))
+    let home_dir = dirs::home_dir();
+
+    let root_dir = find_ancestor_with_any(&current_dir, ASPECT_BOUNDARY_FILES, home_dir.as_deref())
+        .or_else(|| find_ancestor_with_any(&current_dir, BAZEL_BOUNDARY_FILES, None))
         .unwrap_or(current_dir);
 
-    let config = resolve_config(&root_dir, dirs::home_dir().as_deref())?;
+    let config = resolve_config(&root_dir, home_dir.as_deref())?;
     Ok((root_dir, config))
 }
 
