@@ -642,12 +642,9 @@ version(
     }
 
     fn write_version_axl(dir: &Path, version: &str) {
-        std::fs::create_dir_all(dir.join(".aspect")).unwrap();
-        std::fs::write(
-            dir.join(".aspect/version.axl"),
-            format!("version(\"{version}\")\n"),
-        )
-        .unwrap();
+        let path = dir.join(AXL_VERSION_AXL_REL);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, format!("version(\"{version}\")\n")).unwrap();
     }
 
     /// The root's `.aspect/version.axl` wins over the home fallback.
@@ -680,7 +677,10 @@ version(
         let home = tempfile::tempdir().unwrap();
 
         let config = resolve_config(root.path(), Some(home.path())).unwrap();
-        assert_eq!(config.aspect_cli.version(), default_config().aspect_cli.version());
+        assert_eq!(
+            config.aspect_cli.version(),
+            default_config().aspect_cli.version()
+        );
     }
 
     /// A missing home directory is tolerated and yields the default config.
@@ -689,7 +689,10 @@ version(
         let root = tempfile::tempdir().unwrap();
 
         let config = resolve_config(root.path(), None).unwrap();
-        assert_eq!(config.aspect_cli.version(), default_config().aspect_cli.version());
+        assert_eq!(
+            config.aspect_cli.version(),
+            default_config().aspect_cli.version()
+        );
     }
 }
 
@@ -706,13 +709,9 @@ version(
 /// monorepo opt out of the surrounding Bazel root by dropping a `.aspect/`
 /// directory or a `MODULE.aspect` file at its boundary.
 ///
-/// Config resolution, in order:
-/// 1. `.aspect/version.axl` under the resolved root, if it exists.
-/// 2. Otherwise the user-level `~/.aspect/version.axl`, if it exists.
-/// 3. Otherwise [`default_config`].
-///
-/// The resolved root directory is returned unchanged regardless of which config
-/// path was used — the home fallback only supplies configuration, not the root.
+/// The config for the resolved root is loaded via [`resolve_config`], which
+/// falls back to `~/.aspect/version.axl` and then the built-in default. The
+/// returned root directory is unaffected by that fallback.
 ///
 /// **Returns**
 ///
