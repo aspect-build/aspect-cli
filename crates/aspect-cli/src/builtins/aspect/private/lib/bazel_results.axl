@@ -3151,12 +3151,12 @@ DETAILS_TEMPLATE = SNIPPET_MACRO + """
 
 _RENDER_LOG = feature_logger("Status render")
 
-# Fallback body when a details template fails to render. Rendered with
-# `try_jinja2` (macro-free, no data refs beyond `error`/`surface`) so it cannot
-# itself fail. Keeps the check updating with the correct status/title (both
-# computed outside the template) while surfacing the bug to reviewers.
-_DETAILS_FALLBACK_TEMPLATE = """> ⚠️ **Details unavailable** — the {{ surface }} status body failed to render.
-> This is a bug in aspect-cli; the task status above is still accurate.
+# Fallback body when a details template fails to render (either a built-in
+# template or a user-supplied override). Rendered with `try_jinja2` (macro-free,
+# no data refs beyond `error`/`surface`) so it cannot itself fail. Keeps the
+# check updating with the correct status/title (both computed outside the
+# template) while surfacing the render error to reviewers.
+_DETAILS_FALLBACK_TEMPLATE = """> ⚠️ **Details unavailable** — the {{ surface }} status body failed to render. The task status above is still accurate.
 >
 > ```
 > {{ error }}
