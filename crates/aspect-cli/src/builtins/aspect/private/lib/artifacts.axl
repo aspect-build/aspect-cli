@@ -49,8 +49,8 @@ load("./tar.axl", "tar_create", "zip_create")
 # Public types
 
 _Artifact = record(
-    # "testlogs", "profile", "execlog", "bep", "format_diff",
-    # "gazelle_diff", "testlog_file", or any custom kind.
+    # "testlogs", "testlog_file", "build_logs", "build_log_file", "profile",
+    # "execlog", "bep", "format_diff", "gazelle_diff", or any custom kind.
     kind = field(str),
 
     # Direct download URL. Empty when the CI exposes no stable URL
@@ -60,8 +60,8 @@ _Artifact = record(
     # Display filename for the link; falls back to `kind` if empty.
     name = field(str, default = ""),
 
-    # Bazel label for per-target artifacts (kind="testlog_file"); empty
-    # for singletons. Drives `by_label` grouping.
+    # Bazel label for per-target artifacts (kind="testlog_file" /
+    # "build_log_file"); empty for singletons. Drives `by_label` grouping.
     label = field(str, default = ""),
 )
 
@@ -588,6 +588,98 @@ def _collect_test_files(ctx, event, strategy, test_entries, skipped_files):
             continue
         test_entries.append({"src": src, "dest": dest_dir + "/" + file.name, "label": label})
 
+def build_log_dest_dir(label, primary_output = ""):
+    """Destination directory for a failed build action's stdout/stderr.
+
+    Base is `testlog_dest_dir`'s label→path mapping (`//pkg:target` →
+    `pkg/target`); build actions have no run/shard/attempt.
+
+    A single target routinely fails multiple actions of the *same* mnemonic
+    (a `cc_library` with two bad sources emits two `CppCompile`
+    `action_completed` events under one label). The mnemonic alone can't
+    disambiguate them, so when `primary_output` is set — Bazel's per-action
+    unique output path, from `ActionCompletedId.primary_output` — its basename
+    becomes a subdir, keeping each action's streams distinct
+    (`pkg/lib/foo.pic.o/` vs `pkg/lib/bar.pic.o/`). Falls back to the bare
+    label path when absent (the caller's dedup guard resolves any residual
+    basename clash).
+    """
+    base = label.lstrip("/").replace(":", "/")
+    out_base = primary_output.rsplit("/", 1)[-1] if primary_output else ""
+    return base + "/" + out_base if out_base else base
+
+def _collect_build_action_logs(ctx, event, strategy, scratch_dir, seen_dests, build_entries, skipped_files):
+    """Append failed-build-action stdout/stderr entries into the
+    closure-private lists.
+
+    `strategy` is "none" (collect nothing) or "failed" (collect actions
+    reported unsuccessful). Only the `action_completed` kind carries build
+    stdout/stderr; test actions surface via `_collect_test_files`.
+
+    Both `stdout` and `stderr` are BES `File` messages carrying a URI (never
+    inlined `.contents` here — resolving a URI to a path keeps the raw bytes
+    off the Starlark heap, matching lib/bazel_results.axl). Each action's
+    streams land under a per-action subdir (see `build_log_dest_dir`) named
+    `<mnemonic>.<stream>.log`; `seen_dests` (a dict used as a set, shared
+    across the whole run) is the final collision guard — a repeated dest gets
+    a `.N` suffix so no two actions ever overwrite each other's log.
+
+    Both streams are always emitted, even when Bazel reports no stdout/stderr
+    (or the resolved path is missing): a zero-byte placeholder is staged under
+    `scratch_dir` so the uploaded archive positively shows the stream was
+    checked and empty, rather than leaving the reader to guess whether it was
+    dropped. `scratch_dir` must be a job-scoped writable dir.
+
+    All field reads go through `bes_get`: a schema mismatch (or the aborted
+    payload variant) no-ops rather than raising.
+    """
+    if event.kind != "action_completed":
+        return
+    if strategy != "failed":
+        return
+
+    payload = event.payload
+    success = bes_get(payload, "success", None)
+    if success == None or success:
+        return
+
+    label = bes_get(event.id, "label", "") or ""
+    if not label:
+        return
+
+    primary_output = bes_get(event.id, "primary_output", "") or ""
+    dest_dir = build_log_dest_dir(label, primary_output)
+    mnemonic = bes_get(payload, "type", "") or "action"
+
+    for stream in ("stdout", "stderr"):
+        raw_uri = bes_get(bes_get(payload, stream, None), "file", "") or ""
+        src = _file_uri_to_path(raw_uri)
+        name = mnemonic + "." + stream + ".log"
+        dest = dest_dir + "/" + name
+
+        # Guarantee a unique dest even if two actions share label+mnemonic AND
+        # primary-output basename (rare cross-dir clash): suffix `.N`. The
+        # bound is the seen-set size + 1 — more than enough distinct suffixes.
+        if dest in seen_dests:
+            base_dest = dest
+            for n in range(1, len(seen_dests) + 2):
+                candidate = base_dest + "." + str(n)
+                if candidate not in seen_dests:
+                    dest = candidate
+                    break
+        seen_dests[dest] = True
+
+        if not src or not ctx.std.fs.exists(src):
+            if src:
+                skipped_files.append({"label": label, "name": name, "reason": "not found (empty placeholder uploaded)", "raw": src})
+            # Stage a zero-byte placeholder so the archive still carries the
+            # stream — an explicit "checked, nothing here" signal. Path mirrors
+            # the archive dest so each (action, stream) gets its own placeholder.
+            src = scratch_dir + "/" + dest
+            ctx.std.fs.create_dir_all(src.rsplit("/", 1)[0])
+            ctx.std.fs.write(src, "")
+        build_entries.append({"src": src, "dest": dest, "label": label})
+
 def _new_test_group():
     """Fresh per-group upload state. Field semantics: see the upload
     strategies comment block above."""
@@ -599,7 +691,7 @@ def _new_test_group():
         "label_urls": {},
     }
 
-def _trace_summary(ctx, items, test_entries, skipped_files, profile_path, execlog_path, bep_path, uploader_active):
+def _trace_summary(ctx, items, test_entries, build_entries, skipped_files, profile_path, execlog_path, bep_path, uploader_active):
     """Optional per-task debug summary printed when `trace.enabled`."""
     if not trace.enabled:
         return
@@ -612,6 +704,9 @@ def _trace_summary(ctx, items, test_entries, skipped_files, profile_path, execlo
     trace.log("bes/bep:  " + bep_path + " (exists=" + str(ctx.std.fs.exists(bep_path)) + ")")
     trace.log("testlog entries: " + str(len(test_entries)))
     for f in test_entries:
+        trace.log("  " + f["label"] + " " + f["src"] + " -> " + f["dest"])
+    trace.log("build-log entries: " + str(len(build_entries)))
+    for f in build_entries:
         trace.log("  " + f["label"] + " " + f["src"] + " -> " + f["dest"])
     if skipped_files:
         trace.log("skipped files: " + str(len(skipped_files)))
@@ -630,10 +725,15 @@ def _trace_summary(ctx, items, test_entries, skipped_files, profile_path, execlo
 def _artifact_upload_impl(ctx: FeatureContext):
     """Wire interval-based artifact upload into BazelTrait hooks.
 
-      build_event  → collect testlog entries, batch-upload at threshold
-      build_end    → final flush of testlogs + upload profile/execlog/BEP
+      build_event  → collect testlog + failed-build-action-log entries,
+                     batch-upload each at threshold
+      build_end    → final flush of testlogs + build logs + upload
+                     profile/execlog/BEP
 
-    Each upload registers an `_Artifact` via the closure-bound `_append`.
+    Test logs and build-failure logs use independent entry lists + upload
+    groups (same per-CI archive/per-file strategies) so they batch and
+    roll-replace without interfering. Each upload registers an `_Artifact`
+    via the closure-bound `_append`.
     """
     bazel_trait = ctx.traits[BazelTrait]
 
@@ -659,6 +759,8 @@ def _artifact_upload_impl(ctx: FeatureContext):
     ci = detect_ci(ctx.std.env)
     upload_test_logs = ctx.args.upload_test_logs
     upload_testlogs = upload_test_logs != "none"
+    upload_build_logs = ctx.args.upload_build_logs
+    upload_buildlogs = upload_build_logs != "none"
     upload_profile = ctx.args.upload_profile
     upload_bep = ctx.args.upload_bep
     upload_exec_log = ctx.args.upload_exec_log
@@ -673,6 +775,10 @@ def _artifact_upload_impl(ctx: FeatureContext):
     # `.bep.bin` — macOS Finder auto-expands `.bin` on double-click.
     bep_path = tmpdir + "/" + uuid + ".bep.binpb"
 
+    # Scratch root for zero-byte build-log placeholders (empty stdout/stderr).
+    # uuid-namespaced so concurrent same-task runs don't share a tree.
+    build_log_scratch = tmpdir + "/" + uuid + ".build-logs"
+
     if upload_profile:
         bazel_trait.extra_flags.extend([
             "--generate_json_trace_profile",
@@ -684,37 +790,63 @@ def _artifact_upload_impl(ctx: FeatureContext):
     if upload_bep:
         bazel_trait.build_event_sinks.append(bazel.build_events.file(path = bep_path))
 
-    # Closure-private upload-orchestration state.
+    # Closure-private upload-orchestration state. Test logs and build-failure
+    # logs each get their own entry list + upload group so they batch, flush,
+    # and roll-replace independently.
     test_entries = []
+    build_entries = []
     skipped_files = []
     test_group = _new_test_group()
+    build_group = _new_test_group()
 
-    def _publish_testlogs():
-        """Translate upload state into Artifact records. Re-emits each
-        batch; `_append` upserts so items don't bloat with stale URLs."""
-        if test_group["download_url"]:
+    # Set of build-log dest paths already claimed this run — the collision
+    # guard for actions sharing label+mnemonic+output-basename.
+    build_seen_dests = {}
+
+    def _publish_group(group, archive_kind, archive_name, file_kind):
+        """Translate a group's upload state into Artifact records. Re-emits
+        each batch; `_append` upserts so items don't bloat with stale URLs.
+
+        `archive_kind`/`archive_name` cover the single-archive strategies
+        (GitHub zip, GitLab tar) that expose one stable URL; `file_kind`
+        covers the per-file strategies (CircleCI) that expose one URL per
+        (label, filename)."""
+        if group["download_url"]:
             _append(_Artifact(
-                kind = "testlogs",
-                url = test_group["download_url"],
-                name = "testlogs.tar.gz",
+                kind = archive_kind,
+                url = group["download_url"],
+                name = archive_name,
             ))
-        for label, file_urls in test_group["label_urls"].items():
+        for label, file_urls in group["label_urls"].items():
             for fname, url in file_urls.items():
                 _append(_Artifact(
-                    kind = "testlog_file",
+                    kind = file_kind,
                     url = url,
                     name = fname,
                     label = label,
                 ))
 
+    def _publish_testlogs():
+        _publish_group(test_group, "testlogs", "testlogs.tar.gz", "testlog_file")
+
+    def _publish_buildlogs():
+        _publish_group(build_group, "build_logs", "build-logs.tar.gz", "build_log_file")
+
     def _on_build_event(ctx, event):
-        if is_local or not upload_testlogs:
+        if is_local:
             return
-        _collect_test_files(ctx, event, upload_test_logs, test_entries, skipped_files)
-        if len(test_entries) >= test_group["last_count"] + _BATCH_SIZE:
-            name = artifact_name(ci, ctx.task.kind, ctx.task.name, "testlogs")
-            if uploader.upload_testlogs(ctx, test_group, test_entries, name):
-                _publish_testlogs()
+        if upload_testlogs:
+            _collect_test_files(ctx, event, upload_test_logs, test_entries, skipped_files)
+            if len(test_entries) >= test_group["last_count"] + _BATCH_SIZE:
+                name = artifact_name(ci, ctx.task.kind, ctx.task.name, "testlogs")
+                if uploader.upload_testlogs(ctx, test_group, test_entries, name):
+                    _publish_testlogs()
+        if upload_buildlogs:
+            _collect_build_action_logs(ctx, event, upload_build_logs, build_log_scratch, build_seen_dests, build_entries, skipped_files)
+            if len(build_entries) >= build_group["last_count"] + _BATCH_SIZE:
+                name = artifact_name(ci, ctx.task.kind, ctx.task.name, "build-logs")
+                if uploader.upload_testlogs(ctx, build_group, build_entries, name):
+                    _publish_buildlogs()
 
     def _on_build_end(ctx, exit_code):
         if not is_local:
@@ -729,6 +861,16 @@ def _artifact_upload_impl(ctx: FeatureContext):
                     # still reaps the prior partial via prev_ref.
                     if uploader.upload_testlogs(ctx, test_group, test_entries, name, final = True):
                         _publish_testlogs()
+
+                if upload_buildlogs:
+                    name = artifact_name(ci, ctx.task.kind, ctx.task.name, "build-logs")
+                    if uploader.upload_testlogs(ctx, build_group, build_entries, name, final = True):
+                        _publish_buildlogs()
+
+                    # Reap staged empty-stream placeholders (real action logs
+                    # live in the CAS / bazel-out and are not ours to remove).
+                    if ctx.std.fs.exists(build_log_scratch):
+                        ctx.std.fs.remove_dir_all(build_log_scratch)
 
                 # Profile / BEP / exec-log — opt-in each. Source files are
                 # removed on success AND failure (no retry, so a leftover
@@ -746,7 +888,7 @@ def _artifact_upload_impl(ctx: FeatureContext):
                     _upload_file(ctx, kind, filename, src)
                     ctx.std.fs.remove_file(src)
 
-        _trace_summary(ctx, items, test_entries, skipped_files, profile_path, execlog_path, bep_path, not is_local)
+        _trace_summary(ctx, items, test_entries, build_entries, skipped_files, profile_path, execlog_path, bep_path, not is_local)
 
     bazel_trait.build_event.append(_on_build_event)
     bazel_trait.build_end.append(_on_build_end)
@@ -760,13 +902,16 @@ ArtifactUpload = feature(
         # job read access, so every channel defaults off.
         #
         # Risk, highest to lowest:
-        #   upload_exec_log — action env vars + command lines; no on-disk
-        #                     redaction yet. Highest risk.
-        #   upload_testlogs — test stdout/stderr/XML may echo secrets.
-        #   upload_bep      — redacted at the stream source
-        #                     (stream/redaction.rs); low but nonzero.
-        #   upload_profile  — labels/paths/timings; no env/command lines,
-        #                     but labels can leak project structure.
+        #   upload_exec_log  — action env vars + command lines; no on-disk
+        #                      redaction yet. Highest risk.
+        #   upload_test_logs — test stdout/stderr/XML may echo secrets.
+        #   upload_build_logs — failed build actions' stdout/stderr; a compiler
+        #                       or codegen command can echo secrets from env or
+        #                       argv, same as a test.
+        #   upload_bep       — redacted at the stream source
+        #                      (stream/redaction.rs); low but nonzero.
+        #   upload_profile   — labels/paths/timings; no env/command lines,
+        #                      but labels can leak project structure.
         "upload_test_logs": args.string(
             default = "none",
             values = ["none", "failed", "executed", "all"],
@@ -774,6 +919,17 @@ ArtifactUpload = feature(
                           "'none' (default) uploads nothing. 'failed' uploads " +
                           "only non-passing tests. 'executed' uploads every test " +
                           "that ran (skips cached passes). 'all' uploads everything.",
+        ),
+        "upload_build_logs": args.string(
+            default = "none",
+            values = ["none", "failed"],
+            description = "Which build-action logs to upload as artifacts. A failed " +
+                          "build target's stdout/stderr (compiler errors, codegen " +
+                          "output) is uploaded per (target, action), alongside the " +
+                          "failure snippet shown on status surfaces. 'none' (default) " +
+                          "uploads nothing. 'failed' uploads the stdout/stderr of every " +
+                          "build action Bazel reports unsuccessful. Off by default: the " +
+                          "output can echo secrets from the action's env or command line.",
         ),
         "upload_profile": args.boolean(
             default = False,

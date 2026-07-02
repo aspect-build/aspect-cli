@@ -4,7 +4,7 @@ Exercise axl
 
 load("@aspect//delivery.axl", delivery_count_unexplained_unresolved = "count_unexplained_unresolved", delivery_fmt_elapsed = "fmt_elapsed", delivery_should_surface_phase2_stderr = "should_surface_phase2_stderr", delivery_should_upload_grpc_log = "should_upload_grpc_log")
 load("@aspect//lint.axl", "file_uri_to_path", "filter_all", "filter_changeset", "linter_error_message")
-load("@aspect//private/lib/artifacts.axl", "artifact_name", "testlog_dest_dir")
+load("@aspect//private/lib/artifacts.axl", "artifact_name", "build_log_dest_dir", "testlog_dest_dir")
 load("@aspect//private/lib/bazel_results.axl", "compute_reproducer_command", "init_data", "render_check_output", "resolve_aspect_url", "summary_title")
 load(
     "@aspect//private/lib/build_metadata.axl",
@@ -2297,6 +2297,23 @@ def test_artifacts_lib(ctx: TaskContext, tc: int) -> int:
     for (label, run, shard, attempt, expected, desc) in dest_cases:
         got = testlog_dest_dir(label, run, shard, attempt)
         tc = test_case(tc, got == expected, "testlog_dest_dir: %s → %r (got %r)" % (desc, expected, got))
+
+    # build_log_dest_dir — failed build action stdout/stderr; label → path,
+    # no run/shard/attempt (build actions aren't parameterized that way).
+    # With a primary_output, its basename becomes a per-action subdir so
+    # same-mnemonic actions under one label don't collide.
+    build_dest_cases = [
+        # (label, primary_output, expected, desc)
+        ("//pkg:lib", "", "pkg/lib", "no primary_output → bare label path"),
+        ("//pkg/sub:lib", "", "pkg/sub/lib", "nested package → path"),
+        ("//:root", "", "/root", "root package → colon replaced (matches testlog_dest_dir)"),
+        ("@ext//pkg:lib", "", "@ext//pkg/lib", "external label → colon replaced, repo kept"),
+        ("//pkg:lib", "bazel-out/k8-fastbuild/bin/pkg/_objs/lib/foo.pic.o", "pkg/lib/foo.pic.o", "primary_output → basename subdir"),
+        ("//pkg:lib", "bar.o", "pkg/lib/bar.o", "primary_output already a basename"),
+    ]
+    for (label, primary_output, expected, desc) in build_dest_cases:
+        got = build_log_dest_dir(label, primary_output)
+        tc = test_case(tc, got == expected, "build_log_dest_dir: %s → %r (got %r)" % (desc, expected, got))
     return tc
 
 def test_detect_build_url(ctx: TaskContext, tc: int) -> int:

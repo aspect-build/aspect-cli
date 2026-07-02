@@ -3591,6 +3591,7 @@ def build_details_data(data, links, render_ctx = None, status = "", start_date =
     artifact_links = []
     for kind, alabel in [
         ("testlogs", "Test logs"),
+        ("build_logs", "Build logs"),
         ("profile", "Profile"),
         ("execlog", "Execlog"),
         ("bep", "BEP"),
