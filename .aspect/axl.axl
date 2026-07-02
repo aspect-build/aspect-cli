@@ -4,7 +4,7 @@ Exercise axl
 
 load("@aspect//delivery.axl", delivery_count_unexplained_unresolved = "count_unexplained_unresolved", delivery_fmt_elapsed = "fmt_elapsed", delivery_should_surface_phase2_stderr = "should_surface_phase2_stderr", delivery_should_upload_grpc_log = "should_upload_grpc_log")
 load("@aspect//lint.axl", "file_uri_to_path", "filter_all", "filter_changeset", "linter_error_message")
-load("@aspect//private/lib/artifacts.axl", "artifact_name", "testlog_dest_dir")
+load("@aspect//private/lib/artifacts.axl", "artifact_name", "build_log_relpath", "collect_build_action_logs", "dedup_path", "testlog_dest_dir")
 load("@aspect//private/lib/bazel_results.axl", "compute_reproducer_command", "init_data", "render_check_output", "resolve_aspect_url", "summary_title")
 load(
     "@aspect//private/lib/build_metadata.axl",
@@ -2297,6 +2297,87 @@ def test_artifacts_lib(ctx: TaskContext, tc: int) -> int:
     for (label, run, shard, attempt, expected, desc) in dest_cases:
         got = testlog_dest_dir(label, run, shard, attempt)
         tc = test_case(tc, got == expected, "testlog_dest_dir: %s → %r (got %r)" % (desc, expected, got))
+
+    # build_log_relpath — label-relative log path for one failed build stream.
+    # A primary_output's basename namespaces same-mnemonic actions under one
+    # label so their logs don't collide.
+    relpath_cases = [
+        # (primary_output, mnemonic, stream, expected, desc)
+        ("", "CppCompile", "stderr", "CppCompile.stderr.log", "no primary_output → bare mnemonic.stream"),
+        ("", "", "stdout", "action.stdout.log", "no mnemonic → 'action' fallback"),
+        ("bazel-out/k8-fastbuild/bin/pkg/_objs/lib/foo.pic.o", "CppCompile", "stderr", "foo.pic.o/CppCompile.stderr.log", "primary_output → basename subdir"),
+        ("bar.o", "CppCompile", "stdout", "bar.o/CppCompile.stdout.log", "primary_output already a basename"),
+    ]
+    for (primary_output, mnemonic, stream, expected, desc) in relpath_cases:
+        got = build_log_relpath(primary_output, mnemonic, stream)
+        tc = test_case(tc, got == expected, "build_log_relpath: %s → %r (got %r)" % (desc, expected, got))
+
+    # dedup_path — collision guard: identical paths get the lowest free `.N`,
+    # distinct paths pass through. Mutates the seen-set in place.
+    seen = {}
+    tc = test_case(tc, dedup_path("a/x.log", seen) == "a/x.log", "dedup_path: first claim passes through")
+    tc = test_case(tc, dedup_path("a/x.log", seen) == "a/x.log.1", "dedup_path: 2nd identical → .1")
+    tc = test_case(tc, dedup_path("a/x.log", seen) == "a/x.log.2", "dedup_path: 3rd identical → .2")
+    tc = test_case(tc, dedup_path("a/y.log", seen) == "a/y.log", "dedup_path: distinct path unaffected")
+    return tc
+
+def _fake_action_event(label, primary_output, mnemonic, success, stdout_uri = None, stderr_uri = None):
+    """Fake BES action_completed event for collect_build_action_logs tests.
+    `bes_get` reads via getattr, so a struct with the right shape stands in for
+    the runtime's typed event. A None stream models Bazel reporting no file."""
+    def _file(uri):
+        return struct(file = uri) if uri != None else None
+    return struct(
+        kind = "action_completed",
+        id = struct(label = label, primary_output = primary_output),
+        payload = struct(success = success, type = mnemonic, stdout = _file(stdout_uri), stderr = _file(stderr_uri)),
+    )
+
+def test_collect_build_action_logs(ctx: TaskContext, tc: int, temp_dir: str) -> int:
+    """collect_build_action_logs: gating, dual-stream emission, empty-stream
+    placeholders, and same-mnemonic collision handling."""
+    scratch = temp_dir + "/build-log-collect-test"
+    ctx.std.fs.remove_dir_all(scratch) if ctx.std.fs.exists(scratch) else None
+
+    # A real on-disk stderr the collector should reference verbatim.
+    real_stderr = temp_dir + "/real-stderr.log"
+    ctx.std.fs.write(real_stderr, "boom")
+
+    def run(events, strategy = "failed"):
+        seen, entries, skipped = {}, [], []
+        for e in events:
+            collect_build_action_logs(ctx, e, strategy, scratch, seen, entries, skipped)
+        return entries, skipped
+
+    # Non-failed / unknown-success / wrong-kind / disabled events collect nothing.
+    entries, _ = run([
+        _fake_action_event("//pkg:lib", "bin/foo.o", "CppCompile", True, stderr_uri = "file://" + real_stderr),
+        _fake_action_event("//pkg:lib", "bin/foo.o", "CppCompile", None),
+        struct(kind = "test_result", id = struct(label = "//pkg:t"), payload = struct()),
+    ])
+    tc = test_case(tc, len(entries) == 0, "collect: success / unknown-success / non-action events skipped")
+    entries, _ = run([_fake_action_event("//pkg:lib", "bin/foo.o", "CppCompile", False)], strategy = "none")
+    tc = test_case(tc, len(entries) == 0, "collect: strategy=none collects nothing")
+
+    # One failed action → both streams; present stderr kept, absent stdout placeholdered.
+    entries, _ = run([_fake_action_event("//pkg:lib", "bin/foo.o", "CppCompile", False, stderr_uri = "file://" + real_stderr)])
+    dests = sorted([e["dest"] for e in entries])
+    tc = test_case(tc, dests == ["pkg/lib/foo.o/CppCompile.stderr.log", "pkg/lib/foo.o/CppCompile.stdout.log"], "collect: emits stdout+stderr under primary-output subdir (got %r)" % dests)
+    by_dest = {e["dest"]: e for e in entries}
+    tc = test_case(tc, by_dest["pkg/lib/foo.o/CppCompile.stderr.log"]["src"] == real_stderr, "collect: present stderr references the real path")
+    stdout_src = by_dest["pkg/lib/foo.o/CppCompile.stdout.log"]["src"]
+    tc = test_case(tc, stdout_src.startswith(scratch) and ctx.std.fs.read_to_string(stdout_src) == "", "collect: absent stdout → staged zero-byte placeholder")
+
+    # Two same-mnemonic actions under one label with the SAME primary-output
+    # basename must not collide — dedup suffixes the second.
+    entries, _ = run([
+        _fake_action_event("//pkg:lib", "k8-fastbuild/foo.o", "CppCompile", False),
+        _fake_action_event("//pkg:lib", "k8-dbg/foo.o", "CppCompile", False),
+    ])
+    tc = test_case(tc, len(entries) == 4, "collect: two actions × two streams → 4 entries")
+    tc = test_case(tc, len(set([e["dest"] for e in entries])) == 4, "collect: same-basename actions get distinct dests")
+
+    ctx.std.fs.remove_dir_all(scratch) if ctx.std.fs.exists(scratch) else None
     return tc
 
 def test_detect_build_url(ctx: TaskContext, tc: int) -> int:
@@ -3463,6 +3544,7 @@ def impl(ctx: TaskContext) -> int:
     tc = test_detect_build_url(ctx, tc)
     tc = test_detect_ci(ctx, tc)
     tc = test_artifacts_lib(ctx, tc)
+    tc = test_collect_build_action_logs(ctx, tc, temp_dir)
     tc = test_sarif_lib(tc)
     tc = test_file_uri_to_path(tc)
     tc = test_json_try_decode(tc)
