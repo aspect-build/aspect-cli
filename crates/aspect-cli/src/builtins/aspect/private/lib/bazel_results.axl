@@ -82,10 +82,8 @@ MIN_HEARTBEAT_INTERVAL_MS = 5000
 BES_DRAIN_TICK_MS = 250
 
 # bb_clientd FUSE mount root for resolving bytestream:// URIs on Aspect
-# Workflows runners. MUST match lib/artifacts.axl's `_BB_CLIENTD_ROOT` — they
-# resolve the same CAS blobs (artifacts uploads test.log; we read it for
-# snippets), and a mismatch silently breaks reads (path doesn't exist → empty
-# snippet). Can't share via load(): artifacts.axl already loads bazel_results.
+# Workflows runners. lib/artifacts.axl loads `file_uri_to_path` from here, so
+# both files resolve the same CAS blobs off this one root.
 _BB_CLIENTD_ROOT = "/mnt/ephemeral/buildbarn/bb_clientd"
 
 # TestSummary overall_status values from BlazeTestStatus proto enum. starbuf_derive
@@ -200,7 +198,7 @@ def bes_get(obj, field, default = None):
         return default
     return getattr(obj, field, default)
 
-def _file_uri_to_path(uri):
+def file_uri_to_path(uri):
     """Convert a file:// or bytestream:// URI to a local filesystem path.
 
     `file://` (disk-cache / local outputs) is returned verbatim; `bytestream://`
@@ -536,7 +534,7 @@ def process_event(data, event):
             # Resolve the stderr File.uri to a local path only (never .contents):
             # read on demand for the inline snippet, kept off the Starlark heap.
             stderr_uri = bes_get(bes_get(payload, "stderr", None), "file", "") or ""
-            stderr_path = _file_uri_to_path(stderr_uri)
+            stderr_path = file_uri_to_path(stderr_uri)
 
             # One entry per label, deduped mnemonics (a target can fail multiple
             # actions, e.g. CppCompile + CppLink). First action's stderr_path
@@ -627,10 +625,10 @@ def process_event(data, event):
                     xml_uri = bes_get(output, "file", "") or ""
         duration_ms = (bes_get(payload, "test_attempt_duration_millis", 0) or 0) if payload else 0
         data["bazel"]["test_details"][label] = {
-            "log_path": _file_uri_to_path(log_uri),
+            "log_path": file_uri_to_path(log_uri),
             # JUnit XML, when present: lets the snippet prefer structured
             # <failure>/<error> output over scraping the raw test.log.
-            "xml_path": _file_uri_to_path(xml_uri),
+            "xml_path": file_uri_to_path(xml_uri),
             "duration_ms": duration_ms,
         }
 
