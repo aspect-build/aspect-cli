@@ -56,10 +56,12 @@ sh_test(
 genrule(
     name = "demo_build_fail",
     outs = ["demo_build_fail.out"],
-    # Emits a realistic compiler-style error to stderr, then exits non-zero so
-    # the action fails and BES reports its stderr — exercising the action-stderr
-    # snippet path. `>&2` so it lands on the action's stderr, not stdout.
+    # Emits a realistic compiler-style error to stderr AND a line to stdout,
+    # then exits non-zero so the action fails and BES reports both streams —
+    # exercising the action-log upload path (DO NOT COMMIT: stdout line added
+    # for the live build-log test).
     cmd = """(
+echo "INFO: Compiling examples/test_states/widget.cc [1/1]"
 cat >&2 <<'ERR'
 INFO: From Compiling examples/test_states/widget.cc:
 examples/test_states/widget.cc: In function 'int Widget::total() const':

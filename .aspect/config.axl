@@ -195,13 +195,16 @@ def config(ctx: ConfigContext):
     ctx.tasks["delivery"].args.release_bazel_flags = ["--config=release"]
     ctx.tasks["delivery"].args.warn_not_runnable = True
 
-    ctx.tasks["build"].args.targets = ["//...", "-//exclude/..."]
+    # DO NOT COMMIT: force the failing build action into scope so CI exercises
+    # the build-log upload path live.
+    ctx.tasks["build"].args.targets = ["//...", "-//exclude/...", "//examples/test_states:demo_build_fail"]
     ctx.tasks["test"].args.targets = ["//...", "-//exclude/..."]
 
     # Enable artifact uploads (default off, opt-in per repo). Compact execlog
     # stays off until on-disk redaction lands (zstd execlog must pass through
     # the same redactor as the BEP stream). "failed" — passing-test logs are noise.
     ctx.features[ArtifactUpload].args.upload_test_logs = "failed"
+    ctx.features[ArtifactUpload].args.upload_build_logs = "failed"  # DO NOT COMMIT: live-test build-log upload
     ctx.features[ArtifactUpload].args.upload_profile = True
     ctx.features[ArtifactUpload].args.upload_bep = True
 
