@@ -200,8 +200,10 @@ def config(ctx: ConfigContext):
 
     # Enable artifact uploads (default off, opt-in per repo). Compact execlog
     # stays off until on-disk redaction lands (zstd execlog must pass through
-    # the same redactor as the BEP stream). "failed" — passing-test logs are noise.
+    # the same redactor as the BEP stream). "failed" — only failing test/build
+    # logs; passing output is noise.
     ctx.features[ArtifactUpload].args.upload_test_logs = "failed"
+    ctx.features[ArtifactUpload].args.upload_build_logs = "failed"
     ctx.features[ArtifactUpload].args.upload_profile = True
     ctx.features[ArtifactUpload].args.upload_bep = True
 

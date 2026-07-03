@@ -38,7 +38,7 @@ Consumer:
 """
 
 load("@aspect//bazel.axl", "BazelTrait")
-load("./bazel_results.axl", "bes_get")
+load("./bazel_results.axl", "bes_get", "file_uri_to_path")
 load("./buildkite.axl", "buildkite")
 load("./ci.axl", "detect_artifacts_browse_url", "detect_ci_host")
 load("./circleci.axl", "circleci")
@@ -49,8 +49,8 @@ load("./tar.axl", "tar_create", "zip_create")
 # Public types
 
 _Artifact = record(
-    # "testlogs", "profile", "execlog", "bep", "format_diff",
-    # "gazelle_diff", "testlog_file", or any custom kind.
+    # "testlogs", "testlog_file", "build_logs", "build_log_file", "profile",
+    # "execlog", "bep", "format_diff", "gazelle_diff", or any custom kind.
     kind = field(str),
 
     # Direct download URL. Empty when the CI exposes no stable URL
@@ -60,8 +60,8 @@ _Artifact = record(
     # Display filename for the link; falls back to `kind` if empty.
     name = field(str, default = ""),
 
-    # Bazel label for per-target artifacts (kind="testlog_file"); empty
-    # for singletons. Drives `by_label` grouping.
+    # Bazel label for per-target artifacts (kind="testlog_file" /
+    # "build_log_file"); empty for singletons. Drives `by_label` grouping.
     label = field(str, default = ""),
 )
 
@@ -241,7 +241,8 @@ _gitlab = struct(
     delete_artifact = lambda ctx, name: {"success": True},
 )
 
-# Testlog upload strategies (tar / zip / per-file / buildkite-agent).
+# Per-CI upload strategies for a group of per-target files (tar / zip /
+# per-file / buildkite-agent) — used for both test logs and build logs.
 # Each mutates the per-group state dict in place:
 #   last_count   — entries already in the last uploaded archive
 #   version      — bumped per partial upload for `.partial.N` naming
@@ -313,16 +314,16 @@ def _upload_archive(ctx, provider, group, entries, name, ext, build_archive, fin
         _print_upload_error(ctx, artifact, err)
     return False
 
-def _upload_testlogs_tar(ctx, provider, group, entries, name, final = False):
+def _upload_group_tar(ctx, provider, group, entries, name, final = False):
     """Tar.gz strategy — GitLab. Single archive per upload, rolling-replace."""
     return _upload_archive(ctx, provider, group, entries, name, ".tar.gz", tar_create, final)
 
-def _upload_testlogs_zip(ctx, provider, group, entries, name, final = False):
+def _upload_group_zip(ctx, provider, group, entries, name, final = False):
     """Zip strategy — GitHub. The v2 artifact API requires ZIP uploads;
     building the zip directly avoids the provider double-wrapping a tar."""
     return _upload_archive(ctx, provider, group, entries, name, ".zip", zip_create, final)
 
-def _upload_testlogs_buildkite(ctx, group, entries, name):
+def _upload_group_buildkite(ctx, group, entries, name):
     """Symlink-tree + `buildkite-agent artifact upload` — per-file, no
     archive. Incremental: only entries added since the last upload."""
     count = len(entries)
@@ -358,13 +359,14 @@ def _upload_testlogs_buildkite(ctx, group, entries, name):
     warn(ctx.std, "Artifact upload failed — buildkite-agent exited with code " + str(status.code) + ".")
     return False
 
-def _upload_testlogs_per_file(ctx, provider, group, entries, name):
-    """Per-file upload — CircleCI. Records each per-(label, filename) URL
+def _upload_group_per_file(ctx, provider, group, entries, name):
+    """Per-file upload — CircleCI. Records each per-(label, display-name) URL
     into group['label_urls'] so output can link files separately.
 
-    The results table renders one log/xml link per test label, so for
-    runs_per_test / sharded targets (many files share a basename) the first
-    uploaded URL wins; all runs are still uploaded under distinct dest paths.
+    The link key is `entry["name"]` — a per-label-unique display name the
+    collector assigns (test.log/test.xml for tests; a per-action-qualified
+    name for build logs), so distinct files under one label don't overwrite
+    each other's link.
     """
     count = len(entries)
     if count == 0 or count == group["last_count"]:
@@ -384,9 +386,8 @@ def _upload_testlogs_per_file(ctx, provider, group, entries, name):
         if result["success"]:
             url = result.get("download_url", "")
             if url and url.startswith("http"):
-                fname = entry["dest"].rsplit("/", 1)[-1]
                 files = label_urls.setdefault(entry["label"], {})
-                files.setdefault(fname, url)
+                files.setdefault(entry["name"], url)
             group["last_count"] += 1
             any_success = True
         else:
@@ -436,29 +437,26 @@ def _create_uploader(env):
     def delete_artifact(ctx, name):
         return provider.delete_artifact(ctx, name)
 
-    def upload_testlogs(ctx, group, entries, name, final = False):
+    def upload_log_group(ctx, group, entries, name, final = False):
         if ci == "buildkite":
-            return _upload_testlogs_buildkite(ctx, group, entries, name)
+            return _upload_group_buildkite(ctx, group, entries, name)
         if ci == "circleci":
-            return _upload_testlogs_per_file(ctx, provider, group, entries, name)
+            return _upload_group_per_file(ctx, provider, group, entries, name)
         if ci == "github":
-            return _upload_testlogs_zip(ctx, provider, group, entries, name, final = final)
-        return _upload_testlogs_tar(ctx, provider, group, entries, name, final = final)
+            return _upload_group_zip(ctx, provider, group, entries, name, final = final)
+        return _upload_group_tar(ctx, provider, group, entries, name, final = final)
 
     return struct(
         check = check,
         upload_file = upload_file,
         delete_artifact = delete_artifact,
-        upload_testlogs = upload_testlogs,
+        upload_log_group = upload_log_group,
     )
 
 # Helpers for the owner feature impl
 
 # Upload every N new collected files per group.
 _BATCH_SIZE = 5
-
-# bb_clientd FUSE mount root for resolving bytestream:// URIs.
-_BB_CLIENTD_ROOT = "/mnt/ephemeral/buildbarn/bb_clientd"
 
 _HEX = "0123456789abcdef"
 
@@ -470,27 +468,6 @@ def _make_uuid(ctx):
     b[8] = (b[8] & 0x3F) | 0x80
     h = "".join([_HEX[x >> 4] + _HEX[x & 0x0F] for x in b])
     return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
-
-def _file_uri_to_path(uri):
-    """Convert a file:// or bytestream:// URI to a local path.
-
-    bytestream:// resolves via the bb_clientd FUSE mount:
-      `bytestream://host:port/blobs/<hash>/<size>`
-      → `{_BB_CLIENTD_ROOT}/cas/{host}/blobs/sha256/file/{hash}-{size}`
-    """
-    if not uri:
-        return uri
-    if uri.startswith("file://"):
-        return uri[len("file://"):]
-    if uri.startswith("bytestream://"):
-        rest = uri[len("bytestream://"):]
-        parts = rest.split("/")
-        host_port = parts[0]
-        host = host_port.split(":")[0]
-        blob_hash = parts[2]
-        blob_size = parts[3]
-        return _BB_CLIENTD_ROOT + "/cas/" + host + "/blobs/sha256/file/" + blob_hash + "-" + blob_size
-    return uri
 
 # "Not passed" statuses for upload_test_logs="failed". Matches
 # `_FAILED_STATUSES` in lib/bazel_results.axl plus flaky.
@@ -577,7 +554,7 @@ def _collect_test_files(ctx, event, strategy, test_entries, skipped_files):
 
     for file in (bes_get(payload, "test_action_output", None) or []):
         raw_uri = file.file
-        src = _file_uri_to_path(raw_uri)
+        src = file_uri_to_path(raw_uri)
         if not src:
             src = "/".join(file.path_prefix) + "/" + file.name
         if not src:
@@ -586,9 +563,148 @@ def _collect_test_files(ctx, event, strategy, test_entries, skipped_files):
         if not ctx.std.fs.exists(src):
             skipped_files.append({"label": label, "name": file.name, "reason": "not found", "raw": src})
             continue
-        test_entries.append({"src": src, "dest": dest_dir + "/" + file.name, "label": label})
+        test_entries.append({"src": src, "dest": dest_dir + "/" + file.name, "label": label, "name": file.name})
 
-def _new_test_group():
+def build_log_relpath(label, mnemonic, primary_output, stream):
+    """Label-relative path for one failed build stream's log.
+
+    Mirrors the test-log layout (`testlog_dest_dir`): the target's package and
+    name become directories (`//foo/bar:baz` → `foo/bar/baz/`), so a reader can
+    navigate the archive to a failing target the same way. The filename names
+    the action: `<mnemonic>.<stream>.log` (e.g. `Genrule.stderr.log`).
+
+    A target can fail several actions of the *same* mnemonic (two bad genrules,
+    two bad `.cc` in a `cc_library`). `primary_output` — Bazel's per-action
+    unique output path from `ActionCompletedId.primary_output` — disambiguates
+    them via its basename in the filename (`Genrule.out1.stderr.log` vs
+    `Genrule.out2.stderr.log`), keeping the directory the clean target path.
+    Absent, falls back to `<mnemonic>.<stream>.log` (the caller's dedup guard
+    breaks any residual clash).
+    """
+    label_dir = label.lstrip("/").replace(":", "/")
+    out_base = primary_output.rsplit("/", 1)[-1] if primary_output else ""
+    parts = [mnemonic or "action"]
+    if out_base:
+        parts.append(out_base)
+    parts.append(stream)
+    parts.append("log")
+    return label_dir + "/" + ".".join(parts)
+
+# Header/body separator, identical to Bazel's own test.log divider (77 hyphens).
+_LOG_SEPARATOR = "-" * 77
+
+def build_log_header(label, mnemonic, primary_output, stream):
+    """Provenance header prepended to an uploaded build-action log, so a
+    downloaded file is self-describing (which target / action / output / stream
+    it captured) — the log content itself carries no such context.
+
+    `primary output` is the failing action's own output (from
+    `ActionCompletedId.primary_output`), which for a multi-action rule is an
+    intermediate — not necessarily the rule's default output. A `_LOG_SEPARATOR`
+    line closes the header (matching Bazel's test.log divider); the raw action
+    output follows.
+    """
+    lines = [
+        "# target: " + label,
+        "# action: " + (mnemonic or "(unknown)"),
+    ]
+    if primary_output:
+        lines.append("# primary output: " + primary_output)
+    lines.append("# stream: " + stream)
+    lines.append(_LOG_SEPARATOR)
+    return "\n".join(lines) + "\n"
+
+def dedup_path(path, seen):
+    """Return `path`, or `path.N` for the lowest N making it unique against
+    `seen` (a dict used as a set), and mark the result seen. The final
+    collision guard for entry dests."""
+    unique = path
+    if path in seen:
+        for n in range(1, len(seen) + 2):
+            if (path + "." + str(n)) not in seen:
+                unique = path + "." + str(n)
+                break
+    seen[unique] = True
+    return unique
+
+# Cap on action-stream bytes materialized into an uploaded build log. Bounds
+# the Starlark-heap copy: BES stderr can be inlined at 40+ MB (see
+# lib/bazel_results.axl), and even on-disk logs can be large. Overflow is
+# truncated with a trailing marker.
+_MAX_BUILD_LOG_BYTES = 1048576
+
+def _build_log_body(ctx, raw):
+    """Raw action-stream text for a build log, bounded to `_MAX_BUILD_LOG_BYTES`.
+
+    `raw` is the BES `File.file` oneof value: a URI string (read the capped
+    prefix off disk) or inlined `File.contents` bytes. Both are truncated to the
+    cap before decoding — the byte slice keeps an oversized inline stream (BES
+    stderr hits 40+ MB) off the Starlark heap. Returns "" when neither yields
+    content: the stream was empty or absent.
+    """
+    if type(raw) == "string":
+        if not raw:
+            return ""
+
+        # Read one past the cap so an exactly-cap-sized log isn't misflagged.
+        text = ctx.std.fs.try_read_to_string_capped(file_uri_to_path(raw), _MAX_BUILD_LOG_BYTES + 1)
+    elif raw != None:
+        text = str(raw[:_MAX_BUILD_LOG_BYTES + 1])  # slice bytes before decoding
+    else:
+        return ""
+    if len(text) > _MAX_BUILD_LOG_BYTES:
+        return text[:_MAX_BUILD_LOG_BYTES] + "\n[truncated by aspect: log exceeded %d bytes]\n" % _MAX_BUILD_LOG_BYTES
+    return text
+
+def collect_build_action_logs(ctx, event, strategy, scratch_dir, seen_dests, build_entries):
+    """Append a failed build action's stdout+stderr entries to `build_entries`,
+    one archive entry per stream.
+
+    Only `action_completed` carries build stdout/stderr (tests →
+    `_collect_test_files`); `strategy` gates collection ("none" / "failed").
+
+    Every stream is materialized into `scratch_dir` (job-scoped, writable) as a
+    self-describing file: a `build_log_header` provenance block (target / action
+    / output / stream) + separator, then the raw output — read (capped) from the
+    stream's URI, or decoded from inlined `File.contents`, or empty when the
+    action produced none. Both streams are always emitted so the archive
+    positively shows each was checked. Dests are target-based
+    (`build_log_relpath`), deduped so no two actions overwrite each other.
+
+    Field reads go through `bes_get`, so a schema mismatch no-ops.
+    """
+    if event.kind != "action_completed" or strategy != "failed":
+        return
+
+    # Skip successes and events with no `success` field (aborted variant): only
+    # a definitively-failed action should stage logs.
+    payload = event.payload
+    success = bes_get(payload, "success", None)
+    if success == None or success:
+        return
+
+    label = bes_get(event.id, "label", "") or ""
+    if not label:
+        return
+
+    label_dir = label.lstrip("/").replace(":", "/")
+    primary_output = bes_get(event.id, "primary_output", "") or ""
+    mnemonic = bes_get(payload, "type", "") or ""
+
+    for stream in ("stdout", "stderr"):
+        raw = bes_get(bes_get(payload, stream, None), "file", None)
+        dest = dedup_path(build_log_relpath(label, mnemonic, primary_output, stream), seen_dests)
+
+        # Label-relative display name (carries any `.N` dedup suffix) — the
+        # per-label link key on per-file CIs.
+        name = dest[len(label_dir) + 1:]
+
+        src = scratch_dir + "/" + dest
+        ctx.std.fs.create_dir_all(src.rsplit("/", 1)[0])
+        ctx.std.fs.write(src, build_log_header(label, mnemonic, primary_output, stream) + _build_log_body(ctx, raw))
+        build_entries.append({"src": src, "dest": dest, "label": label, "name": name})
+
+def _new_upload_group():
     """Fresh per-group upload state. Field semantics: see the upload
     strategies comment block above."""
     return {
@@ -599,7 +715,7 @@ def _new_test_group():
         "label_urls": {},
     }
 
-def _trace_summary(ctx, items, test_entries, skipped_files, profile_path, execlog_path, bep_path, uploader_active):
+def _trace_summary(ctx, items, channels, skipped_files, profile_path, execlog_path, bep_path, uploader_active):
     """Optional per-task debug summary printed when `trace.enabled`."""
     if not trace.enabled:
         return
@@ -610,9 +726,10 @@ def _trace_summary(ctx, items, test_entries, skipped_files, profile_path, execlo
     trace.log("profile:  " + profile_path + " (exists=" + str(ctx.std.fs.exists(profile_path)) + ")")
     trace.log("execlog:  " + execlog_path + " (exists=" + str(ctx.std.fs.exists(execlog_path)) + ")")
     trace.log("bes/bep:  " + bep_path + " (exists=" + str(ctx.std.fs.exists(bep_path)) + ")")
-    trace.log("testlog entries: " + str(len(test_entries)))
-    for f in test_entries:
-        trace.log("  " + f["label"] + " " + f["src"] + " -> " + f["dest"])
+    for channel in channels:
+        trace.log(channel.basename + " entries: " + str(len(channel.entries)))
+        for f in channel.entries:
+            trace.log("  " + f["label"] + " " + f["src"] + " -> " + f["dest"])
     if skipped_files:
         trace.log("skipped files: " + str(len(skipped_files)))
         for f in skipped_files:
@@ -625,15 +742,39 @@ def _trace_summary(ctx, items, test_entries, skipped_files, profile_path, execlo
         trace.log("  " + a.kind + suffix + " " + (a.name or "") + " -> " + a.url)
     trace.log("------------------------------------")
 
+# A collected-log stream (test logs, build logs). `collect` and `cleanup` are
+# closures bound to the owning task's `_artifact_upload_impl` state; the rest
+# configure how the stream's uploaded URLs register as `_Artifact`s.
+_LogChannel = record(
+    # (ctx, event) -> None: append this stream's entries for a BES event.
+    collect = field(typing.Callable),
+    # (ctx) -> None: reap any scratch this stream staged. No-op for most.
+    cleanup = field(typing.Callable),
+    # Shared entry list [{src, dest, label, name}] the collect closure fills.
+    entries = field(list),
+    # Per-CI upload state from `_new_upload_group`.
+    group = field(dict),
+    # `artifact_name` filename stem, e.g. "testlogs" / "build-logs".
+    basename = field(str),
+    # Registry kind + display name for the single-archive URL (GitHub/GitLab).
+    archive_kind = field(str),
+    archive_name = field(str),
+    # Registry kind for per-(label, name) URLs (CircleCI).
+    file_kind = field(str),
+)
+
 # Owner feature — co-located so it can bind closures to the private trait
 
 def _artifact_upload_impl(ctx: FeatureContext):
     """Wire interval-based artifact upload into BazelTrait hooks.
 
-      build_event  → collect testlog entries, batch-upload at threshold
-      build_end    → final flush of testlogs + upload profile/execlog/BEP
+      build_event  → each active `_LogChannel` collects its entries and
+                     batch-uploads at the size threshold
+      build_end    → final flush of every channel + upload profile/execlog/BEP
 
-    Each upload registers an `_Artifact` via the closure-bound `_append`.
+    Test logs and build-failure logs are independent channels driven through
+    the same batch/flush/publish path (see `channels` below), so they upload
+    without interfering. Each upload registers an `_Artifact` via `_append`.
     """
     bazel_trait = ctx.traits[BazelTrait]
 
@@ -659,6 +800,8 @@ def _artifact_upload_impl(ctx: FeatureContext):
     ci = detect_ci(ctx.std.env)
     upload_test_logs = ctx.args.upload_test_logs
     upload_testlogs = upload_test_logs != "none"
+    upload_build_logs = ctx.args.upload_build_logs
+    upload_buildlogs = upload_build_logs != "none"
     upload_profile = ctx.args.upload_profile
     upload_bep = ctx.args.upload_bep
     upload_exec_log = ctx.args.upload_exec_log
@@ -673,6 +816,10 @@ def _artifact_upload_impl(ctx: FeatureContext):
     # `.bep.bin` — macOS Finder auto-expands `.bin` on double-click.
     bep_path = tmpdir + "/" + uuid + ".bep.binpb"
 
+    # Scratch root for the header-wrapped build-log files staged before upload.
+    # uuid-namespaced so concurrent same-task runs don't share a tree.
+    build_log_scratch = tmpdir + "/" + uuid + ".build-logs"
+
     if upload_profile:
         bazel_trait.extra_flags.extend([
             "--generate_json_trace_profile",
@@ -684,37 +831,68 @@ def _artifact_upload_impl(ctx: FeatureContext):
     if upload_bep:
         bazel_trait.build_event_sinks.append(bazel.build_events.file(path = bep_path))
 
-    # Closure-private upload-orchestration state.
-    test_entries = []
+    # One `_LogChannel` per collected-log stream (test logs, build logs). Each
+    # owns an entry list + upload group so they batch, flush, and roll-replace
+    # independently through the same per-CI strategies.
     skipped_files = []
-    test_group = _new_test_group()
+    channels = []
 
-    def _publish_testlogs():
-        """Translate upload state into Artifact records. Re-emits each
-        batch; `_append` upserts so items don't bloat with stale URLs."""
-        if test_group["download_url"]:
-            _append(_Artifact(
-                kind = "testlogs",
-                url = test_group["download_url"],
-                name = "testlogs.tar.gz",
-            ))
-        for label, file_urls in test_group["label_urls"].items():
+    def _publish(channel):
+        """Register a channel's uploaded URLs as `_Artifact`s. Re-emits each
+        batch; `_append` upserts so items don't bloat with stale URLs.
+
+        The archive strategies (GitHub zip, GitLab tar) expose one stable URL
+        under `archive_kind`; the per-file strategies (CircleCI) expose one URL
+        per (label, name) under `file_kind`."""
+        group = channel.group
+        if group["download_url"]:
+            _append(_Artifact(kind = channel.archive_kind, url = group["download_url"], name = channel.archive_name))
+        for label, file_urls in group["label_urls"].items():
             for fname, url in file_urls.items():
-                _append(_Artifact(
-                    kind = "testlog_file",
-                    url = url,
-                    name = fname,
-                    label = label,
-                ))
+                _append(_Artifact(kind = channel.file_kind, url = url, name = fname, label = label))
+
+    def _flush(ctx, channel, final):
+        """Upload a channel's pending entries and publish on success. `final`
+        collapses the rolling `.partial.N` archives into the plain artifact."""
+        if not final and len(channel.entries) < channel.group["last_count"] + _BATCH_SIZE:
+            return
+        name = artifact_name(ci, ctx.task.kind, ctx.task.name, channel.basename)
+        if uploader.upload_log_group(ctx, channel.group, channel.entries, name, final = final):
+            _publish(channel)
+
+    if not is_local and upload_testlogs:
+        test_entries = []
+        channels.append(_LogChannel(
+            collect = lambda ctx, event: _collect_test_files(ctx, event, upload_test_logs, test_entries, skipped_files),
+            cleanup = lambda ctx: None,
+            entries = test_entries,
+            group = _new_upload_group(),
+            basename = "testlogs",
+            archive_kind = "testlogs",
+            archive_name = "testlogs.tar.gz",
+            file_kind = "testlog_file",
+        ))
+
+    if not is_local and upload_buildlogs:
+        build_entries = []
+        build_seen_dests = {}
+        channels.append(_LogChannel(
+            collect = lambda ctx, event: collect_build_action_logs(ctx, event, upload_build_logs, build_log_scratch, build_seen_dests, build_entries),
+            # Reap the staged header-wrapped log files (copies; the originals
+            # live in the CAS / bazel-out and are not ours to remove).
+            cleanup = lambda ctx: ctx.std.fs.remove_dir_all(build_log_scratch) if ctx.std.fs.exists(build_log_scratch) else None,
+            entries = build_entries,
+            group = _new_upload_group(),
+            basename = "build-logs",
+            archive_kind = "build_logs",
+            archive_name = "build-logs.tar.gz",
+            file_kind = "build_log_file",
+        ))
 
     def _on_build_event(ctx, event):
-        if is_local or not upload_testlogs:
-            return
-        _collect_test_files(ctx, event, upload_test_logs, test_entries, skipped_files)
-        if len(test_entries) >= test_group["last_count"] + _BATCH_SIZE:
-            name = artifact_name(ci, ctx.task.kind, ctx.task.name, "testlogs")
-            if uploader.upload_testlogs(ctx, test_group, test_entries, name):
-                _publish_testlogs()
+        for channel in channels:
+            channel.collect(ctx, event)
+            _flush(ctx, channel, final = False)
 
     def _on_build_end(ctx, exit_code):
         if not is_local:
@@ -722,13 +900,8 @@ def _artifact_upload_impl(ctx: FeatureContext):
             if reason:
                 info(ctx.std, "Artifact upload skipped: " + reason)
             else:
-                if upload_testlogs:
-                    name = artifact_name(ci, ctx.task.kind, ctx.task.name, "testlogs")
-
-                    # final=True publishes plain `{name}`; rolling-delete
-                    # still reaps the prior partial via prev_ref.
-                    if uploader.upload_testlogs(ctx, test_group, test_entries, name, final = True):
-                        _publish_testlogs()
+                for channel in channels:
+                    _flush(ctx, channel, final = True)
 
                 # Profile / BEP / exec-log — opt-in each. Source files are
                 # removed on success AND failure (no retry, so a leftover
@@ -746,7 +919,12 @@ def _artifact_upload_impl(ctx: FeatureContext):
                     _upload_file(ctx, kind, filename, src)
                     ctx.std.fs.remove_file(src)
 
-        _trace_summary(ctx, items, test_entries, skipped_files, profile_path, execlog_path, bep_path, not is_local)
+        _trace_summary(ctx, items, channels, skipped_files, profile_path, execlog_path, bep_path, not is_local)
+
+        # Reap channel scratch unconditionally — even when check() skipped the
+        # upload, build events may have already staged log files.
+        for channel in channels:
+            channel.cleanup(ctx)
 
     bazel_trait.build_event.append(_on_build_event)
     bazel_trait.build_end.append(_on_build_end)
@@ -760,13 +938,16 @@ ArtifactUpload = feature(
         # job read access, so every channel defaults off.
         #
         # Risk, highest to lowest:
-        #   upload_exec_log — action env vars + command lines; no on-disk
-        #                     redaction yet. Highest risk.
-        #   upload_testlogs — test stdout/stderr/XML may echo secrets.
-        #   upload_bep      — redacted at the stream source
-        #                     (stream/redaction.rs); low but nonzero.
-        #   upload_profile  — labels/paths/timings; no env/command lines,
-        #                     but labels can leak project structure.
+        #   upload_exec_log  — action env vars + command lines; no on-disk
+        #                      redaction yet. Highest risk.
+        #   upload_test_logs — test stdout/stderr/XML may echo secrets.
+        #   upload_build_logs — failed build actions' stdout/stderr; a compiler
+        #                       or codegen command can echo secrets from env or
+        #                       argv, same as a test.
+        #   upload_bep       — redacted at the stream source
+        #                      (stream/redaction.rs); low but nonzero.
+        #   upload_profile   — labels/paths/timings; no env/command lines,
+        #                      but labels can leak project structure.
         "upload_test_logs": args.string(
             default = "none",
             values = ["none", "failed", "executed", "all"],
@@ -774,6 +955,16 @@ ArtifactUpload = feature(
                           "'none' (default) uploads nothing. 'failed' uploads " +
                           "only non-passing tests. 'executed' uploads every test " +
                           "that ran (skips cached passes). 'all' uploads everything.",
+        ),
+        "upload_build_logs": args.string(
+            default = "none",
+            values = ["none", "failed"],
+            description = "Which build-action logs to upload as artifacts. A failed " +
+                          "build target's stdout/stderr (compiler errors, codegen " +
+                          "output) is uploaded per (target, action), alongside the " +
+                          "failure snippet shown on status surfaces. 'none' (default) " +
+                          "uploads nothing. 'failed' uploads the stdout/stderr of every " +
+                          "build action Bazel reports unsuccessful.",
         ),
         "upload_profile": args.boolean(
             default = False,
