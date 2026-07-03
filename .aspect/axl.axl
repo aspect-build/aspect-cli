@@ -4,7 +4,7 @@ Exercise axl
 
 load("@aspect//delivery.axl", delivery_count_unexplained_unresolved = "count_unexplained_unresolved", delivery_fmt_elapsed = "fmt_elapsed", delivery_should_surface_phase2_stderr = "should_surface_phase2_stderr", delivery_should_upload_grpc_log = "should_upload_grpc_log")
 load("@aspect//lint.axl", "file_uri_to_path", "filter_all", "filter_changeset", "linter_error_message")
-load("@aspect//private/lib/artifacts.axl", "artifact_name", "testlog_dest_dir")
+load("@aspect//private/lib/artifacts.axl", "artifact_name", "build_log_header", "build_log_relpath", "collect_build_action_logs", "dedup_path", "testlog_dest_dir")
 load("@aspect//private/lib/bazel_results.axl", "compute_reproducer_command", "init_data", "render_check_output", "resolve_aspect_url", "summary_title")
 load(
     "@aspect//private/lib/build_metadata.axl",
@@ -34,6 +34,7 @@ load("@aspect//private/lib/runnable.axl", "apparent_label", "runnable")
 load("@aspect//private/lib/sarif.axl", "get_sarif_summary", "parse_sarif", "parse_sarif_diagnostics", "sarif_to_review_comments")
 load("@aspect//private/lib/tips.axl", "tips")
 load("@demo//answer.axl", "ANSWER")
+load("@std//base64.axl", "base64")
 load("./lambda.axl", "lambda_with_global_bind")
 
 def test_case(tc, cond, msg) -> int:
@@ -2297,6 +2298,132 @@ def test_artifacts_lib(ctx: TaskContext, tc: int) -> int:
     for (label, run, shard, attempt, expected, desc) in dest_cases:
         got = testlog_dest_dir(label, run, shard, attempt)
         tc = test_case(tc, got == expected, "testlog_dest_dir: %s → %r (got %r)" % (desc, expected, got))
+
+    # build_log_relpath — target-based dir (pkg/name/) + action-named log file.
+    # A primary_output's basename lands in the filename to disambiguate
+    # same-mnemonic actions under one target without muddying the directory.
+    relpath_cases = [
+        # (label, mnemonic, primary_output, stream, expected, desc)
+        ("//pkg:lib", "CppCompile", "", "stderr", "pkg/lib/CppCompile.stderr.log", "no primary_output → target dir + mnemonic.stream"),
+        ("//pkg/sub:lib", "Genrule", "", "stdout", "pkg/sub/lib/Genrule.stdout.log", "nested package → nested dirs"),
+        ("//pkg:lib", "", "", "stdout", "pkg/lib/action.stdout.log", "no mnemonic → 'action' fallback"),
+        ("//pkg:lib", "CppCompile", "bazel-out/k8-fastbuild/bin/pkg/_objs/lib/foo.pic.o", "stderr", "pkg/lib/CppCompile.foo.pic.o.stderr.log", "primary_output basename in filename"),
+        ("@ext//pkg:lib", "Genrule", "", "stderr", "@ext//pkg/lib/Genrule.stderr.log", "external label → repo kept"),
+    ]
+    for (label, mnemonic, primary_output, stream, expected, desc) in relpath_cases:
+        got = build_log_relpath(label, mnemonic, primary_output, stream)
+        tc = test_case(tc, got == expected, "build_log_relpath: %s → %r (got %r)" % (desc, expected, got))
+
+    # build_log_header — provenance block: exact lines, ordering, separator.
+    sep = "-" * 77
+    hdr = build_log_header("//pkg:lib", "Genrule", "bin/out.txt", "stderr")
+    tc = test_case(tc, hdr == "# target: //pkg:lib\n# action: Genrule\n# primary output: bin/out.txt\n# stream: stderr\n" + sep + "\n", "build_log_header: full header lines + separator (got %r)" % hdr)
+
+    # Empty primary_output omits its line; empty mnemonic → '(unknown)'.
+    hdr2 = build_log_header("//pkg:lib", "", "", "stdout")
+    tc = test_case(tc, hdr2 == "# target: //pkg:lib\n# action: (unknown)\n# stream: stdout\n" + sep + "\n", "build_log_header: omits blank primary output, '(unknown)' mnemonic (got %r)" % hdr2)
+
+    # dedup_path — collision guard: identical paths get the lowest free `.N`,
+    # distinct paths pass through. Mutates the seen-set in place.
+    seen = {}
+    tc = test_case(tc, dedup_path("a/x.log", seen) == "a/x.log", "dedup_path: first claim passes through")
+    tc = test_case(tc, dedup_path("a/x.log", seen) == "a/x.log.1", "dedup_path: 2nd identical → .1")
+    tc = test_case(tc, dedup_path("a/x.log", seen) == "a/x.log.2", "dedup_path: 3rd identical → .2")
+    tc = test_case(tc, dedup_path("a/y.log", seen) == "a/y.log", "dedup_path: distinct path unaffected")
+    return tc
+
+def _fake_action_event(label, primary_output, mnemonic, success, stdout = None, stderr = None):
+    """Fake BES action_completed event for collect_build_action_logs tests.
+    `bes_get` reads via getattr, so a struct with the right shape stands in for
+    the runtime's typed event. Each stream arg mirrors the `File.file` oneof:
+    a str is a URI, `bytes` is inlined `File.contents`, None means no file."""
+
+    def _file(v):
+        return struct(file = v) if v != None else None
+
+    return struct(
+        kind = "action_completed",
+        id = struct(label = label, primary_output = primary_output),
+        payload = struct(success = success, type = mnemonic, stdout = _file(stdout), stderr = _file(stderr)),
+    )
+
+def test_collect_build_action_logs(ctx: TaskContext, tc: int, temp_dir: str) -> int:
+    """collect_build_action_logs: gating, dual-stream emission, provenance
+    header, on-disk + inlined content, and collision handling."""
+    scratch = temp_dir + "/build-log-collect-test"
+    ctx.std.fs.remove_dir_all(scratch) if ctx.std.fs.exists(scratch) else None
+
+    # A real on-disk stderr whose contents the collector should embed.
+    real_stderr = temp_dir + "/real-stderr.log"
+    ctx.std.fs.write(real_stderr, "boom\ndetails")
+
+    def run(events, strategy = "failed"):
+        seen, entries = {}, []
+        for e in events:
+            collect_build_action_logs(ctx, e, strategy, scratch, seen, entries)
+        return entries
+
+    # Non-failed / unknown-success / wrong-kind / disabled events collect nothing.
+    entries = run([
+        _fake_action_event("//pkg:lib", "bin/foo.o", "CppCompile", True, stderr = "file://" + real_stderr),
+        _fake_action_event("//pkg:lib", "bin/foo.o", "CppCompile", None),
+        struct(kind = "test_result", id = struct(label = "//pkg:t"), payload = struct()),
+    ])
+    tc = test_case(tc, len(entries) == 0, "collect: success / unknown-success / non-action events skipped")
+    entries = run([_fake_action_event("//pkg:lib", "bin/foo.o", "CppCompile", False)], strategy = "none")
+    tc = test_case(tc, len(entries) == 0, "collect: strategy=none collects nothing")
+
+    # One failed action → both streams under the target dir, output basename in
+    # the filename. Each staged file leads with a provenance header + separator,
+    # then the raw output; an absent stream is header-only.
+    entries = run([_fake_action_event("//pkg:lib", "bin/foo.o", "CppCompile", False, stderr = "file://" + real_stderr)])
+    dests = sorted([e["dest"] for e in entries])
+    tc = test_case(tc, dests == ["pkg/lib/CppCompile.foo.o.stderr.log", "pkg/lib/CppCompile.foo.o.stdout.log"], "collect: target-dir + action filename (got %r)" % dests)
+    sep = "-" * 77
+    by_dest = {e["dest"]: e for e in entries}
+    stderr_body = ctx.std.fs.read_to_string(by_dest["pkg/lib/CppCompile.foo.o.stderr.log"]["src"])
+    tc = test_case(tc, "# target: //pkg:lib" in stderr_body and "# action: CppCompile" in stderr_body and "# primary output: bin/foo.o" in stderr_body and "# stream: stderr" in stderr_body, "collect: staged file carries provenance header")
+    tc = test_case(tc, sep in stderr_body and stderr_body.endswith("boom\ndetails"), "collect: header separator precedes the real stderr contents")
+    stdout_body = ctx.std.fs.read_to_string(by_dest["pkg/lib/CppCompile.foo.o.stdout.log"]["src"])
+    tc = test_case(tc, "# stream: stdout" in stdout_body and stdout_body.rstrip("\n").endswith(sep), "collect: absent stdout → header-only file")
+
+    # Inlined content (BES File.contents oneof → bytes) is embedded, not dropped.
+    entries = run([_fake_action_event("//pkg:lib", "bin/foo.o", "CppCompile", False, stderr = base64.decode("aW5saW5lZCBib29t"))])
+    inlined_body = ctx.std.fs.read_to_string({e["dest"]: e for e in entries}["pkg/lib/CppCompile.foo.o.stderr.log"]["src"])
+    tc = test_case(tc, inlined_body.endswith("inlined boom"), "collect: inlined stderr contents embedded (got %r)" % inlined_body)
+
+    # Oversized on-disk log is truncated to the cap with a trailing marker.
+    big = temp_dir + "/big-stderr.log"
+    ctx.std.fs.write(big, "x" * (1048576 + 100))  # > _MAX_BUILD_LOG_BYTES
+    entries = run([_fake_action_event("//pkg:lib", "bin/foo.o", "Genrule", False, stderr = "file://" + big)])
+    big_body = ctx.std.fs.read_to_string({e["dest"]: e for e in entries}["pkg/lib/Genrule.foo.o.stderr.log"]["src"])
+    tc = test_case(tc, "[truncated by aspect:" in big_body, "collect: oversized on-disk log gets truncation marker")
+
+    # Oversized inlined bytes are byte-sliced before decoding (heap-safe) and
+    # likewise marked truncated.
+    big_inline = base64.decode("QUJD" * 400000)  # ~1.2 MB of "ABC…"
+    entries = run([_fake_action_event("//pkg:lib", "bin/foo.o", "Genrule", False, stderr = big_inline)])
+    big_inline_body = ctx.std.fs.read_to_string({e["dest"]: e for e in entries}["pkg/lib/Genrule.foo.o.stderr.log"]["src"])
+    tc = test_case(tc, "[truncated by aspect:" in big_inline_body, "collect: oversized inlined content gets truncation marker")
+
+    # Two failing genrules in ONE target — same mnemonic, distinct outputs. The
+    # output basename in the filename keeps their logs distinct.
+    entries = run([
+        _fake_action_event("//pkg:lib", "bin/gen_a.txt", "Genrule", False),
+        _fake_action_event("//pkg:lib", "bin/gen_b.txt", "Genrule", False),
+    ])
+    stderr_dests = sorted([e["dest"] for e in entries if e["dest"].endswith(".stderr.log")])
+    tc = test_case(tc, stderr_dests == ["pkg/lib/Genrule.gen_a.txt.stderr.log", "pkg/lib/Genrule.gen_b.txt.stderr.log"], "collect: two genrules in one target → distinct output-named logs (got %r)" % stderr_dests)
+
+    # Same mnemonic AND same output basename (rare cross-config clash) — the
+    # `.N` dedup guard still keeps every dest unique.
+    entries = run([
+        _fake_action_event("//pkg:lib", "k8-fastbuild/foo.o", "Genrule", False),
+        _fake_action_event("//pkg:lib", "k8-dbg/foo.o", "Genrule", False),
+    ])
+    tc = test_case(tc, len(set([e["dest"] for e in entries])) == 4, "collect: same output basename still gets distinct dests via dedup")
+
+    ctx.std.fs.remove_dir_all(scratch) if ctx.std.fs.exists(scratch) else None
     return tc
 
 def test_detect_build_url(ctx: TaskContext, tc: int) -> int:
@@ -3463,6 +3590,7 @@ def impl(ctx: TaskContext) -> int:
     tc = test_detect_build_url(ctx, tc)
     tc = test_detect_ci(ctx, tc)
     tc = test_artifacts_lib(ctx, tc)
+    tc = test_collect_build_action_logs(ctx, tc, temp_dir)
     tc = test_sarif_lib(tc)
     tc = test_file_uri_to_path(tc)
     tc = test_json_try_decode(tc)

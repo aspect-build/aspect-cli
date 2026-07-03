@@ -56,3 +56,23 @@ py_binary(
     stamp = 1,
     tags = ["deliverable"],
 )
+
+# A genrule whose build action fails, emitting realistic stdout + stderr, for
+# exercising build-log upload (upload_build_logs) during the delivery task's
+# phase-1 build. `manual` keeps it out of `//...`; to test the case live, add
+# the "deliverable" tag so the delivery query selects it and builds its failing
+# action:
+#   tags = ["manual", "deliverable"],
+genrule(
+    name = "delivery_build_fail",
+    outs = ["delivery_build_fail.out"],
+    cmd = """(
+echo "INFO: Packaging examples/deliverable [1/1]"
+cat >&2 <<'ERR'
+ERROR: examples/deliverable/pkg.bzl:12: packaging //examples/deliverable:delivery_build_fail failed
+examples/deliverable/manifest.yaml:7:3: missing required field 'image' in deliverable manifest
+ERR
+exit 1
+)""",
+    tags = ["manual"],
+)
