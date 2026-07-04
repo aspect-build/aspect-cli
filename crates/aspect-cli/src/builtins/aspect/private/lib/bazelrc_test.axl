@@ -3,8 +3,7 @@
   - `bazelrc.axl` rendering: `command_sections` (which rc command sections to
     use for a Bazel version), `render_bazelrc` (rc text), `startup_flags_for_rc`.
   - `environment.axl` flags: `get_generic_bazelrc_flags` / `get_bazelrc_flags`
-    output, and the output-base isolation helpers (`apply_output_base_suffix`,
-    `set_output_base_suffix`).
+    output, and `apply_output_base_suffix`.
 
 Version-gating of the `(flag, constraint)` tuples from `get_bazelrc_flags` is
 delegated to the bazelrc runtime (`ctx.bazel.new_rc(...).expand(...)`), so it's
@@ -22,7 +21,6 @@ load(
     "apply_output_base_suffix",
     "get_bazelrc_flags",
     "get_generic_bazelrc_flags",
-    "set_output_base_suffix",
 )
 
 def _eq(label, got, want):
@@ -182,57 +180,6 @@ def _test_get_bazelrc_flags_output_base_and_suffix(_ctx):
     _eq("output_base moved", "--output_base=/o/my_repo/aspect-cli-delivery" in suffixed, True)
     _eq("output_user_root shared", "--output_user_root=/b/my_repo/aspect-cli" in suffixed, True)
 
-def _stub_std(env_vars):
-    """Minimal std for get_workflows_environment: env.var lookups (defaulting
-    to ""), fs.exists returning False (no runtime marker files), and a non-TTY
-    stdout (read by CI detection)."""
-    return struct(
-        env = struct(var = lambda name: env_vars.get(name, "")),
-        fs = struct(exists = lambda _path: False),
-        io = struct(stdout = struct(is_tty = False)),
-    )
-
-_RUNNER_ENV = {
-    "ASPECT_WORKFLOWS_RUNNER": "1",
-    "ASPECT_WORKFLOWS_RUNNER_BAZEL_ROOT_DIR": "/b",
-    "ASPECT_WORKFLOWS_RUNNER_OUTPUT_ROOT_DIR": "/o",
-    "GITHUB_REPOSITORY": "acme/my-repo",
-}
-
-def _test_set_output_base_suffix_off_runner_noop(_ctx):
-    # Off a Workflows runner there is no runner-derived base to suffix.
-    flags = ["--nohome_rc"]
-    _eq("off-runner unchanged", set_output_base_suffix(_stub_std({}), flags, "/work/aspect-cli", "-delivery"), flags)
-
-def _test_set_output_base_suffix_empty_noop(_ctx):
-    # Empty suffix short-circuits before touching the environment.
-    flags = ["--output_base=/o/x"]
-    _eq("empty suffix unchanged", set_output_base_suffix(_stub_std({}), flags, "/work/aspect-cli", ""), flags)
-
-def _test_set_output_base_suffix_substitutes_output_base_only(_ctx):
-    # Replaces an --output_base already in the list (e.g. the feature's, or a
-    # generic-suffixed one) with the delivery-suffixed one — exactly one
-    # --output_base survives, and the shared --output_user_root is left as-is.
-    existing = [
-        "--nohome_rc",
-        "--output_user_root=/b/my-repo/aspect-cli",
-        "--output_base=/o/my-repo/aspect-cli-ci",
-    ]
-    got = set_output_base_suffix(_stub_std(_RUNNER_ENV), existing, "/work/aspect-cli", "-delivery")
-    _eq("result", got, [
-        "--nohome_rc",
-        "--output_user_root=/b/my-repo/aspect-cli",
-        "--output_base=/o/my-repo/aspect-cli-delivery",
-    ])
-    _eq("single output_base", len([f for f in got if f.startswith("--output_base=")]), 1)
-    _eq("single output_user_root", len([f for f in got if f.startswith("--output_user_root=")]), 1)
-
-def _test_set_output_base_suffix_adds_when_absent(_ctx):
-    # No --output_base in the input yet: the suffixed one is still added exactly
-    # once, and unrelated flags are preserved.
-    got = set_output_base_suffix(_stub_std(_RUNNER_ENV), ["--nohome_rc"], "/work/aspect-cli", "-delivery")
-    _eq("result", got, ["--nohome_rc", "--output_base=/o/my-repo/aspect-cli-delivery"])
-
 _UNIT_TESTS = [
     _test_generic_flags_are_runner_independent,
     _test_generic_flags_include_remote_cache_env,
@@ -246,10 +193,6 @@ _UNIT_TESTS = [
     _test_apply_output_base_suffix_empty_noop,
     _test_apply_output_base_suffix_no_output_base_noop,
     _test_get_bazelrc_flags_output_base_and_suffix,
-    _test_set_output_base_suffix_off_runner_noop,
-    _test_set_output_base_suffix_empty_noop,
-    _test_set_output_base_suffix_substitutes_output_base_only,
-    _test_set_output_base_suffix_adds_when_absent,
 ]
 
 def _test_impl(ctx):

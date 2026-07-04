@@ -464,35 +464,6 @@ def apply_output_base_suffix(startup_flags: list, suffix: str) -> list:
         return list(startup_flags)
     return [flag + suffix if _is_output_base_flag(flag) else flag for flag in startup_flags]
 
-def set_output_base_suffix(std, startup_flags: list, aspect_root_dir: str, suffix: str) -> list:
-    """Return `startup_flags` with its `--output_base` replaced by the
-    runner-derived output base suffixed with `suffix`, pinning the task to its
-    own Bazel server. `--output_user_root` is left as-is so shared state (install
-    base, external-repo cache) is not duplicated.
-
-    Substitutes rather than appends — the existing `--output_base` is dropped and
-    a single suffixed one added — so exactly one occurrence remains. That matters
-    for the failure-path recovery helpers (`output_base_from_flags` in
-    health_check.rs / sandbox_recovery.rs), which take the FIRST `--output_base`
-    while Bazel takes the LAST: two would let them disagree about which server to
-    recover. The replacement is derived from the RAW runner base
-    (`get_bazelrc_flags`), so a suffix set here supersedes any suffix a prior
-    pass baked in rather than stacking on it.
-
-    Returns `startup_flags` unchanged when `suffix` is empty or the process is
-    not on a Workflows runner (no runner-derived base to suffix). `suffix`
-    becomes part of an on-disk path segment, so the caller must sanitize it.
-    """
-    if not suffix:
-        return list(startup_flags)
-    environment = get_workflows_environment(std)
-    if environment.runner == None:
-        return list(startup_flags)
-    base_startup, _build_flags = get_bazelrc_flags(environment, aspect_root_dir)
-    runner_output_base = [f for f in base_startup if _is_output_base_flag(f)]
-    kept = [f for f in startup_flags if not _is_output_base_flag(f)]
-    return kept + apply_output_base_suffix(runner_output_base, suffix)
-
 # Display helpers
 
 def _url_encode(s: str) -> str:
