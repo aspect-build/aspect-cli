@@ -4,7 +4,7 @@
     use for a Bazel version), `render_bazelrc` (rc text), `startup_flags_for_rc`.
   - `environment.axl` flags: `get_generic_bazelrc_flags` / `get_bazelrc_flags`
     output, and the output-base isolation helpers (`apply_output_base_suffix`,
-    `without_output_base_flags`, `set_output_base_suffix`).
+    `set_output_base_suffix`).
 
 Version-gating of the `(flag, constraint)` tuples from `get_bazelrc_flags` is
 delegated to the bazelrc runtime (`ctx.bazel.new_rc(...).expand(...)`), so it's
@@ -23,7 +23,6 @@ load(
     "get_bazelrc_flags",
     "get_generic_bazelrc_flags",
     "set_output_base_suffix",
-    "without_output_base_flags",
 )
 
 def _eq(label, got, want):
@@ -193,16 +192,6 @@ def _stub_std(env_vars):
         io = struct(stdout = struct(is_tty = False)),
     )
 
-def _test_without_output_base_flags(_ctx):
-    # Drops --output_base; --output_user_root and every other flag survive.
-    got = without_output_base_flags([
-        "--nohome_rc",
-        "--output_user_root=/b/x",
-        "--output_base=/o/x",
-        "--nosystem_rc",
-    ])
-    _eq("filtered", got, ["--nohome_rc", "--output_user_root=/b/x", "--nosystem_rc"])
-
 _RUNNER_ENV = {
     "ASPECT_WORKFLOWS_RUNNER": "1",
     "ASPECT_WORKFLOWS_RUNNER_BAZEL_ROOT_DIR": "/b",
@@ -257,7 +246,6 @@ _UNIT_TESTS = [
     _test_apply_output_base_suffix_empty_noop,
     _test_apply_output_base_suffix_no_output_base_noop,
     _test_get_bazelrc_flags_output_base_and_suffix,
-    _test_without_output_base_flags,
     _test_set_output_base_suffix_off_runner_noop,
     _test_set_output_base_suffix_empty_noop,
     _test_set_output_base_suffix_substitutes_output_base_only,
