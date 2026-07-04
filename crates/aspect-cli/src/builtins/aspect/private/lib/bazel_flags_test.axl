@@ -187,6 +187,7 @@ def _test_sibling_rc_transforms_startup(ctx):
         fail("sibling_rc — untransformed --output_base leaked: %r" % startup)
     if "--from-extra" not in sib.expand(command = "build"):
         fail("sibling_rc — trait extra_flags missing from expansion: %r" % sib.expand(command = "build"))
+
     # Building the sibling must not disturb the active rc.
     if ctx.bazel.active_rc() != active:
         fail("sibling_rc — must not change the active run command")
