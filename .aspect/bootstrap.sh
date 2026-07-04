@@ -314,6 +314,33 @@ else
     echo "/etc/bazel.bazelrc does not exist"
 fi
 
+# Wait for runner cache warming to complete before touching Bazel. Warming
+# restores the ephemeral caches (repository cache, output base) from a cloud
+# archive concurrently with the first jobs the runner accepts, and only hands
+# the directories back once done. Running bazel before then races that restore.
+#
+# This step runs before the aspect-build/setup-aspect plugin (and some pipeline
+# steps don't have the plugin at all), so the CLI's own `_wait_for_warming`
+# health check hasn't run yet — we gate here explicitly. Mirrors
+# `_wait_for_warming` in crates/aspect-cli/src/builtins/aspect/private/lib/
+# health_check.axl and `wait_for_warming` in crates/aspect-launcher/src/
+# warming.rs: enabled when ASPECT_WORKFLOWS_RUNNER_WARMING_ENABLED is non-empty;
+# poll the marker file every 1s with no timeout (a critical warming error
+# terminates the instance, so the loop cannot hang forever); warn and skip when
+# enabled without a published marker path, since completion can never be seen.
+if [ -n "${ASPECT_WORKFLOWS_RUNNER:-}" ] && [ -n "${ASPECT_WORKFLOWS_RUNNER_WARMING_ENABLED:-}" ]; then
+    WARMING_MARKER="${ASPECT_WORKFLOWS_RUNNER_WARMING_COMPLETE_MARKER_FILE:-}"
+    if [ -z "${WARMING_MARKER}" ]; then
+        echo "Warming is enabled on this runner but ASPECT_WORKFLOWS_RUNNER_WARMING_COMPLETE_MARKER_FILE is not set; not waiting for warming to complete." >&2
+    elif [ ! -e "${WARMING_MARKER}" ]; then
+        echo "Waiting for warming to complete before using the aspect cache..."
+        while [ ! -e "${WARMING_MARKER}" ]; do
+            sleep 1
+        done
+        echo "Warming complete, continuing"
+    fi
+fi
+
 # Check for a stale Bazel lock before doing any work, so we detect unhealthy runners
 # early rather than letting a build hang indefinitely.
 if [ -n "${ASPECT_WORKFLOWS_RUNNER:-}" ]; then
