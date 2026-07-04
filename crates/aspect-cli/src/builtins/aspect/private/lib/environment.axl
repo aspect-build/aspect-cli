@@ -383,9 +383,9 @@ def get_bazelrc_flags(environment: WorkflowsEnvironment, aspect_root_dir: str) -
     compression), the runner identity header, the per-runner repository cache and
     output paths, and `--nohome_rc`/`--nosystem_rc`.
 
-    The `--output_base` and `--output_user_root` startup flags in the result are
-    the pair `apply_output_base_suffix` rewrites together to move a task to its
-    own Bazel server.
+    The `--output_base` startup flag in the result is what `apply_output_base_suffix`
+    rewrites to move a task to its own Bazel server (`--output_user_root` stays
+    shared so the install base and external-repo cache are not duplicated).
 
     Args:
         environment: WorkflowsEnvironment. Caller must have verified
@@ -435,52 +435,55 @@ def get_bazelrc_flags(environment: WorkflowsEnvironment, aspect_root_dir: str) -
 
     return (startup_flags, build_flags)
 
-_OUTPUT_BASE_FLAG_PREFIXES = ["--output_base=", "--output_user_root="]
+_OUTPUT_BASE_FLAG_PREFIX = "--output_base="
 
 def _is_output_base_flag(flag: str) -> bool:
-    """True for the `--output_base=`/`--output_user_root=` startup flags that
-    select which Bazel server an invocation talks to."""
-    return any([flag.startswith(prefix) for prefix in _OUTPUT_BASE_FLAG_PREFIXES])
+    """True for the `--output_base=` startup flag that names this invocation's
+    Bazel server (and its analysis cache).
+
+    Deliberately NOT `--output_user_root`: that root holds state we want shared
+    across servers — the install base, the extracted external-repo trees, and
+    the action cache — so only `--output_base` is unique per isolated server."""
+    return flag.startswith(_OUTPUT_BASE_FLAG_PREFIX)
 
 def apply_output_base_suffix(startup_flags: list, suffix: str) -> list:
     """Return a copy of `startup_flags` with `suffix` appended to the path value
-    of any `--output_base=` / `--output_user_root=` entry; every other flag
-    passes through unchanged.
+    of the `--output_base=` entry; every other flag passes through unchanged.
 
-    Both flags select which Bazel server an invocation talks to, so suffixing
-    both with the same string moves the whole invocation to a sibling server
-    (e.g. `.../myrepo/aspect-cli` → `.../myrepo/aspect-cli-delivery`) without
-    colliding with the un-suffixed one — isolating a task whose build flips
-    Bazel options (`--stamp`) from the shared warm analysis cache.
+    `--output_base` names the Bazel server (and its analysis cache), so suffixing
+    it moves the invocation to a sibling server (e.g. `.../myrepo/aspect-cli` →
+    `.../myrepo/aspect-cli-delivery`) — isolating a task whose build flips Bazel
+    options (`--stamp`) from the shared warm analysis cache. `--output_user_root`
+    is left untouched so the install base and external-repo cache stay shared.
 
-    A no-op returning an unchanged copy when `suffix` is empty or no output-base
-    flag is present. `suffix` becomes part of an on-disk path segment, so the
-    caller must sanitize it (e.g. via `sanitize_filename`).
+    A no-op returning an unchanged copy when `suffix` is empty or no
+    `--output_base` is present. `suffix` becomes part of an on-disk path segment,
+    so the caller must sanitize it (e.g. via `sanitize_filename`).
     """
     if not suffix:
         return list(startup_flags)
     return [flag + suffix if _is_output_base_flag(flag) else flag for flag in startup_flags]
 
 def without_output_base_flags(startup_flags: list) -> list:
-    """Return a copy of `startup_flags` with every `--output_base=` /
-    `--output_user_root=` entry removed.
+    """Return a copy of `startup_flags` with every `--output_base=` entry removed
+    (leaving `--output_user_root` in place).
 
-    Used to drop an already-injected output base before substituting a
-    suffixed one, so exactly one `--output_base`/`--output_user_root` survives.
-    A single occurrence matters: the failure-path recovery helpers
-    (`output_base_from_flags` in health_check.rs / sandbox_recovery.rs) take the
-    FIRST match, while Bazel itself takes the LAST — leaving two would let them
-    disagree about which server to recover.
+    Used to drop an already-injected `--output_base` before substituting a
+    suffixed one, so exactly one survives. A single occurrence matters: the
+    failure-path recovery helpers (`output_base_from_flags` in health_check.rs /
+    sandbox_recovery.rs) take the FIRST match, while Bazel itself takes the LAST
+    — leaving two would let them disagree about which server to recover.
     """
     return [flag for flag in startup_flags if not _is_output_base_flag(flag)]
 
 def set_output_base_suffix(std, startup_flags: list, aspect_root_dir: str, suffix: str) -> list:
-    """Return `startup_flags` with its `--output_base`/`--output_user_root` pair
-    replaced by the runner-derived base suffixed with `suffix`, pinning the task
-    to its own Bazel server.
+    """Return `startup_flags` with its `--output_base` replaced by the
+    runner-derived output base suffixed with `suffix`, pinning the task to its
+    own Bazel server. `--output_user_root` is left as-is so shared state (install
+    base, external-repo cache) is not duplicated.
 
-    Substitutes rather than appends — the existing output-base flags are dropped
-    and a single suffixed pair added — so exactly one occurrence remains and the
+    Substitutes rather than appends — the existing `--output_base` is dropped and
+    a single suffixed one added — so exactly one occurrence remains and the
     front-scanning recovery helpers agree with Bazel's last-wins on which server
     is in use (see `without_output_base_flags`). The replacement is derived from
     the RAW runner base (`get_bazelrc_flags`), so a suffix set here supersedes

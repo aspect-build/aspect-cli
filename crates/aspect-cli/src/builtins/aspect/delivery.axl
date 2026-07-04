@@ -56,9 +56,11 @@ it stops poisoning the shared one. This applies to the ENTIRE delivery task,
 not just the stamped final build — startup flags select the server once per
 task, and delivery's earlier phases already run non-standard flags (the
 change-detection aspect, `--experimental_remote_require_cached`) that never
-shared the plain build/test analysis cache anyway. It replaces (does not stack
-on) the generic `--workflows:runner-output-base-suffix`, and is a no-op off a
-Workflows runner (where the output base isn't customized).
+shared the plain build/test analysis cache anyway. Only `--output_base` is
+made unique; `--output_user_root` stays shared so the install base and
+external-repo cache aren't duplicated. It replaces (does not stack on) the
+generic `--workflows:runner-output-base-suffix`, and is a no-op off a Workflows
+runner (where the output base isn't customized).
 
 
 Combination matrix
@@ -1616,7 +1618,7 @@ Currently \x1b[3monly\x1b[23m supported on Aspect Workflows CI runners. Support 
         "workflows_runner_delivery_output_base_suffix": args.string(
             long = "workflows-runner-delivery-output-base-suffix",
             default = "",
-            description = "Suffix appended to the runner-derived Bazel --output_base/--output_user_root for the delivery task only, giving delivery its own Bazel server so its stamped final build (--stamp via --release-bazel-flag) doesn't discard the shared warm unstamped analysis cache the next build/test job relies on. Empty (the default) shares the runner's normal output base. Overrides (replaces, does not stack on) the generic --workflows:runner-output-base-suffix for this task. Only takes effect on Aspect Workflows runners; a no-op elsewhere. Recommended value: `delivery`.",
+            description = "Suffix appended to the runner-derived Bazel --output_base for the delivery task only, giving delivery its own Bazel server so its stamped final build (--stamp via --release-bazel-flag) doesn't discard the shared warm unstamped analysis cache the next build/test job relies on. --output_user_root is left shared so the install base and external-repo cache aren't duplicated. Empty (the default) shares the runner's normal output base. Overrides (replaces, does not stack on) the generic --workflows:runner-output-base-suffix for this task. Only takes effect on Aspect Workflows runners; a no-op elsewhere. Recommended value: `delivery`.",
         ),
         "force_targets": args.string_list(
             long = "force-target",

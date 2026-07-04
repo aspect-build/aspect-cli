@@ -157,13 +157,14 @@ Workflows = feature(
         "runner_output_base_suffix": args.string(
             default = "",
             description = "Suffix appended to the runner-derived Bazel " +
-                          "--output_base/--output_user_root so this task uses its own " +
-                          "Bazel server, isolating it from the shared warm analysis " +
-                          "cache — e.g. to keep a job that flips Bazel options like " +
-                          "--stamp from discarding the cache other jobs reuse. Empty " +
-                          "(the default) shares the runner's normal output base. Only " +
-                          "takes effect on Aspect Workflows runners; a no-op elsewhere. " +
-                          "Set per repo in config.axl via " +
+                          "--output_base so this task uses its own Bazel server, " +
+                          "isolating it from the shared warm analysis cache — e.g. to " +
+                          "keep a job that flips Bazel options like --stamp from " +
+                          "discarding the cache other jobs reuse. --output_user_root is " +
+                          "left shared so the install base and external-repo cache " +
+                          "aren't duplicated. Empty (the default) shares the runner's " +
+                          "normal output base. Only takes effect on Aspect Workflows " +
+                          "runners; a no-op elsewhere. Set per repo in config.axl via " +
                           "ctx.features[Workflows].args.runner_output_base_suffix, or " +
                           "per task with --workflows:runner-output-base-suffix.",
         ),
