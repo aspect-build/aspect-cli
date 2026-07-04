@@ -383,13 +383,14 @@ def get_bazelrc_flags(environment: WorkflowsEnvironment, aspect_root_dir: str) -
     compression), the runner identity header, the per-runner repository cache and
     output paths, and `--nohome_rc`/`--nosystem_rc`.
 
+    The `--output_base` and `--output_user_root` startup flags in the result are
+    the pair `apply_output_base_suffix` rewrites together to move a task to its
+    own Bazel server.
+
     Args:
         environment: WorkflowsEnvironment. Caller must have verified
                      `runner != None` (output_base/output_user_root come from it).
         aspect_root_dir: absolute path to the Aspect project root.
-
-    The `--output_base`/`--output_user_root` startup flags this emits can be
-    rewritten by `apply_output_base_suffix` to move a task to its own Bazel server.
 
     Returns:
         (startup_flags, build_flags): two lists; build_flags may contain
