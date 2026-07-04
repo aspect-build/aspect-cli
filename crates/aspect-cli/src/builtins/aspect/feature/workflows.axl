@@ -2,10 +2,12 @@ load("@aspect//bazel.axl", "BazelTrait")
 load("../private/lib/build_metadata.axl", "get_build_metadata_flags", "get_task_metadata_flags")
 load(
     "../private/lib/environment.axl",
+    "apply_output_base_suffix",
     "color_enabled",
     "get_bazelrc_flags",
     "get_workflows_environment",
     "print_environment_info",
+    "sanitize_filename",
 )
 load("../private/lib/health_check.axl", "HealthCheckTrait", "agent_health_check")
 load(
@@ -63,6 +65,13 @@ def _workflows_impl(ctx: FeatureContext):
             environment = environment,
             aspect_root_dir = ctx.std.env.aspect_root_dir(),
         )
+
+        # Optionally move this task to its own Bazel server by suffixing the
+        # runner-derived output base, so a job that flips Bazel options (e.g.
+        # `--stamp`) keeps off the shared warm analysis cache other jobs reuse.
+        suffix = sanitize_filename(ctx.args.runner_output_base_suffix)
+        if suffix:
+            startup_flags = apply_output_base_suffix(startup_flags, "-" + suffix)
 
         bazel_trait.extra_startup_flags.extend(startup_flags)
         bazel_trait.extra_flags.extend(build_flags)
@@ -144,6 +153,19 @@ Workflows = feature(
             default = "0s",
             description = "Overall BES upload deadline. Duration string; '0s' " +
                           "disables the deadline. Mirrors Bazel's --bes_timeout.",
+        ),
+        "runner_output_base_suffix": args.string(
+            default = "",
+            description = "Suffix appended to the runner-derived Bazel " +
+                          "--output_base/--output_user_root so this task uses its own " +
+                          "Bazel server, isolating it from the shared warm analysis " +
+                          "cache — e.g. to keep a job that flips Bazel options like " +
+                          "--stamp from discarding the cache other jobs reuse. Empty " +
+                          "(the default) shares the runner's normal output base. Only " +
+                          "takes effect on Aspect Workflows runners; a no-op elsewhere. " +
+                          "Set per repo in config.axl via " +
+                          "ctx.features[Workflows].args.runner_output_base_suffix, or " +
+                          "per task with --workflows:runner-output-base-suffix.",
         ),
     },
 )

@@ -388,6 +388,9 @@ def get_bazelrc_flags(environment: WorkflowsEnvironment, aspect_root_dir: str) -
                      `runner != None` (output_base/output_user_root come from it).
         aspect_root_dir: absolute path to the Aspect project root.
 
+    The `--output_base`/`--output_user_root` startup flags this emits can be
+    rewritten by `apply_output_base_suffix` to move a task to its own Bazel server.
+
     Returns:
         (startup_flags, build_flags): two lists; build_flags may contain
         version-gated `(flag, constraint)` tuples.
@@ -430,6 +433,53 @@ def get_bazelrc_flags(environment: WorkflowsEnvironment, aspect_root_dir: str) -
         startup_flags.append("--output_base=" + output_root + "/" + subdir)
 
     return (startup_flags, build_flags)
+
+_OUTPUT_BASE_FLAG_PREFIXES = ["--output_base=", "--output_user_root="]
+
+def _is_output_base_flag(flag: str) -> bool:
+    """True for the `--output_base=`/`--output_user_root=` startup flags that
+    select which Bazel server an invocation talks to."""
+    return any([flag.startswith(prefix) for prefix in _OUTPUT_BASE_FLAG_PREFIXES])
+
+def apply_output_base_suffix(startup_flags: list, suffix: str) -> list:
+    """Return a copy of `startup_flags` with `suffix` appended to the path value
+    of any `--output_base=` / `--output_user_root=` entry; every other flag
+    passes through unchanged.
+
+    Both flags select which Bazel server an invocation talks to, so suffixing
+    both with the same string moves the whole invocation to a sibling server
+    (e.g. `.../myrepo/aspect-cli` → `.../myrepo/aspect-cli-delivery`) without
+    colliding with the un-suffixed one — isolating a task whose build flips
+    Bazel options (`--stamp`) from the shared warm analysis cache.
+
+    A no-op returning an unchanged copy when `suffix` is empty or no output-base
+    flag is present. `suffix` becomes part of an on-disk path segment, so the
+    caller must sanitize it (e.g. via `sanitize_filename`).
+    """
+    if not suffix:
+        return list(startup_flags)
+    return [flag + suffix if _is_output_base_flag(flag) else flag for flag in startup_flags]
+
+def suffixed_output_base_startup_flags(std, aspect_root_dir: str, suffix: str) -> list:
+    """The runner-derived `--output_base`/`--output_user_root` startup flags with
+    `suffix` appended, for pinning one task to its own Bazel server.
+
+    Returns just the (suffixed) output-base pair — not the full runner flag set —
+    so a caller can append them to `BazelTrait.extra_startup_flags` after the
+    Workflows feature already injected the un-suffixed base, letting Bazel's
+    last-wins semantics select the suffixed server.
+
+    Returns `[]` when `suffix` is empty or the process is not on a Workflows
+    runner (no runner-derived base to suffix). `suffix` becomes part of an
+    on-disk path segment, so the caller must sanitize it.
+    """
+    if not suffix:
+        return []
+    environment = get_workflows_environment(std)
+    if environment.runner == None:
+        return []
+    startup_flags, _build_flags = get_bazelrc_flags(environment, aspect_root_dir)
+    return apply_output_base_suffix([f for f in startup_flags if _is_output_base_flag(f)], suffix)
 
 # Display helpers
 

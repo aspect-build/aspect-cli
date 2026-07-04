@@ -41,6 +41,26 @@ Workflows runners start and expose via
 `ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT`).
 
 
+Output base isolation
+---------------------
+
+On an Aspect Workflows runner every task shares one Bazel server (the
+runner-derived `--output_base`). Delivery's final build stamps (`--stamp` via
+`--release-bazel-flag`), which flips Bazel's analysis cache; on the shared
+server that discards the warm unstamped analysis cache the next build/test job
+reuses (Bazel logs "Build options --stamp have changed, discarding analysis
+cache"). Passing `--workflows-runner-delivery-output-base-suffix=<suffix>`
+appends the suffix to the runner-derived output base for the delivery task,
+pinning it to its own persistent Bazel server so it stops poisoning the shared
+one. This applies to the ENTIRE delivery task, not just the stamped final
+build — startup flags select the server once per task, and delivery's earlier
+phases already run non-standard flags (the change-detection aspect,
+`--experimental_remote_require_cached`) that never shared the plain build/test
+analysis cache anyway. It replaces (does not stack on) the generic
+`--workflows:runner-output-base-suffix`, and is a no-op off a Workflows runner
+(where the output base isn't customized).
+
+
 Combination matrix
 ------------------
 
@@ -136,7 +156,7 @@ load(
     deliveryd_query = "query",
     deliveryd_record = "record",
 )
-load("./private/lib/environment.axl", "color_enabled", "error", "info", "warn")
+load("./private/lib/environment.axl", "color_enabled", "error", "info", "sanitize_filename", "suffixed_output_base_startup_flags", "warn")
 load("./private/lib/github.axl", "detect_commit_sha")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "setup_phase", "task_update")
@@ -931,6 +951,18 @@ def _delivery_impl(ctx):
     # the resolved set lands in `data` later.
     targets_subject = " ".join(list(ctx.args.targets)) if ctx.args.targets else ""
 
+    # Give the delivery task its own Bazel server: its stamped final build
+    # (--stamp via --release-bazel-flag) would otherwise discard the shared
+    # warm unstamped analysis cache the next build/test job reuses. Appended
+    # after the Workflows feature's un-suffixed base and any generic
+    # --workflows:runner-output-base-suffix, so Bazel last-wins selects it.
+    # Must run before setup_phase, which resolves startup flags from the trait.
+    delivery_suffix = sanitize_filename(ctx.args.workflows_runner_delivery_output_base_suffix)
+    if delivery_suffix:
+        bazel_trait.extra_startup_flags.extend(
+            suffixed_output_base_startup_flags(ctx.std, ctx.std.env.aspect_root_dir(), "-" + delivery_suffix),
+        )
+
     # Single pre-task setup phase (surface, rc parse + use_rc, health checks);
     # returns the active RunCommand. A failed health check fails the task inside.
     rc = setup_phase(
@@ -1580,6 +1612,11 @@ Currently \x1b[3monly\x1b[23m supported on Aspect Workflows CI runners. Support 
         "salt": args.string(
             default = "",
             description = "Additional string appended to --task:name to scope change detection (task-name:salt). Useful for scoping delivery to a specific environment or pipeline variant without changing --task:name.",
+        ),
+        "workflows_runner_delivery_output_base_suffix": args.string(
+            long = "workflows-runner-delivery-output-base-suffix",
+            default = "",
+            description = "Suffix appended to the runner-derived Bazel --output_base/--output_user_root for the delivery task only, giving delivery its own Bazel server so its stamped final build (--stamp via --release-bazel-flag) doesn't discard the shared warm unstamped analysis cache the next build/test job relies on. Empty (the default) shares the runner's normal output base. Overrides (replaces, does not stack on) the generic --workflows:runner-output-base-suffix for this task. Only takes effect on Aspect Workflows runners; a no-op elsewhere. Recommended value: `delivery`.",
         ),
         "force_targets": args.string_list(
             long = "force-target",
