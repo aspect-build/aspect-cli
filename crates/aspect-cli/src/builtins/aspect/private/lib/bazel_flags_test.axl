@@ -193,6 +193,7 @@ def _test_flags_delta(ctx):
     base's trailing regular flags, so the contribution is not a tail slice. A
     positional slice would drop the leading override (this is how a
     `common:release --stamp` silently vanished) and misattribute a base flag."""
+
     # Plain suffix case: contribution appended after an unchanged base.
     _eq("suffix", flags_delta(["--a", "--b"], ["--a", "--b", "--c"]), ["--c"])
 
