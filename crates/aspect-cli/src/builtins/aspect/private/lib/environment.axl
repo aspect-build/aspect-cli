@@ -383,6 +383,10 @@ def get_bazelrc_flags(environment: WorkflowsEnvironment, aspect_root_dir: str) -
     compression), the runner identity header, the per-runner repository cache and
     output paths, and `--nohome_rc`/`--nosystem_rc`.
 
+    The `--output_base` startup flag in the result is what `apply_output_base_suffix`
+    rewrites to move a task to its own Bazel server (`--output_user_root` stays
+    shared so the install base and external-repo cache are not duplicated).
+
     Args:
         environment: WorkflowsEnvironment. Caller must have verified
                      `runner != None` (output_base/output_user_root come from it).
@@ -430,6 +434,35 @@ def get_bazelrc_flags(environment: WorkflowsEnvironment, aspect_root_dir: str) -
         startup_flags.append("--output_base=" + output_root + "/" + subdir)
 
     return (startup_flags, build_flags)
+
+_OUTPUT_BASE_FLAG_PREFIX = "--output_base="
+
+def _is_output_base_flag(flag: str) -> bool:
+    """True for the `--output_base=` startup flag that names this invocation's
+    Bazel server (and its analysis cache).
+
+    Deliberately NOT `--output_user_root`: that root holds state we want shared
+    across servers — the install base, the extracted external-repo trees, and
+    the action cache — so only `--output_base` is unique per isolated server."""
+    return flag.startswith(_OUTPUT_BASE_FLAG_PREFIX)
+
+def apply_output_base_suffix(startup_flags: list, suffix: str) -> list:
+    """Return a copy of `startup_flags` with `suffix` appended to the path value
+    of the `--output_base=` entry; every other flag passes through unchanged.
+
+    `--output_base` names the Bazel server (and its analysis cache), so suffixing
+    it moves the invocation to a sibling server (e.g. `.../myrepo/aspect-cli` →
+    `.../myrepo/aspect-cli-delivery`) — isolating a task whose build flips Bazel
+    options (`--stamp`) from the shared warm analysis cache. `--output_user_root`
+    is left untouched so the install base and external-repo cache stay shared.
+
+    A no-op returning an unchanged copy when `suffix` is empty or no
+    `--output_base` is present. `suffix` becomes part of an on-disk path segment,
+    so the caller must sanitize it (e.g. via `sanitize_filename`).
+    """
+    if not suffix:
+        return list(startup_flags)
+    return [flag + suffix if _is_output_base_flag(flag) else flag for flag in startup_flags]
 
 # Display helpers
 

@@ -195,6 +195,10 @@ def config(ctx: ConfigContext):
     ctx.tasks["delivery"].args.release_bazel_flags = ["--config=release"]
     ctx.tasks["delivery"].args.warn_not_runnable = True
 
+    # Give the stamped delivery build its own Bazel server so it doesn't discard
+    # the warm analysis cache the unstamped build/test jobs reuse on the runner.
+    ctx.tasks["delivery"].args.workflows_runner_delivery_output_base_suffix = "delivery"
+
     ctx.tasks["build"].args.targets = ["//...", "-//exclude/..."]
     ctx.tasks["test"].args.targets = ["//...", "-//exclude/..."]
 

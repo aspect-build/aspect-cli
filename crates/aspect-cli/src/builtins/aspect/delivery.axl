@@ -41,6 +41,34 @@ Workflows runners start and expose via
 `ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT`).
 
 
+Output base isolation
+---------------------
+
+On an Aspect Workflows runner every task shares one Bazel server (the
+runner-derived `--output_base`), keyed by its analysis cache. Delivery runs
+phases with different analysis configurations, so it maps each to the right
+server rather than thrashing one:
+
+  - `query` and the phase-1 build are plain (no aspect, no release flags), so
+    they run on the task's normal server — sharing the warm analysis that
+    build/test jobs on the runner also reuse.
+  - The checksum phase injects the `hashsum` aspect (`--aspects` +
+    `--output_groups` + `--inject_repository`), which reconfigures the analysis
+    graph. It ALWAYS runs on a `-checksum` sibling server so it can't evict that
+    shared analysis — the aspect busts the cache regardless of the flag below.
+  - The release build (and the dispatch that reads its artifacts) stamps and
+    applies `--config=release`, reconfiguring again. It runs on the shared
+    server by default; `--workflows-runner-delivery-output-base-suffix=<suffix>`
+    moves it to its own `-<suffix>` sibling server so the stamped/release
+    analysis stays warm across delivery runs without evicting the shared one.
+
+Each sibling suffixes only `--output_base`; `--output_user_root` stays shared so
+the install base and external-repo cache aren't duplicated across servers. All
+of this is a no-op off a Workflows runner (where the output base isn't
+customized), and the suffix flag supersedes the generic
+`--workflows:runner-output-base-suffix` for the release build.
+
+
 Combination matrix
 ------------------
 
@@ -123,7 +151,7 @@ load("@aspect//bazel.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DE
 load("@bazel//proto/remote_logging.axl", "remote_logging")
 load("@std//time.axl", "sleep_iter", "time")
 load("./private/lib/artifacts.axl", "artifacts")
-load("./private/lib/bazel_flags.axl", "announce_bazel_args", "aspect_endpoint_auth_flags", "expand_config_flags", "resolve_bazel_announce")
+load("./private/lib/bazel_flags.axl", "announce_bazel_args", "aspect_endpoint_auth_flags", "expand_config_flags", "resolve_bazel_announce", "sibling_rc")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "now_ms", "process_event", bazel_init_data = "init_data")
 load("./private/lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
 load("./private/lib/bes_sinks.axl", "bes_args", "collect_bes_from_args")
@@ -136,7 +164,7 @@ load(
     deliveryd_query = "query",
     deliveryd_record = "record",
 )
-load("./private/lib/environment.axl", "color_enabled", "error", "info", "warn")
+load("./private/lib/environment.axl", "apply_output_base_suffix", "color_enabled", "error", "info", "sanitize_filename", "warn")
 load("./private/lib/github.axl", "detect_commit_sha")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "setup_phase", "task_update")
@@ -547,11 +575,20 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, use
         "--remote_download_outputs=minimal",
     ]
 
+    # Run phase 2 on a `-checksum` sibling server: the `hashsum` aspect
+    # reconfigures the analysis graph, so on the shared server it would evict the
+    # plain analysis phase 1 and the runner's build/test jobs reuse. Always
+    # applied — the aspect busts the cache independent of the release-build
+    # suffix below. `--output_user_root` stays shared; phase 1 keeps the
+    # passed-in `rc` (its plain build shares the runner's analysis).
+    checksum_rc = sibling_rc(ctx, bazel_trait, lambda flags: apply_output_base_suffix(flags, "-checksum"))
+
     # Redirect stderr to a file: require-cached failures are noisy-but-expected;
     # the actionable signal is the gRPC log below. The file is the escape hatch.
     phase2_log_path = _PHASE2_LOG_PATH.format(ctx.task.name)
     phase2_status = ctx.bazel.build(
         flags = phase2_flags,
+        rc = checksum_rc,
         stdout = None,
         stderr = ctx.std.fs.create(phase2_log_path),
         announce_version = announce_version,
@@ -931,6 +968,8 @@ def _delivery_impl(ctx):
     # the resolved set lands in `data` later.
     targets_subject = " ".join(list(ctx.args.targets)) if ctx.args.targets else ""
 
+    delivery_suffix = sanitize_filename(ctx.args.workflows_runner_delivery_output_base_suffix)
+
     # Single pre-task setup phase (surface, rc parse + use_rc, health checks);
     # returns the active RunCommand. A failed health check fails the task inside.
     rc = setup_phase(
@@ -1232,6 +1271,15 @@ def _delivery_impl(ctx):
         ]
         _t_download = time.monotonic()
 
+        # Isolate the release build (and the artifacts dispatch reads from it) on
+        # its own `-<suffix>` server when the user opted in: it stamps and applies
+        # `--config=release`, reconfiguring the analysis away from the plain
+        # build/test one. Off by default — no suffix keeps phase 3 on the shared
+        # server. `--output_user_root` stays shared.
+        phase3_rc = rc
+        if delivery_suffix:
+            phase3_rc = sibling_rc(ctx, bazel_trait, lambda flags: apply_output_base_suffix(flags, "-" + delivery_suffix))
+
         # Redirect stderr to a file: phase-3 re-materializes artifacts (OCI
         # layers, runfiles) and its progress looks like redundant rebuilds;
         # the log is the escape hatch on real failure.
@@ -1239,6 +1287,7 @@ def _delivery_impl(ctx):
         phase3_events = bazel.build_events.iterator()
         build = ctx.bazel.build(
             flags = phase3_flags,
+            rc = phase3_rc,
             build_events = [phase3_events],
             stdout = None,
             stderr = ctx.std.fs.create(phase3_log_path),
@@ -1580,6 +1629,11 @@ Currently \x1b[3monly\x1b[23m supported on Aspect Workflows CI runners. Support 
         "salt": args.string(
             default = "",
             description = "Additional string appended to --task:name to scope change detection (task-name:salt). Useful for scoping delivery to a specific environment or pipeline variant without changing --task:name.",
+        ),
+        "workflows_runner_delivery_output_base_suffix": args.string(
+            long = "workflows-runner-delivery-output-base-suffix",
+            default = "",
+            description = "Suffix appended to the runner-derived Bazel --output_base for delivery's release build (the stamped, --config=release phase and the dispatch that reads its artifacts), moving it to its own Bazel server so its analysis stays warm across delivery runs instead of discarding the analysis cache the runner's build/test jobs reuse. --output_user_root is left shared so the install base and external-repo cache aren't duplicated. Empty (the default) runs the release build on the shared server. The plain change-detection build shares that server too; the checksum phase (which injects an aspect) always gets its own -checksum server regardless of this flag. Only takes effect on Aspect Workflows runners; a no-op elsewhere. Recommended value: `delivery`.",
         ),
         "force_targets": args.string_list(
             long = "force-target",

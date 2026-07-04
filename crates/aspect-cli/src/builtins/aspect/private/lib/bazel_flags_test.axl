@@ -4,7 +4,7 @@ Run with:
   aspect dev test-bazel-flags
 """
 
-load("./bazel_flags.axl", "announce_bazel_args", "aspect_endpoint_auth_flags", "bes_backend_auth_flags", "remote_cache_auth_flags", "requested_config_names", "resolve_announce", "resolve_bazel_announce", "resolve_flags", "resolve_startup_flags", "setup_bazel_command")
+load("./bazel_flags.axl", "announce_bazel_args", "aspect_endpoint_auth_flags", "bes_backend_auth_flags", "flags_delta", "remote_cache_auth_flags", "requested_config_names", "resolve_announce", "resolve_bazel_announce", "resolve_flags", "resolve_startup_flags", "setup_bazel_command", "sibling_rc")
 
 def _eq(label, got, want):
     if got != want:
@@ -171,6 +171,27 @@ def _test_setup_bazel_command_applies_to_ctx_bazel(ctx):
     if "--ignore_all_rc_files" not in startup:
         fail("setup_bazel_command — --ignore_all_rc_files not present: %r" % startup)
 
+def _test_sibling_rc_transforms_startup(ctx):
+    """`sibling_rc` mirrors setup_bazel_command's flags but runs the startup
+    flags through the transform, and does NOT register itself as active."""
+    base = "/tmp/test-sibling-rc-base"
+    bazel_trait = _fake_trait(extra_startup = ["--output_base=" + base], extra = ["--from-extra"])
+    active = setup_bazel_command(ctx, "build", bazel_trait)
+
+    sib = sibling_rc(ctx, bazel_trait, lambda flags: [f + "-checksum" if f.startswith("--output_base=") else f for f in flags])
+
+    startup = list(sib.startup_flags())
+    if ("--output_base=" + base + "-checksum") not in startup:
+        fail("sibling_rc — transform not applied to startup: %r" % startup)
+    if ("--output_base=" + base) in startup:
+        fail("sibling_rc — untransformed --output_base leaked: %r" % startup)
+    if "--from-extra" not in sib.expand(command = "build"):
+        fail("sibling_rc — trait extra_flags missing from expansion: %r" % sib.expand(command = "build"))
+
+    # Building the sibling must not disturb the active rc.
+    if ctx.bazel.active_rc() != active:
+        fail("sibling_rc — must not change the active run command")
+
 # ── requested_config_names (pure) ────────────────────────────────────────
 
 def _test_requested_config_names(ctx):
@@ -184,6 +205,41 @@ def _test_requested_config_names(ctx):
         requested_config_names(["--config=a", "--foo", ("--config=b", "<7"), "--config=c"]),
         ["a", "b", "c"],
     )
+
+def _test_flags_delta(ctx):
+    """`flags_delta` returns the multiset difference full − base in full's order.
+
+    The regression case: a `--config` whose section options render as
+    `--default_override=0:common=…` sort into the overrides block AHEAD of the
+    base's trailing regular flags, so the contribution is not a tail slice. A
+    positional slice would drop the leading override (this is how a
+    `common:release --stamp` silently vanished) and misattribute a base flag."""
+
+    # Plain suffix case: contribution appended after an unchanged base.
+    _eq("suffix", flags_delta(["--a", "--b"], ["--a", "--b", "--c"]), ["--c"])
+
+    # Interleaved override ahead of a trailing base flag: --stamp is added at the
+    # front of the overrides block, --show_result=20 is shared base.
+    base = ["--default_override=0:common=--foo", "--show_result=20"]
+    full = [
+        "--default_override=0:common=--foo",
+        "--default_override=0:common=--stamp",
+        "--show_result=20",
+    ]
+    _eq("interleaved override", flags_delta(base, full), ["--default_override=0:common=--stamp"])
+
+    # Repeated flag: only the extra occurrence is in the delta.
+    _eq("multiset", flags_delta(["--x"], ["--x", "--x"]), ["--x"])
+
+    # Version-gated tuples compare by value.
+    _eq(
+        "tuple",
+        flags_delta([("--a", ">=8")], [("--a", ">=8"), ("--b", "<7")]),
+        [("--b", "<7")],
+    )
+
+    # No extras → empty delta.
+    _eq("empty", flags_delta(["--a", "--b"], ["--a", "--b"]), [])
 
 # ── endpoint auth flags ──────────────────────────────────────────────────
 
@@ -304,14 +360,16 @@ def _test_impl(ctx):
     _test_resolve_bazel_announce_maps_args_to_tuple(ctx)
     _test_announce_bazel_args_shape(ctx)
     _test_requested_config_names(ctx)
+    _test_flags_delta(ctx)
     _test_remote_cache_auth_flags(ctx)
     _test_bes_backend_auth_flags(ctx)
     _test_aspect_endpoint_auth_flags(ctx)
 
-    # Run last: `setup_bazel_command` registers a real active rc on `ctx.bazel`,
-    # so keeping it after the pure subtests prevents bleed-through.
+    # Run last: these register a real active rc on `ctx.bazel`, so keeping them
+    # after the pure subtests prevents bleed-through.
     _test_setup_bazel_command_applies_to_ctx_bazel(ctx)
-    print("bazel_flags_test.axl: OK (16 sections)")
+    _test_sibling_rc_transforms_startup(ctx)
+    print("bazel_flags_test.axl: OK (18 sections)")
     return 0
 
 bazel_flags_tests = task(
