@@ -460,26 +460,43 @@ def apply_output_base_suffix(startup_flags: list, suffix: str) -> list:
         return list(startup_flags)
     return [flag + suffix if _is_output_base_flag(flag) else flag for flag in startup_flags]
 
-def suffixed_output_base_startup_flags(std, aspect_root_dir: str, suffix: str) -> list:
-    """The runner-derived `--output_base`/`--output_user_root` startup flags with
-    `suffix` appended, for pinning one task to its own Bazel server.
+def without_output_base_flags(startup_flags: list) -> list:
+    """Return a copy of `startup_flags` with every `--output_base=` /
+    `--output_user_root=` entry removed.
 
-    Returns just the (suffixed) output-base pair — not the full runner flag set —
-    so a caller can append them to `BazelTrait.extra_startup_flags` after the
-    Workflows feature already injected the un-suffixed base, letting Bazel's
-    last-wins semantics select the suffixed server.
+    Used to drop an already-injected output base before substituting a
+    suffixed one, so exactly one `--output_base`/`--output_user_root` survives.
+    A single occurrence matters: the failure-path recovery helpers
+    (`output_base_from_flags` in health_check.rs / sandbox_recovery.rs) take the
+    FIRST match, while Bazel itself takes the LAST — leaving two would let them
+    disagree about which server to recover.
+    """
+    return [flag for flag in startup_flags if not _is_output_base_flag(flag)]
 
-    Returns `[]` when `suffix` is empty or the process is not on a Workflows
-    runner (no runner-derived base to suffix). `suffix` becomes part of an
-    on-disk path segment, so the caller must sanitize it.
+def set_output_base_suffix(std, startup_flags: list, aspect_root_dir: str, suffix: str) -> list:
+    """Return `startup_flags` with its `--output_base`/`--output_user_root` pair
+    replaced by the runner-derived base suffixed with `suffix`, pinning the task
+    to its own Bazel server.
+
+    Substitutes rather than appends — the existing output-base flags are dropped
+    and a single suffixed pair added — so exactly one occurrence remains and the
+    front-scanning recovery helpers agree with Bazel's last-wins on which server
+    is in use (see `without_output_base_flags`). The replacement is derived from
+    the RAW runner base (`get_bazelrc_flags`), so a suffix set here supersedes
+    any suffix a prior pass baked in rather than stacking on it.
+
+    Returns `startup_flags` unchanged when `suffix` is empty or the process is
+    not on a Workflows runner (no runner-derived base to suffix). `suffix`
+    becomes part of an on-disk path segment, so the caller must sanitize it.
     """
     if not suffix:
-        return []
+        return list(startup_flags)
     environment = get_workflows_environment(std)
     if environment.runner == None:
-        return []
-    startup_flags, _build_flags = get_bazelrc_flags(environment, aspect_root_dir)
-    return apply_output_base_suffix([f for f in startup_flags if _is_output_base_flag(f)], suffix)
+        return list(startup_flags)
+    base_startup, _build_flags = get_bazelrc_flags(environment, aspect_root_dir)
+    suffixed = apply_output_base_suffix([f for f in base_startup if _is_output_base_flag(f)], suffix)
+    return without_output_base_flags(startup_flags) + suffixed
 
 # Display helpers
 
