@@ -248,6 +248,27 @@ def setup_bazel_command(ctx, command, bazel_trait, base_flags = []):
 
     return rc
 
+def sibling_rc(ctx, bazel_trait, startup_transform, command = "build", base_flags = []):
+    """Build a `RunCommand` mirroring `setup_bazel_command`'s flag composition,
+    but with the resolved startup flags run through `startup_transform` first.
+
+    For a phase that needs its own Bazel server within a task — e.g. delivery's
+    change-detection phases, which inject the `hashsum` aspect and so want a
+    separate `--output_base` from the release build. `startup_transform` is a
+    `list[str] -> list[str]` (typically `apply_output_base_suffix(_, suffix)`).
+
+    Unlike `setup_bazel_command`, this neither registers the rc via `use_rc` nor
+    emits the parsed-rc disclosure — the caller `use_rc`s it around the phases
+    that need it and swaps the primary rc back afterward.
+    """
+    startup_flags = startup_transform(resolve_startup_flags(ctx, bazel_trait))
+    flags = list(base_flags) + resolve_flags(ctx, bazel_trait)
+    return ctx.bazel.parse_rc(
+        startup_flags = startup_flags,
+        flags = flags,
+        skip_config_if_missing = requested_config_names(flags),
+    )
+
 _CONFIG_PREFIX = "--config="
 
 def requested_config_names(flags: list) -> list:

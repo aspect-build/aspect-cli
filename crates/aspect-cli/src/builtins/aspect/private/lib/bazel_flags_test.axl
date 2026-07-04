@@ -4,7 +4,7 @@ Run with:
   aspect dev test-bazel-flags
 """
 
-load("./bazel_flags.axl", "announce_bazel_args", "aspect_endpoint_auth_flags", "bes_backend_auth_flags", "flags_delta", "remote_cache_auth_flags", "requested_config_names", "resolve_announce", "resolve_bazel_announce", "resolve_flags", "resolve_startup_flags", "setup_bazel_command")
+load("./bazel_flags.axl", "announce_bazel_args", "aspect_endpoint_auth_flags", "bes_backend_auth_flags", "flags_delta", "remote_cache_auth_flags", "requested_config_names", "resolve_announce", "resolve_bazel_announce", "resolve_flags", "resolve_startup_flags", "setup_bazel_command", "sibling_rc")
 
 def _eq(label, got, want):
     if got != want:
@@ -170,6 +170,26 @@ def _test_setup_bazel_command_applies_to_ctx_bazel(ctx):
         fail("setup_bazel_command — trait --output_base not on rc startup flags: %r" % startup)
     if "--ignore_all_rc_files" not in startup:
         fail("setup_bazel_command — --ignore_all_rc_files not present: %r" % startup)
+
+def _test_sibling_rc_transforms_startup(ctx):
+    """`sibling_rc` mirrors setup_bazel_command's flags but runs the startup
+    flags through the transform, and does NOT register itself as active."""
+    base = "/tmp/test-sibling-rc-base"
+    bazel_trait = _fake_trait(extra_startup = ["--output_base=" + base], extra = ["--from-extra"])
+    active = setup_bazel_command(ctx, "build", bazel_trait)
+
+    sib = sibling_rc(ctx, bazel_trait, lambda flags: [f + "-checksum" if f.startswith("--output_base=") else f for f in flags])
+
+    startup = list(sib.startup_flags())
+    if ("--output_base=" + base + "-checksum") not in startup:
+        fail("sibling_rc — transform not applied to startup: %r" % startup)
+    if ("--output_base=" + base) in startup:
+        fail("sibling_rc — untransformed --output_base leaked: %r" % startup)
+    if "--from-extra" not in sib.expand(command = "build"):
+        fail("sibling_rc — trait extra_flags missing from expansion: %r" % sib.expand(command = "build"))
+    # Building the sibling must not disturb the active rc.
+    if ctx.bazel.active_rc() != active:
+        fail("sibling_rc — must not change the active run command")
 
 # ── requested_config_names (pure) ────────────────────────────────────────
 
@@ -344,10 +364,11 @@ def _test_impl(ctx):
     _test_bes_backend_auth_flags(ctx)
     _test_aspect_endpoint_auth_flags(ctx)
 
-    # Run last: `setup_bazel_command` registers a real active rc on `ctx.bazel`,
-    # so keeping it after the pure subtests prevents bleed-through.
+    # Run last: these register a real active rc on `ctx.bazel`, so keeping them
+    # after the pure subtests prevents bleed-through.
     _test_setup_bazel_command_applies_to_ctx_bazel(ctx)
-    print("bazel_flags_test.axl: OK (17 sections)")
+    _test_sibling_rc_transforms_startup(ctx)
+    print("bazel_flags_test.axl: OK (18 sections)")
     return 0
 
 bazel_flags_tests = task(

@@ -45,22 +45,28 @@ Output base isolation
 ---------------------
 
 On an Aspect Workflows runner every task shares one Bazel server (the
-runner-derived `--output_base`). Delivery's final build stamps (`--stamp` via
-`--release-bazel-flag`), which flips Bazel's analysis cache; on the shared
-server that discards the warm unstamped analysis cache the next build/test job
-reuses (Bazel logs "Build options --stamp have changed, discarding analysis
-cache"). Passing `--workflows-runner-delivery-output-base-suffix=<suffix>`
-substitutes the injected output base with the runner-derived base plus the
-suffix for the delivery task, pinning it to its own persistent Bazel server so
-it stops poisoning the shared one. This applies to the ENTIRE delivery task,
-not just the stamped final build — startup flags select the server once per
-task, and delivery's earlier phases already run non-standard flags (the
-change-detection aspect, `--experimental_remote_require_cached`) that never
-shared the plain build/test analysis cache anyway. Only `--output_base` is
-made unique; `--output_user_root` stays shared so the install base and
-external-repo cache aren't duplicated. It replaces (does not stack on) the
-generic `--workflows:runner-output-base-suffix`, and is a no-op off a Workflows
-runner (where the output base isn't customized).
+runner-derived `--output_base`). Delivery's phases reconfigure that server's
+analysis in ways that evict the warm analysis a plain build/test job reuses:
+the change-detection phases inject the `hashsum` aspect (`--aspects` +
+`--output_groups` + `--inject_repository`), and the final build stamps and
+applies release flags (`--stamp`, `--config=release`). Bazel then logs "Build
+options … have changed, discarding analysis cache" and the next job re-analyzes
+from scratch.
+
+`--workflows-runner-delivery-output-base-suffix=<suffix>` substitutes the
+runner-derived `--output_base` with a suffixed sibling for the delivery task,
+pinning it to its own persistent Bazel server so it stops poisoning the shared
+one. Because startup flags select the server once per task, this covers every
+delivery phase. Within the delivery task the change-detection and release
+builds are themselves analysis-incompatible, so the change-detection phases run
+on a further `-checksum` sibling server (`…-<suffix>-checksum`) — keeping both
+analyses warm across runs rather than thrashing one server between them.
+
+Only `--output_base` is made unique; `--output_user_root` stays shared so the
+install base and external-repo cache aren't duplicated across the servers. The
+flag replaces (does not stack on) the generic
+`--workflows:runner-output-base-suffix`, and is a no-op off a Workflows runner
+(where the output base isn't customized).
 
 
 Combination matrix
@@ -145,7 +151,7 @@ load("@aspect//bazel.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DE
 load("@bazel//proto/remote_logging.axl", "remote_logging")
 load("@std//time.axl", "sleep_iter", "time")
 load("./private/lib/artifacts.axl", "artifacts")
-load("./private/lib/bazel_flags.axl", "announce_bazel_args", "aspect_endpoint_auth_flags", "expand_config_flags", "resolve_bazel_announce")
+load("./private/lib/bazel_flags.axl", "announce_bazel_args", "aspect_endpoint_auth_flags", "expand_config_flags", "resolve_bazel_announce", "sibling_rc")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "now_ms", "process_event", bazel_init_data = "init_data")
 load("./private/lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
 load("./private/lib/bes_sinks.axl", "bes_args", "collect_bes_from_args")
@@ -158,7 +164,7 @@ load(
     deliveryd_query = "query",
     deliveryd_record = "record",
 )
-load("./private/lib/environment.axl", "color_enabled", "error", "info", "sanitize_filename", "set_output_base_suffix", "warn")
+load("./private/lib/environment.axl", "apply_output_base_suffix", "color_enabled", "error", "info", "sanitize_filename", "set_output_base_suffix", "warn")
 load("./private/lib/github.axl", "detect_commit_sha")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "setup_phase", "task_update")
@@ -1149,7 +1155,19 @@ def _delivery_impl(ctx):
     # Phase 1/2 — skipped only in --mode=always + --track-state=false.
     if phase_1_2_runs:
         _t_build = time.monotonic()
-        output_shas, non_hermetic_misses, build_code = _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, user_remote_executor_uri or "", ansi, data)
+
+        # On an isolated delivery server, run the change-detection phases on a
+        # further `-checksum` server so their hashsum-aspect analysis and the
+        # phase-3 release analysis each stay warm (see the "Output base
+        # isolation" section above). Swapped back to the phase-3 server after;
+        # no-op when the task isn't isolated.
+        checksum_rc = rc
+        if delivery_suffix:
+            checksum_rc = sibling_rc(ctx, bazel_trait, lambda flags: apply_output_base_suffix(flags, "-checksum"))
+            ctx.bazel.use_rc(checksum_rc)
+        output_shas, non_hermetic_misses, build_code = _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, checksum_rc, user_remote_executor_uri or "", ansi, data)
+        if delivery_suffix:
+            ctx.bazel.use_rc(rc)
         info(ctx.std, "Build+checksum total: {}.".format(fmt_elapsed(time.monotonic() - _t_build)))
 
         for handler in bazel_trait.build_end:
