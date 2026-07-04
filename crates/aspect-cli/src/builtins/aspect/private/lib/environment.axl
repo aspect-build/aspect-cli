@@ -464,6 +464,11 @@ def apply_output_base_suffix(startup_flags: list, suffix: str) -> list:
         return list(startup_flags)
     return [flag + suffix if _is_output_base_flag(flag) else flag for flag in startup_flags]
 
+def _output_base_flags(startup_flags: list) -> list:
+    """The `--output_base=` entries in `startup_flags` (the complement of
+    `without_output_base_flags`)."""
+    return [flag for flag in startup_flags if _is_output_base_flag(flag)]
+
 def without_output_base_flags(startup_flags: list) -> list:
     """Return a copy of `startup_flags` with every `--output_base=` entry removed
     (leaving `--output_user_root` in place).
@@ -499,7 +504,7 @@ def set_output_base_suffix(std, startup_flags: list, aspect_root_dir: str, suffi
     if environment.runner == None:
         return list(startup_flags)
     base_startup, _build_flags = get_bazelrc_flags(environment, aspect_root_dir)
-    suffixed = apply_output_base_suffix([f for f in base_startup if _is_output_base_flag(f)], suffix)
+    suffixed = apply_output_base_suffix(_output_base_flags(base_startup), suffix)
     return without_output_base_flags(startup_flags) + suffixed
 
 # Display helpers

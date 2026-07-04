@@ -954,8 +954,8 @@ def _delivery_impl(ctx):
     targets_subject = " ".join(list(ctx.args.targets)) if ctx.args.targets else ""
 
     # Pin the delivery task to its own Bazel server (see the "Output base
-    # isolation" section above). Before setup_phase, which resolves startup
-    # flags from the trait.
+    # isolation" section above). Must precede setup_phase, which resolves the
+    # startup flags off the trait.
     delivery_suffix = sanitize_filename(ctx.args.workflows_runner_delivery_output_base_suffix)
     if delivery_suffix:
         bazel_trait.extra_startup_flags = set_output_base_suffix(
