@@ -508,6 +508,60 @@ def _status_comment_contribute(ctx, request, profile = None):
 
     return {"success": False, "error": resp.body or "", "status": resp.status}
 
+# Number of attempts per `_status_check_register` call, and the fixed delay
+# between them. Registration is idempotent (keyed by check_run_id server-side),
+# so re-POSTing on a transient flake is safe; a short in-call retry rides out a
+# one-off blip without waiting for the next heartbeat.
+_REGISTER_ATTEMPTS = 3
+_REGISTER_RETRY_MS = 500
+
+def _status_check_register(ctx, request, profile = None):
+    """Register/heartbeat/deregister one GitHub check run with the Aspect API.
+
+    The task's aspect-cli process posts this while it runs so the backend can
+    finalize the check as "Disconnected" if the process dies before sending its
+    own terminal update (see the Marvin `/status-checks/register` handler).
+    `final=False` registers or heartbeats; `final=True` deregisters after the
+    task's terminal conclusion lands.
+
+    `request` is the JSON-encodable body — `{installation_id,
+    installation_proof, owner, repo, run_id, run_attempt, head_sha,
+    check_run_id, name, final}`.
+
+    Best-effort and never raising: retries up to `_REGISTER_ATTEMPTS` times on a
+    transport error or non-2xx (idempotent upsert, safe to repeat), then returns
+    `{"success": bool, "status": int}`. A miss just widens the sweep's job; the
+    caller never blocks on it.
+    """
+    creds = ctx.aspect.auth.credentials(profile = profile)
+    if not creds:
+        return {"success": False, "status": 0}
+
+    url = ctx.aspect.auth.api_url + "/status-checks/register"
+    headers = {
+        "Authorization": "Bearer " + creds.access_token,
+        "Content-Type": "application/json",
+    }
+    body = json.encode(request)
+
+    status = 0
+    for attempt in range(_REGISTER_ATTEMPTS):
+        if attempt > 0:
+            time.sleep(_REGISTER_RETRY_MS)
+        resp = ctx.http().post(url = url, headers = headers, data = body).map_err(lambda e: str(e)).block()
+        if type(resp) == "string":
+            continue  # transport error — retry
+        status = resp.status
+        if status >= 200 and status < 300:
+            return {"success": True, "status": status}
+
+        # 4xx is a deterministic reject (bad proof, missing permission, bad
+        # body); retrying just burns time. Only transport errors and 5xx retry.
+        if status >= 400 and status < 500:
+            break
+
+    return {"success": False, "status": status}
+
 def _read_rate_limit(ctx, token, api_base = DEFAULT_GITHUB_API):
     """Read the installation's GitHub core rate-limit headroom with its
     installation `token`. Returns `{"remaining": int, "reset": int}` from the
@@ -2275,6 +2329,7 @@ github = struct(
     VALID_ROLES = VALID_ROLES,
     authenticate = _authenticate,
     status_comment_contribute = _status_comment_contribute,
+    status_check_register = _status_check_register,
     preferred_token_pair = _preferred_token_pair,
     missing_credentials_reason = _missing_credentials_reason,
     validate_role = validate_role,
