@@ -332,10 +332,15 @@ def _github_status_checks(ctx: FeatureContext):
                 result = github.status_checks.fail(ctx, token, owner, repo, check_run_id, output = output)
             if result["success"]:
                 _state["_gh_conclusion"] = desired
+
+                # Deregister only once the terminal conclusion actually lands on
+                # GitHub. If the PATCH failed, leave the check registered so the
+                # sweep still finalizes it (as "Disconnected") rather than
+                # dropping cleanup for a check GitHub still shows in progress.
+                if final:
+                    _deregister_check(ctx)
             else:
                 _LOG.warn(ctx.std, "Complete/fail API call failed: %s" % result.get("error", "unknown"))
-            if final:
-                _deregister_check(ctx)
             return
 
         # A terminal update whose conclusion was already set early (e.g. `failing`
