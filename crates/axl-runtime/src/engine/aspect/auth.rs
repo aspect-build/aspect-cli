@@ -268,7 +268,11 @@ fn deployment_name_for_host(deployments: &[Deployment], host: &str) -> Option<St
         .iter()
         .find(|d| {
             d.hosts.iter().any(|h| {
-                let h = h.trim().trim_start_matches('.').trim_end_matches('.').to_lowercase();
+                let h = h
+                    .trim()
+                    .trim_start_matches('.')
+                    .trim_end_matches('.')
+                    .to_lowercase();
                 !h.is_empty() && (host == h || host.ends_with(&format!(".{h}")))
             })
         })
@@ -3069,7 +3073,10 @@ mod tests {
             extract_query_param("/cb?code=a%20b", "code"),
             Some("a b".to_string())
         );
-        assert_eq!(extract_query_param("/cb?code=", "code"), Some("".to_string()));
+        assert_eq!(
+            extract_query_param("/cb?code=", "code"),
+            Some("".to_string())
+        );
         // First occurrence wins.
         assert_eq!(
             extract_query_param("/cb?code=first&code=second", "code"),
