@@ -257,17 +257,18 @@ fn select_account_or_deployment(
 
 /// The name of the configured deployment that owns `host` — an exact or
 /// dot-anchored suffix match against any deployment's `hosts`. Returns `None`
-/// when no configured deployment claims the host (the caller then falls back to
-/// the default profile). Used so endpoint auth attaches the token of the
-/// deployment serving a given cache/BES endpoint, whichever profile it was
-/// logged in under.
+/// when no configured deployment claims the host. Used so endpoint auth attaches
+/// the token of the deployment serving a given cache/BES endpoint, whichever
+/// profile it was logged in under.
 fn deployment_name_for_host(deployments: &[Deployment], host: &str) -> Option<String> {
-    let host = host.to_lowercase();
+    // Normalize a trailing dot so an absolute FQDN (`host.example.com.`) still
+    // matches its configured host.
+    let host = host.trim_end_matches('.').to_lowercase();
     deployments
         .iter()
         .find(|d| {
             d.hosts.iter().any(|h| {
-                let h = h.trim().trim_start_matches('.').to_lowercase();
+                let h = h.trim().trim_start_matches('.').trim_end_matches('.').to_lowercase();
                 !h.is_empty() && (host == h || host.ends_with(&format!(".{h}")))
             })
         })
@@ -2865,7 +2866,12 @@ mod tests {
             deployment_name_for_host(&deployments, "notremote.acme.aspect.build"),
             None
         );
-        // A host no configured deployment claims → default profile (None).
+        // An absolute FQDN (trailing dot) still matches its owning deployment.
+        assert_eq!(
+            deployment_name_for_host(&deployments, "remote.acme.aspect.build.").as_deref(),
+            Some("acme")
+        );
+        // A host no configured deployment claims → None (no token attached).
         assert_eq!(
             deployment_name_for_host(&deployments, "bes.aspect.build"),
             None
