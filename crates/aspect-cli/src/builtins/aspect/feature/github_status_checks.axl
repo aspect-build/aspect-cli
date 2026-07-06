@@ -60,6 +60,12 @@ load("../private/lib/tips.axl", "SURFACE_GITHUB_STATUS_CHECKS", "collect_tips_so
 
 _LOG = feature_logger("GitHub status checks")
 
+# Cadence for re-registering (heartbeating) a check run with the orphan-cleanup
+# backend. A tight fraction of the backend's staleness window so a live task
+# beats several times before it could be judged stale; the register upsert is
+# cheap (one Aspect API call, not a GitHub call).
+_HEARTBEAT_INTERVAL_MS = 30 * 1000
+
 def _detect_triggered_by(env):
     """Return a short string describing who/what triggered this build."""
     if env.var("GITHUB_ACTIONS"):
@@ -161,13 +167,17 @@ def _github_status_checks(ctx: FeatureContext):
         _state["_triggered_by"] = _detect_triggered_by(ctx.std.env)
 
         # actions.read is for the job deep-link only — fails gracefully.
+        # `_extra` captures the installation id + proof from the mint, forwarded
+        # on the register heartbeat so the backend can attribute this check.
         auth_reason = {}
+        auth_extra = {}
         token = github.authenticate(
             ctx,
             owner = owner,
             repo = repo,
             roles = ["checks.write", "actions.read"],
             _reason = auth_reason,
+            _extra = auth_extra,
         )
         if not token:
             _LOG.warn(ctx.std, "Authentication failed for %s/%s — %s" % (
@@ -177,6 +187,8 @@ def _github_status_checks(ctx: FeatureContext):
             ))
             return
         _state["_github_token"] = token
+        _state["_installation_id"] = auth_extra.get("installation_id", "")
+        _state["_installation_proof"] = auth_extra.get("installation_proof", "")
 
         # Re-resolve with the just-minted App token to upgrade the GHA run
         # URL to the per-job URL; cache-hits on the typical path.
@@ -205,6 +217,12 @@ def _github_status_checks(ctx: FeatureContext):
             _LOG.warn(ctx.std, "Failed to create check run: %s" % result.get("error", "unknown error"))
             return
         _state["_check_run_id"] = result["check_run_id"]
+        _state["_check_name"] = check_name
+
+        # Register the check for orphan cleanup and send the first heartbeat, so
+        # the backend finalizes it as "Disconnected" if this process dies before
+        # its own terminal update. Best-effort; retried on later heartbeats.
+        _register_check(ctx, final = False)
 
         # Publish the URL so siblings (GithubStatusComments) can deep-link;
         # `checkrun.url` returns "" until this fires.
@@ -222,6 +240,57 @@ def _github_status_checks(ctx: FeatureContext):
             output = initial_output,
             details_url = html_url or None,
         )
+
+    def _register_check(ctx, final):
+        """Register/heartbeat (`final=False`) or deregister (`final=True`) this
+        task's check run with the Aspect API for orphan cleanup. Best-effort and
+        non-blocking; a miss just leaves the backend to finalize on staleness.
+
+        Needs the installation id + proof from the token mint; skips silently if
+        they're absent (e.g. an env-token path that didn't mint an App token).
+        """
+        check_run_id = _state.get("_check_run_id")
+        installation_id = _state.get("_installation_id")
+        installation_proof = _state.get("_installation_proof")
+        if not check_run_id or not installation_id or not installation_proof:
+            return
+
+        result = github.status_check_register(ctx, {
+            "scm": "github",
+            "installation_id": installation_id,
+            "installation_proof": installation_proof,
+            "owner": owner,
+            "repo": repo,
+            "run_id": ctx.std.env.var("GITHUB_RUN_ID") or "",
+            "run_attempt": ctx.std.env.var("GITHUB_RUN_ATTEMPT") or "1",
+            "head_sha": sha,
+            "check_run_id": check_run_id,
+            "name": _state.get("_check_name", ""),
+            "final": final,
+        })
+        if result["success"] and not final:
+            _state["_last_register_ms"] = now_ms(ctx)
+
+    def _deregister_check(ctx):
+        """Deregister once, after the task lands its own terminal conclusion, so
+        the sweep never finalizes this concluded check as "Disconnected". Guarded
+        so it fires at most once and disables any later heartbeat."""
+        if _state.get("_deregistered"):
+            return
+        _state["_deregistered"] = True
+        _register_check(ctx, final = True)
+
+    def _maybe_heartbeat(ctx):
+        """Re-register on the heartbeat cadence so this check's liveness clock
+        keeps advancing while the task runs. Driven off `_task_update` rather
+        than a timer — updates fire regularly, and a wall-clock gate keeps the
+        rate bounded even when they don't. Stops once deregistered so a late
+        update can't resurrect a concluded check."""
+        if not _state.get("_check_run_id") or _state.get("_deregistered"):
+            return
+        last = _state.get("_last_register_ms", 0)
+        if now_ms(ctx) - last >= _HEARTBEAT_INTERVAL_MS:
+            _register_check(ctx, final = False)
 
     def _push_status(ctx, status, final, output = None):
         """Send a check-run update for `(status, final)`. Idempotent re:
@@ -264,9 +333,22 @@ def _github_status_checks(ctx: FeatureContext):
                 result = github.status_checks.fail(ctx, token, owner, repo, check_run_id, output = output)
             if result["success"]:
                 _state["_gh_conclusion"] = desired
+
+                # Deregister only once the terminal conclusion actually lands on
+                # GitHub. If the PATCH failed, leave the check registered so the
+                # sweep still finalizes it (as "Disconnected") rather than
+                # dropping cleanup for a check GitHub still shows in progress.
+                if final:
+                    _deregister_check(ctx)
             else:
                 _LOG.warn(ctx.std, "Complete/fail API call failed: %s" % result.get("error", "unknown"))
             return
+
+        # A terminal update whose conclusion was already set early (e.g. `failing`
+        # then `failed` — same `failure`) skips the block above; still deregister
+        # so the sweep never mislabels this concluded check as "Disconnected".
+        if final and _state.get("_gh_conclusion"):
+            _deregister_check(ctx)
 
         # Mid-run progress PATCH (keeps the existing conclusion) — skippable
         # under budget pressure; the conclusion-setting calls above always land.
@@ -361,6 +443,9 @@ def _github_status_checks(ctx: FeatureContext):
         check_run_id = _state.get("_check_run_id")
         if not token or not check_run_id:
             return
+
+        # Keep this check's liveness clock fresh while the task runs.
+        _maybe_heartbeat(ctx)
 
         renderer = renderer_for_kind(update.kind)
         if renderer == None:

@@ -445,6 +445,14 @@ def config(ctx: ConfigContext):
             "--config=ci",
         ])
 
+    # On GitHub Actions, disable Bazel's curses UI — the log viewer doesn't
+    # render cursor-movement escapes, so the animated progress leaves garbled,
+    # duplicated lines. Plain streaming output reads correctly.
+    if bool(ctx.std.env.var("GITHUB_ACTIONS")):
+        ctx.traits[BazelTrait].extra_flags.extend([
+            "--curses=no",
+        ])
+
     # Configure user_task's attrs by path (group/name).
     t = ctx.tasks["user/nested/user-task"]
     t.args.message = "hello axl"
