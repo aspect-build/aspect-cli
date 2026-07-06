@@ -18,6 +18,7 @@ use build_event_stream::{
 
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 
+use crate::diag;
 use crate::engine::r#async::rt::AsyncRuntime;
 
 use super::super::stream::Subscriber;
@@ -100,6 +101,14 @@ fn dbg(endpoint: &str, invocation_id: &str, msg: &str) {
     eprintln!("BES sink {endpoint} [{short}]: {msg}");
 }
 
+/// Emit a user-facing `WARNING:` for this sink, prefixed `BES sink <endpoint>:`
+/// to distinguish it in multi-sink configurations. Unlike [`dbg`], it is not
+/// `ASPECT_DEBUG`-gated: BES upload is best-effort and never fails the build,
+/// so this is the only signal that events were delayed or lost.
+fn warn(endpoint: &str, msg: &str) {
+    diag::warn(&format!("BES sink {endpoint}: {msg}"));
+}
+
 /// Send one of the unary lifecycle events (`build_enqueued`,
 /// `invocation_started`, `invocation_finished`, `build_finished`),
 /// timing the round trip and logging the result. Errors are wrapped
@@ -167,18 +176,31 @@ async fn work(
         }
     });
 
-    // Bound the initial connect: a TLS handshake against an unresponsive
-    // endpoint can stall indefinitely without any of the retry machinery
-    // ever running.
+    // `Client::new` only builds a lazy channel (endpoint URI + TLS config); it
+    // does not dial, so a failure here is a client misconfiguration, not an
+    // unreachable backend — the real connect/auth errors surface on the first
+    // lifecycle RPC below. The timeout guards against a pathological stall in
+    // channel construction.
     const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
     let connect_started = std::time::Instant::now();
     let mut client =
         match tokio::time::timeout(CONNECT_TIMEOUT, Client::new(endpoint.clone(), headers)).await {
-            Ok(r) => r.map_err(|e| finalize(&endpoint, format!("connect failed: {e}")))?,
-            Err(_) => {
-                return Err(finalize(
+            Ok(Ok(client)) => client,
+            Ok(Err(e)) => {
+                return Err(fail(
                     &endpoint,
-                    "connect timed out after 10s".to_string(),
+                    "invalid backend configuration, build events will not be delivered",
+                    format!("client setup failed: {e}"),
+                ));
+            }
+            Err(_) => {
+                let secs = CONNECT_TIMEOUT.as_secs();
+                return Err(fail(
+                    &endpoint,
+                    &format!(
+                        "client setup stalled for {secs}s, build events will not be delivered"
+                    ),
+                    format!("client setup timed out after {secs}s"),
                 ));
             }
         };
@@ -216,6 +238,10 @@ async fn work(
     let mut next_seq: i64 = 1;
     let mut attempt: u32 = 0;
     let mut last_message_sent = false;
+    // Warn at most once per sink when the stream first drops into retry, so a
+    // flapping or slow backend produces an early user-facing signal without a
+    // line per retry attempt.
+    let mut warned_transient = false;
 
     'reconnect: loop {
         dbg(
@@ -258,6 +284,16 @@ async fn work(
                         &endpoint,
                         format!("giving up after {attempt} attempts: {err}"),
                     ));
+                }
+                if !warned_transient {
+                    warn(
+                        &endpoint,
+                        &format!(
+                            "backend unreachable, retrying (up to {} times): {err}",
+                            retry.max_retries
+                        ),
+                    );
+                    warned_transient = true;
                 }
                 let delay = backoff(retry.retry_min_delay, attempt);
                 dbg(
@@ -782,7 +818,45 @@ async fn retry_lifecycle(
     }
 }
 
-fn finalize(endpoint: &str, last_error: String) -> SinkError {
-    eprintln!("WARNING: BES sink {endpoint} giving up: {last_error}");
+/// Terminate the sink: warn the user (with `user_msg`) that events won't be
+/// delivered, and return the `SinkError` carrying the machine-readable
+/// `last_error` cause. The two strings differ when the user-facing phrasing
+/// should read better than the raw cause (e.g. client-setup failures).
+fn fail(endpoint: &str, user_msg: &str, last_error: String) -> SinkError {
+    warn(endpoint, user_msg);
     SinkError { last_error }
+}
+
+/// [`fail`] for the give-up cases, where the raw cause is also fit to show the
+/// user directly.
+fn finalize(endpoint: &str, last_error: String) -> SinkError {
+    fail(
+        endpoint,
+        &format!("giving up, build events were not delivered: {last_error}"),
+        last_error,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fail_preserves_machine_cause_independent_of_user_message() {
+        // The user-facing phrasing and the machine-readable cause are allowed to
+        // differ; `SinkError` must carry the latter verbatim for callers that
+        // inspect `sink.error`.
+        let err = fail(
+            "grpcs://bes.example.com",
+            "could not connect, build events will not be delivered",
+            "connect failed: transport error".to_string(),
+        );
+        assert_eq!(err.last_error, "connect failed: transport error");
+    }
+
+    #[test]
+    fn finalize_carries_cause_in_sink_error() {
+        let err = finalize("grpcs://bes.example.com", "deadline exceeded".to_string());
+        assert_eq!(err.last_error, "deadline exceeded");
+    }
 }

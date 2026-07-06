@@ -18,6 +18,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use axl_runtime::banner;
+use axl_runtime::diag;
 use axl_runtime::engine::arg::Arg;
 use axl_runtime::engine::arguments::Arguments;
 use axl_runtime::engine::feature::FeatureLike;
@@ -210,9 +211,9 @@ impl<'a, 'v> Cmd<'a, 'v> {
             .filter(|s| !s.is_empty())
             .cloned();
         if deprecated_key.is_some() {
-            eprintln!(
-                "\x1b[1;33mWARNING:\x1b[0m --task-key is deprecated; use --task:name instead. \
-                 --task-key will be removed in a future release."
+            diag::warn(
+                "--task-key is deprecated; use --task:name instead. \
+                 --task-key will be removed in a future release.",
             );
         }
         // An explicit name (`--task:name` / `--task-key`) is meaningful as-is.

@@ -7,6 +7,7 @@ extern crate self as axl_runtime;
 pub mod banner;
 pub mod builtins;
 pub mod ci;
+pub mod diag;
 pub mod docs;
 pub mod engine;
 pub mod eval;
