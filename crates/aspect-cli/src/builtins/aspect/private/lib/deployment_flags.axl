@@ -185,10 +185,3 @@ def announce_deployment_flags(ctx, flags: DeploymentFlags):
         return
     parts = [label + " (" + uri + ")" for (label, uri) in flags.capabilities]
     info(ctx.std, "Using deployment '" + flags.deployment + "' for " + join_and(parts, oxford = True))
-
-def announce_deployment_bes_streamed(ctx, flags: DeploymentFlags):
-    """Confirm the deployment's CLI-streamed BES backend(s) received the build's
-    events (the sink is a CLI-side gRPC stream, not a bazel flag, so it's
-    otherwise invisible). Caller gates this on a clean, non-failed stream."""
-    for backend in flags.bes_backends:
-        info(ctx.std, "Streamed build events to " + backend + ".")

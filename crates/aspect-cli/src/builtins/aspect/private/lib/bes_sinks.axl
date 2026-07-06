@@ -15,6 +15,7 @@ resolution. (The companion case — BES routed through Bazel via
 """
 
 load("./aspect_endpoint_auth.axl", "endpoint_host", "headers_have_auth", "is_aspect_host", "resolve_aspect_bearer")
+load("./environment.axl", "info")
 
 def bes_args() -> dict:
     """The `bes_backends` / `bes_headers` CLI args every BES-capable task
@@ -82,3 +83,29 @@ def collect_bes_from_args(ctx, extra_backends = []) -> list:
             ),
         )
     return sinks
+
+def bes_upload_line(uri: str, sent: int, acked: int, failed: bool) -> str:
+    """The one-line summary of a CLI-streamed BES backend's upload.
+
+    Reports `<acked> of <sent>` only for a genuine partial upload — a failed
+    stream that left events unconfirmed (`acked < sent`). A clean stream, or a
+    failure after every event was acked (e.g. a post-stream lifecycle error),
+    reports the full `<n> build events` since delivery of the events succeeded.
+    Public so `bes_sinks_test.axl` can assert the message shapes."""
+    backend = uri or "the BES backend"
+    plural = "" if sent == 1 else "s"
+    if failed and acked < sent:
+        return "Uploaded %d of %d build event%s to %s before the stream failed." % (acked, sent, plural, backend)
+    return "Streamed %d build event%s to %s." % (sent, plural, backend)
+
+def summarize_bes_upload(ctx, sinks: list):
+    """Log one line per CLI-streamed BES backend summarizing how many build events
+    it received (see `bes_upload_line`). Call after `sink.wait()`.
+
+    A failed sink already prints its own `WARNING: … giving up` with the cause, so
+    this adds the event count rather than repeating the failure. Covers only the
+    user-facing backends (`--bes-backend` and the deployment's BES), not the CLI's
+    internal build-event sinks.
+    """
+    for sink in sinks:
+        info(ctx.std, bes_upload_line(sink.uri, sink.events_sent, sink.events_acked, sink.failed))

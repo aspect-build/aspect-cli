@@ -16,8 +16,8 @@ load("@aspect//bazel.axl", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
 load("@std//time.axl", "sleep_iter")
 load("./bazel_flags.axl", "aspect_endpoint_auth_flags", "resolve_bazel_announce")
 load("./bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "collapse_repro_targets", "failed_labels", "failed_labels_by_subcommand", "init_data", "now_ms", "process_event", bazel_conclusion = "conclusion")
-load("./bes_sinks.axl", "collect_bes_from_args")
-load("./deployment_flags.axl", "announce_deployment_bes_streamed", "announce_deployment_flags", "deployment_endpoint_flags")
+load("./bes_sinks.axl", "collect_bes_from_args", "summarize_bes_upload")
+load("./deployment_flags.axl", "announce_deployment_flags", "deployment_endpoint_flags")
 load("./health_check.axl", "HealthCheckTrait")
 load("./lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "setup_phase", "task_update")
 load("./repro_commands.axl", "build_aspect_command", "build_bazel_command", "flavor_allows", "print_repro_and_fix", "repro_prefix")
@@ -299,7 +299,12 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
     # injected --remote_cache / BES backend / --remote_executor aren't silent.
     announce_deployment_flags(ctx, deployment)
 
-    bes_sinks = collect_bes_from_args(ctx, extra_backends = deployment.bes_backends)
+    # The CLI-streamed BES sinks (explicit `--bes-backend` + the deployment's BES)
+    # are the user-facing backends we summarize at build end; the trait's own sinks
+    # (the internal Aspect Workflows backend) are appended for streaming but left
+    # out of that summary.
+    cli_bes_sinks = collect_bes_from_args(ctx, extra_backends = deployment.bes_backends)
+    bes_sinks = list(cli_bes_sinks)
     if bazel_trait.build_event_sinks:
         bes_sinks.extend(bazel_trait.build_event_sinks)
     need_bes = bool(bazel_trait.build_event) or bool(lifecycle.task_update)
@@ -471,15 +476,11 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
 
         # Flush sinks before deciding whether to retry — re-binding a Live
         # sink errors (see BuildEventSink::bind_grpc).
-        any_sink_failed = False
         for sink in bes_sinks:
             sink.wait()
-            any_sink_failed = any_sink_failed or sink.failed
 
-        # Confirm the deployment's BES stream landed (a failure already prints its
-        # own `WARNING: BES sink … giving up`, so only announce the clean case).
-        if deployment.bes_backends and not any_sink_failed:
-            announce_deployment_bes_streamed(ctx, deployment)
+        # Summarize how many build events each CLI-streamed backend received.
+        summarize_bes_upload(ctx, cli_bes_sinks)
 
         dispatch_bazel_attempt_end(ctx, bazel_trait, invocation_status.code)
 
