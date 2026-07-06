@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    io::IsTerminal,
     sync::OnceLock,
     thread::{self, JoinHandle},
 };
@@ -18,6 +19,7 @@ use build_event_stream::{
 
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 
+use crate::ci::on_recognized_ci;
 use crate::engine::r#async::rt::AsyncRuntime;
 
 use super::super::stream::Subscriber;
@@ -100,14 +102,23 @@ fn dbg(endpoint: &str, invocation_id: &str, msg: &str) {
     eprintln!("BES sink {endpoint} [{short}]: {msg}");
 }
 
-/// SGR sequence for a bold-yellow `WARNING:` label, matching the CLI's
-/// user-facing warning style (see `cmd.rs`).
-const WARN_LABEL: &str = "\x1b[1;33mWARNING:\x1b[0m";
+/// The `WARNING` label, matching the CLI's severity-prefix style (yellow when
+/// colorized, plain otherwise) from the `warn()` std helper in
+/// `lib/environment.axl`. The `:` sits outside the color span so the label
+/// degrades to a plain `WARNING:` in a non-rendering log.
+fn warn_label(colorize: bool) -> &'static str {
+    if colorize {
+        "\x1b[0;33mWARNING\x1b[0m:"
+    } else {
+        "WARNING:"
+    }
+}
 
-/// Format a user-facing sink WARNING line. Pure (no I/O) so the wording is
-/// unit-testable; [`warn`] wraps it for the stderr side effect.
-fn warn_line(endpoint: &str, msg: &str) -> String {
-    format!("{WARN_LABEL} BES sink {endpoint}: {msg}")
+/// Format a user-facing sink WARNING line. Pure (no I/O) so both the wording
+/// and the color gating are unit-testable; [`warn`] wraps it for the stderr
+/// side effect.
+fn warn_line(colorize: bool, endpoint: &str, msg: &str) -> String {
+    format!("{} BES sink {endpoint}: {msg}", warn_label(colorize))
 }
 
 /// Emit an always-on, user-facing WARNING on stderr. Unlike [`dbg`], this is
@@ -115,8 +126,12 @@ fn warn_line(endpoint: &str, msg: &str) -> String {
 /// events are delayed or lost, so a build that "passes" while its BES upload
 /// is broken still tells the user something is wrong (the upload is
 /// best-effort and never fails the build).
+///
+/// Color follows the same predicate as the rest of the CLI: emitted on an
+/// interactive stderr or a recognized CI host, plain text otherwise.
 fn warn(endpoint: &str, msg: &str) {
-    eprintln!("{}", warn_line(endpoint, msg));
+    let colorize = std::io::stderr().is_terminal() || on_recognized_ci();
+    eprintln!("{}", warn_line(colorize, endpoint, msg));
 }
 
 /// Send one of the unary lifecycle events (`build_enqueued`,
@@ -850,13 +865,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn warn_line_has_bold_yellow_label_and_endpoint() {
-        let line = warn_line("grpcs://bes.example.com", "could not connect");
+    fn warn_line_colorized_matches_cli_warning_style() {
+        // Yellow WARNING with the colon outside the color span, per the `warn()`
+        // std helper in lib/environment.axl.
+        let line = warn_line(true, "grpcs://bes.example.com", "could not connect");
         assert_eq!(
             line,
-            "\x1b[1;33mWARNING:\x1b[0m BES sink grpcs://bes.example.com: could not connect"
+            "\x1b[0;33mWARNING\x1b[0m: BES sink grpcs://bes.example.com: could not connect"
         );
-        assert!(line.starts_with(WARN_LABEL));
+    }
+
+    #[test]
+    fn warn_line_plain_omits_ansi() {
+        let line = warn_line(false, "grpcs://bes.example.com", "could not connect");
+        assert_eq!(
+            line,
+            "WARNING: BES sink grpcs://bes.example.com: could not connect"
+        );
+        assert!(!line.contains('\x1b'));
     }
 
     #[test]
