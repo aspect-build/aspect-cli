@@ -24,7 +24,7 @@ use crate::ci::on_recognized_ci;
 
 /// Severity of a diagnostic line, carrying its label and color.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Severity {
+enum Severity {
     /// Cyan `INFO:` — a notable but expected runtime branch fired.
     Info,
     /// Yellow `WARNING:` — a subsystem problem; the task continues.
@@ -63,7 +63,7 @@ const RESET: &str = "\x1b[0m";
 ///
 /// Pure (no I/O) so both the wording and the color gating are unit-testable;
 /// [`emit`] wraps it for the stderr side effect.
-pub fn format_line(sev: Severity, colorize: bool, msg: &str) -> String {
+fn format_line(sev: Severity, colorize: bool, msg: &str) -> String {
     if colorize {
         format!("{}{}{}: {msg}", sev.color(), sev.label(), RESET)
     } else {
@@ -79,7 +79,7 @@ fn colorize() -> bool {
 }
 
 /// Print one severity-prefixed line to stderr, colorized per [`colorize`].
-pub fn emit(sev: Severity, msg: &str) {
+fn emit(sev: Severity, msg: &str) {
     eprintln!("{}", format_line(sev, colorize(), msg));
 }
 

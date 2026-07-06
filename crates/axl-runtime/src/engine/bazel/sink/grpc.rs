@@ -101,12 +101,10 @@ fn dbg(endpoint: &str, invocation_id: &str, msg: &str) {
     eprintln!("BES sink {endpoint} [{short}]: {msg}");
 }
 
-/// Emit an always-on, user-facing `WARNING:` for this sink. Unlike [`dbg`],
-/// this is not gated on `ASPECT_DEBUG` — it fires on the failures that mean
-/// build events are delayed or lost, so a build that "passes" while its BES
-/// upload is broken still tells the user something is wrong (the upload is
-/// best-effort and never fails the build). Prefixed `BES sink <endpoint>:` to
-/// distinguish it in multi-sink configurations.
+/// Emit a user-facing `WARNING:` for this sink, prefixed `BES sink <endpoint>:`
+/// to distinguish it in multi-sink configurations. Unlike [`dbg`], it is not
+/// `ASPECT_DEBUG`-gated: BES upload is best-effort and never fails the build,
+/// so this is the only signal that events were delayed or lost.
 fn warn(endpoint: &str, msg: &str) {
     diag::warn(&format!("BES sink {endpoint}: {msg}"));
 }
@@ -178,9 +176,11 @@ async fn work(
         }
     });
 
-    // Bound the initial connect: a TLS handshake against an unresponsive
-    // endpoint can stall indefinitely without any of the retry machinery
-    // ever running.
+    // `Client::new` only builds a lazy channel (endpoint URI + TLS config); it
+    // does not dial, so a failure here is a client misconfiguration, not an
+    // unreachable backend — the real connect/auth errors surface on the first
+    // lifecycle RPC below. The timeout guards against a pathological stall in
+    // channel construction.
     const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
     let connect_started = std::time::Instant::now();
     let mut client =
@@ -189,8 +189,8 @@ async fn work(
             Ok(Err(e)) => {
                 return Err(fail(
                     &endpoint,
-                    "could not connect, build events will not be delivered",
-                    format!("connect failed: {e}"),
+                    "invalid backend configuration, build events will not be delivered",
+                    format!("client setup failed: {e}"),
                 ));
             }
             Err(_) => {
@@ -198,9 +198,9 @@ async fn work(
                 return Err(fail(
                     &endpoint,
                     &format!(
-                        "could not connect within {secs}s, build events will not be delivered"
+                        "client setup stalled for {secs}s, build events will not be delivered"
                     ),
-                    format!("connect timed out after {secs}s"),
+                    format!("client setup timed out after {secs}s"),
                 ));
             }
         };
@@ -821,7 +821,7 @@ async fn retry_lifecycle(
 /// Terminate the sink: warn the user (with `user_msg`) that events won't be
 /// delivered, and return the `SinkError` carrying the machine-readable
 /// `last_error` cause. The two strings differ when the user-facing phrasing
-/// should read better than the raw cause (e.g. connect failures).
+/// should read better than the raw cause (e.g. client-setup failures).
 fn fail(endpoint: &str, user_msg: &str, last_error: String) -> SinkError {
     warn(endpoint, user_msg);
     SinkError { last_error }
