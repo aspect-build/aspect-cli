@@ -1,40 +1,135 @@
+load("./private/lib/aspect_endpoint_auth.axl", "login_hint")
+load("./private/lib/deployment_flags.axl", "join_and")
 load("./private/lib/environment.axl", "error", "info")
+
+def _run_browser_login(ctx: TaskContext, deployment: str):
+    """Open the deployment's authorize URL in a browser and wait for the callback,
+    returning the minted credentials. Prints the URL if a browser can't be opened."""
+    session = ctx.aspect.auth.login(deployment = deployment)
+    result = ctx.std.process.command("open").arg(session.url).spawn().wait()
+    if not result.success:
+        print("Open this URL to log in:")
+        print("  " + session.url)
+    else:
+        print("Browser opened. Waiting for authentication...")
+    return session.wait()
+
+# Width of the label column in a deployment's detail block so values align. Must
+# be wider than the longest label ("Status"/"Issuer"/"Grants", all 6) to leave a
+# gap; a label >= this width would collide with its value.
+_LABEL_WIDTH = 8
+
+# What the built-in Aspect account login grants (it has no build endpoints).
+_ACCOUNT_GRANTS = "Aspect Cloud services (e.g. the GitHub App API on CI)"
+
+def identity(d) -> str:
+    """The logged-in identity for a summary: `Name <email>`, or just one of them,
+    or "" when neither is known."""
+    if d.display_name and d.email:
+        return d.display_name + " <" + d.email + ">"
+    return d.display_name or d.email
+
+def login_command(d) -> str:
+    """The `aspect auth login` command that authenticates `d`: bare for the Aspect
+    account, `--deployment <name>` for a deployment."""
+    return login_hint(None if d.builtin else d.name)
+
+def capabilities(d) -> list[str]:
+    """The remote capabilities a deployment advertises, as prose for a usage hint
+    (cache/bes always for a configured deployment; exec only when served). Same
+    labels the `--aspect-*` announcement uses (see `deployment_flags.axl`)."""
+    caps = []
+    for (label, host) in [("remote cache", d.cache), ("remote execution", d.exec), ("BES backend", d.bes)]:
+        if host:
+            caps.append(label)
+    return caps
+
+def status_line(d) -> str:
+    """The Status row value for a summary: the logged-in identity + token status,
+    or a logged-out note pointing at how to log in."""
+    if not d.logged_in:
+        return "logged out (run `" + login_command(d) + "`)"
+    who = identity(d)
+    line = "logged in" + (" as " + who if who else "")
+    return line + (", " + d.status if d.status else "")
+
+def _print_deployment(d, header = True):
+    """Print one entry's aligned detail table (Status, Issuer, and either the
+    build endpoints for a deployment or a Grants line for the built-in Aspect
+    account). Shared by `auth status` and `configure`.
+
+    With `header`, leads with a `●/○ <name>` line (the ● default marker applies
+    only to deployments — it selects which one build/test target). The Aspect
+    account is a list of one under its own section header, so `auth status`
+    passes `header = False` to drop the redundant name line."""
+    if header:
+        is_default = d.default and not d.builtin
+        print(("● " if is_default else "○ ") + d.name + (" (default)" if is_default else ""))
+
+    def _row(label, value):
+        pad = _LABEL_WIDTH - len(label)
+        print("    " + label + (" " * pad if pad > 0 else " ") + value)
+
+    _row("Status", status_line(d))
+    if d.issuer:
+        _row("Issuer", d.issuer)
+    if d.builtin:
+        # The Aspect account has no build endpoints; say what it's for instead.
+        _row("Grants", _ACCOUNT_GRANTS)
+    else:
+        for (kind, host) in [("Cache", d.cache), ("Exec", d.exec), ("BES", d.bes)]:
+            if host:
+                _row(kind, host)
+
+def _print_default_usage_hint():
+    """The `auth status` footer: how --aspect-remote wires the *default* deployment,
+    and how to target another. Always the full text (independent of how many
+    deployments are configured). Leads with a blank line to set it apart."""
+    print("")
+    print("Pass --aspect-remote to a task (e.g. `aspect build --aspect-remote`) to use the")
+    print("default deployment's remote cache, remote execution, and BES backend (when advertised).")
+    print("Add --deployment <name> to target a specific deployment instead of the default.")
+
+def _print_configured_usage_hint(summary):
+    """Post-configure hint naming the just-configured deployment and the remote
+    capabilities it actually advertises. Leads with a blank line to set it apart."""
+    flag = "--aspect-remote --deployment=" + summary.name
+    print("")
+    print("Pass " + flag + " to a task (e.g. `aspect build " + flag + "`)")
+    print("to use this deployment's " + join_and(capabilities(summary)) + ".")
 
 def _login_impl(ctx: TaskContext) -> int:
     if ctx.args.with_token and ctx.args.with_api_token:
         error(ctx.std, "--with-token and --with-api-token are mutually exclusive.")
         return 1
-    elif ctx.args.with_token:
+
+    deployment = ctx.args.deployment
+    if ctx.args.with_token:
         token = ctx.std.io.stdin.read_to_string().strip()
         if not token:
             error(ctx.std, "No token on stdin")
             return 1
-        creds = ctx.aspect.auth.login(token = token)
-        ctx.aspect.auth.persist(creds, profile = ctx.args.profile)
-        print("Logged in as " + creds.name + " (" + creds.email + ")")
+        creds = ctx.aspect.auth.login(token = token, deployment = deployment)
     elif ctx.args.with_api_token:
         inp = ctx.std.io.stdin.read_to_string().strip()
         if not inp:
             error(ctx.std, "No API token on stdin")
             return 1
-        creds = ctx.aspect.auth.login(api_token = inp)
-        ctx.aspect.auth.persist(creds, profile = ctx.args.profile)
-        print("Logged in as " + creds.name + " (" + creds.email + ")")
+        creds = ctx.aspect.auth.login(api_token = inp, deployment = deployment)
     else:
-        session = ctx.aspect.auth.login()
-        result = ctx.std.process.command("open").arg(session.url).spawn().wait()
-        if not result.success:
-            print("Open this URL to log in:")
-            print("  " + session.url)
-        else:
-            print("Browser opened. Waiting for authentication...")
-        creds = session.wait()
-        ctx.aspect.auth.persist(creds, profile = ctx.args.profile)
-        print("Logged in as " + creds.name + " (" + creds.email + ")")
+        creds = _run_browser_login(ctx, deployment)
+
+    # Persist under the deployment's own profile (so endpoint auth resolves it by
+    # host) unless the user pinned an explicit --profile.
+    profile = ctx.args.profile or ctx.aspect.auth.login_profile(deployment = deployment)
+    ctx.aspect.auth.persist(creds, profile = profile)
+    print("Logged in as " + creds.name + " (" + creds.email + ")")
     return 0
 
 login = task(
     group = ["auth"],
+    summary = "Log in to your Aspect account or a Workflows deployment",
+    description = "Authenticate via the browser (or a token on stdin) and store the credential. Targets your Aspect account by default (used for Aspect Cloud services such as the GitHub App API on CI); pass --deployment <name> to log in to a configured Workflows deployment instead.",
     implementation = _login_impl,
     args = {
         "with_token": args.boolean(
@@ -45,45 +140,173 @@ login = task(
             default = False,
             description = "Log in with an 'id:secret' API token read from stdin instead of the browser flow.",
         ),
+        "deployment": args.string(
+            description = "Log in to this configured Workflows deployment (see `aspect auth configure`) instead of your Aspect account. Selects which account/deployment to authenticate.",
+        ),
         "profile": args.string(
-            description = "Credentials profile name. Defaults to $ASPECT_AUTH_PROFILE, then \"default\".",
+            description = "Advanced: the credential store key to save under (defaults to the deployment name, or \"default\" for the Aspect account). Unlike --deployment (which picks who to authenticate), --profile only changes where the credential is filed — use it to keep two identities for the same account/deployment side by side. Also settable via $ASPECT_AUTH_PROFILE.",
+        ),
+    },
+)
+
+def _configure_impl(ctx: TaskContext) -> int:
+    if len(ctx.args.host) != 1:
+        error(ctx.std, "Provide exactly one deployment host, e.g. `aspect auth configure remote.acme.aspect.build`.")
+        return 1
+    host = ctx.args.host[0]
+    info = ctx.aspect.auth.configure(host, name = ctx.args.name, make_default = ctx.args.default)
+
+    if info.status == "unreachable":
+        error(ctx.std, "Could not reach '" + host + "' (" + info.reason + ").")
+        error(ctx.std, "Check your network and that the host is correct, then try again.")
+        return 1
+    if info.status == "not_a_deployment":
+        error(ctx.std, "'" + host + "' is not an Aspect Workflows deployment authentication endpoint.")
+        error(ctx.std, "Double-check the URL — it should be the deployment's remote-cache or BES host (e.g. remote.<deployment>.example.com).")
+        return 1
+
+    print("Configured deployment '" + info.name + "'.")
+    if not info.can_login:
+        print("")
+        print("This deployment does not advertise its login config, so the CLI")
+        print("cannot log in against it. Add the issuer, client_id, and hosts to")
+        print("~/.aspect/config.json by hand.")
+        return 1
+    if not ctx.args.login:
+        print("")
+        print("Run `aspect auth login --deployment " + info.name + "` to authenticate")
+        print("(interactively, or with an API token via --with-api-token).")
+        return 0
+    creds = _run_browser_login(ctx, info.name)
+    ctx.aspect.auth.persist(creds, profile = info.name)
+    print("")
+    summary = ctx.aspect.auth.deployment_summary(info.name)
+    if summary != None:
+        _print_deployment(summary)
+        _print_configured_usage_hint(summary)
+    return 0
+
+configure = task(
+    group = ["auth"],
+    summary = "Configure an Aspect Workflows deployment",
+    description = "Discover a deployment's auth config and endpoints from one of its hosts and record it in ~/.aspect/config.json, then (by default) run the interactive login.",
+    implementation = _configure_impl,
+    args = {
+        "host": args.positional(
+            description = "A deployment host or endpoint URL (e.g. remote.acme.aspect.build). Its /.well-known/oauth-protected-resource document is fetched to discover the auth config.",
+        ),
+        "name": args.string(
+            description = "Name for this deployment. Defaults to a name derived from the host.",
+        ),
+        "default": args.boolean(
+            default = False,
+            description = "Make this the default deployment (what build/test target without an explicit --deployment), taking over from any current default. Without it, a deployment becomes the default only when none is set yet.",
+        ),
+        "login": args.boolean(
+            default = True,
+            description = "Run the interactive login after configuring.",
         ),
     },
 )
 
 def _logout_impl(ctx: TaskContext) -> int:
-    ctx.aspect.auth.logout(profile = ctx.args.profile)
-    print("Logged out.")
+    if ctx.args.all:
+        ctx.aspect.auth.logout(all = True)
+        print("Logged out of all deployments.")
+        return 0
+    name = ctx.aspect.auth.logout(deployment = ctx.args.deployment, profile = ctx.args.profile)
+    print("Logged out of '" + name + "'.")
     return 0
 
 logout = task(
     group = ["auth"],
+    summary = "Log out of your Aspect account or a Workflows deployment",
+    description = "Clear a stored credential: the effective default (your Aspect account, or the default deployment) unless --deployment <name> is given, or --all to clear every credential. A configured deployment stays configured; use `aspect auth remove` to forget it entirely.",
     implementation = _logout_impl,
     args = {
+        "deployment": args.string(
+            description = "Log out of this configured Workflows deployment instead of the effective default. Logging out of the current default deployment also clears the default (no fall-through to another).",
+        ),
+        "all": args.boolean(
+            default = False,
+            description = "Log out everywhere — clear every stored credential (your Aspect account and all deployments).",
+        ),
         "profile": args.string(
-            description = "Credentials profile name. Defaults to $ASPECT_AUTH_PROFILE, then \"default\".",
+            description = "Advanced: the exact credential store key to clear, overriding the one derived from --deployment. See `aspect auth login --help`.",
         ),
     },
 )
 
-def _whoami_impl(ctx: TaskContext) -> int:
-    creds = ctx.aspect.auth.credentials(profile = ctx.args.profile)
-    if creds == None:
-        print("Not logged in. Run `aspect auth login` to authenticate.")
-        return 1
-    print("Logged in as:")
-    print("  Name:   " + creds.name)
-    print("  Email:  " + creds.email)
-    print("  Tenant: " + creds.tenant_id)
-    print("  Token:  " + creds.token_status)
+def _status_impl(ctx: TaskContext) -> int:
+    entries = ctx.aspect.auth.list()
+
+    # The built-in Aspect *account* (no build endpoints) vs. the configured
+    # Workflows *deployments* are two different things — show them apart.
+    account = [d for d in entries if d.builtin]
+    deployments = [d for d in entries if not d.builtin]
+
+    print("Aspect account:")
+    for d in account:
+        _print_deployment(d, header = False)
+
+    print("")
+    if deployments:
+        print("Workflows deployments:")
+        for d in deployments:
+            print("")
+            _print_deployment(d)
+        print("")
+        print("● = default. Switch with `aspect auth use <name>`.")
+        _print_default_usage_hint()
+    else:
+        print("No Workflows deployments configured.")
+        print("Run `aspect auth configure <host>` to add one.")
     return 0
 
-whoami = task(
+status = task(
     group = ["auth"],
-    implementation = _whoami_impl,
+    summary = "Show your Aspect account and deployment login status",
+    description = "Show your Aspect account and every configured Workflows deployment — the identity and token status of each, the default deployment (●), and how to log in to any that are logged out.",
+    implementation = _status_impl,
+    args = {},
+)
+
+def _use_impl(ctx: TaskContext) -> int:
+    if len(ctx.args.deployment) != 1:
+        error(ctx.std, "Provide exactly one deployment name, e.g. `aspect auth use gcp.acme`.")
+        return 1
+    ctx.aspect.auth.set_default(ctx.args.deployment[0])
+    print("Default deployment is now '" + ctx.args.deployment[0] + "'.")
+    return 0
+
+use = task(
+    group = ["auth"],
+    summary = "Set the default Workflows deployment",
+    description = "Make a configured deployment the default, so build/test (and `--deployment`-aware commands) target it — e.g. `aspect build --aspect-remote` — without naming it each time.",
+    implementation = _use_impl,
     args = {
-        "profile": args.string(
-            description = "Credentials profile name. Defaults to $ASPECT_AUTH_PROFILE, then \"default\".",
+        "deployment": args.positional(
+            description = "Name of a configured deployment (see `aspect auth status`) to make the default.",
+        ),
+    },
+)
+
+def _remove_impl(ctx: TaskContext) -> int:
+    if len(ctx.args.deployment) != 1:
+        error(ctx.std, "Provide exactly one deployment name, e.g. `aspect auth remove gcp.acme`.")
+        return 1
+    ctx.aspect.auth.remove(ctx.args.deployment[0])
+    print("Removed deployment '" + ctx.args.deployment[0] + "'.")
+    return 0
+
+remove = task(
+    group = ["auth"],
+    summary = "Forget a configured deployment",
+    description = "Delete a configured deployment from ~/.aspect/config.json and clear its stored credential. Use `aspect auth logout` to only clear the credential and keep the deployment configured.",
+    implementation = _remove_impl,
+    args = {
+        "deployment": args.positional(
+            description = "Name of a configured deployment (see `aspect auth status`) to forget.",
         ),
     },
 )

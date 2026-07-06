@@ -1,0 +1,92 @@
+"""Unit tests for the pure string builders in `auth.axl` (the `status`/`configure`
+detail rendering): `identity`, `login_command`, `capabilities`, `status_line`.
+
+A struct-based fake summary substitutes for a real `DeploymentSummary` (only the
+fields these helpers read are set). The `print`-driven `_print_deployment` /
+usage-hint functions and the fail() paths are exercised end-to-end, not here.
+
+Run with:
+  aspect dev test-auth
+"""
+
+load("@aspect//auth.axl", "capabilities", "identity", "login_command", "status_line")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _summary(
+        name = "gcp",
+        builtin = False,
+        default = False,
+        logged_in = False,
+        display_name = "",
+        email = "",
+        status = "",
+        cache = "",
+        bes = "",
+        exec = ""):
+    return struct(
+        name = name,
+        builtin = builtin,
+        default = default,
+        logged_in = logged_in,
+        display_name = display_name,
+        email = email,
+        status = status,
+        cache = cache,
+        bes = bes,
+        exec = exec,
+    )
+
+def _test_identity(_):
+    _eq("name + email", identity(_summary(display_name = "Greg Magolan", email = "g@x.io")), "Greg Magolan <g@x.io>")
+    _eq("email only", identity(_summary(email = "g@x.io")), "g@x.io")
+    _eq("name only", identity(_summary(display_name = "Greg")), "Greg")
+    _eq("neither", identity(_summary()), "")
+
+def _test_login_command(_):
+    _eq("account → bare", login_command(_summary(builtin = True, name = "aspect")), "aspect auth login")
+    _eq("deployment → --deployment", login_command(_summary(name = "gcp.acme")), "aspect auth login --deployment gcp.acme")
+
+def _test_capabilities(_):
+    _eq("cache + bes", capabilities(_summary(cache = "c", bes = "b")), ["remote cache", "BES backend"])
+    _eq("cache + exec + bes order", capabilities(_summary(cache = "c", bes = "b", exec = "e")), ["remote cache", "remote execution", "BES backend"])
+    _eq("none", capabilities(_summary()), [])
+
+def _test_status_line(_):
+    _eq(
+        "logged out → login hint",
+        status_line(_summary(name = "gcp")),
+        "logged out (run `aspect auth login --deployment gcp`)",
+    )
+    _eq(
+        "logged in with identity + expiry",
+        status_line(_summary(logged_in = True, display_name = "Greg", email = "g@x.io", status = "expires in 2h")),
+        "logged in as Greg <g@x.io>, expires in 2h",
+    )
+    _eq(
+        "logged in, no identity, no status",
+        status_line(_summary(logged_in = True)),
+        "logged in",
+    )
+
+_UNIT_TESTS = [
+    _test_identity,
+    _test_login_command,
+    _test_capabilities,
+    _test_status_line,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("auth.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+auth_tests = task(
+    kind = "test-auth",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

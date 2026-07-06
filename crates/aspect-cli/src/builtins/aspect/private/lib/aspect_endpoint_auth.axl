@@ -3,36 +3,39 @@ to the Bazel-facing endpoints the CLI authenticates: the BES backend (CLI-stream
 `--bes-backend` or Bazel-streamed `--bes_backend`) and the remote cache
 (`--remote_cache`).
 
-The JWT is attached only to Aspect-owned endpoints, so an endpoint pointed at a
-third party never receives Aspect credentials. An endpoint is Aspect-owned when
-its host matches a configured suffix: the built-in `.aspect.build`, comma-separated
-entries from `$ASPECT_AUTH_HOSTS`, or `BazelTrait.aspect_auth_hosts` (for
-self-hosted endpoints on a vanity domain, e.g. `aspect.ci.acme.com`).
+The JWT is attached only to a host owned by a deployment configured via `aspect
+auth configure` (its advertised cache/bes/exec hosts, in `~/.aspect/config.json`),
+so an endpoint pointed at a third party never receives Aspect credentials. This
+mirrors the credential helper (`aspect get`): both gate purely on configured
+deployment hosts, with no built-in suffix or env-var auto-matching.
 
-This module owns the host parsing, suffix matching, header-auth detection, and
+This module owns the host parsing, ownership check, header-auth detection, and
 the best-effort bearer resolution; the consumers attach the result —
 `bes_sinks.axl` to the CLI sink's metadata, `bazel_flags.axl` to a
-`--bes_header` / `--remote_header` flag. Best-effort: an Aspect-owned endpoint
-with no usable credential warns and proceeds unauthenticated rather than failing
-(the server's own rejection then surfaces downstream).
+`--bes_header` / `--remote_header` flag. Best-effort: an owned endpoint with no
+usable credential warns and proceeds unauthenticated rather than failing (the
+server's own rejection then surfaces downstream).
 """
 
 load("./environment.axl", "warn")
 
-# Built-in suffix matched before any user-supplied override.
-_DEFAULT_HOST_SUFFIX = ".aspect.build"
+_NOT_AUTHENTICATED_MSG = "Not authenticated with Aspect; talking to %s without auth. Run `%s` to authenticate."
 
-# Env var holding extra comma-separated host suffixes.
-_HOSTS_ENV = "ASPECT_AUTH_HOSTS"
-
-_NOT_AUTHENTICATED_MSG = "Not authenticated with Aspect; talking to %s without auth. Run `aspect auth login` to authenticate."
+def login_hint(deployment) -> str:
+    """The `aspect auth login` command that re-authenticates `deployment`, naming
+    it with `--deployment` so the hint doesn't assume the default. A falsy
+    `deployment` (no configured deployment owns the endpoint) → the bare login.
+    Public so `aspect_endpoint_auth_test.axl` can load it."""
+    if not deployment:
+        return "aspect auth login"
+    return "aspect auth login --deployment " + deployment
 
 def endpoint_host(uri: str) -> str:
     """Extract the lowercased host from an endpoint URI.
 
     Handles `scheme://host[:port][/path]` and a bare `host[:port]`. Scheme,
     userinfo, port, and path are stripped so the result is just the host for
-    suffix matching. IPv6 literals are not handled (Aspect hosts are DNS names).
+    ownership matching. IPv6 literals are not handled (Aspect hosts are DNS names).
     """
     rest = uri
     sep = rest.find("://")
@@ -45,38 +48,23 @@ def endpoint_host(uri: str) -> str:
         rest = rest.rsplit(":", 1)[0]
     return rest.lower()
 
-def aspect_auth_host_suffixes(std, bazel_trait) -> list[str]:
-    """Resolve the host suffixes whose endpoints receive the Aspect login JWT:
-    the built-in suffix, `$ASPECT_AUTH_HOSTS`, and `BazelTrait.aspect_auth_hosts`.
-    Entries are lowercased and empties dropped.
-    """
-    suffixes = [_DEFAULT_HOST_SUFFIX]
-    env_hosts = std.env.var(_HOSTS_ENV) or ""
-    for h in env_hosts.split(",") + bazel_trait.aspect_auth_hosts:
-        h = h.strip().lower()
-        if h:
-            suffixes.append(h)
-    return suffixes
+def is_aspect_host(ctx, host: str) -> bool:
+    """Whether `host` is owned by a configured deployment (its advertised
+    cache/bes/exec host). The engine's `deployment_for_host` returns the owning
+    deployment's name, else `None`."""
+    return bool(host) and ctx.aspect.auth.deployment_for_host(host) != None
 
-def is_aspect_host(host: str, suffixes: list[str]) -> bool:
-    """Whether `host` is Aspect-owned: an exact match or a dot-anchored suffix
-    match (so `evil-aspect.build` does not match `.aspect.build`)."""
-    for suffix in suffixes:
-        bare = suffix[1:] if suffix.startswith(".") else suffix
-        if host == bare or host.endswith("." + bare):
-            return True
-    return False
-
-def needs_aspect_token(uris: list[str], have_user_auth: bool, suffixes: list[str]) -> bool:
+def needs_aspect_token(ctx, uris: list[str], have_user_auth: bool) -> bool:
     """Whether the Aspect login JWT must be resolved for these endpoints.
 
     True only when the user did not already supply their own auth AND at least
-    one endpoint is Aspect-owned. Gating credential resolution on this keeps a
-    stale/expired local login (which makes `credentials()` raise) from aborting
-    a build whose endpoints are all third-party or already carry user auth.
+    one endpoint is owned by a configured deployment. Gating credential
+    resolution on this keeps a stale/expired local login (which makes
+    `credentials()` raise) from aborting a build whose endpoints are all
+    third-party or already carry user auth.
     """
     return not have_user_auth and any([
-        is_aspect_host(endpoint_host(u), suffixes)
+        is_aspect_host(ctx, endpoint_host(u))
         for u in uris
     ])
 
@@ -87,18 +75,24 @@ def headers_have_auth(headers: list[str]) -> bool:
     prefix."""
     return any([h.lower().startswith("authorization=") for h in headers])
 
-def resolve_aspect_bearer(ctx, what: str) -> str:
-    """Best-effort resolution of the `Bearer <jwt>` Authorization value, for an
-    endpoint described by `what` (e.g. "build events", "the remote cache").
+def resolve_aspect_bearer(ctx, what: str, uri: str = "") -> str:
+    """Best-effort resolution of the `Bearer <jwt>` Authorization value for the
+    endpoint `uri`, described by `what` (e.g. "build events", "the remote cache").
+
+    Credentials are read from the configured deployment that owns the endpoint's
+    host, so a self-hosted endpoint attaches the token it was logged in with.
+    Callers gate on `needs_aspect_token`, so `uri` is always a host a configured
+    deployment owns; `deployment_for_host` resolves its name.
 
     Returns `"Bearer <jwt>"`, or `""` if the user is not authenticated (never
     logged in, or an expired session that cannot be refreshed). In the
     unauthenticated case a warning is printed; the caller proceeds without auth.
-    Callers must gate this on `needs_aspect_token` so the warning fires only when
-    an Aspect-owned endpoint actually lacks credentials.
     """
-    creds = ctx.aspect.auth.credentials(required = False)
+    deployment = ctx.aspect.auth.deployment_for_host(endpoint_host(uri)) if uri else None
+
+    # The deployment name is also its credential-store key (the `profile`).
+    creds = ctx.aspect.auth.credentials(profile = deployment, required = False)
     if creds == None or not creds.access_token:
-        warn(ctx.std, _NOT_AUTHENTICATED_MSG % what)
+        warn(ctx.std, _NOT_AUTHENTICATED_MSG % (what, login_hint(deployment)))
         return ""
     return "Bearer " + creds.access_token

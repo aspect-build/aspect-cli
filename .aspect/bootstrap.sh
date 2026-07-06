@@ -298,6 +298,13 @@ fi
 
 export BAZEL_STARTUP_OPTS
 export BAZEL_BUILD_OPTS="--config=ci ${BAZEL_REMOTE_FLAGS}"
+# On GitHub Actions, disable Bazel's curses UI — the log viewer doesn't render
+# cursor-movement escapes, so the animated progress leaves garbled, duplicated
+# lines. Plain streaming output reads correctly. Must come after --config=ci so
+# it wins over any --curses set by that config.
+if [ -n "${GITHUB_ACTIONS:-}" ]; then
+    BAZEL_BUILD_OPTS="${BAZEL_BUILD_OPTS} --curses=no"
+fi
 export DISABLE_PLUGINS_FLAG
 export LOCK_VERSION_FLAG
 

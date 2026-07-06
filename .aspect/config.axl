@@ -1,3 +1,4 @@
+load("@aspect//auth_test.axl", "auth_tests")
 load("@aspect//feature/artifacts.axl", "ArtifactUpload")
 load("@aspect//feature/buildkite_annotations.axl", "BuildkiteAnnotations")
 load("@aspect//feature/circleci_test_results.axl", "CircleCITestResults")
@@ -15,6 +16,7 @@ load("@aspect//private/lib/bazelrc_test.axl", "bazelrc_tests")
 load("@aspect//private/lib/ci_test.axl", "ci_tests")
 load("@aspect//private/lib/circleci_test.axl", "circleci_tests")
 load("@aspect//private/lib/delivery_results_test.axl", "delivery_results_unit_tests", "delivery_template_snapshot_tests")
+load("@aspect//private/lib/deployment_flags_test.axl", "deployment_flags_tests")
 load("@aspect//private/lib/format_results_test.axl", "format_template_snapshot_tests")
 load("@aspect//private/lib/format_spawn_test.axl", "format_spawn_tests")
 load("@aspect//private/lib/gazelle_results_test.axl", "gazelle_template_snapshot_tests")
@@ -365,6 +367,14 @@ def config(ctx: ConfigContext):
     # aspect_endpoint_auth.axl: host parsing, suffix matching, credential gate.
     # Run with: aspect dev test-aspect-endpoint-auth
     ctx.tasks.add(aspect_endpoint_auth_tests)
+
+    # deployment_flags.axl: --deployment / --aspect-* capability resolution.
+    # Run with: aspect dev test-deployment-flags
+    ctx.tasks.add(deployment_flags_tests)
+
+    # auth.axl: status/configure detail string builders.
+    # Run with: aspect dev test-auth
+    ctx.tasks.add(auth_tests)
 
     # delivery_results template snapshots.
     # Run with: aspect dev test-delivery-template-snapshots

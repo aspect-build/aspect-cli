@@ -10,16 +10,15 @@ def _eq(label, got, want):
     if got != want:
         fail("%s: got %r, want %r" % (label, got, want))
 
-def _fake_trait(extra_startup = [], startup_transform = None, extra = [], task_flags = [], transform = None, aspect_auth_hosts = []):
-    """Stand-in for `BazelTrait` covering the startup-flag, command-flag, and
-    endpoint-auth fields the helpers read."""
+def _fake_trait(extra_startup = [], startup_transform = None, extra = [], task_flags = [], transform = None):
+    """Stand-in for `BazelTrait` covering the startup-flag and command-flag fields
+    the flag helpers read."""
     return struct(
         extra_startup_flags = extra_startup,
         startup_flags = startup_transform,
         extra_flags = extra,
         task_flags = task_flags,
         flags = transform,
-        aspect_auth_hosts = aspect_auth_hosts,
     )
 
 def _fake_ctx(bazel_startup_flags = [], bazel_flags = []):
@@ -36,8 +35,6 @@ def _ctx_with_ci(on_ci):
     so `resolve_announce`'s `auto` branch can be exercised deterministically."""
     env_vars = {"CI": "1"} if on_ci else {}
     return struct(std = struct(env = struct(var = lambda name: env_vars.get(name))))
-
-# ── resolve_announce ─────────────────────────────────────────────────────
 
 def _test_resolve_announce_auto_follows_ci(ctx):
     _eq("auto on CI", resolve_announce(_ctx_with_ci(True), "auto"), True)
@@ -65,8 +62,6 @@ def _test_announce_bazel_args_shape(_ctx):
         sorted(aa.keys()),
         ["announce_bazel_command", "announce_bazel_rc", "announce_bazel_version"],
     )
-
-# ── resolve_startup_flags ────────────────────────────────────────────────
 
 def _test_startup_cli_only(ctx):
     """CLI flags pass through when the trait contributes nothing."""
@@ -116,8 +111,6 @@ def _test_startup_input_list_not_mutated(ctx):
     resolve_startup_flags(_fake_ctx(bazel_startup_flags = cli), _fake_trait(extra_startup = ["--trait"]))
     _eq("startup cli list untouched", cli, ["--client"])
 
-# ── resolve_flags ────────────────────────────────────────────────────────
-
 def _test_flags_full_chain_order(ctx):
     """Slot ordering:
         ctx.args.bazel_flags + bazel_trait.extra_flags
@@ -141,8 +134,6 @@ def _test_flags_empty_defaults(ctx):
         resolve_flags(_fake_ctx(), _fake_trait()),
         [],
     )
-
-# ── setup_bazel_command (integration) ────────────────────────────────────
 
 def _test_setup_bazel_command_applies_to_ctx_bazel(ctx):
     """End-to-end check on a real `ctx`:
@@ -192,8 +183,6 @@ def _test_sibling_rc_transforms_startup(ctx):
     if ctx.bazel.active_rc() != active:
         fail("sibling_rc — must not change the active run command")
 
-# ── requested_config_names (pure) ────────────────────────────────────────
-
 def _test_requested_config_names(ctx):
     """Extracts `--config=NAME` names from plain and version-gated flags,
     ignoring everything else."""
@@ -241,8 +230,6 @@ def _test_flags_delta(ctx):
     # No extras → empty delta.
     _eq("empty", flags_delta(["--a", "--b"], ["--a", "--b"]), [])
 
-# ── endpoint auth flags ──────────────────────────────────────────────────
-
 def _fake_rc(values = {}):
     """Stand-in `RunCommand` over a `{flag: value}` map for single-value flags
     (`--remote_cache`/`--bes_backend`) and a `{flag: [values]}` map for
@@ -253,99 +240,104 @@ def _fake_rc(values = {}):
         flag_values = lambda name, command = None, version = None: values.get(name, []),
     )
 
-def _fake_auth_ctx(access_token = ""):
-    """Stand-in `ctx` for the auth path: `std` reports no env / non-TTY (so
-    suffix resolution sees only the built-in and `warn` stays quiet-but-valid),
-    and `aspect.auth.credentials` returns a fake login (or None when no token)."""
+def _fake_auth_ctx(access_token = "", owned_hosts = []):
+    """Stand-in `ctx` for the auth path: `deployment_for_host` reports a host as
+    owned (returning its host as the deployment name) iff it is in `owned_hosts`,
+    `credentials` returns a fake login (or None when no token), and `std` reports
+    non-TTY so `warn` stays quiet-but-valid."""
     creds = struct(access_token = access_token) if access_token else None
+    owned = {h: h for h in owned_hosts}
     return struct(
         std = struct(
             io = struct(stdout = struct(is_tty = False)),
             env = struct(var = lambda name: None),
         ),
-        aspect = struct(auth = struct(credentials = lambda required = True: creds)),
+        aspect = struct(auth = struct(
+            deployment_for_host = lambda host: owned.get(host),
+            credentials = lambda profile = None, required = True: creds,
+        )),
     )
 
 _TOK = "fake-access-token"
 
-def _test_remote_cache_auth_flags(_):
-    """`--remote_header` auth only for an Aspect-owned cache lacking a user
-    authorization header, and only when a credential resolves."""
-    trait = _fake_trait()
-    ctx = _fake_auth_ctx(access_token = _TOK)
+_CACHE = "remote.acme.aspect.build"
+_BES = "bes.acme.aspect.build"
 
-    _eq("no --remote_cache", remote_cache_auth_flags(ctx, _fake_rc(), "build", trait), [])
+def _test_remote_cache_auth_flags(_):
+    """`--remote_header` auth only for a cache owned by a configured deployment,
+    lacking a user authorization header, and only when a credential resolves."""
+    ctx = _fake_auth_ctx(access_token = _TOK, owned_hosts = [_CACHE])
+
+    _eq("no --remote_cache", remote_cache_auth_flags(ctx, _fake_rc(), "build"), [])
     _eq(
-        "third-party cache",
-        remote_cache_auth_flags(ctx, _fake_rc({"--remote_cache": "grpcs://remote.buildbuddy.io"}), "build", trait),
+        "unowned cache",
+        remote_cache_auth_flags(ctx, _fake_rc({"--remote_cache": "grpcs://remote.buildbuddy.io"}), "build"),
         [],
     )
     _eq(
-        "aspect cache + creds",
-        remote_cache_auth_flags(ctx, _fake_rc({"--remote_cache": "grpcs://remote.aspect.build"}), "build", trait),
+        "owned cache + creds",
+        remote_cache_auth_flags(ctx, _fake_rc({"--remote_cache": "grpcs://" + _CACHE}), "build"),
         ["--remote_header=authorization=Bearer " + _TOK],
     )
     _eq(
-        "aspect cache + user authorization header",
+        "owned cache + user authorization header",
         remote_cache_auth_flags(
             ctx,
-            _fake_rc({"--remote_cache": "grpcs://remote.aspect.build", "--remote_header": ["authorization=Bearer user"]}),
+            _fake_rc({"--remote_cache": "grpcs://" + _CACHE, "--remote_header": ["authorization=Bearer user"]}),
             "build",
-            trait,
         ),
         [],
     )
     _eq(
-        "aspect cache + not logged in",
-        remote_cache_auth_flags(_fake_auth_ctx(), _fake_rc({"--remote_cache": "grpcs://remote.aspect.build"}), "build", trait),
+        "owned cache + not logged in",
+        remote_cache_auth_flags(
+            _fake_auth_ctx(owned_hosts = [_CACHE]),
+            _fake_rc({"--remote_cache": "grpcs://" + _CACHE}),
+            "build",
+        ),
         [],
     )
 
 def _test_bes_backend_auth_flags(_):
-    """`--bes_header` auth for a Bazel-streamed Aspect-owned `--bes_backend`,
-    same gate as the cache path but on the BES flag pair."""
-    trait = _fake_trait()
-    ctx = _fake_auth_ctx(access_token = _TOK)
+    """`--bes_header` auth for a Bazel-streamed `--bes_backend` owned by a
+    configured deployment, same gate as the cache path but on the BES flag pair."""
+    ctx = _fake_auth_ctx(access_token = _TOK, owned_hosts = [_BES])
 
-    _eq("third-party bes", bes_backend_auth_flags(ctx, _fake_rc({"--bes_backend": "grpcs://bes.buildbuddy.io"}), "build", trait), [])
+    _eq("unowned bes", bes_backend_auth_flags(ctx, _fake_rc({"--bes_backend": "grpcs://bes.buildbuddy.io"}), "build"), [])
     _eq(
-        "aspect bes + creds",
-        bes_backend_auth_flags(ctx, _fake_rc({"--bes_backend": "grpcs://bes.aspect.build"}), "build", trait),
+        "owned bes + creds",
+        bes_backend_auth_flags(ctx, _fake_rc({"--bes_backend": "grpcs://" + _BES}), "build"),
         ["--bes_header=authorization=Bearer " + _TOK],
     )
     _eq(
-        "aspect bes + user authorization header",
+        "owned bes + user authorization header",
         bes_backend_auth_flags(
             ctx,
-            _fake_rc({"--bes_backend": "grpcs://bes.aspect.build", "--bes_header": ["Authorization=Bearer user"]}),
+            _fake_rc({"--bes_backend": "grpcs://" + _BES, "--bes_header": ["Authorization=Bearer user"]}),
             "build",
-            trait,
         ),
         [],
     )
 
 def _test_aspect_endpoint_auth_flags(_):
-    """The combined helper concatenates cache + BES auth; an Aspect cache and an
-    Aspect bes backend in the same invocation each get their header."""
-    ctx = _fake_auth_ctx(access_token = _TOK)
+    """The combined helper concatenates cache + BES auth; an owned cache and an
+    owned bes backend in the same invocation each get their header."""
+    ctx = _fake_auth_ctx(access_token = _TOK, owned_hosts = [_CACHE, _BES])
     _eq(
         "cache + bes together",
         aspect_endpoint_auth_flags(
             ctx,
-            _fake_rc({"--remote_cache": "grpcs://remote.aspect.build", "--bes_backend": "grpcs://bes.aspect.build"}),
+            _fake_rc({"--remote_cache": "grpcs://" + _CACHE, "--bes_backend": "grpcs://" + _BES}),
             "build",
-            _fake_trait(),
         ),
         ["--remote_header=authorization=Bearer " + _TOK, "--bes_header=authorization=Bearer " + _TOK],
     )
 
-# ── contract enforcement ─────────────────────────────────────────────────
-#
-# The helpers fail with a clear message when a calling task omits the
-# required args (`bazel_flags`, `bazel_startup_flags`, the `announce_bazel_*`
-# trio). Happy-path coverage is implicit in every other subtest — the test
-# task declares them all. Failure-path coverage would require a second task
-# without the args, which isn't worth the test plumbing.
+# The helpers fail with a clear message when a calling task omits the required
+# args (`bazel_flags`, `bazel_startup_flags`, the `announce_bazel_*` trio).
+# Happy-path coverage is implicit in every other subtest — the test task
+# declares them all. Failure-path coverage would require a second task without
+# the args, which isn't worth the test plumbing.
 
 def _test_impl(ctx):
     _test_startup_cli_only(ctx)
