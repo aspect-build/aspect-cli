@@ -14,7 +14,7 @@ resolution. (The companion case — BES routed through Bazel via
 `bazel_flags.axl` instead.)
 """
 
-load("./aspect_endpoint_auth.axl", "aspect_auth_host_suffixes", "endpoint_host", "headers_have_auth", "is_aspect_host", "needs_aspect_token", "resolve_aspect_bearer")
+load("./aspect_endpoint_auth.axl", "endpoint_host", "headers_have_auth", "is_aspect_host", "resolve_aspect_bearer")
 
 def bes_args() -> dict:
     """The `bes_backends` / `bes_headers` CLI args every BES-capable task
@@ -23,7 +23,7 @@ def bes_args() -> dict:
     return {
         "bes_backends": args.string_list(
             long = "bes-backend",
-            description = "Build Event Service backend(s) the CLI streams BEP events to (e.g. --bes-backend=grpcs://bes.example.com). Repeat to pass multiple. The Aspect login JWT is attached automatically for Aspect-owned backends.",
+            description = "Build Event Service backend(s) the CLI streams BEP events to (e.g. --bes-backend=grpcs://bes.example.com). Repeat to pass multiple. The Aspect login JWT is attached automatically for a backend owned by a configured deployment.",
         ),
         "bes_headers": args.string_list(
             long = "bes-header",
@@ -31,34 +31,49 @@ def bes_args() -> dict:
         ),
     }
 
-def collect_bes_from_args(ctx, bazel_trait) -> list:
+def collect_bes_from_args(ctx, extra_backends = []) -> list:
     """Build the CLI-streamed BES sinks from `--bes-backend` / `--bes-header`.
 
-    Attaches the Aspect login JWT as `Authorization: Bearer <jwt>` to each
-    Aspect-owned backend when the user has not supplied their own `authorization`
-    header; other backends are left untouched so a user token (or none) is
-    honored. Best-effort: an Aspect backend with no usable credential warns and
-    streams unauthenticated rather than failing.
+    Attaches the Aspect login JWT as `Authorization: Bearer <jwt>` to each backend
+    a configured deployment owns when the user has not supplied their own
+    `authorization` header; other backends are left untouched so a user token (or
+    none) is honored. Best-effort: an owned backend with no usable credential
+    warns and streams unauthenticated rather than failing.
+
+    `extra_backends` are additional BES backend URIs to stream to (e.g. the BES
+    host `--deployment` wires up), unioned with `--bes-backend` and deduped so a
+    URI passed both ways yields one sink.
 
     Returns a list of sinks to splice into a task's `build_events`; the caller
     `wait()`s them after the build.
     """
-    suffixes = aspect_auth_host_suffixes(ctx.std, bazel_trait)
-
     metadata = {}
     for bes_header in ctx.args.bes_headers:
         (k, _, v) = bes_header.partition("=")
         metadata[k] = v
 
-    bearer = ""
-    if needs_aspect_token(ctx.args.bes_backends, headers_have_auth(ctx.args.bes_headers), suffixes):
-        bearer = resolve_aspect_bearer(ctx, "build events")
+    user_auth = headers_have_auth(ctx.args.bes_headers)
+
+    # Resolve (and, if unauthenticated, warn) once per distinct owning host so
+    # multiple owned backends on the same host don't each read credentials and
+    # print a duplicate warning.
+    bearer_by_host = {}
+
+    backends = list(ctx.args.bes_backends)
+    for b in extra_backends:
+        if b not in backends:
+            backends.append(b)
 
     sinks = []
-    for bes_backend in ctx.args.bes_backends:
+    for bes_backend in backends:
         backend_metadata = dict(metadata)
-        if bearer and is_aspect_host(endpoint_host(bes_backend), suffixes):
-            backend_metadata["Authorization"] = bearer
+        host = endpoint_host(bes_backend)
+        if not user_auth and is_aspect_host(ctx, host):
+            if host not in bearer_by_host:
+                bearer_by_host[host] = resolve_aspect_bearer(ctx, "build events", bes_backend)
+            bearer = bearer_by_host[host]
+            if bearer:
+                backend_metadata["Authorization"] = bearer
 
         sinks.append(
             bazel.build_events.grpc(

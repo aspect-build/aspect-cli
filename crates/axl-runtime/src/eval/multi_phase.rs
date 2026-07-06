@@ -68,24 +68,44 @@ fn running_verb_color() -> (String, &'static str) {
 /// The task label for the runtime's opening "Running …" and closing
 /// "Passed/Failed …" bookend lines. Reads the CI environment; see
 /// [`task_label_for`] for the pure decision.
-fn task_label(kind: &str, name: &str, name_meaningful: bool) -> String {
-    task_label_for(kind, name, name_meaningful, on_recognized_ci())
+fn task_label(group: &[String], kind: &str, name: &str, name_meaningful: bool) -> String {
+    task_label_for(group, kind, name, name_meaningful, on_recognized_ci())
+}
+
+/// The command path shown to the user: the task's group(s) and kind joined by
+/// spaces, matching the CLI invocation (`aspect auth configure`). A top-level
+/// task (no group) is just its kind (`build`).
+fn task_command_path(group: &[String], kind: &str) -> String {
+    if group.is_empty() {
+        kind.to_string()
+    } else {
+        format!("{} {}", group.join(" "), kind)
+    }
 }
 
 /// Pure core of [`task_label`], env-injected for testing.
 ///
-/// When the name carries information beyond the kind, mirror the CI status
-/// surfaces: lead with the name and bracket the kind as extra context
-/// (`<name> [<kind>]`). That's the case when the name differs from the kind
-/// AND either it's meaningful (an explicit `--task:name` / CI-job-derived name)
-/// or we're on CI (where the name is part of the status-check identity). For a
-/// bare local run the name is a `<kind>-<random-suffix>` placeholder that reads
-/// as noise, so show just `<kind> task`.
-fn task_label_for(kind: &str, name: &str, name_meaningful: bool, on_ci: bool) -> String {
+/// The task is identified by its command path (`<group…> <kind>`, space-joined
+/// to match what the user typed — `auth configure`). When the name carries
+/// information beyond the kind, mirror the CI status surfaces: lead with the name
+/// and bracket the path as extra context (`<name> [<path>]`). That's the case
+/// when the name differs from the kind AND either it's meaningful (an explicit
+/// `--task:name` / CI-job-derived name) or we're on CI (where the name is part of
+/// the status-check identity). For a bare local run the name is a
+/// `<kind>-<random-suffix>` placeholder that reads as noise, so show just
+/// `<path> task`.
+fn task_label_for(
+    group: &[String],
+    kind: &str,
+    name: &str,
+    name_meaningful: bool,
+    on_ci: bool,
+) -> String {
+    let path = task_command_path(group, kind);
     if name != kind && (name_meaningful || on_ci) {
-        format!("{name} [{kind}]")
+        format!("{name} [{path}]")
     } else {
-        format!("{kind} task")
+        format!("{path} task")
     }
 }
 
@@ -388,7 +408,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             EvalError::UnknownError(anyhow!("task index {} out of range", task_index))
         })?;
         let (verb_seq, reset) = running_verb_color();
-        let label = task_label(&task.kind(), task_name, task_name_meaningful);
+        let label = task_label(task.group(), &task.kind(), task_name, task_name_meaningful);
         // Identity banner above the task header — see `crate::banner`.
         if banner::show_runtime_banner() {
             eprintln!("{}\n", banner::line_from_pkg());
@@ -495,10 +515,11 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         // else the task name verbatim.
         let task_friendly_name = task_friendly_name.unwrap_or_else(|| task_name.clone());
 
-        // Capture the kind early — `task_info` is moved into TaskContext below
-        // and is no longer accessible from the closing announcement after
+        // Capture the kind + group early — `task_info` is moved into TaskContext
+        // below and is no longer accessible from the closing announcement after
         // the eval returns.
         let task_kind = task.kind();
+        let task_group = task.group().clone();
         let task_info = TaskInfo::new(
             task.kind(),
             task.friendly_kind(),
@@ -597,7 +618,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         let on_bk = std::env::var_os("BUILDKITE")
             .map(|v| !v.is_empty())
             .unwrap_or(false);
-        let label = task_label(&task_kind, &task_name, task_name_meaningful);
+        let label = task_label(&task_group, &task_kind, &task_name, task_name_meaningful);
         let verdict = Verdict::pick(exit_code, flagged, &bold_green, &bold_yellow, &bold_red);
         if on_bk {
             // On a non-clean verdict, retroactively expand the section that is
@@ -997,24 +1018,49 @@ mod tests {
 
     #[test]
     fn task_label_brackets_kind_when_name_carries_info() {
+        let no_group: &[String] = &[];
         // Meaningful name (explicit --task:name or CI-derived) → `<name> [<kind>]`,
         // on or off CI.
         assert_eq!(
-            task_label_for("format", "format-repeat-2", true, false),
+            task_label_for(no_group, "format", "format-repeat-2", true, false),
             "format-repeat-2 [format]"
         );
         // On CI, any distinct name is bracketed even if not flagged meaningful.
         assert_eq!(
-            task_label_for("test", "test-ci-linux", false, true),
+            task_label_for(no_group, "test", "test-ci-linux", false, true),
             "test-ci-linux [test]"
         );
         // Local autogenerated placeholder (not meaningful, off CI) → just the kind.
         assert_eq!(
-            task_label_for("format", "format-brash-cherries", false, false),
+            task_label_for(no_group, "format", "format-brash-cherries", false, false),
             "format task"
         );
         // name == kind → no redundant bracket, even meaningful or on CI.
-        assert_eq!(task_label_for("lint", "lint", true, true), "lint task");
+        assert_eq!(
+            task_label_for(no_group, "lint", "lint", true, true),
+            "lint task"
+        );
+    }
+
+    #[test]
+    fn task_label_prefixes_group_as_command_path() {
+        let auth: &[String] = &["auth".to_string()];
+        // A grouped task shows its full command path (space-joined), matching the
+        // CLI invocation `aspect auth configure`.
+        assert_eq!(
+            task_label_for(auth, "configure", "configure-brash-cherries", false, false),
+            "auth configure task"
+        );
+        // The bracketed-name form brackets the whole path.
+        assert_eq!(
+            task_label_for(auth, "configure", "my-run", true, false),
+            "my-run [auth configure]"
+        );
+        // A top-level task (no group) is unchanged.
+        assert_eq!(
+            task_label_for(&[], "build", "build", false, false),
+            "build task"
+        );
     }
 
     fn phase(name: &str, emoji: &str, secs: u64) -> PhaseRecord {

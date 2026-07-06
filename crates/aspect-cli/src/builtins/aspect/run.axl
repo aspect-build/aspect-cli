@@ -82,13 +82,13 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # rejects as unrecognized (e.g. `--script_path`).
     rc = setup_phase(ctx, lifecycle, target, "bazel_results", data, hc_trait, bazel_trait, "build")
     announce_version, announce_command = resolve_bazel_announce(ctx)
-    endpoint_auth_flags = aspect_endpoint_auth_flags(ctx, rc, "build", bazel_trait)
+    endpoint_auth_flags = aspect_endpoint_auth_flags(ctx, rc, "build")
 
     # `rc=` opts into the runinfo aspect: `r.flags` then carries the spawn
     # flags + aspect injection that capture the executable, the `args` attribute,
     # and the target env so `r.spawn` replays them the way `bazel run` does.
     r = runnable(ctx, [target], rc = rc)
-    bes_sinks = collect_bes_from_args(ctx, bazel_trait)
+    bes_sinks = collect_bes_from_args(ctx)
     events = bazel.build_events.iterator()
     build_events = [events] + bes_sinks + list(bazel_trait.build_event_sinks)
 

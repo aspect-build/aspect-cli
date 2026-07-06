@@ -115,7 +115,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # failed check concludes the surface and fails the task inside).
     rc = setup_phase(ctx, lifecycle, data["target_pattern"], _KIND, data, hc_trait, bazel_trait, "build")
     announce_version, announce_command = resolve_bazel_announce(ctx)
-    endpoint_auth_flags = aspect_endpoint_auth_flags(ctx, rc, "build", bazel_trait)
+    endpoint_auth_flags = aspect_endpoint_auth_flags(ctx, rc, "build")
 
     # Clean the prior Bazel state under the runner storage mount AFTER
     # `setup_phase` — the health check must run first (the Workflows
@@ -138,7 +138,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # Populate phase: `bazel build --nobuild`. Pass build_event_sinks (the Aspect
     # backend gRPC sink in CI) so the "✨ Aspect Workflows" link resolves to a
     # real record. The local iterator drains BES into `data["bazel"]`.
-    bes_sinks = collect_bes_from_args(ctx, bazel_trait)
+    bes_sinks = collect_bes_from_args(ctx)
     events = bazel.build_events.iterator()
     build_events = [events] + bes_sinks + list(bazel_trait.build_event_sinks)
 

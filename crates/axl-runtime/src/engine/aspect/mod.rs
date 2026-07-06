@@ -14,6 +14,7 @@ use starlark::values::starlark_value;
 use starlark::{environment::GlobalsBuilder, values::starlark_value_as_type::StarlarkValueAsType};
 
 pub mod auth;
+mod credential_store;
 
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
 #[display("<aspect.Aspect>")]

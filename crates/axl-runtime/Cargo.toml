@@ -23,6 +23,7 @@ starlark_derive = "0.13.0"
 starlark_map = "0.13.0"
 
 anyhow = "1.0.98"
+psl = "2"
 serde = { version = "1", features = ["derive"] }
 semver = "1"
 thiserror = "2.0.12"
@@ -70,6 +71,10 @@ galvanize = { path = "../galvanize" }
 
 arc-slice = {version="0.1.0", features = ["std", "abort-on-refcount-overflow"]}
 dirs = "6.0.0"
+# linux-native (kernel keyutils, pure Rust) rather than a secret-service backend:
+# it needs no system libdbus/libssl at build time, so the CLI builds on any Linux
+# host. Headless/CI use the 0600 file fallback (ASPECT_CREDENTIALS_FILE) anyway.
+keyring = { version = "3.6.1", features = ["apple-native", "windows-native", "linux-native"] }
 fibre = "0.5.0"
 flate2 = "1.1.2"
 rand = "0.8.5"

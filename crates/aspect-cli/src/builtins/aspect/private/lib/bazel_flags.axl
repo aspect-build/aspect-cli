@@ -56,7 +56,7 @@ also checked at runtime by `assert_ctx_bazel_ready_for_health_check` (see
     bazel-spawning task.
 """
 
-load("./aspect_endpoint_auth.axl", "aspect_auth_host_suffixes", "headers_have_auth", "needs_aspect_token", "resolve_aspect_bearer")
+load("./aspect_endpoint_auth.axl", "headers_have_auth", "needs_aspect_token", "resolve_aspect_bearer")
 load("./environment.axl", "color_enabled", "detect_ci")
 
 def _require_arg(ctx, name):
@@ -334,54 +334,54 @@ def expand_config_flags(ctx, bazel_trait, extra_flags, command = "build"):
 
     return flags_delta(base_flags, full_flags)
 
-def _endpoint_auth_flags(ctx, rc, command, bazel_trait, endpoint_flag, header_flag, what):
+def _endpoint_auth_flags(ctx, rc, command, endpoint_flag, header_flag, what):
     """Per-invocation `<header_flag>=authorization=Bearer <jwt>` flags for an
-    Aspect-owned endpoint named by `endpoint_flag`, or `[]`.
+    endpoint owned by a configured deployment named by `endpoint_flag`, or `[]`.
 
     Reads the effective `endpoint_flag` (from `--bazel-flag`, a first-class flag,
-    or `.bazelrc` — all resolved through `rc`). When it is Aspect-owned (see
-    `aspect_endpoint_auth.axl`) and the user has not already set
+    or `.bazelrc` — all resolved through `rc`). When a configured deployment owns
+    its host (see `aspect_endpoint_auth.axl`) and the user has not already set
     `<header_flag>=authorization=…`, returns the one auth header flag. Best-effort:
-    an Aspect-owned endpoint with no usable credential warns and returns `[]`.
-    `what` describes the endpoint in that warning.
+    an owned endpoint with no usable credential warns and returns `[]`. `what`
+    describes the endpoint in that warning.
     """
     endpoint = rc.flag_value(endpoint_flag, command = command)
     if not endpoint:
         return []
-    suffixes = aspect_auth_host_suffixes(ctx.std, bazel_trait)
     user_set_auth = headers_have_auth(rc.flag_values(header_flag, command = command))
-    if not needs_aspect_token([endpoint], user_set_auth, suffixes):
+    if not needs_aspect_token(ctx, [endpoint], user_set_auth):
         return []
-    bearer = resolve_aspect_bearer(ctx, what)
+    bearer = resolve_aspect_bearer(ctx, what, endpoint)
     if not bearer:
         return []
     return [header_flag + "=authorization=" + bearer]
 
-def remote_cache_auth_flags(ctx, rc, command, bazel_trait):
-    """Per-invocation flags attaching the Aspect login JWT to an Aspect-owned
-    `--remote_cache` via `--remote_header`, or `[]`. See `_endpoint_auth_flags`.
-    Most callers want the combined `aspect_endpoint_auth_flags`.
+def remote_cache_auth_flags(ctx, rc, command):
+    """Per-invocation flags attaching the Aspect login JWT to a configured
+    deployment's `--remote_cache` via `--remote_header`, or `[]`. See
+    `_endpoint_auth_flags`. Most callers want the combined
+    `aspect_endpoint_auth_flags`.
     """
-    return _endpoint_auth_flags(ctx, rc, command, bazel_trait, "--remote_cache", "--remote_header", "the remote cache")
+    return _endpoint_auth_flags(ctx, rc, command, "--remote_cache", "--remote_header", "the remote cache")
 
-def bes_backend_auth_flags(ctx, rc, command, bazel_trait):
+def bes_backend_auth_flags(ctx, rc, command):
     """Per-invocation flags attaching the Aspect login JWT to a Bazel-streamed
-    Aspect-owned `--bes_backend` via `--bes_header`, or `[]`. See
-    `_endpoint_auth_flags`.
+    `--bes_backend` owned by a configured deployment, via `--bes_header`, or `[]`.
+    See `_endpoint_auth_flags`.
 
     For the CLI's own BES sink (`--bes-backend`) the JWT is attached to the sink
     metadata instead; this covers the case where the user routes BES through
     Bazel via `--bazel-flag=--bes_backend=…`.
     """
-    return _endpoint_auth_flags(ctx, rc, command, bazel_trait, "--bes_backend", "--bes_header", "build events")
+    return _endpoint_auth_flags(ctx, rc, command, "--bes_backend", "--bes_header", "build events")
 
-def aspect_endpoint_auth_flags(ctx, rc, command, bazel_trait):
-    """Per-invocation flags attaching the Aspect login JWT to every Aspect-owned
-    Bazel-facing endpoint: the remote cache (`--remote_header`) and a
-    Bazel-streamed BES backend (`--bes_header`). The one call every
+def aspect_endpoint_auth_flags(ctx, rc, command):
+    """Per-invocation flags attaching the Aspect login JWT to every Bazel-facing
+    endpoint a configured deployment owns: the remote cache (`--remote_header`)
+    and a Bazel-streamed BES backend (`--bes_header`). The one call every
     bazel-spawning task adds to its `flags = [...]`.
     """
     return (
-        remote_cache_auth_flags(ctx, rc, command, bazel_trait) +
-        bes_backend_auth_flags(ctx, rc, command, bazel_trait)
+        remote_cache_auth_flags(ctx, rc, command) +
+        bes_backend_auth_flags(ctx, rc, command)
     )

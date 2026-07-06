@@ -1,24 +1,24 @@
-"""Tests for `lib/aspect_endpoint_auth.axl` — host parsing, suffix matching, and
-the credential-resolution gate for Aspect endpoints (BES backend, remote cache).
+"""Tests for `lib/aspect_endpoint_auth.axl` — host parsing, the configured-deployment
+ownership gate, and credential resolution for Aspect endpoints (BES backend, remote cache).
 
 Run with:
   aspect dev test-aspect-endpoint-auth
 """
 
-load("./aspect_endpoint_auth.axl", "aspect_auth_host_suffixes", "endpoint_host", "headers_have_auth", "is_aspect_host", "needs_aspect_token")
+load("./aspect_endpoint_auth.axl", "endpoint_host", "headers_have_auth", "is_aspect_host", "login_hint", "needs_aspect_token")
 
 def _eq(label, got, want):
     if got != want:
         fail("%s: got %r, want %r" % (label, got, want))
 
-def _fake_std(env = {}):
-    """Stand-in for `ctx.std`: `aspect_auth_host_suffixes` reads only
-    `std.env.var(name)`, returning None for unset keys."""
-    return struct(env = struct(var = lambda name: env.get(name)))
-
-def _fake_trait(aspect_auth_hosts = []):
-    """Stand-in for `BazelTrait`: only `.aspect_auth_hosts` is read."""
-    return struct(aspect_auth_hosts = aspect_auth_hosts)
+def _fake_ctx(owned_hosts = []):
+    """Stand-in for `ctx`: `is_aspect_host`/`needs_aspect_token` read only
+    `ctx.aspect.auth.deployment_for_host(host)`, which returns the owning
+    deployment's name (here just the host itself) or None for unowned hosts."""
+    owned = {h: h for h in owned_hosts}
+    return struct(aspect = struct(auth = struct(
+        deployment_for_host = lambda host: owned.get(host),
+    )))
 
 def _test_endpoint_host(_):
     """Host extraction strips scheme, userinfo, port, and path, and lowercases."""
@@ -31,43 +31,28 @@ def _test_endpoint_host(_):
     _eq("uppercase lowered", endpoint_host("GRPCS://BES.ASPECT.BUILD"), "bes.aspect.build")
 
 def _test_is_aspect_host(_):
-    """Suffix matching is dot-anchored so lookalike domains do not match."""
-    suffixes = [".aspect.build"]
-    _eq("subdomain matches", is_aspect_host("bes.aws.awd-gha-test-dev.aspect.build", suffixes), True)
-    _eq("apex matches", is_aspect_host("aspect.build", suffixes), True)
-    _eq("third-party rejected", is_aspect_host("remote.buildbuddy.io", suffixes), False)
-    _eq("lookalike rejected", is_aspect_host("evil-aspect.build", suffixes), False)
-    _eq("substring rejected", is_aspect_host("aspect.build.evil.com", suffixes), False)
-    vanity = [".aspect.build", "aspect.ci.acme.com"]
-    _eq("vanity exact matches", is_aspect_host("aspect.ci.acme.com", vanity), True)
-    _eq("vanity subdomain matches", is_aspect_host("mirror.aspect.ci.acme.com", vanity), True)
-
-def _test_aspect_auth_host_suffixes(_):
-    """The built-in suffix is always present; $ASPECT_AUTH_HOSTS and the trait
-    extend it. Entries are lowercased and empties dropped."""
-    _eq("default only", aspect_auth_host_suffixes(_fake_std(), _fake_trait()), [".aspect.build"])
-    _eq(
-        "env + trait, lowercased, empties dropped",
-        aspect_auth_host_suffixes(
-            _fake_std({"ASPECT_AUTH_HOSTS": "aspect.ci.acme.com, ,foo.test"}),
-            _fake_trait(["Vanity.Example.COM"]),
-        ),
-        [".aspect.build", "aspect.ci.acme.com", "foo.test", "vanity.example.com"],
-    )
+    """A host is Aspect-owned iff a configured deployment claims it (via the
+    engine's `deployment_for_host`); nothing else matches."""
+    ctx = _fake_ctx(["remote.acme.aspect.build", "bes.acme.aspect.build"])
+    _eq("configured host matches", is_aspect_host(ctx, "remote.acme.aspect.build"), True)
+    _eq("other configured host matches", is_aspect_host(ctx, "bes.acme.aspect.build"), True)
+    _eq("unconfigured .aspect.build rejected", is_aspect_host(ctx, "remote.other.aspect.build"), False)
+    _eq("third-party rejected", is_aspect_host(ctx, "remote.buildbuddy.io"), False)
+    _eq("empty host rejected", is_aspect_host(ctx, ""), False)
 
 def _test_needs_aspect_token(_):
-    """Resolution is gated on an Aspect endpoint lacking user-supplied auth —
-    the gate that keeps a stale login from aborting builds whose token would
-    never be used."""
-    suffixes = [".aspect.build"]
-    _eq("aspect endpoint, no user auth", needs_aspect_token(["grpcs://bes.aspect.build"], False, suffixes), True)
-    _eq("third-party endpoint", needs_aspect_token(["grpcs://remote.buildbuddy.io"], False, suffixes), False)
-    _eq("no endpoints", needs_aspect_token([], False, suffixes), False)
-    _eq("mixed: one aspect endpoint triggers", needs_aspect_token(["grpcs://remote.buildbuddy.io", "grpcs://bes.aspect.build"], False, suffixes), True)
+    """Resolution is gated on a configured-deployment endpoint lacking
+    user-supplied auth — the gate that keeps a stale login from aborting builds
+    whose token would never be used."""
+    ctx = _fake_ctx(["bes.acme.aspect.build"])
+    _eq("owned endpoint, no user auth", needs_aspect_token(ctx, ["grpcs://bes.acme.aspect.build"], False), True)
+    _eq("unowned endpoint", needs_aspect_token(ctx, ["grpcs://remote.buildbuddy.io"], False), False)
+    _eq("no endpoints", needs_aspect_token(ctx, [], False), False)
+    _eq("mixed: one owned endpoint triggers", needs_aspect_token(ctx, ["grpcs://remote.buildbuddy.io", "grpcs://bes.acme.aspect.build"], False), True)
 
     # User-supplied auth (a --bes-header / --remote_header authorization) suppresses
-    # resolution even for an Aspect host, so a stale login cannot abort the build.
-    _eq("user auth suppresses", needs_aspect_token(["grpcs://bes.aspect.build"], True, suffixes), False)
+    # resolution even for an owned host, so a stale login cannot abort the build.
+    _eq("user auth suppresses", needs_aspect_token(ctx, ["grpcs://bes.acme.aspect.build"], True), False)
 
 def _test_headers_have_auth(_):
     """`--remote_header`/`--bes_header` authorization detection is
@@ -80,12 +65,19 @@ def _test_headers_have_auth(_):
     _eq("amongst others", headers_have_auth(["x-foo=bar", "AUTHORIZATION=Bearer x"]), True)
     _eq("value mentioning auth not matched", headers_have_auth(["x-note=authorization=no"]), False)
 
+def _test_login_hint(_):
+    """The hint names a configured deployment with `--deployment`, but stays a
+    bare login when no deployment owns the endpoint."""
+    _eq("none → bare login", login_hint(None), "aspect auth login")
+    _eq("empty → bare login", login_hint(""), "aspect auth login")
+    _eq("deployment names itself", login_hint("gcp.acme"), "aspect auth login --deployment gcp.acme")
+
 def _test_impl(ctx):
     _test_endpoint_host(ctx)
     _test_is_aspect_host(ctx)
-    _test_aspect_auth_host_suffixes(ctx)
     _test_needs_aspect_token(ctx)
     _test_headers_have_auth(ctx)
+    _test_login_hint(ctx)
     print("aspect_endpoint_auth_test.axl: OK (5 sections)")
     return 0
 

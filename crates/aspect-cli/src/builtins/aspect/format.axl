@@ -311,7 +311,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # returns resolved flags (a failed health check fails the task inside).
     rc = setup_phase(ctx, lifecycle, ctx.args.formatter_target, "format_results", data, hc_trait, bazel_trait)
     announce_version, announce_command = resolve_bazel_announce(ctx)
-    endpoint_auth_flags = aspect_endpoint_auth_flags(ctx, rc, "build", bazel_trait)
+    endpoint_auth_flags = aspect_endpoint_auth_flags(ctx, rc, "build")
 
     # `rc=` opts into the runinfo aspect: `r.flags` captures the formatter's
     # executable + `args` attribute + env so `r.spawn` replays them ahead of the
@@ -320,7 +320,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
     # Pass build_event_sinks (carries the Aspect backend gRPC sink in CI) so the
     # "✨ Aspect Workflows" link resolves to a real record, not a 404.
-    bes_sinks = collect_bes_from_args(ctx, bazel_trait)
+    bes_sinks = collect_bes_from_args(ctx)
     events = bazel.build_events.iterator()
     build_events = [events] + bes_sinks + list(bazel_trait.build_event_sinks)
 

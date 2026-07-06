@@ -63,7 +63,6 @@ BazelTrait = trait(
     extra_flags = attr(list[str], default = [], description = "Additional Bazel flags appended to every build/test invocation"),
     extra_startup_flags = attr(list[str], default = [], description = "Additional Bazel startup flags prepended before the command"),
     build_event_sinks = attr(list[bazel.build.BuildEventSink], default = [], description = "Build Event Protocol sinks to stream events to during the build"),
-    aspect_auth_hosts = attr(list[str], default = [], description = "Extra host suffixes (beyond the built-in `.aspect.build` and any in $ASPECT_AUTH_HOSTS) whose `--bes-backend` and `--remote_cache` endpoints should receive the Aspect login JWT as a bearer Authorization header. Set this for self-hosted Aspect backends served from a vanity domain (e.g. `aspect.ci.acme.com`)."),
     execution_log_sinks = attr(list[bazel.execution_log.ExecLogSink], default = [], description = "Execution log sinks to receive the Bazel execution log after the build"),
 
     # Optional transforms — only called when set
