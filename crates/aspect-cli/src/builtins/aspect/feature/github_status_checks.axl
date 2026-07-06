@@ -256,6 +256,7 @@ def _github_status_checks(ctx: FeatureContext):
             return
 
         result = github.status_check_register(ctx, {
+            "scm": "github",
             "installation_id": installation_id,
             "installation_proof": installation_proof,
             "owner": owner,
