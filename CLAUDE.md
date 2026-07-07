@@ -32,5 +32,5 @@ record, and keep the trait's surface to the callable interface.
 ## Comments
 
 - No banner-style comments (e.g. `# ---- section ----`).
-- Keep comments short; only comment when context is genuinely needed.
+- Keep comments minimal. no comment is the best comment. only comment when context is genuinely needed.
 - Prefer documenting in task args / descriptions over inline comments.

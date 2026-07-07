@@ -563,6 +563,25 @@ def _determine_entrypoint(state: struct, target: str) -> struct | None:
         inherited_environment = runinfo.inherited_environment if runinfo != None else [],
     )
 
+def _entrypoint_ready(state: struct, target: str) -> bool:
+    """Whether `target`'s BES output is complete enough to resolve+run.
+
+    True once the target's own `default` output group has arrived and — when the
+    runinfo aspect was injected — its `aspect_runinfo` group has too. The aspect
+    emits its group in a separate `target_completed` (same label, distinct
+    `id.aspect`), so gating on any single matching-label event would race: the
+    aspect completion carries no `default` group (looks output-less), and the
+    plain completion can land before the runinfo JSON is parsed (wrong
+    executable / missing args + env). A non-runnable target never gets an
+    `aspect_runinfo` group, so it stays not-ready until the build ends and the
+    caller resolves it via `determine_entrypoint`."""
+    key = apparent_label(target, state.current_package)
+    if key not in state.target_fileset:
+        return False
+    if state.expects_runinfo and key not in state.runinfo_fileset:
+        return False
+    return True
+
 def _spawn(ctx: TaskContext, state: struct, ep: struct, args: list[str], capture: bool = False, cwd: str | None = None) -> std.process.Child:
     """Spawn `ep.path` in the Bazel runfiles environment.
 
@@ -637,6 +656,14 @@ def runnable(ctx, targets: list[str], rc = None) -> struct:
           extras (e.g. `delivery`'s release flags) places those before `r.flags`
           so the load-bearing flags win.
 
+      entrypoint_ready(target) → bool
+          Whether streaming callers may resolve+run `target` now: its `default`
+          output group has arrived and, when the aspect was injected, its
+          `aspect_runinfo` group too (each lands in its own `target_completed`).
+          Gates spawning a target the instant it finishes without racing the
+          aspect completion; targets still not-ready at build end are resolved
+          via `determine_entrypoint` (non-runnable ones never turn ready).
+
       determine_entrypoint(target) → struct(path, runfiles_dir, runfiles_workspace_dir, args, environment, inherited_environment) | None
           Best executable output for `target` from its BES default output group,
           or None if no BES data was received for it. `runfiles_dir` is the
@@ -674,6 +701,11 @@ def runnable(ctx, targets: list[str], rc = None) -> struct:
         filesets = {},
         target_fileset = {},
         runinfo_fileset = {},
+        # Whether the runinfo aspect was injected (`rc` given). When true a
+        # runnable target's `aspect_runinfo` arrives in a separate
+        # `target_completed` (same label, set `id.aspect`), so `entrypoint_ready`
+        # must await it too.
+        expects_runinfo = rc != None,
         # Single-element list so `_process_bes` can mutate it (struct fields are
         # otherwise read-only after construction).
         workspace_name = [""],
@@ -686,6 +718,7 @@ def runnable(ctx, targets: list[str], rc = None) -> struct:
     return struct(
         flags = flags,
         event = lambda event: _process_bes(state, event),
+        entrypoint_ready = lambda target: _entrypoint_ready(state, target),
         determine_entrypoint = lambda target: _determine_entrypoint(state, target),
         get_default_outputs = lambda target: _get_default_outputs(state, target),
         spawn = lambda ep, args, capture = False, cwd = None: _spawn(ctx, state, ep, args, capture, cwd),
