@@ -41,6 +41,7 @@ def _test_failed_stream(_):
         bes_upload_line("grpcs://bes.acme.aspect.build", 500, 0, True),
         "Uploaded 0 of 500 build events to grpcs://bes.acme.aspect.build before the stream failed.",
     )
+
     # Pluralization keys off the sent count, so a single sent-but-unacked event
     # still reads naturally.
     _eq(
