@@ -99,6 +99,7 @@ def bes_upload_line(uri: str, sent: int, acked: int, failed: bool) -> str:
 
     if not failed:
         return "Streamed %d build event%s to %s." % (sent, plural, backend)
+
     # Failed. A stream that never sent an event failed to connect; one that acked
     # everything it sent delivered its events (the failure was the post-stream
     # lifecycle close), so report the plain count; otherwise it's a partial upload.
