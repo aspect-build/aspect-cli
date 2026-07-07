@@ -299,6 +299,17 @@ def _print_captured_output(label, exit_code, stdout, stderr, ansi):
         print(combined)
     print(_style(sep, _BOLD, ansi))
 
+_HEX = "0123456789abcdef"
+
+def _delivery_nonce(ctx) -> str:
+    """Fresh per-invocation token (32 hex chars) from /dev/urandom. Passed to
+    the `hashsum` aspect as its unused `nonce` parameter so each run mints a new
+    `AspectKey`, forcing Skyframe to re-evaluate the `DeliveryHash` actions (and
+    re-issue their remote `GetActionResult` lookups) without discarding the
+    graph. Never enters the action, so the change-detection digest is stable."""
+    b = ctx.std.fs.open("/dev/urandom").read(16)
+    return "".join([_HEX[b[i] >> 4] + _HEX[b[i] & 0x0F] for i in range(16)])
+
 def _write_aspect_repo(ctx, repo_dir):
     ctx.std.fs.create_dir_all(repo_dir)
     ctx.std.fs.write(repo_dir + "/REPO.bazel", "")
@@ -317,7 +328,10 @@ def _write_aspect_repo(ctx, repo_dir):
     )
     return [OutputGroupInfo(delivery_hash = depset([hash_file]))]
 
-hashsum = aspect(implementation = _hashsum_impl)
+hashsum = aspect(
+    implementation = _hashsum_impl,
+    attrs = {"nonce": attr.string(default = "")},
+)
 """)
 
 _GRPC_LOG_PATH = "/tmp/aspect-delivery-grpc-{}.bin"
@@ -402,8 +416,15 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, use
     else:
         inject_flag = "--inject_repository=aspect_delivery=" + repo_dir
 
+    # Fresh nonce → a new AspectKey each run → Skyframe re-evaluates the
+    # DeliveryHash actions (fresh GetActionResult lookups) on a warm server,
+    # without discarding the graph. The nonce is unused by the action, so the
+    # digest — the change-detection key — is unchanged.
+    nonce = _delivery_nonce(ctx)
+
     aspect_flags = [
         "--aspects=@aspect_delivery//:hashsum.bzl%hashsum",
+        "--aspects_parameters=nonce=" + nonce,
         "--output_groups=+delivery_hash",
         inject_flag,
     ]
@@ -411,8 +432,11 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, use
     endpoint_auth_flags = aspect_endpoint_auth_flags(ctx, rc, "build")
 
     # Phase-1 extras layered on the active run command. Force `=minimal`:
-    # phase 1 reads outputs via BES, never from disk.
-    phase1_flags = ["--nokeep_state_after_build", "--remote_download_outputs=minimal"] + endpoint_auth_flags
+    # phase 1 reads outputs via BES, never from disk. State is kept (no
+    # `--nokeep_state_after_build`) so the runner's shared analysis stays warm
+    # for build/test jobs — phase 2 forces its own re-evaluation via the aspect
+    # nonce instead of discarding the graph.
+    phase1_flags = ["--remote_download_outputs=minimal"] + endpoint_auth_flags
     _t_phase1 = time.monotonic()
     announce_version, announce_command = resolve_bazel_announce(ctx)
 
