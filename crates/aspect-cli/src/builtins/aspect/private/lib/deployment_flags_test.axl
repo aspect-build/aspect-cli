@@ -103,6 +103,17 @@ def _test_umbrella_reports_injected_capabilities(ctx):
         ("bes backend", "grpcs://bes.gcp"),
     ])
 
+def _test_config_default_granular_honored(ctx):
+    # A granular flag turned on via a config.axl default (value True, but NOT
+    # is_explicit — that's CLI-only) must be honored, not ignored in favor of the
+    # umbrella. Regression guard for the is_explicit-only gate.
+    got = deployment_endpoint_flags(_ctx(
+        _endpoints("gcp", cache = "remote.gcp", bes = "bes.gcp", exec = "remote.gcp"),
+        aspect_remote_cache = True,
+    ))
+    _eq("config-on cache → cache wired", got.base_flags, ["--remote_cache=grpcs://remote.gcp"])
+    _eq("config-on cache → no bes (umbrella not set)", got.bes_backends, [])
+
 def _test_join_and(ctx):
     _eq("empty", join_and([]), "")
     _eq("one", join_and(["remote cache"]), "remote cache")
@@ -116,6 +127,7 @@ _UNIT_TESTS = [
     _test_umbrella_skips_unadvertised_capability,
     _test_granular_cache_only,
     _test_explicit_false_overrides_umbrella,
+    _test_config_default_granular_honored,
     _test_umbrella_reports_injected_capabilities,
     _test_join_and,
 ]

@@ -75,9 +75,21 @@ impl CredentialStore {
     /// read. The file backend additionally treats an *unparseable* file as empty
     /// (see `file_load_all`): a legacy/corrupt file means "re-run login", not a
     /// hard error on every command.
-    pub(crate) fn load_all<T: DeserializeOwned>(&self) -> anyhow::Result<HashMap<String, T>> {
+    ///
+    /// When the keyring is empty, credentials from the legacy `credentials.json`
+    /// (written by releases before the keyring backend) are migrated in, so
+    /// upgrading users stay logged in — see [`migrate_legacy_file`].
+    pub(crate) fn load_all<T: DeserializeOwned + Serialize>(
+        &self,
+    ) -> anyhow::Result<HashMap<String, T>> {
         match self {
-            Self::Keyring => keyring_load_all(),
+            Self::Keyring => {
+                let map = keyring_load_all()?;
+                if map.is_empty() {
+                    return migrate_legacy_file();
+                }
+                Ok(map)
+            }
             Self::File(path) => file_load_all(path),
         }
     }
@@ -121,6 +133,21 @@ fn keyring_load_all<T: DeserializeOwned>() -> anyhow::Result<HashMap<String, T>>
             "failed to read credentials from keyring: {e}"
         )),
     }
+}
+
+/// One-time migration of credentials written by pre-keyring releases: read the
+/// legacy file at [`default_file_path`] via [`file_load_all`] and, if it holds
+/// any, write them into the keyring so subsequent reads are keyring-native.
+/// Returns whatever the file held (empty when there is nothing to migrate). The
+/// keyring write is best-effort — a write failure still returns the file's
+/// credentials so the user isn't spuriously logged out; the migration simply
+/// retries on the next load.
+fn migrate_legacy_file<T: DeserializeOwned + Serialize>() -> anyhow::Result<HashMap<String, T>> {
+    let map: HashMap<String, T> = file_load_all(&default_file_path()?)?;
+    if !map.is_empty() {
+        let _ = keyring_save_all(&map);
+    }
+    Ok(map)
 }
 
 fn keyring_save_all<T: Serialize>(map: &HashMap<String, T>) -> anyhow::Result<()> {
@@ -215,6 +242,29 @@ mod tests {
         store.save_all(&map).unwrap();
         let mode = fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_file_is_read_for_migration() {
+        // `migrate_legacy_file` (keyring-empty fallback) reads the legacy file via
+        // `file_load_all`; this covers that read — a populated legacy file yields
+        // its credentials so an upgrading user with a reachable-but-empty keyring
+        // stays logged in, an absent one yields empty. The keyring write-through is
+        // best-effort and deliberately not exercised here (no hermetic keyring).
+        let dir = std::env::temp_dir().join(format!("aspect-cred-migrate-{}", std::process::id()));
+        let path = dir.join("credentials.json");
+
+        let empty: HashMap<String, String> = file_load_all(&path).unwrap();
+        assert!(empty.is_empty(), "absent legacy file → nothing to migrate");
+
+        let mut legacy = HashMap::new();
+        legacy.insert("default".to_string(), "tok-legacy".to_string());
+        CredentialStore::File(path.clone()).save_all(&legacy).unwrap();
+
+        let read: HashMap<String, String> = file_load_all(&path).unwrap();
+        assert_eq!(read, legacy);
+
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -160,41 +160,41 @@ fn load_config_file(path: &PathBuf) -> anyhow::Result<Vec<Deployment>> {
 /// `.aspect/config.json` (when `$ASPECT_WORKSPACE` names one), overlaid by the
 /// user's `~/.aspect/config.json`. Overlay is by `name` (a later entry with the
 /// same name replaces an earlier one), so a user can override the seed or a
-/// repo-declared deployment. Exactly one entry stays `default` — [`select_deployment`]
-/// re-derives the default rather than trusting the flag on every entry.
+/// repo-declared deployment. Exactly one entry stays `default`, with a
+/// higher-precedence layer's default winning — see [`overlay_deployments`].
+/// [`select_deployment`] then re-derives the default rather than trusting the
+/// flag on every entry.
 fn load_deployments() -> anyhow::Result<Vec<Deployment>> {
     let mut merged: Vec<Deployment> = vec![default_deployment()];
-    let overlay = |merged: &mut Vec<Deployment>, entries: Vec<Deployment>| {
-        for entry in entries {
-            if let Some(existing) = merged.iter_mut().find(|d| d.name == entry.name) {
-                *existing = entry;
-            } else {
-                merged.push(entry);
-            }
-        }
-    };
     if let Some(repo_cfg) = repo_config_path() {
-        overlay(&mut merged, load_config_file(&repo_cfg)?);
+        overlay_deployments(&mut merged, load_config_file(&repo_cfg)?);
     }
-    overlay(&mut merged, load_config_file(&config_path()?)?);
-    reconcile_seed_default(&mut merged);
+    overlay_deployments(&mut merged, load_config_file(&config_path()?)?);
     Ok(merged)
 }
 
-/// The seed is re-created `default = true` on every load, but a configured
-/// deployment marked default must win. So clear the seed's default whenever any
-/// configured deployment claims it — leaving the seed as default only when
-/// nothing configured does (which is also the "logged out of the default" state).
-fn reconcile_seed_default(deployments: &mut [Deployment]) {
-    let configured_default = deployments
-        .iter()
-        .any(|d| d.default && d.name != DEFAULT_DEPLOYMENT_NAME);
-    if configured_default {
-        if let Some(seed) = deployments
-            .iter_mut()
-            .find(|d| d.name == DEFAULT_DEPLOYMENT_NAME)
-        {
-            seed.default = false;
+/// Overlay a config layer's `entries` onto `merged` (by `name`), preserving the
+/// "exactly one default" invariant with the incoming layer winning.
+///
+/// Each layer is written with at most one default (see [`upsert_deployment`]).
+/// The built-in seed starts `default = true`, and a repo layer may mark its own
+/// default, so without care a later user layer marking a different deployment
+/// would leave two defaults — and [`select_deployment`] would pick the earlier
+/// (repo) one, so the user could never override a repo default. So when this
+/// layer introduces a default, clear the flag on every prior entry first; a layer
+/// that declares no default leaves the existing one untouched.
+fn overlay_deployments(merged: &mut Vec<Deployment>, entries: Vec<Deployment>) {
+    let layer_has_default = entries.iter().any(|d| d.default);
+    if layer_has_default {
+        for d in merged.iter_mut() {
+            d.default = false;
+        }
+    }
+    for entry in entries {
+        if let Some(existing) = merged.iter_mut().find(|d| d.name == entry.name) {
+            *existing = entry;
+        } else {
+            merged.push(entry);
         }
     }
 }
@@ -2913,16 +2913,33 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_seed_default_yields_to_configured_default() {
-        // Seed loads default=true; a configured default clears it.
-        let mut merged = vec![default_deployment(), dep("acme", true)];
-        reconcile_seed_default(&mut merged);
-        assert!(!merged[0].default, "seed yields to configured default");
-        assert!(merged[1].default);
+    fn overlay_deployments_lets_a_layer_default_win() {
+        // Seed starts default=true; a layer that marks a configured default
+        // clears the seed's.
+        let mut merged = vec![default_deployment()];
+        overlay_deployments(&mut merged, vec![dep("acme", true)]);
+        assert!(!merged[0].default, "seed yields to a configured default");
+        assert!(merged.iter().find(|d| d.name == "acme").unwrap().default);
 
-        // No configured default → the seed stays default (the fallback state).
-        let mut none_configured = vec![default_deployment(), dep("acme", false)];
-        reconcile_seed_default(&mut none_configured);
+        // A later layer marking a DIFFERENT deployment default must win over the
+        // earlier layer's default — the repo+user override case. Both must not
+        // remain default, else select_deployment picks the earlier (repo) one.
+        overlay_deployments(&mut merged, vec![dep("emca", true)]);
+        assert!(
+            !merged.iter().find(|d| d.name == "acme").unwrap().default,
+            "the earlier layer's default is cleared"
+        );
+        assert!(merged.iter().find(|d| d.name == "emca").unwrap().default);
+        assert_eq!(merged.iter().filter(|d| d.default).count(), 1);
+
+        // A layer that declares no default leaves the existing default untouched.
+        overlay_deployments(&mut merged, vec![dep("third", false)]);
+        assert!(merged.iter().find(|d| d.name == "emca").unwrap().default);
+        assert_eq!(merged.iter().filter(|d| d.default).count(), 1);
+
+        // No configured default anywhere → the seed stays the default fallback.
+        let mut none_configured = vec![default_deployment()];
+        overlay_deployments(&mut none_configured, vec![dep("acme", false)]);
         assert!(none_configured[0].default, "seed is the default fallback");
     }
 
