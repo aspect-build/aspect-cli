@@ -49,7 +49,12 @@ bash_deliverable(
 
 # py_binary with stamp=1 — exercises delivery with stamped actions
 # (rules_python injects a constant_metadata version file that must not
-# invalidate downstream action keys across delivery phases).
+# invalidate downstream action keys across delivery phases). Its stamped
+# PyWriteBuildData action is itself uncacheable, so it never resolves a
+# change-detection digest — the in-tree fixture for the unresolved-digest
+# behavior: it hard-fails delivery by default (see the delivery-uncacheable
+# regression job) and warns under --warn-unresolved-digest (which the dogfood
+# delivery jobs pass for exactly this target).
 py_binary(
     name = "py_deliverable",
     srcs = ["py_deliverable.py"],

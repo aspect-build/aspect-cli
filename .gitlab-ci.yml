@@ -128,5 +128,9 @@ delivery-task:
     ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS: $FORCE_TARGETS
   script:
     - .aspect/bootstrap.sh
-    - ASPECT_DEBUG=1 aspect delivery --task:name delivery-gl-debug
-    - aspect delivery --task:name delivery-gl
+    # --warn-unresolved-digest: the deliverable set includes py_deliverable, a
+    # stamped py_binary whose PyWriteBuildData action is uncacheable and never
+    # resolves a digest — a known, tolerated missing digest, so keep it a warning
+    # rather than the (new) default hard failure.
+    - ASPECT_DEBUG=1 aspect delivery --task:name delivery-gl-debug --warn-unresolved-digest
+    - aspect delivery --task:name delivery-gl --warn-unresolved-digest

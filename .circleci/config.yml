@@ -184,7 +184,11 @@ jobs:
       - setup-aspect/setup
       - run:
           name: Delivery Task (ASPECT_DEBUG=1)
-          command: ASPECT_DEBUG=1 aspect delivery --task:name delivery-cci-debug
+          # --warn-unresolved-digest: the deliverable set includes py_deliverable,
+          # a stamped py_binary whose PyWriteBuildData action is uncacheable and
+          # never resolves a digest — a known, tolerated missing digest, so keep
+          # it a warning rather than the (new) default hard failure.
+          command: ASPECT_DEBUG=1 aspect delivery --task:name delivery-cci-debug --warn-unresolved-digest
       - run:
           name: Delivery Task
-          command: aspect delivery --task:name delivery-cci
+          command: aspect delivery --task:name delivery-cci --warn-unresolved-digest

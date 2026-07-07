@@ -49,13 +49,14 @@ runner-derived `--output_base`), keyed by its analysis cache. Delivery runs
 phases with different analysis configurations, so it maps each to the right
 server rather than thrashing one:
 
-  - `query` and the phase-1 build are plain (no aspect, no release flags), so
-    they run on the task's normal server — sharing the warm analysis that
-    build/test jobs on the runner also reuse.
-  - The checksum phase injects the `hashsum` aspect (`--aspects` +
-    `--output_groups` + `--inject_repository`), which reconfigures the analysis
-    graph. It ALWAYS runs on a `-checksum` sibling server so it can't evict that
-    shared analysis — the aspect busts the cache regardless of the flag below.
+  - `query`, the phase-1 build, and the checksum phase all run on the task's
+    normal server, sharing the warm analysis that build/test jobs on the runner
+    also reuse. The checksum phase applies the `hashsum` aspect via
+    `ctx.bazel.aspect(...)`, which materializes it into `@bazel_tools` (already
+    in the repo graph) — so it layers onto the existing configured targets with
+    no `--inject_repository` and no analysis-cache churn, and needs no sibling
+    server. (Only repo-graph changes like `--inject_repository` reconfigure the
+    graph; a command-line aspect alone does not.)
   - The release build (and the dispatch that reads its artifacts) stamps and
     applies `--config=release`, reconfiguring again. It runs on the shared
     server by default; `--workflows-runner-delivery-output-base-suffix=<suffix>`
@@ -152,7 +153,7 @@ load("@bazel//proto/remote_logging.axl", "remote_logging")
 load("@std//time.axl", "sleep_iter", "time")
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_flags.axl", "announce_bazel_args", "aspect_endpoint_auth_flags", "expand_config_flags", "resolve_bazel_announce", "sibling_rc")
-load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "now_ms", "process_event", bazel_init_data = "init_data")
+load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "bes_get", "now_ms", "process_event", bazel_init_data = "init_data")
 load("./private/lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
 load("./private/lib/bes_sinks.axl", "announce_bes_sinks", "bes_args", "collect_bes_from_args", "summarize_bes_upload")
 load("./private/lib/ci.axl", "resolve_build_url")
@@ -310,11 +311,13 @@ def _delivery_nonce(ctx) -> str:
     b = ctx.std.fs.open("/dev/urandom").read(16)
     return "".join([_HEX[b[i] >> 4] + _HEX[b[i] & 0x0F] for i in range(16)])
 
-def _write_aspect_repo(ctx, repo_dir):
-    ctx.std.fs.create_dir_all(repo_dir)
-    ctx.std.fs.write(repo_dir + "/REPO.bazel", "")
-    ctx.std.fs.write(repo_dir + "/BUILD.bazel", "")
-    ctx.std.fs.write(repo_dir + "/hashsum.bzl", """def _hashsum_impl(target, ctx):
+# Source of the change-detection aspect. Applied via `ctx.bazel.aspect(...)`,
+# which materializes it into `@bazel_tools` (already in the repo graph) — so the
+# checksum phase needs no `--inject_repository` and reuses the build's warm
+# analysis with no churn. The `nonce` attr is unused by the action; a fresh
+# value per run (via `parameters`) mints a new AspectKey so the DeliveryHash
+# actions re-run their remote lookups without discarding the graph.
+_HASHSUM_BZL = """def _hashsum_impl(target, ctx):
     files = target[DefaultInfo].files
     runfiles = target[DefaultInfo].default_runfiles
     hash_file = ctx.actions.declare_file(target.label.name + ".delivery_hash")
@@ -332,7 +335,7 @@ hashsum = aspect(
     implementation = _hashsum_impl,
     attrs = {"nonce": attr.string(default = "")},
 )
-""")
+"""
 
 _GRPC_LOG_PATH = "/tmp/aspect-delivery-grpc-{}.bin"
 _PHASE2_LOG_PATH = "/tmp/aspect-delivery-phase2-{}.log"
@@ -344,6 +347,65 @@ _EXECLOG_PATH = "/tmp/aspect-delivery-execlog-{}.bin"
 # entry is a key that drifted between phases (non-hermetic); phase-1
 # execlog's `remote_cacheable` says whether the rule declared the opt-out.
 _DELIVERY_HASH_MNEMONIC = "DeliveryHash"
+
+# An uncacheable action: one Bazel never stores a cache entry for, so the
+# checksum phase can't read a digest for it or for any target that depends on
+# it. Typically an action that embeds build-stamp information or uses a Bazel
+# API that skips caching (e.g. PyWriteData). `label` is the producing target;
+# `action` is its mnemonic (e.g. "Genrule") for the message.
+UncacheableAction = record(
+    label = field(str),
+    action = field(str, default = ""),
+)
+
+def collect_blocking_culprits(uncacheable_actions: list, non_hermetic_misses: dict, targets: list) -> dict:
+    """Shared uncacheable actions that blocked change-detection hashing, keyed
+    by apparent label → list of action/mnemonic hints.
+
+    Combines the BES-reported uncacheable actions (ground truth) with any
+    gRPC-log non-cacheable producers that are not themselves deliverables —
+    those misses would otherwise be dropped, since the per-row lookup only
+    matches deliverable labels, so a shared dependency poisoning many
+    deliverables would go unnamed. A deliverable's own miss is left out here
+    (its per-row message already carries it). Exported for unit testing."""
+    deliverables = {apparent_label(t): True for t in targets}
+    culprits = {}
+    for a in uncacheable_actions:
+        hints = culprits.setdefault(apparent_label(a.label), [])
+        if a.action and a.action not in hints:
+            hints.append(a.action)
+    for producer, mnemonics in non_hermetic_misses.items():
+        if producer in deliverables:
+            continue
+        hints = culprits.setdefault(producer, [])
+        for m in mnemonics:
+            if m not in hints:
+                hints.append(m)
+    return culprits
+
+def _report_blocking_culprits(ctx, culprits: dict, count: int, failing: bool):
+    """Report the uncacheable actions that blocked hashing and how to resolve
+    it, once. ERROR when the task is failing, WARNING when downgraded via
+    `--warn-unresolved-digest`."""
+    lines = []
+    for label in sorted(culprits.keys()):
+        hints = culprits[label]
+        if hints:
+            lines.append("  - {} ({})".format(label, ", ".join(hints)))
+        else:
+            lines.append("  - " + label)
+    body = (
+        "Could not compute a change-detection digest for {} because they — or an action they " +
+        "depend on — cannot be cached. Change detection needs a cache entry to tell whether a " +
+        "target changed, so these targets cannot be delivered. Uncacheable action(s):\n" +
+        "\n".join(lines) + "\n" +
+        "Resolve this by making the action cacheable, or by tagging it \"no-remote\" (or \"local\") " +
+        "so it runs locally instead of blocking delivery."
+    ).format(pluralize(count, "target"))
+    if failing:
+        error(ctx.std, body)
+    else:
+        warn(ctx.std, body)
 
 def should_upload_grpc_log(setting: str, unresolved: int) -> bool:
     """Resolve the --upload-grpc-log tristate: "true" always, "false" never,
@@ -395,39 +457,31 @@ def _surface_phase_stderr(ctx, phase, log_path):
 
 def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, user_remote_executor_uri, ansi, data):
     """Run phase 1 (build) + phase 2 (digest extraction); return
-    `(output_shas, non_hermetic_misses, exit_code)`. Phase-1 BES events drive
-    `data`; phase-2's gRPC log yields the per-target digests for change detection.
+    `(output_shas, non_hermetic_misses, uncacheable_actions, exit_code)`.
+    Phase-1 BES events drive `data`; phase-2's gRPC log yields the per-target
+    digests for change detection, and phase-2 BES yields `uncacheable_actions` —
+    the non-DeliveryHash actions Bazel could not read from cache (the "nasty"
+    targets that block hashing).
 
     Phase 2 is expected to exit non-zero on first delivery, so its stderr is
     captured and echoed/uploaded only when rows can't explain it (see
     `should_surface_phase2_stderr`). The gRPC log uploads per
     `ctx.args.upload_grpc_log`. Uploads no-op off-CI.
     """
-    repo_dir = "/tmp/aspect_delivery_" + ctx.task.name
-    _write_aspect_repo(ctx, repo_dir)
 
-    # `--inject_repository` only registers the repo in the bzlmod graph; under
-    # WORKSPACE mode the injected repo is invisible and `@aspect_delivery` fails
-    # to resolve. `--override_repository` injects in both modes — use it when the
-    # build disables bzlmod. (Bazel 7+ defaults bzlmod on — None means on — so
-    # WORKSPACE is the explicit `--enable_bzlmod=false` the run command reports.)
-    if rc.bool_flag("--enable_bzlmod", command = "build") == False:
-        inject_flag = "--override_repository=aspect_delivery=" + repo_dir
-    else:
-        inject_flag = "--inject_repository=aspect_delivery=" + repo_dir
-
-    # Fresh nonce → a new AspectKey each run → Skyframe re-evaluates the
-    # DeliveryHash actions (fresh GetActionResult lookups) on a warm server,
-    # without discarding the graph. The nonce is unused by the action, so the
-    # digest — the change-detection key — is unchanged.
-    nonce = _delivery_nonce(ctx)
-
-    aspect_flags = [
-        "--aspects=@aspect_delivery//:hashsum.bzl%hashsum",
-        "--aspects_parameters=nonce=" + nonce,
-        "--output_groups=+delivery_hash",
-        inject_flag,
-    ]
+    # The change-detection aspect. `ctx.bazel.aspect(...)` materializes it into
+    # `@bazel_tools` (already in the repo graph, in both bzlmod and WORKSPACE
+    # mode), so phase 2 needs no `--inject_repository`/`--override_repository`
+    # and reuses phase 1's warm analysis with no churn — no separate server.
+    # Fresh `nonce` per run mints a new AspectKey so the DeliveryHash actions
+    # re-run their remote lookups without discarding the graph; unused by the
+    # action, so the change-detection digest is unchanged.
+    hashsum_aspect = ctx.bazel.aspect(
+        implementation = _HASHSUM_BZL,
+        symbol = "hashsum",
+        parameters = {"nonce": _delivery_nonce(ctx)},
+        output_groups = ["delivery_hash"],
+    )
 
     endpoint_auth_flags = aspect_endpoint_auth_flags(ctx, rc, "build")
 
@@ -554,7 +608,7 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, use
         archive_bazel_attempt(data, attempt + 1, status.code)
 
     if status.code != 0:
-        return {}, {}, status.code
+        return {}, {}, [], status.code
     info(ctx.std, "Build took {}.".format(fmt_elapsed(time.monotonic() - _t_phase1)))
 
     # Phase 2. Parse the gRPC log regardless of exit code — non-zero usually
@@ -591,8 +645,8 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, use
         phase2_executor_uri = dummy.grpc_uri
 
     # Phase-2 extras on the active run command. Force `=minimal`: phase 2 reads
-    # digests from the gRPC log, not disk.
-    phase2_flags = aspect_flags + endpoint_auth_flags + [
+    # digests from the gRPC log, not disk. The aspect rides `aspects=` below.
+    phase2_flags = endpoint_auth_flags + [
         "--remote_executor=" + phase2_executor_uri,
         "--experimental_remote_require_cached",
         "--remote_grpc_log=" + log_path,
@@ -600,26 +654,58 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, use
         "--remote_download_outputs=minimal",
     ]
 
-    # Run phase 2 on a `-checksum` sibling server: the `hashsum` aspect
-    # reconfigures the analysis graph, so on the shared server it would evict the
-    # plain analysis phase 1 and the runner's build/test jobs reuse. Always
-    # applied — the aspect busts the cache independent of the release-build
-    # suffix below. `--output_user_root` stays shared; phase 1 keeps the
-    # passed-in `rc` (its plain build shares the runner's analysis).
-    checksum_rc = sibling_rc(ctx, bazel_trait, lambda flags: apply_output_base_suffix(flags, "-checksum"))
+    # Phase 2 runs on phase 1's own `rc` — same server — reusing its warm
+    # analysis. The aspect is materialized into `@bazel_tools` (already in the
+    # graph), so it layers onto the existing configured targets without churn;
+    # no `--inject_repository` and no separate `-checksum` server needed.
 
-    # Redirect stderr to a file: require-cached failures are noisy-but-expected;
-    # the actionable signal is the gRPC log below. The file is the escape hatch.
+    # Stream phase-2 BES so a failed `action_completed` event names each
+    # uncacheable action directly (label + mnemonic). While computing digests,
+    # any action Bazel can't read from cache fails — and BES emits those failure
+    # events, so this is a structured signal without scraping Bazel's stderr.
+    # Excludes our own `DeliveryHash` probes (they fail by design — their lookup
+    # carries the digest); any OTHER failed action is a genuinely uncacheable
+    # target. The gRPC-log misses below are unioned in for robustness. Drained
+    # into a local list only (not the phase-1 `data` counters — expected here).
+    phase2_events = bazel.build_events.iterator()
+
+    # Redirect stderr to a file: the expected cache misses are noisy; the
+    # actionable signal is the gRPC log below. The file is the escape hatch.
     phase2_log_path = _PHASE2_LOG_PATH.format(ctx.task.name)
-    phase2_status = ctx.bazel.build(
+    phase2_build = ctx.bazel.build(
         flags = phase2_flags,
-        rc = checksum_rc,
+        rc = rc,
+        aspects = [hashsum_aspect],
+        build_events = [phase2_events],
         stdout = None,
         stderr = ctx.std.fs.create(phase2_log_path),
         announce_version = announce_version,
         announce_command = announce_command,
         *targets
-    ).wait()
+    )
+
+    # Drain BES concurrently with the build (like phases 1 and 3) — waiting
+    # first could stall the build on a full event buffer.
+    uncacheable_actions = []
+    seen_uncacheable = {}
+    for _tick in sleep_iter(BES_DRAIN_TICK_MS):
+        for _ in range(10000):
+            event = phase2_events.try_pop()
+            if event == None:
+                break
+            if event.kind != "action_completed" or bes_get(event.payload, "success", None):
+                continue
+            mnemonic = bes_get(event.payload, "type", "") or ""
+            if mnemonic == _DELIVERY_HASH_MNEMONIC:
+                continue
+            label = apparent_label(bes_get(event.id, "label", "") or "")
+            if not label or label in seen_uncacheable:
+                continue
+            seen_uncacheable[label] = True
+            uncacheable_actions.append(UncacheableAction(label = label, action = mnemonic))
+        if phase2_events.done:
+            break
+    phase2_status = phase2_build.wait()
 
     # `build_end` not fired here — the outer caller dispatches it once with
     # the aggregate build_code after `_get_output_shas` returns.
@@ -648,7 +734,7 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, use
     if not ctx.std.fs.exists(log_path):
         error(ctx.std, "Phase-2 produced no gRPC log; could not checksum delivery digests. Phase-2 raw log: {}".format(phase2_log_path))
         _surface_phase_stderr(ctx, 2, phase2_log_path)
-        return {}, {}, (phase2_status.code if phase2_status.code != 0 else 1)
+        return {}, {}, uncacheable_actions, (phase2_status.code if phase2_status.code != 0 else 1)
 
     log_file = ctx.std.fs.open(log_path)
     getactionresult_count = 0
@@ -671,6 +757,15 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, use
                 existing.append(mnemonic)
                 misses_by_producer[entry_label] = existing
     _unresolved = len(targets) - len(output_shas)
+
+    # Union the gRPC log's own non-DeliveryHash GetActionResult misses into the
+    # uncacheable set. This is ground truth (the lookup missed) and names any
+    # uncacheable action the phase-2 BES stream didn't surface; deduped by
+    # collect_blocking_culprits. Independent of the opt-out filter below (which
+    # scopes the per-row WARN message, not the culprit list).
+    for producer, mnemonics in misses_by_producer.items():
+        for m in mnemonics:
+            uncacheable_actions.append(UncacheableAction(label = producer, action = m))
 
     # Filter to misses on actions that did NOT declare a remote-cache opt-out
     # — real key-drift symptoms (transient/non-hermetic). Caller surfaces them
@@ -724,14 +819,14 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, use
             phase2_log_path,
         ))
         if should_surface_phase2_stderr(_unexplained_unresolved, getactionresult_count):
-            # Frame the stderr so its expected require-cached errors don't read as the failure.
+            # Frame the stderr so its expected cache-miss errors don't read as the failure.
             _surface_phase_stderr(ctx, 2, phase2_log_path)
-            info(ctx.std, "The Bazel errors above are from phase 2's --experimental_remote_require_cached probe" +
+            info(ctx.std, "The Bazel errors above are from the checksum phase" +
                           " (it reads delivery digests from the remote cache without building); the" +
                           " \"Action must be cached ... but it is not\" lines are expected, and are shown" +
                           " only because a digest could not be resolved for an unexpected reason.")
 
-    return output_shas, non_hermetic_misses, 0
+    return output_shas, non_hermetic_misses, uncacheable_actions, 0
 
 def _pick_status(data, had_failure, terminal):
     """Delivery lifecycle status from accumulated data: aborted → "aborted";
@@ -1172,7 +1267,7 @@ def _delivery_impl(ctx):
 
     # `rc=` opts into the runinfo aspect so the deliverables spawned in phase 3
     # replay their `args` attribute + env the way `bazel run` does. The aspect
-    # rides phase 3 (the build feeding `.event`) via `run_tracker.flags`.
+    # rides phase 3 (the build feeding `.event`) via `run_tracker.aspects`.
     run_tracker = runnable(ctx, targets, rc = rc)
 
     _t_total = time.monotonic()
@@ -1180,7 +1275,7 @@ def _delivery_impl(ctx):
     # Phase 1/2 — skipped only in --mode=always + --track-state=false.
     if phase_1_2_runs:
         _t_build = time.monotonic()
-        output_shas, non_hermetic_misses, build_code = _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, user_remote_executor_uri or "", ansi, data)
+        output_shas, non_hermetic_misses, uncacheable_actions, build_code = _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, user_remote_executor_uri or "", ansi, data)
         info(ctx.std, "Build+checksum total: {}.".format(fmt_elapsed(time.monotonic() - _t_build)))
 
         for handler in bazel_trait.build_end:
@@ -1202,6 +1297,20 @@ def _delivery_impl(ctx):
     else:
         output_shas = {}
         non_hermetic_misses = {}
+        uncacheable_actions = []
+
+    # The nasty targets: uncacheable actions that blocked hashing. If every
+    # target still got a digest, they didn't actually matter — say nothing.
+    # Only when a deliverable failed to hash AND there are uncacheable actions do
+    # we blame them: name the (usually small) list once, with remediation; the
+    # per-target rows point back here. No dependency-graph query — the build is
+    # scoped to the deliverables and their deps, so a listed uncacheable action
+    # is by construction upstream of some unhashable deliverable. ERROR (task
+    # fails) unless --warn-unresolved-digest downgrades to a WARNING.
+    blocking_culprits = collect_blocking_culprits(uncacheable_actions, non_hermetic_misses, targets)
+    unresolved_deliverables = [t for t in targets if not output_shas.get(t)]
+    if phase_1_2_runs and unresolved_deliverables and blocking_culprits:
+        _report_blocking_culprits(ctx, blocking_culprits, len(unresolved_deliverables), failing = not ctx.args.warn_unresolved_digest)
 
     # Record each target's digest with deliveryd. Skipped when --track-state=false.
     if track_state:
@@ -1297,22 +1406,32 @@ def _delivery_impl(ctx):
         output_sha = output_shas.get(label)
 
         if not output_sha and phase_1_2_runs:
-            # Surface the drifting mnemonic inline when we have one (e.g.
-            # PyWriteBuildData with --stamp); else give the generic alias hint.
-            pending_count += 1
+            # No change-detection digest. Two shapes:
+            #  - Uncacheable actions are present — this target (or a dep) couldn't
+            #    be hashed and would be silently dropped from delivery. Hard-fail
+            #    by default; --warn-unresolved-digest downgrades to a warning.
+            #  - No uncacheable action at all — it just isn't in the gRPC log
+            #    (alias / transitioned / filtered). Keep the historical warning.
             mnemonics = non_hermetic_misses.get(apparent_label(label), [])
+            blocked = bool(blocking_culprits)
             if mnemonics:
-                msg = "no digest: non-cacheable upstream action(s) ({}); likely non-hermetic. Phase-2 raw log: {}".format(", ".join(mnemonics), _PHASE2_LOG_PATH.format(ctx.task.name))
+                detail = "uncacheable action(s) on this target ({})".format(", ".join(mnemonics))
+            elif blocked:
+                detail = "an uncacheable action blocked hashing — see the ERROR/WARNING above for the culprit target(s) and the fix"
             else:
-                msg = "no output_sha (not in grpc log; target may be an alias — use the actual target label)"
-            rows.append((label, "WARN", "warn", msg, "-", "-"))
-            delivery_add_result(
-                data,
-                label,
-                "warn",
-                message = msg,
-                is_forced = is_forced,
-            )
+                detail = "not in grpc log; target may be an alias — use the actual target label"
+            msg = "no digest: {}. Phase-2 raw log: {}".format(detail, _PHASE2_LOG_PATH.format(ctx.task.name))
+
+            # An uncacheable action is a hard error; a non-resolution with no
+            # uncacheable action present stays a warning as it always has.
+            if blocked and not ctx.args.warn_unresolved_digest:
+                failed_count += 1
+                rows.append((label, "FAIL", "fail", msg, "-", "-"))
+                delivery_add_result(data, label, "fail", message = msg, is_forced = is_forced)
+            else:
+                pending_count += 1
+                rows.append((label, "WARN", "warn", msg, "-", "-"))
+                delivery_add_result(data, label, "warn", message = msg, is_forced = is_forced)
             _fire_target_hook(data, delivery_trait, run_tracker, label)
         elif not is_forced and target_state and target_state.get("delivered"):
             skipped_count += 1
@@ -1355,9 +1474,9 @@ def _delivery_impl(ctx):
 
         # Flag order (last-wins): active run command, then these per-call extras.
         # `run_tracker.flags` carries every flag needed to build-then-spawn the
-        # deliverables (mandatory spawn flags, the runinfo aspect so each
-        # deliverable's `args`/env replay like `bazel run`, and the
-        # `--remote_download_outputs=toplevel` floor that upgrades a user `=minimal`).
+        # deliverables (mandatory spawn flags + the `--remote_download_outputs=toplevel`
+        # floor that upgrades a user `=minimal`); `run_tracker.aspects` carries the
+        # runinfo aspect so each deliverable's `args`/env replay like `bazel run`.
         # release_flags (`--release-bazel-flag`s like `--stamp`, `--config=release`)
         # come AFTER so a release that *raises* the floor — e.g. `=all` for a rule
         # set that won't run without dependency outputs materialized — still wins
@@ -1386,6 +1505,7 @@ def _delivery_impl(ctx):
         build = ctx.bazel.build(
             flags = phase3_flags,
             rc = phase3_rc,
+            aspects = run_tracker.aspects,
             build_events = [phase3_events],
             stdout = None,
             stderr = ctx.std.fs.create(phase3_log_path),
@@ -1700,11 +1820,15 @@ Currently \x1b[3monly\x1b[23m supported on Aspect Workflows CI runners. Support 
             default = False,
             description = "Downgrade a non-runnable deliverable from a hard failure (exit 1) to a warning. A target tagged 'deliverable' whose entrypoint has no runfiles tree fails by default. Set this flag if your repo intentionally tags non-executable targets as deliverable.",
         ),
+        "warn_unresolved_digest": args.boolean(
+            default = False,
+            description = "Downgrade a delivery target whose change-detection digest could not be resolved from a hard failure (exit 1) to a warning. By default such a target fails the task: an unresolvable digest means an uncacheable action (typically a non-hermetic genrule — e.g. one that shells out to `git` — or a stamped action, on the target itself or a shared upstream dependency) could not be read from the remote cache while computing digests, so change detection could not run and the target would be silently NOT delivered. The failure names the offending target(s) and how to fix them (make them deterministic/cacheable, or tag them `no-remote` / `local`). Set this flag if your repo knowingly ships such actions and prefers a warning over a red build.",
+        ),
         "upload_grpc_log": args.string(
             default = "auto",
             values = ["auto", "true", "false"],
             long = "upload-grpc-log",
-            description = "Whether to upload the phase-2 Bazel gRPC log (--remote_grpc_log) as a CI artifact for debugging change-detection digests. 'auto' (default) uploads only when one or more digests could not be hashed. 'true' always uploads it; 'false' never does. (When phase 2 produces no gRPC log at all, there is nothing to upload regardless of this flag — the captured stderr is uploaded instead.) The require-cached phase logs only GetActionResult/FindMissingBlobs lookups (digests + statuses) — no command lines or action env — but the gRPC call metadata can carry the remote-cache auth token, so the artifact is gated. Requires the Artifact Upload feature and a recognized CI host; no-op otherwise. Per-phase stderr logs are always uploaded on failure regardless of this flag.",
+            description = "Whether to upload the phase-2 Bazel gRPC log (--remote_grpc_log) as a CI artifact for debugging change-detection digests. 'auto' (default) uploads only when one or more digests could not be hashed. 'true' always uploads it; 'false' never does. (When phase 2 produces no gRPC log at all, there is nothing to upload regardless of this flag — the captured stderr is uploaded instead.) The checksum phase logs only GetActionResult/FindMissingBlobs lookups (digests + statuses) — no command lines or action env — but the gRPC call metadata can carry the remote-cache auth token, so the artifact is gated. Requires the Artifact Upload feature and a recognized CI host; no-op otherwise. Per-phase stderr logs are always uploaded on failure regardless of this flag.",
         ),
         "manifest_file": args.string(
             default = "",

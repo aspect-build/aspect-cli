@@ -32,16 +32,15 @@ _DOWNLOAD_OUTPUTS_ALIASES = {
     "--remote_download_all": "all",
 }
 
-# Injected-aspect repo / output-group / file-suffix names. The aspect writes
-# one `<name>.aspect_runinfo.json` per runnable target carrying everything
+# runinfo output-group / file-suffix names. The aspect writes one
+# `<name>.aspect_runinfo.json` per runnable target carrying everything
 # `bazel run` reconstructs but no provider exposes: the executable
 # (runfiles-relative short_path), the expanded+tokenized `args` attribute, and
 # the `RunEnvironmentInfo` env. `determine_entrypoint` reads it back.
-_RUNINFO_REPO = "aspect_runinfo"
 _RUNINFO_OUTPUT_GROUP = "aspect_runinfo"
 _RUNINFO_JSON_SUFFIX = ".aspect_runinfo.json"
 
-# The injected aspect, materialized verbatim into a temp repo. `_tokenize` is a
+# The runinfo aspect source, applied via `ctx.bazel.aspect(...)`. `_tokenize` is a
 # Starlark port of Bazel's ShellUtils.tokenize (ShellUtils.java:90-143); the
 # args pipeline mirrors RunfilesSupport.java:608 — location-expand over `data`,
 # Make-var expand, then shell-tokenize — so the captured argv matches `bazel
@@ -153,34 +152,20 @@ def _runinfo_aspect_impl(target, ctx):
 runinfo = aspect(implementation = _runinfo_aspect_impl)
 """
 
-def _write_runinfo_repo(ctx, repo_dir: str):
-    ctx.std.fs.create_dir_all(repo_dir)
-    ctx.std.fs.write(repo_dir + "/REPO.bazel", "")
-    ctx.std.fs.write(repo_dir + "/BUILD.bazel", "")
-    ctx.std.fs.write(repo_dir + "/runinfo.bzl", _RUNINFO_BZL)
+def _runinfo_aspect(ctx):
+    """The runinfo aspect, as a `ctx.bazel.aspect(...)` value.
 
-def _runinfo_aspect_flags(ctx, rc) -> list[str]:
-    """Materialize the runinfo aspect into a temp injectable repo and return the
-    Bazel flags that apply it to the top-level run target(s).
-
-    Folded into `runnable(rc=...)` so spawn tasks never assemble it by hand.
-    The temp repo is namespaced by `ctx.task.name`. `rc` selects the injection
-    flag: `--inject_repository` only registers the repo in the bzlmod graph, so
-    under WORKSPACE mode (`--enable_bzlmod=false`) the repo is invisible and
-    `@aspect_runinfo` fails to resolve — `--override_repository` injects in both
-    modes. Mirrors `delivery._get_output_shas`.
+    Folded into `runnable(rc=...)` so spawn tasks never wire it by hand. The
+    runtime materializes it into `@bazel_tools` (already in the repo graph, in
+    both bzlmod and WORKSPACE mode), so it applies with no `--inject_repository`
+    and no analysis-cache churn. Callers pass it through `runnable().aspects` to
+    `ctx.bazel.build(aspects = ...)`.
     """
-    repo_dir = "/tmp/aspect_runinfo_" + ctx.task.name
-    _write_runinfo_repo(ctx, repo_dir)
-    if rc.bool_flag("--enable_bzlmod", command = "build") == False:
-        inject = "--override_repository=" + _RUNINFO_REPO + "=" + repo_dir
-    else:
-        inject = "--inject_repository=" + _RUNINFO_REPO + "=" + repo_dir
-    return [
-        "--aspects=@" + _RUNINFO_REPO + "//:runinfo.bzl%runinfo",
-        "--output_groups=+" + _RUNINFO_OUTPUT_GROUP,
-        inject,
-    ]
+    return ctx.bazel.aspect(
+        implementation = _RUNINFO_BZL,
+        symbol = "runinfo",
+        output_groups = [_RUNINFO_OUTPUT_GROUP],
+    )
 
 def download_outputs_sufficient(value: str | None) -> bool:
     """Whether a `--remote_download_outputs` value already puts the top-level
@@ -639,8 +624,9 @@ def runnable(ctx, targets: list[str], rc = None) -> struct:
     """Build a BES event tracker that resolves entrypoints for `targets`.
 
     Pass the active `RunCommand` as `rc` (the value `setup_phase` returns) to opt
-    into the `runinfo` aspect: `flags` then carries the aspect injection too. Omit
-    `rc` (unit tests) for the BES-only heuristic with no aspect.
+    into the `runinfo` aspect: `aspects` then carries it (applied via
+    `ctx.bazel.build(aspects = ...)`). Omit `rc` (unit tests) for the BES-only
+    heuristic with no aspect.
 
     Feed BES events via `.event(event)` as they arrive from the build. Once the
     build completes, query results per target through the returned struct:
@@ -648,13 +634,18 @@ def runnable(ctx, targets: list[str], rc = None) -> struct:
       flags → list[str]
           The single, complete `flags=` to pass to `ctx.bazel.build` — every
           load-bearing flag for building-then-running the targets: the mandatory
-          spawn flags, plus (when `rc` is given) the `runinfo` aspect injection
-          and the `--remote_download_outputs` floor (forced up to `toplevel` only
-          when `rc` resolves below it, so the binary lands on disk while an upward
-          `=all` override still stands). Callers pass `flags = r.flags` and
-          assemble no spawn constants by hand. A caller with its own non-spawn
-          extras (e.g. `delivery`'s release flags) places those before `r.flags`
-          so the load-bearing flags win.
+          spawn flags, plus (when `rc` is given) the `--remote_download_outputs`
+          floor (forced up to `toplevel` only when `rc` resolves below it, so the
+          binary lands on disk while an upward `=all` override still stands).
+          Callers pass `flags = r.flags` and assemble no spawn constants by hand.
+          A caller with its own non-spawn extras (e.g. `delivery`'s release
+          flags) places those before `r.flags` so the load-bearing flags win.
+
+      aspects → list
+          The aspects to pass to `ctx.bazel.build(aspects = ...)` — the
+          `runinfo` aspect when `rc` was given, else empty. Kept separate from
+          `flags` because the runtime materializes aspects itself (into
+          `@bazel_tools`), so callers pass `aspects = r.aspects` verbatim.
 
       entrypoint_ready(target) → bool
           Whether streaming callers may resolve+run `target` now: its `default`
@@ -712,11 +703,14 @@ def runnable(ctx, targets: list[str], rc = None) -> struct:
     )
 
     flags = list(_LOCAL_SPAWN_FLAGS)
+    aspects = []
     if rc != None:
-        flags = flags + _runinfo_aspect_flags(ctx, rc) + _download_floor_flags(rc)
+        flags = flags + _download_floor_flags(rc)
+        aspects = [_runinfo_aspect(ctx)]
 
     return struct(
         flags = flags,
+        aspects = aspects,
         event = lambda event: _process_bes(state, event),
         entrypoint_ready = lambda target: _entrypoint_ready(state, target),
         determine_entrypoint = lambda target: _determine_entrypoint(state, target),

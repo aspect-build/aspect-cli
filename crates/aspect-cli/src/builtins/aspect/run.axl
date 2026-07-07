@@ -113,6 +113,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         target,
         build_events = build_events,
         flags = r.flags + endpoint_auth_flags,
+        aspects = r.aspects,
         announce_version = announce_version,
         announce_command = announce_command,
     )

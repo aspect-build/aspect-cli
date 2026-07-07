@@ -426,5 +426,9 @@ steps:
           limit: 1
     command: |
       export ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS=$$(buildkite-agent meta-data get force_targets --default '')
-      ASPECT_DEBUG=1 aspect delivery --task:name delivery-bk-debug
-      aspect delivery --task:name delivery-bk
+      # --warn-unresolved-digest: the deliverable set includes py_deliverable, a
+      # stamped py_binary whose PyWriteBuildData action is uncacheable and never
+      # resolves a digest — a known, tolerated missing digest, so keep it a
+      # warning rather than the (new) default hard failure.
+      ASPECT_DEBUG=1 aspect delivery --task:name delivery-bk-debug --warn-unresolved-digest
+      aspect delivery --task:name delivery-bk --warn-unresolved-digest
