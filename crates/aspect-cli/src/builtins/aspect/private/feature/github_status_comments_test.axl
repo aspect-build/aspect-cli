@@ -119,7 +119,7 @@ def _body_for(kind, status, data):
     """Mirror the producer's `progress.body` narrative form.
 
     Running emits ship the live phase narrative (`Bazel test running
-    (12 tests run)` / `Linting`); terminal emits ship a verb-prefixed
+    (12 of 58 tests run)` / `Linting`); terminal emits ship a verb-prefixed
     summary (`Bazel test complete (58/58 passed)` /
     `Lint failed (3 errors)`)."""
     compact = _compact_for(kind, status, data)
@@ -2071,7 +2071,7 @@ def _test_impl(ctx):
                     current_phase = "test",
                     current_phase_elapsed_ms = 65000,
                     progress = {
-                        "body": "Bazel test running... (12 tests run)",
+                        "body": "Bazel test running... (12 of 58 tests run)",
                         "stream": "",
                     },
                 ),

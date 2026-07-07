@@ -11,6 +11,7 @@ Event kinds consumed:
   "workspace_status"         — captures workspace_status key=value pairs (BUILD_USER, etc.)
   "configuration"            — captures cpu arch and compilation_mode (target config only)
   "action_completed"         — accumulates failed build actions (up to MAX_FAILED_ACTIONS)
+  "target_configured"        — caches rule kind per label; counts configured targets (incl. test targets, the live progress denominator)
   "target_completed"         — accumulates failed build targets
   "test_result"              — captures per-attempt test.log + test.xml paths and duration (keyed by label)
   "test_summary"             — buckets tests into failed / flaky / passed; tracks duration
@@ -314,6 +315,10 @@ def init_data():
             # label -> rule kind (e.g. "cc_library", "py_test") from
             # target_configured. Detects tests and displays the kind.
             "target_kinds": {},
+            # Count of configured targets whose kind is a test (`*_test`),
+            # from target_configured. The expected-test denominator for the
+            # live "N of M tests run" progress narrative.
+            "test_targets_configured": 0,
             # All built labels (test + non-test), capped at MAX_BUILT_TARGETS.
             "built_targets": [],
             # Targets that completed (success + failure), counting target_completed
@@ -572,7 +577,15 @@ def process_event(data, event):
         if target_kind.endswith(" rule"):
             target_kind = target_kind[:-len(" rule")]
         if label and target_kind:
+            # Aspects that apply to a test target emit extra target_configured
+            # events for the same label (distinct `aspect` field) while
+            # test_summary still reports the test once. Count each test label
+            # a single time — first-seen — so the "N of M tests run"
+            # denominator matches the run count and doesn't overshoot.
+            first_seen = label not in data["bazel"]["target_kinds"]
             data["bazel"]["target_kinds"][label] = target_kind
+            if first_seen and _is_test_kind(target_kind):
+                data["bazel"]["test_targets_configured"] += 1
         data["bazel"]["targets_configured_counted"] += 1
         return False
 

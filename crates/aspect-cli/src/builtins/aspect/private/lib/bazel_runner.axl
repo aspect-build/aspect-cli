@@ -21,7 +21,7 @@ load("./deployment_flags.axl", "announce_deployment_flags", "deployment_endpoint
 load("./health_check.axl", "HealthCheckTrait")
 load("./lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "setup_phase", "task_update")
 load("./repro_commands.axl", "build_aspect_command", "build_bazel_command", "flavor_allows", "print_repro_and_fix", "repro_prefix")
-load("./text.axl", "pluralize")
+load("./text.axl", "format_int_comma", "pluralize")
 
 # ─── Lifecycle status + Result-cell text ──────────────────────────────────────
 #
@@ -115,7 +115,9 @@ def _live_progress(data, command, status):
     Returns a `ProgressStyles` record where `body` is the narrative
     form — verb-prefixed phrase with an optional parenthetical count:
 
-      running:  `Bazel test running (12 tests run)`
+      running:  `Bazel test running (12 of 58 tests run)`
+                (falls back to `(12 tests run)` before the expected
+                test count is known)
       passed:   `Bazel test complete (58/58 passed)`
       failed:   `Bazel test failed (3 tests failed)`
       warning:  `Bazel test complete (2 flaky)`
@@ -135,7 +137,16 @@ def _live_progress(data, command, status):
             flaky = data["bazel"].get("flaky_test_total", 0) or 0
             total = passed + failed + flaky
             if total > 0:
-                running_detail = pluralize(total, "test") + " run"
+                # Prefer "N of M tests run" once the expected test count is
+                # known and at least covers the run count. The denominator
+                # streams in via target_configured events, so guard against a
+                # stale-low expected total (would render M < N) by falling
+                # back to the bare "N tests run" form until it catches up.
+                expected = data["bazel"].get("test_targets_configured", 0) or 0
+                if expected >= total:
+                    running_detail = format_int_comma(total) + " of " + pluralize(expected, "test") + " run"
+                else:
+                    running_detail = pluralize(total, "test") + " run"
                 if failed > 0:
                     running_detail = running_detail + " · " + pluralize(failed, "failed", plural = "failed")
         if not running_detail:

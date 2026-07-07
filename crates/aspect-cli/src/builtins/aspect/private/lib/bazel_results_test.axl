@@ -846,6 +846,42 @@ def _make_test_summary(label, status, cached = False, duration_ms = 0):
         ),
     )
 
+def _make_target_configured(label, target_kind):
+    """Synthesize a minimal `target_configured` BES event for `process_event`.
+
+    Bazel suffixes the rule kind with ` rule` (e.g. `cc_test rule`); mirror
+    that so the handler's strip logic is exercised."""
+    return struct(
+        kind = "target_configured",
+        id = struct(label = label),
+        payload = struct(target_kind = target_kind + " rule"),
+    )
+
+def _test_target_configured_counts_test_targets(ctx):
+    """`target_configured` bumps `test_targets_configured` only for `*_test`
+    rule kinds — the expected-test denominator for the live progress
+    narrative. Non-test targets bump `targets_configured_counted` but not
+    the test count."""
+    data = init_data()
+    process_event(data, _make_target_configured("//pkg:lib", "cc_library"))
+    process_event(data, _make_target_configured("//pkg:a_test", "cc_test"))
+    process_event(data, _make_target_configured("//pkg:b_test", "py_test"))
+
+    _eq("only *_test targets counted", data["bazel"]["test_targets_configured"], 2)
+    _eq("every configured target counted", data["bazel"]["targets_configured_counted"], 3)
+
+def _test_target_configured_dedups_aspect_events(ctx):
+    """Aspects on a test target re-emit target_configured for the same label.
+    The test denominator must count each test label once so it matches the
+    run count and doesn't overshoot (e.g. "10 of 20 tests run" that never
+    catches up)."""
+    data = init_data()
+    process_event(data, _make_target_configured("//pkg:a_test", "cc_test"))
+    process_event(data, _make_target_configured("//pkg:a_test", "cc_test"))
+    process_event(data, _make_target_configured("//pkg:a_test", "cc_test"))
+
+    _eq("test label counted once despite aspect re-emits", data["bazel"]["test_targets_configured"], 1)
+
 def _test_failed_test_survives_passed_bucket_cap(ctx):
     """Regression: a failed test arriving after `passed_tests` hits
     `MAX_TEST_TARGETS` must still land in `failed_tests`. A previous
@@ -1240,6 +1276,8 @@ _UNIT_TESTS = [
     _test_bes_get_returns_default_for_missing_field,
     _test_bes_get_returns_value_for_present_field,
     _test_bes_get_handles_none,
+    _test_target_configured_counts_test_targets,
+    _test_target_configured_dedups_aspect_events,
     _test_failed_test_survives_passed_bucket_cap,
     _test_flaky_test_survives_passed_bucket_cap,
     _test_common_label_root_same_package_returns_all_pattern,
