@@ -1243,8 +1243,10 @@ def _delivery_impl(ctx):
     else:
         delivery_state = {}
 
-    # Phase 3: download + BES for targets needing delivery. In --mode=always
-    # every resolved target is a candidate (no change detection).
+    # Phase 3: fused download + delivery. Bazel lands a target's outputs +
+    # runfiles on disk before its `target_completed` fires (current-Bazel
+    # guarantee, build/run only), so each delivery spawns on its event and
+    # overlaps the rest of the build. --mode=always skips change detection.
     if mode == "always":
         delivery_targets = list(targets)
     else:
@@ -1257,122 +1259,37 @@ def _delivery_impl(ctx):
             )
         ]
 
-    # Phase 3 builds + materializes runfiles for `bazel run`. Skipped only for
-    # the dry-run + --track-state=false preview (nothing to run).
-    if delivery_targets and not preview_only:
-        delivery_targets_label = pluralize(len(delivery_targets), "target")
-        status = _pick_status(data, had_failure = False, terminal = False)
-        task_update(
-            ctx,
-            lifecycle,
-            status,
-            ProgressStyles(
-                body = "Downloading runfiles for {} being delivered...".format(delivery_targets_label),
-                stream = "Downloading runfiles for {} being delivered".format(delivery_targets_label),
-            ),
-            kind = "delivery_results",
-            data = data,
-            phase = Phase(name = "download", description = "Download runfiles", emoji = "📥"),
-        )
-
-        # Expand any `--config=NAME` in release_bazel_flags against the rc — the
-        # release build reaches Bazel under --ignore_all_rc_files, so an
-        # unexpanded `--config=release` would fail with "Config value not
-        # defined" (the task's own expanded_flags already went through this).
-        release_flags = expand_config_flags(ctx, bazel_trait, ctx.args.release_bazel_flags)
-
-        # Phase 3 flag order (last-wins): active run command, then these per-call
-        # extras. `run_tracker.flags` carries every flag needed to build-then-spawn
-        # the deliverables (mandatory spawn flags, the runinfo aspect so each
-        # deliverable's `args`/env replay like `bazel run`, and the
-        # `--remote_download_outputs=toplevel` floor that upgrades a user `=minimal`).
-        # release_flags (`--release-bazel-flag`s like `--stamp`, `--config=release`)
-        # come AFTER so a release that *raises* the floor — e.g. `=all` for a rule
-        # set that won't run without dependency outputs materialized — still wins
-        # over `=toplevel` (the floor is a minimum, not a ceiling).
-        # `--noremote_upload_local_results` keeps release artifacts out of the
-        # shared remote cache (delivery-specific).
-        phase3_flags = run_tracker.flags + list(release_flags) + aspect_endpoint_auth_flags(ctx, rc, "build") + [
-            "--noremote_upload_local_results",
-        ]
-        _t_download = time.monotonic()
-
-        # Isolate the release build (and the artifacts dispatch reads from it) on
-        # its own `-<suffix>` server when the user opted in: it stamps and applies
-        # `--config=release`, reconfiguring the analysis away from the plain
-        # build/test one. Off by default — no suffix keeps phase 3 on the shared
-        # server. `--output_user_root` stays shared.
-        phase3_rc = rc
-        if delivery_suffix:
-            phase3_rc = sibling_rc(ctx, bazel_trait, lambda flags: apply_output_base_suffix(flags, "-" + delivery_suffix))
-
-        # Redirect stderr to a file: phase-3 re-materializes artifacts (OCI
-        # layers, runfiles) and its progress looks like redundant rebuilds;
-        # the log is the escape hatch on real failure.
-        phase3_log_path = _PHASE3_LOG_PATH.format(ctx.task.name)
-        phase3_events = bazel.build_events.iterator()
-        build = ctx.bazel.build(
-            flags = phase3_flags,
-            rc = phase3_rc,
-            build_events = [phase3_events],
-            stdout = None,
-            stderr = ctx.std.fs.create(phase3_log_path),
-            announce_version = announce_version,
-            announce_command = announce_command,
-            *delivery_targets
-        )
-        for event in phase3_events:
-            run_tracker.event(event)
-        status = build.wait()
-
-        dispatch_bazel_attempt_end(ctx, bazel_trait, status.code)
-
-        # When phase 1/2 was skipped, phase 3 is the only build; otherwise the
-        # outer caller already fired `build_end` with the phase-1 build_code.
-        if not phase_1_2_runs:
-            dispatch_bazel_build_end(ctx, bazel_trait, status.code)
-        if status.code != 0:
-            error(ctx.std, "Build failed with exit code {}. Phase-3 raw log: {}".format(status.code, phase3_log_path))
-            _surface_phase_stderr(ctx, 3, phase3_log_path)
-            for label in delivery_targets:
-                delivery_add_result(
-                    data,
-                    label,
-                    "warn",
-                    message = "download failed (exit {})".format(status.code),
-                    output_sha = output_shas.get(label, ""),
-                )
-                _fire_target_hook(data, delivery_trait, None, label)
-            return _emit_final(ctx, lifecycle, data, exit_code = status.code)
-        info(ctx.std, "Download took {}.".format(fmt_elapsed(time.monotonic() - _t_download)))
-
     max_par = ctx.args.max_parallelization
     if max_par < 1:
         error(ctx.std, "--max-parallelization must be >= 1, got {}.".format(max_par))
         return _emit_final(ctx, lifecycle, data, exit_code = 1)
     capture = max_par > 1
 
-    # Step 1: collect targets needing delivery; record WARN/SKIP immediately
     status = _pick_status(data, had_failure = False, terminal = False)
     task_update(
         ctx,
         lifecycle,
         status,
         ProgressStyles(
-            body = "Selecting targets for delivery...",
-            stream = "Selecting targets for delivery",
+            body = "Delivering targets...",
+            stream = "Delivering targets",
         ),
         kind = "delivery_results",
         data = data,
         phase = Phase(name = "deliver", description = "Deliver targets", emoji = "🚚"),
     )
+
     rows = []
     skipped_count = 0
     pending_count = 0
     success_count = 0
     failed_count = 0
-    pending = []  # [(label, entrypoint, is_forced, output_sha)]
 
+    # Row now for targets needing no build (WARN missing-digest, SKIP delivered,
+    # DRY-RUN preview); the rest go to `spawnable`, keyed by apparent label (the
+    # form BES emits), with `spawn_order` holding table order.
+    spawnable = {}
+    spawn_order = []
     for label in targets:
         # --mode=always behaves as if every target was --force-target'd.
         is_forced = label in forced_targets or mode == "always"
@@ -1411,135 +1328,230 @@ def _delivery_impl(ctx):
             )
             _fire_target_hook(data, delivery_trait, run_tracker, label)
         elif preview_only:
-            # No entrypoint needed; dry_run skips the bazel run path.
-            pending.append((label, None, is_forced, output_sha or "-"))
-        else:
-            ep = run_tracker.determine_entrypoint(label)
-            if ep == None:
-                warn_msg = "no build output reported for this target (possibly an alias, filtered, or transitioned away)"
-                pending_count += 1
-                rows.append((label, "WARN", "warn", warn_msg, output_sha or "-", "-"))
-                delivery_add_result(data, label, "warn", message = warn_msg, output_sha = output_sha or "", is_forced = is_forced)
-                _fire_target_hook(data, delivery_trait, run_tracker, label)
-            elif not ep.runfiles_dir:
-                not_runnable_msg = "tagged 'deliverable' but not runnable: no runfiles directory at {}.runfiles (target may not be an executable rule)".format(ep.path)
-                if ctx.args.warn_not_runnable:
-                    pending_count += 1
-                    rows.append((label, "WARN", "warn", not_runnable_msg, output_sha or "-", "-"))
-                    delivery_add_result(data, label, "warn", message = not_runnable_msg, output_sha = output_sha or "", is_forced = is_forced)
-                else:
-                    failed_count += 1
-                    rows.append((label, "FAIL", "fail", not_runnable_msg, output_sha or "-", "-"))
-                    delivery_add_result(data, label, "fail", message = not_runnable_msg, output_sha = output_sha or "", is_forced = is_forced)
-                _fire_target_hook(data, delivery_trait, run_tracker, label)
-            else:
-                pending.append((label, ep, is_forced, output_sha or "-"))
-
-    # Intermediate update so skip/warn state is visible before the
-    # (potentially long) per-target loop.
-    pending_label = pluralize(len(pending), "target")
-    if dry_run:
-        prepass_progress = "Previewing {}... (dry-run)".format(pending_label)
-        prepass_cli = "Previewing {} (dry-run)".format(pending_label)
-    elif pending:
-        prepass_progress = "Delivering {}...".format(pending_label)
-        prepass_cli = "Delivering {}".format(pending_label)
-    else:
-        prepass_progress = "No targets to deliver"
-        prepass_cli = "No targets to deliver"
-    status = _pick_status(data, had_failure = False, terminal = False)
-    task_update(
-        ctx,
-        lifecycle,
-        status,
-        ProgressStyles(
-            body = prepass_progress,
-            stream = prepass_cli,
-        ),
-        kind = "delivery_results",
-        data = data,
-    )
-
-    # Step 2: dispatch in chunks of max_par — spawn all in chunk, poll for completions
-    for chunk_start in range(0, len(pending), max_par):
-        chunk = pending[chunk_start:chunk_start + max_par]
-
-        if dry_run:
-            for label, _, is_forced, output_sha in chunk:
-                forced_marker = " (FORCED)" if is_forced else ""
-                pending_count += 1
-                rows.append((label, "DRY-RUN" + forced_marker, "pending", "-", output_sha, "-"))
-                delivery_add_result(
-                    data,
-                    label,
-                    "pending",
-                    message = "dry-run" + (" (forced)" if is_forced else ""),
-                    output_sha = output_sha,
-                    is_forced = is_forced,
-                )
-                _fire_target_hook(data, delivery_trait, run_tracker, label)
-            continue
-
-        children = []
-        for label, entrypoint, is_forced, output_sha in chunk:
+            # dry-run + --track-state=false: no build runs, so preview directly.
+            pending_count += 1
             forced_marker = " (FORCED)" if is_forced else ""
-            print("  {} {}{}...".format(_style("Delivering", _BOLD, ansi), label, forced_marker))
-            children.append((label, is_forced, output_sha, time.monotonic(), run_tracker.spawn(entrypoint, [], capture)))
-
-        for label, is_forced, output_sha, t_start, child in children:
-            forced_marker = " (FORCED)" if is_forced else ""
-            if capture:
-                out = child.wait_with_output()
-                exit_code = out.status.code
-                _print_captured_output(label, exit_code, out.stdout, out.stderr, ansi)
-            else:
-                exit_code = child.wait().code
-
-            duration = fmt_elapsed(time.monotonic() - t_start)
-            if exit_code == 0:
-                if track_state:
-                    deliveryd_deliver(ctx, endpoint, ci_host, output_sha, prefix, build_url)
-                success_count += 1
-                rows.append((label, "OK" + forced_marker, "ok", build_url, output_sha, duration))
-                delivery_add_result(
-                    data,
-                    label,
-                    "ok",
-                    message = build_url,
-                    output_sha = output_sha,
-                    is_forced = is_forced,
-                )
-            else:
-                if track_state:
-                    deliveryd_delete_artifact(ctx, endpoint, ci_host, output_sha, prefix)
-                failed_count += 1
-                rows.append((label, "FAIL" + forced_marker, "fail", "-", output_sha, duration))
-                delivery_add_result(
-                    data,
-                    label,
-                    "fail",
-                    message = "exit {}".format(exit_code),
-                    output_sha = output_sha,
-                    is_forced = is_forced,
-                )
-            _fire_target_hook(data, delivery_trait, run_tracker, label)
-
-            # Per-completion progress. priority=False throttles BK/GHSC
-            # PATCHes; empty stream suppresses the CLI line (the per-target
-            # "Delivering <label>..." already ticks).
-            done = success_count + failed_count
-            status = _pick_status(data, had_failure = failed_count > 0, terminal = False)
-            task_update(
-                ctx,
-                lifecycle,
-                status,
-                ProgressStyles(
-                    body = "Delivering {} of {}...".format(done, pluralize(len(pending), "target")),
-                ),
-                kind = "delivery_results",
-                data = data,
-                priority = False,
+            rows.append((label, "DRY-RUN" + forced_marker, "pending", "-", output_sha or "-", "-"))
+            delivery_add_result(
+                data,
+                label,
+                "pending",
+                message = "dry-run" + (" (forced)" if is_forced else ""),
+                output_sha = output_sha or "-",
+                is_forced = is_forced,
             )
+            _fire_target_hook(data, delivery_trait, run_tracker, label)
+        else:
+            spawnable[apparent_label(label)] = (label, is_forced, output_sha or "-")
+            spawn_order.append(label)
+
+    build_exit_code = 0
+    if delivery_targets and not preview_only:
+        # Expand any `--config=NAME` in release_bazel_flags against the rc — the
+        # release build reaches Bazel under --ignore_all_rc_files, so an
+        # unexpanded `--config=release` would fail with "Config value not
+        # defined" (the task's own expanded_flags already went through this).
+        release_flags = expand_config_flags(ctx, bazel_trait, ctx.args.release_bazel_flags)
+
+        # Flag order (last-wins): active run command, then these per-call extras.
+        # `run_tracker.flags` carries every flag needed to build-then-spawn the
+        # deliverables (mandatory spawn flags, the runinfo aspect so each
+        # deliverable's `args`/env replay like `bazel run`, and the
+        # `--remote_download_outputs=toplevel` floor that upgrades a user `=minimal`).
+        # release_flags (`--release-bazel-flag`s like `--stamp`, `--config=release`)
+        # come AFTER so a release that *raises* the floor — e.g. `=all` for a rule
+        # set that won't run without dependency outputs materialized — still wins
+        # over `=toplevel` (the floor is a minimum, not a ceiling).
+        # `--noremote_upload_local_results` keeps release artifacts out of the
+        # shared remote cache (delivery-specific).
+        phase3_flags = run_tracker.flags + list(release_flags) + aspect_endpoint_auth_flags(ctx, rc, "build") + [
+            "--noremote_upload_local_results",
+        ]
+
+        # Isolate the release build (and the artifacts dispatch reads from it) on
+        # its own `-<suffix>` server when the user opted in: it stamps and applies
+        # `--config=release`, reconfiguring the analysis away from the plain
+        # build/test one. Off by default — no suffix keeps phase 3 on the shared
+        # server. `--output_user_root` stays shared.
+        phase3_rc = rc
+        if delivery_suffix:
+            phase3_rc = sibling_rc(ctx, bazel_trait, lambda flags: apply_output_base_suffix(flags, "-" + delivery_suffix))
+
+        # Redirect stderr to a file: phase-3 re-materializes artifacts (OCI
+        # layers, runfiles) and its progress looks like redundant rebuilds;
+        # the log is the escape hatch on real failure.
+        phase3_log_path = _PHASE3_LOG_PATH.format(ctx.task.name)
+        _t_download = time.monotonic()
+        phase3_events = bazel.build_events.iterator()
+        build = ctx.bazel.build(
+            flags = phase3_flags,
+            rc = phase3_rc,
+            build_events = [phase3_events],
+            stdout = None,
+            stderr = ctx.std.fs.create(phase3_log_path),
+            announce_version = announce_version,
+            announce_command = announce_command,
+            *delivery_targets
+        )
+
+        # `running` is a FIFO reaped in submission order: a child blocked on a
+        # full stdout pipe drains in its turn, so a stuck delivery can't deadlock
+        # the pipeline (each head exits independently of those queued behind it).
+        dispatched = {}
+        ready = []
+        running = []
+        total_deliverable = len(spawn_order)
+        build_done = False
+        last_emit_ms = now_ms(ctx)
+
+        for _tick in sleep_iter(BES_DRAIN_TICK_MS):
+            interesting = False
+
+            # Drain events; on stream end drain once more (racing `done`), then
+            # capture the build exit.
+            if not build_done:
+                for _ in range(10000):
+                    event = phase3_events.try_pop()
+                    if event == None:
+                        break
+                    run_tracker.event(event)
+                if phase3_events.done:
+                    for _ in range(10000):
+                        event = phase3_events.try_pop()
+                        if event == None:
+                            break
+                        run_tracker.event(event)
+                    status = build.wait()
+                    build_exit_code = status.code
+                    dispatch_bazel_attempt_end(ctx, bazel_trait, status.code)
+
+                    # phase 1/2 skipped → phase 3 is the only build; else the
+                    # caller already fired `build_end`.
+                    if not phase_1_2_runs:
+                        dispatch_bazel_build_end(ctx, bazel_trait, status.code)
+                    if status.code != 0:
+                        error(ctx.std, "Delivery build failed with exit code {}. Phase-3 raw log: {}".format(status.code, phase3_log_path))
+                        _surface_phase_stderr(ctx, 3, phase3_log_path)
+                    else:
+                        info(ctx.std, "Delivery build took {}.".format(fmt_elapsed(time.monotonic() - _t_download)))
+                    build_done = True
+
+            # Resolve each target once its default + runinfo outputs are in (see
+            # `entrypoint_ready`), so a delivery spawns the instant it's built
+            # without racing the aspect completion. Targets still not ready at
+            # build end are resolved best-effort: no default output → never
+            # built; built-but-non-runnable → the not-runnable branch below.
+            for label in spawn_order:
+                key = apparent_label(label)
+                if key in dispatched:
+                    continue
+                if not run_tracker.entrypoint_ready(label) and not build_done:
+                    continue
+                _, is_forced, output_sha = spawnable[key]
+                dispatched[key] = True
+                interesting = True
+                ep = run_tracker.determine_entrypoint(label)
+                if ep == None:
+                    pending_count += 1
+                    if build_exit_code:
+                        warn_msg = "never built (delivery build exited {}). Phase-3 raw log: {}".format(build_exit_code, phase3_log_path)
+                    else:
+                        warn_msg = "no build output reported for this target (possibly an alias, filtered, or transitioned away)"
+                    rows.append((label, "WARN", "warn", warn_msg, output_sha, "-"))
+                    delivery_add_result(data, label, "warn", message = warn_msg, output_sha = output_sha, is_forced = is_forced)
+                    _fire_target_hook(data, delivery_trait, run_tracker, label)
+                elif not ep.runfiles_dir:
+                    not_runnable_msg = "tagged 'deliverable' but not runnable: no runfiles directory at {}.runfiles (target may not be an executable rule)".format(ep.path)
+                    if ctx.args.warn_not_runnable:
+                        pending_count += 1
+                        rows.append((label, "WARN", "warn", not_runnable_msg, output_sha, "-"))
+                        delivery_add_result(data, label, "warn", message = not_runnable_msg, output_sha = output_sha, is_forced = is_forced)
+                    else:
+                        failed_count += 1
+                        rows.append((label, "FAIL", "fail", not_runnable_msg, output_sha, "-"))
+                        delivery_add_result(data, label, "fail", message = not_runnable_msg, output_sha = output_sha, is_forced = is_forced)
+                    _fire_target_hook(data, delivery_trait, run_tracker, label)
+                elif dry_run:
+                    pending_count += 1
+                    forced_marker = " (FORCED)" if is_forced else ""
+                    rows.append((label, "DRY-RUN" + forced_marker, "pending", "-", output_sha, "-"))
+                    delivery_add_result(data, label, "pending", message = "dry-run" + (" (forced)" if is_forced else ""), output_sha = output_sha, is_forced = is_forced)
+                    _fire_target_hook(data, delivery_trait, run_tracker, label)
+                else:
+                    ready.append((label, ep, is_forced, output_sha))
+
+            for _ in range(max_par):
+                if not ready or len(running) >= max_par:
+                    break
+                label, ep, is_forced, output_sha = ready.pop(0)
+                forced_marker = " (FORCED)" if is_forced else ""
+                print("  {} {}{}...".format(_style("Delivering", _BOLD, ansi), label, forced_marker))
+                running.append((label, is_forced, output_sha, time.monotonic(), run_tracker.spawn(ep, [], capture)))
+                interesting = True
+
+            # Block on the head at capacity or when finalizing; otherwise reap
+            # only finished heads so the event drain isn't stalled. The bound
+            # drains every in-flight + queued delivery in one finalizing tick.
+            for _ in range(len(running) + len(ready) + 1):
+                if not running:
+                    break
+                must_reap = len(running) >= max_par or (build_done and not ready)
+                if not must_reap and running[0][4].try_wait() == None:
+                    break
+                label, is_forced, output_sha, t_start, child = running.pop(0)
+                if capture:
+                    out = child.wait_with_output()
+                    exit_code = out.status.code
+                    _print_captured_output(label, exit_code, out.stdout, out.stderr, ansi)
+                else:
+                    exit_code = child.wait().code
+                duration = fmt_elapsed(time.monotonic() - t_start)
+                forced_marker = " (FORCED)" if is_forced else ""
+                if exit_code == 0:
+                    if track_state:
+                        deliveryd_deliver(ctx, endpoint, ci_host, output_sha, prefix, build_url)
+                    success_count += 1
+                    rows.append((label, "OK" + forced_marker, "ok", build_url, output_sha, duration))
+                    delivery_add_result(data, label, "ok", message = build_url, output_sha = output_sha, is_forced = is_forced)
+                else:
+                    if track_state:
+                        deliveryd_delete_artifact(ctx, endpoint, ci_host, output_sha, prefix)
+                    failed_count += 1
+                    rows.append((label, "FAIL" + forced_marker, "fail", "-", output_sha, duration))
+                    delivery_add_result(data, label, "fail", message = "exit {}".format(exit_code), output_sha = output_sha, is_forced = is_forced)
+                _fire_target_hook(data, delivery_trait, run_tracker, label)
+                interesting = True
+                for _ in range(max_par):
+                    if not ready or len(running) >= max_par:
+                        break
+                    nlabel, nep, nis_forced, noutput_sha = ready.pop(0)
+                    nforced_marker = " (FORCED)" if nis_forced else ""
+                    print("  {} {}{}...".format(_style("Delivering", _BOLD, ansi), nlabel, nforced_marker))
+                    running.append((nlabel, nis_forced, noutput_sha, time.monotonic(), run_tracker.spawn(nep, [], capture)))
+
+            # priority=False throttles surface PATCHes; the per-target lines
+            # already tick the CLI.
+            if interesting or now_ms(ctx) - last_emit_ms >= MIN_HEARTBEAT_INTERVAL_MS:
+                task_update(
+                    ctx,
+                    lifecycle,
+                    _pick_status(data, had_failure = failed_count > 0, terminal = False),
+                    ProgressStyles(
+                        body = "Delivered {} of {}...".format(success_count + failed_count, pluralize(total_deliverable, "target")),
+                    ),
+                    kind = "delivery_results",
+                    data = data,
+                    priority = False,
+                )
+                last_emit_ms = now_ms(ctx)
+
+            if build_done and not ready and not running:
+                break
+
+    # The fused loop appends rows as deliveries complete; sort back to request
+    # order for a stable table.
+    _target_order = {label: i for i, label in enumerate(targets)}
+    rows = sorted(rows, key = lambda r: _target_order.get(r[0], len(targets)))
 
     # Calculate column widths for alignment
     max_label_width = len("TARGET")
@@ -1603,7 +1615,8 @@ def _delivery_impl(ctx):
 
     delivery_trait.delivery_end()
 
-    exit_code = 1 if failed_count > 0 else 0
+    # A failed build fails the task even though its targets are WARN, not FAIL.
+    exit_code = build_exit_code or (1 if failed_count > 0 else 0)
     return _emit_final(ctx, lifecycle, data, exit_code = exit_code)
 
 delivery = task(
