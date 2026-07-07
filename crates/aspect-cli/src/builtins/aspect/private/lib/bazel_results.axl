@@ -577,8 +577,14 @@ def process_event(data, event):
         if target_kind.endswith(" rule"):
             target_kind = target_kind[:-len(" rule")]
         if label and target_kind:
+            # Aspects that apply to a test target emit extra target_configured
+            # events for the same label (distinct `aspect` field) while
+            # test_summary still reports the test once. Count each test label
+            # a single time — first-seen — so the "N of M tests run"
+            # denominator matches the run count and doesn't overshoot.
+            first_seen = label not in data["bazel"]["target_kinds"]
             data["bazel"]["target_kinds"][label] = target_kind
-            if _is_test_kind(target_kind):
+            if first_seen and _is_test_kind(target_kind):
                 data["bazel"]["test_targets_configured"] += 1
         data["bazel"]["targets_configured_counted"] += 1
         return False
