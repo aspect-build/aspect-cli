@@ -23,7 +23,8 @@ use crate::engine::r#async::rt::AsyncRuntime;
 
 use super::super::stream::Subscriber;
 use super::retry::{
-    BufferOverflow, RetryBuffer, RetryConfig, SinkError, SinkOutcome, backoff, is_retryable,
+    BufferOverflow, RetryBuffer, RetryConfig, SinkError, SinkOutcome, SinkStats, backoff,
+    is_retryable,
 };
 
 #[derive(Debug)]
@@ -72,7 +73,7 @@ impl Grpc {
         headers: HashMap<String, String>,
         invocation_id: String,
         retry: RetryConfig,
-    ) -> JoinHandle<SinkOutcome> {
+    ) -> JoinHandle<(SinkStats, SinkOutcome)> {
         thread::spawn(move || rt.block_on(work(recv, endpoint, headers, invocation_id, retry)))
     }
 }
@@ -150,7 +151,7 @@ async fn work(
     headers: HashMap<String, String>,
     invocation_id: String,
     retry: RetryConfig,
-) -> SinkOutcome {
+) -> (SinkStats, SinkOutcome) {
     dbg(
         &endpoint,
         &invocation_id,
@@ -187,21 +188,27 @@ async fn work(
         match tokio::time::timeout(CONNECT_TIMEOUT, Client::new(endpoint.clone(), headers)).await {
             Ok(Ok(client)) => client,
             Ok(Err(e)) => {
-                return Err(fail(
-                    &endpoint,
-                    "invalid backend configuration, build events will not be delivered",
-                    format!("client setup failed: {e}"),
-                ));
+                return (
+                    SinkStats::default(),
+                    Err(fail(
+                        &endpoint,
+                        "invalid backend configuration, build events will not be delivered",
+                        format!("client setup failed: {e}"),
+                    )),
+                );
             }
             Err(_) => {
                 let secs = CONNECT_TIMEOUT.as_secs();
-                return Err(fail(
-                    &endpoint,
-                    &format!(
-                        "client setup stalled for {secs}s, build events will not be delivered"
-                    ),
-                    format!("client setup timed out after {secs}s"),
-                ));
+                return (
+                    SinkStats::default(),
+                    Err(fail(
+                        &endpoint,
+                        &format!(
+                            "client setup stalled for {secs}s, build events will not be delivered"
+                        ),
+                        format!("client setup timed out after {secs}s"),
+                    )),
+                );
             }
         };
     dbg(
@@ -215,7 +222,7 @@ async fn work(
 
     let build_id = invocation_id.clone();
 
-    send_lifecycle_logged(
+    if let Err(e) = send_lifecycle_logged(
         "build_enqueued",
         &retry,
         &mut client,
@@ -223,8 +230,11 @@ async fn work(
         &endpoint,
         &invocation_id,
     )
-    .await?;
-    send_lifecycle_logged(
+    .await
+    {
+        return (SinkStats::default(), Err(e));
+    }
+    if let Err(e) = send_lifecycle_logged(
         "invocation_started",
         &retry,
         &mut client,
@@ -232,10 +242,14 @@ async fn work(
         &endpoint,
         &invocation_id,
     )
-    .await?;
+    .await
+    {
+        return (SinkStats::default(), Err(e));
+    }
 
     let mut buffer = RetryBuffer::new(retry.retry_max_buffer_size);
     let mut next_seq: i64 = 1;
+    let mut max_acked: i64 = 0;
     let mut attempt: u32 = 0;
     let mut last_message_sent = false;
     // Warn at most once per sink when the stream first drops into retry, so a
@@ -262,6 +276,7 @@ async fn work(
             &mut event_rx,
             &mut buffer,
             &mut next_seq,
+            &mut max_acked,
             &mut last_message_sent,
             &endpoint,
         )
@@ -280,10 +295,14 @@ async fn work(
             DriveOutcome::Done | DriveOutcome::UpstreamClosed => break 'reconnect,
             DriveOutcome::Transient(err) => {
                 if attempt >= retry.max_retries {
-                    return Err(finalize(
-                        &endpoint,
-                        format!("giving up after {attempt} attempts: {err}"),
-                    ));
+                    let stats = SinkStats::from_counters(next_seq, max_acked);
+                    return (
+                        stats,
+                        Err(finalize(
+                            &endpoint,
+                            format!("giving up after {attempt} attempts: {err}"),
+                        )),
+                    );
                 }
                 if !warned_transient {
                     warn(
@@ -306,10 +325,15 @@ async fn work(
                 continue 'reconnect;
             }
             DriveOutcome::Fatal(err) => {
-                return Err(finalize(&endpoint, format!("non-retryable: {err}")));
+                let stats = SinkStats::from_counters(next_seq, max_acked);
+                return (
+                    stats,
+                    Err(finalize(&endpoint, format!("non-retryable: {err}"))),
+                );
             }
             DriveOutcome::BufferFull(err) => {
-                return Err(finalize(&endpoint, err.to_string()));
+                let stats = SinkStats::from_counters(next_seq, max_acked);
+                return (stats, Err(finalize(&endpoint, err.to_string())));
             }
         }
     }
@@ -356,7 +380,7 @@ async fn work(
         .await?;
         Ok::<(), SinkError>(())
     };
-    match retry.timeout {
+    let outcome = match retry.timeout {
         Some(d) => match tokio::time::timeout(d, post_stream).await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(e)) => Err(e),
@@ -366,7 +390,9 @@ async fn work(
             )),
         },
         None => post_stream.await,
-    }
+    };
+    let stats = SinkStats::from_counters(next_seq, max_acked);
+    (stats, outcome)
 }
 
 /// Bound for the `event_rx.recv()` wait inside `preload_first_event`.
@@ -498,6 +524,7 @@ async fn drive_stream(
     event_rx: &mut tokio::sync::mpsc::UnboundedReceiver<BuildEvent>,
     buffer: &mut RetryBuffer,
     next_seq: &mut i64,
+    max_acked: &mut i64,
     last_message_sent: &mut bool,
     endpoint: &str,
 ) -> DriveOutcome {
@@ -689,6 +716,7 @@ async fn drive_stream(
                 match resp {
                     Some(Ok(r)) => {
                         buffer.prune_until(r.sequence_number);
+                        *max_acked = (*max_acked).max(r.sequence_number);
                         // Once we've sent last_message AND every event we
                         // sent has been ack'd, we're done — exit without
                         // waiting for the server to close the response

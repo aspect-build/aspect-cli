@@ -87,7 +87,7 @@ load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_flags.axl", "announce_bazel_args", "aspect_endpoint_auth_flags", "bazel_flag_args", "resolve_bazel_announce")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event")
 load("./private/lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
-load("./private/lib/bes_sinks.axl", "bes_args", "collect_bes_from_args")
+load("./private/lib/bes_sinks.axl", "announce_bes_sinks", "bes_args", "collect_bes_from_args", "summarize_bes_upload")
 load("./private/lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
 load("./private/lib/environment.axl", "color_enabled", "detect_ci", "error", "info", "warn")
 load("./private/lib/gazelle_results.axl", "dedupe_subtrees", "dir_at_or_below", "extract_changed_dirs", gaz_init_data = "init_data", gazelle_conclusion = "conclusion")
@@ -462,9 +462,10 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     r = runnable(ctx, [ctx.args.gazelle_target], rc = rc)
 
     # See format.axl for why the trait sinks need to be plumbed in.
-    bes_sinks = collect_bes_from_args(ctx)
+    bes_sinks = collect_bes_from_args(ctx) + list(bazel_trait.build_event_sinks)
+    announce_bes_sinks(ctx, bes_sinks)
     events = bazel.build_events.iterator()
-    build_events = [events] + bes_sinks + list(bazel_trait.build_event_sinks)
+    build_events = [events] + bes_sinks
 
     # Fire build_start hooks before spawning — Workflows registers the BK
     # `--- :bazel: Running bazel …` section marker here.
@@ -541,8 +542,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             break
 
     build_status = build.wait()
-    for sink in bes_sinks + list(bazel_trait.build_event_sinks):
+    for sink in bes_sinks:
         sink.wait()
+    summarize_bes_upload(ctx, bes_sinks)
     dispatch_bazel_attempt_end(ctx, bazel_trait, build_status.code)
     dispatch_bazel_build_end(ctx, bazel_trait, build_status.code)
 

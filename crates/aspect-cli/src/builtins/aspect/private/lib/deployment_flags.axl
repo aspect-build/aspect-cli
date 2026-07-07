@@ -41,9 +41,10 @@ _SCHEME = "grpcs://"
 
 # What `deployment_endpoint_flags` hands back to `run_bazel_task`: Bazel base
 # flags to prepend (--remote_cache / --remote_executor) and extra CLI-streamed
-# BES backend URIs, plus the deployment name and the injected capabilities as
-# `(label, uri)` pairs (empty when nothing was) so the runner can announce which
-# endpoint each capability is wired to.
+# BES backend URIs, plus the deployment name and the base-flag capabilities as
+# `(label, uri)` pairs for the "Using deployment …" line. BES is wired via
+# `bes_backends` and announced by its own streaming line, so it is not in
+# `capabilities`.
 DeploymentFlags = record(
     base_flags = field(list),
     bes_backends = field(list),
@@ -130,8 +131,8 @@ def deployment_endpoint_flags(ctx) -> DeploymentFlags:
         if explicit:
             fail(flag + ": " + named + " does not advertise " + capability + ". Run `aspect auth configure <host>` for a deployment that serves one.")
 
-    # Capabilities are reported in a consistent order: remote cache, remote
-    # execution, then BES backend.
+    # The "Using deployment …" capabilities are reported cache then exec (BES is
+    # wired below but announced via its own streaming line, not here).
     base_flags = []
     bes_backends = []
     capabilities = []
@@ -153,9 +154,10 @@ def deployment_endpoint_flags(ctx) -> DeploymentFlags:
 
     if want_bes:
         if endpoints.bes:
-            uri = _SCHEME + endpoints.bes
-            bes_backends.append(uri)
-            capabilities.append(("bes backend", uri))
+            # Wired as a CLI-streamed BES sink; its own "Streaming build events to
+            # …" line announces it (and the end-of-build summary reports it), so it
+            # is deliberately left out of the `capabilities` display below.
+            bes_backends.append(_SCHEME + endpoints.bes)
         else:
             _require(bes_explicit, "--aspect-bes-backend", "a BES backend")
 
@@ -177,18 +179,11 @@ def join_and(items: list[str], oxford: bool = False) -> str:
     return ", ".join(items[:-1]) + ", and " + items[-1]
 
 def announce_deployment_flags(ctx, flags: DeploymentFlags):
-    """Tell the user, in one line, which deployment's capabilities this bazel call
-    is wired to (`--aspect-*`) and the endpoint each uses, so the injected
-    --remote_cache / bes backend / --remote_executor aren't silent. No-op when
-    nothing was injected."""
+    """Tell the user, in one line, which deployment's base-flag capabilities this
+    bazel call is wired to (`--aspect-*`) and the endpoint each uses, so the
+    injected --remote_cache / --remote_executor aren't silent. (BES is announced
+    separately by `announce_bes_sinks`.) No-op when nothing was injected."""
     if not flags.capabilities:
         return
     parts = [label + " (" + uri + ")" for (label, uri) in flags.capabilities]
     info(ctx.std, "Using deployment '" + flags.deployment + "' for " + join_and(parts, oxford = True))
-
-def announce_deployment_bes_streamed(ctx, flags: DeploymentFlags):
-    """Confirm the deployment's CLI-streamed BES backend(s) received the build's
-    events (the sink is a CLI-side gRPC stream, not a bazel flag, so it's
-    otherwise invisible). Caller gates this on a clean, non-failed stream."""
-    for backend in flags.bes_backends:
-        info(ctx.std, "Streamed build events to " + backend + ".")

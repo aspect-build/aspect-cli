@@ -189,6 +189,31 @@ pub struct SinkError {
 /// the sink gave up.
 pub type SinkOutcome = Result<(), SinkError>;
 
+/// How much a gRPC sink transferred, reported on both clean and failed exits so
+/// the end-of-build summary can say how many build events reached the backend.
+/// `sent` counts distinct events streamed (deduped across reconnect replays);
+/// `acked` counts those the server confirmed (its sequence-number acks are the
+/// only delivery signal), so `acked < sent` means events were streamed but not
+/// confirmed landed.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SinkStats {
+    pub sent: u64,
+    pub acked: u64,
+}
+
+impl SinkStats {
+    /// Derive the stats from a forwarder's live counters at an exit point.
+    /// `next_seq` is the next unused sequence number (starts at 1, so distinct
+    /// events sent is `next_seq - 1`); `max_acked` is the highest sequence the
+    /// server confirmed. Both clamp at 0 so a pre-stream exit reports nothing.
+    pub fn from_counters(next_seq: i64, max_acked: i64) -> Self {
+        SinkStats {
+            sent: (next_seq - 1).max(0) as u64,
+            acked: max_acked.max(0) as u64,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,6 +221,28 @@ mod tests {
 
     fn req() -> PublishBuildToolEventStreamRequest {
         PublishBuildToolEventStreamRequest::default()
+    }
+
+    #[test]
+    fn sink_stats_from_counters() {
+        // Fresh forwarder that never streamed an event (next_seq still 1).
+        assert_eq!(
+            SinkStats::from_counters(1, 0),
+            SinkStats { sent: 0, acked: 0 }
+        );
+        // Streamed 1284, server acked 812.
+        assert_eq!(
+            SinkStats::from_counters(1285, 812),
+            SinkStats {
+                sent: 1284,
+                acked: 812
+            }
+        );
+        // Defensive clamp: negative counters (unreachable in practice) report 0.
+        assert_eq!(
+            SinkStats::from_counters(0, -1),
+            SinkStats { sent: 0, acked: 0 }
+        );
     }
 
     #[test]

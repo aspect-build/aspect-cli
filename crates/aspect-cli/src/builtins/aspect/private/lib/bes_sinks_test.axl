@@ -1,0 +1,117 @@
+"""Tests for `lib/bes_sinks.axl` — the BES upload summary line and the gRPC-sink
+filter shared by the announce/summary helpers.
+
+Run with:
+  aspect dev test-bes-sinks
+"""
+
+load("./bes_sinks.axl", "bes_upload_line", "grpc_backends")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _test_clean_stream(_):
+    """A clean stream reports the sent count and names the backend."""
+    _eq(
+        "many events",
+        bes_upload_line("grpcs://bes.acme.aspect.build", 1284, 1284, False),
+        "Streamed 1284 build events to grpcs://bes.acme.aspect.build.",
+    )
+    _eq(
+        "singular event",
+        bes_upload_line("grpcs://bes.acme.aspect.build", 1, 1, False),
+        "Streamed 1 build event to grpcs://bes.acme.aspect.build.",
+    )
+    _eq(
+        "zero events",
+        bes_upload_line("grpcs://bes.acme.aspect.build", 0, 0, False),
+        "Streamed 0 build events to grpcs://bes.acme.aspect.build.",
+    )
+
+def _test_failed_stream(_):
+    """A failed stream that left events unconfirmed reports acked-of-sent so the
+    partial upload is visible."""
+    _eq(
+        "partial upload",
+        bes_upload_line("grpcs://bes.acme.aspect.build", 1284, 812, True),
+        "Uploaded 812 of 1284 build events to grpcs://bes.acme.aspect.build before the stream failed.",
+    )
+    _eq(
+        "nothing acked",
+        bes_upload_line("grpcs://bes.acme.aspect.build", 500, 0, True),
+        "Uploaded 0 of 500 build events to grpcs://bes.acme.aspect.build before the stream failed.",
+    )
+
+    # Pluralization keys off the sent count, so a single sent-but-unacked event
+    # still reads naturally.
+    _eq(
+        "singular sent",
+        bes_upload_line("grpcs://bes.acme.aspect.build", 1, 0, True),
+        "Uploaded 0 of 1 build event to grpcs://bes.acme.aspect.build before the stream failed.",
+    )
+
+def _test_failed_after_full_ack(_):
+    """A failure after every event was acked (e.g. a post-stream lifecycle error)
+    reports the full count — the events themselves were delivered, so the
+    partial-upload framing would misleadingly imply loss."""
+    _eq(
+        "all acked despite failure",
+        bes_upload_line("grpcs://bes.acme.aspect.build", 1284, 1284, True),
+        "Streamed 1284 build events to grpcs://bes.acme.aspect.build.",
+    )
+
+def _test_connect_failure(_):
+    """A stream that failed before sending anything (a connect failure) reports a
+    plain failure, not a misleading 'Streamed 0 build events'."""
+    _eq(
+        "nothing sent, failed",
+        bes_upload_line("grpcs://localhost:1", 0, 0, True),
+        "Failed to stream build events to grpcs://localhost:1.",
+    )
+
+def _test_missing_uri(_):
+    """A sink with no URI falls back to a generic backend name."""
+    _eq(
+        "empty uri, clean",
+        bes_upload_line("", 3, 3, False),
+        "Streamed 3 build events to the BES backend.",
+    )
+    _eq(
+        "empty uri, failed",
+        bes_upload_line("", 3, 1, True),
+        "Uploaded 1 of 3 build events to the BES backend before the stream failed.",
+    )
+
+def _test_grpc_backends_filters_file_sinks(_):
+    """`grpc_backends` keeps only sinks with a backend URI, so a file sink (a
+    local BEP dump, `uri == None`) is dropped from both announce and summary
+    rather than surfacing a spurious "the BES backend" line."""
+    grpc_a = struct(uri = "grpcs://bes.a")
+    grpc_b = struct(uri = "grpcs://bes.b")
+    file_sink = struct(uri = None)
+    got = grpc_backends([grpc_a, file_sink, grpc_b])
+    _eq("only gRPC-backend sinks survive", [s.uri for s in got], ["grpcs://bes.a", "grpcs://bes.b"])
+    _eq("no gRPC sinks → empty", grpc_backends([file_sink]), [])
+
+_UNIT_TESTS = [
+    _test_clean_stream,
+    _test_failed_stream,
+    _test_failed_after_full_ack,
+    _test_connect_failure,
+    _test_missing_uri,
+    _test_grpc_backends_filters_file_sinks,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("bes_sinks_test.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+bes_sinks_tests = task(
+    kind = "test-bes-sinks",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

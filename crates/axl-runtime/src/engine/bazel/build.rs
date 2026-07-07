@@ -37,7 +37,7 @@ use super::iter::ExecutionLogIterator;
 use super::iter::WorkspaceEventIterator;
 use super::sink::execlog::ExecLogSink;
 use super::sink::grpc;
-use super::sink::retry::{RetryConfig, SinkOutcome};
+use super::sink::retry::{RetryConfig, SinkOutcome, SinkStats};
 use super::sink::tracing as tracing_sink;
 use super::stream::BuildEventStream;
 use super::stream::ExecLogStream;
@@ -145,8 +145,12 @@ enum SinkPhase {
 }
 
 enum SinkLive {
-    Grpc { join: JoinHandle<SinkOutcome> },
-    File { signal: Arc<FileSignal> },
+    Grpc {
+        join: JoinHandle<(SinkStats, SinkOutcome)>,
+    },
+    File {
+        signal: Arc<FileSignal>,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -156,6 +160,12 @@ struct SinkOutcomeState {
     /// `times_bound > 0` distinguishes "never bound" from "freshly bound
     /// but already waited" — needed by the `done` attribute.
     times_bound: usize,
+    /// Distinct build events streamed to the backend on the most recent bind
+    /// (gRPC sinks only; 0 for file sinks). See `SinkStats`.
+    events_sent: u64,
+    /// Build events the backend confirmed on the most recent bind (gRPC sinks
+    /// only; 0 for file sinks). See `SinkStats`.
+    events_acked: u64,
 }
 
 pub struct FileSignal {
@@ -241,6 +251,13 @@ impl BuildEventSink {
     fn file_path(&self) -> Option<String> {
         match &*self.config {
             SinkConfig::File { path } => Some(path.clone()),
+            _ => None,
+        }
+    }
+
+    fn grpc_uri(&self) -> Option<String> {
+        match &*self.config {
+            SinkConfig::Grpc { uri, .. } => Some(uri.clone()),
             _ => None,
         }
     }
@@ -342,12 +359,27 @@ impl<'v> values::StarlarkValue<'v> for BuildEventSink {
                 Some(e) => heap.alloc_str(e).to_value(),
                 None => Value::new_none(),
             }),
+            // Build events streamed to a gRPC backend and those the server acked
+            // (its sequence-number acks are the only delivery confirmation), so a
+            // caller can report how many events reached the backend. Both are 0
+            // for a file sink or a stream that never bound. See `wait`.
+            "events_sent" => Some(heap.alloc(outcome.events_sent)),
+            "events_acked" => Some(heap.alloc(outcome.events_acked)),
+            // The gRPC backend URI (None for a file sink), so a summary can name
+            // the backend without the caller tracking it separately.
+            "uri" => Some(match self.grpc_uri() {
+                Some(uri) => heap.alloc_str(&uri).to_value(),
+                None => Value::new_none(),
+            }),
             _ => None,
         }
     }
 
     fn has_attr(&self, attribute: &str, _heap: Heap<'v>) -> bool {
-        matches!(attribute, "done" | "failed" | "error")
+        matches!(
+            attribute,
+            "done" | "failed" | "error" | "events_sent" | "events_acked" | "uri"
+        )
     }
 }
 
@@ -367,13 +399,16 @@ pub(crate) fn build_event_sink_methods(registry: &mut MethodsBuilder) {
                 SinkPhase::Idle => return Ok(NoneOr::None),
             }
         };
-        let outcome: Result<(), String> = match live {
+        let (outcome, stats): (Result<(), String>, SinkStats) = match live {
             SinkLive::Grpc { join } => match join.join() {
-                Ok(Ok(())) => Ok(()),
-                Ok(Err(e)) => Err(e.last_error),
-                Err(_) => Err("sink worker thread panicked".to_string()),
+                Ok((stats, Ok(()))) => (Ok(()), stats),
+                Ok((stats, Err(e))) => (Err(e.last_error), stats),
+                Err(_) => (
+                    Err("sink worker thread panicked".to_string()),
+                    SinkStats::default(),
+                ),
             },
-            SinkLive::File { signal } => signal.wait(),
+            SinkLive::File { signal } => (signal.wait(), SinkStats::default()),
         };
         let (failed, error) = match outcome {
             Ok(()) => (false, None),
@@ -382,6 +417,8 @@ pub(crate) fn build_event_sink_methods(registry: &mut MethodsBuilder) {
         let mut out = sink.outcome.lock().unwrap();
         out.failed = failed;
         out.error = error;
+        out.events_sent = stats.sent;
+        out.events_acked = stats.acked;
         Ok(NoneOr::None)
     }
 }

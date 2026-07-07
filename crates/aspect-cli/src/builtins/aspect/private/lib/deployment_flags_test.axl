@@ -90,18 +90,19 @@ def _test_explicit_false_overrides_umbrella(ctx):
     _eq("still gets bes from umbrella", got.bes_backends, ["grpcs://bes.gcp"])
 
 def _test_umbrella_reports_injected_capabilities(ctx):
-    # The announced capabilities are (label, uri) pairs in cache/exec/bes order,
-    # for the "Using deployment …" line + per-endpoint detail.
+    # The "Using deployment …" capabilities are (label, uri) pairs in cache/exec
+    # order. BES is wired (bes_backends) but announced via its own streaming line,
+    # so it is not among the reported capabilities.
     got = deployment_endpoint_flags(_ctx(
         _endpoints("gcp", cache = "remote.gcp", bes = "bes.gcp", exec = "remote.gcp"),
         aspect_remote = True,
     ))
     _eq("deployment name carried", got.deployment, "gcp")
-    _eq("capabilities carry label + uri in cache/exec/bes order", got.capabilities, [
+    _eq("capabilities carry label + uri in cache/exec order (no bes)", got.capabilities, [
         ("remote cache", "grpcs://remote.gcp"),
         ("remote execution", "grpcs://remote.gcp"),
-        ("bes backend", "grpcs://bes.gcp"),
     ])
+    _eq("bes still wired as a backend", got.bes_backends, ["grpcs://bes.gcp"])
 
 def _test_join_and(ctx):
     _eq("empty", join_and([]), "")
