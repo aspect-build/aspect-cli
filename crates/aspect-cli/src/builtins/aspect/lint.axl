@@ -22,7 +22,7 @@ load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_flags.axl", "announce_bazel_args", "aspect_endpoint_auth_flags", "bazel_flag_args", "resolve_bazel_announce")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event")
 load("./private/lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
-load("./private/lib/bes_sinks.axl", "bes_args", "collect_bes_from_args")
+load("./private/lib/bes_sinks.axl", "announce_bes_sinks", "bes_args", "collect_bes_from_args", "summarize_bes_upload")
 load("./private/lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
 load("./private/lib/environment.axl", "color_enabled", "detect_ci", "error", "warn")
 load("./private/lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_changed_files_listing")
@@ -707,9 +707,10 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     for hook in lint_trait.lint_start:
         hook(ctx)
 
-    bes_sinks = collect_bes_from_args(ctx)
+    bes_sinks = collect_bes_from_args(ctx) + list(bazel_trait.build_event_sinks)
+    announce_bes_sinks(ctx, bes_sinks)
     events = bazel.build_events.iterator()
-    build_events = [events] + bes_sinks + list(bazel_trait.build_event_sinks)
+    build_events = [events] + bes_sinks
 
     for hook in bazel_trait.build_start:
         hook(ctx)
@@ -834,8 +835,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
     # 7. Wait for build
     build_status = build.wait()
-    for sink in bes_sinks + list(bazel_trait.build_event_sinks):
+    for sink in bes_sinks:
         sink.wait()
+    summarize_bes_upload(ctx, bes_sinks)
 
     dispatch_bazel_attempt_end(ctx, bazel_trait, build_status.code)
 

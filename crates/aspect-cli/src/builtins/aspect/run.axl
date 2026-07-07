@@ -6,7 +6,7 @@ load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_flags.axl", "announce_bazel_args", "aspect_endpoint_auth_flags", "bazel_flag_args", "resolve_bazel_announce")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "init_data", "process_event", bazel_conclusion = "conclusion")
 load("./private/lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
-load("./private/lib/bes_sinks.axl", "bes_args", "collect_bes_from_args")
+load("./private/lib/bes_sinks.axl", "announce_bes_sinks", "bes_args", "collect_bes_from_args", "summarize_bes_upload")
 load("./private/lib/environment.axl", "error")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "dispatch_task_update", "setup_phase", "task_update")
@@ -88,9 +88,10 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # flags + aspect injection that capture the executable, the `args` attribute,
     # and the target env so `r.spawn` replays them the way `bazel run` does.
     r = runnable(ctx, [target], rc = rc)
-    bes_sinks = collect_bes_from_args(ctx)
+    bes_sinks = collect_bes_from_args(ctx) + list(bazel_trait.build_event_sinks)
+    announce_bes_sinks(ctx, bes_sinks)
     events = bazel.build_events.iterator()
-    build_events = [events] + bes_sinks + list(bazel_trait.build_event_sinks)
+    build_events = [events] + bes_sinks
 
     for hook in bazel_trait.build_start:
         hook(ctx)
@@ -129,8 +130,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             break
 
     build_status = build.wait()
-    for sink in bes_sinks + list(bazel_trait.build_event_sinks):
+    for sink in bes_sinks:
         sink.wait()
+    summarize_bes_upload(ctx, bes_sinks)
     dispatch_bazel_attempt_end(ctx, bazel_trait, build_status.code)
     dispatch_bazel_build_end(ctx, bazel_trait, build_status.code)
 

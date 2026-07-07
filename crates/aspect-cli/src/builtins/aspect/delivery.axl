@@ -154,7 +154,7 @@ load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_flags.axl", "announce_bazel_args", "aspect_endpoint_auth_flags", "expand_config_flags", "resolve_bazel_announce", "sibling_rc")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "now_ms", "process_event", bazel_init_data = "init_data")
 load("./private/lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
-load("./private/lib/bes_sinks.axl", "bes_args", "collect_bes_from_args")
+load("./private/lib/bes_sinks.axl", "announce_bes_sinks", "bes_args", "collect_bes_from_args", "summarize_bes_upload")
 load("./private/lib/ci.axl", "resolve_build_url")
 load("./private/lib/delivery_results.axl", delivery_add_result = "add_result", delivery_build_manifest = "build_manifest", delivery_conclusion = "conclusion", delivery_init_data = "init_data")
 load(
@@ -514,10 +514,11 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, use
                 break
         status = build.wait()
 
-        # Flush trait sinks (e.g. bessie) before any retry — re-binding a
+        # Flush the CLI-streamed BES sinks before any retry — re-binding a
         # Live sink errors.
         for sink in build_events:
             sink.wait()
+        summarize_bes_upload(ctx, build_events)
 
         dispatch_bazel_attempt_end(ctx, bazel_trait, status.code)
 
@@ -1044,6 +1045,7 @@ def _delivery_impl(ctx):
     # CLI-streamed `--bes-backend` sinks stream phase-1 events and are waited
     # alongside the trait sinks (see `_get_output_shas`).
     build_events = collect_bes_from_args(ctx) + list(bazel_trait.build_event_sinks)
+    announce_bes_sinks(ctx, build_events)
 
     for handler in bazel_trait.build_start:
         handler(ctx)

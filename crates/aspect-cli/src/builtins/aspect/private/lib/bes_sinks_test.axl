@@ -1,10 +1,11 @@
-"""Tests for `lib/bes_sinks.axl` — the end-of-build BES upload summary line.
+"""Tests for `lib/bes_sinks.axl` — the BES upload summary line and the gRPC-sink
+filter shared by the announce/summary helpers.
 
 Run with:
   aspect dev test-bes-sinks
 """
 
-load("./bes_sinks.axl", "bes_upload_line")
+load("./bes_sinks.axl", "bes_upload_line", "grpc_backends")
 
 def _eq(label, got, want):
     if got != want:
@@ -60,6 +61,15 @@ def _test_failed_after_full_ack(_):
         "Streamed 1284 build events to grpcs://bes.acme.aspect.build.",
     )
 
+def _test_connect_failure(_):
+    """A stream that failed before sending anything (a connect failure) reports a
+    plain failure, not a misleading 'Streamed 0 build events'."""
+    _eq(
+        "nothing sent, failed",
+        bes_upload_line("grpcs://localhost:1", 0, 0, True),
+        "Failed to stream build events to grpcs://localhost:1.",
+    )
+
 def _test_missing_uri(_):
     """A sink with no URI falls back to a generic backend name."""
     _eq(
@@ -73,11 +83,24 @@ def _test_missing_uri(_):
         "Uploaded 1 of 3 build events to the BES backend before the stream failed.",
     )
 
+def _test_grpc_backends_filters_file_sinks(_):
+    """`grpc_backends` keeps only sinks with a backend URI, so a file sink (a
+    local BEP dump, `uri == None`) is dropped from both announce and summary
+    rather than surfacing a spurious "the BES backend" line."""
+    grpc_a = struct(uri = "grpcs://bes.a")
+    grpc_b = struct(uri = "grpcs://bes.b")
+    file_sink = struct(uri = None)
+    got = grpc_backends([grpc_a, file_sink, grpc_b])
+    _eq("only gRPC-backend sinks survive", [s.uri for s in got], ["grpcs://bes.a", "grpcs://bes.b"])
+    _eq("no gRPC sinks → empty", grpc_backends([file_sink]), [])
+
 _UNIT_TESTS = [
     _test_clean_stream,
     _test_failed_stream,
     _test_failed_after_full_ack,
+    _test_connect_failure,
     _test_missing_uri,
+    _test_grpc_backends_filters_file_sinks,
 ]
 
 def _test_impl(ctx):

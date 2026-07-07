@@ -226,14 +226,23 @@ mod tests {
     #[test]
     fn sink_stats_from_counters() {
         // Fresh forwarder that never streamed an event (next_seq still 1).
-        assert_eq!(SinkStats::from_counters(1, 0), SinkStats { sent: 0, acked: 0 });
+        assert_eq!(
+            SinkStats::from_counters(1, 0),
+            SinkStats { sent: 0, acked: 0 }
+        );
         // Streamed 1284, server acked 812.
         assert_eq!(
             SinkStats::from_counters(1285, 812),
-            SinkStats { sent: 1284, acked: 812 }
+            SinkStats {
+                sent: 1284,
+                acked: 812
+            }
         );
         // Defensive clamp: negative counters (unreachable in practice) report 0.
-        assert_eq!(SinkStats::from_counters(0, -1), SinkStats { sent: 0, acked: 0 });
+        assert_eq!(
+            SinkStats::from_counters(0, -1),
+            SinkStats { sent: 0, acked: 0 }
+        );
     }
 
     #[test]
