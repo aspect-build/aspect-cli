@@ -38,6 +38,8 @@ Runner = record(
     az = field(str, default = ""),
     preemptible = field(bool, default = False),
     warming_enabled = field(bool, default = False),
+    # → enables BES-backend upload of the JSON profile + compact exec log.
+    upload_build_diagnostics = field(bool, default = False),
     cloud_provider = field(str, default = ""),
     data_dir = field(str, default = ""),
     bin_dir = field(str, default = DEFAULT_BIN_DIR),
@@ -293,6 +295,7 @@ def _read_runner(std) -> Runner | None:
         warming_complete = warming_complete,
         warming_current_cache = warming_current_cache,
         warming_enabled = bool(std.env.var("ASPECT_WORKFLOWS_RUNNER_WARMING_ENABLED")),
+        upload_build_diagnostics = bool(std.env.var("ASPECT_WORKFLOWS_RUNNER_UPLOAD_BUILD_DIAGNOSTICS")),
         runner_group_name = std.env.var("ASPECT_WORKFLOWS_RUNNER_GROUP_NAME") or "",
         runner_group_queue = std.env.var("ASPECT_WORKFLOWS_RUNNER_GROUP_QUEUE") or "",
         runner_resource_type = std.env.var("ASPECT_WORKFLOWS_RUNNER_RESOURCE_TYPE") or "",
@@ -463,6 +466,35 @@ def apply_output_base_suffix(startup_flags: list, suffix: str) -> list:
     if not suffix:
         return list(startup_flags)
     return [flag + suffix if _is_output_base_flag(flag) else flag for flag in startup_flags]
+
+def get_build_diagnostics_flags(environment: WorkflowsEnvironment, enabled: bool) -> list:
+    """BES-backend upload flags for the JSON profile + compact exec log.
+
+    `enabled` is the opt-in decision the caller owns — the deployment env var
+    (runner.upload_build_diagnostics) OR the workspace-level override arg — so
+    both paths reach the flags. Even when enabled, returns empty unless both a
+    BES backend and a remote cache are wired up: the files ride the BES stream
+    to the remote cache as bytestream:// refs, so both are required for the
+    upload to land. `--generate_json_trace_profile` is already set
+    unconditionally in get_bazelrc_flags; this only enriches/uploads it.
+    """
+    runner = environment.runner
+    if not enabled or runner == None:
+        return []
+    if environment.build_events == None or environment.remote_cache == None:
+        return []
+
+    tmpdir = runner.job_tmpdir
+    return [
+        "--experimental_profile_include_target_label",
+        "--profile=" + tmpdir + "/command.profile.gz",
+        # Version-gated tuple like the cache-compression flags above;
+        # --execution_log_compact_file needs Bazel >= 7.1.
+        ("--execution_log_compact_file=" + tmpdir + "/exec.log.zstd", ">=7.1.0"),
+        # Upload ALL BEP-referenced local outputs (default is `minimal`) so
+        # the profile + exec log actually reach the cache for ivy-bep-etl.
+        "--remote_build_event_upload=all",
+    ]
 
 # Display helpers
 

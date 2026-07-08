@@ -5,6 +5,7 @@ load(
     "apply_output_base_suffix",
     "color_enabled",
     "get_bazelrc_flags",
+    "get_build_diagnostics_flags",
     "get_workflows_environment",
     "print_environment_info",
     "sanitize_filename",
@@ -75,6 +76,13 @@ def _workflows_impl(ctx: FeatureContext):
 
         bazel_trait.extra_startup_flags.extend(startup_flags)
         bazel_trait.extra_flags.extend(build_flags)
+
+        # BES-backend upload of the JSON profile + compact exec log. Driven by
+        # the deployment (ASPECT_WORKFLOWS_RUNNER_UPLOAD_BUILD_DIAGNOSTICS) or a
+        # workspace-level override arg. get_build_diagnostics_flags re-checks
+        # build_events/remote_cache and returns [] if either is missing.
+        diagnostics_on = ctx.args.upload_build_diagnostics or environment.runner.upload_build_diagnostics
+        bazel_trait.extra_flags.extend(get_build_diagnostics_flags(environment, diagnostics_on))
 
         # On older runners, `bazel` on the PATH is the legacy CLI, which we
         # disable the plugin feature on. `ASPECT_WORKFLOWS_RUNNER_NO_LEGACY_CLI`
@@ -167,6 +175,15 @@ Workflows = feature(
                           "runners; a no-op elsewhere. Set per repo in config.axl via " +
                           "ctx.features[Workflows].args.runner_output_base_suffix, or " +
                           "per task with --workflows:runner-output-base-suffix.",
+        ),
+        "upload_build_diagnostics": args.boolean(
+            default = False,
+            description = "Upload Bazel's JSON trace profile and compact " +
+                          "execution log to the remote cache via BES for " +
+                          "backend analysis. Normally driven by the deployment " +
+                          "(ASPECT_WORKFLOWS_RUNNER_UPLOAD_BUILD_DIAGNOSTICS); " +
+                          "this arg is a workspace-level override. No effect " +
+                          "unless a BES backend and remote cache are configured.",
         ),
     },
 )
