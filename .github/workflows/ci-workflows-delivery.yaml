@@ -73,7 +73,11 @@ jobs:
         # enrichment hook in //.aspect/config.axl. Additional force
         # targets (via the workflow_dispatch input or the
         # ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS env var) merge in.
-        run: aspect delivery --task:name delivery-gha --warn-not-runnable --force-target=//examples/deliverable:deliverable_with_digest
+        # --warn-unresolved-digest: this deliverable set includes py_deliverable,
+        # a stamped py_binary whose PyWriteBuildData action is uncacheable and so
+        # never resolves a digest — a known, tolerated missing digest here, so
+        # keep it a warning rather than the (new) default hard failure.
+        run: aspect delivery --task:name delivery-gha --warn-not-runnable --warn-unresolved-digest --force-target=//examples/deliverable:deliverable_with_digest
   delivery-debug-task:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     timeout-minutes: 10
@@ -93,4 +97,54 @@ jobs:
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Delivery Task (ASPECT_DEBUG=1)
-        run: ASPECT_DEBUG=1 aspect delivery --task:name delivery-gha-debug --force-target=//examples/deliverable:deliverable_with_digest
+        # --warn-unresolved-digest for the same reason as delivery-gha: the
+        # deliverable set includes the stamped, uncacheable py_deliverable.
+        run: ASPECT_DEBUG=1 aspect delivery --task:name delivery-gha-debug --warn-unresolved-digest --force-target=//examples/deliverable:deliverable_with_digest
+  # Regression guard for the silent-warn bug where an unhashable deliverable
+  # passed green and was never delivered. //examples/deliverable:py_deliverable
+  # is a stamped py_binary whose PyWriteBuildData action is uncacheable, so it
+  # never resolves a change-detection digest. Delivery must HARD-FAIL by default
+  # — naming the culprit target + action and the fix — and DOWNGRADE to a
+  # warning (exit 0) under --warn-unresolved-digest. (The default delivery query
+  # `attr(tags, deliverable, //...)` from config.axl takes precedence over
+  # positional targets, so we assert against this in-tree deliverable rather
+  # than a bespoke target the query would skip.)
+  delivery-uncacheable-digest-task:
+    runs-on: [self-hosted, aspect-workflows, aspect-default]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/install-prebuilt-aspect-cli
+        if: inputs.prebuild_run_id != ''
+        with:
+          run-id: ${{ inputs.prebuild_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Bootstrap
+        if: inputs.prebuild_run_id == ''
+        run: .aspect/bootstrap.sh
+      - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+      - name: Delivery unresolvable-digest must hard-fail
+        run: |
+          set -uo pipefail
+          # This job deliberately makes delivery fail, so suppress its GitHub
+          # check run — a red "aspect / delivery-uncacheable" check on the PR
+          # would be noise, not a real signal.
+          common="--track-state=false --mode=always --dry-run --github-status-checks:enabled=false"
+
+          echo "== Expect HARD FAILURE (default: no --warn-unresolved-digest) =="
+          out="$(aspect delivery --task:name delivery-uncacheable $common 2>&1)" && code=0 || code=$?
+          echo "$out"
+          if [ "$code" -eq 0 ]; then
+            echo "::error::delivery succeeded but must hard-fail when a digest can't be resolved"; exit 1
+          fi
+          echo "$out" | grep -q "py_deliverable" \
+            || { echo "::error::failure did not name the uncacheable target py_deliverable"; exit 1; }
+          echo "$out" | grep -q "PyWriteBuildData" \
+            || { echo "::error::failure did not name the uncacheable action PyWriteBuildData"; exit 1; }
+          echo "$out" | grep -Eq "no-remote|local" \
+            || { echo "::error::failure did not surface the no-remote / local remediation"; exit 1; }
+
+          echo "== Expect WARNING downgrade (exit 0) with --warn-unresolved-digest =="
+          aspect delivery --task:name delivery-uncacheable-warn --warn-unresolved-digest $common

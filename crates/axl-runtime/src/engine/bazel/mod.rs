@@ -33,6 +33,7 @@ use crate::engine::store::Env;
 use axl_proto;
 use axl_types::stream::Writable;
 
+mod aspect;
 mod build;
 mod cancel;
 mod health_check;
@@ -362,6 +363,54 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         Ok(NoneType)
     }
 
+    /// Define a Bazel aspect to apply via `ctx.bazel.build(aspects = [...])`
+    /// (or `test`).
+    ///
+    /// The runtime materializes the aspect into `@bazel_tools` — already in the
+    /// repo graph — so applying it needs no `--inject_repository` and causes no
+    /// analysis-cache churn: the build reuses its warm analysis and layers the
+    /// aspect on top. The materialized files live under the Bazel install base
+    /// (outside the workspace), so they're invisible to the IDE and VCS.
+    ///
+    /// # Arguments
+    ///
+    /// * `implementation` - The `.bzl` source defining the aspect.
+    /// * `symbol` - The aspect symbol within `implementation` (the `%name`).
+    /// * `parameters` - `{key: value}` passed as `--aspects_parameters`. A value
+    ///   that changes per run (e.g. a nonce) mints a fresh `AspectKey`, forcing
+    ///   the aspect to re-evaluate without discarding the analysis graph.
+    /// * `output_groups` - Output groups to request so the aspect's outputs
+    ///   build; each is passed as `--output_groups=+<group>`.
+    ///
+    /// **Example**
+    ///
+    /// ```python
+    /// hashsum = ctx.bazel.aspect(
+    ///     implementation = HASHSUM_BZL,
+    ///     symbol = "hashsum",
+    ///     parameters = {"nonce": nonce},
+    ///     output_groups = ["delivery_hash"],
+    /// )
+    /// ctx.bazel.build("//my/pkg:target", aspects = [hashsum])
+    /// ```
+    fn aspect<'v>(
+        #[allow(unused_variables)] this: values::Value<'v>,
+        #[starlark(require = named)] implementation: String,
+        #[starlark(require = named)] symbol: String,
+        #[starlark(require = named, default = UnpackDictEntries::default())]
+        parameters: UnpackDictEntries<String, String>,
+        #[starlark(require = named, default = UnpackList::default())] output_groups: UnpackList<
+            String,
+        >,
+    ) -> anyhow::Result<aspect::Aspect> {
+        Ok(aspect::Aspect {
+            implementation,
+            symbol,
+            parameters: parameters.entries,
+            output_groups: output_groups.items,
+        })
+    }
+
     /// Build one or more Bazel targets.
     ///
     /// Returns a `Build` object. The call does not block — use `.wait()` to
@@ -446,6 +495,9 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = NoneOr::None)] directory: NoneOr<String>,
         #[starlark(require = named, default = false)] announce_version: bool,
         #[starlark(require = named, default = false)] announce_command: bool,
+        #[starlark(require = named, default = UnpackList::default())] aspects: UnpackList<
+            aspect::Aspect,
+        >,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<build::Build> {
         let build_events = partition_build_events(build_events);
@@ -453,8 +505,12 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             Either::Left(b) => (b, vec![]),
             Either::Right(sinks) => (true, sinks.items),
         };
-        let (resolved_flags, resolved_startup_flags) =
+        let (mut resolved_flags, resolved_startup_flags) =
             resolve_invocation_flags(this, "build", rc, &flags.items)?;
+        resolved_flags.extend(aspect::materialize(
+            &aspects.items,
+            &resolved_startup_flags,
+        )?);
         let env = Env::from_eval(eval)?;
         let (stdout, stderr) = resolve_stdio(stdio, stdout, stderr)?;
         let build = build::Build::spawn(
@@ -559,6 +615,9 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = NoneOr::None)] directory: NoneOr<String>,
         #[starlark(require = named, default = false)] announce_version: bool,
         #[starlark(require = named, default = false)] announce_command: bool,
+        #[starlark(require = named, default = UnpackList::default())] aspects: UnpackList<
+            aspect::Aspect,
+        >,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<build::Build> {
         let build_events = partition_build_events(build_events);
@@ -566,8 +625,12 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             Either::Left(b) => (b, vec![]),
             Either::Right(sinks) => (true, sinks.items),
         };
-        let (resolved_flags, resolved_startup_flags) =
+        let (mut resolved_flags, resolved_startup_flags) =
             resolve_invocation_flags(this, "test", rc, &flags.items)?;
+        resolved_flags.extend(aspect::materialize(
+            &aspects.items,
+            &resolved_startup_flags,
+        )?);
         let env = Env::from_eval(eval)?;
         let (stdout, stderr) = resolve_stdio(stdio, stdout, stderr)?;
         let test = build::Build::spawn(

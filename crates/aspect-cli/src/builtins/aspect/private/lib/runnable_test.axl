@@ -654,10 +654,17 @@ def _test_no_runinfo_yields_empty_args_env(ctx):
 # Exercised through `runnable(rc=...).flags`; the helpers are private.
 
 def _make_flags_ctx():
-    """ctx mock sufficient for `runnable().flags`: writes the temp aspect
-    repo (no-op fs) and carries a task key for the repo path."""
+    """ctx mock sufficient for `runnable().flags`/`.aspects`: a fake
+    `ctx.bazel.aspect(...)` returns a sentinel struct so tests can assert the
+    runinfo aspect is surfaced."""
     return struct(
         task = struct(name = "testkey"),
+        bazel = struct(
+            aspect = lambda implementation, symbol, parameters = {}, output_groups = []: struct(
+                symbol = symbol,
+                output_groups = output_groups,
+            ),
+        ),
         std = struct(
             env = struct(
                 bazel_root_dir = lambda: "/ws",
@@ -716,25 +723,21 @@ def _test_download_floor_alias_last_wins(ctx):
     if _FLOOR not in r.flags:
         fail("alias last-wins (minimal) → forced up; got %r" % r.flags)
 
-def _test_flags_inject_repo_by_default(ctx):
+def _test_aspects_carry_runinfo(ctx):
+    # `rc` given → the runinfo aspect is surfaced via `.aspects` (materialized
+    # into @bazel_tools by the runtime), never as flags.
     r = runnable(_make_flags_ctx(), ["//a:b"], rc = _make_rc([]))
-    joined = " ".join(r.flags)
-    if "--inject_repository=aspect_runinfo=" not in joined:
-        fail("default → inject_repository; got %r" % r.flags)
-    if "--aspects=@aspect_runinfo//:runinfo.bzl%runinfo" not in r.flags:
-        fail("missing runinfo aspect flag; got %r" % r.flags)
-
-def _test_flags_override_repo_in_workspace_mode(ctx):
-    r = runnable(_make_flags_ctx(), ["//a:b"], rc = _make_rc([], bzlmod = False))
-    if "--override_repository=aspect_runinfo=" not in " ".join(r.flags):
-        fail("workspace mode → override_repository; got %r" % r.flags)
+    if len(r.aspects) != 1 or r.aspects[0].symbol != "runinfo":
+        fail("default → one runinfo aspect in .aspects; got %r" % r.aspects)
+    if "aspect_runinfo" in " ".join(r.flags):
+        fail("aspect must not leak into flags; got %r" % r.flags)
 
 def _test_flags_no_rc_is_spawn_flags_only(ctx):
     r = runnable(None, ["//a:b"])
     if _FLOOR in r.flags:
         fail("no rc → no floor; got %r" % r.flags)
-    if "aspect_runinfo" in " ".join(r.flags):
-        fail("no rc → no aspect injection; got %r" % r.flags)
+    if r.aspects:
+        fail("no rc → no aspect; got %r" % r.aspects)
     if "--build_runfile_links" not in r.flags:
         fail("flags must always carry the mandatory spawn flags; got %r" % r.flags)
 
@@ -880,8 +883,7 @@ _UNIT_TESTS = [
     _test_download_floor_skips_when_toplevel_alias,
     _test_download_floor_two_token_all,
     _test_download_floor_alias_last_wins,
-    _test_flags_inject_repo_by_default,
-    _test_flags_override_repo_in_workspace_mode,
+    _test_aspects_carry_runinfo,
     _test_flags_no_rc_is_spawn_flags_only,
     _test_download_outputs_toplevel_sufficient,
     _test_download_outputs_all_sufficient,

@@ -2,7 +2,7 @@
 Exercise axl
 """
 
-load("@aspect//delivery.axl", delivery_count_unexplained_unresolved = "count_unexplained_unresolved", delivery_fmt_elapsed = "fmt_elapsed", delivery_should_surface_phase2_stderr = "should_surface_phase2_stderr", delivery_should_upload_grpc_log = "should_upload_grpc_log")
+load("@aspect//delivery.axl", delivery_UncacheableAction = "UncacheableAction", delivery_collect_blocking_culprits = "collect_blocking_culprits", delivery_count_unexplained_unresolved = "count_unexplained_unresolved", delivery_fmt_elapsed = "fmt_elapsed", delivery_should_surface_phase2_stderr = "should_surface_phase2_stderr", delivery_should_upload_grpc_log = "should_upload_grpc_log")
 load("@aspect//lint.axl", "file_uri_to_path", "filter_all", "filter_changeset", "linter_error_message")
 load("@aspect//private/lib/artifacts.axl", "artifact_name", "build_log_header", "build_log_relpath", "collect_build_action_logs", "dedup_path", "testlog_dest_dir")
 load("@aspect//private/lib/bazel_results.axl", "compute_reproducer_command", "init_data", "render_check_output", "resolve_aspect_url", "summary_title")
@@ -1928,6 +1928,38 @@ def test_delivery_should_surface_phase2_stderr(tc: int) -> int:
 
     return tc
 
+def test_delivery_collect_blocking_culprits(tc: int) -> int:
+    """Coverage for naming the uncacheable actions that block hashing.
+
+    Culprits come from two sources: phase-2 BES failed actions
+    (`UncacheableAction`s) and gRPC-log non-cacheable producers. A shared
+    upstream dependency that isn't itself a deliverable must still be named
+    (the bug where such misses were dropped), while a deliverable's own
+    gRPC-log miss is left to its per-row message."""
+
+    up = delivery_UncacheableAction(label = "//pkg:upstream", action = "Genrule")
+
+    # A shared upstream dep (not a deliverable) is surfaced, with its mnemonic.
+    culprits = delivery_collect_blocking_culprits([up], {}, ["//pkg:a", "//pkg:b"])
+    tc = test_case(tc, "//pkg:upstream" in culprits, "collect_culprits: shared upstream uncacheable action surfaced")
+    tc = test_case(tc, culprits["//pkg:upstream"] == ["Genrule"], "collect_culprits: mnemonic hint carried")
+
+    # A nasty target tagged `deliverable` (its own action uncacheable) is still
+    # named — the deliverable exclusion applies only to gRPC-log producers.
+    self_culprits = delivery_collect_blocking_culprits([up], {}, ["//pkg:upstream"])
+    tc = test_case(tc, "//pkg:upstream" in self_culprits, "collect_culprits: uncacheable deliverable itself named")
+
+    # gRPC-log producer misses that aren't deliverables are included; a
+    # deliverable's own gRPC-log miss is left out (its per-row message has it).
+    culprits2 = delivery_collect_blocking_culprits([], {"//pkg:upstream": ["Genrule"], "//pkg:a": ["X"]}, ["//pkg:a", "//pkg:b"])
+    tc = test_case(tc, "//pkg:upstream" in culprits2, "collect_culprits: non-deliverable producer miss included")
+    tc = test_case(tc, "//pkg:a" not in culprits2, "collect_culprits: deliverable's own gRPC-log miss excluded")
+
+    # Nothing uncacheable → empty.
+    tc = test_case(tc, delivery_collect_blocking_culprits([], {}, ["//pkg:a"]) == {}, "collect_culprits: none → empty")
+
+    return tc
+
 def test_build_metadata_lib(tc: int) -> int:
     """Coverage for the pure helpers in lib/build_metadata.axl."""
 
@@ -3610,6 +3642,7 @@ def impl(ctx: TaskContext) -> int:
     tc = test_delivery_should_upload_grpc_log(tc)
     tc = test_delivery_count_unexplained_unresolved(tc)
     tc = test_delivery_should_surface_phase2_stderr(tc)
+    tc = test_delivery_collect_blocking_culprits(tc)
     tc = test_build_metadata_lib(tc)
     tc = test_severity_for_status(tc)
     tc = test_gazelle_dir_helpers(tc)
