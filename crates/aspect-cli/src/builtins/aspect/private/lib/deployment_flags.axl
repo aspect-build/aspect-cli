@@ -79,15 +79,23 @@ def deployment_flag_args() -> dict:
     }
 
 def _want(ctx, name: str, umbrella: bool) -> (bool, bool):
-    """Resolve capability arg `name` to `(on, explicit)`: an explicitly-set
-    granular flag wins (and is explicit); otherwise it follows the
-    `--aspect-remote` umbrella (not explicit).
+    """Resolve capability arg `name` to `(on, requested)`: a directly-set granular
+    flag wins over the `--aspect-remote` umbrella; otherwise the flag follows it.
 
-    The distinction drives error handling: an explicitly-requested capability the
+    A flag is "directly set" when it was given on the CLI (`is_explicit`) or turned
+    on via a `config.axl` default. The granular flags default off, so a resolved
+    `True` covers the config-on case that `is_explicit` (CLI-only) misses; a CLI
+    `--aspect-remote-*=false` is caught by `is_explicit` so it still opts that
+    capability out of the umbrella. (A config default of `False` reads the same as
+    the built-in default, so config cannot opt a capability out of the umbrella —
+    only the CLI can.)
+
+    `requested` drives error handling: a directly-requested capability the
     deployment can't serve is an error, whereas the umbrella silently skips a
     capability the deployment doesn't advertise ("use whatever it offers")."""
-    if ctx.args.is_explicit(name):
-        return (getattr(ctx.args, name), True)
+    value = getattr(ctx.args, name)
+    if ctx.args.is_explicit(name) or value:
+        return (value, True)
     return (umbrella, False)
 
 def deployment_endpoint_flags(ctx) -> DeploymentFlags:
