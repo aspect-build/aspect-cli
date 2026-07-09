@@ -60,18 +60,9 @@ both sides or neither). The probe resolves flags from the same rc/config as
 `aspect test`/`build`, so they align by default.
 """
 
-load("@aspect//bazel.axl", "BazelTrait")
+load("@aspect//bazel.axl", "BazelTrait", "bazel")
 load("@bazel//proto/remote_logging.axl", "remote_logging")
 load("@std//time.axl", "time")
-load(
-    "./private/lib/bazel_flags.axl",
-    "announce_bazel_args",
-    "aspect_endpoint_auth_flags",
-    "bazel_flag_args",
-    "resolve_bazel_announce",
-    "resolve_flags",
-    "resolve_startup_flags",
-)
 load("./private/lib/ansi.axl", "ansi")
 load("./private/lib/environment.axl", "color_enabled")
 load("./private/lib/remote_executor.axl", "start_dummy_executor", "stop_dummy_executor")
@@ -350,10 +341,9 @@ def _impl(ctx: TaskContext) -> int:
     mode = ctx.args.mode
     timing = {}  # seconds per phase — split bazel work vs our analysis at the end
 
-    bazel_trait = ctx.traits[BazelTrait]
-    startup_flags = resolve_startup_flags(ctx, bazel_trait)
-    flags = resolve_flags(ctx, bazel_trait)
-    announce_version, announce_command = resolve_bazel_announce(ctx)
+    startup_flags = bazel.flags.resolve_startup(ctx)
+    flags = bazel.flags.resolve(ctx)
+    announce_version, announce_command = bazel.announce.resolve(ctx)
 
     # One run command for the queries, the precise pre-build, and the probe — all
     # on the default output base. The probe forces fresh remote lookups via
@@ -369,7 +359,7 @@ def _impl(ctx: TaskContext) -> int:
 
     # Attach the Aspect login JWT when the cache is an Aspect-owned endpoint;
     # the probe and pre-build below both hit it.
-    endpoint_auth_flags = aspect_endpoint_auth_flags(ctx, rc, "test")
+    endpoint_auth_flags = bazel.auth.flags(ctx, rc, "test")
 
     # Enumerate + reverse-dep under the same resolved flags as the probe/build,
     # so a `--config`/`--bazel-flag` that changes package loading or the test set
@@ -513,5 +503,5 @@ diff = task(
                 "workspace. Intersected with `tests(<patterns>)`."
             ),
         ),
-    } | bazel_flag_args("the cache-diff probe") | announce_bazel_args("the cache-diff probe"),
+    } | bazel.flags.args("the cache-diff probe") | bazel.announce.args("the cache-diff probe"),
 )

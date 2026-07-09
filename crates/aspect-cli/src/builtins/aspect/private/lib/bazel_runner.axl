@@ -12,9 +12,8 @@ any change to how build events are processed or how status updates are emitted
 applies uniformly to both tasks.
 """
 
-load("@aspect//bazel.axl", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
+load("@aspect//bazel.axl", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS", "bazel")
 load("@std//time.axl", "sleep_iter")
-load("./bazel_flags.axl", "aspect_endpoint_auth_flags", "resolve_bazel_announce")
 load("./bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "collapse_repro_targets", "failed_labels", "failed_labels_by_subcommand", "init_data", "now_ms", "process_event", bazel_conclusion = "conclusion")
 load("./bes_sinks.axl", "announce_bes_sinks", "collect_bes_from_args", "summarize_bes_upload")
 load("./deployment_flags.axl", "announce_deployment_flags", "deployment_endpoint_flags")
@@ -304,7 +303,7 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
     # build/test below (a failed health check concludes the surface and fails
     # the task inside setup_phase).
     rc = setup_phase(ctx, lifecycle, " ".join(targets), "bazel_results", data, hc_trait, bazel_trait, command, bazel_base_flags = base_flags)
-    announce_version, announce_command = resolve_bazel_announce(ctx)
+    announce_version, announce_command = bazel.announce.resolve(ctx)
 
     # Surface which deployment's `--remote_cache` / `--remote_executor` the
     # `--aspect-*` flags wired in, so the injected base flags aren't silent. (BES
@@ -323,7 +322,7 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
     # Per-invocation extras: inject `--remote_header` / `--bes_header` auth for an
     # Aspect-owned remote cache or Bazel-streamed `--bes_backend` (appended after
     # rc expansion on each bazel build/test call).
-    invocation_flags = aspect_endpoint_auth_flags(ctx, rc, command)
+    invocation_flags = bazel.auth.flags(ctx, rc, command)
 
     for handler in bazel_trait.build_start:
         handler(ctx)

@@ -148,12 +148,11 @@ See https://aspect.build/docs/cli/guides/delivery-manifest.
 User-facing migration guide: https://aspect.build/docs/cli/migration/delivery
 """
 
-load("@aspect//bazel.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
+load("@aspect//bazel.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS", bzl = "bazel")
 load("@bazel//proto/remote_logging.axl", "remote_logging")
 load("@std//time.axl", "sleep_iter", "time")
 load("./private/lib/ansi.axl", "ansi")
 load("./private/lib/artifacts.axl", "artifacts")
-load("./private/lib/bazel_flags.axl", "announce_bazel_args", "aspect_endpoint_auth_flags", "expand_config_flags", "resolve_bazel_announce", "sibling_rc")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "bes_get", "now_ms", "process_event", bazel_init_data = "init_data")
 load("./private/lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
 load("./private/lib/bes_sinks.axl", "announce_bes_sinks", "bes_args", "collect_bes_from_args", "summarize_bes_upload")
@@ -471,7 +470,7 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, use
         output_groups = ["delivery_hash"],
     )
 
-    endpoint_auth_flags = aspect_endpoint_auth_flags(ctx, rc, "build")
+    endpoint_auth_flags = bzl.auth.flags(ctx, rc, "build")
 
     # Phase-1 extras layered on the active run command. Force `=minimal`:
     # phase 1 reads outputs via BES, never from disk. State is kept (no
@@ -480,7 +479,7 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, use
     # nonce instead of discarding the graph.
     phase1_flags = ["--remote_download_outputs=minimal"] + endpoint_auth_flags
     _t_phase1 = time.monotonic()
-    announce_version, announce_command = resolve_bazel_announce(ctx)
+    announce_version, announce_command = bzl.announce.resolve(ctx)
 
     # Snapshot pre-loop state so retries reset BES counters without re-running
     # setup. Restored via clear+update to keep the caller's `data` ref valid.
@@ -1090,7 +1089,7 @@ def _delivery_impl(ctx):
         bazel_trait,
         "build",
     )
-    announce_version, announce_command = resolve_bazel_announce(ctx)
+    announce_version, announce_command = bzl.announce.resolve(ctx)
 
     delivery_trait = ctx.traits[DeliveryTrait]
     delivery_trait.delivery_start()
@@ -1458,7 +1457,7 @@ def _delivery_impl(ctx):
         # release build reaches Bazel under --ignore_all_rc_files, so an
         # unexpanded `--config=release` would fail with "Config value not
         # defined" (the task's own expanded_flags already went through this).
-        release_flags = expand_config_flags(ctx, bazel_trait, ctx.args.release_bazel_flags)
+        release_flags = bzl.flags.expand_config(ctx, ctx.args.release_bazel_flags)
 
         # Flag order (last-wins): active run command, then these per-call extras.
         # `run_tracker.flags` carries every flag needed to build-then-spawn the
@@ -1471,7 +1470,7 @@ def _delivery_impl(ctx):
         # over `=toplevel` (the floor is a minimum, not a ceiling).
         # `--noremote_upload_local_results` keeps release artifacts out of the
         # shared remote cache (delivery-specific).
-        phase3_flags = run_tracker.flags + list(release_flags) + aspect_endpoint_auth_flags(ctx, rc, "build") + [
+        phase3_flags = run_tracker.flags + list(release_flags) + bzl.auth.flags(ctx, rc, "build") + [
             "--noremote_upload_local_results",
         ]
 
@@ -1482,7 +1481,7 @@ def _delivery_impl(ctx):
         # server. `--output_user_root` stays shared.
         phase3_rc = rc
         if delivery_suffix:
-            phase3_rc = sibling_rc(ctx, bazel_trait, lambda flags: apply_output_base_suffix(flags, "-" + delivery_suffix))
+            phase3_rc = bzl.sibling_rc(ctx, lambda flags: apply_output_base_suffix(flags, "-" + delivery_suffix))
 
         # Redirect stderr to a file: phase-3 re-materializes artifacts (OCI
         # layers, runfiles) and its progress looks like redundant rebuilds;
@@ -1828,7 +1827,7 @@ Currently """ + ansi.ITALIC + "only" + ansi.ITALIC_OFF + """ supported on Aspect
             maximum = 1000000000,
             description = "Bazel target labels to deliver.",
         ),
-    } | announce_bazel_args("the delivery build phases") | bes_args(),
+    } | bzl.announce.args("the delivery build phases") | bes_args(),
     traits = [
         BazelTrait,
         DeliveryTrait,

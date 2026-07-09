@@ -1,19 +1,19 @@
-"""Tests for `lib/bazel_flags.axl`.
+"""Tests for the `bazel` flag/rc/auth helpers (in @aspect//bazel.axl).
 
 Run with:
   aspect dev test-bazel-flags
 """
 
-load("./bazel_flags.axl", "announce_bazel_args", "aspect_endpoint_auth_flags", "bes_backend_auth_flags", "flags_delta", "remote_cache_auth_flags", "requested_config_names", "resolve_announce", "resolve_bazel_announce", "resolve_flags", "resolve_startup_flags", "setup_bazel_command", "sibling_rc")
+load("@aspect//bazel.axl", "BazelTrait", "bazel", "testonly_config_names", "testonly_flags_delta")
 
 def _eq(label, got, want):
     if got != want:
         fail("%s: got %r, want %r" % (label, got, want))
 
-def _fake_trait(extra_startup = [], startup_transform = None, extra = [], task_flags = [], transform = None):
-    """Stand-in for `BazelTrait` covering the startup-flag and command-flag fields
-    the flag helpers read."""
-    return struct(
+def _trait(extra_startup = [], startup_transform = None, extra = [], task_flags = [], transform = None):
+    """A real `BazelTrait` with just the startup/command-flag fields the helpers
+    read."""
+    return BazelTrait(
         extra_startup_flags = extra_startup,
         startup_flags = startup_transform,
         extra_flags = extra,
@@ -21,42 +21,46 @@ def _fake_trait(extra_startup = [], startup_transform = None, extra = [], task_f
         flags = transform,
     )
 
-def _fake_ctx(bazel_startup_flags = [], bazel_flags = []):
-    """Stand-in for `TaskContext` with the CLI args the helpers read.
-    `hasattr` returns True for declared fields, so the `_require_arg`
-    contract check inside the helpers is satisfied."""
-    return struct(args = struct(
-        bazel_startup_flags = bazel_startup_flags,
-        bazel_flags = bazel_flags,
-    ))
-
-def _ctx_with_ci(on_ci):
-    """Stand-in `ctx` whose `std.env.var` reports a CI marker (or not),
-    so `resolve_announce`'s `auto` branch can be exercised deterministically."""
-    env_vars = {"CI": "1"} if on_ci else {}
-    return struct(std = struct(env = struct(var = lambda name: env_vars.get(name))))
-
-def _test_resolve_announce_auto_follows_ci(ctx):
-    _eq("auto on CI", resolve_announce(_ctx_with_ci(True), "auto"), True)
-    _eq("auto off CI", resolve_announce(_ctx_with_ci(False), "auto"), False)
-
-def _test_resolve_announce_explicit_overrides_ci(ctx):
-    # Explicit true/false ignore the environment.
-    _eq("true off CI", resolve_announce(_ctx_with_ci(False), "true"), True)
-    _eq("false on CI", resolve_announce(_ctx_with_ci(True), "false"), False)
-
-def _test_resolve_bazel_announce_maps_args_to_tuple(_ctx):
-    # Distinct version/command values catch a swapped or copy-pasted read.
-    ctx = struct(
-        std = struct(env = struct(var = lambda name: None)),  # off CI
-        args = struct(announce_bazel_version = "true", announce_bazel_command = "false"),
+def _fake_ctx(bazel_startup_flags = [], bazel_flags = [], trait = None):
+    """Stand-in for `TaskContext` with the CLI args and trait map the helpers
+    read. `ctx.traits[BazelTrait]` resolves against a plain dict — trait types
+    are hashable, so a dict keyed by `BazelTrait` mimics the real trait map.
+    `hasattr` returns True for declared args, satisfying `_require_arg`."""
+    return struct(
+        args = struct(
+            bazel_startup_flags = bazel_startup_flags,
+            bazel_flags = bazel_flags,
+        ),
+        traits = {BazelTrait: trait if trait != None else _trait()},
     )
-    _eq("(version, command) order", resolve_bazel_announce(ctx), (True, False))
 
-def _test_announce_bazel_args_shape(_ctx):
-    """`announce_bazel_args` returns exactly the three flags every
-    Bazel-spawning task must declare (the `resolve_*` contract)."""
-    aa = announce_bazel_args("the build")
+def _announce_ctx(on_ci, version = "auto", command = "auto"):
+    """Stand-in `ctx` whose `std.env.var` reports a CI marker (or not) and whose
+    args carry the announce flags, so `bazel.announce.resolve` is exercisable
+    deterministically."""
+    env_vars = {"CI": "1"} if on_ci else {}
+    return struct(
+        std = struct(env = struct(var = lambda name: env_vars.get(name))),
+        args = struct(announce_bazel_version = version, announce_bazel_command = command),
+    )
+
+def _test_announce_auto_follows_ci(ctx):
+    _eq("auto on CI", bazel.announce.resolve(_announce_ctx(True)), (True, True))
+    _eq("auto off CI", bazel.announce.resolve(_announce_ctx(False)), (False, False))
+
+def _test_announce_explicit_overrides_ci(ctx):
+    # Explicit true/false ignore the environment; distinct values catch a
+    # swapped or copy-pasted (version, command) read.
+    _eq(
+        "(version, command) order, explicit",
+        bazel.announce.resolve(_announce_ctx(True, version = "true", command = "false")),
+        (True, False),
+    )
+
+def _test_announce_args_shape(ctx):
+    """`bazel.announce.args` returns exactly the three flags every
+    Bazel-spawning task must declare (the resolve contract)."""
+    aa = bazel.announce.args("the build")
     _eq(
         "announce arg keys",
         sorted(aa.keys()),
@@ -67,27 +71,26 @@ def _test_startup_cli_only(ctx):
     """CLI flags pass through when the trait contributes nothing."""
     _eq(
         "startup cli-only",
-        resolve_startup_flags(_fake_ctx(bazel_startup_flags = ["--client"]), _fake_trait()),
+        bazel.flags.resolve_startup(_fake_ctx(bazel_startup_flags = ["--client"])),
         ["--client"],
     )
 
 def _test_startup_trait_extra_appended(ctx):
-    """`bazel_trait.extra_startup_flags` is appended after CLI flags."""
+    """`trait.extra_startup_flags` is appended after CLI flags."""
     _eq(
         "startup trait extras after CLI",
-        resolve_startup_flags(_fake_ctx(bazel_startup_flags = ["--client"]), _fake_trait(extra_startup = ["--trait"])),
+        bazel.flags.resolve_startup(_fake_ctx(bazel_startup_flags = ["--client"], trait = _trait(extra_startup = ["--trait"]))),
         ["--client", "--trait"],
     )
 
 def _test_startup_transform_replaces_list(ctx):
-    """`bazel_trait.startup_flags` is a list→list transform; the return
-    value is used as-is, not merged."""
+    """`trait.startup_flags` is a list→list transform; the return value is used
+    as-is, not merged."""
     transform = lambda flags: flags + ["--from-transform"]
     _eq(
         "startup transform appended",
-        resolve_startup_flags(
-            _fake_ctx(bazel_startup_flags = ["--client"]),
-            _fake_trait(extra_startup = ["--trait"], startup_transform = transform),
+        bazel.flags.resolve_startup(
+            _fake_ctx(bazel_startup_flags = ["--client"], trait = _trait(extra_startup = ["--trait"], startup_transform = transform)),
         ),
         ["--client", "--trait", "--from-transform"],
     )
@@ -97,32 +100,29 @@ def _test_startup_transform_can_filter(ctx):
     transform = lambda flags: [f for f in flags if f != "--drop-me"]
     _eq(
         "startup transform filters",
-        resolve_startup_flags(
-            _fake_ctx(bazel_startup_flags = ["--keep"]),
-            _fake_trait(extra_startup = ["--drop-me"], startup_transform = transform),
+        bazel.flags.resolve_startup(
+            _fake_ctx(bazel_startup_flags = ["--keep"], trait = _trait(extra_startup = ["--drop-me"], startup_transform = transform)),
         ),
         ["--keep"],
     )
 
 def _test_startup_input_list_not_mutated(ctx):
-    """`resolve_startup_flags` must not mutate the caller's CLI flag list
+    """`bazel.flags.resolve_startup` must not mutate the caller's CLI flag list
     (`ctx.args.bazel_startup_flags` is a live reference)."""
     cli = ["--client"]
-    resolve_startup_flags(_fake_ctx(bazel_startup_flags = cli), _fake_trait(extra_startup = ["--trait"]))
+    bazel.flags.resolve_startup(_fake_ctx(bazel_startup_flags = cli, trait = _trait(extra_startup = ["--trait"])))
     _eq("startup cli list untouched", cli, ["--client"])
 
 def _test_flags_full_chain_order(ctx):
     """Slot ordering:
-        ctx.args.bazel_flags + bazel_trait.extra_flags
-            + task_flags hooks → transform.
+        ctx.args.bazel_flags + trait.extra_flags + task_flags hooks → transform.
     Verify each slot lands where the contract promises."""
     task_hook = lambda c: ["--from-hook"]
     transform = lambda fs: fs + ["--from-transform"]
     _eq(
-        "resolve_flags full chain",
-        resolve_flags(
-            _fake_ctx(bazel_flags = ["--cli"]),
-            _fake_trait(extra = ["--trait-extra"], task_flags = [task_hook], transform = transform),
+        "resolve full chain",
+        bazel.flags.resolve(
+            _fake_ctx(bazel_flags = ["--cli"], trait = _trait(extra = ["--trait-extra"], task_flags = [task_hook], transform = transform)),
         ),
         ["--cli", "--trait-extra", "--from-hook", "--from-transform"],
     )
@@ -130,46 +130,45 @@ def _test_flags_full_chain_order(ctx):
 def _test_flags_empty_defaults(ctx):
     """No CLI flags, no trait additions → empty result."""
     _eq(
-        "resolve_flags empty",
-        resolve_flags(_fake_ctx(), _fake_trait()),
+        "resolve empty",
+        bazel.flags.resolve(_fake_ctx()),
         [],
     )
 
-def _test_setup_bazel_command_applies_to_ctx_bazel(ctx):
+def _test_setup_command_applies_to_ctx_bazel(ctx):
     """End-to-end check on a real `ctx`:
-      - the returned `RunCommand` is registered as the active rc
-        (`ctx.bazel.active_rc()`);
-      - the caller's `base_flags` appear in its `build` expansion
-        (rc expansion may interleave them, so we don't assert position);
+      - the returned `RunCommand` is registered as the active rc;
+      - the caller's `base_flags` appear in its `build` expansion;
       - the trait's `extra_startup_flags` land on the rc's startup flags;
-      - `--ignore_all_rc_files` is present so the bazel subprocess
-        doesn't re-parse rc.
+      - `--ignore_all_rc_files` is present.
     The workspace `.bazelrc` is parsed as a side effect, which is fine
     for a dev test."""
-    sentinel = "/tmp/test-setup-bazel-command-sentinel"
-    bazel_trait = _fake_trait(extra_startup = ["--output_base=" + sentinel])
+    sentinel = "/tmp/test-setup-command-sentinel"
+    # Inject a real trait into the live trait map and let setup_command read it
+    # back via ctx.traits[BazelTrait] — exercises the production (no-override) path.
+    ctx.traits[BazelTrait] = _trait(extra_startup = ["--output_base=" + sentinel])
 
-    rc = setup_bazel_command(ctx, "build", bazel_trait, base_flags = ["--from-base"])
+    rc = bazel.setup_command(ctx, "build", base_flags = ["--from-base"])
 
     if rc != ctx.bazel.active_rc():
-        fail("setup_bazel_command — returned rc not registered as active")
+        fail("setup_command — returned rc not registered as active")
     if "--from-base" not in rc.expand(command = "build"):
-        fail("setup_bazel_command — base_flag not in build expansion: %r" % rc.expand(command = "build"))
+        fail("setup_command — base_flag not in build expansion: %r" % rc.expand(command = "build"))
 
     startup = list(rc.startup_flags())
     if ("--output_base=" + sentinel) not in startup:
-        fail("setup_bazel_command — trait --output_base not on rc startup flags: %r" % startup)
+        fail("setup_command — trait --output_base not on rc startup flags: %r" % startup)
     if "--ignore_all_rc_files" not in startup:
-        fail("setup_bazel_command — --ignore_all_rc_files not present: %r" % startup)
+        fail("setup_command — --ignore_all_rc_files not present: %r" % startup)
 
 def _test_sibling_rc_transforms_startup(ctx):
-    """`sibling_rc` mirrors setup_bazel_command's flags but runs the startup
+    """`bazel.sibling_rc` mirrors setup_command's flags but runs the startup
     flags through the transform, and does NOT register itself as active."""
     base = "/tmp/test-sibling-rc-base"
-    bazel_trait = _fake_trait(extra_startup = ["--output_base=" + base], extra = ["--from-extra"])
-    active = setup_bazel_command(ctx, "build", bazel_trait)
+    ctx.traits[BazelTrait] = _trait(extra_startup = ["--output_base=" + base], extra = ["--from-extra"])
+    active = bazel.setup_command(ctx, "build")
 
-    sib = sibling_rc(ctx, bazel_trait, lambda flags: [f + "-checksum" if f.startswith("--output_base=") else f for f in flags])
+    sib = bazel.sibling_rc(ctx, lambda flags: [f + "-checksum" if f.startswith("--output_base=") else f for f in flags])
 
     startup = list(sib.startup_flags())
     if ("--output_base=" + base + "-checksum") not in startup:
@@ -183,57 +182,54 @@ def _test_sibling_rc_transforms_startup(ctx):
     if ctx.bazel.active_rc() != active:
         fail("sibling_rc — must not change the active run command")
 
-def _test_requested_config_names(ctx):
-    """Extracts `--config=NAME` names from plain and version-gated flags,
-    ignoring everything else."""
-    _eq("no configs", requested_config_names(["--keep_going", "--show_result=20"]), [])
-    _eq("plain config", requested_config_names(["--config=release", "--keep_going"]), ["release"])
-    _eq("tuple config", requested_config_names([("--config=ci", ">=8.0.0")]), ["ci"])
+def _test_config_names(ctx):
+    """`testonly_config_names` extracts `--config=NAME` names from plain and
+    version-gated flags, ignoring everything else."""
+    _eq("no configs", testonly_config_names(["--keep_going", "--show_result=20"]), [])
+    _eq("plain config", testonly_config_names(["--config=release", "--keep_going"]), ["release"])
+    _eq("tuple config", testonly_config_names([("--config=ci", ">=8.0.0")]), ["ci"])
     _eq(
         "mixed",
-        requested_config_names(["--config=a", "--foo", ("--config=b", "<7"), "--config=c"]),
+        testonly_config_names(["--config=a", "--foo", ("--config=b", "<7"), "--config=c"]),
         ["a", "b", "c"],
     )
 
 def _test_flags_delta(ctx):
-    """`flags_delta` returns the multiset difference full − base in full's order.
+    """`testonly_flags_delta` returns the multiset difference full − base in
+    full's order.
 
     The regression case: a `--config` whose section options render as
     `--default_override=0:common=…` sort into the overrides block AHEAD of the
-    base's trailing regular flags, so the contribution is not a tail slice. A
-    positional slice would drop the leading override (this is how a
-    `common:release --stamp` silently vanished) and misattribute a base flag."""
+    base's trailing regular flags, so the contribution is not a tail slice."""
 
     # Plain suffix case: contribution appended after an unchanged base.
-    _eq("suffix", flags_delta(["--a", "--b"], ["--a", "--b", "--c"]), ["--c"])
+    _eq("suffix", testonly_flags_delta(["--a", "--b"], ["--a", "--b", "--c"]), ["--c"])
 
-    # Interleaved override ahead of a trailing base flag: --stamp is added at the
-    # front of the overrides block, --show_result=20 is shared base.
+    # Interleaved override ahead of a trailing base flag.
     base = ["--default_override=0:common=--foo", "--show_result=20"]
     full = [
         "--default_override=0:common=--foo",
         "--default_override=0:common=--stamp",
         "--show_result=20",
     ]
-    _eq("interleaved override", flags_delta(base, full), ["--default_override=0:common=--stamp"])
+    _eq("interleaved override", testonly_flags_delta(base, full), ["--default_override=0:common=--stamp"])
 
     # Repeated flag: only the extra occurrence is in the delta.
-    _eq("multiset", flags_delta(["--x"], ["--x", "--x"]), ["--x"])
+    _eq("multiset", testonly_flags_delta(["--x"], ["--x", "--x"]), ["--x"])
 
     # Version-gated tuples compare by value.
     _eq(
         "tuple",
-        flags_delta([("--a", ">=8")], [("--a", ">=8"), ("--b", "<7")]),
+        testonly_flags_delta([("--a", ">=8")], [("--a", ">=8"), ("--b", "<7")]),
         [("--b", "<7")],
     )
 
     # No extras → empty delta.
-    _eq("empty", flags_delta(["--a", "--b"], ["--a", "--b"]), [])
+    _eq("empty", testonly_flags_delta(["--a", "--b"], ["--a", "--b"]), [])
 
 def _fake_rc(values = {}):
     """Stand-in `RunCommand` over a `{flag: value}` map for single-value flags
-    (`--remote_cache`/`--bes_backend`) and a `{flag: [values]}` map for
-    repeatable flags (`--remote_header`/`--bes_header`). `command`/`version`
+    and a `{flag: [values]}` map for repeatable flags. `command`/`version`
     kwargs are accepted and ignored."""
     return struct(
         flag_value = lambda name, command = None, version = None: values.get(name),
@@ -242,9 +238,8 @@ def _fake_rc(values = {}):
 
 def _fake_auth_ctx(access_token = "", owned_hosts = []):
     """Stand-in `ctx` for the auth path: `deployment_for_host` reports a host as
-    owned (returning its host as the deployment name) iff it is in `owned_hosts`,
-    `credentials` returns a fake login (or None when no token), and `std` reports
-    non-TTY so `warn` stays quiet-but-valid."""
+    owned iff it is in `owned_hosts`, `credentials` returns a fake login (or None
+    when no token), and `std` reports non-TTY so `warn` stays quiet-but-valid."""
     creds = struct(access_token = access_token) if access_token else None
     owned = {h: h for h in owned_hosts}
     return struct(
@@ -263,34 +258,42 @@ _TOK = "fake-access-token"
 _CACHE = "remote.acme.aspect.build"
 _BES = "bes.acme.aspect.build"
 
-def _test_remote_cache_auth_flags(_):
-    """`--remote_header` auth only for a cache owned by a configured deployment,
-    lacking a user authorization header, and only when a credential resolves."""
-    ctx = _fake_auth_ctx(access_token = _TOK, owned_hosts = [_CACHE])
+def _test_auth_flags(ctx):
+    """`bazel.auth.flags` attaches `--remote_header`/`--bes_header` only for an
+    endpoint owned by a configured deployment, lacking a user authorization
+    header, and only when a credential resolves. Covers the cache path, the BES
+    path, and their combination through the one public entry point."""
+    both = _fake_auth_ctx(access_token = _TOK, owned_hosts = [_CACHE, _BES])
 
-    _eq("no --remote_cache", remote_cache_auth_flags(ctx, _fake_rc(), "build"), [])
+    _eq("no endpoints", bazel.auth.flags(both, _fake_rc(), "build"), [])
     _eq(
-        "unowned cache",
-        remote_cache_auth_flags(ctx, _fake_rc({"--remote_cache": "grpcs://remote.buildbuddy.io"}), "build"),
+        "unowned endpoints",
+        bazel.auth.flags(both, _fake_rc({"--remote_cache": "grpcs://remote.buildbuddy.io", "--bes_backend": "grpcs://bes.buildbuddy.io"}), "build"),
         [],
     )
     _eq(
-        "owned cache + creds",
-        remote_cache_auth_flags(ctx, _fake_rc({"--remote_cache": "grpcs://" + _CACHE}), "build"),
+        "owned cache only",
+        bazel.auth.flags(both, _fake_rc({"--remote_cache": "grpcs://" + _CACHE}), "build"),
         ["--remote_header=authorization=Bearer " + _TOK],
     )
     _eq(
-        "owned cache + user authorization header",
-        remote_cache_auth_flags(
-            ctx,
-            _fake_rc({"--remote_cache": "grpcs://" + _CACHE, "--remote_header": ["authorization=Bearer user"]}),
-            "build",
-        ),
+        "owned bes only",
+        bazel.auth.flags(both, _fake_rc({"--bes_backend": "grpcs://" + _BES}), "build"),
+        ["--bes_header=authorization=Bearer " + _TOK],
+    )
+    _eq(
+        "owned cache + bes together",
+        bazel.auth.flags(both, _fake_rc({"--remote_cache": "grpcs://" + _CACHE, "--bes_backend": "grpcs://" + _BES}), "build"),
+        ["--remote_header=authorization=Bearer " + _TOK, "--bes_header=authorization=Bearer " + _TOK],
+    )
+    _eq(
+        "user authorization header skips",
+        bazel.auth.flags(both, _fake_rc({"--remote_cache": "grpcs://" + _CACHE, "--remote_header": ["authorization=Bearer user"]}), "build"),
         [],
     )
     _eq(
-        "owned cache + not logged in",
-        remote_cache_auth_flags(
+        "not logged in",
+        bazel.auth.flags(
             _fake_auth_ctx(owned_hosts = [_CACHE]),
             _fake_rc({"--remote_cache": "grpcs://" + _CACHE}),
             "build",
@@ -298,46 +301,9 @@ def _test_remote_cache_auth_flags(_):
         [],
     )
 
-def _test_bes_backend_auth_flags(_):
-    """`--bes_header` auth for a Bazel-streamed `--bes_backend` owned by a
-    configured deployment, same gate as the cache path but on the BES flag pair."""
-    ctx = _fake_auth_ctx(access_token = _TOK, owned_hosts = [_BES])
-
-    _eq("unowned bes", bes_backend_auth_flags(ctx, _fake_rc({"--bes_backend": "grpcs://bes.buildbuddy.io"}), "build"), [])
-    _eq(
-        "owned bes + creds",
-        bes_backend_auth_flags(ctx, _fake_rc({"--bes_backend": "grpcs://" + _BES}), "build"),
-        ["--bes_header=authorization=Bearer " + _TOK],
-    )
-    _eq(
-        "owned bes + user authorization header",
-        bes_backend_auth_flags(
-            ctx,
-            _fake_rc({"--bes_backend": "grpcs://" + _BES, "--bes_header": ["Authorization=Bearer user"]}),
-            "build",
-        ),
-        [],
-    )
-
-def _test_aspect_endpoint_auth_flags(_):
-    """The combined helper concatenates cache + BES auth; an owned cache and an
-    owned bes backend in the same invocation each get their header."""
-    ctx = _fake_auth_ctx(access_token = _TOK, owned_hosts = [_CACHE, _BES])
-    _eq(
-        "cache + bes together",
-        aspect_endpoint_auth_flags(
-            ctx,
-            _fake_rc({"--remote_cache": "grpcs://" + _CACHE, "--bes_backend": "grpcs://" + _BES}),
-            "build",
-        ),
-        ["--remote_header=authorization=Bearer " + _TOK, "--bes_header=authorization=Bearer " + _TOK],
-    )
-
 # The helpers fail with a clear message when a calling task omits the required
-# args (`bazel_flags`, `bazel_startup_flags`, the `announce_bazel_*` trio).
-# Happy-path coverage is implicit in every other subtest — the test task
-# declares them all. Failure-path coverage would require a second task without
-# the args, which isn't worth the test plumbing.
+# args. Happy-path coverage is implicit in every other subtest — the test task
+# declares them all.
 
 def _test_impl(ctx):
     _test_startup_cli_only(ctx)
@@ -347,21 +313,18 @@ def _test_impl(ctx):
     _test_startup_input_list_not_mutated(ctx)
     _test_flags_full_chain_order(ctx)
     _test_flags_empty_defaults(ctx)
-    _test_resolve_announce_auto_follows_ci(ctx)
-    _test_resolve_announce_explicit_overrides_ci(ctx)
-    _test_resolve_bazel_announce_maps_args_to_tuple(ctx)
-    _test_announce_bazel_args_shape(ctx)
-    _test_requested_config_names(ctx)
+    _test_announce_auto_follows_ci(ctx)
+    _test_announce_explicit_overrides_ci(ctx)
+    _test_announce_args_shape(ctx)
+    _test_config_names(ctx)
     _test_flags_delta(ctx)
-    _test_remote_cache_auth_flags(ctx)
-    _test_bes_backend_auth_flags(ctx)
-    _test_aspect_endpoint_auth_flags(ctx)
+    _test_auth_flags(ctx)
 
     # Run last: these register a real active rc on `ctx.bazel`, so keeping them
     # after the pure subtests prevents bleed-through.
-    _test_setup_bazel_command_applies_to_ctx_bazel(ctx)
+    _test_setup_command_applies_to_ctx_bazel(ctx)
     _test_sibling_rc_transforms_startup(ctx)
-    print("bazel_flags_test.axl: OK (18 sections)")
+    print("bazel_flags_test.axl: OK (14 sections)")
     return 0
 
 bazel_flags_tests = task(

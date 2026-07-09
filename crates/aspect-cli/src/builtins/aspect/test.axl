@@ -2,9 +2,8 @@
 A default 'test' task that wraps a 'bazel test' command.
 """
 
-load("@aspect//bazel.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
+load("@aspect//bazel.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS", "bazel")
 load("./private/lib/artifacts.axl", "artifacts")
-load("./private/lib/bazel_flags.axl", "announce_bazel_args", "bazel_flag_args")
 load("./private/lib/bazel_runner.axl", "run_bazel_task")
 load("./private/lib/bes_sinks.axl", "bes_args")
 load("./private/lib/deployment_flags.axl", "deployment_flag_args")
@@ -136,7 +135,7 @@ test = task(
             default = False,
             description = "Cancel any running Bazel invocation before starting the test.",
         ),
-    } | bazel_flag_args("the test invocation") | announce_bazel_args("the test") | bes_args() | deployment_flag_args() | repro_flavor_args(),
+    } | bazel.flags.args("the test invocation") | bazel.announce.args("the test") | bes_args() | deployment_flag_args() | repro_flavor_args(),
     traits = [
         BazelTrait,
         HealthCheckTrait,

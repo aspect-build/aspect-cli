@@ -14,7 +14,7 @@ is the Workflows-registered hook that:
 
 The `assert_ctx_bazel_ready_for_health_check` guard is exported so
 custom tasks composing `BazelTrait` + `HealthCheckTrait` get the same
-fail-loud contract enforcement — see `lib/bazel_flags.axl` for the
+fail-loud contract enforcement — see `bazel.axl` for the
 canonical helpers that satisfy it.
 """
 
@@ -335,7 +335,7 @@ def assert_ctx_bazel_ready_for_health_check(ctx, environment):
     (`ctx.bazel.active_rc()`) is missing `--output_base`.
 
     Built-in tasks satisfy this via `lib/lifecycle.axl::setup_phase`, which
-    registers the active run command (through `setup_bazel_command` →
+    registers the active run command (through `bazel.setup_command` →
     `ctx.bazel.use_rc`) before running the `health_check` hooks. Custom tasks
     running the health check outside `setup_phase` must `use_rc` first.
     """
@@ -345,7 +345,7 @@ def assert_ctx_bazel_ready_for_health_check(ctx, environment):
         "Bazel health check would target the wrong server: the active run " +
         "command is missing --output_base on a Workflows runner. Run the " +
         "health check via lib/lifecycle.axl::setup_phase, or set an active " +
-        "run command via ctx.bazel.use_rc (e.g. through setup_bazel_command) " +
+        "run command via ctx.bazel.use_rc (e.g. through bazel.setup_command) " +
         "before the health_check hooks.",
     )
 

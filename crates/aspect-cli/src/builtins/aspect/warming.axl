@@ -26,10 +26,9 @@ populate build; it shuts down the health check's Bazel server before wiping the
 output base, and isn't a surface phase of its own. See `_impl`.)
 """
 
-load("@aspect//bazel.axl", "BazelTrait")
+load("@aspect//bazel.axl", "BazelTrait", "bazel")
 load("@std//time.axl", "sleep_iter")
 load("./private/lib/artifacts.axl", "artifacts")
-load("./private/lib/bazel_flags.axl", "announce_bazel_args", "aspect_endpoint_auth_flags", "bazel_flag_args", "resolve_bazel_announce")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event")
 load("./private/lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
 load("./private/lib/bes_sinks.axl", "announce_bes_sinks", "bes_args", "collect_bes_from_args", "summarize_bes_upload")
@@ -114,8 +113,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # runner metadata, incl. --output_base), and runs the health_check hooks (a
     # failed check concludes the surface and fails the task inside).
     rc = setup_phase(ctx, lifecycle, data["target_pattern"], _KIND, data, hc_trait, bazel_trait, "build")
-    announce_version, announce_command = resolve_bazel_announce(ctx)
-    endpoint_auth_flags = aspect_endpoint_auth_flags(ctx, rc, "build")
+    announce_version, announce_command = bazel.announce.resolve(ctx)
+    endpoint_auth_flags = bazel.auth.flags(ctx, rc, "build")
 
     # Clean the prior Bazel state under the runner storage mount AFTER
     # `setup_phase` — the health check must run first (the Workflows
@@ -282,5 +281,5 @@ warming = task(
             default = ["..."],
             description = "Bazel target patterns to warm. Defaults to '...' which expands to all rule targets in the package at and beneath the current directory.",
         ),
-    } | bazel_flag_args("the warming build") | announce_bazel_args("the warming build") | bes_args(),
+    } | bazel.flags.args("the warming build") | bazel.announce.args("the warming build") | bes_args(),
 )

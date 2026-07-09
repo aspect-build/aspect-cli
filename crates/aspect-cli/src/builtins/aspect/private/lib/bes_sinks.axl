@@ -11,7 +11,7 @@ the user has not supplied their own `authorization` header — see
 `aspect_endpoint_auth.axl` for the host gate and best-effort credential
 resolution. (The companion case — BES routed through Bazel via
 `--bazel-flag=--bes_backend` — is handled by `bes_backend_auth_flags` in
-`bazel_flags.axl` instead.)
+`bazel.axl` instead.)
 """
 
 load("./aspect_endpoint_auth.axl", "endpoint_host", "headers_have_auth", "is_aspect_host", "resolve_aspect_bearer")
