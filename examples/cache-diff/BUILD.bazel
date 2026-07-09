@@ -50,3 +50,22 @@ sh_test(
     srcs = ["t.sh"],
     data = [":libA"],
 )
+
+# --- Targets that carry their OWN exec_properties ---------------------------
+# --remote_default_exec_properties is dropped from these actions' remote keys
+# (PlatformUtils uses the platform/target exec_properties instead). The probe
+# must still capture them: the salt-delete is unconditional, so their action
+# nodes are invalidated and re-probed like any other.
+genrule(
+    name = "libExec",
+    outs = ["libExec.txt"],
+    cmd = "echo E-v1 > $@",
+    exec_properties = {"cache-diff-marker": "has-own-exec-props"},
+)
+
+sh_test(
+    name = "testExec",
+    srcs = ["t.sh"],
+    data = [":libExec"],
+    exec_properties = {"cache-diff-marker": "has-own-exec-props"},
+)
