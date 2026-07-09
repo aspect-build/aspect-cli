@@ -1,7 +1,7 @@
 """Buildkite Annotations feature for Aspect tasks.
 
 Creates and updates a Buildkite annotation reflecting the live state of a task.
-Parallel to `GithubStatusChecks` — subscribes to the same `TaskLifecycleTrait`
+Parallel to `GithubStatusChecks` — subscribes to the same `Phases`
 hooks and reuses the same per-kind renderers so the rendered body stays in
 sync with the GitHub check-run body.
 
@@ -33,7 +33,7 @@ load(
 )
 load("../private/lib/ci.axl", "resolve_build_url")
 load("../private/lib/environment.axl", "feature_logger", "workflows_results_url")
-load("../private/lib/lifecycle.axl", "TaskLifecycleTrait", "TaskUpdate", "publish_expanded_phases")
+load("../private/lib/lifecycle.axl", "Phases", "TaskUpdate", "phases")
 load("../private/lib/rate_limit.axl", "usage_footer")
 load("../private/lib/result_text.axl", "severity_for_status")
 load("../private/lib/tips.axl", "SURFACE_BUILDKITE_ANNOTATIONS", "collect_tips_sorted")
@@ -202,7 +202,7 @@ def _write_annotation(ctx, style, body, context_id):
 # ─── Feature implementation ───────────────────────────────────────────────────
 
 def _buildkite_annotations(ctx: FeatureContext):
-    lifecycle = ctx.traits[TaskLifecycleTrait]
+    lifecycle = ctx.traits[Phases]
 
     mode = ctx.args.mode
     is_bk = bool(ctx.std.env.var("BUILDKITE"))
@@ -224,7 +224,7 @@ def _buildkite_annotations(ctx: FeatureContext):
     # headers are printed by the task lifecycle, not by this feature — so set it
     # before the probe can early-return. No-op off Buildkite (the section
     # emitter is itself BK-gated), so it's safe under any `mode`.
-    publish_expanded_phases(ctx, ctx.args.expand_phases)
+    phases.publish_expanded_phases(ctx, ctx.args.expand_phases)
 
     # Probe buildkite-agent — on a Workflows runner it always exists,
     # so this is a clean rc check; elsewhere `.spawn()` raises before
@@ -279,7 +279,7 @@ def _buildkite_annotations(ctx: FeatureContext):
                    (ctx.task.name, subject_str, _state["_context_id"]))
 
     def _task_update(ctx, update):
-        # Latch the subject before init/render: `setup_phase` sets it on the
+        # Latch the subject before init/render: `phases.setup` sets it on the
         # first update, but a later update may refine it (e.g. a query task
         # resolving its targets). Empty means "no change", so keep the prior
         # value. Init reads `_state["_subject"]`, so this must run first.

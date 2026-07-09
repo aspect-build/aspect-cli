@@ -209,7 +209,7 @@ def _setup_command(ctx, command: str, base_flags: list = []):
     command — each self-expands and adds `--ignore_all_rc_files`. `base_flags`
     are task-injected defaults the user can override via `--bazel-flag=...`.
 
-    Built-in tasks reach this through `lib/lifecycle.axl::setup_phase`, which
+    Built-in tasks reach this through `phases.setup`, which
     calls it before the Bazel health-check hooks so the check inspects the same
     active run command every Bazel call uses.
     """

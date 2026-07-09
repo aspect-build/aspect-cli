@@ -623,7 +623,7 @@ def _spawn(ctx: TaskContext, state: struct, ep: struct, args: list[str], capture
 def runnable(ctx, targets: list[str], rc = None) -> struct:
     """Build a BES event tracker that resolves entrypoints for `targets`.
 
-    Pass the active `RunCommand` as `rc` (the value `setup_phase` returns) to opt
+    Pass the active `RunCommand` as `rc` (the value `phases.setup` returns) to opt
     into the `runinfo` aspect: `aspects` then carries it (applied via
     `ctx.bazel.build(aspects = ...)`). Omit `rc` (unit tests) for the BES-only
     heuristic with no aspect.

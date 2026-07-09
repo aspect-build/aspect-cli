@@ -81,7 +81,7 @@ load("../private/lib/checkrun.axl", "checkrun")
 load("../private/lib/ci.axl", "detect_ci_host", "resolve_build_url")
 load("../private/lib/environment.axl", "feature_logger", "workflows_results_url")
 load("../private/lib/github.axl", "github")
-load("../private/lib/lifecycle.axl", "TaskLifecycleTrait")
+load("../private/lib/lifecycle.axl", "Phases")
 load("../private/lib/log_snippet.axl", "code_fence_for")
 load(
     "../private/lib/rate_limit.axl",
@@ -1286,7 +1286,7 @@ def _merge_comment_only_state(existing_state, head_sha, run_id, workflow_name, o
     return _merge_state(existing_state, head_sha, run_id, workflow_name, my_entries, {})
 
 def _github_status_comments(ctx: FeatureContext):
-    lifecycle = ctx.traits[TaskLifecycleTrait]
+    lifecycle = ctx.traits[Phases]
 
     # GHSC publishes the check-run URL via `checkrun.set_url`;
     # `checkrun.url(ctx)` returns "" until then.

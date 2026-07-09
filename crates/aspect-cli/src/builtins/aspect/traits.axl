@@ -6,7 +6,7 @@ files can load the full trait set with a single import:
 
     load("@aspect//traits.axl",
          "BazelTrait",
-         "TaskLifecycleTrait",
+         "Phases",
          "DeliveryTrait",
          "HealthCheckTrait",
          "REPRO_FIX_ACCEPT",
@@ -44,7 +44,7 @@ load(
     _ReproFixCommandKind = "ReproFixCommandKind",
     _ReproFixInfo = "ReproFixInfo",
     _ReproFixSuggestion = "ReproFixSuggestion",
-    _TaskLifecycleTrait = "TaskLifecycleTrait",
+    _Phases = "Phases",
     _TaskUpdate = "TaskUpdate",
     _repro_fix_replace = "repro_fix_replace",
 )
@@ -60,6 +60,6 @@ ReproFixCommand = _ReproFixCommand
 ReproFixCommandKind = _ReproFixCommandKind
 ReproFixInfo = _ReproFixInfo
 ReproFixSuggestion = _ReproFixSuggestion
-TaskLifecycleTrait = _TaskLifecycleTrait
+Phases = _Phases
 TaskUpdate = _TaskUpdate
 repro_fix_replace = _repro_fix_replace

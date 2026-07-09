@@ -17,6 +17,25 @@ def _style(text: str, code: str, enabled: bool = True) -> str:
     `enabled`, else bare `text`."""
     return code + text + _RESET if enabled else text
 
+# Default phase-label highlight when ASPECT_CLI_HIGHLIGHT_COLOR is unset:
+# bold cyan. The env var holds SGR params (e.g. `94`, `38;5;75`); empty
+# disables the highlight color.
+_DEFAULT_HIGHLIGHT_COLOR = "1;36"
+
+def _highlight_style(std, enabled: bool = True) -> str:
+    """SGR prefix for a styled highlight label (phase headers, …), or "" when
+    color is off. Reads `ASPECT_CLI_HIGHLIGHT_COLOR` (SGR params); unset →
+    bold cyan, empty → no color. Like `style`, the caller gates `enabled` on
+    `color_enabled(std)` (kept out of `ansi` to avoid an env import cycle)."""
+    if not enabled:
+        return ""
+    color_arg = std.env.var("ASPECT_CLI_HIGHLIGHT_COLOR")
+    if color_arg == None:
+        color_arg = _DEFAULT_HIGHLIGHT_COLOR
+    if not color_arg:
+        return ""
+    return _seq(color_arg)
+
 def _strip(text: str) -> str:
     """`text` with ANSI CSI (`\\x1b[`…final-byte) and OSC (`\\x1b]`…BEL) escapes
     removed. Character walk — the runtime has no regex module."""
@@ -75,4 +94,5 @@ ansi = namespace(
     seq = _seq,
     style = _style,
     strip = _strip,
+    highlight_style = _highlight_style,
 )

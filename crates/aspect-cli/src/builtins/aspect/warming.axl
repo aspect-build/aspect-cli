@@ -10,7 +10,7 @@ runner it then runs the warming archiver
 the warming bucket — so a CI workflow only needs to call `aspect ci warming`.
 
 Like every other task that calls Bazel, it resolves its flags through
-`setup_phase` (which folds in the Workflows runner metadata — the per-runner
+`phases.setup` (which folds in the Workflows runner metadata — the per-runner
 `--output_base`, repository cache, and identity header — and runs the
 `HealthCheckTrait` health checks before building). It is therefore not given an
 `--output-base` flag of its own; on a Workflows runner the output base comes
@@ -21,7 +21,7 @@ The whole run surfaces as a single status check / Buildkite annotation
 spanning the 🔨 populate and 📦 archive phases, so the check reflects the
 archive-upload outcome, not just the build. Off a Workflows runner the archive
 step is reported as skipped and the task still passes. (The prior-state cleanup
-runs after `setup_phase` — so the health check runs first — but before the
+runs after `phases.setup` — so the health check runs first — but before the
 populate build; it shuts down the health check's Bazel server before wiping the
 output base, and isn't a surface phase of its own. See `_impl`.)
 """
@@ -34,7 +34,7 @@ load("./private/lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_b
 load("./private/lib/bes_sinks.axl", "announce_bes_sinks", "bes_args", "collect_bes_from_args", "summarize_bes_upload")
 load("./private/lib/environment.axl", "error", "warn")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
-load("./private/lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "dispatch_task_update", "setup_phase", "task_update")
+load("./private/lib/lifecycle.axl", "phases")
 load("./private/lib/tips.axl", "tips")
 load("./private/lib/warming_results.axl", warming_conclusion = "conclusion", warming_init_data = "init_data")
 
@@ -57,9 +57,11 @@ def _pick_status(data, had_failure, terminal):
         return "failed" if terminal else "failing"
     return "passed" if terminal else "running"
 
-def _emit_final(ctx, lifecycle, data, exit_code):
+def _emit_final(ph, exit_code):
     """Emit the terminal task_update for status-check consumers and return the
     TaskConclusion `_impl` returns."""
+    ctx = ph.ctx
+    data = ph.data
     status = _pick_status(data, had_failure = exit_code != 0, terminal = True)
     if not data.get("finish_time_ms"):
         data["finish_time_ms"] = now_ms(ctx)
@@ -67,11 +69,9 @@ def _emit_final(ctx, lifecycle, data, exit_code):
         data["bazel"]["wall_time_ms"] = data["finish_time_ms"] - data["start_time_ms"]
 
     bookend = warming_conclusion(status, data)
-    return task_update(
-        ctx,
-        lifecycle,
+    return ph.update(
         status,
-        ProgressStyles(body = bookend),
+        phases.ProgressStyles(body = bookend),
         kind = _KIND,
         data = data,
         final = True,
@@ -97,13 +97,12 @@ def _clean_storage_mount(ctx, mount: str):
 
 def _impl(ctx: TaskContext) -> int | TaskConclusion:
     bazel_trait = ctx.traits[BazelTrait]
-    hc_trait = ctx.traits[HealthCheckTrait]
-    lifecycle = ctx.traits[TaskLifecycleTrait]
 
     on_workflows_runner = bool(ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER"))
     targets = list(ctx.args.targets)
 
     data = warming_init_data()
+    ph = phases.new(ctx, data)
     data["start_time_ms"] = now_ms(ctx)
     data["target_pattern"] = " ".join(targets)
     data["warming"]["on_runner"] = on_workflows_runner
@@ -112,12 +111,12 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # body, resolves Bazel flags + parses the workspace .bazelrc (folding in the
     # runner metadata, incl. --output_base), and runs the health_check hooks (a
     # failed check concludes the surface and fails the task inside).
-    rc = setup_phase(ctx, lifecycle, data["target_pattern"], _KIND, data, hc_trait, bazel_trait, "build")
+    rc = ph.setup(data["target_pattern"], _KIND, "build")
     announce_version, announce_command = bazel.announce.resolve(ctx)
     endpoint_auth_flags = bazel.auth.flags(ctx, rc, "build")
 
     # Clean the prior Bazel state under the runner storage mount AFTER
-    # `setup_phase` — the health check must run first (the Workflows
+    # `phases.setup` — the health check must run first (the Workflows
     # `agent_health_check` validates the runner before warming touches its
     # state). The health check (`ctx.bazel.health_check()`) starts/uses the
     # Bazel server in the runner `--output_base` under this same mount, so
@@ -145,17 +144,15 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     for hook in bazel_trait.build_start:
         hook(ctx)
 
-    task_update(
-        ctx,
-        lifecycle,
+    ph.update(
         "running",
-        ProgressStyles(
+        phases.ProgressStyles(
             body = "Populating caches... (bazel build --nobuild)",
             stream = "Populating caches (bazel build --nobuild)",
         ),
         kind = _KIND,
         data = data,
-        phase = Phase(name = "populate", description = "Populate Bazel caches", emoji = "🔨"),
+        phase = phases.Phase(name = "populate", description = "Populate Bazel caches", emoji = "🔨"),
     )
 
     build = ctx.bazel.build(
@@ -170,11 +167,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # re-emit (status-surface only, empty stream) so the Workflows link surfaces
     # at spawn rather than at build.wait().
     data["sink_invocation_id"] = build.sink_invocation_id
-    task_update(
-        ctx,
-        lifecycle,
+    ph.update(
         "running",
-        ProgressStyles(body = "Populating caches... (bazel build --nobuild)"),
+        phases.ProgressStyles(body = "Populating caches... (bazel build --nobuild)"),
         kind = _KIND,
         data = data,
     )
@@ -194,11 +189,11 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             if process_event(data, event):
                 interesting = True
         if interesting or now_ms(ctx) - last_emit_ms >= MIN_HEARTBEAT_INTERVAL_MS:
-            dispatch_task_update(ctx, lifecycle, TaskUpdate(
+            ph.dispatch(phases.Update(
                 kind = _KIND,
                 status = _pick_status(data, had_failure = False, terminal = False),
                 data = data,
-                progress = ProgressStyles(),
+                progress = phases.ProgressStyles(),
             ))
             last_emit_ms = now_ms(ctx)
         if events.done:
@@ -217,7 +212,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
     if not build_status.success:
         data["warming"]["build_failed"] = True
-        return _emit_final(ctx, lifecycle, data, build_status.code or 1)
+        return _emit_final(ph, build_status.code or 1)
 
     # Archive phase: upload the populated caches to the warming bucket. Only on
     # an Aspect Workflows runner; off-runner it's reported as skipped.
@@ -231,19 +226,17 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             "Workflows runner this task also uploads the populated caches to the " +
             "warming bucket.",
         )
-        return _emit_final(ctx, lifecycle, data, 0)
+        return _emit_final(ph, 0)
 
-    task_update(
-        ctx,
-        lifecycle,
+    ph.update(
         "running",
-        ProgressStyles(
+        phases.ProgressStyles(
             body = "Uploading warming archive...",
             stream = "Uploading warming archive",
         ),
         kind = _KIND,
         data = data,
-        phase = Phase(name = "archive", description = "Upload warming archive", emoji = "📦"),
+        phase = phases.Phase(name = "archive", description = "Upload warming archive", emoji = "📦"),
     )
 
     archiver = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_WARMING_ARCHIVER") or _DEFAULT_WARMING_ARCHIVER
@@ -253,16 +246,16 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         msg = "the warming archiver was not found at %s. Upgrade to the latest aspect-cli to enable warming: %s" % (archiver, ASPECT_CLI_RELEASES_URL)
         error(ctx.std, "Cannot upload the warming archive: " + msg)
         data["warming"]["archive_error"] = msg
-        return _emit_final(ctx, lifecycle, data, 1)
+        return _emit_final(ph, 1)
 
     # Inherits the script's stdout/stderr so the user sees its progress in real time.
     archive = ctx.std.process.command(archiver).spawn().wait()
     if archive.code != 0:
         data["warming"]["archive_error"] = "the warming archiver exited with code %d" % archive.code
-        return _emit_final(ctx, lifecycle, data, archive.code)
+        return _emit_final(ph, archive.code)
 
     data["warming"]["archive_succeeded"] = True
-    return _emit_final(ctx, lifecycle, data, 0)
+    return _emit_final(ph, 0)
 
 warming = task(
     group = ["ci"],
@@ -272,8 +265,7 @@ warming = task(
     traits = [
         BazelTrait,
         HealthCheckTrait,
-        TaskLifecycleTrait,
-    ] + artifacts.TRAITS + tips.TRAITS,
+    ] + phases.TRAITS + artifacts.TRAITS + tips.TRAITS,
     args = {
         "targets": args.positional(
             minimum = 1,

@@ -6,7 +6,7 @@ through clap's `ValueSource::CommandLine` is covered by the Rust unit
 tests on `Arguments`.
 """
 
-load("./lifecycle.axl", "REPRO_FIX_ACCEPT", "REPRO_FIX_REJECT", "ReproFixCommand", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "repro_fix_replace")
+load("./lifecycle.axl", "REPRO_FIX_ACCEPT", "REPRO_FIX_REJECT", "ReproFixCommand", "TaskUpdate", "testonly_suggest_fixes", "testonly_dispatch", "repro_fix_replace")
 load("./repro_commands.axl", "build_aspect_command", "build_bazel_command", "explicit_flags", "filter_by_flavor", "flavor_allows", "has_tools_bazel_wrapper", "is_vanilla_bazel_slug", "rehydrate_commands", "repro_prefix", "slug_flavor", "subdir_prefix")
 
 def _eq(label, got, want):
@@ -613,7 +613,7 @@ def _seed_data():
 
 def _test_no_handlers_is_noop(_ctx):
     data = _seed_data()
-    apply_repro_fix_hooks(
+    testonly_suggest_fixes(
         _fake_apply_ctx(),
         _fake_lifecycle([]),
         data,
@@ -626,7 +626,7 @@ def _test_no_handlers_is_noop(_ctx):
 
 def _test_accept_keeps_entry(_ctx):
     data = _seed_data()
-    apply_repro_fix_hooks(
+    testonly_suggest_fixes(
         _fake_apply_ctx(),
         _fake_lifecycle([lambda ctx, info: REPRO_FIX_ACCEPT]),
         data,
@@ -644,7 +644,7 @@ def _test_reject_drops_entry(_ctx):
     def reject_fix(ctx, info):
         return REPRO_FIX_REJECT if info.command_kind.value == "fix" else REPRO_FIX_ACCEPT
 
-    apply_repro_fix_hooks(
+    testonly_suggest_fixes(
         _fake_apply_ctx(),
         _fake_lifecycle([reject_fix]),
         data,
@@ -661,7 +661,7 @@ def _test_replace_rewrites_entry(_ctx):
     def rewrite(ctx, info):
         return repro_fix_replace(command = info.command.replace("aspect ", "wrapper "))
 
-    apply_repro_fix_hooks(
+    testonly_suggest_fixes(
         _fake_apply_ctx(),
         _fake_lifecycle([rewrite]),
         data,
@@ -692,7 +692,7 @@ def _test_replace_description_only(_ctx):
         "repro_commands": [ReproFixCommand(command = "x", description = "old", slug = "lint-repro")],
         "fix_commands": [],
     }
-    apply_repro_fix_hooks(
+    testonly_suggest_fixes(
         _fake_apply_ctx(),
         _fake_lifecycle([lambda ctx, info: repro_fix_replace(description = "new")]),
         data,
@@ -709,7 +709,7 @@ def _test_replace_both_none_is_noop(_ctx):
         "repro_commands": [ReproFixCommand(command = "x", description = "y", slug = "lint-repro")],
         "fix_commands": [],
     }
-    apply_repro_fix_hooks(
+    testonly_suggest_fixes(
         _fake_apply_ctx(),
         _fake_lifecycle([lambda ctx, info: repro_fix_replace()]),
         data,
@@ -733,7 +733,7 @@ def _test_chain_passes_through_replacements(_ctx):
     def step2(ctx, info):
         return repro_fix_replace(command = info.command + "2")
 
-    apply_repro_fix_hooks(
+    testonly_suggest_fixes(
         _fake_apply_ctx(),
         _fake_lifecycle([step1, step2]),
         data,
@@ -760,7 +760,7 @@ def _test_chain_short_circuits_on_reject(_ctx):
         calls.append("step2")
         return REPRO_FIX_ACCEPT
 
-    apply_repro_fix_hooks(
+    testonly_suggest_fixes(
         _fake_apply_ctx(),
         _fake_lifecycle([step1, step2]),
         data,
@@ -797,7 +797,7 @@ def _test_info_exposes_typed_fields(_ctx):
         })
         return REPRO_FIX_ACCEPT
 
-    apply_repro_fix_hooks(
+    testonly_suggest_fixes(
         _fake_apply_ctx(),
         _fake_lifecycle([capture]),
         data,
@@ -839,7 +839,7 @@ def _test_empty_lists_skip_chain(_ctx):
         seen.append(info.command_kind.value)
         return REPRO_FIX_ACCEPT
 
-    apply_repro_fix_hooks(
+    testonly_suggest_fixes(
         _fake_apply_ctx(),
         _fake_lifecycle([capture]),
         data,
@@ -863,7 +863,7 @@ def _test_slug_visible_to_hook(_ctx):
     def reject_vanilla(ctx, info):
         return REPRO_FIX_REJECT if info.slug == "test-repro-vanilla-bazel" else REPRO_FIX_ACCEPT
 
-    apply_repro_fix_hooks(
+    testonly_suggest_fixes(
         _fake_apply_ctx(),
         _fake_lifecycle([reject_vanilla]),
         data,
@@ -882,7 +882,7 @@ def _test_slug_preserved_through_replace(_ctx):
         "repro_commands": [ReproFixCommand(command = "aspect buildifier", slug = "format-repro")],
         "fix_commands": [],
     }
-    apply_repro_fix_hooks(
+    testonly_suggest_fixes(
         _fake_apply_ctx(),
         _fake_lifecycle([lambda ctx, info: repro_fix_replace(command = info.command.replace("aspect ", "bazel "))]),
         data,
@@ -909,7 +909,7 @@ def _test_slug_visible_after_replace_in_chain(_ctx):
         later_saw.append(info.slug)
         return REPRO_FIX_ACCEPT
 
-    apply_repro_fix_hooks(
+    testonly_suggest_fixes(
         _fake_apply_ctx(),
         _fake_lifecycle([first, second]),
         data,
@@ -960,7 +960,7 @@ def _test_post_hook_entries_carry_hooked_flag(_ctx):
     `_hooked = True` so re-calls (e.g. from `dispatch_task_update`)
     short-circuit."""
     data = _seed_data()
-    apply_repro_fix_hooks(
+    testonly_suggest_fixes(
         _fake_apply_ctx(),
         _fake_lifecycle([lambda ctx, info: REPRO_FIX_ACCEPT]),
         data,
@@ -984,9 +984,9 @@ def _test_second_apply_skips_already_hooked(_ctx):
         return REPRO_FIX_ACCEPT
 
     handlers = [counting_hook]
-    apply_repro_fix_hooks(_fake_apply_ctx(), _fake_lifecycle(handlers), data, kind = "lint_results", status = "failed", exit_code = 1)
+    testonly_suggest_fixes(_fake_apply_ctx(), _fake_lifecycle(handlers), data, kind = "lint_results", status = "failed", exit_code = 1)
     first = call_count[0]
-    apply_repro_fix_hooks(_fake_apply_ctx(), _fake_lifecycle(handlers), data, kind = "lint_results", status = "failed", exit_code = 1)
+    testonly_suggest_fixes(_fake_apply_ctx(), _fake_lifecycle(handlers), data, kind = "lint_results", status = "failed", exit_code = 1)
     _eq("first pass invoked hook once per entry (4 entries)", first, 4)
     _eq("second pass invoked hook zero additional times", call_count[0], first)
 
@@ -1000,11 +1000,11 @@ def _test_mixed_new_and_hooked_entries(_ctx):
         seen.append(info.command)
         return REPRO_FIX_ACCEPT
 
-    apply_repro_fix_hooks(_fake_apply_ctx(), _fake_lifecycle([capture]), data, kind = "lint_results", status = "failed", exit_code = 1)
+    testonly_suggest_fixes(_fake_apply_ctx(), _fake_lifecycle([capture]), data, kind = "lint_results", status = "failed", exit_code = 1)
     seen_first = list(seen)
 
     data["repro_commands"].append(ReproFixCommand(command = "added-later", slug = "lint-repro"))
-    apply_repro_fix_hooks(_fake_apply_ctx(), _fake_lifecycle([capture]), data, kind = "lint_results", status = "failed", exit_code = 1)
+    testonly_suggest_fixes(_fake_apply_ctx(), _fake_lifecycle([capture]), data, kind = "lint_results", status = "failed", exit_code = 1)
 
     _eq("first pass saw seed entries", seen_first, [
         "aspect lint -- //a:a",
@@ -1041,7 +1041,7 @@ def _test_dispatch_hooks_then_fans_out(_ctx):
         task_update = [task_update_handler],
     )
     update = TaskUpdate(kind = "lint_results", status = "failed", data = data)
-    dispatch_task_update(_fake_apply_ctx(), lifecycle, update)
+    testonly_dispatch(_fake_apply_ctx(), lifecycle, update)
 
     _eq("hook saw original command", hook_saw, ["x"])
     _eq("handler saw post-hook command", handler_saw, ["x-rewritten"])
@@ -1065,8 +1065,8 @@ def _test_dispatch_idempotent_across_emits(_ctx):
         task_update = [],
     )
     update = TaskUpdate(kind = "lint_results", status = "running", data = data)
-    dispatch_task_update(_fake_apply_ctx(), lifecycle, update)
-    dispatch_task_update(_fake_apply_ctx(), lifecycle, update)
+    testonly_dispatch(_fake_apply_ctx(), lifecycle, update)
+    testonly_dispatch(_fake_apply_ctx(), lifecycle, update)
     _eq("hook invoked exactly once across two dispatches", hook_calls[0], 1)
 
 def _test_dispatch_skips_hook_when_lists_empty(_ctx):
@@ -1087,7 +1087,7 @@ def _test_dispatch_skips_hook_when_lists_empty(_ctx):
         task_update = [handler],
     )
     update = TaskUpdate(kind = "lint_results", status = "running", data = {})
-    dispatch_task_update(_fake_apply_ctx(), lifecycle, update)
+    testonly_dispatch(_fake_apply_ctx(), lifecycle, update)
     _eq("hook not called when lists are empty", hook_count[0], 0)
     _eq("handler still called", handler_count[0], 1)
 
@@ -1187,7 +1187,7 @@ def _test_hook_preserves_target(_ctx):
         "repro_commands": [ReproFixCommand(command = "aspect test -- //x", slug = "test-repro-aspect", target = "//x")],
         "fix_commands": [],
     }
-    apply_repro_fix_hooks(_fake_apply_ctx(), lifecycle, data, kind = "bazel_results", status = "failed")
+    testonly_suggest_fixes(_fake_apply_ctx(), lifecycle, data, kind = "bazel_results", status = "failed")
     out = data["repro_commands"][0]
     _eq("hook rewrote command", out.command, "EDITED aspect test -- //x")
     _eq("hook preserved target", out.target, "//x")

@@ -168,7 +168,7 @@ load(
 load("./private/lib/environment.axl", "apply_output_base_suffix", "color_enabled", "error", "info", "sanitize_filename", "warn")
 load("./private/lib/github.axl", "detect_commit_sha")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
-load("./private/lib/lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "setup_phase", "task_update")
+load("./private/lib/lifecycle.axl", "phases")
 load("./private/lib/remote_executor.axl", "start_dummy_executor", "stop_dummy_executor")
 load("./private/lib/repro_commands.axl", "build_aspect_command", "print_repro_and_fix", "repro_prefix", "task_cli_path")
 load("./private/lib/runnable.axl", "apparent_label", "runnable")
@@ -442,7 +442,7 @@ def _surface_phase_stderr(ctx, phase, log_path):
     ctx.std.io.stderr.write(ctx.std.fs.read_to_string(log_path))
     artifacts.upload_file(ctx, "delivery_phase{}_log".format(phase), "phase{}-stderr.log".format(phase), log_path)
 
-def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, user_remote_executor_uri, color, data):
+def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_executor_uri, color):
     """Run phase 1 (build) + phase 2 (digest extraction); return
     `(output_shas, non_hermetic_misses, uncacheable_actions, exit_code)`.
     Phase-1 BES events drive `data`; phase-2's gRPC log yields the per-target
@@ -455,6 +455,8 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, use
     `should_surface_phase2_stderr`). The gRPC log uploads per
     `ctx.args.upload_grpc_log`. Uploads no-op off-CI.
     """
+    ctx = ph.ctx
+    data = ph.data
 
     # The change-detection aspect. `ctx.bazel.aspect(...)` materializes it into
     # `@bazel_tools` (already in the repo graph, in both bzlmod and WORKSPACE
@@ -516,30 +518,26 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, use
         targets_label = pluralize(len(targets), "target")
         status = _pick_status(data, had_failure = False, terminal = False)
         if attempt == 0:
-            task_update(
-                ctx,
-                lifecycle,
+            ph.update(
                 status,
-                ProgressStyles(
+                phases.ProgressStyles(
                     body = "Building {} for delivery...".format(targets_label),
                     stream = "Building {} for delivery".format(targets_label),
                 ),
                 kind = "delivery_results",
                 data = data,
-                phase = Phase(name = "build", description = "Build delivery targets", emoji = "🔨"),
+                phase = phases.Phase(name = "build", description = "Build delivery targets", emoji = "🔨"),
             )
         else:
-            task_update(
-                ctx,
-                lifecycle,
+            ph.update(
                 status,
-                ProgressStyles(
+                phases.ProgressStyles(
                     body = "Retrying delivery build... (attempt {}, {})".format(attempt + 1, targets_label),
                     stream = "Retrying delivery build (attempt {}, {})".format(attempt + 1, targets_label),
                 ),
                 kind = "delivery_results",
                 data = data,
-                phase = Phase(
+                phase = phases.Phase(
                     name = "build_retry_" + str(attempt + 1),
                     description = "Retry attempt — Build delivery targets",
                     emoji = "🔨",
@@ -573,7 +571,7 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, use
                 for handler in bazel_trait.build_event:
                     handler(ctx, event)
             if interesting or now_ms(ctx) - last_emit_ms >= MIN_HEARTBEAT_INTERVAL_MS:
-                _emit_update(ctx, lifecycle, data)
+                _emit_update(ph)
                 last_emit_ms = now_ms(ctx)
             if events.done:
                 break
@@ -602,17 +600,15 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, use
     # just means DeliveryHash wasn't cached yet, normal on first delivery.
     targets_label = pluralize(len(targets), "target")
     status = _pick_status(data, had_failure = False, terminal = False)
-    task_update(
-        ctx,
-        lifecycle,
+    ph.update(
         status,
-        ProgressStyles(
+        phases.ProgressStyles(
             body = "Checksuming delivery digests for {}...".format(targets_label),
             stream = "Checksuming delivery digests for {}".format(targets_label),
         ),
         kind = "delivery_results",
         data = data,
-        phase = Phase(name = "checksum", description = "Checksum delivery digests", emoji = "💯"),
+        phase = phases.Phase(name = "checksum", description = "Checksum delivery digests", emoji = "💯"),
     )
     _t_phase2 = time.monotonic()
     log_path = _GRPC_LOG_PATH.format(ctx.task.name)
@@ -890,25 +886,28 @@ def _fire_target_hook(data, delivery_trait, run_tracker, label):
     for k, v in extras.items():
         entry["custom"][k] = v
 
-def _emit_update(ctx, lifecycle, data, had_failure = False):
+def _emit_update(ph, had_failure = False):
     """Emit a bare task_update carrying accumulating delivery data.
 
     For data-only refreshes during phase-1 BES streaming: an empty
     `update.progress` keeps the surface's latched phase label, so `data`
     updates without disturbing the "Last update" line. Phase transitions go
     through `task_update()`."""
+    data = ph.data
     status = _pick_status(data, had_failure = had_failure, terminal = False)
-    dispatch_task_update(ctx, lifecycle, TaskUpdate(
+    ph.dispatch(phases.Update(
         kind = "delivery_results",
         status = status,
         data = data,
-        progress = ProgressStyles(),
+        progress = phases.ProgressStyles(),
     ))
 
-def _emit_final(ctx, lifecycle, data, exit_code):
+def _emit_final(ph, exit_code):
     """Emit the terminal `task_update(final=True)` plus the manifest. Called
     on every return path out of `_delivery_impl` so a check run is always
     completed, even on early error exits before any per-target data exist."""
+    ctx = ph.ctx
+    data = ph.data
     if not data.get("finish_time_ms"):
         data["finish_time_ms"] = now_ms(ctx)
     if not data.get("wall_time_ms") and data.get("start_time_ms"):
@@ -932,7 +931,7 @@ def _emit_final(ctx, lifecycle, data, exit_code):
             if ctx.args.mode != "always":
                 desc = "CI ran --mode=%s; --mode=always --track-state=false for off-runner with no state backend." % ctx.args.mode
             prefix = repro_prefix(ctx)
-            data["repro_commands"].append(ReproFixCommand(
+            data["repro_commands"].append(phases.ReproFixCommand(
                 command = prefix + repro,
                 description = desc,
                 slug = "delivery-repro-local-preview",
@@ -943,12 +942,9 @@ def _emit_final(ctx, lifecycle, data, exit_code):
 
     # Pre-hook with rich `ReproFixInfo` the dispatch safety-net can't supply;
     # entries hooked here are skipped on dispatch via `_hooked`.
-    apply_repro_fix_hooks(
-        ctx,
-        lifecycle,
-        data,
-        kind = "delivery_results",
-        status = final_status,
+    ph.suggest_fixes(
+        "delivery_results",
+        final_status,
         exit_code = exit_code,
         targets = list(ctx.args.targets),
         extras = {
@@ -961,13 +957,13 @@ def _emit_final(ctx, lifecycle, data, exit_code):
     # is registered when the GHSC / BK annotation snapshot their artifact_urls.
     manifest = _publish_manifest(ctx, data)
 
-    dispatch_task_update(ctx, lifecycle, TaskUpdate(
+    ph.dispatch(phases.Update(
         kind = "delivery_results",
         status = final_status,
         final = True,
         conclusion = bookend,
         data = data,
-        progress = ProgressStyles(
+        progress = phases.ProgressStyles(
             body = _body_text(final_status, data),
         ),
     ))
@@ -1050,13 +1046,12 @@ def _publish_manifest(ctx, data):
     return manifest
 
 def _delivery_impl(ctx):
-    hc_trait = ctx.traits[HealthCheckTrait]
     bazel_trait = ctx.traits[BazelTrait]
-    lifecycle = ctx.traits[TaskLifecycleTrait]
 
-    # Build the data shell up front so an early failure (before setup_phase
+    # Build the data shell up front so an early failure (before phases.setup
     # opens the surface) still has data to render.
     data = delivery_init_data()
+    ph = phases.new(ctx, data)
     data["start_time_ms"] = now_ms(ctx)
     data["delivery"]["commit_sha"] = ctx.args.commit_sha
     data["delivery"]["build_url"] = ctx.args.build_url
@@ -1070,7 +1065,7 @@ def _delivery_impl(ctx):
 
     color = color_enabled(ctx.std)
 
-    # Requested targets feed setup_phase's `subject` (rendered in the status
+    # Requested targets feed phases.setup's `subject` (rendered in the status
     # check's "Explicit command line"). Often empty for query-based delivery —
     # the resolved set lands in `data` later.
     targets_subject = " ".join(list(ctx.args.targets)) if ctx.args.targets else ""
@@ -1079,14 +1074,9 @@ def _delivery_impl(ctx):
 
     # Single pre-task setup phase (surface, rc parse + use_rc, health checks);
     # returns the active RunCommand. A failed health check fails the task inside.
-    rc = setup_phase(
-        ctx,
-        lifecycle,
+    rc = ph.setup(
         targets_subject,
         "delivery_results",
-        data,
-        hc_trait,
-        bazel_trait,
         "build",
     )
     announce_version, announce_command = bzl.announce.resolve(ctx)
@@ -1102,7 +1092,7 @@ def _delivery_impl(ctx):
 
     if mode == "selective" and not track_state:
         msg = "--mode=selective requires --track-state=true. Change detection cannot decide what to deliver without persisted state. Either use --track-state=true (the default), or switch to --mode=always to deliver without change detection (combine with --dry-run for a preview)."
-        _emit_final(ctx, lifecycle, data, exit_code = 1)
+        _emit_final(ph, exit_code = 1)
         fail(msg)
 
     # phase 1/2 runs whenever digests are needed (recorded or previewed).
@@ -1114,7 +1104,7 @@ def _delivery_impl(ctx):
     # deliveryd state backend; Workflows runners expose its Unix socket here.
     endpoint = ctx.std.env.var("ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT")
     if not endpoint and track_state:
-        _emit_final(ctx, lifecycle, data, exit_code = 1)
+        _emit_final(ph, exit_code = 1)
         fail("ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT is not set. The delivery state backend must be running. (Pass --track-state=false to run without state tracking; allowed in combination with --dry-run or --mode=always.)")
 
     # commit-sha / build-url auto-detect from CI env. commit_sha is only
@@ -1123,7 +1113,7 @@ def _delivery_impl(ctx):
     commit_sha = ctx.args.commit_sha or detect_commit_sha(ctx.std)
     if not commit_sha and track_state:
         msg = "Could not determine commit SHA. Pass --commit-sha=<sha>, or run on a CI host that exposes GITHUB_SHA, BUILDKITE_COMMIT, CIRCLE_SHA1, or CI_COMMIT_SHA."
-        _emit_final(ctx, lifecycle, data, exit_code = 1)
+        _emit_final(ph, exit_code = 1)
         fail(msg)
     if not commit_sha:
         commit_sha = "-"
@@ -1176,24 +1166,22 @@ def _delivery_impl(ctx):
         else:
             error(ctx.std, "Delivery requires a remote cache but no --remote_cache or --remote_executor was found." +
                            " (Use --mode=always --track-state=false to deliver every target without change detection.)")
-            return _emit_final(ctx, lifecycle, data, exit_code = 1)
+            return _emit_final(ph, exit_code = 1)
 
     # Resolve the delivery set (via `--query` or positional targets) under a
     # single `resolve` phase. The phase update is the opening bookend, emitted
     # before the query runs; the resolved set is recorded into `data` within
     # the same phase and surfaces on the next phase's update.
     query_expr = ctx.args.query
-    task_update(
-        ctx,
-        lifecycle,
+    ph.update(
         _pick_status(data, had_failure = False, terminal = False),
-        ProgressStyles(
+        phases.ProgressStyles(
             body = "Resolving targets to deliver...",
             stream = "Resolving targets to deliver",
         ),
         kind = "delivery_results",
         data = data,
-        phase = Phase(name = "resolve", description = "Resolve targets to deliver", emoji = "🎯"),
+        phase = phases.Phase(name = "resolve", description = "Resolve targets to deliver", emoji = "🎯"),
         subject = query_expr,
     )
     if query_expr:
@@ -1232,7 +1220,7 @@ def _delivery_impl(ctx):
 
     # Emit within the resolve phase (no `phase`, so no boundary/`→`) — just
     # latches the resolved data and refined subject.
-    dispatch_task_update(ctx, lifecycle, TaskUpdate(
+    ph.dispatch(phases.Update(
         kind = "delivery_results",
         data = data,
         subject = data["target_pattern"],
@@ -1240,14 +1228,14 @@ def _delivery_impl(ctx):
 
     if not targets:
         info(ctx.std, "No targets to deliver")
-        return _emit_final(ctx, lifecycle, data, exit_code = 0)
+        return _emit_final(ph, exit_code = 0)
 
     # Hard-fail on forced labels not in the resolved set: force-target only
     # flips change detection, it doesn't add labels — catches typos at startup.
     unmatched_forced = [t for t in forced_targets if t not in targets]
     if unmatched_forced:
         msg = "--force-target / ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS labels not in the resolved delivery set: " + ", ".join(unmatched_forced) + ". Force-target re-delivers labels already selected by --query or positional args; it does not add new labels. Either fix the typo or update --query / positional targets to include them."
-        _emit_final(ctx, lifecycle, data, exit_code = 1)
+        _emit_final(ph, exit_code = 1)
         fail(msg)
 
     _print_header(color, endpoint, ci_host, commit_sha, prefix, prefix_source, build_url, rc.expand(command = "build"), targets, forced_targets, mode, dry_run, track_state)
@@ -1262,7 +1250,7 @@ def _delivery_impl(ctx):
     # Phase 1/2 — skipped only in --mode=always + --track-state=false.
     if phase_1_2_runs:
         _t_build = time.monotonic()
-        output_shas, non_hermetic_misses, uncacheable_actions, build_code = _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, user_remote_executor_uri or "", color, data)
+        output_shas, non_hermetic_misses, uncacheable_actions, build_code = _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_executor_uri or "", color)
         info(ctx.std, "Build+checksum total: {}.".format(fmt_elapsed(time.monotonic() - _t_build)))
 
         for handler in bazel_trait.build_end:
@@ -1280,7 +1268,7 @@ def _delivery_impl(ctx):
                     message = "build failed (exit {})".format(build_code),
                 )
                 _fire_target_hook(data, delivery_trait, None, label)
-            return _emit_final(ctx, lifecycle, data, exit_code = build_code)
+            return _emit_final(ph, exit_code = build_code)
     else:
         output_shas = {}
         non_hermetic_misses = {}
@@ -1302,17 +1290,15 @@ def _delivery_impl(ctx):
     # Record each target's digest with deliveryd. Skipped when --track-state=false.
     if track_state:
         status = _pick_status(data, had_failure = False, terminal = False)
-        task_update(
-            ctx,
-            lifecycle,
+        ph.update(
             status,
-            ProgressStyles(
+            phases.ProgressStyles(
                 body = "Recording delivery digests...",
                 stream = "Recording delivery digests",
             ),
             kind = "delivery_results",
             data = data,
-            phase = Phase(name = "record", description = "Record delivery digests", emoji = "📝"),
+            phase = phases.Phase(name = "record", description = "Record delivery digests", emoji = "📝"),
         )
         for label in targets:
             if label in output_shas:
@@ -1323,17 +1309,15 @@ def _delivery_impl(ctx):
     # or --mode=always (every target is a candidate).
     if track_state and mode != "always":
         status = _pick_status(data, had_failure = False, terminal = False)
-        task_update(
-            ctx,
-            lifecycle,
+        ph.update(
             status,
-            ProgressStyles(
+            phases.ProgressStyles(
                 body = "Detecting which targets have already been delivered...",
                 stream = "Detecting which targets have already been delivered",
             ),
             kind = "delivery_results",
             data = data,
-            phase = Phase(name = "detect", description = "Detect already-delivered targets", emoji = "🔬"),
+            phase = phases.Phase(name = "detect", description = "Detect already-delivered targets", emoji = "🔬"),
         )
         delivery_state = deliveryd_query(ctx, endpoint, ci_host, commit_sha, prefix)
     else:
@@ -1358,21 +1342,19 @@ def _delivery_impl(ctx):
     max_par = ctx.args.max_parallelization
     if max_par < 1:
         error(ctx.std, "--max-parallelization must be >= 1, got {}.".format(max_par))
-        return _emit_final(ctx, lifecycle, data, exit_code = 1)
+        return _emit_final(ph, exit_code = 1)
     capture = max_par > 1
 
     status = _pick_status(data, had_failure = False, terminal = False)
-    task_update(
-        ctx,
-        lifecycle,
+    ph.update(
         status,
-        ProgressStyles(
+        phases.ProgressStyles(
             body = "Delivering targets...",
             stream = "Delivering targets",
         ),
         kind = "delivery_results",
         data = data,
-        phase = Phase(name = "deliver", description = "Deliver targets", emoji = "🚚"),
+        phase = phases.Phase(name = "deliver", description = "Deliver targets", emoji = "🚚"),
     )
 
     rows = []
@@ -1639,11 +1621,9 @@ def _delivery_impl(ctx):
             # priority=False throttles surface PATCHes; the per-target lines
             # already tick the CLI.
             if interesting or now_ms(ctx) - last_emit_ms >= MIN_HEARTBEAT_INTERVAL_MS:
-                task_update(
-                    ctx,
-                    lifecycle,
+                ph.update(
                     _pick_status(data, had_failure = failed_count > 0, terminal = False),
-                    ProgressStyles(
+                    phases.ProgressStyles(
                         body = "Delivered {} of {}...".format(success_count + failed_count, pluralize(total_deliverable, "target")),
                     ),
                     kind = "delivery_results",
@@ -1724,7 +1704,7 @@ def _delivery_impl(ctx):
 
     # A failed build fails the task even though its targets are WARN, not FAIL.
     exit_code = build_exit_code or (1 if failed_count > 0 else 0)
-    return _emit_final(ctx, lifecycle, data, exit_code = exit_code)
+    return _emit_final(ph, exit_code = exit_code)
 
 delivery = task(
     kind = "delivery",
@@ -1832,7 +1812,6 @@ Currently """ + ansi.ITALIC + "only" + ansi.ITALIC_OFF + """ supported on Aspect
         BazelTrait,
         DeliveryTrait,
         HealthCheckTrait,
-        TaskLifecycleTrait,
-    ] + artifacts.TRAITS + tips.TRAITS,
+    ] + phases.TRAITS + artifacts.TRAITS + tips.TRAITS,
     implementation = _delivery_impl,
 )

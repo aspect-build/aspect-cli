@@ -17,8 +17,7 @@ load("@std//time.axl", "sleep_iter")
 load("./bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "collapse_repro_targets", "failed_labels", "failed_labels_by_subcommand", "init_data", "now_ms", "process_event", bazel_conclusion = "conclusion")
 load("./bes_sinks.axl", "announce_bes_sinks", "collect_bes_from_args", "summarize_bes_upload")
 load("./deployment_flags.axl", "announce_deployment_flags", "deployment_endpoint_flags")
-load("./health_check.axl", "HealthCheckTrait")
-load("./lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "setup_phase", "task_update")
+load("./lifecycle.axl", "Phases", "phases")
 load("./repro_commands.axl", "build_aspect_command", "build_bazel_command", "flavor_allows", "print_repro_and_fix", "repro_prefix")
 load("./text.axl", "format_int_comma", "pluralize")
 
@@ -168,40 +167,38 @@ def _live_progress(data, command, status):
         if tail:
             body = body + " (" + tail + ")"
 
-    return ProgressStyles(
+    return phases.ProgressStyles(
         body = body,
         stream = "",
     )
 
-def _emit_terminal(ctx, lifecycle, command, data, exit_code, targets = []):
-    """Fire the terminal `task_update(final=True)` and return a
+def _emit_terminal(ph, command, exit_code, targets = []):
+    """Fire the terminal `ph.update(final=True)` and return a
     `TaskConclusion` for `run_bazel_task` to return, so status surfaces
     conclude rather than stick at "running". (A failed setup health check
-    concludes the surface separately, inside `setup_phase`.)
+    concludes the surface separately, inside `ph.setup`.)
 
     `targets` is the resolved Bazel target patterns; forwarded to
-    `apply_repro_fix_hooks` for `repro_fix_suggestion` hooks to scope by.
+    `ph.suggest_fixes` for `repro_fix_suggestion` hooks to scope by.
     """
+    data = ph.data
     final_status = _pick_status(command, data, had_failure = exit_code != 0, terminal = True)
     bookend = bazel_conclusion(final_status, data)
 
     # Pre-hook with rich `ReproFixInfo` (exit_code / bazel_subcommand /
     # targets / failed_targets) the safety-net call inside
-    # `dispatch_task_update` can't supply. Entries hooked here are
+    # `ph.dispatch` can't supply. Entries hooked here are
     # skipped on dispatch via the `_hooked` flag.
-    apply_repro_fix_hooks(
-        ctx,
-        lifecycle,
-        data,
-        kind = "bazel_results",
-        status = final_status,
+    ph.suggest_fixes(
+        "bazel_results",
+        final_status,
         exit_code = exit_code,
         bazel_subcommand = command,
         targets = targets,
         failed_targets = failed_labels(data),
     )
 
-    dispatch_task_update(ctx, lifecycle, TaskUpdate(
+    ph.dispatch(phases.Update(
         kind = "bazel_results",
         status = final_status,
         final = True,
@@ -209,7 +206,7 @@ def _emit_terminal(ctx, lifecycle, command, data, exit_code, targets = []):
         data = data,
         progress = _live_progress(data, command, final_status),
     ))
-    print_repro_and_fix(ctx.std, data, final_status)
+    print_repro_and_fix(ph.ctx.std, data, final_status)
 
     return TaskConclusion(
         exit_code = exit_code,
@@ -266,9 +263,7 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
                  forwarding `--target_pattern_file=<path>` to Bazel
                  directly, and otherwise reads `ctx.args.targets`.
     """
-    hc_trait = ctx.traits[HealthCheckTrait]
     bazel_trait = ctx.traits[BazelTrait]
-    lifecycle = ctx.traits[TaskLifecycleTrait]
 
     # Runner-injected base flags Bazel must see verbatim: the TTY signal
     # for progress rendering and, optionally, --target_pattern_file=…
@@ -296,13 +291,14 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
         else:
             targets = ctx.args.targets
 
-    data = init_data()
+    ph = phases.new(ctx, init_data())
+    data = ph.data
 
     # The single pre-task `setup` phase: status-surface init + first render, rc
     # parse + `use_rc`, health checks. The active run command drives the
     # build/test below (a failed health check concludes the surface and fails
-    # the task inside setup_phase).
-    rc = setup_phase(ctx, lifecycle, " ".join(targets), "bazel_results", data, hc_trait, bazel_trait, command, bazel_base_flags = base_flags)
+    # the task inside ph.setup).
+    rc = ph.setup(" ".join(targets), "bazel_results", command, base_flags = base_flags)
     announce_version, announce_command = bazel.announce.resolve(ctx)
 
     # Surface which deployment's `--remote_cache` / `--remote_executor` the
@@ -317,7 +313,7 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
     if bazel_trait.build_event_sinks:
         bes_sinks.extend(bazel_trait.build_event_sinks)
     announce_bes_sinks(ctx, bes_sinks)
-    need_bes = bool(bazel_trait.build_event) or bool(lifecycle.task_update)
+    need_bes = bool(bazel_trait.build_event) or bool(ctx.traits[Phases].task_update)
 
     # Per-invocation extras: inject `--remote_header` / `--bes_header` auth for an
     # Aspect-owned remote cache or Bazel-streamed `--bes_backend` (appended after
@@ -363,22 +359,20 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
 
             # Re-init for the new attempt; `process_event` increments
             # BES counters in-place, so without a fresh dict the retry
-            # would double-count everything from the failed run.
-            data = init_data()
+            # would double-count everything from the failed run. `ph.reset`
+            # refills in place so `data` (and `ph.data`) stay the same ref.
+            ph.reset(init_data())
             data["bazel_attempts"] = prior_attempts
 
         spawn_status = _pick_status(command, data, had_failure = False, terminal = False)
-        task_update(
-            ctx,
-            lifecycle,
+        ph.update(
             spawn_status,
-            ProgressStyles(
+            phases.ProgressStyles(
                 body = phase_label,
                 stream = phase_cli,
             ),
             kind = "bazel_results",
-            data = data,
-            phase = Phase(
+            phase = phases.Phase(
                 name = phase_id,
                 description = phase_desc,
                 # `build` / `test` (and their `<command>_retry_N` variants)
@@ -428,15 +422,12 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
         # the CLI line) so the Aspect Workflows link surfaces without
         # duplicating the CLI spawn line.
         spawn_status = _pick_status(command, data, had_failure = False, terminal = False)
-        task_update(
-            ctx,
-            lifecycle,
+        ph.update(
             spawn_status,
-            ProgressStyles(
+            phases.ProgressStyles(
                 body = phase_label,
             ),
             kind = "bazel_results",
-            data = data,
         )
 
         saw_first_event = False
@@ -470,14 +461,14 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
                     # the spawn label; priority=True bypasses throttle.
                     is_first = not saw_first_event
                     saw_first_event = True
-                    update = TaskUpdate(
+                    update = phases.Update(
                         kind = "bazel_results",
                         status = live_status,
                         progress = _live_progress(data, command, live_status),
                         priority = is_first,
                         data = data,
                     )
-                    dispatch_task_update(ctx, lifecycle, update)
+                    ph.dispatch(update)
                     last_emit_ms = now_ms(ctx)
                 if events.done:
                     break
@@ -510,7 +501,7 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
     def _add_repro(cmd, slug, description = "", target = ""):
         """Append a repro command unless its flavor is suppressed (slug-derived)."""
         if cmd and flavor_allows(_flavors, slug):
-            data["repro_commands"].append(ReproFixCommand(
+            data["repro_commands"].append(phases.ReproFixCommand(
                 command = cmd,
                 description = description,
                 slug = slug,
@@ -554,4 +545,4 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
         for _label in _by_sub[_sub]:
             _add_pair(_sub, [_label], target = _label)
 
-    return _emit_terminal(ctx, lifecycle, command, data, invocation_status.code, targets = targets)
+    return _emit_terminal(ph, command, invocation_status.code, targets = targets)

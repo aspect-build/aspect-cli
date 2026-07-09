@@ -185,6 +185,13 @@ impl<'v> StarlarkValue<'v> for TraitMap<'v> {
         Ok(instance)
     }
 
+    /// `Trait in ctx.traits` — True iff the trait type is declared on the
+    /// task, whether or not its instance has been constructed. A non-trait
+    /// key is simply not present rather than an error.
+    fn is_in(&self, other: Value<'v>) -> starlark::Result<bool> {
+        Ok(extract_trait_type_id(other).is_some_and(|id| self.contains(id)))
+    }
+
     fn set_at(&self, index: Value<'v>, new_value: Value<'v>) -> starlark::Result<()> {
         let type_id = extract_trait_type_id(index).ok_or_else(|| {
             starlark::Error::new_other(anyhow::anyhow!(
@@ -279,5 +286,10 @@ impl<'v> StarlarkValue<'v> for FrozenTraitMap {
                 )))
             }
         }
+    }
+
+    /// See `TraitMap::is_in`.
+    fn is_in(&self, other: Value<'v>) -> starlark::Result<bool> {
+        Ok(extract_trait_type_id(other).is_some_and(|id| self.entries.contains_key(&id)))
     }
 }

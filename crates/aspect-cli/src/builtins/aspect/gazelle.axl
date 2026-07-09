@@ -92,7 +92,7 @@ load("./private/lib/environment.axl", "color_enabled", "detect_ci", "error", "in
 load("./private/lib/gazelle_results.axl", "dedupe_subtrees", "dir_at_or_below", "extract_changed_dirs", gaz_init_data = "init_data", gazelle_conclusion = "conclusion")
 load("./private/lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_changed_files_listing")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
-load("./private/lib/lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "pick_task_status", "resolve_severity", "setup_phase", "task_update")
+load("./private/lib/lifecycle.axl", "phases", "pick_task_status", "resolve_severity")
 load("./private/lib/path_glob.axl", "match_any")
 load("./private/lib/repro_commands.axl", "build_aspect_command", "build_bazel_command", "explicit_flags", "filter_by_flavor", "has_tools_bazel_wrapper", "print_repro_and_fix", "repro_flavor_args", "repro_prefix", "task_cli_path")
 load("./private/lib/runnable.axl", "runnable")
@@ -208,7 +208,7 @@ def _append_repro_command(ctx, data):
     """
     effective_dirs = (data.get("gazelle", {}) or {}).get("dirs", []) or []
     prefix = repro_prefix(ctx)
-    data["repro_commands"].append(ReproFixCommand(
+    data["repro_commands"].append(phases.ReproFixCommand(
         command = prefix + build_aspect_command(
             task_cli_path(ctx.task),
             _detection_flags(ctx, "check"),
@@ -238,14 +238,14 @@ def _append_fix_commands(ctx, data):
     prefix = repro_prefix(ctx)
 
     if len(fix_dirs) <= _FIX_DIRS_LIMIT:
-        data["fix_commands"].append(ReproFixCommand(
+        data["fix_commands"].append(phases.ReproFixCommand(
             command = prefix + build_aspect_command(task_path, explicit_flags, fix_dirs, max_chars = 4096),
             slug = "gazelle-fix",
         ))
     else:
         shown = fix_dirs[:_FIX_DIRS_LIMIT]
         remaining = len(fix_dirs) - _FIX_DIRS_LIMIT
-        data["fix_commands"].append(ReproFixCommand(
+        data["fix_commands"].append(phases.ReproFixCommand(
             command = prefix + build_aspect_command(task_path, explicit_flags, shown, max_chars = 4096),
             description = "First %d of %d affected dirs (plus %d other%s)" % (
                 _FIX_DIRS_LIMIT,
@@ -255,7 +255,7 @@ def _append_fix_commands(ctx, data):
             ),
             slug = "gazelle-fix-truncated",
         ))
-        data["fix_commands"].append(ReproFixCommand(
+        data["fix_commands"].append(phases.ReproFixCommand(
             command = prefix + build_aspect_command(task_path, _detection_flags(ctx, "apply"), []),
             description = "Or re-discover and update all %d affected dirs" % len(fix_dirs),
             slug = "gazelle-fix-rediscover",
@@ -264,7 +264,7 @@ def _append_fix_commands(ctx, data):
     # Vanilla-bazel alternate. Skipped under the `tools/bazel` wrapper — there
     # `bazel run` re-routes through `aspect run`, so "vanilla" would mislead.
     if not has_tools_bazel_wrapper(ctx):
-        data["fix_commands"].append(ReproFixCommand(
+        data["fix_commands"].append(phases.ReproFixCommand(
             command = prefix + build_bazel_command("run", [ctx.args.gazelle_target]),
             description = "vanilla bazel",
             slug = "gazelle-fix-vanilla-bazel",
@@ -280,7 +280,7 @@ def _resolve_check_only(ctx):
         return bool(detect_ci(ctx.std.env))
     return val == "true"
 
-def _resolve_effective_dirs(ctx, lifecycle, data):
+def _resolve_effective_dirs(ph):
     """Combine --scope/--dirs/--scope-all-on-change/--changed-file-pattern into
     the effective dir list. Returns (effective_dirs, no_op); no_op=True → exit 0
     cleanly (--scope=changed found no dirs, or --scope=all positionals all
@@ -291,6 +291,8 @@ def _resolve_effective_dirs(ctx, lifecycle, data):
     --scope=changed: detect changed files, escalate to whole-repo on a
         --scope-all-on-change match, filter by --changed-file-pattern, derive
         parent dirs, intersect with user_dirs, dedupe overlapping subtrees."""
+    ctx = ph.ctx
+    data = ph.data
     raw_user_dirs = list(ctx.args.dirs or [])
     user_dirs = []
     for d in raw_user_dirs:
@@ -310,17 +312,15 @@ def _resolve_effective_dirs(ctx, lifecycle, data):
 
     # --scope=changed
     status = _pick_status(data, had_failure = False, terminal = False)
-    task_update(
-        ctx,
-        lifecycle,
+    ph.update(
         status,
-        ProgressStyles(
+        phases.ProgressStyles(
             body = "Detecting changed files...",
             stream = "Detecting changed files",
         ),
         kind = "gazelle_results",
         data = data,
-        phase = Phase(name = "detect", description = "Detect changed files", emoji = "🔍"),
+        phase = phases.Phase(name = "detect", description = "Detect changed files", emoji = "🔍"),
     )
     detect_result = detect_changed_files(
         ctx,
@@ -370,9 +370,11 @@ def _resolve_effective_dirs(ctx, lifecycle, data):
 
     return effective, False
 
-def _emit_final(ctx, lifecycle, data, exit_code):
+def _emit_final(ph, exit_code):
     """Emit the terminal task_update and return a TaskConclusion. Always
     appends the repro command; appends fix commands when gazelle had updates."""
+    ctx = ph.ctx
+    data = ph.data
     status = _pick_status(data, had_failure = exit_code != 0, terminal = True)
     if not data.get("finish_time_ms"):
         data["finish_time_ms"] = now_ms(ctx)
@@ -388,27 +390,24 @@ def _emit_final(ctx, lifecycle, data, exit_code):
 
     bookend = gazelle_conclusion(status, data)
 
-    # Pre-hook with rich ReproFixInfo (exit_code/extras) the dispatch_task_update
+    # Pre-hook with rich ReproFixInfo (exit_code/extras) the phases.dispatch
     # safety-net can't supply; hooked entries skip dispatch via `_hooked`.
-    apply_repro_fix_hooks(
-        ctx,
-        lifecycle,
-        data,
-        kind = "gazelle_results",
-        status = status,
+    ph.suggest_fixes(
+        "gazelle_results",
+        status,
         exit_code = exit_code,
         extras = {
             "affected_files": (data.get("gazelle", {}) or {}).get("affected_files", []) or [],
         },
     )
 
-    dispatch_task_update(ctx, lifecycle, TaskUpdate(
+    ph.dispatch(phases.Update(
         kind = "gazelle_results",
         status = status,
         final = True,
         conclusion = bookend,
         data = data,
-        progress = ProgressStyles(
+        progress = phases.ProgressStyles(
             body = _body_text(status, data),
         ),
     ))
@@ -423,12 +422,11 @@ def _emit_final(ctx, lifecycle, data, exit_code):
 # buildifier: disable=function-docstring
 def _impl(ctx: TaskContext) -> int | TaskConclusion:
     bazel_trait = ctx.traits[BazelTrait]
-    hc_trait = ctx.traits[HealthCheckTrait]
-    lifecycle = ctx.traits[TaskLifecycleTrait]
     ansi = color_enabled(ctx.std)
 
     # Initialize data for status-check emission.
     data = gaz_init_data()
+    ph = phases.new(ctx, data)
     data["start_time_ms"] = now_ms(ctx)
     data["gazelle"]["gazelle_target"] = ctx.args.gazelle_target
     data["gazelle"]["gazelle_command"] = ctx.args.gazelle_command or ""
@@ -442,18 +440,18 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
     # Single pre-task setup phase (status surface, rc parse, health checks);
     # returns resolved flags (a failed health check fails the task inside).
-    rc = setup_phase(ctx, lifecycle, ctx.args.gazelle_target, "gazelle_results", data, hc_trait, bazel_trait)
+    rc = ph.setup(ctx.args.gazelle_target, "gazelle_results")
     announce_version, announce_command = bazel.announce.resolve(ctx)
     endpoint_auth_flags = bazel.auth.flags(ctx, rc, "build")
 
     # Resolve dirs before the build: gazelle needs them when spawned, the no-op
     # short-circuit skips the build entirely, and the repro/fix builders read
     # data["gazelle"]["dirs"].
-    effective_dirs, no_op = _resolve_effective_dirs(ctx, lifecycle, data)
+    effective_dirs, no_op = _resolve_effective_dirs(ph)
     data["gazelle"]["dirs"] = list(effective_dirs)
     if no_op:
         data["gazelle"]["no_changed_dirs"] = True
-        return _emit_final(ctx, lifecycle, data, 0)
+        return _emit_final(ph, 0)
 
     # `rc=` opts into the runinfo aspect: `r.flags` captures the gazelle
     # target's executable (the sh_binary, not its `-runner.bash` helper), its
@@ -472,17 +470,15 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         hook(ctx)
 
     status = _pick_status(data, had_failure = False, terminal = False)
-    task_update(
-        ctx,
-        lifecycle,
+    ph.update(
         status,
-        ProgressStyles(
+        phases.ProgressStyles(
             body = "Building gazelle... (%s)" % ctx.args.gazelle_target,
             stream = "Building gazelle (%s)" % ctx.args.gazelle_target,
         ),
         kind = "gazelle_results",
         data = data,
-        phase = Phase(name = "build", description = "Build gazelle", emoji = "🔨"),
+        phase = phases.Phase(name = "build", description = "Build gazelle", emoji = "🔨"),
     )
 
     build = ctx.bazel.build(
@@ -503,11 +499,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # Re-emit now the link is known, but only to status surfaces — empty
     # `stream` suppresses the duplicate CLI line.
     status = _pick_status(data, had_failure = False, terminal = False)
-    task_update(
-        ctx,
-        lifecycle,
+    ph.update(
         status,
-        ProgressStyles(
+        phases.ProgressStyles(
             body = "Building gazelle... (%s)" % ctx.args.gazelle_target,
         ),
         kind = "gazelle_results",
@@ -531,11 +525,11 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                 interesting = True
         if interesting or now_ms(ctx) - last_emit_ms >= MIN_HEARTBEAT_INTERVAL_MS:
             heartbeat_status = _pick_status(data, had_failure = False, terminal = False)
-            dispatch_task_update(ctx, lifecycle, TaskUpdate(
+            ph.dispatch(phases.Update(
                 kind = "gazelle_results",
                 status = heartbeat_status,
                 data = data,
-                progress = ProgressStyles(),
+                progress = phases.ProgressStyles(),
             ))
             last_emit_ms = now_ms(ctx)
         if events.done:
@@ -549,12 +543,12 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     dispatch_bazel_build_end(ctx, bazel_trait, build_status.code)
 
     if not build_status.success:
-        _emit_final(ctx, lifecycle, data, build_status.code or 1)
+        _emit_final(ph, build_status.code or 1)
         fail("Building the gazelle target has failed.")
 
     ep = r.determine_entrypoint(ctx.args.gazelle_target)
     if not ep:
-        _emit_final(ctx, lifecycle, data, 1)
+        _emit_final(ph, 1)
         fail("Failed to determine the gazelle target's entrypoint.")
 
     # Diff phase: -mode=diff yields the verdict + patch without touching the
@@ -580,17 +574,15 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     diff_args.append("-mode=diff")
     diff_args.extend(effective_dirs)
     status = _pick_status(data, had_failure = False, terminal = False)
-    task_update(
-        ctx,
-        lifecycle,
+    ph.update(
         status,
-        ProgressStyles(
+        phases.ProgressStyles(
             body = "Running gazelle... (-mode=diff)",
             stream = "Running gazelle (-mode=diff)",
         ),
         kind = "gazelle_results",
         data = data,
-        phase = Phase(name = "diff", description = "Compute BUILD-file diff", emoji = "📋"),
+        phase = phases.Phase(name = "diff", description = "Compute BUILD-file diff", emoji = "📋"),
     )
     diff_proc = r.spawn(ep, diff_args, capture = True)
     diff_stdout = diff_proc.stdout().read_to_string()
@@ -609,12 +601,12 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         error(ctx.std, "Gazelle (-mode=diff) exited %d with no diff output (likely a configuration error)." % diff_status.code)
         data["gazelle"]["gazelle_error"] = True
         data["gazelle"]["gazelle_error_code"] = diff_status.code
-        return _emit_final(ctx, lifecycle, data, diff_status.code)
+        return _emit_final(ph, diff_status.code)
 
     if not diff_stdout.strip():
         # Clean, regardless of --severity / --check-only.
         print("✅ All BUILD files are up to date.")
-        return _emit_final(ctx, lifecycle, data, 0)
+        return _emit_final(ph, 0)
 
     affected = _parse_diff_paths(diff_stdout)
 
@@ -626,17 +618,16 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     if not check_only:
         files_label = pluralize(len(affected), "file")
         status = _pick_status(data, had_failure = False, terminal = False)
-        task_update(
+        phases.update(
             ctx,
-            lifecycle,
             status,
-            ProgressStyles(
+            phases.ProgressStyles(
                 body = "Applying gazelle patch... (%s)" % files_label,
                 stream = "Applying gazelle patch (%s)" % files_label,
             ),
             kind = "gazelle_results",
             data = data,
-            phase = Phase(name = "apply", description = "Apply gazelle patch", emoji = "📦"),
+            phase = phases.Phase(name = "apply", description = "Apply gazelle patch", emoji = "📦"),
         )
         tmp = ctx.std.env.temp_dir()
         patch_path = tmp + "/gazelle-" + ctx.task.name + ".patch"
@@ -650,7 +641,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             data["gazelle"]["affected_files"] = affected
             data["gazelle"]["apply_error"] = True
             data["gazelle"]["apply_error_msg"] = apply_result.stderr.strip()
-            return _emit_final(ctx, lifecycle, data, apply_result.status.code)
+            return _emit_final(ph, apply_result.status.code)
 
     verb = "would update" if check_only else "updated"
     if affected:
@@ -677,13 +668,13 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # Verdict from --severity (resolved at entry).
     if severity_resolved == "fail":
         error(ctx.std, "BUILD files are out of date.")
-        return _emit_final(ctx, lifecycle, data, 1)
+        return _emit_final(ph, 1)
     if severity_resolved == "warn":
         info(ctx.std, "BUILD files are out of date. --severity=warn → exiting 0 with a warning signal.")
     elif not check_only:
         # Local apply: tree already updated, don't tell them to re-run.
         print("Gazelle updated %d file(s). Review and commit the changes." % len(affected))
-    return _emit_final(ctx, lifecycle, data, 0)
+    return _emit_final(ph, 0)
 
 gazelle = task(
     args = {
@@ -744,7 +735,6 @@ gazelle = task(
     traits = [
         BazelTrait,
         HealthCheckTrait,
-        TaskLifecycleTrait,
-    ] + artifacts.TRAITS + tips.TRAITS,
+    ] + phases.TRAITS + artifacts.TRAITS + tips.TRAITS,
     implementation = _impl,
 )

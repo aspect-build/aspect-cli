@@ -3,83 +3,37 @@
 load("@aspect//bazel.axl", "BazelTrait", "bazel")
 load("@std//time.axl", "sleep_iter")
 load("./private/lib/artifacts.axl", "artifacts")
-load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "init_data", "process_event", bazel_conclusion = "conclusion")
+load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "init_data", "process_event")
 load("./private/lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
 load("./private/lib/bes_sinks.axl", "announce_bes_sinks", "bes_args", "collect_bes_from_args", "summarize_bes_upload")
 load("./private/lib/environment.axl", "error")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
-load("./private/lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "dispatch_task_update", "setup_phase", "task_update")
+load("./private/lib/lifecycle.axl", "phases")
 load("./private/lib/runnable.axl", "RUN_IN_DESCRIPTION", "resolve_run_in", "runnable")
 load("./private/lib/tips.axl", "tips")
 
-def _terminal_status(data, exit_code):
-    """Lifecycle status for the run task's terminal emit.
-
-    `aborted` wins when bazel terminated the build (timeout/OOM/ctrl-c);
-    otherwise a non-zero exit (build failure, run-setup failure, or a
-    non-zero exit from the spawned binary) is `failed`, and zero is
-    `passed`. The run task has no flaky/warning outcome.
-    """
-    if data.get("bazel", {}).get("aborted"):
-        return "aborted"
-    return "passed" if exit_code == 0 else "failed"
-
-def _emit_terminal(ctx, lifecycle, data, exit_code, conclusion_text = None):
-    """Fire the terminal `task_update(final=True)` and return a
-    `TaskConclusion` for `_impl` to return.
-
-    Mirrors `bazel_runner._emit_terminal` so the run task concludes its
-    status surfaces (GitHub check runs, Buildkite annotations) the same
-    way `build`/`test` do — without this the surfaces stay stuck at
-    "running" because nothing ever delivers a final update. Called from
-    every exit path (build failure, run-setup failure, and the spawned
-    binary's exit).
-
-    `conclusion_text` overrides the bookend summary for cases the bazel
-    bucket logic can't describe (e.g. a built target whose binary exits
-    non-zero — not a build failure). When None, falls back to the bazel
-    conclusion derived from the accumulated BES counters.
-    """
-    status = _terminal_status(data, exit_code)
-    bookend = conclusion_text if conclusion_text != None else bazel_conclusion(status, data)
-
-    dispatch_task_update(ctx, lifecycle, TaskUpdate(
-        kind = "bazel_results",
-        status = status,
-        final = True,
-        conclusion = bookend,
-        data = data,
-        progress = ProgressStyles(body = bookend),
-    ))
-
-    return TaskConclusion(
-        exit_code = exit_code,
-        text = bookend,
-        flagged = status == "warning",
-    )
 
 def _impl(ctx: TaskContext) -> int | TaskConclusion:
     bazel_trait = ctx.traits[BazelTrait]
-    hc_trait = ctx.traits[HealthCheckTrait]
-    lifecycle = ctx.traits[TaskLifecycleTrait]
 
     target = ctx.args.target[0]
     forward_args = list(ctx.args.run_args)
 
     # Resolve --run-in up front: a bad value (typo, `git-root` outside
-    # a git repo) must fail before setup_phase opens status surfaces
+    # a git repo) must fail before phases.setup opens status surfaces
     # and before the build spends time.
     spawn_cwd = resolve_run_in(ctx, ctx.args.run_in)
 
     data = init_data()
+    ph = phases.new(ctx, data)
 
     # The single pre-task setup phase (status surface, rc parse, health
     # checks); returns the resolved flags (a failed health check fails the task
-    # inside setup_phase). Expand the "build" rc section, not "run": this task
+    # inside phases.setup). Expand the "build" rc section, not "run": this task
     # ultimately invokes `ctx.bazel.build`, which spawns a literal `bazel
     # build`. The `run:` rc section can contain options Bazel's `build` command
     # rejects as unrecognized (e.g. `--script_path`).
-    rc = setup_phase(ctx, lifecycle, target, "bazel_results", data, hc_trait, bazel_trait, "build")
+    rc = ph.setup(target, "bazel_results", "build")
     announce_version, announce_command = bazel.announce.resolve(ctx)
     endpoint_auth_flags = bazel.auth.flags(ctx, rc, "build")
 
@@ -95,17 +49,14 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     for hook in bazel_trait.build_start:
         hook(ctx)
 
-    task_update(
-        ctx,
-        lifecycle,
+    ph.update(
         "running",
-        ProgressStyles(
+        phases.ProgressStyles(
             body = "Building %s..." % target,
             stream = "Building %s" % target,
         ),
         kind = "bazel_results",
-        data = data,
-        phase = Phase(name = "build", description = "Build run target", emoji = "🔨"),
+        phase = phases.Phase(name = "build", description = "Build run target", emoji = "🔨"),
     )
 
     build = ctx.bazel.build(
@@ -137,27 +88,23 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     dispatch_bazel_build_end(ctx, bazel_trait, build_status.code)
 
     if not build_status.success:
-        return _emit_terminal(ctx, lifecycle, data, build_status.code or 1)
+        return build_status.code
 
     entrypoint = r.determine_entrypoint(target)
     if entrypoint == None:
         error(ctx.std, "Failed to determine the run entrypoint for %s." % target)
-        return _emit_terminal(ctx, lifecycle, data, 1, conclusion_text = "Failed to determine run entrypoint")
+        return 1
 
-    task_update(
-        ctx,
-        lifecycle,
+    ph.update(
         "running",
-        ProgressStyles(
+        phases.ProgressStyles(
             body = "Running %s..." % target,
             stream = "Running %s" % target,
         ),
-        phase = Phase(name = "run", description = "Run target", emoji = "🚀"),
+        phase = phases.Phase(name = "run", description = "Run target", emoji = "🚀"),
     )
 
-    code = r.spawn(entrypoint, forward_args, cwd = spawn_cwd).wait().code
-    bookend = "Ran %s" % target if code == 0 else "%s exited with code %d" % (target, code)
-    return _emit_terminal(ctx, lifecycle, data, code, conclusion_text = bookend)
+    return r.spawn(entrypoint, forward_args, cwd = spawn_cwd).wait().code
 
 run = task(
     summary = "Build a target with bazel and run the resulting binary.",
@@ -186,7 +133,6 @@ run = task(
     traits = [
         BazelTrait,
         HealthCheckTrait,
-        TaskLifecycleTrait,
-    ] + artifacts.TRAITS + tips.TRAITS,
+    ] + phases.TRAITS + artifacts.TRAITS + tips.TRAITS,
     implementation = _impl,
 )

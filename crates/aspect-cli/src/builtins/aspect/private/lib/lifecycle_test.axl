@@ -18,7 +18,7 @@ Run with:
   aspect dev test-lifecycle
 """
 
-load("./lifecycle.axl", "Phase", "bk_phase_section_marker", "publish_expanded_phases")
+load("./lifecycle.axl", "Phase", "phases")
 
 _ENV_KEY = "ASPECT_BK_EXPANDED_PHASES"
 
@@ -35,25 +35,25 @@ def _test_marker(ctx):
     build_expanded = Phase(name = "build", expanded = True)
 
     # No config, no Phase.expanded → collapsed.
-    _eq("default collapsed", bk_phase_section_marker(ctx, build), "---")
+    _eq("default collapsed", phases.bk_phase_section_marker(ctx, build), "---")
 
     # Phase.expanded wins on its own.
-    _eq("Phase.expanded → expanded", bk_phase_section_marker(ctx, build_expanded), "+++")
+    _eq("Phase.expanded → expanded", phases.bk_phase_section_marker(ctx, build_expanded), "+++")
 
     # Config names the phase → expanded; an unnamed phase stays collapsed.
-    publish_expanded_phases(ctx, ["build"])
-    _eq("config match → expanded", bk_phase_section_marker(ctx, build), "+++")
-    _eq("config miss → collapsed", bk_phase_section_marker(ctx, test), "---")
+    phases.publish_expanded_phases(ctx, ["build"])
+    _eq("config match → expanded", phases.bk_phase_section_marker(ctx, build), "+++")
+    _eq("config miss → collapsed", phases.bk_phase_section_marker(ctx, test), "---")
 
     # Whitespace around configured ids is tolerated.
-    publish_expanded_phases(ctx, [" build ", "test"])
-    _eq("config whitespace tolerated", bk_phase_section_marker(ctx, build), "+++")
-    _eq("config second entry matches", bk_phase_section_marker(ctx, test), "+++")
+    phases.publish_expanded_phases(ctx, [" build ", "test"])
+    _eq("config whitespace tolerated", phases.bk_phase_section_marker(ctx, build), "+++")
+    _eq("config second entry matches", phases.bk_phase_section_marker(ctx, test), "+++")
 
     # Empty list clears the channel → back to Phase.expanded only.
-    publish_expanded_phases(ctx, [])
-    _eq("cleared config → collapsed", bk_phase_section_marker(ctx, build), "---")
-    _eq("cleared config, Phase.expanded still wins", bk_phase_section_marker(ctx, build_expanded), "+++")
+    phases.publish_expanded_phases(ctx, [])
+    _eq("cleared config → collapsed", phases.bk_phase_section_marker(ctx, build), "---")
+    _eq("cleared config, Phase.expanded still wins", phases.bk_phase_section_marker(ctx, build_expanded), "+++")
 
     if prior == None:
         ctx.std.env.remove_var(_ENV_KEY)

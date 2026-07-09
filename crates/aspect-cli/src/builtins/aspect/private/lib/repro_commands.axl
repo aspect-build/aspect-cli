@@ -16,7 +16,7 @@ terminal-emit time:
 `ReproFixCommand` carries `command` (the shell-ready line),
 `description` (optional, rendered as a `# <description>` comment above
 the command), and `slug` (a stable kebab-case identifier — catalogued
-in `apply_repro_fix_hooks` below — that lets
+in `phases.suggest_fixes` below — that lets
 `lifecycle.repro_fix_suggestion` hooks scope decisions without
 parsing the command string).
 
@@ -42,10 +42,10 @@ the per-task lists into a single rolled-up view across tasks: two
 contributions of the same `(command, description)` collapse into one
 row that lists every contributing task name.
 
-`apply_repro_fix_hooks` and `dispatch_task_update` live in
-`lib/lifecycle.axl` next to `TaskLifecycleTrait`. The framework runs
-hooks automatically on every surface emit via `dispatch_task_update`;
-producers MAY call `apply_repro_fix_hooks` explicitly at terminal
+`phases.suggest_fixes` and `phases.dispatch` live in
+`lib/lifecycle.axl` next to `Phases`. The framework runs
+hooks automatically on every surface emit via `phases.dispatch`;
+producers MAY call `phases.suggest_fixes` explicitly at terminal
 emit to supply rich `info` (exit_code, bazel_subcommand, targets,
 failed_targets, extras). The `_hooked` flag on each `ReproFixCommand`
 makes both paths idempotent.
@@ -824,6 +824,6 @@ def _print_repro_entry(color, entry):
         print(line)
     print("```")
 
-# `apply_repro_fix_hooks` and `dispatch_task_update` are defined in
-# `./lifecycle.axl`, next to `TaskLifecycleTrait`. See the module
+# `phases.suggest_fixes` and `phases.dispatch` are defined in
+# `./lifecycle.axl`, next to `Phases`. See the module
 # docstring above for the contract.

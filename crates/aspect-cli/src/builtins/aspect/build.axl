@@ -8,7 +8,7 @@ load("./private/lib/bazel_runner.axl", "run_bazel_task")
 load("./private/lib/bes_sinks.axl", "bes_args")
 load("./private/lib/deployment_flags.axl", "deployment_flag_args")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
-load("./private/lib/lifecycle.axl", "TaskLifecycleTrait")
+load("./private/lib/lifecycle.axl", "phases")
 load("./private/lib/repro_commands.axl", "repro_flavor_args")
 load("./private/lib/tips.axl", "tips")
 
@@ -40,7 +40,6 @@ build = task(
     traits = [
         BazelTrait,
         HealthCheckTrait,
-        TaskLifecycleTrait,
-    ] + artifacts.TRAITS + tips.TRAITS,
+    ] + phases.TRAITS + artifacts.TRAITS + tips.TRAITS,
     implementation = _impl,
 )

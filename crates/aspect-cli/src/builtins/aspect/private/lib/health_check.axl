@@ -1,7 +1,7 @@
 """HealthCheckTrait and the Workflows runner-agent health check.
 
 `HealthCheckTrait` lets features register `health_check` hooks that run
-during the task's Setup phase (via `lib/lifecycle.axl::setup_phase`); a
+during the task's Setup phase (via `phases.setup`); a
 hook returning a non-None message fails the task. `agent_health_check`
 is the Workflows-registered hook that:
 
@@ -298,7 +298,7 @@ def run_health_checks(ctx, hc_trait):
     Every hook runs even after one reports an error, so diagnostic hooks (e.g.
     the Workflows runner-env table) always print. A non-None result means the
     environment is unhealthy; the hook has already signaled the agent, and the
-    caller (`lifecycle.setup_phase`) fails the task on it."""
+    caller (`phases.setup`) fails the task on it."""
     if hc_trait == None:
         return None
     health_error = None
@@ -334,17 +334,17 @@ def assert_ctx_bazel_ready_for_health_check(ctx, environment):
     """Fail if a Workflows runner is in use and the active run command
     (`ctx.bazel.active_rc()`) is missing `--output_base`.
 
-    Built-in tasks satisfy this via `lib/lifecycle.axl::setup_phase`, which
+    Built-in tasks satisfy this via `phases.setup`, which
     registers the active run command (through `bazel.setup_command` →
     `ctx.bazel.use_rc`) before running the `health_check` hooks. Custom tasks
-    running the health check outside `setup_phase` must `use_rc` first.
+    running the health check outside `phases.setup` must `use_rc` first.
     """
     if ctx_bazel_ready_for_health_check(ctx, environment):
         return
     fail(
         "Bazel health check would target the wrong server: the active run " +
         "command is missing --output_base on a Workflows runner. Run the " +
-        "health check via lib/lifecycle.axl::setup_phase, or set an active " +
+        "health check via phases.setup, or set an active " +
         "run command via ctx.bazel.use_rc (e.g. through bazel.setup_command) " +
         "before the health_check hooks.",
     )
@@ -366,11 +366,11 @@ def agent_health_check(ctx, environment):
         print("--- :thermometer: Workflows runner health check")
 
     # Snapshot job-history before `_wait_for_warming` re-reads the
-    # environment. `setup_phase` runs `append_runner_job_history` ahead
+    # environment. `phases.setup` runs `append_runner_job_history` ahead
     # of this hook, so the file already contains the current task's
     # entry — but Vigor's saved snapshot in `last_health_check` was
     # written before this task ran. The feature-time `environment` was
-    # captured in phase 3 (before phase 4 ran setup_phase), so this
+    # captured in phase 3 (before phase 4 ran phases.setup), so this
     # field still reflects the pre-append state. Re-reading would
     # desync the rewritten Job History count from Vigor's report.
     job_history = environment.runner.runner_job_history
