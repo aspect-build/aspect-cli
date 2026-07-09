@@ -1,131 +1,32 @@
-"""`aspect axl test` — run AXL `*_test.axl` unit tests.
+"""`aspect axl test` — run AXL `*.test.axl` unit tests.
 
-Discovers `*_test.axl` files under the given paths (files or directories,
-defaulting to the Aspect workspace root), runs each file's top-level
-`def test_*(t)` functions through the built-in parallel test runner, and
-reports pass/fail per test.
+Discovers `*.test.axl` files under the given paths (files or directories,
+defaulting to the Aspect workspace root), loads each through the normal AXL
+load path — so a test file's own `load(...)`s resolve exactly as they would in
+any other module — and runs each file's top-level `def test_*(t)` functions,
+reporting pass/fail per test. Discovery does not descend into hidden
+directories (e.g. `.git`) or follow directory symlinks (so Bazel output trees
+are skipped).
 
-The runner evaluates each file in isolation with no module loader, so a test
-file that `load(...)`s other modules is reported as a load error rather than
-run; self-contained test files run fully. Discovery does not descend into
-hidden directories (e.g. `.git`) or follow directory symlinks (so Bazel
-output trees are skipped).
+The runner is implemented natively and intercepts this command before the
+ordinary task phases run; this task exists to define the command's CLI surface
+(its `paths` argument and help text).
 """
 
-# Capture the privileged test-runner namespace at module-eval time, where the
-# @aspect std-context marker is present. The task implementation runs later in
-# the shared execution module (no marker), so it must reuse this binding rather
-# than call `__builtins__.testing()` itself.
-_testing = __builtins__.testing()
-
-GREEN = "\033[32m"
-RED = "\033[31m"
-DIM = "\033[2m"
-BOLD = "\033[1m"
-RESET = "\033[0m"
-
-# Generous worklist bound; directory symlinks are not followed (read_dir marks
-# them non-dir), so this only guards against a pathologically deep real tree.
-_WALK_LIMIT = 1000000
-
-def _walk_test_files(ctx, root):
-    """Every `*_test.axl` path at or under `root` (a file or directory)."""
-    found = []
-    if not ctx.std.fs.is_dir(root):
-        if root.endswith("_test.axl"):
-            found.append(root)
-        return found
-
-    stack = [root]
-    for _ in range(_WALK_LIMIT):
-        if not stack:
-            break
-        current = stack.pop()
-        for entry in ctx.std.fs.read_dir(current):
-            child = current + "/" + entry.path
-            if entry.is_dir:
-                if not entry.path.startswith("."):
-                    stack.append(child)
-            elif entry.path.endswith("_test.axl"):
-                found.append(child)
-    return found
-
-def _resolve_test_files(ctx, paths):
-    """De-duplicated, order-preserving list of test files across all roots."""
-    roots = list(paths) if paths else [ctx.std.env.aspect_root_dir()]
-    files = []
-    seen = {}
-    for root in roots:
-        for path in _walk_test_files(ctx, root):
-            if path not in seen:
-                seen[path] = True
-                files.append(path)
-    return files
-
-def _relativize(ctx, path):
-    """Render `path` relative to the workspace root for readable output."""
-    root = ctx.std.env.aspect_root_dir()
-    prefix = root + "/"
-    if path.startswith(prefix):
-        return path[len(prefix):]
-    return path
-
-def _report_file(ctx, path, result):
-    """Print one file's result; return (passed, failed, errored) tallies."""
-    rel = _relativize(ctx, path)
-
-    if result["error"] != None:
-        print("%s%sERROR%s %s" % (RED, BOLD, RESET, rel))
-        for line in result["error"].split("\n"):
-            print("    " + line)
-        return (0, 0, 1)
-
-    passed = result["passed"]
-    failed = result["failed"]
-    status = GREEN + "ok  " + RESET if failed == 0 else RED + "FAIL" + RESET
-    print("%s %s%s%s (%d passed, %d failed)" % (status, DIM, rel, RESET, passed, failed))
-
-    for outcome in result["outcomes"]:
-        if not outcome["passed"]:
-            print("    %sFAIL%s %s" % (RED, RESET, outcome["name"]))
-            if outcome["message"] != None:
-                for line in outcome["message"].split("\n"):
-                    print("         " + line)
-    return (passed, failed, 0)
-
 def _impl(ctx: TaskContext) -> int:
-    files = _resolve_test_files(ctx, ctx.args.paths)
-    if not files:
-        print("No *_test.axl files found.")
-        return 0
-
-    total_passed = 0
-    total_failed = 0
-    file_errors = 0
-
-    for path in files:
-        source = ctx.std.fs.read_to_string(path)
-        result = _testing.run(source)
-        passed, failed, errored = _report_file(ctx, path, result)
-        total_passed += passed
-        total_failed += failed
-        file_errors += errored
-
-    print("")
-    summary = "%d passed, %d failed across %d file(s)" % (total_passed, total_failed, len(files))
-    if file_errors:
-        summary += ", %d file error(s)" % file_errors
-    print(BOLD + summary + RESET)
-
-    return 0 if total_failed == 0 and file_errors == 0 else 1
+    # `aspect axl test` is dispatched to the native runner before a task
+    # implementation would execute. Reaching here means that interception did
+    # not fire — surface it loudly rather than silently reporting no tests.
+    print("internal error: `aspect axl test` was not dispatched to the native test runner")
+    return 1
 
 test = task(
     group = ["axl"],
-    summary = "Run AXL *_test.axl unit tests.",
+    summary = "Run AXL *.test.axl unit tests.",
     implementation = _impl,
     args = {
         "paths": args.positional(
-            description = "Files or directories to search for `*_test.axl` tests. Defaults to the Aspect workspace root.",
+            description = "Files or directories to search for `*.test.axl` tests. Defaults to the Aspect workspace root.",
         ),
     },
 )

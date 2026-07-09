@@ -118,6 +118,7 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                 aspect_root.clone(),
                 bazel_root.clone(),
                 git_root.clone(),
+                &root_mod,
                 &modules,
             );
             let mut mpe = MultiPhaseEval::new(env, &loader);
@@ -161,6 +162,22 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
             }
 
             let dispatch = cmd.dispatch(matches)?;
+
+            // `aspect axl test` is served by the native test runner. It borrows
+            // the live loader to load every `*.test.axl` file through the normal
+            // load path — so a test file's own `load(...)`s resolve — then runs
+            // its `test_*` functions. This bypasses the ordinary feature/task
+            // phases, which a self-contained test run does not need.
+            {
+                let tasks = mpe.tasks();
+                if let Some(task) = tasks.get(dispatch.task_id) {
+                    if task.name() == "test" && task.group().as_slice() == ["axl"] {
+                        let paths = dispatch.string_list("paths");
+                        let code = axl_runtime::engine::testing::run_tests(&loader, &paths)?;
+                        return Ok(ExitCode::from(code as u8));
+                    }
+                }
+            }
 
             // Print the "Running <task>" header before feature
             // implementations run so any diagnostic output from feature

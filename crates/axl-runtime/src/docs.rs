@@ -36,7 +36,10 @@ pub fn documentation() -> anyhow::Result<Documentation> {
     // short-circuit before any caller-context lookups in `FileLoader::load`),
     // so no seeding is required.
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
-    let loader = Loader::new("docgen".to_string(), cwd.clone(), cwd, None, &[]);
+    // Docgen only evaluates leaf `@std`/`@bazel` modules, which never consult
+    // the root scope — an empty placeholder module satisfies the signature.
+    let root_mod = crate::module::Mod::default();
+    let loader = Loader::new("docgen".to_string(), cwd.clone(), cwd, None, &root_mod, &[]);
 
     let mut builtins = Vec::new();
     let modules = [

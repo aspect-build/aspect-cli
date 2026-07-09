@@ -26,6 +26,11 @@ enum LoadState {
 }
 
 /// Internal loader for .axl files, handling path resolution, security checks, and recursive loading.
+///
+/// The native `aspect axl test` runner borrows the driver's live loader
+/// directly (via `MultiPhaseEval`) to discover and load `*.test.axl` files on
+/// demand through this very machinery, so a test file's own `load()`s resolve
+/// exactly as anywhere else.
 #[derive(Debug)]
 pub struct AxlLoader<'m> {
     pub(crate) env: Env,
@@ -38,6 +43,11 @@ pub struct AxlLoader<'m> {
     /// per-file by suffix in `eval_module_inner` so the test surface never
     /// reaches production AXL.
     test_globals: Globals,
+
+    /// The root (`//`) module — the user's workspace. Scope for any file under
+    /// the workspace root that isn't inside a `@dep`, e.g. the `*_test.axl`
+    /// files `aspect axl test` discovers.
+    root_mod: &'m Mod,
 
     /// All modules (root + deps) discovered during MODULE.aspect expansion,
     /// looked up by name to resolve `@<name>//path` loads.
@@ -64,6 +74,7 @@ impl<'m> AxlLoader<'m> {
         aspect_root: PathBuf,
         bazel_root: PathBuf,
         git_root: Option<PathBuf>,
+        root_mod: &'m Mod,
         modules: &'m [Mod],
     ) -> Self {
         Self {
@@ -71,11 +82,39 @@ impl<'m> AxlLoader<'m> {
             dialect: api::dialect(),
             globals: api::get_globals().build(),
             test_globals: api::get_test_globals(),
+            root_mod,
             modules,
             load_stack: RefCell::new(vec![]),
             module_stack: RefCell::new(vec![]),
             loaded_modules: RefCell::new(HashMap::new()),
         }
+    }
+
+    /// Absolute workspace root — the anchor `aspect axl test` walks to discover
+    /// `*.test.axl` files when no explicit paths are given.
+    pub(crate) fn aspect_root(&self) -> &Path {
+        &self.env.aspect_root_dir
+    }
+
+    /// The module scope a workspace-absolute `path` belongs to: the `@dep`
+    /// whose root is an ancestor of `path`, else the root module. Used to pick
+    /// the scope for `load()` resolution when loading a `*_test.axl` file.
+    pub(crate) fn scope_for_path(&self, path: &Path) -> &'m Mod {
+        self.modules
+            .iter()
+            .filter(|m| path.starts_with(&m.root))
+            // Deepest matching root wins (a nested dep beats an ancestor dep).
+            .max_by_key(|m| m.root.as_os_str().len())
+            .unwrap_or(self.root_mod)
+    }
+
+    /// Load `abs_path` as a module through the normal load path (resolving its
+    /// own `load()`s) and return the frozen result. The scope is inferred from
+    /// the path. This is what lets the test runner treat a `*_test.axl` file as
+    /// an ordinary, on-demand-loaded module.
+    pub(crate) fn load_file(&self, abs_path: &Path) -> Result<FrozenModule, EvalError> {
+        let scope = self.scope_for_path(abs_path);
+        self.eval_module(scope, abs_path)
     }
 
     /// Evaluate a `.axl` file in the given module's scope. Pushes `scope` onto
@@ -158,14 +197,14 @@ impl<'m> AxlLoader<'m> {
         };
 
         let ast = AstModule::parse(&path.to_string_lossy(), raw, &self.dialect)?;
-        // `*_test.axl` files are evaluated against the augmented test surface
+        // `*.test.axl` files are evaluated against the augmented test surface
         // (base AXL + `asserts`, …); every other file gets the production
         // surface. Keying on the filename suffix keeps the test vocabulary
         // strictly scoped to test files.
         let is_test = path
             .file_name()
             .and_then(|n| n.to_str())
-            .is_some_and(|n| n.ends_with("_test.axl"));
+            .is_some_and(|n| n.ends_with(".test.axl"));
         let globals = if is_test {
             &self.test_globals
         } else {

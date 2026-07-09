@@ -104,11 +104,13 @@ impl EvalBuilder {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let rt = Runtime::new()?;
         let _g = rt.enter();
+        let root_mod = Mod::default();
         let loader = Loader::new(
             "test".to_string(),
             manifest_dir.clone(),
             manifest_dir,
             None,
+            &root_mod,
             &[],
         );
         let ast = AstModule::parse("test", self.code, &dialect()).map_err(|e| anyhow!("{}", e))?;
@@ -185,6 +187,7 @@ impl EvalBuilder {
                 tmp.path().to_path_buf(),
                 tmp.path().to_path_buf(),
                 None,
+                &root_mod,
                 &modules,
             );
             let mut mpe = MultiPhaseEval::new(env, &loader);

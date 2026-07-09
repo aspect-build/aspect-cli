@@ -171,6 +171,17 @@ impl Dispatch {
         merge_args(task.args(), task.overrides(), leaf, heap, Scope::Task)
     }
 
+    /// Values of a positional / string-list arg on the selected leaf command,
+    /// read straight from the parsed matches. Used by the native `aspect axl
+    /// test` path, which needs the `paths` positional without building a full
+    /// `Arguments` on a heap.
+    pub fn string_list(&self, key: &str) -> Vec<String> {
+        let leaf = deepest_subcommand(&self.matches).expect("dispatch built from valid matches");
+        leaf.get_many::<String>(key)
+            .map(|it| it.cloned().collect())
+            .unwrap_or_default()
+    }
+
     /// Build the merged `Arguments` for a feature implementation invocation.
     pub fn feature_args<'v>(&self, feat: &dyn FeatureLike<'v>, heap: Heap<'v>) -> Arguments<'v> {
         let leaf = deepest_subcommand(&self.matches).expect("dispatch built from valid matches");

@@ -1,16 +1,16 @@
 # AXL native testing — design sketch + POC
 
-Status: **proof-of-concept**. This document captures the design we converged
-on for giving AXL a first-class, pytest-style testing story built into the
-engine, describes what the POC in this branch actually implements, and logs
-the decisions made without explicit sign-off so they can be reviewed.
+Status: **implemented**. `aspect axl test` runs `*.test.axl` files natively.
+This document captures the design we converged on for giving AXL a
+first-class, pytest-style testing story built into the engine, describes what
+is implemented, and logs the decisions made along the way.
 
 ## Goal
 
 A test author writes:
 
 ```python
-# lib/ci_test.axl   — a *_test.axl file gets the augmented test surface
+# lib/ci.test.axl   — a *.test.axl file gets the augmented test surface
 load("./ci.axl", "detect_ci_host")
 
 def test_detect_ci_host_none_off_ci(t):
@@ -22,9 +22,10 @@ def test_github_actions_precedence(t):
     asserts.eq(detect_ci_host(t.ctx.std.env)["marker"], "GITHUB_ACTIONS")
 ```
 
-and runs `aspect test //...`. No per-test wiring in `config.axl`, no
+and runs `aspect axl test`. No per-test wiring in `config.axl`, no
 hand-maintained list in `pipeline.yaml`, no copied `_eq` helper, no
-`_snapshot_env`/`_restore_env` dance.
+`_snapshot_env`/`_restore_env` dance. The test file `load()`s the module it
+exercises exactly as any other AXL module would.
 
 ## The converged design
 
@@ -69,35 +70,56 @@ hand-maintained list in `pipeline.yaml`, no copied `_eq` helper, no
    (the env overlay, and the bazel backend below), never in a process-global —
    concurrent workers therefore share no mutable state.
 
-## What the POC implements (and how to run it)
+## What is implemented (and how to run it)
 
-All in `crates/axl-runtime`:
+The command:
+
+```sh
+aspect axl test [paths...]     # defaults to the workspace root
+```
+
+discovers every `*.test.axl` file under the given paths, loads each through
+the normal AXL load path (so its own `load(...)`s resolve), runs the file's
+`def test_*(t)` functions, and prints a per-file pass/fail report. Exit code
+is `0` when everything passes, `1` on any failure or load error.
+
+The runner is **native**: the CLI driver holds the live `AxlLoader`, so it
+loads test files directly (`crates/aspect-cli/src/main.rs` intercepts the
+`axl test` command and calls `engine::testing::run_tests`). `aspect axl test`
+itself is declared as an AXL task (`crates/aspect-cli/src/builtins/aspect/
+axl_test.axl`) only to define the CLI surface (its `paths` arg and help).
+
+Pieces, all in `crates/axl-runtime` unless noted:
 
 | Piece | Location |
 |---|---|
 | `asserts` namespace (`eq`, `ne`, `is_true`, `is_false`, `contains`, `not_contains`, `gt`, `ge`, `lt`, `le`, `fails`) | `src/engine/testing.rs` |
 | `Test` harness value (`t.env`, `t.std`, `t.ctx`) | `src/engine/testing.rs` |
-| `test_*` discovery + parallel (thread-per-shard) runner + summary | `src/engine/testing.rs` (`run_test_source`) |
+| Native `*.test.axl` discovery + loader-backed runner + report | `src/engine/testing.rs` (`run_tests`) |
+| `aspect axl test` command surface + native interception | `crates/aspect-cli/src/builtins/aspect/axl_test.axl`, `crates/aspect-cli/src/main.rs` |
+| In-process `test_*` engine used by unit tests (parallel, thread-per-shard) | `src/engine/testing.rs` (`run_test_source`) |
 | In-memory env overlay handle (`TestEnvMap`) carried on the harness values | `src/engine/store.rs` (`TestEnvMap`); minted in `src/engine/testing.rs` |
 | `std.Env`/`Std`/`TaskContext` carry the overlay (`Option<TestEnvMap>`) on the value | `src/engine/std/env.rs`, `src/engine/std/mod.rs`, `src/engine/task_context.rs` |
 | `std.env` reads/writes the overlay carried on its value when present | `src/engine/std/env.rs` (`var`/`set_var`/`remove_var`/`vars`) |
 | Test-only globals surface | `src/eval/api.rs` (`get_test_globals`) |
-| Loader selects test globals for `*_test.axl` | `src/eval/load.rs` |
+| Loader selects test globals for `*.test.axl` | `src/eval/load.rs` |
 
-Run the end-to-end proof:
+Run the Rust proofs:
 
 ```sh
 cargo test -p axl-runtime testing::
 ```
 
-`discovers_and_runs_test_functions` proves: test-only `asserts` parses only via
-the test surface; `test_*` discovery (and that `helper_*` is *not* run);
-`t.env` overlay observed through both `t.std.env` and a real `t.ctx`;
-isolation; and per-test failure capture. `overlay_does_not_leak_into_process`
-proves the overlay never mutates the real process environment.
-`runs_tests_in_parallel_shards` forces the multi-worker path (8 jobs over 17
-tests) and proves cross-test isolation holds concurrently and that outcomes
-still merge back into definition order.
+`native_runner_loads_module_under_test` proves a `*.test.axl` file can `load()`
+the module it exercises (the load-bearing property of running natively) and
+that per-test failures are captured. `discover_finds_dot_test_axl_and_skips_hidden`
+pins discovery (matches `.test.axl`, not the old `_test.axl`; skips hidden
+dirs). `discovers_and_runs_test_functions` proves test-only `asserts` parses
+only via the test surface, `test_*` discovery (and that `helper_*` is *not*
+run), and the `t.env`/`t.std.env`/`t.ctx` shared overlay.
+`overlay_does_not_leak_into_process` proves the overlay never mutates the real
+process environment. `runs_tests_in_parallel_shards` exercises the in-process
+engine's multi-worker path (8 jobs over 17 tests).
 
 ## Decisions — reviewed
 
@@ -130,10 +152,17 @@ change:
 4. **`is_true`/`is_false`, not `true`/`false`.** Rust reserved words; also
    clearer.
 
-5. **The runner re-evaluates the test source in a live module** rather than
-   reusing the loader's frozen module + cross-heap calls. Simpler and avoids
-   freeze/thaw; the loader globals-swap is still implemented and exercised for
-   the normal load path. A production runner should unify these.
+5. **Two runners: loader-backed (production) and source-based (unit tests).**
+   `aspect axl test` runs natively — the driver already holds the `AxlLoader`,
+   so `run_tests` loads each `*.test.axl` file through the real load path
+   (resolving its `load()`s) and calls the frozen `test_*` functions on a
+   scratch heap, sequentially. The older `run_test_source` engine — which
+   re-parses inline source with no loader and fans tests across worker threads
+   — is retained as the in-process test engine for this module's Rust unit
+   tests. They could be unified (have `run_tests` shell out to the sharded
+   engine), but the native path is deliberately sequential for now: it calls
+   already-frozen functions on one heap, avoiding freeze/thaw and `!Send`
+   cross-thread juggling.
 
 6. **`env` is an *overlay*, not a "backend"; bazel *is* a backend.** *Decided
    vocabulary.* For env, the `std.Env` type and methods are identical — only

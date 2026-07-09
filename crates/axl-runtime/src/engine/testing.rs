@@ -1,10 +1,9 @@
-//! Built-in test framework for AXL — POC.
+//! Built-in test framework for AXL.
 //!
-//! This is a proof-of-concept implementation of the design discussed for
-//! giving AXL a native, pytest-style testing story. It demonstrates the
-//! load-bearing decisions end to end:
+//! Gives AXL a native, pytest-style testing story, backing `aspect axl test`.
+//! The load-bearing decisions:
 //!
-//!   1. **Test-only globals.** `*_test.axl` files are evaluated against an
+//!   1. **Test-only globals.** `*.test.axl` files are evaluated against an
 //!      augmented globals surface (base AXL + the `asserts` namespace). The
 //!      vocabulary exists *only* in test files (see `eval::api::get_test_globals`
 //!      and the loader's per-file globals selection in `eval::load`), so it
@@ -30,26 +29,37 @@
 //!      reality — and the one shared `Rc` is what makes `t.env`, `t.std.env`,
 //!      and `t.ctx.std.env` observe the same map.
 //!
-//!   5. **Per-test isolation, run in parallel.** Each test runs with a fresh
-//!      overlay; a failed assertion (which raises) is caught per-test and
-//!      recorded, so one failure never aborts the run — pytest semantics.
-//!      Tests fan out across `min(tests, cpus)` worker threads, each with its
-//!      own Starlark heap (heaps are `!Send`), and results merge back into
-//!      definition order. This is sound precisely because per-test state lives
-//!      on the test's own values, never in a process-global — so concurrent
-//!      workers share no mutable state.
+//!   5. **Per-test isolation.** Each test runs with a fresh overlay; a failed
+//!      assertion (which raises) is caught per-test and recorded, so one
+//!      failure never aborts the run — pytest semantics.
 //!
-//! Not yet built (tracked in `docs/testing.md`): the `aspect test` runner as
-//! an AXL task, snapshot golden files, fs/process/http mock backends, and the
-//! LSP knowing about the `_test.axl` surface.
+//! ## Two runners
+//!
+//! * [`run_tests`] backs `aspect axl test`. The CLI driver holds the live
+//!   `AxlLoader`, so each `*.test.axl` file is loaded *through the normal load
+//!   path* — resolving the file's own `load(...)`s — then its `test_*`
+//!   functions run against the harness. This is what lets a test file import
+//!   the module it exercises.
+//! * [`run_test_source`] is the in-process engine used by the Rust unit tests
+//!   in this module: it parses inline source (no loader) and fans tests out
+//!   across `min(tests, cpus)` worker threads, each with its own `!Send` heap,
+//!   merging results back into definition order. It exercises the harness,
+//!   isolation, and the bazel `Fake` backend without touching the filesystem.
+//!
+//! Not yet built (tracked in `docs/testing.md`): snapshot golden files,
+//! fs/process/http mock backends, and the LSP knowing about the `.test.axl`
+//! surface.
 
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use allocative::Allocative;
 use derive_more::Display;
-use starlark::environment::{GlobalsBuilder, Methods, MethodsBuilder, MethodsStatic, Module};
+use starlark::environment::{
+    FrozenModule, GlobalsBuilder, Methods, MethodsBuilder, MethodsStatic, Module,
+};
 use starlark::eval::Evaluator;
 use starlark::syntax::AstModule;
 use starlark::values::none::{NoneOr, NoneType};
@@ -858,10 +868,243 @@ fn run_test_source_with_jobs(
     })
 }
 
+// ─── Native `aspect axl test` runner ─────────────────────────────────────────
+//
+// `aspect axl test` is served natively rather than by AXL: the CLI driver holds
+// the live `AxlLoader`, so it can load each `*.test.axl` file *through the normal
+// load path* (resolving the file's own `load(...)`s), then run its `test_*`
+// functions against the same harness the in-process runner uses. This is why a
+// test file can `load()` the module it exercises — it is loaded exactly like any
+// other AXL module.
+
+/// True for a `*.test.axl` filename.
+fn is_test_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.ends_with(".test.axl"))
+}
+
+/// Bound on directory-walk iterations; directory symlinks are not followed
+/// (`file_type` reports the link, not its target), so this only guards against
+/// a pathologically deep real tree.
+const WALK_LIMIT: usize = 1_000_000;
+
+/// Every `*.test.axl` file at or under each root (a file or directory),
+/// de-duplicated and sorted for a deterministic report. Hidden directories
+/// (`.git`, …) and directory symlinks (Bazel output trees) are skipped.
+fn discover_test_files(roots: &[PathBuf]) -> Vec<PathBuf> {
+    let mut found: BTreeSet<PathBuf> = BTreeSet::new();
+    for root in roots {
+        let Ok(meta) = std::fs::metadata(root) else {
+            continue;
+        };
+        if !meta.is_dir() {
+            if is_test_file(root) {
+                found.insert(root.clone());
+            }
+            continue;
+        }
+        let mut stack = vec![root.clone()];
+        let mut budget = WALK_LIMIT;
+        while let Some(dir) = stack.pop() {
+            if budget == 0 {
+                break;
+            }
+            budget -= 1;
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                let Ok(ft) = entry.file_type() else { continue };
+                if ft.is_dir() {
+                    if !name.starts_with('.') {
+                        stack.push(entry.path());
+                    }
+                } else if name.ends_with(".test.axl") {
+                    found.insert(entry.path());
+                }
+            }
+        }
+    }
+    found.into_iter().collect()
+}
+
+/// Run every top-level `def test_*(t)` in an already-loaded test module, each
+/// with a fresh harness, sequentially on a scratch heap. `base_env` backs the
+/// production reads `t.std`/`t.ctx` make (roots, cli version).
+fn run_frozen_module(
+    module: &FrozenModule,
+    base_env: &RuntimeEnv,
+) -> anyhow::Result<TestSummary> {
+    let mut names: Vec<String> = module
+        .names()
+        .map(|s| s.as_str().to_string())
+        .filter(|n| n.starts_with("test_"))
+        .filter(|n| {
+            module
+                .get(n)
+                .ok()
+                .map(|o| o.value().to_value().get_type() == "function")
+                .unwrap_or(false)
+        })
+        .collect();
+    names.sort();
+
+    let mut outcomes = Vec::with_capacity(names.len());
+    Module::with_temp_heap(|live| -> anyhow::Result<()> {
+        for name in names {
+            let owned = module
+                .get(&name)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let func = live.heap().access_owned_frozen_value(&owned);
+            // Fresh, isolated overlay per test (same contract as the in-process
+            // runner); real bazel (`fake_bin = None`).
+            let overlay: TestEnvMap = Arc::new(Mutex::new(BTreeMap::new()));
+            let t = live.heap().alloc(Test::new(overlay, None));
+            let mut eval = Evaluator::new(&live);
+            eval.extra = Some(base_env);
+            let outcome = match eval.eval_function(func, &[t], &[]) {
+                Ok(_) => TestOutcome {
+                    name,
+                    passed: true,
+                    message: None,
+                },
+                Err(e) => TestOutcome {
+                    name,
+                    passed: false,
+                    message: Some(e.to_string()),
+                },
+            };
+            outcomes.push(outcome);
+        }
+        Ok(())
+    })?;
+    Ok(TestSummary { outcomes })
+}
+
+/// ANSI palette; blank when stdout is not a TTY so piped output stays clean.
+struct Palette {
+    green: &'static str,
+    red: &'static str,
+    dim: &'static str,
+    bold: &'static str,
+    reset: &'static str,
+}
+
+impl Palette {
+    fn detect() -> Self {
+        use std::io::IsTerminal;
+        if std::io::stdout().is_terminal() {
+            Palette {
+                green: "\x1b[32m",
+                red: "\x1b[31m",
+                dim: "\x1b[2m",
+                bold: "\x1b[1m",
+                reset: "\x1b[0m",
+            }
+        } else {
+            Palette {
+                green: "",
+                red: "",
+                dim: "",
+                bold: "",
+                reset: "",
+            }
+        }
+    }
+}
+
+/// Discover, load, and run every `*.test.axl` file under `paths` (defaulting to
+/// the workspace root), printing a per-file report. Returns the process exit
+/// code: `0` when everything passed, `1` on any test failure or load error.
+///
+/// Loading goes through the caller's live `loader`, so a test file's own
+/// `load(...)`s resolve exactly as they would in any other module — this is the
+/// whole point of running natively where the loader is in hand.
+pub fn run_tests(loader: &crate::eval::Loader, paths: &[String]) -> anyhow::Result<i32> {
+    let root = loader.aspect_root();
+    let roots: Vec<PathBuf> = if paths.is_empty() {
+        vec![root.to_path_buf()]
+    } else {
+        paths.iter().map(PathBuf::from).collect()
+    };
+    let files = discover_test_files(&roots);
+    let pal = Palette::detect();
+
+    if files.is_empty() {
+        println!("No *.test.axl files found.");
+        return Ok(0);
+    }
+
+    let rel = |p: &Path| p.strip_prefix(root).unwrap_or(p).display().to_string();
+    let (mut total_pass, mut total_fail, mut file_errors) = (0usize, 0usize, 0usize);
+
+    for path in &files {
+        match loader.load_file(path) {
+            Err(e) => {
+                println!("{}{}ERROR{} {}", pal.red, pal.bold, pal.reset, rel(path));
+                for line in format!("{e:#}").lines() {
+                    println!("    {line}");
+                }
+                file_errors += 1;
+            }
+            Ok(module) => {
+                let summary = run_frozen_module(&module, &loader.env)?;
+                let (p, f) = (summary.passed(), summary.failed());
+                total_pass += p;
+                total_fail += f;
+                let status = if f == 0 {
+                    format!("{}ok  {}", pal.green, pal.reset)
+                } else {
+                    format!("{}FAIL{}", pal.red, pal.reset)
+                };
+                println!(
+                    "{} {}{}{} ({} passed, {} failed)",
+                    status,
+                    pal.dim,
+                    rel(path),
+                    pal.reset,
+                    p,
+                    f
+                );
+                for o in &summary.outcomes {
+                    if !o.passed {
+                        println!("    {}FAIL{} {}", pal.red, pal.reset, o.name);
+                        if let Some(m) = &o.message {
+                            for line in m.lines() {
+                                println!("         {line}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    println!();
+    let mut line = format!(
+        "{} passed, {} failed across {} file(s)",
+        total_pass,
+        total_fail,
+        files.len()
+    );
+    if file_errors > 0 {
+        line.push_str(&format!(", {file_errors} file error(s)"));
+    }
+    println!("{}{}{}", pal.bold, line, pal.reset);
+
+    Ok(if total_fail == 0 && file_errors == 0 {
+        0
+    } else {
+        1
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use tokio::runtime::Runtime;
 
     fn base_env() -> RuntimeEnv {
@@ -973,6 +1216,77 @@ def helper_not_discovered(t):
             expected.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
             "outcomes must be in definition order, not completion order"
         );
+    }
+
+    #[test]
+    fn discover_finds_dot_test_axl_and_skips_hidden() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir(root.join("sub")).unwrap();
+        std::fs::create_dir(root.join(".hidden")).unwrap();
+        std::fs::write(root.join("a.test.axl"), "").unwrap();
+        std::fs::write(root.join("sub/b.test.axl"), "").unwrap();
+        // `_test.axl` (the old convention) must NOT match the `.test.axl` suffix.
+        std::fs::write(root.join("sub/legacy_test.axl"), "").unwrap();
+        std::fs::write(root.join(".hidden/c.test.axl"), "").unwrap();
+
+        let files = discover_test_files(&[root.to_path_buf()]);
+        let names: Vec<String> = files
+            .iter()
+            .map(|p| p.strip_prefix(root).unwrap().display().to_string())
+            .collect();
+        assert_eq!(names, vec!["a.test.axl".to_string(), "sub/b.test.axl".to_string()]);
+    }
+
+    /// The load-bearing property of the native runner: a `*.test.axl` file can
+    /// `load()` the module it exercises, because the runner loads it through the
+    /// real `AxlLoader` (resolving its `load()`s) rather than re-parsing source
+    /// with no loader.
+    #[test]
+    fn native_runner_loads_module_under_test() {
+        let rt = Runtime::new().unwrap();
+        let _g = rt.enter();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("lib.axl"), "def double(x):\n    return x * 2\n").unwrap();
+        std::fs::write(
+            root.join("math.test.axl"),
+            "load(\"./lib.axl\", \"double\")\n\
+             \n\
+             def test_double_ok(t):\n    asserts.eq(double(21), 42)\n\
+             \n\
+             def test_double_wrong(t):\n    asserts.eq(double(1), 3)\n",
+        )
+        .unwrap();
+
+        let root_mod = crate::module::Mod::new(
+            root.to_path_buf(),
+            crate::module::AXL_ROOT_MODULE_NAME.to_string(),
+            root.to_path_buf(),
+        );
+        let modules: Vec<crate::module::Mod> = vec![];
+        let loader = crate::eval::Loader::new(
+            "test".to_string(),
+            root.to_path_buf(),
+            root.to_path_buf(),
+            None,
+            &root_mod,
+            &modules,
+        );
+
+        let module = loader
+            .load_file(&root.join("math.test.axl"))
+            .expect("test file (and its load()) should load");
+        let summary = run_frozen_module(&module, &base_env()).expect("run ok");
+        assert_eq!(summary.passed(), 1, "report:\n{}", summary.report());
+        assert_eq!(summary.failed(), 1, "report:\n{}", summary.report());
+        let failed: Vec<&str> = summary
+            .outcomes
+            .iter()
+            .filter(|o| !o.passed)
+            .map(|o| o.name.as_str())
+            .collect();
+        assert_eq!(failed, vec!["test_double_wrong"]);
     }
 
     #[test]
