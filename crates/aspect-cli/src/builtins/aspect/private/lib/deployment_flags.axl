@@ -69,7 +69,8 @@ match the endpoint-auth host gate and receive its login JWT (see
 """
 
 load("@aspect//bazel/build_events.axl", "bazel_bes_backend")
-load("./aspect_endpoint_auth.axl", "same_bes_endpoint")
+load("@aspect//bazel.axl", "BazelTrait")
+load("./aspect_endpoint_auth.axl", "credential_helper_covers_host", "endpoint_host", "headers_have_auth", "needs_aspect_token", "resolve_aspect_bearer", "same_bes_endpoint")
 load("./environment.axl", "info")
 
 # Bazel-facing Aspect endpoints are TLS gRPC.
@@ -408,3 +409,74 @@ def announce_deployment_flags(ctx, flags: DeploymentFlags):
     line = deployment_announcement(flags)
     if line:
         info(ctx.std, line)
+
+def _endpoint_auth_flags(ctx, rc, command: str, endpoint_flag: str, header_flag: str, what: str) -> list:
+    """Per-invocation `<header_flag>=authorization=Bearer <jwt>` flags for an
+    endpoint owned by a configured deployment named by `endpoint_flag`, or `[]`.
+
+    Reads the effective `endpoint_flag` through `rc`. When a configured deployment
+    owns its host and the stream will not already carry an `authorization` —
+    neither an explicit `<header_flag>=authorization=…` nor a
+    `--credential_helper` registered for the host — returns the one auth header
+    flag. Suppressing on a matching credential helper keeps Bazel from adding a
+    second `authorization` alongside the injected one, which gRPC would comma-join
+    into a token a JWT-validating proxy rejects. Best-effort: an owned endpoint
+    with no usable credential warns and returns `[]`. `what` describes the endpoint
+    in the warning.
+    """
+    endpoint = rc.flag_value(endpoint_flag, command = command)
+    if not endpoint:
+        return []
+
+    # `--credential_helper` carries Bazel's `oldName` alias
+    # `--experimental_credential_helper`; both populate the same option, so a
+    # helper configured under either spelling makes Bazel add its own auth.
+    credential_helpers = (
+        rc.flag_values("--credential_helper", command = command) +
+        rc.flag_values("--experimental_credential_helper", command = command)
+    )
+    already_authenticated = (
+        headers_have_auth(rc.flag_values(header_flag, command = command)) or
+        credential_helper_covers_host(credential_helpers, endpoint_host(endpoint))
+    )
+    if not needs_aspect_token(ctx, [endpoint], already_authenticated):
+        return []
+    bearer = resolve_aspect_bearer(ctx, what, endpoint)
+    if not bearer:
+        return []
+    return [header_flag + "=authorization=" + bearer]
+
+def deployment_auth_flags(ctx, rc, command: str) -> list:
+    """Per-invocation `--remote_header`/`--bes_header` auth for every Bazel-facing
+    endpoint (remote cache + Bazel-streamed BES) a configured deployment owns and
+    the resolved `rc` points at. Registered on `BazelTrait.rc_flags` by the
+    `Deployment` feature for build/test, and called directly by the tasks that
+    drive their own spawn loop (run / format / lint / warming / gazelle /
+    delivery / cache-diff)."""
+    return (
+        _endpoint_auth_flags(ctx, rc, command, "--remote_cache", "--remote_header", "the remote cache") +
+        _endpoint_auth_flags(ctx, rc, command, "--bes_backend", "--bes_header", "build events")
+    )
+
+def _deployment_impl(ctx):
+    """Feature setup: resolve the selected deployment's endpoints and wire them
+    into the `BazelTrait` — injected `--remote_cache`/`--remote_executor` base
+    flags, extra BES backends, and the post-rc auth-header hook. The auth hook is
+    registered unconditionally (it also authenticates user-set Aspect endpoints);
+    the announce line fires only when a capability was actually injected."""
+    t = ctx.traits[BazelTrait]
+    dep = deployment_endpoint_flags(ctx)
+    t.base_flags.extend(dep.base_flags)
+    t.bes_backends.extend(dep.bes_backends)
+    t.bes_results_sources.extend(_advertised_bes_sources(ctx, dep))
+    t.rc_flags.append(deployment_auth_flags)
+    if dep.capabilities:
+        t.build_start.append(lambda tctx: announce_deployment_flags(tctx, dep))
+
+Deployment = feature(
+    name = "deployment",
+    display_name = "Deployment",
+    summary = "Wire builds to a configured Aspect Workflows deployment's remote cache, BES backend, and remote execution.",
+    implementation = _deployment_impl,
+    args = deployment_flag_args(),
+)
