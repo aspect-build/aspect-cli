@@ -27,6 +27,7 @@ Status surfaces flip to the verdict via the task's own terminal
 # Record, trait, and emitter sit together here; `traits.axl` re-exports
 # them for user `config.axl` files.
 
+load("./ansi.axl", "ansi")
 load("./bazel_flags.axl", "setup_bazel_command")
 load("./environment.axl", "color_enabled", "detect_ci")
 load("./health_check.axl", "run_health_checks")
@@ -394,8 +395,6 @@ def dispatch_task_update(ctx, lifecycle, update):
     for handler in lifecycle.task_update:
         handler(ctx, update)
 
-_RESET = "\033[0m"
-
 # Default phase-label highlight when ASPECT_CLI_HIGHLIGHT_COLOR is unset:
 # bold cyan. The env var holds SGR params (e.g. `94`, `38;5;75`); empty
 # disables the highlight color.
@@ -411,37 +410,7 @@ def _highlight_style(std):
         color_arg = _DEFAULT_HIGHLIGHT_COLOR
     if not color_arg:
         return ""
-    return "\033[" + color_arg + "m"
-
-def _strip_ansi(text):
-    """Return `text` with ANSI CSI/SGR escapes removed (`\\033[`…`m`).
-    Character walk because the Starlark runtime has no regex module."""
-    if not text:
-        return text
-    if "\033" not in text:
-        return text
-    out = ""
-    i = 0
-    n = len(text)
-    for _ in range(n):
-        if i >= n:
-            break
-        c = text[i]
-        if c == "\033" and i + 1 < n and text[i + 1] == "[":
-            # Skip to the next 'm' (SGR terminator) or end of string.
-            j = i + 2
-            for _ in range(n - j):
-                if j >= n:
-                    break
-                if text[j] == "m":
-                    j += 1
-                    break
-                j += 1
-            i = j
-        else:
-            out += c
-            i += 1
-    return out
+    return ansi.seq(color_arg)
 
 # `Phase.emoji` fallback: a Buildkite shortcode rendering the Aspect
 # brand glyph on BK (literal text elsewhere), so custom phases without an
@@ -493,7 +462,7 @@ def _emit_bk_phase_section(ctx, phase, progress_styles = None):
     label = phase.display_name or _titlecase_phase(phase.name)
     style = _highlight_style(ctx.std)
     if style:
-        label = style + label + _RESET
+        label = style + label + ansi.RESET
     suffix = ""
     if progress_styles != None:
         cli = progress_styles.stream or progress_styles.body
@@ -513,7 +482,7 @@ def _resolve_progress_styles(progress):
     """Coerce `progress` into a `ProgressStyles`. A str → stream verbatim,
     body ANSI-stripped; a `ProgressStyles` is returned as-is."""
     if type(progress) == "string":
-        bare = _strip_ansi(progress)
+        bare = ansi.strip(progress)
         return ProgressStyles(
             body = bare,
             stream = progress,
@@ -590,7 +559,7 @@ def task_update(ctx, lifecycle, status, progress, kind = "", data = None, priori
             if phase.emoji:
                 label = phase.emoji + " " + label
             if style:
-                cli_text = style + label + _RESET + " · " + cli_text
+                cli_text = style + label + ansi.RESET + " · " + cli_text
             else:
                 cli_text = label + " · " + cli_text
 

@@ -1,0 +1,78 @@
+"""Shared ANSI/SGR sequences and helpers — the single source for terminal styling.
+
+Callers decide whether to emit color (gate on `color_enabled`); this only
+builds the sequences.
+"""
+
+_CSI = "\x1b["
+_RESET = _CSI + "0m"
+
+def _seq(params: str) -> str:
+    """A full SGR escape from raw `params`, e.g. `seq("1;36")` → bold cyan.
+    For combos and runtime-configured codes; prefer the named constants."""
+    return _CSI + params + "m"
+
+def _style(text: str, code: str, enabled: bool = True) -> str:
+    """`text` wrapped in `code` (a constant here or `seq(...)`) then reset when
+    `enabled`, else bare `text`."""
+    return code + text + _RESET if enabled else text
+
+def _strip(text: str) -> str:
+    """`text` with ANSI CSI (`\\x1b[`…final-byte) and OSC (`\\x1b]`…BEL) escapes
+    removed. Character walk — the runtime has no regex module."""
+    if not text or "\x1b" not in text:
+        return text
+    out = []
+    i = 0
+    n = len(text)
+    for _ in range(n):
+        if i >= n:
+            break
+        c = text[i]
+        if c == "\x1b" and i + 1 < n and text[i + 1] == "[":
+            # CSI: parameter/intermediate bytes then a single final byte. Any
+            # non-parameter byte terminates.
+            j = i + 2
+            for _ in range(n - j):
+                if j >= n:
+                    break
+                cj = text[j]
+                j += 1
+                if cj not in "0123456789;:":
+                    break
+            i = j
+        elif c == "\x1b" and i + 1 < n and text[i + 1] == "]":
+            # OSC: skip to BEL (0x07).
+            j = i + 2
+            for _ in range(n - j):
+                if j >= n:
+                    break
+                if text[j] == "\x07":
+                    j += 1
+                    break
+                j += 1
+            i = j
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+ansi = namespace(
+    RESET = _RESET,
+    BOLD = _CSI + "1m",
+    DIM = _CSI + "2m",
+    ITALIC = _CSI + "3m",
+    ITALIC_OFF = _CSI + "23m",
+    RED = _CSI + "31m",
+    GREEN = _CSI + "32m",
+    YELLOW = _CSI + "33m",
+    BLUE = _CSI + "34m",
+    CYAN = _CSI + "36m",
+    GREY = _CSI + "38;5;244m",
+    ORANGE = _CSI + "38;5;208m",
+    CLEAR_LINE = _CSI + "2K",
+    MOVE_UP = _CSI + "1A",
+    seq = _seq,
+    style = _style,
+    strip = _strip,
+)

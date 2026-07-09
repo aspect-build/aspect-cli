@@ -151,6 +151,7 @@ User-facing migration guide: https://aspect.build/docs/cli/migration/delivery
 load("@aspect//bazel.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
 load("@bazel//proto/remote_logging.axl", "remote_logging")
 load("@std//time.axl", "sleep_iter", "time")
+load("./private/lib/ansi.axl", "ansi")
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_flags.axl", "announce_bazel_args", "aspect_endpoint_auth_flags", "expand_config_flags", "resolve_bazel_announce", "sibling_rc")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "bes_get", "now_ms", "process_event", bazel_init_data = "init_data")
@@ -248,19 +249,6 @@ DeliveryTrait = trait(
     ),
 )
 
-# ANSI codes
-_BOLD = "\033[1m"
-_GREEN = "\033[32m"
-_YELLOW = "\033[33m"
-_RED = "\033[31m"
-_RESET = "\033[0m"
-
-def _style(text, codes, ansi):
-    """Wrap text in ANSI codes when `ansi`."""
-    if ansi:
-        return codes + text + _RESET
-    return text
-
 def pad(s, width):
     return s + " " * (width - len(s))
 
@@ -271,34 +259,34 @@ def fmt_elapsed(secs):
         return "{}.{}s".format(int(secs), int(secs * 10) % 10)
     return "{}m{}s".format(int(secs) // 60, int(secs) % 60)
 
-def _print_header(ansi, endpoint, ci_host, commit_sha, prefix, prefix_source, build_url, expanded_flags, targets, forced_targets, mode, dry_run, track_state):
-    print(_style("Delivery:", _BOLD, ansi))
+def _print_header(color, endpoint, ci_host, commit_sha, prefix, prefix_source, build_url, expanded_flags, targets, forced_targets, mode, dry_run, track_state):
+    print(ansi.style("Delivery:", ansi.BOLD, color))
     mode_str = mode + (" (dry-run)" if dry_run else "")
-    print("  {}: {}".format(_style("Mode", _BOLD, ansi), mode_str))
+    print("  {}: {}".format(ansi.style("Mode", ansi.BOLD, color), mode_str))
     if track_state:
-        print("  {}: {}".format(_style("State", _BOLD, ansi), endpoint))
+        print("  {}: {}".format(ansi.style("State", ansi.BOLD, color), endpoint))
     else:
-        print("  {}: (untracked — --track-state=false)".format(_style("State", _BOLD, ansi)))
-    print("  {}: {}".format(_style("Host", _BOLD, ansi), ci_host))
-    print("  {}: {}".format(_style("Commit", _BOLD, ansi), commit_sha))
-    print("  {}: {} (set by {})".format(_style("Prefix", _BOLD, ansi), prefix, prefix_source))
-    print("  {}: {}".format(_style("URL", _BOLD, ansi), build_url))
-    print("  {}: {}".format(_style("Flags", _BOLD, ansi), expanded_flags))
+        print("  {}: (untracked — --track-state=false)".format(ansi.style("State", ansi.BOLD, color)))
+    print("  {}: {}".format(ansi.style("Host", ansi.BOLD, color), ci_host))
+    print("  {}: {}".format(ansi.style("Commit", ansi.BOLD, color), commit_sha))
+    print("  {}: {} (set by {})".format(ansi.style("Prefix", ansi.BOLD, color), prefix, prefix_source))
+    print("  {}: {}".format(ansi.style("URL", ansi.BOLD, color), build_url))
+    print("  {}: {}".format(ansi.style("Flags", ansi.BOLD, color), expanded_flags))
     print()
-    print(_style("Found {} to deliver:".format(pluralize(len(targets), "target")), _BOLD, ansi))
+    print(ansi.style("Found {} to deliver:".format(pluralize(len(targets), "target")), ansi.BOLD, color))
     for t in targets:
-        forced_marker = _style(" (forced)", _YELLOW, ansi) if t in forced_targets else ""
+        forced_marker = ansi.style(" (forced)", ansi.YELLOW, color) if t in forced_targets else ""
         print("  - {}{}".format(t, forced_marker))
     print("")
 
-def _print_captured_output(label, exit_code, stdout, stderr, ansi):
+def _print_captured_output(label, exit_code, stdout, stderr, color):
     sep = "─" * 36
     header = "── {} (exit {}) ".format(label, exit_code)
-    print(_style(header + sep[:max(0, len(sep) - len(header))], _BOLD, ansi))
+    print(ansi.style(header + sep[:max(0, len(sep) - len(header))], ansi.BOLD, color))
     combined = (stdout or "") + (stderr or "")
     if combined.strip():
         print(combined)
-    print(_style(sep, _BOLD, ansi))
+    print(ansi.style(sep, ansi.BOLD, color))
 
 _HEX = "0123456789abcdef"
 
@@ -455,7 +443,7 @@ def _surface_phase_stderr(ctx, phase, log_path):
     ctx.std.io.stderr.write(ctx.std.fs.read_to_string(log_path))
     artifacts.upload_file(ctx, "delivery_phase{}_log".format(phase), "phase{}-stderr.log".format(phase), log_path)
 
-def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, user_remote_executor_uri, ansi, data):
+def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, user_remote_executor_uri, color, data):
     """Run phase 1 (build) + phase 2 (digest extraction); return
     `(output_shas, non_hermetic_misses, uncacheable_actions, exit_code)`.
     Phase-1 BES events drive `data`; phase-2's gRPC log yields the per-target
@@ -1081,7 +1069,7 @@ def _delivery_impl(ctx):
     data["delivery"]["dry_run"] = bool(ctx.args.dry_run)
     data["delivery"]["track_state"] = bool(ctx.args.track_state)
 
-    ansi = color_enabled(ctx.std)
+    color = color_enabled(ctx.std)
 
     # Requested targets feed setup_phase's `subject` (rendered in the status
     # check's "Explicit command line"). Often empty for query-based delivery —
@@ -1263,7 +1251,7 @@ def _delivery_impl(ctx):
         _emit_final(ctx, lifecycle, data, exit_code = 1)
         fail(msg)
 
-    _print_header(ansi, endpoint, ci_host, commit_sha, prefix, prefix_source, build_url, rc.expand(command = "build"), targets, forced_targets, mode, dry_run, track_state)
+    _print_header(color, endpoint, ci_host, commit_sha, prefix, prefix_source, build_url, rc.expand(command = "build"), targets, forced_targets, mode, dry_run, track_state)
 
     # `rc=` opts into the runinfo aspect so the deliverables spawned in phase 3
     # replay their `args` attribute + env the way `bazel run` does. The aspect
@@ -1275,7 +1263,7 @@ def _delivery_impl(ctx):
     # Phase 1/2 — skipped only in --mode=always + --track-state=false.
     if phase_1_2_runs:
         _t_build = time.monotonic()
-        output_shas, non_hermetic_misses, uncacheable_actions, build_code = _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, user_remote_executor_uri or "", ansi, data)
+        output_shas, non_hermetic_misses, uncacheable_actions, build_code = _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, user_remote_executor_uri or "", color, data)
         info(ctx.std, "Build+checksum total: {}.".format(fmt_elapsed(time.monotonic() - _t_build)))
 
         for handler in bazel_trait.build_end:
@@ -1605,7 +1593,7 @@ def _delivery_impl(ctx):
                     break
                 label, ep, is_forced, output_sha = ready.pop(0)
                 forced_marker = " (FORCED)" if is_forced else ""
-                print("  {} {}{}...".format(_style("Delivering", _BOLD, ansi), label, forced_marker))
+                print("  {} {}{}...".format(ansi.style("Delivering", ansi.BOLD, color), label, forced_marker))
                 running.append((label, is_forced, output_sha, time.monotonic(), run_tracker.spawn(ep, [], capture)))
                 interesting = True
 
@@ -1622,7 +1610,7 @@ def _delivery_impl(ctx):
                 if capture:
                     out = child.wait_with_output()
                     exit_code = out.status.code
-                    _print_captured_output(label, exit_code, out.stdout, out.stderr, ansi)
+                    _print_captured_output(label, exit_code, out.stdout, out.stderr, color)
                 else:
                     exit_code = child.wait().code
                 duration = fmt_elapsed(time.monotonic() - t_start)
@@ -1646,7 +1634,7 @@ def _delivery_impl(ctx):
                         break
                     nlabel, nep, nis_forced, noutput_sha = ready.pop(0)
                     nforced_marker = " (FORCED)" if nis_forced else ""
-                    print("  {} {}{}...".format(_style("Delivering", _BOLD, ansi), nlabel, nforced_marker))
+                    print("  {} {}{}...".format(ansi.style("Delivering", ansi.BOLD, color), nlabel, nforced_marker))
                     running.append((nlabel, nis_forced, noutput_sha, time.monotonic(), run_tracker.spawn(nep, [], capture)))
 
             # priority=False throttles surface PATCHes; the per-target lines
@@ -1690,11 +1678,11 @@ def _delivery_impl(ctx):
             max_duration_width = len(duration)
 
     status_styles = {
-        "ok": _BOLD + _GREEN,
-        "skip": _BOLD + _YELLOW,
-        "pending": _BOLD + _YELLOW,
-        "warn": _BOLD + _RED,
-        "fail": _BOLD + _RED,
+        "ok": ansi.BOLD + ansi.GREEN,
+        "skip": ansi.BOLD + ansi.YELLOW,
+        "pending": ansi.BOLD + ansi.YELLOW,
+        "warn": ansi.BOLD + ansi.RED,
+        "fail": ansi.BOLD + ansi.RED,
     }
 
     # KEY = <prefix>:<hash[:12]> — the change-detection identity (namespace +
@@ -1709,9 +1697,9 @@ def _delivery_impl(ctx):
         pad("KEY", key_width),
         "BUILD URL",
     )
-    print(_style(header, _BOLD, ansi))
+    print(ansi.style(header, ansi.BOLD, color))
     for label, status_text, status_type, delivered_by, output_sha, duration in rows:
-        styled_status = _style(status_text, status_styles[status_type], ansi)
+        styled_status = ansi.style(status_text, status_styles[status_type], color)
         padding = " " * (max_status_width - len(status_text))
         key = prefix + ":" + output_sha[:12] if output_sha and output_sha != "-" else "-"
         print("  {}  {}{}  {}  {}  {}".format(
@@ -1726,12 +1714,12 @@ def _delivery_impl(ctx):
     total_elapsed = fmt_elapsed(time.monotonic() - _t_total)
     print("")
     summary_parts = [
-        _style("{} delivered".format(success_count), _BOLD + _GREEN, ansi),
-        _style("{} skipped".format(skipped_count), _BOLD + _YELLOW, ansi),
-        _style("{} pending".format(pending_count), _BOLD + _YELLOW, ansi),
-        _style("{} failed".format(failed_count), _BOLD + _RED, ansi),
+        ansi.style("{} delivered".format(success_count), ansi.BOLD + ansi.GREEN, color),
+        ansi.style("{} skipped".format(skipped_count), ansi.BOLD + ansi.YELLOW, color),
+        ansi.style("{} pending".format(pending_count), ansi.BOLD + ansi.YELLOW, color),
+        ansi.style("{} failed".format(failed_count), ansi.BOLD + ansi.RED, color),
     ]
-    print("{} {}  ({} total)".format(_style("Summary:", _BOLD, ansi), ", ".join(summary_parts), total_elapsed))
+    print("{} {}  ({} total)".format(ansi.style("Summary:", ansi.BOLD, color), ", ".join(summary_parts), total_elapsed))
 
     delivery_trait.delivery_end()
 
@@ -1744,7 +1732,7 @@ delivery = task(
     summary = "Build and deliver binary targets. Targets are built with stamping and delivered exactly once per commit unless forced; change detection skips targets whose outputs haven't changed since the last delivery.",
     description = """Build and deliver binary targets. Targets are built with stamping and delivered exactly once per commit unless forced; change detection skips targets whose outputs haven't changed since the last delivery.
 
-Currently \x1b[3monly\x1b[23m supported on Aspect Workflows CI runners. Support for generic CI runners is planned. Contact Aspect support <support@aspect.build> for more info.""",
+Currently """ + ansi.ITALIC + "only" + ansi.ITALIC_OFF + """ supported on Aspect Workflows CI runners. Support for generic CI runners is planned. Contact Aspect support <support@aspect.build> for more info.""",
     args = {
         "ci_host": args.string(
             default = "bk",

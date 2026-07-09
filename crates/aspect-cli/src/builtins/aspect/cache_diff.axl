@@ -72,6 +72,7 @@ load(
     "resolve_flags",
     "resolve_startup_flags",
 )
+load("./private/lib/ansi.axl", "ansi")
 load("./private/lib/environment.axl", "color_enabled")
 load("./private/lib/remote_executor.axl", "start_dummy_executor", "stop_dummy_executor")
 load("./private/lib/runnable.axl", "apparent_label")
@@ -88,20 +89,11 @@ _TEST_MNEMONIC = "TestRunner"
 # baseline flags compute the keys we probe), so digests still match the baseline.
 _SALT_SENTINEL = "aspect_cache_diff_probe"
 
-_BOLD = "\x1b[1m"
-_DIM = "\x1b[2m"
-_RED = "\x1b[31m"
-_YELLOW = "\x1b[33m"
-_RESET = "\x1b[0m"
-
 GetActionResultEntry = record(
     label = field(str),
     mnemonic = field(str),
     code = field(int),
 )
-
-def _style(ansi: bool, code: str, text: str) -> str:
-    return code + text + _RESET if ansi else text
 
 def _fmt_elapsed(secs) -> str:
     """`S.Ts` under a minute, else `MmSs` — same shape as delivery.axl."""
@@ -165,7 +157,7 @@ def _invalidate_action_nodes(ctx: TaskContext, rc, endpoint_auth_flags: list, an
     ).wait()
     timing["invalidate"] = time.monotonic() - _t
 
-def _run_probe(ctx: TaskContext, patterns: list, anchor: str, rc, endpoint_auth_flags: list, announce_version: bool, announce_command: bool, ansi: bool, timing: dict) -> list | None:
+def _run_probe(ctx: TaskContext, patterns: list, anchor: str, rc, endpoint_auth_flags: list, announce_version: bool, announce_command: bool, color: bool, timing: dict) -> list | None:
     """Require-cached test probe; return its logged `GetActionResultEntry` rows,
     or `None` if Bazel failed unexpectedly (no gRPC log — its captured stderr is
     surfaced first). Bazel's own stdout/stderr are hidden: the expected
@@ -216,7 +208,7 @@ def _run_probe(ctx: TaskContext, patterns: list, anchor: str, rc, endpoint_auth_
     timing["probe"] = time.monotonic() - _t
 
     if not ctx.std.fs.exists(log_path):
-        _err(ctx, _style(ansi, _RED, "ERROR") + ": the cache probe produced no gRPC log; Bazel failed before reaching the remote cache. Its output:")
+        _err(ctx, ansi.style("ERROR", ansi.RED, color) + ": the cache probe produced no gRPC log; Bazel failed before reaching the remote cache. Its output:")
         if ctx.std.fs.exists(err_path):
             ctx.std.io.stderr.write(ctx.std.fs.read_to_string(err_path))
         return None
@@ -244,14 +236,14 @@ def _run_probe(ctx: TaskContext, patterns: list, anchor: str, rc, endpoint_auth_
     # probe failed and it isn't solely require-cached denials — no cache lookups
     # happened at all, or stderr carries a non-denial ERROR — surface it and fail.
     if status.code != 0 and (not entries or _probe_has_unexpected_error(ctx, err_path)):
-        _err(ctx, _style(ansi, _RED, "ERROR") + ": the cache probe failed for a reason other than require-cached denials (exit {}). Its output:".format(status.code))
+        _err(ctx, ansi.style("ERROR", ansi.RED, color) + ": the cache probe failed for a reason other than require-cached denials (exit {}). Its output:".format(status.code))
         if ctx.std.fs.exists(err_path):
             ctx.std.io.stderr.write(ctx.std.fs.read_to_string(err_path))
         return None
 
     return entries
 
-def _build_missing_non_test(ctx: TaskContext, patterns: list, rc, endpoint_auth_flags: list, announce_version: bool, announce_command: bool, ansi: bool, timing: dict) -> bool:
+def _build_missing_non_test(ctx: TaskContext, patterns: list, rc, endpoint_auth_flags: list, announce_version: bool, announce_command: bool, color: bool, timing: dict) -> bool:
     """precise pre-pass: execute + upload the missing non-test actions on the
     default (incremental) output base. Bazel output hidden; surfaced + False
     returned on a hard build failure (a real broken target, not a cache miss)."""
@@ -268,7 +260,7 @@ def _build_missing_non_test(ctx: TaskContext, patterns: list, rc, endpoint_auth_
     ).wait()
     timing["build"] = time.monotonic() - _t
     if status.code != 0:
-        _err(ctx, _style(ansi, _RED, "ERROR") + ": precise pre-build failed (exit {}); a target does not build. Its output:".format(status.code))
+        _err(ctx, ansi.style("ERROR", ansi.RED, color) + ": precise pre-build failed (exit {}); a target does not build. Its output:".format(status.code))
         if ctx.std.fs.exists(err_path):
             ctx.std.io.stderr.write(ctx.std.fs.read_to_string(err_path))
         return False
@@ -280,7 +272,7 @@ def _reason_text(test_label: str, cause: dict) -> str:
         return "own test action not cached (its inputs changed)"
     return "cache miss in {} ({})".format(cause["target"], cause["mnemonic"])
 
-def _attribute(ctx: TaskContext, causes: dict, test_label: str, cause: dict, stream_stdout: bool, verbose: bool, ansi: bool) -> None:
+def _attribute(ctx: TaskContext, causes: dict, test_label: str, cause: dict, stream_stdout: bool, verbose: bool, color: bool) -> None:
     """Record one structured `cause` ({target, mnemonic}) for `test_label` and
     stream it. On first sighting the label goes to stdout (when `stream_stdout`);
     when `verbose`, an aligned reason line goes to stderr."""
@@ -290,10 +282,10 @@ def _attribute(ctx: TaskContext, causes: dict, test_label: str, cause: dict, str
         _emit(ctx, test_label)
     if verbose:
         reason = _reason_text(test_label, cause)
-        head = _style(ansi, _BOLD, test_label) if first else " " * len(test_label)
-        _err(ctx, "  " + head + "  " + _style(ansi, _DIM, "← " + reason))
+        head = ansi.style(test_label, ansi.BOLD, color) if first else " " * len(test_label)
+        _err(ctx, "  " + head + "  " + ansi.style("← " + reason, ansi.DIM, color))
 
-def _classify_and_stream(ctx: TaskContext, entries: list, test_targets: list, rc, stream_stdout: bool, verbose: bool, ansi: bool, timing: dict) -> dict:
+def _classify_and_stream(ctx: TaskContext, entries: list, test_targets: list, rc, stream_stdout: bool, verbose: bool, color: bool, timing: dict) -> dict:
     """Turn probe entries into affected tests + structured causes, streaming each
     test the moment it is attributed. Returns `causes`: {test_label: [{target,
     mnemonic}, ...]} in discovery order. A missed non-test action is attributed
@@ -316,7 +308,7 @@ def _classify_and_stream(ctx: TaskContext, entries: list, test_targets: list, rc
     rdeps_secs = 0.0
     for e in missed:
         if e.mnemonic == _TEST_MNEMONIC and e.label in test_set:
-            _attribute(ctx, causes, e.label, {"target": e.label, "mnemonic": e.mnemonic}, stream_stdout, verbose, ansi)
+            _attribute(ctx, causes, e.label, {"target": e.label, "mnemonic": e.mnemonic}, stream_stdout, verbose, color)
             continue
 
         # Non-test (dependency) miss: which in-scope tests does it reach?
@@ -331,10 +323,10 @@ def _classify_and_stream(ctx: TaskContext, entries: list, test_targets: list, rc
         rdeps_secs += time.monotonic() - _tq
         for label in dep_tests:
             if label in test_set:
-                _attribute(ctx, causes, label, cause, stream_stdout, verbose, ansi)
+                _attribute(ctx, causes, label, cause, stream_stdout, verbose, color)
 
     if unattributable > 0 and verbose:
-        _err(ctx, _style(ansi, _YELLOW, "WARNING") + ": {} cache miss(es) outside the main repo could not be attributed to a test.".format(unattributable))
+        _err(ctx, ansi.style("WARNING", ansi.YELLOW, color) + ": {} cache miss(es) outside the main repo could not be attributed to a test.".format(unattributable))
     timing["attribute"] = rdeps_secs
     timing["classify"] = (time.monotonic() - _t_all) - rdeps_secs
     return causes
@@ -352,7 +344,7 @@ def _emit_json(ctx: TaskContext, mode: str, test_targets: list, affected: list, 
     ctx.std.io.stdout.write(json.encode(doc, indent = 2) + "\n")
 
 def _impl(ctx: TaskContext) -> int:
-    ansi = color_enabled(ctx.std)
+    color = color_enabled(ctx.std)
     patterns = list(ctx.args.targets)
     union = " + ".join(patterns)
     mode = ctx.args.mode
@@ -371,7 +363,7 @@ def _impl(ctx: TaskContext) -> int:
 
     # Explicit, up-front requirement: no remote cache → nothing to diff against.
     if not rc.flag_value("--remote_cache", command = "test") and not rc.flag_value("--remote_executor", command = "test"):
-        _err(ctx, _style(ansi, _RED, "ERROR") + ": `aspect cache diff` requires a remote cache. It diffs the working tree against the cache to decide what changed; with no cache there is nothing to compare.")
+        _err(ctx, ansi.style("ERROR", ansi.RED, color) + ": `aspect cache diff` requires a remote cache. It diffs the working tree against the cache to decide what changed; with no cache there is nothing to compare.")
         _err(ctx, "  Configure --remote_cache=<uri> (e.g. in .bazelrc), and seed a baseline once with `bazel test //... --remote_upload_local_results`.")
         return 1
 
@@ -389,16 +381,16 @@ def _impl(ctx: TaskContext) -> int:
         _err(ctx, "No test targets in scope for: " + union)
         return 0
 
-    _err(ctx, _style(ansi, _BOLD, "Diffing {} test target(s) against the remote cache [--mode={}]…".format(len(test_targets), mode)))
+    _err(ctx, ansi.style("Diffing {} test target(s) against the remote cache [--mode={}]…".format(len(test_targets), mode), ansi.BOLD, color))
 
     if mode == "precise":
-        if not _build_missing_non_test(ctx, patterns, rc, endpoint_auth_flags, announce_version, announce_command, ansi, timing):
+        if not _build_missing_non_test(ctx, patterns, rc, endpoint_auth_flags, announce_version, announce_command, color, timing):
             return 1
 
     # Anchor for the probe's invalidate pass: any in-scope target whose build
     # enters the execution phase (where the salt-delete fires). The first test
     # target always exists; the delete is global regardless of which one.
-    entries = _run_probe(ctx, patterns, test_targets[0], rc, endpoint_auth_flags, announce_version, announce_command, ansi, timing)
+    entries = _run_probe(ctx, patterns, test_targets[0], rc, endpoint_auth_flags, announce_version, announce_command, color, timing)
     if entries == None:
         return 1
 
@@ -415,32 +407,32 @@ def _impl(ctx: TaskContext) -> int:
         rc,
         stream_stdout = fmt == "lines" and not using_exec,
         verbose = fmt != "json",
-        ansi = ansi,
+        color = color,
         timing = timing,
     )
     affected = [t for t in test_targets if t in causes]
 
     _err(ctx, "")
-    _err(ctx, _style(ansi, _BOLD, "Affected {} of {} test target(s).".format(len(affected), len(test_targets))))
+    _err(ctx, ansi.style("Affected {} of {} test target(s).".format(len(affected), len(test_targets)), ansi.BOLD, color))
 
     # Time split: bazel (probe + queries + precise build) vs our analysis (gRPC
     # log parse + attribution bookkeeping).
     bazel_secs = timing.get("invalidate", 0) + timing.get("probe", 0) + timing.get("enumerate", 0) + timing.get("attribute", 0) + timing.get("build", 0)
     analysis_secs = timing.get("parse", 0) + timing.get("classify", 0)
     build_part = " · build {}".format(_fmt_elapsed(timing["build"])) if "build" in timing else ""
-    _err(ctx, _style(ansi, _DIM, "  bazel {}: invalidate {} · probe {} · enumerate {} · attribute {}{}".format(
+    _err(ctx, ansi.style("  bazel {}: invalidate {} · probe {} · enumerate {} · attribute {}{}".format(
         _fmt_elapsed(bazel_secs),
         _fmt_elapsed(timing.get("invalidate", 0)),
         _fmt_elapsed(timing.get("probe", 0)),
         _fmt_elapsed(timing.get("enumerate", 0)),
         _fmt_elapsed(timing.get("attribute", 0)),
         build_part,
-    )))
-    _err(ctx, _style(ansi, _DIM, "  analysis {}: parse {} · classify {}".format(
+    ), ansi.DIM, color))
+    _err(ctx, ansi.style("  analysis {}: parse {} · classify {}".format(
         _fmt_elapsed(analysis_secs),
         _fmt_elapsed(timing.get("parse", 0)),
         _fmt_elapsed(timing.get("classify", 0)),
-    )))
+    ), ansi.DIM, color))
 
     # --exec: hand the affected labels to a command instead of writing stdout.
     if using_exec:

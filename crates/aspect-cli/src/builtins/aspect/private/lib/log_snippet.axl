@@ -31,6 +31,8 @@ without a filesystem; the wrappers take `std` (= `ctx.std`) and degrade to
 `source = "none"` on any missing/unreadable path.
 """
 
+load("./ansi.axl", "ansi")
+
 SnippetOptions = record(
     # Max lines kept in the emitted snippet body.
     max_lines = field(int, default = 20),
@@ -109,46 +111,6 @@ _FAILURE_MARKERS = [
     "timeout",
 ]
 
-def _strip_ansi(text):
-    """Remove ANSI CSI/SGR escapes (`\\033[`…final-byte) and OSC sequences
-    (`\\033]`…BEL). Character walk — the runtime has no regex module."""
-    if not text or "\033" not in text:
-        return text
-    out = []
-    i = 0
-    n = len(text)
-    for _ in range(n):
-        if i >= n:
-            break
-        c = text[i]
-        if c == "\033" and i + 1 < n and text[i + 1] == "[":
-            # CSI: parameter/intermediate bytes (digits, ;, :, space-/ ) then a
-            # single final byte terminates. Treat any non-parameter byte as final.
-            j = i + 2
-            for _ in range(n - j):
-                if j >= n:
-                    break
-                cj = text[j]
-                j += 1
-                if cj not in "0123456789;:":
-                    break
-            i = j
-        elif c == "\033" and i + 1 < n and text[i + 1] == "]":
-            # OSC: skip to BEL (0x07) or string terminator ESC\\.
-            j = i + 2
-            for _ in range(n - j):
-                if j >= n:
-                    break
-                if text[j] == "\007":
-                    j += 1
-                    break
-                j += 1
-            i = j
-        else:
-            out.append(c)
-            i += 1
-    return "".join(out)
-
 def _clean_lines(text):
     """Split into display lines after ANSI stripping, progress-bar collapse, and
     de-duplication of consecutive identical lines.
@@ -157,7 +119,7 @@ def _clean_lines(text):
     the last `\\r` on a physical line survives (drops progress-bar spam). Runs of
     identical lines collapse to one. Returns a list of lines (no trailing \\n).
     """
-    cleaned = _strip_ansi(text)
+    cleaned = ansi.strip(text)
     lines = []
     prev = None
     for raw in cleaned.split("\n"):

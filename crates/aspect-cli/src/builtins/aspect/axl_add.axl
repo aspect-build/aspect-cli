@@ -9,25 +9,15 @@ Usage:
 
 load("@std//base64.axl", "base64")
 load("@std//hash.axl", "sha512")
+load("./private/lib/ansi.axl", "ansi")
 load("./private/lib/environment.axl", "error")
-
-# ANSI escape codes for terminal UI
-ORANGE = "\033[38;5;208m"
-GREEN = "\033[32m"
-DIM = "\033[2m"
-BOLD = "\033[1m"
-CYAN = "\033[36m"
-YELLOW = "\033[33m"
-RESET = "\033[0m"
-CLEAR_LINE = "\033[2K"
-MOVE_UP = "\033[1A"
 
 def progress_bar(current: int, total: int, width: int = 30) -> str:
     """Generate an orange progress bar string."""
     filled = int(width * current / total)
     bar = "▪" * filled + "▫" * (width - filled)
     percent = int(100 * current / total)
-    return ORANGE + "[" + bar + "]" + RESET + " " + str(percent) + "%"
+    return ansi.ORANGE + "[" + bar + "]" + ansi.RESET + " " + str(percent) + "%"
 
 def show_phase(ctx: TaskContext, phases: list, current: int):
     """Display phases with checkmarks and progress bar."""
@@ -43,20 +33,20 @@ def show_phase(ctx: TaskContext, phases: list, current: int):
         num_lines = len(phases) + 1  # phases + progress bar
 
         # Clear current line first (progress bar has no trailing newline)
-        io.stdout.write("\r" + CLEAR_LINE)
+        io.stdout.write("\r" + ansi.CLEAR_LINE)
 
         # Move up and clear remaining lines
         for _ in range(num_lines - 1):
-            io.stdout.write(MOVE_UP + CLEAR_LINE)
+            io.stdout.write(ansi.MOVE_UP + ansi.CLEAR_LINE)
 
     lines = []
     for i, phase in enumerate(phases):
         if i < current:
-            lines.append(GREEN + "✓" + RESET + " " + phase)
+            lines.append(ansi.GREEN + "✓" + ansi.RESET + " " + phase)
         elif i == current:
             lines.append("  " + phase + "...")
         else:
-            lines.append(DIM + "  " + phase + RESET)
+            lines.append(ansi.DIM + "  " + phase + ansi.RESET)
 
     # Write phases and progress bar
     output = "\n".join(lines) + "\n"
@@ -71,11 +61,11 @@ def clear_progress(ctx: TaskContext, num_lines: int):
     io = ctx.std.io
 
     # Clear current line first (progress bar has no trailing newline)
-    io.stdout.write("\r" + CLEAR_LINE)
+    io.stdout.write("\r" + ansi.CLEAR_LINE)
 
     # Move up and clear remaining lines
     for _ in range(num_lines - 1):
-        io.stdout.write(MOVE_UP + CLEAR_LINE)
+        io.stdout.write(ansi.MOVE_UP + ansi.CLEAR_LINE)
     io.stdout.write("\r")
     io.stdout.flush()
 
@@ -326,14 +316,14 @@ def _impl(ctx: TaskContext) -> int:
     # Confirmation (only for latest version, unless --yes flag is set)
     if version == "latest" and not ctx.args.yes:
         print("")
-        print(BOLD + ORANGE + "📦 Release" + RESET)
-        print(DIM + "   ─────────────────────────────────────" + RESET)
-        print(DIM + "   Version   " + RESET + BOLD + tag_name + RESET)
-        print(DIM + "   Author    " + RESET + author_login + (CYAN + " <" + author_url + ">" + RESET if author_url else ""))
-        print(DIM + "   Integrity " + RESET + DIM + integrity + RESET)
+        print(ansi.BOLD + ansi.ORANGE + "📦 Release" + ansi.RESET)
+        print(ansi.DIM + "   ─────────────────────────────────────" + ansi.RESET)
+        print(ansi.DIM + "   Version   " + ansi.RESET + ansi.BOLD + tag_name + ansi.RESET)
+        print(ansi.DIM + "   Author    " + ansi.RESET + author_login + (ansi.CYAN + " <" + author_url + ">" + ansi.RESET if author_url else ""))
+        print(ansi.DIM + "   Integrity " + ansi.RESET + ansi.DIM + integrity + ansi.RESET)
         print("")
-        if not confirm(ctx, YELLOW + "?" + RESET + " Add this dependency to MODULE.aspect"):
-            print(DIM + "Cancelled." + RESET)
+        if not confirm(ctx, ansi.YELLOW + "?" + ansi.RESET + " Add this dependency to MODULE.aspect"):
+            print(ansi.DIM + "Cancelled." + ansi.RESET)
             return 1
 
     # Phase 3: Add to MODULE.aspect

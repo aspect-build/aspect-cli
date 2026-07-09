@@ -53,12 +53,7 @@ load("../private/lib/lint_comments.axl", lc_build_marker = "build_marker", lc_ex
 load("../private/lib/patch.axl", patch_hunk_edit_blocks = "hunk_edit_blocks", patch_parse = "parse")
 load("../private/lib/sarif.axl", "parse_sarif", "parse_sarif_diagnostics", "sarif_to_review_comments")
 
-# ANSI codes (matching delivery.axl/lint.axl)
 _LOG = feature_logger("GitHub lint comments")
-
-_BOLD = "\033[1m"
-_YELLOW = "\033[33m"
-_RESET = "\033[0m"
 
 # Cap-ordering priority (error < warning < info, unknown last). Keys are the
 # internal severity vocabulary (post lib/sarif.axl::_translate_sarif_level).

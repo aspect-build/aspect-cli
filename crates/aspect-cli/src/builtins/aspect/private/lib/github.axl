@@ -12,6 +12,7 @@ HTTP failure contract (every helper below):
 
 load("@std//base64.axl", "base64")
 load("@std//time.axl", "time")
+load("./ansi.axl", "ansi")
 load("./environment.axl", "color_enabled", "info", "warn")
 load("./gitlab_detect.axl", "detect_gitlab_mr_base_sha", "is_gitlab_synthesized_merge_pipeline")
 load(
@@ -1641,10 +1642,10 @@ def print_changed_files_listing(ctx, detect_result):
         print("Scope detection unavailable: %s" % detect_result["source"])
         return
     print("Detecting changed files via %s" % detect_result["source"])
-    ansi = color_enabled(ctx.std)
-    green = "\033[32m" if ansi else ""
-    red = "\033[31m" if ansi else ""
-    reset = "\033[0m" if ansi else ""
+    color = color_enabled(ctx.std)
+    green = ansi.GREEN if color else ""
+    red = ansi.RED if color else ""
+    reset = ansi.RESET if color else ""
 
     def _entry_to_rows(entry):
         # Bare filename → single row, no counts.

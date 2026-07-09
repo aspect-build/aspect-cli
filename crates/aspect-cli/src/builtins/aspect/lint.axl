@@ -18,6 +18,7 @@ Usage:
 
 load("@aspect//bazel.axl", "BazelTrait")
 load("@std//time.axl", "sleep", "sleep_iter")
+load("./private/lib/ansi.axl", "ansi")
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_flags.axl", "announce_bazel_args", "aspect_endpoint_auth_flags", "bazel_flag_args", "resolve_bazel_announce")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event")
@@ -363,9 +364,9 @@ def _print_linters_run(ctx, tools_run):
     """Print a one-line summary of the linters that fired. No-op when none ran."""
     if not tools_run:
         return
-    ansi = color_enabled(ctx.std)
-    bold = "\033[1m" if ansi else ""
-    reset = "\033[0m" if ansi else ""
+    color = color_enabled(ctx.std)
+    bold = ansi.BOLD if color else ""
+    reset = ansi.RESET if color else ""
     print("")
     print("%s🧹 Linters%s (%d): %s" % (bold, reset, len(tools_run), ", ".join(tools_run)))
 
@@ -377,9 +378,9 @@ def _print_relevant_findings(ctx, relevant, strategy_name):
     """
     if not relevant:
         return
-    ansi = color_enabled(ctx.std)
-    bold = "\033[1m" if ansi else ""
-    reset = "\033[0m" if ansi else ""
+    color = color_enabled(ctx.std)
+    bold = ansi.BOLD if color else ""
+    reset = ansi.RESET if color else ""
     print("")
     label = "%sLint findings%s after %s%s%s (%d)" % (
         bold,
@@ -628,7 +629,6 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     hc_trait = ctx.traits[HealthCheckTrait]
     lifecycle = ctx.traits[TaskLifecycleTrait]
     strategy = _STRATEGIES[ctx.args.strategy]
-    ansi = color_enabled(ctx.std)
 
     # Validate up front so a typo doesn't fail after the build has run.
     validate_findings_destination(lint_trait.findings_destination)
