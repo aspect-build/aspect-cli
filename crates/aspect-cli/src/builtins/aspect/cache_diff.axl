@@ -42,10 +42,15 @@ precise narrows it to genuine input changes.
 Requires a writable `--remote_cache` (checked up front). require-cached only
 engages on the remote execution path, so the probe reuses the rc's
 `--remote_executor` if one is wired, else stands up an in-process dummy. The
-probe runs with `--nokeep_state_after_build --nouse_action_cache`, which force a
-fresh remote `GetActionResult` per action by clearing the two short-circuit
-layers — in-memory Skyframe and the persistent action cache — so no separate or
-wiped output base is needed.
+probe is two invocations on the same warm output base: pass 1 flips the
+action-execution salt (a sentinel `--remote_default_exec_properties`) to
+`memoizingEvaluator.delete` every ACTION_EXECUTION node WITHOUT re-analysis —
+the analysis graph is preserved — and pass 2 re-checks each action with a fresh
+remote `GetActionResult` under the baseline flags, clearing the persistent
+action cache with `--nouse_action_cache`. Neither the salt nor
+`--nouse_action_cache` is part of the action key, so digests still match the
+baseline. This replaces the old `--nokeep_state_after_build`, which dropped the
+whole Skyframe graph and re-analyzed on every probe.
 
 No RBE and no seed step: a local `bazel test` and this remote probe compute the
 same action digests **given the same flags**, so a normal CI baseline matches.
@@ -73,6 +78,15 @@ load("./private/lib/runnable.axl", "apparent_label")
 
 _GRPC_GET_ACTION_RESULT = "build.bazel.remote.execution.v2.ActionCache/GetActionResult"
 _TEST_MNEMONIC = "TestRunner"
+
+# A sentinel default exec-property injected ONLY on the invalidate pass. It flips
+# the action-execution salt (RemoteModule.computeActionExecutionSalt folds the
+# default exec-properties in unconditionally), which triggers a single global
+# delete of every ACTION_EXECUTION Skyframe node — leaving the analysis graph
+# intact, since RemoteOptions is not a configuration fragment. It never enters an
+# action key (it is dropped from the platform proto, and only the observe pass's
+# baseline flags compute the keys we probe), so digests still match the baseline.
+_SALT_SENTINEL = "aspect_cache_diff_probe"
 
 _BOLD = "\x1b[1m"
 _DIM = "\x1b[2m"
@@ -119,31 +133,72 @@ def _probe_has_unexpected_error(ctx: TaskContext, err_path: str) -> bool:
         return True
     return False
 
-def _run_probe(ctx: TaskContext, patterns: list, rc, endpoint_auth_flags: list, announce_version: bool, announce_command: bool, ansi: bool, timing: dict) -> list | None:
+def _invalidate_action_nodes(ctx: TaskContext, rc, endpoint_auth_flags: list, anchor: str, dummy, timing: dict) -> None:
+    """Pass 1 of the probe: drop every ACTION_EXECUTION node from the *warm*
+    Skyframe graph WITHOUT re-analysis, so pass 2 re-checks each action against
+    the remote cache. Flipping `--remote_default_exec_properties` (via
+    `_SALT_SENTINEL`) changes the action-execution salt, which triggers one global
+    `memoizingEvaluator.delete(ACTION_EXECUTION)` — the analysis graph
+    (ConfiguredTarget/ActionLookup) is untouched. Building a single anchor target
+    only serves to enter the execution phase, where that delete fires; require-cached
+    denies the few re-evaluated actions so nothing executes. This replaces the old
+    `--nokeep_state_after_build`, which dropped the *entire* Skyframe graph and forced
+    a full re-analysis on every probe."""
+    err_path = "/tmp/aspect-cache-diff-invalidate-{}.log".format(ctx.task.name)
+    flags = endpoint_auth_flags + [
+        "--experimental_remote_require_cached",
+        "--remote_default_exec_properties=" + _SALT_SENTINEL + "=1",
+        "--keep_going",
+        "--remote_download_outputs=minimal",
+    ]
+    if dummy:
+        flags.append("--remote_executor=" + dummy.grpc_uri)
+    _t = time.monotonic()
+    ctx.bazel.build(
+        rc = rc,
+        flags = flags,
+        stdout = None,
+        stderr = ctx.std.fs.create(err_path),
+        announce_version = False,
+        announce_command = False,
+        *[anchor]
+    ).wait()
+    timing["invalidate"] = time.monotonic() - _t
+
+def _run_probe(ctx: TaskContext, patterns: list, anchor: str, rc, endpoint_auth_flags: list, announce_version: bool, announce_command: bool, ansi: bool, timing: dict) -> list | None:
     """Require-cached test probe; return its logged `GetActionResultEntry` rows,
     or `None` if Bazel failed unexpectedly (no gRPC log — its captured stderr is
     surfaced first). Bazel's own stdout/stderr are hidden: the expected
-    require-cached denials are noise, the signal is the log."""
+    require-cached denials are noise, the signal is the log.
+
+    Two invocations on the same warm output base: pass 1 (`_invalidate_action_nodes`)
+    salt-deletes the ACTION_EXECUTION layer without re-analysis; pass 2 re-checks
+    every action against the remote cache under the *baseline* flags, so the keys
+    match the baseline exactly."""
     log_path = "/tmp/aspect-cache-diff-grpc-{}.bin".format(ctx.task.name)
     err_path = "/tmp/aspect-cache-diff-probe-{}.log".format(ctx.task.name)
 
+    # require-cached only engages on the remote-execution path; reuse a wired
+    # --remote_executor, else stand up an in-process dummy for both passes.
     dummy = None
+    if not rc.flag_value("--remote_executor", command = "test"):
+        dummy = start_dummy_executor()
+
+    # Pass 1: invalidate the action layer (warm analysis preserved).
+    _invalidate_action_nodes(ctx, rc, endpoint_auth_flags, anchor, dummy, timing)
+
+    # Pass 2: observe. Baseline flags → keys identical to the baseline (no salt
+    # sentinel here). --nouse_action_cache clears the persistent action-cache
+    # short-circuit; pass 1's salt-delete cleared the in-memory Skyframe one.
+    # Neither is part of the action key, so digests still match the baseline.
     flags = endpoint_auth_flags + [
         "--experimental_remote_require_cached",
-        # Force every action through a fresh remote GetActionResult instead of a
-        # local short-circuit. Two layers short-circuit unchanged actions: the
-        # in-memory Skyframe graph (dropped by --nokeep_state_after_build) and
-        # the persistent on-disk action cache (ignored by --nouse_action_cache).
-        # Neither flag is part of the action key, so digests still match the
-        # baseline. Runs on the default output base — no separate/wiped base.
-        "--nokeep_state_after_build",
         "--nouse_action_cache",
         "--remote_grpc_log=" + log_path,
         "--keep_going",
         "--remote_download_outputs=minimal",
     ]
-    if not rc.flag_value("--remote_executor", command = "test"):
-        dummy = start_dummy_executor()
+    if dummy:
         flags.append("--remote_executor=" + dummy.grpc_uri)
 
     _t = time.monotonic()
@@ -339,7 +394,11 @@ def _impl(ctx: TaskContext) -> int:
     if mode == "precise":
         if not _build_missing_non_test(ctx, patterns, rc, endpoint_auth_flags, announce_version, announce_command, ansi, timing):
             return 1
-    entries = _run_probe(ctx, patterns, rc, endpoint_auth_flags, announce_version, announce_command, ansi, timing)
+
+    # Anchor for the probe's invalidate pass: any in-scope target whose build
+    # enters the execution phase (where the salt-delete fires). The first test
+    # target always exists; the delete is global regardless of which one.
+    entries = _run_probe(ctx, patterns, test_targets[0], rc, endpoint_auth_flags, announce_version, announce_command, ansi, timing)
     if entries == None:
         return 1
 
@@ -366,11 +425,12 @@ def _impl(ctx: TaskContext) -> int:
 
     # Time split: bazel (probe + queries + precise build) vs our analysis (gRPC
     # log parse + attribution bookkeeping).
-    bazel_secs = timing.get("probe", 0) + timing.get("enumerate", 0) + timing.get("attribute", 0) + timing.get("build", 0)
+    bazel_secs = timing.get("invalidate", 0) + timing.get("probe", 0) + timing.get("enumerate", 0) + timing.get("attribute", 0) + timing.get("build", 0)
     analysis_secs = timing.get("parse", 0) + timing.get("classify", 0)
     build_part = " · build {}".format(_fmt_elapsed(timing["build"])) if "build" in timing else ""
-    _err(ctx, _style(ansi, _DIM, "  bazel {}: probe {} · enumerate {} · attribute {}{}".format(
+    _err(ctx, _style(ansi, _DIM, "  bazel {}: invalidate {} · probe {} · enumerate {} · attribute {}{}".format(
         _fmt_elapsed(bazel_secs),
+        _fmt_elapsed(timing.get("invalidate", 0)),
         _fmt_elapsed(timing.get("probe", 0)),
         _fmt_elapsed(timing.get("enumerate", 0)),
         _fmt_elapsed(timing.get("attribute", 0)),
