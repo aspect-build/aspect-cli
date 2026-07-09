@@ -1,7 +1,7 @@
 """Unit tests for lib/runnable.axl: apparent_label normalization, BES matching,
 entrypoint selection (passes 1–3), and runfiles directory detection."""
 
-load("./runnable.axl", "apparent_label", "download_outputs_sufficient", "effective_download_outputs", "resolve_run_in", "runnable")
+load("./runnable.axl", "apparent_label", "download_outputs_sufficient", "effective_download_outputs", "resolve_run_in", "runfiles_env", "runnable")
 
 def _eq(label, got, want):
     if got != want:
@@ -650,6 +650,42 @@ def _test_no_runinfo_yields_empty_args_env(ctx):
     _eq("no-runinfo: env empty", ep.environment, {})
     _eq("no-runinfo: inherited empty", ep.inherited_environment, [])
 
+# runfiles_env — the RUNFILES_* env `_spawn` applies. RUNFILES_MANIFEST_FILE is
+# mapped to None (actively removed): if present it forces manifest-mode
+# resolution in rules_py's hermetic_launcher, which follows the venv's
+# bin/python symlink to the real interpreter and drops the venv's site-packages
+# (the venv's third-party deps). It must be removed, not merely left unset,
+# because the spawned child inherits aspect-cli's env — an aspect-cli launched
+# from a Bazel binary/test carries the parent's RUNFILES_MANIFEST_FILE.
+
+def _spawn_ep(runfiles_dir):
+    """An entrypoint struct shaped like `determine_entrypoint`'s return, with
+    only the fields `runfiles_env` reads populated."""
+    return struct(
+        runfiles_dir = runfiles_dir,
+        runfiles_workspace_dir = (runfiles_dir + "/_main") if runfiles_dir else None,
+    )
+
+def _test_runfiles_env_unsets_manifest_file(ctx):
+    """With a runfiles tree: RUNFILES_DIR / JAVA_RUNFILES / RUNFILES_WORKSPACE_DIR
+    are exported (directory mode), and RUNFILES_MANIFEST_FILE is mapped to None
+    so `_spawn` removes any inherited manifest — leaving it would force
+    hermetic_launcher's symlink-following manifest mode and break the venv."""
+    env = runfiles_env(_spawn_ep("/out/bin/pkg/hello.runfiles"))
+    if "RUNFILES_MANIFEST_FILE" not in env:
+        fail("runfiles_env: RUNFILES_MANIFEST_FILE must be present and mapped to None so an inherited manifest is removed")
+    if env["RUNFILES_MANIFEST_FILE"] != None:
+        fail("runfiles_env: RUNFILES_MANIFEST_FILE must be None (removes an inherited manifest); got %r" % env["RUNFILES_MANIFEST_FILE"])
+    _eq("runfiles_env: RUNFILES_DIR", env.get("RUNFILES_DIR"), "/out/bin/pkg/hello.runfiles")
+    _eq("runfiles_env: JAVA_RUNFILES", env.get("JAVA_RUNFILES"), "/out/bin/pkg/hello.runfiles")
+    _eq("runfiles_env: RUNFILES_WORKSPACE_DIR", env.get("RUNFILES_WORKSPACE_DIR"), "/out/bin/pkg/hello.runfiles/_main")
+
+def _test_runfiles_env_empty_without_tree(ctx):
+    """No runfiles tree (`runfiles_dir` is None) → empty dict: none of the
+    RUNFILES_* vars are set (and no manifest unset, since directory mode isn't
+    in play)."""
+    _eq("runfiles_env: empty without tree", runfiles_env(_spawn_ep(None)), {})
+
 # flags — runinfo injection + the --remote_download_outputs floor.
 # Exercised through `runnable(rc=...).flags`; the helpers are private.
 
@@ -876,6 +912,8 @@ _UNIT_TESTS = [
     _test_runinfo_selects_executable_over_heuristic,
     _test_runinfo_attaches_args_and_env,
     _test_no_runinfo_yields_empty_args_env,
+    _test_runfiles_env_unsets_manifest_file,
+    _test_runfiles_env_empty_without_tree,
     _test_download_floor_forced_when_unset,
     _test_download_floor_forced_when_minimal,
     _test_download_floor_forced_when_minimal_alias,
