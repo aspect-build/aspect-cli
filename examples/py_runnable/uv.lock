@@ -1,0 +1,22 @@
+version = 1
+revision = 3
+requires-python = ">=3.11"
+
+[[package]]
+name = "cowsay"
+version = "6.1"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f1/13/63c0a02c44024ee16f664e0b36eefeb22d54e93531630bd99e237986f534/cowsay-6.1-py3-none-any.whl", hash = "sha256:274b1e6fc1b966d53976333eb90ac94cb07a450a700b455af9fbdf882244b30a", size = 25560, upload-time = "2023-09-25T16:30:01.619Z" },
+]
+
+[[package]]
+name = "py-binary-example"
+version = "0.0.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "cowsay" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "cowsay" }]

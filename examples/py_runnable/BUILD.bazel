@@ -1,0 +1,13 @@
+load("@aspect_rules_py//py:defs.bzl", "py_binary")
+
+# py_binary whose launcher is the hermetic_launcher native stub, with a
+# third-party pypi dep in its venv — the fixture for `aspect run`
+# executing a rules_py binary.
+py_binary(
+    name = "hello",
+    srcs = ["hello.py"],
+    main = "hello.py",
+    deps = [
+        "@pypi//cowsay",
+    ],
+)

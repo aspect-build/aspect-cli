@@ -583,12 +583,11 @@ def _spawn(ctx: TaskContext, state: struct, ep: struct, args: list[str], capture
     wrappers can locate the workspace, and the four ASPECT_* variables for
     tools that prefer aspect-native conventions.
 
-    When `ep.runfiles_dir` is set, also injects RUNFILES_DIR /
-    RUNFILES_MANIFEST_FILE / JAVA_RUNFILES so `rlocation` in sh_binary wrappers
-    and the bash runfiles library resolve data deps regardless of cwd, plus
-    RUNFILES_WORKSPACE_DIR (the cwd `bazel run` uses, `runfiles_dir/<workspace>`)
-    for tools that want the canonical workspace root inside runfiles without
-    re-deriving it from RUNFILES_DIR.
+    When `ep.runfiles_dir` is set, also applies the `runfiles_env(ep)` vars
+    (RUNFILES_DIR / JAVA_RUNFILES / RUNFILES_WORKSPACE_DIR) so `rlocation` in
+    sh_binary wrappers and the bash runfiles library resolve data deps regardless
+    of cwd, and unsets RUNFILES_MANIFEST_FILE — see `runfiles_env` for why the
+    manifest var must be actively removed from the spawned env.
 
     Working directory defaults to `runfiles_dir/<workspace>` (matching `bazel run`)
     when a runfiles tree is present, falling back to the aspect invocation directory
@@ -610,15 +609,55 @@ def _spawn(ctx: TaskContext, state: struct, ep: struct, args: list[str], capture
         .env("ASPECT_BAZEL_ROOT_DIRECTORY", ctx.std.env.bazel_root_dir()) \
         .env("ASPECT_GIT_ROOT_DIRECTORY", ctx.std.env.git_root_dir() or "") \
         .args(getattr(ep, "args", []) + list(args))
-    if ep.runfiles_dir:
-        cmd = cmd \
-            .env("RUNFILES_DIR", ep.runfiles_dir) \
-            .env("JAVA_RUNFILES", ep.runfiles_dir) \
-            .env("RUNFILES_MANIFEST_FILE", ep.runfiles_dir + "_manifest") \
-            .env("RUNFILES_WORKSPACE_DIR", ep.runfiles_workspace_dir)
+    for k, v in runfiles_env(ep).items():
+        cmd = cmd.env(k, v)
     if capture:
         cmd = cmd.stdout("piped").stderr("piped")
     return cmd.spawn()
+
+def runfiles_env(ep: struct) -> dict:
+    """The RUNFILES_* environment `_spawn` exports for entrypoint `ep`.
+
+    Empty when `ep` has no materialized runfiles tree (`runfiles_dir` is None).
+    Otherwise RUNFILES_DIR / JAVA_RUNFILES (the runfiles root) plus
+    RUNFILES_WORKSPACE_DIR (the cwd `bazel run` uses, `runfiles_dir/<workspace>`,
+    for tools that want the canonical workspace root without re-deriving it), and
+    RUNFILES_MANIFEST_FILE mapped to `None` to REMOVE it from the spawned env.
+
+    RUNFILES_MANIFEST_FILE must be actively unset, not merely left unset by us.
+    The standard runfiles libraries resolve manifest-first, then directory:
+    whenever RUNFILES_MANIFEST_FILE is present they take manifest mode, which
+    resolves a runfile to its real (symlink-target) path rather than its in-tree
+    path. rules_py's `hermetic_launcher` binary then resolves the venv's
+    `bin/python` through the manifest to the underlying interpreter, so Python
+    computes `sys.prefix` from the interpreter repo, never reads the venv's
+    `pyvenv.cfg`, and the venv's site-packages (its third-party deps) never land
+    on `sys.path`. The spawned child inherits aspect-cli's own environment, so
+    when aspect-cli is itself launched from a Bazel binary/test (which exports
+    RUNFILES_MANIFEST_FILE pointing at aspect-cli's OWN manifest), simply not
+    adding the var isn't enough — the child would inherit the parent's manifest
+    and resolve the wrong tree. Mapping it to `None` (the local process wrapper
+    removes vars set to None) forces directory mode off RUNFILES_DIR, matching
+    how `bazel run` launches top-level binaries (no manifest; the launcher
+    self-discovers its tree from argv[0]). `--build_runfile_links` (always in
+    `_LOCAL_SPAWN_FLAGS`) guarantees the tree is materialized, so directory mode
+    always resolves.
+
+    TODO(windows): with `--noenable_runfiles` (Windows default) there is no
+    symlink tree, so `runfiles_dir` is None and this returns empty — a spawned
+    binary that doesn't self-discover its runfiles then can't resolve data deps.
+    The fix there is RUNFILES_MANIFEST_FILE, but setting it re-triggers the
+    hermetic_launcher manifest-mode breakage above, so the manifest path needs
+    its own (launcher-safe) handling rather than reusing this branch.
+    """
+    if not ep.runfiles_dir:
+        return {}
+    return {
+        "RUNFILES_DIR": ep.runfiles_dir,
+        "JAVA_RUNFILES": ep.runfiles_dir,
+        "RUNFILES_WORKSPACE_DIR": ep.runfiles_workspace_dir,
+        "RUNFILES_MANIFEST_FILE": None,
+    }
 
 def runnable(ctx, targets: list[str], rc = None) -> struct:
     """Build a BES event tracker that resolves entrypoints for `targets`.
