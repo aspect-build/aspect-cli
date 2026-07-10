@@ -19,9 +19,12 @@
 //! secret service is reachable, else the file backend at the default path.
 //!
 //! Read/write semantics: an absent entry/file reads as "no credentials". A
-//! genuine read failure is surfaced as an error (never an empty map), so a
-//! subsequent whole-set `save_all` cannot silently overwrite credentials it only
-//! failed to read.
+//! genuine read failure — the secret service unreachable, or a file that can't be
+//! read — is surfaced as an error (never an empty map), so a subsequent whole-set
+//! `save_all` cannot silently overwrite credentials it only failed to read. A
+//! stored value that *is* readable but no longer deserializes into the expected
+//! shape (a legacy/corrupt layout) reads as "no credentials" on both backends, so
+//! it means "re-run login" rather than a hard error blocking every command.
 
 use std::collections::HashMap;
 use std::fs;
@@ -72,9 +75,10 @@ impl CredentialStore {
     /// (not logged in). An IO/service read failure (secret service unreachable, a
     /// file that can't be read) is an error rather than an empty map, so a
     /// subsequent `save_all` never overwrites good credentials it merely failed to
-    /// read. The file backend additionally treats an *unparseable* file as empty
-    /// (see `file_load_all`): a legacy/corrupt file means "re-run login", not a
-    /// hard error on every command.
+    /// read. A readable-but-*unparseable* stored value (a legacy/corrupt layout)
+    /// is treated as empty on both backends — see `file_load_all` and
+    /// `keyring_load_all` — so it means "re-run login", not a hard error on every
+    /// command.
     pub(crate) fn load_all<T: DeserializeOwned>(&self) -> anyhow::Result<HashMap<String, T>> {
         match self {
             Self::Keyring => keyring_load_all(),
@@ -114,8 +118,13 @@ fn keyring_available() -> bool {
 fn keyring_load_all<T: DeserializeOwned>() -> anyhow::Result<HashMap<String, T>> {
     let entry = keyring_entry()?;
     match entry.get_password() {
-        Ok(raw) => serde_json::from_str(&raw)
-            .map_err(|e| anyhow::anyhow!("failed to parse stored credentials: {e}")),
+        // A stored blob that no longer deserializes into the expected shape (a
+        // pre-`{profile: entry}` layout, or a legacy bare-string value migrated in
+        // from an old `credentials.json`) is treated as "no credentials" so the
+        // user simply re-runs `aspect auth login` — matching the file backend
+        // (`file_load_all`). A hard error here would instead brick every command
+        // until the keyring entry is hand-deleted.
+        Ok(raw) => Ok(serde_json::from_str(&raw).unwrap_or_default()),
         Err(keyring::Error::NoEntry) => Ok(HashMap::new()),
         Err(e) => Err(anyhow::anyhow!(
             "failed to read credentials from keyring: {e}"
@@ -215,6 +224,34 @@ mod tests {
         store.save_all(&map).unwrap();
         let mode = fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[derive(serde::Deserialize)]
+    struct FakeEntry {
+        #[allow(dead_code)]
+        access_token: String,
+    }
+
+    #[test]
+    fn unparseable_stored_blob_reads_as_empty() {
+        // A legacy blob whose profile values are bare strings (the pre-struct
+        // layout, or a value migrated in from an old `credentials.json`) no longer
+        // deserializes into the entry struct. Both backends must read it as "no
+        // credentials" — a re-login prompt — rather than a hard error that blocks
+        // every command. This mirrors the tolerance keyring_load_all relies on for
+        // the same blob shape (no hermetic keyring to exercise directly).
+        let legacy = r#"{"default":"tok-legacy"}"#;
+        let parsed: HashMap<String, FakeEntry> =
+            serde_json::from_str(legacy).unwrap_or_default();
+        assert!(parsed.is_empty(), "legacy bare-string blob → no credentials");
+
+        let dir = std::env::temp_dir().join(format!("aspect-cred-legacy-{}", std::process::id()));
+        let path = dir.join("credentials.json");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(&path, legacy).unwrap();
+        let via_file: HashMap<String, FakeEntry> = file_load_all(&path).unwrap();
+        assert!(via_file.is_empty(), "file backend tolerates the same blob");
         let _ = fs::remove_dir_all(&dir);
     }
 
