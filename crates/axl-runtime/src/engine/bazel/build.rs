@@ -7,6 +7,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use allocative::Allocative;
 use axl_types::stream::Writable;
@@ -42,6 +43,7 @@ use super::sink::tracing as tracing_sink;
 use super::stream::BuildEventStream;
 use super::stream::ExecLogStream;
 use super::stream::Subscriber;
+use super::stream::SubscriberFilter;
 use super::stream::WorkspaceEventStream;
 
 /// Convert a Starlark `Writable` handle to a `std::process::Stdio` for use
@@ -426,8 +428,15 @@ pub(crate) fn build_event_sink_methods(registry: &mut MethodsBuilder) {
 #[derive(Clone)]
 struct IterConfig {
     /// `None` means no filter — every event yields. `Some(set)` keeps only
-    /// events whose payload tag is in the set.
+    /// events whose payload tag is in the set. Applied SEND-side at `bind`
+    /// time (see `BuildEventStream::subscribe_filtered`), so a filtered
+    /// iterator's buffer never holds events of other kinds.
     kinds: Option<Arc<HashSet<i32>>>,
+    /// When `Some(ms)`, blocking iteration (`for event in iter`) yields a
+    /// Starlark `None` after `ms` of silence instead of blocking forever, so
+    /// callers get a heartbeat tick even while Bazel is quiet. `None` blocks
+    /// until the next event or stream close (the historical behavior).
+    tick_ms: Option<u64>,
 }
 
 enum IterState {
@@ -467,22 +476,31 @@ impl std::fmt::Debug for IterState {
 }
 
 impl BuildEventIter {
-    pub fn new(kinds: Option<HashSet<i32>>) -> Self {
+    pub fn new(kinds: Option<HashSet<i32>>, tick_ms: Option<u64>) -> Self {
         Self {
             config: IterConfig {
                 kinds: kinds.map(Arc::new),
+                tick_ms,
             },
             state: Arc::new(Mutex::new(IterState::Pending)),
         }
     }
 
     /// Subscribe the iterator's receiver. Must run before bazel opens the
-    /// BEP FIFO so the early burst is buffered.
+    /// BEP FIFO so the early burst is buffered. The `kinds=` filter is
+    /// installed here as a send-side predicate, so the reader thread drops
+    /// unwanted kinds before they ever enter this iterator's buffer.
     fn bind(&self, stream: &BuildEventStream) -> anyhow::Result<()> {
         let mut state = self.state.lock().unwrap();
         match *state {
             IterState::Pending => {
-                let recv = stream.subscribe();
+                let filter: Option<SubscriberFilter<BuildEvent>> =
+                    self.config.kinds.clone().map(|kinds| {
+                        let f: SubscriberFilter<BuildEvent> =
+                            Arc::new(move |event: &BuildEvent| event_kind_in(event, &kinds));
+                        f
+                    });
+                let recv = stream.subscribe_filtered(filter);
                 *state = IterState::Live { recv };
                 Ok(())
             }
@@ -536,36 +554,48 @@ impl<'v> values::StarlarkValue<'v> for BuildEventIter {
     }
 
     unsafe fn iter_next(&self, _i: usize, heap: Heap<'v>) -> Option<Value<'v>> {
-        // Loop because `kinds=` may filter out events.
-        loop {
-            // Take recv out of the Mutex so we don't hold the lock across
-            // the blocking call.
-            let recv = {
-                let mut state = self.state.lock().unwrap();
-                match std::mem::replace(&mut *state, IterState::Pending) {
-                    IterState::Live { recv } => recv,
-                    other => {
-                        *state = other;
-                        return None;
-                    }
-                }
-            };
-
-            let result = recv.recv();
-            match result {
-                Ok(event) => {
-                    // Put recv back before deciding whether to filter or yield.
-                    *self.state.lock().unwrap() = IterState::Live { recv };
-                    if matches_kinds(&event, self.config.kinds.as_ref()) {
-                        return Some(event.alloc_value(heap));
-                    }
-                    // Otherwise loop and read the next event.
-                }
-                Err(_) => {
-                    *self.state.lock().unwrap() = IterState::Done;
+        // Take recv out of the Mutex so we don't hold the lock across the
+        // blocking call. Events are pre-filtered send-side (see `bind`), so
+        // whatever arrives is already a kind the caller asked for.
+        let recv = {
+            let mut state = self.state.lock().unwrap();
+            match std::mem::replace(&mut *state, IterState::Pending) {
+                IterState::Live { recv } => recv,
+                other => {
+                    *state = other;
                     return None;
                 }
             }
+        };
+
+        match self.config.tick_ms {
+            // Heartbeat mode: yield an event, or a Starlark `None` when the
+            // stream goes quiet for `ms`, so the caller's loop keeps ticking.
+            Some(ms) => match recv.recv_timeout(Duration::from_millis(ms)) {
+                Ok(event) => {
+                    *self.state.lock().unwrap() = IterState::Live { recv };
+                    Some(event.alloc_value(heap))
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    *self.state.lock().unwrap() = IterState::Live { recv };
+                    Some(Value::new_none())
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    *self.state.lock().unwrap() = IterState::Done;
+                    None
+                }
+            },
+            // Blocking mode: yield events until the stream closes.
+            None => match recv.recv() {
+                Ok(event) => {
+                    *self.state.lock().unwrap() = IterState::Live { recv };
+                    Some(event.alloc_value(heap))
+                }
+                Err(_) => {
+                    *self.state.lock().unwrap() = IterState::Done;
+                    None
+                }
+            },
         }
     }
 
@@ -586,40 +616,32 @@ pub(crate) fn build_event_iter_methods(registry: &mut MethodsBuilder) {
         Ok(NoneOr::None)
     }
 
-    /// Non-blocking pop. Returns `None` when empty or disconnected. Honors
-    /// the `kinds=` filter.
+    /// Non-blocking pop. Returns `None` when empty or disconnected. Events are
+    /// already `kinds=`-filtered send-side, so whatever is buffered is wanted.
     fn try_pop<'v>(this: Value<'v>) -> anyhow::Result<NoneOr<BuildEvent>> {
         let iter = this
             .downcast_ref_err::<BuildEventIter>()
             .into_anyhow_result()?;
-        let kinds = iter.config.kinds.clone();
-        loop {
-            let mut state = iter.state.lock().unwrap();
-            let recv = match &*state {
-                IterState::Live { recv } => recv,
-                _ => return Ok(NoneOr::None),
-            };
-            match recv.try_recv() {
-                Ok(event) => {
-                    drop(state);
-                    if matches_kinds(&event, kinds.as_ref()) {
-                        return Ok(NoneOr::Other(event));
-                    }
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => return Ok(NoneOr::None),
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    *state = IterState::Done;
-                    return Ok(NoneOr::None);
-                }
+        let mut state = iter.state.lock().unwrap();
+        let recv = match &*state {
+            IterState::Live { recv } => recv,
+            _ => return Ok(NoneOr::None),
+        };
+        match recv.try_recv() {
+            Ok(event) => Ok(NoneOr::Other(event)),
+            Err(std::sync::mpsc::TryRecvError::Empty) => Ok(NoneOr::None),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                *state = IterState::Done;
+                Ok(NoneOr::None)
             }
         }
     }
 }
 
-fn matches_kinds(event: &BuildEvent, kinds: Option<&Arc<HashSet<i32>>>) -> bool {
-    let Some(kinds) = kinds else {
-        return true;
-    };
+/// True when `event`'s payload kind is in `kinds`. A payload-less event never
+/// matches a filter (there's no kind to test). Used to build the send-side
+/// subscriber filter in `BuildEventIter::bind`.
+fn event_kind_in(event: &BuildEvent, kinds: &HashSet<i32>) -> bool {
     let Some(payload) = event.payload.as_ref() else {
         return false;
     };

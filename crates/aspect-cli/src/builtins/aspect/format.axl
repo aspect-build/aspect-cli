@@ -15,11 +15,10 @@ Usage:
 
 """
 
-load("@aspect//bazel.axl", "BazelTrait", "bazel")
+load("@aspect//bazel.axl", "BazelTrait", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end", bzl = "bazel")
 load("@std//time.axl", "sleep_iter")
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event")
-load("./private/lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
 load("./private/lib/bes_sinks.axl", "announce_bes_sinks", "bes_args", "collect_bes_from_args", "summarize_bes_upload")
 load("./private/lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
 load("./private/lib/environment.axl", "color_enabled", "error", "info", "warn")
@@ -307,8 +306,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # Single pre-task setup phase (status surface, rc parse, health checks);
     # returns resolved flags (a failed health check fails the task inside).
     rc = ph.setup(ctx.args.formatter_target, "format_results")
-    announce_version, announce_command = bazel.announce.resolve(ctx)
-    endpoint_auth_flags = bazel.auth.flags(ctx, rc, "build")
+    announce_version, announce_command = bzl.announce.resolve(ctx)
+    endpoint_auth_flags = bzl.auth.flags(ctx, rc, "build")
 
     # `rc=` opts into the runinfo aspect: `r.flags` captures the formatter's
     # executable + `args` attribute + env so `r.spawn` replays them ahead of the
@@ -697,7 +696,7 @@ format = task(
             maximum = 4096,
             minimum = 0,
         ),
-    } | bazel.flags.args("the formatter build") | bazel.announce.args("the formatter build") | bes_args() | repro_flavor_args(include_fix = True),
+    } | bzl.flags.args("the formatter build") | bzl.announce.args("the formatter build") | bes_args() | repro_flavor_args(include_fix = True),
     traits = [
         BazelTrait,
         HealthCheckTrait,

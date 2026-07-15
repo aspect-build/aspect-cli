@@ -2,41 +2,49 @@
 A default 'build' task that wraps a 'bazel build' command.
 """
 
-load("@aspect//bazel.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS", "bazel")
+load("@aspect//bazel.axl", "BazelTrait", bbazel = "bazel")
 load("./private/lib/artifacts.axl", "artifacts")
-load("./private/lib/bazel_runner.axl", "run_bazel_task")
-load("./private/lib/bes_sinks.axl", "bes_args")
-load("./private/lib/deployment_flags.axl", "deployment_flag_args")
+load("./private/lib/bazel_results.axl", "results")
+load("./private/lib/deployment_flags.axl", "announce_deployment_flags", "deployment_endpoint_flags", "deployment_flag_args")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "phases")
 load("./private/lib/repro_commands.axl", "repro_flavor_args")
 load("./private/lib/tips.axl", "tips")
 
 def _impl(ctx: TaskContext) -> int | TaskConclusion:
-    return run_bazel_task(ctx, command = "build")
+    # `--deployment` / `--aspect-*` endpoints, injected as prepended base flags
+    # (user --bazel-flag still wins) + extra BES backends.
+    dep = deployment_endpoint_flags(ctx)
+
+    # High-level invocation handle: resolves targets, the flag → rc pipeline,
+    # BES sinks, auth, and the retry budget once. The whole flow is visible below.
+    bz = bbazel.build(ctx, flags = dep.base_flags, backends = dep.bes_backends)
+    rs = results.build(ctx)
+    targets = bz.targets()
+
+    rs.setup(targets, bz.rc)          # surface init + health checks (rc already active)
+    announce_deployment_flags(ctx, dep)
+    bz.start()                        # build_start hooks + --cancel + BES announce
+
+    w = None
+    for attempt in bz.attempts():
+        rs.attempt(attempt.index, prior = w)
+        inv = attempt.spawn(targets, events = results.KINDS if rs.live else False)
+        rs.invocation(inv)
+        for event in inv.events:      # BuildEvent | None (None = quiet-tick heartbeat)
+            bz.each(event)
+            rs.process(event)
+        w = attempt.wait()
+        if w.success or not bz.should_retry(w):
+            break
+
+    bz.summary()
+    bz.end(0 if w.success else (w.code or 1))
+    return rs.conclude(w, targets)
 
 build = task(
-    args = {
-        # TODO: Support - (list from stdin)
-        "targets": args.positional(
-            default = ["..."],
-            description = "Bazel target patterns to build. Defaults to '...' which expands to all rule targets in the package at and beneath the current directory. When any pattern is hyphen-led (e.g. excludes like `-//experimental/...`), separate them from flags with `--`: `aspect build -- //... -//experimental/...`.",
-            maximum = 512,
-            minimum = 1,
-        ),
-        "target_pattern_file": args.string(
-            default = "",
-            description = "Read newline-separated target patterns from this file instead of the command line (mirrors Bazel's --target_pattern_file). Blank lines and `#` comments are ignored. Cannot be combined with command-line target patterns.",
-        ),
-        "bazel_retry_attempts": args.int(
-            default = DEFAULT_BAZEL_RETRY_ATTEMPTS,
-            description = BAZEL_RETRY_ATTEMPTS_DESCRIPTION,
-        ),
-        "cancel": args.boolean(
-            default = False,
-            description = "Cancel any running Bazel invocation before starting the build.",
-        ),
-    } | bazel.flags.args("the build") | bazel.announce.args("the build") | bes_args() | deployment_flag_args() | repro_flavor_args(),
+    args = bbazel.targets_arg("build") | bbazel.core_args("the build") |
+           deployment_flag_args() | repro_flavor_args(),
     traits = [
         BazelTrait,
         HealthCheckTrait,

@@ -8,7 +8,7 @@ Two task implementations live here:
     `compute_invocation_state`, `conclusion`, and skipped-bucket plumbing.
 """
 
-load("./bazel_results.axl", "MAX_TEST_TARGETS", "STATUS_ICONS", "STATUS_LABELS", "aspect_web_ui_url", "bes_get", "build_details_data", "common_label_root", "compute_invocation_state", "conclusion", "failed_labels_by_subcommand", "init_data", "process_event", "render_bes_url", "render_check_output", "render_details_or_fallback", "render_summary_or_fallback", "repro_by_target", "repro_targets")
+load("./bazel_results.axl", "MAX_TEST_TARGETS", "RESULTS_KINDS", "STATUS_ICONS", "STATUS_LABELS", "aspect_web_ui_url", "bes_get", "build_details_data", "common_label_root", "compute_invocation_state", "conclusion", "failed_labels_by_subcommand", "init_data", "process_event", "render_bes_url", "render_check_output", "render_details_or_fallback", "render_summary_or_fallback", "repro_by_target", "repro_targets")
 load("./lifecycle.axl", "ReproFixCommand")
 
 # Fake data builders
@@ -1256,7 +1256,47 @@ def _test_try_template_engines_return_ok_text_tuple(ctx):
     (jj_ok, _) = ctx.template.try_jinja2("{{ undefined_macro(x) }}", data = {})
     _eq("jinja2 undefined call not ok", jj_ok, False)
 
+def _test_results_kinds_locked(ctx):
+    """`RESULTS_KINDS` is the passed to the results event iterator as its `kinds=`
+    filter, so it MUST list every kind `process_event` consumes. Lock the set so
+    a new `process_event` branch (or a stray edit) can't silently drop events —
+    if you add/remove a consumed kind, update both `process_event` and this list."""
+    expected = [
+        "aborted",
+        "action_completed",
+        "build_finished",
+        "build_metadata",
+        "build_metrics",
+        "build_started",
+        "configuration",
+        "options_parsed",
+        "structured_command_line",
+        "target_completed",
+        "target_configured",
+        "test_result",
+        "test_summary",
+        "workspace_status",
+    ]
+    _eq("RESULTS_KINDS set", sorted(RESULTS_KINDS), expected)
+
+def _test_results_kinds_all_processed(ctx):
+    """Every kind in `RESULTS_KINDS` drives a real `process_event` branch — feed
+    a minimal event of each and confirm it's handled without error (missing
+    payload fields are tolerated via `bes_get`)."""
+    for kind in RESULTS_KINDS:
+        event = struct(
+            kind = kind,
+            id = struct(label = "//pkg:t", configuration = struct(id = "c1")),
+            payload = struct(),
+        )
+        # Returns a bool ("warrants a status update"); we only assert no crash.
+        result = process_event(init_data(), event)
+        if result != True and result != False:
+            fail("process_event(%s) returned non-bool: %r" % (kind, result))
+
 _UNIT_TESTS = [
+    _test_results_kinds_locked,
+    _test_results_kinds_all_processed,
     _test_try_template_engines_return_ok_text_tuple,
     _test_render_or_fallback_passthrough,
     _test_render_details_or_fallback_degrades,

@@ -2,11 +2,10 @@
 A default 'test' task that wraps a 'bazel test' command.
 """
 
-load("@aspect//bazel.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS", "bazel")
+load("@aspect//bazel.axl", "BazelTrait", bbazel = "bazel")
 load("./private/lib/artifacts.axl", "artifacts")
-load("./private/lib/bazel_runner.axl", "run_bazel_task")
-load("./private/lib/bes_sinks.axl", "bes_args")
-load("./private/lib/deployment_flags.axl", "deployment_flag_args")
+load("./private/lib/bazel_results.axl", "results")
+load("./private/lib/deployment_flags.axl", "announce_deployment_flags", "deployment_endpoint_flags", "deployment_flag_args")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "phases")
 load("./private/lib/repro_commands.axl", "repro_flavor_args")
@@ -75,12 +74,37 @@ def _run_coverage_tool(ctx, bin, raw_args, report_path):
         )
 
 def _impl(ctx: TaskContext) -> int | TaskConclusion:
+    # Coverage flags must land BEFORE the invocation handle resolves the rc, so
+    # append to the trait here (the constructor folds `extra_flags` into the rc).
     if ctx.args.coverage:
         bazel_trait = ctx.traits[BazelTrait]
         bazel_trait.extra_flags.append("--collect_code_coverage")
         bazel_trait.extra_flags.append("--combined_report=lcov")
 
-    conclusion = run_bazel_task(ctx, command = "test")
+    dep = deployment_endpoint_flags(ctx)
+    bz = bbazel.test(ctx, flags = dep.base_flags, backends = dep.bes_backends)
+    rs = results.test(ctx)
+    targets = bz.targets()
+
+    rs.setup(targets, bz.rc)
+    announce_deployment_flags(ctx, dep)
+    bz.start()
+
+    w = None
+    for attempt in bz.attempts():
+        rs.attempt(attempt.index, prior = w)
+        inv = attempt.spawn(targets, events = results.KINDS if rs.live else False)
+        rs.invocation(inv)
+        for event in inv.events:
+            bz.each(event)
+            rs.process(event)
+        w = attempt.wait()
+        if w.success or not bz.should_retry(w):
+            break
+
+    bz.summary()
+    bz.end(0 if w.success else (w.code or 1))
+    conclusion = rs.conclude(w, targets)
 
     if ctx.args.coverage:
         report_path = _resolve_report(ctx)
@@ -100,17 +124,6 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
 test = task(
     args = {
-        # TODO: Support - (list from stdin)
-        "targets": args.positional(
-            minimum = 1,
-            maximum = 512,
-            default = ["..."],
-            description = "Bazel target patterns to test. Defaults to '...' which expands to all rule targets in the package at and beneath the current directory. When any pattern is hyphen-led (e.g. excludes like `-//experimental/...`), separate them from flags with `--`: `aspect test -- //... -//experimental/...`.",
-        ),
-        "target_pattern_file": args.string(
-            default = "",
-            description = "Read newline-separated target patterns from this file instead of the command line (mirrors Bazel's --target_pattern_file). Blank lines and `#` comments are ignored. Cannot be combined with command-line target patterns.",
-        ),
         "coverage": args.boolean(
             default = False,
             description = "Collect code coverage while testing. Adds --collect_code_coverage and --combined_report=lcov so Bazel writes the merged LCOV report at `$(bazel info output_path)/_coverage/_coverage_report.dat`.",
@@ -127,15 +140,8 @@ test = task(
             long = "coverage-tool-arg",
             description = "Argument forwarded to --coverage-tool. Repeat the flag to pass multiple. The `{report}` (or `{lcov}`) placeholder is replaced with the absolute path of the merged LCOV report. Example: `--coverage-tool=codecov --coverage-tool-arg=-f --coverage-tool-arg={report}`.",
         ),
-        "bazel_retry_attempts": args.int(
-            default = DEFAULT_BAZEL_RETRY_ATTEMPTS,
-            description = BAZEL_RETRY_ATTEMPTS_DESCRIPTION,
-        ),
-        "cancel": args.boolean(
-            default = False,
-            description = "Cancel any running Bazel invocation before starting the test.",
-        ),
-    } | bazel.flags.args("the test invocation") | bazel.announce.args("the test") | bes_args() | deployment_flag_args() | repro_flavor_args(),
+    } | bbazel.targets_arg("test") | bbazel.core_args("the test invocation") |
+        deployment_flag_args() | repro_flavor_args(),
     traits = [
         BazelTrait,
         HealthCheckTrait,

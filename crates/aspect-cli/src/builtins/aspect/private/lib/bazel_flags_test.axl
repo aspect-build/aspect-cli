@@ -4,7 +4,7 @@ Run with:
   aspect dev test-bazel-flags
 """
 
-load("@aspect//bazel.axl", "BazelTrait", "bazel", "testonly_config_names", "testonly_flags_delta")
+load("@aspect//bazel.axl", "BazelTrait", "bazel", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end", "testonly_config_names", "testonly_flags_delta")
 
 def _eq(label, got, want):
     if got != want:
@@ -305,7 +305,70 @@ def _test_auth_flags(ctx):
 # args. Happy-path coverage is implicit in every other subtest — the test task
 # declares them all.
 
+# ─── bazel_attempt_end / build_end hook dispatchers ──────────────────────────
+# The seam every bazel-driving task calls after `build.wait()` / `test.wait()`
+# to fire `bazel_trait` recovery/finalization hooks (moved here from the retired
+# bazel_runner.axl). Short, but the contract every task depends on — silent
+# breakage would skip every Workflows-feature recovery hook.
+
+def _record_into(recorder, key, name):
+    """Hook callable that appends `(name, exit_code)` into `recorder[key]`."""
+
+    def _hook(_ctx, exit_code):
+        recorder[key].append((name, exit_code))
+
+    return _hook
+
+def _dispatch_fake_trait(attempt_hooks = [], build_end_hooks = []):
+    """Stand-in for `BazelTrait`; the dispatchers only read these two lists."""
+    return struct(
+        bazel_attempt_end = attempt_hooks,
+        build_end = build_end_hooks,
+    )
+
+def _test_attempt_dispatch_empty_is_noop(_):
+    dispatch_bazel_attempt_end(None, _dispatch_fake_trait(), 0)
+
+def _test_build_end_dispatch_empty_is_noop(_):
+    dispatch_bazel_build_end(None, _dispatch_fake_trait(), 0)
+
+def _test_attempt_dispatch_invokes_in_order(_):
+    """attempt_end hooks fire in registration order, each getting the exit_code."""
+    recorder = {"attempt": []}
+    trait = _dispatch_fake_trait(attempt_hooks = [
+        _record_into(recorder, "attempt", "first"),
+        _record_into(recorder, "attempt", "second"),
+        _record_into(recorder, "attempt", "third"),
+    ])
+    dispatch_bazel_attempt_end(None, trait, 37)
+    _eq("attempt order + exit_code passthrough", recorder["attempt"], [("first", 37), ("second", 37), ("third", 37)])
+
+def _test_build_end_dispatch_invokes_in_order(_):
+    recorder = {"build_end": []}
+    trait = _dispatch_fake_trait(build_end_hooks = [
+        _record_into(recorder, "build_end", "a"),
+        _record_into(recorder, "build_end", "b"),
+    ])
+    dispatch_bazel_build_end(None, trait, 0)
+    _eq("build_end order + exit_code passthrough", recorder["build_end"], [("a", 0), ("b", 0)])
+
+def _test_attempt_dispatch_does_not_fire_build_end(_):
+    """Dispatchers are separately addressable — attempt_end must not fire build_end."""
+    recorder = {"attempt": [], "build_end": []}
+    trait = _dispatch_fake_trait(
+        attempt_hooks = [_record_into(recorder, "attempt", "a")],
+        build_end_hooks = [_record_into(recorder, "build_end", "b")],
+    )
+    dispatch_bazel_attempt_end(None, trait, 0)
+    _eq("attempt fired", recorder["attempt"], [("a", 0)])
+    _eq("build_end not fired", recorder["build_end"], [])
+
 def _test_impl(ctx):
+    _test_attempt_dispatch_empty_is_noop(ctx)
+    _test_build_end_dispatch_empty_is_noop(ctx)
+    _test_attempt_dispatch_invokes_in_order(ctx)
+    _test_build_end_dispatch_invokes_in_order(ctx)
+    _test_attempt_dispatch_does_not_fire_build_end(ctx)
     _test_startup_cli_only(ctx)
     _test_startup_trait_extra_appended(ctx)
     _test_startup_transform_replaces_list(ctx)
@@ -324,7 +387,7 @@ def _test_impl(ctx):
     # after the pure subtests prevents bleed-through.
     _test_setup_command_applies_to_ctx_bazel(ctx)
     _test_sibling_rc_transforms_startup(ctx)
-    print("bazel_flags_test.axl: OK (14 sections)")
+    print("bazel_flags_test.axl: OK (19 sections)")
     return 0
 
 bazel_flags_tests = task(

@@ -1,10 +1,9 @@
 """A default 'run' task that builds a target with `bazel build` and runs the resulting binary."""
 
-load("@aspect//bazel.axl", "BazelTrait", "bazel")
+load("@aspect//bazel.axl", "BazelTrait", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end", bzl = "bazel")
 load("@std//time.axl", "sleep_iter")
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "init_data", "process_event")
-load("./private/lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
 load("./private/lib/bes_sinks.axl", "announce_bes_sinks", "bes_args", "collect_bes_from_args", "summarize_bes_upload")
 load("./private/lib/environment.axl", "error")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
@@ -34,8 +33,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # build`. The `run:` rc section can contain options Bazel's `build` command
     # rejects as unrecognized (e.g. `--script_path`).
     rc = ph.setup(target, "bazel_results", "build")
-    announce_version, announce_command = bazel.announce.resolve(ctx)
-    endpoint_auth_flags = bazel.auth.flags(ctx, rc, "build")
+    announce_version, announce_command = bzl.announce.resolve(ctx)
+    endpoint_auth_flags = bzl.auth.flags(ctx, rc, "build")
 
     # `rc=` opts into the runinfo aspect: `r.flags` then carries the spawn
     # flags + aspect injection that capture the executable, the `args` attribute,
@@ -129,7 +128,7 @@ run = task(
                 "this flag as a no-op."
             ),
         ),
-    } | bazel.flags.args("the build") | bazel.announce.args("the build") | bes_args(),
+    } | bzl.flags.args("the build") | bzl.announce.args("the build") | bes_args(),
     traits = [
         BazelTrait,
         HealthCheckTrait,

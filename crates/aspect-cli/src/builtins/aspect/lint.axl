@@ -16,12 +16,11 @@ Usage:
     aspect lint --fix
 """
 
-load("@aspect//bazel.axl", "BazelTrait", "bazel")
+load("@aspect//bazel.axl", "BazelTrait", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end", bzl = "bazel")
 load("@std//time.axl", "sleep", "sleep_iter")
 load("./private/lib/ansi.axl", "ansi")
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event")
-load("./private/lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
 load("./private/lib/bes_sinks.axl", "announce_bes_sinks", "bes_args", "collect_bes_from_args", "summarize_bes_upload")
 load("./private/lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
 load("./private/lib/environment.axl", "color_enabled", "detect_ci", "error", "warn")
@@ -636,7 +635,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     data["lint"]["strategy"] = _strategy_name(strategy)
     data["target_pattern"] = " ".join(list(ctx.args.targets)) if ctx.args.targets else ""
 
-    # Base flags computed before phases.setup, which forwards them to bazel.setup_command.
+    # Base flags computed before phases.setup, which forwards them to bzl.setup_command.
     base_flags = ["--remote_download_regex='.*AspectRulesLint.*'"]
     for aspect in ctx.args.aspects:
         base_flags.append("--aspects=" + aspect)
@@ -661,8 +660,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # Pre-task setup phase (status surface, rc parse, health checks); returns
     # resolved flags (a failed health check fails the task inside phases.setup).
     rc = ph.setup(data["target_pattern"], "lint_results", "build", base_flags = base_flags)
-    announce_version, announce_command = bazel.announce.resolve(ctx)
-    endpoint_auth_flags = bazel.auth.flags(ctx, rc, "build")
+    announce_version, announce_command = bzl.announce.resolve(ctx)
+    endpoint_auth_flags = bzl.auth.flags(ctx, rc, "build")
 
     # Detect changed files BEFORE lint_start hooks so features read the canonical
     # lint_trait.changed_files. Prefers GitHub PR Files API, falls back to local
@@ -1088,7 +1087,7 @@ lint = task(
             default = ["..."],
             description = "Bazel target patterns to lint. Defaults to '...' which expands to all rule targets in the package at and beneath the current directory. Pass multiple patterns to combine includes and excludes; when any pattern is hyphen-led, separate them from flags with `--` (e.g. `aspect lint -- //... -//experimental/...`).",
         ),
-    } | bazel.flags.args("the lint build") | bazel.announce.args("the lint build") | bes_args() | repro_flavor_args(include_fix = True),
+    } | bzl.flags.args("the lint build") | bzl.announce.args("the lint build") | bes_args() | repro_flavor_args(include_fix = True),
     traits = [
         BazelTrait,
         HealthCheckTrait,

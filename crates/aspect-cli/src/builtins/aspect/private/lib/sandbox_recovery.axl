@@ -24,7 +24,7 @@ registers when `environment.runner != None`:
    the FINAL attempt exits with `BLAZE_INTERNAL_ERROR (37)` or
    `LOCAL_ENVIRONMENTAL_ERROR (36)`, the Bazel server is persistently
    sick (could be #23880 the disk-scan missed, JVM OOM, native crash,
-   corrupt lock file, etc.). The retry loop in `bazel_runner.axl` only
+   corrupt lock file, etc.). The `bazel.build(ctx)` retry loop only
    continues retrying on these two codes — `bazel_trait.build_retry`
    keys off `default_retry`. So a final exit code that is itself
    retryable-class means *every* prior attempt was also retryable-class

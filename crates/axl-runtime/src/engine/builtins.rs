@@ -5,6 +5,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
+use std::time::SystemTime;
 
 use allocative::Allocative;
 use base64::{
@@ -484,6 +485,27 @@ fn builtins_time_methods(registry: &mut MethodsBuilder) {
             .get_or_init(Instant::now)
             .elapsed()
             .as_nanos() as i64)
+    }
+
+    /// Returns the wall-clock time in milliseconds since the Unix epoch.
+    ///
+    /// Unlike `monotonic*`, this is real calendar time and is comparable
+    /// across processes — use it to stamp events, not to measure elapsed
+    /// time (a clock adjustment can make it jump). Returns 0 if the system
+    /// clock is set before the epoch.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// load("@std//time.axl", "now_ms")
+    /// stamped_at = now_ms()
+    /// ```
+    fn now_ms(this: Value<'_>) -> anyhow::Result<i64> {
+        let _ = this;
+        Ok(SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0))
     }
 }
 

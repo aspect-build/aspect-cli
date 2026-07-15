@@ -12,6 +12,14 @@ must alias this import — `load("@aspect//bazel.axl", bzl = "bazel")` — so th
 """
 
 load("./private/lib/aspect_endpoint_auth.axl", "headers_have_auth", "needs_aspect_token", "resolve_aspect_bearer")
+load(
+    "./private/lib/bes_sinks.axl",
+    "announce_bes_sinks",
+    "bes_args",
+    "build_events_iterator",
+    "collect_bes_from_args",
+    "summarize_bes_upload",
+)
 load("./private/lib/environment.axl", "color_enabled", "detect_ci")
 
 exit_codes = struct(
@@ -71,6 +79,12 @@ BazelTrait = trait(
     # Declarative data — composable, zero-cost reads
     extra_flags = attr(list[str], default = [], description = "Additional Bazel flags appended to every build/test invocation"),
     extra_startup_flags = attr(list[str], default = [], description = "Additional Bazel startup flags prepended before the command"),
+    # Injected DEFAULT flags — prepended ahead of the user's `--bazel-flag`s so a
+    # user override still wins (last-wins). Distinct from `extra_flags`, which
+    # append AFTER the user's and therefore beat them. Features that wire an
+    # endpoint the user may override (e.g. a deployment's `--remote_cache`) use
+    # this; features that force a flag use `extra_flags`.
+    base_flags = attr(list[str], default = [], description = "Default Bazel flags prepended before the user's --bazel-flag overrides (user overrides win)"),
     # Element types are `bazel.build.BuildEventSink` / `bazel.execution_log.ExecLogSink`
     # (builtin `bazel` global), left bare because this file's `bazel` name is the
     # exported namespace and those builtin types aren't loadable via `@bazel//`.
@@ -96,6 +110,34 @@ BazelTrait = trait(
     bazel_attempt_end = attr(list[typing.Callable[[TaskContext, int], None]], default = [], description = "Hooks called once after EACH Bazel invocation attempt (including retries), with that attempt's exit code. Runs after the wait() returns and before the retry decision, so a hook can take corrective action (e.g. clean stranded sandbox state) that might let the next retry succeed. Distinct from `build_end`, which fires once after the final attempt."),
     build_end = attr(list[typing.Callable[[TaskContext, int], None]], default = [], description = "Hooks called once after the Bazel invocation completes (after all retries), with the final exit code"),
 )
+
+def dispatch_bazel_attempt_end(ctx, bazel_trait, exit_code):
+    """Fire every `bazel_trait.bazel_attempt_end` hook with `exit_code`.
+
+    Call after a `ctx.bazel.build(...).wait()` (or `.test(...)`) has returned and
+    the per-invocation work that must complete before the NEXT attempt is done
+    (notably BES sink draining — re-binding a Live sink errors). Inside a retry
+    loop, fire BEFORE the retry decision so a hook can repair state that would
+    otherwise make the next attempt fail the same way (e.g.
+    `bazel.recover_poisoned_sandbox`). Outside a retry loop, fires exactly once.
+
+    The `bazel.build(ctx)` / `bazel.test(ctx)` invocation handle fires this hook
+    itself (`attempt.wait`); this free function is for tasks that still drive
+    their own spawn loop (run / format / lint / warming / gazelle / delivery)."""
+    for handler in bazel_trait.bazel_attempt_end:
+        handler(ctx, exit_code)
+
+def dispatch_bazel_build_end(ctx, bazel_trait, exit_code):
+    """Fire every `bazel_trait.build_end` hook with the FINAL `exit_code`.
+
+    Call after the retry loop has exited (or, single-attempt, after the only
+    `wait()`). Features hang task-finalization here — `ArtifactUpload` runs its
+    Profile / BEP / Execlog / Testlogs upload, `sandbox_recovery` signals the
+    runner unhealthy on a final server-internal-error exit. The invocation handle
+    fires this via `build.end`; this free function serves the not-yet-migrated
+    tasks' own spawn loops."""
+    for handler in bazel_trait.build_end:
+        handler(ctx, exit_code)
 
 # Flag/rc/auth helpers (formerly lib/bazel_flags.axl). Private `_`-prefixed
 # functions behind the `bazel` namespace so the whole Bazel surface is one
@@ -340,9 +382,205 @@ def _aspect_endpoint_auth_flags(ctx, rc, command: str) -> list:
         _bes_backend_auth_flags(ctx, rc, command)
     )
 
+# ─── The invocation handle: `bazel.build(ctx)` / `bazel.test(ctx)` ────────────
+#
+# The high-level, AXL-aware wrapper over the low-level `ctx.bazel.build/test`.
+# The constructor resolves targets, the flag→rc pipeline (`use_rc`), CLI-streamed
+# BES sinks, per-invocation auth, announce flags, and the retry budget ONCE; the
+# returned handle exposes the flow as verbs the task drives in a visible loop
+# (see `build.axl`). It reads `BazelTrait` from `ctx.traits`, so features keep
+# extending builds through the trait exactly as before — the handle is a
+# consumer of the feature system, not a replacement for it.
+
+# BES drain cadence. Passed as `tick_ms` to the event iterator so
+# `for event in inv.events` yields `None` after this many ms of quiet, giving a
+# results heartbeat without a separate sleep loop.
+_TICK_MS = 250
+
+def _resolve_targets(ctx) -> tuple:
+    """`(patterns, base_flags)` honoring `--target-pattern-file`: when set, forward
+    it as a Bazel flag (patterns empty) rather than expand to argv — fails on
+    combine-with-positional or a missing file. Otherwise the positional patterns."""
+    pattern_file = getattr(ctx.args, "target_pattern_file", "") if hasattr(ctx.args, "target_pattern_file") else ""
+    if pattern_file:
+        if ctx.args.is_explicit("targets"):
+            fail("--target-pattern-file cannot be combined with command-line target patterns")
+        if not ctx.std.fs.exists(pattern_file):
+            fail("--target-pattern-file: file not found: " + pattern_file)
+        return ([], ["--target_pattern_file=" + pattern_file])
+    return (list(ctx.args.targets), [])
+
+def _invocation(ctx, command: str, flags: list = [], backends: list = []):
+    """Shared constructor for `_build` / `_test`. `flags` are extra base flags to
+    prepend (user `--bazel-flag` still wins); `backends` are extra CLI-streamed
+    BES backend URIs to union with `--bes-backend`."""
+    bazel_trait = ctx.traits[BazelTrait]
+
+    (patterns, target_flags) = _resolve_targets(ctx)
+
+    # Base (default) flags, prepended so user --bazel-flag overrides win:
+    # the TTY signal, feature-injected `trait.base_flags` (e.g. a deployment's
+    # --remote_cache), caller `flags`, and the --target_pattern_file forward.
+    base_flags = ["--isatty=" + str(int(ctx.std.io.stdout.is_tty))]
+    base_flags.extend(bazel_trait.base_flags)
+    base_flags.extend(flags)
+    base_flags.extend(target_flags)
+
+    # Resolve flags → parse_rc → use_rc → announce-rc disclosure. The active run
+    # command drives the health check (in results.setup) and every spawn below.
+    rc = _setup_command(ctx, command, base_flags = base_flags)
+
+    (announce_version, announce_command) = _resolve_announce(ctx)
+
+    # CLI-streamed BES sinks: `--bes-backend` + `backends` + the trait's own
+    # (feature-injected) sinks.
+    sinks = collect_bes_from_args(ctx, extra_backends = backends)
+    sinks.extend(bazel_trait.build_event_sinks)
+
+    # Per-invocation auth headers for rc-visible Aspect endpoints, appended to
+    # each spawn's flags after rc expansion.
+    auth_flags = _aspect_endpoint_auth_flags(ctx, rc, command)
+
+    requested = ctx.args.bazel_retry_attempts if hasattr(ctx.args, "bazel_retry_attempts") else DEFAULT_BAZEL_RETRY_ATTEMPTS
+    max_attempts = max(1, requested)
+
+    # Shared across attempt handles: the live invocation (for wait()) and the
+    # index of the attempt that last spawned (for should_retry()).
+    state = {"invocation": None, "index": 0}
+
+    def _make_attempt(index):
+        def spawn(targets, extra_flags = [], aspects = [], events = False):
+            state["index"] = index
+
+            # One iterator per invocation, fanned out in AXL — an extra runtime
+            # iterator would deep-clone the whole stream. `events`: False → none;
+            # True → all kinds; a list → those kinds (send-side filtered). A trait
+            # build_event hook may want any kind, so its presence forces all kinds.
+            trait_wants = bool(bazel_trait.build_event)
+            if events == False and not trait_wants:
+                iterator = None
+            else:
+                kinds = None if (trait_wants or events == True) else events
+                iterator = build_events_iterator(kinds = kinds, tick_ms = _TICK_MS)
+
+            # `[]` would ENABLE BES with no consumer (the runtime treats an empty
+            # list as "stream on"); collapse to False so a local build with no
+            # sinks/iterator runs with no BEP fifo at all.
+            be = ([iterator] if iterator else []) + list(sinks)
+            build_events = be if be else False
+
+            if command == "test":
+                inv = ctx.bazel.test(
+                    build_events = build_events,
+                    execution_log = bazel_trait.execution_log_sinks or False,
+                    announce_version = announce_version,
+                    announce_command = announce_command,
+                    flags = auth_flags + extra_flags,
+                    *targets
+                )
+            else:
+                inv = ctx.bazel.build(
+                    build_events = build_events,
+                    execution_log = bazel_trait.execution_log_sinks or False,
+                    announce_version = announce_version,
+                    announce_command = announce_command,
+                    flags = auth_flags + extra_flags,
+                    aspects = aspects,
+                    *targets
+                )
+            state["invocation"] = inv
+            return struct(
+                events = iterator if iterator else [],
+                sink_invocation_id = inv.sink_invocation_id,
+            )
+
+        def wait():
+            status = state["invocation"].wait()
+            # Flush BES sinks before the retry decision: rebinding a still-Live
+            # gRPC sink on the next spawn errors, and wait() resets it to Idle.
+            for sink in sinks:
+                sink.wait()
+            for handler in bazel_trait.bazel_attempt_end:
+                handler(ctx, status.code)
+            return status
+
+        return struct(index = index, spawn = spawn, wait = wait)
+
+    def start():
+        for handler in bazel_trait.build_start:
+            handler(ctx)
+        if hasattr(ctx.args, "cancel") and ctx.args.cancel:
+            ctx.bazel.cancel_invocation().wait()
+        announce_bes_sinks(ctx, sinks)
+
+    def should_retry(w) -> bool:
+        return w.code != 0 and bazel_trait.build_retry(w.code) and state["index"] < max_attempts - 1
+
+    def each(event):
+        # `event` is None on a quiet tick — nothing for trait hooks to do.
+        if event == None:
+            return
+        for handler in bazel_trait.build_event:
+            handler(ctx, event)
+
+    return struct(
+        rc = rc,
+        targets = lambda: patterns,
+        start = start,
+        attempts = lambda: [_make_attempt(i) for i in range(max_attempts)],
+        should_retry = should_retry,
+        each = each,
+        summary = lambda: summarize_bes_upload(ctx, sinks),
+        end = lambda code: [handler(ctx, code) for handler in bazel_trait.build_end],
+    )
+
+def _build(ctx, flags: list = [], backends: list = []):
+    """High-level `bazel build` invocation handle. See `_invocation`."""
+    return _invocation(ctx, "build", flags = flags, backends = backends)
+
+def _test(ctx, flags: list = [], backends: list = []):
+    """High-level `bazel test` invocation handle. See `_invocation`."""
+    return _invocation(ctx, "test", flags = flags, backends = backends)
+
+# The CLI args every Bazel-spawning task must register (splat into `task(args)`).
+# CORE_ARGS is command-agnostic; BUILD_ARGS/TEST_ARGS carry the positional target
+# pattern with command-specific help. `deployment.args()` / `repro.args()` stay
+# separate (their libs can't be imported here without a load cycle) and are
+# splatted at the task alongside these.
+def _core_args(phrase: str) -> dict:
+    return _flag_args(phrase) | _announce_args(phrase) | bes_args() | {
+        "target_pattern_file": args.string(
+            default = "",
+            description = "Read newline-separated target patterns from this file instead of the command line (mirrors Bazel's --target_pattern_file). Blank lines and `#` comments are ignored. Cannot be combined with command-line target patterns.",
+        ),
+        "bazel_retry_attempts": args.int(
+            default = DEFAULT_BAZEL_RETRY_ATTEMPTS,
+            description = BAZEL_RETRY_ATTEMPTS_DESCRIPTION,
+        ),
+        "cancel": args.boolean(
+            default = False,
+            description = "Cancel any running Bazel invocation before starting.",
+        ),
+    }
+
+def _targets_arg(verb: str) -> dict:
+    return {
+        "targets": args.positional(
+            default = ["..."],
+            minimum = 1,
+            maximum = 512,
+            description = "Bazel target patterns to %s. Defaults to '...' which expands to all rule targets in the package at and beneath the current directory. When any pattern is hyphen-led (e.g. excludes like `-//experimental/...`), separate them from flags with `--`: `aspect %s -- //... -//experimental/...`." % (verb, verb),
+        ),
+    }
+
 bazel = namespace(
     setup_command = _setup_command,
     sibling_rc = _sibling_rc,
+    build = _build,
+    test = _test,
+    core_args = _core_args,
+    targets_arg = _targets_arg,
+    TRAITS = [BazelTrait],
     flags = namespace(
         resolve = _resolve_flags,
         resolve_startup = _resolve_startup_flags,

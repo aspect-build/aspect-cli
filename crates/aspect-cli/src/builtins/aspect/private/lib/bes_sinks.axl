@@ -17,6 +17,17 @@ resolution. (The companion case — BES routed through Bazel via
 load("./aspect_endpoint_auth.axl", "endpoint_host", "headers_have_auth", "is_aspect_host", "resolve_aspect_bearer")
 load("./environment.axl", "info")
 
+def build_events_iterator(kinds = None, tick_ms = None):
+    """Fresh CLI-side BES event iterator (`bazel.build_events.iterator`).
+
+    Exposed here because this file already binds the builtin `bazel` global,
+    while `bazel.axl` cannot (its own exported `bazel` namespace shadows the
+    builtin). `kinds` is a list of event-kind aliases (or None for every kind);
+    `tick_ms` (when set) makes `for event in iter` yield `None` on a quiet tick
+    so callers get a heartbeat without a separate sleep loop. One iterator per
+    invocation — the runtime rejects rebinding a used handle."""
+    return bazel.build_events.iterator(kinds = kinds, tick_ms = tick_ms)
+
 def bes_args() -> dict:
     """The `bes_backends` / `bes_headers` CLI args every BES-capable task
     declares, with one canonical description each. Splat into a task's

@@ -695,6 +695,50 @@ def _setup(ctx, subject, kind, data, command = "build", base_flags = []):
 
     return rc
 
+def _setup_surface(ctx, subject, kind, data):
+    """Surface half of `_setup`: everything except the Bazel rc parse.
+
+    For tasks that resolve the active `RunCommand` themselves BEFORE the
+    lifecycle surface opens — e.g. the `bazel.build(ctx)` / `bazel.test(ctx)`
+    invocation handle owns the flag → `parse_rc` → `use_rc` pipeline, then hands
+    the live rc here. Runs, in order:
+
+      1. `append_runner_job_history`.
+      2. Open the `🔧 Setup` phase mark (the task's first `phases.update`, so
+         surfaces self-init and render their first body from `data`).
+      3. `health_check` hooks — they read the ALREADY-active run command
+         (`ctx.bazel.active_rc()`, set by the caller's rc pipeline), so this
+         must run after the caller has `use_rc`'d. On unhealthy, concludes the
+         surface and `fail()`s — never returns.
+
+    Unlike `_setup`, this never touches `ctx.bazel` flags itself; the caller
+    owns the rc so the same active run command drives both the health check and
+    every subsequent spawn.
+    """
+    append_runner_job_history(ctx)
+
+    _update(
+        ctx,
+        "running",
+        ProgressStyles(
+            body = "Running setup...",
+            stream = "Running setup",
+        ),
+        kind = kind,
+        data = data,
+        phase = Phase(
+            name = "setup",
+            description = "Prepare the task environment",
+            emoji = "🔧",
+        ),
+        subject = subject,
+    )
+
+    hc_trait = ctx.traits[HealthCheckTrait] if HealthCheckTrait in ctx.traits else None
+    health_error = run_health_checks(ctx, hc_trait)
+    if health_error != None:
+        _fail_health_check(ctx, kind, data, health_error)
+
 # Uniform surface body/conclusion on health-check failure; the detailed
 # reason goes to the CLI/log instead.
 _HEALTH_CHECK_FAILED = "Health check failed"
@@ -741,6 +785,9 @@ def _new(ctx, data):
     def setup(subject, kind, command = "build", base_flags = []):
         return _setup(ctx, subject, kind, data, command, base_flags)
 
+    def setup_surface(subject, kind):
+        _setup_surface(ctx, subject, kind, data)
+
     def update(status, progress, kind = "", data = None, priority = True, phase = None, final = False, conclusion = "", exit_code = 0, subject = ""):
         return _update(
             ctx,
@@ -782,6 +829,7 @@ def _new(ctx, data):
         ctx = ctx,
         data = _data,
         setup = setup,
+        setup_surface = setup_surface,
         update = update,
         dispatch = dispatch,
         suggest_fixes = suggest_fixes,
