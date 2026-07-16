@@ -166,6 +166,11 @@ def _configure_impl(ctx: TaskContext) -> int:
         return 1
 
     print("Configured deployment '" + info.name + "'.")
+    if info.multiple_auth_servers:
+        print("")
+        print("This deployment advertised multiple authorization servers; the CLI")
+        print("configured the first. To use a different one, add its issuer and")
+        print("client_id to ~/.aspect/config.json by hand.")
     if not info.can_login:
         print("")
         print("This deployment does not advertise its login config, so the CLI")

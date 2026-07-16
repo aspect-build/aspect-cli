@@ -346,12 +346,45 @@ fn resolve_aspect_env() -> anyhow::Result<AuthEnv> {
 /// Protected Resource Metadata). Both the remote-cache and BES edges serve it.
 const PROTECTED_RESOURCE_PATH: &str = "/.well-known/oauth-protected-resource";
 
+/// One entry of the discovery document's `aspect_authorization_servers` list —
+/// an OAuth issuer bundled with the PKCE `client_id` and `scopes` to use against
+/// it. Pairing the client and scopes with each issuer lets a deployment advertise
+/// more than one authorization server, which the flat top-level
+/// `client_id`/`scopes_supported` cannot express.
+#[derive(Debug, Deserialize)]
+struct AspectAuthServer {
+    #[serde(default)]
+    issuer: String,
+    #[serde(default)]
+    client_id: String,
+    #[serde(default)]
+    scopes: Vec<String>,
+}
+
+/// The chosen OAuth config for a deployment: one issuer with its PKCE client and
+/// scopes, resolved from the discovery document's authorization servers.
+struct SelectedAuthServer<'a> {
+    issuer: &'a str,
+    client_id: &'a str,
+    scopes: &'a [String],
+    /// The document advertised more than one authorization server and we picked
+    /// the first. `configure` surfaces this so the user knows a different issuer
+    /// would require editing `~/.aspect/config.json` by hand.
+    multiple: bool,
+}
+
 /// A deployment endpoint's discovery document, served at
-/// [`PROTECTED_RESOURCE_PATH`]. `authorization_servers[0]` is the OAuth issuer
-/// the CLI mints a bearer against (interactive PKCE or API token); `client_id` is
-/// the public PKCE client. `scopes_supported` are the OAuth scopes the CLI
-/// requests at login (overridable per deployment for a bring-your-own IdP that
-/// doesn't accept the standard OIDC set); empty falls back to that default set.
+/// [`PROTECTED_RESOURCE_PATH`].
+///
+/// `aspect_authorization_servers` is the current, preferred shape: a list of
+/// {issuer, client_id, scopes} — the OAuth config the CLI mints a bearer against
+/// (interactive PKCE or API token). The flat top-level `authorization_servers`
+/// (issuer URLs) + `client_id` + `scopes_supported` are the legacy shape, used
+/// as a fallback by [`ProtectedResource::selected_auth_server`] when no usable
+/// `aspect_authorization_servers` entry is present (older deployments). `scopes`
+/// are overridable per deployment for a bring-your-own IdP that doesn't accept
+/// the standard OIDC set, and empty falls back to [`DEFAULT_LOGIN_SCOPES`].
+///
 /// `aspect_endpoints` is the capability → host map the deployment serves (remote
 /// cache + BES share one client, so one login covers every host); the CLI records
 /// it so `--deployment` can wire each host to the right Bazel flag.
@@ -359,6 +392,8 @@ const PROTECTED_RESOURCE_PATH: &str = "/.well-known/oauth-protected-resource";
 struct ProtectedResource {
     #[serde(default)]
     resource: String,
+    #[serde(default)]
+    aspect_authorization_servers: Vec<AspectAuthServer>,
     #[serde(default)]
     authorization_servers: Vec<String>,
     #[serde(default)]
@@ -370,13 +405,34 @@ struct ProtectedResource {
 }
 
 impl ProtectedResource {
-    /// The OAuth issuer — the first advertised authorization server. Empty when
-    /// none is advertised.
-    fn issuer(&self) -> &str {
-        self.authorization_servers
-            .first()
-            .map(String::as_str)
-            .unwrap_or("")
+    /// The OAuth config to log in with: the first usable `aspect_authorization_servers`
+    /// entry (one that carries an issuer) when the document uses the current shape,
+    /// else the legacy flat fields (`authorization_servers[0]` + top-level
+    /// `client_id`/`scopes_supported`). `multiple` reflects the list actually
+    /// selected from, counting only issuer-bearing entries. Returns `None` when
+    /// neither shape advertises an issuer, so the caller records a deployment that
+    /// can't log in.
+    fn selected_auth_server(&self) -> Option<SelectedAuthServer<'_>> {
+        let mut usable = self
+            .aspect_authorization_servers
+            .iter()
+            .filter(|s| !s.issuer.is_empty());
+        if let Some(first) = usable.next() {
+            return Some(SelectedAuthServer {
+                issuer: &first.issuer,
+                client_id: &first.client_id,
+                scopes: &first.scopes,
+                multiple: usable.next().is_some(),
+            });
+        }
+        let mut usable = self.authorization_servers.iter().filter(|s| !s.is_empty());
+        let issuer = usable.next()?;
+        Some(SelectedAuthServer {
+            issuer,
+            client_id: &self.client_id,
+            scopes: &self.scopes_supported,
+            multiple: usable.next().is_some(),
+        })
     }
 }
 
@@ -475,19 +531,23 @@ fn deployment_name_from_host(host: &str) -> String {
     }
 }
 
-/// Build a [`Deployment`] record from a discovered [`ProtectedResource`].
-/// `issuer` + `client_id` are the OAuth config for login (interactive or API
-/// token); absent when the endpoint does not advertise them. `hosts` are the
-/// endpoints this deployment's token covers: the configured host, the advertised
-/// `resource` host, and every `aspect_endpoints` host, deduped. The typed
-/// `endpoints` map is recorded (hosts normalized) so `--deployment` can wire each
-/// to its Bazel flag. `configured_host` is the host the user ran `configure`
-/// against (the `resource` may be a canonical alias).
+/// Build a [`Deployment`] record from a discovered [`ProtectedResource`],
+/// returning whether the document advertised more than one usable authorization
+/// server (so the caller can warn that only the first was recorded).
+///
+/// `issuer` + `client_id` + `scopes` come from the selected authorization server
+/// ([`ProtectedResource::selected_auth_server`]); all are absent when the endpoint
+/// advertises no issuer. `hosts` are the endpoints this deployment's token covers:
+/// the configured host, the advertised `resource` host, and every
+/// `aspect_endpoints` host, deduped. The typed `endpoints` map is recorded (hosts
+/// normalized) so `--deployment` can wire each to its Bazel flag. `configured_host`
+/// is the host the user ran `configure` against (the `resource` may be a canonical
+/// alias).
 fn deployment_from_discovery(
     name: String,
     configured_host: &str,
     info: &ProtectedResource,
-) -> Deployment {
+) -> (Deployment, bool) {
     let mut hosts: Vec<String> = Vec::new();
     let mut push = |h: &str| {
         let h = endpoint_host_str(h);
@@ -507,17 +567,20 @@ fn deployment_from_discovery(
     push(&endpoints.cache);
     push(&endpoints.bes);
     push(&endpoints.exec);
+    let selected = info.selected_auth_server();
+    let multiple = selected.as_ref().is_some_and(|s| s.multiple);
     let advertised = |s: &str| (!s.is_empty()).then(|| s.to_string());
-    Deployment {
+    let deployment = Deployment {
         name,
         default: false,
-        issuer: advertised(info.issuer()),
-        client_id: advertised(&info.client_id),
+        issuer: selected.as_ref().and_then(|s| advertised(s.issuer)),
+        client_id: selected.as_ref().and_then(|s| advertised(s.client_id)),
         api_url: None,
         hosts,
-        scopes: info.scopes_supported.clone(),
+        scopes: selected.as_ref().map(|s| s.scopes.to_vec()).unwrap_or_default(),
         endpoints,
-    }
+    };
+    (deployment, multiple)
 }
 
 /// Insert or replace `deployment` in `existing` (by name), keeping exactly one
@@ -1731,6 +1794,10 @@ pub struct DeploymentInfo {
     pub can_login: bool,
     pub is_default: bool,
     pub hosts: Vec<String>,
+    /// Discovery advertised more than one usable authorization server; the CLI
+    /// recorded the first. The `configure` task surfaces this so the user knows a
+    /// different issuer would require editing `~/.aspect/config.json` by hand.
+    pub multiple_auth_servers: bool,
 }
 
 starlark_simple_value!(DeploymentInfo);
@@ -1781,6 +1848,11 @@ fn deployment_info_methods(registry: &mut MethodsBuilder) {
             .hosts
             .clone();
         Ok(heap.alloc(hosts))
+    }
+
+    #[starlark(attribute)]
+    fn multiple_auth_servers<'v>(this: values::Value<'v>) -> anyhow::Result<bool> {
+        attr_bool!(this, DeploymentInfo, multiple_auth_servers)
     }
 }
 
@@ -2242,6 +2314,7 @@ fn auth_methods(registry: &mut MethodsBuilder) {
             can_login: false,
             is_default: false,
             hosts: Vec::new(),
+            multiple_auth_servers: false,
         };
         let info = match block_on(probe_protected_resource(&host)) {
             Discovery::Reachable(info) => info,
@@ -2254,7 +2327,8 @@ fn auth_methods(registry: &mut MethodsBuilder) {
             .into_option()
             .filter(|n| !n.is_empty())
             .unwrap_or_else(|| deployment_name_from_host(&host));
-        let mut deployment = deployment_from_discovery(name.clone(), &host, &info);
+        let (mut deployment, multiple_auth_servers) =
+            deployment_from_discovery(name.clone(), &host, &info);
         // `--default` forces this deployment to take the default crown (upsert
         // then clears it on every other entry); without it, upsert only sets the
         // default when none exists yet, so a second configure doesn't hijack it.
@@ -2269,6 +2343,7 @@ fn auth_methods(registry: &mut MethodsBuilder) {
             can_login,
             is_default,
             hosts,
+            multiple_auth_servers,
         }))
     }
 
@@ -2633,12 +2708,13 @@ mod tests {
 
     #[test]
     fn deployment_from_discovery_records_issuer_client_and_all_hosts() {
-        // A deployment advertising an authorization server + client_id + endpoints:
-        // recorded and loggable. hosts = configured host ∪ resource ∪ every
-        // endpoint host, deduped; the typed endpoints map is preserved (and its
-        // hosts are normalized to bare hosts).
+        // A deployment advertising an authorization server + client_id + endpoints
+        // via the legacy flat shape: recorded and loggable. hosts = configured host
+        // ∪ resource ∪ every endpoint host, deduped; the typed endpoints map is
+        // preserved (and its hosts are normalized to bare hosts).
         let advertised = ProtectedResource {
             resource: "https://remote.acme.aspect.build".to_string(),
+            aspect_authorization_servers: vec![],
             authorization_servers: vec!["https://acme.auth.aspect.build".to_string()],
             client_id: "abc".to_string(),
             scopes_supported: vec!["openid".to_string(), "groups".to_string()],
@@ -2648,8 +2724,9 @@ mod tests {
                 exec: "https://remote.acme.aspect.build".to_string(),
             },
         };
-        let d =
+        let (d, multiple) =
             deployment_from_discovery("acme".to_string(), "remote.acme.aspect.build", &advertised);
+        assert!(!multiple);
         assert_eq!(d.issuer.as_deref(), Some("https://acme.auth.aspect.build"));
         assert_eq!(d.client_id.as_deref(), Some("abc"));
         // A BYO-IdP scope override is recorded verbatim...
@@ -2680,6 +2757,7 @@ mod tests {
         // not loggable. No exec advertised → exec stays empty.
         let bare = ProtectedResource {
             resource: "https://remote.acme.aspect.build".to_string(),
+            aspect_authorization_servers: vec![],
             authorization_servers: vec![],
             client_id: String::new(),
             scopes_supported: vec![],
@@ -2689,7 +2767,7 @@ mod tests {
                 exec: String::new(),
             },
         };
-        let d = deployment_from_discovery("acme".to_string(), "remote.acme.aspect.build", &bare);
+        let (d, _) = deployment_from_discovery("acme".to_string(), "remote.acme.aspect.build", &bare);
         assert!(d.issuer.is_none() && d.client_id.is_none());
         assert_eq!(
             d.hosts,
@@ -2700,6 +2778,165 @@ mod tests {
         );
         assert!(d.endpoints.exec.is_empty());
         assert!(auth_env_from(&d).is_err());
+    }
+
+    #[test]
+    fn deployment_from_discovery_prefers_aspect_authorization_servers() {
+        // The current shape nests issuer/client_id/scopes per authorization server.
+        // When present it wins over the flat legacy fields (which older servers set,
+        // and which a transitional server may still populate alongside).
+        let info = ProtectedResource {
+            resource: "https://remote.acme.aspect.build".to_string(),
+            aspect_authorization_servers: vec![AspectAuthServer {
+                issuer: "https://auth.dev.aspect.build".to_string(),
+                client_id: "nested-client".to_string(),
+                scopes: vec!["openid".to_string(), "email".to_string()],
+            }],
+            authorization_servers: vec!["https://legacy.auth.aspect.build".to_string()],
+            client_id: "legacy-client".to_string(),
+            scopes_supported: vec!["openid".to_string()],
+            aspect_endpoints: Endpoints {
+                cache: "remote.acme.aspect.build".to_string(),
+                ..Default::default()
+            },
+        };
+        let (d, multiple) =
+            deployment_from_discovery("acme".to_string(), "remote.acme.aspect.build", &info);
+        assert!(!multiple);
+        assert_eq!(d.issuer.as_deref(), Some("https://auth.dev.aspect.build"));
+        assert_eq!(d.client_id.as_deref(), Some("nested-client"));
+        assert_eq!(d.scopes, vec!["openid".to_string(), "email".to_string()]);
+    }
+
+    #[test]
+    fn deployment_from_discovery_flags_multiple_auth_servers_and_takes_first() {
+        // More than one advertised: record the first and flag it so the caller can
+        // prompt/warn that a different issuer needs a re-run of `configure`.
+        let info = ProtectedResource {
+            resource: "https://remote.acme.aspect.build".to_string(),
+            aspect_authorization_servers: vec![
+                AspectAuthServer {
+                    issuer: "https://auth.dev.aspect.build".to_string(),
+                    client_id: "first-client".to_string(),
+                    scopes: vec!["openid".to_string()],
+                },
+                AspectAuthServer {
+                    issuer: "https://auth.corp.example.com".to_string(),
+                    client_id: "second-client".to_string(),
+                    scopes: vec!["openid".to_string()],
+                },
+            ],
+            authorization_servers: vec![],
+            client_id: String::new(),
+            scopes_supported: vec![],
+            aspect_endpoints: Endpoints {
+                cache: "remote.acme.aspect.build".to_string(),
+                ..Default::default()
+            },
+        };
+        let (d, multiple) =
+            deployment_from_discovery("acme".to_string(), "remote.acme.aspect.build", &info);
+        assert!(multiple);
+        assert_eq!(d.issuer.as_deref(), Some("https://auth.dev.aspect.build"));
+        assert_eq!(d.client_id.as_deref(), Some("first-client"));
+    }
+
+    #[test]
+    fn deployment_from_discovery_falls_back_to_legacy_when_no_usable_nested_entry() {
+        // A nested list with no issuer-bearing entry is not usable; fall back to the
+        // flat legacy fields rather than recording an issuer-less deployment.
+        let info = ProtectedResource {
+            resource: "https://remote.acme.aspect.build".to_string(),
+            aspect_authorization_servers: vec![AspectAuthServer {
+                issuer: String::new(),
+                client_id: "nested-client".to_string(),
+                scopes: vec![],
+            }],
+            authorization_servers: vec!["https://legacy.auth.aspect.build".to_string()],
+            client_id: "legacy-client".to_string(),
+            scopes_supported: vec!["openid".to_string()],
+            aspect_endpoints: Endpoints {
+                cache: "remote.acme.aspect.build".to_string(),
+                ..Default::default()
+            },
+        };
+        let (d, _) =
+            deployment_from_discovery("acme".to_string(), "remote.acme.aspect.build", &info);
+        assert_eq!(d.issuer.as_deref(), Some("https://legacy.auth.aspect.build"));
+        assert_eq!(d.client_id.as_deref(), Some("legacy-client"));
+        assert_eq!(d.scopes, vec!["openid".to_string()]);
+    }
+
+    #[test]
+    fn deployment_from_discovery_skips_issuerless_entry_for_a_later_usable_one() {
+        // An issuer-less entry ahead of a valid one is skipped rather than aborting
+        // the nested shape: the first usable entry wins. Only one entry is usable,
+        // so `multiple` is false even though the raw list has two elements.
+        let info = ProtectedResource {
+            resource: "https://remote.acme.aspect.build".to_string(),
+            aspect_authorization_servers: vec![
+                AspectAuthServer {
+                    issuer: String::new(),
+                    client_id: "skip-me".to_string(),
+                    scopes: vec![],
+                },
+                AspectAuthServer {
+                    issuer: "https://auth.dev.aspect.build".to_string(),
+                    client_id: "good-client".to_string(),
+                    scopes: vec!["openid".to_string()],
+                },
+            ],
+            authorization_servers: vec![],
+            client_id: String::new(),
+            scopes_supported: vec![],
+            aspect_endpoints: Endpoints {
+                cache: "remote.acme.aspect.build".to_string(),
+                ..Default::default()
+            },
+        };
+        let (d, multiple) =
+            deployment_from_discovery("acme".to_string(), "remote.acme.aspect.build", &info);
+        assert!(!multiple);
+        assert_eq!(d.issuer.as_deref(), Some("https://auth.dev.aspect.build"));
+        assert_eq!(d.client_id.as_deref(), Some("good-client"));
+    }
+
+    #[test]
+    fn deployment_from_discovery_multiple_counts_only_usable_entries() {
+        // The `multiple` warning keys on usable (issuer-bearing) entries, not raw
+        // list length: two usable entries alongside a skipped issuer-less one still
+        // count as multiple.
+        let info = ProtectedResource {
+            resource: "https://remote.acme.aspect.build".to_string(),
+            aspect_authorization_servers: vec![
+                AspectAuthServer {
+                    issuer: "https://auth.dev.aspect.build".to_string(),
+                    client_id: "first".to_string(),
+                    scopes: vec![],
+                },
+                AspectAuthServer {
+                    issuer: String::new(),
+                    client_id: "skip-me".to_string(),
+                    scopes: vec![],
+                },
+                AspectAuthServer {
+                    issuer: "https://auth.corp.example.com".to_string(),
+                    client_id: "second".to_string(),
+                    scopes: vec![],
+                },
+            ],
+            authorization_servers: vec![],
+            client_id: String::new(),
+            scopes_supported: vec![],
+            aspect_endpoints: Endpoints {
+                cache: "remote.acme.aspect.build".to_string(),
+                ..Default::default()
+            },
+        };
+        let (d, multiple) =
+            deployment_from_discovery("acme".to_string(), "remote.acme.aspect.build", &info);
+        assert!(multiple);
+        assert_eq!(d.client_id.as_deref(), Some("first"));
     }
 
     #[test]
