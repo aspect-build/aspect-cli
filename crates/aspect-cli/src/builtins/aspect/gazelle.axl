@@ -85,7 +85,7 @@ load("@aspect//bazel.axl", "BazelTrait", "dispatch_bazel_attempt_end", "dispatch
 load("@std//time.axl", "sleep_iter")
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event")
-load("./private/lib/bes_sinks.axl", "announce_bes_sinks", "bes_args", "collect_bes_from_args", "summarize_bes_upload")
+load("./bazel/build_events.axl", "announce_bes_sinks", "bes_args", "collect_bes_from_args", "summarize_bes_upload")
 load("./private/lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
 load("./private/lib/environment.axl", "color_enabled", "detect_ci", "error", "info", "warn")
 load("./private/lib/gazelle_results.axl", "dedupe_subtrees", "dir_at_or_below", "extract_changed_dirs", gaz_init_data = "init_data", gazelle_conclusion = "conclusion")
@@ -441,7 +441,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # returns resolved flags (a failed health check fails the task inside).
     rc = ph.setup(ctx.args.gazelle_target, "gazelle_results")
     announce_version, announce_command = bzl.announce.resolve(ctx)
-    endpoint_auth_flags = bzl.auth.flags(ctx, rc, "build")
+    endpoint_auth_flags = deployment_auth_flags(ctx, rc, "build")
 
     # Resolve dirs before the build: gazelle needs them when spawned, the no-op
     # short-circuit skips the build entirely, and the repro/fix builders read

@@ -1,5 +1,5 @@
 load("@aspect//bazel.axl", "BazelTrait")
-load("../private/lib/build_metadata.axl", "get_build_metadata_flags", "get_task_metadata_flags")
+load("../bazel/build_metadata.axl", "get_build_metadata_flags", "get_task_metadata_flags")
 load(
     "../private/lib/environment.axl",
     "apply_output_base_suffix",

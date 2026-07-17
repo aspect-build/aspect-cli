@@ -37,7 +37,7 @@ same flags at invocation time.
 Only file output is supported — there is no stdout mode.
 """
 
-load("./private/lib/build_metadata.axl", "version_gte")
+load("./bazel/build_metadata.axl", "version_gte")
 load(
     "./private/lib/environment.axl",
     "detect_ci",

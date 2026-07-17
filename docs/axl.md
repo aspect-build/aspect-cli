@@ -179,3 +179,9 @@ that are carefully promoted to the public api with minimal api.
 Only export constants/functions/types if they are required in the public api.
 
 Symbols can be exported via `testonly_` prefix for writing unit tests. 
+
+**§12 Use traits to inject behavior**: Tasks are supposed to stay generic, eg build task should not know about Workflows deployments
+but should provide necessary injection points via traits to allow external `feature()` to inject behavior. 
+
+For instance build.axl task uses BazelTrait to allow features to inspect final form of `BazelRc` object to decide whether to add `--remote_header` 
+for the configured RE or BES backend.

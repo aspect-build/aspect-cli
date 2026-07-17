@@ -1,0 +1,113 @@
+"""The `BazelTrait` interface, Bazel exit codes, and the retry budget constants.
+
+`BazelTrait`, `exit_codes`, and the retry constants are top-level: tasks index
+`ctx.traits[BazelTrait]` and read the constants directly. The `dispatch_*` free
+functions fire the lifecycle hooks for tasks that still drive their own spawn
+loop (the invocation handle fires them itself)."""
+
+exit_codes = struct(
+    SUCCESS = 0,
+    BUILD_FAILURE = 1,
+    PARSING_FAILURE = 1,
+    COMMAND_LINE_ERROR = 2,
+    TESTS_FAILED = 3,
+    PARTIAL_ANALYSIS_FAILURE = 3,
+    NO_TESTS_FOUND = 4,
+    RUN_FAILURE = 6,
+    ANALYSIS_FAILURE = 7,
+    INTERRUPTED = 8,
+    LOCK_HELD_NOBLOCK_FOR_LOCK = 9,
+    REMOTE_ENVIRONMENTAL_ERROR = 32,
+    OOM_ERROR = 33,
+    REMOTE_ERROR = 34,
+    LOCAL_ENVIRONMENTAL_ERROR = 36,
+    BLAZE_INTERNAL_ERROR = 37,
+    TRANSIENT_BUILD_EVENT_SERVICE_UPLOAD_ERROR = 38,
+    REMOTE_CACHE_EVICTED = 39,
+    PERSISTENT_BUILD_EVENT_SERVICE_UPLOAD_ERROR = 45,
+    EXTERNAL_DEPS_ERROR = 48,
+)
+
+# Default attempt budget for the build/test/delivery retry loops. Tasks
+# that wire up `--bazel-retry-attempts` use this as their `args.int`
+# default; the `bazel.build(ctx)` handle / `delivery.axl` retry loops also fall
+# back to it when a task doesn't define the arg at all, so adding a new
+# bazel-driving task doesn't silently inherit `range(0)` or fail at load
+# time.
+DEFAULT_BAZEL_RETRY_ATTEMPTS = 3
+
+# Canonical help text for the `--bazel-retry-attempts` flag. Centralized so
+# `build`, `test`, `delivery` (and any future bazel-driving task) can share
+# one description and not drift over time.
+BAZEL_RETRY_ATTEMPTS_DESCRIPTION = (
+    "Maximum number of Bazel invocation attempts (including the first attempt) before giving up. " +
+    "Only retried for exit codes the build_retry trait predicate accepts " +
+    "(BLAZE_INTERNAL_ERROR (37) and LOCAL_ENVIRONMENTAL_ERROR (36) by default). " +
+    "Set to 1 to disable retries."
+)
+
+# https://bazel.build/run/scripts#exit-codes
+def default_retry(code: int) -> bool:
+    """Returns True if the given exit code is retryable.
+
+    Retryable codes are those indicating transient infrastructure failures
+    where re-running the command may succeed:
+      - BLAZE_INTERNAL_ERROR (37): Bazel server crash.
+      - LOCAL_ENVIRONMENTAL_ERROR (36): Local env failure, often caused by
+        a queued command failing because the server is crashing.
+    """
+    return code == exit_codes.BLAZE_INTERNAL_ERROR or code == exit_codes.LOCAL_ENVIRONMENTAL_ERROR
+
+BazelTrait = trait(
+    # Declarative data — composable, zero-cost reads
+    extra_flags = attr(list[str], default = [], description = "Additional Bazel flags appended to every build/test invocation"),
+    extra_startup_flags = attr(list[str], default = [], description = "Additional Bazel startup flags prepended before the command"),
+    # Injected DEFAULT flags — prepended ahead of the user's `--bazel-flag`s so a
+    # user override still wins (last-wins). Distinct from `extra_flags`, which
+    # append AFTER the user's and therefore beat them. Features that wire an
+    # endpoint the user may override (e.g. a deployment's `--remote_cache`) use
+    # this; features that force a flag use `extra_flags`.
+    base_flags = attr(list[str], default = [], description = "Default Bazel flags prepended before the user's --bazel-flag overrides (user overrides win)"),
+    # Extra CLI-streamed BES backend URIs, unioned with `--bes-backend` and turned
+    # into gRPC sinks (with Aspect auth attached) by the invocation handle. A
+    # feature injecting a deployment's advertised BES backend extends this.
+    bes_backends = attr(list[str], default = [], description = "Extra CLI-streamed BES backend URIs to stream build events to"),
+    # Element types are `bazel.build.BuildEventSink` / `bazel.execution_log.ExecLogSink`
+    # (builtin `bazel` global), left bare because those builtin types aren't
+    # loadable via `@bazel//`.
+    build_event_sinks = attr(list, default = [], description = "Build Event Protocol sinks to stream events to during the build"),
+    execution_log_sinks = attr(list, default = [], description = "Execution log sinks to receive the Bazel execution log after the build"),
+
+    # Task-time flag contributors — hooks that receive TaskContext and return
+    # additional flags to append to the invocation. Fires late enough in the
+    # task lifecycle (after the task is known but before Bazel is spawned) that
+    # features can inject ctx.task-dependent flags (e.g. --build_metadata=
+    # ASPECT_TASK_NAME=...). Invoked by the `bazel.build(ctx)` handle for
+    # build/test and by each task's impl for lint/delivery.
+    task_flags = attr(list[typing.Callable[[TaskContext], list[str]]], default = [], description = "Hooks returning additional flags; called with TaskContext at invocation time"),
+
+    # Post-rc flag contributors — hooks called with (ctx, resolved rc, command)
+    # AFTER the .bazelrc is parsed; returned flags are appended to each spawn.
+    # For flags that depend on the FINAL rc shape rather than the CLI args — e.g.
+    # a deployment feature injecting --remote_header/--bes_header auth for the
+    # endpoints the rc actually resolved to. `rc` is the builtin RunCommand
+    # (unmodelable here), so it's typed loosely.
+    rc_flags = attr(list[typing.Callable[[TaskContext, typing.Any, str], list[str]]], default = [], description = "Hooks called with (ctx, resolved rc, command) after rc parse; return flags appended to each spawn"),
+
+    # Lifecycle hooks — lists of callables; callers close over their own state
+    build_start = attr(list[typing.Callable[[TaskContext], None]], default = [], description = "Hooks called once before the Bazel invocation starts"),
+    build_event = attr(list[typing.Callable[[TaskContext, dict], None]], default = [], description = "Hooks called for each Build Event Protocol event received during the build"),
+    build_retry = attr(typing.Callable[[int], bool], default = default_retry, description = "Predicate called with the exit code; return True to retry the build"),
+    bazel_attempt_end = attr(list[typing.Callable[[TaskContext, int], None]], default = [], description = "Hooks called once after EACH Bazel invocation attempt (including retries), with that attempt's exit code. Runs after the wait() returns and before the retry decision, so a hook can take corrective action (e.g. clean stranded sandbox state) that might let the next retry succeed. Distinct from `build_end`, which fires once after the final attempt."),
+    build_end = attr(list[typing.Callable[[TaskContext, int], None]], default = [], description = "Hooks called once after the Bazel invocation completes (after all retries), with the final exit code"),
+)
+
+def dispatch_bazel_attempt_end(ctx, bazel_trait, exit_code):
+    """Fire every `bazel_trait.bazel_attempt_end` hook with `exit_code`"""
+    for handler in bazel_trait.bazel_attempt_end:
+        handler(ctx, exit_code)
+
+def dispatch_bazel_build_end(ctx, bazel_trait, exit_code):
+    """Fire every `bazel_trait.build_end` hook with the FINAL `exit_code`"""
+    for handler in bazel_trait.build_end:
+        handler(ctx, exit_code)

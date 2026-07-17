@@ -7,7 +7,7 @@ kilgore/app/layout/header/ExecutionContext.tsx); values are uppercase enum
 strings (VCS=GITHUB, CI_HOST=BUILDKITE, …).
 """
 
-load("./ci.axl", "detect_buildkite_build_url")
+load("../private/lib/ci.axl", "detect_buildkite_build_url")
 
 _VCS_HOST_TO_ENUM = {
     "github.com": "GITHUB",

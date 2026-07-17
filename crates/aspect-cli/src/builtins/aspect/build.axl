@@ -5,46 +5,41 @@ A default 'build' task that wraps a 'bazel build' command.
 load("@aspect//bazel.axl", "BazelTrait", bbazel = "bazel")
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_results.axl", "results")
-load("./private/lib/deployment_flags.axl", "announce_deployment_flags", "deployment_endpoint_flags", "deployment_flag_args")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "phases")
 load("./private/lib/repro_commands.axl", "repro_flavor_args")
 load("./private/lib/tips.axl", "tips")
 
 def _impl(ctx: TaskContext) -> int | TaskConclusion:
-    # `--deployment` / `--aspect-*` endpoints, injected as prepended base flags
-    # (user --bazel-flag still wins) + extra BES backends.
-    dep = deployment_endpoint_flags(ctx)
-
     # High-level invocation handle: resolves targets, the flag → rc pipeline,
-    # BES sinks, auth, and the retry budget once. The whole flow is visible below.
-    bz = bbazel.build(ctx, flags = dep.base_flags, backends = dep.bes_backends)
+    # BES sinks, the trait's rc_flags hooks, and the retry budget once into an
+    # immutable record. Deployment endpoints/auth are injected by the Deployment
+    # feature through the trait (see `feature/deployment.axl`). The whole flow is
+    # visible below as thin verbs over the handle.
+    bz = bbazel.build(ctx)
     rs = results.build(ctx)
-    targets = bz.targets()
 
-    rs.setup(targets, bz.rc)          # surface init + health checks (rc already active)
-    announce_deployment_flags(ctx, dep)
-    bz.start()                        # build_start hooks + --cancel + BES announce
+    rs.setup(bz.targets, bz.rc)       # surface init + health checks (rc already active)
+    bz.start()                        # build_start hooks (deployment announce) + --cancel + BES announce
 
     w = None
-    for attempt in bz.attempts():
-        rs.attempt(attempt.index, prior = w)
-        inv = attempt.spawn(targets, events = results.KINDS if rs.live else False)
-        rs.invocation(inv)
-        for event in inv.events:      # BuildEvent | None (None = quiet-tick heartbeat)
-            bz.each(event)
+    for i in bz.attempts:             # `i` is the single source of truth for the attempt index
+        rs.attempt(i, prior = w)
+        sp = bz.spawn(i, events = results.KINDS if rs.live else False)
+        rs.invocation(sp)
+        for event in sp.events:       # BuildEvent | None (None = quiet-tick heartbeat)
+            bz.on_event(event)
             rs.process(event)
-        w = attempt.wait()
-        if w.success or not bz.should_retry(w):
+        w = sp.wait()                 # bazel_attempt_end hooks
+        if w.success or not bz.should_retry(sp, w):
             break
 
-    bz.summary()
-    bz.end(0 if w.success else (w.code or 1))
-    return rs.conclude(w, targets)
+    bz.finish(w)                      # BES summary + build_end + code coercion
+    return rs.conclude(w, bz.targets)
 
 build = task(
     args = bbazel.targets_arg("build") | bbazel.core_args("the build") |
-           deployment_flag_args() | repro_flavor_args(),
+           repro_flavor_args(),
     traits = [
         BazelTrait,
         HealthCheckTrait,

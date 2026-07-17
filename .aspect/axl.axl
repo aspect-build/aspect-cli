@@ -7,7 +7,7 @@ load("@aspect//lint.axl", "file_uri_to_path", "filter_all", "filter_changeset", 
 load("@aspect//private/lib/artifacts.axl", "artifact_name", "build_log_header", "build_log_relpath", "collect_build_action_logs", "dedup_path", "testlog_dest_dir")
 load("@aspect//private/lib/bazel_results.axl", "compute_reproducer_command", "init_data", "render_check_output", "resolve_aspect_url", "summary_title")
 load(
-    "@aspect//private/lib/build_metadata.axl",
+    "@aspect//bazel/build_metadata.axl",
     "detect_vcs_from_host",
     "parse_git_remote_url",
     "version_gte",

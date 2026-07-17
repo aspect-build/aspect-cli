@@ -1,11 +1,11 @@
-"""Tests for `lib/bes_sinks.axl` — the BES upload summary line and the gRPC-sink
+"""Tests for `bazel/build_events.axl` — the BES upload summary line and the gRPC-sink
 filter shared by the announce/summary helpers.
 
 Run with:
   aspect dev test-bes-sinks
 """
 
-load("./bes_sinks.axl", "bes_upload_line", "grpc_backends")
+load("./build_events.axl", "bes_upload_line", "grpc_backends")
 
 def _eq(label, got, want):
     if got != want:
@@ -106,7 +106,7 @@ _UNIT_TESTS = [
 def _test_impl(ctx):
     for t in _UNIT_TESTS:
         t(ctx)
-    print("bes_sinks_test.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    print("build_events_test.axl: OK (%d tests)" % len(_UNIT_TESTS))
     return 0
 
 bes_sinks_tests = task(

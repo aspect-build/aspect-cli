@@ -154,7 +154,7 @@ load("@std//time.axl", "sleep_iter", "time")
 load("./private/lib/ansi.axl", "ansi")
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "bes_get", "now_ms", "process_event", bazel_init_data = "init_data")
-load("./private/lib/bes_sinks.axl", "announce_bes_sinks", "bes_args", "collect_bes_from_args", "summarize_bes_upload")
+load("./bazel/build_events.axl", "announce_bes_sinks", "bes_args", "collect_bes_from_args", "summarize_bes_upload")
 load("./private/lib/ci.axl", "resolve_build_url")
 load("./private/lib/delivery_results.axl", delivery_add_result = "add_result", delivery_build_manifest = "build_manifest", delivery_conclusion = "conclusion", delivery_init_data = "init_data")
 load(
@@ -471,7 +471,7 @@ def _get_output_shas(bazel_trait, ph, build_events, targets, rc, user_remote_exe
         output_groups = ["delivery_hash"],
     )
 
-    endpoint_auth_flags = bzl.auth.flags(ctx, rc, "build")
+    endpoint_auth_flags = deployment_auth_flags(ctx, rc, "build")
 
     # Phase-1 extras layered on the active run command. Force `=minimal`:
     # phase 1 reads outputs via BES, never from disk. State is kept (no
@@ -1451,7 +1451,7 @@ def _delivery_impl(ctx):
         # over `=toplevel` (the floor is a minimum, not a ceiling).
         # `--noremote_upload_local_results` keeps release artifacts out of the
         # shared remote cache (delivery-specific).
-        phase3_flags = run_tracker.flags + list(release_flags) + bzl.auth.flags(ctx, rc, "build") + [
+        phase3_flags = run_tracker.flags + list(release_flags) + deployment_auth_flags(ctx, rc, "build") + [
             "--noremote_upload_local_results",
         ]
 

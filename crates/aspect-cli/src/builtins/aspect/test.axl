@@ -5,7 +5,6 @@ A default 'test' task that wraps a 'bazel test' command.
 load("@aspect//bazel.axl", "BazelTrait", bbazel = "bazel")
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_results.axl", "results")
-load("./private/lib/deployment_flags.axl", "announce_deployment_flags", "deployment_endpoint_flags", "deployment_flag_args")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "phases")
 load("./private/lib/repro_commands.axl", "repro_flavor_args")
@@ -81,30 +80,26 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         bazel_trait.extra_flags.append("--collect_code_coverage")
         bazel_trait.extra_flags.append("--combined_report=lcov")
 
-    dep = deployment_endpoint_flags(ctx)
-    bz = bbazel.test(ctx, flags = dep.base_flags, backends = dep.bes_backends)
+    bz = bbazel.test(ctx)
     rs = results.test(ctx)
-    targets = bz.targets()
 
-    rs.setup(targets, bz.rc)
-    announce_deployment_flags(ctx, dep)
+    rs.setup(bz.targets, bz.rc)
     bz.start()
 
     w = None
-    for attempt in bz.attempts():
-        rs.attempt(attempt.index, prior = w)
-        inv = attempt.spawn(targets, events = results.KINDS if rs.live else False)
-        rs.invocation(inv)
-        for event in inv.events:
-            bz.each(event)
+    for i in bz.attempts:
+        rs.attempt(i, prior = w)
+        sp = bz.spawn(i, events = results.KINDS if rs.live else False)
+        rs.invocation(sp)
+        for event in sp.events:
+            bz.on_event(event)
             rs.process(event)
-        w = attempt.wait()
-        if w.success or not bz.should_retry(w):
+        w = sp.wait()
+        if w.success or not bz.should_retry(sp, w):
             break
 
-    bz.summary()
-    bz.end(0 if w.success else (w.code or 1))
-    conclusion = rs.conclude(w, targets)
+    bz.finish(w)
+    conclusion = rs.conclude(w, bz.targets)
 
     if ctx.args.coverage:
         report_path = _resolve_report(ctx)
@@ -141,7 +136,7 @@ test = task(
             description = "Argument forwarded to --coverage-tool. Repeat the flag to pass multiple. The `{report}` (or `{lcov}`) placeholder is replaced with the absolute path of the merged LCOV report. Example: `--coverage-tool=codecov --coverage-tool-arg=-f --coverage-tool-arg={report}`.",
         ),
     } | bbazel.targets_arg("test") | bbazel.core_args("the test invocation") |
-        deployment_flag_args() | repro_flavor_args(),
+        repro_flavor_args(),
     traits = [
         BazelTrait,
         HealthCheckTrait,

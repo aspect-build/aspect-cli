@@ -359,7 +359,7 @@ def _impl(ctx: TaskContext) -> int:
 
     # Attach the Aspect login JWT when the cache is an Aspect-owned endpoint;
     # the probe and pre-build below both hit it.
-    endpoint_auth_flags = bazel.auth.flags(ctx, rc, "test")
+    endpoint_auth_flags = deployment_auth_flags(ctx, rc, "test")
 
     # Enumerate + reverse-dep under the same resolved flags as the probe/build,
     # so a `--config`/`--bazel-flag` that changes package loading or the test set

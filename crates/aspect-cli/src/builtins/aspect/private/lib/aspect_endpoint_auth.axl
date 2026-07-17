@@ -11,7 +11,7 @@ deployment hosts, with no built-in suffix or env-var auto-matching.
 
 This module owns the host parsing, ownership check, header-auth detection, and
 the best-effort bearer resolution; the consumers attach the result —
-`bes_sinks.axl` to the CLI sink's metadata, `bazel.axl` to a
+`build_events.axl` to the CLI sink's metadata, `bazel.axl` to a
 `--bes_header` / `--remote_header` flag. Best-effort: an owned endpoint with no
 usable credential warns and proceeds unauthenticated rather than failing (the
 server's own rejection then surfaces downstream).
