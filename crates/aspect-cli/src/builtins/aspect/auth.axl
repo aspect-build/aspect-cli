@@ -149,28 +149,75 @@ login = task(
     },
 )
 
+def _prompt_issuer(ctx, servers):
+    """Prompt the user to choose an authorization server issuer by number.
+
+    TTY only: returns None off a TTY (the caller prints how to pass --issuer and
+    exits) rather than reading a number nobody typed. On a TTY, an empty,
+    non-numeric, or out-of-range entry re-prompts instead of aborting.
+    """
+    if not ctx.std.io.stdout.is_tty:
+        return None
+    ctx.std.io.stdout.write("This deployment advertises multiple authorization servers.\n")
+    ctx.std.io.stdout.write("Choose one to log in against:\n")
+    for i, server in enumerate(servers):
+        ctx.std.io.stdout.write("  {}. {}\n".format(i + 1, server.issuer))
+    for _attempt in range(len(servers) + 100):
+        ctx.std.io.stdout.write("Enter a number [1-{}]: ".format(len(servers)))
+        ctx.std.io.stdout.flush()
+        raw = str(ctx.std.io.stdin.read(16)).strip()
+        if raw.isdigit():
+            idx = int(raw) - 1
+            if idx >= 0 and idx < len(servers):
+                return servers[idx].issuer
+        print("Please enter a number between 1 and {}.".format(len(servers)))
+    return None
+
+def _discover_deployment(ctx, host):
+    """Discover and record `host`'s deployment, resolving a multi-issuer choice.
+
+    Returns the recorded (`status == "ok"`) DeploymentInfo, or None after printing
+    a message and when the caller should exit non-zero. `--issuer` selects among
+    advertised authorization servers; when the deployment offers more than one and
+    none was given, prompts on a TTY, else instructs the user to pass --issuer.
+    The prompt re-invokes discovery once with the chosen issuer, so every outcome
+    (including a transport error on that second probe) is reported uniformly.
+    """
+    issuer = ctx.args.issuer
+    for _attempt in range(2):
+        info = ctx.aspect.auth.configure(host, name = ctx.args.name, make_default = ctx.args.default, issuer = issuer)
+        if info.status == "ok":
+            return info
+        if info.status == "unreachable":
+            error(ctx.std, "Could not reach '" + host + "' (" + info.reason + ").")
+            error(ctx.std, "Check your network and that the host is correct, then try again.")
+            return None
+        if info.status == "not_a_deployment":
+            error(ctx.std, "'" + host + "' is not an Aspect Workflows deployment authentication endpoint.")
+            error(ctx.std, "Double-check the URL — it should be the deployment's remote-cache or BES host (e.g. remote.<deployment>.example.com).")
+            return None
+        if info.status == "issuer_not_advertised":
+            error(ctx.std, "'" + issuer + "' is not one of the authorization servers this deployment advertises.")
+            error(ctx.std, "Choose one of: " + ", ".join([s.issuer for s in info.auth_servers]))
+            return None
+        # needs_issuer: prompt (TTY) then loop to re-run with the chosen issuer.
+        issuer = _prompt_issuer(ctx, info.auth_servers)
+        if not issuer:
+            error(ctx.std, "This deployment advertises multiple authorization servers; pass --issuer=<url>.")
+            error(ctx.std, "Choose one of: " + ", ".join([s.issuer for s in info.auth_servers]))
+            return None
+    return None
+
 def _configure_impl(ctx: TaskContext) -> int:
     if len(ctx.args.host) != 1:
         error(ctx.std, "Provide exactly one deployment host, e.g. `aspect auth configure remote.acme.aspect.build`.")
         return 1
     host = ctx.args.host[0]
-    info = ctx.aspect.auth.configure(host, name = ctx.args.name, make_default = ctx.args.default)
-
-    if info.status == "unreachable":
-        error(ctx.std, "Could not reach '" + host + "' (" + info.reason + ").")
-        error(ctx.std, "Check your network and that the host is correct, then try again.")
-        return 1
-    if info.status == "not_a_deployment":
-        error(ctx.std, "'" + host + "' is not an Aspect Workflows deployment authentication endpoint.")
-        error(ctx.std, "Double-check the URL — it should be the deployment's remote-cache or BES host (e.g. remote.<deployment>.example.com).")
+    info = _discover_deployment(ctx, host)
+    if info == None:
         return 1
 
     print("Configured deployment '" + info.name + "'.")
-    if info.multiple_auth_servers:
-        print("")
-        print("This deployment advertised multiple authorization servers; the CLI")
-        print("configured the first. To use a different one, add its issuer and")
-        print("client_id to ~/.aspect/config.json by hand.")
     if not info.can_login:
         print("")
         print("This deployment does not advertise its login config, so the CLI")
@@ -206,6 +253,9 @@ configure = task(
         "default": args.boolean(
             default = False,
             description = "Make this the default deployment (what build/test target without an explicit --deployment), taking over from any current default. Without it, a deployment becomes the default only when none is set yet.",
+        ),
+        "issuer": args.string(
+            description = "Authorization server issuer to log in against, for deployments that advertise more than one (e.g. https://auth.acme.example.com). Required when running non-interactively; on a TTY you are prompted to choose. Fails if the deployment does not advertise it.",
         ),
         "login": args.boolean(
             default = True,
