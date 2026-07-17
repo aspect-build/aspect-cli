@@ -1,6 +1,7 @@
 load("./private/lib/aspect_endpoint_auth.axl", "login_hint")
 load("./private/lib/deployment_flags.axl", "join_and")
 load("./private/lib/environment.axl", "error", "info")
+load("./private/lib/prompt.axl", "prompt_choice")
 
 def _run_browser_login(ctx: TaskContext, deployment: str):
     """Open the deployment's authorize URL in a browser and wait for the callback,
@@ -149,29 +150,8 @@ login = task(
     },
 )
 
-def _prompt_issuer(ctx, servers):
-    """Prompt the user to choose an authorization server issuer by number.
-
-    TTY only: returns None off a TTY (the caller prints how to pass --issuer and
-    exits) rather than reading a number nobody typed. On a TTY, an empty,
-    non-numeric, or out-of-range entry re-prompts instead of aborting.
-    """
-    if not ctx.std.io.stdout.is_tty:
-        return None
-    ctx.std.io.stdout.write("This deployment advertises multiple authorization servers.\n")
-    ctx.std.io.stdout.write("Choose one to log in against:\n")
-    for i, server in enumerate(servers):
-        ctx.std.io.stdout.write("  {}. {}\n".format(i + 1, server.issuer))
-    for _attempt in range(len(servers) + 100):
-        ctx.std.io.stdout.write("Enter a number [1-{}]: ".format(len(servers)))
-        ctx.std.io.stdout.flush()
-        raw = str(ctx.std.io.stdin.read(16)).strip()
-        if raw.isdigit():
-            idx = int(raw) - 1
-            if idx >= 0 and idx < len(servers):
-                return servers[idx].issuer
-        print("Please enter a number between 1 and {}.".format(len(servers)))
-    return None
+def _advertised_issuers(servers):
+    return ", ".join([s.issuer for s in servers])
 
 def _discover_deployment(ctx, host):
     """Discover and record `host`'s deployment, resolving a multi-issuer choice.
@@ -198,14 +178,20 @@ def _discover_deployment(ctx, host):
             return None
         if info.status == "issuer_not_advertised":
             error(ctx.std, "'" + issuer + "' is not one of the authorization servers this deployment advertises.")
-            error(ctx.std, "Choose one of: " + ", ".join([s.issuer for s in info.auth_servers]))
+            error(ctx.std, "Choose one of: " + _advertised_issuers(info.auth_servers))
             return None
-        # needs_issuer: prompt (TTY) then loop to re-run with the chosen issuer.
-        issuer = _prompt_issuer(ctx, info.auth_servers)
-        if not issuer:
+        chosen = prompt_choice(
+            ctx,
+            info.auth_servers,
+            lambda s: s.issuer,
+            ["This deployment advertises multiple authorization servers.", "Choose one to log in against:"],
+        )
+        if chosen == None:
             error(ctx.std, "This deployment advertises multiple authorization servers; pass --issuer=<url>.")
-            error(ctx.std, "Choose one of: " + ", ".join([s.issuer for s in info.auth_servers]))
+            error(ctx.std, "Choose one of: " + _advertised_issuers(info.auth_servers))
             return None
+        issuer = chosen.issuer
+    # A prompted issuer always resolves on the second pass; guard the loop bound.
     return None
 
 def _configure_impl(ctx: TaskContext) -> int:

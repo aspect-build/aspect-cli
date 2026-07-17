@@ -28,6 +28,7 @@ load("@aspect//private/lib/gitlab_token_cache.axl", "gitlab_token_cache")
 load("@aspect//private/lib/lifecycle.axl", "ReproFixCommand")
 load("@aspect//private/lib/log_snippet.axl", "SnippetOptions", "code_fence_for", "extract_junit_failure", "extract_snippet")
 load("@aspect//private/lib/path_glob.axl", "match_any", "match_path")
+load("@aspect//private/lib/prompt.axl", "prompt_choice")
 load("@aspect//private/lib/repro_commands.axl", "build_aspect_command", "dedup_and_attribute", "patch_download_cmd", "task_cli_path")
 load("@aspect//private/lib/result_text.axl", "severity_for_status")
 load("@aspect//private/lib/runnable.axl", "apparent_label", "runnable")
@@ -3649,9 +3650,19 @@ def impl(ctx: TaskContext) -> int:
     tc = test_log_snippet(ctx, tc, temp_dir)
     tc = test_bazel_render_snippets(ctx, tc, temp_dir)
     tc = test_gitlab_token_cache(ctx, tc, temp_dir)
+    tc = test_prompt_choice(tc)
 
     print(tc, "tests passed")
     return 0
+
+def test_prompt_choice(tc: int) -> int:
+    """prompt_choice returns None off a TTY rather than blocking on stdin — the
+    branch that keeps `configure`/`init` safe in CI. The interactive selection
+    loop needs a real terminal and is exercised via live CI, not here."""
+    fake_ctx = struct(std = struct(io = struct(stdout = struct(is_tty = False))))
+    got = prompt_choice(fake_ctx, ["a", "b"], lambda x: x, ["Choose:"])
+    tc = test_case(tc, got == None, "prompt_choice: off-TTY returns None")
+    return tc
 
 def test_gitlab_token_cache(ctx: TaskContext, tc: int, temp_dir: str) -> int:
     """Covers the installation-proof carriage added to the GitLab token

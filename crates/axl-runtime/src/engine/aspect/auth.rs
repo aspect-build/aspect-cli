@@ -374,15 +374,16 @@ struct AuthServer {
 
 /// Whether two issuers name the same authorization server, tolerant of how a
 /// user types the `--issuer` flag: scheme and trailing slash are ignored and the
-/// host compares case-insensitively (`Auth.Dev.Aspect.Build`, `auth.dev.aspect.build`,
-/// and `https://auth.dev.aspect.build/` all match).
+/// comparison is case-insensitive (`HTTPS://Auth.Dev.Aspect.Build`,
+/// `auth.dev.aspect.build`, and `https://auth.dev.aspect.build/` all match).
 fn issuers_match(a: &str, b: &str) -> bool {
     fn normalize(s: &str) -> String {
-        s.trim()
-            .trim_end_matches('/')
+        // Lowercase first so the scheme strip is case-insensitive too.
+        let s = s.trim().to_ascii_lowercase();
+        s.trim_end_matches('/')
             .trim_start_matches("https://")
             .trim_start_matches("http://")
-            .to_ascii_lowercase()
+            .to_string()
     }
     normalize(a) == normalize(b)
 }
@@ -2913,6 +2914,11 @@ mod tests {
         assert!(issuers_match(
             "https://Auth.Dev.Aspect.Build",
             "http://auth.dev.aspect.build"
+        ));
+        // The scheme strip is case-insensitive too.
+        assert!(issuers_match(
+            "HTTPS://auth.dev.aspect.build",
+            "auth.dev.aspect.build"
         ));
         assert!(!issuers_match(
             "https://auth.dev.aspect.build",

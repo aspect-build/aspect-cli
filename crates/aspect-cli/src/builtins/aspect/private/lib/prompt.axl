@@ -1,0 +1,26 @@
+"""Interactive terminal prompts shared across tasks."""
+
+def prompt_choice(ctx, items, label, header):
+    """Prompt the user to pick one of `items` by number, re-prompting on bad input.
+
+    `label` maps an item to its display string; `header` is a list of lines printed
+    before the numbered list. Returns the chosen item, or None off a TTY (the
+    caller prints how to supply the choice non-interactively and exits) — an empty,
+    non-numeric, or out-of-range entry re-prompts rather than aborting.
+    """
+    if not ctx.std.io.stdout.is_tty:
+        return None
+    for line in header:
+        ctx.std.io.stdout.write(line + "\n")
+    for i, item in enumerate(items):
+        ctx.std.io.stdout.write("  {}. {}\n".format(i + 1, label(item)))
+    for _attempt in range(len(items) + 100):
+        ctx.std.io.stdout.write("Enter a number [1-{}]: ".format(len(items)))
+        ctx.std.io.stdout.flush()
+        raw = str(ctx.std.io.stdin.read(16)).strip()
+        if raw.isdigit():
+            idx = int(raw) - 1
+            if idx >= 0 and idx < len(items):
+                return items[idx]
+        print("Please enter a number between 1 and {}.".format(len(items)))
+    return None
