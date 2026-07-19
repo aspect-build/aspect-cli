@@ -191,6 +191,7 @@ def _discover_deployment(ctx, host):
             error(ctx.std, "Choose one of: " + _advertised_issuers(info.auth_servers))
             return None
         issuer = chosen.issuer
+
     # A prompted issuer always resolves on the second pass; guard the loop bound.
     return None
 

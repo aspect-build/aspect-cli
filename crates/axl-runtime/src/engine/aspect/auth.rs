@@ -476,7 +476,10 @@ enum AuthServerChoice {
 ///     there are none, or [`AuthServerChoice::Ambiguous`] when more than one.
 fn resolve_auth_server(candidates: &[AuthServer], requested: Option<&str>) -> AuthServerChoice {
     if let Some(requested) = requested {
-        return match candidates.iter().find(|c| issuers_match(&c.issuer, requested)) {
+        return match candidates
+            .iter()
+            .find(|c| issuers_match(&c.issuer, requested))
+        {
             Some(c) => AuthServerChoice::Selected(c.clone()),
             None => AuthServerChoice::NotAdvertised,
         };
@@ -2477,7 +2480,8 @@ fn auth_methods(registry: &mut MethodsBuilder) {
             AuthServerChoice::Selected(s) => Some(s),
             AuthServerChoice::None => None,
         };
-        let mut deployment = deployment_from_discovery(name.clone(), &host, &info, selected.as_ref());
+        let mut deployment =
+            deployment_from_discovery(name.clone(), &host, &info, selected.as_ref());
         // `--default` forces this deployment to take the default crown (upsert
         // then clears it on every other entry); without it, upsert only sets the
         // default when none exists yet, so a second configure doesn't hijack it.
@@ -2874,7 +2878,10 @@ mod tests {
         ProtectedResource {
             resource: "https://remote.acme.aspect.build".to_string(),
             aspect_authorization_servers,
-            authorization_servers: authorization_servers.iter().map(|s| s.to_string()).collect(),
+            authorization_servers: authorization_servers
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
             client_id: client_id.to_string(),
             scopes_supported: scopes_supported.iter().map(|s| s.to_string()).collect(),
             aspect_endpoints: Endpoints {
@@ -2898,7 +2905,12 @@ mod tests {
                 }
             ),
         };
-        deployment_from_discovery("acme".to_string(), "remote.acme.aspect.build", info, selected.as_ref())
+        deployment_from_discovery(
+            "acme".to_string(),
+            "remote.acme.aspect.build",
+            info,
+            selected.as_ref(),
+        )
     }
 
     #[test]
@@ -3016,7 +3028,10 @@ mod tests {
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].issuer, "https://auth.dev.aspect.build");
         assert_eq!(servers[0].client_id, "nested-client");
-        assert_eq!(servers[0].scopes, vec!["openid".to_string(), "email".to_string()]);
+        assert_eq!(
+            servers[0].scopes,
+            vec!["openid".to_string(), "email".to_string()]
+        );
     }
 
     #[test]
