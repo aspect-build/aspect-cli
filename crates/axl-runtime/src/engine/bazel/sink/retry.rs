@@ -19,6 +19,22 @@ pub struct RetryConfig {
     pub retry_min_delay: Duration,
     pub retry_max_buffer_size: usize,
     pub timeout: Option<Duration>,
+    /// How long a single write into the bidi request stream may block before
+    /// the connection is declared stalled (server stopped reading; HTTP/2
+    /// flow-control windows and the request channel are full) and the stream
+    /// is torn down for a retry. Not exposed to Starlark; overridable in
+    /// tests.
+    pub send_stall_timeout: Duration,
+    /// How long the server may go without acking while unacked events are
+    /// outstanding (pre-half-close) before the stream is torn down for a
+    /// retry. Not exposed to Starlark; overridable in tests.
+    pub ack_progress_timeout: Duration,
+    /// How long to wait, after the request side half-closes, for the server
+    /// to ack outstanding events and close the response stream. Some
+    /// backends sit on a half-closed stream without acking or closing;
+    /// without this bound the sink thread — and the build's `sink.wait()` —
+    /// would hang. Not exposed to Starlark; overridable in tests.
+    pub half_close_timeout: Duration,
 }
 
 impl Default for RetryConfig {
@@ -28,6 +44,9 @@ impl Default for RetryConfig {
             retry_min_delay: Duration::from_secs(1),
             retry_max_buffer_size: 10_000,
             timeout: None,
+            send_stall_timeout: Duration::from_secs(60),
+            ack_progress_timeout: Duration::from_secs(120),
+            half_close_timeout: Duration::from_secs(30),
         }
     }
 }
