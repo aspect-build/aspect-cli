@@ -27,6 +27,7 @@ ships as placeholders (unless `--skip-repin`).
 """
 
 load("./private/lib/init_render.axl", "load_config", "preset_flags", "preset_names", "render")
+load("./private/lib/prompt.axl", "prompt_choice")
 
 # Default template source: the latest published release of this GitHub repo.
 # `--template-ref` overrides the ref (branch, tag, or commit), e.g.
@@ -83,29 +84,15 @@ def parse_template(spec):
     fail("unknown --template scheme {!r} in {!r}; supported: github:, file:".format(scheme, spec))
 
 def _prompt_preset(ctx, names):
-    """Prompt the user to choose a preset by number, re-prompting on bad input.
+    """Prompt the user to choose a preset by name, printing an off-TTY hint.
 
-    TTY only: returns None off a TTY (the caller prints a hint and exits) rather
-    than reading a number nobody typed. On a TTY, an empty, non-numeric, or
-    out-of-range entry re-prompts instead of aborting — a typo shouldn't discard
-    the template that was just fetched.
+    A typo shouldn't discard the template that was just fetched, so
+    [`prompt_choice`] re-prompts on bad input; None means off a TTY or exhausted.
     """
     if not ctx.std.io.stdout.is_tty:
         print("No --preset given and stdin is not a TTY; pass --preset=<name>.")
         return None
-    ctx.std.io.stdout.write("Choose a preset:\n")
-    for i, name in enumerate(names):
-        ctx.std.io.stdout.write("  {}. {}\n".format(i + 1, name))
-    for _attempt in range(len(names) + 100):
-        ctx.std.io.stdout.write("Enter a number [1-{}]: ".format(len(names)))
-        ctx.std.io.stdout.flush()
-        raw = str(ctx.std.io.stdin.read(16)).strip()
-        if raw.isdigit():
-            idx = int(raw) - 1
-            if idx >= 0 and idx < len(names):
-                return names[idx]
-        print("Please enter a number between 1 and {}.".format(len(names)))
-    return None
+    return prompt_choice(ctx, names, lambda name: name, ["Choose a preset:"])
 
 def project_name(arg_name, out_dir):
     """Resolve the project name (snake_case).
