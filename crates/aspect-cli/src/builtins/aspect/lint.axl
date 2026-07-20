@@ -599,7 +599,10 @@ def _try_process_lint_file(ctx, file, filepath, data, strategy, changed_files, l
         return {"interesting": False, "linter_exit_code": 0, "failed_tool": ""}
 
     if file.name.endswith(".patch"):
-        if not ctx.std.fs.exists(filepath):
+        # Readability gate (content discarded): requeues the patch until the
+        # blob is materialized, since lint_patch hooks buffer the path and
+        # later re-read it with a plain read_to_string.
+        if _read_lint_file(ctx, filepath) == None:
             return None
         patches.append(filepath)
         for hook in lint_trait.lint_patch:
