@@ -5,6 +5,8 @@ Reads runner environment from environment variables and exposes it as typed
 records. Also provides bazelrc flag generation and host/CI detection.
 """
 
+load("./ansi.axl", "ansi")
+
 DEFAULT_STORAGE_PATH = "/mnt/ephemeral"
 DEFAULT_BIN_DIR = "/etc/aspect/workflows/bin"
 AWS_LOG_GROUP = "/aw/runner/cloud-init/output"  # AWS CloudWatch log group
@@ -131,24 +133,15 @@ def color_enabled(std):
 
 def info(std, msg):
     """Print a bold cyan `INFO:` line for notable runtime state."""
-    if color_enabled(std):
-        print("\x1b[1;36mINFO\x1b[0m: " + msg)
-    else:
-        print("INFO: " + msg)
+    print(ansi.style("INFO", ansi.seq("1;36"), color_enabled(std)) + ": " + msg)
 
 def warn(std, msg):
     """Print a yellow `WARNING:` line for non-fatal subsystem failures."""
-    if color_enabled(std):
-        print("\x1b[0;33mWARNING\x1b[0m: " + msg)
-    else:
-        print("WARNING: " + msg)
+    print(ansi.style("WARNING", ansi.seq("0;33"), color_enabled(std)) + ": " + msg)
 
 def error(std, msg):
     """Print a red `ERROR:` line for recoverable errors preceding non-zero exit."""
-    if color_enabled(std):
-        print("\x1b[0;31mERROR\x1b[0m: " + msg)
-    else:
-        print("ERROR: " + msg)
+    print(ansi.style("ERROR", ansi.seq("0;31"), color_enabled(std)) + ": " + msg)
 
 def feature_logger(feature):
     """(info, warn, error, trace) bundle prepending `<feature>: ` to each message.
@@ -628,20 +621,15 @@ def print_environment_info(std: std.Std, env: WorkflowsEnvironment) -> None:
         print("--- :rocket: Workflows runner metadata")
 
     color = color_enabled(std)
+
+    # Bold+underline+blue title mirrors `_display_runner_health` in
+    # health_check.axl so the two setup-phase sections match.
     title = "Workflows runner metadata"
-    if color:
-        # Bold+underline+blue, mirrors `_display_runner_health` in
-        # health_check.axl so the two setup-phase sections match.
-        print("\x1b[1;4;34m" + title + "\x1b[0m")
-    else:
-        print(title)
+    print(ansi.style(title, ansi.seq("1;4;34"), color))
 
     rows = build_aspect_runner_rows(std)
     for row in rows:
-        if color:
-            print("\x1b[34m" + row["key"] + "\x1b[0m: " + row["value"])
-        else:
-            print(row["key"] + ": " + row["value"])
+        print(ansi.style(row["key"], ansi.BLUE, color) + ": " + row["value"])
 
     # Cloud-specific debug command — jump from job log to runner bootstrap logs.
     if runner.cloud_provider == "aws":
@@ -652,7 +640,4 @@ def print_environment_info(std: std.Std, env: WorkflowsEnvironment) -> None:
         cli = ""
     if cli:
         label = "Bootstrap logs"
-        if color:
-            print("\x1b[34m" + label + "\x1b[0m: " + cli)
-        else:
-            print(label + ": " + cli)
+        print(ansi.style(label, ansi.BLUE, color) + ": " + cli)

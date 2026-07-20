@@ -22,6 +22,7 @@ use_task("warming.axl", "warming")
 
 use_feature("feature/artifacts.axl", "ArtifactUpload")
 use_feature("feature/circleci_test_results.axl", "CircleCITestResults")
+use_feature("feature/deployment.axl", "Deployment")
 use_feature("feature/github_lint_comments.axl", "GithubLintComments")
 use_feature("feature/github_status_checks.axl", "GithubStatusChecks")
 use_feature("feature/github_status_comments.axl", "GithubStatusComments")

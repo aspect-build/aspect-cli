@@ -1,0 +1,210 @@
+"""The high-level invocation handle: `bazel.build(ctx)` / `bazel.test(ctx)`.
+
+The constructor resolves EVERYTHING once — targets, the flag→rc pipeline
+(`use_rc`), CLI-streamed BES sinks, the trait's `rc_flags` hooks, announce flags
+and the retry budget — into one immutable `_Invocation` record. The returned handle
+exposes the flow as verbs the task drives in a visible loop (see `build.axl`):
+the verbs are thin forwarders over that single record, and the top-level `_do_*`
+functions thread it — no closure tower, no mutable state dict. The live
+invocation and the attempt index are threaded as values (the `_spawned` struct
+and the callsite's loop counter), never stored."""
+
+load(
+    "./build_events.axl",
+    "announce_bes_sinks",
+    "build_events_iterator",
+    "collect_bes_from_args",
+    "summarize_bes_upload",
+)
+load("./flags.axl", "resolve_announce", "resolve_rc_flags", "setup_command")
+load("./trait.axl", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
+
+# BES drain cadence. Passed as `tick_ms` to the event iterator so
+# `for event in sp.events` yields `None` after this many ms of quiet, giving a
+# results heartbeat without a separate sleep loop.
+_TICK_MS = 250
+
+# Immutable, resolved-once config for one high-level bazel run. Replaces the old
+# mutable `state = {"invocation": None, "index": 0}` dict: nothing here is
+# reassigned, and the live invocation + attempt index are threaded as values
+# rather than stored. `ctx` is carried so the `_do_*` verbs need neither a
+# per-call `ctx` (§7) nor a closure over one. `trait`/`rc`/`sinks` are runtime
+# handles with no `@aspect`-nameable type, so they are typed `Any`/`list`.
+_Invocation = record(
+    ctx = field(typing.Any),
+    command = field(str),
+    trait = field(typing.Any),
+    rc = field(typing.Any),
+    patterns = field(list[str]),
+    sinks = field(list),
+    rc_flags = field(list[str]),
+    announce_version = field(bool),
+    announce_command = field(bool),
+    max_attempts = field(int),
+)
+
+def _resolve_targets(ctx) -> tuple:
+    """`(patterns, base_flags)` honoring `--target-pattern-file`: when set, forward
+    it as a Bazel flag (patterns empty) rather than expand to argv — fails on
+    combine-with-positional or a missing file. Otherwise the positional patterns."""
+    pattern_file = getattr(ctx.args, "target_pattern_file", "") if hasattr(ctx.args, "target_pattern_file") else ""
+    if pattern_file:
+        if ctx.args.is_explicit("targets"):
+            fail("--target-pattern-file cannot be combined with command-line target patterns")
+        if not ctx.std.fs.exists(pattern_file):
+            fail("--target-pattern-file: file not found: " + pattern_file)
+        return ([], ["--target_pattern_file=" + pattern_file])
+    return (list(ctx.args.targets), [])
+
+def _resolve(ctx, command: str) -> _Invocation:
+    """Shared constructor for `build` / `test`. Reads everything a feature injected
+    on the trait (base flags, BES backends, the `rc_flags` hooks); the bazel core
+    knows nothing about deployments or Aspect auth."""
+    trait = ctx.traits[BazelTrait]
+    (patterns, target_flags) = _resolve_targets(ctx)
+
+    # Base (default) flags, prepended so user --bazel-flag overrides win:
+    # the TTY signal, feature-injected `trait.base_flags` (e.g. a deployment's
+    # --remote_cache), and the --target_pattern_file forward.
+    base_flags = ["--isatty=" + str(int(ctx.std.io.stdout.is_tty))]
+    base_flags.extend(trait.base_flags)
+    base_flags.extend(target_flags)
+
+    # Resolve flags → parse_rc → use_rc → announce-rc disclosure. The active run
+    # command drives the health check (in results.setup) and every spawn below.
+    rc = setup_command(ctx, command, base_flags = base_flags)
+
+    (announce_version, announce_command) = resolve_announce(ctx)
+
+    # CLI-streamed BES sinks: `--bes-backend` + feature-injected backend URIs
+    # (`trait.bes_backends`) + the trait's own (feature-injected) sinks.
+    sinks = collect_bes_from_args(ctx, extra_backends = list(trait.bes_backends))
+    sinks.extend(trait.build_event_sinks)
+
+    # Post-rc flag hooks: features (e.g. deployment auth) inject flags computed
+    # from the resolved rc; appended to each spawn after rc expansion.
+    rc_flags = resolve_rc_flags(ctx, rc, command)
+
+    requested = ctx.args.bazel_retry_attempts if hasattr(ctx.args, "bazel_retry_attempts") else DEFAULT_BAZEL_RETRY_ATTEMPTS
+
+    return _Invocation(
+        ctx = ctx,
+        command = command,
+        trait = trait,
+        rc = rc,
+        patterns = patterns,
+        sinks = sinks,
+        rc_flags = rc_flags,
+        announce_version = announce_version,
+        announce_command = announce_command,
+        max_attempts = max(1, requested),
+    )
+
+def _do_start(inv: _Invocation) -> None:
+    """`build_start` hooks + `--cancel` + BES announce. Once, before the loop."""
+    for handler in inv.trait.build_start:
+        handler(inv.ctx)
+    if hasattr(inv.ctx.args, "cancel") and inv.ctx.args.cancel:
+        inv.ctx.bazel.cancel_invocation().wait()
+    announce_bes_sinks(inv.ctx, inv.sinks)
+
+def _do_spawn(inv: _Invocation, index: int, extra_flags: list, aspects: list, events):
+    """Spawn attempt `index` and RETURN a `_spawned` struct — the live handle is
+    threaded via that return value, never stored on `inv`."""
+
+    # One iterator per invocation, fanned out in AXL — an extra runtime iterator
+    # would deep-clone the whole stream. `events`: False → none; True → all kinds;
+    # a list → those kinds (send-side filtered). A trait build_event hook may want
+    # any kind, so its presence forces all kinds.
+    trait_wants = bool(inv.trait.build_event)
+    if events == False and not trait_wants:
+        iterator = None
+    else:
+        kinds = None if (trait_wants or events == True) else events
+        iterator = build_events_iterator(kinds = kinds, tick_ms = _TICK_MS)
+
+    # `[]` would ENABLE BES with no consumer (the runtime treats an empty list as
+    # "stream on"); collapse to False so a local build with no sinks/iterator runs
+    # with no BEP fifo at all.
+    be = ([iterator] if iterator else []) + list(inv.sinks)
+    build_events = be if be else False
+
+    if inv.command == "test":
+        handle = inv.ctx.bazel.test(
+            build_events = build_events,
+            execution_log = inv.trait.execution_log_sinks or False,
+            announce_version = inv.announce_version,
+            announce_command = inv.announce_command,
+            flags = inv.rc_flags + extra_flags,
+            *inv.patterns
+        )
+    else:
+        handle = inv.ctx.bazel.build(
+            build_events = build_events,
+            execution_log = inv.trait.execution_log_sinks or False,
+            announce_version = inv.announce_version,
+            announce_command = inv.announce_command,
+            flags = inv.rc_flags + extra_flags,
+            aspects = aspects,
+            *inv.patterns
+        )
+    return struct(
+        index = index,
+        events = iterator if iterator else [],
+        sink_invocation_id = handle.sink_invocation_id,
+        wait = lambda: _do_wait(inv, handle),
+    )
+
+def _do_wait(inv: _Invocation, handle):
+    """Block on the attempt, flush BES sinks (rebinding a still-Live gRPC sink on
+    the next spawn errors; wait() resets it to Idle), then fire `bazel_attempt_end`
+    before the retry decision."""
+    status = handle.wait()
+    for sink in inv.sinks:
+        sink.wait()
+    for handler in inv.trait.bazel_attempt_end:
+        handler(inv.ctx, status.code)
+    return status
+
+def _do_on_event(inv: _Invocation, event) -> None:
+    """Dispatch one BES event to the trait's `build_event` hooks. `event` is None
+    on a quiet tick — nothing to do."""
+    if event == None:
+        return
+    for handler in inv.trait.build_event:
+        handler(inv.ctx, event)
+
+def _do_should_retry(inv: _Invocation, sp, w) -> bool:
+    """Retry the attempt `sp` produced? Explicit at the callsite, never folded
+    into wait(). The index is read straight off the spawned struct."""
+    return w.code != 0 and inv.trait.build_retry(w.code) and sp.index < inv.max_attempts - 1
+
+def _do_finish(inv: _Invocation, w) -> None:
+    """Conclude: summarize the BES upload, then fire `build_end` with the final
+    exit code. Merges the old `summary()` + `end()` and owns the code coercion."""
+    summarize_bes_upload(inv.ctx, inv.sinks)
+    code = 0 if w.success else (w.code or 1)
+    for handler in inv.trait.build_end:
+        handler(inv.ctx, code)
+
+def _handle(ctx, command: str):
+    """Build the immutable config, then a handle of thin forwarders over it."""
+    inv = _resolve(ctx, command)
+    return struct(
+        rc = inv.rc,
+        targets = inv.patterns,
+        attempts = list(range(inv.max_attempts)),
+        start = lambda: _do_start(inv),
+        spawn = lambda index, extra_flags = [], aspects = [], events = False: _do_spawn(inv, index, extra_flags, aspects, events),
+        on_event = lambda event: _do_on_event(inv, event),
+        should_retry = lambda sp, w: _do_should_retry(inv, sp, w),
+        finish = lambda w: _do_finish(inv, w),
+    )
+
+def build(ctx):
+    """High-level `bazel build` invocation handle. See module docstring."""
+    return _handle(ctx, "build")
+
+def test(ctx):
+    """High-level `bazel test` invocation handle. See module docstring."""
+    return _handle(ctx, "test")

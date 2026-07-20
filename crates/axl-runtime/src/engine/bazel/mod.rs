@@ -1120,6 +1120,7 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
         #[starlark(require = named, default = NoneOr::None)] kinds: NoneOr<
             UnpackList<values::Value>,
         >,
+        #[starlark(require = named, default = NoneOr::None)] tick_ms: NoneOr<i32>,
     ) -> anyhow::Result<build::BuildEventIter> {
         let kinds = match kinds {
             NoneOr::None => None,
@@ -1136,7 +1137,12 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
                 Some(set)
             }
         };
-        Ok(build::BuildEventIter::new(kinds))
+        let tick_ms = match tick_ms {
+            NoneOr::None => None,
+            NoneOr::Other(ms) if ms > 0 => Some(ms as u64),
+            NoneOr::Other(ms) => anyhow::bail!("tick_ms must be a positive integer; got {ms}"),
+        };
+        Ok(build::BuildEventIter::new(kinds, tick_ms))
     }
 }
 

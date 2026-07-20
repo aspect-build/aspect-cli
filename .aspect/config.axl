@@ -1,4 +1,5 @@
 load("@aspect//auth_test.axl", "auth_tests")
+load("@aspect//bazel/build_events_test.axl", "bes_sinks_tests")
 load("@aspect//feature/artifacts.axl", "ArtifactUpload")
 load("@aspect//feature/buildkite_annotations.axl", "BuildkiteAnnotations")
 load("@aspect//feature/circleci_test_results.axl", "CircleCITestResults")
@@ -11,9 +12,7 @@ load("@aspect//private/helpers_test.axl", "helpers_facade_tests")
 load("@aspect//private/lib/aspect_endpoint_auth_test.axl", "aspect_endpoint_auth_tests")
 load("@aspect//private/lib/bazel_flags_test.axl", "bazel_flags_tests")
 load("@aspect//private/lib/bazel_results_test.axl", "bazel_results_unit_tests", "template_snapshot_tests")
-load("@aspect//private/lib/bazel_runner_test.axl", "bazel_runner_tests")
 load("@aspect//private/lib/bazelrc_test.axl", "bazelrc_tests")
-load("@aspect//private/lib/bes_sinks_test.axl", "bes_sinks_tests")
 load("@aspect//private/lib/ci_test.axl", "ci_tests")
 load("@aspect//private/lib/circleci_test.axl", "circleci_tests")
 load("@aspect//private/lib/delivery_results_test.axl", "delivery_results_unit_tests", "delivery_template_snapshot_tests")
@@ -42,7 +41,7 @@ load("@aspect//private/lib/tips_test.axl", "tips_tests")
 load("@aspect//private/lib/warming_results_test.axl", "warming_template_snapshot_tests")
 load("@aspect//private/lib/wrapper_test.axl", "wrapper_tests")
 load("@aspect//tips.axl", "TASK_SCREENS", "TIP_SUGGESTION", "TIP_TEMPLATE_RAW", "add_tip")
-load("@aspect//traits.axl", "BazelTrait", "DeliveryTrait", "LintTrait", "REPRO_FIX_ACCEPT", "REPRO_FIX_REJECT", "ReproFixInfo", "ReproFixSuggestion", "TaskLifecycleTrait", "TaskUpdate", "repro_fix_replace")
+load("@aspect//traits.axl", "BazelTrait", "DeliveryTrait", "LintTrait", "Phases", "REPRO_FIX_ACCEPT", "REPRO_FIX_REJECT", "ReproFixInfo", "ReproFixSuggestion", "TaskUpdate", "repro_fix_replace")
 load("./lambda.axl", "lambda_with_global_bind")
 
 def _user_task_impl(ctx: TaskContext) -> int:
@@ -229,7 +228,7 @@ def config(ctx: ConfigContext):
 
     # Customize repro/fix suggestions; order matters — rewrite first (aspect →
     # bazel buildifier), then drop vanilla-bazel alternates.
-    lifecycle = ctx.traits[TaskLifecycleTrait]
+    lifecycle = ctx.traits[Phases]
     lifecycle.repro_fix_suggestion.append(_buildifier_repro_fix)
     lifecycle.repro_fix_suggestion.append(_shorten_delivery_local_preview)
 
@@ -361,10 +360,6 @@ def config(ctx: ConfigContext):
     # Run with: aspect dev test-bazel-flags
     ctx.tasks.add(bazel_flags_tests)
 
-    # bazel_runner.axl dispatch helpers: the bazel_attempt_end/build_end seam.
-    # Run with: aspect dev test-bazel-runner
-    ctx.tasks.add(bazel_runner_tests)
-
     # aspect_endpoint_auth.axl: host parsing, suffix matching, credential gate.
     # Run with: aspect dev test-aspect-endpoint-auth
     ctx.tasks.add(aspect_endpoint_auth_tests)
@@ -373,7 +368,7 @@ def config(ctx: ConfigContext):
     # Run with: aspect dev test-deployment-flags
     ctx.tasks.add(deployment_flags_tests)
 
-    # bes_sinks.axl: the end-of-build BES upload summary line.
+    # build_events.axl: the end-of-build BES upload summary line.
     # Run with: aspect dev test-bes-sinks
     ctx.tasks.add(bes_sinks_tests)
 

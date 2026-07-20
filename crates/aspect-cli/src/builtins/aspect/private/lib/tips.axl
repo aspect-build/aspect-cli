@@ -39,6 +39,7 @@ need to probe — the data flow just goes quiet.
     TIP_INFO        — FYI.
 """
 
+load("./ansi.axl", "ansi")
 load("./environment.axl", "color_enabled")
 
 # ── Severity constants ───────────────────────────────────────────────
@@ -155,7 +156,7 @@ def tip_shows_on(tip, surface):
 #
 # A `tip_suggestion` hook (on the public `TipsTrait`) fires on every
 # `add_tip`, letting `config.axl` accept/reject/rewrite any tip — same
-# shape as `repro_fix_suggestion` on `TaskLifecycleTrait`.
+# shape as `repro_fix_suggestion` on `Phases`.
 
 # `accept` keeps, `reject` drops (never stored/surfaced), `replace`
 # overrides the set fields on the returned `TipSuggestion`.
@@ -523,13 +524,13 @@ def _print_tip(std, id, severity, title, body):
 
     prefix = "%s %s:" % (severity_emoji(severity), severity_label(severity).upper())
     if color_on:
-        prefix = "\x1b[" + code + "m" + prefix + "\x1b[0m"
+        prefix = ansi.style(prefix, ansi.seq(code))
 
         # Bold the title (no color) so the whole header reads as one line.
-        title = "\x1b[1m" + title + "\x1b[0m"
+        title = ansi.style(title, ansi.BOLD)
     print(prefix + " " + title)
 
-    bar = "\x1b[" + code + "m│\x1b[0m" if color_on else "│"
+    bar = ansi.style("│", ansi.seq(code), color_on)
     cleaned = strip_code_fences(body)
     if cleaned:
         for line in cleaned.split("\n"):

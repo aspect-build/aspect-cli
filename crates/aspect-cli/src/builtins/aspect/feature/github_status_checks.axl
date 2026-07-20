@@ -40,7 +40,7 @@ load("../private/lib/checkrun.axl", "checkrun")
 load("../private/lib/ci.axl", "detect_ci_host", "resolve_build_url")
 load("../private/lib/environment.axl", "feature_logger", "workflows_results_url")
 load("../private/lib/github.axl", "detect_commit_sha", "detect_github_repo", "github")
-load("../private/lib/lifecycle.axl", "TaskLifecycleTrait", "TaskUpdate")
+load("../private/lib/lifecycle.axl", "Phases", "TaskUpdate")
 load(
     "../private/lib/lint_results.axl",
     "lint_annotation_plan",
@@ -96,7 +96,7 @@ def _collect_ci_links(ctx, results_base_url):
     }
 
 def _github_status_checks(ctx: FeatureContext):
-    lifecycle = ctx.traits[TaskLifecycleTrait]
+    lifecycle = ctx.traits[Phases]
 
     templates = ctx.args.templates or {}
     metadata_keys = list(ctx.args.metadata_keys or [])
@@ -354,7 +354,7 @@ def _github_status_checks(ctx: FeatureContext):
         # under budget pressure; the conclusion-setting calls above always land.
         github.status_checks.update(ctx, token, owner, repo, check_run_id, output = output, skippable = True)
 
-    # TaskLifecycleTrait hooks
+    # Phases hooks
 
     def _init(ctx):
         # One-time init on first task_update: stash the task name (FeatureContext

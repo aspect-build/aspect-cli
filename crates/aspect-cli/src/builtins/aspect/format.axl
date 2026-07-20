@@ -15,20 +15,18 @@ Usage:
 
 """
 
-load("@aspect//bazel.axl", "BazelTrait")
+load("@aspect//bazel.axl", "BazelTrait", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end", bzl = "bazel")
 load("@std//time.axl", "sleep_iter")
+load("./bazel/build_events.axl", "announce_bes_sinks", "bes_args", "collect_bes_from_args", "summarize_bes_upload")
 load("./private/lib/artifacts.axl", "artifacts")
-load("./private/lib/bazel_flags.axl", "announce_bazel_args", "aspect_endpoint_auth_flags", "bazel_flag_args", "resolve_bazel_announce")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event")
-load("./private/lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
-load("./private/lib/bes_sinks.axl", "announce_bes_sinks", "bes_args", "collect_bes_from_args", "summarize_bes_upload")
 load("./private/lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
 load("./private/lib/environment.axl", "color_enabled", "error", "info", "warn")
 load("./private/lib/format_results.axl", fmt_init_data = "init_data", format_conclusion = "conclusion")
 load("./private/lib/format_spawn.axl", "compute_spawn_args")
 load("./private/lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_changed_files_listing")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
-load("./private/lib/lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "pick_task_status", "resolve_severity", "setup_phase", "task_update")
+load("./private/lib/lifecycle.axl", "phases", "pick_task_status", "resolve_severity")
 load("./private/lib/path_glob.axl", "match_any")
 load("./private/lib/path_normalize.axl", "normalize_files_for_cwd")
 load("./private/lib/repro_commands.axl", "build_aspect_command", "build_bazel_command", "explicit_flags", "filter_by_flavor", "has_tools_bazel_wrapper", "print_repro_and_fix", "repro_flavor_args", "repro_prefix", "task_cli_path")
@@ -168,7 +166,7 @@ def _append_repro_command(ctx, data):
              explicit_flags(ctx, _DETECTION_PAIRS) +
              _surfaced_base_ref_flag(ctx))
     prefix = repro_prefix(ctx)
-    data["repro_commands"].append(ReproFixCommand(
+    data["repro_commands"].append(phases.ReproFixCommand(
         command = prefix + build_aspect_command(task_cli_path(ctx.task), flags, []),
         slug = "format-repro",
     ))
@@ -195,14 +193,14 @@ def _append_fix_commands(ctx, data):
     positional_flags = ([("--severity", "info")] +
                         explicit_flags(ctx, [("formatter_target", "--formatter-target")]))
     if len(affected) <= _FIX_FILES_LIMIT:
-        data["fix_commands"].append(ReproFixCommand(
+        data["fix_commands"].append(phases.ReproFixCommand(
             command = prefix + build_aspect_command(task_path, positional_flags, affected, max_chars = 4096),
             slug = "format-fix",
         ))
     else:
         shown = affected[:_FIX_FILES_LIMIT]
         remaining = len(affected) - _FIX_FILES_LIMIT
-        data["fix_commands"].append(ReproFixCommand(
+        data["fix_commands"].append(phases.ReproFixCommand(
             command = prefix + build_aspect_command(task_path, positional_flags, shown, max_chars = 4096),
             description = "First %d of %d affected files (plus %d other%s)" % (
                 _FIX_FILES_LIMIT,
@@ -216,7 +214,7 @@ def _append_fix_commands(ctx, data):
         detection = ([("--severity", "info")] +
                      explicit_flags(ctx, _DETECTION_PAIRS) +
                      _surfaced_base_ref_flag(ctx))
-        data["fix_commands"].append(ReproFixCommand(
+        data["fix_commands"].append(phases.ReproFixCommand(
             command = prefix + build_aspect_command(task_path, detection, []),
             description = "Or re-discover and format all %d affected files" % len(affected),
             slug = "format-fix-rediscover",
@@ -228,7 +226,7 @@ def _append_fix_commands(ctx, data):
     if not has_tools_bazel_wrapper(ctx):
         bazel_flags = ["--run_in_cwd"] if ctx.args.run_in == "cwd" else []
         bazel_run_args = [ctx.args.formatter_target] + list(ctx.args.formatter_args) + affected
-        data["fix_commands"].append(ReproFixCommand(
+        data["fix_commands"].append(phases.ReproFixCommand(
             command = prefix + build_bazel_command(
                 "run",
                 bazel_run_args,
@@ -239,8 +237,10 @@ def _append_fix_commands(ctx, data):
             slug = "format-fix-vanilla-bazel",
         ))
 
-def _emit_final(ctx, lifecycle, data, exit_code):
+def _emit_final(ph, exit_code):
     """Emit the terminal task_update for status-check consumers."""
+    ctx = ph.ctx
+    data = ph.data
     status = _pick_status(data, had_failure = exit_code != 0, terminal = True)
     if not data.get("finish_time_ms"):
         data["finish_time_ms"] = now_ms(ctx)
@@ -256,27 +256,24 @@ def _emit_final(ctx, lifecycle, data, exit_code):
 
     bookend = format_conclusion(status, data)
 
-    # Pre-hook with rich ReproFixInfo (exit_code/extras) the dispatch_task_update
+    # Pre-hook with rich ReproFixInfo (exit_code/extras) the ph.dispatch
     # safety-net can't supply; hooked entries skip dispatch via `_hooked`.
-    apply_repro_fix_hooks(
-        ctx,
-        lifecycle,
-        data,
-        kind = "format_results",
-        status = status,
+    ph.suggest_fixes(
+        "format_results",
+        status,
         exit_code = exit_code,
         extras = {
             "affected_files": (data.get("format", {}) or {}).get("affected_files", []) or [],
         },
     )
 
-    dispatch_task_update(ctx, lifecycle, TaskUpdate(
+    ph.dispatch(phases.Update(
         kind = "format_results",
         status = status,
         final = True,
         conclusion = bookend,
         data = data,
-        progress = ProgressStyles(
+        progress = phases.ProgressStyles(
             body = _body_text(status, data),
         ),
     ))
@@ -291,16 +288,15 @@ def _emit_final(ctx, lifecycle, data, exit_code):
 # buildifier: disable=function-docstring
 def _impl(ctx: TaskContext) -> int | TaskConclusion:
     bazel_trait = ctx.traits[BazelTrait]
-    hc_trait = ctx.traits[HealthCheckTrait]
-    lifecycle = ctx.traits[TaskLifecycleTrait]
     ansi = color_enabled(ctx.std)
 
-    # Resolve --run-in up front: a bad value must fail before setup_phase opens
+    # Resolve --run-in up front: a bad value must fail before phases.setup opens
     # status surfaces and the build spends time.
     spawn_cwd = resolve_run_in(ctx, ctx.args.run_in)
 
     # Initialize data for status-check emission.
     data = fmt_init_data()
+    ph = phases.new(ctx, data)
     data["start_time_ms"] = now_ms(ctx)
     data["format"]["scope"] = ctx.args.scope
     data["format"]["formatter_target"] = ctx.args.formatter_target
@@ -309,9 +305,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
     # Single pre-task setup phase (status surface, rc parse, health checks);
     # returns resolved flags (a failed health check fails the task inside).
-    rc = setup_phase(ctx, lifecycle, ctx.args.formatter_target, "format_results", data, hc_trait, bazel_trait)
-    announce_version, announce_command = resolve_bazel_announce(ctx)
-    endpoint_auth_flags = aspect_endpoint_auth_flags(ctx, rc, "build")
+    rc = ph.setup(ctx.args.formatter_target, "format_results")
+    announce_version, announce_command = bzl.announce.resolve(ctx)
+    endpoint_auth_flags = bzl.rc_flags(ctx, rc, "build")
 
     # `rc=` opts into the runinfo aspect: `r.flags` captures the formatter's
     # executable + `args` attribute + env so `r.spawn` replays them ahead of the
@@ -331,17 +327,15 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         hook(ctx)
 
     status = _pick_status(data, had_failure = False, terminal = False)
-    task_update(
-        ctx,
-        lifecycle,
+    ph.update(
         status,
-        ProgressStyles(
+        phases.ProgressStyles(
             body = "Building formatter... (%s)" % ctx.args.formatter_target,
             stream = "Building formatter (%s)" % ctx.args.formatter_target,
         ),
         kind = "format_results",
         data = data,
-        phase = Phase(name = "build", description = "Build formatter", emoji = "🔨"),
+        phase = phases.Phase(name = "build", description = "Build formatter", emoji = "🔨"),
     )
 
     build = ctx.bazel.build(
@@ -362,11 +356,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # Re-emit now the link is known, but only to status surfaces — empty
     # `stream` suppresses the duplicate CLI line.
     status = _pick_status(data, had_failure = False, terminal = False)
-    task_update(
-        ctx,
-        lifecycle,
+    ph.update(
         status,
-        ProgressStyles(
+        phases.ProgressStyles(
             body = "Building formatter... (%s)" % ctx.args.formatter_target,
         ),
         kind = "format_results",
@@ -390,11 +382,11 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                 interesting = True
         if interesting or now_ms(ctx) - last_emit_ms >= MIN_HEARTBEAT_INTERVAL_MS:
             heartbeat_status = _pick_status(data, had_failure = False, terminal = False)
-            dispatch_task_update(ctx, lifecycle, TaskUpdate(
+            ph.dispatch(phases.Update(
                 kind = "format_results",
                 status = heartbeat_status,
                 data = data,
-                progress = ProgressStyles(),
+                progress = phases.ProgressStyles(),
             ))
             last_emit_ms = now_ms(ctx)
         if events.done:
@@ -408,12 +400,12 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     dispatch_bazel_build_end(ctx, bazel_trait, build_status.code)
 
     if not build_status.success:
-        _emit_final(ctx, lifecycle, data, build_status.code or 1)
+        _emit_final(ph, build_status.code or 1)
         fail("Building the formatter has failed.")
 
     ep = r.determine_entrypoint(ctx.args.formatter_target)
     if not ep:
-        _emit_final(ctx, lifecycle, data, 1)
+        _emit_final(ph, 1)
         fail("Failed to determine the formatter entrypoint.")
 
     exclude_patterns = list(ctx.args.exclude_patterns)
@@ -437,17 +429,15 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         # host), else local `git diff <merge-base> --diff-filter=d --name-only`.
         # --base-ref / --merge-base apply only to that fallback.
         status = _pick_status(data, had_failure = False, terminal = False)
-        task_update(
-            ctx,
-            lifecycle,
+        ph.update(
             status,
-            ProgressStyles(
+            phases.ProgressStyles(
                 body = "Detecting changed files...",
                 stream = "Detecting changed files",
             ),
             kind = "format_results",
             data = data,
-            phase = Phase(name = "detect", description = "Detect changed files", emoji = "🔍"),
+            phase = phases.Phase(name = "detect", description = "Detect changed files", emoji = "🔍"),
         )
         detect_result = detect_changed_files(
             ctx,
@@ -481,7 +471,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             if not changed_files:
                 info(ctx.std, "No files to format")
                 data["format"]["no_files_to_format"] = True
-                return _emit_final(ctx, lifecycle, data, 0)
+                return _emit_final(ph, 0)
 
             # Post-filter count for the Configuration row's `Scope: changed — N file(s)`.
             data["changed_files_count"] = len(changed_files)
@@ -495,31 +485,27 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         files_label = pluralize(len(format_args), "file")
         scope_label = "" if explicit_files else " in scope"
         status = _pick_status(data, had_failure = False, terminal = False)
-        task_update(
-            ctx,
-            lifecycle,
+        ph.update(
             status,
-            ProgressStyles(
+            phases.ProgressStyles(
                 body = "Formatting %s%s..." % (files_label, scope_label),
                 stream = "Formatting %s%s" % (files_label, scope_label),
             ),
             kind = "format_results",
             data = data,
-            phase = Phase(name = "format", description = "Format files", emoji = "✨"),
+            phase = phases.Phase(name = "format", description = "Format files", emoji = "✨"),
         )
     else:
         status = _pick_status(data, had_failure = False, terminal = False)
-        task_update(
-            ctx,
-            lifecycle,
+        ph.update(
             status,
-            ProgressStyles(
+            phases.ProgressStyles(
                 body = "Formatting all files...",
                 stream = "Formatting all files",
             ),
             kind = "format_results",
             data = data,
-            phase = Phase(name = "format", description = "Format files", emoji = "✨"),
+            phase = phases.Phase(name = "format", description = "Format files", emoji = "✨"),
         )
 
     spawn_args = compute_spawn_args(
@@ -535,7 +521,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         error(ctx.std, "Formatter exited with code %d." % exit.code)
         data["format"]["formatter_error"] = True
         data["format"]["formatter_error_code"] = exit.code
-        return _emit_final(ctx, lifecycle, data, exit.code)
+        return _emit_final(ph, exit.code)
 
     # No HEAD (no git repo / no initial commit) → no snapshot, can't diff. The
     # formatter ran; degrade detection with a warning rather than failing.
@@ -545,22 +531,20 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                       "whether it changed anything. Make at least one commit (or run inside a git repo) " +
                       "and re-run if you want `aspect format` to surface formatter-induced changes.")
         data["format"]["no_git"] = True
-        return _emit_final(ctx, lifecycle, data, 0)
+        return _emit_final(ph, 0)
 
     # Diff post-format tree vs the pre-format snapshot; non-empty = formatting
     # required. Empty pre_snap (was clean) → `git diff HEAD`, same answer.
     status = _pick_status(data, had_failure = False, terminal = False)
-    task_update(
-        ctx,
-        lifecycle,
+    ph.update(
         status,
-        ProgressStyles(
+        phases.ProgressStyles(
             body = "Computing format diff...",
             stream = "Computing format diff",
         ),
         kind = "format_results",
         data = data,
-        phase = Phase(name = "diff", description = "Detect formatter-induced changes", emoji = "📋"),
+        phase = phases.Phase(name = "diff", description = "Detect formatter-induced changes", emoji = "📋"),
     )
     formatter_diff = _diff_against(ctx, pre_snap)
     if not formatter_diff:
@@ -573,7 +557,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         else:
             scope_text = ""
         print("No files%s were modified." % scope_text)
-        return _emit_final(ctx, lifecycle, data, 0)
+        return _emit_final(ph, 0)
 
     # Pattern filters hide files from the affected list + failure decision; they
     # don't undo changes (still in the tree), just stop unexpected files failing.
@@ -590,7 +574,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     if not affected:
         if filtered_count > 0:
             info(ctx.std, "Formatter modified %d file(s), all filtered by pattern rules; treating as OK." % filtered_count)
-        return _emit_final(ctx, lifecycle, data, 0)
+        return _emit_final(ph, 0)
 
     n = len(affected)
     if explicit_files:
@@ -639,12 +623,12 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     data["applied"] = True
     if severity_resolved == "fail":
         error(ctx.std, "Formatting required.")
-        return _emit_final(ctx, lifecycle, data, 1)
+        return _emit_final(ph, 1)
     if severity_resolved == "warn":
         info(ctx.std, "Formatter modified %d file(s). --severity=warn → exiting 0 with a warning signal." % len(affected))
     else:
         print("Formatted %d file(s). Review and commit the changes." % len(affected))
-    return _emit_final(ctx, lifecycle, data, 0)
+    return _emit_final(ph, 0)
 
 format = task(
     args = {
@@ -712,11 +696,10 @@ format = task(
             maximum = 4096,
             minimum = 0,
         ),
-    } | bazel_flag_args("the formatter build") | announce_bazel_args("the formatter build") | bes_args() | repro_flavor_args(include_fix = True),
+    } | bzl.flags.args("the formatter build") | bzl.announce.args("the formatter build") | bes_args() | repro_flavor_args(include_fix = True),
     traits = [
         BazelTrait,
         HealthCheckTrait,
-        TaskLifecycleTrait,
-    ] + artifacts.TRAITS + tips.TRAITS,
+    ] + phases.TRAITS + artifacts.TRAITS + tips.TRAITS,
     implementation = _impl,
 )

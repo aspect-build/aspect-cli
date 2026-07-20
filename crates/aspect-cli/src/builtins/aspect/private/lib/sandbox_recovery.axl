@@ -24,7 +24,7 @@ registers when `environment.runner != None`:
    the FINAL attempt exits with `BLAZE_INTERNAL_ERROR (37)` or
    `LOCAL_ENVIRONMENTAL_ERROR (36)`, the Bazel server is persistently
    sick (could be #23880 the disk-scan missed, JVM OOM, native crash,
-   corrupt lock file, etc.). The retry loop in `bazel_runner.axl` only
+   corrupt lock file, etc.). The `bazel.build(ctx)` retry loop only
    continues retrying on these two codes — `bazel_trait.build_retry`
    keys off `default_retry`. So a final exit code that is itself
    retryable-class means *every* prior attempt was also retryable-class
@@ -40,6 +40,7 @@ hook returns early. The runner is healthy enough to produce a verdict.
 """
 
 load("@aspect//bazel.axl", "default_retry")
+load("./ansi.axl", "ansi")
 
 def _signal_unhealthy(ctx, environment):
     """Best-effort invoke the Workflows agent's `signal_instance_unhealthy`
@@ -76,7 +77,7 @@ def make_attempt_end_hook(environment):
             return
         if result.outcome == "repaired":
             print(
-                "\x1b[33mWARNING\x1b[0m: cleaned up bazel#23880-poisoning " +
+                ansi.style("WARNING", ansi.YELLOW) + ": cleaned up bazel#23880-poisoning " +
                 "sandbox entries: " + ", ".join(result.removed) + ". " +
                 "Retries (and future jobs on this runner) should now " +
                 "succeed. See bazelbuild/bazel#23880; fixed upstream in " +
@@ -86,7 +87,7 @@ def make_attempt_end_hook(environment):
 
         remaining = ", ".join(result.remaining) if result.remaining else "(unknown)"
         print(
-            "\x1b[31mWARNING\x1b[0m: bazel#23880-style sandbox poisoning " +
+            ansi.style("WARNING", ansi.RED) + ": bazel#23880-style sandbox poisoning " +
             "detected and could not be cleaned (entries that survived " +
             "removal: " + remaining + "). Marking this runner unhealthy " +
             "so the next job lands on a fresh instance.",
@@ -111,7 +112,7 @@ def make_final_status_hook(environment):
         if not default_retry(exit_code):
             return
         print(
-            "\x1b[31mWARNING\x1b[0m: Bazel exited " + str(exit_code) +
+            ansi.style("WARNING", ansi.RED) + ": Bazel exited " + str(exit_code) +
             " after all retries (server-internal-error class). Marking " +
             "this runner unhealthy so the next job lands on a fresh " +
             "instance.",

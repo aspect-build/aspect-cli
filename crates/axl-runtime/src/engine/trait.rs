@@ -1,10 +1,12 @@
 use std::cell::Cell;
 use std::fmt::{self, Display, Write};
+use std::hash::Hasher;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use allocative::Allocative;
 use dupe::Dupe;
 
+use starlark::collections::StarlarkHasher;
 use starlark::environment::{GlobalsBuilder, Methods, MethodsBuilder, MethodsStatic};
 use starlark::starlark_module;
 use starlark::values::dict::AllocDict;
@@ -246,6 +248,17 @@ impl<'v> StarlarkValue<'v> for TraitType<'v> {
         write!(collector, "{}", self).unwrap();
     }
 
+    // Hash/equality by the trait's unique id so a trait type can key a dict or
+    // set (e.g. faking `ctx.traits[SomeTrait]` in a unit test).
+    fn write_hash(&self, hasher: &mut StarlarkHasher) -> starlark::Result<()> {
+        hasher.write_u64(self.id);
+        Ok(())
+    }
+
+    fn equals(&self, other: Value<'v>) -> starlark::Result<bool> {
+        Ok(extract_trait_type_id(other) == Some(self.id))
+    }
+
     fn export_as(
         &self,
         variable_name: &str,
@@ -369,6 +382,15 @@ impl<'v> StarlarkValue<'v> for FrozenTraitType {
 
     fn collect_repr(&self, collector: &mut String) {
         write!(collector, "{}", self).unwrap();
+    }
+
+    fn write_hash(&self, hasher: &mut StarlarkHasher) -> starlark::Result<()> {
+        hasher.write_u64(self.id);
+        Ok(())
+    }
+
+    fn equals(&self, other: Value<'v>) -> starlark::Result<bool> {
+        Ok(extract_trait_type_id(other) == Some(self.id))
     }
 
     fn invoke(

@@ -1,5 +1,5 @@
 load("@aspect//bazel.axl", "BazelTrait")
-load("../private/lib/build_metadata.axl", "get_build_metadata_flags", "get_task_metadata_flags")
+load("../bazel/build_metadata.axl", "get_build_metadata_flags", "get_task_metadata_flags")
 load(
     "../private/lib/environment.axl",
     "apply_output_base_suffix",
@@ -48,7 +48,7 @@ def _workflows_impl(ctx: FeatureContext):
 
     if environment.runner != None:
         # On a Workflows runner, register the runner-environment table and the
-        # Bazel server health check as `health_check` hooks. `setup_phase` runs
+        # Bazel server health check as `health_check` hooks. `phases.setup` runs
         # them inside the Setup phase; each prints its own BK section marker.
         hc_trait.health_check.append(lambda ctx: print_environment_info(ctx.std, environment))
         hc_trait.health_check.append(lambda ctx: agent_health_check(ctx, environment))

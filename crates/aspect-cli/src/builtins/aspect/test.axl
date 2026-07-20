@@ -2,14 +2,11 @@
 A default 'test' task that wraps a 'bazel test' command.
 """
 
-load("@aspect//bazel.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
+load("@aspect//bazel.axl", "BazelTrait", bbazel = "bazel")
 load("./private/lib/artifacts.axl", "artifacts")
-load("./private/lib/bazel_flags.axl", "announce_bazel_args", "bazel_flag_args")
-load("./private/lib/bazel_runner.axl", "run_bazel_task")
-load("./private/lib/bes_sinks.axl", "bes_args")
-load("./private/lib/deployment_flags.axl", "deployment_flag_args")
+load("./private/lib/bazel_results.axl", "results")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
-load("./private/lib/lifecycle.axl", "TaskLifecycleTrait")
+load("./private/lib/lifecycle.axl", "phases")
 load("./private/lib/repro_commands.axl", "repro_flavor_args")
 load("./private/lib/tips.axl", "tips")
 
@@ -76,12 +73,33 @@ def _run_coverage_tool(ctx, bin, raw_args, report_path):
         )
 
 def _impl(ctx: TaskContext) -> int | TaskConclusion:
+    # Coverage flags must land BEFORE the invocation handle resolves the rc, so
+    # append to the trait here (the constructor folds `extra_flags` into the rc).
     if ctx.args.coverage:
         bazel_trait = ctx.traits[BazelTrait]
         bazel_trait.extra_flags.append("--collect_code_coverage")
         bazel_trait.extra_flags.append("--combined_report=lcov")
 
-    conclusion = run_bazel_task(ctx, command = "test")
+    bz = bbazel.test(ctx)
+    rs = results.test(ctx)
+
+    rs.setup(bz.targets, bz.rc)
+    bz.start()
+
+    w = None
+    for i in bz.attempts:
+        rs.attempt(i, prior = w)
+        sp = bz.spawn(i, events = results.KINDS if rs.live else False)
+        rs.invocation(sp)
+        for event in sp.events:
+            bz.on_event(event)
+            rs.process(event)
+        w = sp.wait()
+        if w.success or not bz.should_retry(sp, w):
+            break
+
+    bz.finish(w)
+    conclusion = rs.conclude(w, bz.targets)
 
     if ctx.args.coverage:
         report_path = _resolve_report(ctx)
@@ -101,46 +119,27 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
 test = task(
     args = {
-        # TODO: Support - (list from stdin)
-        "targets": args.positional(
-            minimum = 1,
-            maximum = 512,
-            default = ["..."],
-            description = "Bazel target patterns to test. Defaults to '...' which expands to all rule targets in the package at and beneath the current directory. When any pattern is hyphen-led (e.g. excludes like `-//experimental/...`), separate them from flags with `--`: `aspect test -- //... -//experimental/...`.",
-        ),
-        "target_pattern_file": args.string(
-            default = "",
-            description = "Read newline-separated target patterns from this file instead of the command line (mirrors Bazel's --target_pattern_file). Blank lines and `#` comments are ignored. Cannot be combined with command-line target patterns.",
-        ),
-        "coverage": args.boolean(
-            default = False,
-            description = "Collect code coverage while testing. Adds --collect_code_coverage and --combined_report=lcov so Bazel writes the merged LCOV report at `$(bazel info output_path)/_coverage/_coverage_report.dat`.",
-        ),
-        "coverage_report": args.string(
-            default = "",
-            description = "Copy the merged LCOV report produced by --coverage to this path. Parent directories are created as needed. No effect unless --coverage is set.",
-        ),
-        "coverage_tool": args.string(
-            default = "",
-            description = "External binary to run against the merged LCOV report after a --coverage run (e.g. `genhtml`, `codecov`). The report path is substituted into any `--coverage-tool-arg` containing the `{report}` (or `{lcov}`) placeholder; if no placeholder is present, the path is appended as the last argument. The tool runs regardless of the test exit code so uploaders can publish partial coverage; a non-zero exit from the tool is surfaced as a warning and does not fail the test task. No effect unless --coverage is set.",
-        ),
-        "coverage_tool_args": args.string_list(
-            long = "coverage-tool-arg",
-            description = "Argument forwarded to --coverage-tool. Repeat the flag to pass multiple. The `{report}` (or `{lcov}`) placeholder is replaced with the absolute path of the merged LCOV report. Example: `--coverage-tool=codecov --coverage-tool-arg=-f --coverage-tool-arg={report}`.",
-        ),
-        "bazel_retry_attempts": args.int(
-            default = DEFAULT_BAZEL_RETRY_ATTEMPTS,
-            description = BAZEL_RETRY_ATTEMPTS_DESCRIPTION,
-        ),
-        "cancel": args.boolean(
-            default = False,
-            description = "Cancel any running Bazel invocation before starting the test.",
-        ),
-    } | bazel_flag_args("the test invocation") | announce_bazel_args("the test") | bes_args() | deployment_flag_args() | repro_flavor_args(),
+               "coverage": args.boolean(
+                   default = False,
+                   description = "Collect code coverage while testing. Adds --collect_code_coverage and --combined_report=lcov so Bazel writes the merged LCOV report at `$(bazel info output_path)/_coverage/_coverage_report.dat`.",
+               ),
+               "coverage_report": args.string(
+                   default = "",
+                   description = "Copy the merged LCOV report produced by --coverage to this path. Parent directories are created as needed. No effect unless --coverage is set.",
+               ),
+               "coverage_tool": args.string(
+                   default = "",
+                   description = "External binary to run against the merged LCOV report after a --coverage run (e.g. `genhtml`, `codecov`). The report path is substituted into any `--coverage-tool-arg` containing the `{report}` (or `{lcov}`) placeholder; if no placeholder is present, the path is appended as the last argument. The tool runs regardless of the test exit code so uploaders can publish partial coverage; a non-zero exit from the tool is surfaced as a warning and does not fail the test task. No effect unless --coverage is set.",
+               ),
+               "coverage_tool_args": args.string_list(
+                   long = "coverage-tool-arg",
+                   description = "Argument forwarded to --coverage-tool. Repeat the flag to pass multiple. The `{report}` (or `{lcov}`) placeholder is replaced with the absolute path of the merged LCOV report. Example: `--coverage-tool=codecov --coverage-tool-arg=-f --coverage-tool-arg={report}`.",
+               ),
+           } | bbazel.targets_arg("test") | bbazel.core_args("the test invocation") |
+           repro_flavor_args(),
     traits = [
         BazelTrait,
         HealthCheckTrait,
-        TaskLifecycleTrait,
-    ] + artifacts.TRAITS + tips.TRAITS,
+    ] + phases.TRAITS + artifacts.TRAITS + tips.TRAITS,
     implementation = _impl,
 )

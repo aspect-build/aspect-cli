@@ -16,18 +16,17 @@ Usage:
     aspect lint --fix
 """
 
-load("@aspect//bazel.axl", "BazelTrait")
+load("@aspect//bazel.axl", "BazelTrait", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end", bzl = "bazel")
 load("@std//time.axl", "sleep", "sleep_iter")
+load("./bazel/build_events.axl", "announce_bes_sinks", "bes_args", "collect_bes_from_args", "summarize_bes_upload")
+load("./private/lib/ansi.axl", "ansi")
 load("./private/lib/artifacts.axl", "artifacts")
-load("./private/lib/bazel_flags.axl", "announce_bazel_args", "aspect_endpoint_auth_flags", "bazel_flag_args", "resolve_bazel_announce")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event")
-load("./private/lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
-load("./private/lib/bes_sinks.axl", "announce_bes_sinks", "bes_args", "collect_bes_from_args", "summarize_bes_upload")
 load("./private/lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
 load("./private/lib/environment.axl", "color_enabled", "detect_ci", "error", "warn")
 load("./private/lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_changed_files_listing")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
-load("./private/lib/lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "setup_phase", "task_update")
+load("./private/lib/lifecycle.axl", "phases")
 load("./private/lib/lint_results.axl", "detect_lint_tool", lint_accumulate = "accumulate", lint_conclusion = "conclusion", lint_init_data = "init_data")
 load("./private/lib/repro_commands.axl", "build_aspect_command", "explicit_flags", "flavor_allows", "print_repro_and_fix", "repro_flavor_args", "repro_prefix", "task_cli_path")
 load("./private/lib/sarif.axl", "get_sarif_summary", "parse_sarif", "parse_sarif_diagnostics")
@@ -363,9 +362,9 @@ def _print_linters_run(ctx, tools_run):
     """Print a one-line summary of the linters that fired. No-op when none ran."""
     if not tools_run:
         return
-    ansi = color_enabled(ctx.std)
-    bold = "\033[1m" if ansi else ""
-    reset = "\033[0m" if ansi else ""
+    color = color_enabled(ctx.std)
+    bold = ansi.BOLD if color else ""
+    reset = ansi.RESET if color else ""
     print("")
     print("%s🧹 Linters%s (%d): %s" % (bold, reset, len(tools_run), ", ".join(tools_run)))
 
@@ -377,9 +376,9 @@ def _print_relevant_findings(ctx, relevant, strategy_name):
     """
     if not relevant:
         return
-    ansi = color_enabled(ctx.std)
-    bold = "\033[1m" if ansi else ""
-    reset = "\033[0m" if ansi else ""
+    color = color_enabled(ctx.std)
+    bold = ansi.BOLD if color else ""
+    reset = ansi.RESET if color else ""
     print("")
     label = "%sLint findings%s after %s%s%s (%d)" % (
         bold,
@@ -625,20 +624,18 @@ def _drain_pending_files(ctx, pending, data, strategy, changed_files, lint_trait
 def _impl(ctx: TaskContext) -> int | TaskConclusion:
     lint_trait = ctx.traits[LintTrait]
     bazel_trait = ctx.traits[BazelTrait]
-    hc_trait = ctx.traits[HealthCheckTrait]
-    lifecycle = ctx.traits[TaskLifecycleTrait]
     strategy = _STRATEGIES[ctx.args.strategy]
-    ansi = color_enabled(ctx.std)
 
     # Validate up front so a typo doesn't fail after the build has run.
     validate_findings_destination(lint_trait.findings_destination)
 
     data = lint_init_data()
+    ph = phases.new(ctx, data)
     data["start_time_ms"] = now_ms(ctx)
     data["lint"]["strategy"] = _strategy_name(strategy)
     data["target_pattern"] = " ".join(list(ctx.args.targets)) if ctx.args.targets else ""
 
-    # Base flags computed before setup_phase, which forwards them to setup_bazel_command.
+    # Base flags computed before phases.setup, which forwards them to bzl.setup_command.
     base_flags = ["--remote_download_regex='.*AspectRulesLint.*'"]
     for aspect in ctx.args.aspects:
         base_flags.append("--aspects=" + aspect)
@@ -661,26 +658,24 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         base_flags.append("--output_groups=rules_lint_machine")
 
     # Pre-task setup phase (status surface, rc parse, health checks); returns
-    # resolved flags (a failed health check fails the task inside setup_phase).
-    rc = setup_phase(ctx, lifecycle, data["target_pattern"], "lint_results", data, hc_trait, bazel_trait, "build", bazel_base_flags = base_flags)
-    announce_version, announce_command = resolve_bazel_announce(ctx)
-    endpoint_auth_flags = aspect_endpoint_auth_flags(ctx, rc, "build")
+    # resolved flags (a failed health check fails the task inside phases.setup).
+    rc = ph.setup(data["target_pattern"], "lint_results", "build", base_flags = base_flags)
+    announce_version, announce_command = bzl.announce.resolve(ctx)
+    endpoint_auth_flags = bzl.rc_flags(ctx, rc, "build")
 
     # Detect changed files BEFORE lint_start hooks so features read the canonical
     # lint_trait.changed_files. Prefers GitHub PR Files API, falls back to local
     # `git diff <base> --unified=0`. Lives in lib/github.axl (format wants it too).
     status = _pick_status(data, had_failure = False, terminal = False)
-    task_update(
-        ctx,
-        lifecycle,
+    ph.update(
         status,
-        ProgressStyles(
+        phases.ProgressStyles(
             body = "Detecting changed files...",
             stream = "Detecting changed files",
         ),
         kind = "lint_results",
         data = data,
-        phase = Phase(name = "detect", description = "Detect changed files", emoji = "🔍"),
+        phase = phases.Phase(name = "detect", description = "Detect changed files", emoji = "🔍"),
     )
     detect_result = detect_changed_files(
         ctx,
@@ -716,17 +711,15 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         hook(ctx)
 
     status = _pick_status(data, had_failure = False, terminal = False)
-    task_update(
-        ctx,
-        lifecycle,
+    ph.update(
         status,
-        ProgressStyles(
+        phases.ProgressStyles(
             body = "Running lint aspects...",
             stream = "Running lint aspects",
         ),
         kind = "lint_results",
         data = data,
-        phase = Phase(name = "lint", description = "Run lint aspects", emoji = "🔬"),
+        phase = phases.Phase(name = "lint", description = "Run lint aspects", emoji = "🔬"),
     )
 
     # 6. Build + stream events
@@ -748,11 +741,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # Re-emit now that sink_invocation_id is known (Web UI link); status surfaces
     # only — empty `stream` suppresses the duplicate CLI line.
     status = _pick_status(data, had_failure = False, terminal = False)
-    task_update(
-        ctx,
-        lifecycle,
+    ph.update(
         status,
-        ProgressStyles(
+        phases.ProgressStyles(
             body = "Running lint aspects...",
         ),
         kind = "lint_results",
@@ -823,11 +814,11 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             # Flip to "failing" on mid-build action failure so the breakdown tags Lint.
             had_action_failure = data["bazel"].get("failed_actions_total", 0) > 0
             heartbeat_status = _pick_status(data, had_failure = had_action_failure, terminal = False)
-            dispatch_task_update(ctx, lifecycle, TaskUpdate(
+            ph.dispatch(phases.Update(
                 kind = "lint_results",
                 status = heartbeat_status,
                 data = data,
-                progress = ProgressStyles(),
+                progress = phases.ProgressStyles(),
             ))
             last_emit_ms = now_ms(ctx)
         if events.done:
@@ -902,17 +893,15 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     if not build_failed and fix_apply and scoped_patches:
         patches_label = pluralize(len(scoped_patches), "auto-fix patch", plural = "auto-fix patches")
         status = _pick_status(data, had_failure = False, terminal = False)
-        task_update(
-            ctx,
-            lifecycle,
+        ph.update(
             status,
-            ProgressStyles(
+            phases.ProgressStyles(
                 body = "Applying %s..." % patches_label,
                 stream = "Applying " + patches_label,
             ),
             kind = "lint_results",
             data = data,
-            phase = Phase(name = "apply", description = "Apply auto-fix patches", emoji = "📦"),
+            phase = phases.Phase(name = "apply", description = "Apply auto-fix patches", emoji = "📦"),
         )
         for patch in scoped_patches:
             ctx.std.process.command("patch").arg("-p1").arg("--input=" + patch) \
@@ -924,17 +913,15 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # instead of Lint; without it the lint phase stays active so Lint is tagged.
     if not build_failed and lint_tools_run:
         status = _pick_status(data, had_failure = False, terminal = False)
-        task_update(
-            ctx,
-            lifecycle,
+        ph.update(
             status,
-            ProgressStyles(
+            phases.ProgressStyles(
                 body = "Filtering diagnostics...",
                 stream = "Filtering diagnostics",
             ),
             kind = "lint_results",
             data = data,
-            phase = Phase(name = "filter", description = "Filter diagnostics", emoji = "🔎"),
+            phase = phases.Phase(name = "filter", description = "Filter diagnostics", emoji = "🔎"),
         )
 
     # diagnostics were already filtered per-batch as SARIF streamed in, so the
@@ -1008,12 +995,12 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     task_path = task_cli_path(ctx.task)
     prefix = repro_prefix(ctx)
     if flavor_allows(ctx.args.repro_flavors, "lint-repro"):
-        data["repro_commands"].append(ReproFixCommand(
+        data["repro_commands"].append(phases.ReproFixCommand(
             command = prefix + build_aspect_command(task_path, repro_flags, targets),
             slug = "lint-repro",
         ))
     if data["lint"]["suggestions"] and flavor_allows(ctx.args.fix_flavors, "lint-fix"):
-        data["fix_commands"].append(ReproFixCommand(
+        data["fix_commands"].append(phases.ReproFixCommand(
             command = prefix + build_aspect_command(task_path, [("--fix", None)] + repro_flags, targets),
             slug = "lint-fix",
         ))
@@ -1023,13 +1010,10 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     bookend = lint_conclusion(final_status, data)
 
     # Pre-hook with rich ReproFixInfo (exit_code/targets/extras) that the
-    # dispatch_task_update safety-net can't supply; these are skipped on dispatch.
-    apply_repro_fix_hooks(
-        ctx,
-        lifecycle,
-        data,
-        kind = "lint_results",
-        status = final_status,
+    # ph.dispatch safety-net can't supply; these are skipped on dispatch.
+    ph.suggest_fixes(
+        "lint_results",
+        final_status,
         exit_code = exit_code,
         targets = targets,
         extras = {
@@ -1038,13 +1022,13 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         },
     )
 
-    dispatch_task_update(ctx, lifecycle, TaskUpdate(
+    ph.dispatch(phases.Update(
         kind = "lint_results",
         status = final_status,
         final = True,
         conclusion = bookend,
         data = data,
-        progress = ProgressStyles(
+        progress = phases.ProgressStyles(
             body = _body_text(final_status, data),
         ),
     ))
@@ -1103,12 +1087,11 @@ lint = task(
             default = ["..."],
             description = "Bazel target patterns to lint. Defaults to '...' which expands to all rule targets in the package at and beneath the current directory. Pass multiple patterns to combine includes and excludes; when any pattern is hyphen-led, separate them from flags with `--` (e.g. `aspect lint -- //... -//experimental/...`).",
         ),
-    } | bazel_flag_args("the lint build") | announce_bazel_args("the lint build") | bes_args() | repro_flavor_args(include_fix = True),
+    } | bzl.flags.args("the lint build") | bzl.announce.args("the lint build") | bes_args() | repro_flavor_args(include_fix = True),
     traits = [
         BazelTrait,
         HealthCheckTrait,
         LintTrait,
-        TaskLifecycleTrait,
-    ] + artifacts.TRAITS + tips.TRAITS,
+    ] + phases.TRAITS + artifacts.TRAITS + tips.TRAITS,
     implementation = _impl,
 )
