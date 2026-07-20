@@ -236,6 +236,18 @@ def _expand_config_flags(ctx, extra_flags: list, command: str = "build") -> list
 
     return _flags_delta(base, full)
 
+def _resolve_rc_flags(ctx, rc, command: str) -> list:
+    """Fire the trait's post-rc `rc_flags` hooks against the resolved `rc` and
+    concatenate the flags they return. The seam every bazel-driving task applies
+    after resolving its rc — features (e.g. deployment auth) inject through
+    `BazelTrait.rc_flags`, and the task stays ignorant of what. The invocation
+    handle applies this for build/test; tasks that drive their own spawn loop
+    call `bazel.rc_flags(ctx, rc, command)` themselves."""
+    out = []
+    for hook in ctx.traits[BazelTrait].rc_flags:
+        out.extend(hook(ctx, rc, command))
+    return out
+
 flags = namespace(
     resolve = _resolve_flags,
     resolve_startup = _resolve_startup_flags,
@@ -254,6 +266,7 @@ announce = namespace(
 setup_command = _setup_command
 sibling_rc = _sibling_rc
 resolve_announce = _resolve_announce
+resolve_rc_flags = _resolve_rc_flags
 core_args = _core_args
 targets_arg = _targets_arg
 testonly_flags_delta = _flags_delta

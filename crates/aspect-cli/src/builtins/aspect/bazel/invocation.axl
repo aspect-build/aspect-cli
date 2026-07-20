@@ -16,7 +16,7 @@ load(
     "collect_bes_from_args",
     "summarize_bes_upload",
 )
-load("./flags.axl", "resolve_announce", "setup_command")
+load("./flags.axl", "resolve_announce", "resolve_rc_flags", "setup_command")
 load("./trait.axl", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
 
 # BES drain cadence. Passed as `tick_ms` to the event iterator so
@@ -83,9 +83,7 @@ def _resolve(ctx, command: str) -> _Invocation:
 
     # Post-rc flag hooks: features (e.g. deployment auth) inject flags computed
     # from the resolved rc; appended to each spawn after rc expansion.
-    rc_flags = []
-    for hook in trait.rc_flags:
-        rc_flags.extend(hook(ctx, rc, command))
+    rc_flags = resolve_rc_flags(ctx, rc, command)
 
     requested = ctx.args.bazel_retry_attempts if hasattr(ctx.args, "bazel_retry_attempts") else DEFAULT_BAZEL_RETRY_ATTEMPTS
 

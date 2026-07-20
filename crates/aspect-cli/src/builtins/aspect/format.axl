@@ -21,7 +21,6 @@ load("./bazel/build_events.axl", "announce_bes_sinks", "bes_args", "collect_bes_
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event")
 load("./private/lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
-load("./private/lib/deployment_flags.axl", "deployment_auth_flags")
 load("./private/lib/environment.axl", "color_enabled", "error", "info", "warn")
 load("./private/lib/format_results.axl", fmt_init_data = "init_data", format_conclusion = "conclusion")
 load("./private/lib/format_spawn.axl", "compute_spawn_args")
@@ -308,7 +307,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # returns resolved flags (a failed health check fails the task inside).
     rc = ph.setup(ctx.args.formatter_target, "format_results")
     announce_version, announce_command = bzl.announce.resolve(ctx)
-    endpoint_auth_flags = deployment_auth_flags(ctx, rc, "build")
+    endpoint_auth_flags = bzl.rc_flags(ctx, rc, "build")
 
     # `rc=` opts into the runinfo aspect: `r.flags` captures the formatter's
     # executable + `args` attribute + env so `r.spawn` replays them ahead of the

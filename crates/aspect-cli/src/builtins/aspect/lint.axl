@@ -23,7 +23,6 @@ load("./private/lib/ansi.axl", "ansi")
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event")
 load("./private/lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
-load("./private/lib/deployment_flags.axl", "deployment_auth_flags")
 load("./private/lib/environment.axl", "color_enabled", "detect_ci", "error", "warn")
 load("./private/lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_changed_files_listing")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
@@ -662,7 +661,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # resolved flags (a failed health check fails the task inside phases.setup).
     rc = ph.setup(data["target_pattern"], "lint_results", "build", base_flags = base_flags)
     announce_version, announce_command = bzl.announce.resolve(ctx)
-    endpoint_auth_flags = deployment_auth_flags(ctx, rc, "build")
+    endpoint_auth_flags = bzl.rc_flags(ctx, rc, "build")
 
     # Detect changed files BEFORE lint_start hooks so features read the canonical
     # lint_trait.changed_files. Prefers GitHub PR Files API, falls back to local

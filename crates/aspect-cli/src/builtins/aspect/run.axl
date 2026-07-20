@@ -5,7 +5,6 @@ load("@std//time.axl", "sleep_iter")
 load("./bazel/build_events.axl", "announce_bes_sinks", "bes_args", "collect_bes_from_args", "summarize_bes_upload")
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "init_data", "process_event")
-load("./private/lib/deployment_flags.axl", "deployment_auth_flags")
 load("./private/lib/environment.axl", "error")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "phases")
@@ -34,7 +33,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # rejects as unrecognized (e.g. `--script_path`).
     rc = ph.setup(target, "bazel_results", "build")
     announce_version, announce_command = bzl.announce.resolve(ctx)
-    endpoint_auth_flags = deployment_auth_flags(ctx, rc, "build")
+    endpoint_auth_flags = bzl.rc_flags(ctx, rc, "build")
 
     # `rc=` opts into the runinfo aspect: `r.flags` then carries the spawn
     # flags + aspect injection that capture the executable, the `args` attribute,
