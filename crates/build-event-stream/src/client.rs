@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Duration;
 
 use axl_proto::google::devtools::build::v1::{
     PublishBuildToolEventStreamRequest, PublishBuildToolEventStreamResponse,
@@ -18,6 +19,18 @@ pub struct Client {
     inner: PublishBuildEventClient<InterceptedService<Channel, AuthInterceptor>>,
 }
 
+/// HTTP/2 PING cadence (mirrors Bazel's `--grpc_keepalive_time` default of
+/// 30s for its own gRPC connections). Without keepalives a peer that
+/// vanishes without a FIN/RST — e.g. a backend scaled in mid-stream — leaves
+/// reads pending forever and writes pending until the OS TCP retransmit
+/// limit (~15+ minutes).
+const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(30);
+/// How long to wait for a PING ack before declaring the connection dead
+/// (mirrors Bazel's `--grpc_keepalive_timeout`).
+const KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(15);
+/// Bound for TCP connection establishment when the lazy channel first dials.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[derive(thiserror::Error, Debug)]
 pub enum ClientError {
     #[error(transparent)]
@@ -35,6 +48,11 @@ impl Client {
     ) -> Result<Self, ClientError> {
         let channel = Channel::from_shared(endpoint)?
             .user_agent("AXL")?
+            .connect_timeout(CONNECT_TIMEOUT)
+            .tcp_keepalive(Some(KEEP_ALIVE_INTERVAL))
+            .http2_keep_alive_interval(KEEP_ALIVE_INTERVAL)
+            .keep_alive_timeout(KEEP_ALIVE_TIMEOUT)
+            .keep_alive_while_idle(true)
             .tls_config(
                 ClientTlsConfig::new()
                     .with_native_roots()

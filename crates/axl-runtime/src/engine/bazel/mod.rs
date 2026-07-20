@@ -1103,6 +1103,7 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
                 retry_min_delay,
                 retry_max_buffer_size: retry_max_buffer_size as usize,
                 timeout,
+                ..Default::default()
             },
         ))
     }

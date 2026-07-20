@@ -279,6 +279,7 @@ async fn work(
             &mut max_acked,
             &mut last_message_sent,
             &endpoint,
+            &retry,
         )
         .await;
         dbg(
@@ -508,6 +509,33 @@ async fn preload_first_event(
     }
 }
 
+/// Send one request into the bidi request channel, bounding the wait.
+///
+/// The channel only backs up when tonic's request pump stops pulling —
+/// i.e. the server stopped reading and the HTTP/2 flow-control windows
+/// are full (hung backend, or a dead connection the keepalive hasn't
+/// killed yet). An unbounded `send().await` there would suspend
+/// `drive_stream`'s select loop forever; instead surface a Transient
+/// outcome so the outer retry loop tears the stream down and replays.
+async fn send_bounded(
+    sender: &tokio::sync::mpsc::Sender<PublishBuildToolEventStreamRequest>,
+    req: PublishBuildToolEventStreamRequest,
+    stall_timeout: std::time::Duration,
+    context: &str,
+) -> Result<(), DriveOutcome> {
+    match tokio::time::timeout(stall_timeout, sender.send(req)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(_)) => Err(DriveOutcome::Transient(ClientError::Status(
+            tonic::Status::unavailable(format!("request stream closed {context}")),
+        ))),
+        Err(_) => Err(DriveOutcome::Transient(ClientError::Status(
+            tonic::Status::deadline_exceeded(format!(
+                "request stream stalled for {stall_timeout:?} {context} (server stopped reading)"
+            )),
+        ))),
+    }
+}
+
 /// Drive a single bidi stream until it ends (cleanly or with error).
 ///
 /// Owns the request channel for this connection. Pulls events from
@@ -517,6 +545,12 @@ async fn preload_first_event(
 /// buffered events under their original seqs at the start of the
 /// connection (skipping the one already pre-loaded by
 /// `preload_first_event`).
+///
+/// Every wait is bounded so a hung or silently-dropped connection can
+/// never wedge the sink: stream open (`OPEN_TIMEOUT`), each write into
+/// the request channel (`retry.send_stall_timeout`), ack progress while
+/// unacked events are outstanding (`retry.ack_progress_timeout`), and
+/// the post-half-close drain (`HALF_CLOSE_DEADLINE`).
 async fn drive_stream(
     client: &mut Client,
     build_id: &str,
@@ -527,6 +561,7 @@ async fn drive_stream(
     max_acked: &mut i64,
     last_message_sent: &mut bool,
     endpoint: &str,
+    retry: &RetryConfig,
 ) -> DriveOutcome {
     let (sender, receiver) = tokio::sync::mpsc::channel::<PublishBuildToolEventStreamRequest>(64);
     let request_stream = ReceiverStream::new(receiver);
@@ -623,14 +658,22 @@ async fn drive_stream(
         if Some(*seq) == preloaded_seq {
             continue;
         }
-        if sender.send(req.clone()).await.is_err() {
-            return DriveOutcome::Transient(ClientError::Status(tonic::Status::unavailable(
-                "request stream closed during replay",
-            )));
+        if let Err(outcome) =
+            send_bounded(&sender, req.clone(), retry.send_stall_timeout, "during replay").await
+        {
+            return outcome;
         }
     }
 
     let mut sender_opt = Some(sender);
+
+    // Ack-progress watchdog: armed while unacked events are outstanding and
+    // the request side is still open, reset on every ack. Catches a backend
+    // that keeps the connection alive but silently stops acking mid-stream —
+    // otherwise that case is only detected at buffer overflow (10k events)
+    // or not at all. Once half-closed, `half_close_deadline` governs instead.
+    let mut ack_deadline: Option<tokio::time::Instant> = (!buffer.is_empty())
+        .then(|| tokio::time::Instant::now() + retry.ack_progress_timeout);
 
     // Hard deadline for waiting after the request side is half-closed.
     // Once we drop `sender_opt` (last_message sent or upstream broadcaster
@@ -689,14 +732,16 @@ async fn drive_stream(
                 if let Err(overflow) = buffer.push(seq, req.clone()) {
                     return DriveOutcome::BufferFull(overflow);
                 }
+                if ack_deadline.is_none() {
+                    ack_deadline =
+                        Some(tokio::time::Instant::now() + retry.ack_progress_timeout);
+                }
 
                 let s = sender_opt.as_ref().unwrap();
-                if s.send(req).await.is_err() {
-                    // Request channel rejected: the bidi stream broke.
-                    // Hold onto the buffered event for replay on reconnect.
-                    return DriveOutcome::Transient(ClientError::Status(
-                        tonic::Status::unavailable("request stream closed mid-send"),
-                    ));
+                if let Err(outcome) =
+                    send_bounded(s, req, retry.send_stall_timeout, "mid-send").await
+                {
+                    return outcome;
                 }
 
                 if last {
@@ -717,6 +762,8 @@ async fn drive_stream(
                     Some(Ok(r)) => {
                         buffer.prune_until(r.sequence_number);
                         *max_acked = (*max_acked).max(r.sequence_number);
+                        ack_deadline = (!buffer.is_empty())
+                            .then(|| tokio::time::Instant::now() + retry.ack_progress_timeout);
                         // Once we've sent last_message AND every event we
                         // sent has been ack'd, we're done — exit without
                         // waiting for the server to close the response
@@ -801,6 +848,32 @@ async fn drive_stream(
                     DriveOutcome::UpstreamClosed
                 };
             }
+            // Ack-progress watchdog arm (see `ack_deadline`). Disabled once
+            // the request side is half-closed — `half_close_deadline` bounds
+            // that phase with a tighter deadline.
+            _ = async {
+                match ack_deadline {
+                    Some(d) => tokio::time::sleep_until(d).await,
+                    None => std::future::pending::<()>().await,
+                }
+            }, if ack_deadline.is_some() && half_close_deadline.is_none() => {
+                dbg(
+                    endpoint,
+                    invocation_id,
+                    &format!(
+                        "no ack progress within {:?} ({} events unacked) — reconnecting",
+                        retry.ack_progress_timeout,
+                        buffer.len()
+                    ),
+                );
+                return DriveOutcome::Transient(ClientError::Status(
+                    tonic::Status::deadline_exceeded(format!(
+                        "no BES ack progress within {:?} ({} events unacked)",
+                        retry.ack_progress_timeout,
+                        buffer.len()
+                    )),
+                ));
+            }
         }
     }
 }
@@ -868,6 +941,163 @@ fn finalize(endpoint: &str, last_error: String) -> SinkError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::pin::Pin;
+    use std::time::Duration;
+
+    use axl_proto::build_event_stream::{Progress, build_event::Payload};
+    use axl_proto::google::devtools::build::v1::{
+        PublishBuildToolEventStreamResponse,
+        publish_build_event_server::{PublishBuildEvent, PublishBuildEventServer},
+    };
+    use futures::Stream;
+    use tonic::{Request, Response, Status, Streaming};
+
+    /// In-process BES server whose bidi handler misbehaves in a controlled
+    /// way: with `drain_inbound = false` it holds the request stream alive
+    /// without ever polling it, so HTTP/2 flow-control credit is never
+    /// returned and the client's writes stall (a hung backend, or a peer
+    /// that died without closing the connection). With `true` it reads and
+    /// discards every request but never sends an ack. Neither mode ever
+    /// closes the response stream.
+    struct MisbehavingServer {
+        drain_inbound: bool,
+    }
+
+    #[tonic::async_trait]
+    impl PublishBuildEvent for MisbehavingServer {
+        async fn publish_lifecycle_event(
+            &self,
+            _request: Request<PublishLifecycleEventRequest>,
+        ) -> Result<Response<()>, Status> {
+            Ok(Response::new(()))
+        }
+
+        type PublishBuildToolEventStreamStream =
+            Pin<Box<dyn Stream<Item = Result<PublishBuildToolEventStreamResponse, Status>> + Send>>;
+
+        async fn publish_build_tool_event_stream(
+            &self,
+            request: Request<Streaming<PublishBuildToolEventStreamRequest>>,
+        ) -> Result<Response<Self::PublishBuildToolEventStreamStream>, Status> {
+            let mut inbound = request.into_inner();
+            let drain = self.drain_inbound;
+            tokio::spawn(async move {
+                if drain {
+                    while inbound.next().await.is_some() {}
+                }
+                // Keep `inbound` alive without polling (or after it ends) so
+                // the stream is never reset from the server side.
+                std::future::pending::<()>().await;
+            });
+            Ok(Response::new(Box::pin(futures::stream::pending())))
+        }
+    }
+
+    async fn start_server(drain_inbound: bool) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(
+            tonic::transport::Server::builder()
+                .add_service(PublishBuildEventServer::new(MisbehavingServer {
+                    drain_inbound,
+                }))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener)),
+        );
+        format!("http://{addr}")
+    }
+
+    fn progress_event(stderr_bytes: usize) -> BuildEvent {
+        BuildEvent {
+            payload: Some(Payload::Progress(Progress {
+                stderr: "x".repeat(stderr_bytes),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+    }
+
+    /// Run `drive_stream` against a misbehaving server and return its
+    /// outcome, panicking if it fails to detect the stall and hangs.
+    async fn drive_against(endpoint: String, events: Vec<BuildEvent>, retry: RetryConfig) -> DriveOutcome {
+        let mut client = Client::new(endpoint, HashMap::new()).await.unwrap();
+        let (tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<BuildEvent>();
+        for ev in events {
+            tx.send(ev).unwrap();
+        }
+        // `tx` stays alive across the call: upstream must look open, since a
+        // closed upstream arms the (already bounded) half-close path instead.
+        let mut buffer = RetryBuffer::new(retry.retry_max_buffer_size);
+        let mut next_seq = 1i64;
+        let mut max_acked = 0i64;
+        let mut last_message_sent = false;
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(30),
+            drive_stream(
+                &mut client,
+                "test-build",
+                "test-invocation",
+                &mut event_rx,
+                &mut buffer,
+                &mut next_seq,
+                &mut max_acked,
+                &mut last_message_sent,
+                "test-endpoint",
+                &retry,
+            ),
+        )
+        .await
+        .expect("drive_stream hung: stall was not detected");
+        drop(tx);
+        outcome
+    }
+
+    /// Server accepts the stream then never reads: flow-control windows and
+    /// the request channel fill, and the bounded send must surface a
+    /// Transient outcome instead of suspending the loop forever.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn send_stall_surfaces_transient() {
+        let endpoint = start_server(false).await;
+        let retry = RetryConfig {
+            send_stall_timeout: Duration::from_millis(300),
+            // Keep the ack watchdog out of the way so the send path is what
+            // trips first.
+            ack_progress_timeout: Duration::from_secs(60),
+            ..Default::default()
+        };
+        // 128 KiB events overrun the HTTP/2 window quickly; 100 of them is
+        // far more than window + request-channel capacity (64).
+        let events = (0..100).map(|_| progress_event(128 * 1024)).collect();
+        match drive_against(endpoint, events, retry).await {
+            DriveOutcome::Transient(ClientError::Status(s)) => {
+                assert!(s.message().contains("stalled"), "unexpected status: {s}");
+            }
+            other => panic!("expected Transient stall, got {}", other.label()),
+        }
+    }
+
+    /// Server reads every event but never acks: the ack-progress watchdog
+    /// must surface a Transient outcome rather than waiting for buffer
+    /// overflow (or forever).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ack_silence_surfaces_transient() {
+        let endpoint = start_server(true).await;
+        let retry = RetryConfig {
+            send_stall_timeout: Duration::from_secs(60),
+            ack_progress_timeout: Duration::from_millis(300),
+            ..Default::default()
+        };
+        let events = (0..5).map(|_| progress_event(64)).collect();
+        match drive_against(endpoint, events, retry).await {
+            DriveOutcome::Transient(ClientError::Status(s)) => {
+                assert!(
+                    s.message().contains("no BES ack progress"),
+                    "unexpected status: {s}"
+                );
+            }
+            other => panic!("expected Transient ack timeout, got {}", other.label()),
+        }
+    }
 
     #[test]
     fn fail_preserves_machine_cause_independent_of_user_message() {
