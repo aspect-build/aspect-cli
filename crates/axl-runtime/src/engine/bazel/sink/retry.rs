@@ -29,6 +29,12 @@ pub struct RetryConfig {
     /// outstanding (pre-half-close) before the stream is torn down for a
     /// retry. Not exposed to Starlark; overridable in tests.
     pub ack_progress_timeout: Duration,
+    /// How long to wait, after the request side half-closes, for the server
+    /// to ack outstanding events and close the response stream. Some
+    /// backends sit on a half-closed stream without acking or closing;
+    /// without this bound the sink thread — and the build's `sink.wait()` —
+    /// would hang. Not exposed to Starlark; overridable in tests.
+    pub half_close_timeout: Duration,
 }
 
 impl Default for RetryConfig {
@@ -40,6 +46,7 @@ impl Default for RetryConfig {
             timeout: None,
             send_stall_timeout: Duration::from_secs(60),
             ack_progress_timeout: Duration::from_secs(120),
+            half_close_timeout: Duration::from_secs(30),
         }
     }
 }

@@ -19,14 +19,13 @@ pub struct Client {
     inner: PublishBuildEventClient<InterceptedService<Channel, AuthInterceptor>>,
 }
 
-/// HTTP/2 PING cadence (mirrors Bazel's `--grpc_keepalive_time` default of
-/// 30s for its own gRPC connections). Without keepalives a peer that
-/// vanishes without a FIN/RST — e.g. a backend scaled in mid-stream — leaves
-/// reads pending forever and writes pending until the OS TCP retransmit
-/// limit (~15+ minutes).
+/// HTTP/2 PING cadence (also used as the TCP keepalive interval). Without
+/// keepalives, a peer that vanishes without a FIN/RST leaves reads pending
+/// forever and writes pending until the OS TCP retransmit limit (~15+
+/// minutes). 30s matches the `--grpc_keepalive_time=30s` commonly configured
+/// for Bazel's own gRPC connections.
 const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(30);
-/// How long to wait for a PING ack before declaring the connection dead
-/// (mirrors Bazel's `--grpc_keepalive_timeout`).
+/// How long to wait for a PING ack before declaring the connection dead.
 const KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(15);
 /// Bound for TCP connection establishment when the lazy channel first dials.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
