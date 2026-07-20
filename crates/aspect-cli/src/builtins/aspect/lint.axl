@@ -42,6 +42,10 @@ _BB_CLIENTD_ROOT = "/mnt/ephemeral/buildbarn/bb_clientd"
 # async and the BES event can arrive before the file lands. 30s is generous.
 _POST_BUILD_DOWNLOAD_TIMEOUT_MS = 30000
 
+# Bound for a single lint-file read probe (see _read_lint_file). Matches the
+# drain tick so one stuck file delays a tick by at most one interval.
+_LINT_FILE_PROBE_TIMEOUT_MS = 250
+
 def file_uri_to_path(uri):
     """Resolve a BES file URI to a local path via the bb_clientd FUSE mount.
 
@@ -551,19 +555,18 @@ def _read_lint_file(ctx, filepath):
     """Read a lint output file, or None when its contents can't be read yet.
 
     bytestream:// URIs resolve through the bb_clientd FUSE mount, where the
-    inode exists as soon as the BES event arrives but reading can still fail
-    transiently (EIO) while the blob fetch is in flight — so exists()+read
-    can crash. `try_read_to_string` collapses read errors to "", which is
-    ambiguous with a legitimately empty file (a clean linter's `.out` is
-    empty); an empty read of a file whose stat size is non-zero disambiguates
-    the failure. None keeps the file in the pending queue for retry.
+    inode exists as soon as the BES event arrives but reading blocks until
+    the blob materializes — and blocks *forever* when the blob can't be
+    fetched at all (e.g. evicted from the remote cache with no action re-run
+    to re-upload it). A plain read would wedge the whole task inside one
+    uninterruptible syscall, so this uses the bounded `poll_read_to_string`:
+    the read runs in the background, each call returns within the timeout,
+    and None (file not readable yet) keeps the file in the pending queue —
+    retried each tick until the post-build drain budget warns and skips it.
+    None always means unreadable, never empty: a clean linter's empty `.out`
+    reads as "".
     """
-    if not ctx.std.fs.exists(filepath):
-        return None
-    content = ctx.std.fs.try_read_to_string(filepath)
-    if content == "" and ctx.std.fs.metadata(filepath).size > 0:
-        return None
-    return content
+    return ctx.std.fs.poll_read_to_string(filepath, _LINT_FILE_PROBE_TIMEOUT_MS)
 
 def _try_process_lint_file(ctx, file, filepath, data, strategy, changed_files, lint_trait, github_output, patches):
     """Read and process one BES lint output file.
