@@ -138,6 +138,14 @@ def test_fs(ctx: TaskContext, tc: int, temp_dir: str):
     content = ctx.std.fs.read_to_string(file_path)
     tc = test_case(tc, content == "hello world", "read_to_string should return the written content")
 
+    # Test read_to_string_or_none: content on success, None (not "") on failure,
+    # and "" for a legitimately empty file so callers can tell the two apart.
+    tc = test_case(tc, ctx.std.fs.read_to_string_or_none(file_path) == "hello world", "read_to_string_or_none should return content for a readable file")
+    tc = test_case(tc, ctx.std.fs.read_to_string_or_none(test_dir + "/does_not_exist.txt") == None, "read_to_string_or_none should return None for a missing file")
+    empty_path = test_dir + "/empty_file.txt"
+    ctx.std.fs.write(empty_path, "")
+    tc = test_case(tc, ctx.std.fs.read_to_string_or_none(empty_path) == "", "read_to_string_or_none should return \"\" (not None) for an empty file")
+
     # Test metadata and symlink_metadata
     meta = ctx.std.fs.metadata(file_path)
     at_least_epoch = 1763025368000000
