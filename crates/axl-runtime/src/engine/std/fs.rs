@@ -5,7 +5,7 @@ use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
 use starlark::values::ValueOfUnchecked;
 use starlark::values::list::UnpackList;
-use starlark::values::none::{NoneOr, NoneType};
+use starlark::values::none::NoneType;
 use std::fs;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
@@ -401,27 +401,6 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
     ) -> anyhow::Result<values::StringValue<'v>> {
         let r = fs::read_to_string(path.as_str()).map(|f| heap.alloc_str(f.as_str()))?;
         Ok(r)
-    }
-
-    /// Reads the entire contents of a file into a string, or returns `None` on
-    /// any I/O error (missing file, permission denied, non-UTF-8 content,
-    /// transient read failure).
-    ///
-    /// Unlike `try_read_to_string`, which collapses errors to `""`, the `None`
-    /// return lets callers distinguish a failed read from a legitimately empty
-    /// file. Needed when the path resolves through a network-backed filesystem
-    /// (e.g. the bb_clientd FUSE mount) where `exists()` can succeed while the
-    /// read's backing blob fetch still fails transiently (EIO) and the caller
-    /// wants to retry rather than fail.
-    fn read_to_string_or_none<'v>(
-        #[allow(unused)] this: values::Value<'v>,
-        #[starlark(require = pos)] path: values::StringValue,
-        heap: Heap<'v>,
-    ) -> anyhow::Result<NoneOr<values::StringValue<'v>>> {
-        Ok(match fs::read_to_string(path.as_str()) {
-            Ok(s) => NoneOr::Other(heap.alloc_str(s.as_str())),
-            Err(_) => NoneOr::None,
-        })
     }
 
     /// Removes an empty directory.

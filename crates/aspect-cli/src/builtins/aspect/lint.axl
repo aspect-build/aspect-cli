@@ -163,7 +163,7 @@ def _filter_patches_by_strategy(ctx, patches, strategy, changed_files):
         return []
     kept = []
     for patch_path in patches:
-        content = ctx.std.fs.read_to_string_or_none(patch_path)
+        content = _read_lint_file(ctx, patch_path)
         if content == None:
             warn(ctx.std, "Failed to read lint patch (skipping): %s" % patch_path)
             continue
@@ -547,30 +547,45 @@ def _body_text(status, data):
         return "Lint aborted"
     return ""
 
+def _read_lint_file(ctx, filepath):
+    """Read a lint output file, or None when its contents can't be read yet.
+
+    bytestream:// URIs resolve through the bb_clientd FUSE mount, where the
+    inode exists as soon as the BES event arrives but reading can still fail
+    transiently (EIO) while the blob fetch is in flight — so exists()+read
+    can crash. `try_read_to_string` collapses read errors to "", which is
+    ambiguous with a legitimately empty file (a clean linter's `.out` is
+    empty); an empty read of a file whose stat size is non-zero disambiguates
+    the failure. None keeps the file in the pending queue for retry.
+    """
+    if not ctx.std.fs.exists(filepath):
+        return None
+    content = ctx.std.fs.try_read_to_string(filepath)
+    if content == "" and ctx.std.fs.metadata(filepath).size > 0:
+        return None
+    return content
+
 def _try_process_lint_file(ctx, file, filepath, data, strategy, changed_files, lint_trait, github_output, patches):
     """Read and process one BES lint output file.
 
-    Returns None when the file's contents can't be read yet, else
-    {"interesting": bool, "linter_exit_code": int, "failed_tool": str}.
+    Returns None when the file's contents can't be read yet (see
+    `_read_lint_file`), else {"interesting": bool, "linter_exit_code": int,
+    "failed_tool": str}. A None keeps the file in the pending queue, retried
+    each tick until the post-build drain timeout warns and skips it.
     `failed_tool` names the linter when its `.exit_code` was non-zero (else ""),
-    so the fail_on_linter_error path can report which tool failed. Reads use
-    `read_to_string_or_none` rather than exists()+read: bytestream:// URIs
-    resolve through the bb_clientd FUSE mount, where the inode exists as soon
-    as the BES event arrives but reading can still fail transiently (EIO)
-    while the blob fetch is in flight. A None here keeps the file in the
-    pending queue, retried each tick until the post-build drain timeout.
+    so the fail_on_linter_error path can report which tool failed.
     SARIF is filtered per-batch against the (pure) strategy scope, so per-batch
     results equal a terminal pass and findings don't flicker as batches arrive.
     """
     if file.name.endswith(".out"):
-        out = ctx.std.fs.read_to_string_or_none(filepath)
+        out = _read_lint_file(ctx, filepath)
         if out == None:
             return None
         ctx.std.io.stderr.write(out)
         return {"interesting": False, "linter_exit_code": 0, "failed_tool": ""}
 
     if file.name.endswith(".report"):
-        report = ctx.std.fs.read_to_string_or_none(filepath)
+        report = _read_lint_file(ctx, filepath)
         if report == None:
             return None
         if "sarif-" in report:
@@ -592,7 +607,7 @@ def _try_process_lint_file(ctx, file, filepath, data, strategy, changed_files, l
         return {"interesting": False, "linter_exit_code": 0, "failed_tool": ""}
 
     if file.name.endswith(".exit_code"):
-        content = ctx.std.fs.read_to_string_or_none(filepath)
+        content = _read_lint_file(ctx, filepath)
         if content == None:
             return None
         stripped = content.rstrip()
