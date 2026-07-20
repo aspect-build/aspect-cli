@@ -420,17 +420,18 @@ struct ProtectedResource {
 }
 
 impl ProtectedResource {
-    /// The authorization servers the CLI can log in against, in advertised order:
-    /// every issuer-bearing `aspect_authorization_servers` entry when the document
-    /// uses the current shape, else the legacy flat fields
-    /// (`authorization_servers` + top-level `client_id`/`scopes_supported`).
-    /// Empty when neither shape advertises an issuer, so the caller records a
-    /// deployment that can't log in.
+    /// The authorization servers the CLI can log in against, in advertised order.
+    /// A login target needs both an issuer and a `client_id` (PKCE), so this keeps
+    /// only `aspect_authorization_servers` entries carrying both when the document
+    /// uses the current shape; if none qualify it falls back to the legacy flat
+    /// fields (`authorization_servers` + top-level `client_id`/`scopes_supported`).
+    /// Empty when neither shape advertises a usable server, so the caller records
+    /// a deployment that can't log in.
     fn auth_servers(&self) -> Vec<AuthServer> {
         let nested: Vec<AuthServer> = self
             .aspect_authorization_servers
             .iter()
-            .filter(|s| !s.issuer.is_empty())
+            .filter(|s| !s.issuer.is_empty() && !s.client_id.is_empty())
             .map(|s| AuthServer {
                 issuer: s.issuer.clone(),
                 client_id: s.client_id.clone(),
@@ -3035,11 +3036,13 @@ mod tests {
     }
 
     #[test]
-    fn auth_servers_skips_issuerless_nested_entries() {
-        // Issuer-less nested entries are dropped; a valid later entry still surfaces.
+    fn auth_servers_skips_nested_entries_missing_issuer_or_client_id() {
+        // A login target needs both issuer and client_id; entries missing either
+        // are dropped so a later fully-usable entry surfaces instead.
         let info = protected_resource(
             vec![
-                nested("", "skip-me"),
+                nested("", "no-issuer"),
+                nested("https://auth.partial.aspect.build", ""),
                 nested("https://auth.dev.aspect.build", "good-client"),
             ],
             vec![],
@@ -3048,14 +3051,16 @@ mod tests {
         );
         let servers = info.auth_servers();
         assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].issuer, "https://auth.dev.aspect.build");
         assert_eq!(servers[0].client_id, "good-client");
     }
 
     #[test]
     fn auth_servers_falls_back_to_legacy_when_no_usable_nested_entry() {
-        // A nested list with no issuer-bearing entry falls back to the flat fields.
+        // A nested list whose only entry lacks a client_id is not usable; fall back
+        // to the flat fields rather than recording an issuer-only deployment.
         let info = protected_resource(
-            vec![nested("", "nested-client")],
+            vec![nested("https://auth.partial.aspect.build", "")],
             vec!["https://legacy.auth.aspect.build"],
             "legacy-client",
             vec!["openid"],
