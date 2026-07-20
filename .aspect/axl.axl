@@ -2,10 +2,6 @@
 Exercise axl
 """
 
-load("@aspect//delivery.axl", delivery_UncacheableAction = "UncacheableAction", delivery_collect_blocking_culprits = "collect_blocking_culprits", delivery_count_unexplained_unresolved = "count_unexplained_unresolved", delivery_fmt_elapsed = "fmt_elapsed", delivery_should_surface_phase2_stderr = "should_surface_phase2_stderr", delivery_should_upload_grpc_log = "should_upload_grpc_log")
-load("@aspect//lint.axl", "file_uri_to_path", "filter_all", "filter_changeset", "linter_error_message")
-load("@aspect//private/lib/artifacts.axl", "artifact_name", "build_log_header", "build_log_relpath", "collect_build_action_logs", "dedup_path", "testlog_dest_dir")
-load("@aspect//private/lib/bazel_results.axl", "compute_reproducer_command", "init_data", "render_check_output", "resolve_aspect_url", "summary_title")
 load(
     "@aspect//bazel/build_metadata.axl",
     "detect_vcs_from_host",
@@ -13,6 +9,10 @@ load(
     "version_gte",
     "version_tuple",
 )
+load("@aspect//delivery.axl", delivery_UncacheableAction = "UncacheableAction", delivery_collect_blocking_culprits = "collect_blocking_culprits", delivery_count_unexplained_unresolved = "count_unexplained_unresolved", delivery_fmt_elapsed = "fmt_elapsed", delivery_should_surface_phase2_stderr = "should_surface_phase2_stderr", delivery_should_upload_grpc_log = "should_upload_grpc_log")
+load("@aspect//lint.axl", "file_uri_to_path", "filter_all", "filter_changeset", "linter_error_message")
+load("@aspect//private/lib/artifacts.axl", "artifact_name", "build_log_header", "build_log_relpath", "collect_build_action_logs", "dedup_path", "testlog_dest_dir")
+load("@aspect//private/lib/bazel_results.axl", "compute_reproducer_command", "init_data", "render_check_output", "resolve_aspect_url", "summary_title")
 load("@aspect//private/lib/check_dispatch.axl", "SURFACE_PR_COMMENT", "SURFACE_STATUS_CHECK", "snippet_budget_for")
 load("@aspect//private/lib/ci.axl", "detect_build_url")
 load("@aspect//private/lib/deliveryd.axl", deliveryd_parse_endpoint = "parse_endpoint")

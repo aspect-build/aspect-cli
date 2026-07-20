@@ -4622,6 +4622,7 @@ def _results_new(ctx, command):
     deferred abort guard so a fatal error still concludes the surface."""
     ph = phases.new(ctx, init_data())
     data = ph.data
+
     # first: next emit bypasses the surface throttle (priority).
     # last_monotonic: monotonic seconds at the last emit (0 → first tick emits).
     # attempts: count of spawned attempts (human-numbered). label: current
@@ -4680,6 +4681,7 @@ def _results_new(ctx, command):
 
     def invocation(inv):
         data["sink_invocation_id"] = inv.sink_invocation_id
+
         # Surface the Aspect Workflows link now rather than on the next
         # heartbeat. Body only (no CLI re-print).
         if inv.sink_invocation_id:
@@ -4725,7 +4727,10 @@ def _results_new(ctx, command):
         def _add(cmd, slug, description = "", target = ""):
             if cmd and flavor_allows(flavors, slug):
                 data["repro_commands"].append(phases.ReproFixCommand(
-                    command = cmd, description = description, slug = slug, target = target,
+                    command = cmd,
+                    description = description,
+                    slug = slug,
+                    target = target,
                 ))
 
         def _add_pair(subcommand, labels, target = ""):

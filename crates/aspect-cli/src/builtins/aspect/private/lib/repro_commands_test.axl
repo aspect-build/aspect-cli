@@ -6,7 +6,7 @@ through clap's `ValueSource::CommandLine` is covered by the Rust unit
 tests on `Arguments`.
 """
 
-load("./lifecycle.axl", "REPRO_FIX_ACCEPT", "REPRO_FIX_REJECT", "ReproFixCommand", "TaskUpdate", "testonly_suggest_fixes", "testonly_dispatch", "repro_fix_replace")
+load("./lifecycle.axl", "REPRO_FIX_ACCEPT", "REPRO_FIX_REJECT", "ReproFixCommand", "TaskUpdate", "repro_fix_replace", "testonly_dispatch", "testonly_suggest_fixes")
 load("./repro_commands.axl", "build_aspect_command", "build_bazel_command", "explicit_flags", "filter_by_flavor", "flavor_allows", "has_tools_bazel_wrapper", "is_vanilla_bazel_slug", "rehydrate_commands", "repro_prefix", "slug_flavor", "subdir_prefix")
 
 def _eq(label, got, want):

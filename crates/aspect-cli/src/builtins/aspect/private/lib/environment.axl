@@ -621,6 +621,7 @@ def print_environment_info(std: std.Std, env: WorkflowsEnvironment) -> None:
         print("--- :rocket: Workflows runner metadata")
 
     color = color_enabled(std)
+
     # Bold+underline+blue title mirrors `_display_runner_health` in
     # health_check.axl so the two setup-phase sections match.
     title = "Workflows runner metadata"

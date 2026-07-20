@@ -9,8 +9,6 @@ functions thread it — no closure tower, no mutable state dict. The live
 invocation and the attempt index are threaded as values (the `_spawned` struct
 and the callsite's loop counter), never stored."""
 
-load("./flags.axl", "resolve_announce", "setup_command")
-load("./trait.axl", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
 load(
     "./build_events.axl",
     "announce_bes_sinks",
@@ -18,6 +16,8 @@ load(
     "collect_bes_from_args",
     "summarize_bes_upload",
 )
+load("./flags.axl", "resolve_announce", "setup_command")
+load("./trait.axl", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
 
 # BES drain cadence. Passed as `tick_ms` to the event iterator so
 # `for event in sp.events` yields `None` after this many ms of quiet, giving a

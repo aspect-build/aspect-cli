@@ -19,22 +19,22 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     bz = bbazel.build(ctx)
     rs = results.build(ctx)
 
-    rs.setup(bz.targets, bz.rc)       # surface init + health checks (rc already active)
-    bz.start()                        # build_start hooks (deployment announce) + --cancel + BES announce
+    rs.setup(bz.targets, bz.rc)  # surface init + health checks (rc already active)
+    bz.start()  # build_start hooks (deployment announce) + --cancel + BES announce
 
     w = None
-    for i in bz.attempts:             # `i` is the single source of truth for the attempt index
+    for i in bz.attempts:  # `i` is the single source of truth for the attempt index
         rs.attempt(i, prior = w)
         sp = bz.spawn(i, events = results.KINDS if rs.live else False)
         rs.invocation(sp)
-        for event in sp.events:       # BuildEvent | None (None = quiet-tick heartbeat)
+        for event in sp.events:  # BuildEvent | None (None = quiet-tick heartbeat)
             bz.on_event(event)
             rs.process(event)
-        w = sp.wait()                 # bazel_attempt_end hooks
+        w = sp.wait()  # bazel_attempt_end hooks
         if w.success or not bz.should_retry(sp, w):
             break
 
-    bz.finish(w)                      # BES summary + build_end + code coercion
+    bz.finish(w)  # BES summary + build_end + code coercion
     return rs.conclude(w, bz.targets)
 
 build = task(

@@ -119,24 +119,24 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
 test = task(
     args = {
-        "coverage": args.boolean(
-            default = False,
-            description = "Collect code coverage while testing. Adds --collect_code_coverage and --combined_report=lcov so Bazel writes the merged LCOV report at `$(bazel info output_path)/_coverage/_coverage_report.dat`.",
-        ),
-        "coverage_report": args.string(
-            default = "",
-            description = "Copy the merged LCOV report produced by --coverage to this path. Parent directories are created as needed. No effect unless --coverage is set.",
-        ),
-        "coverage_tool": args.string(
-            default = "",
-            description = "External binary to run against the merged LCOV report after a --coverage run (e.g. `genhtml`, `codecov`). The report path is substituted into any `--coverage-tool-arg` containing the `{report}` (or `{lcov}`) placeholder; if no placeholder is present, the path is appended as the last argument. The tool runs regardless of the test exit code so uploaders can publish partial coverage; a non-zero exit from the tool is surfaced as a warning and does not fail the test task. No effect unless --coverage is set.",
-        ),
-        "coverage_tool_args": args.string_list(
-            long = "coverage-tool-arg",
-            description = "Argument forwarded to --coverage-tool. Repeat the flag to pass multiple. The `{report}` (or `{lcov}`) placeholder is replaced with the absolute path of the merged LCOV report. Example: `--coverage-tool=codecov --coverage-tool-arg=-f --coverage-tool-arg={report}`.",
-        ),
-    } | bbazel.targets_arg("test") | bbazel.core_args("the test invocation") |
-        repro_flavor_args(),
+               "coverage": args.boolean(
+                   default = False,
+                   description = "Collect code coverage while testing. Adds --collect_code_coverage and --combined_report=lcov so Bazel writes the merged LCOV report at `$(bazel info output_path)/_coverage/_coverage_report.dat`.",
+               ),
+               "coverage_report": args.string(
+                   default = "",
+                   description = "Copy the merged LCOV report produced by --coverage to this path. Parent directories are created as needed. No effect unless --coverage is set.",
+               ),
+               "coverage_tool": args.string(
+                   default = "",
+                   description = "External binary to run against the merged LCOV report after a --coverage run (e.g. `genhtml`, `codecov`). The report path is substituted into any `--coverage-tool-arg` containing the `{report}` (or `{lcov}`) placeholder; if no placeholder is present, the path is appended as the last argument. The tool runs regardless of the test exit code so uploaders can publish partial coverage; a non-zero exit from the tool is surfaced as a warning and does not fail the test task. No effect unless --coverage is set.",
+               ),
+               "coverage_tool_args": args.string_list(
+                   long = "coverage-tool-arg",
+                   description = "Argument forwarded to --coverage-tool. Repeat the flag to pass multiple. The `{report}` (or `{lcov}`) placeholder is replaced with the absolute path of the merged LCOV report. Example: `--coverage-tool=codecov --coverage-tool-arg=-f --coverage-tool-arg={report}`.",
+               ),
+           } | bbazel.targets_arg("test") | bbazel.core_args("the test invocation") |
+           repro_flavor_args(),
     traits = [
         BazelTrait,
         HealthCheckTrait,

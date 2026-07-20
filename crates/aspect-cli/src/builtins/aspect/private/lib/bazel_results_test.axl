@@ -1289,6 +1289,7 @@ def _test_results_kinds_all_processed(ctx):
             id = struct(label = "//pkg:t", configuration = struct(id = "c1")),
             payload = struct(),
         )
+
         # Returns a bool ("warrants a status update"); we only assert no crash.
         result = process_event(init_data(), event)
         if result != True and result != False:

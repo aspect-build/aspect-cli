@@ -36,8 +36,8 @@ Status surfaces flip to the verdict via the task's own terminal
 # the bottom is the task-facing surface, and `traits.axl` re-exports the
 # trait + repro records for user `config.axl` files.
 
-load("./ansi.axl", "ansi")
 load("@aspect//bazel.axl", "BazelTrait", "bazel")
+load("./ansi.axl", "ansi")
 load("./environment.axl", "color_enabled", "detect_ci")
 load("./health_check.axl", "HealthCheckTrait", "run_health_checks")
 load("./runner_job_history.axl", "append_runner_job_history")

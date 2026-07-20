@@ -1,4 +1,5 @@
 load("@aspect//auth_test.axl", "auth_tests")
+load("@aspect//bazel/build_events_test.axl", "bes_sinks_tests")
 load("@aspect//feature/artifacts.axl", "ArtifactUpload")
 load("@aspect//feature/buildkite_annotations.axl", "BuildkiteAnnotations")
 load("@aspect//feature/circleci_test_results.axl", "CircleCITestResults")
@@ -12,7 +13,6 @@ load("@aspect//private/lib/aspect_endpoint_auth_test.axl", "aspect_endpoint_auth
 load("@aspect//private/lib/bazel_flags_test.axl", "bazel_flags_tests")
 load("@aspect//private/lib/bazel_results_test.axl", "bazel_results_unit_tests", "template_snapshot_tests")
 load("@aspect//private/lib/bazelrc_test.axl", "bazelrc_tests")
-load("@aspect//bazel/build_events_test.axl", "bes_sinks_tests")
 load("@aspect//private/lib/ci_test.axl", "ci_tests")
 load("@aspect//private/lib/circleci_test.axl", "circleci_tests")
 load("@aspect//private/lib/delivery_results_test.axl", "delivery_results_unit_tests", "delivery_template_snapshot_tests")
@@ -41,7 +41,7 @@ load("@aspect//private/lib/tips_test.axl", "tips_tests")
 load("@aspect//private/lib/warming_results_test.axl", "warming_template_snapshot_tests")
 load("@aspect//private/lib/wrapper_test.axl", "wrapper_tests")
 load("@aspect//tips.axl", "TASK_SCREENS", "TIP_SUGGESTION", "TIP_TEMPLATE_RAW", "add_tip")
-load("@aspect//traits.axl", "BazelTrait", "DeliveryTrait", "LintTrait", "REPRO_FIX_ACCEPT", "REPRO_FIX_REJECT", "ReproFixInfo", "ReproFixSuggestion", "Phases", "TaskUpdate", "repro_fix_replace")
+load("@aspect//traits.axl", "BazelTrait", "DeliveryTrait", "LintTrait", "Phases", "REPRO_FIX_ACCEPT", "REPRO_FIX_REJECT", "ReproFixInfo", "ReproFixSuggestion", "TaskUpdate", "repro_fix_replace")
 load("./lambda.axl", "lambda_with_global_bind")
 
 def _user_task_impl(ctx: TaskContext) -> int:

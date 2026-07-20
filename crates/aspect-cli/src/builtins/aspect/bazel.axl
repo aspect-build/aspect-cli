@@ -15,16 +15,6 @@ must alias this import — `load("@aspect//bazel.axl", bzl = "bazel")` — so th
 """
 
 load(
-    "./bazel/trait.axl",
-    "BAZEL_RETRY_ATTEMPTS_DESCRIPTION",
-    "BazelTrait",
-    "DEFAULT_BAZEL_RETRY_ATTEMPTS",
-    "default_retry",
-    "dispatch_bazel_attempt_end",
-    "dispatch_bazel_build_end",
-    "exit_codes",
-)
-load(
     "./bazel/flags.axl",
     "testonly_config_names",
     "testonly_flags_delta",
@@ -36,6 +26,16 @@ load(
     _targets_arg = "targets_arg",
 )
 load("./bazel/invocation.axl", _build = "build", _test = "test")
+load(
+    "./bazel/trait.axl",
+    "BAZEL_RETRY_ATTEMPTS_DESCRIPTION",
+    "BazelTrait",
+    "DEFAULT_BAZEL_RETRY_ATTEMPTS",
+    "default_retry",
+    "dispatch_bazel_attempt_end",
+    "dispatch_bazel_build_end",
+    "exit_codes",
+)
 
 bazel = namespace(
     build = _build,

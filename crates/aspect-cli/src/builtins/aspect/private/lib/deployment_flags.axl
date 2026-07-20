@@ -34,9 +34,9 @@ match the endpoint-auth host gate and receive its login JWT (see
 `aspect_endpoint_auth.axl`).
 """
 
+load("@aspect//bazel.axl", "BazelTrait")
 load("./aspect_endpoint_auth.axl", "headers_have_auth", "needs_aspect_token", "resolve_aspect_bearer")
 load("./environment.axl", "info")
-load("@aspect//bazel.axl", "BazelTrait")
 
 # Bazel-facing Aspect endpoints are TLS gRPC.
 _SCHEME = "grpcs://"

@@ -5,20 +5,19 @@ Run with:
 """
 
 load("@aspect//bazel.axl", "BazelTrait", "bazel", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end", "testonly_config_names", "testonly_flags_delta")
+load("@aspect//private/lib/deployment_flags.axl", "deployment_auth_flags")
 
 def _eq(label, got, want):
     if got != want:
         fail("%s: got %r, want %r" % (label, got, want))
 
-def _trait(extra_startup = [], startup_transform = None, extra = [], task_flags = [], transform = None):
+def _trait(extra_startup = [], extra = [], task_flags = []):
     """A real `BazelTrait` with just the startup/command-flag fields the helpers
     read."""
     return BazelTrait(
         extra_startup_flags = extra_startup,
-        startup_flags = startup_transform,
         extra_flags = extra,
         task_flags = task_flags,
-        flags = transform,
     )
 
 def _fake_ctx(bazel_startup_flags = [], bazel_flags = [], trait = None):
@@ -83,29 +82,6 @@ def _test_startup_trait_extra_appended(ctx):
         ["--client", "--trait"],
     )
 
-def _test_startup_transform_replaces_list(ctx):
-    """`trait.startup_flags` is a list→list transform; the return value is used
-    as-is, not merged."""
-    transform = lambda flags: flags + ["--from-transform"]
-    _eq(
-        "startup transform appended",
-        bazel.flags.resolve_startup(
-            _fake_ctx(bazel_startup_flags = ["--client"], trait = _trait(extra_startup = ["--trait"], startup_transform = transform)),
-        ),
-        ["--client", "--trait", "--from-transform"],
-    )
-
-def _test_startup_transform_can_filter(ctx):
-    """A transform can also drop or rewrite flags."""
-    transform = lambda flags: [f for f in flags if f != "--drop-me"]
-    _eq(
-        "startup transform filters",
-        bazel.flags.resolve_startup(
-            _fake_ctx(bazel_startup_flags = ["--keep"], trait = _trait(extra_startup = ["--drop-me"], startup_transform = transform)),
-        ),
-        ["--keep"],
-    )
-
 def _test_startup_input_list_not_mutated(ctx):
     """`bazel.flags.resolve_startup` must not mutate the caller's CLI flag list
     (`ctx.args.bazel_startup_flags` is a live reference)."""
@@ -115,16 +91,15 @@ def _test_startup_input_list_not_mutated(ctx):
 
 def _test_flags_full_chain_order(ctx):
     """Slot ordering:
-        ctx.args.bazel_flags + trait.extra_flags + task_flags hooks → transform.
+        ctx.args.bazel_flags + trait.extra_flags + task_flags hooks.
     Verify each slot lands where the contract promises."""
     task_hook = lambda c: ["--from-hook"]
-    transform = lambda fs: fs + ["--from-transform"]
     _eq(
         "resolve full chain",
         bazel.flags.resolve(
-            _fake_ctx(bazel_flags = ["--cli"], trait = _trait(extra = ["--trait-extra"], task_flags = [task_hook], transform = transform)),
+            _fake_ctx(bazel_flags = ["--cli"], trait = _trait(extra = ["--trait-extra"], task_flags = [task_hook])),
         ),
-        ["--cli", "--trait-extra", "--from-hook", "--from-transform"],
+        ["--cli", "--trait-extra", "--from-hook"],
     )
 
 def _test_flags_empty_defaults(ctx):
@@ -144,6 +119,7 @@ def _test_setup_command_applies_to_ctx_bazel(ctx):
     The workspace `.bazelrc` is parsed as a side effect, which is fine
     for a dev test."""
     sentinel = "/tmp/test-setup-command-sentinel"
+
     # Inject a real trait into the live trait map and let setup_command read it
     # back via ctx.traits[BazelTrait] — exercises the production (no-override) path.
     ctx.traits[BazelTrait] = _trait(extra_startup = ["--output_base=" + sentinel])
@@ -259,41 +235,41 @@ _CACHE = "remote.acme.aspect.build"
 _BES = "bes.acme.aspect.build"
 
 def _test_auth_flags(ctx):
-    """`bazel.auth.flags` attaches `--remote_header`/`--bes_header` only for an
+    """`deployment_auth_flags` attaches `--remote_header`/`--bes_header` only for an
     endpoint owned by a configured deployment, lacking a user authorization
     header, and only when a credential resolves. Covers the cache path, the BES
     path, and their combination through the one public entry point."""
     both = _fake_auth_ctx(access_token = _TOK, owned_hosts = [_CACHE, _BES])
 
-    _eq("no endpoints", bazel.auth.flags(both, _fake_rc(), "build"), [])
+    _eq("no endpoints", deployment_auth_flags(both, _fake_rc(), "build"), [])
     _eq(
         "unowned endpoints",
-        bazel.auth.flags(both, _fake_rc({"--remote_cache": "grpcs://remote.buildbuddy.io", "--bes_backend": "grpcs://bes.buildbuddy.io"}), "build"),
+        deployment_auth_flags(both, _fake_rc({"--remote_cache": "grpcs://remote.buildbuddy.io", "--bes_backend": "grpcs://bes.buildbuddy.io"}), "build"),
         [],
     )
     _eq(
         "owned cache only",
-        bazel.auth.flags(both, _fake_rc({"--remote_cache": "grpcs://" + _CACHE}), "build"),
+        deployment_auth_flags(both, _fake_rc({"--remote_cache": "grpcs://" + _CACHE}), "build"),
         ["--remote_header=authorization=Bearer " + _TOK],
     )
     _eq(
         "owned bes only",
-        bazel.auth.flags(both, _fake_rc({"--bes_backend": "grpcs://" + _BES}), "build"),
+        deployment_auth_flags(both, _fake_rc({"--bes_backend": "grpcs://" + _BES}), "build"),
         ["--bes_header=authorization=Bearer " + _TOK],
     )
     _eq(
         "owned cache + bes together",
-        bazel.auth.flags(both, _fake_rc({"--remote_cache": "grpcs://" + _CACHE, "--bes_backend": "grpcs://" + _BES}), "build"),
+        deployment_auth_flags(both, _fake_rc({"--remote_cache": "grpcs://" + _CACHE, "--bes_backend": "grpcs://" + _BES}), "build"),
         ["--remote_header=authorization=Bearer " + _TOK, "--bes_header=authorization=Bearer " + _TOK],
     )
     _eq(
         "user authorization header skips",
-        bazel.auth.flags(both, _fake_rc({"--remote_cache": "grpcs://" + _CACHE, "--remote_header": ["authorization=Bearer user"]}), "build"),
+        deployment_auth_flags(both, _fake_rc({"--remote_cache": "grpcs://" + _CACHE, "--remote_header": ["authorization=Bearer user"]}), "build"),
         [],
     )
     _eq(
         "not logged in",
-        bazel.auth.flags(
+        deployment_auth_flags(
             _fake_auth_ctx(owned_hosts = [_CACHE]),
             _fake_rc({"--remote_cache": "grpcs://" + _CACHE}),
             "build",
@@ -371,8 +347,6 @@ def _test_impl(ctx):
     _test_attempt_dispatch_does_not_fire_build_end(ctx)
     _test_startup_cli_only(ctx)
     _test_startup_trait_extra_appended(ctx)
-    _test_startup_transform_replaces_list(ctx)
-    _test_startup_transform_can_filter(ctx)
     _test_startup_input_list_not_mutated(ctx)
     _test_flags_full_chain_order(ctx)
     _test_flags_empty_defaults(ctx)
@@ -387,7 +361,7 @@ def _test_impl(ctx):
     # after the pure subtests prevents bleed-through.
     _test_setup_command_applies_to_ctx_bazel(ctx)
     _test_sibling_rc_transforms_startup(ctx)
-    print("bazel_flags_test.axl: OK (19 sections)")
+    print("bazel_flags_test.axl: OK (17 sections)")
     return 0
 
 bazel_flags_tests = task(
