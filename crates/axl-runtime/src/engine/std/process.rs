@@ -5,6 +5,7 @@ use std::process::Stdio;
 use allocative::Allocative;
 use anyhow::anyhow;
 use derive_more::Display;
+use either::Either;
 
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
@@ -115,6 +116,35 @@ impl<'v> values::StarlarkValue<'v> for Command {
     }
 }
 
+/// Resolve a `stdout`/`stderr` argument to a [`Stdio`]. Accepts the mode
+/// strings `"null"`/`"piped"`/`"inherit"`, or a writable file stream from
+/// `fs.create(...)` — whose owned file is taken and handed to the child so its
+/// output lands directly on disk. `field` names the caller for error messages.
+fn stdio_from<'v>(
+    io: Either<values::StringValue<'v>, stream::Writable>,
+    field: &str,
+) -> anyhow::Result<Stdio> {
+    match io {
+        Either::Left(mode) => match mode.as_str() {
+            "null" => Ok(Stdio::null()),
+            "piped" => Ok(Stdio::piped()),
+            "inherit" => Ok(Stdio::inherit()),
+            other => Err(anyhow!("invalid {field} type {other}")),
+        },
+        Either::Right(stream::Writable::File(file)) => {
+            let file = file
+                .lock()
+                .unwrap()
+                .take()
+                .ok_or_else(|| anyhow!("{field} file stream has already been consumed"))?;
+            Ok(Stdio::from(file))
+        }
+        Either::Right(_) => Err(anyhow!(
+            "{field} redirect requires a file stream from fs.create(...)"
+        )),
+    }
+}
+
 #[starlark_module]
 pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
     fn arg<'v>(
@@ -180,17 +210,17 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
     ///
     /// Defaults to [`inherit`] when used with [`spawn`] or [`status`], and
     /// defaults to [`piped`] when used with [`output`].
+    ///
+    /// Accepts the strings `"null"`, `"piped"`, `"inherit"`, or a writable file
+    /// stream from `fs.create(...)` to redirect output straight to that file —
+    /// letting a caller poll the child's liveness with `try_wait` and read the
+    /// file afterwards instead of draining a pipe with `wait_with_output`.
     fn stdout<'v>(
         this: values::Value<'v>,
-        #[starlark(require = pos)] io: values::StringValue,
+        #[starlark(require = pos)] io: Either<values::StringValue<'v>, stream::Writable>,
     ) -> anyhow::Result<values::Value<'v>> {
         let cmd = this.downcast_ref_err::<Command>().into_anyhow_result()?;
-        match io.as_str() {
-            "null" => cmd.inner.borrow_mut().stdout(Stdio::null()),
-            "piped" => cmd.inner.borrow_mut().stdout(Stdio::piped()),
-            "inherit" => cmd.inner.borrow_mut().stdout(Stdio::inherit()),
-            v => return Err(anyhow::anyhow!("invalid stdout type {v}")),
-        };
+        cmd.inner.borrow_mut().stdout(stdio_from(io, "stdout")?);
         Ok(this)
     }
 
@@ -198,17 +228,14 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
     ///
     /// Defaults to [`inherit`] when used with [`spawn`] or [`status`], and
     /// defaults to [`piped`] when used with [`output`].
+    ///
+    /// Accepts the same values as [`stdout`].
     fn stderr<'v>(
         this: values::Value<'v>,
-        #[starlark(require = pos)] io: values::StringValue,
+        #[starlark(require = pos)] io: Either<values::StringValue<'v>, stream::Writable>,
     ) -> anyhow::Result<values::Value<'v>> {
         let cmd = this.downcast_ref_err::<Command>().into_anyhow_result()?;
-        match io.as_str() {
-            "null" => cmd.inner.borrow_mut().stderr(Stdio::null()),
-            "piped" => cmd.inner.borrow_mut().stderr(Stdio::piped()),
-            "inherit" => cmd.inner.borrow_mut().stderr(Stdio::inherit()),
-            v => return Err(anyhow::anyhow!("invalid stderr type {v}")),
-        };
+        cmd.inner.borrow_mut().stderr(stdio_from(io, "stderr")?);
         Ok(this)
     }
 

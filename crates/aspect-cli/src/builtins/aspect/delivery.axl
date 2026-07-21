@@ -300,6 +300,24 @@ def _print_captured_output(label, exit_code, stdout, stderr, ansi):
         print(combined)
     print(_style(sep, _BOLD, ansi))
 
+def _spawn_deliverable(ctx, run_tracker, ansi, capture, label, ep, is_forced, output_sha):
+    """Spawn one deliverable, print its `Delivering` line, and return the
+    running-tuple `(label, is_forced, output_sha, t_start, child, stdout_path,
+    stderr_path)`. When capturing, the child's stdout/stderr are redirected to
+    per-target temp files so the reap loop polls `try_wait()` and reads them
+    after exit instead of draining a pipe (the path fields are None otherwise)."""
+    forced_marker = " (FORCED)" if is_forced else ""
+    print("  {} {}{}...".format(_style("Delivering", _BOLD, ansi), label, forced_marker))
+    stdout_path = None
+    stderr_path = None
+    if capture:
+        stdout_path = _DELIVER_STDOUT_PATH.format(ctx.task.name, sanitize_filename(label))
+        stderr_path = _DELIVER_STDERR_PATH.format(ctx.task.name, sanitize_filename(label))
+        child = run_tracker.spawn(ep, [], stdout_path = stdout_path, stderr_path = stderr_path)
+    else:
+        child = run_tracker.spawn(ep, [], capture)
+    return (label, is_forced, output_sha, time.monotonic(), child, stdout_path, stderr_path)
+
 _HEX = "0123456789abcdef"
 
 def _delivery_nonce(ctx) -> str:
@@ -341,6 +359,14 @@ _GRPC_LOG_PATH = "/tmp/aspect-delivery-grpc-{}.bin"
 _PHASE2_LOG_PATH = "/tmp/aspect-delivery-phase2-{}.log"
 _PHASE3_LOG_PATH = "/tmp/aspect-delivery-phase3-{}.log"
 _EXECLOG_PATH = "/tmp/aspect-delivery-execlog-{}.bin"
+
+# Per-target capture files for the parallel dispatch path. Each deliverable
+# redirects its stdout/stderr straight to these (via `cmd.stdout(fs.create(...))`)
+# so reaping polls `try_wait()` and reads the files after exit — never draining
+# a live pipe. Formatted with `(task name, sanitized label)`; deleted per target
+# as it is reaped.
+_DELIVER_STDOUT_PATH = "/tmp/aspect-delivery-deliver-{}-{}.stdout"
+_DELIVER_STDERR_PATH = "/tmp/aspect-delivery-deliver-{}-{}.stderr"
 
 # Mnemonic of the per-target action our hashsum aspect registers; the gRPC
 # log uses it to find the change-detection digest entries. Any other non-OK
@@ -1516,9 +1542,10 @@ def _delivery_impl(ctx):
 
         # `running` holds spawned deliveries; finished ones are reaped out of
         # submission order so a slow head can't idle the slots queued behind it.
-        # When every slot is full and none has finished we block on the head, so
-        # a child blocked on a full stdout pipe still drains in its turn and a
-        # stuck delivery can't deadlock the pipeline.
+        # Captured children write stdout/stderr to per-target temp files (not a
+        # pipe), so `try_wait()` alone drives reaping — a slow deliverable never
+        # blocks draining the others. When every slot is full and none has
+        # finished we block on the head to make room.
         dispatched = {}
         ready = []
         running = []
@@ -1606,19 +1633,17 @@ def _delivery_impl(ctx):
                 if not ready or len(running) >= max_par:
                     break
                 label, ep, is_forced, output_sha = ready.pop(0)
-                forced_marker = " (FORCED)" if is_forced else ""
-                print("  {} {}{}...".format(_style("Delivering", _BOLD, ansi), label, forced_marker))
-                running.append((label, is_forced, output_sha, time.monotonic(), run_tracker.spawn(ep, [], capture)))
+                running.append(_spawn_deliverable(ctx, run_tracker, ansi, capture, label, ep, is_forced, output_sha))
                 interesting = True
 
             # Harvest finished deliveries out of submission order so a slow head
             # never idles the slots queued behind it: scan for any exited child
-            # and reap it, refilling as slots free. Only when every slot is full
-            # and none has finished (or we're finalizing) do we block — on the
-            # head, so its captured pipe is drained in FIFO order and a delivery
-            # that fills its stdout buffer is still read in its turn and can't
-            # deadlock the pipeline. The bound drains every in-flight + queued
-            # delivery in one finalizing tick.
+            # via try_wait() and reap it, refilling as slots free. Captured
+            # output lands in per-target temp files, so reaping reads a finished
+            # file rather than draining a live pipe — no delivery can deadlock
+            # the pipeline. Only when every slot is full and none has finished
+            # (or we're finalizing) do we block on the head. The bound drains
+            # every in-flight + queued delivery in one finalizing tick.
             for _ in range(len(running) + len(ready) + 1):
                 if not running:
                     break
@@ -1631,11 +1656,22 @@ def _delivery_impl(ctx):
                     if not (len(running) >= max_par or (build_done and not ready)):
                         break
                     reap_idx = 0
-                label, is_forced, output_sha, t_start, child = running.pop(reap_idx)
+                label, is_forced, output_sha, t_start, child, stdout_path, stderr_path = running.pop(reap_idx)
                 if capture:
-                    out = child.wait_with_output()
-                    exit_code = out.status.code
-                    _print_captured_output(label, exit_code, out.stdout, out.stderr, ansi)
+                    # Output was redirected to files, so wait() has no pipe to
+                    # drain; read them after exit, print atomically, upload as
+                    # CI artifacts (no-op off-CI), then delete this target's files.
+                    exit_code = child.wait().code
+                    stdout = ctx.std.fs.read_to_string(stdout_path) if ctx.std.fs.exists(stdout_path) else ""
+                    stderr = ctx.std.fs.read_to_string(stderr_path) if ctx.std.fs.exists(stderr_path) else ""
+                    _print_captured_output(label, exit_code, stdout, stderr, ansi)
+                    safe_label = sanitize_filename(label)
+                    if stdout.strip():
+                        artifacts.upload(ctx, "delivery_target_output", safe_label + ".stdout.log", stdout)
+                    if stderr.strip():
+                        artifacts.upload(ctx, "delivery_target_output", safe_label + ".stderr.log", stderr)
+                    ctx.std.fs.remove_file(stdout_path)
+                    ctx.std.fs.remove_file(stderr_path)
                 else:
                     exit_code = child.wait().code
                 duration = fmt_elapsed(time.monotonic() - t_start)
@@ -1658,9 +1694,7 @@ def _delivery_impl(ctx):
                     if not ready or len(running) >= max_par:
                         break
                     nlabel, nep, nis_forced, noutput_sha = ready.pop(0)
-                    nforced_marker = " (FORCED)" if nis_forced else ""
-                    print("  {} {}{}...".format(_style("Delivering", _BOLD, ansi), nlabel, nforced_marker))
-                    running.append((nlabel, nis_forced, noutput_sha, time.monotonic(), run_tracker.spawn(nep, [], capture)))
+                    running.append(_spawn_deliverable(ctx, run_tracker, ansi, capture, nlabel, nep, nis_forced, noutput_sha))
 
             # priority=False throttles surface PATCHes; the per-target lines
             # already tick the CLI.
@@ -1827,7 +1861,7 @@ Currently \x1b[3monly\x1b[23m supported on Aspect Workflows CI runners. Support 
         ),
         "max_parallelization": args.int(
             default = 1,
-            description = "Maximum number of delivery targets to run concurrently. When greater than 1, stdout/stderr is captured and printed atomically after each target finishes.",
+            description = "Maximum number of delivery targets to run concurrently. When greater than 1, each target's stdout/stderr is redirected to per-target temp files (so a slow deliverable never blocks reaping of the others), printed atomically after it finishes, and uploaded as CI artifacts.",
         ),
         "warn_not_runnable": args.boolean(
             default = False,
