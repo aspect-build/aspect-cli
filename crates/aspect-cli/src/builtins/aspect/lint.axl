@@ -62,10 +62,6 @@ def _bb_clientd_mounted(ctx, root):
     Read from /proc/self/mounts: procfs never blocks, while stat()ing the
     mount root would be served by the (possibly wedged) bb_clientd daemon
     itself. Without procfs (macOS) fall back to a direct existence check.
-
-    Runners without bb_clientd — non-Aspect runners, or future Aspect runner
-    versions — still receive bytestream:// URIs in BES events; those fall
-    back to the file's local output-tree path instead (see _lint_file_path).
     """
     mounts = ctx.std.fs.try_read_to_string("/proc/self/mounts")
     if mounts:
@@ -867,8 +863,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # rules_lint tool names observed in BES file-name markers.
     lint_tools_run = {}
 
-    # Whether bytestream:// paths can resolve at all on this runner; remote
-    # lint outputs are skipped (and counted) when they can't.
+    # bytestream:// URIs resolve through bb_clientd only when this runner has
+    # a usable mount (declared by env and actually mounted); bb_root None
+    # routes them to the output-tree fallback instead (see _lint_file_path).
     bb_root = bb_clientd_root(ctx)
     if bb_root != None and not _bb_clientd_mounted(ctx, bb_root):
         bb_root = None
@@ -986,7 +983,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             sleep(BES_DRAIN_TICK_MS)
 
     if skipped_remote_files:
-        warn(ctx.std, "Skipped %s: no bb_clientd mount on this runner and no local output-tree path to read instead" % pluralize(skipped_remote_files, "remote lint output"))
+        warn(ctx.std, "Skipped %s: no local path can serve them (no bb_clientd mount and no output-tree path)" % pluralize(skipped_remote_files, "lint output file"))
 
     build_failed = not build_status.success
     data["lint"]["build_failed"] = build_failed

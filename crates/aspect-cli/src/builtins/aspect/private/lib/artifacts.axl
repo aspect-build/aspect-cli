@@ -552,9 +552,10 @@ def _collect_test_files(ctx, event, strategy, test_entries, skipped_files):
         bes_get(event.id, "attempt", 0) or 0,
     )
 
+    bb_root = bb_clientd_root(ctx)
     for file in (bes_get(payload, "test_action_output", None) or []):
         raw_uri = file.file
-        src = file_uri_to_path(raw_uri, bb_clientd_root(ctx))
+        src = file_uri_to_path(raw_uri, bb_root)
         if not src:
             src = "/".join(file.path_prefix) + "/" + file.name
         if not src:

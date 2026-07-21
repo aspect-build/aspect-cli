@@ -3,9 +3,9 @@ Exercise axl
 """
 
 load("@aspect//delivery.axl", delivery_UncacheableAction = "UncacheableAction", delivery_collect_blocking_culprits = "collect_blocking_culprits", delivery_count_unexplained_unresolved = "count_unexplained_unresolved", delivery_fmt_elapsed = "fmt_elapsed", delivery_should_surface_phase2_stderr = "should_surface_phase2_stderr", delivery_should_upload_grpc_log = "should_upload_grpc_log")
-load("@aspect//lint.axl", "file_uri_to_path", "filter_all", "filter_changeset", "linter_error_message")
+load("@aspect//lint.axl", "filter_all", "filter_changeset", "linter_error_message")
 load("@aspect//private/lib/artifacts.axl", "artifact_name", "build_log_header", "build_log_relpath", "collect_build_action_logs", "dedup_path", "testlog_dest_dir")
-load("@aspect//private/lib/bazel_results.axl", "compute_reproducer_command", "init_data", "render_check_output", "resolve_aspect_url", "summary_title")
+load("@aspect//private/lib/bazel_results.axl", "bb_clientd_root", "compute_reproducer_command", "file_uri_to_path", "init_data", "render_check_output", "resolve_aspect_url", "summary_title")
 load(
     "@aspect//private/lib/build_metadata.axl",
     "detect_vcs_from_host",
@@ -2536,7 +2536,7 @@ def test_detect_build_url(ctx: TaskContext, tc: int) -> int:
     return tc
 
 def test_file_uri_to_path(tc: int) -> int:
-    """Coverage for lint.file_uri_to_path BES URI → bb_clientd path."""
+    """Coverage for bazel_results.file_uri_to_path BES URI → local path."""
     BB = "/mnt/ephemeral/buildbarn/bb_clientd"
 
     # file:// passthrough (scheme stripped).
@@ -2560,6 +2560,41 @@ def test_file_uri_to_path(tc: int) -> int:
     expected_sha512 = BB + "/cas/cache.example.com/blobs/sha512/file/HASHHASH-9999"
     tc = test_case(tc, file_uri_to_path(uri_sha512) == expected_sha512, "file_uri_to_path: bytestream sha512")
 
+    # Explicit bb_root overrides the default mount root.
+    custom = file_uri_to_path(uri4, "/custom/mount")
+    tc = test_case(tc, custom == "/custom/mount/cas/localhost/blobs/sha256/file/abc123def-4567", "file_uri_to_path: explicit bb_root")
+
+    # bb_root None (runner without bb_clientd): bytestream URIs have no local
+    # path; file:// still resolves.
+    tc = test_case(tc, file_uri_to_path(uri4, None) == "", "file_uri_to_path: bytestream with bb_root None → \"\"")
+    tc = test_case(tc, file_uri_to_path("file:///a/b", None) == "/a/b", "file_uri_to_path: file:// unaffected by bb_root None")
+
+    # Empty / non-URI values.
+    tc = test_case(tc, file_uri_to_path("") == "", "file_uri_to_path: empty → \"\"")
+
+    return tc
+
+def test_bb_clientd_root(ctx: TaskContext, tc: int) -> int:
+    """Coverage for bazel_results.bb_clientd_root env precedence."""
+    prior_mount = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_BB_CLIENTD_MOUNT")
+    prior_no_bb = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_NO_BB_CLIENTD")
+
+    ctx.std.env.remove_var("ASPECT_WORKFLOWS_RUNNER_BB_CLIENTD_MOUNT")
+    ctx.std.env.remove_var("ASPECT_WORKFLOWS_RUNNER_NO_BB_CLIENTD")
+    tc = test_case(tc, bb_clientd_root(ctx) == "/mnt/ephemeral/buildbarn/bb_clientd", "bb_clientd_root: legacy default when no env")
+
+    ctx.std.env.set_var("ASPECT_WORKFLOWS_RUNNER_BB_CLIENTD_MOUNT", "/data/bb_clientd")
+    tc = test_case(tc, bb_clientd_root(ctx) == "/data/bb_clientd", "bb_clientd_root: runner-exported mount wins")
+
+    # The no-bb_clientd marker wins over everything, including a stale mount env.
+    ctx.std.env.set_var("ASPECT_WORKFLOWS_RUNNER_NO_BB_CLIENTD", "1")
+    tc = test_case(tc, bb_clientd_root(ctx) == None, "bb_clientd_root: NO_BB_CLIENTD → None")
+
+    for name, prior in [("ASPECT_WORKFLOWS_RUNNER_BB_CLIENTD_MOUNT", prior_mount), ("ASPECT_WORKFLOWS_RUNNER_NO_BB_CLIENTD", prior_no_bb)]:
+        if prior == None:
+            ctx.std.env.remove_var(name)
+        else:
+            ctx.std.env.set_var(name, prior)
     return tc
 
 def test_validate_role(tc: int) -> int:
@@ -3626,6 +3661,7 @@ def impl(ctx: TaskContext) -> int:
     tc = test_collect_build_action_logs(ctx, tc, temp_dir)
     tc = test_sarif_lib(tc)
     tc = test_file_uri_to_path(tc)
+    tc = test_bb_clientd_root(ctx, tc)
     tc = test_json_try_decode(tc)
     tc = test_apparent_label(tc)
     tc = test_process_bes_target_completed(ctx, tc)

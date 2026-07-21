@@ -13,7 +13,6 @@ load("../private/lib/circleci.axl", "circleci")
 load("../private/lib/environment.axl", "detect_ci", "info", "warn")
 load("../private/lib/tar.axl", "tar_create")
 
-# bb_clientd FUSE mount root for bytestream:// URIs (see lib/artifacts.axl).
 # Non-passing statuses for upload_test_results="failed" (mirrors lib/artifacts.axl).
 _NOT_PASSED_STATUSES = [
     "failed",
