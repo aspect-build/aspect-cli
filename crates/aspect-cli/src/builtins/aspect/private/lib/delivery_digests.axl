@@ -1,0 +1,60 @@
+"""Pure helpers for the delivery `--local-hash-fallback` path.
+
+Isolated from `delivery.axl` so the eligibility gate and execution-log digest
+extraction are unit-testable without loading the delivery task. See
+`--local-hash-fallback` in `delivery.axl` for how these are wired into phase 2b.
+"""
+
+load("./runnable.axl", "apparent_label")
+
+def volatile_deliverable_labels(action_meta: dict) -> dict:
+    """Apparent labels of targets with a non-cacheable action.
+
+    `action_meta` maps `(target_label, mnemonic)` -> `{"cacheable": bool,
+    "remote_cacheable": bool}` (read from the phase-1 execution log). A target
+    with any `cacheable == False` action is volatile (stamped / non-hermetic):
+    its digest is not stable across builds, so it must NOT be local-hashed.
+    Returns a set-like dict `{apparent_label: True}`."""
+    volatile = {}
+    for key, meta in action_meta.items():
+        target_label = key[0]
+        if not meta.get("cacheable", True):
+            volatile[apparent_label(target_label)] = True
+    return volatile
+
+def eligible_for_local_hash(unresolved_deliverables: list, volatile_labels: dict) -> list:
+    """Deliverables eligible for the local-hash fallback: unresolved AND not
+    volatile. Input order preserved. Aliases / transitioned targets self-filter
+    downstream — the local pass simply won't produce a digest for them."""
+    return [d for d in unresolved_deliverables if apparent_label(d) not in volatile_labels]
+
+def extract_delivery_hash_digests(spawns: list, mnemonic: str) -> dict:
+    """Map apparent target label -> action digest hash for each DeliveryHash
+    spawn in a decoded execution log. `spawns` is a list of dicts
+    `{"target_label": str, "mnemonic": str, "digest_hash": str}` (the fields the
+    caller pulls off `ExecLogEntry.Spawn`). Keeps only entries whose mnemonic
+    matches `mnemonic` and carry a non-empty digest hash."""
+    out = {}
+    for s in spawns:
+        if s.get("mnemonic") != mnemonic:
+            continue
+        h = s.get("digest_hash") or ""
+        if not h:
+            continue
+        out[apparent_label(s["target_label"])] = h
+    return out
+
+def merge_local_digests(output_shas: dict, extracted: dict, eligible: list) -> int:
+    """Fill `output_shas` for each eligible target the local pass hashed.
+    `output_shas` is keyed by the ORIGINAL target label; `extracted` is keyed by
+    apparent label. Mutates `output_shas` in place; never overwrites an existing
+    (phase-2) entry. Returns the count newly resolved."""
+    count = 0
+    for label in eligible:
+        if label in output_shas:
+            continue
+        h = extracted.get(apparent_label(label))
+        if h:
+            output_shas[label] = h
+            count += 1
+    return count

@@ -1,0 +1,57 @@
+"""Tests for `lib/delivery_digests.axl` — the --local-hash-fallback pure logic.
+
+Run with: aspect dev test-delivery-digests
+"""
+
+load("./delivery_digests.axl", "eligible_for_local_hash", "extract_delivery_hash_digests", "merge_local_digests", "volatile_deliverable_labels")
+
+def _check_volatile_detects_cacheable_false():
+    action_meta = {
+        ("//ml:torch", "Genrule"): {"cacheable": True, "remote_cacheable": True},
+        ("//app:py", "PyWriteBuildData"): {"cacheable": False, "remote_cacheable": True},
+    }
+    v = volatile_deliverable_labels(action_meta)
+    if "//app:py" not in v or "//ml:torch" in v:
+        fail("expected only //app:py volatile, got {}".format(v))
+
+def _check_eligible_excludes_volatile():
+    got = eligible_for_local_hash(["//ml:torch", "//app:py"], {"//app:py": True})
+    if got != ["//ml:torch"]:
+        fail("expected [//ml:torch], got {}".format(got))
+
+def _check_extract_filters_by_mnemonic_and_empty():
+    spawns = [
+        {"target_label": "//ml:torch", "mnemonic": "DeliveryHash", "digest_hash": "aaa"},
+        {"target_label": "//ml:torch", "mnemonic": "Genrule", "digest_hash": "zzz"},
+        {"target_label": "//ml:other", "mnemonic": "DeliveryHash", "digest_hash": ""},
+    ]
+    got = extract_delivery_hash_digests(spawns, "DeliveryHash")
+    if got != {"//ml:torch": "aaa"}:
+        fail("expected {//ml:torch: aaa}, got {}".format(got))
+
+def _check_merge_fills_only_eligible_and_missing():
+    output_shas = {"//already:done": "kept"}
+    extracted = {"//ml:torch": "aaa", "//not:eligible": "bbb"}
+    n = merge_local_digests(output_shas, extracted, ["//ml:torch", "//already:done"])
+    if n != 1 or output_shas.get("//ml:torch") != "aaa" or output_shas.get("//already:done") != "kept":
+        fail("bad merge: n={} shas={}".format(n, output_shas))
+
+_UNIT_TESTS = [
+    _check_volatile_detects_cacheable_false,
+    _check_eligible_excludes_volatile,
+    _check_extract_filters_by_mnemonic_and_empty,
+    _check_merge_fills_only_eligible_and_missing,
+]
+
+def _unit_test_impl(ctx: TaskContext) -> int:
+    for t in _UNIT_TESTS:
+        t()
+    print("delivery_digests.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+delivery_digests_unit_tests = task(
+    kind = "test-delivery-digests",
+    group = ["dev"],
+    implementation = _unit_test_impl,
+    args = {},
+)

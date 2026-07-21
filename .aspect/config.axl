@@ -16,6 +16,7 @@ load("@aspect//private/lib/bazelrc_test.axl", "bazelrc_tests")
 load("@aspect//private/lib/bes_sinks_test.axl", "bes_sinks_tests")
 load("@aspect//private/lib/ci_test.axl", "ci_tests")
 load("@aspect//private/lib/circleci_test.axl", "circleci_tests")
+load("@aspect//private/lib/delivery_digests_test.axl", "delivery_digests_unit_tests")
 load("@aspect//private/lib/delivery_results_test.axl", "delivery_results_unit_tests", "delivery_template_snapshot_tests")
 load("@aspect//private/lib/deployment_flags_test.axl", "deployment_flags_tests")
 load("@aspect//private/lib/format_results_test.axl", "format_template_snapshot_tests")
@@ -388,6 +389,10 @@ def config(ctx: ConfigContext):
     # Delivery results unit: init_data/add_result/build_manifest schema shape.
     # Run with: aspect dev test-delivery-results
     ctx.tasks.add(delivery_results_unit_tests)
+
+    # Delivery digests unit: --local-hash-fallback eligibility + digest merge.
+    # Run with: aspect dev test-delivery-digests
+    ctx.tasks.add(delivery_digests_unit_tests)
 
     # format_results template snapshots.
     # Run with: aspect dev test-format-template-snapshots
