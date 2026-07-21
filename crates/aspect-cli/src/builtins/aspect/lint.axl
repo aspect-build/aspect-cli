@@ -64,14 +64,33 @@ def _bb_clientd_mounted(ctx, root):
     itself. Without procfs (macOS) fall back to a direct existence check.
 
     Runners without bb_clientd — non-Aspect runners, or future Aspect runner
-    versions — can still receive bytestream:// URIs in BES events; their
-    resolved paths can never become readable, so intake skips those files
-    outright instead of letting them churn in the pending queue.
+    versions — still receive bytestream:// URIs in BES events; those fall
+    back to the file's local output-tree path instead (see _lint_file_path).
     """
     mounts = ctx.std.fs.try_read_to_string("/proc/self/mounts")
     if mounts:
         return " " + root + " " in mounts
     return ctx.std.fs.exists(root)
+
+def _lint_file_path(file, bb_root):
+    """Best local path for a BES-announced lint output file, or "".
+
+    With a bb_clientd mount (`bb_root` set), bytestream:// URIs resolve
+    through it. Without one (non-Aspect runners, runners without bb_clientd),
+    fall back to the file's output-tree path (path_prefix/name, relative to
+    the workspace): the lint build passes --remote_download_regex for lint
+    outputs, so Bazel downloads them into bazel-out even under minimal
+    downloads and the local copy serves the read. file:// URIs are local
+    paths either way. "" when nothing can serve the file (e.g. inlined
+    contents with no path_prefix).
+    """
+    uri = file.file
+    if bb_root == None and type(uri) == "string" and uri.startswith("bytestream://"):
+        prefix = list(file.path_prefix or [])
+        if prefix and file.name:
+            return "/".join(prefix) + "/" + file.name
+        return ""
+    return file_uri_to_path(uri, bb_root)
 
 # Filter functions — (all_diagnostics, changed_files) -> relevant_diagnostics
 def filter_all(diagnostics, changed_files):
@@ -563,9 +582,10 @@ def _read_lint_file(ctx, filepath, timeout_ms = _LINT_FILE_PROBE_TIMEOUT_MS):
     the file in the pending queue — retried each tick until the post-build
     drain budget warns and skips it.
 
-    Anything else is a plain local path (file:// URIs — no remote CAS in
-    play), read directly: local disk can't stall the way bb_clientd reads
-    can, and the direct path avoids a background probe thread per read. An
+    Anything else is a plain local path — file:// URIs, or the output-tree
+    fallback for bytestream URIs on runners without bb_clientd — read
+    directly: local disk can't stall the way bb_clientd reads can, and the
+    direct path avoids a background probe thread per read. An
     empty read of a file whose size is non-zero is a failed read, matching
     the probe's contract.
 
@@ -677,7 +697,7 @@ def _drain_pending_files(ctx, bb_root, pending, pending_meta, data, strategy, ch
     exit_nonzero = False
     now = now_ms(ctx)
     for pfile in pending:
-        pfilepath = file_uri_to_path(pfile.file, bb_root)
+        pfilepath = _lint_file_path(pfile, bb_root)
         result = _try_process_lint_file(ctx, pfile, pfilepath, data, strategy, changed_files, lint_trait, github_output, patches, _probe_timeout_ms(ctx, pass_deadline_ms))
         if result == None:
             meta = pending_meta.setdefault(pfilepath, {"first_ms": now, "warned": False})
@@ -850,7 +870,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # Whether bytestream:// paths can resolve at all on this runner; remote
     # lint outputs are skipped (and counted) when they can't.
     bb_root = bb_clientd_root(ctx)
-    bb_clientd_ok = bb_root != None and _bb_clientd_mounted(ctx, bb_root)
+    if bb_root != None and not _bb_clientd_mounted(ctx, bb_root):
+        bb_root = None
     skipped_remote_files = 0
 
     # Emit on each interesting tick, and at least every MIN_HEARTBEAT_INTERVAL_MS
@@ -889,13 +910,12 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                 interesting = True
             if event.kind == "named_set_of_files":
                 for file in event.payload.files:
-                    filepath = file_uri_to_path(file.file, bb_root)
+                    filepath = _lint_file_path(file, bb_root)
                     tool = detect_lint_tool(file.name)
                     if tool:
                         lint_tools_run[tool] = True
                     if file.name.endswith(".patch") or file.name.endswith(".out") or file.name.endswith(".report") or file.name.endswith(".exit_code"):
-                        uri = file.file
-                        if not bb_clientd_ok and type(uri) == "string" and uri.startswith("bytestream://"):
+                        if not filepath:
                             skipped_remote_files += 1
                             continue
                         result = _try_process_lint_file(ctx, file, filepath, data, strategy, changed_files, lint_trait, github_output, patches, _probe_timeout_ms(ctx, pass_deadline_ms))
@@ -960,13 +980,13 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                 slow_warned = True
             if now_ms(ctx) >= post_build_deadline_ms:
                 for pfile in pending_files:
-                    pfilepath = file_uri_to_path(pfile.file, bb_root)
+                    pfilepath = _lint_file_path(pfile, bb_root)
                     warn(ctx.std, "Lint file not readable %ds after build completed (skipping): %s" % (_POST_BUILD_DOWNLOAD_TIMEOUT_MS // 1000, pfilepath))
                 break
             sleep(BES_DRAIN_TICK_MS)
 
     if skipped_remote_files:
-        warn(ctx.std, "Skipped %s (bytestream:// URIs): this runner has no bb_clientd mount" % pluralize(skipped_remote_files, "remote lint output"))
+        warn(ctx.std, "Skipped %s: no bb_clientd mount on this runner and no local output-tree path to read instead" % pluralize(skipped_remote_files, "remote lint output"))
 
     build_failed = not build_status.success
     data["lint"]["build_failed"] = build_failed
