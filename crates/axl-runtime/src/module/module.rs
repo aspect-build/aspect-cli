@@ -14,7 +14,7 @@ use starlark::values::ProvidesStaticType;
 use starlark::values::StarlarkValue;
 use starlark::values::starlark_value;
 
-use crate::module::AXL_ROOT_MODULE_NAME;
+use crate::module::{AXL_ROOT_MODULE_NAME, AXL_USER_MODULE_NAME};
 
 #[derive(Debug, ProvidesStaticType, Default)]
 pub struct Mod {
@@ -40,6 +40,14 @@ impl Mod {
 
     pub fn is_root(&self) -> bool {
         self.name == AXL_ROOT_MODULE_NAME
+    }
+
+    /// Module scope for the user-global config area (`~/.aspect`). Loads in
+    /// the user `config.axl` — relative (`./x.axl`) or module-rooted
+    /// (`x.axl`) — resolve within `dir` and are confined to it, independent
+    /// of any project module.
+    pub fn user_config_scope(dir: PathBuf) -> Self {
+        Self::new(dir.clone(), AXL_USER_MODULE_NAME.to_string(), dir)
     }
 
     pub fn from_eval<'v, 'a, 'e>(eval: &'e mut Evaluator<'v, 'a, '_>) -> Result<&'e mut Mod> {

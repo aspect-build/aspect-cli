@@ -127,7 +127,7 @@ def config(ctx: ConfigContext):
     cfg.some_field = "value"
 ```
 
-Config files are evaluated in order: the project root's `.aspect/config.axl` first, then any nested `.aspect/config.axl` files down toward the invocation directory, and finally the user-global `~/.aspect/config.axl` if it exists — so per-user overrides win over repo defaults. An explicit CLI flag always beats any config value.
+Config files are evaluated in order: the project root's `.aspect/config.axl` first, then any nested `.aspect/config.axl` files down toward the invocation directory, and finally the user-global `~/.aspect/config.axl` if it exists — so per-user overrides win over repo defaults. An explicit CLI flag always beats any config value. The user-global config evaluates in its own module scope: its `load()` statements resolve within `~/.aspect` (and are confined to it), independent of the project.
 
 ### Feature Files
 
