@@ -349,6 +349,8 @@ _GRPC_LOG_PATH = "/tmp/aspect-delivery-grpc-{}.bin"
 _PHASE2_LOG_PATH = "/tmp/aspect-delivery-phase2-{}.log"
 _PHASE3_LOG_PATH = "/tmp/aspect-delivery-phase3-{}.log"
 _EXECLOG_PATH = "/tmp/aspect-delivery-execlog-{}.bin"
+_LOCAL_HASH_EXECLOG_PATH = "/tmp/aspect-delivery-localhash-execlog-{}.bin"
+_LOCAL_HASH_LOG_PATH = "/tmp/aspect-delivery-localhash-{}.log"
 
 # Mnemonic of the per-target action our hashsum aspect registers; the gRPC
 # log uses it to find the change-detection digest entries. Any other non-OK
@@ -840,6 +842,74 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, use
 
     return output_shas, non_hermetic_misses, uncacheable_actions, volatile_deliverables, 0
 
+def _resolve_local_digests(ctx, rc, eligible: list, output_shas: dict, announce_version: bool, announce_command: bool) -> int:
+    """Phase 2b — the `--local-hash-fallback` pass.
+
+    Build `eligible` (unresolved-but-deterministic deliverables) with the
+    `hashsum_local` aspect, whose DeliveryHash action runs LOCALLY (no
+    `no-local`). `--nouse_action_cache` forces every DeliveryHash spawn to be
+    scheduled and logged with its stable action digest, defeating the
+    local-action-cache blind spot without changing the digest. The upstream is a
+    disk/remote cache hit when a cache is present; with no cache the eligible
+    targets are rebuilt locally.
+
+    Read each DeliveryHash spawn's action digest from the execution log and merge
+    into `output_shas`. Best-effort: a build failure (or a missing log) is
+    non-fatal — logs and returns 0, leaving targets unresolved to fall through to
+    the existing warn/fail path. Returns the count newly resolved."""
+    hashsum_local = ctx.bazel.aspect(
+        implementation = _HASHSUM_BZL,
+        symbol = "hashsum_local",
+        parameters = {"nonce": _delivery_nonce(ctx)},
+        output_groups = ["delivery_hash"],
+    )
+    execlog_path = _LOCAL_HASH_EXECLOG_PATH.format(ctx.task.name)
+    log_path = _LOCAL_HASH_LOG_PATH.format(ctx.task.name)
+
+    status = ctx.bazel.build(
+        rc = rc,
+        aspects = [hashsum_local],
+        flags = [
+            "--output_groups=+delivery_hash",
+            "--nouse_action_cache",
+            "--remote_download_outputs=minimal",
+        ],
+        execution_log = [bazel.execution_log.file(path = execlog_path)],
+        stdout = None,
+        stderr = ctx.std.fs.create(log_path),
+        announce_version = announce_version,
+        announce_command = announce_command,
+        *eligible
+    ).wait()
+
+    if status.code != 0:
+        warn(ctx.std, "--local-hash-fallback build failed (exit {}); leaving {} target(s) unresolved. Log: {}".format(status.code, len(eligible), log_path))
+        if ctx.std.fs.exists(log_path):
+            ctx.std.io.stderr.write(ctx.std.fs.read_to_string(log_path))
+        return 0
+
+    if not ctx.std.fs.exists(execlog_path):
+        warn(ctx.std, "--local-hash-fallback produced no execution log; leaving {} target(s) unresolved.".format(len(eligible)))
+        return 0
+
+    spawns = []
+    execlog_file = ctx.std.fs.open(execlog_path)
+    for entry in bazel.build.execution_log.ExecLogEntry().parse_from_delimited(execlog_file):
+        spawn = entry.type
+        if spawn == None or type(spawn) != "spawn":
+            continue
+        if not spawn.target_label or not spawn.mnemonic:
+            continue
+        spawns.append({
+            "target_label": spawn.target_label,
+            "mnemonic": spawn.mnemonic,
+            "digest_hash": spawn.digest.hash if spawn.digest else "",
+        })
+    ctx.std.fs.remove_file(execlog_path)
+
+    extracted = extract_delivery_hash_digests(spawns, _DELIVERY_HASH_MNEMONIC)
+    return merge_local_digests(output_shas, extracted, eligible)
+
 def _pick_status(data, had_failure, terminal):
     """Delivery lifecycle status from accumulated data: aborted → "aborted";
     had_failure → "failing"/"failed"; `warn` count > 0 → "warning";
@@ -1311,6 +1381,19 @@ def _delivery_impl(ctx):
         non_hermetic_misses = {}
         uncacheable_actions = []
         volatile_deliverables = {}
+
+    # Phase 2b — --local-hash-fallback. For deliverables phase 2 could not resolve
+    # from the remote cache but whose actions are deterministic (not volatile),
+    # compute the DeliveryHash action digest LOCALLY and merge it into
+    # output_shas, so they deliver and are change-tracked. Opt-in; skipped when
+    # the flag is off. Non-fatal — unresolved targets fall through below.
+    if phase_1_2_runs and ctx.args.local_hash_fallback:
+        prelim_unresolved = [t for t in targets if not output_shas.get(t)]
+        eligible = eligible_for_local_hash(prelim_unresolved, volatile_deliverables)
+        if eligible:
+            resolved = _resolve_local_digests(ctx, rc, eligible, output_shas, announce_version, announce_command)
+            if resolved > 0:
+                info(ctx.std, "Resolved {} delivery digest(s) via --local-hash-fallback (local build).".format(resolved))
 
     # The nasty targets: uncacheable actions that blocked hashing. If every
     # target still got a digest, they didn't actually matter — say nothing.
