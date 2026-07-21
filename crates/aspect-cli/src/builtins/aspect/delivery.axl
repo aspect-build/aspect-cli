@@ -1514,9 +1514,11 @@ def _delivery_impl(ctx):
             *delivery_targets
         )
 
-        # `running` is a FIFO reaped in submission order: a child blocked on a
-        # full stdout pipe drains in its turn, so a stuck delivery can't deadlock
-        # the pipeline (each head exits independently of those queued behind it).
+        # `running` holds spawned deliveries; finished ones are reaped out of
+        # submission order so a slow head can't idle the slots queued behind it.
+        # When every slot is full and none has finished we block on the head, so
+        # a child blocked on a full stdout pipe still drains in its turn and a
+        # stuck delivery can't deadlock the pipeline.
         dispatched = {}
         ready = []
         running = []
@@ -1609,16 +1611,27 @@ def _delivery_impl(ctx):
                 running.append((label, is_forced, output_sha, time.monotonic(), run_tracker.spawn(ep, [], capture)))
                 interesting = True
 
-            # Block on the head at capacity or when finalizing; otherwise reap
-            # only finished heads so the event drain isn't stalled. The bound
-            # drains every in-flight + queued delivery in one finalizing tick.
+            # Harvest finished deliveries out of submission order so a slow head
+            # never idles the slots queued behind it: scan for any exited child
+            # and reap it, refilling as slots free. Only when every slot is full
+            # and none has finished (or we're finalizing) do we block — on the
+            # head, so its captured pipe is drained in FIFO order and a delivery
+            # that fills its stdout buffer is still read in its turn and can't
+            # deadlock the pipeline. The bound drains every in-flight + queued
+            # delivery in one finalizing tick.
             for _ in range(len(running) + len(ready) + 1):
                 if not running:
                     break
-                must_reap = len(running) >= max_par or (build_done and not ready)
-                if not must_reap and running[0][4].try_wait() == None:
-                    break
-                label, is_forced, output_sha, t_start, child = running.pop(0)
+                reap_idx = None
+                for i in range(len(running)):
+                    if running[i][4].try_wait() != None:
+                        reap_idx = i
+                        break
+                if reap_idx == None:
+                    if not (len(running) >= max_par or (build_done and not ready)):
+                        break
+                    reap_idx = 0
+                label, is_forced, output_sha, t_start, child = running.pop(reap_idx)
                 if capture:
                     out = child.wait_with_output()
                     exit_code = out.status.code
