@@ -319,22 +319,28 @@ def _delivery_nonce(ctx) -> str:
 # analysis with no churn. The `nonce` attr is unused by the action; a fresh
 # value per run (via `parameters`) mints a new AspectKey so the DeliveryHash
 # actions re-run their remote lookups without discarding the graph.
-_HASHSUM_BZL = """def _hashsum_impl(target, ctx):
-    files = target[DefaultInfo].files
-    runfiles = target[DefaultInfo].default_runfiles
-    hash_file = ctx.actions.declare_file(target.label.name + ".delivery_hash")
-    ctx.actions.run_shell(
-        inputs = depset([], transitive = [files, runfiles.files]),
-        outputs = [hash_file],
-        command = "echo 'Delivery by AXL' > " + hash_file.path,
-        mnemonic = "DeliveryHash",
-        progress_message = "Computing delivery hash for %{label}",
-        execution_requirements = {"no-local": "1"},
-    )
-    return [OutputGroupInfo(delivery_hash = depset([hash_file]))]
+_HASHSUM_BZL = """def _make_hashsum_impl(no_local):
+    def _hashsum_impl(target, ctx):
+        files = target[DefaultInfo].files
+        runfiles = target[DefaultInfo].default_runfiles
+        hash_file = ctx.actions.declare_file(target.label.name + ".delivery_hash")
+        ctx.actions.run_shell(
+            inputs = depset([], transitive = [files, runfiles.files]),
+            outputs = [hash_file],
+            command = "echo 'Delivery by AXL' > " + hash_file.path,
+            mnemonic = "DeliveryHash",
+            progress_message = "Computing delivery hash for %{label}",
+            execution_requirements = {"no-local": "1"} if no_local else {},
+        )
+        return [OutputGroupInfo(delivery_hash = depset([hash_file]))]
+    return _hashsum_impl
 
 hashsum = aspect(
-    implementation = _hashsum_impl,
+    implementation = _make_hashsum_impl(True),
+    attrs = {"nonce": attr.string(default = "")},
+)
+hashsum_local = aspect(
+    implementation = _make_hashsum_impl(False),
     attrs = {"nonce": attr.string(default = "")},
 )
 """
