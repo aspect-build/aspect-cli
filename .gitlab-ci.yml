@@ -128,9 +128,10 @@ delivery-task:
     ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS: $FORCE_TARGETS
   script:
     - .aspect/bootstrap.sh
-    # --warn-unresolved-digest: the deliverable set includes py_deliverable, a
-    # stamped py_binary whose PyWriteBuildData action is uncacheable and never
-    # resolves a digest — a known, tolerated missing digest, so keep it a warning
-    # rather than the (new) default hard failure.
-    - ASPECT_DEBUG=1 aspect delivery --task:name delivery-gl-debug --warn-unresolved-digest
-    - aspect delivery --task:name delivery-gl --warn-unresolved-digest
+    # --local-hash-fallback: the deliverable set includes no_remote_exec_deliverable,
+    # a deterministic target tagged no-remote-exec that is not in the remote cache;
+    # the flag hashes it locally so it delivers (first run) and SKIPs on the second
+    # invocation, exercising change-detection continuity end-to-end.
+    # --warn-unresolved-digest: still covers py_deliverable's volatile stamped action.
+    - ASPECT_DEBUG=1 aspect delivery --task:name delivery-gl-debug --local-hash-fallback --warn-unresolved-digest
+    - aspect delivery --task:name delivery-gl --local-hash-fallback --warn-unresolved-digest
