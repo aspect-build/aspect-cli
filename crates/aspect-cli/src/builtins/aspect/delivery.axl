@@ -158,6 +158,7 @@ load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTE
 load("./private/lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
 load("./private/lib/bes_sinks.axl", "announce_bes_sinks", "bes_args", "collect_bes_from_args", "summarize_bes_upload")
 load("./private/lib/ci.axl", "resolve_build_url")
+load("./private/lib/delivery_digests.axl", "eligible_for_local_hash", "extract_delivery_hash_digests", "merge_local_digests", "volatile_deliverable_labels")
 load("./private/lib/delivery_results.axl", delivery_add_result = "add_result", delivery_build_manifest = "build_manifest", delivery_conclusion = "conclusion", delivery_init_data = "init_data")
 load(
     "./private/lib/deliveryd.axl",
@@ -458,11 +459,13 @@ def _surface_phase_stderr(ctx, phase, log_path):
 
 def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, user_remote_executor_uri, ansi, data):
     """Run phase 1 (build) + phase 2 (digest extraction); return
-    `(output_shas, non_hermetic_misses, uncacheable_actions, exit_code)`.
+    `(output_shas, non_hermetic_misses, uncacheable_actions, volatile_deliverables, exit_code)`.
     Phase-1 BES events drive `data`; phase-2's gRPC log yields the per-target
     digests for change detection, and phase-2 BES yields `uncacheable_actions` —
     the non-DeliveryHash actions Bazel could not read from cache (the "nasty"
-    targets that block hashing).
+    targets that block hashing). `volatile_deliverables` is the set of apparent
+    labels with a non-cacheable (stamped/non-hermetic) phase-1 action, derived
+    from the phase-1 execution log — ineligible for the local-hash fallback.
 
     Phase 2 is expected to exit non-zero on first delivery, so its stderr is
     captured and echoed/uploaded only when rows can't explain it (see
@@ -609,7 +612,7 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, use
         archive_bazel_attempt(data, attempt + 1, status.code)
 
     if status.code != 0:
-        return {}, {}, [], status.code
+        return {}, {}, [], {}, status.code
     info(ctx.std, "Build took {}.".format(fmt_elapsed(time.monotonic() - _t_phase1)))
 
     # Phase 2. Parse the gRPC log regardless of exit code — non-zero usually
@@ -735,7 +738,7 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, use
     if not ctx.std.fs.exists(log_path):
         error(ctx.std, "Phase-2 produced no gRPC log; could not checksum delivery digests. Phase-2 raw log: {}".format(phase2_log_path))
         _surface_phase_stderr(ctx, 2, phase2_log_path)
-        return {}, {}, uncacheable_actions, (phase2_status.code if phase2_status.code != 0 else 1)
+        return {}, {}, uncacheable_actions, {}, (phase2_status.code if phase2_status.code != 0 else 1)
 
     log_file = ctx.std.fs.open(log_path)
     getactionresult_count = 0
@@ -772,6 +775,7 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, use
     # — real key-drift symptoms (transient/non-hermetic). Caller surfaces them
     # inline on the failed row.
     non_hermetic_misses = {}
+    volatile_deliverables = {}
     if misses_by_producer:
         action_meta = {}
         execlog_file = ctx.std.fs.open(phase1_execlog_path)
@@ -795,6 +799,7 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, use
                 if meta and not meta["remote_cacheable"]:
                     continue
                 non_hermetic_misses.setdefault(producer, []).append(m)
+        volatile_deliverables = volatile_deliverable_labels(action_meta)
     ctx.std.fs.remove_file(phase1_execlog_path)
 
     # Gate on `non_hermetic_misses` (post opt-out filter), not raw
@@ -827,7 +832,7 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, use
                           " \"Action must be cached ... but it is not\" lines are expected, and are shown" +
                           " only because a digest could not be resolved for an unexpected reason.")
 
-    return output_shas, non_hermetic_misses, uncacheable_actions, 0
+    return output_shas, non_hermetic_misses, uncacheable_actions, volatile_deliverables, 0
 
 def _pick_status(data, had_failure, terminal):
     """Delivery lifecycle status from accumulated data: aborted → "aborted";
@@ -1276,7 +1281,7 @@ def _delivery_impl(ctx):
     # Phase 1/2 — skipped only in --mode=always + --track-state=false.
     if phase_1_2_runs:
         _t_build = time.monotonic()
-        output_shas, non_hermetic_misses, uncacheable_actions, build_code = _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, user_remote_executor_uri or "", ansi, data)
+        output_shas, non_hermetic_misses, uncacheable_actions, volatile_deliverables, build_code = _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, user_remote_executor_uri or "", ansi, data)
         info(ctx.std, "Build+checksum total: {}.".format(fmt_elapsed(time.monotonic() - _t_build)))
 
         for handler in bazel_trait.build_end:
@@ -1299,6 +1304,7 @@ def _delivery_impl(ctx):
         output_shas = {}
         non_hermetic_misses = {}
         uncacheable_actions = []
+        volatile_deliverables = {}
 
     # The nasty targets: uncacheable actions that blocked hashing. If every
     # target still got a digest, they didn't actually matter — say nothing.
