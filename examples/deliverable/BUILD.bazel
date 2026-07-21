@@ -62,6 +62,17 @@ py_binary(
     tags = ["deliverable"],
 )
 
+# Deterministic target tagged no-remote-exec — the ENG-1799 fixture. Its output
+# is stable (cacheable) but it is not pushed to the remote cache, so the
+# require-cached checksum phase cannot hash it. With --local-hash-fallback it
+# delivers via a locally-computed digest; without the flag it warns/fails (the
+# in-tree contrast to py_deliverable's volatile, always-unhashable case).
+custom_deliverable(
+    name = "no_remote_exec_deliverable",
+    data = [":delivery_payload"],
+    tags = ["deliverable", "no-remote-exec"],
+)
+
 # A genrule whose build action fails, emitting realistic stdout + stderr, for
 # exercising build-log upload (upload_build_logs) during the delivery task's
 # phase-1 build. `manual` keeps it out of `//...`; to test the case live, add
