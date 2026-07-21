@@ -289,6 +289,15 @@ def _test_remote_cache_auth_flags(_):
         [],
     )
     _eq(
+        "owned cache + credential helper for host",
+        remote_cache_auth_flags(
+            ctx,
+            _fake_rc({"--remote_cache": "grpcs://" + _CACHE, "--credential_helper": ["*.acme.aspect.build=/usr/bin/helper"]}),
+            "build",
+        ),
+        [],
+    )
+    _eq(
         "owned cache + not logged in",
         remote_cache_auth_flags(
             _fake_auth_ctx(owned_hosts = [_CACHE]),
@@ -317,6 +326,37 @@ def _test_bes_backend_auth_flags(_):
             "build",
         ),
         [],
+    )
+
+    # A `--credential_helper` registered for the BES host means Bazel will add its
+    # own `authorization`, so the CLI must not inject a second one (issue #1325).
+    _eq(
+        "owned bes + credential helper for host",
+        bes_backend_auth_flags(
+            ctx,
+            _fake_rc({"--bes_backend": "grpcs://" + _BES, "--credential_helper": [_BES + "=/usr/bin/helper"]}),
+            "build",
+        ),
+        [],
+    )
+    _eq(
+        "owned bes + unscoped credential helper",
+        bes_backend_auth_flags(
+            ctx,
+            _fake_rc({"--bes_backend": "grpcs://" + _BES, "--credential_helper": ["/usr/bin/helper"]}),
+            "build",
+        ),
+        [],
+    )
+    # A credential helper for a different host does not suppress the injected auth.
+    _eq(
+        "owned bes + credential helper for other host still injects",
+        bes_backend_auth_flags(
+            ctx,
+            _fake_rc({"--bes_backend": "grpcs://" + _BES, "--credential_helper": ["remote.buildbuddy.io=/usr/bin/helper"]}),
+            "build",
+        ),
+        ["--bes_header=authorization=Bearer " + _TOK],
     )
 
 def _test_aspect_endpoint_auth_flags(_):

@@ -5,7 +5,7 @@ Run with:
   aspect dev test-aspect-endpoint-auth
 """
 
-load("./aspect_endpoint_auth.axl", "endpoint_host", "headers_have_auth", "is_aspect_host", "login_hint", "needs_aspect_token")
+load("./aspect_endpoint_auth.axl", "credential_helper_covers_host", "endpoint_host", "headers_have_auth", "is_aspect_host", "login_hint", "needs_aspect_token")
 
 def _eq(label, got, want):
     if got != want:
@@ -65,6 +65,28 @@ def _test_headers_have_auth(_):
     _eq("amongst others", headers_have_auth(["x-foo=bar", "AUTHORIZATION=Bearer x"]), True)
     _eq("value mentioning auth not matched", headers_have_auth(["x-note=authorization=no"]), False)
 
+def _test_credential_helper_covers_host(_):
+    """A `--credential_helper` registered for the endpoint host means Bazel will
+    add its own `authorization`, so the CLI must treat the stream as already
+    authenticated. Mirrors Bazel's scope resolution: default helper, exact host,
+    and `*.<domain>` wildcard (domain itself + subdomains)."""
+    host = "bes.acme.aspect.build"
+
+    _eq("no helpers", credential_helper_covers_host([], host), False)
+    _eq("unscoped default helper covers all", credential_helper_covers_host(["/usr/bin/cred-helper"], host), True)
+    _eq("exact host match", credential_helper_covers_host(["bes.acme.aspect.build=/usr/bin/h"], host), True)
+    _eq("exact host case-insensitive", credential_helper_covers_host(["BES.ACME.ASPECT.BUILD=/usr/bin/h"], host), True)
+    _eq("other host no match", credential_helper_covers_host(["remote.acme.aspect.build=/usr/bin/h"], host), False)
+    _eq("wildcard subdomain match", credential_helper_covers_host(["*.acme.aspect.build=/usr/bin/h"], host), True)
+    _eq("wildcard domain itself match", credential_helper_covers_host(["*.acme.aspect.build=/h"], "acme.aspect.build"), True)
+    _eq("wildcard non-subdomain no match", credential_helper_covers_host(["*.other.aspect.build=/h"], host), False)
+    _eq("wildcard is not a substring match", credential_helper_covers_host(["*.aspect.build=/h"], "notacme.aspect.build"), True)
+    _eq(
+        "amongst others",
+        credential_helper_covers_host(["remote.acme.aspect.build=/h", "bes.acme.aspect.build=/h"], host),
+        True,
+    )
+
 def _test_login_hint(_):
     """The hint names a configured deployment with `--deployment`, but stays a
     bare login when no deployment owns the endpoint."""
@@ -77,8 +99,9 @@ def _test_impl(ctx):
     _test_is_aspect_host(ctx)
     _test_needs_aspect_token(ctx)
     _test_headers_have_auth(ctx)
+    _test_credential_helper_covers_host(ctx)
     _test_login_hint(ctx)
-    print("aspect_endpoint_auth_test.axl: OK (5 sections)")
+    print("aspect_endpoint_auth_test.axl: OK (6 sections)")
     return 0
 
 aspect_endpoint_auth_tests = task(

@@ -56,7 +56,7 @@ also checked at runtime by `assert_ctx_bazel_ready_for_health_check` (see
     bazel-spawning task.
 """
 
-load("./aspect_endpoint_auth.axl", "headers_have_auth", "needs_aspect_token", "resolve_aspect_bearer")
+load("./aspect_endpoint_auth.axl", "credential_helper_covers_host", "endpoint_host", "headers_have_auth", "needs_aspect_token", "resolve_aspect_bearer")
 load("./environment.axl", "color_enabled", "detect_ci")
 
 def _require_arg(ctx, name):
@@ -340,16 +340,26 @@ def _endpoint_auth_flags(ctx, rc, command, endpoint_flag, header_flag, what):
 
     Reads the effective `endpoint_flag` (from `--bazel-flag`, a first-class flag,
     or `.bazelrc` — all resolved through `rc`). When a configured deployment owns
-    its host (see `aspect_endpoint_auth.axl`) and the user has not already set
-    `<header_flag>=authorization=…`, returns the one auth header flag. Best-effort:
-    an owned endpoint with no usable credential warns and returns `[]`. `what`
-    describes the endpoint in that warning.
+    its host (see `aspect_endpoint_auth.axl`) and the stream will not already carry
+    an `authorization` — neither an explicit `<header_flag>=authorization=…` nor a
+    `--credential_helper` registered for the host — returns the one auth header
+    flag. Suppressing on a matching credential helper keeps Bazel from adding a
+    second `authorization` alongside the injected one, which gRPC would comma-join
+    into a token a JWT-validating proxy rejects. Best-effort: an owned endpoint
+    with no usable credential warns and returns `[]`. `what` describes the endpoint
+    in that warning.
     """
     endpoint = rc.flag_value(endpoint_flag, command = command)
     if not endpoint:
         return []
-    user_set_auth = headers_have_auth(rc.flag_values(header_flag, command = command))
-    if not needs_aspect_token(ctx, [endpoint], user_set_auth):
+    already_authenticated = (
+        headers_have_auth(rc.flag_values(header_flag, command = command)) or
+        credential_helper_covers_host(
+            rc.flag_values("--credential_helper", command = command),
+            endpoint_host(endpoint),
+        )
+    )
+    if not needs_aspect_token(ctx, [endpoint], already_authenticated):
         return []
     bearer = resolve_aspect_bearer(ctx, what, endpoint)
     if not bearer:
