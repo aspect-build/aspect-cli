@@ -75,6 +75,43 @@ def headers_have_auth(headers: list[str]) -> bool:
     prefix."""
     return any([h.lower().startswith("authorization=") for h in headers])
 
+def _credential_helper_scope(value: str) -> str | None:
+    """The scope of a `--credential_helper` value, or `None` for an unscoped
+    (default) helper that applies to every URI.
+
+    Bazel accepts `<path>` (default helper) or `<scope>=<path>`, split on the
+    first `=`. A `<scope>` is an exact host (`bes.example.com`) or a wildcard
+    (`*.example.com`, matching that domain and its subdomains). A bare path with
+    no `=` is the default helper, invoked for any host lacking a more specific one.
+    """
+    idx = value.find("=")
+    if idx == -1:
+        return None
+    return value[:idx]
+
+def credential_helper_covers_host(values: list[str], host: str) -> bool:
+    """Whether any `--credential_helper` in `values` would be invoked for `host`,
+    and so may itself supply an `authorization` header for it.
+
+    Mirrors Bazel's per-URI resolution: an unscoped default helper covers every
+    host, an exact-host scope covers that host, and a `*.<domain>` wildcard covers
+    `<domain>` and its subdomains. When a helper covers the endpoint's host, the
+    CLI must not also inject its own `authorization` — the stream would carry two.
+    """
+    host = host.lower()
+    for value in values:
+        scope = _credential_helper_scope(value)
+        if scope == None:
+            return True
+        scope = scope.lower()
+        if scope.startswith("*."):
+            domain = scope[2:]
+            if host == domain or host.endswith("." + domain):
+                return True
+        elif scope == host:
+            return True
+    return False
+
 def resolve_aspect_bearer(ctx, what: str, uri: str = "") -> str:
     """Best-effort resolution of the `Bearer <jwt>` Authorization value for the
     endpoint `uri`, described by `what` (e.g. "build events", "the remote cache").
