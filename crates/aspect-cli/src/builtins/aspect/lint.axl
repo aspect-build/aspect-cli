@@ -20,7 +20,7 @@ load("@aspect//bazel.axl", "BazelTrait")
 load("@std//time.axl", "sleep", "sleep_iter")
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_flags.axl", "announce_bazel_args", "aspect_endpoint_auth_flags", "bazel_flag_args", "resolve_bazel_announce")
-load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event")
+load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "bb_clientd_root", "file_uri_to_path", "now_ms", "process_event")
 load("./private/lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
 load("./private/lib/bes_sinks.axl", "announce_bes_sinks", "bes_args", "collect_bes_from_args", "summarize_bes_upload")
 load("./private/lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
@@ -34,9 +34,6 @@ load("./private/lib/sarif.axl", "get_sarif_summary", "parse_sarif", "parse_sarif
 load("./private/lib/tar.axl", "tar_create")
 load("./private/lib/text.axl", "pluralize")
 load("./private/lib/tips.axl", "tips")
-
-# bb_clientd FUSE mount root for resolving bytestream:// URIs on Aspect Workflows runners.
-_BB_CLIENTD_ROOT = "/mnt/ephemeral/buildbarn/bb_clientd"
 
 # Poll budget for pending lint files after build.wait(): remote downloads are
 # async and the BES event can arrive before the file lands. 30s is generous.
@@ -59,36 +56,8 @@ _PASS_READ_BUDGET_MS = 1000
 # without it, a wedged storage layer is silent until the post-build skip.
 _PENDING_READ_WARN_MS = 30000
 
-def file_uri_to_path(uri):
-    """Resolve a BES file URI to a local path via the bb_clientd FUSE mount.
-
-    Handles both bytestream forms:
-      - bytestream://HOST:PORT/blobs/HASH/SIZE              (4 parts)
-      - bytestream://HOST:PORT/blobs/<digest>/HASH/SIZE     (5 parts, modern sha256)
-    In the 5-part form parts[2] is the digest-function name, HASH/SIZE shift to
-    parts[3]/parts[4]; treating parts[2] as the hash yields non-resolving paths.
-    """
-    if uri.startswith("file://"):
-        return uri[len("file://"):]
-    if uri.startswith("bytestream://"):
-        rest = uri[len("bytestream://"):]
-        parts = rest.split("/")
-        host = parts[0].split(":")[0]
-
-        # parts[2] is a digest-function name in the 5-part form; hash/size shift right.
-        if len(parts) >= 5 and parts[2] in ("sha256", "sha512", "blake3"):
-            digest_fn = parts[2]
-            blob_hash = parts[3]
-            blob_size = parts[4]
-        else:
-            digest_fn = "sha256"
-            blob_hash = parts[2] if len(parts) > 2 else ""
-            blob_size = parts[3] if len(parts) > 3 else ""
-        return _BB_CLIENTD_ROOT + "/cas/" + host + "/blobs/" + digest_fn + "/file/" + blob_hash + "-" + blob_size
-    return uri
-
-def _bb_clientd_mounted(ctx):
-    """True when a bb_clientd virtual filesystem is mounted at _BB_CLIENTD_ROOT.
+def _bb_clientd_mounted(ctx, root):
+    """True when a bb_clientd virtual filesystem is mounted at `root`.
 
     Read from /proc/self/mounts: procfs never blocks, while stat()ing the
     mount root would be served by the (possibly wedged) bb_clientd daemon
@@ -101,8 +70,8 @@ def _bb_clientd_mounted(ctx):
     """
     mounts = ctx.std.fs.try_read_to_string("/proc/self/mounts")
     if mounts:
-        return " " + _BB_CLIENTD_ROOT + " " in mounts
-    return ctx.std.fs.exists(_BB_CLIENTD_ROOT)
+        return " " + root + " " in mounts
+    return ctx.std.fs.exists(root)
 
 # Filter functions — (all_diagnostics, changed_files) -> relevant_diagnostics
 def filter_all(diagnostics, changed_files):
@@ -603,7 +572,8 @@ def _read_lint_file(ctx, filepath, timeout_ms = _LINT_FILE_PROBE_TIMEOUT_MS):
     Either way, None always means unreadable, never empty: a clean linter's
     empty `.out` reads as "".
     """
-    if not filepath.startswith(_BB_CLIENTD_ROOT):
+    root = bb_clientd_root(ctx)
+    if root == None or not filepath.startswith(root):
         if not ctx.std.fs.exists(filepath):
             return None
         content = ctx.std.fs.try_read_to_string(filepath)
@@ -691,7 +661,7 @@ def _record_lint_result(result, failed_linters):
         failed_linters[result["failed_tool"]] = True
     return (result["interesting"], result["linter_exit_code"] != 0)
 
-def _drain_pending_files(ctx, pending, pending_meta, data, strategy, changed_files, lint_trait, github_output, patches, failed_linters, pass_deadline_ms):
+def _drain_pending_files(ctx, bb_root, pending, pending_meta, data, strategy, changed_files, lint_trait, github_output, patches, failed_linters, pass_deadline_ms):
     """One pass over pending files → (still_pending, was_interesting, exit_nonzero).
     still_pending holds files whose remote download hasn't landed or whose
     contents couldn't be read yet. `pass_deadline_ms` caps this pass's total
@@ -707,7 +677,7 @@ def _drain_pending_files(ctx, pending, pending_meta, data, strategy, changed_fil
     exit_nonzero = False
     now = now_ms(ctx)
     for pfile in pending:
-        pfilepath = file_uri_to_path(pfile.file)
+        pfilepath = file_uri_to_path(pfile.file, bb_root)
         result = _try_process_lint_file(ctx, pfile, pfilepath, data, strategy, changed_files, lint_trait, github_output, patches, _probe_timeout_ms(ctx, pass_deadline_ms))
         if result == None:
             meta = pending_meta.setdefault(pfilepath, {"first_ms": now, "warned": False})
@@ -879,7 +849,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
     # Whether bytestream:// paths can resolve at all on this runner; remote
     # lint outputs are skipped (and counted) when they can't.
-    bb_clientd_ok = _bb_clientd_mounted(ctx)
+    bb_root = bb_clientd_root(ctx)
+    bb_clientd_ok = bb_root != None and _bb_clientd_mounted(ctx, bb_root)
     skipped_remote_files = 0
 
     # Emit on each interesting tick, and at least every MIN_HEARTBEAT_INTERVAL_MS
@@ -891,6 +862,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
 
         pending_files, pending_interesting, pending_exit_nonzero = _drain_pending_files(
             ctx,
+            bb_root,
             pending_files,
             pending_meta,
             data,
@@ -917,12 +889,13 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                 interesting = True
             if event.kind == "named_set_of_files":
                 for file in event.payload.files:
-                    filepath = file_uri_to_path(file.file)
+                    filepath = file_uri_to_path(file.file, bb_root)
                     tool = detect_lint_tool(file.name)
                     if tool:
                         lint_tools_run[tool] = True
                     if file.name.endswith(".patch") or file.name.endswith(".out") or file.name.endswith(".report") or file.name.endswith(".exit_code"):
-                        if not bb_clientd_ok and filepath.startswith(_BB_CLIENTD_ROOT):
+                        uri = file.file
+                        if not bb_clientd_ok and type(uri) == "string" and uri.startswith("bytestream://"):
                             skipped_remote_files += 1
                             continue
                         result = _try_process_lint_file(ctx, file, filepath, data, strategy, changed_files, lint_trait, github_output, patches, _probe_timeout_ms(ctx, pass_deadline_ms))
@@ -965,6 +938,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         for _i in range(_POST_BUILD_DOWNLOAD_TIMEOUT_MS // BES_DRAIN_TICK_MS + 1):
             pending_files, _, pending_exit_nonzero = _drain_pending_files(
                 ctx,
+                bb_root,
                 pending_files,
                 pending_meta,
                 data,
@@ -986,13 +960,13 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                 slow_warned = True
             if now_ms(ctx) >= post_build_deadline_ms:
                 for pfile in pending_files:
-                    pfilepath = file_uri_to_path(pfile.file)
+                    pfilepath = file_uri_to_path(pfile.file, bb_root)
                     warn(ctx.std, "Lint file not readable %ds after build completed (skipping): %s" % (_POST_BUILD_DOWNLOAD_TIMEOUT_MS // 1000, pfilepath))
                 break
             sleep(BES_DRAIN_TICK_MS)
 
     if skipped_remote_files:
-        warn(ctx.std, "Skipped %s (bytestream:// URIs): no bb_clientd mount at %s on this runner" % (pluralize(skipped_remote_files, "remote lint output"), _BB_CLIENTD_ROOT))
+        warn(ctx.std, "Skipped %s (bytestream:// URIs): this runner has no bb_clientd mount" % pluralize(skipped_remote_files, "remote lint output"))
 
     build_failed = not build_status.success
     data["lint"]["build_failed"] = build_failed

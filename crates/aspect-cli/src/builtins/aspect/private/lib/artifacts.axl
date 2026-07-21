@@ -38,7 +38,7 @@ Consumer:
 """
 
 load("@aspect//bazel.axl", "BazelTrait")
-load("./bazel_results.axl", "bes_get", "file_uri_to_path")
+load("./bazel_results.axl", "bb_clientd_root", "bes_get", "file_uri_to_path")
 load("./buildkite.axl", "buildkite")
 load("./ci.axl", "detect_artifacts_browse_url", "detect_ci_host")
 load("./circleci.axl", "circleci")
@@ -554,7 +554,7 @@ def _collect_test_files(ctx, event, strategy, test_entries, skipped_files):
 
     for file in (bes_get(payload, "test_action_output", None) or []):
         raw_uri = file.file
-        src = file_uri_to_path(raw_uri)
+        src = file_uri_to_path(raw_uri, bb_clientd_root(ctx))
         if not src:
             src = "/".join(file.path_prefix) + "/" + file.name
         if not src:
@@ -647,7 +647,7 @@ def _build_log_body(ctx, raw):
             return ""
 
         # Read one past the cap so an exactly-cap-sized log isn't misflagged.
-        text = ctx.std.fs.try_read_to_string_capped(file_uri_to_path(raw), _MAX_BUILD_LOG_BYTES + 1)
+        text = ctx.std.fs.try_read_to_string_capped(file_uri_to_path(raw, bb_clientd_root(ctx)), _MAX_BUILD_LOG_BYTES + 1)
     elif raw != None:
         text = str(raw[:_MAX_BUILD_LOG_BYTES + 1])  # slice bytes before decoding
     else:
