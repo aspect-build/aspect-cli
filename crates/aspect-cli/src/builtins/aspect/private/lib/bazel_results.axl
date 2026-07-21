@@ -82,10 +82,11 @@ MIN_HEARTBEAT_INTERVAL_MS = 5000
 # don't stall the loop.
 BES_DRAIN_TICK_MS = 250
 
-# bb_clientd FUSE mount root for resolving bytestream:// URIs on Aspect
-# Workflows runners. lib/artifacts.axl loads `file_uri_to_path` from here, so
-# both files resolve the same CAS blobs off this one root.
-_BB_CLIENTD_ROOT = "/mnt/ephemeral/buildbarn/bb_clientd"
+# Default bb_clientd FUSE mount root on Aspect Workflows runners, used for
+# runners that predate the ASPECT_WORKFLOWS_RUNNER_BB_CLIENTD_MOUNT platform env
+# (see bb_clientd_root). Also the fallback for `process_event`'s internal
+# path derivations, which have no ctx to read the env from.
+_DEFAULT_BB_CLIENTD_ROOT = "/mnt/ephemeral/buildbarn/bb_clientd"
 
 # TestSummary overall_status values from BlazeTestStatus proto enum. starbuf_derive
 # lowercases CamelCase to snake_case: Failed → "failed", FailedToBuild → "failed_to_build".
@@ -199,29 +200,55 @@ def bes_get(obj, field, default = None):
         return default
     return getattr(obj, field, default)
 
-def file_uri_to_path(uri):
+def bb_clientd_root(ctx) -> str | None:
+    """Resolve the bb_clientd mount root for bytestream:// URI resolution.
+
+    None when the runner declares it has no bb_clientd
+    (ASPECT_WORKFLOWS_RUNNER_NO_BB_CLIENTD=1) — bytestream URIs cannot be
+    resolved locally at all, so callers should skip remote-blob reads.
+    Otherwise the runner-exported ASPECT_WORKFLOWS_RUNNER_BB_CLIENTD_MOUNT, falling
+    back to the legacy hard-coded root for runners predating the env vars.
+    """
+    if ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_NO_BB_CLIENTD"):
+        return None
+    return ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_BB_CLIENTD_MOUNT") or _DEFAULT_BB_CLIENTD_ROOT
+
+def file_uri_to_path(uri, bb_root = _DEFAULT_BB_CLIENTD_ROOT):
     """Convert a file:// or bytestream:// URI to a local filesystem path.
 
     `file://` (disk-cache / local outputs) is returned verbatim; `bytestream://`
-    (remote cache) is resolved via the bb_clientd FUSE mount:
+    (remote cache) is resolved via the bb_clientd mount:
       bytestream://host:port/blobs/<hash>/<size>
-      -> {_BB_CLIENTD_ROOT}/cas/{host}/blobs/sha256/file/{hash}-{size}
+      -> {bb_root}/cas/{host}/blobs/sha256/file/{hash}-{size}
+    (a 5-part form with an explicit digest-function segment shifts hash/size
+    right). Callers with a ctx should pass `bb_root = bb_clientd_root(ctx)` so
+    the runner-exported mount wins over the legacy default.
 
-    Returns "" for a non-string `uri` — the BES `File.file` oneof yields bytes
-    when contents are inlined (not a URI), which we can't turn into a path.
+    Returns "" for a non-string `uri` (the BES `File.file` oneof yields bytes
+    when contents are inlined) and for bytestream URIs when `bb_root` is None
+    (runner without bb_clientd) — there is no local path they can resolve to.
     """
     if type(uri) != "string" or not uri:
         return ""
     if uri.startswith("file://"):
         return uri[len("file://"):]
     if uri.startswith("bytestream://"):
+        if bb_root == None:
+            return ""
         rest = uri[len("bytestream://"):]
         parts = rest.split("/")
-        host_port = parts[0]
-        host = host_port.split(":")[0]
-        blob_hash = parts[2]
-        blob_size = parts[3]
-        return _BB_CLIENTD_ROOT + "/cas/" + host + "/blobs/sha256/file/" + blob_hash + "-" + blob_size
+        host = parts[0].split(":")[0]
+
+        # parts[2] is a digest-function name in the 5-part form; hash/size shift right.
+        if len(parts) >= 5 and parts[2] in ("sha256", "sha512", "blake3"):
+            digest_fn = parts[2]
+            blob_hash = parts[3]
+            blob_size = parts[4]
+        else:
+            digest_fn = "sha256"
+            blob_hash = parts[2] if len(parts) > 2 else ""
+            blob_size = parts[3] if len(parts) > 3 else ""
+        return bb_root + "/cas/" + host + "/blobs/" + digest_fn + "/file/" + blob_hash + "-" + blob_size
     return uri
 
 def _repro_with_prefix(prefix, labels, max_chars):

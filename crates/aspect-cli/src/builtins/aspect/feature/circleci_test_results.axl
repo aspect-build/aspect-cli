@@ -8,13 +8,10 @@ on CircleCI.
 """
 
 load("@aspect//bazel.axl", "BazelTrait")
-load("../private/lib/bazel_results.axl", "bes_get")
+load("../private/lib/bazel_results.axl", "bb_clientd_root", "bes_get", "file_uri_to_path")
 load("../private/lib/circleci.axl", "circleci")
 load("../private/lib/environment.axl", "detect_ci", "info", "warn")
 load("../private/lib/tar.axl", "tar_create")
-
-# bb_clientd FUSE mount root for bytestream:// URIs (see lib/artifacts.axl).
-_BB_CLIENTD_ROOT = "/mnt/ephemeral/buildbarn/bb_clientd"
 
 # Non-passing statuses for upload_test_results="failed" (mirrors lib/artifacts.axl).
 _NOT_PASSED_STATUSES = [
@@ -27,21 +24,6 @@ _NOT_PASSED_STATUSES = [
     "incomplete",
     "no_status",
 ]
-
-def _file_uri_to_path(uri: str) -> str:
-    """file:// or bytestream:// URI -> local path (bytestream via bb_clientd)."""
-    if not uri:
-        return uri
-    if uri.startswith("file://"):
-        return uri[len("file://"):]
-    if uri.startswith("bytestream://"):
-        rest = uri[len("bytestream://"):]
-        parts = rest.split("/")
-        host = parts[0].split(":")[0]
-        blob_hash = parts[2]
-        blob_size = parts[3]
-        return _BB_CLIENTD_ROOT + "/cas/" + host + "/blobs/sha256/file/" + blob_hash + "-" + blob_size
-    return uri
 
 def _should_collect(strategy: str, status: str, cached: bool) -> bool:
     """all=every test, executed=ran this build, failed=non-passing only."""
@@ -78,7 +60,7 @@ def _collect_test_xml(ctx, event, strategy: str, entries: dict) -> None:
         name = bes_get(file, "name", "") or ""
         if not name.endswith(".xml"):
             continue
-        src = _file_uri_to_path(bes_get(file, "file", "") or "")
+        src = file_uri_to_path(bes_get(file, "file", "") or "", bb_clientd_root(ctx))
         if not src or not ctx.std.fs.exists(src):
             continue
         entries[label_path + "/" + name] = {"src": src, "cached": cached}

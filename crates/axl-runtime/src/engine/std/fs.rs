@@ -5,11 +5,12 @@ use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
 use starlark::values::ValueOfUnchecked;
 use starlark::values::list::UnpackList;
-use starlark::values::none::NoneType;
+use starlark::values::none::{NoneOr, NoneType};
+use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
-use std::sync::{Arc, Mutex};
-use std::time::UNIX_EPOCH;
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::{Duration, UNIX_EPOCH};
 
 use super::stream;
 
@@ -188,6 +189,72 @@ impl<'v> values::StarlarkValue<'v> for Filesystem {
 }
 
 starlark_simple_value!(Filesystem);
+
+/// A background read whose completion callers poll for. `state` is `None`
+/// while the reader thread is still running; `Some(result)` once it finished
+/// (`result` is `None` on any I/O/UTF-8 error, `Some(content)` on success).
+struct ReadProbe {
+    state: Mutex<Option<Option<String>>>,
+    done: Condvar,
+}
+
+/// In-flight [`ReadProbe`]s keyed by path. Entries are removed when a poll
+/// consumes a completed probe; a probe whose read never returns (e.g. a FUSE
+/// request the filesystem daemon never answers) leaves its entry — and its
+/// stuck reader thread — in place for the life of the process, which is what
+/// bounds the leak to one thread per distinct stuck path.
+static READ_PROBES: OnceLock<Mutex<HashMap<String, Arc<ReadProbe>>>> = OnceLock::new();
+
+/// Poll a coalesced background read of `path` (see `poll_read_to_string` for
+/// the contract). Only the call that spawns the probe blocks (up to
+/// `timeout`); later polls for the same path return its state immediately.
+fn poll_read(path: &str, timeout: Duration) -> Option<String> {
+    let registry = READ_PROBES.get_or_init(Default::default);
+    let (probe, spawned_here) = {
+        let mut reg = registry.lock().unwrap();
+        match reg.get(path) {
+            Some(probe) => (probe.clone(), false),
+            None => {
+                let probe = Arc::new(ReadProbe {
+                    state: Mutex::new(None),
+                    done: Condvar::new(),
+                });
+                reg.insert(path.to_string(), probe.clone());
+                let thread_probe = probe.clone();
+                let thread_path = path.to_string();
+                let spawned = std::thread::Builder::new()
+                    .name("fs-read-probe".to_string())
+                    .spawn(move || {
+                        let result = fs::read_to_string(&thread_path).ok();
+                        *thread_probe.state.lock().unwrap() = Some(result);
+                        thread_probe.done.notify_all();
+                    });
+                if spawned.is_err() {
+                    *probe.state.lock().unwrap() = Some(None);
+                }
+                (probe, true)
+            }
+        }
+    };
+
+    let mut state = probe.state.lock().unwrap();
+    if spawned_here && state.is_none() {
+        state = probe
+            .done
+            .wait_timeout_while(state, timeout, |s| s.is_none())
+            .unwrap()
+            .0;
+    }
+    let result = state.clone();
+    drop(state);
+    match result {
+        Some(result) => {
+            registry.lock().unwrap().remove(path);
+            result
+        }
+        None => None,
+    }
+}
 
 #[starlark_module]
 pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
@@ -571,6 +638,36 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         Ok(heap.alloc_str(s.as_str()))
     }
 
+    /// Reads the entire contents of a file into a string without ever
+    /// blocking the caller for more than `timeout_ms`, or returns `None`
+    /// when the contents aren't available yet.
+    ///
+    /// Built for polling files on network-backed filesystems (e.g. a
+    /// bb_clientd FUSE mount materializing remote-cache blobs), where a read
+    /// can block indefinitely — a plain `read_to_string` would wedge the
+    /// task. The read runs on a background thread; the first call for a path
+    /// waits up to `timeout_ms` for it, and while that read is still in
+    /// flight, subsequent calls for the same path return `None` immediately
+    /// rather than starting another read. Whenever the read eventually
+    /// completes, the next call returns its result: the file contents, or
+    /// `None` on any I/O/UTF-8 error (including a missing file).
+    ///
+    /// Callers are expected to poll until content or a caller-side deadline:
+    /// `None` always means "not readable yet", never "empty file" (an empty
+    /// readable file returns `""`).
+    fn poll_read_to_string<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        #[starlark(require = pos)] path: values::StringValue,
+        #[starlark(require = pos)] timeout_ms: i32,
+        heap: Heap<'v>,
+    ) -> anyhow::Result<NoneOr<values::StringValue<'v>>> {
+        let timeout = Duration::from_millis(timeout_ms.max(0) as u64);
+        Ok(match poll_read(path.as_str(), timeout) {
+            Some(content) => NoneOr::Other(heap.alloc_str(content.as_str())),
+            None => NoneOr::None,
+        })
+    }
+
     /// Reads at most `max_bytes` bytes from the start of a file into a string,
     /// or returns `""` on any I/O error (missing file, permission denied,
     /// transient failure). Like `try_read_to_string`, the silent fall-through
@@ -681,5 +778,92 @@ fn marshal_metadata<'v>(m: &fs::Metadata, heap: Heap<'v>) -> Metadata<'v> {
         accessed,
         created,
         readonly: heap.alloc(permissions.readonly()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn poll_read_returns_content_for_readable_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ok.txt");
+        fs::write(&path, "hello").unwrap();
+        let got = poll_read(path.to_str().unwrap(), Duration::from_secs(5));
+        assert_eq!(got.as_deref(), Some("hello"));
+        // Consumed probes are removed so a later poll re-reads fresh content.
+        fs::write(&path, "world").unwrap();
+        let got = poll_read(path.to_str().unwrap(), Duration::from_secs(5));
+        assert_eq!(got.as_deref(), Some("world"));
+    }
+
+    #[test]
+    fn poll_read_distinguishes_empty_from_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        let empty = dir.path().join("empty.txt");
+        fs::write(&empty, "").unwrap();
+        assert_eq!(
+            poll_read(empty.to_str().unwrap(), Duration::from_secs(5)).as_deref(),
+            Some("")
+        );
+        let missing = dir.path().join("missing.txt");
+        assert_eq!(
+            poll_read(missing.to_str().unwrap(), Duration::from_secs(5)),
+            None
+        );
+    }
+
+    /// A FIFO with no writer blocks `open()` indefinitely — the same shape as
+    /// a FUSE read the daemon never answers. The first poll must give up at
+    /// its timeout, later polls must return immediately while the probe is
+    /// still stuck, and once the "blob" arrives (a writer opens the FIFO) a
+    /// later poll must deliver the content.
+    #[cfg(unix)]
+    #[test]
+    fn poll_read_never_blocks_on_a_stuck_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stuck.fifo");
+        nix::unistd::mkfifo(&path, nix::sys::stat::Mode::from_bits(0o644).unwrap()).unwrap();
+        let p = path.to_str().unwrap();
+
+        let started = std::time::Instant::now();
+        assert_eq!(poll_read(p, Duration::from_millis(200)), None);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "first poll must return at its timeout"
+        );
+
+        // Probe is in flight: this must not block for another timeout.
+        let started = std::time::Instant::now();
+        assert_eq!(poll_read(p, Duration::from_secs(60)), None);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "in-flight poll must return immediately"
+        );
+
+        // The "download" lands: the stuck open() completes, EOF ends the read.
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .and_then(|mut f| f.write_all(b"landed"))
+            .unwrap();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            match poll_read(p, Duration::from_millis(100)) {
+                Some(content) => {
+                    assert_eq!(content, "landed");
+                    break;
+                }
+                None => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "probe never completed after the FIFO writer arrived"
+                    );
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+        }
     }
 }
