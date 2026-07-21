@@ -352,12 +352,17 @@ def _endpoint_auth_flags(ctx, rc, command, endpoint_flag, header_flag, what):
     endpoint = rc.flag_value(endpoint_flag, command = command)
     if not endpoint:
         return []
+
+    # `--credential_helper` carries Bazel's `oldName` alias
+    # `--experimental_credential_helper`; both populate the same option, so a
+    # helper configured under either spelling makes Bazel add its own auth.
+    credential_helpers = (
+        rc.flag_values("--credential_helper", command = command) +
+        rc.flag_values("--experimental_credential_helper", command = command)
+    )
     already_authenticated = (
         headers_have_auth(rc.flag_values(header_flag, command = command)) or
-        credential_helper_covers_host(
-            rc.flag_values("--credential_helper", command = command),
-            endpoint_host(endpoint),
-        )
+        credential_helper_covers_host(credential_helpers, endpoint_host(endpoint))
     )
     if not needs_aspect_token(ctx, [endpoint], already_authenticated):
         return []

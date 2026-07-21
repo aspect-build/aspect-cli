@@ -348,6 +348,19 @@ def _test_bes_backend_auth_flags(_):
         ),
         [],
     )
+
+    # The old `--experimental_credential_helper` spelling aliases to the same
+    # Bazel option, so it must suppress the injected auth too.
+    _eq(
+        "owned bes + experimental credential helper for host",
+        bes_backend_auth_flags(
+            ctx,
+            _fake_rc({"--bes_backend": "grpcs://" + _BES, "--experimental_credential_helper": [_BES + "=/usr/bin/helper"]}),
+            "build",
+        ),
+        [],
+    )
+
     # A credential helper for a different host does not suppress the injected auth.
     _eq(
         "owned bes + credential helper for other host still injects",
