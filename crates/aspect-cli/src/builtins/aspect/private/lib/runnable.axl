@@ -567,8 +567,15 @@ def _entrypoint_ready(state: struct, target: str) -> bool:
         return False
     return True
 
-def _spawn(ctx: TaskContext, state: struct, ep: struct, args: list[str], capture: bool = False, cwd: str | None = None) -> std.process.Child:
+def _spawn(ctx: TaskContext, state: struct, ep: struct, args: list[str], capture: bool = False, cwd: str | None = None, stdout_path: str | None = None, stderr_path: str | None = None) -> std.process.Child:
     """Spawn `ep.path` in the Bazel runfiles environment.
+
+    Output disposition: pass `stdout_path` / `stderr_path` to redirect the
+    child's streams straight to those files (created via `fs.create`), letting
+    the caller poll `try_wait()` for liveness and read the files after exit
+    without draining a pipe. Otherwise `capture=True` pipes both streams for a
+    single `wait_with_output()`. When neither is set the child inherits our
+    stdout/stderr.
 
     The argv is `ep.args + args`: the target's `args` attribute (expanded and
     tokenized by the `runinfo` aspect) precedes the caller's forwarded args,
@@ -611,7 +618,11 @@ def _spawn(ctx: TaskContext, state: struct, ep: struct, args: list[str], capture
         .args(getattr(ep, "args", []) + list(args))
     for k, v in runfiles_env(ep).items():
         cmd = cmd.env(k, v)
-    if capture:
+    if stdout_path:
+        cmd = cmd.stdout(ctx.std.fs.create(stdout_path))
+    if stderr_path:
+        cmd = cmd.stderr(ctx.std.fs.create(stderr_path))
+    if capture and not stdout_path and not stderr_path:
         cmd = cmd.stdout("piped").stderr("piped")
     return cmd.spawn()
 
@@ -714,7 +725,7 @@ def runnable(ctx, targets: list[str], rc = None) -> struct:
           the build's `--remote_download_outputs` setting; the caller is
           responsible for materializing what it intends to read.
 
-      spawn(ep, args, capture=False, cwd=None) → Child
+      spawn(ep, args, capture=False, cwd=None, stdout_path=None, stderr_path=None) → Child
           Spawn `ep.path` with Bazel runfiles environment variables set. The
           target's `args` attribute (`ep.args`) is prepended before `args`, and
           its `RunEnvironmentInfo` env (`ep.environment`) is applied, matching
@@ -722,6 +733,9 @@ def runnable(ctx, targets: list[str], rc = None) -> struct:
           runfiles tree is present (matching `bazel run`), falling back to the
           aspect invocation directory when there is no runfiles tree. Pass an
           explicit `cwd` to override — e.g. the resolved value from `--run-in=<choice>`.
+          Pass `stdout_path` / `stderr_path` to redirect the child's streams to
+          files (so a non-blocking `try_wait()` reap can read them after exit
+          without draining a pipe); else `capture=True` pipes for `wait_with_output()`.
     """
     current_package = _current_package(ctx) if ctx else ""
     state = struct(
@@ -754,5 +768,5 @@ def runnable(ctx, targets: list[str], rc = None) -> struct:
         entrypoint_ready = lambda target: _entrypoint_ready(state, target),
         determine_entrypoint = lambda target: _determine_entrypoint(state, target),
         get_default_outputs = lambda target: _get_default_outputs(state, target),
-        spawn = lambda ep, args, capture = False, cwd = None: _spawn(ctx, state, ep, args, capture, cwd),
+        spawn = lambda ep, args, capture = False, cwd = None, stdout_path = None, stderr_path = None: _spawn(ctx, state, ep, args, capture, cwd, stdout_path, stderr_path),
     )

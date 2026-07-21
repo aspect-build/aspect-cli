@@ -118,8 +118,7 @@ impl<'v> UnpackValue<'v> for Writable {
     type Error = anyhow::Error;
 
     fn unpack_value_impl(value: values::Value<'v>) -> Result<Option<Self>, Self::Error> {
-        let v = value.downcast_ref_err::<Writable>().into_anyhow_result()?;
-        Ok(Some(v.dupe()))
+        Ok(value.downcast_ref::<Writable>().map(|v| v.dupe()))
     }
 }
 
