@@ -130,8 +130,12 @@ delivery-task:
     - .aspect/bootstrap.sh
     # --local-hash-fallback: the deliverable set includes no_remote_exec_deliverable,
     # a deterministic target tagged no-remote-exec that is not in the remote cache;
-    # the flag hashes it locally so it delivers (first run) and SKIPs on the second
-    # invocation, exercising change-detection continuity end-to-end.
+    # the flag hashes it locally so it delivers. The first delivery-gl run delivers
+    # it via the local hash; the repeated delivery-gl run (same commit, same
+    # --task:name, so it hits the recorded state) must SKIP it, proving digest
+    # stability + change-detection continuity end-to-end. delivery-gl-debug is the
+    # ASPECT_DEBUG variant under its own state prefix.
     # --warn-unresolved-digest: still covers py_deliverable's volatile stamped action.
     - ASPECT_DEBUG=1 aspect delivery --task:name delivery-gl-debug --local-hash-fallback --warn-unresolved-digest
+    - aspect delivery --task:name delivery-gl --local-hash-fallback --warn-unresolved-digest
     - aspect delivery --task:name delivery-gl --local-hash-fallback --warn-unresolved-digest

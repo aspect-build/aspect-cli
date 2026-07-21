@@ -856,7 +856,9 @@ def _resolve_local_digests(ctx, rc, eligible: list, output_shas: dict, announce_
     Read each DeliveryHash spawn's action digest from the execution log and merge
     into `output_shas`. Best-effort: a build failure (or a missing log) is
     non-fatal — logs and returns 0, leaving targets unresolved to fall through to
-    the existing warn/fail path. Returns the count newly resolved."""
+    the existing warn/fail path. Returns the count newly resolved. Layers
+    `aspect_endpoint_auth_flags` the same as phases 1-3 so its remote-cache reads
+    authenticate on Aspect Workflows runners."""
     hashsum_local = ctx.bazel.aspect(
         implementation = _HASHSUM_BZL,
         symbol = "hashsum_local",
@@ -869,7 +871,7 @@ def _resolve_local_digests(ctx, rc, eligible: list, output_shas: dict, announce_
     status = ctx.bazel.build(
         rc = rc,
         aspects = [hashsum_local],
-        flags = [
+        flags = aspect_endpoint_auth_flags(ctx, rc, "build") + [
             "--output_groups=+delivery_hash",
             "--nouse_action_cache",
             "--remote_download_outputs=minimal",
