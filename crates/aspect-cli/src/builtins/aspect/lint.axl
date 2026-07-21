@@ -42,9 +42,17 @@ _BB_CLIENTD_ROOT = "/mnt/ephemeral/buildbarn/bb_clientd"
 # async and the BES event can arrive before the file lands. 30s is generous.
 _POST_BUILD_DOWNLOAD_TIMEOUT_MS = 30000
 
-# Bound for a single lint-file read probe (see _read_lint_file). Matches the
-# drain tick so one stuck file delays a tick by at most one interval.
+# Bound for a single lint-file read probe (see _read_lint_file).
 _LINT_FILE_PROBE_TIMEOUT_MS = 250
+
+# Blocking budget for one drain/event pass. Each pass may spend at most this
+# long waiting on freshly spawned read probes in total; past the budget,
+# probes are polled nonblocking (timeout 0) and their results harvested on a
+# later pass. Bounds a batch of many distinct stuck files — hundreds of
+# unfetchable blobs would otherwise stall one pass for minutes at one probe
+# timeout each — so the loop keeps ticking, heartbeating, and checking its
+# own deadlines.
+_PASS_READ_BUDGET_MS = 1000
 
 # Age at which a still-unreadable lint file gets a one-time warning naming it.
 # Surfaces a stuck remote-cache/FUSE read while the task is still running —
@@ -556,7 +564,7 @@ def _body_text(status, data):
         return "Lint aborted"
     return ""
 
-def _read_lint_file(ctx, filepath):
+def _read_lint_file(ctx, filepath, timeout_ms = _LINT_FILE_PROBE_TIMEOUT_MS):
     """Read a lint output file, or None when its contents can't be read yet.
 
     bytestream:// URIs resolve through the bb_clientd FUSE mount, where the
@@ -565,19 +573,29 @@ def _read_lint_file(ctx, filepath):
     fetched at all (e.g. evicted from the remote cache with no action re-run
     to re-upload it). A plain read would wedge the whole task inside one
     uninterruptible syscall, so this uses the bounded `poll_read_to_string`:
-    the read runs in the background, each call returns within the timeout,
-    and None (file not readable yet) keeps the file in the pending queue —
-    retried each tick until the post-build drain budget warns and skips it.
-    None always means unreadable, never empty: a clean linter's empty `.out`
-    reads as "".
+    the read runs in the background, each call returns within `timeout_ms`
+    (0 = poll without blocking), and None (file not readable yet) keeps the
+    file in the pending queue — retried each tick until the post-build drain
+    budget warns and skips it. None always means unreadable, never empty: a
+    clean linter's empty `.out` reads as "".
     """
-    return ctx.std.fs.poll_read_to_string(filepath, _LINT_FILE_PROBE_TIMEOUT_MS)
+    return ctx.std.fs.poll_read_to_string(filepath, timeout_ms)
 
-def _try_process_lint_file(ctx, file, filepath, data, strategy, changed_files, lint_trait, github_output, patches):
+def _probe_timeout_ms(ctx, pass_deadline_ms):
+    """Per-read probe bound for one drain/event pass: the standard probe
+    timeout, clamped to what remains of the pass's `_PASS_READ_BUDGET_MS`
+    blocking budget. 0 (nonblocking poll) once the budget is spent."""
+    remaining = pass_deadline_ms - now_ms(ctx)
+    if remaining <= 0:
+        return 0
+    return min(remaining, _LINT_FILE_PROBE_TIMEOUT_MS)
+
+def _try_process_lint_file(ctx, file, filepath, data, strategy, changed_files, lint_trait, github_output, patches, probe_timeout_ms):
     """Read and process one BES lint output file.
 
     Returns None when the file's contents can't be read yet (see
-    `_read_lint_file`), else {"interesting": bool, "linter_exit_code": int,
+    `_read_lint_file`; `probe_timeout_ms` bounds the read wait, 0 = poll
+    without blocking), else {"interesting": bool, "linter_exit_code": int,
     "failed_tool": str}. A None keeps the file in the pending queue, retried
     each tick until the post-build drain timeout warns and skips it.
     `failed_tool` names the linter when its `.exit_code` was non-zero (else ""),
@@ -586,14 +604,14 @@ def _try_process_lint_file(ctx, file, filepath, data, strategy, changed_files, l
     results equal a terminal pass and findings don't flicker as batches arrive.
     """
     if file.name.endswith(".out"):
-        out = _read_lint_file(ctx, filepath)
+        out = _read_lint_file(ctx, filepath, probe_timeout_ms)
         if out == None:
             return None
         ctx.std.io.stderr.write(out)
         return {"interesting": False, "linter_exit_code": 0, "failed_tool": ""}
 
     if file.name.endswith(".report"):
-        report = _read_lint_file(ctx, filepath)
+        report = _read_lint_file(ctx, filepath, probe_timeout_ms)
         if report == None:
             return None
         if "sarif-" in report:
@@ -610,7 +628,7 @@ def _try_process_lint_file(ctx, file, filepath, data, strategy, changed_files, l
         # Readability gate (content discarded): requeues the patch until the
         # blob is materialized, since lint_patch hooks buffer the path and
         # later re-read it with a plain read_to_string.
-        if _read_lint_file(ctx, filepath) == None:
+        if _read_lint_file(ctx, filepath, probe_timeout_ms) == None:
             return None
         patches.append(filepath)
         for hook in lint_trait.lint_patch:
@@ -618,7 +636,7 @@ def _try_process_lint_file(ctx, file, filepath, data, strategy, changed_files, l
         return {"interesting": False, "linter_exit_code": 0, "failed_tool": ""}
 
     if file.name.endswith(".exit_code"):
-        content = _read_lint_file(ctx, filepath)
+        content = _read_lint_file(ctx, filepath, probe_timeout_ms)
         if content == None:
             return None
         stripped = content.rstrip()
@@ -642,10 +660,11 @@ def _record_lint_result(result, failed_linters):
         failed_linters[result["failed_tool"]] = True
     return (result["interesting"], result["linter_exit_code"] != 0)
 
-def _drain_pending_files(ctx, pending, pending_meta, data, strategy, changed_files, lint_trait, github_output, patches, failed_linters):
+def _drain_pending_files(ctx, pending, pending_meta, data, strategy, changed_files, lint_trait, github_output, patches, failed_linters, pass_deadline_ms):
     """One pass over pending files → (still_pending, was_interesting, exit_nonzero).
     still_pending holds files whose remote download hasn't landed or whose
-    contents couldn't be read yet.
+    contents couldn't be read yet. `pass_deadline_ms` caps this pass's total
+    blocking time on read probes (see `_probe_timeout_ms`).
     `pending_meta` (path → {"first_ms", "warned"}) tracks how long each file
     has been unreadable across passes; a file pending longer than
     `_PENDING_READ_WARN_MS` gets a one-time warning naming it, so a stuck
@@ -658,7 +677,7 @@ def _drain_pending_files(ctx, pending, pending_meta, data, strategy, changed_fil
     now = now_ms(ctx)
     for pfile in pending:
         pfilepath = file_uri_to_path(pfile.file)
-        result = _try_process_lint_file(ctx, pfile, pfilepath, data, strategy, changed_files, lint_trait, github_output, patches)
+        result = _try_process_lint_file(ctx, pfile, pfilepath, data, strategy, changed_files, lint_trait, github_output, patches, _probe_timeout_ms(ctx, pass_deadline_ms))
         if result == None:
             meta = pending_meta.setdefault(pfilepath, {"first_ms": now, "warned": False})
             if not meta["warned"] and now - meta["first_ms"] >= _PENDING_READ_WARN_MS:
@@ -832,6 +851,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     last_emit_ms = now_ms(ctx)
     for _tick in sleep_iter(BES_DRAIN_TICK_MS):
         interesting = False
+        pass_deadline_ms = now_ms(ctx) + _PASS_READ_BUDGET_MS
 
         pending_files, pending_interesting, pending_exit_nonzero = _drain_pending_files(
             ctx,
@@ -844,6 +864,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             github_output,
             patches,
             failed_linters,
+            pass_deadline_ms,
         )
         if pending_interesting:
             interesting = True
@@ -865,7 +886,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                     if tool:
                         lint_tools_run[tool] = True
                     if file.name.endswith(".patch") or file.name.endswith(".out") or file.name.endswith(".report") or file.name.endswith(".exit_code"):
-                        result = _try_process_lint_file(ctx, file, filepath, data, strategy, changed_files, lint_trait, github_output, patches)
+                        result = _try_process_lint_file(ctx, file, filepath, data, strategy, changed_files, lint_trait, github_output, patches, _probe_timeout_ms(ctx, pass_deadline_ms))
                         if result == None:
                             pending_files.append(file)
                         else:
@@ -914,6 +935,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
                 github_output,
                 patches,
                 failed_linters,
+                now_ms(ctx) + _PASS_READ_BUDGET_MS,
             )
             if pending_exit_nonzero:
                 linter_exit_code = 1
