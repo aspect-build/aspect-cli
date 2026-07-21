@@ -195,6 +195,7 @@ dependencies = [
  "axl-runtime",
  "chrono",
  "clap",
+ "dirs",
  "include_dir",
  "names",
  "opentelemetry",

@@ -20,7 +20,8 @@ use tracing::info_span;
 
 use crate::cmd::Cmd;
 use crate::helpers::{
-    find_aspect_root, find_bazel_root, find_git_root, get_default_axl_search_paths, search_sources,
+    find_aspect_root, find_bazel_root, find_git_root, find_user_config,
+    get_default_axl_search_paths, search_sources,
 };
 
 // Must use a multi thread runtime with at least 3 threads for following reasons;
@@ -102,7 +103,15 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
     }
 
     let search_paths = get_default_axl_search_paths(&current_work_dir, &aspect_root);
-    let (scripts, configs) = search_sources(&search_paths).await?;
+    let (scripts, mut configs) = search_sources(&search_paths).await?;
+
+    // User-global overrides run last among configs (the aspect root may be
+    // the home dir itself, in which case it's already in the list).
+    if let Some(user_config) = find_user_config(dirs::home_dir().as_deref()).await {
+        if !configs.contains(&user_config) {
+            configs.push(user_config);
+        }
+    }
 
     // `_root` is entered on this thread; spawn_blocking moves work to a
     // different thread where the span stack is empty. Capture the span and

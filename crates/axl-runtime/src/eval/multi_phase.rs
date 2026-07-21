@@ -334,6 +334,10 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
     /// and `Feature` values in-place via `set_attr` — the same `Value<'v>` objects
     /// discovered in Phase 1 are reused, so subsequent phases see the updated state.
     /// `ctx.tasks.add(...)` may insert additional tasks into `self.tasks`.
+    ///
+    /// `configs` are absolute paths evaluated in order, so a later file's writes
+    /// win over an earlier one's. Paths need not live under `mode.root` — the
+    /// user-global `~/.aspect/config.axl` is passed here as the final entry.
     #[tracing::instrument(name = "execute.configs", skip_all)]
     pub fn execute_configs(&mut self, configs: &[PathBuf], mode: &'l Mod) -> Result<(), EvalError> {
         let heap = self.heap();
@@ -366,13 +370,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         ));
 
         for config_path in configs {
-            let rel_path = config_path
-                .strip_prefix(&mode.root)
-                .map_err(|e| EvalError::UnknownError(anyhow!("Failed to strip prefix: {e}")))?
-                .to_path_buf();
-
-            let abs = mode.root.join(&rel_path);
-            let frozen = self.eval_file(mode, &abs)?;
+            let frozen = self.eval_file(mode, config_path)?;
 
             let function_name = "config";
             let def = frozen
