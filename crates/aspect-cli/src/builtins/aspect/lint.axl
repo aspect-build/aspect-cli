@@ -567,18 +567,32 @@ def _body_text(status, data):
 def _read_lint_file(ctx, filepath, timeout_ms = _LINT_FILE_PROBE_TIMEOUT_MS):
     """Read a lint output file, or None when its contents can't be read yet.
 
-    bytestream:// URIs resolve through the bb_clientd FUSE mount, where the
+    Paths under the bb_clientd mount (bytestream:// URIs resolved by
+    `file_uri_to_path`) go through the bounded `poll_read_to_string`: the
     inode exists as soon as the BES event arrives but reading blocks until
     the blob materializes — and blocks *forever* when the blob can't be
-    fetched at all (e.g. evicted from the remote cache with no action re-run
-    to re-upload it). A plain read would wedge the whole task inside one
-    uninterruptible syscall, so this uses the bounded `poll_read_to_string`:
-    the read runs in the background, each call returns within `timeout_ms`
-    (0 = poll without blocking), and None (file not readable yet) keeps the
-    file in the pending queue — retried each tick until the post-build drain
-    budget warns and skips it. None always means unreadable, never empty: a
-    clean linter's empty `.out` reads as "".
+    fetched at all. A plain read would wedge the whole task inside one
+    uninterruptible syscall, so the read runs in the background, each call
+    returns within `timeout_ms` (0 = poll without blocking), and None keeps
+    the file in the pending queue — retried each tick until the post-build
+    drain budget warns and skips it.
+
+    Anything else is a plain local path (file:// URIs — no remote CAS in
+    play), read directly: local disk can't stall the way bb_clientd reads
+    can, and the direct path avoids a background probe thread per read. An
+    empty read of a file whose size is non-zero is a failed read, matching
+    the probe's contract.
+
+    Either way, None always means unreadable, never empty: a clean linter's
+    empty `.out` reads as "".
     """
+    if not filepath.startswith(_BB_CLIENTD_ROOT):
+        if not ctx.std.fs.exists(filepath):
+            return None
+        content = ctx.std.fs.try_read_to_string(filepath)
+        if content == "" and ctx.std.fs.metadata(filepath).size > 0:
+            return None
+        return content
     return ctx.std.fs.poll_read_to_string(filepath, timeout_ms)
 
 def _probe_timeout_ms(ctx, pass_deadline_ms):
