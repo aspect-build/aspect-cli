@@ -83,7 +83,7 @@ MIN_HEARTBEAT_INTERVAL_MS = 5000
 BES_DRAIN_TICK_MS = 250
 
 # Default bb_clientd FUSE mount root on Aspect Workflows runners, used for
-# runners that predate the ASPECT_WORKFLOWS_BB_CLIENTD_MOUNT platform env
+# runners that predate the ASPECT_WORKFLOWS_RUNNER_BB_CLIENTD_MOUNT platform env
 # (see bb_clientd_root). Also the fallback for `process_event`'s internal
 # path derivations, which have no ctx to read the env from.
 _DEFAULT_BB_CLIENTD_ROOT = "/mnt/ephemeral/buildbarn/bb_clientd"
@@ -206,12 +206,12 @@ def bb_clientd_root(ctx) -> str | None:
     None when the runner declares it has no bb_clientd
     (ASPECT_WORKFLOWS_RUNNER_NO_BB_CLIENTD=1) — bytestream URIs cannot be
     resolved locally at all, so callers should skip remote-blob reads.
-    Otherwise the runner-exported ASPECT_WORKFLOWS_BB_CLIENTD_MOUNT, falling
+    Otherwise the runner-exported ASPECT_WORKFLOWS_RUNNER_BB_CLIENTD_MOUNT, falling
     back to the legacy hard-coded root for runners predating the env vars.
     """
     if ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_NO_BB_CLIENTD"):
         return None
-    return ctx.std.env.var("ASPECT_WORKFLOWS_BB_CLIENTD_MOUNT") or _DEFAULT_BB_CLIENTD_ROOT
+    return ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_BB_CLIENTD_MOUNT") or _DEFAULT_BB_CLIENTD_ROOT
 
 def file_uri_to_path(uri, bb_root = _DEFAULT_BB_CLIENTD_ROOT):
     """Convert a file:// or bytestream:// URI to a local filesystem path.
