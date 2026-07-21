@@ -192,6 +192,8 @@ pub const AXL_MODULE_FILE: &str = "MODULE.aspect";
 
 pub const AXL_ROOT_MODULE_NAME: &str = "root";
 
+pub const AXL_USER_MODULE_NAME: &str = "user";
+
 pub const AXL_SCRIPT_EXTENSION: &str = "axl";
 
 pub const AXL_CONFIG_EXTENSION: &str = "config.axl";

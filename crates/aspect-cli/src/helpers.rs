@@ -94,6 +94,20 @@ async fn find_ancestor_with_any(start: &Path, markers: &[&str]) -> Option<PathBu
     None
 }
 
+/// User-global config file: `<home_dir>/.aspect/config.axl`, if it exists.
+///
+/// Callers append this after all project config.axl files so per-user
+/// overrides are applied last among configs (explicit CLI flags still win
+/// over any config value).
+#[instrument]
+pub async fn find_user_config(home_dir: Option<&Path>) -> Option<PathBuf> {
+    let path = home_dir?.join(DOT_ASPECT_FOLDER).join(AXL_CONFIG_EXTENSION);
+    match fs::metadata(&path).await {
+        Ok(meta) if meta.is_file() => Some(path),
+        _ => None,
+    }
+}
+
 /// Returns a list of axl search paths by constructing paths from the
 /// `aspect_root_dir` up to `current_work_dir`, appending `.aspect` to each.
 /// If the relative path from `aspect_root_dir` to `current_work_dir` includes
@@ -279,6 +293,31 @@ mod tests {
         tokio_fs::create_dir_all(&cwd).await.unwrap();
 
         assert_eq!(find_git_root(&cwd).await, None);
+    }
+
+    /// `~/.aspect/config.axl` is found when present.
+    #[tokio::test]
+    async fn user_config_found_when_present() {
+        let (_tmp, home) = setup(&[".aspect/config.axl"]).await;
+
+        assert_eq!(
+            find_user_config(Some(&home)).await,
+            Some(home.join(".aspect/config.axl"))
+        );
+    }
+
+    /// Missing file, missing home dir, and a `config.axl` directory all
+    /// resolve to no user config.
+    #[tokio::test]
+    async fn user_config_absent_cases() {
+        let (_tmp, home) = setup(&[]).await;
+        assert_eq!(find_user_config(Some(&home)).await, None);
+        assert_eq!(find_user_config(None).await, None);
+
+        tokio_fs::create_dir_all(home.join(".aspect/config.axl"))
+            .await
+            .unwrap();
+        assert_eq!(find_user_config(Some(&home)).await, None);
     }
 
     /// When aspect and git roots diverge (e.g. git repo contains a

@@ -5,6 +5,7 @@ mod helpers;
 mod trace;
 mod trace_buffer;
 
+use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -20,7 +21,8 @@ use tracing::info_span;
 
 use crate::cmd::Cmd;
 use crate::helpers::{
-    find_aspect_root, find_bazel_root, find_git_root, get_default_axl_search_paths, search_sources,
+    find_aspect_root, find_bazel_root, find_git_root, find_user_config,
+    get_default_axl_search_paths, search_sources,
 };
 
 // Must use a multi thread runtime with at least 3 threads for following reasons;
@@ -104,6 +106,20 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
     let search_paths = get_default_axl_search_paths(&current_work_dir, &aspect_root);
     let (scripts, configs) = search_sources(&search_paths).await?;
 
+    // User-global overrides run last among configs, scoped to their own
+    // module so loads resolve within ~/.aspect. Skipped when the aspect
+    // root is the home dir itself — the file is already in `configs`.
+    let user_config = find_user_config(dirs::home_dir().as_deref())
+        .await
+        .filter(|path| !configs.contains(path))
+        .map(|path| {
+            let dir = path
+                .parent()
+                .expect("config path has a parent")
+                .to_path_buf();
+            (path, Mod::user_config_scope(dir))
+        });
+
     // `_root` is entered on this thread; spawn_blocking moves work to a
     // different thread where the span stack is empty. Capture the span and
     // re-enter it on the worker so the phase spans nest under `root`.
@@ -127,7 +143,16 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                 .map_err(anyhow::Error::from)?;
 
             // Phase 2: run config files.
-            mpe.execute_configs(&configs, &root_mod)
+            let config_entries: Vec<(&Path, &Mod)> = configs
+                .iter()
+                .map(|path| (path.as_path(), &root_mod))
+                .chain(
+                    user_config
+                        .iter()
+                        .map(|(path, r#mod)| (path.as_path(), r#mod)),
+                )
+                .collect();
+            mpe.execute_configs(&config_entries)
                 .map_err(anyhow::Error::from)?;
 
             // Build the CLI surface from current eval state.

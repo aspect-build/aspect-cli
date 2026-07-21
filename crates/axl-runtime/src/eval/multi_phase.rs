@@ -334,8 +334,14 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
     /// and `Feature` values in-place via `set_attr` — the same `Value<'v>` objects
     /// discovered in Phase 1 are reused, so subsequent phases see the updated state.
     /// `ctx.tasks.add(...)` may insert additional tasks into `self.tasks`.
+    ///
+    /// Each config is an absolute path paired with the module scope its `load()`
+    /// statements resolve against. Files are evaluated in order, so a later
+    /// file's writes win over an earlier one's — the user-global
+    /// `~/.aspect/config.axl` is passed last, scoped to its own module so its
+    /// relative loads resolve within `~/.aspect` rather than the project.
     #[tracing::instrument(name = "execute.configs", skip_all)]
-    pub fn execute_configs(&mut self, configs: &[PathBuf], mode: &'l Mod) -> Result<(), EvalError> {
+    pub fn execute_configs(&mut self, configs: &[(&Path, &'l Mod)]) -> Result<(), EvalError> {
         let heap = self.heap();
 
         // Register trait types from all tasks into a TraitMap; instances are created lazily
@@ -365,14 +371,8 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             self.telemetry_value,
         ));
 
-        for config_path in configs {
-            let rel_path = config_path
-                .strip_prefix(&mode.root)
-                .map_err(|e| EvalError::UnknownError(anyhow!("Failed to strip prefix: {e}")))?
-                .to_path_buf();
-
-            let abs = mode.root.join(&rel_path);
-            let frozen = self.eval_file(mode, &abs)?;
+        for (config_path, scope) in configs {
+            let frozen = self.eval_file(scope, config_path)?;
 
             let function_name = "config";
             let def = frozen
@@ -1010,10 +1010,14 @@ fn display_width(s: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        TimingMode, display_width, format_duration, render_phase_breakdown, render_timing_segment,
-        task_label_for,
+        ModuleEnv, MultiPhaseEval, TimingMode, display_width, format_duration,
+        render_phase_breakdown, render_timing_segment, task_label_for,
     };
+    use crate::engine::arguments::Arguments;
     use crate::engine::task_info::PhaseRecord;
+    use crate::eval::Loader;
+    use crate::module::Mod;
+    use starlark::values::ValueLike;
     use std::time::Duration;
 
     #[test]
@@ -1180,6 +1184,100 @@ mod tests {
             desc_cols[0], desc_cols[1],
             "description columns misaligned: {out:?}"
         );
+    }
+
+    /// A user-global config outside the project evaluates under its own
+    /// module scope: its relative `load()` resolves within the user config
+    /// dir, and because it runs last, its writes win over the project config.
+    #[test]
+    fn user_scoped_config_loads_locally_and_wins_over_project_config() {
+        let proj = tempfile::tempdir().unwrap();
+        let user_dir = tempfile::tempdir().unwrap();
+
+        let script = proj.path().join("hello.axl");
+        std::fs::write(
+            &script,
+            r#"
+def _impl(ctx):
+    pass
+
+hello = task(
+    implementation = _impl,
+    args = {"greeting": args.string(default = "default")},
+)
+"#,
+        )
+        .unwrap();
+        let proj_config = proj.path().join("config.axl");
+        std::fs::write(
+            &proj_config,
+            r#"
+def config(ctx):
+    ctx.tasks["hello"].args.greeting = "project"
+"#,
+        )
+        .unwrap();
+
+        let user_config = user_dir.path().join("config.axl");
+        std::fs::write(
+            user_dir.path().join("greeting.axl"),
+            r#"USER_GREETING = "user""#,
+        )
+        .unwrap();
+        std::fs::write(
+            &user_config,
+            r#"
+load("./greeting.axl", "USER_GREETING")
+
+def config(ctx):
+    ctx.tasks["hello"].args.greeting = USER_GREETING
+"#,
+        )
+        .unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _g = rt.enter();
+
+        let modules: Vec<Mod> = vec![];
+        let root_mod = Mod::new(
+            proj.path().to_path_buf(),
+            "_root".to_string(),
+            proj.path().to_path_buf(),
+        );
+        let user_mod = Mod::user_config_scope(user_dir.path().to_path_buf());
+
+        ModuleEnv::with(|env| -> anyhow::Result<()> {
+            let loader = Loader::new(
+                "test".to_string(),
+                proj.path().to_path_buf(),
+                proj.path().to_path_buf(),
+                None,
+                &modules,
+            );
+            let mut mpe = MultiPhaseEval::new(env, &loader);
+            mpe.eval(&[script], &root_mod, &modules).unwrap();
+            mpe.execute_configs(&[
+                (proj_config.as_path(), &root_mod),
+                (user_config.as_path(), &user_mod),
+            ])
+            .unwrap();
+
+            let tasks = mpe.tasks();
+            assert_eq!(tasks.len(), 1);
+            let overrides = tasks[0]
+                .overrides()
+                .downcast_ref::<Arguments>()
+                .expect("overrides is an Arguments");
+            assert_eq!(
+                overrides
+                    .get("greeting")
+                    .expect("greeting override set")
+                    .to_repr(),
+                r#""user""#
+            );
+            Ok(())
+        })
+        .unwrap();
     }
 }
 
