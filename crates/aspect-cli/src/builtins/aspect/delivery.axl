@@ -28,6 +28,7 @@ Three orthogonal flags shape every invocation:
   --mode={selective,always}    default `selective` — the delivery model
   --dry-run                       default off — preview, do not run targets
   --track-state={true,false}      default true — record/query delivery state
+  --local-hash-fallback           default off — locally hash uncached targets
 
 `selective` uses change detection (only candidates not yet delivered for the
 `--task:name[:--salt]` prefix); `always` skips it and treats every resolved
@@ -1823,6 +1824,10 @@ Currently \x1b[3monly\x1b[23m supported on Aspect Workflows CI runners. Support 
         "warn_unresolved_digest": args.boolean(
             default = False,
             description = "Downgrade a delivery target whose change-detection digest could not be resolved from a hard failure (exit 1) to a warning. By default such a target fails the task: an unresolvable digest means an uncacheable action (typically a non-hermetic genrule — e.g. one that shells out to `git` — or a stamped action, on the target itself or a shared upstream dependency) could not be read from the remote cache while computing digests, so change detection could not run and the target would be silently NOT delivered. The failure names the offending target(s) and how to fix them (make them deterministic/cacheable, or tag them `no-remote` / `local`). Set this flag if your repo knowingly ships such actions and prefers a warning over a red build.",
+        ),
+        "local_hash_fallback": args.boolean(
+            default = False,
+            description = "Deliver deterministic targets that are not in the remote cache (e.g. large targets tagged `no-remote-exec`) by computing their change-detection digest with a local build. By default such a target cannot be hashed (change detection reads digests from the remote cache) and is not delivered. When set, delivery runs an extra local hash pass over the unresolved-but-deterministic deliverables and reads each DeliveryHash action digest from the execution log, so they deliver and are change-tracked. Volatile targets (a stamped or otherwise non-cacheable action) are excluded — their digest is not stable — and still require --warn-unresolved-digest. Best-effort: if the local pass fails to build, those targets fall through to the usual warn/fail. Note: the local pass runs with --nouse_action_cache; with a disk or remote cache present the upstream is a cache hit, otherwise the eligible targets are rebuilt locally.",
         ),
         "upload_grpc_log": args.string(
             default = "auto",
