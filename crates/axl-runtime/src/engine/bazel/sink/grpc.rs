@@ -266,10 +266,17 @@ async fn work(
         max_acked: 0,
         last_message_sent: false,
     };
+    // Consecutive reconnect attempts without ack progress. An attempt during
+    // which the server acked anything resets it to 0 (mirrors Bazel's
+    // `BuildEventServiceUploader`), so a backend that deliberately ends
+    // long-lived streams with a retryable status (e.g. UNAVAILABLE from a
+    // draining server) can shed and be rejoined indefinitely — only attempts
+    // that make no progress count against `max_retries`.
     let mut attempt: u32 = 0;
-    // Warn at most once per sink when the stream first drops into retry, so a
-    // flapping or slow backend produces an early user-facing signal without a
-    // line per retry attempt.
+    // Warn at most once per sink when the stream first drops into a
+    // no-progress retry, so a flapping or slow backend produces an early
+    // user-facing signal without a line per retry attempt. Progress-making
+    // reconnects (server-initiated stream sheds) are routine and stay quiet.
     let mut warned_transient = false;
 
     'reconnect: loop {
@@ -283,6 +290,7 @@ async fn work(
                 state.buffer.len()
             ),
         );
+        let acked_before = state.max_acked;
         let drive_started = std::time::Instant::now();
         let outcome = drive_stream(
             &mut client,
@@ -307,7 +315,18 @@ async fn work(
         match outcome {
             DriveOutcome::Done | DriveOutcome::UpstreamClosed => break 'reconnect,
             DriveOutcome::Transient(err) => {
-                if attempt >= retry.max_retries {
+                let made_progress = state.max_acked > acked_before;
+                if made_progress {
+                    dbg(
+                        &endpoint,
+                        &invocation_id,
+                        &format!(
+                            "acks advanced to {} since last connect — resetting retry budget: {err}",
+                            state.max_acked
+                        ),
+                    );
+                    attempt = 0;
+                } else if attempt >= retry.max_retries {
                     let stats = SinkStats::from_counters(state.next_seq, state.max_acked);
                     return (
                         stats,
@@ -317,7 +336,7 @@ async fn work(
                         )),
                     );
                 }
-                if !warned_transient {
+                if !made_progress && !warned_transient {
                     warn(
                         &endpoint,
                         &format!(
@@ -334,7 +353,9 @@ async fn work(
                     &format!("backoff {:?} before retry {}", delay, attempt + 1),
                 );
                 tokio::time::sleep(delay).await;
-                attempt += 1;
+                if !made_progress {
+                    attempt += 1;
+                }
                 continue 'reconnect;
             }
             DriveOutcome::Fatal(err) => {
@@ -970,6 +991,11 @@ mod tests {
         DrainNoAck,
         /// Well-behaved: ack every request's sequence number.
         Ack,
+        /// Ack the first N requests of each connection, then end the
+        /// response stream with UNAVAILABLE — a server that sheds
+        /// long-lived streams expecting the client to reconnect and
+        /// resume from the last acked event.
+        AckThenShed(u32),
     }
 
     struct TestServer {
@@ -1021,6 +1047,30 @@ mod tests {
                                 break;
                             }
                         }
+                    });
+                    Ok(Response::new(Box::pin(ReceiverStream::new(ack_rx))))
+                }
+                ServerMode::AckThenShed(acks_per_stream) => {
+                    let (ack_tx, ack_rx) = tokio::sync::mpsc::channel(16);
+                    tokio::spawn(async move {
+                        let mut acked = 0;
+                        while acked < acks_per_stream {
+                            let Some(Ok(req)) = inbound.next().await else {
+                                return;
+                            };
+                            let seq = req.ordered_build_event.map_or(0, |e| e.sequence_number);
+                            let ack = PublishBuildToolEventStreamResponse {
+                                stream_id: None,
+                                sequence_number: seq,
+                            };
+                            if ack_tx.send(Ok(ack)).await.is_err() {
+                                return;
+                            }
+                            acked += 1;
+                        }
+                        let _ = ack_tx
+                            .send(Err(Status::unavailable("stream shed by server")))
+                            .await;
                     });
                     Ok(Response::new(Box::pin(ReceiverStream::new(ack_rx))))
                 }
@@ -1172,6 +1222,85 @@ mod tests {
             DriveOutcome::Done => {}
             other => panic!("expected Done, got {}", other.label()),
         }
+    }
+
+    /// Run the full `work` state machine (lifecycle + stream + reconnects)
+    /// against a [`TestServer`], panicking if it fails to complete within the
+    /// test bound.
+    async fn work_against(
+        endpoint: String,
+        events: Vec<BuildEvent>,
+        retry: RetryConfig,
+    ) -> (SinkStats, SinkOutcome) {
+        use crate::engine::bazel::stream::broadcaster::Broadcaster;
+        let broadcaster = Broadcaster::new();
+        let recv = broadcaster.subscribe();
+        for ev in events {
+            broadcaster.send(ev);
+        }
+        broadcaster.close();
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            work(
+                recv,
+                endpoint,
+                HashMap::new(),
+                "test-invocation".to_string(),
+                retry,
+            ),
+        )
+        .await
+        .expect("work did not complete within the test bound")
+    }
+
+    /// Server sheds every stream with UNAVAILABLE after acking two events:
+    /// each reconnect makes progress, so the retry budget keeps resetting
+    /// (mirroring Bazel) and the whole stream lands even though the number
+    /// of sheds far exceeds `max_retries`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shed_with_progress_resets_retry_budget() {
+        let endpoint = start_server(ServerMode::AckThenShed(2)).await;
+        let retry = RetryConfig {
+            max_retries: 1,
+            retry_min_delay: Duration::from_millis(10),
+            ..Default::default()
+        };
+        let mut events: Vec<BuildEvent> = (0..10).map(|_| progress_event(64)).collect();
+        events.last_mut().unwrap().last_message = true;
+        let (stats, outcome) = work_against(endpoint, events, retry).await;
+        assert!(
+            outcome.is_ok(),
+            "expected success, got {:?}",
+            outcome.unwrap_err()
+        );
+        assert_eq!(
+            stats,
+            SinkStats {
+                sent: 10,
+                acked: 10
+            }
+        );
+    }
+
+    /// Server sheds every stream with UNAVAILABLE without ever acking: no
+    /// attempt makes progress, so the budget must still bound the retries.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shed_without_progress_exhausts_retry_budget() {
+        let endpoint = start_server(ServerMode::AckThenShed(0)).await;
+        let retry = RetryConfig {
+            max_retries: 1,
+            retry_min_delay: Duration::from_millis(10),
+            ..Default::default()
+        };
+        let mut events: Vec<BuildEvent> = (0..3).map(|_| progress_event(64)).collect();
+        events.last_mut().unwrap().last_message = true;
+        let (stats, outcome) = work_against(endpoint, events, retry).await;
+        let err = outcome.expect_err("expected the sink to give up");
+        assert!(
+            err.last_error.contains("giving up after 1 attempts"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(stats.acked, 0);
     }
 
     #[test]
