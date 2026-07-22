@@ -2,7 +2,11 @@
 //!
 //! Mirrors Bazel's `BuildEventServiceUploader`: bounded retry budget with
 //! full-jitter exponential backoff and an in-flight buffer for replay across
-//! reconnects. Terminal failures are surfaced via the sink's outcome — the
+//! reconnects. Ack progress during an attempt resets the budget, so only
+//! consecutive no-progress attempts count against it and a server that
+//! periodically ends streams with a retryable status (e.g. UNAVAILABLE)
+//! is rejoined for as long as events keep landing.
+//! Terminal failures are surfaced via the sink's outcome — the
 //! caller decides what to do (warn, fail the task, etc.); the runtime never
 //! tries to second-guess the policy.
 
@@ -15,6 +19,9 @@ use rand::Rng;
 
 #[derive(Debug, Clone)]
 pub struct RetryConfig {
+    /// Consecutive reconnect attempts without ack progress before the sink
+    /// gives up. An attempt during which the server acked anything resets
+    /// the count.
     pub max_retries: u32,
     pub retry_min_delay: Duration,
     pub retry_max_buffer_size: usize,

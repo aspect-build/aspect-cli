@@ -1063,8 +1063,12 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
     /// # Arguments
     /// * `uri` - BES endpoint. `grpcs://` is rewritten to `https://`.
     /// * `metadata` - Headers attached to every request.
-    /// * `max_retries` - Max reconnect attempts after an error before giving
-    ///   up (default `4`). `0` disables retry; the sink is still non-fatal.
+    /// * `max_retries` - Max consecutive reconnect attempts without ack
+    ///   progress before giving up (default `4`). An attempt during which the
+    ///   server acked events resets the count, so a backend that routinely
+    ///   ends long-lived streams with `UNAVAILABLE` is rejoined for as long
+    ///   as events keep landing. `0` disables retry; the sink is still
+    ///   non-fatal.
     /// * `retry_min_delay` - Base delay for exponential backoff
     ///   (default `"1s"`).
     /// * `retry_max_buffer_size` - Cap on the in-flight unacked retry buffer

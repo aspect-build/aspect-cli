@@ -7,7 +7,8 @@ use std::{
 use axl_proto::{
     build_event_stream::BuildEvent,
     google::devtools::build::v1::{
-        BuildStatus, PublishBuildToolEventStreamRequest, PublishLifecycleEventRequest,
+        BuildStatus, PublishBuildToolEventStreamRequest, PublishBuildToolEventStreamResponse,
+        PublishLifecycleEventRequest,
     },
 };
 use build_event_stream::{
@@ -17,6 +18,7 @@ use build_event_stream::{
 };
 
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
+use tonic::Streaming;
 
 use crate::diag;
 use crate::engine::r#async::rt::AsyncRuntime;
@@ -158,6 +160,14 @@ struct StreamState {
     last_message_sent: bool,
 }
 
+impl StreamState {
+    /// Apply a server ack: prune the replay buffer and advance `max_acked`.
+    fn record_ack(&mut self, seq: i64) {
+        self.buffer.prune_until(seq);
+        self.max_acked = self.max_acked.max(seq);
+    }
+}
+
 async fn work(
     recv: Subscriber<BuildEvent>,
     endpoint: String,
@@ -266,10 +276,12 @@ async fn work(
         max_acked: 0,
         last_message_sent: false,
     };
+    // Consecutive reconnect attempts without ack progress; see
+    // `RetryConfig::max_retries` for the progress-reset contract.
     let mut attempt: u32 = 0;
-    // Warn at most once per sink when the stream first drops into retry, so a
-    // flapping or slow backend produces an early user-facing signal without a
-    // line per retry attempt.
+    // Warn at most once per sink, and only for no-progress retries: a
+    // flapping or slow backend gets an early user-facing signal, while
+    // routine server-initiated stream sheds stay quiet.
     let mut warned_transient = false;
 
     'reconnect: loop {
@@ -283,6 +295,7 @@ async fn work(
                 state.buffer.len()
             ),
         );
+        let acked_before = state.max_acked;
         let drive_started = std::time::Instant::now();
         let outcome = drive_stream(
             &mut client,
@@ -307,7 +320,20 @@ async fn work(
         match outcome {
             DriveOutcome::Done | DriveOutcome::UpstreamClosed => break 'reconnect,
             DriveOutcome::Transient(err) => {
-                if attempt >= retry.max_retries {
+                // `max_retries == 0` is documented as "retry disabled" and
+                // wins over the progress reset.
+                let made_progress = state.max_acked > acked_before;
+                if made_progress && retry.max_retries > 0 {
+                    dbg(
+                        &endpoint,
+                        &invocation_id,
+                        &format!(
+                            "acks advanced to {} since last connect — resetting retry budget: {err}",
+                            state.max_acked
+                        ),
+                    );
+                    attempt = 0;
+                } else if attempt >= retry.max_retries {
                     let stats = SinkStats::from_counters(state.next_seq, state.max_acked);
                     return (
                         stats,
@@ -316,8 +342,7 @@ async fn work(
                             format!("giving up after {attempt} attempts: {err}"),
                         )),
                     );
-                }
-                if !warned_transient {
+                } else if !warned_transient {
                     warn(
                         &endpoint,
                         &format!(
@@ -334,7 +359,9 @@ async fn work(
                     &format!("backoff {:?} before retry {}", delay, attempt + 1),
                 );
                 tokio::time::sleep(delay).await;
-                attempt += 1;
+                if !made_progress {
+                    attempt += 1;
+                }
                 continue 'reconnect;
             }
             DriveOutcome::Fatal(err) => {
@@ -555,6 +582,30 @@ async fn send_bounded(
     }
 }
 
+/// Bound for [`drain_acks`]: long enough to harvest acks the server already
+/// wrote before a request-side failure, negligible next to the retry backoff.
+const DRAIN_ACKS_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Harvest acks already queued on the response stream after a request-side
+/// send failure, before the stream is torn down.
+///
+/// The replay loop and the mid-send path await channel sends without polling
+/// the response stream, so when a server acks some events and then ends the
+/// stream the failure can surface on the send side with those acks still
+/// unread. Recording them keeps the accounting honest: the acked events
+/// leave the replay buffer and — via `max_acked` — count as progress toward
+/// the retry-budget reset. Best-effort and bounded; anything missed is
+/// replayed and deduped by the server.
+async fn drain_acks(
+    response_stream: &mut Streaming<PublishBuildToolEventStreamResponse>,
+    state: &mut StreamState,
+) {
+    let deadline = tokio::time::Instant::now() + DRAIN_ACKS_TIMEOUT;
+    while let Ok(Some(Ok(resp))) = tokio::time::timeout_at(deadline, response_stream.next()).await {
+        state.record_ack(resp.sequence_number);
+    }
+}
+
 /// Drive a single bidi stream until it ends (cleanly or with error).
 ///
 /// Owns the request channel for this connection. Pulls events from
@@ -570,6 +621,9 @@ async fn send_bounded(
 /// the request channel (`retry.send_stall_timeout`), ack progress while
 /// unacked events are outstanding (`retry.ack_progress_timeout`), and
 /// the post-half-close drain (`retry.half_close_timeout`).
+///
+/// Send-side failures call [`drain_acks`] before returning so acks the
+/// server already wrote still prune the buffer and count as progress.
 async fn drive_stream(
     client: &mut Client,
     build_id: &str,
@@ -667,6 +721,7 @@ async fn drive_stream(
     // numbers. The server dedups via OrderedBuildEvent.sequence_number.
     // Skip the entry `preload_first_event` already sent — server would
     // dedup anyway, but resending wastes bytes.
+    let mut replay_failure = None;
     for (seq, req) in state.buffer.iter() {
         if Some(*seq) == preloaded_seq {
             continue;
@@ -679,8 +734,13 @@ async fn drive_stream(
         )
         .await
         {
-            return outcome;
+            replay_failure = Some(outcome);
+            break;
         }
+    }
+    if let Some(outcome) = replay_failure {
+        drain_acks(&mut response_stream, state).await;
+        return outcome;
     }
 
     let mut sender_opt = Some(sender);
@@ -753,6 +813,7 @@ async fn drive_stream(
                 if let Err(outcome) =
                     send_bounded(s, req, retry.send_stall_timeout, "mid-send").await
                 {
+                    drain_acks(&mut response_stream, state).await;
                     return outcome;
                 }
 
@@ -772,8 +833,7 @@ async fn drive_stream(
             resp = response_stream.next() => {
                 match resp {
                     Some(Ok(r)) => {
-                        state.buffer.prune_until(r.sequence_number);
-                        state.max_acked = state.max_acked.max(r.sequence_number);
+                        state.record_ack(r.sequence_number);
                         ack_deadline = (!state.buffer.is_empty())
                             .then(|| tokio::time::Instant::now() + retry.ack_progress_timeout);
                         // Once we've sent last_message AND every event we
@@ -950,10 +1010,11 @@ mod tests {
     use std::time::Duration;
 
     use axl_proto::build_event_stream::{Progress, build_event::Payload};
-    use axl_proto::google::devtools::build::v1::{
-        PublishBuildToolEventStreamResponse,
-        publish_build_event_server::{PublishBuildEvent, PublishBuildEventServer},
+    use axl_proto::google::devtools::build::v1::publish_build_event_server::{
+        PublishBuildEvent, PublishBuildEventServer,
     };
+
+    use crate::engine::bazel::stream::broadcaster::Broadcaster;
     use futures::Stream;
     use tonic::{Request, Response, Status, Streaming};
 
@@ -970,6 +1031,11 @@ mod tests {
         DrainNoAck,
         /// Well-behaved: ack every request's sequence number.
         Ack,
+        /// Ack the first N requests of each connection, then end the
+        /// response stream with UNAVAILABLE — a server that sheds
+        /// long-lived streams expecting the client to reconnect and
+        /// resume from the last acked event.
+        AckThenShed(u32),
     }
 
     struct TestServer {
@@ -1021,6 +1087,30 @@ mod tests {
                                 break;
                             }
                         }
+                    });
+                    Ok(Response::new(Box::pin(ReceiverStream::new(ack_rx))))
+                }
+                ServerMode::AckThenShed(acks_per_stream) => {
+                    let (ack_tx, ack_rx) = tokio::sync::mpsc::channel(16);
+                    tokio::spawn(async move {
+                        let mut acked = 0;
+                        while acked < acks_per_stream {
+                            let Some(Ok(req)) = inbound.next().await else {
+                                return;
+                            };
+                            let seq = req.ordered_build_event.map_or(0, |e| e.sequence_number);
+                            let ack = PublishBuildToolEventStreamResponse {
+                                stream_id: None,
+                                sequence_number: seq,
+                            };
+                            if ack_tx.send(Ok(ack)).await.is_err() {
+                                return;
+                            }
+                            acked += 1;
+                        }
+                        let _ = ack_tx
+                            .send(Err(Status::unavailable("stream shed by server")))
+                            .await;
                     });
                     Ok(Response::new(Box::pin(ReceiverStream::new(ack_rx))))
                 }
@@ -1172,6 +1262,161 @@ mod tests {
             DriveOutcome::Done => {}
             other => panic!("expected Done, got {}", other.label()),
         }
+    }
+
+    /// Run the full `work` state machine (lifecycle + stream + reconnects)
+    /// against a [`TestServer`], panicking if it fails to complete within the
+    /// test bound.
+    async fn work_against(
+        endpoint: String,
+        events: Vec<BuildEvent>,
+        retry: RetryConfig,
+    ) -> (SinkStats, SinkOutcome) {
+        let broadcaster = Broadcaster::new();
+        let recv = broadcaster.subscribe();
+        for ev in events {
+            broadcaster.send(ev);
+        }
+        broadcaster.close();
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            work(
+                recv,
+                endpoint,
+                HashMap::new(),
+                "test-invocation".to_string(),
+                retry,
+            ),
+        )
+        .await
+        .expect("work did not complete within the test bound")
+    }
+
+    /// Server sheds every stream with UNAVAILABLE after acking two events:
+    /// each reconnect makes progress, so the retry budget keeps resetting
+    /// (mirroring Bazel) and the whole stream lands even though the number
+    /// of sheds far exceeds `max_retries`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shed_with_progress_resets_retry_budget() {
+        let endpoint = start_server(ServerMode::AckThenShed(2)).await;
+        let retry = RetryConfig {
+            max_retries: 1,
+            retry_min_delay: Duration::from_millis(10),
+            ..Default::default()
+        };
+        let mut events: Vec<BuildEvent> = (0..10).map(|_| progress_event(64)).collect();
+        events.last_mut().unwrap().last_message = true;
+        let (stats, outcome) = work_against(endpoint, events, retry).await;
+        assert!(
+            outcome.is_ok(),
+            "expected success, got {:?}",
+            outcome.unwrap_err()
+        );
+        assert_eq!(
+            stats,
+            SinkStats {
+                sent: 10,
+                acked: 10
+            }
+        );
+    }
+
+    /// `max_retries = 0` is documented as "retry disabled" and must win over
+    /// the progress reset: a shed that acked events still ends the sink.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn zero_retry_budget_wins_over_progress_reset() {
+        let endpoint = start_server(ServerMode::AckThenShed(2)).await;
+        let retry = RetryConfig {
+            max_retries: 0,
+            retry_min_delay: Duration::from_millis(10),
+            ..Default::default()
+        };
+        let mut events: Vec<BuildEvent> = (0..10).map(|_| progress_event(64)).collect();
+        events.last_mut().unwrap().last_message = true;
+        let (stats, outcome) = work_against(endpoint, events, retry).await;
+        let err = outcome.expect_err("expected the sink to give up");
+        assert!(
+            err.last_error.contains("giving up after 0 attempts"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(stats.acked, 2);
+    }
+
+    /// Replay a large unacked buffer against a server that acks 10 events
+    /// then sheds while the replay is still pushing: the failure surfaces on
+    /// the send side (the replay loop never polls the response stream), and
+    /// [`drain_acks`] must record the acks the server already wrote so the
+    /// attempt counts as progress and the acked events leave the buffer.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shed_mid_replay_drains_pending_acks() {
+        let endpoint = start_server(ServerMode::AckThenShed(10)).await;
+        let retry = RetryConfig {
+            send_stall_timeout: Duration::from_secs(2),
+            ..Default::default()
+        };
+        let mut client = Client::new(endpoint, HashMap::new()).await.unwrap();
+        // Upstream stays open but produces nothing; only the replay runs.
+        let (_event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<BuildEvent>();
+        let mut state = StreamState {
+            buffer: RetryBuffer::new(retry.retry_max_buffer_size),
+            next_seq: 101,
+            max_acked: 0,
+            last_message_sent: false,
+        };
+        // 128 KiB events overrun the HTTP/2 flow-control window and the
+        // request channel once the server stops reading, so the replay
+        // blocks mid-buffer with the 10 acks still unread.
+        for seq in 1..=100 {
+            let req = build_tool::bazel_event(
+                "test-build".to_string(),
+                "test-invocation".to_string(),
+                seq,
+                &progress_event(128 * 1024),
+            );
+            state.buffer.push(seq, req).unwrap();
+        }
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(30),
+            drive_stream(
+                &mut client,
+                "test-build",
+                "test-invocation",
+                &mut event_rx,
+                &mut state,
+                "test-endpoint",
+                &retry,
+            ),
+        )
+        .await
+        .expect("drive_stream did not complete within the test bound");
+        assert!(
+            matches!(outcome, DriveOutcome::Transient(_)),
+            "expected Transient, got {}",
+            outcome.label()
+        );
+        assert_eq!(state.max_acked, 10);
+        assert_eq!(state.buffer.len(), 90);
+    }
+
+    /// Server sheds every stream with UNAVAILABLE without ever acking: no
+    /// attempt makes progress, so the budget must still bound the retries.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shed_without_progress_exhausts_retry_budget() {
+        let endpoint = start_server(ServerMode::AckThenShed(0)).await;
+        let retry = RetryConfig {
+            max_retries: 1,
+            retry_min_delay: Duration::from_millis(10),
+            ..Default::default()
+        };
+        let mut events: Vec<BuildEvent> = (0..3).map(|_| progress_event(64)).collect();
+        events.last_mut().unwrap().last_message = true;
+        let (stats, outcome) = work_against(endpoint, events, retry).await;
+        let err = outcome.expect_err("expected the sink to give up");
+        assert!(
+            err.last_error.contains("giving up after 1 attempts"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(stats.acked, 0);
     }
 
     #[test]
