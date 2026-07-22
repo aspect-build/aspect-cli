@@ -601,8 +601,7 @@ async fn drain_acks(
     state: &mut StreamState,
 ) {
     let deadline = tokio::time::Instant::now() + DRAIN_ACKS_TIMEOUT;
-    while let Ok(Some(Ok(resp))) = tokio::time::timeout_at(deadline, response_stream.next()).await
-    {
+    while let Ok(Some(Ok(resp))) = tokio::time::timeout_at(deadline, response_stream.next()).await {
         state.record_ack(resp.sequence_number);
     }
 }
