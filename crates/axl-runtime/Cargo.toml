@@ -29,7 +29,7 @@ semver = "1"
 thiserror = "2.0.12"
 
 prost = "0.14.1"
-reqwest = { version="0.12.22", features = ["stream", "gzip", "zstd", "json"] }
+reqwest = { version = "0.12.22", default-features = false, features = ["http2", "charset", "system-proxy", "rustls-tls", "rustls-tls-native-roots", "stream", "gzip", "zstd", "json"] }
 hyper = "1.6.0"
 hyper-util = { version = "0.1.12", features = ["client-legacy", "tokio", "http1"] }
 hyperlocal = "0.9.1"

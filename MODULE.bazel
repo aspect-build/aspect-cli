@@ -62,19 +62,6 @@ crate.from_cargo(
     ],
 )
 
-bazel_dep(name = "openssl", version = "3.3.1.bcr.6")
-
-crate.annotation(
-    build_script_data = ["@openssl//:gen_dir"],
-    build_script_env = {
-        "OPENSSL_STATIC": "1",
-        "OPENSSL_DIR": "$(location @openssl//:gen_dir)",
-    },
-    crate = "openssl-sys",
-)
-
-inject_repo(crate, "openssl")
-
 bazel_dep(name = "zstd", version = "1.5.7")
 
 crate.annotation(
