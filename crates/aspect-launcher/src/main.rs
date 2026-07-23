@@ -146,6 +146,25 @@ async fn _download_into_cache(
         eprintln!("\rdownloaded {size_str} in {time_str}\x1b[K");
     }
 
+    // A 0-byte (or truncated) body would `exec` into an ENOEXEC "Exec format
+    // error" downstream. Reject it here so the caller's retry loop re-fetches
+    // instead of caching and punting to an empty binary. GitHub's release CDN
+    // can briefly serve an empty 200 for an asset that isn't fully propagated.
+    if downloaded == 0 {
+        let _ = tokio::fs::remove_file(&tmp_file).await;
+        return Err(miette::miette!(
+            "downloaded an empty file (0 bytes) — refusing to cache it"
+        ));
+    }
+    if let Some(total) = total_size {
+        if downloaded != total {
+            let _ = tokio::fs::remove_file(&tmp_file).await;
+            return Err(miette::miette!(
+                "download truncated: got {downloaded} bytes, expected {total}"
+            ));
+        }
+    }
+
     // And move it into the cache
     tokio::fs::rename(&tmp_file, &cache_entry)
         .await
