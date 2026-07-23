@@ -197,6 +197,7 @@ dependencies = [
  "clap",
  "dirs",
  "include_dir",
+ "libc",
  "names",
  "opentelemetry",
  "opentelemetry-appender-tracing",
