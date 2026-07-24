@@ -20,8 +20,8 @@ render → post under a local time lease), so a single job still renders a
 correct comment.
 
 Requires the Aspect GitHub App with `prs.write` (issue-comment
-POST/PATCH/DELETE/GET) and Aspect credentials (ASPECT_API_TOKEN) for the
-contribute call.
+POST/PATCH/DELETE/GET), `actions.read` (GitHub Actions job deep-links), and
+Aspect credentials (ASPECT_API_TOKEN) for the contribute call.
 
 Comment shape is precomputed in AXL; the Jinja2 template is a pure
 renderer. `_prepare_for_render` decorates each entry with:
@@ -107,6 +107,8 @@ load(
     "tip_shows_on",
     "tip_to_payload",
 )
+
+GITHUB_STATUS_COMMENT_ROLES = ["prs.write", "actions.read"]
 
 _MARKER_FMT = "<!-- aspect-ci-status:pr-%d -->"
 
@@ -1744,7 +1746,7 @@ def _github_status_comments(ctx: FeatureContext):
             ctx,
             owner = owner,
             repo = repo,
-            roles = ["prs.write"],
+            roles = GITHUB_STATUS_COMMENT_ROLES,
             _reason = auth_reason,
             _extra = auth_extra,
         )
