@@ -222,6 +222,20 @@ def validate_role(role):
     """Validate that a role is in the known set."""
     return role in VALID_ROLES
 
+# Role that authorizes the GitHub Actions job-URL deep-link upgrade
+# (`resolve_build_url` → `detect_github_actions_build_url`). Only meaningful on
+# GitHub Actions; off-GHA the Actions API is never called, so requesting it
+# there would needlessly fail the whole token mint (all-or-nothing) on
+# installations that don't grant it. Gate it with `with_job_link_role`.
+JOB_LINK_ROLE = "actions.read"
+
+def with_job_link_role(env, base_roles):
+    """Append `JOB_LINK_ROLE` to `base_roles` only when running on GitHub
+    Actions, where the job-URL deep-link upgrade actually fires."""
+    if env.var("GITHUB_ACTIONS"):
+        return base_roles + [JOB_LINK_ROLE]
+    return base_roles
+
 # Stable `_reason["kind"]` identifiers; downstream discriminates on these,
 # not the human-readable `reason` string.
 _AUTH_KIND_NO_OWNER_REPO = "no-owner-repo"
@@ -2327,6 +2341,8 @@ def delete_review_comment(ctx, token, owner, repo, comment_id, api_base = DEFAUL
 
 github = struct(
     VALID_ROLES = VALID_ROLES,
+    JOB_LINK_ROLE = JOB_LINK_ROLE,
+    with_job_link_role = with_job_link_role,
     authenticate = _authenticate,
     status_comment_contribute = _status_comment_contribute,
     status_check_register = _status_check_register,

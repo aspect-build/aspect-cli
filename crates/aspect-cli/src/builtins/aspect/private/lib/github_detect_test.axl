@@ -626,6 +626,21 @@ def _test_impl(ctx):
         ("gha-fallback", None, "env"),
     )
 
+    # ── with_job_link_role: actions.read only on GitHub Actions ───────
+    # Off-GHA the Actions API is never called, so the job-link role must
+    # not be requested there (it would fail the whole mint on
+    # installations that don't grant it).
+    _eq(
+        "with_job_link_role: appends actions.read on GitHub Actions",
+        github.with_job_link_role(_ctx_with_env({"GITHUB_ACTIONS": "true"}).std.env, ["prs.write"]),
+        ["prs.write", github.JOB_LINK_ROLE],
+    )
+    _eq(
+        "with_job_link_role: unchanged off GitHub Actions",
+        github.with_job_link_role(_ctx_with_env({}).std.env, ["prs.write"]),
+        ["prs.write"],
+    )
+
     # ── Failure-kind gate for tip_add_aspect_api_token ────────────────
     # `_authenticate` classifies failures via a stable `kind` field;
     # `_preferred_token_pair` keys the missing-credentials tip off

@@ -60,6 +60,13 @@ load("../private/lib/tips.axl", "SURFACE_GITHUB_STATUS_CHECKS", "collect_tips_so
 
 _LOG = feature_logger("GitHub status checks")
 
+# `checks.write` (create/update the check run) is always required.
+# `actions.read` (job deep-link) is added only on GitHub Actions by
+# `github.with_job_link_role`; off-GHA the Actions API is never called and
+# requesting it would needlessly fail the mint on installations that don't
+# grant it.
+GITHUB_STATUS_CHECK_ROLES = ["checks.write"]
+
 # Cadence for re-registering (heartbeating) a check run with the orphan-cleanup
 # backend. A tight fraction of the backend's staleness window so a live task
 # beats several times before it could be judged stale; the register upsert is
@@ -166,7 +173,6 @@ def _github_status_checks(ctx: FeatureContext):
         _state["_started_ms"] = now_ms(ctx)
         _state["_triggered_by"] = _detect_triggered_by(ctx.std.env)
 
-        # actions.read is for the job deep-link only — fails gracefully.
         # `_extra` captures the installation id + proof from the mint, forwarded
         # on the register heartbeat so the backend can attribute this check.
         auth_reason = {}
@@ -175,7 +181,7 @@ def _github_status_checks(ctx: FeatureContext):
             ctx,
             owner = owner,
             repo = repo,
-            roles = ["checks.write", "actions.read"],
+            roles = github.with_job_link_role(ctx.std.env, GITHUB_STATUS_CHECK_ROLES),
             _reason = auth_reason,
             _extra = auth_extra,
         )
