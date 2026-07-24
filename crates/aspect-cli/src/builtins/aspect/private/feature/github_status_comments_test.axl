@@ -1670,9 +1670,9 @@ def _check_repro_dedup_consecutive_headings(ctx):
 
 def _test_impl(ctx):
     _eq(
-        "status-comment token roles include job-link access",
+        "status-comment base roles are prs.write only (job-link role gated to GHA)",
         GITHUB_STATUS_COMMENT_ROLES,
-        ["prs.write", "actions.read"],
+        ["prs.write"],
     )
 
     sep = "=" * 70
