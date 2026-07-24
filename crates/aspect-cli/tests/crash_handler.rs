@@ -2,6 +2,10 @@
 //! binary with the internal crash trigger (`ASPECT_INTERNAL_TEST_CRASH`) and
 //! assert the report reaches stderr while the process still dies with the
 //! original signal (so CI harnesses observe an unchanged exit status).
+//!
+//! These run under `cargo test` (they need the built binary via
+//! `CARGO_BIN_EXE_*`). The handler's pure logic is unit-tested inside
+//! `crash_handler.rs`, which is what the Bazel `:test` target covers.
 
 #![cfg(unix)]
 

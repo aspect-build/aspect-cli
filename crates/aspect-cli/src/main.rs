@@ -247,8 +247,8 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
 }
 
 fn main() -> ExitCode {
-    // First, before any other machinery, so fatal-signal reporting covers
-    // everything after it (see `crash_handler` module docs).
+    // Install first, before any other machinery, so fatal-signal reporting
+    // covers everything after it (see the `crash_handler` module docs).
     crash_handler::install();
     crash_handler::trigger_test_crash();
 
