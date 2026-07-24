@@ -36,6 +36,7 @@ use axl_types::stream::Writable;
 mod aspect;
 mod build;
 mod cancel;
+mod capture;
 mod health_check;
 mod info;
 mod iter;
@@ -437,6 +438,11 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// * `stdio` - Shorthand: set both `stdout` and `stderr` from a single
     ///   `Stdio` bundle (typically `ctx.std.io`). Cannot be combined with
     ///   `stdout`/`stderr`.
+    /// * `output` - An `OutputProcessor` from `bazel.output.processor(...)`.
+    ///   When set, the child's stderr is captured by the runtime, run through
+    ///   the output processing pipeline, and forwarded to the real stderr
+    ///   (overriding the resolved `stderr` slot). Omit (the default) to leave
+    ///   stderr handling to `stderr`/`stdio`/inherit.
     /// * `directory` - Working directory for the Bazel invocation; selects
     ///   the workspace / server (used for git-worktree execution).
     /// * `announce_version` - Print an `INFO: Bazel <version>` line before
@@ -492,6 +498,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named)] stdout: Option<NoneOr<Writable>>,
         #[starlark(require = named)] stderr: Option<NoneOr<Writable>>,
         #[starlark(require = named, default = NoneOr::None)] stdio: NoneOr<StdStdio>,
+        #[starlark(require = named, default = NoneOr::None)] output: NoneOr<build::OutputProcessor>,
         #[starlark(require = named, default = NoneOr::None)] directory: NoneOr<String>,
         #[starlark(require = named, default = false)] announce_version: bool,
         #[starlark(require = named, default = false)] announce_command: bool,
@@ -523,6 +530,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             resolved_startup_flags,
             stdout,
             stderr,
+            output.into_option(),
             directory.into_option(),
             build::AnnounceSpawn {
                 version: announce_version,
@@ -559,6 +567,11 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// * `stdio` - Shorthand: set both `stdout` and `stderr` from a single
     ///   `Stdio` bundle (typically `ctx.std.io`). Cannot be combined with
     ///   `stdout`/`stderr`.
+    /// * `output` - An `OutputProcessor` from `bazel.output.processor(...)`.
+    ///   When set, the child's stderr is captured by the runtime, run through
+    ///   the output processing pipeline, and forwarded to the real stderr
+    ///   (overriding the resolved `stderr` slot). Omit (the default) to leave
+    ///   stderr handling to `stderr`/`stdio`/inherit.
     /// * `directory` - Working directory for the Bazel invocation; selects
     ///   the workspace / server (used for git-worktree execution).
     /// * `announce_version` - Print an `INFO: Bazel <version>` line before
@@ -612,6 +625,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named)] stdout: Option<NoneOr<Writable>>,
         #[starlark(require = named)] stderr: Option<NoneOr<Writable>>,
         #[starlark(require = named, default = NoneOr::None)] stdio: NoneOr<StdStdio>,
+        #[starlark(require = named, default = NoneOr::None)] output: NoneOr<build::OutputProcessor>,
         #[starlark(require = named, default = NoneOr::None)] directory: NoneOr<String>,
         #[starlark(require = named, default = false)] announce_version: bool,
         #[starlark(require = named, default = false)] announce_command: bool,
@@ -643,6 +657,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             resolved_startup_flags,
             stdout,
             stderr,
+            output.into_option(),
             directory.into_option(),
             build::AnnounceSpawn {
                 version: announce_version,
@@ -1188,6 +1203,139 @@ fn parse_event_kind<'v>(value: values::Value<'v>) -> anyhow::Result<i32> {
 }
 
 #[starlark_module]
+fn register_output(globals: &mut GlobalsBuilder) {
+    /// Create a captured-output processor. Pass it as
+    /// `ctx.bazel.build(output = bazel.output.processor(...))` to capture the
+    /// child's stderr, run it through the processing pipeline, and forward it
+    /// to the real stderr instead of letting Bazel write the terminal directly.
+    ///
+    /// # Arguments
+    /// * `tty` - Whether the destination stderr is an interactive terminal.
+    ///   `True` → allocate a PTY so Bazel keeps its live curses progress UI
+    ///   (bytes forwarded near-verbatim). `False` → a plain pipe, so Bazel
+    ///   emits clean newline-terminated lines. Defaults to auto-detecting the
+    ///   real stderr, but a caller that also sets Bazel flags should pass an
+    ///   explicit value so the one decision drives both.
+    /// * `collapse_repeats` - Fold runs of consecutive identical lines into
+    ///   the first occurrence plus a `(last line repeated N more times)`
+    ///   annotation. Meant for the pipe (non-TTY) mode, where Bazel emits
+    ///   line-oriented output.
+    /// * `match_patterns` - `{id: regex}` observer patterns matched against
+    ///   every captured line. Hits are recorded and readable — during or after
+    ///   the build — via `build.output_matches()` as `(id, line)` tuples
+    ///   (capped at 1024 hits; lines truncated to 2048 bytes). Drive hooks
+    ///   and features from these, e.g. in a `bazel_attempt_end` handler.
+    /// * `fatal_patterns` - Regexes that, when matched, latch
+    ///   `build.output_fatal` and record the first such line in
+    ///   `build.output_fatal_line` — the health signal for reacting to a
+    ///   wedged server (cancel the invocation, mark the runner unhealthy).
+    ///   `build.output_idle_ms` complements this for silence-based stall
+    ///   detection.
+    /// * `respond_patterns` - `{id: regex}` interactive patterns. A matching
+    ///   line is **held** — not yet shown to the user — and surfaced as an
+    ///   event on `build.output_events()`; answer it with `keep()`,
+    ///   `replace(text)`, or `drop()` to control what is forwarded. Output
+    ///   order is preserved (everything behind the held line waits), so
+    ///   drain the events promptly from your build loop. An unanswered event
+    ///   fails open after `respond_timeout_ms`: the original line forwards.
+    /// * `respond_timeout_ms` - Fail-open deadline per held line
+    ///   (default 1000). A slow or absent consumer delays matched lines by at
+    ///   most this much and never wedges the build.
+    ///
+    /// All patterns are [regex](https://docs.rs/regex) syntax and are
+    /// compiled here — an invalid pattern errors at construction.
+    ///
+    /// The caller must set `--isatty` / `--curses` on the Bazel invocation to
+    /// match: `--isatty=1` for a PTY, `--isatty=0 --curses=no` for a pipe
+    /// (see `bazel_runner.axl`).
+    ///
+    /// **Example**
+    ///
+    /// ```python
+    /// processor = bazel.output.processor(
+    ///     tty = ctx.std.io.stderr.is_tty,
+    ///     collapse_repeats = True,
+    ///     match_patterns = {"oom": r"java\.lang\.OutOfMemoryError"},
+    ///     fatal_patterns = [r"Server terminated abruptly"],
+    ///     respond_patterns = {"cred": r"password|token"},
+    /// )
+    /// build = ctx.bazel.build("//...", output = processor, flags = ["--isatty=0", "--curses=no"])
+    /// events = build.output_events()
+    /// for _tick in sleep_iter(50):
+    ///     ev = events.try_pop()
+    ///     if ev:
+    ///         ev.replace("(credential elided)")  # or ev.keep() / ev.drop()
+    ///     if events.done:
+    ///         break
+    /// status = build.wait()
+    /// if build.output_fatal:
+    ///     print("bazel server died: " + (build.output_fatal_line or ""))
+    /// for id, line in build.output_matches():
+    ///     print("matched " + id + ": " + line)
+    /// ```
+    #[starlark(as_type = build::OutputProcessor)]
+    fn processor(
+        #[starlark(require = named, default = NoneOr::None)] tty: NoneOr<bool>,
+        #[starlark(require = named, default = false)] collapse_repeats: bool,
+        #[starlark(require = named, default = UnpackDictEntries::default())]
+        match_patterns: UnpackDictEntries<String, String>,
+        #[starlark(require = named, default = UnpackList::default())] fatal_patterns: UnpackList<
+            String,
+        >,
+        #[starlark(require = named, default = UnpackDictEntries::default())]
+        respond_patterns: UnpackDictEntries<String, String>,
+        #[starlark(require = named, default = 1000)] respond_timeout_ms: i32,
+    ) -> anyhow::Result<build::OutputProcessor> {
+        use std::io::IsTerminal;
+        let is_tty = match tty {
+            NoneOr::Other(b) => b,
+            NoneOr::None => std::io::stderr().is_terminal(),
+        };
+        let mode = if is_tty {
+            build::CaptureMode::Pty
+        } else {
+            build::CaptureMode::Pipe
+        };
+        if respond_timeout_ms <= 0 {
+            anyhow::bail!("respond_timeout_ms must be > 0, got {respond_timeout_ms}");
+        }
+        let compile = |(id, pattern): (String, String)| -> anyhow::Result<(String, regex::Regex)> {
+            let re = regex::Regex::new(&pattern)
+                .map_err(|e| anyhow::anyhow!("invalid regex for '{id}': {e}"))?;
+            Ok((id, re))
+        };
+        Ok(build::OutputProcessor::new(
+            mode,
+            collapse_repeats,
+            match_patterns
+                .entries
+                .into_iter()
+                .map(compile)
+                .collect::<anyhow::Result<Vec<_>>>()?,
+            fatal_patterns
+                .items
+                .into_iter()
+                .map(|p| compile((p.clone(), p)))
+                .collect::<anyhow::Result<Vec<_>>>()?,
+            respond_patterns
+                .entries
+                .into_iter()
+                .map(compile)
+                .collect::<anyhow::Result<Vec<_>>>()?,
+            std::time::Duration::from_millis(respond_timeout_ms as u64),
+        ))
+    }
+}
+
+#[starlark_module]
+fn register_output_types(globals: &mut GlobalsBuilder) {
+    const OutputProcessor: StarlarkValueAsType<build::OutputProcessor> = StarlarkValueAsType::new();
+    const OutputMatch: StarlarkValueAsType<iter::OutputMatch> = StarlarkValueAsType::new();
+    const OutputEventIterator: StarlarkValueAsType<iter::OutputEventIterator> =
+        StarlarkValueAsType::new();
+}
+
+#[starlark_module]
 fn register_execlog_sinks(globals: &mut GlobalsBuilder) {
     #[starlark(as_type = sink::execlog::ExecLogSink)]
     fn file(
@@ -1253,6 +1401,11 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
 
     globals.namespace("build_events", |globals| {
         register_build_events(globals);
+    });
+
+    globals.namespace("output", |globals| {
+        register_output_types(globals);
+        register_output(globals);
     });
 
     globals.namespace("execution_log", |globals| {
