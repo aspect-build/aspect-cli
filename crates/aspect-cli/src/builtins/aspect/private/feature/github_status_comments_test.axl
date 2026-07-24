@@ -26,6 +26,7 @@ load(
     "@aspect//feature/github_status_comments.axl",
     "DEFAULT_BODY_TEMPLATE",
     "DEFAULT_STATUS_BADGES",
+    "GITHUB_STATUS_COMMENT_ROLES",
     "MARKER_FMT",
     "bucket_entries",
     "by_task_overflow",
@@ -1668,6 +1669,12 @@ def _check_repro_dedup_consecutive_headings(ctx):
         fail("repro dedup: install hint missing from body")
 
 def _test_impl(ctx):
+    _eq(
+        "status-comment token roles include job-link access",
+        GITHUB_STATUS_COMMENT_ROLES,
+        ["prs.write", "actions.read"],
+    )
+
     sep = "=" * 70
 
     _check_collect_tip_rows(ctx)
