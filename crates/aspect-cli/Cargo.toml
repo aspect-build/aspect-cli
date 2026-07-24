@@ -42,5 +42,8 @@ serde_json = "1.0"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 dirs = "6.0.0"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"

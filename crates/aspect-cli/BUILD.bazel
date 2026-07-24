@@ -23,6 +23,7 @@ rust_binary(
         "@crates//:clap",
         "@crates//:dirs",
         "@crates//:include_dir",
+        "@crates//:libc",
         "@crates//:names",
         "@crates//:opentelemetry",
         "@crates//:opentelemetry-appender-tracing",
