@@ -19,6 +19,8 @@ use_task("wrapper.axl", "uninstall")
 use_task("init.axl", "init")
 use_task("bazelrc.axl", "bazelrc")
 use_task("warming.axl", "warming")
+use_task("runner_metadata.axl", "runner_metadata")
+use_task("runner_health_check.axl", "runner_health_check")
 
 use_feature("feature/artifacts.axl", "ArtifactUpload")
 use_feature("feature/circleci_test_results.axl", "CircleCITestResults")

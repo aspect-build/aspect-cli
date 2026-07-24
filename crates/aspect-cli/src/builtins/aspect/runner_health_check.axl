@@ -1,0 +1,63 @@
+"""`aspect ci runner-health-check` — run just the Aspect Workflows runner health check.
+
+Every Bazel-calling task already runs this during its Setup phase: the `Workflows`
+feature registers `agent_health_check` as a `HealthCheckTrait` hook (see
+`feature/workflows.axl`), and `lib/lifecycle.axl::setup_phase` runs it before the
+build. This command runs just that step on demand — it waits for cache warming to
+complete, prints the last runner health check and warming status, then probes the
+runner's Bazel server (`ctx.bazel.health_check()`), signaling the runner unhealthy
+if the server is wedged.
+
+Like every Bazel-calling task it resolves its flags through `setup_bazel_command`,
+which folds in the Workflows runner metadata — notably the per-runner
+`--output_base` that `agent_health_check` requires so the probe targets the
+project-specific Bazel server (see `assert_ctx_bazel_ready_for_health_check` in
+`private/lib/health_check.axl`). It is therefore not given an `--output-base` flag
+of its own.
+
+Exits non-zero when the Bazel server is unhealthy. Off an Aspect Workflows runner
+there is no runner to check, so it prints an informational line and exits 0.
+"""
+
+load("@aspect//bazel.axl", "BazelTrait")
+load(
+    "./private/lib/bazel_flags.axl",
+    "announce_bazel_args",
+    "bazel_flag_args",
+    "setup_bazel_command",
+)
+load(
+    "./private/lib/environment.axl",
+    "error",
+    "get_workflows_environment",
+    "info",
+)
+load("./private/lib/health_check.axl", "HealthCheckTrait", "agent_health_check")
+
+def _impl(ctx: TaskContext) -> int:
+    environment = get_workflows_environment(ctx.std)
+    if environment.runner == None:
+        info(ctx.std, "Not on an Aspect Workflows runner; no runner health check to run.")
+        return 0
+
+    # Register the active run command before the health check — it carries the
+    # per-runner --output_base that `agent_health_check` requires (see docstring).
+    setup_bazel_command(ctx, "build", ctx.traits[BazelTrait])
+
+    health_error = agent_health_check(ctx, environment)
+    if health_error != None:
+        error(ctx.std, health_error)
+        return 1
+    return 0
+
+runner_health_check = task(
+    group = ["ci"],
+    summary = "Run the Aspect Workflows runner health check.",
+    description = "Run the runner health check that other tasks run during their Setup phase: wait for cache warming to complete, print the last runner health check and warming status, then probe the runner's Bazel server and signal the runner unhealthy if it is wedged. Exits non-zero when the Bazel server is unhealthy. Off a Workflows runner there is nothing to check, so it prints an informational line and exits 0.",
+    implementation = _impl,
+    traits = [
+        BazelTrait,
+        HealthCheckTrait,
+    ],
+    args = bazel_flag_args("the health check") | announce_bazel_args("the health check"),
+)
