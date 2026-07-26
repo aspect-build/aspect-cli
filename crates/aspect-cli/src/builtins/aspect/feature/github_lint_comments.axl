@@ -49,7 +49,7 @@ CIRCLE_BUILD_NUM): siblings in separate jobs would then see each other as
 load("@aspect//lint.axl", "LintTrait")
 load("../private/lib/environment.axl", "color_enabled", "feature_logger")
 load("../private/lib/github.axl", "github")
-load("../private/lib/lint_comments.axl", lc_build_marker = "build_marker", lc_extract_marker = "extract_marker", lc_is_commentable = "is_commentable", lc_parse_marker = "parse_marker", lc_suggestion_block = "suggestion_block")
+load("../private/lib/lint_comments.axl", lc_build_marker = "build_marker", lc_can_attempt_comment = "can_attempt_comment", lc_diff_window = "diff_window", lc_extract_marker = "extract_marker", lc_parse_marker = "parse_marker", lc_suggestion_block = "suggestion_block")
 load("../private/lib/patch.axl", patch_hunk_edit_blocks = "hunk_edit_blocks", patch_parse = "parse")
 load("../private/lib/sarif.axl", "parse_sarif", "parse_sarif_diagnostics", "sarif_to_review_comments")
 
@@ -301,6 +301,20 @@ def _get_existing_markers(ctx, gh, task_key):
             markers[marker] = c.get("html_url", "") or ""
     return markers
 
+def _postable(gh, comments):
+    """Drop comments GitHub can't anchor in the PR diff (it 422s them).
+
+    Applied at the API boundary rather than in the lint strategy: the strategy's
+    `relevant_diagnostics` only reaches `_lint_end`, and `hold-the-file`
+    deliberately keeps findings on unchanged lines of a changed file, which are
+    valid diagnostics but not valid review-comment anchors.
+    """
+    return [
+        c
+        for c in comments
+        if lc_can_attempt_comment(gh["window"], c.get("path", ""), c.get("line", 0), c.get("start_line"))
+    ]
+
 def _post_individually(ctx, gh, comments, existing_markers, task_key):
     """Post each comment via the GitHub API. Mutates dicts in place, setting
     `_html_url` on success or on dedup-against-prior-run (via existing_markers[marker])
@@ -383,7 +397,10 @@ def _cleanup_comments(ctx, gh, relevant_diagnostics, run_id, task_key, suggestio
         # empty and only patch-derived suggestion_markers remain.
         if destination in ("auto", "both") and not diag.get("has_fix"):
             continue
-        if lc_is_commentable(diag["file"], diag["line"], gh["changed_lines"], prefix = gh.get("prefix", "")):
+        # Must match `_postable`'s gate exactly: `desired` decides what survives
+        # reaping, so a narrower rule here would delete comments this same run
+        # just posted (e.g. every one of them on an unscoped run).
+        if lc_can_attempt_comment(gh["window"], diag["file"], diag["line"]):
             marker = lc_build_marker(run_id, task_key, diag["tool"], diag["file"], diag["line"], diag["rule_id"])
             desired[marker] = True
 
@@ -490,7 +507,7 @@ def _github_lint_impl(ctx: FeatureContext):
                 "repo": pr["repo"],
                 "head_sha": pr["sha"],
                 "pr_number": pr["pr_number"],
-                "changed_lines": {},
+                "window": lc_diff_window([]),
                 "prefix": "",
                 "stale": False,
             }
@@ -540,8 +557,9 @@ def _github_lint_impl(ctx: FeatureContext):
                 state["dropped_per_severity"][sev] = state["dropped_per_severity"].get(sev, 0) + 1
 
     if gh:
-        # Workspace prefix relative to the git root; _post_individually prepends
-        # it since SARIF paths are workspace-relative but GitHub wants repo-relative.
+        # Workspace prefix relative to the git root. _post_individually prepends it
+        # (SARIF paths are workspace-relative, GitHub wants repo-relative); the
+        # diff window uses it to reconcile mixed-relativity changed-file keys.
         git_out = ctx.std.process.command("git").arg("rev-parse").arg("--show-prefix").current_dir(ctx.std.env.aspect_root_dir()).stdout("piped").stderr("null").spawn().wait_with_output()
         if git_out.status.success:
             gh["prefix"] = git_out.stdout.strip()
@@ -551,11 +569,7 @@ def _github_lint_impl(ctx: FeatureContext):
         # avoid a duplicate PR Files API call / git diff.
         if not gh:
             return
-
-        # Use `hunk_lines` (added + ±3 context) not `lines` (added only): GitHub
-        # accepts comments anywhere in the displayed hunk, and findings often land
-        # next to an edit (e.g. SC2164 on the line after an edited comment).
-        gh["changed_lines"] = {f["file"]: f.get("hunk_lines") or f["lines"] for f in lint_trait.changed_files}
+        gh["window"] = lc_diff_window(lint_trait.changed_files, prefix = gh["prefix"])
 
     def _lint_report(ctx, filepath):
         # Per-SARIF-file callback. Errors stream immediately (fast feedback);
@@ -565,15 +579,10 @@ def _github_lint_impl(ctx: FeatureContext):
             return
         comments = _build_comments(ctx, filepath, run_id, ctx.task.name, destination = destination)
 
-        # Count before the commentability filter so the reported total keeps
-        # matching the diagnostic count; findings outside the displayed diff
-        # still surface on the non-review-comment status surfaces.
+        # Count before filtering so the reported total keeps matching the
+        # diagnostic count; out-of-diff findings still reach the other surfaces.
         state["all_comments_count"] += len(comments)
-        comments = [
-            c
-            for c in comments
-            if lc_is_commentable(c.get("path", ""), c.get("line", 0), gh["changed_lines"], gh.get("prefix", ""), c.get("start_line"))
-        ]
+        comments = _postable(gh, comments)
 
         cap_exhausted = bool(gh) and state["posted"] >= max_pr_comments
 
@@ -792,12 +801,7 @@ def _github_lint_impl(ctx: FeatureContext):
                 if destination == "annotations":
                     suggestion_comments = []
                 else:
-                    suggestion_comments = _build_suggestion_comments(ctx, relevant_diagnostics)
-                    suggestion_comments = [
-                        c
-                        for c in suggestion_comments
-                        if lc_is_commentable(c.get("path", ""), c.get("line", 0), gh["changed_lines"], gh.get("prefix", ""), c.get("start_line"))
-                    ]
+                    suggestion_comments = _postable(gh, _build_suggestion_comments(ctx, relevant_diagnostics))
                 non_errors = [c for c in state["all_comments"] if c.get("_severity") != "error"] + suggestion_comments
 
                 # Intra-run dedup by marker (within-run dupes; the existing-markers
@@ -910,11 +914,12 @@ def _github_lint_impl(ctx: FeatureContext):
                 trace.log("inactive reason:  %s" % gh_inactive_reason)
             trace.log("found comments:   %s" % state["all_comments_count"])
             if gh:
-                trace.log("git prefix:       %r" % gh.get("prefix", ""))
+                trace.log("git prefix:       %r" % gh["prefix"])
+                lines_by_path = gh["window"].lines_by_path
                 changed_line_count = 0
-                for v in gh["changed_lines"].values():
+                for v in lines_by_path.values():
                     changed_line_count += len(v)
-                trace.log("changed lines:    %s across %s file(s)" % (changed_line_count, len(gh["changed_lines"])))
+                trace.log("changed lines:    %s across %s file(s)" % (changed_line_count, len(lines_by_path)))
                 trace.log("destination:      %s" % destination)
             trace.log("posted comments:  %s" % state["posted"])
             if outcome:
