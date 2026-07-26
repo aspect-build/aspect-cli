@@ -1,7 +1,7 @@
 """VCS-agnostic helpers shared by the GitHub and GitLab lint-comment
 features.
 
-Two pieces are genuinely pure (string in, string out) and worth sharing
+Three pieces are genuinely pure (data in, data out) and worth sharing
 so both features stay byte-identical and a single test covers them:
 
   * Marker build/parse — the hidden HTML comment that uniquely
@@ -9,6 +9,8 @@ so both features stay byte-identical and a single test covers them:
   * Suggestion-block rendering — GitHub uses a bare ```suggestion fence
     (replaces the commented-on line); GitLab uses ```suggestion:-X+Y
     (replaces `current-X` through `current+Y`).
+  * Diff-window lookup (`DiffWindow`) — whether a review comment's
+    anchor range falls where the host can display it.
 
 The orchestration (discovery, dedup state machine, API calls) stays in
 each feature file — it's API-coupled and not shareable as-is.
@@ -98,15 +100,79 @@ def suggestion_block(replacement, current, start_line, end_line, vcs):
         fence = "```suggestion"
     return "%s\n%s\n```" % (fence, replacement)
 
-def is_commentable(path: str, line: int, changed_lines: dict, prefix: str = "", start_line = None) -> bool:
-    """Whether GitHub can anchor a review comment on this path and range."""
-    lines = changed_lines.get(path)
-    if lines == None and prefix:
-        lines = changed_lines.get(prefix + path)
-    first_line = start_line or line
-    if lines == None or first_line < 1 or line < first_line:
+DiffWindow = record(
+    # {workspace-relative path: {0-based line: True}} — the lines the host will
+    # display. Canonicalized by `diff_window`; comment paths key in directly.
+    lines_by_path = field(dict),
+    # False when change detection could not determine the changed-file set, so an
+    # absent path means "unknown" rather than "unchanged".
+    scoped = field(bool, default = True),
+)
+
+def diff_window(changed_files: list, prefix: str = "", scoped: bool = True) -> DiffWindow:
+    """Index `changed_files` into a `DiffWindow` for anchor lookups.
+
+    Uses `hunk_lines` (added + ±3 context) rather than `lines` (added only):
+    hosts accept comments anywhere in a displayed hunk, and findings often land
+    beside an edit (e.g. SC2164 on the line after an edited comment). Falls back
+    to `lines` for older fixtures that predate `hunk_lines`.
+
+    Keys are canonicalized to workspace-relative so lookups need no fallback
+    guessing. `changed_files` is not uniformly relative: `detect_changed_files`'
+    PR Files API path strips `prefix` already, while its local `git diff` paths
+    stay repo-relative (no `--relative`). Stripping a leading `prefix` when
+    present normalizes both, and matters in a nested workspace where the two
+    conventions would otherwise collide (workspace `sub/`, keys `foo.ts` and
+    `sub/foo.ts`, denoting different files).
+
+    Regions are indexed into dicts once so membership stays constant-time;
+    validating an N-line span would otherwise scan the region list per line.
+
+    Args:
+      changed_files: `LintTrait.changed_files` entries.
+      prefix:        workspace path relative to the repo root ("" at the root).
+      scoped:        `LintTrait.changed_files_scoped` — False disables gating
+                     entirely (see `can_attempt_comment`).
+    """
+    lines_by_path = {}
+    for f in changed_files:
+        path = f.get("file", "")
+        if not path:
+            continue
+        if prefix and path.startswith(prefix):
+            path = path[len(prefix):]
+        region = f.get("hunk_lines") or f.get("lines") or []
+        lines_by_path[path] = {line: True for line in region}
+    return DiffWindow(lines_by_path = lines_by_path, scoped = scoped)
+
+def can_attempt_comment(window: DiffWindow, path: str, line: int, start_line = None) -> bool:
+    """Whether a review comment on workspace-relative `path` anchored at
+    `[start_line or line, line]` is worth sending.
+
+    Requires the whole span to be displayed, because hosts anchor a multi-line
+    comment on its full range rather than just its endpoints.
+
+    Unconditionally True for an unscoped window: change detection failed, so
+    every path is "unknown" rather than "unchanged" and suppressing comments
+    would hide findings the run is deliberately surfacing (lint degrades to
+    `strategy=hard` in that state). An out-of-window attempt costs a non-fatal
+    422 the callers already collect. When the window IS scoped, an absent path
+    means unchanged and gets no comment — the 422s this guard exists to prevent.
+
+    Callers that gate comment *retention* must reuse this exact predicate: a
+    narrower rule would reap comments the same run just posted.
+    """
+    if not window.scoped:
+        return True
+    lines = window.lines_by_path.get(path)
+    if lines == None:
+        return False
+
+    # `start_line == 0` is an invalid range, not "absent", so test against None.
+    first_line = line if start_line == None else start_line
+    if first_line < 1 or line < first_line:
         return False
     for current_line in range(first_line, line + 1):
-        if current_line - 1 not in lines:
+        if (current_line - 1) not in lines:
             return False
     return True

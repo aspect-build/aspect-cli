@@ -4,11 +4,122 @@ Run with:
   aspect dev test-lint-comments
 """
 
-load("./lint_comments.axl", "build_marker", "extract_marker", "is_commentable", "parse_marker", "suggestion_block")
+load("./lint_comments.axl", "build_marker", "can_attempt_comment", "diff_window", "extract_marker", "parse_marker", "suggestion_block")
 
 def _eq(label, got, want):
     if got != want:
         fail("%s: got %r, want %r" % (label, got, want))
+
+def _changed_file(path, hunk_lines = None, lines = None):
+    """A `changed_files` entry as `detect_changed_files` reports it (0-based
+    line regions). `hunk_lines = None` models pre-`hunk_lines` fixtures.
+    """
+    entry = {"file": path}
+    if hunk_lines != None:
+        entry["hunk_lines"] = hunk_lines
+    if lines != None:
+        entry["lines"] = lines
+    return entry
+
+def _test_diff_window():
+    window = diff_window([
+        _changed_file("pkg/a.ts", hunk_lines = [9, 10], lines = [10]),
+        _changed_file("pkg/legacy.ts", lines = [4]),
+        _changed_file("", hunk_lines = [1]),
+    ])
+
+    # hunk_lines wins over lines; lines is the pre-hunk_lines fallback.
+    _eq("window prefers hunk_lines", window.lines_by_path["pkg/a.ts"], {9: True, 10: True})
+    _eq("window falls back to lines", window.lines_by_path["pkg/legacy.ts"], {4: True})
+    _eq("window skips empty path", "" in window.lines_by_path, False)
+    _eq("window entry count", len(window.lines_by_path), 2)
+    _eq("window scoped by default", window.scoped, True)
+    _eq("empty changed_files", diff_window([]).lines_by_path, {})
+
+    # A changed file with an empty region is still an entry: "nothing displayed",
+    # which blocks anchoring, unlike a path the window never mentions.
+    empty = diff_window([_changed_file("pkg/empty.ts", hunk_lines = [])])
+    _eq("empty region is an entry", "pkg/empty.ts" in empty.lines_by_path, True)
+    _eq("empty region blocks anchoring", can_attempt_comment(empty, "pkg/empty.ts", 10), False)
+
+    # Keys canonicalize to workspace-relative: the local git-diff path reports
+    # repo-relative paths, the PR Files API already stripped the prefix, and both
+    # must land on the same key.
+    _eq(
+        "repo-relative key stripped",
+        diff_window([_changed_file("sub/pkg/p.ts", hunk_lines = [19])], prefix = "sub/").lines_by_path,
+        {"pkg/p.ts": {19: True}},
+    )
+    _eq(
+        "already-stripped key kept",
+        diff_window([_changed_file("pkg/p.ts", hunk_lines = [19])], prefix = "sub/").lines_by_path,
+        {"pkg/p.ts": {19: True}},
+    )
+
+    # Only a leading prefix is stripped, and only once.
+    _eq(
+        "prefix stripped once",
+        diff_window([_changed_file("sub/sub/p.ts", hunk_lines = [1])], prefix = "sub/").lines_by_path,
+        {"sub/p.ts": {1: True}},
+    )
+    _eq(
+        "interior match not stripped",
+        diff_window([_changed_file("pkg/sub/p.ts", hunk_lines = [1])], prefix = "sub/").lines_by_path,
+        {"pkg/sub/p.ts": {1: True}},
+    )
+
+def _test_can_attempt_comment():
+    # 0-based hunk regions; a comment on 1-based line N needs N-1 present.
+    window = diff_window([
+        _changed_file("pkg/direct.ts", hunk_lines = [9]),
+        _changed_file("pkg/gapped.ts", hunk_lines = [39, 41]),
+        _changed_file("pkg/range.ts", hunk_lines = [29, 30, 31]),
+    ])
+
+    _eq("direct changed line", can_attempt_comment(window, "pkg/direct.ts", 10), True)
+    _eq("outside changed hunk", can_attempt_comment(window, "pkg/direct.ts", 11), False)
+    _eq("commentable range", can_attempt_comment(window, "pkg/range.ts", 32, start_line = 30), True)
+    _eq("single-line range in window", can_attempt_comment(window, "pkg/range.ts", 30, start_line = 30), True)
+
+    # Multi-line ranges need every line displayed, since the host anchors the
+    # whole span — line 41 (0-based 40) is not in the gapped hunk.
+    _eq("range crosses collapsed diff", can_attempt_comment(window, "pkg/gapped.ts", 42, start_line = 40), False)
+    _eq("range endpoints only is not enough", can_attempt_comment(window, "pkg/gapped.ts", 42, start_line = 42), True)
+
+    # Scoped window: an absent path is unchanged, so no comment. These are the
+    # 422s the guard exists to prevent — findings stream pre-strategy, so raw
+    # SARIF carries diagnostics for files the PR never touched.
+    _eq("unchanged file rejected", can_attempt_comment(window, "pkg/missing.ts", 10), False)
+    _eq("known file outside hunk", can_attempt_comment(window, "pkg/gapped.ts", 100), False)
+    _eq("scoped but empty rejects", can_attempt_comment(diff_window([]), "pkg/direct.ts", 10), False)
+
+    # Unscoped: detection failed, so nothing is known to be unchanged and lint is
+    # already degraded to strategy=hard. Gating would hide surfaced findings.
+    unscoped = diff_window([], scoped = False)
+    _eq("unscoped posts everything", can_attempt_comment(unscoped, "pkg/anything.ts", 999), True)
+    _eq("unscoped ignores ranges", can_attempt_comment(unscoped, "pkg/anything.ts", 1, start_line = 999), True)
+
+    # start_line == 0 is an invalid range, not "absent".
+    _eq("zero start_line rejected", can_attempt_comment(window, "pkg/direct.ts", 10, start_line = 0), False)
+    _eq("inverted range rejected", can_attempt_comment(window, "pkg/range.ts", 30, start_line = 32), False)
+    _eq("negative line rejected", can_attempt_comment(window, "pkg/direct.ts", -1), False)
+
+    # Nested workspace: comment paths are workspace-relative and key in directly
+    # once `diff_window` has canonicalized the changed-file keys.
+    prefixed = diff_window([_changed_file("apps/docs/pkg/p.ts", hunk_lines = [19])], prefix = "apps/docs/")
+    _eq("workspace-relative path resolves", can_attempt_comment(prefixed, "pkg/p.ts", 20), True)
+    _eq("workspace-relative path gates", can_attempt_comment(prefixed, "pkg/p.ts", 25), False)
+
+    # Nested workspace at sub/ where sub/foo.ts and sub/sub/foo.ts both change:
+    # canonicalized to foo.ts and sub/foo.ts, so neither shadows the other.
+    collide = diff_window(
+        [_changed_file("sub/foo.ts", hunk_lines = [9]), _changed_file("sub/sub/foo.ts", hunk_lines = [99])],
+        prefix = "sub/",
+    )
+    _eq("workspace file resolves", can_attempt_comment(collide, "foo.ts", 10), True)
+    _eq("nested namesake resolves", can_attempt_comment(collide, "sub/foo.ts", 100), True)
+    _eq("namesake lines not crossed", can_attempt_comment(collide, "foo.ts", 100), False)
+    _eq("workspace lines not crossed", can_attempt_comment(collide, "sub/foo.ts", 10), False)
 
 def _test_impl(ctx):
     m = build_marker("gl-123", "lint-bk", "ShellCheck", "a/b.sh", 42, "SC2164")
@@ -37,18 +148,8 @@ def _test_impl(ctx):
     _eq("gitlab suggestion single", suggestion_block("foo", current = 10, start_line = 10, end_line = 10, vcs = "gitlab"), "```suggestion:-0+0\nfoo\n```")
     _eq("gitlab suggestion multi", suggestion_block("foo\nbar\nbaz", current = 12, start_line = 10, end_line = 12, vcs = "gitlab"), "```suggestion:-2+0\nfoo\nbar\nbaz\n```")
 
-    changed_lines = {
-        "pkg/direct.ts": [9],
-        "pkg/gapped.ts": [39, 41],
-        "pkg/range.ts": [29, 30, 31],
-        "apps/docs/pkg/prefixed.ts": [19],
-    }
-    _eq("direct changed line", is_commentable("pkg/direct.ts", 10, changed_lines), True)
-    _eq("prefixed changed line", is_commentable("pkg/prefixed.ts", 20, changed_lines, prefix = "apps/docs/"), True)
-    _eq("outside changed hunk", is_commentable("pkg/direct.ts", 11, changed_lines), False)
-    _eq("unchanged file", is_commentable("pkg/missing.ts", 10, changed_lines), False)
-    _eq("commentable range", is_commentable("pkg/range.ts", 32, changed_lines, start_line = 30), True)
-    _eq("range crosses collapsed diff", is_commentable("pkg/gapped.ts", 42, changed_lines, start_line = 40), False)
+    _test_diff_window()
+    _test_can_attempt_comment()
 
     print("lint_comments.axl: OK")
     return 0
