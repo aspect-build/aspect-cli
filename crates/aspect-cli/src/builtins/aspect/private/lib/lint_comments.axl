@@ -117,11 +117,14 @@ def diff_window(changed_files: list, prefix: str = "") -> DiffWindow:
     beside an edit (e.g. SC2164 on the line after an edited comment). Falls back
     to `lines` for older fixtures that predate `hunk_lines`.
 
+    Regions are indexed into dicts once here so membership stays constant-time:
+    validating an N-line suggestion against an N-line hunk would otherwise scan
+    the region list per line.
+
     Keys are whatever `changed_files` carries, which is NOT uniformly relative:
     `detect_changed_files`' PR Files API path strips the workspace prefix, while
-    its local `git diff` paths stay repo-relative (no `--relative`). Comment
-    paths are always workspace-relative, so lookups try the bare path first and
-    then `prefix + path`.
+    its local `git diff` paths stay repo-relative (no `--relative`). See
+    `_displayed_lines` for how a lookup reconciles the two.
     """
     lines_by_path = {}
     for f in changed_files:
@@ -133,13 +136,22 @@ def diff_window(changed_files: list, prefix: str = "") -> DiffWindow:
     return DiffWindow(lines_by_path = lines_by_path, prefix = prefix)
 
 def _displayed_lines(window: DiffWindow, path: str):
-    """The 0-based displayed-line set for `path`, or None when the window holds
-    no entry for it (no change context — distinct from an empty set).
+    """The 0-based displayed-line set for the workspace-relative `path`, or None
+    when the window holds no entry for it (no change context — distinct from an
+    empty set).
+
+    Tries `prefix + path` FIRST so the check matches the repo-relative path the
+    comment is actually posted to. Preferring the bare key would, in a nested
+    workspace whose repo root has a same-named file, validate against the wrong
+    file's line set — suppressing a valid comment or admitting an off-diff one.
+    The bare key is the fallback for change sets already normalized to
+    workspace-relative paths (the PR Files API strips the prefix).
     """
-    lines = window.lines_by_path.get(path)
-    if lines == None and window.prefix:
+    if window.prefix:
         lines = window.lines_by_path.get(window.prefix + path)
-    return lines
+        if lines != None:
+            return lines
+    return window.lines_by_path.get(path)
 
 def can_attempt_comment(window: DiffWindow, path: str, line: int, start_line = None) -> bool:
     """Whether a review comment anchored at `[start_line or line, line]` is

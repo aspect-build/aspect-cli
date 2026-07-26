@@ -215,10 +215,10 @@ def _post_comments(ctx, gl, comments, existing_markers, task_key):
         path = c.get("path", "")
         line = c.get("line", 0)
 
-        # Gate on the unprefixed (workspace-relative) path; the repo prefix is
-        # applied only when building the GitLab position below. Single-line only
-        # (no start_line): a GitLab position anchors one line and encodes the
-        # span in the suggestion fence, so only the anchor must be displayed.
+        # Pass the workspace-relative path; the window applies the repo prefix
+        # itself so the check matches the `new_path` built below. Single-line
+        # only (no start_line): a GitLab position anchors one line and encodes
+        # the span in the suggestion fence, so only the anchor must be displayed.
         if not can_attempt_comment(gl["window"], path, line):
             continue
         prefix = gl["prefix"]

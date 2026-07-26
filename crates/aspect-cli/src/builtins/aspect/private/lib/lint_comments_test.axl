@@ -83,13 +83,15 @@ def _test_can_attempt_comment():
     _eq("prefix fallback still gates", can_attempt_comment(prefixed, "pkg/p.ts", 25), False)
     _eq("prefixed path also resolves", can_attempt_comment(prefixed, "apps/docs/pkg/p.ts", 20), True)
 
-    # Bare path wins when both keys exist, so a prefix can't shadow a real entry.
+    # Both keys present (repo root and workspace have a same-named file): the
+    # prefixed key wins, because that is the path the comment is posted to.
+    # Preferring the bare key would validate against the repo-root file.
     both = diff_window(
         [_changed_file("pkg/p.ts", hunk_lines = [9]), _changed_file("sub/pkg/p.ts", hunk_lines = [99])],
         prefix = "sub/",
     )
-    _eq("bare key preferred", can_attempt_comment(both, "pkg/p.ts", 10), True)
-    _eq("bare key not shadowed", can_attempt_comment(both, "pkg/p.ts", 100), False)
+    _eq("prefixed key wins on collision", can_attempt_comment(both, "pkg/p.ts", 100), True)
+    _eq("repo-root lines not consulted", can_attempt_comment(both, "pkg/p.ts", 10), False)
 
 def _test_impl(ctx):
     m = build_marker("gl-123", "lint-bk", "ShellCheck", "a/b.sh", 42, "SC2164")
