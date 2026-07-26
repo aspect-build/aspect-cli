@@ -304,10 +304,12 @@ def _get_existing_markers(ctx, gh, task_key):
 def _postable(gh, comments):
     """Drop comments GitHub can't anchor in the PR diff (it 422s them).
 
-    Applied at the API boundary rather than in the lint strategy: the strategy's
-    `relevant_diagnostics` only reaches `_lint_end`, and `hold-the-file`
-    deliberately keeps findings on unchanged lines of a changed file, which are
-    valid diagnostics but not valid review-comment anchors.
+    Gating belongs at the API boundary, not in the lint strategy: `_lint_report`
+    streams raw SARIF and the strategy's `relevant_diagnostics` only reaches
+    `_lint_end`, so findings for untouched files arrive here regardless of
+    strategy. Even scoped strategies produce valid diagnostics that are not valid
+    comment anchors — `hold-the-file` keeps findings on unchanged lines of a
+    changed file. Those still surface on the other status surfaces.
     """
     return [
         c
@@ -397,9 +399,8 @@ def _cleanup_comments(ctx, gh, relevant_diagnostics, run_id, task_key, suggestio
         # empty and only patch-derived suggestion_markers remain.
         if destination in ("auto", "both") and not diag.get("has_fix"):
             continue
-        # Must match `_postable`'s gate exactly: `desired` decides what survives
-        # reaping, so a narrower rule here would delete comments this same run
-        # just posted (e.g. every one of them on an unscoped run).
+        # Same predicate as `_postable`: `desired` decides what survives reaping,
+        # so a narrower rule here would delete comments this run just posted.
         if lc_can_attempt_comment(gh["window"], diag["file"], diag["line"]):
             marker = lc_build_marker(run_id, task_key, diag["tool"], diag["file"], diag["line"], diag["rule_id"])
             desired[marker] = True
@@ -559,7 +560,7 @@ def _github_lint_impl(ctx: FeatureContext):
     if gh:
         # Workspace prefix relative to the git root. _post_individually prepends it
         # (SARIF paths are workspace-relative, GitHub wants repo-relative); the
-        # diff window uses it to reconcile mixed-relativity changed-file keys.
+        # diff window strips it to canonicalize changed-file keys.
         git_out = ctx.std.process.command("git").arg("rev-parse").arg("--show-prefix").current_dir(ctx.std.env.aspect_root_dir()).stdout("piped").stderr("null").spawn().wait_with_output()
         if git_out.status.success:
             gh["prefix"] = git_out.stdout.strip()
@@ -569,7 +570,11 @@ def _github_lint_impl(ctx: FeatureContext):
         # avoid a duplicate PR Files API call / git diff.
         if not gh:
             return
-        gh["window"] = lc_diff_window(lint_trait.changed_files, prefix = gh["prefix"])
+        gh["window"] = lc_diff_window(
+            lint_trait.changed_files,
+            prefix = gh["prefix"],
+            scoped = lint_trait.changed_files_scoped,
+        )
 
     def _lint_report(ctx, filepath):
         # Per-SARIF-file callback. Errors stream immediately (fast feedback);
