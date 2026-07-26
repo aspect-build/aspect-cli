@@ -99,12 +99,30 @@ def suggestion_block(replacement, current, start_line, end_line, vcs):
     return "%s\n%s\n```" % (fence, replacement)
 
 def is_commentable(path: str, line: int, changed_lines: dict, prefix: str = "", start_line = None) -> bool:
-    """Whether GitHub can anchor a review comment on this path and range."""
+    """Whether GitHub can anchor a review comment on this path and range.
+
+    Fails OPEN when there is no line-set for `path`: an absent entry means "no
+    change context for this file", not "nothing is commentable". Change
+    detection can legitimately come up empty (shallow checkout ⇒ `strategy=hard`
+    with `changed_files = []`), and suppressing every comment there would hide
+    findings the run is deliberately surfacing. Out-of-hunk attempts 422, which
+    callers already tolerate as non-fatal. Matches the GitLab sibling's
+    `lines != None` gate.
+
+    `changed_lines` is 0-based (`hunk_lines`); `line`/`start_line` are 1-based
+    SARIF. Keys may be workspace- or repo-relative, so `prefix` is tried as a
+    fallback. A multi-line range needs every line displayed, since GitHub
+    anchors the whole span.
+    """
     lines = changed_lines.get(path)
     if lines == None and prefix:
         lines = changed_lines.get(prefix + path)
-    first_line = start_line or line
-    if lines == None or first_line < 1 or line < first_line:
+    if lines == None:
+        return True
+
+    # Explicit None check: start_line == 0 is an invalid range, not "absent".
+    first_line = line if start_line == None else start_line
+    if first_line < 1 or line < first_line:
         return False
     for current_line in range(first_line, line + 1):
         if current_line - 1 not in lines:

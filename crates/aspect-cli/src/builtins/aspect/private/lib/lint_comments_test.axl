@@ -46,9 +46,20 @@ def _test_impl(ctx):
     _eq("direct changed line", is_commentable("pkg/direct.ts", 10, changed_lines), True)
     _eq("prefixed changed line", is_commentable("pkg/prefixed.ts", 20, changed_lines, prefix = "apps/docs/"), True)
     _eq("outside changed hunk", is_commentable("pkg/direct.ts", 11, changed_lines), False)
-    _eq("unchanged file", is_commentable("pkg/missing.ts", 10, changed_lines), False)
     _eq("commentable range", is_commentable("pkg/range.ts", 32, changed_lines, start_line = 30), True)
     _eq("range crosses collapsed diff", is_commentable("pkg/gapped.ts", 42, changed_lines, start_line = 40), False)
+
+    # Fail open with no line-set: a file absent from changed_lines has no change
+    # context, and an empty changed_lines is the unscoped `strategy=hard` run.
+    _eq("file absent from changed set", is_commentable("pkg/missing.ts", 10, changed_lines), True)
+    _eq("unscoped run posts everything", is_commentable("pkg/direct.ts", 999, {}), True)
+
+    # A known file with a known hunk still gates — this is the 422 the fix targets.
+    _eq("known file outside hunk", is_commentable("pkg/gapped.ts", 100, changed_lines), False)
+
+    # start_line == 0 is an invalid range, not "absent".
+    _eq("zero start_line rejected", is_commentable("pkg/direct.ts", 10, changed_lines, start_line = 0), False)
+    _eq("inverted range rejected", is_commentable("pkg/range.ts", 30, changed_lines, start_line = 32), False)
 
     print("lint_comments.axl: OK")
     return 0

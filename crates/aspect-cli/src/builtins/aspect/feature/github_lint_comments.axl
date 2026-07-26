@@ -564,12 +564,16 @@ def _github_lint_impl(ctx: FeatureContext):
         if gh and gh["stale"]:
             return
         comments = _build_comments(ctx, filepath, run_id, ctx.task.name, destination = destination)
+
+        # Count before the commentability filter so the reported total keeps
+        # matching the diagnostic count; findings outside the displayed diff
+        # still surface on the non-review-comment status surfaces.
+        state["all_comments_count"] += len(comments)
         comments = [
             c
             for c in comments
             if lc_is_commentable(c.get("path", ""), c.get("line", 0), gh["changed_lines"], gh.get("prefix", ""), c.get("start_line"))
         ]
-        state["all_comments_count"] += len(comments)
 
         cap_exhausted = bool(gh) and state["posted"] >= max_pr_comments
 
