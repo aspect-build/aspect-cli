@@ -49,7 +49,7 @@ CIRCLE_BUILD_NUM): siblings in separate jobs would then see each other as
 load("@aspect//lint.axl", "LintTrait")
 load("../private/lib/environment.axl", "color_enabled", "feature_logger")
 load("../private/lib/github.axl", "github")
-load("../private/lib/lint_comments.axl", lc_build_marker = "build_marker", lc_extract_marker = "extract_marker", lc_parse_marker = "parse_marker", lc_suggestion_block = "suggestion_block")
+load("../private/lib/lint_comments.axl", lc_build_marker = "build_marker", lc_extract_marker = "extract_marker", lc_is_commentable = "is_commentable", lc_parse_marker = "parse_marker", lc_suggestion_block = "suggestion_block")
 load("../private/lib/patch.axl", patch_hunk_edit_blocks = "hunk_edit_blocks", patch_parse = "parse")
 load("../private/lib/sarif.axl", "parse_sarif", "parse_sarif_diagnostics", "sarif_to_review_comments")
 
@@ -383,8 +383,7 @@ def _cleanup_comments(ctx, gh, relevant_diagnostics, run_id, task_key, suggestio
         # empty and only patch-derived suggestion_markers remain.
         if destination in ("auto", "both") and not diag.get("has_fix"):
             continue
-        lines = gh["changed_lines"].get(diag["file"])
-        if lines and (diag["line"] - 1) in lines:
+        if lc_is_commentable(diag["file"], diag["line"], gh["changed_lines"], prefix = gh.get("prefix", "")):
             marker = lc_build_marker(run_id, task_key, diag["tool"], diag["file"], diag["line"], diag["rule_id"])
             desired[marker] = True
 
@@ -565,6 +564,11 @@ def _github_lint_impl(ctx: FeatureContext):
         if gh and gh["stale"]:
             return
         comments = _build_comments(ctx, filepath, run_id, ctx.task.name, destination = destination)
+        comments = [
+            c
+            for c in comments
+            if lc_is_commentable(c.get("path", ""), c.get("line", 0), gh["changed_lines"], gh.get("prefix", ""), c.get("start_line"))
+        ]
         state["all_comments_count"] += len(comments)
 
         cap_exhausted = bool(gh) and state["posted"] >= max_pr_comments
@@ -587,15 +591,10 @@ def _github_lint_impl(ctx: FeatureContext):
         if not errors_in_batch:
             return
 
-        # No diff-region pre-filter: try every comment. Out-of-hunk attempts 422,
-        # collected in state["errors"] (logged, non-fatal). The strategy filter
-        # already keeps relevant_diagnostics aligned with the diff window.
-        ready = errors_in_batch
-
         # Cap accounting — _post_individually skips already-posted markers, so
         # dupes don't consume budget; count only new postable comments.
         new_only = []
-        for c in ready:
+        for c in errors_in_batch:
             marker = lc_extract_marker(c.get("body", ""), task_key = ctx.task.name)
             if marker and marker in gh["existing_markers"]:
                 continue
@@ -790,14 +789,16 @@ def _github_lint_impl(ctx: FeatureContext):
                     suggestion_comments = []
                 else:
                     suggestion_comments = _build_suggestion_comments(ctx, relevant_diagnostics)
+                    suggestion_comments = [
+                        c
+                        for c in suggestion_comments
+                        if lc_is_commentable(c.get("path", ""), c.get("line", 0), gh["changed_lines"], gh.get("prefix", ""), c.get("start_line"))
+                    ]
                 non_errors = [c for c in state["all_comments"] if c.get("_severity") != "error"] + suggestion_comments
 
                 # Intra-run dedup by marker (within-run dupes; the existing-markers
                 # check below handles prior-run dupes).
                 non_errors = _dedup_by_marker(non_errors, ctx.task.name)
-
-                # No diff-region pre-filter (see _lint_report); out-of-hunk 422s
-                # are tolerated via _post_individually's error collection.
 
                 # 1. Dedup against existing markers (now include just-streamed errors).
                 deduped_skipped = 0
