@@ -399,6 +399,7 @@ def _cleanup_comments(ctx, gh, relevant_diagnostics, run_id, task_key, suggestio
         # empty and only patch-derived suggestion_markers remain.
         if destination in ("auto", "both") and not diag.get("has_fix"):
             continue
+
         # Same predicate as `_postable`: `desired` decides what survives reaping,
         # so a narrower rule here would delete comments this run just posted.
         if lc_can_attempt_comment(gh["window"], diag["file"], diag["line"]):

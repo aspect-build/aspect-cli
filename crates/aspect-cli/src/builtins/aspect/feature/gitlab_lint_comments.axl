@@ -446,6 +446,7 @@ def _cleanup_and_resolve(ctx, gl, relevant_diagnostics, run_id, task_key, sugges
             continue
         if destination in ("auto", "both") and not diag.get("has_fix"):
             continue
+
         # Same predicate as `_post_comments`, so cleanup can't reap a comment
         # this very run just posted.
         if can_attempt_comment(gl["window"], diag["file"], diag["line"]):
