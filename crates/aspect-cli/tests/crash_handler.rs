@@ -34,12 +34,15 @@ fn assert_reported(out: &Output, signal_label: &str, signal: libc::c_int) {
     // way, at least one `0x…` instruction pointer must reach stderr — that is
     // the part that previously faulted and printed nothing inside the handler.
     assert!(
-        stderr.contains("crash pc:") && stderr.contains("resolve with `addr2line"),
+        stderr.contains("crash pc:") && stderr.contains("addr2line -fe aspect-cli"),
         "missing crash-site report in stderr: {stderr}"
     );
+    // Code addresses print as `<runtime> (+<static offset>)`; at least one
+    // frame line must reach stderr — this is the part that previously faulted
+    // and printed nothing inside the handler on static-musl builds.
     assert!(
-        stderr.contains("\n  0x"),
-        "no raw frame addresses in backtrace: {stderr}"
+        stderr.contains(" (+0x"),
+        "no resolvable frame offsets in backtrace: {stderr}"
     );
     assert_eq!(
         out.status.signal(),
@@ -78,7 +81,7 @@ fn stack_overflow_on_spawned_thread_is_reported() {
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("fatal signal:") && stderr.contains("\n  0x"),
+        stderr.contains("fatal signal:") && stderr.contains(" (+0x"),
         "stack-overflow crash produced no backtrace: {stderr}"
     );
 }

@@ -35,7 +35,12 @@ def rust_binary(name, rustc_env_files = [], version_key = "", crate_features = [
                 "-Ccodegen-units=1",
                 "-Copt-level=3",
                 "-Cpanic=abort",
-                "-Cstrip=symbols",
+                # Keep symbols + debug info in the release binary: the crash
+                # handler prints ASLR-relative offsets that then resolve to
+                # function names and file:line against the shipped binary
+                # (`addr2line`). Stripping would leave crash reports
+                # unsymbolizable (only ~5% larger; worth it for self-diagnosis).
+                "-Cstrip=none",
             ],
             "//conditions:default": [
                 "-Ccodegen-units=1",
@@ -90,7 +95,7 @@ def rust_library(name, rustc_env_files = [], version_key = "", crate_features = 
                 "-Ccodegen-units=1",
                 "-Copt-level=3",
                 "-Cpanic=abort",
-                "-Cstrip=symbols",
+                "-Cstrip=none",
             ],
             "//conditions:default": [
                 "-Ccodegen-units=1",
@@ -118,7 +123,7 @@ def rust_proc_macro(name, crate_features = [], **kwargs):
                 "-Ccodegen-units=1",
                 "-Copt-level=3",
                 "-Cpanic=abort",
-                "-Cstrip=symbols",
+                "-Cstrip=none",
             ],
             "//conditions:default": [
                 "-Ccodegen-units=1",

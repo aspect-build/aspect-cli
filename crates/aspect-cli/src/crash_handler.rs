@@ -17,12 +17,16 @@
 //! stack walk uses `backtrace::trace_unsynchronized` (no allocator lock) and
 //! emits raw instruction pointers only — it does NOT symbolize, because
 //! resolving symbols allocates and, on static-musl release builds (the case
-//! this handler exists for), faults inside the handler. Resolve the addresses
-//! offline against the binary with `addr2line -fe aspect-cli <addr>`. A
-//! re-entrancy flag turns any fault inside the handler into an immediate
-//! default-action death. Handlers run on the alternate signal stack
-//! (`SA_ONSTACK`) std installs per thread, so stack-overflow SIGSEGVs are
-//! reported rather than double-faulting.
+//! this handler exists for), faults inside the handler. A re-entrancy flag
+//! turns any fault inside the handler into an immediate default-action death.
+//! Handlers run on the alternate signal stack (`SA_ONSTACK`) std installs per
+//! thread, so stack-overflow SIGSEGVs are reported rather than double-faulting.
+//!
+//! Resolving the report: release binaries are position-independent, so each
+//! code address is printed as `<runtime> (+<static offset>)` where the offset
+//! already has the ASLR load bias removed. Release builds keep their symbols
+//! (see `bazel/rust/defs.bzl`), so the offset resolves to a function and
+//! file:line directly against the binary: `addr2line -fe aspect-cli <offset>`.
 //!
 //! `ASPECT_NO_CRASH_HANDLER` (any non-empty value) skips installation.
 
@@ -182,12 +186,59 @@ mod unix {
         write_stderr(format_hex(value, &mut buf));
     }
 
-    /// Walk the current call stack and write each frame's raw instruction
-    /// pointer to stderr, one `0x…` per line. Signal-safe: it neither allocates
-    /// nor symbolizes (both fault inside a signal handler on static-musl builds
-    /// — the very case this handler exists for). Resolve the addresses offline
-    /// against the binary, e.g. `addr2line -fe aspect-cli <addr>`.
-    fn write_raw_backtrace() {
+    /// The main executable's load bias (the runtime base a position-independent
+    /// executable was mapped at). Subtract it from a runtime address to get the
+    /// static, ASLR-independent offset that resolves against the on-disk binary
+    /// (`addr2line -e aspect-cli <offset>`). Returns 0 on non-Linux or if the
+    /// bias can't be determined — in which case the printed offset equals the
+    /// raw address.
+    fn load_bias() -> usize {
+        #[cfg(target_os = "linux")]
+        {
+            // The first object `dl_iterate_phdr` reports is the main
+            // executable; its `dlpi_addr` is the load bias. Stop after it.
+            extern "C" fn cb(
+                info: *mut libc::dl_phdr_info,
+                _size: libc::size_t,
+                data: *mut libc::c_void,
+            ) -> libc::c_int {
+                // SAFETY: `info` is a valid dl_phdr_info for the callback's
+                // lifetime; `data` is the &mut usize we passed in.
+                unsafe {
+                    *(data as *mut usize) = (*info).dlpi_addr as usize;
+                }
+                1 // non-zero: visit only the first (main executable) entry
+            }
+            let mut bias: usize = 0;
+            // SAFETY: dl_iterate_phdr with a callback that only writes through
+            // the provided pointer; no allocation.
+            unsafe {
+                libc::dl_iterate_phdr(Some(cb), (&mut bias) as *mut usize as *mut libc::c_void);
+            }
+            bias
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            0
+        }
+    }
+
+    /// Write a runtime code address as `<abs> (+<offset>)`, where `offset` is
+    /// `abs - bias` — the static offset that resolves against the on-disk
+    /// binary regardless of ASLR. When `bias` is 0 the offset equals `abs`.
+    fn write_addr(abs: usize, bias: usize) {
+        write_hex(abs);
+        write_stderr(b" (+");
+        write_hex(abs.wrapping_sub(bias));
+        write_stderr(b")");
+    }
+
+    /// Walk the current call stack and write each frame's instruction pointer
+    /// to stderr as `<abs> (+<offset>)` (see [`write_addr`]), one per line.
+    /// Signal-safe: it neither allocates nor symbolizes (both fault inside a
+    /// signal handler on static-musl builds — the very case this handler exists
+    /// for).
+    fn write_raw_backtrace(bias: usize) {
         // SAFETY: single-shot within a dying process; `trace_unsynchronized`
         // avoids the global lock `trace` takes (which could deadlock if the
         // crash happened while that lock was held). The callback only writes
@@ -195,7 +246,7 @@ mod unix {
         unsafe {
             backtrace::trace_unsynchronized(|frame| {
                 write_stderr(b"  ");
-                write_hex(frame.ip() as usize);
+                write_addr(frame.ip() as usize, bias);
                 write_stderr(b"\n");
                 true
             });
@@ -274,19 +325,21 @@ mod unix {
             reset_and_reraise(sig);
         }
 
+        let bias = load_bias();
+
         write_stderr(b"\naspect-cli: fatal signal: ");
         write_stderr(signal_name(sig).as_bytes());
         write_stderr(b"\nfault address: ");
         write_hex(fault_addr(info));
         write_stderr(b"\ncrash pc: ");
-        write_hex(crash_pc(ctx));
+        write_addr(crash_pc(ctx), bias);
         write_stderr(
-            b"\naddresses are raw instruction pointers; resolve with \
-              `addr2line -fe aspect-cli <addr>`.\ncrash pc is the fault site; \
-              the frames below may be truncated to the handler frame on \
-              static-musl builds:\n",
+            b"\ncode addresses print as `<runtime> (+<static offset>)`; resolve the \
+              static offset against this binary:\n  \
+              `addr2line -fe aspect-cli <offset>`.\ncrash pc is the fault site; the \
+              frames below may be truncated to the handler frame on static-musl builds:\n",
         );
-        write_raw_backtrace();
+        write_raw_backtrace(bias);
         write_stderr(
             b"aspect-cli crashed; please report this at \
               https://github.com/aspect-build/aspect-cli/issues including the output above.\n",
