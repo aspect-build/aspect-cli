@@ -21,40 +21,71 @@ fn run_with_trigger(kind: &str, extra_env: &[(&str, &str)]) -> Output {
     cmd.output().expect("failed to spawn aspect-cli")
 }
 
-#[test]
-fn segv_reports_backtrace_and_dies_with_original_signal() {
-    let out = run_with_trigger("segv", &[]);
+/// Assert a crash report was printed and the process died by `signal`.
+fn assert_reported(out: &Output, signal_label: &str, signal: libc::c_int) {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("fatal signal: SIGSEGV (segmentation fault)"),
+        stderr.contains(&format!("fatal signal: {signal_label}")),
         "missing signal line in stderr: {stderr}"
     );
+    // The fault site must be reported. `crash pc` is populated from the
+    // ucontext on Linux (the reliable address where unwinding truncates on
+    // static-musl); elsewhere the raw frame walk supplies the addresses. Either
+    // way, at least one `0x…` instruction pointer must reach stderr — that is
+    // the part that previously faulted and printed nothing inside the handler.
     assert!(
-        stderr.contains("backtrace:"),
-        "missing backtrace in stderr: {stderr}"
+        stderr.contains("crash pc:") && stderr.contains("resolve with `addr2line"),
+        "missing crash-site report in stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("\n  0x"),
+        "no raw frame addresses in backtrace: {stderr}"
     );
     assert_eq!(
         out.status.signal(),
-        Some(libc::SIGSEGV),
-        "expected death by SIGSEGV, got {:?}",
+        Some(signal),
+        "expected death by {signal_label}, got {:?}",
         out.status
     );
 }
 
 #[test]
-fn abort_reports_and_dies_with_original_signal() {
-    let out = run_with_trigger("abort", &[]);
+fn segv_on_main_thread_is_reported() {
+    assert_reported(&run_with_trigger("segv", &[]), "SIGSEGV", libc::SIGSEGV);
+}
+
+/// The Starlark task runs on a spawned (tokio blocking/worker) thread, so a
+/// crash there is the realistic case — the handler must report it too.
+#[test]
+fn segv_on_spawned_thread_is_reported() {
+    assert_reported(
+        &run_with_trigger("segv-thread", &[]),
+        "SIGSEGV",
+        libc::SIGSEGV,
+    );
+}
+
+/// Stack overflow lands on the alternate signal stack; the raw-address walk
+/// must still emit frames rather than double-faulting into silence.
+#[test]
+fn stack_overflow_on_spawned_thread_is_reported() {
+    let out = run_with_trigger("stackoverflow-thread", &[]);
+    // SIGSEGV on Linux, SIGBUS on macOS — both are handled fatal signals.
+    let sig = out.status.signal().expect("expected death by signal");
+    assert!(
+        sig == libc::SIGSEGV || sig == libc::SIGBUS,
+        "expected SIGSEGV/SIGBUS, got signal {sig}"
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("fatal signal: SIGABRT (abort)"),
-        "missing signal line in stderr: {stderr}"
+        stderr.contains("fatal signal:") && stderr.contains("\n  0x"),
+        "stack-overflow crash produced no backtrace: {stderr}"
     );
-    assert_eq!(
-        out.status.signal(),
-        Some(libc::SIGABRT),
-        "expected death by SIGABRT, got {:?}",
-        out.status
-    );
+}
+
+#[test]
+fn abort_is_reported() {
+    assert_reported(&run_with_trigger("abort", &[]), "SIGABRT", libc::SIGABRT);
 }
 
 #[test]

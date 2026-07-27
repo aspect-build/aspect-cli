@@ -193,6 +193,7 @@ dependencies = [
  "anyhow",
  "aspect-telemetry",
  "axl-runtime",
+ "backtrace",
  "chrono",
  "clap",
  "dirs",

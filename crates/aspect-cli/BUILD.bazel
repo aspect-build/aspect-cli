@@ -18,6 +18,7 @@ rust_binary(
         "//crates/aspect-telemetry",
         "//crates/axl-runtime",
         "@crates//:anyhow",
+        "@crates//:backtrace",
         "@crates//:base64",
         "@crates//:chrono",
         "@crates//:clap",
