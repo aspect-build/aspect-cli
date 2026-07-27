@@ -44,6 +44,7 @@ dirs = "6.0.0"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+backtrace = "0.3"
 
 [dev-dependencies]
 tempfile = "3"
