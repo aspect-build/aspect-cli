@@ -1188,9 +1188,10 @@ def _delivery_impl(ctx):
 
     # iter handles are created per attempt inside the retry loop. The
     # CLI-streamed `--bes-backend` sinks stream phase-1 events and are waited
-    # alongside the trait sinks (see `_get_output_shas`).
+    # alongside the trait sinks (see `_get_output_shas`). Announced under the
+    # first phase header below rather than here, so the lines land inside a
+    # phase instead of ahead of the task's first one.
     build_events = collect_bes_from_args(ctx) + list(bazel_trait.build_event_sinks)
-    announce_bes_sinks(ctx, build_events)
 
     for handler in bazel_trait.build_start:
         handler(ctx)
@@ -1235,6 +1236,11 @@ def _delivery_impl(ctx):
         phase = Phase(name = "resolve", description = "Resolve targets to deliver", emoji = "🎯"),
         subject = query_expr,
     )
+
+    # After the first phase line. Announced here rather than at the phase-1
+    # spawn because the sinks also stream when phase 1/2 are skipped.
+    announce_bes_sinks(ctx, build_events)
+
     if query_expr:
         # Echo the query so the resolved set (or failure) is attributable to it.
         info(ctx.std, "Running bazel query: {}".format(query_expr))

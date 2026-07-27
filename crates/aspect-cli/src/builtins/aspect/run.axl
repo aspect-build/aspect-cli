@@ -89,7 +89,6 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # and the target env so `r.spawn` replays them the way `bazel run` does.
     r = runnable(ctx, [target], rc = rc)
     bes_sinks = collect_bes_from_args(ctx) + list(bazel_trait.build_event_sinks)
-    announce_bes_sinks(ctx, bes_sinks)
     events = bazel.build_events.iterator()
     build_events = [events] + bes_sinks
 
@@ -108,6 +107,10 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         data = data,
         phase = Phase(name = "build", description = "Build run target", emoji = "🔨"),
     )
+
+    # After the phase line, so the streams are announced under the spawn they
+    # belong to.
+    announce_bes_sinks(ctx, bes_sinks)
 
     build = ctx.bazel.build(
         target,

@@ -321,7 +321,6 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # Pass build_event_sinks (carries the Aspect backend gRPC sink in CI) so the
     # "✨ Aspect Workflows" link resolves to a real record, not a 404.
     bes_sinks = collect_bes_from_args(ctx) + list(bazel_trait.build_event_sinks)
-    announce_bes_sinks(ctx, bes_sinks)
     events = bazel.build_events.iterator()
     build_events = [events] + bes_sinks
 
@@ -343,6 +342,10 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         data = data,
         phase = Phase(name = "build", description = "Build formatter", emoji = "🔨"),
     )
+
+    # After the phase line, so the streams are announced under the spawn they
+    # belong to.
+    announce_bes_sinks(ctx, bes_sinks)
 
     build = ctx.bazel.build(
         ctx.args.formatter_target,
