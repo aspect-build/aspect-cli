@@ -120,7 +120,12 @@ def announce_bes_sinks(ctx, sinks: list):
     streamed to it — so a `--bes-backend`, a deployment's BES, and the Workflows
     runner's env-injected backend are all visible at build start (the sinks are
     CLI-side gRPC streams, otherwise invisible in the Bazel command). The
-    end-of-build counterpart is `summarize_bes_upload`."""
+    end-of-build counterpart is `summarize_bes_upload`.
+
+    Call *after* the spawning phase's `task_update`, not before: the streams
+    belong to the spawn, so announcing first strands these lines above the phase
+    header they describe. Callers with a retry loop announce on the first attempt
+    only — a retry reuses the same sinks."""
     for sink in grpc_backends(sinks):
         info(ctx.std, "Streaming build events to %s." % sink.uri)
 

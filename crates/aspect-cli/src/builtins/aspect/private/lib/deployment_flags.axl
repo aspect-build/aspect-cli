@@ -182,7 +182,12 @@ def announce_deployment_flags(ctx, flags: DeploymentFlags):
     """Tell the user, in one line, which deployment's base-flag capabilities this
     bazel call is wired to (`--aspect-*`) and the endpoint each uses, so the
     injected --remote_cache / --remote_executor aren't silent. (BES is announced
-    separately by `announce_bes_sinks`.) No-op when nothing was injected."""
+    separately by `announce_bes_sinks`.) No-op when nothing was injected.
+
+    Call *after* the spawning phase's `task_update`, not before: the flags belong
+    to the bazel call, so announcing at resolve time strands this line above the
+    phase header it describes. Callers with a retry loop announce on the first
+    attempt only — a retry reuses the same flags."""
     if not flags.capabilities:
         return
     parts = [label + " (" + uri + ")" for (label, uri) in flags.capabilities]
