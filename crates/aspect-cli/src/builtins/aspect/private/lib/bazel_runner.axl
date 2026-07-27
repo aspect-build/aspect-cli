@@ -16,7 +16,7 @@ load("@aspect//bazel.axl", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
 load("@std//time.axl", "sleep_iter")
 load("./bazel_flags.axl", "aspect_endpoint_auth_flags", "resolve_bazel_announce")
 load("./bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "collapse_repro_targets", "failed_labels", "failed_labels_by_subcommand", "init_data", "now_ms", "process_event", bazel_conclusion = "conclusion")
-load("./bes_sinks.axl", "announce_bes_sinks", "collect_bes_from_args", "summarize_bes_upload")
+load("./bes_sinks.axl", "announce_bes_sinks", "bazel_bes_backend", "collect_bes_from_args", "drop_bazel_streamed_sinks", "summarize_bes_upload")
 load("./deployment_flags.axl", "announce_deployment_flags", "deployment_endpoint_flags")
 load("./health_check.axl", "HealthCheckTrait")
 load("./lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "setup_phase", "task_update")
@@ -308,11 +308,12 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
 
     # Every CLI-streamed BES sink: explicit `--bes-backend`, the deployment's BES,
     # and the trait's own sinks (the Workflows runner's env-injected backend).
-    # Announced with the first spawn below (the streams belong to the spawn) and
-    # summarized at build end.
-    bes_sinks = collect_bes_from_args(ctx, extra_backends = deployment.bes_backends)
+    # Any that names the endpoint Bazel's own `--bes_backend` already uploads to
+    # is dropped, so the invocation is streamed once. Announced with the first
+    # spawn below (the streams belong to the spawn) and summarized at build end.
+    bes_sinks = collect_bes_from_args(ctx, extra_backends = deployment.bes_backends, rc = rc, command = command)
     if bazel_trait.build_event_sinks:
-        bes_sinks.extend(bazel_trait.build_event_sinks)
+        bes_sinks.extend(drop_bazel_streamed_sinks(ctx, bazel_trait.build_event_sinks, bazel_bes_backend(rc, command)))
     need_bes = bool(bazel_trait.build_event) or bool(lifecycle.task_update)
 
     # Per-invocation extras: inject `--remote_header` / `--bes_header` auth for an

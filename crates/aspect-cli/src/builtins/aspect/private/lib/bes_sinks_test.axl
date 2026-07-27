@@ -1,15 +1,30 @@
-"""Tests for `lib/bes_sinks.axl` — the BES upload summary line and the gRPC-sink
-filter shared by the announce/summary helpers.
+"""Tests for `lib/bes_sinks.axl` — the BES upload summary line, the gRPC-sink
+filter shared by the announce/summary helpers, and the duplicate-stream drop that
+keeps the CLI from streaming to an endpoint Bazel's own `--bes_backend` already
+uploads to.
 
 Run with:
   aspect dev test-bes-sinks
 """
 
-load("./bes_sinks.axl", "bes_upload_line", "grpc_backends")
+load("./bes_sinks.axl", "bazel_bes_backend", "bes_upload_line", "drop_bazel_streamed", "drop_bazel_streamed_sinks", "grpc_backends")
 
 def _eq(label, got, want):
     if got != want:
         fail("%s: got %r, want %r" % (label, got, want))
+
+def _fake_ctx():
+    """Stand-in for `ctx`: the drop helpers touch it only to `info(ctx.std, …)`,
+    which reads `std.io.stdout.is_tty` and `std.env.var` to decide on color."""
+    return struct(std = struct(
+        io = struct(stdout = struct(is_tty = False)),
+        env = struct(var = lambda name: None),
+    ))
+
+def _fake_rc(values):
+    """Stand-in for a `RunCommand`: `bazel_bes_backend` calls only `flag_value`.
+    `values` maps a flag name to its effective value."""
+    return struct(flag_value = lambda name, command: values.get(name))
 
 def _test_clean_stream(_):
     """A clean stream reports the sent count and names the backend."""
@@ -94,6 +109,66 @@ def _test_grpc_backends_filters_file_sinks(_):
     _eq("only gRPC-backend sinks survive", [s.uri for s in got], ["grpcs://bes.a", "grpcs://bes.b"])
     _eq("no gRPC sinks → empty", grpc_backends([file_sink]), [])
 
+def _test_bazel_bes_backend(_):
+    """The effective Bazel `--bes_backend` is read off the run command; a missing
+    flag or absent run command both mean "Bazel is not uploading"."""
+    rc = _fake_rc({"--bes_backend": "grpcs://bes.acme.aspect.build"})
+    _eq("flag set", bazel_bes_backend(rc, "build"), "grpcs://bes.acme.aspect.build")
+    _eq("flag unset", bazel_bes_backend(_fake_rc({}), "build"), "")
+    _eq("no run command", bazel_bes_backend(None, "build"), "")
+
+def _test_drop_bazel_streamed(_):
+    """A CLI backend naming the same endpoint as Bazel's `--bes_backend` is
+    dropped — the duplicate-stream fix — while others survive."""
+    ctx = _fake_ctx()
+    backends = ["grpcs://bes.acme.aspect.build", "grpcs://bes.other.example.com"]
+
+    _eq(
+        "exact match dropped",
+        drop_bazel_streamed(ctx, backends, "grpcs://bes.acme.aspect.build"),
+        ["grpcs://bes.other.example.com"],
+    )
+
+    # The customer's case: the runner injects the implicit-port spelling while the
+    # user writes `:443` (or the reverse). Both name one endpoint.
+    _eq(
+        "default port spelled out still matches",
+        drop_bazel_streamed(ctx, backends, "grpcs://bes.acme.aspect.build:443"),
+        ["grpcs://bes.other.example.com"],
+    )
+    _eq(
+        "explicit-port backend vs implicit bazel flag",
+        drop_bazel_streamed(ctx, ["grpcs://bes.acme.aspect.build:443"], "grpcs://bes.acme.aspect.build"),
+        [],
+    )
+
+    _eq("unrelated backend kept", drop_bazel_streamed(ctx, backends, "grpcs://bes.third.example.com"), backends)
+    _eq("different port kept", drop_bazel_streamed(ctx, backends, "grpcs://bes.acme.aspect.build:8980"), backends)
+    _eq("no bazel backend is a no-op", drop_bazel_streamed(ctx, backends, ""), backends)
+    _eq("empty backend list", drop_bazel_streamed(ctx, [], "grpcs://bes.acme.aspect.build"), [])
+
+def _test_drop_bazel_streamed_sinks(_):
+    """The already-built-sink variant drops the same duplicates (the Workflows
+    runner's env-injected backend) but never a file sink, which is a local BEP
+    dump rather than a second upload."""
+    ctx = _fake_ctx()
+    workflows = struct(uri = "grpcs://bes.acme.aspect.build")
+    other = struct(uri = "grpcs://bes.other.example.com")
+    file_sink = struct(uri = None)
+    sinks = [workflows, file_sink, other]
+
+    _eq(
+        "duplicate gRPC sink dropped, file sink kept",
+        [s.uri for s in drop_bazel_streamed_sinks(ctx, sinks, "grpcs://bes.acme.aspect.build:443")],
+        [None, "grpcs://bes.other.example.com"],
+    )
+    _eq("no bazel backend is a no-op", drop_bazel_streamed_sinks(ctx, sinks, ""), sinks)
+    _eq(
+        "file sink alone survives",
+        drop_bazel_streamed_sinks(ctx, [file_sink], "grpcs://bes.acme.aspect.build"),
+        [file_sink],
+    )
+
 _UNIT_TESTS = [
     _test_clean_stream,
     _test_failed_stream,
@@ -101,6 +176,9 @@ _UNIT_TESTS = [
     _test_connect_failure,
     _test_missing_uri,
     _test_grpc_backends_filters_file_sinks,
+    _test_bazel_bes_backend,
+    _test_drop_bazel_streamed,
+    _test_drop_bazel_streamed_sinks,
 ]
 
 def _test_impl(ctx):

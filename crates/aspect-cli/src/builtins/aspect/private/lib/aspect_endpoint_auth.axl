@@ -15,6 +15,10 @@ the best-effort bearer resolution; the consumers attach the result —
 `--bes_header` / `--remote_header` flag. Best-effort: an owned endpoint with no
 usable credential warns and proceeds unauthenticated rather than failing (the
 server's own rejection then surfaces downstream).
+
+It also owns endpoint identity — `endpoint_authority` / `same_bes_endpoint`,
+used by `bes_sinks.axl` to recognize when a CLI-streamed backend is the same
+endpoint Bazel's own `--bes_backend` already uploads to.
 """
 
 load("./environment.axl", "warn")
@@ -47,6 +51,47 @@ def endpoint_host(uri: str) -> str:
     if ":" in rest:
         rest = rest.rsplit(":", 1)[0]
     return rest.lower()
+
+_DEFAULT_PORTS = {
+    "grpcs": "443",
+    "https": "443",
+    "grpc": "80",
+    "http": "80",
+}
+
+def endpoint_authority(uri: str) -> str:
+    """The `host:port` authority of an endpoint URI, with the scheme's default
+    port made explicit so equivalent spellings compare equal.
+
+    `grpcs://bes.example.com`, `grpcs://bes.example.com:443`, and
+    `bes.example.com:443` all normalize to `bes.example.com:443`. A schemeless
+    URI with no port has no default to apply, so only its host is returned —
+    matching Bazel, which cannot dial it without a port either.
+    """
+    rest = uri.strip()
+    scheme = ""
+    sep = rest.find("://")
+    if sep != -1:
+        scheme = rest[:sep].lower()
+        rest = rest[sep + 3:]
+    rest = rest.split("/")[0]
+    if "@" in rest:
+        rest = rest.split("@")[-1]
+
+    if ":" in rest:
+        (host, _, port) = rest.rpartition(":")
+        return host.lower() + ":" + port
+    return rest.lower() + ":" + _DEFAULT_PORTS[scheme] if scheme in _DEFAULT_PORTS else rest.lower()
+
+def same_bes_endpoint(a: str, b: str) -> bool:
+    """Whether two BES backend URIs address the same endpoint.
+
+    Compares normalized authorities (see `endpoint_authority`), so a default port
+    written out explicitly still matches. Scheme is deliberately ignored: `grpc://`
+    vs `grpcs://` on the same host:port is a TLS misconfiguration, not a second
+    backend, and streaming twice to it is still a duplicate.
+    """
+    return bool(a) and bool(b) and endpoint_authority(a) == endpoint_authority(b)
 
 def is_aspect_host(ctx, host: str) -> bool:
     """Whether `host` is owned by a configured deployment (its advertised
