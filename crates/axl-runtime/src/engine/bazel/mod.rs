@@ -1074,7 +1074,7 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
     /// * `retry_max_buffer_bytes` - Byte budget for the in-flight unacked
     ///   replay buffer. Exceeding it evicts the oldest retained events, which
     ///   costs replay coverage on a later reconnect but never fails the
-    ///   upload. Unset uses `ASPECT_BES_RETRY_MAX_BUFFER_BYTES` if set,
+    ///   upload. Unset uses `ASPECT_CLI_BES_RETRY_MAX_BUFFER_BYTES` if set,
     ///   otherwise 256 MiB.
     /// * `timeout` - Overall upload deadline (default `"0s"` = no deadline).
     #[starlark(as_type = build::BuildEventSink)]
@@ -1091,7 +1091,7 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
             anyhow::bail!("max_retries must be >= 0, got {max_retries}");
         }
         // Unset falls through to the env-aware default so a runner-level
-        // `ASPECT_BES_RETRY_MAX_BUFFER_BYTES` applies to tasks that don't pin
+        // `ASPECT_CLI_BES_RETRY_MAX_BUFFER_BYTES` applies to tasks that don't pin
         // the knob; an explicit value always wins over the environment.
         let retry_max_buffer_bytes = match retry_max_buffer_bytes {
             NoneOr::Other(n) if n <= 0 => {

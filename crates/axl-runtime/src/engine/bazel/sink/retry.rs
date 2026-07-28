@@ -39,7 +39,7 @@ pub const DEFAULT_RETRY_MAX_BUFFER_BYTES: usize = 256 * 1024 * 1024;
 /// the build: a memory-constrained runner may want less, and a fleet that
 /// routinely streams very large events may want more. Setting it per-runner
 /// avoids having to thread a flag through every task definition.
-pub const RETRY_MAX_BUFFER_BYTES_ENV: &str = "ASPECT_BES_RETRY_MAX_BUFFER_BYTES";
+pub const RETRY_MAX_BUFFER_BYTES_ENV: &str = "ASPECT_CLI_BES_RETRY_MAX_BUFFER_BYTES";
 
 /// Parse a byte size: a plain count (`1048576`) or a suffixed value (`512MB`,
 /// `1GiB`). Suffixes are binary multiples; `KB` and `KiB` are both 1024. Case-
@@ -588,6 +588,31 @@ mod tests {
         assert!(
             parse_byte_size("99999999999999999999GB").is_err(),
             "overflow must be an error, not a wrap"
+        );
+    }
+
+    /// End-to-end check that the resolver reads the real environment variable
+    /// under its documented name — the unit tests below exercise the fallback
+    /// rules but would keep passing if `RETRY_MAX_BUFFER_BYTES_ENV` were
+    /// misspelled or `default_retry_max_buffer_bytes` stopped consulting it.
+    ///
+    /// Cannot call `default_retry_max_buffer_bytes` itself: it caches in a
+    /// process-wide `OnceLock`, so the value it returns depends on whichever
+    /// test touched it first. This drives the same path with an explicit read.
+    #[test]
+    fn env_var_name_is_read_from_the_environment() {
+        // SAFETY: single-threaded within this test, and the value is removed
+        // before returning so no other test observes it.
+        unsafe { std::env::set_var(RETRY_MAX_BUFFER_BYTES_ENV, "7MB") };
+        let raw = std::env::var(RETRY_MAX_BUFFER_BYTES_ENV).ok();
+        let (bytes, warning) = resolve_buffer_bytes_override(raw.as_deref());
+        unsafe { std::env::remove_var(RETRY_MAX_BUFFER_BYTES_ENV) };
+
+        assert_eq!(bytes, 7 * 1024 * 1024);
+        assert!(warning.is_none());
+        assert_eq!(
+            RETRY_MAX_BUFFER_BYTES_ENV, "ASPECT_CLI_BES_RETRY_MAX_BUFFER_BYTES",
+            "the documented variable name is part of the public interface"
         );
     }
 

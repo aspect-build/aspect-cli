@@ -113,7 +113,7 @@ def _workflows_impl(ctx: FeatureContext):
         bessie_sinks = []
         if environment.build_events and environment.build_events.backend:
             # 0 means "not set on the command line": leave the arg off so the
-            # runtime resolves it from ASPECT_BES_RETRY_MAX_BUFFER_BYTES (or
+            # runtime resolves it from ASPECT_CLI_BES_RETRY_MAX_BUFFER_BYTES (or
             # the built-in default). Passing it unconditionally would make this
             # flag's default silently outrank the runner's environment.
             buffer_bytes = ctx.args.bes_retry_max_buffer_bytes
@@ -162,7 +162,7 @@ Workflows = feature(
                           "buffer. Exceeding it evicts the oldest retained " +
                           "events, so a later reconnect replays an incomplete " +
                           "range; the upload itself continues. 0 (the default) " +
-                          "defers to ASPECT_BES_RETRY_MAX_BUFFER_BYTES, or " +
+                          "defers to ASPECT_CLI_BES_RETRY_MAX_BUFFER_BYTES, or " +
                           "256MiB when that is unset.",
         ),
         "bes_timeout": args.string(
