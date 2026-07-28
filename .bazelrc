@@ -17,6 +17,15 @@ common:release --workspace_status_command "${PWD}/bazel/workspace_status.sh"
 common:release --compilation_mode=opt
 common:release --@rules_rust//rust/settings:lto=fat
 
+# TEMPORARY (diagnostic release): compile every crate — including third-party
+# ones such as starlark — with debug assertions on, so a corrupt allocation
+# panics where it happens instead of surfacing later as an allocator abort with
+# no useful stack. This enables `debug_assert!` (notably starlark's arena bounds
+# checks and `Alloca::assert_state`) plus arithmetic overflow checks. Costs
+# ~3.4MB (+7%) on the musl release binary. Remove once the lint segfault under
+# investigation is diagnosed.
+common:release --@rules_rust//rust/settings:extra_rustc_flags=-Cdebug-assertions=y
+
 # Don't stop at the first failure on CI — surface every failing target/test in
 # one run (a failed build action otherwise aborts the test phase before any
 # test executes). Applied via `--config=ci`, injected by .aspect/config.axl when
