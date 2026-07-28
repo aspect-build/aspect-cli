@@ -6,6 +6,17 @@ mod helpers;
 mod trace;
 mod trace_buffer;
 
+/// Use mimalloc rather than the platform allocator.
+///
+/// The Linux release binaries are static-musl, whose mallocng is markedly
+/// slower than mimalloc under the allocation patterns this CLI produces —
+/// parsing tens of thousands of build events, and building large Starlark
+/// heaps — and takes a single global lock across every thread. mimalloc keeps
+/// per-thread free lists, so the BES/sink/probe threads stop contending with
+/// the Starlark thread on every allocation.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;

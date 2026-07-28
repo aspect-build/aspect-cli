@@ -126,6 +126,26 @@ mod unix {
                 .join()
                 .ok();
             }
+            // Crash during process teardown, after `main` has returned: the
+            // libc exit path runs atexit handlers and static destructors, and
+            // a fault there must still be reported.
+            Ok("segv-atexit") => {
+                extern "C" fn boom() {
+                    // SAFETY: intentional null write to raise SIGSEGV.
+                    unsafe { std::ptr::null_mut::<u8>().write_volatile(1) }
+                }
+                // SAFETY: registering an atexit handler.
+                unsafe { libc::atexit(boom) };
+            }
+            // Crash on a detached thread while the main thread is exiting —
+            // the shape of a background reader still running at teardown.
+            Ok("segv-detached-at-exit") => {
+                std::thread::spawn(|| {
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    // SAFETY: intentional null write to raise SIGSEGV.
+                    unsafe { std::ptr::null_mut::<u8>().write_volatile(1) }
+                });
+            }
             _ => {}
         }
     }
