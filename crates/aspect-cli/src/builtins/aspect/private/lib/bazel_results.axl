@@ -287,6 +287,11 @@ def init_data():
         # bazel_runner.axl after Build::spawn; "" when no sinks. Differs from
         # build_started.uuid (Bazel's server-side UUID).
         "sink_invocation_id": "",
+        # True when the CLI's sink to the Aspect BES backend was suppressed
+        # because Bazel uploads there itself, so no sink id is minted and
+        # `resolve_aspect_url` must key on Bazel's invocation_id instead. Set by
+        # the task before spawning; see bes_sinks.axl::drop_bazel_streamed.
+        "bes_streamed_by_bazel": False,
         # Producer-authored at terminal-emit time. Each entry {command, description};
         # see lib/repro_commands.axl.
         "repro_commands": [],
@@ -453,13 +458,16 @@ def process_event(data, event):
 
     if kind == "build_started":
         # Reset state for the new stream (handles retries). Preserve the
-        # task-managed sink_invocation_id (set before this event) — wiping it
-        # would drop the Aspect Workflows link from every annotation.
+        # task-managed sink_invocation_id and bes_streamed_by_bazel (both set
+        # before this event) — wiping either would drop the Aspect Workflows
+        # link from every annotation.
         preserved_sink_id = data.get("sink_invocation_id", "") or ""
+        preserved_bazel_streamed = data.get("bes_streamed_by_bazel", False)
         fresh = init_data()
         for k in fresh:
             data[k] = fresh[k]
         data["sink_invocation_id"] = preserved_sink_id
+        data["bes_streamed_by_bazel"] = preserved_bazel_streamed
 
         payload = event.payload
         uuid = bes_get(payload, "uuid", "") or ""
@@ -932,15 +940,23 @@ def _join_url(base, id):
 def resolve_aspect_url(links, data):
     """Return the Aspect Web UI URL for an invocation, or "" if unavailable.
 
-    Keyed on `sink_invocation_id`, NOT Bazel's `invocation_id`: the Aspect Web
-    UI indexes by the UUID the gRPC sink (`stream_sink.rs`) mints up-front when
-    spawning BES subscribers — that's the stream-level id the backend sees;
-    Bazel's own UUID is unknown to the backend (would 404).
+    Normally keyed on `sink_invocation_id`, NOT Bazel's `invocation_id`: the
+    Aspect Web UI indexes by the UUID the gRPC sink (`stream_sink.rs`) mints
+    up-front when spawning BES subscribers — that's the stream-level id the
+    backend sees; Bazel's own UUID is unknown to the backend (would 404).
 
     Tasks with sinks active set `data["sink_invocation_id"]` from
     `build.sink_invocation_id` right after `ctx.bazel.build(...)` (the runtime
-    mints it inside `Build::spawn`). See `bazel_runner.axl`. Without sinks the
-    field is empty and we suppress the link.
+    mints it inside `Build::spawn`). See `bazel_runner.axl`.
+
+    The exception is `bes_streamed_by_bazel`: when the CLI sink was suppressed
+    because Bazel uploads to that same backend itself (see
+    `bes_sinks.axl::drop_bazel_streamed`), no sink id is minted, but the backend
+    *does* have the invocation — indexed under Bazel's own UUID, since Bazel is
+    the uploader. Keying on `data["bazel"]["invocation_id"]` there keeps the link
+    alive instead of dropping it for exactly the users who wired BES up twice.
+
+    Without either id the link is suppressed.
 
     `links["results_base_url"]` (from `WorkflowsEnvironment.build_events.results_url`)
     is the prefix, joined as `{base}/{id}` (no `/invocations/` segment). Typical:
@@ -950,6 +966,8 @@ def resolve_aspect_url(links, data):
     if not base:
         return ""
     inv_id = data.get("sink_invocation_id", "") or ""
+    if not inv_id and data.get("bes_streamed_by_bazel"):
+        inv_id = data.get("bazel", {}).get("invocation_id", "") or ""
     if not inv_id:
         return ""
     return _join_url(base, inv_id)

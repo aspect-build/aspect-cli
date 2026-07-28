@@ -16,7 +16,7 @@ load("@aspect//bazel.axl", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
 load("@std//time.axl", "sleep_iter")
 load("./bazel_flags.axl", "aspect_endpoint_auth_flags", "resolve_bazel_announce")
 load("./bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "collapse_repro_targets", "failed_labels", "failed_labels_by_subcommand", "init_data", "now_ms", "process_event", bazel_conclusion = "conclusion")
-load("./bes_sinks.axl", "announce_bes_sinks", "bazel_bes_backend", "collect_bes_from_args", "drop_bazel_streamed_sinks", "summarize_bes_upload")
+load("./bes_sinks.axl", "announce_bes_sinks", "aspect_bes_streamed_by_bazel", "bazel_bes_backend", "collect_bes_from_args", "drop_bazel_streamed_sinks", "summarize_bes_upload")
 load("./deployment_flags.axl", "announce_deployment_flags", "deployment_endpoint_flags")
 load("./health_check.axl", "HealthCheckTrait")
 load("./lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "setup_phase", "task_update")
@@ -311,9 +311,14 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
     # Any that names the endpoint Bazel's own `--bes_backend` already uploads to
     # is dropped, so the invocation is streamed once. Announced with the first
     # spawn below (the streams belong to the spawn) and summarized at build end.
+    bazel_backend = bazel_bes_backend(rc, command)
     bes_sinks = collect_bes_from_args(ctx, extra_backends = deployment.bes_backends, rc = rc, command = command)
     if bazel_trait.build_event_sinks:
-        bes_sinks.extend(drop_bazel_streamed_sinks(ctx, bazel_trait.build_event_sinks, bazel_bes_backend(rc, command)))
+        bes_sinks.extend(drop_bazel_streamed_sinks(ctx, bazel_trait.build_event_sinks, bazel_backend))
+
+    # No sink to the Aspect backend means no sink id is minted, so the Web UI
+    # link has to key on Bazel's invocation_id instead (Bazel is the uploader).
+    data["bes_streamed_by_bazel"] = aspect_bes_streamed_by_bazel(ctx, bazel_backend)
     need_bes = bool(bazel_trait.build_event) or bool(lifecycle.task_update)
 
     # Per-invocation extras: inject `--remote_header` / `--bes_header` auth for an
@@ -360,9 +365,12 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
 
             # Re-init for the new attempt; `process_event` increments
             # BES counters in-place, so without a fresh dict the retry
-            # would double-count everything from the failed run.
+            # would double-count everything from the failed run. The
+            # bazel-streams-BES verdict is a property of the flags, not the
+            # attempt, so it carries over.
             data = init_data()
             data["bazel_attempts"] = prior_attempts
+            data["bes_streamed_by_bazel"] = aspect_bes_streamed_by_bazel(ctx, bazel_backend)
 
         spawn_status = _pick_status(command, data, had_failure = False, terminal = False)
         task_update(

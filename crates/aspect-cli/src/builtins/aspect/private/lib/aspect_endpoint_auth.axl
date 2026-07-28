@@ -63,13 +63,14 @@ def endpoint_authority(uri: str) -> str:
     """The `host:port` authority of an endpoint URI, with the scheme's default
     port made explicit so equivalent spellings compare equal.
 
-    `grpcs://bes.example.com`, `grpcs://bes.example.com:443`, and
-    `bes.example.com:443` all normalize to `bes.example.com:443`. A schemeless
-    URI with no port has no default to apply, so only its host is returned —
-    matching Bazel, which cannot dial it without a port either.
+    `grpcs://bes.example.com`, `grpcs://bes.example.com:443`, `bes.example.com`,
+    and `bes.example.com:443` all normalize to `bes.example.com:443`. Bazel
+    documents these endpoints as `[SCHEME://]HOST[:PORT]` and assumes `grpcs`
+    when the scheme is omitted, so a schemeless URI takes the same :443 default.
+    An unrecognized scheme has no default to apply and yields the bare host.
     """
     rest = uri.strip()
-    scheme = ""
+    scheme = "grpcs"
     sep = rest.find("://")
     if sep != -1:
         scheme = rest[:sep].lower()

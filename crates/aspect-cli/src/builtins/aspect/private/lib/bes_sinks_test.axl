@@ -7,18 +7,20 @@ Run with:
   aspect dev test-bes-sinks
 """
 
-load("./bes_sinks.axl", "bazel_bes_backend", "bes_upload_line", "drop_bazel_streamed", "drop_bazel_streamed_sinks", "grpc_backends")
+load("./bes_sinks.axl", "aspect_bes_streamed_by_bazel", "bazel_bes_backend", "bes_upload_line", "drop_bazel_streamed", "drop_bazel_streamed_sinks", "grpc_backends")
 
 def _eq(label, got, want):
     if got != want:
         fail("%s: got %r, want %r" % (label, got, want))
 
-def _fake_ctx():
+def _fake_ctx(env = {}):
     """Stand-in for `ctx`: the drop helpers touch it only to `info(ctx.std, …)`,
-    which reads `std.io.stdout.is_tty` and `std.env.var` to decide on color."""
+    which reads `std.io.stdout.is_tty` and `std.env.var` to decide on color;
+    `aspect_bes_streamed_by_bazel` additionally reads
+    `ASPECT_WORKFLOWS_BES_BACKEND` out of `env`."""
     return struct(std = struct(
         io = struct(stdout = struct(is_tty = False)),
-        env = struct(var = lambda name: None),
+        env = struct(var = lambda name: env.get(name)),
     ))
 
 def _fake_rc(values):
@@ -169,6 +171,33 @@ def _test_drop_bazel_streamed_sinks(_):
         [file_sink],
     )
 
+def _test_aspect_bes_streamed_by_bazel(_):
+    """True only when Bazel's `--bes_backend` is the runner's own Aspect BES
+    backend — the case where the Web UI still holds the invocation (under
+    Bazel's id) despite the CLI sink being suppressed."""
+    runner = {"ASPECT_WORKFLOWS_BES_BACKEND": "grpcs://bes.acme.aspect.build"}
+
+    _eq(
+        "bazel uploads to the Aspect backend",
+        aspect_bes_streamed_by_bazel(_fake_ctx(runner), "grpcs://bes.acme.aspect.build"),
+        True,
+    )
+    _eq(
+        "default-port spelling still matches",
+        aspect_bes_streamed_by_bazel(_fake_ctx(runner), "bes.acme.aspect.build:443"),
+        True,
+    )
+
+    # Suppressing a third-party BES says nothing about what the Aspect UI holds,
+    # so the link must stay keyed on the (absent) sink id and be dropped.
+    _eq(
+        "bazel uploads elsewhere",
+        aspect_bes_streamed_by_bazel(_fake_ctx(runner), "grpcs://bes.buildbuddy.io"),
+        False,
+    )
+    _eq("no bazel backend", aspect_bes_streamed_by_bazel(_fake_ctx(runner), ""), False)
+    _eq("off a runner", aspect_bes_streamed_by_bazel(_fake_ctx(), "grpcs://bes.acme.aspect.build"), False)
+
 _UNIT_TESTS = [
     _test_clean_stream,
     _test_failed_stream,
@@ -179,6 +208,7 @@ _UNIT_TESTS = [
     _test_bazel_bes_backend,
     _test_drop_bazel_streamed,
     _test_drop_bazel_streamed_sinks,
+    _test_aspect_bes_streamed_by_bazel,
 ]
 
 def _test_impl(ctx):

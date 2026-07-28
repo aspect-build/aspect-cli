@@ -1184,6 +1184,70 @@ def _test_aspect_web_ui_url(ctx):
     env.set_var("ASPECT_WORKFLOWS_BES_RESULTS_URL", "")
     _eq("aspect_web_ui_url empty without base", aspect_web_ui_url(env, {"sink_invocation_id": "abc-123"}), "")
 
+def _test_aspect_web_ui_url_bazel_streamed(ctx):
+    """When the CLI sink was suppressed because Bazel uploads to the same Aspect
+    backend, no sink id is minted — the link keys on Bazel's invocation_id
+    instead, since Bazel is what the backend indexed the invocation under."""
+    env = ctx.std.env
+    env.set_var("ASPECT_WORKFLOWS_BES_RESULTS_URL", "https://app.oss.aspect.build")
+    bazel_streamed = {
+        "sink_invocation_id": "",
+        "bes_streamed_by_bazel": True,
+        "bazel": {"invocation_id": "bazel-uuid-1"},
+    }
+    _eq(
+        "falls back to bazel's invocation id",
+        aspect_web_ui_url(env, bazel_streamed),
+        "https://app.oss.aspect.build/bazel-uuid-1",
+    )
+
+    # Without the flag the sink id is the only key; a bare Bazel id would 404,
+    # so the link stays suppressed.
+    _eq(
+        "no fallback when the flag is unset",
+        aspect_web_ui_url(env, {"sink_invocation_id": "", "bazel": {"invocation_id": "bazel-uuid-1"}}),
+        "",
+    )
+    _eq(
+        "no fallback before build_started supplies the id",
+        aspect_web_ui_url(env, {"sink_invocation_id": "", "bes_streamed_by_bazel": True, "bazel": {}}),
+        "",
+    )
+
+    # A live sink still wins: its id is what that backend indexed.
+    _eq(
+        "sink id takes precedence",
+        aspect_web_ui_url(env, {
+            "sink_invocation_id": "sink-1",
+            "bes_streamed_by_bazel": True,
+            "bazel": {"invocation_id": "bazel-uuid-1"},
+        }),
+        "https://app.oss.aspect.build/sink-1",
+    )
+
+def _test_build_started_preserves_bazel_streamed(ctx):
+    """`process_event`'s build_started reset wipes top-level state for the new
+    stream; `bes_streamed_by_bazel` is task-managed and set before the event, so
+    like `sink_invocation_id` it must survive — otherwise a retry silently drops
+    the Aspect link.
+
+    `bes_get` is a `getattr`, so a struct stands in for the BES event."""
+    data = init_data()
+    data["sink_invocation_id"] = "sink-1"
+    data["bes_streamed_by_bazel"] = True
+    process_event(data, struct(
+        kind = "build_started",
+        payload = struct(
+            uuid = "bazel-uuid-1",
+            build_tool_version = "9.0.1",
+            command = "build",
+            start_time_millis = 1000,
+        ),
+    ))
+    _eq("sink id preserved", data["sink_invocation_id"], "sink-1")
+    _eq("bazel-streamed flag preserved", data["bes_streamed_by_bazel"], True)
+    _eq("bazel invocation id captured", data["bazel"]["invocation_id"], "bazel-uuid-1")
+
 def _test_render_bes_url(ctx):
     """`render_bes_url` joins data['bazel'] bes_results_url + invocation_id,
     and returns "" when either half is missing."""
@@ -1263,6 +1327,8 @@ _UNIT_TESTS = [
     _test_render_summary_or_fallback_degrades,
     _test_status_maps_cover_every_terminal_status,
     _test_aspect_web_ui_url,
+    _test_aspect_web_ui_url_bazel_streamed,
+    _test_build_started_preserves_bazel_streamed,
     _test_render_bes_url,
     _test_failed_status_without_failure_bucket,
     _test_failed_status_with_explicit_action_failure,

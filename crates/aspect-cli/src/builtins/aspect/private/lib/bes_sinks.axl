@@ -87,6 +87,21 @@ def drop_bazel_streamed_sinks(ctx, sinks: list, bazel_backend: str) -> list:
             kept.append(sink)
     return kept
 
+def aspect_bes_streamed_by_bazel(ctx, bazel_backend: str) -> bool:
+    """Whether Bazel's own `--bes_backend` is the Aspect BES backend this runner
+    reports results for — i.e. the CLI's sink to it was (or would be) suppressed,
+    yet the Aspect Web UI still holds the invocation because Bazel uploaded it.
+
+    Callers set `data["bes_streamed_by_bazel"]` from this so `resolve_aspect_url`
+    keys the link on Bazel's `invocation_id` rather than the sink id that was
+    never minted. Gated on the runner's own `ASPECT_WORKFLOWS_BES_BACKEND`:
+    suppressing a third-party BES says nothing about what the Aspect UI has.
+    """
+    if not bazel_backend:
+        return False
+    aspect_backend = ctx.std.env.var("ASPECT_WORKFLOWS_BES_BACKEND") or ""
+    return same_bes_endpoint(aspect_backend, bazel_backend)
+
 def bazel_bes_backend(rc, command: str) -> str:
     """The effective `--bes_backend` Bazel itself will upload to, or `""`.
 

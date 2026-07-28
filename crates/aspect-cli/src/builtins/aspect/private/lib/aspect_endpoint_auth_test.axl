@@ -44,9 +44,10 @@ def _test_endpoint_authority(_):
     _eq("uppercase lowered", endpoint_authority("GRPCS://BES.Aspect.Build"), "bes.aspect.build:443")
     _eq("surrounding space ignored", endpoint_authority("  grpcs://bes.aspect.build  "), "bes.aspect.build:443")
 
-    # No scheme and no port leaves no default to apply — Bazel could not dial it
-    # either, so the bare host is the most that can be said about it.
-    _eq("schemeless, portless", endpoint_authority("bes.aspect.build"), "bes.aspect.build")
+    # Bazel documents `[SCHEME://]HOST[:PORT]` and assumes grpcs with no scheme,
+    # so a bare host takes :443 — otherwise `--bes_backend=bes.example.com`
+    # would miss a `grpcs://bes.example.com` sink and both would stream.
+    _eq("schemeless, portless", endpoint_authority("bes.aspect.build"), "bes.aspect.build:443")
     _eq("unknown scheme, portless", endpoint_authority("unix://bes.aspect.build"), "bes.aspect.build")
 
 def _test_same_bes_endpoint(_):
@@ -69,6 +70,17 @@ def _test_same_bes_endpoint(_):
     )
     _eq("case insensitive", same_bes_endpoint("GRPCS://BES.ACME.ASPECT.BUILD", "grpcs://bes.acme.aspect.build"), True)
     _eq("path ignored", same_bes_endpoint("grpcs://bes.acme.aspect.build/x", "grpcs://bes.acme.aspect.build"), True)
+
+    # Bazel accepts a schemeless `--bes_backend` and assumes grpcs, so it must
+    # match the runner's `grpcs://` sink however the user spelled it.
+    _eq("schemeless bazel flag", same_bes_endpoint("grpcs://bes.acme.aspect.build", "bes.acme.aspect.build"), True)
+    _eq("schemeless both sides", same_bes_endpoint("bes.acme.aspect.build", "bes.acme.aspect.build:443"), True)
+    _eq(
+        "schemeless vs https sink",
+        same_bes_endpoint("https://bes.acme.aspect.build", "bes.acme.aspect.build"),
+        True,
+    )
+    _eq("schemeless, different host", same_bes_endpoint("grpcs://bes.a.aspect.build", "bes.b.aspect.build"), False)
 
     _eq("different host", same_bes_endpoint("grpcs://bes.a.aspect.build", "grpcs://bes.b.aspect.build"), False)
     _eq("different port", same_bes_endpoint("grpcs://bes.acme.aspect.build:8980", "grpcs://bes.acme.aspect.build"), False)
