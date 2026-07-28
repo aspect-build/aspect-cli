@@ -40,18 +40,20 @@ pub enum ClientError {
     Status(#[from] tonic::Status),
 }
 
+/// How Bazel's gRPC URI schemes map onto the HTTP ones tonic understands.
+const SCHEME_ALIASES: [(&str, &str); 2] = [("grpcs://", "https://"), ("grpc://", "http://")];
+
 /// The transport URI tonic can dial for a BES `endpoint`.
 ///
 /// `Channel::from_shared` only understands `http`/`https`, while Bazel spells a
-/// TLS BES backend `grpcs://` (and plaintext `grpc://`), so those are mapped to
-/// their HTTP equivalents. TLS follows from the resulting scheme: tonic applies
-/// the `tls_config` below only to an `https` URI, leaving `grpc://` plaintext.
+/// TLS BES backend `grpcs://` and a plaintext one `grpc://`. TLS then follows
+/// from the mapped scheme, since tonic applies a `tls_config` only to `https`.
 ///
 /// Confined to this function on purpose — the caller's `endpoint` string is also
 /// what user-facing logs report, and rewriting it there would tell a user their
 /// `grpcs://` backend is an `https://` one they never configured.
 fn transport_uri(endpoint: &str) -> String {
-    for (scheme, replacement) in [("grpcs://", "https://"), ("grpc://", "http://")] {
+    for (scheme, replacement) in SCHEME_ALIASES {
         if let Some(rest) = endpoint.strip_prefix(scheme) {
             return format!("{replacement}{rest}");
         }

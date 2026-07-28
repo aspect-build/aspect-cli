@@ -22,7 +22,7 @@ load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_flags.axl", "announce_bazel_args", "aspect_endpoint_auth_flags", "bazel_flag_args", "resolve_bazel_announce")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "bb_clientd_root", "file_uri_to_path", "now_ms", "process_event")
 load("./private/lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
-load("./private/lib/bes_sinks.axl", "announce_bes_sinks", "aspect_bes_streamed_by_bazel", "bazel_bes_backend", "bes_args", "collect_bes_from_args", "drop_bazel_streamed_sinks", "summarize_bes_upload")
+load("./private/lib/bes_sinks.axl", "announce_bes_sinks", "bes_args", "bes_streamed_by_bazel", "collect_bes_sinks", "summarize_bes_upload")
 load("./private/lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
 load("./private/lib/environment.axl", "color_enabled", "detect_ci", "error", "warn")
 load("./private/lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_changed_files_listing")
@@ -802,12 +802,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     for hook in lint_trait.lint_start:
         hook(ctx)
 
-    bazel_backend = bazel_bes_backend(rc, "build")
-    bes_sinks = collect_bes_from_args(ctx, rc = rc) + drop_bazel_streamed_sinks(ctx, bazel_trait.build_event_sinks, bazel_backend)
-
-    # No sink to the Aspect backend means no sink id is minted, so the Web UI
-    # link has to key on Bazel's invocation_id instead (Bazel is the uploader).
-    data["bes_streamed_by_bazel"] = aspect_bes_streamed_by_bazel(ctx, bazel_backend)
+    bes_sinks = collect_bes_sinks(ctx, bazel_trait, rc)
+    data["bes_streamed_by_bazel"] = bes_streamed_by_bazel(ctx, rc)
     events = bazel.build_events.iterator()
     build_events = [events] + bes_sinks
 

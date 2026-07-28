@@ -29,6 +29,7 @@ def _test_endpoint_host(_):
     _eq("userinfo stripped", endpoint_host("grpcs://user@bes.aspect.build"), "bes.aspect.build")
     _eq("userinfo + port", endpoint_host("grpcs://user:pw@bes.aspect.build:443/x"), "bes.aspect.build")
     _eq("uppercase lowered", endpoint_host("GRPCS://BES.ASPECT.BUILD"), "bes.aspect.build")
+    _eq("surrounding space ignored", endpoint_host("  grpcs://bes.aspect.build  "), "bes.aspect.build")
 
 def _test_endpoint_authority(_):
     """Authority extraction keeps the port and fills in the scheme's default, so
