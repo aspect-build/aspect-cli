@@ -30,7 +30,7 @@ load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "setup_phase", "task_update")
 load("./private/lib/lint_results.axl", "detect_lint_tool", lint_accumulate = "accumulate", lint_conclusion = "conclusion", lint_init_data = "init_data")
 load("./private/lib/repro_commands.axl", "build_aspect_command", "explicit_flags", "flavor_allows", "print_repro_and_fix", "repro_flavor_args", "repro_prefix", "task_cli_path")
-load("./private/lib/sarif.axl", "get_sarif_summary", "parse_sarif", "parse_sarif_diagnostics", "sarif_diagnostics")
+load("./private/lib/sarif.axl", "get_sarif_summary", "parse_sarif", "sarif_diagnostics")
 load("./private/lib/tar.axl", "tar_create")
 load("./private/lib/text.axl", "pluralize")
 load("./private/lib/tips.axl", "tips")
@@ -131,16 +131,16 @@ def parse_patch_hunks(content):
     `+++ b/<path>` side (leading `b/` stripped), lines 1-based inclusive.
     Empty list when unparseable — callers treat that as "leave the patch alone".
 
-    A hunk's declared line count is clamped to the number of lines the patch
-    actually contains. The count comes from the `@@` header, and a malformed or
-    truncated patch can declare a span far larger than its body; callers expand
-    each hunk to one entry per line, so an unclamped count would allocate
-    proportional to the declared number rather than the real one.
+    A hunk's declared line count is clamped to the number of lines in the
+    patch, since no hunk can cover more than that. The count comes from the
+    `@@` header, and a malformed or truncated patch can declare a span far
+    larger than its body; callers expand each hunk to one entry per line, so
+    an unclamped count allocates proportional to the declared number.
     """
     hunks = []
     current_file = ""
     lines = content.split("\n")
-    max_span = len(lines)
+    max_count = len(lines)
     for line in lines:
         if line.startswith("+++ "):
             rest = line[4:]
@@ -165,7 +165,7 @@ def parse_patch_hunks(content):
         if not (a_str.isdigit() and b_str.isdigit()):
             continue
         start = int(a_str)
-        count = min(int(b_str), max_span)
+        count = min(int(b_str), max_count)
         if count <= 0:
             continue
         hunks.append({
