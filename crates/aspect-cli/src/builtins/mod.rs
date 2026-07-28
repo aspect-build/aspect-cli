@@ -1,25 +1,31 @@
 //! Embedded built-in task tree extraction.
 //!
-//! Release builds embed the `src/builtins/aspect` tree via `include_dir!`
-//! and extract it to disk on first use so the AXL runtime can `load(...)`
-//! files by path. Debug builds skip extraction and point straight at the
-//! source tree.
+//! The `src/builtins/aspect` tree is embedded via `include_dir!` and
+//! extracted to disk on first use so the AXL runtime can `load(...)`
+//! files by path. Only cargo debug builds skip the embed and point
+//! straight at the source tree, so `.axl` edits apply without a
+//! recompile.
+//!
+//! The gate is `any(not(debug_assertions), feature = "bazel")`, not
+//! `debug_assertions` alone: every Bazel build sets the `bazel` feature
+//! (see `bazel/rust/defs.bzl`) and must embed regardless of assertion
+//! flags — the source-tree path only exists on the build machine.
 //!
 //! Extraction is crash-safe: writes go to a temp directory and are
 //! published with an atomic `rename`, gated by a `.complete` marker
 //! written last. See [`extract_aspect_builtins`] for the full protocol.
 
-#[cfg(any(not(debug_assertions), test))]
+#[cfg(any(not(debug_assertions), feature = "bazel", test))]
 use std::path::Path;
 use std::path::PathBuf;
 
-#[cfg(not(debug_assertions))]
+#[cfg(any(not(debug_assertions), feature = "bazel"))]
 use include_dir::{Dir, DirEntry, include_dir};
 
-#[cfg(not(debug_assertions))]
+#[cfg(any(not(debug_assertions), feature = "bazel"))]
 static ASPECT_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/src/builtins/aspect");
 
-#[cfg(debug_assertions)]
+#[cfg(all(debug_assertions, not(feature = "bazel")))]
 pub fn expand_builtins(
     _root_dir: PathBuf,
     _broot: PathBuf,
@@ -31,7 +37,7 @@ pub fn expand_builtins(
     )])
 }
 
-#[cfg(not(debug_assertions))]
+#[cfg(any(not(debug_assertions), feature = "bazel"))]
 pub fn expand_builtins(
     _root_dir: PathBuf,
     broot: PathBuf,
@@ -52,7 +58,7 @@ pub fn expand_builtins(
 
 /// Marker written into `{content_hash}/` after every file is flushed.
 /// Its presence is the sole signal that extraction is complete.
-#[cfg(any(not(debug_assertions), test))]
+#[cfg(any(not(debug_assertions), feature = "bazel", test))]
 const COMPLETE_MARKER: &str = ".complete";
 
 /// Atomically extract `files` into `{broot}/{content_hash}/aspect/` and
@@ -71,7 +77,7 @@ const COMPLETE_MARKER: &str = ".complete";
 /// Using rename (not `remove_dir_all`) for both the stale-cleanup and
 /// the publish step keeps every transition atomic, so a loser can
 /// never delete a winner's just-published tree.
-#[cfg(any(not(debug_assertions), test))]
+#[cfg(any(not(debug_assertions), feature = "bazel", test))]
 fn extract_aspect_builtins(
     broot: &Path,
     content_hash: &str,
@@ -100,7 +106,7 @@ fn extract_aspect_builtins(
 /// Write `files` into `tmp_dir/aspect/`, mark complete, and rename into
 /// `final_dir`. Splits the body of [`extract_aspect_builtins`] so the
 /// caller can centralize tmp-dir cleanup on any failure.
-#[cfg(any(not(debug_assertions), test))]
+#[cfg(any(not(debug_assertions), feature = "bazel", test))]
 fn write_and_publish(
     tmp_dir: &Path,
     final_dir: &Path,
@@ -133,7 +139,7 @@ fn write_and_publish(
 /// Best-effort throughout: a concurrent thread may have already
 /// trashed the same dir, or our trash-remove may race a sibling's
 /// remove. The post-rename marker check is the authoritative outcome.
-#[cfg(any(not(debug_assertions), test))]
+#[cfg(any(not(debug_assertions), feature = "bazel", test))]
 fn evict_stale_dir(final_dir: &Path) {
     use std::fs;
 
