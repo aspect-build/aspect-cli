@@ -1061,7 +1061,10 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
     /// numbers. The BES protocol's per-stream dedup makes replay safe.
     ///
     /// # Arguments
-    /// * `uri` - BES endpoint. `grpcs://` is rewritten to `https://`.
+    /// * `uri` - BES endpoint, kept verbatim: it is what `sink.uri` reports and
+    ///   what user-facing logs name. `grpcs://` / `grpc://` are mapped to their
+    ///   HTTP equivalents at dial time (see `build_event_stream::client`), TLS
+    ///   following from the scheme.
     /// * `metadata` - Headers attached to every request.
     /// * `max_retries` - Max consecutive reconnect attempts without ack
     ///   progress before giving up (default `4`). An attempt during which the
@@ -1100,7 +1103,7 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
             Some(timeout_dur)
         };
         Ok(build::BuildEventSink::new_grpc(
-            uri.replace("grpcs://", "https://"),
+            uri,
             HashMap::from_iter(metadata.entries),
             sink::retry::RetryConfig {
                 max_retries: max_retries as u32,
