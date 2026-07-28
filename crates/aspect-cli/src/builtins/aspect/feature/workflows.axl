@@ -117,7 +117,7 @@ def _workflows_impl(ctx: FeatureContext):
                 metadata = bes_metadata,
                 max_retries = ctx.args.bes_max_retries,
                 retry_min_delay = ctx.args.bes_retry_min_delay,
-                retry_max_buffer_size = ctx.args.bes_retry_max_buffer_size,
+                retry_max_buffer_bytes = ctx.args.bes_retry_max_buffer_bytes,
                 timeout = ctx.args.bes_timeout,
             ))
 
@@ -151,11 +151,12 @@ Workflows = feature(
                           "between BES reconnect attempts. Duration string " +
                           "(e.g. '500ms', '2s', '1m').",
         ),
-        "bes_retry_max_buffer_size": args.int(
-            default = 10000,
-            description = "Cap on the in-flight unacked BES retry buffer. " +
-                          "Exceeding this mid-stream is a terminal failure; " +
-                          "the sink logs to stderr and stops uploading.",
+        "bes_retry_max_buffer_bytes": args.int(
+            default = 268435456,
+            description = "Byte budget for the in-flight unacked BES replay " +
+                          "buffer. Exceeding it evicts the oldest retained " +
+                          "events, so a later reconnect replays an incomplete " +
+                          "range; the upload itself continues.",
         ),
         "bes_timeout": args.string(
             default = "0s",

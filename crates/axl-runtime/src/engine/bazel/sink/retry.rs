@@ -9,13 +9,24 @@
 //! Terminal failures are surfaced via the sink's outcome — the
 //! caller decides what to do (warn, fail the task, etc.); the runtime never
 //! tries to second-guess the policy.
+//!
+//! The replay buffer is bounded by bytes and evicts its oldest entries when
+//! full; a slow-acking backend degrades replay coverage but never terminates
+//! the upload. See [`RetryBuffer`].
 
 use std::collections::VecDeque;
 use std::time::Duration;
 
 use axl_proto::google::devtools::build::v1::PublishBuildToolEventStreamRequest;
 use build_event_stream::client::ClientError;
+use prost::Message;
 use rand::Rng;
+
+/// Default byte budget for the unacked replay buffer (256 MiB). Sized to hold
+/// a long stream of ordinary events (hundreds of thousands, at a few hundred
+/// bytes each) plus a few of the multi-megabyte outliers that carry action
+/// stdout, so eviction stays rare in practice.
+pub const DEFAULT_RETRY_MAX_BUFFER_BYTES: usize = 256 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct RetryConfig {
@@ -24,7 +35,10 @@ pub struct RetryConfig {
     /// the count.
     pub max_retries: u32,
     pub retry_min_delay: Duration,
-    pub retry_max_buffer_size: usize,
+    /// Byte budget for the unacked replay buffer. Exceeding it evicts the
+    /// oldest retained events rather than failing the stream — see
+    /// [`RetryBuffer`].
+    pub retry_max_buffer_bytes: usize,
     pub timeout: Option<Duration>,
     /// How long a single write into the bidi request stream may block before
     /// the connection is declared stalled (server stopped reading; HTTP/2
@@ -49,7 +63,7 @@ impl Default for RetryConfig {
         Self {
             max_retries: 4,
             retry_min_delay: Duration::from_secs(1),
-            retry_max_buffer_size: 10_000,
+            retry_max_buffer_bytes: DEFAULT_RETRY_MAX_BUFFER_BYTES,
             timeout: None,
             send_stall_timeout: Duration::from_secs(60),
             ack_progress_timeout: Duration::from_secs(120),
@@ -99,42 +113,91 @@ pub fn parse_duration(s: &str) -> Result<Duration, String> {
     })
 }
 
-/// Bounded ring of unacked stream events keyed by their original sequence
+/// Byte-bounded ring of unacked stream events keyed by their original sequence
 /// number. On reconnect the entire buffer is replayed before fresh events
 /// resume — the BES protocol's per-stream sequence-number dedup makes this
 /// safe even if the server already saw some of the replayed events.
+///
+/// The bound is a byte budget, not an event count, because BEP event sizes span
+/// orders of magnitude: most events are a few hundred bytes, but an action's
+/// captured stdout can reach tens of megabytes. A count-based cap therefore
+/// bounds neither memory (a handful of large events blows past any reasonable
+/// footprint) nor stream length (hundreds of thousands of small events are
+/// cheap), so it fires on builds that are perfectly healthy while failing to
+/// protect against the ones that actually consume memory.
+///
+/// Overflow is not an error. Retaining an event serves exactly one purpose —
+/// replaying it if the stream reconnects — so when the budget is exceeded the
+/// oldest entries are evicted to make room. The only consequence is that a
+/// subsequent reconnect cannot replay the evicted range; the server tolerates
+/// the resulting sequence gap (it acks by position and readers page forward
+/// past missing seqs). Delivery of the current stream is unaffected, which is
+/// what makes eviction strictly better than tearing the stream down.
 pub struct RetryBuffer {
-    cap: usize,
-    items: VecDeque<(i64, PublishBuildToolEventStreamRequest)>,
+    /// Byte budget for retained (unacked) events.
+    cap_bytes: usize,
+    /// Sum of `encoded_len()` over `items`, maintained incrementally.
+    bytes: usize,
+    /// Events evicted to stay under budget — a nonzero count means a reconnect
+    /// would replay an incomplete range.
+    evicted: u64,
+    items: VecDeque<(i64, usize, PublishBuildToolEventStreamRequest)>,
 }
 
 impl RetryBuffer {
-    pub fn new(cap: usize) -> Self {
+    pub fn new(cap_bytes: usize) -> Self {
         Self {
-            cap,
+            cap_bytes,
+            bytes: 0,
+            evicted: 0,
             items: VecDeque::new(),
         }
     }
 
-    /// Push an event into the buffer. Returns `Err` if the buffer is full —
-    /// the caller must transition to terminal at that point per the design.
-    pub fn push(
-        &mut self,
-        seq: i64,
-        req: PublishBuildToolEventStreamRequest,
-    ) -> Result<(), BufferOverflow> {
-        if self.items.len() >= self.cap {
-            return Err(BufferOverflow { cap: self.cap, seq });
+    /// Retain an event for potential replay, evicting the oldest entries when
+    /// it would exceed the byte budget. Infallible: the event is always sent
+    /// regardless of whether it could be retained.
+    ///
+    /// An event larger than the whole budget is not retained at all — evicting
+    /// everything else to hold one oversized event would forfeit more replay
+    /// coverage than it buys.
+    pub fn push(&mut self, seq: i64, req: PublishBuildToolEventStreamRequest) {
+        let size = req.encoded_len();
+
+        if size > self.cap_bytes {
+            self.evict_all();
+            self.evicted += 1;
+            return;
         }
-        self.items.push_back((seq, req));
-        Ok(())
+
+        while self.bytes + size > self.cap_bytes {
+            match self.items.pop_front() {
+                Some((_, evicted_size, _)) => {
+                    self.bytes -= evicted_size;
+                    self.evicted += 1;
+                }
+                // Unreachable: `size <= cap_bytes` and an empty buffer has
+                // `bytes == 0`, so the loop condition is already false.
+                None => break,
+            }
+        }
+
+        self.bytes += size;
+        self.items.push_back((seq, size, req));
+    }
+
+    fn evict_all(&mut self) {
+        self.evicted += self.items.len() as u64;
+        self.items.clear();
+        self.bytes = 0;
     }
 
     /// Drop every entry with `seq <= ack_seq`. Called when the server acks a
     /// response on the bidi stream.
     pub fn prune_until(&mut self, ack_seq: i64) {
-        while let Some((seq, _)) = self.items.front() {
+        while let Some((seq, size, _)) = self.items.front() {
             if *seq <= ack_seq {
+                self.bytes -= *size;
                 self.items.pop_front();
             } else {
                 break;
@@ -147,20 +210,25 @@ impl RetryBuffer {
         self.items.len()
     }
 
+    /// Retained bytes. Exposed for tests and debug logging.
+    #[allow(dead_code)]
+    pub fn bytes(&self) -> usize {
+        self.bytes
+    }
+
+    /// How many events were dropped to stay under budget. Nonzero means a
+    /// reconnect replays an incomplete range.
+    pub fn evicted(&self) -> u64 {
+        self.evicted
+    }
+
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &(i64, PublishBuildToolEventStreamRequest)> {
-        self.items.iter()
+    pub fn iter(&self) -> impl Iterator<Item = (&i64, &PublishBuildToolEventStreamRequest)> {
+        self.items.iter().map(|(seq, _, req)| (seq, req))
     }
-}
-
-#[derive(Debug, thiserror::Error)]
-#[error("retry buffer overflowed (cap={cap}) while attempting to buffer seq {seq}")]
-pub struct BufferOverflow {
-    pub cap: usize,
-    pub seq: i64,
 }
 
 /// Full-jitter exponential backoff. Mirrors Bazel:
@@ -249,6 +317,19 @@ mod tests {
         PublishBuildToolEventStreamRequest::default()
     }
 
+    /// A request whose encoded size is at least `n` bytes, for byte-budget
+    /// tests. Payload goes in `project_id`, a plain string field.
+    fn req_sized(n: usize) -> PublishBuildToolEventStreamRequest {
+        PublishBuildToolEventStreamRequest {
+            project_id: "x".repeat(n),
+            ..Default::default()
+        }
+    }
+
+    fn seqs(b: &RetryBuffer) -> Vec<i64> {
+        b.iter().map(|(s, _)| *s).collect()
+    }
+
     #[test]
     fn sink_stats_from_counters() {
         // Fresh forwarder that never streamed an event (next_seq still 1).
@@ -271,26 +352,96 @@ mod tests {
         );
     }
 
+    /// A high budget retains everything: many small events must not evict,
+    /// which is the case a count-based cap used to fail.
     #[test]
-    fn buffer_push_until_cap_then_overflow() {
-        let mut b = RetryBuffer::new(2);
-        b.push(1, req()).unwrap();
-        b.push(2, req()).unwrap();
-        let err = b.push(3, req()).unwrap_err();
-        assert_eq!(err.cap, 2);
-        assert_eq!(err.seq, 3);
-        assert_eq!(b.len(), 2);
+    fn buffer_retains_many_small_events() {
+        let mut b = RetryBuffer::new(1024 * 1024);
+        for i in 1..=20_000 {
+            b.push(i, req());
+        }
+        assert_eq!(b.len(), 20_000);
+        assert_eq!(b.evicted(), 0);
+    }
+
+    /// Overflow evicts oldest-first and keeps the newest events, rather than
+    /// failing.
+    #[test]
+    fn buffer_evicts_oldest_when_over_budget() {
+        let one = req_sized(100).encoded_len();
+        let mut b = RetryBuffer::new(one * 3);
+
+        for i in 1..=3 {
+            b.push(i, req_sized(100));
+        }
+        assert_eq!(seqs(&b), vec![1, 2, 3]);
+        assert_eq!(b.evicted(), 0);
+
+        // Fourth event exceeds the budget: seq 1 is evicted to make room.
+        b.push(4, req_sized(100));
+        assert_eq!(seqs(&b), vec![2, 3, 4]);
+        assert_eq!(b.evicted(), 1);
+        assert!(b.bytes() <= one * 3);
+    }
+
+    /// One large event can evict several small ones — eviction is driven by
+    /// bytes, not entry count.
+    #[test]
+    fn buffer_large_event_evicts_multiple_small() {
+        let small = req_sized(10).encoded_len();
+        let mut b = RetryBuffer::new(small * 10);
+        for i in 1..=10 {
+            b.push(i, req_sized(10));
+        }
+        assert_eq!(b.len(), 10);
+
+        b.push(11, req_sized(small * 5));
+        assert_eq!(*seqs(&b).last().unwrap(), 11);
+        assert!(b.len() < 10, "large event should displace several small ones");
+        assert!(b.bytes() <= small * 10);
+    }
+
+    /// An event bigger than the entire budget is not retained, and does not
+    /// take the rest of the buffer down with it beyond making room.
+    #[test]
+    fn buffer_oversized_event_is_not_retained() {
+        let mut b = RetryBuffer::new(1024);
+        b.push(1, req_sized(10));
+        b.push(2, req_sized(4096));
+
+        assert!(b.is_empty(), "oversized event must not be retained");
+        assert_eq!(b.bytes(), 0);
+        assert_eq!(b.evicted(), 2, "the evicted small event and the oversized one");
+
+        // The buffer stays usable afterwards.
+        b.push(3, req_sized(10));
+        assert_eq!(seqs(&b), vec![3]);
     }
 
     #[test]
     fn buffer_prune_removes_only_le_ack() {
-        let mut b = RetryBuffer::new(8);
+        let mut b = RetryBuffer::new(1024 * 1024);
         for i in 1..=5 {
-            b.push(i, req()).unwrap();
+            b.push(i, req());
         }
         b.prune_until(3);
-        let seqs: Vec<i64> = b.iter().map(|(s, _)| *s).collect();
-        assert_eq!(seqs, vec![4, 5]);
+        assert_eq!(seqs(&b), vec![4, 5]);
+    }
+
+    /// Pruning must return bytes to the budget, or the buffer would evict
+    /// spuriously after a long healthy stream.
+    #[test]
+    fn buffer_prune_reclaims_bytes() {
+        let mut b = RetryBuffer::new(1024 * 1024);
+        for i in 1..=10 {
+            b.push(i, req_sized(100));
+        }
+        let full = b.bytes();
+        assert!(full > 0);
+
+        b.prune_until(10);
+        assert!(b.is_empty());
+        assert_eq!(b.bytes(), 0, "pruning everything must zero the byte count");
     }
 
     #[test]
