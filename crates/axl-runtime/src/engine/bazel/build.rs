@@ -1267,6 +1267,14 @@ Test = task(implementation = _impl)
         );
     }
 
+    /// Omitting the knob is the path that defers to
+    /// `ASPECT_BES_RETRY_MAX_BUFFER_BYTES`, so it must stay valid.
+    #[test]
+    fn grpc_accepts_omitted_buffer_bytes() {
+        crate::axl_check!(r#"bazel.build_events.grpc(uri = "grpcs://bes.example.com")"#)
+            .expect("omitting retry_max_buffer_bytes should validate");
+    }
+
     #[test]
     fn grpc_rejects_zero_buffer_bytes() {
         let err = crate::axl_check!(

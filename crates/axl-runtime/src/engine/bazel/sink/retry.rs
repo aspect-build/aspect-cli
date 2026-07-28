@@ -22,11 +22,116 @@ use build_event_stream::client::ClientError;
 use prost::Message;
 use rand::Rng;
 
-/// Default byte budget for the unacked replay buffer (256 MiB). Sized to hold
+/// Built-in byte budget for the unacked replay buffer (256 MiB). Sized to hold
 /// a long stream of ordinary events (hundreds of thousands, at a few hundred
 /// bytes each) plus a few of the multi-megabyte outliers that carry action
 /// stdout, so eviction stays rare in practice.
+///
+/// Overridable per-runner via [`RETRY_MAX_BUFFER_BYTES_ENV`]; prefer
+/// [`default_retry_max_buffer_bytes`] over reading this directly.
 pub const DEFAULT_RETRY_MAX_BUFFER_BYTES: usize = 256 * 1024 * 1024;
+
+/// Environment override for the replay buffer's byte budget. Accepts a plain
+/// byte count or a size suffix (`KB`/`MB`/`GB`, or the `KiB`/`MiB`/`GiB`
+/// spellings — all binary multiples).
+///
+/// This exists because the right budget is a property of the machine, not of
+/// the build: a memory-constrained runner may want less, and a fleet that
+/// routinely streams very large events may want more. Setting it per-runner
+/// avoids having to thread a flag through every task definition.
+pub const RETRY_MAX_BUFFER_BYTES_ENV: &str = "ASPECT_BES_RETRY_MAX_BUFFER_BYTES";
+
+/// Parse a byte size: a plain count (`1048576`) or a suffixed value (`512MB`,
+/// `1GiB`). Suffixes are binary multiples; `KB` and `KiB` are both 1024. Case-
+/// insensitive, and whitespace between number and suffix is allowed.
+pub fn parse_byte_size(s: &str) -> Result<usize, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("empty size string".into());
+    }
+
+    let digits_end = s
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(s.len());
+    if digits_end == 0 {
+        return Err(format!("invalid size '{s}': expected a leading number"));
+    }
+    let (num_str, unit) = s.split_at(digits_end);
+    let unit = unit.trim().to_ascii_lowercase();
+
+    let multiplier: usize = match unit.as_str() {
+        "" | "b" => 1,
+        "k" | "kb" | "kib" => 1024,
+        "m" | "mb" | "mib" => 1024 * 1024,
+        "g" | "gb" | "gib" => 1024 * 1024 * 1024,
+        other => {
+            return Err(format!(
+                "invalid size '{s}': unknown unit '{other}' (expected one of B, KB, MB, GB)"
+            ));
+        }
+    };
+
+    let n: usize = num_str
+        .parse()
+        .map_err(|e| format!("invalid size '{s}': {e}"))?;
+    n.checked_mul(multiplier)
+        .ok_or_else(|| format!("invalid size '{s}': value overflows"))
+}
+
+/// The replay buffer's default byte budget, honoring
+/// [`RETRY_MAX_BUFFER_BYTES_ENV`] when it is set to a usable value.
+///
+/// Read once per process and cached: this is consulted when constructing every
+/// sink, and a mid-run change in the environment should not make two sinks in
+/// the same build disagree.
+///
+/// An unset or empty value uses the built-in default. A malformed or zero value
+/// warns and falls back rather than failing the build — BES upload is
+/// best-effort, and a typo'd tuning knob is not worth losing a CI run over.
+pub fn default_retry_max_buffer_bytes() -> usize {
+    static RESOLVED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *RESOLVED.get_or_init(|| {
+        let (bytes, warning) =
+            resolve_buffer_bytes_override(std::env::var(RETRY_MAX_BUFFER_BYTES_ENV).ok().as_deref());
+        if let Some(w) = warning {
+            crate::diag::warn(&w);
+        }
+        bytes
+    })
+}
+
+/// Resolve the override value, returning the budget to use and an optional
+/// warning to emit. Split from [`default_retry_max_buffer_bytes`] so the
+/// fallback rules are testable without mutating process-wide state.
+///
+/// Unset/empty is silent (the common case). A malformed or zero value warns and
+/// falls back — BES upload is best-effort, and a typo'd tuning knob is not
+/// worth losing a CI run over.
+fn resolve_buffer_bytes_override(raw: Option<&str>) -> (usize, Option<String>) {
+    let Some(raw) = raw else {
+        return (DEFAULT_RETRY_MAX_BUFFER_BYTES, None);
+    };
+    if raw.trim().is_empty() {
+        return (DEFAULT_RETRY_MAX_BUFFER_BYTES, None);
+    }
+    match parse_byte_size(raw) {
+        Ok(0) => (
+            DEFAULT_RETRY_MAX_BUFFER_BYTES,
+            Some(format!(
+                "{RETRY_MAX_BUFFER_BYTES_ENV}={raw} must be > 0; \
+                 using the default of {DEFAULT_RETRY_MAX_BUFFER_BYTES} bytes"
+            )),
+        ),
+        Ok(n) => (n, None),
+        Err(e) => (
+            DEFAULT_RETRY_MAX_BUFFER_BYTES,
+            Some(format!(
+                "{RETRY_MAX_BUFFER_BYTES_ENV}: {e}; \
+                 using the default of {DEFAULT_RETRY_MAX_BUFFER_BYTES} bytes"
+            )),
+        ),
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct RetryConfig {
@@ -37,7 +142,7 @@ pub struct RetryConfig {
     pub retry_min_delay: Duration,
     /// Byte budget for the unacked replay buffer. Exceeding it evicts the
     /// oldest retained events rather than failing the stream — see
-    /// [`RetryBuffer`].
+    /// [`RetryBuffer`]. Defaults via [`default_retry_max_buffer_bytes`].
     pub retry_max_buffer_bytes: usize,
     pub timeout: Option<Duration>,
     /// How long a single write into the bidi request stream may block before
@@ -63,7 +168,7 @@ impl Default for RetryConfig {
         Self {
             max_retries: 4,
             retry_min_delay: Duration::from_secs(1),
-            retry_max_buffer_bytes: DEFAULT_RETRY_MAX_BUFFER_BYTES,
+            retry_max_buffer_bytes: default_retry_max_buffer_bytes(),
             timeout: None,
             send_stall_timeout: Duration::from_secs(60),
             ack_progress_timeout: Duration::from_secs(120),
@@ -451,6 +556,79 @@ mod tests {
             let d = backoff(min, attempt);
             let cap = min * 30;
             assert!(d <= cap, "attempt {attempt}: {d:?} > {cap:?}");
+        }
+    }
+
+    #[test]
+    fn parse_byte_size_plain_and_suffixed() {
+        assert_eq!(parse_byte_size("1024").unwrap(), 1024);
+        assert_eq!(parse_byte_size("0").unwrap(), 0);
+        assert_eq!(parse_byte_size("512B").unwrap(), 512);
+        assert_eq!(parse_byte_size("2KB").unwrap(), 2048);
+        assert_eq!(parse_byte_size("256MB").unwrap(), 256 * 1024 * 1024);
+        assert_eq!(parse_byte_size("1GB").unwrap(), 1024 * 1024 * 1024);
+
+        // The `iB` spellings and bare unit letters are the same binary multiple.
+        assert_eq!(parse_byte_size("256MiB").unwrap(), 256 * 1024 * 1024);
+        assert_eq!(parse_byte_size("256M").unwrap(), 256 * 1024 * 1024);
+
+        // Case and internal whitespace are tolerated.
+        assert_eq!(parse_byte_size("256mb").unwrap(), 256 * 1024 * 1024);
+        assert_eq!(parse_byte_size(" 256 MB ").unwrap(), 256 * 1024 * 1024);
+    }
+
+    #[test]
+    fn parse_byte_size_rejects_malformed() {
+        assert!(parse_byte_size("").is_err());
+        assert!(parse_byte_size("   ").is_err());
+        assert!(parse_byte_size("MB").is_err(), "no leading number");
+        assert!(parse_byte_size("12TB").is_err(), "unsupported unit");
+        assert!(parse_byte_size("1.5MB").is_err(), "fractional unsupported");
+        assert!(parse_byte_size("-1").is_err(), "negative unsupported");
+        assert!(
+            parse_byte_size("99999999999999999999GB").is_err(),
+            "overflow must be an error, not a wrap"
+        );
+    }
+
+    /// A usable override is taken verbatim, with no warning.
+    #[test]
+    fn env_override_applies_when_valid() {
+        let (bytes, warning) = resolve_buffer_bytes_override(Some("512MB"));
+        assert_eq!(bytes, 512 * 1024 * 1024);
+        assert!(warning.is_none(), "a valid override should be silent");
+
+        let (bytes, warning) = resolve_buffer_bytes_override(Some("1048576"));
+        assert_eq!(bytes, 1024 * 1024);
+        assert!(warning.is_none());
+    }
+
+    /// Unset or empty is the common case and must not warn.
+    #[test]
+    fn env_override_absent_is_silent_default() {
+        for raw in [None, Some(""), Some("   ")] {
+            let (bytes, warning) = resolve_buffer_bytes_override(raw);
+            assert_eq!(bytes, DEFAULT_RETRY_MAX_BUFFER_BYTES, "{raw:?}");
+            assert!(warning.is_none(), "{raw:?} should not warn");
+        }
+    }
+
+    /// A malformed or zero override falls back to the default and warns — a
+    /// typo'd tuning knob must never break a build or silently disable the
+    /// buffer.
+    #[test]
+    fn env_override_invalid_warns_and_falls_back() {
+        for bad in ["garbage", "12TB", "1.5MB", "-1", "0", "0MB"] {
+            let (bytes, warning) = resolve_buffer_bytes_override(Some(bad));
+            assert_eq!(
+                bytes, DEFAULT_RETRY_MAX_BUFFER_BYTES,
+                "{bad:?} should fall back to the default"
+            );
+            let warning = warning.unwrap_or_else(|| panic!("{bad:?} should warn"));
+            assert!(
+                warning.contains(RETRY_MAX_BUFFER_BYTES_ENV),
+                "warning should name the env var: {warning}"
+            );
         }
     }
 

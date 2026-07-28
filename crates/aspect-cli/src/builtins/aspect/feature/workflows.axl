@@ -112,12 +112,17 @@ def _workflows_impl(ctx: FeatureContext):
 
         bessie_sinks = []
         if environment.build_events and environment.build_events.backend:
+            # 0 means "not set on the command line": leave the arg off so the
+            # runtime resolves it from ASPECT_BES_RETRY_MAX_BUFFER_BYTES (or
+            # the built-in default). Passing it unconditionally would make this
+            # flag's default silently outrank the runner's environment.
+            buffer_bytes = ctx.args.bes_retry_max_buffer_bytes
             bessie_sinks.append(bazel.build_events.grpc(
                 uri = environment.build_events.backend,
                 metadata = bes_metadata,
                 max_retries = ctx.args.bes_max_retries,
                 retry_min_delay = ctx.args.bes_retry_min_delay,
-                retry_max_buffer_bytes = ctx.args.bes_retry_max_buffer_bytes,
+                retry_max_buffer_bytes = buffer_bytes if buffer_bytes > 0 else None,
                 timeout = ctx.args.bes_timeout,
             ))
 
@@ -152,11 +157,13 @@ Workflows = feature(
                           "(e.g. '500ms', '2s', '1m').",
         ),
         "bes_retry_max_buffer_bytes": args.int(
-            default = 268435456,
+            default = 0,
             description = "Byte budget for the in-flight unacked BES replay " +
                           "buffer. Exceeding it evicts the oldest retained " +
                           "events, so a later reconnect replays an incomplete " +
-                          "range; the upload itself continues.",
+                          "range; the upload itself continues. 0 (the default) " +
+                          "defers to ASPECT_BES_RETRY_MAX_BUFFER_BYTES, or " +
+                          "256MiB when that is unset.",
         ),
         "bes_timeout": args.string(
             default = "0s",

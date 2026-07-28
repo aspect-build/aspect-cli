@@ -1072,9 +1072,10 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
     /// * `retry_min_delay` - Base delay for exponential backoff
     ///   (default `"1s"`).
     /// * `retry_max_buffer_bytes` - Byte budget for the in-flight unacked
-    ///   replay buffer (default 256 MiB). Exceeding it evicts the oldest
-    ///   retained events, which costs replay coverage on a later reconnect
-    ///   but never fails the upload.
+    ///   replay buffer. Exceeding it evicts the oldest retained events, which
+    ///   costs replay coverage on a later reconnect but never fails the
+    ///   upload. Unset uses `ASPECT_BES_RETRY_MAX_BUFFER_BYTES` if set,
+    ///   otherwise 256 MiB.
     /// * `timeout` - Overall upload deadline (default `"0s"` = no deadline).
     #[starlark(as_type = build::BuildEventSink)]
     fn grpc(
@@ -1083,16 +1084,22 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
         metadata: UnpackDictEntries<String, String>,
         #[starlark(require = named, default = 4)] max_retries: i32,
         #[starlark(require = named, default = "1s")] retry_min_delay: &str,
-        #[starlark(require = named, default = sink::retry::DEFAULT_RETRY_MAX_BUFFER_BYTES as i64)]
-        retry_max_buffer_bytes: i64,
+        #[starlark(require = named, default = NoneOr::None)] retry_max_buffer_bytes: NoneOr<i64>,
         #[starlark(require = named, default = "0s")] timeout: &str,
     ) -> anyhow::Result<build::BuildEventSink> {
         if max_retries < 0 {
             anyhow::bail!("max_retries must be >= 0, got {max_retries}");
         }
-        if retry_max_buffer_bytes <= 0 {
-            anyhow::bail!("retry_max_buffer_bytes must be > 0, got {retry_max_buffer_bytes}");
-        }
+        // Unset falls through to the env-aware default so a runner-level
+        // `ASPECT_BES_RETRY_MAX_BUFFER_BYTES` applies to tasks that don't pin
+        // the knob; an explicit value always wins over the environment.
+        let retry_max_buffer_bytes = match retry_max_buffer_bytes {
+            NoneOr::Other(n) if n <= 0 => {
+                anyhow::bail!("retry_max_buffer_bytes must be > 0, got {n}");
+            }
+            NoneOr::Other(n) => n as usize,
+            NoneOr::None => sink::retry::default_retry_max_buffer_bytes(),
+        };
         let retry_min_delay = sink::retry::parse_duration(retry_min_delay)
             .map_err(|e| anyhow::anyhow!("retry_min_delay: {e}"))?;
         let timeout_dur =
@@ -1108,7 +1115,7 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
             sink::retry::RetryConfig {
                 max_retries: max_retries as u32,
                 retry_min_delay,
-                retry_max_buffer_bytes: retry_max_buffer_bytes as usize,
+                retry_max_buffer_bytes,
                 timeout,
                 ..Default::default()
             },
