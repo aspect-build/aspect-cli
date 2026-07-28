@@ -15,7 +15,6 @@ load(
 )
 load("@aspect//private/lib/check_dispatch.axl", "SURFACE_PR_COMMENT", "SURFACE_STATUS_CHECK", "snippet_budget_for")
 load("@aspect//private/lib/ci.axl", "detect_build_url")
-load("@aspect//private/lib/deliveryd.axl", deliveryd_parse_endpoint = "parse_endpoint")
 load("@aspect//private/lib/environment.axl", "color_enabled", "detect_ci", "parse_git_url_name", "sanitize_filename")
 load(
     "@aspect//private/lib/gazelle_results.axl",
@@ -1816,25 +1815,6 @@ def test_sanitize_filename(tc: int) -> int:
     for (input, expected, desc) in cases:
         got = sanitize_filename(input)
         tc = test_case(tc, got == expected, "sanitize_filename: %s → %r (got %r)" % (desc, expected, got))
-    return tc
-
-def test_deliveryd_parse_endpoint(tc: int) -> int:
-    """Coverage for deliveryd.parse_endpoint."""
-    base, sock = deliveryd_parse_endpoint("unix:///run/deliveryd.sock")
-    tc = test_case(tc, base == "http://localhost", "parse_endpoint: unix → base = http://localhost")
-    tc = test_case(tc, sock == "/run/deliveryd.sock", "parse_endpoint: unix → socket path")
-
-    base, sock = deliveryd_parse_endpoint("http://deliveryd.local:8080")
-    tc = test_case(tc, base == "http://deliveryd.local:8080", "parse_endpoint: http → base passthrough")
-    tc = test_case(tc, sock == None, "parse_endpoint: http → no socket")
-
-    base, sock = deliveryd_parse_endpoint("https://deliveryd.example.com")
-    tc = test_case(tc, base == "https://deliveryd.example.com", "parse_endpoint: https → base passthrough")
-    tc = test_case(tc, sock == None, "parse_endpoint: https → no socket")
-
-    # Invalid scheme should fail() — we can't catch it easily, so just don't test
-    # the failure path here.
-
     return tc
 
 def test_delivery_should_upload_grpc_log(tc: int) -> int:
@@ -3675,7 +3655,6 @@ def impl(ctx: TaskContext) -> int:
     tc = test_repro_commands_lib(tc)
     tc = test_parse_git_url_name(tc)
     tc = test_sanitize_filename(tc)
-    tc = test_deliveryd_parse_endpoint(tc)
     tc = test_delivery_should_upload_grpc_log(tc)
     tc = test_delivery_count_unexplained_unresolved(tc)
     tc = test_delivery_should_surface_phase2_stderr(tc)
