@@ -96,7 +96,14 @@ def parse_sarif_diagnostics(content):
     is True when the result carries an inline-fix relatedLocation (see
     `_result_has_fix`).
     """
-    sarif = json.try_decode(content, {})
+    return sarif_diagnostics(json.try_decode(content, {}))
+
+def sarif_diagnostics(sarif):
+    """Flatten an already-decoded SARIF dict into diagnostic dicts.
+
+    Same shape as `parse_sarif_diagnostics`, for callers that already decoded
+    the document (via `parse_sarif`) and would otherwise pay to parse it twice.
+    """
     diagnostics = []
     for run in sarif.get("runs", []):
         tool_name = run.get("tool", {}).get("driver", {}).get("name", "unknown")

@@ -3,7 +3,7 @@ Exercise axl
 """
 
 load("@aspect//delivery.axl", delivery_UncacheableAction = "UncacheableAction", delivery_collect_blocking_culprits = "collect_blocking_culprits", delivery_count_unexplained_unresolved = "count_unexplained_unresolved", delivery_fmt_elapsed = "fmt_elapsed", delivery_should_surface_phase2_stderr = "should_surface_phase2_stderr", delivery_should_upload_grpc_log = "should_upload_grpc_log")
-load("@aspect//lint.axl", "filter_all", "filter_changeset", "linter_error_message")
+load("@aspect//lint.axl", "filter_all", "filter_changeset", "linter_error_message", "parse_patch_hunks")
 load("@aspect//private/lib/artifacts.axl", "artifact_name", "build_log_header", "build_log_relpath", "collect_build_action_logs", "dedup_path", "testlog_dest_dir")
 load("@aspect//private/lib/bazel_results.axl", "bb_clientd_root", "compute_reproducer_command", "file_uri_to_path", "init_data", "render_check_output", "resolve_aspect_url", "summary_title")
 load(
@@ -32,7 +32,7 @@ load("@aspect//private/lib/prompt.axl", "prompt_choice")
 load("@aspect//private/lib/repro_commands.axl", "build_aspect_command", "dedup_and_attribute", "patch_download_cmd", "task_cli_path")
 load("@aspect//private/lib/result_text.axl", "severity_for_status")
 load("@aspect//private/lib/runnable.axl", "apparent_label", "runnable")
-load("@aspect//private/lib/sarif.axl", "get_sarif_summary", "parse_sarif", "parse_sarif_diagnostics", "sarif_to_review_comments")
+load("@aspect//private/lib/sarif.axl", "get_sarif_summary", "parse_sarif", "parse_sarif_diagnostics", "sarif_diagnostics", "sarif_to_review_comments")
 load("@aspect//private/lib/tips.axl", "tips")
 load("@demo//answer.axl", "ANSWER")
 load("@std//base64.axl", "base64")
@@ -2655,6 +2655,46 @@ def test_lint_filters(tc: int) -> int:
 
     return tc
 
+def test_parse_patch_hunks(tc: int) -> int:
+    """Coverage for lint.parse_patch_hunks — hunk spans and the count clamp."""
+    patch = "\n".join([
+        "--- a/src/x.ts",
+        "+++ b/src/x.ts",
+        "@@ -1,2 +1,3 @@",
+        " ctx",
+        "+added one",
+        "+added two",
+    ])
+    hunks = parse_patch_hunks(patch)
+    tc = test_case(tc, len(hunks) == 1, "parse_patch_hunks: one hunk")
+    tc = test_case(tc, hunks[0]["file"] == "src/x.ts", "parse_patch_hunks: strips b/ prefix")
+    tc = test_case(tc, hunks[0]["start_line"] == 1, "parse_patch_hunks: start line")
+    tc = test_case(tc, hunks[0]["end_line"] == 3, "parse_patch_hunks: end line = start + count - 1")
+
+    # `,B` omitted means a single line.
+    single = parse_patch_hunks("--- a/y\n+++ b/y\n@@ -5 +7 @@\n+z")
+    tc = test_case(tc, len(single) == 1 and single[0]["start_line"] == 7, "parse_patch_hunks: implicit count start")
+    tc = test_case(tc, single[0]["end_line"] == 7, "parse_patch_hunks: implicit count spans one line")
+
+    # A declared count far larger than the patch body is clamped to the number
+    # of lines actually present. Callers expand hunks one entry per line, so an
+    # unclamped count from a truncated/malformed patch would allocate without
+    # bound.
+    huge = parse_patch_hunks("--- a/z\n+++ b/z\n@@ -1,1 +1,200000000 @@\n+only one line")
+    tc = test_case(tc, len(huge) == 1, "parse_patch_hunks: bogus count still yields a hunk")
+    span = huge[0]["end_line"] - huge[0]["start_line"] + 1
+    tc = test_case(tc, span <= 4, "parse_patch_hunks: clamps count to lines present (got %d)" % span)
+
+    # Non-numeric and non-positive counts are skipped outright.
+    tc = test_case(tc, parse_patch_hunks("--- a/q\n+++ b/q\n@@ -1,1 +x,y @@\n+a") == [], "parse_patch_hunks: non-numeric skipped")
+    tc = test_case(tc, parse_patch_hunks("--- a/q\n+++ b/q\n@@ -1,1 +1,0 @@\n+a") == [], "parse_patch_hunks: zero count skipped")
+
+    # No +++ header → nothing to attribute hunks to.
+    tc = test_case(tc, parse_patch_hunks("@@ -1,1 +1,5 @@\n+a") == [], "parse_patch_hunks: no file header → []")
+    tc = test_case(tc, parse_patch_hunks("") == [], "parse_patch_hunks: empty → []")
+
+    return tc
+
 def test_linter_error_message(tc: int) -> int:
     """Coverage for lint.linter_error_message — the fail_on_linter_error text."""
     single = linter_error_message({"PMD": True}, "hard")
@@ -3253,6 +3293,12 @@ def test_sarif_lib(tc: int) -> int:
     """
 
     diags = parse_sarif_diagnostics(sarif_text)
+
+    # sarif_diagnostics() takes an already-decoded document and must agree with
+    # the string-parsing entry point, so callers that already hold the dict can
+    # skip a second parse.
+    tc = test_case(tc, sarif_diagnostics(parse_sarif(sarif_text)) == diags, "sarif_diagnostics: matches parse_sarif_diagnostics")
+    tc = test_case(tc, sarif_diagnostics({}) == [], "sarif_diagnostics: empty document → []")
     tc = test_case(tc, len(diags) == 2, "parse_sarif_diagnostics: 2 data")
     tc = test_case(tc, diags[0]["tool"] == "shellcheck", "parse_sarif_diagnostics: tool name")
     tc = test_case(tc, diags[0]["file"] == "scripts/build.sh", "parse_sarif_diagnostics: file path")
@@ -3667,6 +3713,7 @@ def impl(ctx: TaskContext) -> int:
     tc = test_process_bes_target_completed(ctx, tc)
     tc = test_validate_role(tc)
     tc = test_lint_filters(tc)
+    tc = test_parse_patch_hunks(tc)
     tc = test_linter_error_message(tc)
     tc = test_fmt_elapsed(tc)
     tc = test_summary_title(tc)

@@ -20,7 +20,7 @@ load("@aspect//bazel.axl", "BazelTrait")
 load("@std//time.axl", "sleep", "sleep_iter")
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_flags.axl", "announce_bazel_args", "aspect_endpoint_auth_flags", "bazel_flag_args", "resolve_bazel_announce")
-load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "bb_clientd_root", "file_uri_to_path", "now_ms", "process_event")
+load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "bb_clientd_root", "bes_get", "file_uri_to_path", "now_ms", "process_event")
 load("./private/lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
 load("./private/lib/bes_sinks.axl", "announce_bes_sinks", "bes_args", "collect_bes_from_args", "summarize_bes_upload")
 load("./private/lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
@@ -30,7 +30,7 @@ load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "setup_phase", "task_update")
 load("./private/lib/lint_results.axl", "detect_lint_tool", lint_accumulate = "accumulate", lint_conclusion = "conclusion", lint_init_data = "init_data")
 load("./private/lib/repro_commands.axl", "build_aspect_command", "explicit_flags", "flavor_allows", "print_repro_and_fix", "repro_flavor_args", "repro_prefix", "task_cli_path")
-load("./private/lib/sarif.axl", "get_sarif_summary", "parse_sarif", "parse_sarif_diagnostics")
+load("./private/lib/sarif.axl", "get_sarif_summary", "parse_sarif", "sarif_diagnostics")
 load("./private/lib/tar.axl", "tar_create")
 load("./private/lib/text.axl", "pluralize")
 load("./private/lib/tips.axl", "tips")
@@ -124,16 +124,24 @@ def filter_hunks(diagnostics, changed_files):
         result.append(d)
     return result
 
-def _parse_patch_hunks(content):
+def parse_patch_hunks(content):
     """Extract the (file, line) span of every hunk in a unified diff.
 
     Returns `{file, start_line, end_line}` per hunk; `file` is the post-fix
     `+++ b/<path>` side (leading `b/` stripped), lines 1-based inclusive.
     Empty list when unparseable — callers treat that as "leave the patch alone".
+
+    A hunk's declared line count is clamped to the number of lines in the
+    patch, since no hunk can cover more than that. The count comes from the
+    `@@` header, and a malformed or truncated patch can declare a span far
+    larger than its body; callers expand each hunk to one entry per line, so
+    an unclamped count allocates proportional to the declared number.
     """
     hunks = []
     current_file = ""
-    for line in content.split("\n"):
+    lines = content.split("\n")
+    max_count = len(lines)
+    for line in lines:
         if line.startswith("+++ "):
             rest = line[4:]
             if rest.startswith("b/"):
@@ -157,7 +165,7 @@ def _parse_patch_hunks(content):
         if not (a_str.isdigit() and b_str.isdigit()):
             continue
         start = int(a_str)
-        count = int(b_str)
+        count = min(int(b_str), max_count)
         if count <= 0:
             continue
         hunks.append({
@@ -185,7 +193,7 @@ def _filter_patches_by_strategy(ctx, patches, strategy, changed_files):
         if content == None:
             warn(ctx.std, "Failed to read lint patch (skipping): %s" % patch_path)
             continue
-        hunks = _parse_patch_hunks(content)
+        hunks = parse_patch_hunks(content)
         if not hunks:
             kept.append(patch_path)
             continue
@@ -572,7 +580,7 @@ def _body_text(status, data):
         return "Lint aborted"
     return ""
 
-def _read_lint_file(ctx, filepath, timeout_ms = _LINT_FILE_PROBE_TIMEOUT_MS):
+def _read_lint_file(ctx, filepath, timeout_ms = _LINT_FILE_PROBE_TIMEOUT_MS, expected_len = -1):
     """Read a lint output file, or None when its contents can't be read yet.
 
     Paths under the bb_clientd mount (bytestream:// URIs resolved by
@@ -585,25 +593,26 @@ def _read_lint_file(ctx, filepath, timeout_ms = _LINT_FILE_PROBE_TIMEOUT_MS):
     the file in the pending queue — retried each tick until the post-build
     drain budget warns and skips it.
 
+    `expected_len` is the file's authoritative byte length (BES `File.length`),
+    or -1 when unknown. Both read paths compare the bytes they actually read
+    against it and report a short read as not-yet-readable: a successful read
+    is not proof the contents are whole, because the file can be exposed before
+    its download finishes, and every consumer here (SARIF parse, patch hunks,
+    exit codes) silently misbehaves on truncated input rather than failing
+    loudly.
+
     Anything else is a plain local path — file:// URIs, or the output-tree
-    fallback for bytestream URIs on runners without bb_clientd — read
-    directly: local disk can't stall the way bb_clientd reads can, and the
-    direct path avoids a background probe thread per read. An
-    empty read of a file whose size is non-zero is a failed read, matching
-    the probe's contract.
+    fallback for bytestream URIs on runners without bb_clientd — read directly
+    via `read_to_string_if_complete`: local disk can't stall the way bb_clientd
+    reads can, so it needs no background probe, only the same length gate.
 
     Either way, None always means unreadable, never empty: a clean linter's
     empty `.out` reads as "".
     """
     root = bb_clientd_root(ctx)
     if root == None or not filepath.startswith(root):
-        if not ctx.std.fs.exists(filepath):
-            return None
-        content = ctx.std.fs.try_read_to_string(filepath)
-        if content == "" and ctx.std.fs.metadata(filepath).size > 0:
-            return None
-        return content
-    return ctx.std.fs.poll_read_to_string(filepath, timeout_ms)
+        return ctx.std.fs.read_to_string_if_complete(filepath, expected_len = expected_len)
+    return ctx.std.fs.poll_read_to_string(filepath, timeout_ms, expected_len = expected_len)
 
 def _probe_timeout_ms(ctx, pass_deadline_ms):
     """Per-read probe bound for one drain/event pass: the standard probe
@@ -626,20 +635,33 @@ def _try_process_lint_file(ctx, file, filepath, data, strategy, changed_files, l
     so the fail_on_linter_error path can report which tool failed.
     SARIF is filtered per-batch against the (pure) strategy scope, so per-batch
     results equal a terminal pass and findings don't flicker as batches arrive.
+
+    Every read is gated on the file's BES-declared length so a
+    still-materializing blob is retried rather than parsed half-written.
     """
+    expected_len = bes_get(file, "length", -1) or -1
+
     if file.name.endswith(".out"):
-        out = _read_lint_file(ctx, filepath, probe_timeout_ms)
+        out = _read_lint_file(ctx, filepath, probe_timeout_ms, expected_len)
         if out == None:
             return None
         ctx.std.io.stderr.write(out)
         return {"interesting": False, "linter_exit_code": 0, "failed_tool": ""}
 
     if file.name.endswith(".report"):
-        report = _read_lint_file(ctx, filepath, probe_timeout_ms)
+        report = _read_lint_file(ctx, filepath, probe_timeout_ms, expected_len)
         if report == None:
             return None
         if "sarif-" in report:
-            lint_accumulate(data, strategy.filter(parse_sarif_diagnostics(report), changed_files))
+            sarif = parse_sarif(report)
+            if not sarif:
+                # The read was complete (length-gated), so a document that
+                # still won't decode is malformed rather than in flight —
+                # retrying can't help. Name it instead of dropping its
+                # findings silently.
+                warn(ctx.std, "Ignoring unparseable SARIF report: %s" % filepath)
+                return {"interesting": False, "linter_exit_code": 0, "failed_tool": ""}
+            lint_accumulate(data, strategy.filter(sarif_diagnostics(sarif), changed_files))
             for hook in lint_trait.lint_report:
                 hook(ctx, filepath)
             return {"interesting": True, "linter_exit_code": 0, "failed_tool": ""}
@@ -649,10 +671,10 @@ def _try_process_lint_file(ctx, file, filepath, data, strategy, changed_files, l
         return {"interesting": False, "linter_exit_code": 0, "failed_tool": ""}
 
     if file.name.endswith(".patch"):
-        # Readability gate (content discarded): requeues the patch until the
-        # blob is materialized, since lint_patch hooks buffer the path and
-        # later re-read it with a plain read_to_string.
-        if _read_lint_file(ctx, filepath, probe_timeout_ms) == None:
+        # Readability gate (content discarded): requeues until the blob is
+        # whole, since lint_patch hooks buffer the path and re-read it later
+        # with a plain read_to_string that has no completeness check.
+        if _read_lint_file(ctx, filepath, probe_timeout_ms, expected_len) == None:
             return None
         patches.append(filepath)
         for hook in lint_trait.lint_patch:
@@ -660,7 +682,7 @@ def _try_process_lint_file(ctx, file, filepath, data, strategy, changed_files, l
         return {"interesting": False, "linter_exit_code": 0, "failed_tool": ""}
 
     if file.name.endswith(".exit_code"):
-        content = _read_lint_file(ctx, filepath, probe_timeout_ms)
+        content = _read_lint_file(ctx, filepath, probe_timeout_ms, expected_len)
         if content == None:
             return None
         stripped = content.rstrip()
