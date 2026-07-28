@@ -112,10 +112,9 @@ def _workflows_impl(ctx: FeatureContext):
 
         bessie_sinks = []
         if environment.build_events and environment.build_events.backend:
-            # 0 means "not set on the command line": leave the arg off so the
-            # runtime resolves it from ASPECT_CLI_BES_RETRY_MAX_BUFFER_BYTES (or
-            # the built-in default). Passing it unconditionally would make this
-            # flag's default silently outrank the runner's environment.
+            # Passing 0 (unset) through would let this flag's default outrank
+            # ASPECT_CLI_BES_RETRY_MAX_BUFFER_BYTES, so omit the arg instead and
+            # let the runtime resolve it.
             buffer_bytes = ctx.args.bes_retry_max_buffer_bytes
             bessie_sinks.append(bazel.build_events.grpc(
                 uri = environment.build_events.backend,

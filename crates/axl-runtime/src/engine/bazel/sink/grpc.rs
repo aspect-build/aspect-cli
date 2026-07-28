@@ -285,10 +285,11 @@ async fn work(
             &endpoint,
             &invocation_id,
             &format!(
-                "entering drive_stream (attempt={}, next_seq={}, buffered={})",
+                "entering drive_stream (attempt={}, next_seq={}, buffered={} events / {} bytes)",
                 attempt,
                 state.next_seq,
-                state.buffer.len()
+                state.buffer.len(),
+                state.buffer.bytes(),
             ),
         );
         let acked_before = state.max_acked;
@@ -707,19 +708,20 @@ async fn drive_stream(
         ),
     );
 
-    // Events evicted to keep the replay buffer under its byte budget can no
-    // longer be resent, so this reconnect leaves a permanent gap in what the
-    // backend receives. Warn rather than debug-log: it is the only signal that
-    // events were lost, and BES upload never fails the build.
-    let evicted = state.buffer.evicted();
+    // Evicted events were streamed on the previous connection but are no longer
+    // retained, so any the server had not yet acked cannot be resent and will be
+    // missing from it. Warn rather than debug-log: BES upload never fails the
+    // build, making this the only signal that data may be incomplete.
+    let evicted = state.buffer.take_evicted();
     if evicted > 0 {
         warn(
             endpoint,
             &format!(
-                "replay buffer exceeded its {} byte budget earlier in this build; \
-                 {evicted} build event(s) could not be replayed after reconnecting \
-                 and are missing from the backend",
-                retry.retry_max_buffer_bytes
+                "replay buffer exceeded its {} byte budget; {evicted} build event(s) \
+                 were dropped from it and cannot be resent on this reconnect. Raise \
+                 {} to retain more.",
+                retry.retry_max_buffer_bytes,
+                super::retry::RETRY_MAX_BUFFER_BYTES_ENV,
             ),
         );
     }

@@ -5,14 +5,14 @@
 //! reconnects. Ack progress during an attempt resets the budget, so only
 //! consecutive no-progress attempts count against it and a server that
 //! periodically ends streams with a retryable status (e.g. UNAVAILABLE)
-//! is rejoined for as long as events keep landing.
-//! Terminal failures are surfaced via the sink's outcome — the
-//! caller decides what to do (warn, fail the task, etc.); the runtime never
-//! tries to second-guess the policy.
+//! is rejoined for as long as events keep landing. The replay buffer is
+//! bounded by bytes rather than event count and sheds its oldest entries when
+//! full, so a slow-acking backend costs replay coverage but never ends the
+//! upload — see [`RetryBuffer`].
 //!
-//! The replay buffer is bounded by bytes and evicts its oldest entries when
-//! full; a slow-acking backend degrades replay coverage but never terminates
-//! the upload. See [`RetryBuffer`].
+//! Terminal failures are surfaced via the sink's outcome — the caller decides
+//! what to do (warn, fail the task, etc.); the runtime never tries to
+//! second-guess the policy.
 
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -31,68 +31,25 @@ use rand::Rng;
 /// [`default_retry_max_buffer_bytes`] over reading this directly.
 pub const DEFAULT_RETRY_MAX_BUFFER_BYTES: usize = 256 * 1024 * 1024;
 
-/// Environment override for the replay buffer's byte budget. Accepts a plain
-/// byte count or a size suffix (`KB`/`MB`/`GB`, or the `KiB`/`MiB`/`GiB`
-/// spellings — all binary multiples).
+/// Environment override for the replay buffer's byte budget, letting a runner
+/// size it to its own memory without threading a flag through every task.
+/// Accepts a plain byte count or a size suffix — see [`parse_byte_size`].
 ///
-/// This exists because the right budget is a property of the machine, not of
-/// the build: a memory-constrained runner may want less, and a fleet that
-/// routinely streams very large events may want more. Setting it per-runner
-/// avoids having to thread a flag through every task definition.
+/// The `CLI` in the name distinguishes this from Bazel's own BES uploader
+/// (`--bes_backend`), whose buffering it does not affect.
 pub const RETRY_MAX_BUFFER_BYTES_ENV: &str = "ASPECT_CLI_BES_RETRY_MAX_BUFFER_BYTES";
 
-/// Parse a byte size: a plain count (`1048576`) or a suffixed value (`512MB`,
-/// `1GiB`). Suffixes are binary multiples; `KB` and `KiB` are both 1024. Case-
-/// insensitive, and whitespace between number and suffix is allowed.
-pub fn parse_byte_size(s: &str) -> Result<usize, String> {
-    let s = s.trim();
-    if s.is_empty() {
-        return Err("empty size string".into());
-    }
-
-    let digits_end = s
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(s.len());
-    if digits_end == 0 {
-        return Err(format!("invalid size '{s}': expected a leading number"));
-    }
-    let (num_str, unit) = s.split_at(digits_end);
-    let unit = unit.trim().to_ascii_lowercase();
-
-    let multiplier: usize = match unit.as_str() {
-        "" | "b" => 1,
-        "k" | "kb" | "kib" => 1024,
-        "m" | "mb" | "mib" => 1024 * 1024,
-        "g" | "gb" | "gib" => 1024 * 1024 * 1024,
-        other => {
-            return Err(format!(
-                "invalid size '{s}': unknown unit '{other}' (expected one of B, KB, MB, GB)"
-            ));
-        }
-    };
-
-    let n: usize = num_str
-        .parse()
-        .map_err(|e| format!("invalid size '{s}': {e}"))?;
-    n.checked_mul(multiplier)
-        .ok_or_else(|| format!("invalid size '{s}': value overflows"))
-}
-
 /// The replay buffer's default byte budget, honoring
-/// [`RETRY_MAX_BUFFER_BYTES_ENV`] when it is set to a usable value.
+/// [`RETRY_MAX_BUFFER_BYTES_ENV`].
 ///
-/// Read once per process and cached: this is consulted when constructing every
-/// sink, and a mid-run change in the environment should not make two sinks in
-/// the same build disagree.
-///
-/// An unset or empty value uses the built-in default. A malformed or zero value
-/// warns and falls back rather than failing the build — BES upload is
-/// best-effort, and a typo'd tuning knob is not worth losing a CI run over.
+/// Read once per process and cached, so two sinks in one build cannot disagree
+/// if the environment changes mid-run.
 pub fn default_retry_max_buffer_bytes() -> usize {
     static RESOLVED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *RESOLVED.get_or_init(|| {
-        let (bytes, warning) =
-            resolve_buffer_bytes_override(std::env::var(RETRY_MAX_BUFFER_BYTES_ENV).ok().as_deref());
+        let (bytes, warning) = resolve_buffer_bytes_override(
+            std::env::var(RETRY_MAX_BUFFER_BYTES_ENV).ok().as_deref(),
+        );
         if let Some(w) = warning {
             crate::diag::warn(&w);
         }
@@ -100,13 +57,13 @@ pub fn default_retry_max_buffer_bytes() -> usize {
     })
 }
 
-/// Resolve the override value, returning the budget to use and an optional
-/// warning to emit. Split from [`default_retry_max_buffer_bytes`] so the
-/// fallback rules are testable without mutating process-wide state.
+/// Resolve the override, returning the budget to use and any warning to emit.
+/// Separate from [`default_retry_max_buffer_bytes`] so the rules are testable
+/// without touching process-wide state.
 ///
-/// Unset/empty is silent (the common case). A malformed or zero value warns and
-/// falls back — BES upload is best-effort, and a typo'd tuning knob is not
-/// worth losing a CI run over.
+/// Unset or empty is silent — the common case. A malformed or zero value warns
+/// and falls back to the built-in default: BES upload is best-effort, so a
+/// typo'd tuning knob should not cost a CI run.
 fn resolve_buffer_bytes_override(raw: Option<&str>) -> (usize, Option<String>) {
     let Some(raw) = raw else {
         return (DEFAULT_RETRY_MAX_BUFFER_BYTES, None);
@@ -177,6 +134,47 @@ impl Default for RetryConfig {
     }
 }
 
+/// Split a suffixed scalar (`"512MB"`, `"250ms"`) into its numeric prefix and
+/// lower-cased unit. Surrounding and internal whitespace is ignored; a missing
+/// unit yields `""`.
+///
+/// `kind` names the value in error messages ("size", "duration").
+fn split_scalar_unit<'a>(s: &'a str, kind: &str) -> Result<(&'a str, String), String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err(format!("empty {kind} string"));
+    }
+    let digits_end = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+    if digits_end == 0 {
+        return Err(format!("invalid {kind} '{s}': expected a leading number"));
+    }
+    let (num, unit) = s.split_at(digits_end);
+    Ok((num, unit.trim().to_ascii_lowercase()))
+}
+
+/// Parse a byte size: a plain count (`1048576`) or a suffixed value (`512MB`,
+/// `1GiB`). Suffixes are binary multiples, so `KB` and `KiB` are both 1024.
+/// Case-insensitive; whitespace between number and suffix is allowed.
+pub fn parse_byte_size(s: &str) -> Result<usize, String> {
+    let (num, unit) = split_scalar_unit(s, "size")?;
+    let multiplier: usize = match unit.as_str() {
+        "" | "b" => 1,
+        "k" | "kb" | "kib" => 1024,
+        "m" | "mb" | "mib" => 1024 * 1024,
+        "g" | "gb" | "gib" => 1024 * 1024 * 1024,
+        other => {
+            return Err(format!(
+                "invalid size '{s}': unknown unit '{other}' (expected one of B, KB, MB, GB)"
+            ));
+        }
+    };
+    let n: usize = num
+        .parse()
+        .map_err(|e| format!("invalid size '{s}': {e}"))?;
+    n.checked_mul(multiplier)
+        .ok_or_else(|| format!("invalid size '{s}': value overflows"))
+}
+
 /// Parse a duration string like `"1s"`, `"500ms"`, `"2m"`, `"1h"`, `"1d"`,
 /// `"0s"`.
 ///
@@ -185,36 +183,21 @@ impl Default for RetryConfig {
 /// `"0s"` (or any zero value) is the documented sentinel for "no deadline"
 /// when used as a timeout; the caller decides what zero means.
 pub fn parse_duration(s: &str) -> Result<Duration, String> {
-    let s = s.trim();
-    if s.is_empty() {
-        return Err("empty duration string".into());
-    }
-    let (num_str, unit) = if let Some(rest) = s.strip_suffix("ms") {
-        (rest, "ms")
-    } else if let Some(rest) = s.strip_suffix('s') {
-        (rest, "s")
-    } else if let Some(rest) = s.strip_suffix('m') {
-        (rest, "m")
-    } else if let Some(rest) = s.strip_suffix('h') {
-        (rest, "h")
-    } else if let Some(rest) = s.strip_suffix('d') {
-        (rest, "d")
-    } else {
-        return Err(format!(
-            "invalid duration '{s}': expected suffix one of 'ms', 's', 'm', 'h', 'd'"
-        ));
-    };
-    let n: u64 = num_str
-        .trim()
+    let (num, unit) = split_scalar_unit(s, "duration")?;
+    let n: u64 = num
         .parse()
         .map_err(|e| format!("invalid duration '{s}': {e}"))?;
-    Ok(match unit {
+    Ok(match unit.as_str() {
         "ms" => Duration::from_millis(n),
         "s" => Duration::from_secs(n),
         "m" => Duration::from_secs(n * 60),
         "h" => Duration::from_secs(n * 3600),
         "d" => Duration::from_secs(n * 86_400),
-        _ => unreachable!(),
+        _ => {
+            return Err(format!(
+                "invalid duration '{s}': expected suffix one of 'ms', 's', 'm', 'h', 'd'"
+            ));
+        }
     })
 }
 
@@ -223,29 +206,25 @@ pub fn parse_duration(s: &str) -> Result<Duration, String> {
 /// resume — the BES protocol's per-stream sequence-number dedup makes this
 /// safe even if the server already saw some of the replayed events.
 ///
-/// The bound is a byte budget, not an event count, because BEP event sizes span
-/// orders of magnitude: most events are a few hundred bytes, but an action's
-/// captured stdout can reach tens of megabytes. A count-based cap therefore
-/// bounds neither memory (a handful of large events blows past any reasonable
-/// footprint) nor stream length (hundreds of thousands of small events are
-/// cheap), so it fires on builds that are perfectly healthy while failing to
-/// protect against the ones that actually consume memory.
+/// The bound is a byte budget, not an event count: BEP event sizes span orders
+/// of magnitude (a few hundred bytes for most, tens of megabytes for one
+/// carrying an action's stdout), so a count bounds neither memory nor stream
+/// length.
 ///
-/// Overflow is not an error. Retaining an event serves exactly one purpose —
-/// replaying it if the stream reconnects — so when the budget is exceeded the
-/// oldest entries are evicted to make room. The only consequence is that a
-/// subsequent reconnect cannot replay the evicted range; the server tolerates
-/// the resulting sequence gap (it acks by position and readers page forward
-/// past missing seqs). Delivery of the current stream is unaffected, which is
-/// what makes eviction strictly better than tearing the stream down.
+/// Overflow is not an error. Retention exists only to enable replay, so when
+/// the budget is exceeded the oldest entries are evicted. The cost is that a
+/// later reconnect cannot replay the evicted range — the server tolerates the
+/// resulting sequence gap, acking by position and paging forward past missing
+/// seqs — while delivery of the live stream is unaffected.
 pub struct RetryBuffer {
     /// Byte budget for retained (unacked) events.
     cap_bytes: usize,
     /// Sum of `encoded_len()` over `items`, maintained incrementally.
     bytes: usize,
-    /// Events evicted to stay under budget — a nonzero count means a reconnect
-    /// would replay an incomplete range.
+    /// Events evicted since the last [`Self::take_evicted`].
     evicted: u64,
+    /// `(sequence number, encoded size, request)`, oldest first. The size is
+    /// cached so eviction and pruning adjust `bytes` without re-encoding.
     items: VecDeque<(i64, usize, PublishBuildToolEventStreamRequest)>,
 }
 
@@ -269,32 +248,26 @@ impl RetryBuffer {
     pub fn push(&mut self, seq: i64, req: PublishBuildToolEventStreamRequest) {
         let size = req.encoded_len();
 
-        if size > self.cap_bytes {
-            self.evict_all();
-            self.evicted += 1;
-            return;
+        // `size <= cap_bytes` bounds the loop: an empty buffer has `bytes == 0`,
+        // so the condition is false by the time everything has been evicted.
+        while !self.items.is_empty() && self.bytes + size > self.cap_bytes {
+            self.evict_oldest();
         }
 
-        while self.bytes + size > self.cap_bytes {
-            match self.items.pop_front() {
-                Some((_, evicted_size, _)) => {
-                    self.bytes -= evicted_size;
-                    self.evicted += 1;
-                }
-                // Unreachable: `size <= cap_bytes` and an empty buffer has
-                // `bytes == 0`, so the loop condition is already false.
-                None => break,
-            }
+        if size > self.cap_bytes {
+            self.evicted += 1;
+            return;
         }
 
         self.bytes += size;
         self.items.push_back((seq, size, req));
     }
 
-    fn evict_all(&mut self) {
-        self.evicted += self.items.len() as u64;
-        self.items.clear();
-        self.bytes = 0;
+    fn evict_oldest(&mut self) {
+        if let Some((_, size, _)) = self.items.pop_front() {
+            self.bytes -= size;
+            self.evicted += 1;
+        }
     }
 
     /// Drop every entry with `seq <= ack_seq`. Called when the server acks a
@@ -310,21 +283,24 @@ impl RetryBuffer {
         }
     }
 
-    #[allow(dead_code)]
+    /// Number of retained events.
     pub fn len(&self) -> usize {
         self.items.len()
     }
 
-    /// Retained bytes. Exposed for tests and debug logging.
-    #[allow(dead_code)]
+    /// Bytes currently retained, against the budget passed to [`Self::new`].
     pub fn bytes(&self) -> usize {
         self.bytes
     }
 
-    /// How many events were dropped to stay under budget. Nonzero means a
-    /// reconnect replays an incomplete range.
-    pub fn evicted(&self) -> u64 {
-        self.evicted
+    /// Events dropped to stay under budget since the last call, resetting the
+    /// counter.
+    ///
+    /// Callers report this once per reconnect, and the count is cumulative
+    /// across the whole build; draining it keeps a second reconnect from
+    /// re-reporting losses the first one already announced.
+    pub fn take_evicted(&mut self) -> u64 {
+        std::mem::take(&mut self.evicted)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -457,8 +433,8 @@ mod tests {
         );
     }
 
-    /// A high budget retains everything: many small events must not evict,
-    /// which is the case a count-based cap used to fail.
+    /// Many small events fit comfortably: event count alone never triggers
+    /// eviction.
     #[test]
     fn buffer_retains_many_small_events() {
         let mut b = RetryBuffer::new(1024 * 1024);
@@ -466,7 +442,7 @@ mod tests {
             b.push(i, req());
         }
         assert_eq!(b.len(), 20_000);
-        assert_eq!(b.evicted(), 0);
+        assert_eq!(b.take_evicted(), 0);
     }
 
     /// Overflow evicts oldest-first and keeps the newest events, rather than
@@ -480,12 +456,12 @@ mod tests {
             b.push(i, req_sized(100));
         }
         assert_eq!(seqs(&b), vec![1, 2, 3]);
-        assert_eq!(b.evicted(), 0);
+        assert_eq!(b.take_evicted(), 0);
 
         // Fourth event exceeds the budget: seq 1 is evicted to make room.
         b.push(4, req_sized(100));
         assert_eq!(seqs(&b), vec![2, 3, 4]);
-        assert_eq!(b.evicted(), 1);
+        assert_eq!(b.take_evicted(), 1);
         assert!(b.bytes() <= one * 3);
     }
 
@@ -502,7 +478,10 @@ mod tests {
 
         b.push(11, req_sized(small * 5));
         assert_eq!(*seqs(&b).last().unwrap(), 11);
-        assert!(b.len() < 10, "large event should displace several small ones");
+        assert!(
+            b.len() < 10,
+            "large event should displace several small ones"
+        );
         assert!(b.bytes() <= small * 10);
     }
 
@@ -516,11 +495,33 @@ mod tests {
 
         assert!(b.is_empty(), "oversized event must not be retained");
         assert_eq!(b.bytes(), 0);
-        assert_eq!(b.evicted(), 2, "the evicted small event and the oversized one");
+        assert_eq!(
+            b.take_evicted(),
+            2,
+            "the evicted small event and the oversized one"
+        );
 
         // The buffer stays usable afterwards.
         b.push(3, req_sized(10));
         assert_eq!(seqs(&b), vec![3]);
+    }
+
+    /// `take_evicted` drains, so consecutive reconnects each report only what
+    /// was evicted since the last one rather than re-announcing old losses.
+    #[test]
+    fn buffer_take_evicted_drains() {
+        let one = req_sized(100).encoded_len();
+        let mut b = RetryBuffer::new(one * 2);
+        assert_eq!(b.take_evicted(), 0, "nothing evicted yet");
+
+        for i in 1..=4 {
+            b.push(i, req_sized(100));
+        }
+        assert_eq!(b.take_evicted(), 2);
+        assert_eq!(b.take_evicted(), 0, "second read must not repeat the count");
+
+        b.push(5, req_sized(100));
+        assert_eq!(b.take_evicted(), 1, "only the newly evicted event");
     }
 
     #[test]
@@ -537,16 +538,33 @@ mod tests {
     /// spuriously after a long healthy stream.
     #[test]
     fn buffer_prune_reclaims_bytes() {
+        let one = req_sized(100).encoded_len();
         let mut b = RetryBuffer::new(1024 * 1024);
         for i in 1..=10 {
             b.push(i, req_sized(100));
         }
-        let full = b.bytes();
-        assert!(full > 0);
+        assert_eq!(b.bytes(), one * 10);
+
+        b.prune_until(4);
+        assert_eq!(b.bytes(), one * 6, "partial prune reclaims proportionally");
 
         b.prune_until(10);
         assert!(b.is_empty());
-        assert_eq!(b.bytes(), 0, "pruning everything must zero the byte count");
+        assert_eq!(b.bytes(), 0);
+    }
+
+    /// Reclaimed budget is reusable: a stream that acks as it goes keeps
+    /// pushing indefinitely without ever evicting.
+    #[test]
+    fn buffer_acked_stream_never_evicts() {
+        let one = req_sized(100).encoded_len();
+        let mut b = RetryBuffer::new(one * 4);
+        for i in 1..=100 {
+            b.push(i, req_sized(100));
+            b.prune_until(i);
+        }
+        assert!(b.is_empty());
+        assert_eq!(b.take_evicted(), 0, "acked events free their budget");
     }
 
     #[test]
@@ -666,8 +684,14 @@ mod tests {
         assert_eq!(parse_duration("1h").unwrap(), Duration::from_secs(3600));
         assert_eq!(parse_duration("1d").unwrap(), Duration::from_secs(86_400));
         assert!(parse_duration("").is_err());
-        assert!(parse_duration("10").is_err());
+        assert!(parse_duration("10").is_err(), "a bare number has no unit");
         assert!(parse_duration("abc").is_err());
+        assert!(parse_duration("5x").is_err(), "unknown unit");
+
+        // Shared with `parse_byte_size` via `split_scalar_unit`: case and
+        // internal whitespace are tolerated.
+        assert_eq!(parse_duration("250MS").unwrap(), Duration::from_millis(250));
+        assert_eq!(parse_duration(" 2 m ").unwrap(), Duration::from_secs(120));
     }
 
     #[test]
