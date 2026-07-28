@@ -268,6 +268,11 @@ def _repro_with_prefix(prefix, labels, max_chars):
         return ("", 0)
     return (base + " ".join(included), len(included))
 
+# Keys a task resolves before the build and `process_event` must not clobber
+# when `build_started` resets the accumulator for a new (or retried) stream.
+# Both identify the invocation to the Aspect Web UI; see `resolve_aspect_url`.
+_TASK_OWNED_KEYS = ["sink_invocation_id", "bes_streamed_by_bazel"]
+
 def init_data():
     """Create a fresh data accumulator.
 
@@ -275,6 +280,9 @@ def init_data():
     `["bazel"]`. The rendered "Bazel details" reads `data["bazel"][...]`;
     root scalars stay at the root so non-bazel tasks can populate them too.
     See `crates/aspect-cli/src/builtins/aspect/DEVELOPMENT.md` for the schema.
+
+    `_TASK_OWNED_KEYS` names the root scalars that survive a `build_started`
+    reset.
     """
     return {
         # start/finish ms since epoch. build/test: from BES (process_event).
@@ -287,6 +295,11 @@ def init_data():
         # bazel_runner.axl after Build::spawn; "" when no sinks. Differs from
         # build_started.uuid (Bazel's server-side UUID).
         "sink_invocation_id": "",
+        # True when Bazel uploads to the Aspect BES backend itself, so the CLI
+        # streams no sink there and `resolve_aspect_url` keys on Bazel's
+        # invocation_id. Set by the task before spawning; see
+        # bes_sinks.axl::bes_streamed_by_bazel.
+        "bes_streamed_by_bazel": False,
         # Producer-authored at terminal-emit time. Each entry {command, description};
         # see lib/repro_commands.axl.
         "repro_commands": [],
@@ -452,14 +465,14 @@ def process_event(data, event):
     kind = event.kind
 
     if kind == "build_started":
-        # Reset state for the new stream (handles retries). Preserve the
-        # task-managed sink_invocation_id (set before this event) — wiping it
-        # would drop the Aspect Workflows link from every annotation.
-        preserved_sink_id = data.get("sink_invocation_id", "") or ""
+        # Reset state for the new stream (handles retries), less the keys the
+        # task owns and sets before this event — wiping those would drop the
+        # Aspect Workflows link from every annotation.
+        preserved = {k: data[k] for k in _TASK_OWNED_KEYS if k in data}
         fresh = init_data()
         for k in fresh:
             data[k] = fresh[k]
-        data["sink_invocation_id"] = preserved_sink_id
+        data.update(preserved)
 
         payload = event.payload
         uuid = bes_get(payload, "uuid", "") or ""
@@ -932,15 +945,17 @@ def _join_url(base, id):
 def resolve_aspect_url(links, data):
     """Return the Aspect Web UI URL for an invocation, or "" if unavailable.
 
-    Keyed on `sink_invocation_id`, NOT Bazel's `invocation_id`: the Aspect Web
-    UI indexes by the UUID the gRPC sink (`stream_sink.rs`) mints up-front when
-    spawning BES subscribers — that's the stream-level id the backend sees;
-    Bazel's own UUID is unknown to the backend (would 404).
+    Keyed on whichever id the backend indexed the invocation under:
 
-    Tasks with sinks active set `data["sink_invocation_id"]` from
-    `build.sink_invocation_id` right after `ctx.bazel.build(...)` (the runtime
-    mints it inside `Build::spawn`). See `bazel_runner.axl`. Without sinks the
-    field is empty and we suppress the link.
+      - `sink_invocation_id` when the CLI streamed it — the UUID the gRPC sink
+        (`stream_sink.rs`) mints up-front when spawning BES subscribers. Tasks
+        set it from `build.sink_invocation_id` right after `ctx.bazel.build(...)`
+        (the runtime mints it inside `Build::spawn`); see `bazel_runner.axl`.
+      - `data["bazel"]["invocation_id"]` when `bes_streamed_by_bazel` says Bazel
+        uploaded it instead, in which case no sink — and so no sink id — exists.
+
+    The two are not interchangeable: Bazel's UUID is unknown to a backend the CLI
+    streamed to, and would 404. Without either id the link is suppressed.
 
     `links["results_base_url"]` (from `WorkflowsEnvironment.build_events.results_url`)
     is the prefix, joined as `{base}/{id}` (no `/invocations/` segment). Typical:
@@ -950,6 +965,8 @@ def resolve_aspect_url(links, data):
     if not base:
         return ""
     inv_id = data.get("sink_invocation_id", "") or ""
+    if not inv_id and data.get("bes_streamed_by_bazel"):
+        inv_id = data.get("bazel", {}).get("invocation_id", "") or ""
     if not inv_id:
         return ""
     return _join_url(base, inv_id)

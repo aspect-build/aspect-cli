@@ -1,15 +1,44 @@
-"""Tests for `lib/bes_sinks.axl` — the BES upload summary line and the gRPC-sink
-filter shared by the announce/summary helpers.
+"""Tests for `lib/bes_sinks.axl` — the BES upload summary line, the gRPC-sink
+filter shared by the announce/summary helpers, sink collection, and the
+duplicate-stream drop that keeps the CLI from streaming to an endpoint Bazel's
+own `--bes_backend` already uploads to.
 
 Run with:
   aspect dev test-bes-sinks
 """
 
-load("./bes_sinks.axl", "bes_upload_line", "grpc_backends")
+load("./bes_sinks.axl", "bazel_bes_backend", "bes_streamed_by_bazel", "bes_upload_line", "collect_bes_from_args", "collect_bes_sinks", "grpc_backends")
 
 def _eq(label, got, want):
     if got != want:
         fail("%s: got %r, want %r" % (label, got, want))
+
+def _fake_ctx(env = {}, bes_backends = [], bes_headers = []):
+    """Stand-in for `ctx`. `info(ctx.std, …)` reads `std.io.stdout.is_tty` and
+    `std.env.var` to decide on color, `bes_streamed_by_bazel` reads
+    `ASPECT_WORKFLOWS_BES_BACKEND` from `env`, and the collect helpers read the
+    `--bes-backend` / `--bes-header` args.
+
+    `aspect.auth.deployment_for_host` returns None throughout: these tests cover
+    endpoint matching, not the JWT attachment `aspect_endpoint_auth_test.axl`
+    owns, and an unowned host skips credential resolution entirely."""
+    return struct(
+        std = struct(
+            io = struct(stdout = struct(is_tty = False)),
+            env = struct(var = lambda name: env.get(name)),
+        ),
+        args = struct(bes_backends = bes_backends, bes_headers = bes_headers),
+        aspect = struct(auth = struct(deployment_for_host = lambda host: None)),
+    )
+
+def _fake_rc(values):
+    """Stand-in for a `RunCommand`: `bazel_bes_backend` calls only `flag_value`.
+    `values` maps a flag name to its effective value."""
+    return struct(flag_value = lambda name, command: values.get(name))
+
+def _fake_trait(sinks):
+    """Stand-in for `BazelTrait`: `collect_bes_sinks` reads only its sink list."""
+    return struct(build_event_sinks = sinks)
 
 def _test_clean_stream(_):
     """A clean stream reports the sent count and names the backend."""
@@ -94,6 +123,96 @@ def _test_grpc_backends_filters_file_sinks(_):
     _eq("only gRPC-backend sinks survive", [s.uri for s in got], ["grpcs://bes.a", "grpcs://bes.b"])
     _eq("no gRPC sinks → empty", grpc_backends([file_sink]), [])
 
+def _test_bazel_bes_backend(_):
+    """The effective Bazel `--bes_backend` is read off the run command; a missing
+    flag or absent run command both mean "Bazel is not uploading"."""
+    rc = _fake_rc({"--bes_backend": "grpcs://bes.acme.aspect.build"})
+    _eq("flag set", bazel_bes_backend(rc, "build"), "grpcs://bes.acme.aspect.build")
+    _eq("flag unset", bazel_bes_backend(_fake_rc({}), "build"), "")
+    _eq("no run command", bazel_bes_backend(None, "build"), "")
+
+def _test_collect_drops_duplicate_backends(_):
+    """A `--bes-backend` naming the same endpoint as Bazel's `--bes_backend` is
+    dropped — the duplicate-stream fix — while others still get a sink."""
+    duplicate = "grpcs://bes.acme.aspect.build"
+    other = "grpcs://bes.other.example.com"
+
+    def uris(bazel_backend, backends = [duplicate, other]):
+        ctx = _fake_ctx(bes_backends = backends)
+        return [s.uri for s in collect_bes_from_args(ctx, bazel_backend = bazel_backend)]
+
+    _eq("exact match dropped", uris(duplicate), [other])
+
+    # The customer's case: the runner injects the implicit-port spelling while
+    # the user writes `:443` (or the reverse). Both name one endpoint.
+    _eq("bazel spells the default port", uris(duplicate + ":443"), [other])
+    _eq(
+        "backend spells the default port",
+        uris(duplicate, backends = [duplicate + ":443"]),
+        [],
+    )
+    _eq("schemeless bazel flag", uris("bes.acme.aspect.build"), [other])
+
+    _eq("unrelated backend kept", uris("grpcs://bes.third.example.com"), [duplicate, other])
+    _eq("different port kept", uris(duplicate + ":8980"), [duplicate, other])
+    _eq("no bazel backend is a no-op", uris(""), [duplicate, other])
+    _eq("no backends", uris(duplicate, backends = []), [])
+
+def _test_collect_bes_sinks(_):
+    """`collect_bes_sinks` returns the `--bes-backend` sinks then the trait's own,
+    dropping duplicates from both groups. A file sink (no `uri`) is a local BEP
+    dump, not a second upload, so it always survives."""
+    duplicate = "grpcs://bes.acme.aspect.build"
+    trait_sinks = [
+        struct(uri = duplicate),
+        struct(uri = None),
+        struct(uri = "grpcs://bes.other.example.com"),
+    ]
+
+    def uris(bazel_backend, backends = [duplicate, "grpcs://bes.cli.example.com"]):
+        ctx = _fake_ctx(bes_backends = backends)
+        rc = _fake_rc({"--bes_backend": bazel_backend} if bazel_backend else {})
+        return [s.uri for s in collect_bes_sinks(ctx, _fake_trait(trait_sinks), rc)]
+
+    _eq(
+        "duplicates dropped from both groups, file sink kept",
+        uris(duplicate + ":443"),
+        ["grpcs://bes.cli.example.com", None, "grpcs://bes.other.example.com"],
+    )
+    _eq(
+        "nothing dropped without a bazel backend",
+        uris(""),
+        [duplicate, "grpcs://bes.cli.example.com", duplicate, None, "grpcs://bes.other.example.com"],
+    )
+
+    # Suppressing every gRPC sink is the case that costs the Web UI its sink id;
+    # the file sink still comes back so a --bep-file dump keeps working.
+    _eq(
+        "all gRPC sinks suppressed",
+        uris(duplicate, backends = [duplicate]),
+        [None, "grpcs://bes.other.example.com"],
+    )
+
+def _test_bes_streamed_by_bazel(_):
+    """True only when Bazel's `--bes_backend` is the runner's own Aspect BES
+    backend — the case where the Web UI still holds the invocation (under
+    Bazel's id) despite the CLI streaming no sink to it."""
+    aspect_backend = "grpcs://bes.acme.aspect.build"
+
+    def check(bazel_backend, runner_backend = aspect_backend):
+        env = {"ASPECT_WORKFLOWS_BES_BACKEND": runner_backend} if runner_backend else {}
+        rc = _fake_rc({"--bes_backend": bazel_backend} if bazel_backend else {})
+        return bes_streamed_by_bazel(_fake_ctx(env = env), rc)
+
+    _eq("bazel uploads to the Aspect backend", check(aspect_backend), True)
+    _eq("default-port spelling still matches", check("bes.acme.aspect.build:443"), True)
+
+    # Suppressing a third-party BES says nothing about what the Aspect UI holds,
+    # so the link must stay keyed on the (absent) sink id and be dropped.
+    _eq("bazel uploads elsewhere", check("grpcs://bes.buildbuddy.io"), False)
+    _eq("no bazel backend", check(""), False)
+    _eq("off a runner", check(aspect_backend, runner_backend = ""), False)
+
 _UNIT_TESTS = [
     _test_clean_stream,
     _test_failed_stream,
@@ -101,6 +220,10 @@ _UNIT_TESTS = [
     _test_connect_failure,
     _test_missing_uri,
     _test_grpc_backends_filters_file_sinks,
+    _test_bazel_bes_backend,
+    _test_collect_drops_duplicate_backends,
+    _test_collect_bes_sinks,
+    _test_bes_streamed_by_bazel,
 ]
 
 def _test_impl(ctx):

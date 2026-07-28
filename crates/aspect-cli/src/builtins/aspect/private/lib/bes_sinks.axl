@@ -3,8 +3,14 @@
 `--bes-backend` makes the aspect-cli stream BEP to the backend through its own
 gRPC sink (distinct from Bazel's `--bes_backend`, which makes Bazel upload). Every
 bazel-spawning task that exposes the flags (`bes_args`) builds the sinks here
-(`collect_bes_from_args`), splices them into its `build_events` list, and
-`wait()`s them after the build.
+(`collect_bes_sinks`), splices them into its `build_events` list, and `wait()`s
+them after the build.
+
+The two paths are mutually exclusive per endpoint: a CLI sink to the endpoint
+Bazel's own `--bes_backend` uploads to is dropped, so the invocation is streamed
+once rather than twice. Because that can leave no sink at all — and the Aspect
+Web UI link keys on an id only a sink mints — a task pairs the collect call with
+`bes_streamed_by_bazel`, which redirects the link to Bazel's invocation id.
 
 The Aspect login JWT is attached to an Aspect-owned backend's sink metadata when
 the user has not supplied their own `authorization` header — see
@@ -14,13 +20,13 @@ resolution. (The companion case — BES routed through Bazel via
 `bazel_flags.axl` instead.)
 """
 
-load("./aspect_endpoint_auth.axl", "endpoint_host", "headers_have_auth", "is_aspect_host", "resolve_aspect_bearer")
+load("./aspect_endpoint_auth.axl", "endpoint_host", "headers_have_auth", "is_aspect_host", "resolve_aspect_bearer", "same_bes_endpoint")
 load("./environment.axl", "info")
 
 def bes_args() -> dict:
     """The `bes_backends` / `bes_headers` CLI args every BES-capable task
     declares, with one canonical description each. Splat into a task's
-    `args = {...}`; read back by `collect_bes_from_args`."""
+    `args = {...}`; read back by `collect_bes_sinks`."""
     return {
         "bes_backends": args.string_list(
             long = "bes-backend",
@@ -32,8 +38,89 @@ def bes_args() -> dict:
         ),
     }
 
-def collect_bes_from_args(ctx, extra_backends = []) -> list:
-    """Build the CLI-streamed BES sinks from `--bes-backend` / `--bes-header`.
+_DUPLICATE_MSG = ("Not streaming build events to %s from the CLI: Bazel is already " +
+                  "uploading them there via --bes_backend=%s.")
+
+def bazel_bes_backend(rc, command: str) -> str:
+    """The effective `--bes_backend` Bazel itself will upload to, or `""`.
+
+    Reads through the run command, so it sees the flag wherever it came from —
+    `--bazel-flag=--bes_backend=…`, a `.bazelrc`, or an expanded `--config`.
+    `rc` may be `None` for a caller with no run command to consult.
+
+    Public so `bes_sinks_test.axl` can assert the resolution.
+    """
+    if rc == None:
+        return ""
+    return rc.flag_value("--bes_backend", command = command) or ""
+
+def _drop_bazel_streamed(ctx, items: list, uri_of, bazel_backend: str) -> list:
+    """`items` minus those whose `uri_of(item)` names the same endpoint as Bazel's
+    own `bazel_backend`, announcing each one dropped.
+
+    Both the CLI sink and Bazel's uploader stream the *same* invocation, so an
+    endpoint configured on both paths receives two streams for one build: the
+    backend records a duplicate invocation, and the two streams race to close.
+
+    Bazel wins the tie because it is the more explicit request — the CLI's
+    backends are auto-wired (a Workflows runner's `ASPECT_WORKFLOWS_BES_BACKEND`,
+    a `--deployment`'s advertised host) while `--bes_backend` is set by hand.
+
+    `uri_of` returning `""`/`None` keeps the item: a file sink (a local BEP dump)
+    is not a second upload. A no-op when `bazel_backend` is empty.
+    """
+    if not bazel_backend:
+        return items
+
+    kept = []
+    for item in items:
+        uri = uri_of(item)
+        if uri and same_bes_endpoint(uri, bazel_backend):
+            info(ctx.std, _DUPLICATE_MSG % (uri, bazel_backend))
+        else:
+            kept.append(item)
+    return kept
+
+def bes_streamed_by_bazel(ctx, rc, command: str = "build") -> bool:
+    """Whether Bazel's own `--bes_backend` is the Aspect BES backend this runner
+    reports results for, so the CLI streams no sink of its own to it.
+
+    Tasks store this as `data["bes_streamed_by_bazel"]`, which tells
+    `resolve_aspect_url` to key the Web UI link on Bazel's `invocation_id`: with
+    no sink there is no sink id, but the backend still holds the invocation —
+    indexed under Bazel's UUID, since Bazel uploaded it.
+
+    Gated on the runner's own `ASPECT_WORKFLOWS_BES_BACKEND`, because suppressing
+    a third-party BES says nothing about what the Aspect Web UI has.
+    """
+    bazel_backend = bazel_bes_backend(rc, command)
+    if not bazel_backend:
+        return False
+    return same_bes_endpoint(ctx.std.env.var("ASPECT_WORKFLOWS_BES_BACKEND") or "", bazel_backend)
+
+def collect_bes_sinks(ctx, bazel_trait, rc, command: str = "build", extra_backends = []) -> list:
+    """Every CLI-streamed BES sink for one bazel spawn, in the order a task
+    splices them into `build_events`: those built from `--bes-backend` /
+    `--bes-header` and `extra_backends`, then the ones features already pushed
+    onto `BazelTrait.build_event_sinks` (a Workflows runner's env-injected
+    backend, a `--bep-file` dump).
+
+    Sinks to the endpoint Bazel's own `--bes_backend` uploads to are dropped from
+    both groups so the invocation is streamed once — see `_drop_bazel_streamed`.
+
+    The one call a bazel-spawning task makes; pair it with
+    `bes_streamed_by_bazel` to keep the Aspect Web UI link resolvable. The caller
+    `wait()`s the returned sinks after the build.
+    """
+    bazel_backend = bazel_bes_backend(rc, command)
+    return (
+        collect_bes_from_args(ctx, extra_backends = extra_backends, bazel_backend = bazel_backend) +
+        _drop_bazel_streamed(ctx, list(bazel_trait.build_event_sinks), lambda s: s.uri, bazel_backend)
+    )
+
+def collect_bes_from_args(ctx, extra_backends = [], bazel_backend: str = "") -> list:
+    """The CLI-streamed BES sinks from `--bes-backend` / `--bes-header`. Most
+    callers want `collect_bes_sinks`, which also covers the trait's own sinks.
 
     Attaches the Aspect login JWT as `Authorization: Bearer <jwt>` to each backend
     a configured deployment owns when the user has not supplied their own
@@ -45,8 +132,8 @@ def collect_bes_from_args(ctx, extra_backends = []) -> list:
     host `--deployment` wires up), unioned with `--bes-backend` and deduped so a
     URI passed both ways yields one sink.
 
-    Returns a list of sinks to splice into a task's `build_events`; the caller
-    `wait()`s them after the build.
+    `bazel_backend` is the endpoint Bazel uploads to itself (`""` when it does
+    not); a backend naming it is dropped rather than streamed twice.
     """
     metadata = {}
     for bes_header in ctx.args.bes_headers:
@@ -64,6 +151,8 @@ def collect_bes_from_args(ctx, extra_backends = []) -> list:
     for b in extra_backends:
         if b not in backends:
             backends.append(b)
+
+    backends = _drop_bazel_streamed(ctx, backends, lambda b: b, bazel_backend)
 
     sinks = []
     for bes_backend in backends:
