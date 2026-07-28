@@ -208,7 +208,13 @@ static READ_PROBES: OnceLock<Mutex<HashMap<String, Arc<ReadProbe>>>> = OnceLock:
 /// Poll a coalesced background read of `path` (see `poll_read_to_string` for
 /// the contract). Only the call that spawns the probe blocks (up to
 /// `timeout`); later polls for the same path return its state immediately.
-fn poll_read(path: &str, timeout: Duration) -> Option<String> {
+///
+/// `expected_len`, when `Some`, is the authoritative byte length the file must
+/// have to count as fully materialized. A read returning fewer bytes is a
+/// partial read — a network-backed filesystem can expose a blob before it has
+/// finished fetching it — and is reported as "not readable yet" so the caller
+/// retries rather than consuming a truncated file.
+fn poll_read(path: &str, timeout: Duration, expected_len: Option<u64>) -> Option<String> {
     let registry = READ_PROBES.get_or_init(Default::default);
     let (probe, spawned_here) = {
         let mut reg = registry.lock().unwrap();
@@ -225,7 +231,13 @@ fn poll_read(path: &str, timeout: Duration) -> Option<String> {
                 let spawned = std::thread::Builder::new()
                     .name("fs-read-probe".to_string())
                     .spawn(move || {
-                        let result = fs::read_to_string(&thread_path).ok();
+                        let result =
+                            fs::read_to_string(&thread_path)
+                                .ok()
+                                .filter(|c| match expected_len {
+                                    Some(want) => c.len() as u64 == want,
+                                    None => true,
+                                });
                         *thread_probe.state.lock().unwrap() = Some(result);
                         thread_probe.done.notify_all();
                     });
@@ -655,14 +667,23 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
     /// Callers are expected to poll until content or a caller-side deadline:
     /// `None` always means "not readable yet", never "empty file" (an empty
     /// readable file returns `""`).
+    ///
+    /// Pass `expected_len` (bytes) when the caller knows the file's
+    /// authoritative size — e.g. `File.length` from a build event. A read
+    /// returning fewer bytes means the blob is still materializing, and is
+    /// reported as `None` so the caller retries instead of consuming a
+    /// truncated file. Omit it (or pass a negative value) to accept whatever
+    /// the read returns.
     fn poll_read_to_string<'v>(
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = pos)] path: values::StringValue,
         #[starlark(require = pos)] timeout_ms: i32,
+        #[starlark(require = named, default = -1)] expected_len: i64,
         heap: Heap<'v>,
     ) -> anyhow::Result<NoneOr<values::StringValue<'v>>> {
         let timeout = Duration::from_millis(timeout_ms.max(0) as u64);
-        Ok(match poll_read(path.as_str(), timeout) {
+        let expected_len = (expected_len >= 0).then_some(expected_len as u64);
+        Ok(match poll_read(path.as_str(), timeout, expected_len) {
             Some(content) => NoneOr::Other(heap.alloc_str(content.as_str())),
             None => NoneOr::None,
         })
@@ -790,12 +811,55 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ok.txt");
         fs::write(&path, "hello").unwrap();
-        let got = poll_read(path.to_str().unwrap(), Duration::from_secs(5));
+        let got = poll_read(path.to_str().unwrap(), Duration::from_secs(5), None);
         assert_eq!(got.as_deref(), Some("hello"));
         // Consumed probes are removed so a later poll re-reads fresh content.
         fs::write(&path, "world").unwrap();
-        let got = poll_read(path.to_str().unwrap(), Duration::from_secs(5));
+        let got = poll_read(path.to_str().unwrap(), Duration::from_secs(5), None);
         assert_eq!(got.as_deref(), Some("world"));
+    }
+
+    /// A read shorter than the authoritative length is a partially-materialized
+    /// blob: report "not readable yet" so the caller retries, and deliver the
+    /// content once the file reaches its full size.
+    #[test]
+    fn poll_read_rejects_reads_shorter_than_expected_len() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("partial.txt");
+        fs::write(&path, "half").unwrap();
+        let p = path.to_str().unwrap();
+
+        assert_eq!(poll_read(p, Duration::from_secs(5), Some(8)), None);
+        // Exact length is accepted.
+        assert_eq!(
+            poll_read(p, Duration::from_secs(5), Some(4)).as_deref(),
+            Some("half")
+        );
+        // Once the rest lands, the full content is delivered.
+        fs::write(&path, "halfhalf").unwrap();
+        assert_eq!(
+            poll_read(p, Duration::from_secs(5), Some(8)).as_deref(),
+            Some("halfhalf")
+        );
+    }
+
+    /// `expected_len` counts bytes, not characters — a multi-byte UTF-8 file
+    /// must not be mistaken for a short read.
+    #[test]
+    fn poll_read_expected_len_is_bytes_not_chars() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("utf8.txt");
+        let content = "héllo→"; // 6 chars, 9 bytes
+        fs::write(&path, content).unwrap();
+        let p = path.to_str().unwrap();
+        assert_eq!(content.chars().count(), 6);
+        assert_eq!(content.len(), 9);
+        // The byte length is accepted; the character count would be rejected.
+        assert_eq!(
+            poll_read(p, Duration::from_secs(5), Some(9)).as_deref(),
+            Some(content)
+        );
+        assert_eq!(poll_read(p, Duration::from_secs(5), Some(6)), None);
     }
 
     #[test]
@@ -804,12 +868,12 @@ mod tests {
         let empty = dir.path().join("empty.txt");
         fs::write(&empty, "").unwrap();
         assert_eq!(
-            poll_read(empty.to_str().unwrap(), Duration::from_secs(5)).as_deref(),
+            poll_read(empty.to_str().unwrap(), Duration::from_secs(5), None).as_deref(),
             Some("")
         );
         let missing = dir.path().join("missing.txt");
         assert_eq!(
-            poll_read(missing.to_str().unwrap(), Duration::from_secs(5)),
+            poll_read(missing.to_str().unwrap(), Duration::from_secs(5), None),
             None
         );
     }
@@ -828,7 +892,7 @@ mod tests {
         let p = path.to_str().unwrap();
 
         let started = std::time::Instant::now();
-        assert_eq!(poll_read(p, Duration::from_millis(200)), None);
+        assert_eq!(poll_read(p, Duration::from_millis(200), None), None);
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "first poll must return at its timeout"
@@ -836,7 +900,7 @@ mod tests {
 
         // Probe is in flight: this must not block for another timeout.
         let started = std::time::Instant::now();
-        assert_eq!(poll_read(p, Duration::from_secs(60)), None);
+        assert_eq!(poll_read(p, Duration::from_secs(60), None), None);
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "in-flight poll must return immediately"
@@ -851,7 +915,7 @@ mod tests {
 
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
-            match poll_read(p, Duration::from_millis(100)) {
+            match poll_read(p, Duration::from_millis(100), None) {
                 Some(content) => {
                     assert_eq!(content, "landed");
                     break;
