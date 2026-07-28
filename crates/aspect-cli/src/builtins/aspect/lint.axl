@@ -594,35 +594,24 @@ def _read_lint_file(ctx, filepath, timeout_ms = _LINT_FILE_PROBE_TIMEOUT_MS, exp
     drain budget warns and skips it.
 
     `expected_len` is the file's authoritative byte length (BES `File.length`),
-    or -1 when unknown. A read shorter than it means the blob is still
-    materializing: the inode can be exposed before the fetch completes, so a
-    read that succeeds is not proof the contents are whole. Such a read is
-    reported as not-yet-readable and retried, because every consumer here
-    (SARIF parse, patch hunks, exit codes) silently misbehaves on truncated
-    input rather than failing loudly.
+    or -1 when unknown. Both read paths compare the bytes they actually read
+    against it and report a short read as not-yet-readable: a successful read
+    is not proof the contents are whole, because the file can be exposed before
+    its download finishes, and every consumer here (SARIF parse, patch hunks,
+    exit codes) silently misbehaves on truncated input rather than failing
+    loudly.
 
     Anything else is a plain local path — file:// URIs, or the output-tree
-    fallback for bytestream URIs on runners without bb_clientd — read
-    directly: local disk can't stall the way bb_clientd reads can, and the
-    direct path avoids a background probe thread per read. The same
-    completeness check applies, via the file's own size.
+    fallback for bytestream URIs on runners without bb_clientd — read directly
+    via `read_to_string_if_complete`: local disk can't stall the way bb_clientd
+    reads can, so it needs no background probe, only the same length gate.
 
     Either way, None always means unreadable, never empty: a clean linter's
     empty `.out` reads as "".
     """
     root = bb_clientd_root(ctx)
     if root == None or not filepath.startswith(root):
-        if not ctx.std.fs.exists(filepath):
-            return None
-        content = ctx.std.fs.try_read_to_string(filepath)
-        # Size is read after the content so a file still being written is seen
-        # as short rather than matching a stale pre-read size.
-        size = ctx.std.fs.metadata(filepath).size
-        if content == "" and size > 0:
-            return None
-        if expected_len >= 0 and size != expected_len:
-            return None
-        return content
+        return ctx.std.fs.read_to_string_if_complete(filepath, expected_len = expected_len)
     return ctx.std.fs.poll_read_to_string(filepath, timeout_ms, expected_len = expected_len)
 
 def _probe_timeout_ms(ctx, pass_deadline_ms):

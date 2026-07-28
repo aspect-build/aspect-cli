@@ -650,6 +650,34 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         Ok(heap.alloc_str(s.as_str()))
     }
 
+    /// Reads a file only if it is exactly `expected_len` bytes, else `None`.
+    ///
+    /// For local reads of a file that another process may still be writing or
+    /// downloading. Comparing the bytes actually read against the
+    /// authoritative length is the only reliable completeness test: a `stat`
+    /// taken before the read can be stale by the time the read runs, and one
+    /// taken after can have caught up with a writer that finished mid-read, so
+    /// either would accept a prefix. `None` means "not complete yet" — poll
+    /// again. A negative `expected_len` disables the check and accepts
+    /// whatever the read returns.
+    ///
+    /// This is the non-blocking counterpart to `poll_read_to_string`, which
+    /// applies the same length gate to reads that can block indefinitely.
+    fn read_to_string_if_complete<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        #[starlark(require = pos)] path: values::StringValue,
+        #[starlark(require = named, default = -1)] expected_len: i64,
+        heap: Heap<'v>,
+    ) -> anyhow::Result<NoneOr<values::StringValue<'v>>> {
+        let Ok(s) = fs::read_to_string(path.as_str()) else {
+            return Ok(NoneOr::None);
+        };
+        if expected_len >= 0 && s.len() as u64 != expected_len as u64 {
+            return Ok(NoneOr::None);
+        }
+        Ok(NoneOr::Other(heap.alloc_str(s.as_str())))
+    }
+
     /// Reads the entire contents of a file into a string without ever
     /// blocking the caller for more than `timeout_ms`, or returns `None`
     /// when the contents aren't available yet.
@@ -817,6 +845,38 @@ mod tests {
         fs::write(&path, "world").unwrap();
         let got = poll_read(path.to_str().unwrap(), Duration::from_secs(5), None);
         assert_eq!(got.as_deref(), Some("world"));
+    }
+
+    /// The direct-read gate compares the bytes actually read, so a prefix is
+    /// rejected even if the file reaches its full length immediately after.
+    #[test]
+    fn read_to_string_if_complete_gates_on_bytes_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+
+        // Helper mirroring the builtin's body; the starlark wrapper only adds
+        // heap allocation on top of this.
+        fn read_if_complete(path: &std::path::Path, expected_len: i64) -> Option<String> {
+            let s = fs::read_to_string(path).ok()?;
+            if expected_len >= 0 && s.len() as u64 != expected_len as u64 {
+                return None;
+            }
+            Some(s)
+        }
+
+        fs::write(&path, "half").unwrap();
+        assert_eq!(read_if_complete(&path, 8), None, "prefix is rejected");
+        assert_eq!(read_if_complete(&path, 4).as_deref(), Some("half"));
+        // Longer than declared is also wrong (stale or overwritten file).
+        assert_eq!(read_if_complete(&path, 2), None, "over-long is rejected");
+        // A negative length disables the check.
+        assert_eq!(read_if_complete(&path, -1).as_deref(), Some("half"));
+        // A genuinely empty file is content, not an error.
+        let empty = dir.path().join("empty.txt");
+        fs::write(&empty, "").unwrap();
+        assert_eq!(read_if_complete(&empty, 0).as_deref(), Some(""));
+        // A missing file is unreadable regardless of the expected length.
+        assert_eq!(read_if_complete(&dir.path().join("nope"), -1), None);
     }
 
     /// A read shorter than the authoritative length is a partially-materialized
