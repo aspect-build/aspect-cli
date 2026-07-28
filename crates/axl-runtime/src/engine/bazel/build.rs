@@ -1267,15 +1267,23 @@ Test = task(implementation = _impl)
         );
     }
 
+    /// Omitting the knob is the path that defers to
+    /// `ASPECT_CLI_BES_RETRY_MAX_BUFFER_BYTES`, so it must stay valid.
     #[test]
-    fn grpc_rejects_zero_buffer_size() {
+    fn grpc_accepts_omitted_buffer_bytes() {
+        crate::axl_check!(r#"bazel.build_events.grpc(uri = "grpcs://bes.example.com")"#)
+            .expect("omitting retry_max_buffer_bytes should validate");
+    }
+
+    #[test]
+    fn grpc_rejects_zero_buffer_bytes() {
         let err = crate::axl_check!(
-            r#"bazel.build_events.grpc(uri = "http://localhost:1", retry_max_buffer_size = 0)"#
+            r#"bazel.build_events.grpc(uri = "http://localhost:1", retry_max_buffer_bytes = 0)"#
         )
         .expect_err("expected validation error")
         .to_string();
         assert!(
-            err.contains("retry_max_buffer_size") && err.contains("> 0"),
+            err.contains("retry_max_buffer_bytes") && err.contains("> 0"),
             "unexpected error: {err}"
         );
     }
@@ -1308,7 +1316,7 @@ Test = task(implementation = _impl)
     metadata = {"x-auth": "tok"},
     max_retries = 0,
     retry_min_delay = "500ms",
-    retry_max_buffer_size = 16,
+    retry_max_buffer_bytes = 1048576,
     timeout = "30s",
 )"#
         )
