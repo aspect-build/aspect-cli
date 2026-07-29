@@ -17,6 +17,7 @@ load("@aspect//private/lib/bes_sinks_test.axl", "bes_sinks_tests")
 load("@aspect//private/lib/ci_test.axl", "ci_tests")
 load("@aspect//private/lib/circleci_test.axl", "circleci_tests")
 load("@aspect//private/lib/delivery_results_test.axl", "delivery_results_unit_tests", "delivery_template_snapshot_tests")
+load("@aspect//private/lib/deliveryd_test.axl", "deliveryd_tests")
 load("@aspect//private/lib/deployment_flags_test.axl", "deployment_flags_tests")
 load("@aspect//private/lib/format_results_test.axl", "format_template_snapshot_tests")
 load("@aspect//private/lib/format_spawn_test.axl", "format_spawn_tests")
@@ -372,6 +373,10 @@ def config(ctx: ConfigContext):
     # deployment_flags.axl: --deployment / --aspect-* capability resolution.
     # Run with: aspect dev test-deployment-flags
     ctx.tasks.add(deployment_flags_tests)
+
+    # deliveryd.axl: v1/v2 negotiation and the wire shape of each verb.
+    # Run with: aspect dev test-deliveryd
+    ctx.tasks.add(deliveryd_tests)
 
     # bes_sinks.axl: the end-of-build BES upload summary line.
     # Run with: aspect dev test-bes-sinks

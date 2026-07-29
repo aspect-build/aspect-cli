@@ -1,0 +1,288 @@
+"""Unit tests for lib/deliveryd.axl.
+
+A struct-based fake `ctx` (like `deployment_flags_test.axl`) serves canned HTTP
+responses keyed by `"<METHOD> <path>"` and records every request, so the two
+dialects can be asserted on the wire: which endpoint was called, with which
+field names, and — for v2 — that `record` sends nothing at all.
+
+`fail()` cannot be caught in Starlark, so the error paths (non-2xx, corrupt JSON)
+are not exercised here; an unreachable daemon is, since that surfaces through
+`.status` instead of failing.
+"""
+
+load("./deliveryd.axl", "deliveryd", parse_endpoint = "testonly_parse_endpoint")
+
+_SOCKET = "unix:///run/deliveryd.sock"
+_BASE = "http://localhost"
+
+_V2_HEALTH = {
+    "status": "ok",
+    "version": "2",
+    "storage": {
+        "reachable": True,
+        "ping_ms": 1,
+        "used_memory_bytes": 3221225472,
+        "maxmemory_bytes": 55834574848,
+        "used_memory_pct": 5.77,
+        "maxmemory_policy": "noeviction",
+    },
+}
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _res(status, body = "", headers = []):
+    return struct(status = status, body = body if type(body) == "string" else json.encode(body), headers = headers)
+
+def _future(res):
+    return struct(map_err = lambda f: struct(block = lambda: res), block = lambda: res)
+
+def _error_future(message):
+    return struct(map_err = lambda f: struct(block = lambda: f(message)), block = lambda: message)
+
+def _health_res(version = "2"):
+    headers = [("deliveryd-version", version)] if version else []
+    return _res(200, _V2_HEALTH, headers)
+
+def _ctx(responses, calls):
+    """Fake ctx whose http serves `responses` ({"<METHOD> <path>": res | None},
+    None meaning a transport error) and appends each request to `calls`."""
+
+    def respond(method, url, data):
+        path = url[len(_BASE):]
+        key = method + " " + path
+        calls.append(struct(method = method, path = path, body = json.try_decode(data, None) if data else None))
+        if key not in responses:
+            fail("unexpected deliveryd request: " + key)
+        res = responses[key]
+        if res == None:
+            return _error_future("connection refused")
+        return _future(res)
+
+    http = struct(
+        get = lambda url, headers = {}, unix_socket = None: respond("GET", url, None),
+        query = lambda url, headers = {}, data = None, unix_socket = None: respond("QUERY", url, data),
+        post = lambda url, headers = {}, data = None, unix_socket = None: respond("POST", url, data),
+        delete = lambda url, headers = {}, data = None, unix_socket = None: respond("DELETE", url, data),
+    )
+    return struct(
+        http = lambda: http,
+        std = struct(env = struct(var = lambda name: _SOCKET)),
+    )
+
+def _client(responses, calls, **kwargs):
+    return deliveryd.new(
+        _ctx(responses, calls),
+        host = kwargs.pop("host", "gh"),
+        prefix = kwargs.pop("prefix", "deliver"),
+        commit = kwargs.pop("commit", "abc123"),
+        signature = kwargs.pop("signature", "https://ci/build/7"),
+        **kwargs
+    )
+
+def _test_parse_endpoint(ctx):
+    (base, sock) = parse_endpoint("unix:///run/deliveryd.sock")
+    _eq("unix → base", base, "http://localhost")
+    _eq("unix → socket", sock, "/run/deliveryd.sock")
+
+    (base, sock) = parse_endpoint("http://deliveryd.local:8080")
+    _eq("http → base passthrough", base, "http://deliveryd.local:8080")
+    _eq("http → no socket", sock, None)
+
+    (base, sock) = parse_endpoint("https://deliveryd.example.com")
+    _eq("https → base passthrough", base, "https://deliveryd.example.com")
+    _eq("https → no socket", sock, None)
+
+def _test_negotiates_from_health_header(ctx):
+    calls = []
+    dd = _client({"GET /health": _health_res("2")}, calls)
+    _eq("version header → v2", dd.version, 2)
+    _eq("negotiation probes /health once", [c.path for c in calls], ["/health"])
+    _eq("probe fills .status", dd.status.ok, True)
+    _eq("probe reads storage", dd.status.storage.reachable, True)
+
+    # A daemon that answers /health without the header predates v2.
+    dd = _client({"GET /health": _res(200, {"status": "ok"})}, [])
+    _eq("no version header → v1", dd.version, 1)
+
+    # Endpoint defaults to the env var when not passed explicitly.
+    _eq("endpoint from env", dd.endpoint, _SOCKET)
+
+def _test_unreachable_reports_status(ctx):
+    dd = _client({"GET /health": None}, [])
+    _eq("unreachable → not ok", dd.status.ok, False)
+    _eq("unreachable → error carries the transport reason", dd.status.error, "connection refused")
+
+def _test_v2_record_is_a_noop(ctx):
+    calls = []
+    dd = _client({"GET /health": _health_res()}, calls)
+    dd.record("//pkg:a", "digest-a")
+    _eq("v2 record sends nothing", [c.path for c in calls], ["/health"])
+
+def _test_v1_record_posts_legacy_fields(ctx):
+    calls = []
+    dd = _client({"GET /health": _res(200, {}), "POST /record": _res(200, "ok")}, calls)
+    dd.record("//pkg:a", "digest-a")
+    _eq("v1 record → POST /record", calls[-1].path, "/record")
+    _eq("v1 record payload", calls[-1].body, {
+        "ci_host": "gh",
+        "commit_sha": "abc123",
+        "workspace": "deliver",
+        "label": "//pkg:a",
+        "output_sha": "digest-a",
+    })
+
+def _test_v2_query_batches_and_maps_back(ctx):
+    calls = []
+    dd = _client({
+        "GET /health": _health_res(),
+        "QUERY /delivery": _res(200, {"delivered": {"digest-a": "https://ci/build/1"}}),
+    }, calls)
+
+    # Two labels share a digest; a third has none and is never asked about.
+    got = dd.query({"//pkg:a": "digest-a", "//pkg:b": "digest-a", "//pkg:c": "digest-c", "//pkg:d": ""})
+    _eq("v2 query → one QUERY /delivery", [c.path for c in calls], ["/health", "/delivery"])
+    _eq("v2 query method", calls[-1].method, "QUERY")
+    _eq("v2 query payload", calls[-1].body, {
+        "host": "gh",
+        "prefix": "deliver",
+        "digests": ["digest-a", "digest-c"],
+    })
+    _eq("delivered digest maps back to every label holding it", got, {
+        "//pkg:a": "https://ci/build/1",
+        "//pkg:b": "https://ci/build/1",
+    })
+
+def _test_v2_query_skips_the_round_trip_when_no_digests(ctx):
+    calls = []
+    dd = _client({"GET /health": _health_res()}, calls)
+    _eq("no digests → empty", dd.query({"//pkg:a": ""}), {})
+    _eq("no digests → no request", [c.path for c in calls], ["/health"])
+
+def _test_v1_query_narrows_to_delivered_labels(ctx):
+    calls = []
+    dd = _client({
+        "GET /health": _res(200, {}),
+        "POST /query": _res(200, {"targets": [
+            {"label": "//pkg:a", "output_sha": "digest-a", "delivered": True, "delivered_by": "https://ci/build/1"},
+            {"label": "//pkg:b", "output_sha": "digest-b", "delivered": False},
+            {"label": "//pkg:gone", "output_sha": "digest-x", "delivered": True, "delivered_by": "https://ci/build/0"},
+        ]}),
+    }, calls)
+
+    got = dd.query({"//pkg:a": "digest-a", "//pkg:b": "digest-b"})
+    _eq("v1 query payload", calls[-1].body, {"ci_host": "gh", "commit_sha": "abc123", "workspace": "deliver"})
+    _eq("v1 query → only delivered, only asked-about", got, {"//pkg:a": "https://ci/build/1"})
+
+def _test_v2_deliver_and_delete(ctx):
+    calls = []
+    dd = _client({
+        "GET /health": _health_res(),
+        "POST /delivery": _res(200, "ok"),
+        "DELETE /delivery": _res(200, "ok"),
+    }, calls)
+
+    dd.deliver("//pkg:a", "digest-a")
+    _eq("v2 deliver → POST /delivery", (calls[-1].method, calls[-1].path), ("POST", "/delivery"))
+    _eq("v2 deliver payload", calls[-1].body, {
+        "host": "gh",
+        "prefix": "deliver",
+        "digest": "digest-a",
+        "label": "//pkg:a",
+        "commit": "abc123",
+        "signature": "https://ci/build/7",
+    })
+
+    dd.deliver("//pkg:a", "digest-a", meta = {"image": "sha256:beef"})
+    _eq("meta rides along when set", calls[-1].body["meta"], {"image": "sha256:beef"})
+
+    dd.delete("digest-a")
+    _eq("v2 delete → DELETE /delivery", (calls[-1].method, calls[-1].path), ("DELETE", "/delivery"))
+    _eq("v2 delete payload", calls[-1].body, {"host": "gh", "prefix": "deliver", "digest": "digest-a"})
+
+def _test_v1_deliver_and_delete(ctx):
+    calls = []
+    dd = _client({
+        "GET /health": _res(200, {}),
+        "POST /deliver": _res(200, "ok"),
+        "POST /artifact/delete": _res(200, "ok"),
+    }, calls)
+
+    dd.deliver("//pkg:a", "digest-a")
+    _eq("v1 deliver → POST /deliver", calls[-1].path, "/deliver")
+    _eq("v1 deliver payload", calls[-1].body, {
+        "ci_host": "gh",
+        "output_sha": "digest-a",
+        "workspace": "deliver",
+        "signature": "https://ci/build/7",
+    })
+
+    dd.delete("digest-a")
+    _eq("v1 delete → POST /artifact/delete", calls[-1].path, "/artifact/delete")
+    _eq("v1 delete payload", calls[-1].body, {"ci_host": "gh", "output_sha": "digest-a", "workspace": "deliver"})
+
+def _test_health_reprobes(ctx):
+    calls = []
+    dd = _client({"GET /health": _health_res()}, calls)
+    health = dd.health()
+    _eq("health re-probes", [c.path for c in calls], ["/health", "/health"])
+    _eq("health ok", health.ok, True)
+    _eq("health version", health.version, 2)
+    _eq("health status", health.status, "ok")
+    _eq("health storage reachable", health.storage.reachable, True)
+    _eq("health storage used", health.storage.used_bytes, 3221225472)
+    _eq("health storage max", health.storage.max_bytes, 55834574848)
+    _eq("health storage policy", health.storage.policy, "noeviction")
+
+def _test_describe_storage(ctx):
+    dd = _client({"GET /health": _health_res()}, [])
+    _eq(
+        "full stats render as one line",
+        deliveryd.describe_storage(dd.status),
+        "3.0 GiB / 52.0 GiB (5.7%) · noeviction · ping 1ms",
+    )
+
+    # No maxmemory configured: no ratio and no percentage to report.
+    unbounded = dict(_V2_HEALTH)
+    unbounded["storage"] = {"reachable": True, "ping_ms": 2, "used_memory_bytes": 1536}
+    dd = _client({"GET /health": _res(200, unbounded, [("deliveryd-version", "2")])}, [])
+    _eq("no maxmemory → used only", deliveryd.describe_storage(dd.status), "1.5 KiB used · ping 2ms")
+
+    # A daemon reporting reachability but no memory stats: no size clause at all.
+    bare = dict(_V2_HEALTH)
+    bare["storage"] = {"reachable": True, "ping_ms": 3}
+    dd = _client({"GET /health": _res(200, bare, [("deliveryd-version", "2")])}, [])
+    _eq("no memory stats → ping only", deliveryd.describe_storage(dd.status), "ping 3ms")
+
+    # A v1 daemon reports no storage at all; the caller drops the line.
+    dd = _client({"GET /health": _res(200, {})}, [])
+    _eq("no storage → empty", deliveryd.describe_storage(dd.status), "")
+
+_UNIT_TESTS = [
+    _test_parse_endpoint,
+    _test_negotiates_from_health_header,
+    _test_unreachable_reports_status,
+    _test_v2_record_is_a_noop,
+    _test_v1_record_posts_legacy_fields,
+    _test_v2_query_batches_and_maps_back,
+    _test_v2_query_skips_the_round_trip_when_no_digests,
+    _test_v1_query_narrows_to_delivered_labels,
+    _test_v2_deliver_and_delete,
+    _test_v1_deliver_and_delete,
+    _test_health_reprobes,
+    _test_describe_storage,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("deliveryd.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+deliveryd_tests = task(
+    kind = "test-deliveryd",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

@@ -1,140 +1,357 @@
+"""Client for `deliveryd`, the delivery-state daemon — speaks v2, falls back to v1.
+
+deliveryd tracks which artifacts have already been delivered so a re-run can skip
+them. v2 keys that state by artifact digest and answers one batched
+`QUERY /delivery`; v1 keys it by commit and needs a per-target `record` before
+`POST /query` can answer. `new()` negotiates the dialect once, off the
+`DeliveryD-Version` header on `/health`, and every verb below speaks whichever
+one the daemon advertises — callers write v2-shaped code and never branch on the
+version.
+
+    dd = deliveryd.new(ctx, host = "gh", prefix = ctx.task.name, commit = sha, signature = build_url)
+    delivered = dd.query(digests)      # {label: digest} -> {label: signature}
+    dd.deliver(label, digest)          # after the run succeeded
+    dd.delete(digest)                  # after it failed
 """
-Client library for communicating with deliveryd.
 
-deliveryd is a Unix socket HTTP server that manages delivery state,
-tracking which artifacts have been delivered and preventing re-delivery.
-"""
+# Where an Aspect Workflows runner publishes the daemon's Unix socket.
+ENDPOINT_ENV = "ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT"
 
-def parse_endpoint(endpoint):
-    """
-    Parse a deliveryd endpoint string.
+# A daemon that answers /health without advertising a version predates v2 and
+# speaks the `record` + commit-keyed `query` + `deliver` + `artifact/delete` API.
+_V1 = 1
+_V2 = 2
 
-    Accepts:
-      - unix:///path/to/socket  → unix socket
-      - http://host:port        → plain HTTP
-      - https://host:port       → HTTPS
-    """
+# hyper and reqwest lower-case header names; the daemon spells it DeliveryD-Version.
+_VERSION_HEADER = "deliveryd-version"
+
+_JSON_HEADERS = {"Content-Type": "application/json"}
+
+# Usable before the version is negotiated — the /health probe rides it.
+_Conn = record(
+    http = field(typing.Any),
+    base_url = field(str),
+    socket = field(str | None),
+    endpoint = field(str),
+)
+
+# `status = 0` means the request never completed (DNS, a missing socket, a
+# refused connection); `body` then holds the transport error.
+_Response = record(
+    status = field(int),
+    body = field(str),
+    headers = field(list),
+)
+
+# Everything a delivery run holds constant: the connection, the negotiated
+# dialect, the state key (`host`/`prefix`) and the provenance stored alongside a
+# delivery (`commit`/`signature`). The verbs thread it, so no call re-passes ctx.
+_Client = record(
+    conn = field(_Conn),
+    version = field(int),
+    host = field(str),
+    prefix = field(str),
+    commit = field(str),
+    signature = field(str),
+)
+
+# The daemon's view of its backing store, as reported by /health. Absent on a
+# v1 daemon, whose /health carries no body.
+Storage = record(
+    reachable = field(bool, default = False),
+    ping_ms = field(int, default = 0),
+    used_bytes = field(int, default = 0),
+    max_bytes = field(int, default = 0),
+    used_pct = field(float, default = 0.0),
+    policy = field(str, default = ""),
+)
+
+Health = record(
+    ok = field(bool),
+    version = field(int),
+    status = field(str, default = ""),
+    storage = field(Storage, default = Storage()),
+    error = field(str, default = ""),
+)
+
+_UNITS = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"]
+
+def _format_bytes(n: int) -> str:
+    """A coarse IEC size (`3.0 GiB`); tenths truncated, as `fmt_elapsed` does."""
+    if n < 1024:
+        return "{} B".format(n)
+
+    # Scaled by 10 throughout so the tenth survives integer division.
+    scaled = n * 10
+    unit = 0
+    for _ in range(len(_UNITS) - 1):
+        if scaled < 10240:
+            break
+        scaled = scaled // 1024
+        unit += 1
+    return "{}.{} {}".format(scaled // 10, scaled % 10, _UNITS[unit])
+
+def _format_pct(pct: float) -> str:
+    tenths = int(pct * 10)
+    return "{}.{}%".format(tenths // 10, tenths % 10)
+
+def describe_storage(health: Health) -> str:
+    """The storage half of `/health` as one line, or "" when the daemon reported
+    none (a v1 daemon, or an unreachable one)."""
+    s = health.storage
+    if not s.reachable:
+        return ""
+    parts = []
+    if s.max_bytes:
+        parts.append("{} / {} ({})".format(_format_bytes(s.used_bytes), _format_bytes(s.max_bytes), _format_pct(s.used_pct)))
+    elif s.used_bytes:
+        parts.append(_format_bytes(s.used_bytes) + " used")
+    if s.policy:
+        parts.append(s.policy)
+    parts.append("ping {}ms".format(s.ping_ms))
+    return " · ".join(parts)
+
+def _parse_endpoint(endpoint: str) -> tuple:
+    """`(base_url, socket_path)` for `unix:///path`, `http://host:port` or
+    `https://host:port`. `socket_path` is None for the plain-HTTP forms."""
     if endpoint.startswith("unix://"):
         return ("http://localhost", endpoint[len("unix://"):])
     if endpoint.startswith("http://") or endpoint.startswith("https://"):
         return (endpoint, None)
-    msg = "Invalid deliveryd endpoint '{}': must start with unix://, http://, or https://".format(endpoint)
-    fail(msg)
+    fail("Invalid deliveryd endpoint '{}': must start with unix://, http://, or https://".format(endpoint))
 
-def _post(http, endpoint, path, data):
-    """Make a POST request to deliveryd, handling unix:// endpoints."""
-    base_url, socket_path = parse_endpoint(endpoint)
-    encoded = json.encode(data)
-    if socket_path:
-        return http.post(url = base_url + path, headers = {"Content-Type": "application/json"}, data = encoded, unix_socket = socket_path)
-    return http.post(url = base_url + path, headers = {"Content-Type": "application/json"}, data = encoded)
+def _send(conn: _Conn, method: str, path: str, payload) -> _Response:
+    """One request, with transport errors flattened into `status = 0` rather
+    than raised — every caller wants to name the operation in the message."""
+    url = conn.base_url + path
+    data = json.encode(payload) if payload != None else None
+    if method == "GET":
+        fut = conn.http.get(url = url, headers = _JSON_HEADERS, unix_socket = conn.socket)
+    elif method == "QUERY":
+        fut = conn.http.query(url = url, headers = _JSON_HEADERS, data = data, unix_socket = conn.socket)
+    elif method == "DELETE":
+        fut = conn.http.delete(url = url, headers = _JSON_HEADERS, data = data, unix_socket = conn.socket)
+    else:
+        fut = conn.http.post(url = url, headers = _JSON_HEADERS, data = data, unix_socket = conn.socket)
 
-def _get(http, endpoint, path):
-    """Make a GET request to deliveryd, handling unix:// endpoints."""
-    base_url, socket_path = parse_endpoint(endpoint)
-    if socket_path:
-        return http.get(url = base_url + path, unix_socket = socket_path)
-    return http.get(url = base_url + path)
+    res = fut.map_err(lambda e: str(e)).block()
+    if type(res) == "string":
+        return _Response(status = 0, body = res, headers = [])
+    return _Response(status = res.status, body = res.body, headers = res.headers)
 
-def health(ctx, endpoint):
-    """
-    Check if deliveryd is healthy by calling the /health endpoint.
+def _ok(res: _Response) -> bool:
+    return res.status >= 200 and res.status < 300
 
-    Returns:
-        True if healthy, False otherwise
-    """
-    http = ctx.http()
-    result = _get(http, endpoint, "/health").map_err(lambda e: str(e)).block()
-    if type(result) == "string":
-        return False
-    return result.status >= 200 and result.status < 300
+def _header(res: _Response, name: str) -> str:
+    for pair in res.headers:
+        if pair[0].lower() == name:
+            return pair[1]
+    return ""
 
-def query(ctx, endpoint, ci_host, commit_sha, workspace):
-    """
-    Query deliveryd for delivery state of all targets in a commit.
-    Returns a dict mapping label -> {output_sha, delivered, delivered_by}.
-    """
-    http = ctx.http()
-    response = _post(http, endpoint, "/query", {
-        "ci_host": ci_host,
-        "commit_sha": commit_sha,
-        "workspace": workspace,
-    }).block()
+def _check(conn: _Conn, op: str, res: _Response):
+    if _ok(res):
+        return
+    reason = "transport error: " + res.body if res.status == 0 else "HTTP {}: {}".format(res.status, res.body.strip())
+    fail("deliveryd {} failed ({}): {}".format(op, conn.endpoint, reason))
 
-    if response.status < 200 or response.status >= 300:
-        msg = "deliveryd query failed: " + response.body
-        fail(msg)
-
-    # try_decode + fail with a clean message — protects `aspect delivery`
-    # from a corrupted/early-truncated 2xx response from deliveryd
-    # (rare, but the daemon shares state between many concurrent
-    # deliveries, so a defensive decode here costs nothing).
-    data = json.try_decode(response.body, None)
+def _decode(conn: _Conn, op: str, res: _Response) -> dict:
+    """Decode a 2xx JSON body. The daemon multiplexes state across concurrent
+    deliveries, so a truncated body is rare but must not die as a type error."""
+    data = json.try_decode(res.body, None)
     if data == None:
-        fail("deliveryd /query returned 2xx but body was not valid JSON: " + (response.body or "")[:200].replace("\n", " "))
+        fail("deliveryd {} returned 2xx but body was not valid JSON: {}".format(op, res.body[:200].replace("\n", " ")))
+    return data
 
-    targets = data.get("targets", []) or []
+def _negotiate(conn: _Conn) -> tuple:
+    """`(version, health_response)` from one `/health` probe."""
+    res = _send(conn, "GET", "/health", None)
+    if res.status == 0:
+        return (_V1, res)
+    advertised = _header(res, _VERSION_HEADER)
+    if not advertised.isdigit():
+        return (_V1, res)
+    return (max(_V1, int(advertised)), res)
 
-    # Build lookup dict by label
-    result = {}
-    for target in targets:
-        result[target["label"]] = {
-            "output_sha": target["output_sha"],
-            "delivered": target["delivered"],
-            "delivered_by": target.get("delivered_by"),
-        }
-    return result
+def _to_health(res: _Response, version: int) -> Health:
+    if res.status == 0:
+        return Health(ok = False, version = version, error = res.body)
+    body = json.try_decode(res.body, {})
+    if type(body) != "dict":
+        body = {}
+    return Health(
+        ok = _ok(res),
+        version = version,
+        status = body.get("status", "") or "",
+        storage = _to_storage(body.get("storage", {}) or {}),
+        error = "" if _ok(res) else "HTTP {}: {}".format(res.status, res.body.strip()),
+    )
 
-def deliver(ctx, endpoint, ci_host, output_sha, workspace, build_url):
-    """
-    Mark a target as delivered. build_url is stored as the delivery signature
-    and identifies the CI build that performed the delivery.
-    """
-    http = ctx.http()
-    response = _post(http, endpoint, "/deliver", {
-        "ci_host": ci_host,
-        "output_sha": output_sha,
-        "workspace": workspace,
-        "signature": build_url,
-    }).block()
+def _to_storage(s: dict) -> Storage:
+    # Sizes are coerced: JSON gives an int for a whole percentage and the record
+    # fields are strictly typed.
+    if not s.get("reachable", False):
+        return Storage(reachable = False)
+    return Storage(
+        reachable = True,
+        ping_ms = int(s.get("ping_ms", 0) or 0),
+        used_bytes = int(s.get("used_memory_bytes", 0) or 0),
+        max_bytes = int(s.get("maxmemory_bytes", 0) or 0),
+        used_pct = float(s.get("used_memory_pct", 0) or 0),
+        policy = s.get("maxmemory_policy", "") or "",
+    )
 
-    if response.status < 200 or response.status >= 300:
-        msg = "deliveryd deliver failed: " + response.body
-        fail(msg)
+def _do_health(c: _Client) -> Health:
+    """Re-probe: reachability, the daemon's view of its storage, and the version
+    it advertises now."""
+    (version, res) = _negotiate(c.conn)
+    return _to_health(res, version)
 
-def record(ctx, endpoint, ci_host, commit_sha, workspace, label, output_sha):
-    """
-    Record a target's output SHA with deliveryd.
-    This must be called before the target can be queried or delivered.
-    """
-    http = ctx.http()
-    response = _post(http, endpoint, "/record", {
-        "ci_host": ci_host,
-        "commit_sha": commit_sha,
-        "workspace": workspace,
+def _do_record(c: _Client, label: str, digest: str) -> None:
+    """Register `(label, digest)` under the commit so `query`/`deliver` can find
+    it. v2 keys state by digest alone — the client already holds every digest —
+    so there is nothing to record and this is a no-op."""
+    if c.version >= _V2:
+        return
+    res = _send(c.conn, "POST", "/record", {
+        "ci_host": c.host,
+        "commit_sha": c.commit,
+        "workspace": c.prefix,
         "label": label,
-        "output_sha": output_sha,
-    }).map_err(lambda e: e).block()
+        "output_sha": digest,
+    })
+    _check(c.conn, "record", res)
 
-    if type(response) == "string":
-        msg = "deliveryd record failed: " + response
-        fail(msg)
+def _do_query(c: _Client, digests: dict) -> dict:
+    """Which of `{label: digest}` are already delivered → `{label: signature}`,
+    the signature being the build URL that delivered it. Labels absent from the
+    result are not delivered; labels with an empty digest are never asked about."""
+    if c.version >= _V2:
+        return _query_v2(c, digests)
+    return _query_v1(c, digests)
 
-    if response.status < 200 or response.status >= 300:
-        msg = "deliveryd record failed: " + response.body
-        fail(msg)
+def _query_v2(c: _Client, digests: dict) -> dict:
+    # Deduped (two labels can share a digest) in the caller's order.
+    wanted = {digest: True for digest in digests.values() if digest}
+    if not wanted:
+        return {}
+    res = _send(c.conn, "QUERY", "/delivery", {
+        "host": c.host,
+        "prefix": c.prefix,
+        "digests": list(wanted.keys()),
+    })
+    _check(c.conn, "query", res)
+    delivered = _decode(c.conn, "query", res).get("delivered", {}) or {}
+    return {
+        label: delivered[digest]
+        for label, digest in digests.items()
+        if digest and digest in delivered
+    }
 
-def delete_artifact(ctx, endpoint, ci_host, output_sha, workspace):
+def _query_v1(c: _Client, digests: dict) -> dict:
+    # v1 answers for the whole commit, keyed by label, and only for targets a
+    # prior `record` registered; narrowed to the asked-about labels so both
+    # dialects return the same shape.
+    res = _send(c.conn, "POST", "/query", {
+        "ci_host": c.host,
+        "commit_sha": c.commit,
+        "workspace": c.prefix,
+    })
+    _check(c.conn, "query", res)
+    delivered = {}
+    for target in _decode(c.conn, "query", res).get("targets", []) or []:
+        label = target.get("label", "")
+        if label in digests and target.get("delivered"):
+            delivered[label] = target.get("delivered_by") or ""
+    return delivered
+
+def _do_deliver(c: _Client, label: str, digest: str, meta: dict = {}) -> None:
+    """Record that `label`'s delivery run succeeded. Call after the run — this
+    persists the outcome, it does not perform the delivery."""
+    if c.version >= _V2:
+        payload = {
+            "host": c.host,
+            "prefix": c.prefix,
+            "digest": digest,
+            "label": label,
+            "commit": c.commit,
+            "signature": c.signature,
+        }
+
+        # Opaque enrichment the daemon stores verbatim; omitted when empty.
+        if meta:
+            payload["meta"] = meta
+    else:
+        payload = {
+            "ci_host": c.host,
+            "output_sha": digest,
+            "workspace": c.prefix,
+            "signature": c.signature,
+        }
+    res = _send(c.conn, "POST", "/delivery" if c.version >= _V2 else "/deliver", payload)
+    _check(c.conn, "deliver", res)
+
+def _do_delete(c: _Client, digest: str) -> None:
+    """Drop a digest's state after a failed delivery, so the next run retries it
+    instead of reading the failure as "already delivered"."""
+    if c.version >= _V2:
+        res = _send(c.conn, "DELETE", "/delivery", {
+            "host": c.host,
+            "prefix": c.prefix,
+            "digest": digest,
+        })
+    else:
+        res = _send(c.conn, "POST", "/artifact/delete", {
+            "ci_host": c.host,
+            "output_sha": digest,
+            "workspace": c.prefix,
+        })
+    _check(c.conn, "delete", res)
+
+def _new(ctx, host: str, prefix: str, commit: str = "", signature: str = "", endpoint: str = ""):
+    """Connect to deliveryd and negotiate the API version, once.
+
+    `host` is the CI host label ("gh", "bk", …) and `prefix` the change-detection
+    namespace; together they key the state. `commit` and `signature` (the build
+    URL) are the provenance stored with each delivery — `commit` is also the
+    state key on a v1 daemon. `endpoint` defaults to `ENDPOINT_ENV`.
+
+    The negotiation probe doubles as a reachability check, reported through
+    `.status` rather than raised — a dead daemon is a startup error the caller
+    concludes its own surface for, not a mid-run write failure.
     """
-    Delete artifact metadata (used for cleanup on failed deliveries).
-    """
-    http = ctx.http()
-    response = _post(http, endpoint, "/artifact/delete", {
-        "ci_host": ci_host,
-        "output_sha": output_sha,
-        "workspace": workspace,
-    }).block()
+    endpoint = endpoint or ctx.std.env.var(ENDPOINT_ENV)
+    if not endpoint:
+        fail("deliveryd endpoint is not set; expected {} in the environment.".format(ENDPOINT_ENV))
 
-    if response.status < 200 or response.status >= 300:
-        msg = "deliveryd artifact delete failed: " + response.body
-        fail(msg)
+    (base_url, socket) = _parse_endpoint(endpoint)
+    conn = _Conn(http = ctx.http(), base_url = base_url, socket = socket, endpoint = endpoint)
+    (version, res) = _negotiate(conn)
+
+    c = _Client(
+        conn = conn,
+        version = version,
+        host = host,
+        prefix = prefix,
+        commit = commit,
+        signature = signature,
+    )
+    return struct(
+        endpoint = endpoint,
+        version = version,
+        status = _to_health(res, version),
+        health = lambda: _do_health(c),
+        record = lambda label, digest: _do_record(c, label, digest),
+        query = lambda digests: _do_query(c, digests),
+        deliver = lambda label, digest, meta = {}: _do_deliver(c, label, digest, meta),
+        delete = lambda digest: _do_delete(c, digest),
+    )
+
+deliveryd = namespace(
+    new = _new,
+    describe_storage = describe_storage,
+    ENDPOINT_ENV = ENDPOINT_ENV,
+    Health = Health,
+    Storage = Storage,
+)
+
+testonly_parse_endpoint = _parse_endpoint
