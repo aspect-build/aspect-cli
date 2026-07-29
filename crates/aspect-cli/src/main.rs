@@ -14,8 +14,49 @@ mod trace_buffer;
 /// heaps — and takes a single global lock across every thread. mimalloc keeps
 /// per-thread free lists, so the BES/sink/probe threads stop contending with
 /// the Starlark thread on every allocation.
+///
+/// Built with mimalloc's `secure` feature (`MI_SECURE=4`): guard pages around
+/// metadata, encoded free lists, randomized placement, and double-free
+/// detection.
+///
+/// This preserves a property we would otherwise lose. musl's mallocng
+/// validates a check byte on every allocation, so heap corruption aborted the
+/// process by itself; a default mimalloc build performs no equivalent check
+/// and would let the same corruption pass unnoticed. The secure build restores
+/// that detection.
+///
+/// [`install_allocator_error_handler`] makes those detections fatal.
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+/// Abort the process when mimalloc detects heap corruption.
+///
+/// mimalloc's built-in handling is not sufficient on its own. It aborts only
+/// on `EFAULT` (corrupted metadata, corrupted thread-free list, and — under
+/// the `secure` build — a detected buffer overflow), while a double free
+/// (`EAGAIN`) or a free of an invalid pointer (`EINVAL`) is reported and then
+/// execution *continues*. Continuing on a corrupted heap is what makes this
+/// class of bug so hard to trace: the eventual crash lands somewhere
+/// unrelated, long after the write that caused it.
+///
+/// Registering our own handler makes every corruption code fatal at the point
+/// of detection. The resulting SIGABRT is caught by the crash handler, which
+/// prints the signal and a resolvable address.
+///
+/// Note that detection is separately silent unless `show_errors` is on, so the
+/// message explaining *what* was detected only appears when the process was
+/// launched with `MIMALLOC_SHOW_ERRORS=1`. The abort happens either way.
+fn install_allocator_error_handler() {
+    /// Codes that indicate heap corruption rather than a benign condition
+    /// (`ENOMEM`/`EOVERFLOW` are allocation failures, not corruption).
+    extern "C" fn on_error(code: std::ffi::c_int, _arg: *mut std::ffi::c_void) {
+        if matches!(code, libc::EFAULT | libc::EAGAIN | libc::EINVAL) {
+            std::process::abort();
+        }
+    }
+    // SAFETY: registering a global error callback; the callback only aborts.
+    unsafe { libmimalloc_sys::mi_register_error(Some(on_error), std::ptr::null_mut()) };
+}
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -261,6 +302,7 @@ fn main() -> ExitCode {
     // Install first, before any other machinery, so fatal-signal reporting
     // covers everything after it (see the `crash_handler` module docs).
     crash_handler::install();
+    install_allocator_error_handler();
     crash_handler::trigger_test_crash();
 
     // Intercept the Bazel credential helper (`aspect get`) before the async

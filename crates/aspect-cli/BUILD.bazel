@@ -25,6 +25,7 @@ rust_binary(
         "@crates//:dirs",
         "@crates//:include_dir",
         "@crates//:libc",
+        "@crates//:libmimalloc-sys",
         "@crates//:mimalloc",
         "@crates//:names",
         "@crates//:opentelemetry",
