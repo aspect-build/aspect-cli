@@ -14,6 +14,23 @@ mod trace_buffer;
 /// heaps — and takes a single global lock across every thread. mimalloc keeps
 /// per-thread free lists, so the BES/sink/probe threads stop contending with
 /// the Starlark thread on every allocation.
+///
+/// Built with mimalloc's `secure` feature (`MI_SECURE=4`): guard pages around
+/// metadata, encoded free lists, randomized placement, and double-free
+/// detection.
+///
+/// This preserves a property we would otherwise lose. musl's mallocng
+/// validates a check byte on every allocation, so heap corruption aborted the
+/// process by itself; a default mimalloc build performs no equivalent check
+/// and would let the same corruption pass unnoticed. The secure build restores
+/// that detection.
+///
+/// Detection is silent by default: mimalloc only prints on a detected error
+/// when `show_errors` is on, and only aborts when `abort_on_error` is. Both are
+/// read from the environment at process start (before `main`, so they cannot be
+/// set from inside the process), so a run that needs the diagnostic must be
+/// launched with `MIMALLOC_SHOW_ERRORS=1 MIMALLOC_ABORT_ON_ERROR=1`. The abort
+/// is a SIGABRT, which the crash handler reports with a resolvable address.
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
