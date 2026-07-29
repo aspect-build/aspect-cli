@@ -25,14 +25,38 @@ mod trace_buffer;
 /// and would let the same corruption pass unnoticed. The secure build restores
 /// that detection.
 ///
-/// Detection is silent by default: mimalloc only prints on a detected error
-/// when `show_errors` is on, and only aborts when `abort_on_error` is. Both are
-/// read from the environment at process start (before `main`, so they cannot be
-/// set from inside the process), so a run that needs the diagnostic must be
-/// launched with `MIMALLOC_SHOW_ERRORS=1 MIMALLOC_ABORT_ON_ERROR=1`. The abort
-/// is a SIGABRT, which the crash handler reports with a resolvable address.
+/// [`install_allocator_error_handler`] makes those detections fatal.
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+/// Abort the process when mimalloc detects heap corruption.
+///
+/// mimalloc's built-in handling is not sufficient on its own. It aborts only
+/// on `EFAULT` (corrupted metadata, corrupted thread-free list, and — under
+/// the `secure` build — a detected buffer overflow), while a double free
+/// (`EAGAIN`) or a free of an invalid pointer (`EINVAL`) is reported and then
+/// execution *continues*. Continuing on a corrupted heap is what makes this
+/// class of bug so hard to trace: the eventual crash lands somewhere
+/// unrelated, long after the write that caused it.
+///
+/// Registering our own handler makes every corruption code fatal at the point
+/// of detection. The resulting SIGABRT is caught by the crash handler, which
+/// prints the signal and a resolvable address.
+///
+/// Note that detection is separately silent unless `show_errors` is on, so the
+/// message explaining *what* was detected only appears when the process was
+/// launched with `MIMALLOC_SHOW_ERRORS=1`. The abort happens either way.
+fn install_allocator_error_handler() {
+    /// Codes that indicate heap corruption rather than a benign condition
+    /// (`ENOMEM`/`EOVERFLOW` are allocation failures, not corruption).
+    extern "C" fn on_error(code: std::ffi::c_int, _arg: *mut std::ffi::c_void) {
+        if matches!(code, libc::EFAULT | libc::EAGAIN | libc::EINVAL) {
+            std::process::abort();
+        }
+    }
+    // SAFETY: registering a global error callback; the callback only aborts.
+    unsafe { libmimalloc_sys::mi_register_error(Some(on_error), std::ptr::null_mut()) };
+}
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -278,6 +302,7 @@ fn main() -> ExitCode {
     // Install first, before any other machinery, so fatal-signal reporting
     // covers everything after it (see the `crash_handler` module docs).
     crash_handler::install();
+    install_allocator_error_handler();
     crash_handler::trigger_test_crash();
 
     // Intercept the Bazel credential helper (`aspect get`) before the async
