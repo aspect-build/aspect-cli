@@ -291,8 +291,8 @@ _ASPECT_API_TOKEN_HOST_DETAIL = {
             "  with:\n" +
             "    aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}\n" +
             "```\n\n" +
-            "Find the latest release's commit SHA at " +
-            "https://github.com/aspect-build/setup-aspect/releases."
+            "Find the latest release's commit SHA on the " +
+            "[setup-aspect releases page](https://github.com/aspect-build/setup-aspect/releases)."
         ),
     ),
     AspectApiTokenHost("buildkite").value: struct(
@@ -329,7 +329,7 @@ def tip_add_aspect_api_token(ctx, host: AspectApiTokenHost):
             "Without it, " + detail.degraded_features + " degrade. The task itself " +
             "completes regardless — only the GitHub-side surfaces are affected.\n\n" +
             "Issue an `ASPECT_API_TOKEN` from the Aspect Web UI " +
-            "(see https://aspect.build/docs/cli/authentication). " +
+            "(see the [authentication docs](https://aspect.build/docs/cli/authentication)). " +
             detail.host_advice
         ),
     )
