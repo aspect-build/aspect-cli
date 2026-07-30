@@ -121,6 +121,25 @@ mod tests {
         assert_ne!(path1, path2);
     }
 
+    /// The tool name is the same (`aspect-cli`) for both the primary and the
+    /// `-debug-` release variant, so their cache entries are kept apart only by the
+    /// artifact name embedded in the download URL. If this ever stopped holding, a
+    /// debug run would overwrite the primary binary at the same path.
+    #[test]
+    fn test_tool_path_separates_debug_variant() {
+        let cache = AspectCache::from(PathBuf::from("/tmp/cache"));
+        let base = "https://github.com/aspect-build/aspect-cli/releases/download/v2026.31.10";
+        let primary = cache.tool_path(
+            &"aspect-cli".to_string(),
+            &format!("{base}/aspect-cli-x86_64-unknown-linux-musl"),
+        );
+        let debug = cache.tool_path(
+            &"aspect-cli".to_string(),
+            &format!("{base}/aspect-cli-debug-x86_64-unknown-linux-musl"),
+        );
+        assert_ne!(primary, debug);
+    }
+
     #[test]
     fn test_tool_path_different_names_differ() {
         let cache = AspectCache::from(PathBuf::from("/tmp/cache"));

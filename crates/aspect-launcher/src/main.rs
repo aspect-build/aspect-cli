@@ -47,6 +47,39 @@ fn debug_mode() -> bool {
     }
 }
 
+/// Whether to fetch the `-debug-` release variant instead of the primary binary.
+///
+/// Separate from [`debug_mode`] on purpose: `ASPECT_DEBUG` requests verbose logging and
+/// is set routinely, so it must not also swap in a larger, slower binary.
+fn debug_cli_mode() -> bool {
+    match var("ASPECT_DEBUG_CLI") {
+        Ok(val) => !val.is_empty(),
+        _ => false,
+    }
+}
+
+/// Default release asset name for a tool, e.g. `aspect-cli-x86_64-unknown-linux-musl`.
+///
+/// With `debug` set, names the `-debug-` variant published alongside the primary binary:
+/// unstripped and built with debug assertions, so a crash report resolves to function
+/// and file:line at the cost of size and speed.
+///
+/// Only used when the config did not name an `artifact` explicitly, since a debug
+/// counterpart of an arbitrary asset may not exist.
+fn default_artifact(repo: &str, debug: bool) -> String {
+    if debug {
+        format!("{}-debug-{}", repo, LLVM_TRIPLE)
+    } else {
+        format!("{}-{}", repo, LLVM_TRIPLE)
+    }
+}
+
+/// Direct download URL for a release asset. Also the cache key for the downloaded
+/// binary, so every caller must build it the same way.
+fn release_asset_url(org: &str, repo: &str, tag: &str, artifact: &str) -> String {
+    format!("https://github.com/{org}/{repo}/releases/download/{tag}/{artifact}")
+}
+
 const ASPECT_LAUNCHER_METHOD_HTTP: &str = "http";
 const ASPECT_LAUNCHER_METHOD_GITHUB: &str = "github";
 const ASPECT_LAUNCHER_METHOD_LOCAL: &str = "local";
@@ -173,6 +206,40 @@ async fn _download_into_cache(
 
     // FIXME: Check download integrity/signatures?
     Ok(())
+}
+
+/// Retry up to 3 times with exponential backoff (0s, 1s, 2s) to survive transient
+/// failures such as a mid-stream connection reset.
+async fn download_with_retries(
+    client: &Client,
+    url: &str,
+    dest: &PathBuf,
+    download_msg: &str,
+) -> Result<()> {
+    const MAX_DOWNLOAD_ATTEMPTS: u32 = 3;
+    let mut last_err = None;
+    for attempt in 0..MAX_DOWNLOAD_ATTEMPTS {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(1 << (attempt - 1))).await;
+            eprintln!(
+                "retrying download (attempt {}/{})",
+                attempt + 1,
+                MAX_DOWNLOAD_ATTEMPTS
+            );
+        }
+        let req = gh_request(client, url.to_owned())
+            .header(
+                HeaderName::from_static("accept"),
+                HeaderValue::from_static("application/octet-stream"),
+            )
+            .build()
+            .into_diagnostic()?;
+        match _download_into_cache(client, dest, req, download_msg).await {
+            Ok(()) => return Ok(()),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err.expect("at least one attempt must have run"))
 }
 
 #[derive(Deserialize, Debug)]
@@ -310,8 +377,11 @@ async fn configure_tool_task(
                     let pinned_version = tool.version();
                     let version_for_vars = pinned_version.unwrap_or(&fallback_version);
 
+                    // Gates the fallback below: only a name we chose has a known primary
+                    // counterpart to fall back to.
+                    let chose_debug_variant = artifact.is_empty() && debug_cli_mode();
                     let artifact = if artifact.is_empty() {
-                        format!("{}-{}", repo, LLVM_TRIPLE)
+                        default_artifact(repo, chose_debug_variant)
                     } else {
                         replace_vars(artifact, version_for_vars)
                     };
@@ -343,9 +413,8 @@ async fn configure_tool_task(
                         if cache.latest_tag_is_fresh(&hint_path, HINT_MAX_AGE) {
                             if let Ok(cached_tag) = fs::read_to_string(&hint_path) {
                                 let cached_tag = cached_tag.trim().to_owned();
-                                let cached_url = format!(
-                                    "https://github.com/{org}/{repo}/releases/download/{cached_tag}/{artifact}"
-                                );
+                                let cached_url =
+                                    release_asset_url(org, repo, &cached_tag, &artifact);
                                 let cached_dest = cache.tool_path(&tool.name(), &cached_url);
                                 if cached_dest.exists() {
                                     if debug_mode() {
@@ -423,9 +492,7 @@ async fn configure_tool_task(
                             // fall back to it and touch the hint so we don't hammer a down API.
                             if let Ok(stale_tag) = fs::read_to_string(&hint_path) {
                                 let stale_tag = stale_tag.trim().to_owned();
-                                let stale_url = format!(
-                                    "https://github.com/{org}/{repo}/releases/download/{stale_tag}/{artifact}"
-                                );
+                                let stale_url = release_asset_url(org, repo, &stale_tag, &artifact);
                                 let stale_dest = cache.tool_path(&tool.name(), &stale_url);
                                 if stale_dest.exists() {
                                     if debug_mode() {
@@ -492,11 +559,8 @@ async fn configure_tool_task(
                     };
 
                     // Step 2: Download from the direct release URL using the resolved tag.
-                    let direct_url = format!(
-                        "https://github.com/{org}/{repo}/releases/download/{resolved_tag}/{artifact}"
-                    );
-
-                    let tool_dest_file = cache.tool_path(&tool.name(), &direct_url);
+                    let mut direct_url = release_asset_url(org, repo, &resolved_tag, &artifact);
+                    let mut tool_dest_file = cache.tool_path(&tool.name(), &direct_url);
                     let mut extra_envs = HashMap::new();
                     extra_envs.insert("ASPECT_LAUNCHER_ASPECT_CLI_ORG".to_string(), org.clone());
                     extra_envs.insert("ASPECT_LAUNCHER_ASPECT_CLI_REPO".to_string(), repo.clone());
@@ -534,44 +598,48 @@ async fn configure_tool_task(
                             tool_dest_file
                         );
                     };
-                    let download_msg = format!(
-                        "downloading aspect cli version {} file {}",
-                        resolved_tag, artifact
-                    );
+                    let download_msg =
+                        |a: &str| format!("downloading aspect cli version {resolved_tag} file {a}");
 
-                    // Retry up to 3 times with exponential backoff (0 s, 1 s, 2 s) to
-                    // survive transient failures such as a mid-stream connection reset.
-                    const MAX_DOWNLOAD_ATTEMPTS: u32 = 3;
-                    let mut download_err: Option<miette::Error> = None;
-                    for attempt in 0..MAX_DOWNLOAD_ATTEMPTS {
-                        if attempt > 0 {
-                            let delay = std::time::Duration::from_secs(1 << (attempt - 1));
-                            tokio::time::sleep(delay).await;
-                            eprintln!(
-                                "retrying download (attempt {}/{})",
-                                attempt + 1,
-                                MAX_DOWNLOAD_ATTEMPTS
-                            );
-                        }
-                        let req = gh_request(&client, direct_url.clone())
-                            .header(
-                                HeaderName::from_static("accept"),
-                                HeaderValue::from_static("application/octet-stream"),
+                    let mut download_err = download_with_retries(
+                        &client,
+                        &direct_url,
+                        &tool_dest_file,
+                        &download_msg(&artifact),
+                    )
+                    .await
+                    .err();
+
+                    // A pinned tag is resolved without consulting the asset list, so a
+                    // release that predates the `-debug-` variant only fails here. Serve
+                    // the primary binary rather than no CLI at all.
+                    if download_err.is_some() && chose_debug_variant {
+                        let primary = default_artifact(repo, false);
+                        eprintln!(
+                            "{artifact} is unavailable in {resolved_tag}; falling back to {primary}"
+                        );
+                        direct_url = release_asset_url(org, repo, &resolved_tag, &primary);
+                        tool_dest_file = cache.tool_path(&tool.name(), &direct_url);
+                        extra_envs.insert(
+                            "ASPECT_LAUNCHER_ASPECT_CLI_ARTIFACT".to_string(),
+                            primary.clone(),
+                        );
+                        download_err = if tool_dest_file.exists() {
+                            None
+                        } else {
+                            fs::create_dir_all(tool_dest_file.parent().unwrap())
+                                .into_diagnostic()?;
+                            download_with_retries(
+                                &client,
+                                &direct_url,
+                                &tool_dest_file,
+                                &download_msg(&primary),
                             )
-                            .build()
-                            .into_diagnostic()?;
-                        match _download_into_cache(&client, &tool_dest_file, req, &download_msg)
                             .await
-                        {
-                            Ok(()) => {
-                                download_err = None;
-                                break;
-                            }
-                            Err(e) => {
-                                download_err = Some(e);
-                            }
-                        }
+                            .err()
+                        };
                     }
+
                     if let Some(e) = download_err {
                         errs.push(Err(e));
                         continue;
@@ -770,6 +838,67 @@ mod tests {
     }
 
     #[test]
+    fn test_default_artifact_is_the_primary_binary() {
+        assert_eq!(
+            default_artifact("aspect-cli", false),
+            format!("aspect-cli-{}", LLVM_TRIPLE)
+        );
+    }
+
+    #[test]
+    fn test_default_artifact_debug_selects_the_debug_variant() {
+        assert_eq!(
+            default_artifact("aspect-cli", true),
+            format!("aspect-cli-debug-{}", LLVM_TRIPLE)
+        );
+    }
+
+    /// The two variants must be distinct names so they resolve to different release
+    /// assets and, because the cache key hashes the download URL, different cache
+    /// entries — a debug run must never overwrite the primary binary in place.
+    #[test]
+    fn test_default_artifact_variants_differ() {
+        assert_ne!(
+            default_artifact("aspect-cli", false),
+            default_artifact("aspect-cli", true)
+        );
+    }
+
+    /// The debug variant's fallback target is the primary name for the same release, so
+    /// the two must differ only by the `-debug-` infix.
+    #[test]
+    fn test_default_artifact_debug_is_the_primary_name_plus_infix() {
+        assert_eq!(
+            default_artifact("aspect-cli", true),
+            default_artifact("aspect-cli", false).replace("aspect-cli-", "aspect-cli-debug-")
+        );
+    }
+
+    #[test]
+    fn test_release_asset_url() {
+        assert_eq!(
+            release_asset_url(
+                "aspect-build",
+                "aspect-cli",
+                "v2026.31.10",
+                "aspect-cli-linux"
+            ),
+            "https://github.com/aspect-build/aspect-cli/releases/download/v2026.31.10/aspect-cli-linux"
+        );
+    }
+
+    /// The URL is the cache key, so the debug and primary variants of one release must
+    /// not collide.
+    #[test]
+    fn test_release_asset_url_distinguishes_variants() {
+        let url = |a: &str| release_asset_url("aspect-build", "aspect-cli", "v2026.31.10", a);
+        assert_ne!(
+            url(&default_artifact("aspect-cli", false)),
+            url(&default_artifact("aspect-cli", true))
+        );
+    }
+
+    #[test]
     fn test_release_deserialize_with_assets() {
         let json = r#"{
             "tag_name": "v1.0.0",
@@ -898,8 +1027,10 @@ mod tests {
         tag: &str,
         artifact: &str,
     ) -> PathBuf {
-        let url = format!("https://github.com/{org}/{repo}/releases/download/{tag}/{artifact}");
-        cache.tool_path(&"aspect-cli".to_string(), &url)
+        cache.tool_path(
+            &"aspect-cli".to_string(),
+            &release_asset_url(org, repo, tag, artifact),
+        )
     }
 
     /// Create a temp dir scoped to this test process so parallel test runs don't collide.
