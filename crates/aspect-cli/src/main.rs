@@ -15,25 +15,23 @@ mod trace_buffer;
 /// per-thread free lists, so the BES/sink/probe threads stop contending with
 /// the Starlark thread on every allocation.
 ///
-/// Built with mimalloc's `secure` feature (`MI_SECURE=4`): guard pages around
+/// Built in mimalloc's secure mode (`MI_SECURE=4`): guard pages around
 /// metadata, encoded free lists, randomized placement, and double-free
-/// detection.
-///
-/// This preserves a property we would otherwise lose. musl's mallocng
-/// validates a check byte on every allocation, so heap corruption aborted the
-/// process by itself; a default mimalloc build performs no equivalent check
-/// and would let the same corruption pass unnoticed. The secure build restores
-/// that detection.
-///
-/// [`install_allocator_error_handler`] makes those detections fatal.
+/// detection. That restores a property the platform allocator gave us for free
+/// — musl's mallocng validates a check byte on every allocation, so heap
+/// corruption aborted the process by itself, whereas a default mimalloc build
+/// performs no equivalent check and would let the same corruption pass
+/// silently. Costs roughly 7% on an allocation-heavy workload, with no change
+/// in binary size. See [`install_allocator_error_handler`], which makes any
+/// detection fatal rather than merely reported.
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 /// Abort the process when mimalloc detects heap corruption.
 ///
 /// mimalloc's built-in handling is not sufficient on its own. It aborts only
-/// on `EFAULT` (corrupted metadata, corrupted thread-free list, and — under
-/// the `secure` build — a detected buffer overflow), while a double free
+/// on `EFAULT` (corrupted metadata, corrupted thread-free list, and — in
+/// secure mode — a detected buffer overflow), while a double free
 /// (`EAGAIN`) or a free of an invalid pointer (`EINVAL`) is reported and then
 /// execution *continues*. Continuing on a corrupted heap is what makes this
 /// class of bug so hard to trace: the eventual crash lands somewhere

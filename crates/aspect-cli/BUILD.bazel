@@ -2,53 +2,61 @@ load("//bazel/release:release.bzl", "release")
 load("//bazel/rust:defs.bzl", "rust_binary", "rust_test")
 load("//bazel/rust:multi_platform_rust_binaries.bzl", "multi_platform_rust_binaries")
 
+# Shared by the primary binary and the `-debug-` diagnostic variant so the two
+# cannot drift apart.
+DEPS = [
+    "//crates/aspect-telemetry",
+    "//crates/axl-runtime",
+    "@crates//:anyhow",
+    "@crates//:backtrace",
+    "@crates//:base64",
+    "@crates//:chrono",
+    "@crates//:clap",
+    "@crates//:dirs",
+    "@crates//:include_dir",
+    "@crates//:libc",
+    "@crates//:libmimalloc-sys",
+    "@crates//:mimalloc",
+    "@crates//:names",
+    "@crates//:opentelemetry",
+    "@crates//:opentelemetry-appender-tracing",
+    "@crates//:opentelemetry-otlp",
+    "@crates//:opentelemetry-semantic-conventions",
+    "@crates//:opentelemetry_sdk",
+    "@crates//:rand",
+    "@crates//:reqwest",
+    "@crates//:serde",
+    "@crates//:serde_json",
+    "@crates//:sha2",
+    "@crates//:sha256",
+    "@crates//:starlark",
+    "@crates//:thiserror",
+    "@crates//:tokio",
+    "@crates//:tonic",
+    "@crates//:tracing",
+    "@crates//:tracing-core",
+    "@crates//:tracing-opentelemetry",
+    "@crates//:tracing-subscriber",
+    "@crates//:uuid",
+]
+
+SRCS = glob(["src/**/*.rs"])
+
+COMPILE_DATA = glob([
+    "src/builtins/**/*.axl",
+    "src/builtins/**/*.aspect",
+])
+
 rust_binary(
     name = "aspect-cli",
-    srcs = glob(["src/**/*.rs"]),
-    compile_data = glob([
-        "src/builtins/**/*.axl",
-        "src/builtins/**/*.aspect",
-    ]),
+    srcs = SRCS,
+    compile_data = COMPILE_DATA,
     version_key = "STABLE_MONOREPO_VERSION",
     visibility = [
         "//:__pkg__",
         "//examples/deliverable:__pkg__",
     ],
-    deps = [
-        "//crates/aspect-telemetry",
-        "//crates/axl-runtime",
-        "@crates//:anyhow",
-        "@crates//:backtrace",
-        "@crates//:base64",
-        "@crates//:chrono",
-        "@crates//:clap",
-        "@crates//:dirs",
-        "@crates//:include_dir",
-        "@crates//:libc",
-        "@crates//:libmimalloc-sys",
-        "@crates//:mimalloc",
-        "@crates//:names",
-        "@crates//:opentelemetry",
-        "@crates//:opentelemetry-appender-tracing",
-        "@crates//:opentelemetry-otlp",
-        "@crates//:opentelemetry-semantic-conventions",
-        "@crates//:opentelemetry_sdk",
-        "@crates//:rand",
-        "@crates//:reqwest",
-        "@crates//:serde",
-        "@crates//:serde_json",
-        "@crates//:sha2",
-        "@crates//:sha256",
-        "@crates//:starlark",
-        "@crates//:thiserror",
-        "@crates//:tokio",
-        "@crates//:tonic",
-        "@crates//:tracing",
-        "@crates//:tracing-core",
-        "@crates//:tracing-opentelemetry",
-        "@crates//:tracing-subscriber",
-        "@crates//:uuid",
-    ],
+    deps = DEPS,
 )
 
 rust_test(
@@ -59,7 +67,7 @@ rust_test(
     ]),
     crate = ":aspect-cli",
     deps = [
-        "@crates//:tempfile",
+    "@crates//:tempfile",
     ],
 )
 
@@ -69,8 +77,45 @@ multi_platform_rust_binaries(
     target = ":aspect-cli",
 )
 
+# Diagnostic variant, released alongside the primary binary as
+# `aspect-cli-debug-<triple>`. Identical code, built to fail loudly instead of
+# fast, for reproducing a crash that the stripped release build cannot explain:
+#
+#   -Cstrip=none        keep symbols + debug info, so the crash handler's
+#                       ASLR-relative offsets resolve to function and file:line
+#   -Cdebug-assertions  enable `debug_assert!` (notably starlark's arena bounds
+#                       checks) and arithmetic overflow checks
+# The allocator's secure mode (guard pages, encoded free lists, double-free
+# detection) is on in both variants — Bazel's crate universe builds one
+# mimalloc for the whole graph, so it cannot be switched per target, and its
+# cost is ~7% on an allocation-heavy workload with no size change.
+#
+# Larger and slower than the primary binary; not what `aspect` installs by
+# default.
+rust_binary(
+    name = "aspect-cli-debug",
+    srcs = SRCS,
+    compile_data = COMPILE_DATA,
+    crate_root = "src/main.rs",
+    release_rustc_flags = [
+        "-Cstrip=none",
+        "-Cdebug-assertions=y",
+    ],
+    version_key = "STABLE_MONOREPO_VERSION",
+    deps = DEPS,
+)
+
+multi_platform_rust_binaries(
+    name = "debug_bins",
+    tags = ["no-macos"],
+    target = ":aspect-cli-debug",
+)
+
 release(
     name = "release",
     tags = ["no-macos"],
-    targets = [":bins"],
+    targets = [
+        ":bins",
+        ":debug_bins",
+    ],
 )
