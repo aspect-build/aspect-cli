@@ -185,8 +185,18 @@ jobs:
           echo "$output"
           echo "$output" | grep -q "falling back to aspect-cli-" \
             || { echo "FAIL: expected a fallback message"; exit 1; }
-          echo "$output" | grep -qE "^downloading .* file aspect-cli-" \
-            || { echo "FAIL: expected an artifact download"; exit 1; }
           if echo "$output" | grep -qE "^downloading .* file aspect-cli-debug-"; then
-            echo "FAIL: the fallback must download the primary artifact"; exit 1
+            echo "FAIL: the fallback must not download the debug artifact"; exit 1
           fi
+          # The primary binary for this pin may already be cached by test 5, so the
+          # fallback either downloads it or serves it from cache. Assert on the binary it
+          # provisioned instead, which holds either way: cache paths are keyed on the
+          # download URL, so the debug entry it first tried and the primary entry it
+          # settled on are different directories.
+          attempted=$(echo "$output" | sed -nE 's/.*downloading "[^"]*aspect-cli-debug-[^"]*" to "([^"]*)".*/\1/p' | head -1)
+          provisioned=$(echo "$output" | sed -nE 's/^provisioned at "([^"]*)".*/\1/p' | head -1)
+          echo "attempted=$attempted"
+          echo "provisioned=$provisioned"
+          [ -n "$provisioned" ] || { echo "FAIL: no provisioned path in output"; exit 1; }
+          [ "$provisioned" != "$attempted" ] \
+            || { echo "FAIL: provisioned the debug cache entry, not the primary"; exit 1; }
