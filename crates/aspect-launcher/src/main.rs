@@ -47,6 +47,24 @@ fn debug_mode() -> bool {
     }
 }
 
+/// Default release asset name for a tool, e.g. `aspect-cli-x86_64-unknown-linux-musl`.
+///
+/// Under `ASPECT_DEBUG` this selects the `-debug-` variant published alongside the
+/// primary binary (unstripped, with debug assertions enabled graph-wide) so that a
+/// crash report from a debug run resolves to function and file:line. The variant is
+/// larger and slower, which is why it is opt-in.
+///
+/// Only used when the config did not name an `artifact` explicitly; an explicit name
+/// is passed through untouched, since we cannot know whether a debug counterpart of
+/// someone else's asset exists.
+fn default_artifact(repo: &str, debug: bool) -> String {
+    if debug {
+        format!("{}-debug-{}", repo, LLVM_TRIPLE)
+    } else {
+        format!("{}-{}", repo, LLVM_TRIPLE)
+    }
+}
+
 const ASPECT_LAUNCHER_METHOD_HTTP: &str = "http";
 const ASPECT_LAUNCHER_METHOD_GITHUB: &str = "github";
 const ASPECT_LAUNCHER_METHOD_LOCAL: &str = "local";
@@ -310,8 +328,11 @@ async fn configure_tool_task(
                     let pinned_version = tool.version();
                     let version_for_vars = pinned_version.unwrap_or(&fallback_version);
 
+                    // True only when we picked the `-debug-` name ourselves, which is
+                    // what lets the download failure below explain a missing variant.
+                    let chose_debug_variant = artifact.is_empty() && debug_mode();
                     let artifact = if artifact.is_empty() {
-                        format!("{}-{}", repo, LLVM_TRIPLE)
+                        default_artifact(repo, debug_mode())
                     } else {
                         replace_vars(artifact, version_for_vars)
                     };
@@ -573,7 +594,19 @@ async fn configure_tool_task(
                         }
                     }
                     if let Some(e) = download_err {
-                        errs.push(Err(e));
+                        // The `-debug-` variant only exists in releases from v2026.31.10
+                        // on. A pinned older version resolves its tag without consulting
+                        // the asset list, so the first sign of a missing variant is a 404
+                        // here; say so rather than leaving a bare HTTP status.
+                        if chose_debug_variant {
+                            errs.push(Err(e.wrap_err(format!(
+                                "{artifact} not found in {resolved_tag}; the debug variant is \
+                                 only published in releases from v2026.31.10 on. Unset \
+                                 ASPECT_DEBUG or use a newer version."
+                            ))));
+                        } else {
+                            errs.push(Err(e));
+                        }
                         continue;
                     }
                     return Ok((
@@ -767,6 +800,33 @@ mod tests {
     fn test_replace_vars_no_placeholders() {
         let result = replace_vars("plain-string", "1.0.0");
         assert_eq!(result, "plain-string");
+    }
+
+    #[test]
+    fn test_default_artifact_is_the_primary_binary() {
+        assert_eq!(
+            default_artifact("aspect-cli", false),
+            format!("aspect-cli-{}", LLVM_TRIPLE)
+        );
+    }
+
+    #[test]
+    fn test_default_artifact_debug_selects_the_debug_variant() {
+        assert_eq!(
+            default_artifact("aspect-cli", true),
+            format!("aspect-cli-debug-{}", LLVM_TRIPLE)
+        );
+    }
+
+    /// The two variants must be distinct names so they resolve to different release
+    /// assets and, because the cache key hashes the download URL, different cache
+    /// entries — a debug run must never overwrite the primary binary in place.
+    #[test]
+    fn test_default_artifact_variants_differ() {
+        assert_ne!(
+            default_artifact("aspect-cli", false),
+            default_artifact("aspect-cli", true)
+        );
     }
 
     #[test]
