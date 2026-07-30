@@ -3,7 +3,7 @@
 load("@aspect_bazel_lib//lib:expand_template.bzl", _expand_template = "expand_template")
 load("@rules_rust//rust:defs.bzl", _rust_binary = "rust_binary", _rust_library = "rust_library", _rust_proc_macro = "rust_proc_macro", _rust_test = "rust_test")
 
-def rust_binary(name, rustc_env_files = [], version_key = "", crate_features = [], **kwargs):
+def rust_binary(name, rustc_env_files = [], version_key = "", crate_features = [], release_rustc_flags = ["-Cstrip=symbols"], **kwargs):
     """
     Macro for rust_binary defaults.
 
@@ -12,6 +12,10 @@ def rust_binary(name, rustc_env_files = [], version_key = "", crate_features = [
         rustc_env_files: Additional env files to pass to the rust compiler
         version_key: Stamp key to use for version replacement at compile time
         crate_features: Create features to enable for the binary target
+        release_rustc_flags: Flags appended only in release (`-c opt`) builds.
+            Defaults to stripping symbols. A debug-symbol variant of a binary
+            overrides this with `-Cstrip=none` (plus whatever else it needs) so
+            the two variants differ only by these flags.
         **kwargs: Additional args to pass to rust_binary
     """
 
@@ -35,13 +39,7 @@ def rust_binary(name, rustc_env_files = [], version_key = "", crate_features = [
                 "-Ccodegen-units=1",
                 "-Copt-level=3",
                 "-Cpanic=abort",
-                # Keep symbols + debug info in the release binary: the crash
-                # handler prints ASLR-relative offsets that then resolve to
-                # function names and file:line against the shipped binary
-                # (`addr2line`). Stripping would leave crash reports
-                # unsymbolizable (only ~5% larger; worth it for self-diagnosis).
-                "-Cstrip=none",
-            ],
+            ] + release_rustc_flags,
             "//conditions:default": [
                 "-Ccodegen-units=1",
                 "-Copt-level=3",
@@ -95,7 +93,7 @@ def rust_library(name, rustc_env_files = [], version_key = "", crate_features = 
                 "-Ccodegen-units=1",
                 "-Copt-level=3",
                 "-Cpanic=abort",
-                "-Cstrip=none",
+                "-Cstrip=symbols",
             ],
             "//conditions:default": [
                 "-Ccodegen-units=1",
@@ -123,7 +121,7 @@ def rust_proc_macro(name, crate_features = [], **kwargs):
                 "-Ccodegen-units=1",
                 "-Copt-level=3",
                 "-Cpanic=abort",
-                "-Cstrip=none",
+                "-Cstrip=symbols",
             ],
             "//conditions:default": [
                 "-Ccodegen-units=1",
