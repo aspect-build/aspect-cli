@@ -140,10 +140,8 @@ jobs:
             echo "FAIL: should not re-download on cache hit"; exit 1
           fi
       # ── Test 7: Debug variant ─────────────────────────────────────────────────
-      # ASPECT_DEBUG_CLI → fetch aspect-cli-debug-<triple> instead of the primary
-      # binary. Pinned to the first release that published the variant. Note that
-      # ASPECT_DEBUG (set by every test above) must NOT have this effect: it means
-      # verbose logging only, and the versions pinned above predate the variant.
+      # ASPECT_DEBUG_CLI → download aspect-cli-debug-<triple>. Pinned to the first
+      # release that published the variant, so no fallback should occur.
       - name: "Test 7: ASPECT_DEBUG_CLI downloads the debug variant"
         run: |
           mkdir -p /tmp/axl-test-debug/.aspect
@@ -152,10 +150,14 @@ jobs:
           output=$(cd /tmp/axl-test-debug && ASPECT_DEBUG=1 ASPECT_DEBUG_CLI=1 \
             cargo run --manifest-path "$GITHUB_WORKSPACE/Cargo.toml" -p aspect-launcher $CARGO_TARGET_ARGS -- version 2>&1) || true
           echo "$output"
-          echo "$output" | grep -q "aspect-cli-debug-" \
-            || { echo "FAIL: expected the -debug- artifact"; exit 1; }
-      # Same workspace without ASPECT_DEBUG_CLI → primary binary, and a separate
-      # cache entry, so the debug run above cannot have overwritten it.
+          echo "$output" | grep -qE "^downloading .* file aspect-cli-debug-" \
+            || { echo "FAIL: expected to download the -debug- artifact"; exit 1; }
+          if echo "$output" | grep -q "falling back"; then
+            echo "FAIL: the variant exists in this release; should not fall back"; exit 1
+          fi
+      # ASPECT_DEBUG alone must not change which binary is used: it means verbose
+      # logging only. Same workspace as test 7, so a distinct cache entry is also
+      # asserted -- the debug run must not have overwritten the primary binary.
       - name: "Test 8: Without ASPECT_DEBUG_CLI the primary binary is used"
         run: |
           output=$(cd /tmp/axl-test-debug && ASPECT_DEBUG=1 \
@@ -163,4 +165,28 @@ jobs:
           echo "$output"
           if echo "$output" | grep -q "aspect-cli-debug-"; then
             echo "FAIL: ASPECT_DEBUG alone must not select the debug variant"; exit 1
+          fi
+      # ── Test 9: Missing variant falls back ────────────────────────────────────
+      # Releases before v2026.31.10 publish no debug asset. A pinned tag is resolved
+      # without consulting the asset list, so the launcher must recover by serving the
+      # primary binary instead of failing.
+      - name: "Test 9: Missing debug variant falls back to the primary binary"
+        run: |
+          mkdir -p /tmp/axl-test-nodebug/.aspect
+          printf 'version("2026.15.2")\n' > /tmp/axl-test-nodebug/.aspect/version.axl
+          touch /tmp/axl-test-nodebug/MODULE.bazel
+          # Unlike the tests above, the exit status matters here: the fallback has to
+          # leave the launcher working, so this must not be swallowed with `|| true`.
+          if ! output=$(cd /tmp/axl-test-nodebug && ASPECT_DEBUG=1 ASPECT_DEBUG_CLI=1 \
+            cargo run --manifest-path "$GITHUB_WORKSPACE/Cargo.toml" -p aspect-launcher $CARGO_TARGET_ARGS -- version 2>&1); then
+            echo "$output"
+            echo "FAIL: launcher should succeed via fallback"; exit 1
+          fi
+          echo "$output"
+          echo "$output" | grep -q "falling back to aspect-cli-" \
+            || { echo "FAIL: expected a fallback message"; exit 1; }
+          echo "$output" | grep -qE "^downloading .* file aspect-cli-" \
+            || { echo "FAIL: expected an artifact download"; exit 1; }
+          if echo "$output" | grep -qE "^downloading .* file aspect-cli-debug-"; then
+            echo "FAIL: the fallback must download the primary artifact"; exit 1
           fi
