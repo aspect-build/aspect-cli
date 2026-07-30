@@ -613,7 +613,12 @@ jobs:
   # Smoke-tests the new test-task flags. Ported from the Buildkite
   # `test-flags-task` step. `--target-pattern-file` is forwarded to Bazel
   # verbatim, so the assertion is just that aspect resolves the file and the run
-  # completes. `--coverage` is exercised against an sh_test rather than a
+  # completes. The IDE/BSP step re-runs the same pattern file in the shape the
+  # IntelliJ Bazel plugin produces through the tools/bazel wrapper — Bazel's own
+  # flag spellings behind `--bazel-flag` — and asserts the caller's BEP file is
+  # actually written. The CLI appends its own `--build_event_binary_file` last,
+  # and the Bazel option is single-valued.
+  # `--coverage` is exercised against an sh_test rather than a
   # rust_test: toolchains_llvm_bootstrapped 0.5.2 (pinned in MODULE.bazel) ships
   # without libclang_rt.profile.a, so any rust_test under --collect_code_coverage
   # fails CppLink (upstream hermeticbuild/hermetic-llvm#318, fixed in #468 — not
@@ -636,7 +641,16 @@ jobs:
           echo "# smoke: targets forwarded via --target_pattern_file" > "$PATTERNS"
           echo "//examples/test_states:always_pass" >> "$PATTERNS"
           aspect test --task:name test-gha-target-pattern-file --target-pattern-file="$PATTERNS"
-          rm -f "$PATTERNS"
+
+          echo "--- IDE/BSP shape — forwarded --target_pattern_file + --build_event_binary_file"
+          BEP=$(mktemp)
+          aspect build --task:name test-gha-ide-passthrough \
+            --bazel-flag=--target_pattern_file="$PATTERNS" \
+            --bazel-flag=--build_event_binary_file="$BEP" \
+            --bazel-flag=--build_event_binary_file_upload_mode=wait_for_upload_complete \
+            --bazel-flag=--tool_tag=bazelbsp:3.2.0
+          test -s "$BEP" || { echo "caller's --build_event_binary_file was not written"; exit 1; }
+          rm -f "$BEP" "$PATTERNS"
 
           echo "--- aspect test --coverage (+ --coverage-report + --coverage-tool)"
           REPORT=$(mktemp)
