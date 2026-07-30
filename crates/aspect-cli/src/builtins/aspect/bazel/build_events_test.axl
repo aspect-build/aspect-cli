@@ -1,13 +1,14 @@
 """Tests for `bazel/build_events.axl` — the BES upload summary line, the gRPC-sink
 filter shared by the announce/summary helpers, sink collection, and the
 duplicate-stream drop that keeps the CLI from streaming to an endpoint Bazel's
-own `--bes_backend` already uploads to.
+own `--bes_backend` already uploads to, and the file-sink tee that keeps a
+caller's `--build_event_binary_file` from being silently clobbered.
 
 Run with:
   aspect dev test-bes-sinks
 """
 
-load("@aspect//bazel/build_events.axl", "bazel_bes_backend", "bes_results_line", "bes_streamed_by_bazel", "bes_upload_line", "collect_bes_from_args", "collect_bes_sinks", "dropped_bes_backends", "grpc_backends")
+load("@aspect//bazel/build_events.axl", "bazel_bep_file", "bazel_bes_backend", "bes_results_line", "bes_streamed_by_bazel", "bes_upload_line", "collect_bes_from_args", "collect_bes_sinks", "dropped_bes_backends", "grpc_backends")
 
 def _eq(label, got, want):
     if got != want:
@@ -248,6 +249,44 @@ def _test_collect_bes_sinks(_):
         [None, "grpcs://bes.other.example.com"],
     )
 
+def _test_bazel_bep_file(_):
+    """`bazel_bep_file` reads the caller's `--build_event_binary_file` off the run
+    command, so it sees the flag from `--bazel-flag=`, a `.bazelrc`, or a
+    `--config` expansion alike."""
+    _eq("caller asked for one", bazel_bep_file(_fake_rc({"--build_event_binary_file": "/tmp/bep.binpb"}), "build"), "/tmp/bep.binpb")
+    _eq("flag unset", bazel_bep_file(_fake_rc({}), "build"), "")
+    _eq("no run command", bazel_bep_file(None, "build"), "")
+
+def _test_collect_bes_sinks_tees_caller_bep_file(_):
+    """A caller's `--build_event_binary_file` becomes a trailing file sink, so the
+    path they asked for is written from Bazel's own byte stream.
+
+    Without it their file is silently empty: the Bazel option is single-valued and
+    `Build::spawn` appends the CLI's own path last."""
+    trait = _fake_trait([struct(uri = "grpcs://bes.other.example.com")])
+
+    def uris(rc_values):
+        ctx = _fake_ctx(bes_backends = [])
+        return [s.uri for s in collect_bes_sinks(ctx, trait, _fake_rc(rc_values))]
+
+    _eq(
+        "file sink appended after the trait's own",
+        uris({"--build_event_binary_file": "/tmp/bep.binpb"}),
+        ["grpcs://bes.other.example.com", None],
+    )
+    _eq("no BEP flag, no extra sink", uris({}), ["grpcs://bes.other.example.com"])
+
+    # The tee is a local dump, so it survives the duplicate-stream drop that
+    # suppresses a CLI sink to the endpoint Bazel itself uploads to.
+    duplicate = "grpcs://bes.acme.aspect.build"
+    ctx = _fake_ctx(bes_backends = [duplicate])
+    rc = _fake_rc({"--bes_backend": duplicate, "--build_event_binary_file": "/tmp/bep.binpb"})
+    _eq(
+        "kept while every gRPC sink is suppressed",
+        [s.uri for s in collect_bes_sinks(ctx, _fake_trait([struct(uri = duplicate)]), rc)],
+        [None],
+    )
+
 def _test_bes_streamed_by_bazel(_):
     """True only when Bazel's `--bes_backend` is the runner's own Aspect BES
     backend — the case where the Web UI still holds the invocation (under
@@ -280,6 +319,8 @@ _UNIT_TESTS = [
     _test_bazel_bes_backend,
     _test_collect_drops_duplicate_backends,
     _test_collect_bes_sinks,
+    _test_bazel_bep_file,
+    _test_collect_bes_sinks_tees_caller_bep_file,
     _test_bes_streamed_by_bazel,
 ]
 
