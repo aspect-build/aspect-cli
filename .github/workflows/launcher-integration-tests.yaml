@@ -1,5 +1,4 @@
 name: Launcher Integration Tests
-
 on:
   push:
     branches: [main]
@@ -9,11 +8,9 @@ on:
       - crates/aspect-launcher/**
       - crates/aspect-telemetry/**
   workflow_dispatch:
-
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
-
 jobs:
   integration-tests:
     name: Integration tests (${{ matrix.os }})
@@ -22,16 +19,13 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-
     env:
       ASPECT_LAUNCHER_CACHE: /tmp/aspect-launcher-ci-cache
       CARGO_TERM_COLOR: always
       # Use the workflow's GITHUB_TOKEN to avoid rate-limiting on the releases API
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
     steps:
       - uses: actions/checkout@v6
-
       - name: Cache cargo registry and build artifacts
         uses: actions/cache@v5
         with:
@@ -42,7 +36,6 @@ jobs:
           key: ${{ runner.os }}-cargo-launcher-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-launcher-
-
       # The published aspect-cli artifacts are named after the Rust target triple
       # (e.g. aspect-cli-x86_64-unknown-linux-musl). LLVM_TRIPLE is baked into
       # the launcher at compile time via build.rs. In production the launcher is
@@ -56,14 +49,11 @@ jobs:
           sudo apt-get install -y musl-tools
           rustup target add x86_64-unknown-linux-musl
           echo "CARGO_TARGET_ARGS=--target x86_64-unknown-linux-musl" >> "$GITHUB_ENV"
-
       - name: Build launcher
         run: cargo build -p aspect-launcher $CARGO_TARGET_ARGS
-
       # ── Test 1: Unpinned first run ────────────────────────────────────────────
       # Fresh cache, no version.axl → must query the releases API and download
       # the latest stable (non-prerelease) release.
-
       - name: "Test 1: Unpinned first run queries releases API"
         run: |
           mkdir -p /tmp/axl-test
@@ -75,10 +65,8 @@ jobs:
           # Must resolve to a stable vYYYY.WW.P tag, not a prerelease
           echo "$output" | grep -q 'downloading aspect cli version v[0-9]' \
             || { echo "FAIL: expected stable version download"; exit 1; }
-
       # ── Test 2: Warm cache ────────────────────────────────────────────────────
       # Hint is fresh, binary is present → no network call.
-
       - name: "Test 2: Warm cache skips API"
         run: |
           output=$(cd /tmp/axl-test && ASPECT_DEBUG=1 \
@@ -89,10 +77,8 @@ jobs:
           if echo "$output" | grep -q "querying releases"; then
             echo "FAIL: should not query API on warm cache"; exit 1
           fi
-
       # ── Test 3: Stale hint ────────────────────────────────────────────────────
       # Backdate hint mtime → must re-query API, then reuse the already-cached binary.
-
       - name: "Test 3: Stale hint triggers API re-query"
         run: |
           python3 -c "
@@ -111,10 +97,8 @@ jobs:
           if echo "$output" | grep -q "^downloading "; then
             echo "FAIL: should not re-download when binary is cached"; exit 1
           fi
-
       # ── Test 4: API failure fallback ──────────────────────────────────────────
       # Stale hint + bad token → must fall back to cached binary and reset expiry.
-
       - name: "Test 4: API failure falls back to stale cached binary"
         run: |
           python3 -c "
@@ -128,10 +112,8 @@ jobs:
           echo "$output"
           echo "$output" | grep -q "API error, falling back to stale cached tag" \
             || { echo "FAIL: expected stale fallback message"; exit 1; }
-
       # ── Test 5: Pinned version (first run) ────────────────────────────────────
       # version.axl with an explicit version → resolve tag directly, no API call.
-
       - name: "Test 5: Pinned version downloads directly without API call"
         run: |
           mkdir -p /tmp/axl-test-pinned/.aspect
@@ -145,10 +127,8 @@ jobs:
           if echo "$output" | grep -q "querying releases"; then
             echo "FAIL: pinned version should not query API"; exit 1
           fi
-
       # ── Test 6: Pinned version (cache hit) ────────────────────────────────────
       # Same pinned version, second run → cache hit, no download, no API call.
-
       - name: "Test 6: Pinned version cache hit"
         run: |
           output=$(cd /tmp/axl-test-pinned && ASPECT_DEBUG=1 \
@@ -159,13 +139,11 @@ jobs:
           if echo "$output" | grep -q "^downloading "; then
             echo "FAIL: should not re-download on cache hit"; exit 1
           fi
-
       # ── Test 7: Debug variant ─────────────────────────────────────────────────
       # ASPECT_DEBUG_CLI → fetch aspect-cli-debug-<triple> instead of the primary
       # binary. Pinned to the first release that published the variant. Note that
       # ASPECT_DEBUG (set by every test above) must NOT have this effect: it means
       # verbose logging only, and the versions pinned above predate the variant.
-
       - name: "Test 7: ASPECT_DEBUG_CLI downloads the debug variant"
         run: |
           mkdir -p /tmp/axl-test-debug/.aspect
@@ -176,10 +154,8 @@ jobs:
           echo "$output"
           echo "$output" | grep -q "aspect-cli-debug-" \
             || { echo "FAIL: expected the -debug- artifact"; exit 1; }
-
       # Same workspace without ASPECT_DEBUG_CLI → primary binary, and a separate
       # cache entry, so the debug run above cannot have overwritten it.
-
       - name: "Test 8: Without ASPECT_DEBUG_CLI the primary binary is used"
         run: |
           output=$(cd /tmp/axl-test-debug && ASPECT_DEBUG=1 \
