@@ -44,6 +44,11 @@ also checked at runtime by `assert_ctx_bazel_ready_for_health_check` (see
   - `resolve_flags` — combine CLI bazel-flags + `BazelTrait` additions
     + task-time hooks + transform into a single command flag list.
 
+  - `forwarded_flag_value` — the value of a Bazel flag the caller forwarded
+    verbatim through `--bazel-flag=<name>=<value>`. For the narrow case that
+    must be answered *before* the rc is parsed; everything else reads the
+    effective value off the `RunCommand` with `rc.flag_value`.
+
   - `resolve_announce` / `resolve_bazel_announce` — resolve the
     `announce_bazel_*` flag values (`"auto"|"true"|"false"`) to bools;
     `auto` is on under CI. `resolve_bazel_announce` returns the
@@ -150,6 +155,32 @@ def bazel_flag_args(build_phrase: str) -> dict:
             description = "Additional Bazel startup flags (e.g. --bazel-startup-flag=--host_jvm_args=-Xmx2g). Repeat the flag to pass multiple. Note: changing startup flags restarts the Bazel server.",
         ),
     }
+
+def forwarded_flag_value(bazel_flags: list, name: str) -> str:
+    """The value of a Bazel flag the caller forwarded verbatim through
+    `--bazel-flag=<name>=<value>`, or `""` when unset.
+
+    Last occurrence wins, mirroring Bazel's own single-valued option parsing (and
+    `RunCommand.flag_value`). Matches both spellings: `--name=value` in one
+    `--bazel-flag`, and the two-token `--name value` form split across
+    consecutive entries. The `name` must match exactly up to the `=`, so
+    `--target_pattern_file_foo=x` is not a `--target_pattern_file`.
+
+    Reads `ctx.args.bazel_flags` rather than the parsed rc, so it does NOT see a
+    flag from `.bazelrc` or a `--config` expansion. That is deliberate: its one
+    caller resolves target patterns before `parse_rc` runs (the resolved pattern
+    file has to be in the `base_flags` the rc is parsed from), and the flags it
+    asks about are per-invocation ones no rc file should carry. Anything that can
+    wait for the rc should use `rc.flag_value` instead.
+    """
+    eq_prefix = name + "="
+    value = ""
+    for i, flag in enumerate(bazel_flags):
+        if flag.startswith(eq_prefix):
+            value = flag[len(eq_prefix):]
+        elif flag == name and i + 1 < len(bazel_flags) and not bazel_flags[i + 1].startswith("-"):
+            value = bazel_flags[i + 1]
+    return value
 
 def resolve_startup_flags(ctx, bazel_trait):
     """Build the startup flag list:
