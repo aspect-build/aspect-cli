@@ -83,8 +83,11 @@ multi_platform_rust_binaries(
 #
 #   -Cstrip=none        keep symbols + debug info, so the crash handler's
 #                       ASLR-relative offsets resolve to function and file:line
-#   -Cdebug-assertions  enable `debug_assert!` (notably starlark's arena bounds
-#                       checks) and arithmetic overflow checks
+#   debug_assertions    a transition rebuilds the whole graph — dependencies
+#                       included — with `-Cdebug-assertions=y`, enabling
+#                       `debug_assert!` (notably starlark's arena bounds checks)
+#                       and arithmetic overflow checks
+#
 # The allocator's secure mode (guard pages, encoded free lists, double-free
 # detection) is on in both variants — Bazel's crate universe builds one
 # mimalloc for the whole graph, so it cannot be switched per target, and its
@@ -97,16 +100,14 @@ rust_binary(
     srcs = SRCS,
     compile_data = COMPILE_DATA,
     crate_root = "src/main.rs",
-    release_rustc_flags = [
-        "-Cstrip=none",
-        "-Cdebug-assertions=y",
-    ],
+    release_rustc_flags = ["-Cstrip=none"],
     version_key = "STABLE_MONOREPO_VERSION",
     deps = DEPS,
 )
 
 multi_platform_rust_binaries(
     name = "debug_bins",
+    debug_assertions = True,
     tags = ["no-macos"],
     target = ":aspect-cli-debug",
 )

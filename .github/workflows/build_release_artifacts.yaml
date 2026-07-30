@@ -54,13 +54,16 @@ jobs:
         # doesn't need a broader download policy. `:brew` is part of the
         # launcher `:release` graph but is NOT under `:bins`, so it must be
         # listed explicitly — otherwise a remote cache hit leaves `brew.rb`
-        # remote-only and the cp fails with "cannot stat".
+        # remote-only and the cp fails with "cannot stat". Same reasoning for
+        # aspect-cli's `:debug_bins`, which `:release` copies but which is not
+        # reachable from `:bins`.
         run: |
           mkdir -p upload_root/assets
           bazel build --config=release --config=ci --remote_download_outputs=toplevel \
             //crates/aspect-launcher:bins \
             //crates/aspect-launcher:brew \
             //crates/aspect-cli:bins \
+            //crates/aspect-cli:debug_bins \
             //crates/axl-docgen:bins
           bazel run --config=release --config=ci //crates/aspect-launcher:release -- "${PWD}/upload_root/assets"
           bazel run --config=release --config=ci //crates/aspect-cli:release -- "${PWD}/upload_root/assets"
