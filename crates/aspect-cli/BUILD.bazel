@@ -67,7 +67,7 @@ rust_test(
     ]),
     crate = ":aspect-cli",
     deps = [
-    "@crates//:tempfile",
+        "@crates//:tempfile",
     ],
 )
 
