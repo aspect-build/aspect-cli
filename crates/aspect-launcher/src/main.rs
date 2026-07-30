@@ -47,12 +47,24 @@ fn debug_mode() -> bool {
     }
 }
 
+/// Whether to fetch the `-debug-` release variant instead of the primary binary.
+///
+/// Deliberately a separate knob from [`debug_mode`]: `ASPECT_DEBUG` only turns on the
+/// launcher's own verbose logging, and is set routinely (our integration tests set it
+/// on every run) where silently swapping in a bigger, slower binary — one that does
+/// not exist in releases before v2026.31.10 — would be a surprise.
+fn debug_cli_mode() -> bool {
+    match var("ASPECT_DEBUG_CLI") {
+        Ok(val) => !val.is_empty(),
+        _ => false,
+    }
+}
+
 /// Default release asset name for a tool, e.g. `aspect-cli-x86_64-unknown-linux-musl`.
 ///
-/// Under `ASPECT_DEBUG` this selects the `-debug-` variant published alongside the
-/// primary binary (unstripped, with debug assertions enabled graph-wide) so that a
-/// crash report from a debug run resolves to function and file:line. The variant is
-/// larger and slower, which is why it is opt-in.
+/// With `debug` set this selects the `-debug-` variant published alongside the primary
+/// binary (unstripped, with debug assertions enabled graph-wide) so that a crash report
+/// resolves to function and file:line. The variant is larger and slower, hence opt-in.
 ///
 /// Only used when the config did not name an `artifact` explicitly; an explicit name
 /// is passed through untouched, since we cannot know whether a debug counterpart of
@@ -330,9 +342,9 @@ async fn configure_tool_task(
 
                     // True only when we picked the `-debug-` name ourselves, which is
                     // what lets the download failure below explain a missing variant.
-                    let chose_debug_variant = artifact.is_empty() && debug_mode();
+                    let chose_debug_variant = artifact.is_empty() && debug_cli_mode();
                     let artifact = if artifact.is_empty() {
-                        default_artifact(repo, debug_mode())
+                        default_artifact(repo, debug_cli_mode())
                     } else {
                         replace_vars(artifact, version_for_vars)
                     };
@@ -602,7 +614,7 @@ async fn configure_tool_task(
                             errs.push(Err(e.wrap_err(format!(
                                 "{artifact} not found in {resolved_tag}; the debug variant is \
                                  only published in releases from v2026.31.10 on. Unset \
-                                 ASPECT_DEBUG or use a newer version."
+                                 ASPECT_DEBUG_CLI or use a newer version."
                             ))));
                         } else {
                             errs.push(Err(e));
