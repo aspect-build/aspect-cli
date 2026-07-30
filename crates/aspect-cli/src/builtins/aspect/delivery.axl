@@ -5,8 +5,9 @@ Replaces the legacy Redis-backed `delivery_manifest` + `delivery` pipeline.
 Up to three Bazel build phases plus a dispatch loop:
 
   1. Phase 1 — build with the `hashsum` aspect injected; it emits a
-     `DeliveryHash` action per target, marked `no-local` so it always
-     resolves through the remote cache.
+     `DeliveryHash` probe action per target, carrying a per-run nonce in its
+     execution requirements so the probe is always scheduled and its digest
+     always observable (see `_HASHSUM_BZL`).
   2. Phase 2 — re-run with `--experimental_remote_require_cached` +
      `--remote_grpc_log`; extract `action_digest.hash` per target from the
      gRPC log. (Phases 1+2 share one function.) The `no-local` action needs
@@ -321,20 +322,35 @@ def _spawn_deliverable(ctx, run_tracker, ansi, capture, label, ep, is_forced, ou
 _HEX = "0123456789abcdef"
 
 def _delivery_nonce(ctx) -> str:
-    """Fresh per-invocation token (32 hex chars) from /dev/urandom. Passed to
-    the `hashsum` aspect as its unused `nonce` parameter so each run mints a new
-    `AspectKey`, forcing Skyframe to re-evaluate the `DeliveryHash` actions (and
-    re-issue their remote `GetActionResult` lookups) without discarding the
-    graph. Never enters the action, so the change-detection digest is stable."""
+    """Fresh per-invocation token (32 hex chars) from /dev/urandom, passed to the
+    `hashsum` aspect as its `nonce` parameter.
+
+    It mints a new `AspectKey` (so Skyframe re-evaluates the `DeliveryHash`
+    actions without discarding the graph) and, because the aspect forwards it to
+    the action's `supports-delivery-nonce` execution requirement, a new Bazel
+    action key — so Bazel's local action cache cannot serve the probe and every
+    run re-issues the remote `GetActionResult` lookup that carries the digest.
+    Execution requirements are not part of the REv2 action digest, so the
+    change-detection digest itself is unchanged."""
     b = ctx.std.fs.open("/dev/urandom").read(16)
     return "".join([_HEX[b[i] >> 4] + _HEX[b[i] & 0x0F] for i in range(16)])
 
 # Source of the change-detection aspect. Applied via `ctx.bazel.aspect(...)`,
 # which materializes it into `@bazel_tools` (already in the repo graph) — so the
 # checksum phase needs no `--inject_repository` and reuses the build's warm
-# analysis with no churn. The `nonce` attr is unused by the action; a fresh
-# value per run (via `parameters`) mints a new AspectKey so the DeliveryHash
-# actions re-run their remote lookups without discarding the graph.
+# analysis with no churn.
+#
+# The DeliveryHash action is a probe: it exists only so Bazel computes its REv2
+# action digest (a hash over the target's outputs + runfiles) and reveals it in
+# the `GetActionResult` request the checksum phase reads. It must therefore be
+# scheduled as a spawn on every run, which is what `nonce` buys — Bazel's tags
+# propagate into aspect-registered actions, so a deliverable tagged
+# `no-remote-exec` yields a probe that CAN run locally, and a probe that runs
+# successfully lands in the local action cache and is silently skipped (no
+# spawn, no lookup, no digest) on every later run. Feeding the nonce through
+# `supports-delivery-nonce` changes the action key each run, so the probe is
+# always scheduled; it does not reach the REv2 action digest, so digests stay
+# comparable across runs and across delivery versions.
 _HASHSUM_BZL = """def _hashsum_impl(target, ctx):
     files = target[DefaultInfo].files
     runfiles = target[DefaultInfo].default_runfiles
@@ -345,7 +361,10 @@ _HASHSUM_BZL = """def _hashsum_impl(target, ctx):
         command = "echo 'Delivery by AXL' > " + hash_file.path,
         mnemonic = "DeliveryHash",
         progress_message = "Computing delivery hash for %{label}",
-        execution_requirements = {"no-local": "1"},
+        execution_requirements = {
+            "no-local": "1",
+            "supports-delivery-nonce": ctx.attr.nonce,
+        },
     )
     return [OutputGroupInfo(delivery_hash = depset([hash_file]))]
 
@@ -499,9 +518,10 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, rc, use
     # `@bazel_tools` (already in the repo graph, in both bzlmod and WORKSPACE
     # mode), so phase 2 needs no `--inject_repository`/`--override_repository`
     # and reuses phase 1's warm analysis with no churn — no separate server.
-    # Fresh `nonce` per run mints a new AspectKey so the DeliveryHash actions
-    # re-run their remote lookups without discarding the graph; unused by the
-    # action, so the change-detection digest is unchanged.
+    # Fresh `nonce` per run mints a new AspectKey and a new DeliveryHash action
+    # key, so every run re-issues the remote lookups (never served from Bazel's
+    # local action cache) without discarding the graph; the nonce does not reach
+    # the REv2 action digest, so the change-detection digest is unchanged.
     hashsum_aspect = ctx.bazel.aspect(
         implementation = _HASHSUM_BZL,
         symbol = "hashsum",

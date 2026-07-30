@@ -134,3 +134,11 @@ delivery-task:
     # rather than the (new) default hard failure.
     - ASPECT_DEBUG=1 aspect delivery --task:name delivery-gl-debug --warn-unresolved-digest
     - aspect delivery --task:name delivery-gl --warn-unresolved-digest
+    # no_remote_exec_deliverable regresses only on the SECOND consecutive run in
+    # one output base — its DeliveryHash probe may run locally, and a probe that
+    # ran successfully is served from Bazel's local action cache next time, so no
+    # lookup and no digest. Run it twice under its own state prefix, without
+    # --warn-unresolved-digest so an unresolved digest hard-fails; the second run
+    # must SKIP it, proving the digest is stable across runs.
+    - aspect delivery --task:name delivery-gl-nre --query //examples/deliverable:no_remote_exec_deliverable
+    - aspect delivery --task:name delivery-gl-nre --query //examples/deliverable:no_remote_exec_deliverable
