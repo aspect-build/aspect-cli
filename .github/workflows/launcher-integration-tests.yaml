@@ -159,3 +159,32 @@ jobs:
           if echo "$output" | grep -q "^downloading "; then
             echo "FAIL: should not re-download on cache hit"; exit 1
           fi
+
+      # ── Test 7: Debug variant ─────────────────────────────────────────────────
+      # ASPECT_DEBUG_CLI → fetch aspect-cli-debug-<triple> instead of the primary
+      # binary. Pinned to the first release that published the variant. Note that
+      # ASPECT_DEBUG (set by every test above) must NOT have this effect: it means
+      # verbose logging only, and the versions pinned above predate the variant.
+
+      - name: "Test 7: ASPECT_DEBUG_CLI downloads the debug variant"
+        run: |
+          mkdir -p /tmp/axl-test-debug/.aspect
+          printf 'version("2026.31.10")\n' > /tmp/axl-test-debug/.aspect/version.axl
+          touch /tmp/axl-test-debug/MODULE.bazel
+          output=$(cd /tmp/axl-test-debug && ASPECT_DEBUG=1 ASPECT_DEBUG_CLI=1 \
+            cargo run --manifest-path "$GITHUB_WORKSPACE/Cargo.toml" -p aspect-launcher $CARGO_TARGET_ARGS -- version 2>&1) || true
+          echo "$output"
+          echo "$output" | grep -q "aspect-cli-debug-" \
+            || { echo "FAIL: expected the -debug- artifact"; exit 1; }
+
+      # Same workspace without ASPECT_DEBUG_CLI → primary binary, and a separate
+      # cache entry, so the debug run above cannot have overwritten it.
+
+      - name: "Test 8: Without ASPECT_DEBUG_CLI the primary binary is used"
+        run: |
+          output=$(cd /tmp/axl-test-debug && ASPECT_DEBUG=1 \
+            cargo run --manifest-path "$GITHUB_WORKSPACE/Cargo.toml" -p aspect-launcher $CARGO_TARGET_ARGS -- version 2>&1) || true
+          echo "$output"
+          if echo "$output" | grep -q "aspect-cli-debug-"; then
+            echo "FAIL: ASPECT_DEBUG alone must not select the debug variant"; exit 1
+          fi
