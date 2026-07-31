@@ -2027,6 +2027,9 @@ pub struct DeploymentSummary {
     pub cache: String,
     pub bes: String,
     pub exec: String,
+    /// Advertised build-result viewer (a full URL, not a host), empty when the
+    /// deployment serves no web UI.
+    pub results_url: String,
 }
 
 starlark_simple_value!(DeploymentSummary);
@@ -2095,6 +2098,11 @@ fn deployment_summary_methods(registry: &mut MethodsBuilder) {
     fn exec<'v>(this: values::Value<'v>) -> anyhow::Result<String> {
         attr_str!(this, DeploymentSummary, exec)
     }
+
+    #[starlark(attribute)]
+    fn results_url<'v>(this: values::Value<'v>) -> anyhow::Result<String> {
+        attr_str!(this, DeploymentSummary, results_url)
+    }
 }
 
 /// Build the summaries for `ctx.aspect.auth.list()`: the built-in Aspect account
@@ -2156,6 +2164,7 @@ fn summarize_deployment(
         cache: d.endpoints.cache.clone(),
         bes: d.endpoints.bes.clone(),
         exec: d.endpoints.exec.clone(),
+        results_url: d.endpoints.results_url.clone(),
     }
 }
 
@@ -3483,13 +3492,16 @@ mod tests {
             cache: "remote.acme".to_string(),
             bes: "bes.acme".to_string(),
             exec: String::new(),
-            results_url: String::new(),
+            results_url: "https://app.acme/i/".to_string(),
         };
         let s = summarize_deployment(&acme, &creds, true);
         assert!(s.logged_in && s.default && !s.builtin);
         assert_eq!(s.email, "u@x.io");
         assert_eq!(s.cache, "remote.acme");
         assert!(s.exec.is_empty());
+        // Carried through so `auth status` can show the build-result viewer; kept
+        // verbatim as a URL rather than normalized to a host like the endpoints.
+        assert_eq!(s.results_url, "https://app.acme/i/");
 
         // A logged-out deployment: credential-derived fields are empty.
         let s = summarize_deployment(&dep("other", false), &creds, true);

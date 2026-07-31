@@ -16,8 +16,8 @@ def _run_browser_login(ctx: TaskContext, deployment: str):
     return session.wait()
 
 # Width of the label column in a deployment's detail block so values align. Must
-# be wider than the longest label ("Status"/"Issuer"/"Grants", all 6) to leave a
-# gap; a label >= this width would collide with its value.
+# be wider than the longest label ("Results", 7) to leave a gap; a label >= this
+# width would collide with its value.
 _LABEL_WIDTH = 8
 
 # What the built-in Aspect account login grants (it has no build endpoints).
@@ -82,9 +82,11 @@ def _print_deployment(d, header = True):
         # The Aspect account has no build endpoints; say what it's for instead.
         _row("Grants", _ACCOUNT_GRANTS)
     else:
-        for (kind, host) in [("Cache", d.cache), ("Exec", d.exec), ("BES", d.bes)]:
-            if host:
-                _row(kind, host)
+        # Endpoint hosts first, then the build-result viewer — a full URL rather than
+        # a host, and the one row that is a link a user can open.
+        for (kind, value) in [("Cache", d.cache), ("Exec", d.exec), ("BES", d.bes), ("Results", d.results_url)]:
+            if value:
+                _row(kind, value)
 
 def _print_default_usage_hint():
     """The `auth status` footer: how --remote wires the *default* deployment, how to
