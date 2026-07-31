@@ -8,7 +8,7 @@
 
 use std::io::IsTerminal;
 
-use aspect_telemetry::{cargo_pkg_short_version, is_debug_build};
+use aspect_telemetry::cargo_pkg_short_version;
 
 use crate::ci::on_recognized_ci;
 
@@ -23,17 +23,9 @@ const DOCS_URL: &str = "https://aspect.build/docs/cli";
 /// The grey banner line for `version`, e.g.
 /// `Aspect CLI v1.2.3 — https://aspect.build/docs/cli`, wrapped in ANSI grey.
 ///
-/// A `-debug-` build is marked here too: it is slower and larger than the primary
-/// binary, so a run that unexpectedly used one should be obvious from its output.
-///
 /// No trailing newline — callers place it within their own layout.
 pub fn line(version: &str) -> String {
-    let debug = if is_debug_build() {
-        " (debug build)"
-    } else {
-        ""
-    };
-    format!("{GREY}Aspect CLI v{version}{debug} — {DOCS_URL}{RESET}")
+    format!("{GREY}Aspect CLI v{version} — {DOCS_URL}{RESET}")
 }
 
 /// [`line`] resolving the version from workspace crate metadata. For call
@@ -71,23 +63,8 @@ mod tests {
     #[test]
     fn line_renders_grey_version_and_docs_url() {
         let s = line("9.9.9");
-        // Tests build with debug assertions on, so the marker is expected here; the
-        // release binary renders the same line without it.
-        let debug = if is_debug_build() {
-            " (debug build)"
-        } else {
-            ""
-        };
-        assert_eq!(
-            s,
-            format!("{GREY}Aspect CLI v9.9.9{debug} — {DOCS_URL}{RESET}")
-        );
+        assert_eq!(s, format!("{GREY}Aspect CLI v9.9.9 — {DOCS_URL}{RESET}"));
         assert!(s.starts_with(GREY) && s.ends_with(RESET));
-    }
-
-    #[test]
-    fn line_marks_debug_builds() {
-        assert_eq!(line("9.9.9").contains("(debug build)"), is_debug_build());
     }
 
     #[test]
