@@ -951,7 +951,7 @@ def _join_url(base, id):
 def resolve_aspect_url(links, data):
     """Return the Aspect Web UI URL for an invocation, or "" if unavailable.
 
-    Keyed on whichever id the backend indexed the invocation under:
+    Keyed on the id most directly identifying the invocation:
 
       - `sink_invocation_id` when the CLI streamed it — the UUID the gRPC sink
         (`stream_sink.rs`) mints up-front when spawning BES subscribers. Tasks
@@ -960,8 +960,10 @@ def resolve_aspect_url(links, data):
       - `data["bazel"]["invocation_id"]` when `bes_streamed_by_bazel` says Bazel
         uploaded it instead, in which case no sink — and so no sink id — exists.
 
-    The two are not interchangeable: Bazel's UUID is unknown to a backend the CLI
-    streamed to, and would 404. Without either id the link is suppressed.
+    The Web UI resolves `/i/<id>` under either the BES envelope UUID (the sink id) or
+    the Bazel invocation id carried in the events, so both forms land on the same
+    page; the sink id is preferred simply because it is the one this process minted.
+    Without either id the link is suppressed.
 
     `links["results_base_url"]` (from `WorkflowsEnvironment.build_events.results_url`)
     is the prefix, joined as `{base}/{id}` (no `/invocations/` segment). Typical:
@@ -2345,9 +2347,10 @@ def _sorted_dedup(args, allow_env):
 def render_bes_url(data: dict) -> str:
     """Full BES results URL from `data["bazel"]`, or "" when unavailable.
 
-    Keyed on Bazel's own `invocation_id` (the --bes_results_url backend only
-    sees that UUID). BES counterpart to `aspect_web_ui_url`, which keys on
-    sink_invocation_id.
+    Keyed on Bazel's own `invocation_id`, mirroring the link Bazel itself prints from
+    `--bes_results_url`. BES counterpart to `aspect_web_ui_url`, which keys on
+    `sink_invocation_id`; against the Aspect Web UI the two resolve to the same page
+    (see `resolve_aspect_url`).
     """
     base = data["bazel"].get("bes_results_url", "")
     inv = data["bazel"].get("invocation_id", "")
