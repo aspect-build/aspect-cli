@@ -35,15 +35,16 @@ def login_command(d) -> str:
     account, `--deployment <name>` for a deployment."""
     return login_hint(None if d.builtin else d.name)
 
-def capabilities(d) -> list[str]:
-    """The remote capabilities a deployment advertises, as prose for a usage hint
-    (cache/bes always for a configured deployment; exec only when served). Same
-    labels the `--aspect-*` announcement uses (see `deployment_flags.axl`)."""
-    caps = []
-    for (label, host) in [("remote cache", d.cache), ("remote execution", d.exec), ("BES backend", d.bes)]:
-        if host:
-            caps.append(label)
-    return caps
+def capabilities(d, default_only: bool = False) -> list[str]:
+    """The remote capabilities a deployment advertises, as prose for a usage hint.
+    Same labels the `--remote` announcement uses (see `deployment_flags.axl`).
+
+    `default_only` drops remote execution, listing just what bare `--remote` wires —
+    exec is opt-in, so a hint about `--remote` must not promise it."""
+    pairs = [("remote cache", d.cache), ("BES backend", d.bes)]
+    if not default_only:
+        pairs.insert(1, ("remote execution", d.exec))
+    return [label for (label, host) in pairs if host]
 
 def status_line(d) -> str:
     """The Status row value for a summary: the logged-in identity + token status,
@@ -83,21 +84,26 @@ def _print_deployment(d, header = True):
                 _row(kind, host)
 
 def _print_default_usage_hint():
-    """The `auth status` footer: how --aspect-remote wires the *default* deployment,
-    and how to target another. Always the full text (independent of how many
-    deployments are configured). Leads with a blank line to set it apart."""
+    """The `auth status` footer: how --remote wires the *default* deployment, how to
+    add remote execution (never implied), and how to target another deployment.
+    Always the full text (independent of how many deployments are configured).
+    Leads with a blank line to set it apart."""
     print("")
-    print("Pass --aspect-remote to a task (e.g. `aspect build --aspect-remote`) to use the")
-    print("default deployment's remote cache, remote execution, and BES backend (when advertised).")
+    print("Pass --remote to a task (e.g. `aspect build --remote`) to use the default")
+    print("deployment's remote cache and BES backend. Add --remote=exec for remote execution.")
     print("Add --deployment <name> to target a specific deployment instead of the default.")
 
 def _print_configured_usage_hint(summary):
     """Post-configure hint naming the just-configured deployment and the remote
-    capabilities it actually advertises. Leads with a blank line to set it apart."""
-    flag = "--aspect-remote --deployment=" + summary.name
+    capabilities it actually advertises. Names `--remote=exec` only when the
+    deployment serves remote execution, since it is never wired by default.
+    Leads with a blank line to set it apart."""
+    flag = "--remote --deployment=" + summary.name
     print("")
     print("Pass " + flag + " to a task (e.g. `aspect build " + flag + "`)")
-    print("to use this deployment's " + join_and(capabilities(summary)) + ".")
+    print("to use this deployment's " + join_and(capabilities(summary, default_only = True)) + ".")
+    if summary.exec:
+        print("Remote execution is opt-in: use --remote=exec to enable it.")
 
 def _login_impl(ctx: TaskContext) -> int:
     if ctx.args.with_token and ctx.args.with_api_token:
@@ -324,7 +330,7 @@ def _use_impl(ctx: TaskContext) -> int:
 use = task(
     group = ["auth"],
     summary = "Set the default Workflows deployment",
-    description = "Make a configured deployment the default, so build/test (and `--deployment`-aware commands) target it — e.g. `aspect build --aspect-remote` — without naming it each time.",
+    description = "Make a configured deployment the default, so build/test (and `--deployment`-aware commands) target it — e.g. `aspect build --remote` — without naming it each time.",
     implementation = _use_impl,
     args = {
         "deployment": args.positional(

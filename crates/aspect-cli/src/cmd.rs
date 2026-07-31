@@ -360,6 +360,7 @@ fn arg_to_clap(scope: Scope<'_>, name: &str, arg: &Arg) -> ClapArg {
             short,
             values,
             description,
+            bare,
             ..
         } => {
             let mut it = ClapArg::new(id.clone())
@@ -374,6 +375,16 @@ fn arg_to_clap(scope: Scope<'_>, name: &str, arg: &Arg) -> ClapArg {
             } else {
                 it.value_parser(value_parser!(String))
             };
+            // `bare = "…"` makes a valueless `--flag` legal. `require_equals` keeps
+            // the next argv token from being swallowed as the value, so
+            // `--remote //foo` parses as bare flag + target rather than
+            // `--remote=//foo` (same shape as the Boolean arm below).
+            if let Some(bare) = bare {
+                it = it
+                    .num_args(0..=1)
+                    .require_equals(true)
+                    .default_missing_value(bare.clone());
+            }
             it
         }
         Arg::Boolean {
@@ -1188,6 +1199,7 @@ mod tests {
             long: None,
             values: None,
             description: None,
+            bare: None,
         }
     }
 
@@ -1714,10 +1726,78 @@ mod tests {
             long: Some("custom-flag".to_owned()),
             values: None,
             description: None,
+            bare: None,
         };
         assert_eq!(
             clap_id(Scope::Feature("artifact-upload"), "mode", &arg),
             "custom-flag"
+        );
+    }
+
+    /// `args.string(bare = …)` makes a valueless `--flag` legal, which is what lets
+    /// `--remote` be the short form of `--remote=cache,bes`. The `default` must stay
+    /// reachable so "absent" and "passed bare" remain distinguishable, and
+    /// `require_equals` must keep the following argv token from being eaten as the
+    /// value (`--remote //foo` is a bare flag plus a target, not `--remote=//foo`).
+    #[test]
+    fn string_arg_with_bare_accepts_valueless_flag() {
+        let arg = Arg::String {
+            required: false,
+            default: String::new(),
+            short: None,
+            long: None,
+            values: None,
+            description: None,
+            bare: Some("default".to_owned()),
+        };
+        let cmd = || {
+            Command::new("t")
+                .no_binary_name(true)
+                .arg(arg_to_clap(Scope::Task, "remote", &arg))
+                .arg(ClapArg::new("targets").num_args(0..))
+        };
+        let get = |m: &ArgMatches| m.get_one::<String>("remote").cloned().unwrap_or_default();
+
+        // Absent → the default; bare → the `bare` value; explicit → that value.
+        assert_eq!(get(&cmd().try_get_matches_from([] as [&str; 0]).unwrap()), "");
+        assert_eq!(get(&cmd().try_get_matches_from(["--remote"]).unwrap()), "default");
+        assert_eq!(
+            get(&cmd().try_get_matches_from(["--remote=exec,no-bes"]).unwrap()),
+            "exec,no-bes"
+        );
+
+        // A following positional is not swallowed as the flag's value.
+        let m = cmd().try_get_matches_from(["--remote", "//foo"]).unwrap();
+        assert_eq!(get(&m), "default");
+        assert_eq!(
+            m.get_many::<String>("targets")
+                .unwrap()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["//foo".to_string()]
+        );
+
+        // Space-separated values are rejected rather than silently misparsed.
+        assert!(
+            Command::new("t")
+                .no_binary_name(true)
+                .arg(arg_to_clap(Scope::Task, "remote", &arg))
+                .try_get_matches_from(["--remote", "exec"])
+                .is_err()
+        );
+    }
+
+    /// Without `bare`, a string flag still requires its value — the pre-existing
+    /// behavior every other `args.string` flag depends on.
+    #[test]
+    fn string_arg_without_bare_still_requires_a_value() {
+        let arg = arg_string("");
+        assert!(
+            Command::new("t")
+                .no_binary_name(true)
+                .arg(arg_to_clap(Scope::Task, "mode", &arg))
+                .try_get_matches_from(["--mode"])
+                .is_err()
         );
     }
 }

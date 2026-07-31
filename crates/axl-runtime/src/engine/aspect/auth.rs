@@ -73,6 +73,14 @@ const DEFAULT_LOGIN_SCOPES: &[&str] = &["openid", "profile", "email", "offline_a
 /// the remote executor (`--remote_executor`), present only when the deployment
 /// serves remote execution. Any field may be empty (the capability isn't served
 /// or predates endpoint advertisement).
+///
+/// `results_url` is the odd one out: the build-result viewer
+/// (`--bes_results_url`), advertised as a top-level `aspect_bes_results_url`
+/// rather than an `aspect_endpoints` entry because it is a full URL, not a bare
+/// host. It is carried here so one struct describes everything BES-adjacent a
+/// deployment offers, but it is never host-normalized and never joins the
+/// auth-gate `hosts` — it addresses a web UI, not a gRPC endpoint the login JWT
+/// is sent to. Empty when the deployment has no web UI.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 struct Endpoints {
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -81,11 +89,16 @@ struct Endpoints {
     bes: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     exec: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    results_url: String,
 }
 
 impl Endpoints {
     fn is_empty(&self) -> bool {
-        self.cache.is_empty() && self.bes.is_empty() && self.exec.is_empty()
+        self.cache.is_empty()
+            && self.bes.is_empty()
+            && self.exec.is_empty()
+            && self.results_url.is_empty()
     }
 }
 
@@ -243,7 +256,7 @@ fn select_deployment(deployments: &[Deployment], name: Option<&str>) -> anyhow::
 /// *account* by default rather than the default *deployment*: an explicit
 /// `name` picks that deployment (erroring if unknown); an empty `name` resolves
 /// the built-in Aspect account (the seed). The default-deployment concept (set by
-/// `auth use`) governs builds (`--aspect-remote`), not the account login — so a
+/// `auth use`) governs builds (`--remote`), not the account login — so a
 /// bare `auth login` always means the account, never a configured default.
 fn select_account_or_deployment(
     deployments: &[Deployment],
@@ -417,6 +430,11 @@ struct ProtectedResource {
     scopes_supported: Vec<String>,
     #[serde(default)]
     aspect_endpoints: Endpoints,
+    /// Where this deployment's build results are viewable (`--bes_results_url`).
+    /// Top-level rather than an `aspect_endpoints` entry because it is a URL, not
+    /// a bare host; omitted by a deployment with no web UI.
+    #[serde(default)]
+    aspect_bes_results_url: String,
 }
 
 impl ProtectedResource {
@@ -629,6 +647,10 @@ fn deployment_from_discovery(
         cache: endpoint_host_str(&info.aspect_endpoints.cache),
         bes: endpoint_host_str(&info.aspect_endpoints.bes),
         exec: endpoint_host_str(&info.aspect_endpoints.exec),
+        // A viewer URL, kept verbatim: it is passed to --bes_results_url, not
+        // dialed as a gRPC endpoint, so it is neither host-normalized nor pushed
+        // onto the auth gate below.
+        results_url: info.aspect_bes_results_url.clone(),
     };
     push(&endpoints.cache);
     push(&endpoints.bes);
@@ -2156,7 +2178,10 @@ fn one_deployment_summary(name: &str) -> anyhow::Result<Option<DeploymentSummary
 /// `cache` (→ --remote_cache), `bes` (→ the CLI BES sink / --bes_backend), and
 /// `exec` (→ --remote_executor). Each is a bare host, or "" when the deployment
 /// doesn't advertise/serve that capability. `name` is the resolved deployment
-/// name. Consumed by bazel-spawning tasks' `--deployment` to auto-wire the flags.
+/// name. Consumed by bazel-spawning tasks' `--remote` to auto-wire the flags.
+///
+/// `results_url` is a full URL rather than a host — the build-result viewer
+/// (→ --bes_results_url), "" when the deployment advertises no web UI.
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative, Clone)]
 #[display("<aspect.DeploymentEndpoints>")]
 pub struct DeploymentEndpoints {
@@ -2164,6 +2189,7 @@ pub struct DeploymentEndpoints {
     pub cache: String,
     pub bes: String,
     pub exec: String,
+    pub results_url: String,
 }
 
 starlark_simple_value!(DeploymentEndpoints);
@@ -2196,6 +2222,11 @@ fn deployment_endpoints_methods(registry: &mut MethodsBuilder) {
     #[starlark(attribute)]
     fn exec<'v>(this: values::Value<'v>) -> anyhow::Result<String> {
         attr_str!(this, DeploymentEndpoints, exec)
+    }
+
+    #[starlark(attribute)]
+    fn results_url<'v>(this: values::Value<'v>) -> anyhow::Result<String> {
+        attr_str!(this, DeploymentEndpoints, results_url)
     }
 }
 
@@ -2502,12 +2533,13 @@ fn auth_methods(registry: &mut MethodsBuilder) {
     }
 
     /// The Bazel-facing endpoints (`cache`/`bes`/`exec` hosts) advertised by the
-    /// deployment named `deployment` (or the default when omitted), so
-    /// `aspect <build|test> --deployment <name>` can auto-wire --remote_cache,
-    /// the BES backend, and --remote_executor. Errors if the deployment names no
-    /// configured deployment. A deployment that advertised no endpoints (an older
-    /// discovery, or the built-in Aspect seed) returns empty strings — the task
-    /// then injects nothing and relies on the user's own flags.
+    /// deployment named `deployment` (or the default when omitted), plus its
+    /// `results_url` viewer, so `aspect <build|test> --remote` can auto-wire
+    /// --remote_cache, the BES backend, --remote_executor, and --bes_results_url.
+    /// Errors if the deployment names no configured deployment. A deployment that
+    /// advertised no endpoints (an older discovery, or the built-in Aspect seed)
+    /// returns empty strings — the task then injects nothing and relies on the
+    /// user's own flags.
     fn deployment_endpoints<'v>(
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = named, default = NoneOr::None)] deployment: NoneOr<String>,
@@ -2520,6 +2552,7 @@ fn auth_methods(registry: &mut MethodsBuilder) {
             cache: selected.endpoints.cache,
             bes: selected.endpoints.bes,
             exec: selected.endpoints.exec,
+            results_url: selected.endpoints.results_url,
         }))
     }
 
@@ -2889,6 +2922,7 @@ mod tests {
                 cache: "remote.acme.aspect.build".to_string(),
                 ..Default::default()
             },
+            aspect_bes_results_url: String::new(),
         }
     }
 
@@ -2939,6 +2973,47 @@ mod tests {
         ));
     }
 
+    /// The wire contract with the deployment's `/.well-known/oauth-protected-resource`
+    /// document (see aspect-build/silo#11571): `aspect_bes_results_url` is top-level,
+    /// beside `aspect_endpoints`, because it is a full URL rather than a bare host.
+    /// Parsing it by the wrong name would silently drop the Web UI link, so assert the
+    /// JSON shape rather than only the struct.
+    #[test]
+    fn parses_advertised_bes_results_url_from_discovery_json() {
+        let doc = r#"{
+            "resource": "https://remote.acme.aspect.build",
+            "authorization_servers": ["https://acme.auth.aspect.build"],
+            "client_id": "abc",
+            "aspect_endpoints": {
+                "cache": "remote.acme.aspect.build",
+                "bes": "bes.acme.aspect.build"
+            },
+            "aspect_bes_results_url": "https://app.acme.aspect.build/i/"
+        }"#;
+        let info: ProtectedResource = serde_json::from_str(doc).unwrap();
+        assert_eq!(
+            info.aspect_bes_results_url,
+            "https://app.acme.aspect.build/i/"
+        );
+        // It rides on the deployment record through the endpoints struct, unnormalized.
+        let d = deployment_from_discovery(
+            "acme".to_string(),
+            "remote.acme.aspect.build",
+            &info,
+            None,
+        );
+        assert_eq!(d.endpoints.results_url, "https://app.acme.aspect.build/i/");
+
+        // A deployment with no web UI omits the key: absent parses as empty, and
+        // `bes_results_url_flag` then injects nothing.
+        let no_ui = r#"{
+            "resource": "https://remote.acme.aspect.build",
+            "aspect_endpoints": {"cache": "remote.acme.aspect.build"}
+        }"#;
+        let info: ProtectedResource = serde_json::from_str(no_ui).unwrap();
+        assert!(info.aspect_bes_results_url.is_empty());
+    }
+
     #[test]
     fn deployment_from_discovery_records_issuer_client_and_all_hosts() {
         // A deployment advertising an authorization server + client_id + endpoints
@@ -2955,7 +3030,9 @@ mod tests {
                 cache: "https://remote.acme.aspect.build".to_string(),
                 bes: "bes.acme.aspect.build".to_string(),
                 exec: "https://remote.acme.aspect.build".to_string(),
+                results_url: String::new(),
             },
+            aspect_bes_results_url: "https://app.acme.aspect.build/i/".to_string(),
         };
         let d = configure_from(&advertised, None);
         assert_eq!(d.issuer.as_deref(), Some("https://acme.auth.aspect.build"));
@@ -2982,6 +3059,13 @@ mod tests {
         assert_eq!(d.endpoints.cache, "remote.acme.aspect.build");
         assert_eq!(d.endpoints.bes, "bes.acme.aspect.build");
         assert_eq!(d.endpoints.exec, "remote.acme.aspect.build");
+        // The viewer URL comes off the top-level `aspect_bes_results_url` and is kept
+        // verbatim — it is passed to --bes_results_url, not dialed, so it keeps its
+        // scheme and path where the endpoint hosts above are normalized to bare hosts.
+        assert_eq!(d.endpoints.results_url, "https://app.acme.aspect.build/i/");
+        // ...and it is NOT an auth-gate host: the login JWT goes to gRPC endpoints,
+        // not the web UI (the `hosts` assertion above already covers the full set).
+        assert!(!d.hosts.iter().any(|h| h.contains("app.acme")));
         assert!(auth_env_from(&d).is_ok());
 
         // An endpoint that advertises no authorization server: hosts recorded, but
@@ -2996,7 +3080,10 @@ mod tests {
                 cache: "remote.acme.aspect.build".to_string(),
                 bes: "bes.acme.aspect.build".to_string(),
                 exec: String::new(),
+                results_url: String::new(),
             },
+            // A deployment with no web UI omits it entirely.
+            aspect_bes_results_url: String::new(),
         };
         let d = configure_from(&bare, None);
         assert!(d.issuer.is_none() && d.client_id.is_none());
@@ -3400,6 +3487,7 @@ mod tests {
             cache: "remote.acme".to_string(),
             bes: "bes.acme".to_string(),
             exec: String::new(),
+            results_url: String::new(),
         };
         let s = summarize_deployment(&acme, &creds, true);
         assert!(s.logged_in && s.default && !s.builtin);

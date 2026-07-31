@@ -54,6 +54,13 @@ def _test_capabilities(_):
     _eq("cache + exec + bes order", capabilities(_summary(cache = "c", bes = "b", exec = "e")), ["remote cache", "remote execution", "BES backend"])
     _eq("none", capabilities(_summary()), [])
 
+    # default_only lists what bare --remote wires, so exec is dropped even when served.
+    _eq(
+        "default_only drops exec",
+        capabilities(_summary(cache = "c", bes = "b", exec = "e"), default_only = True),
+        ["remote cache", "BES backend"],
+    )
+
 def _test_status_line(_):
     _eq(
         "logged out → login hint",
