@@ -60,7 +60,9 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use aspect_telemetry::{cargo_pkg_short_version, do_not_track, send_telemetry};
+use aspect_telemetry::{
+    cargo_pkg_display_version, cargo_pkg_short_version, do_not_track, send_telemetry,
+};
 use axl_runtime::bazel_live;
 use axl_runtime::ci::on_recognized_ci;
 use axl_runtime::eval::{Loader, ModuleEnv, MultiPhaseEval};
@@ -226,7 +228,7 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
 
             match matches.subcommand_name() {
                 Some("version") => {
-                    println!("{}", cargo_pkg_short_version());
+                    println!("{}", cargo_pkg_display_version());
                     return Ok(ExitCode::SUCCESS);
                 }
                 Some("help") => {
