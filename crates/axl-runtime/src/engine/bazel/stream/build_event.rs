@@ -12,7 +12,7 @@ use std::{
 };
 use thiserror::Error;
 
-use super::broadcaster::{Broadcaster, Subscriber};
+use super::broadcaster::{Broadcaster, Subscriber, SubscriberFilter};
 use super::redaction::redact_event;
 use super::util::{MultiWriter, read_varint};
 
@@ -287,14 +287,22 @@ impl BuildEventStream {
     /// and don't need history replay. Use `subscribe()` for user-facing APIs
     /// where late subscription support is needed.
     pub fn subscribe(&self) -> Subscriber<BuildEvent> {
+        self.subscribe_filtered(None)
+    }
+
+    /// Subscribe with an optional send-side filter (see
+    /// [`Broadcaster::subscribe_filtered`]). A filtered subscriber's buffer
+    /// only holds events the filter accepts — the reader thread skips the rest
+    /// before cloning them, so a `kinds=`-scoped AXL iterator never pays for
+    /// the event kinds it doesn't consume.
+    pub fn subscribe_filtered(
+        &self,
+        filter: Option<SubscriberFilter<BuildEvent>>,
+    ) -> Subscriber<BuildEvent> {
         match self.broadcaster.as_ref() {
-            Some(b) => b.subscribe(),
-            None => {
-                // Stream has already been joined; return an immediately-disconnected channel.
-                let (tx, rx) = std::sync::mpsc::channel();
-                drop(tx);
-                rx
-            }
+            Some(b) => b.subscribe_filtered(filter),
+            // Stream has already been joined.
+            None => Subscriber::disconnected(),
         }
     }
 
