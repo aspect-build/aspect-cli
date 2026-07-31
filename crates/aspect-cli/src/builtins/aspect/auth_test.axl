@@ -10,6 +10,7 @@ Run with:
 """
 
 load("@aspect//auth.axl", "capabilities", "identity", "login_command", "status_line")
+load("./private/lib/deployment_flags.axl", "REMOTE_DEFAULT_CAPS")
 
 def _eq(label, got, want):
     if got != want:
@@ -54,10 +55,11 @@ def _test_capabilities(_):
     _eq("cache + exec + bes order", capabilities(_summary(cache = "c", bes = "b", exec = "e")), ["remote cache", "remote execution", "BES backend"])
     _eq("none", capabilities(_summary()), [])
 
-    # default_only lists what bare --remote wires, so exec is dropped even when served.
+    # REMOTE_DEFAULT_CAPS lists what bare --remote wires, so the opt-in remote
+    # execution is dropped even when the deployment serves it.
     _eq(
-        "default_only drops exec",
-        capabilities(_summary(cache = "c", bes = "b", exec = "e"), default_only = True),
+        "restricted to the default caps drops exec",
+        capabilities(_summary(cache = "c", bes = "b", exec = "e"), only = REMOTE_DEFAULT_CAPS),
         ["remote cache", "BES backend"],
     )
 

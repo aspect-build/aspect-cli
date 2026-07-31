@@ -68,46 +68,104 @@ load("./environment.axl", "info")
 # Bazel-facing Aspect endpoints are TLS gRPC.
 _SCHEME = "grpcs://"
 
+# One capability `--remote` can wire.
+#
+#   endpoint  the `DeploymentEndpoints` field holding its host
+#   flag      Bazel flag to inject, or "" when the CLI wires it itself (BES, as a
+#             CLI-streamed sink rather than a flag)
+#   label     how it is named to users
+#   announced whether the "Using deployment …" line lists it; BES is false because
+#             `announce_bes_sinks` gives it its own "Streaming build events to …"
+#   needs     completes "<deployment> does not advertise …" when a named capability
+#             is unavailable
+Capability = record(
+    endpoint = field(str),
+    label = field(str),
+    needs = field(str),
+    flag = field(str, default = ""),
+    announced = field(bool, default = True),
+)
+
 # Capabilities `--remote` accepts, each with a `no-` form that subtracts it.
-# `cache`/`bes` are on unless subtracted; `exec` is additive. `none` wires nothing
-# (an escape hatch from a config.axl default).
-_CAPABILITIES = ["cache", "bes", "exec"]
-_DEFAULT_ON = ["cache", "bes"]
+# `cache`/`bes` are on unless subtracted; `exec` is additive (never implied, since it
+# relocates every action). `none` wires nothing — an escape hatch from a config.axl
+# default. Order is the order capabilities are wired and announced.
+_CAPABILITY_SPECS = {
+    "cache": Capability(
+        endpoint = "cache",
+        flag = "--remote_cache",
+        label = "remote cache",
+        needs = "a remote cache",
+    ),
+    "exec": Capability(
+        endpoint = "exec",
+        flag = "--remote_executor",
+        label = "remote execution",
+        needs = "remote execution",
+    ),
+    "bes": Capability(
+        endpoint = "bes",
+        label = "BES backend",
+        needs = "a BES backend",
+        announced = False,
+    ),
+}
+
+# Capability names in the order they are wired, announced, and listed to users.
+REMOTE_CAPABILITIES = list(_CAPABILITY_SPECS)
+
+# What bare `--remote` wires: the accelerators that can't change build semantics.
+REMOTE_DEFAULT_CAPS = ["cache", "bes"]
+
+def capability_label(name: str) -> str:
+    """How `name` is named to users, or `""` when it isn't a capability."""
+    capability = _CAPABILITY_SPECS.get(name)
+    return capability.label if capability else ""
 
 # What clap substitutes for a valueless `--remote` (`args.string(bare = …)`), so an
-# empty string keeps meaning "flag absent" and the two stay distinguishable without
-# consulting `is_explicit`.
-BARE = "default"
+# empty string keeps meaning "flag absent" and the two stay distinguishable. Not a
+# spellable capability list, so a user typing it verbatim can't reach this path by
+# accident.
+BARE = "<bare>"
 
 # What `deployment_endpoint_flags` hands back to `run_bazel_task`: Bazel base
 # flags to prepend (--remote_cache / --remote_executor) and extra CLI-streamed
 # BES backend URIs, plus the deployment name and the base-flag capabilities as
 # `(label, uri)` pairs for the "Using deployment …" line. BES is wired via
 # `bes_backends` and announced by its own streaming line, so it is not in
-# `capabilities`. `results_url` is the deployment's advertised build-result
-# viewer, passed to `--bes_results_url` when nothing else supplies one;
-# `deployment_bes` is the deployment's BES URI whether or not a sink was wired to
-# it, so `bes_results_url_flag` can still recognize Bazel uploading there itself.
+# `capabilities`.
+#
+# `bes_uri` is the deployment's BES endpoint whether or not a sink was wired to it
+# (`--remote=no-bes` leaves `bes_backends` empty), so `bes_results_url_flag` can
+# still tell that Bazel is uploading there itself. `results_url` is the advertised
+# build-result viewer that pairs with it.
 DeploymentFlags = record(
     base_flags = field(list),
     bes_backends = field(list),
     deployment = field(str, default = ""),
     capabilities = field(list, default = []),
     results_url = field(str, default = ""),
-    deployment_bes = field(list, default = []),
+    bes_uri = field(str, default = ""),
 )
 
-# Which capabilities `--remote` resolved to. `explicit` are the ones the user named
-# (and didn't later negate), so an unadvertised one fails; a defaulted capability is
-# absent from it and is skipped silently when the deployment lacks it.
+# Which capabilities `--remote` resolved to: `on` maps every capability in
+# `REMOTE_CAPABILITIES` to whether to wire it, and `named` holds the subset the user asked
+# for by name (and didn't later negate). The split drives error handling — a named
+# capability the deployment can't serve is an error, a defaulted one is skipped.
 RemoteSpec = record(
-    cache = field(bool),
-    bes = field(bool),
-    exec = field(bool),
-    explicit = field(list),
+    on = field(dict),
+    named = field(list),
 )
 
-_OFF = RemoteSpec(cache = False, bes = False, exec = False, explicit = [])
+def _spec(on: dict, named: list = []) -> RemoteSpec:
+    return RemoteSpec(on = on, named = named)
+
+def _endpoint_uri(endpoints, capability: Capability) -> str:
+    """`capability`'s gRPC URI on `endpoints`, or `""` when unadvertised."""
+    host = getattr(endpoints, capability.endpoint)
+    return _SCHEME + host if host else ""
+
+_OFF = _spec({c: False for c in REMOTE_CAPABILITIES})
 
 def deployment_flag_args() -> dict:
     """The `--deployment` selector plus the `--remote` capability list every
@@ -135,13 +193,11 @@ def parse_remote(value: str) -> RemoteSpec:
     """Parse a `--remote` value into a [`RemoteSpec`].
 
     An empty `value` means the flag was omitted (→ nothing wired); a bare `--remote`
-    arrives as `BARE` (→ the default capabilities), so the two are distinguishable
-    without consulting `is_explicit`.
+    arrives as `BARE` (→ the default capabilities).
 
-    `cache`/`bes` start on and `exec` off; each named token turns its capability on
-    and each `no-` token turns it off, applied left to right so the last mention of a
-    capability wins. Only *named* capabilities land in `explicit` — a defaulted one
-    the deployment lacks is skipped rather than failing.
+    `cache`/`bes` start on and `exec` off; each token turns its capability on and each
+    `no-` token turns it off, applied left to right so the last mention of a
+    capability wins.
 
     `fail`s on an unrecognized token and on `none` combined with anything else.
     Public so `deployment_flags_test.axl` can assert the grammar.
@@ -157,27 +213,20 @@ def parse_remote(value: str) -> RemoteSpec:
             fail("--remote: 'none' cannot be combined with other capabilities; got '%s'." % value)
         return _OFF
 
-    on = {c: c in _DEFAULT_ON for c in _CAPABILITIES}
-    explicit = []
+    on = {c: c in REMOTE_DEFAULT_CAPS for c in REMOTE_CAPABILITIES}
+    named = []
     for token in tokens:
         negated = token.startswith("no-")
         capability = token[len("no-"):] if negated else token
-        if capability not in _CAPABILITIES:
+        if capability not in REMOTE_CAPABILITIES:
             fail("--remote: unknown capability '%s'. Expected %s (each also as no-<capability>), or none." %
-                 (token, ", ".join(_CAPABILITIES)))
+                 (token, ", ".join(REMOTE_CAPABILITIES)))
         on[capability] = not negated
+        if not negated and capability not in named:
+            named.append(capability)
 
-        # A negated capability isn't a request the deployment must satisfy, and a
-        # capability named twice is still one request.
-        if not negated and capability not in explicit:
-            explicit.append(capability)
-
-    return RemoteSpec(
-        cache = on["cache"],
-        bes = on["bes"],
-        exec = on["exec"],
-        explicit = [c for c in explicit if on[c]],
-    )
+    # A capability negated after being named is no longer a request.
+    return _spec(on, [c for c in named if on[c]])
 
 def deployment_endpoint_flags(ctx) -> DeploymentFlags:
     """Resolve `--remote` into the [`DeploymentFlags`] to inject (`base_flags`:
@@ -195,13 +244,13 @@ def deployment_endpoint_flags(ctx) -> DeploymentFlags:
     spec = parse_remote(ctx.args.remote)
 
     # Selecting a deployment without saying what to use it for wires nothing, which
-    # reads as a silent no-op; make it a clear error instead. `--remote=none` counts
-    # as saying so (it deliberately wires nothing).
+    # reads as a silent no-op; make it a clear error instead. An explicit
+    # `--remote=none` says so deliberately and is left alone.
     if ctx.args.deployment and not ctx.args.remote:
         fail("--deployment=%s selects a deployment but wires nothing on its own. " % ctx.args.deployment +
              "Add --remote for its remote cache and BES backend, or --remote=exec to add remote execution.")
 
-    if not (spec.cache or spec.bes or spec.exec):
+    if not any(spec.on.values()):
         return DeploymentFlags(base_flags = [], bes_backends = [])
 
     endpoints = ctx.aspect.auth.deployment_endpoints(deployment = ctx.args.deployment)
@@ -210,51 +259,35 @@ def deployment_endpoint_flags(ctx) -> DeploymentFlags:
     # target is the current default; if that resolves to something with no
     # endpoints (the built-in Aspect account — i.e. no default deployment is
     # configured), fail clearly rather than blaming a capability.
-    no_endpoints = not (endpoints.cache or endpoints.bes or endpoints.exec)
-    if no_endpoints and not ctx.args.deployment:
+    advertises_none = not any([_endpoint_uri(endpoints, c) for c in _CAPABILITY_SPECS.values()])
+    if advertises_none and not ctx.args.deployment:
         fail("--remote requires a Workflows deployment, but no default is set. " +
              "Run `aspect auth configure <host>` to add one. " +
              "If you already have deployments (see `aspect auth status`), set a default with " +
              "`aspect auth use <name>` or pass an explicit --deployment <name>.")
 
-    named = "deployment '" + endpoints.name + "'"
-
-    def _require(capability, what):
-        # A capability the user named and the deployment can't serve is an error; a
-        # defaulted one is skipped silently.
-        if capability in spec.explicit:
-            fail("--remote=%s: %s does not advertise %s. Run `aspect auth configure <host>` for a deployment that serves one." %
-                 (capability, named, what))
-
-    # The "Using deployment …" capabilities are reported cache then exec (BES is
-    # wired below but announced via its own streaming line, not here).
     base_flags = []
     bes_backends = []
     capabilities = []
-    if spec.cache:
-        if endpoints.cache:
-            uri = _SCHEME + endpoints.cache
-            base_flags.append("--remote_cache=" + uri)
-            capabilities.append(("remote cache", uri))
-        else:
-            _require("cache", "a remote cache")
+    for (name, capability) in _CAPABILITY_SPECS.items():
+        if not spec.on[name]:
+            continue
 
-    if spec.exec:
-        if endpoints.exec:
-            uri = _SCHEME + endpoints.exec
-            base_flags.append("--remote_executor=" + uri)
-            capabilities.append(("remote execution", uri))
-        else:
-            _require("exec", "remote execution")
+        uri = _endpoint_uri(endpoints, capability)
+        if not uri:
+            # A capability the user named and the deployment can't serve is an error;
+            # a defaulted one is skipped silently.
+            if name in spec.named:
+                fail("--remote=%s: deployment '%s' does not advertise %s. Run `aspect auth configure <host>` for a deployment that serves one." %
+                     (name, endpoints.name, capability.needs))
+            continue
 
-    if spec.bes:
-        if endpoints.bes:
-            # Wired as a CLI-streamed BES sink; its own "Streaming build events to
-            # …" line announces it (and the end-of-build summary reports it), so it
-            # is deliberately left out of the `capabilities` display below.
-            bes_backends.append(_SCHEME + endpoints.bes)
+        if capability.flag:
+            base_flags.append(capability.flag + "=" + uri)
         else:
-            _require("bes", "a BES backend")
+            bes_backends.append(uri)
+        if capability.announced:
+            capabilities.append((capability.label, uri))
 
     return DeploymentFlags(
         base_flags = base_flags,
@@ -262,7 +295,7 @@ def deployment_endpoint_flags(ctx) -> DeploymentFlags:
         deployment = endpoints.name,
         capabilities = capabilities,
         results_url = endpoints.results_url,
-        deployment_bes = [_SCHEME + endpoints.bes] if endpoints.bes else [],
+        bes_uri = _endpoint_uri(endpoints, _CAPABILITY_SPECS["bes"]),
     )
 
 def bes_results_url_flag(ctx, rc, flags: DeploymentFlags, command: str = "build") -> list:
@@ -287,10 +320,9 @@ def bes_results_url_flag(ctx, rc, flags: DeploymentFlags, command: str = "build"
 
     Gated on actually reporting there, so the link can't point at an invocation the
     backend never received. Either path counts: the CLI's own sink to the
-    deployment's BES (`flags.bes_backends`, i.e. `--remote` included `bes`), or
-    Bazel uploading to that same endpoint via its own `--bes_backend` — which is
-    also the case where the CLI's duplicate sink was dropped. `--remote=no-bes`
-    with no Bazel-side upload contributes no results URL.
+    deployment's BES, or Bazel uploading to that same endpoint via its own
+    `--bes_backend` (also the case where the CLI's duplicate sink was dropped).
+    `--remote=no-bes` with no Bazel-side upload contributes no results URL.
     """
     if not flags.results_url:
         return []
@@ -299,13 +331,7 @@ def bes_results_url_flag(ctx, rc, flags: DeploymentFlags, command: str = "build"
     if ctx.std.env.var("ASPECT_WORKFLOWS_BES_RESULTS_URL"):
         return []
 
-    reporting = bool(flags.bes_backends)
-    if not reporting:
-        # No CLI sink of our own; Bazel may still be uploading to this deployment's
-        # BES, which the viewer URL describes just as well.
-        bazel_backend = bazel_bes_backend(rc, command)
-        reporting = bool([b for b in flags.deployment_bes if same_bes_endpoint(b, bazel_backend)])
-
+    reporting = bool(flags.bes_backends) or same_bes_endpoint(flags.bes_uri, bazel_bes_backend(rc, command))
     if not reporting:
         return []
 
@@ -321,6 +347,14 @@ def join_and(items: list[str], oxford: bool = False) -> str:
         return items[0] + (", and " if oxford else " and ") + items[1]
     return ", ".join(items[:-1]) + ", and " + items[-1]
 
+def deployment_announcement(flags: DeploymentFlags) -> str:
+    """The "Using deployment …" line for `flags`, or `""` when nothing was injected.
+    Split from `announce_deployment_flags` so the wording is unit-testable."""
+    if not flags.capabilities:
+        return ""
+    parts = [label + " (" + uri + ")" for (label, uri) in flags.capabilities]
+    return "Using deployment '" + flags.deployment + "' for " + join_and(parts, oxford = True)
+
 def announce_deployment_flags(ctx, flags: DeploymentFlags):
     """Tell the user, in one line, which deployment's base-flag capabilities this
     bazel call is wired to (`--remote`) and the endpoint each uses, so the
@@ -331,7 +365,6 @@ def announce_deployment_flags(ctx, flags: DeploymentFlags):
     to the bazel call, so announcing at resolve time strands this line above the
     phase header it describes. Callers with a retry loop announce on the first
     attempt only — a retry reuses the same flags."""
-    if not flags.capabilities:
-        return
-    parts = [label + " (" + uri + ")" for (label, uri) in flags.capabilities]
-    info(ctx.std, "Using deployment '" + flags.deployment + "' for " + join_and(parts, oxford = True))
+    line = deployment_announcement(flags)
+    if line:
+        info(ctx.std, line)

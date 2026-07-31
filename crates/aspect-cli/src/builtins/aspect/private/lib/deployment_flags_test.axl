@@ -12,7 +12,7 @@ matrix: the default capability set, `exec` as additive, `no-` subtraction, `none
 and the `--bes_results_url` precedence chain.
 """
 
-load("./deployment_flags.axl", "BARE", "bes_results_url_flag", "deployment_endpoint_flags", "join_and", "parse_remote")
+load("./deployment_flags.axl", "BARE", "bes_results_url_flag", "deployment_announcement", "deployment_endpoint_flags", "join_and", "parse_remote")
 
 def _eq(label, got, want):
     if got != want:
@@ -44,55 +44,55 @@ _ALL = _endpoints("gcp", cache = "cache.gcp", bes = "bes.gcp", exec = "remote.gc
 
 def _test_parse_defaults(ctx):
     # Bare --remote arrives as the sentinel: the two accelerators on, exec off.
-    # Neither is "explicit", so an unadvertised one is skipped rather than failing.
+    # Neither is named, so an unadvertised one is skipped rather than failing.
     spec = parse_remote(BARE)
-    _eq("bare --remote → cache", spec.cache, True)
-    _eq("bare --remote → bes", spec.bes, True)
-    _eq("bare --remote → no exec", spec.exec, False)
-    _eq("bare --remote names nothing explicitly", spec.explicit, [])
+    _eq("bare --remote → cache", spec.on["cache"], True)
+    _eq("bare --remote → bes", spec.on["bes"], True)
+    _eq("bare --remote → no exec", spec.on["exec"], False)
+    _eq("bare --remote names nothing", spec.named, [])
 
 def _test_parse_omitted_is_off(ctx):
     spec = parse_remote("")
-    _eq("omitted → cache off", spec.cache, False)
-    _eq("omitted → bes off", spec.bes, False)
-    _eq("omitted → exec off", spec.exec, False)
+    _eq("omitted → cache off", spec.on["cache"], False)
+    _eq("omitted → bes off", spec.on["bes"], False)
+    _eq("omitted → exec off", spec.on["exec"], False)
 
 def _test_parse_exec_is_additive(ctx):
     # The case that motivated the grammar: `exec` adds to the defaults rather than
-    # replacing them, and is explicit (so an exec-less deployment is an error).
+    # replacing them, and counts as named (so an exec-less deployment is an error).
     spec = parse_remote("exec")
-    _eq("exec keeps cache", spec.cache, True)
-    _eq("exec keeps bes", spec.bes, True)
-    _eq("exec on", spec.exec, True)
-    _eq("exec is named explicitly", spec.explicit, ["exec"])
+    _eq("exec keeps cache", spec.on["cache"], True)
+    _eq("exec keeps bes", spec.on["bes"], True)
+    _eq("exec on", spec.on["exec"], True)
+    _eq("exec counts as named", spec.named, ["exec"])
 
 def _test_parse_negation(ctx):
     spec = parse_remote("exec,no-bes")
-    _eq("no-bes subtracts bes", spec.bes, False)
-    _eq("cache still on", spec.cache, True)
-    _eq("exec still on", spec.exec, True)
-    _eq("a negated capability is not a request", spec.explicit, ["exec"])
+    _eq("no-bes subtracts bes", spec.on["bes"], False)
+    _eq("cache still on", spec.on["cache"], True)
+    _eq("exec still on", spec.on["exec"], True)
+    _eq("a negated capability is not a request", spec.named, ["exec"])
 
     only_bes = parse_remote("no-cache")
-    _eq("no-cache subtracts cache", only_bes.cache, False)
-    _eq("no-cache leaves bes", only_bes.bes, True)
+    _eq("no-cache subtracts cache", only_bes.on["cache"], False)
+    _eq("no-cache leaves bes", only_bes.on["bes"], True)
 
 def _test_parse_last_mention_wins(ctx):
     # Tokens apply left to right, so a re-enable after a negation sticks (and is
     # then a named request).
     spec = parse_remote("no-exec,exec")
-    _eq("re-enabled exec", spec.exec, True)
-    _eq("re-enabled exec is explicit", spec.explicit, ["exec"])
+    _eq("re-enabled exec", spec.on["exec"], True)
+    _eq("re-enabled exec counts as named", spec.named, ["exec"])
 
     off = parse_remote("exec,no-exec")
-    _eq("negated last → off", off.exec, False)
-    _eq("negated last → not explicit", off.explicit, [])
+    _eq("negated last → off", off.on["exec"], False)
+    _eq("negated last → not named", off.named, [])
 
 def _test_parse_none(ctx):
     spec = parse_remote("none")
-    _eq("none → cache off", spec.cache, False)
-    _eq("none → bes off", spec.bes, False)
-    _eq("none → exec off", spec.exec, False)
+    _eq("none → cache off", spec.on["cache"], False)
+    _eq("none → bes off", spec.on["bes"], False)
+    _eq("none → exec off", spec.on["exec"], False)
 
 def _test_no_remote_injects_nothing(ctx):
     got = deployment_endpoint_flags(_ctx(_ALL))
@@ -117,7 +117,23 @@ def _test_exec_adds_executor(ctx):
 def _test_no_bes_skips_sink(ctx):
     got = deployment_endpoint_flags(_ctx(_ALL, remote = "exec,no-bes"))
     _eq("no-bes → no sink", got.bes_backends, [])
-    _eq("no-bes still records the deployment's bes", got.deployment_bes, ["grpcs://bes.gcp"])
+    _eq("no-bes still records the deployment's bes", got.bes_uri, "grpcs://bes.gcp")
+
+def _test_exec_without_cache_wires_executor_only(ctx):
+    # `no-cache,exec` leaves Bazel to route CAS/AC through --remote_executor (the
+    # equivalence delivery.axl and cache_diff.axl rely on), so no --remote_cache is
+    # injected and the announcement names only remote execution.
+    got = deployment_endpoint_flags(_ctx(_ALL, remote = "no-cache,exec"))
+    _eq("exec alone → executor only", got.base_flags, ["--remote_executor=grpcs://remote.gcp"])
+    _eq("exec alone → announced as execution only", got.capabilities, [
+        ("remote execution", "grpcs://remote.gcp"),
+    ])
+
+def _test_parse_tolerates_whitespace(ctx):
+    # A quoted list from a config.axl or shell alias may carry spaces.
+    spec = parse_remote(" exec , no-bes ")
+    _eq("spaced tokens still parse", [spec.on["exec"], spec.on["bes"]], [True, False])
+    _eq("spaced tokens still count as named", spec.named, ["exec"])
 
 def _test_default_skips_unadvertised(ctx):
     # A deployment with no exec and no bes: bare --remote names neither, so both are
@@ -182,6 +198,26 @@ def _test_results_url_absent_when_unadvertised(ctx):
     flags = deployment_endpoint_flags(ctx_)
     _eq("no advertised viewer → no flag", bes_results_url_flag(ctx_, _rc(), flags), [])
 
+def _test_announcement_line(ctx):
+    """The "Using deployment …" line names each injected base-flag capability with
+    its endpoint, and is empty when nothing was injected (so nothing is printed)."""
+    line = deployment_announcement(deployment_endpoint_flags(_ctx(_ALL, remote = "exec")))
+    _eq(
+        "names the deployment and each base-flag capability",
+        line,
+        "Using deployment 'gcp' for remote cache (grpcs://cache.gcp), and remote execution (grpcs://remote.gcp)",
+    )
+    # BES is announced by its own "Streaming build events to …" line, not this one.
+    if "bes.gcp" in line:
+        fail("announcement should not mention the BES backend: %r" % line)
+
+    _eq("nothing injected → no line", deployment_announcement(deployment_endpoint_flags(_ctx(_ALL))), "")
+    _eq(
+        "bes-only → no line (nothing to announce here)",
+        deployment_announcement(deployment_endpoint_flags(_ctx(_ALL, remote = "no-cache"))),
+        "",
+    )
+
 def _test_join_and(ctx):
     _eq("empty", join_and([]), "")
     _eq("one", join_and(["remote cache"]), "remote cache")
@@ -196,12 +232,15 @@ _UNIT_TESTS = [
     _test_parse_negation,
     _test_parse_last_mention_wins,
     _test_parse_none,
+    _test_parse_tolerates_whitespace,
     _test_no_remote_injects_nothing,
     _test_default_wires_cache_and_bes,
     _test_exec_adds_executor,
     _test_no_bes_skips_sink,
+    _test_exec_without_cache_wires_executor_only,
     _test_default_skips_unadvertised,
     _test_reports_injected_capabilities,
+    _test_announcement_line,
     _test_results_url_from_discovery,
     _test_results_url_yields_to_user_flag,
     _test_results_url_yields_to_runner_env,
