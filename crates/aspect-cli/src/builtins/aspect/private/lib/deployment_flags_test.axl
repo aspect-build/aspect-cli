@@ -9,10 +9,11 @@ struct, and `ctx.std.env.var` from a fixed map.
 deployment doesn't advertise, `--deployment` with no `--remote`, a bad capability
 token) are exercised by the CLI end-to-end, not here. These cover the resolution
 matrix: the default capability set, `exec` as additive, `no-` subtraction, `none`,
-and the `--bes_results_url` precedence chain.
+and both build-result URL paths (Bazel-uploaded → `--bes_results_url`, CLI-streamed
+→ the sink-keyed `data["aspect_results_url"]`).
 """
 
-load("./deployment_flags.axl", "BARE", "bes_results_url_flag", "deployment_announcement", "deployment_endpoint_flags", "join_and", "parse_remote")
+load("./deployment_flags.axl", "BARE", "aspect_results_url", "bes_results_url_flag", "deployment_announcement", "deployment_endpoint_flags", "join_and", "parse_remote")
 
 def _eq(label, got, want):
     if got != want:
@@ -153,39 +154,24 @@ def _test_reports_injected_capabilities(ctx):
         ("remote execution", "grpcs://remote.gcp"),
     ])
 
-def _test_results_url_from_discovery(ctx):
-    ctx_ = _ctx(_ALL, remote = BARE)
-    flags = deployment_endpoint_flags(ctx_)
+def _test_results_url_carried_off_discovery(ctx):
+    flags = deployment_endpoint_flags(_ctx(_ALL, remote = BARE))
     _eq("results_url carried off discovery", flags.results_url, "https://app.gcp/i/")
-    _eq(
-        "wired when streaming to the deployment's bes",
-        bes_results_url_flag(ctx_, _rc(), flags),
-        ["--bes_results_url=https://app.gcp/i/"],
-    )
 
-def _test_results_url_yields_to_user_flag(ctx):
+def _test_bes_flag_only_for_bazel_side_upload(ctx):
+    """`--bes_results_url` is joined with Bazel's own invocation_id, so it may only be
+    injected when Bazel is the uploader. A CLI sink indexes under its own UUID, which
+    that flag's consumers never see."""
     ctx_ = _ctx(_ALL, remote = BARE)
     flags = deployment_endpoint_flags(ctx_)
-    rc = _rc({"--bes_results_url": "https://mine.example"})
-    _eq("a user-set --bes_results_url wins", bes_results_url_flag(ctx_, rc, flags), [])
 
-def _test_results_url_yields_to_runner_env(ctx):
-    ctx_ = _ctx(_ALL, remote = BARE, env = {"ASPECT_WORKFLOWS_BES_RESULTS_URL": "https://runner.example"})
-    flags = deployment_endpoint_flags(ctx_)
-    _eq("the runner env var wins over discovery", bes_results_url_flag(ctx_, _rc(), flags), [])
+    # The CLI is streaming the sink itself → the flag would render a dead link.
+    _eq("cli-streamed sink → no --bes_results_url", bes_results_url_flag(ctx_, _rc(), flags), [])
 
-def _test_results_url_needs_reporting(ctx):
-    # --remote=no-bes with no Bazel-side upload: nothing reports to this
-    # deployment's BES, so a viewer link would point at an invocation it never got.
-    ctx_ = _ctx(_ALL, remote = "no-bes")
-    flags = deployment_endpoint_flags(ctx_)
-    _eq("no sink → no results url", bes_results_url_flag(ctx_, _rc(), flags), [])
-
-    # ...but Bazel uploading to that same endpoint counts as reporting.
-    rc = _rc({"--bes_backend": "grpcs://bes.gcp"})
+    # Bazel uploading to the deployment's BES is the case the flag describes.
     _eq(
         "bazel-side upload to the deployment's bes → wired",
-        bes_results_url_flag(ctx_, rc, flags),
+        bes_results_url_flag(ctx_, _rc({"--bes_backend": "grpcs://bes.gcp"}), flags),
         ["--bes_results_url=https://app.gcp/i/"],
     )
 
@@ -193,10 +179,48 @@ def _test_results_url_needs_reporting(ctx):
     other = _rc({"--bes_backend": "grpcs://bes.elsewhere"})
     _eq("unrelated bazel backend → not wired", bes_results_url_flag(ctx_, other, flags), [])
 
-def _test_results_url_absent_when_unadvertised(ctx):
-    ctx_ = _ctx(_endpoints("aws", cache = "cache.aws", bes = "bes.aws"), remote = BARE)
+def _test_bes_flag_yields_to_existing_sources(ctx):
+    bazel_uploads = _rc({"--bes_backend": "grpcs://bes.gcp"})
+
+    ctx_ = _ctx(_ALL, remote = BARE)
     flags = deployment_endpoint_flags(ctx_)
-    _eq("no advertised viewer → no flag", bes_results_url_flag(ctx_, _rc(), flags), [])
+    user_set = _rc({"--bes_backend": "grpcs://bes.gcp", "--bes_results_url": "https://mine.example"})
+    _eq("a user-set --bes_results_url wins", bes_results_url_flag(ctx_, user_set, flags), [])
+
+    runner = _ctx(_ALL, remote = BARE, env = {"ASPECT_WORKFLOWS_BES_RESULTS_URL": "https://runner.example"})
+    _eq(
+        "the runner env var wins over discovery",
+        bes_results_url_flag(runner, bazel_uploads, deployment_endpoint_flags(runner)),
+        [],
+    )
+
+    no_viewer = _ctx(_endpoints("aws", cache = "cache.aws", bes = "bes.aws"), remote = BARE)
+    _eq(
+        "no advertised viewer → no flag",
+        bes_results_url_flag(no_viewer, bazel_uploads, deployment_endpoint_flags(no_viewer)),
+        [],
+    )
+
+def _test_aspect_results_url_for_cli_streamed_sink(ctx):
+    """The CLI-streamed counterpart: the base rides in `data` for
+    `resolve_aspect_url`, which keys on the sink's own UUID."""
+    ctx_ = _ctx(_ALL, remote = BARE)
+    _eq(
+        "streaming a sink → base carried for the sink-keyed link",
+        aspect_results_url(ctx_, deployment_endpoint_flags(ctx_)),
+        "https://app.gcp/i/",
+    )
+
+    # No sink means no sink id, so a base alone would render nothing.
+    no_bes = _ctx(_ALL, remote = "no-bes")
+    _eq("no sink → no base", aspect_results_url(no_bes, deployment_endpoint_flags(no_bes)), "")
+
+    # On a runner the CI surfaces already read the env var as results_base_url.
+    runner = _ctx(_ALL, remote = BARE, env = {"ASPECT_WORKFLOWS_BES_RESULTS_URL": "https://runner.example"})
+    _eq("runner env var wins", aspect_results_url(runner, deployment_endpoint_flags(runner)), "")
+
+    no_viewer = _ctx(_endpoints("aws", cache = "cache.aws", bes = "bes.aws"), remote = BARE)
+    _eq("no advertised viewer → no base", aspect_results_url(no_viewer, deployment_endpoint_flags(no_viewer)), "")
 
 def _test_announcement_line(ctx):
     """The "Using deployment …" line names each injected base-flag capability with
@@ -242,11 +266,10 @@ _UNIT_TESTS = [
     _test_default_skips_unadvertised,
     _test_reports_injected_capabilities,
     _test_announcement_line,
-    _test_results_url_from_discovery,
-    _test_results_url_yields_to_user_flag,
-    _test_results_url_yields_to_runner_env,
-    _test_results_url_needs_reporting,
-    _test_results_url_absent_when_unadvertised,
+    _test_results_url_carried_off_discovery,
+    _test_bes_flag_only_for_bazel_side_upload,
+    _test_bes_flag_yields_to_existing_sources,
+    _test_aspect_results_url_for_cli_streamed_sink,
     _test_join_and,
 ]
 

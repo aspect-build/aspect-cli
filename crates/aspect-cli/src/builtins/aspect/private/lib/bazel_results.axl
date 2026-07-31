@@ -270,8 +270,9 @@ def _repro_with_prefix(prefix, labels, max_chars):
 
 # Keys a task resolves before the build and `process_event` must not clobber
 # when `build_started` resets the accumulator for a new (or retried) stream.
-# Both identify the invocation to the Aspect Web UI; see `resolve_aspect_url`.
-_TASK_OWNED_KEYS = ["sink_invocation_id", "bes_streamed_by_bazel"]
+# All three feed the Aspect Web UI link — two identify the invocation, one is its
+# base URL off a runner; see `resolve_aspect_url`.
+_TASK_OWNED_KEYS = ["sink_invocation_id", "bes_streamed_by_bazel", "aspect_results_url"]
 
 def init_data():
     """Create a fresh data accumulator.
@@ -300,6 +301,11 @@ def init_data():
         # invocation_id. Set by the task before spawning; see
         # bes_sinks.axl::bes_streamed_by_bazel.
         "bes_streamed_by_bazel": False,
+        # Aspect Web UI base URL advertised by the `--remote` deployment, used by
+        # `resolve_aspect_url` when ASPECT_WORKFLOWS_BES_RESULTS_URL is unset (i.e.
+        # off a runner). Set by bazel_runner.axl; see
+        # deployment_flags.axl::aspect_results_url.
+        "aspect_results_url": "",
         # Producer-authored at terminal-emit time. Each entry {command, description};
         # see lib/repro_commands.axl.
         "repro_commands": [],
@@ -960,8 +966,12 @@ def resolve_aspect_url(links, data):
     `links["results_base_url"]` (from `WorkflowsEnvironment.build_events.results_url`)
     is the prefix, joined as `{base}/{id}` (no `/invocations/` segment). Typical:
         ASPECT_WORKFLOWS_BES_RESULTS_URL=https://app.oss.aspect.build
+
+    Off a runner that env var is unset, so `data["aspect_results_url"]` — the viewer
+    the selected `--remote` deployment advertises — is the fallback base, letting a
+    local build render the same link.
     """
-    base = links.get("results_base_url", "") if links else ""
+    base = (links.get("results_base_url", "") if links else "") or data.get("aspect_results_url", "")
     if not base:
         return ""
     inv_id = data.get("sink_invocation_id", "") or ""

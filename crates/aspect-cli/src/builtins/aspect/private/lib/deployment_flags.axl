@@ -300,15 +300,16 @@ def deployment_endpoint_flags(ctx) -> DeploymentFlags:
 
 def bes_results_url_flag(ctx, rc, flags: DeploymentFlags, command: str = "build") -> list:
     """`["--bes_results_url=<url>"]` when the selected deployment advertises a
-    build-result viewer and this invocation is reporting to that deployment's BES,
-    else `[]`.
+    build-result viewer and *Bazel itself* uploads to that deployment's BES, else
+    `[]`.
 
-    Bazel renders the "View invocation" link from `--bes_results_url`, and
-    `bazel_results.axl` reads it back off the command line for the same link in PR
-    comments and status checks. On a Workflows runner it comes from
-    `ASPECT_WORKFLOWS_BES_RESULTS_URL`; discovery is the second path to it, so a
-    local `--remote` build gets the link too, and a runner whose env var is unset
-    recovers it.
+    Bazel renders its "View invocation" line from `--bes_results_url`, joining the
+    base with its own `invocation_id`; `render_bes_url` reads the flag back for the
+    same link on the CI surfaces. Both key on Bazel's UUID, which is only the id the
+    backend indexed when Bazel was the uploader — so this flag is gated on exactly
+    that. When the CLI streams the sink instead, the invocation is indexed under the
+    sink's own UUID, and `aspect_results_url` (below) carries the base to
+    `resolve_aspect_url`, which keys on `sink_invocation_id`.
 
     Precedence, most specific first:
       1. A `--bes_results_url` the user already set (command line, `.bazelrc`, or an
@@ -317,12 +318,6 @@ def bes_results_url_flag(ctx, rc, flags: DeploymentFlags, command: str = "build"
       2. `ASPECT_WORKFLOWS_BES_RESULTS_URL` — the runner's own deliberate config,
          which `bazel_flags.axl` already injects.
       3. The deployment's advertised `aspect_bes_results_url`.
-
-    Gated on actually reporting there, so the link can't point at an invocation the
-    backend never received. Either path counts: the CLI's own sink to the
-    deployment's BES, or Bazel uploading to that same endpoint via its own
-    `--bes_backend` (also the case where the CLI's duplicate sink was dropped).
-    `--remote=no-bes` with no Bazel-side upload contributes no results URL.
     """
     if not flags.results_url:
         return []
@@ -331,11 +326,30 @@ def bes_results_url_flag(ctx, rc, flags: DeploymentFlags, command: str = "build"
     if ctx.std.env.var("ASPECT_WORKFLOWS_BES_RESULTS_URL"):
         return []
 
-    reporting = bool(flags.bes_backends) or same_bes_endpoint(flags.bes_uri, bazel_bes_backend(rc, command))
-    if not reporting:
+    # Only Bazel-side uploads are indexed under the UUID this flag's consumers use.
+    if not same_bes_endpoint(flags.bes_uri, bazel_bes_backend(rc, command)):
         return []
 
     return ["--bes_results_url=" + flags.results_url]
+
+def aspect_results_url(ctx, flags: DeploymentFlags) -> str:
+    """The Aspect Web UI base URL for `data["aspect_results_url"]`, or `""`.
+
+    The counterpart to `bes_results_url_flag` for the CLI-streamed path: the
+    invocation is indexed under the sink's own UUID, so the base is carried in `data`
+    for `resolve_aspect_url` (which keys on `sink_invocation_id`) rather than passed
+    to Bazel as `--bes_results_url`.
+
+    Empty unless the deployment advertises a viewer AND the CLI is streaming to that
+    deployment's BES — with no sink there is no sink id, and a base alone renders
+    nothing. Yields to `ASPECT_WORKFLOWS_BES_RESULTS_URL`, which the CI surfaces
+    already read as `links["results_base_url"]`.
+    """
+    if not flags.results_url or not flags.bes_backends:
+        return ""
+    if ctx.std.env.var("ASPECT_WORKFLOWS_BES_RESULTS_URL"):
+        return ""
+    return flags.results_url
 
 def join_and(items: list[str], oxford: bool = False) -> str:
     """Join with commas and a trailing "and": [a] → "a"; [a,b,c] → "a, b, and c".
