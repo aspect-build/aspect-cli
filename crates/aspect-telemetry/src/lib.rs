@@ -43,6 +43,27 @@ pub fn cargo_pkg_short_version() -> String {
     }
 }
 
+/// Whether this binary is the `-debug-` release variant (or a local dev build).
+///
+/// The variant is built with `-Cdebug-assertions=y` applied across the whole graph,
+/// which the stripped `-c opt` release never sets, so the flag identifies the build
+/// itself. Deliberately not an environment check: `ASPECT_DEBUG_CLI` is the launcher's
+/// request for the variant, not proof that the running binary is one.
+pub fn is_debug_build() -> bool {
+    cfg!(debug_assertions)
+}
+
+/// Version for display, suffixed when running a build that trades speed for
+/// diagnostics so it is obvious which binary produced a log or crash report.
+pub fn cargo_pkg_display_version() -> String {
+    let v = cargo_pkg_short_version();
+    if is_debug_build() {
+        format!("{v} (debug build)")
+    } else {
+        v
+    }
+}
+
 pub fn do_not_track() -> bool {
     var("DO_NOT_TRACK").is_ok()
 }
@@ -196,6 +217,26 @@ fn build_payload() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The suffix must track how this test binary was built, not an env var, so the
+    /// marker cannot be faked on or spuriously appear on a release build.
+    #[test]
+    fn display_version_is_suffixed_only_for_debug_builds() {
+        let display = cargo_pkg_display_version();
+        let bare = cargo_pkg_short_version();
+        if is_debug_build() {
+            assert_eq!(display, format!("{bare} (debug build)"));
+        } else {
+            assert_eq!(display, bare);
+        }
+    }
+
+    /// Whatever the build, the bare version stays a parseable prefix — telemetry and
+    /// AXL compare against it.
+    #[test]
+    fn display_version_starts_with_the_bare_version() {
+        assert!(cargo_pkg_display_version().starts_with(&cargo_pkg_short_version()));
+    }
 
     #[test]
     fn payload_is_wrapped_under_aspect_cli_with_core_keys() {
