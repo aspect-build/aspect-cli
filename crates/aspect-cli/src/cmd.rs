@@ -17,6 +17,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::ExitCode;
 
+use aspect_telemetry::cargo_pkg_display_version;
 use axl_runtime::banner;
 use axl_runtime::diag;
 use axl_runtime::engine::arg::Arg;
@@ -107,7 +108,8 @@ impl<'a, 'v> Cmd<'a, 'v> {
             .about("Aspect's programmable task runner built on top of Bazel\n{ Correct, Fast, Usable } -- Choose three")
             .subcommand_value_name("TASK|GROUP|COMMAND")
             .disable_help_subcommand(true)
-            .version(version.to_owned())
+            // Display only; `version` stays the bare number for AXL and telemetry.
+            .version(cargo_pkg_display_version())
             .disable_version_flag(true)
             .arg(
                 ClapArg::new("version")
@@ -1304,7 +1306,15 @@ mod tests {
         };
         let mut root = cmd.build("1.2.3").expect("build ok");
 
-        let banner = "Aspect CLI v1.2.3 — https://aspect.build/docs/cli";
+        // `banner::line` marks debug builds, and tests always build with debug
+        // assertions on, so derive the suffix rather than hardcoding the whole line.
+        let debug = if aspect_telemetry::is_debug_build() {
+            " (debug build)"
+        } else {
+            ""
+        };
+        let banner = format!("Aspect CLI v1.2.3{debug} — https://aspect.build/docs/cli");
+        let banner = banner.as_str();
         let rendered = |c: &mut Command| c.render_help().to_string();
 
         assert!(
