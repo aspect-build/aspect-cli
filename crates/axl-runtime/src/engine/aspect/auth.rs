@@ -2996,12 +2996,8 @@ mod tests {
             "https://app.acme.aspect.build/i/"
         );
         // It rides on the deployment record through the endpoints struct, unnormalized.
-        let d = deployment_from_discovery(
-            "acme".to_string(),
-            "remote.acme.aspect.build",
-            &info,
-            None,
-        );
+        let d =
+            deployment_from_discovery("acme".to_string(), "remote.acme.aspect.build", &info, None);
         assert_eq!(d.endpoints.results_url, "https://app.acme.aspect.build/i/");
 
         // A deployment with no web UI omits the key: absent parses as empty, and

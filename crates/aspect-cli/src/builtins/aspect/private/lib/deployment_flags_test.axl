@@ -207,6 +207,7 @@ def _test_announcement_line(ctx):
         line,
         "Using deployment 'gcp' for remote cache (grpcs://cache.gcp), and remote execution (grpcs://remote.gcp)",
     )
+
     # BES is announced by its own "Streaming build events to …" line, not this one.
     if "bes.gcp" in line:
         fail("announcement should not mention the BES backend: %r" % line)

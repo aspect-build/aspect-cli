@@ -1759,10 +1759,18 @@ mod tests {
         let get = |m: &ArgMatches| m.get_one::<String>("remote").cloned().unwrap_or_default();
 
         // Absent → the default; bare → the `bare` value; explicit → that value.
-        assert_eq!(get(&cmd().try_get_matches_from([] as [&str; 0]).unwrap()), "");
-        assert_eq!(get(&cmd().try_get_matches_from(["--remote"]).unwrap()), "default");
         assert_eq!(
-            get(&cmd().try_get_matches_from(["--remote=exec,no-bes"]).unwrap()),
+            get(&cmd().try_get_matches_from([] as [&str; 0]).unwrap()),
+            ""
+        );
+        assert_eq!(
+            get(&cmd().try_get_matches_from(["--remote"]).unwrap()),
+            "default"
+        );
+        assert_eq!(
+            get(&cmd()
+                .try_get_matches_from(["--remote=exec,no-bes"])
+                .unwrap()),
             "exec,no-bes"
         );
 
