@@ -19,6 +19,7 @@ canonical helpers that satisfy it.
 """
 
 load("@std//time.axl", "time")
+load("./ansi.axl", "ansi")
 load("./environment.axl", "AWS_LOG_GROUP", "get_workflows_environment", "is_warming_complete", "is_warming_observable", "warn")
 
 def _url_encode(s):
@@ -126,16 +127,16 @@ def _wait_for_warming(std, environment):
 
 def _section_heading(label):
     """Sub-section heading: blank line + blue `• <label>`."""
-    return "\n\x1b[34m• " + label + "\x1b[0m"
+    return "\n" + ansi.style("• " + label, ansi.BLUE)
 
 def _status_marker(kind):
     """Status glyph: ✓ green, ✗ red, ? yellow. Used as the
     leading char on a status line under a sub-section heading."""
     if kind == "ok":
-        return "\x1b[32m✓\x1b[0m"
+        return ansi.style("✓", ansi.GREEN)
     if kind == "fail":
-        return "\x1b[31m✗\x1b[0m"
-    return "\x1b[33m?\x1b[0m"
+        return ansi.style("✗", ansi.RED)
+    return ansi.style("?", ansi.YELLOW)
 
 def _display_warming(environment):
     """
@@ -182,41 +183,12 @@ def _display_bazel_health(health):
         print("\t" + _status_marker("warn") +
               " bazel health check inconclusive: " + (health.message or "unknown"))
 
-def _strip_ansi(s):
-    """Strip CSI escape sequences (`\\x1b[...m`) from `s`.
-
-    Used only for line-shape matching when redacting Vigor's pre-formatted
-    output — we don't try to be a complete terminal emulator, just enough
-    to recognize a `• <Section>` bullet header regardless of how Vigor
-    colored it. Non-CSI escapes pass through unchanged.
-    """
-    result = ""
-    i = 0
-    n = len(s)
-    for _ in range(n):
-        if i >= n:
-            break
-        if i + 1 < n and s[i] == "\x1b" and s[i + 1] == "[":
-            j = i + 2
-            for _ in range(n - j):
-                if j >= n:
-                    break
-                if s[j] == "m":
-                    j += 1
-                    break
-                j += 1
-            i = j
-        else:
-            result += s[i]
-            i += 1
-    return result
-
 def _bullet_header_label(line):
     """Return the section label of a Vigor bullet-header line
     (`• <label>` after ANSI stripping), or None if `line` isn't a bullet
     header. Vigor emits headers as
     `\\x1b[34m•\\x1b[0m \\x1b[34m<label>\\x1b[0m`."""
-    stripped = _strip_ansi(line)
+    stripped = ansi.strip(line)
     if not stripped.startswith("• "):
         return None
     return stripped[2:].strip()
@@ -238,7 +210,7 @@ def render_local_job_history(history):
     Returns the rendered section with a trailing newline.
     """
     lines = [line for line in history.split("\n") if line]
-    out = ["\x1b[34m• Job History\x1b[0m"]
+    out = [ansi.style("• Job History", ansi.BLUE)]
     out.append("\tNumber of builds on this runner: %d" % len(lines))
     if lines:
         out.append("\tMost recently:")
@@ -301,7 +273,7 @@ def _display_runner_health(environment, job_history):
     saved report (i.e. before this task's `append_runner_job_history`
     call). The caller is responsible for snapshotting it.
     """
-    print("\x1b[1;4;34mRunner Health\x1b[0m")
+    print(ansi.style("Runner Health", ansi.seq("1;4;34")))
 
     if not environment.runner.last_health_check:
         print("Health check has not yet been run on this runner")

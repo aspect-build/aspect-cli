@@ -58,6 +58,7 @@ commands without opening the status surface.
 `explicit_flags`, and `dedup_and_attribute` are pure (no I/O).
 """
 
+load("./ansi.axl", "ansi")
 load("./environment.axl", "color_enabled")
 load("./lifecycle.axl", "ReproFixCommand")
 
@@ -758,7 +759,7 @@ def print_repro_and_fix(std, data, status):
     """
     repros = data.get("repro_commands", []) or []
     fixes = data.get("fix_commands", []) or []
-    ansi = color_enabled(std)
+    color = color_enabled(std)
     on_ci = bool(std.env.var("CI"))
 
     # Repro block is CI-only (locally you're already staring at the failure).
@@ -770,27 +771,27 @@ def print_repro_and_fix(std, data, status):
     # leads; the reproduce command (how CI ran it) follows.
     if fixes:
         print("")
-        print(_repro_header(ansi, "🛠️ Fix:"))
+        print(_repro_header(color, "🛠️ Fix:"))
         for i, entry in enumerate(fixes):
             if i > 0:
                 print("")
-            _print_repro_entry(ansi, entry)
+            _print_repro_entry(color, entry)
     if on_ci and repros:
         print("")
-        print(_repro_header(ansi, "🔁 Reproduce:"))
+        print(_repro_header(color, "🔁 Reproduce:"))
         for i, entry in enumerate(repros):
             if i > 0:
                 print("")
-            _print_repro_entry(ansi, entry)
+            _print_repro_entry(color, entry)
     if on_ci:
         print("")
-        print(_install_hint_line(ansi))
+        print(_install_hint_line(color))
     print("")
 
-def _repro_header(ansi, label):
-    return "\x1b[1m" + label + "\x1b[0m" if ansi else label
+def _repro_header(color, label):
+    return ansi.style(label, ansi.BOLD, color)
 
-def _install_hint_line(ansi):
+def _install_hint_line(color):
     """Grey-formatted install hint printed under each repro/fix block.
 
     Uses 256-color grey (`38;5;244`) rather than SGR 2 (faint): GitHub
@@ -798,9 +799,9 @@ def _install_hint_line(ansi):
     true under GHA, so the hint would render at full weight on CI even
     though the styling was applied.
     """
-    return ("\x1b[38;5;244m" + ASPECT_CLI_INSTALL_HINT + "\x1b[0m") if ansi else ASPECT_CLI_INSTALL_HINT
+    return ansi.style(ASPECT_CLI_INSTALL_HINT, ansi.GREY, color)
 
-def _print_repro_entry(ansi, entry):
+def _print_repro_entry(color, entry):
     """Print one `ReproFixCommand` entry as a fenced code block.
 
     The comment and command lines are wrapped in ``` … ``` fences and
@@ -818,7 +819,7 @@ def _print_repro_entry(ansi, entry):
     print("```")
     if entry.description:
         comment = "# " + entry.description
-        print(("\x1b[38;5;244m" + comment + "\x1b[0m") if ansi else comment)
+        print(ansi.style(comment, ansi.GREY, color))
     for line in entry.command.split("\n"):
         print(line)
     print("```")
