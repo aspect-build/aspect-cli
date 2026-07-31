@@ -52,7 +52,8 @@ viewer becomes `--bes_results_url`; see [`advertised_results_url`], which pairs 
 viewer with the backend it serves.
 
 Failures:
-  - An unrecognized capability token, or `none` combined with anything else.
+  - An unrecognized capability token, a value naming no capabilities at all, or
+    `none` combined with anything else.
   - `--deployment` with no `--remote` (nothing to wire).
   - `--remote` with no deployment to draw from — no `--deployment` and no default
     Workflows deployment configured (the target resolves to the built-in Aspect
@@ -123,10 +124,23 @@ REMOTE_CAPABILITIES = list(_CAPABILITY_SPECS)
 # What bare `--remote` wires: the accelerators that can't change build semantics.
 REMOTE_DEFAULT_CAPS = ["cache", "bes"]
 
-def capability_label(name: str) -> str:
-    """How `name` is named to users, or `""` when it isn't a capability."""
-    capability = _CAPABILITY_SPECS.get(name)
-    return capability.label if capability else ""
+def capability_labels(endpoints, only: list[str] = []) -> list[str]:
+    """The capabilities `endpoints` advertises, as the labels users see, in
+    [`REMOTE_CAPABILITIES`] order. Reads each capability's own endpoint field, so a new
+    capability needs no change here.
+
+    `only` restricts the result to those capability names — pass
+    [`REMOTE_DEFAULT_CAPS`] for what bare `--remote` wires, so a hint about it can't
+    promise the opt-in remote execution.
+
+    Takes anything carrying the endpoint fields: a `DeploymentEndpoints` or the
+    `DeploymentSummary` behind `aspect auth status`.
+    """
+    return [
+        capability.label
+        for (name, capability) in _CAPABILITY_SPECS.items()
+        if getattr(endpoints, capability.endpoint) and (not only or name in only)
+    ]
 
 # What clap substitutes for a valueless `--remote` (`args.string(bare = …)`), so an
 # empty string keeps meaning "flag absent" and the two stay distinguishable. Not a
@@ -160,18 +174,16 @@ DeploymentFlags = record(
 # named capability the deployment can't serve is an error, a defaulted one is skipped.
 RemoteSpec = record(
     on = field(dict),
-    named = field(list),
+    named = field(list, default = []),
 )
 
-def _spec(on: dict, named: list = []) -> RemoteSpec:
-    return RemoteSpec(on = on, named = named)
+# Wire nothing: an omitted `--remote`, or an explicit `--remote=none`.
+_OFF = RemoteSpec(on = {c: False for c in REMOTE_CAPABILITIES})
 
 def _endpoint_uri(endpoints, capability: Capability) -> str:
     """`capability`'s gRPC URI on `endpoints`, or `""` when unadvertised."""
     host = getattr(endpoints, capability.endpoint)
     return _SCHEME + host if host else ""
-
-_OFF = _spec({c: False for c in REMOTE_CAPABILITIES})
 
 def deployment_flag_args() -> dict:
     """The `--deployment` selector plus the `--remote` capability list every
@@ -205,14 +217,20 @@ def parse_remote(value: str) -> RemoteSpec:
     `no-` token turns it off, applied left to right so the last mention of a
     capability wins.
 
-    `fail`s on an unrecognized token and on `none` combined with anything else.
-    Public so `deployment_flags_test.axl` can assert the grammar.
+    `fail`s on an unrecognized token, on a value naming no capabilities at all (an
+    empty or separator-only list, which would otherwise pass silently as the
+    defaults), and on `none` combined with anything else. Public so
+    `deployment_flags_test.axl` can assert the grammar.
     """
     if not value:
         return _OFF
+    if value == BARE:
+        # A bare `--remote` carries no tokens, leaving the defaults in place.
+        return RemoteSpec(on = {c: c in REMOTE_DEFAULT_CAPS for c in REMOTE_CAPABILITIES})
 
-    # The bare-flag sentinel carries no tokens, leaving the defaults in place.
-    tokens = [] if value == BARE else [t.strip() for t in value.split(",") if t.strip()]
+    tokens = [t.strip() for t in value.split(",") if t.strip()]
+    if not tokens:
+        fail("--remote='%s' names no capabilities. Pass bare --remote for the defaults, or --remote=none to wire nothing." % value)
 
     if "none" in tokens:
         if len(tokens) > 1:
@@ -232,26 +250,24 @@ def parse_remote(value: str) -> RemoteSpec:
             named.append(capability)
 
     # A capability negated after being named is no longer a request.
-    return _spec(on, [c for c in named if on[c]])
+    return RemoteSpec(on = on, named = [c for c in named if on[c]])
 
 def deployment_endpoint_flags(ctx) -> DeploymentFlags:
-    """Resolve `--remote` into the [`DeploymentFlags`] to inject (`base_flags`:
-    --remote_cache / --remote_executor to prepend; `bes_backends`: extra
-    CLI-streamed BES backend URIs; `results_url`: the advertised build-result
-    viewer).
+    """Resolve `--deployment` + `--remote` into the [`DeploymentFlags`] to inject.
 
-    `fail`s when `--deployment` is passed without `--remote`, and when a *named*
-    capability can't be satisfied; a defaulted capability the deployment doesn't
-    advertise is skipped (see module docstring).
+    `fail`s when `--deployment` is passed without `--remote`, when no deployment is
+    available to draw endpoints from, and when a *named* capability can't be satisfied;
+    a defaulted capability the deployment doesn't advertise is skipped (see module
+    docstring).
     """
     if not hasattr(ctx.args, "remote"):
         return DeploymentFlags(base_flags = [], bes_backends = [])
 
     spec = parse_remote(ctx.args.remote)
 
-    # Selecting a deployment without saying what to use it for wires nothing, which
-    # reads as a silent no-op; make it a clear error instead. An explicit
-    # `--remote=none` says so deliberately and is left alone.
+    # Selecting a deployment with no `--remote` at all wires nothing, which reads as a
+    # silent no-op; make it a clear error. `--remote=none` (or an all-negated list)
+    # asks for nothing deliberately and is left alone.
     if ctx.args.deployment and not ctx.args.remote:
         fail("--deployment=%s selects a deployment but wires nothing on its own. " % ctx.args.deployment +
              "Add --remote for its remote cache and BES backend, or --remote=exec to add remote execution.")

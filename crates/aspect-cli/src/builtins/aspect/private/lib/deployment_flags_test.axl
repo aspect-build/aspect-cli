@@ -7,13 +7,14 @@ struct, and `ctx.std.env.var` from a fixed map.
 
 `fail()` cannot be caught in Starlark, so the error paths (a named capability the
 deployment doesn't advertise, `--deployment` with no `--remote`, a bad capability
-token) are exercised by the CLI end-to-end, not here. These cover the resolution
-matrix: the default capability set, `exec` as additive, `no-` subtraction, `none`,
-and the build-result URL — which forwarding paths set `--bes_results_url`, and that
-its value comes from the same source as the backend being reported to.
+token, a value naming no capabilities) are exercised by the CLI end-to-end, not here.
+These cover the resolution matrix: the default capability set, `exec` as additive,
+`no-` subtraction, `none`, and the build-result URL — which forwarding paths set
+`--bes_results_url`, and that its value comes from the same source as the backend
+being reported to.
 """
 
-load("./deployment_flags.axl", "BARE", "advertised_results_url", "bes_results_url_flag", "deployment_announcement", "deployment_endpoint_flags", "join_and", "parse_remote")
+load("./deployment_flags.axl", "BARE", "REMOTE_DEFAULT_CAPS", "advertised_results_url", "bes_results_url_flag", "capability_labels", "deployment_announcement", "deployment_endpoint_flags", "join_and", "parse_remote")
 
 def _eq(label, got, want):
     if got != want:
@@ -98,6 +99,17 @@ def _test_parse_none(ctx):
     _eq("none → cache off", spec.on["cache"], False)
     _eq("none → bes off", spec.on["bes"], False)
     _eq("none → exec off", spec.on["exec"], False)
+
+def _test_parse_all_negated_wires_nothing(ctx):
+    # Negating every default is a longhand `none`: legal, and wires nothing.
+    spec = parse_remote("no-cache,no-bes")
+    _eq("all negated → nothing on", [v for v in spec.on.values() if v], [])
+    _eq("all negated → nothing named", spec.named, [])
+    _eq(
+        "and so injects nothing",
+        deployment_endpoint_flags(_ctx(_ALL, remote = "no-cache,no-bes")).base_flags,
+        [],
+    )
 
 def _test_no_remote_injects_nothing(ctx):
     got = deployment_endpoint_flags(_ctx(_ALL))
@@ -326,6 +338,25 @@ def _test_results_url_absent_without_a_match(ctx):
         "",
     )
 
+def _test_capability_labels(ctx):
+    """The prose labels behind `aspect auth status`' usage hint, in wiring order and
+    covering only what the deployment advertises."""
+    _eq("cache + bes", capability_labels(_endpoints("x", cache = "c", bes = "b")), ["remote cache", "BES backend"])
+    _eq(
+        "cache/exec/bes order",
+        capability_labels(_ALL),
+        ["remote cache", "remote execution", "BES backend"],
+    )
+    _eq("nothing advertised", capability_labels(_endpoints("x")), [])
+
+    # REMOTE_DEFAULT_CAPS is what bare --remote wires, so the opt-in remote execution
+    # is dropped even when the deployment serves it.
+    _eq(
+        "restricted to the default caps drops exec",
+        capability_labels(_ALL, only = REMOTE_DEFAULT_CAPS),
+        ["remote cache", "BES backend"],
+    )
+
 def _test_announcement_line(ctx):
     """The "Using deployment …" line names each injected base-flag capability with
     its endpoint, and is empty when nothing was injected (so nothing is printed)."""
@@ -361,6 +392,7 @@ _UNIT_TESTS = [
     _test_parse_negation,
     _test_parse_last_mention_wins,
     _test_parse_none,
+    _test_parse_all_negated_wires_nothing,
     _test_parse_tolerates_whitespace,
     _test_no_remote_injects_nothing,
     _test_default_wires_cache_and_bes,
@@ -369,6 +401,7 @@ _UNIT_TESTS = [
     _test_exec_without_cache_wires_executor_only,
     _test_default_skips_unadvertised,
     _test_reports_injected_capabilities,
+    _test_capability_labels,
     _test_announcement_line,
     _test_results_url_carried_off_discovery,
     _test_bes_flag_either_forwarding_path,
