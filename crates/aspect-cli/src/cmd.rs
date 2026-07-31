@@ -1734,11 +1734,11 @@ mod tests {
         );
     }
 
-    /// `args.string(bare = …)` makes a valueless `--flag` legal, which is what lets
-    /// `--remote` be the short form of `--remote=cache,bes`. The `default` must stay
-    /// reachable so "absent" and "passed bare" remain distinguishable, and
-    /// `require_equals` must keep the following argv token from being eaten as the
-    /// value (`--remote //foo` is a bare flag plus a target, not `--remote=//foo`).
+    /// `args.string(bare = …)` makes a valueless `--flag` legal — what lets `--remote`
+    /// stand alone. The `default` must stay reachable so "absent" and "passed bare"
+    /// remain distinguishable, and `require_equals` must keep the following argv token
+    /// from being eaten as the value (`--remote //foo` is a bare flag plus a target,
+    /// not `--remote=//foo`).
     #[test]
     fn string_arg_with_bare_accepts_valueless_flag() {
         let arg = Arg::String {

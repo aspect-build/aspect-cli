@@ -301,10 +301,9 @@ def init_data():
         # invocation_id. Set by the task before spawning; see
         # bes_sinks.axl::bes_streamed_by_bazel.
         "bes_streamed_by_bazel": False,
-        # Aspect Web UI base URL advertised by the `--remote` deployment, used by
-        # `resolve_aspect_url` when ASPECT_WORKFLOWS_BES_RESULTS_URL is unset (i.e.
-        # off a runner). Set by bazel_runner.axl; see
-        # deployment_flags.axl::aspect_results_url.
+        # Aspect Web UI base URL for the BES backend this build reports to, the
+        # fallback base for `resolve_aspect_url`. Set by bazel_runner.axl; see
+        # deployment_flags.axl::advertised_results_url.
         "aspect_results_url": "",
         # Producer-authored at terminal-emit time. Each entry {command, description};
         # see lib/repro_commands.axl.
@@ -969,9 +968,9 @@ def resolve_aspect_url(links, data):
     is the prefix, joined as `{base}/{id}` (no `/invocations/` segment). Typical:
         ASPECT_WORKFLOWS_BES_RESULTS_URL=https://app.oss.aspect.build
 
-    Off a runner that env var is unset, so `data["aspect_results_url"]` — the viewer
-    the selected `--remote` deployment advertises — is the fallback base, letting a
-    local build render the same link.
+    `data["aspect_results_url"]` is the fallback base — the viewer advertised for the
+    BES backend this build reports to (see `deployment_flags.axl`) — so a local
+    `--remote` build renders the same link off a runner.
     """
     base = (links.get("results_base_url", "") if links else "") or data.get("aspect_results_url", "")
     if not base:

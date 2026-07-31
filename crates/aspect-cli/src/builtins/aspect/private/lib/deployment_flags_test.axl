@@ -281,17 +281,50 @@ def _test_bes_flag_yields_to_user_flag(ctx):
         [],
     )
 
-def _test_advertised_results_url_precedence(ctx):
-    """The same base feeds `data["aspect_results_url"]` for the sink-keyed Web UI
-    link, with identical precedence."""
+def _test_results_url_and_flag_agree(ctx):
+    """`data["aspect_results_url"]` (the CI surfaces' base) and the injected
+    `--bes_results_url` are always the same value, so the two links can't disagree.
+
+    Exercised on the case that separates them: the environment advertises a backend
+    this build is *not* streaming to, so its viewer must not be borrowed for the
+    deployment's BES. (On a real runner the env backend is itself a sink — see
+    `workflows.axl` — and then the environment legitimately wins by ordering.)"""
+    split = _ctx(_ALL, remote = BARE, env = {
+        "ASPECT_WORKFLOWS_BES_BACKEND": "grpcs://bes.runner",
+        "ASPECT_WORKFLOWS_BES_RESULTS_URL": "https://app.runner",
+    })
+    flags = deployment_endpoint_flags(split)
+    sinks = _sinks("grpcs://bes.gcp")
+
+    base = advertised_results_url(split, _rc(), sinks, flags)
+    _eq("base tracks the backend actually streamed to", base, "https://app.gcp/i/")
+    _eq(
+        "the flag carries that same base",
+        bes_results_url_flag(split, _rc(), sinks, flags),
+        ["--bes_results_url=" + base],
+    )
+
+    # Streaming to both (the runner shape): the environment is the more deliberate
+    # config and wins.
+    both = _sinks("grpcs://bes.gcp", "grpcs://bes.runner")
+    _eq(
+        "both streamed → env viewer wins",
+        advertised_results_url(split, _rc(), both, flags),
+        "https://app.runner",
+    )
+
+def _test_results_url_absent_without_a_match(ctx):
     ctx_ = _ctx(_ALL, remote = BARE)
-    _eq("advertised value", advertised_results_url(ctx_, deployment_endpoint_flags(ctx_)), "https://app.gcp/i/")
-
-    runner = _ctx(_ALL, remote = BARE, env = {"ASPECT_WORKFLOWS_BES_RESULTS_URL": "https://app.runner"})
-    _eq("env wins", advertised_results_url(runner, deployment_endpoint_flags(runner)), "https://app.runner")
-
-    no_viewer = _ctx(_endpoints("aws", cache = "cache.aws", bes = "bes.aws"), remote = BARE)
-    _eq("neither → empty", advertised_results_url(no_viewer, deployment_endpoint_flags(no_viewer)), "")
+    _eq(
+        "third-party BES → no base",
+        advertised_results_url(ctx_, _rc(), _sinks("grpcs://bes.elsewhere"), deployment_endpoint_flags(ctx_)),
+        "",
+    )
+    _eq(
+        "no forwarding at all → no base",
+        advertised_results_url(ctx_, _rc(), [], deployment_endpoint_flags(ctx_)),
+        "",
+    )
 
 def _test_announcement_line(ctx):
     """The "Using deployment …" line names each injected base-flag capability with
@@ -344,7 +377,8 @@ _UNIT_TESTS = [
     _test_bes_flag_url_matches_backend_source,
     _test_bes_flag_requires_both_halves,
     _test_bes_flag_yields_to_user_flag,
-    _test_advertised_results_url_precedence,
+    _test_results_url_and_flag_agree,
+    _test_results_url_absent_without_a_match,
     _test_join_and,
 ]
 

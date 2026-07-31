@@ -323,11 +323,11 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
     invocation_flags = aspect_endpoint_auth_flags(ctx, rc, command)
     invocation_flags.extend(bes_results_url_flag(ctx, rc, bes_sinks, deployment, command))
 
-    # The Aspect Web UI link keys on the sink's own id, so it needs the same base in
-    # `data` rather than on the command line. A property of the resolved flags, so it
-    # is restored onto each retry's fresh `data`.
-    deployment_results_base = advertised_results_url(ctx, deployment)
-    data["aspect_results_url"] = deployment_results_base
+    # The same viewer reaches the CI surfaces through `data` — they key the link on the
+    # sink's own id rather than reading it off the command line. A property of the
+    # resolved flags, so it is restored onto each retry's fresh `data`.
+    results_base = advertised_results_url(ctx, rc, bes_sinks, deployment, command)
+    data["aspect_results_url"] = results_base
 
     for handler in bazel_trait.build_start:
         handler(ctx)
@@ -372,7 +372,7 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
             data = init_data()
             data["bazel_attempts"] = prior_attempts
             data["bes_streamed_by_bazel"] = bazel_streams_bes
-            data["aspect_results_url"] = deployment_results_base
+            data["aspect_results_url"] = results_base
 
         spawn_status = _pick_status(command, data, had_failure = False, terminal = False)
         task_update(

@@ -45,6 +45,12 @@ dedicated cache host.
 The injected `--remote_cache` / `--remote_executor` are Bazel base flags, so an
 explicit `--bazel-flag=--remote_cache=…` still wins (last-wins).
 
+A deployment also advertises where its build results are viewable
+(`aspect_bes_results_url`). Whenever this build forwards BES to an advertised
+backend — through Bazel's own `--bes_backend` or the CLI's internal client — that
+viewer becomes `--bes_results_url`; see [`advertised_results_url`], which pairs each
+viewer with the backend it serves.
+
 Failures:
   - An unrecognized capability token, or `none` combined with anything else.
   - `--deployment` with no `--remote` (nothing to wire).
@@ -136,8 +142,8 @@ BARE = "<bare>"
 # `capabilities`.
 #
 # `bes_uri` is the deployment's BES endpoint whether or not a sink was wired to it
-# (`--remote=no-bes` leaves `bes_backends` empty), so `bes_results_url_flag` can
-# still tell that Bazel is uploading there itself. `results_url` is the advertised
+# (`--remote=no-bes` leaves `bes_backends` empty), so `advertised_results_url` can
+# still recognize Bazel uploading there itself. `results_url` is the advertised
 # build-result viewer that pairs with it.
 DeploymentFlags = record(
     base_flags = field(list),
@@ -149,9 +155,9 @@ DeploymentFlags = record(
 )
 
 # Which capabilities `--remote` resolved to: `on` maps every capability in
-# `REMOTE_CAPABILITIES` to whether to wire it, and `named` holds the subset the user asked
-# for by name (and didn't later negate). The split drives error handling — a named
-# capability the deployment can't serve is an error, a defaulted one is skipped.
+# `REMOTE_CAPABILITIES` to whether to wire it, and `named` holds the subset the user
+# asked for by name (and didn't later negate). The split drives error handling — a
+# named capability the deployment can't serve is an error, a defaulted one is skipped.
 RemoteSpec = record(
     on = field(dict),
     named = field(list),
@@ -298,9 +304,8 @@ def deployment_endpoint_flags(ctx) -> DeploymentFlags:
         bes_uri = _endpoint_uri(endpoints, _CAPABILITY_SPECS["bes"]),
     )
 
-def advertised_bes_sources(ctx, flags: DeploymentFlags) -> list[(str, str)]:
-    """The `(backend, results_url)` pairs this invocation could report to, each pair
-    from a single source so a viewer is never quoted for a backend it doesn't serve:
+def _advertised_bes_sources(ctx, flags: DeploymentFlags) -> list[(str, str)]:
+    """The `(backend, results_url)` pairs a build-result viewer could be drawn from:
     the runner environment first (`ASPECT_WORKFLOWS_BES_BACKEND` +
     `ASPECT_WORKFLOWS_BES_RESULTS_URL`), then the `--remote` deployment's advertised
     endpoint + `aspect_bes_results_url`.
@@ -315,39 +320,40 @@ def advertised_bes_sources(ctx, flags: DeploymentFlags) -> list[(str, str)]:
     ]
     return [(backend, url) for (backend, url) in pairs if backend and url]
 
-def advertised_results_url(ctx, flags: DeploymentFlags) -> str:
-    """The build-result viewer base for `data["aspect_results_url"]`, preferring the
-    runner's `ASPECT_WORKFLOWS_BES_RESULTS_URL` over the deployment's advertised
-    value. `""` when neither exists."""
-    return ctx.std.env.var("ASPECT_WORKFLOWS_BES_RESULTS_URL") or flags.results_url
+def advertised_results_url(ctx, rc, bes_sinks: list, flags: DeploymentFlags, command: str = "build") -> str:
+    """The build-result viewer for this invocation, or `""`.
 
-def bes_results_url_flag(ctx, rc, bes_sinks: list, flags: DeploymentFlags, command: str = "build") -> list:
-    """`["--bes_results_url=<url>"]` when this invocation forwards BES to an advertised
-    backend and the user set no `--bes_results_url` of their own, else `[]`.
+    Keeping each `(backend, viewer)` pair together means the URL always belongs to the
+    BES that actually received the invocation: a build streaming to the deployment's
+    BES gets the deployment's viewer even on a runner whose environment advertises a
+    different backend. The environment wins when both sources name the same backend.
 
-    Forwarding counts either way round — Bazel uploading via its own `--bes_backend`,
-    or the CLI streaming through its internal client — and the backend may be
-    advertised by the runner environment or by the `--remote` deployment. A build
-    reporting only to some third-party BES gets nothing, since no results URL
-    describes it.
-
-    The URL is taken from whichever source advertised the backend being reported to,
-    so the viewer always belongs to the BES that received the invocation; the
-    environment wins when both name it. A `--bes_results_url` the user already set —
-    command line, `.bazelrc`, or an expanded `--config`, all seen through `rc` — is
-    never overridden.
+    `""` when nothing this build reports to has an advertised viewer — a third-party
+    BES, or a source naming only one half of the pair.
     """
-    if rc != None and rc.flag_value("--bes_results_url", command = command):
-        return []
 
     # Everywhere this invocation reports BES: the CLI's own sinks (internal client)
     # plus whatever Bazel uploads to itself.
     reporting_to = [sink.uri for sink in bes_sinks if sink.uri] + [bazel_bes_backend(rc, command)]
 
-    for (backend, results_url) in advertised_bes_sources(ctx, flags):
+    for (backend, results_url) in _advertised_bes_sources(ctx, flags):
         if [target for target in reporting_to if same_bes_endpoint(backend, target)]:
-            return ["--bes_results_url=" + results_url]
-    return []
+            return results_url
+    return ""
+
+def bes_results_url_flag(ctx, rc, bes_sinks: list, flags: DeploymentFlags, command: str = "build") -> list:
+    """`["--bes_results_url=<url>"]` for [`advertised_results_url`], else `[]`.
+
+    Bazel renders its "View invocation" line from this flag, and `render_bes_url` reads
+    it back for the same link on the CI surfaces. A `--bes_results_url` the user already
+    set — command line, `.bazelrc`, or an expanded `--config`, all seen through `rc` —
+    is never overridden.
+    """
+    if rc != None and rc.flag_value("--bes_results_url", command = command):
+        return []
+
+    results_url = advertised_results_url(ctx, rc, bes_sinks, flags, command)
+    return ["--bes_results_url=" + results_url] if results_url else []
 
 def join_and(items: list[str], oxford: bool = False) -> str:
     """Join with commas and a trailing "and": [a] → "a"; [a,b,c] → "a, b, and c".
