@@ -17,7 +17,7 @@ load("@std//time.axl", "sleep_iter")
 load("./bazel_flags.axl", "aspect_endpoint_auth_flags", "resolve_bazel_announce")
 load("./bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "collapse_repro_targets", "failed_labels", "failed_labels_by_subcommand", "init_data", "now_ms", "process_event", bazel_conclusion = "conclusion")
 load("./bes_sinks.axl", "announce_bes_sinks", "bes_streamed_by_bazel", "collect_bes_sinks", "summarize_bes_upload")
-load("./deployment_flags.axl", "announce_deployment_flags", "aspect_results_url", "bes_results_url_flag", "deployment_endpoint_flags")
+load("./deployment_flags.axl", "advertised_results_url", "announce_deployment_flags", "bes_results_url_flag", "deployment_endpoint_flags")
 load("./health_check.axl", "HealthCheckTrait")
 load("./lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "setup_phase", "task_update")
 load("./repro_commands.axl", "build_aspect_command", "build_bazel_command", "flavor_allows", "print_repro_and_fix", "repro_prefix")
@@ -318,15 +318,15 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
 
     # Per-invocation extras: inject `--remote_header` / `--bes_header` auth for an
     # Aspect-owned remote cache or Bazel-streamed `--bes_backend` (appended after
-    # rc expansion on each bazel build/test call), plus the deployment's advertised
-    # `--bes_results_url` when Bazel itself uploads to its BES.
+    # rc expansion on each bazel build/test call), plus `--bes_results_url` when this
+    # build forwards BES to an advertised backend.
     invocation_flags = aspect_endpoint_auth_flags(ctx, rc, command)
-    invocation_flags.extend(bes_results_url_flag(ctx, rc, deployment, command))
+    invocation_flags.extend(bes_results_url_flag(ctx, rc, bes_sinks, deployment, command))
 
-    # The CLI-streamed counterpart: that invocation is indexed under the sink's UUID,
-    # so the viewer base rides in `data` for `resolve_aspect_url` instead. A property
-    # of the resolved flags, so it is restored onto each retry's fresh `data`.
-    deployment_results_base = aspect_results_url(ctx, deployment)
+    # The Aspect Web UI link keys on the sink's own id, so it needs the same base in
+    # `data` rather than on the command line. A property of the resolved flags, so it
+    # is restored onto each retry's fresh `data`.
+    deployment_results_base = advertised_results_url(ctx, deployment)
     data["aspect_results_url"] = deployment_results_base
 
     for handler in bazel_trait.build_start:

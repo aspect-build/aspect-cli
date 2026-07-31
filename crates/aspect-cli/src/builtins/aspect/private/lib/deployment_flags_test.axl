@@ -9,11 +9,11 @@ struct, and `ctx.std.env.var` from a fixed map.
 deployment doesn't advertise, `--deployment` with no `--remote`, a bad capability
 token) are exercised by the CLI end-to-end, not here. These cover the resolution
 matrix: the default capability set, `exec` as additive, `no-` subtraction, `none`,
-and both build-result URL paths (Bazel-uploaded → `--bes_results_url`, CLI-streamed
-→ the sink-keyed `data["aspect_results_url"]`).
+and the build-result URL — which forwarding paths set `--bes_results_url`, and that
+its value comes from the same source as the backend being reported to.
 """
 
-load("./deployment_flags.axl", "BARE", "aspect_results_url", "bes_results_url_flag", "deployment_announcement", "deployment_endpoint_flags", "join_and", "parse_remote")
+load("./deployment_flags.axl", "BARE", "advertised_results_url", "bes_results_url_flag", "deployment_announcement", "deployment_endpoint_flags", "join_and", "parse_remote")
 
 def _eq(label, got, want):
     if got != want:
@@ -40,6 +40,10 @@ def _ctx(endpoints, deployment = "", remote = "", env = {}):
 def _rc(flags = {}):
     """A fake run command whose `flag_value` reads from a fixed map."""
     return struct(flag_value = lambda name, command = "build": flags.get(name, ""))
+
+def _sinks(*uris):
+    """Fake CLI-streamed BES sinks; only `.uri` is read."""
+    return [struct(uri = uri) for uri in uris]
 
 _ALL = _endpoints("gcp", cache = "cache.gcp", bes = "bes.gcp", exec = "remote.gcp", results_url = "https://app.gcp/i/")
 
@@ -158,69 +162,136 @@ def _test_results_url_carried_off_discovery(ctx):
     flags = deployment_endpoint_flags(_ctx(_ALL, remote = BARE))
     _eq("results_url carried off discovery", flags.results_url, "https://app.gcp/i/")
 
-def _test_bes_flag_only_for_bazel_side_upload(ctx):
-    """`--bes_results_url` is joined with Bazel's own invocation_id, so it may only be
-    injected when Bazel is the uploader. A CLI sink indexes under its own UUID, which
-    that flag's consumers never see."""
+def _test_bes_flag_either_forwarding_path(ctx):
+    """Set whenever BES reaches an advertised backend — the CLI's internal client or
+    Bazel's own uploader."""
+    ctx_ = _ctx(_ALL, remote = BARE)
+    flags = deployment_endpoint_flags(ctx_)
+    wanted = ["--bes_results_url=https://app.gcp/i/"]
+
+    # The CLI streams the deployment's BES itself (`--remote` wired the sink).
+    _eq(
+        "cli internal client → wired",
+        bes_results_url_flag(ctx_, _rc(), _sinks("grpcs://bes.gcp"), flags),
+        wanted,
+    )
+
+    # Bazel uploads to the same endpoint (the CLI's duplicate sink was dropped).
+    _eq(
+        "bazel-side upload → wired",
+        bes_results_url_flag(ctx_, _rc({"--bes_backend": "grpcs://bes.gcp"}), [], flags),
+        wanted,
+    )
+
+def _test_bes_flag_needs_an_advertised_backend(ctx):
+    """A build reporting only to some third-party BES gets nothing — no results URL
+    describes it."""
     ctx_ = _ctx(_ALL, remote = BARE)
     flags = deployment_endpoint_flags(ctx_)
 
-    # The CLI is streaming the sink itself → the flag would render a dead link.
-    _eq("cli-streamed sink → no --bes_results_url", bes_results_url_flag(ctx_, _rc(), flags), [])
-
-    # Bazel uploading to the deployment's BES is the case the flag describes.
     _eq(
-        "bazel-side upload to the deployment's bes → wired",
-        bes_results_url_flag(ctx_, _rc({"--bes_backend": "grpcs://bes.gcp"}), flags),
+        "third-party sink → not wired",
+        bes_results_url_flag(ctx_, _rc(), _sinks("grpcs://bes.elsewhere"), flags),
+        [],
+    )
+    _eq(
+        "third-party bazel backend → not wired",
+        bes_results_url_flag(ctx_, _rc({"--bes_backend": "grpcs://bes.elsewhere"}), [], flags),
+        [],
+    )
+    _eq("no forwarding at all → not wired", bes_results_url_flag(ctx_, _rc(), [], flags), [])
+
+def _test_bes_flag_env_advertised_backend(ctx):
+    """The advertised backend may come from the runner env rather than a deployment:
+    `--remote` is absent here, so everything is read off the environment."""
+    runner = _ctx(_ALL, env = {
+        "ASPECT_WORKFLOWS_BES_BACKEND": "grpcs://bes.runner",
+        "ASPECT_WORKFLOWS_BES_RESULTS_URL": "https://app.runner",
+    })
+    flags = deployment_endpoint_flags(runner)
+    _eq(
+        "env-advertised backend + env results url → wired",
+        bes_results_url_flag(runner, _rc(), _sinks("grpcs://bes.runner"), flags),
+        ["--bes_results_url=https://app.runner"],
+    )
+
+def _test_bes_flag_url_matches_backend_source(ctx):
+    """The URL comes from whichever source advertised the backend being reported to, so
+    a viewer is never quoted for a BES it doesn't serve."""
+
+    # Env and deployment name *different* backends. Streaming to the deployment's must
+    # use the deployment's viewer, not the env one that describes another backend.
+    split = _ctx(_ALL, remote = BARE, env = {
+        "ASPECT_WORKFLOWS_BES_BACKEND": "grpcs://bes.runner",
+        "ASPECT_WORKFLOWS_BES_RESULTS_URL": "https://app.runner",
+    })
+    flags = deployment_endpoint_flags(split)
+    _eq(
+        "deployment backend → deployment viewer",
+        bes_results_url_flag(split, _rc(), _sinks("grpcs://bes.gcp"), flags),
         ["--bes_results_url=https://app.gcp/i/"],
     )
-
-    # A third-party --bes_backend is not this deployment's BES.
-    other = _rc({"--bes_backend": "grpcs://bes.elsewhere"})
-    _eq("unrelated bazel backend → not wired", bes_results_url_flag(ctx_, other, flags), [])
-
-def _test_bes_flag_yields_to_existing_sources(ctx):
-    bazel_uploads = _rc({"--bes_backend": "grpcs://bes.gcp"})
-
-    ctx_ = _ctx(_ALL, remote = BARE)
-    flags = deployment_endpoint_flags(ctx_)
-    user_set = _rc({"--bes_backend": "grpcs://bes.gcp", "--bes_results_url": "https://mine.example"})
-    _eq("a user-set --bes_results_url wins", bes_results_url_flag(ctx_, user_set, flags), [])
-
-    runner = _ctx(_ALL, remote = BARE, env = {"ASPECT_WORKFLOWS_BES_RESULTS_URL": "https://runner.example"})
     _eq(
-        "the runner env var wins over discovery",
-        bes_results_url_flag(runner, bazel_uploads, deployment_endpoint_flags(runner)),
+        "env backend → env viewer",
+        bes_results_url_flag(split, _rc(), _sinks("grpcs://bes.runner"), flags),
+        ["--bes_results_url=https://app.runner"],
+    )
+
+    # Both sources name the same backend: the environment is the more deliberate
+    # config and wins.
+    same = _ctx(_ALL, remote = BARE, env = {
+        "ASPECT_WORKFLOWS_BES_BACKEND": "grpcs://bes.gcp",
+        "ASPECT_WORKFLOWS_BES_RESULTS_URL": "https://app.runner",
+    })
+    _eq(
+        "same backend from both → env viewer wins",
+        bes_results_url_flag(same, _rc(), _sinks("grpcs://bes.gcp"), deployment_endpoint_flags(same)),
+        ["--bes_results_url=https://app.runner"],
+    )
+
+def _test_bes_flag_requires_both_halves(ctx):
+    """A source contributes only when it names a backend *and* a viewer."""
+
+    # Deployment advertises a BES but no viewer.
+    no_viewer = _ctx(_endpoints("aws", cache = "cache.aws", bes = "bes.aws"), remote = BARE)
+    _eq(
+        "backend without a viewer → not wired",
+        bes_results_url_flag(no_viewer, _rc(), _sinks("grpcs://bes.aws"), deployment_endpoint_flags(no_viewer)),
         [],
     )
 
-    no_viewer = _ctx(_endpoints("aws", cache = "cache.aws", bes = "bes.aws"), remote = BARE)
+    # A results URL in the env with no env backend describes nothing we report to.
+    url_only = _ctx(
+        _endpoints("aws", cache = "cache.aws", bes = "bes.aws"),
+        remote = BARE,
+        env = {"ASPECT_WORKFLOWS_BES_RESULTS_URL": "https://app.runner"},
+    )
     _eq(
-        "no advertised viewer → no flag",
-        bes_results_url_flag(no_viewer, bazel_uploads, deployment_endpoint_flags(no_viewer)),
+        "viewer without a backend → not wired",
+        bes_results_url_flag(url_only, _rc(), _sinks("grpcs://bes.aws"), deployment_endpoint_flags(url_only)),
         [],
     )
 
-def _test_aspect_results_url_for_cli_streamed_sink(ctx):
-    """The CLI-streamed counterpart: the base rides in `data` for
-    `resolve_aspect_url`, which keys on the sink's own UUID."""
+def _test_bes_flag_yields_to_user_flag(ctx):
     ctx_ = _ctx(_ALL, remote = BARE)
+    user_set = _rc({"--bes_results_url": "https://mine.example"})
     _eq(
-        "streaming a sink → base carried for the sink-keyed link",
-        aspect_results_url(ctx_, deployment_endpoint_flags(ctx_)),
-        "https://app.gcp/i/",
+        "a user-set --bes_results_url is never overridden",
+        bes_results_url_flag(ctx_, user_set, _sinks("grpcs://bes.gcp"), deployment_endpoint_flags(ctx_)),
+        [],
     )
 
-    # No sink means no sink id, so a base alone would render nothing.
-    no_bes = _ctx(_ALL, remote = "no-bes")
-    _eq("no sink → no base", aspect_results_url(no_bes, deployment_endpoint_flags(no_bes)), "")
+def _test_advertised_results_url_precedence(ctx):
+    """The same base feeds `data["aspect_results_url"]` for the sink-keyed Web UI
+    link, with identical precedence."""
+    ctx_ = _ctx(_ALL, remote = BARE)
+    _eq("advertised value", advertised_results_url(ctx_, deployment_endpoint_flags(ctx_)), "https://app.gcp/i/")
 
-    # On a runner the CI surfaces already read the env var as results_base_url.
-    runner = _ctx(_ALL, remote = BARE, env = {"ASPECT_WORKFLOWS_BES_RESULTS_URL": "https://runner.example"})
-    _eq("runner env var wins", aspect_results_url(runner, deployment_endpoint_flags(runner)), "")
+    runner = _ctx(_ALL, remote = BARE, env = {"ASPECT_WORKFLOWS_BES_RESULTS_URL": "https://app.runner"})
+    _eq("env wins", advertised_results_url(runner, deployment_endpoint_flags(runner)), "https://app.runner")
 
     no_viewer = _ctx(_endpoints("aws", cache = "cache.aws", bes = "bes.aws"), remote = BARE)
-    _eq("no advertised viewer → no base", aspect_results_url(no_viewer, deployment_endpoint_flags(no_viewer)), "")
+    _eq("neither → empty", advertised_results_url(no_viewer, deployment_endpoint_flags(no_viewer)), "")
 
 def _test_announcement_line(ctx):
     """The "Using deployment …" line names each injected base-flag capability with
@@ -267,9 +338,13 @@ _UNIT_TESTS = [
     _test_reports_injected_capabilities,
     _test_announcement_line,
     _test_results_url_carried_off_discovery,
-    _test_bes_flag_only_for_bazel_side_upload,
-    _test_bes_flag_yields_to_existing_sources,
-    _test_aspect_results_url_for_cli_streamed_sink,
+    _test_bes_flag_either_forwarding_path,
+    _test_bes_flag_needs_an_advertised_backend,
+    _test_bes_flag_env_advertised_backend,
+    _test_bes_flag_url_matches_backend_source,
+    _test_bes_flag_requires_both_halves,
+    _test_bes_flag_yields_to_user_flag,
+    _test_advertised_results_url_precedence,
     _test_join_and,
 ]
 
