@@ -1,4 +1,4 @@
-"""Tests for `lib/bes_sinks.axl` — the BES upload summary line, the gRPC-sink
+"""Tests for `bazel/build_events.axl` — the BES upload summary line, the gRPC-sink
 filter shared by the announce/summary helpers, sink collection, and the
 duplicate-stream drop that keeps the CLI from streaming to an endpoint Bazel's
 own `--bes_backend` already uploads to.
@@ -7,7 +7,7 @@ Run with:
   aspect dev test-bes-sinks
 """
 
-load("./bes_sinks.axl", "bazel_bes_backend", "bes_results_line", "bes_streamed_by_bazel", "bes_upload_line", "collect_bes_from_args", "collect_bes_sinks", "dropped_bes_backends", "grpc_backends")
+load("@aspect//bazel/build_events.axl", "bazel_bes_backend", "bes_results_line", "bes_streamed_by_bazel", "bes_upload_line", "collect_bes_from_args", "collect_bes_sinks", "dropped_bes_backends", "grpc_backends")
 
 def _eq(label, got, want):
     if got != want:
@@ -286,7 +286,7 @@ _UNIT_TESTS = [
 def _test_impl(ctx):
     for t in _UNIT_TESTS:
         t(ctx)
-    print("bes_sinks_test.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    print("build_events_test.axl: OK (%d tests)" % len(_UNIT_TESTS))
     return 0
 
 bes_sinks_tests = task(

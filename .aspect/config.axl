@@ -1,4 +1,5 @@
 load("@aspect//auth_test.axl", "auth_tests")
+load("@aspect//bazel/build_events_test.axl", "bes_sinks_tests")
 load("@aspect//feature/artifacts.axl", "ArtifactUpload")
 load("@aspect//feature/buildkite_annotations.axl", "BuildkiteAnnotations")
 load("@aspect//feature/circleci_test_results.axl", "CircleCITestResults")
@@ -13,7 +14,6 @@ load("@aspect//private/lib/bazel_flags_test.axl", "bazel_flags_tests")
 load("@aspect//private/lib/bazel_results_test.axl", "bazel_results_unit_tests", "template_snapshot_tests")
 load("@aspect//private/lib/bazel_runner_test.axl", "bazel_runner_tests")
 load("@aspect//private/lib/bazelrc_test.axl", "bazelrc_tests")
-load("@aspect//private/lib/bes_sinks_test.axl", "bes_sinks_tests")
 load("@aspect//private/lib/ci_test.axl", "ci_tests")
 load("@aspect//private/lib/circleci_test.axl", "circleci_tests")
 load("@aspect//private/lib/delivery_results_test.axl", "delivery_results_unit_tests", "delivery_template_snapshot_tests")
@@ -373,7 +373,7 @@ def config(ctx: ConfigContext):
     # Run with: aspect dev test-deployment-flags
     ctx.tasks.add(deployment_flags_tests)
 
-    # bes_sinks.axl: the end-of-build BES upload summary line.
+    # bazel/build_events.axl: the end-of-build BES upload summary line.
     # Run with: aspect dev test-bes-sinks
     ctx.tasks.add(bes_sinks_tests)
 

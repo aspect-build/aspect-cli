@@ -299,7 +299,7 @@ def init_data():
         # True when Bazel uploads to the Aspect BES backend itself, so the CLI
         # streams no sink there and `resolve_aspect_url` keys on Bazel's
         # invocation_id. Set by the task before spawning; see
-        # bes_sinks.axl::bes_streamed_by_bazel.
+        # bazel/build_events.axl::bes_streamed_by_bazel.
         "bes_streamed_by_bazel": False,
         # Aspect Web UI base URL for the BES backend this build reports to, the
         # fallback base for `resolve_aspect_url`. Set by bazel_runner.axl; see
