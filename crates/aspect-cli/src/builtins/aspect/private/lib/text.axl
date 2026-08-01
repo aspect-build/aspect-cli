@@ -6,6 +6,7 @@ Currently:
     with thousands-separated count.
   - `truncate_for_title(text, max_len)` — word-boundary truncation with a
     `…` suffix, for status-surface titles.
+  - `join_url(base, segment)` — single-slash URL join.
 
 All are stateless, pure-string helpers. Add a new function here when
 it's wanted by more than one module and not specific to any one
@@ -70,3 +71,8 @@ def truncate_for_title(text, max_len = SUBJECT_TITLE_MAX):
     if last_space > max_len // 2:
         return window[:last_space] + "…"
     return window + "…"
+
+def join_url(base: str, segment: str) -> str:
+    """Join `base` + `segment` with exactly one slash, tolerating a trailing slash on
+    `base` (an advertised results URL may or may not carry one)."""
+    return (base if base.endswith("/") else base + "/") + segment

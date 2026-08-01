@@ -22,6 +22,7 @@ resolution. (The companion case — BES routed through Bazel via
 
 load("./aspect_endpoint_auth.axl", "endpoint_host", "headers_have_auth", "is_aspect_host", "resolve_aspect_bearer", "same_bes_endpoint")
 load("./environment.axl", "info")
+load("./text.axl", "join_url")
 
 def bes_args() -> dict:
     """The `bes_backends` / `bes_headers` CLI args every BES-capable task
@@ -54,9 +55,9 @@ def bazel_bes_backend(rc, command: str) -> str:
         return ""
     return rc.flag_value("--bes_backend", command = command) or ""
 
-def _drop_bazel_streamed(ctx, items: list, uri_of, bazel_backend: str) -> list:
+def _drop_bazel_streamed(items: list, uri_of, bazel_backend: str) -> list:
     """`items` minus those whose `uri_of(item)` names the same endpoint as Bazel's
-    own `bazel_backend`, announcing each one dropped.
+    own `bazel_backend`.
 
     Both the CLI sink and Bazel's uploader stream the *same* invocation, so an
     endpoint configured on both paths receives two streams for one build: the
@@ -67,19 +68,16 @@ def _drop_bazel_streamed(ctx, items: list, uri_of, bazel_backend: str) -> list:
     a `--deployment`'s advertised host) while `--bes_backend` is set by hand.
 
     `uri_of` returning `""`/`None` keeps the item: a file sink (a local BEP dump)
-    is not a second upload. A no-op when `bazel_backend` is empty.
+    is not a second upload. A no-op when `bazel_backend` is empty. Silent — the
+    drops are announced at spawn time by `announce_dropped_bes_sinks`.
     """
     if not bazel_backend:
         return items
-
-    kept = []
-    for item in items:
-        uri = uri_of(item)
-        if uri and same_bes_endpoint(uri, bazel_backend):
-            info(ctx.std, _DUPLICATE_MSG % (uri, bazel_backend))
-        else:
-            kept.append(item)
-    return kept
+    return [
+        item
+        for item in items
+        if not (uri_of(item) and same_bes_endpoint(uri_of(item), bazel_backend))
+    ]
 
 def bes_streamed_by_bazel(ctx, rc, command: str = "build") -> bool:
     """Whether Bazel's own `--bes_backend` is the Aspect BES backend this runner
@@ -115,8 +113,35 @@ def collect_bes_sinks(ctx, bazel_trait, rc, command: str = "build", extra_backen
     bazel_backend = bazel_bes_backend(rc, command)
     return (
         collect_bes_from_args(ctx, extra_backends = extra_backends, bazel_backend = bazel_backend) +
-        _drop_bazel_streamed(ctx, list(bazel_trait.build_event_sinks), lambda s: s.uri, bazel_backend)
+        _drop_bazel_streamed(list(bazel_trait.build_event_sinks), lambda s: s.uri, bazel_backend)
     )
+
+def dropped_bes_backends(ctx, bazel_trait, rc, command: str = "build", extra_backends = []) -> list[str]:
+    """The BES endpoints `collect_bes_sinks` skipped because Bazel uploads to them
+    itself, deduped. Same inputs as that call — pass the same arguments.
+
+    Separate so the "Not streaming …" notice lands with the spawn it describes rather
+    than during collection, which happens while the setup phase is still on screen."""
+    bazel_backend = bazel_bes_backend(rc, command)
+    if not bazel_backend:
+        return []
+
+    candidates = list(ctx.args.bes_backends) + list(extra_backends) + [s.uri for s in bazel_trait.build_event_sinks]
+    dropped = []
+    for uri in candidates:
+        if uri and same_bes_endpoint(uri, bazel_backend) and uri not in dropped:
+            dropped.append(uri)
+    return dropped
+
+def announce_dropped_bes_sinks(ctx, dropped: list[str], rc, command: str = "build"):
+    """Announce, one line per endpoint, that the CLI is *not* streaming there because
+    Bazel already uploads to it — so the absent "Streaming build events to …" line
+    isn't a silent omission. See `_drop_bazel_streamed` for why Bazel wins the tie.
+
+    Call alongside the other spawn-time disclosures; a no-op when nothing was dropped."""
+    bazel_backend = bazel_bes_backend(rc, command)
+    for uri in dropped:
+        info(ctx.std, _DUPLICATE_MSG % (uri, bazel_backend))
 
 def collect_bes_from_args(ctx, extra_backends = [], bazel_backend: str = "") -> list:
     """The CLI-streamed BES sinks from `--bes-backend` / `--bes-header`. Most
@@ -152,7 +177,7 @@ def collect_bes_from_args(ctx, extra_backends = [], bazel_backend: str = "") -> 
         if b not in backends:
             backends.append(b)
 
-    backends = _drop_bazel_streamed(ctx, backends, lambda b: b, bazel_backend)
+    backends = _drop_bazel_streamed(backends, lambda b: b, bazel_backend)
 
     sinks = []
     for bes_backend in backends:
@@ -217,6 +242,28 @@ def announce_bes_sinks(ctx, sinks: list):
     only — a retry reuses the same sinks."""
     for sink in grpc_backends(sinks):
         info(ctx.std, "Streaming build events to %s." % sink.uri)
+
+def bes_results_line(results_url: str, invocation_id: str) -> str:
+    """The "Streaming build results to …" line for a CLI-streamed invocation, or `""`
+    when either half is missing. Public so `bes_sinks_test.axl` can assert the shape."""
+    if not results_url or not invocation_id:
+        return ""
+    return "Streaming build results to %s." % join_url(results_url, invocation_id)
+
+def announce_bes_results_url(ctx, results_url: str, invocation_id: str):
+    """Announce where the invocation the CLI just streamed is viewable, the companion
+    to `announce_bes_sinks`' "Streaming build events to …" line.
+
+    Bazel prints its own "Streaming build results to: …" only when *it* uploads (its
+    BES module is what `--bes_backend` activates), so a CLI-streamed build would
+    otherwise show no URL at all. Keyed on the sink's own invocation id, which is what
+    the backend indexed.
+
+    Call after `ctx.bazel.build(...)` — the runtime mints the id inside `Build::spawn`.
+    A no-op without both halves."""
+    line = bes_results_line(results_url, invocation_id)
+    if line:
+        info(ctx.std, line)
 
 def summarize_bes_upload(ctx, sinks: list):
     """Log one line per CLI-streamed BES backend summarizing how many build events

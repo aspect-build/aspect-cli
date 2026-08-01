@@ -57,7 +57,7 @@ load("./log_snippet.axl", "SnippetOptions", "code_fence_for", "extract_junit_fai
 load("./path_glob.axl", "match_path")
 load("./repro_commands.axl", "ASPECT_CLI_INSTALL_HINT_MARKDOWN")
 load("./result_text.axl", "emoji_for_status")
-load("./text.axl", "SUBJECT_TITLE_MAX", "format_int_comma", "pluralize", "truncate_for_title")
+load("./text.axl", "SUBJECT_TITLE_MAX", "format_int_comma", "join_url", "pluralize", "truncate_for_title")
 load("./tips.axl", "decorate_tip")
 
 # Max unique failed-target labels to keep detail for (entries are small).
@@ -942,11 +942,6 @@ def process_event(data, event):
 
     return False
 
-def _join_url(base, id):
-    """Join base URL + invocation id with exactly one slash (tolerates a trailing
-    slash on `base`)."""
-    return (base if base.endswith("/") else base + "/") + id
-
 def resolve_aspect_url(links, data):
     """Return the Aspect Web UI URL for an invocation, or "" if unavailable.
 
@@ -980,7 +975,7 @@ def resolve_aspect_url(links, data):
         inv_id = data.get("bazel", {}).get("invocation_id", "") or ""
     if not inv_id:
         return ""
-    return _join_url(base, inv_id)
+    return join_url(base, inv_id)
 
 def aspect_web_ui_url(env: std.Env, data: dict) -> str:
     """Aspect Web UI invocation URL, or "" when unavailable. Joins
@@ -2355,7 +2350,7 @@ def render_bes_url(data: dict) -> str:
     inv = data["bazel"].get("invocation_id", "")
     if not base or not inv:
         return ""
-    return _join_url(base, inv)
+    return join_url(base, inv)
 
 def format_run_date(ctx, epoch_ms):
     """Format an epoch-ms timestamp as a human-readable date (e.g.
@@ -3468,7 +3463,7 @@ def _build_retry_attempt_rows(data, links):
     rows = []
     for a in attempts:
         sink_id = a.get("sink_invocation_id", "") or ""
-        url = _join_url(base, sink_id) if (base and sink_id) else ""
+        url = join_url(base, sink_id) if (base and sink_id) else ""
         rows.append({
             "attempt": a.get("attempt", 0),
             "outcome": "passed" if a.get("exit_code", 1) == 0 else "failed",

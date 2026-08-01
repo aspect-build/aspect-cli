@@ -358,14 +358,20 @@ def advertised_results_url(ctx, rc, bes_sinks: list, flags: DeploymentFlags, com
     return ""
 
 def bes_results_url_flag(ctx, rc, bes_sinks: list, flags: DeploymentFlags, command: str = "build") -> list:
-    """`["--bes_results_url=<url>"]` for [`advertised_results_url`], else `[]`.
+    """`["--bes_results_url=<url>"]` when *Bazel* uploads the BES itself, else `[]`.
 
-    Bazel renders its "View invocation" line from this flag, and `render_bes_url` reads
-    it back for the same link on the CI surfaces. A `--bes_results_url` the user already
-    set — command line, `.bazelrc`, or an expanded `--config`, all seen through `rc` —
-    is never overridden.
+    Only Bazel consumes this flag, and only its BES module — the one `--bes_backend`
+    activates — reads it, to print "Streaming build results to: …" and to key the link
+    on its own `invocation_id`. Passing it on the CLI-streamed path would inject a flag
+    nothing acts on, so that path announces the URL itself; see
+    `bes_sinks.axl::announce_bes_results_url`.
+
+    A `--bes_results_url` the user already set — command line, `.bazelrc`, or an
+    expanded `--config`, all seen through `rc` — is never overridden.
     """
     if rc != None and rc.flag_value("--bes_results_url", command = command):
+        return []
+    if not bazel_bes_backend(rc, command):
         return []
 
     results_url = advertised_results_url(ctx, rc, bes_sinks, flags, command)
