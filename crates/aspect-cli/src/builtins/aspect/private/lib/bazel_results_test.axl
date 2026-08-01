@@ -1225,6 +1225,51 @@ def _test_aspect_web_ui_url_bazel_streamed(ctx):
         "https://app.oss.aspect.build/sink-1",
     )
 
+def _test_aspect_web_ui_url_discovered_base(ctx):
+    """Off a runner `ASPECT_WORKFLOWS_BES_RESULTS_URL` is unset, so the base falls back
+    to the viewer the `--remote` deployment advertised (`data["aspect_results_url"]`,
+    set by bazel_runner.axl). Still keyed on the sink id, which is what the Aspect
+    backend indexed the CLI-streamed invocation under."""
+    env = ctx.std.env
+    env.set_var("ASPECT_WORKFLOWS_BES_RESULTS_URL", "")
+    _eq(
+        "discovered base + sink id",
+        aspect_web_ui_url(env, {
+            "sink_invocation_id": "sink-1",
+            "aspect_results_url": "https://app.gcp.aspect.build/i",
+        }),
+        "https://app.gcp.aspect.build/i/sink-1",
+    )
+    _eq(
+        "discovered base still needs an invocation id",
+        aspect_web_ui_url(env, {"sink_invocation_id": "", "aspect_results_url": "https://app.gcp.aspect.build/i"}),
+        "",
+    )
+
+    # On a runner the env var is the deliberate local config and wins.
+    env.set_var("ASPECT_WORKFLOWS_BES_RESULTS_URL", "https://app.oss.aspect.build")
+    _eq(
+        "runner env base wins over the discovered one",
+        aspect_web_ui_url(env, {
+            "sink_invocation_id": "sink-1",
+            "aspect_results_url": "https://app.gcp.aspect.build/i",
+        }),
+        "https://app.oss.aspect.build/sink-1",
+    )
+    env.set_var("ASPECT_WORKFLOWS_BES_RESULTS_URL", "")
+
+def _test_build_started_preserves_aspect_results_url(ctx):
+    """The discovered base is task-owned like `sink_invocation_id`, so the
+    `build_started` reset must not drop it — otherwise the link vanishes mid-stream."""
+    data = init_data()
+    data["aspect_results_url"] = "https://app.gcp.aspect.build/i"
+    data["sink_invocation_id"] = "sink-1"
+    process_event(data, struct(
+        kind = "build_started",
+        payload = struct(uuid = "bazel-uuid-1", start_time_millis = 1),
+    ))
+    _eq("discovered base survives build_started", data["aspect_results_url"], "https://app.gcp.aspect.build/i")
+
 def _test_build_started_preserves_bazel_streamed(ctx):
     """`process_event`'s build_started reset wipes top-level state for the new
     stream; `bes_streamed_by_bazel` is task-managed and set before the event, so
@@ -1328,6 +1373,8 @@ _UNIT_TESTS = [
     _test_status_maps_cover_every_terminal_status,
     _test_aspect_web_ui_url,
     _test_aspect_web_ui_url_bazel_streamed,
+    _test_aspect_web_ui_url_discovered_base,
+    _test_build_started_preserves_aspect_results_url,
     _test_build_started_preserves_bazel_streamed,
     _test_render_bes_url,
     _test_failed_status_without_failure_bucket,

@@ -31,6 +31,12 @@ pub enum Arg {
         long: Option<String>,
         values: Option<Vec<String>>,
         description: Option<String>,
+        /// Value to use when the flag is given with no `=value`, making a bare
+        /// `--flag` legal (`args.string(bare = "…")`). `None` keeps the default
+        /// behavior, where the flag requires a value. Distinct from `default`,
+        /// which applies when the flag is absent entirely — a flag with both can
+        /// tell "not passed" from "passed bare".
+        bare: Option<String>,
     },
     Boolean {
         required: bool,
@@ -361,6 +367,12 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     /// Defines a string flag that can be specified as `--flag_name=flag_value`.
     ///
     /// Use `long = "override-name"` to override the default kebab-case derivation.
+    ///
+    /// `bare = "value"` additionally makes a valueless `--flag_name` legal,
+    /// resolving to `value` — for a flag whose common case needs no argument
+    /// (`--remote` meaning "the usual capabilities"). Without it, omitting the
+    /// value is an error. `bare` and `default` are independent, so a flag can
+    /// distinguish "absent" from "passed with no value".
     fn string<'v>(
         #[starlark(require = named, default = false)] required: bool,
         #[starlark(require = named)] default: Option<String>,
@@ -368,6 +380,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         #[starlark(require = named, default = NoneOr::None)] long: NoneOr<String>,
         #[starlark(require = named, default = NoneOr::None)] values: NoneOr<UnpackList<String>>,
         #[starlark(require = named, default = NoneOr::None)] description: NoneOr<String>,
+        #[starlark(require = named, default = NoneOr::None)] bare: NoneOr<String>,
     ) -> starlark::Result<Arg> {
         if required && default.is_some() {
             return Err(starlark::Error::new_kind(starlark::ErrorKind::Function(
@@ -379,6 +392,16 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
                 anyhow::anyhow!("`short` must be a 1-character string."),
             )));
         }
+        let bare = bare.into_option();
+        // A `values` list constrains what the flag accepts, so a `bare` outside it
+        // would be unreachable-but-injected — reject it at declaration instead.
+        if let (Some(bare), NoneOr::Other(allowed)) = (bare.as_ref(), &values) {
+            if !allowed.items.contains(bare) {
+                return Err(starlark::Error::new_kind(starlark::ErrorKind::Function(
+                    anyhow::anyhow!("`bare` value {bare:?} is not among the allowed `values`."),
+                )));
+            }
+        }
         Ok(Arg::String {
             required,
             default: default.unwrap_or_default(),
@@ -386,6 +409,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
             long: validated_long(long)?,
             values: values.into_option().map(|it| it.items),
             description: description.into_option(),
+            bare,
         })
     }
 

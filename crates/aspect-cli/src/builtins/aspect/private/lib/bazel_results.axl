@@ -57,7 +57,7 @@ load("./log_snippet.axl", "SnippetOptions", "code_fence_for", "extract_junit_fai
 load("./path_glob.axl", "match_path")
 load("./repro_commands.axl", "ASPECT_CLI_INSTALL_HINT_MARKDOWN")
 load("./result_text.axl", "emoji_for_status")
-load("./text.axl", "SUBJECT_TITLE_MAX", "format_int_comma", "pluralize", "truncate_for_title")
+load("./text.axl", "SUBJECT_TITLE_MAX", "format_int_comma", "join_url", "pluralize", "truncate_for_title")
 load("./tips.axl", "decorate_tip")
 
 # Max unique failed-target labels to keep detail for (entries are small).
@@ -270,8 +270,9 @@ def _repro_with_prefix(prefix, labels, max_chars):
 
 # Keys a task resolves before the build and `process_event` must not clobber
 # when `build_started` resets the accumulator for a new (or retried) stream.
-# Both identify the invocation to the Aspect Web UI; see `resolve_aspect_url`.
-_TASK_OWNED_KEYS = ["sink_invocation_id", "bes_streamed_by_bazel"]
+# All three feed the Aspect Web UI link — two identify the invocation, one is its
+# base URL off a runner; see `resolve_aspect_url`.
+_TASK_OWNED_KEYS = ["sink_invocation_id", "bes_streamed_by_bazel", "aspect_results_url"]
 
 def init_data():
     """Create a fresh data accumulator.
@@ -300,6 +301,10 @@ def init_data():
         # invocation_id. Set by the task before spawning; see
         # bes_sinks.axl::bes_streamed_by_bazel.
         "bes_streamed_by_bazel": False,
+        # Aspect Web UI base URL for the BES backend this build reports to, the
+        # fallback base for `resolve_aspect_url`. Set by bazel_runner.axl; see
+        # deployment_flags.axl::advertised_results_url.
+        "aspect_results_url": "",
         # Producer-authored at terminal-emit time. Each entry {command, description};
         # see lib/repro_commands.axl.
         "repro_commands": [],
@@ -937,15 +942,10 @@ def process_event(data, event):
 
     return False
 
-def _join_url(base, id):
-    """Join base URL + invocation id with exactly one slash (tolerates a trailing
-    slash on `base`)."""
-    return (base if base.endswith("/") else base + "/") + id
-
 def resolve_aspect_url(links, data):
     """Return the Aspect Web UI URL for an invocation, or "" if unavailable.
 
-    Keyed on whichever id the backend indexed the invocation under:
+    Keyed on the id most directly identifying the invocation:
 
       - `sink_invocation_id` when the CLI streamed it — the UUID the gRPC sink
         (`stream_sink.rs`) mints up-front when spawning BES subscribers. Tasks
@@ -954,14 +954,20 @@ def resolve_aspect_url(links, data):
       - `data["bazel"]["invocation_id"]` when `bes_streamed_by_bazel` says Bazel
         uploaded it instead, in which case no sink — and so no sink id — exists.
 
-    The two are not interchangeable: Bazel's UUID is unknown to a backend the CLI
-    streamed to, and would 404. Without either id the link is suppressed.
+    The Web UI resolves `/i/<id>` under either the BES envelope UUID (the sink id) or
+    the Bazel invocation id carried in the events, so both forms land on the same
+    page; the sink id is preferred simply because it is the one this process minted.
+    Without either id the link is suppressed.
 
     `links["results_base_url"]` (from `WorkflowsEnvironment.build_events.results_url`)
     is the prefix, joined as `{base}/{id}` (no `/invocations/` segment). Typical:
         ASPECT_WORKFLOWS_BES_RESULTS_URL=https://app.oss.aspect.build
+
+    `data["aspect_results_url"]` is the fallback base — the viewer advertised for the
+    BES backend this build reports to (see `deployment_flags.axl`) — so a local
+    `--remote` build renders the same link off a runner.
     """
-    base = links.get("results_base_url", "") if links else ""
+    base = (links.get("results_base_url", "") if links else "") or data.get("aspect_results_url", "")
     if not base:
         return ""
     inv_id = data.get("sink_invocation_id", "") or ""
@@ -969,7 +975,7 @@ def resolve_aspect_url(links, data):
         inv_id = data.get("bazel", {}).get("invocation_id", "") or ""
     if not inv_id:
         return ""
-    return _join_url(base, inv_id)
+    return join_url(base, inv_id)
 
 def aspect_web_ui_url(env: std.Env, data: dict) -> str:
     """Aspect Web UI invocation URL, or "" when unavailable. Joins
@@ -2335,15 +2341,16 @@ def _sorted_dedup(args, allow_env):
 def render_bes_url(data: dict) -> str:
     """Full BES results URL from `data["bazel"]`, or "" when unavailable.
 
-    Keyed on Bazel's own `invocation_id` (the --bes_results_url backend only
-    sees that UUID). BES counterpart to `aspect_web_ui_url`, which keys on
-    sink_invocation_id.
+    Keyed on Bazel's own `invocation_id`, mirroring the link Bazel itself prints from
+    `--bes_results_url`. BES counterpart to `aspect_web_ui_url`, which keys on
+    `sink_invocation_id`; against the Aspect Web UI the two resolve to the same page
+    (see `resolve_aspect_url`).
     """
     base = data["bazel"].get("bes_results_url", "")
     inv = data["bazel"].get("invocation_id", "")
     if not base or not inv:
         return ""
-    return _join_url(base, inv)
+    return join_url(base, inv)
 
 def format_run_date(ctx, epoch_ms):
     """Format an epoch-ms timestamp as a human-readable date (e.g.
@@ -3456,7 +3463,7 @@ def _build_retry_attempt_rows(data, links):
     rows = []
     for a in attempts:
         sink_id = a.get("sink_invocation_id", "") or ""
-        url = _join_url(base, sink_id) if (base and sink_id) else ""
+        url = join_url(base, sink_id) if (base and sink_id) else ""
         rows.append({
             "attempt": a.get("attempt", 0),
             "outcome": "passed" if a.get("exit_code", 1) == 0 else "failed",

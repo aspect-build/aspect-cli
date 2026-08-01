@@ -16,8 +16,8 @@ load("@aspect//bazel.axl", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
 load("@std//time.axl", "sleep_iter")
 load("./bazel_flags.axl", "aspect_endpoint_auth_flags", "resolve_bazel_announce")
 load("./bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "collapse_repro_targets", "failed_labels", "failed_labels_by_subcommand", "init_data", "now_ms", "process_event", bazel_conclusion = "conclusion")
-load("./bes_sinks.axl", "announce_bes_sinks", "bes_streamed_by_bazel", "collect_bes_sinks", "summarize_bes_upload")
-load("./deployment_flags.axl", "announce_deployment_flags", "deployment_endpoint_flags")
+load("./bes_sinks.axl", "announce_bes_results_url", "announce_bes_sinks", "announce_dropped_bes_sinks", "bes_streamed_by_bazel", "collect_bes_sinks", "dropped_bes_backends", "summarize_bes_upload")
+load("./deployment_flags.axl", "advertised_results_url", "announce_deployment_flags", "bes_results_url_flag", "deployment_endpoint_flags")
 load("./health_check.axl", "HealthCheckTrait")
 load("./lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "setup_phase", "task_update")
 load("./repro_commands.axl", "build_aspect_command", "build_bazel_command", "flavor_allows", "print_repro_and_fix", "repro_prefix")
@@ -278,7 +278,7 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
     # user can still override via --bazel-flag=...
     base_flags = ["--isatty=" + str(int(ctx.std.io.stdout.is_tty))]
 
-    # `--deployment <name>` wires the deployment's advertised endpoints:
+    # `--remote` wires the selected deployment's advertised endpoints:
     # --remote_cache / --remote_executor as base flags (user --bazel-flag still
     # overrides, last-wins), and its BES host into the CLI's BES sinks below.
     deployment = deployment_endpoint_flags(ctx)
@@ -307,8 +307,10 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
     announce_version, announce_command = resolve_bazel_announce(ctx)
 
     # Announced with the first spawn below (the streams belong to the spawn) and
-    # summarized at build end.
+    # summarized at build end. `dropped_bes` are the endpoints Bazel uploads to
+    # itself, announced there too so the missing sinks aren't a silent omission.
     bes_sinks = collect_bes_sinks(ctx, bazel_trait, rc, command, extra_backends = deployment.bes_backends)
+    dropped_bes = dropped_bes_backends(ctx, bazel_trait, rc, command, extra_backends = deployment.bes_backends)
     need_bes = bool(bazel_trait.build_event) or bool(lifecycle.task_update)
 
     # A property of the resolved flags, so it holds for every attempt and is
@@ -318,8 +320,16 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
 
     # Per-invocation extras: inject `--remote_header` / `--bes_header` auth for an
     # Aspect-owned remote cache or Bazel-streamed `--bes_backend` (appended after
-    # rc expansion on each bazel build/test call).
+    # rc expansion on each bazel build/test call), plus `--bes_results_url` when this
+    # build forwards BES to an advertised backend.
     invocation_flags = aspect_endpoint_auth_flags(ctx, rc, command)
+    invocation_flags.extend(bes_results_url_flag(ctx, rc, bes_sinks, deployment, command))
+
+    # The same viewer reaches the CI surfaces through `data` — they key the link on the
+    # sink's own id rather than reading it off the command line. A property of the
+    # resolved flags, so it is restored onto each retry's fresh `data`.
+    results_base = advertised_results_url(ctx, rc, bes_sinks, deployment, command)
+    data["aspect_results_url"] = results_base
 
     for handler in bazel_trait.build_start:
         handler(ctx)
@@ -364,6 +374,7 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
             data = init_data()
             data["bazel_attempts"] = prior_attempts
             data["bes_streamed_by_bazel"] = bazel_streams_bes
+            data["aspect_results_url"] = results_base
 
         spawn_status = _pick_status(command, data, had_failure = False, terminal = False)
         task_update(
@@ -394,6 +405,7 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
         if attempt == 0:
             announce_deployment_flags(ctx, deployment)
             announce_bes_sinks(ctx, bes_sinks)
+            announce_dropped_bes_sinks(ctx, dropped_bes, rc, command)
 
         # Per-attempt iter handle; single-use, so re-create each retry.
         events = bazel.build_events.iterator() if need_bes else None
@@ -430,6 +442,12 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
         # carries the Aspect Workflows link. Empty when no BES sinks
         # were configured.
         data["sink_invocation_id"] = invocation.sink_invocation_id
+
+        # Bazel prints "Streaming build results to: …" only when it uploads the BES
+        # itself, so say it here for the sinks the CLI streams. First attempt only,
+        # matching the other spawn-time disclosures above.
+        if attempt == 0:
+            announce_bes_results_url(ctx, results_base, invocation.sink_invocation_id)
 
         # Re-emit to the status surfaces only (stream = "" suppresses
         # the CLI line) so the Aspect Workflows link surfaces without

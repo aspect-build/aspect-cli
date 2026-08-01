@@ -9,7 +9,7 @@ Run with:
   aspect dev test-auth
 """
 
-load("@aspect//auth.axl", "capabilities", "identity", "login_command", "status_line")
+load("@aspect//auth.axl", "identity", "login_command", "status_line")
 
 def _eq(label, got, want):
     if got != want:
@@ -25,7 +25,8 @@ def _summary(
         status = "",
         cache = "",
         bes = "",
-        exec = ""):
+        exec = "",
+        results_url = ""):
     return struct(
         name = name,
         builtin = builtin,
@@ -36,6 +37,7 @@ def _summary(
         status = status,
         cache = cache,
         bes = bes,
+        results_url = results_url,
         exec = exec,
     )
 
@@ -48,11 +50,6 @@ def _test_identity(_):
 def _test_login_command(_):
     _eq("account → bare", login_command(_summary(builtin = True, name = "aspect")), "aspect auth login")
     _eq("deployment → --deployment", login_command(_summary(name = "gcp.acme")), "aspect auth login --deployment gcp.acme")
-
-def _test_capabilities(_):
-    _eq("cache + bes", capabilities(_summary(cache = "c", bes = "b")), ["remote cache", "BES backend"])
-    _eq("cache + exec + bes order", capabilities(_summary(cache = "c", bes = "b", exec = "e")), ["remote cache", "remote execution", "BES backend"])
-    _eq("none", capabilities(_summary()), [])
 
 def _test_status_line(_):
     _eq(
@@ -74,7 +71,6 @@ def _test_status_line(_):
 _UNIT_TESTS = [
     _test_identity,
     _test_login_command,
-    _test_capabilities,
     _test_status_line,
 ]
 
