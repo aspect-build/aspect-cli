@@ -92,6 +92,10 @@ fn run_build(args: &[String]) {
         find_flag_value(args, "--scenario").unwrap_or_else(|| "success".to_string());
     let s = scenario(&scenario_name);
 
+    for line in s.stderr_lines {
+        eprintln!("{line}");
+    }
+
     if let Some(path) = bes_path {
         write_scenario(&path, &s);
     }
@@ -161,6 +165,9 @@ struct Scenario {
     open_delay: Duration,
     attempts: Vec<Vec<BuildEvent>>,
     exit: ExitBehavior,
+    /// Lines printed to stderr before the BEP write, for tests exercising
+    /// the captured-output pipeline (real bazel writes its console to stderr).
+    stderr_lines: &'static [&'static str],
 }
 
 fn write_scenario(path: &str, scenario: &Scenario) {
@@ -198,6 +205,22 @@ fn scenario(name: &str) -> Scenario {
             open_delay: Duration::from_millis(50),
             attempts: vec![vec![build_started(), build_finished(0, true)]],
             exit: ExitBehavior::Code(0),
+            stderr_lines: &[],
+        },
+
+        // Like `success`, but emits console lines on stderr first — drives
+        // the captured-output pipeline tests (match/fatal/respond patterns
+        // against real child stderr).
+        "stderr_chatter" => Scenario {
+            open_delay: Duration::from_millis(50),
+            attempts: vec![vec![build_started(), build_finished(0, true)]],
+            exit: ExitBehavior::Code(0),
+            stderr_lines: &[
+                "INFO: Analyzed 1 target",
+                "WARNING: deprecated flag used",
+                "password=hunter2 leaked",
+                "INFO: Build completed successfully",
+            ],
         },
 
         // Regression for aspect-build/aspect-cli#1060: a single attempt with
@@ -212,6 +235,7 @@ fn scenario(name: &str) -> Scenario {
             open_delay: Duration::ZERO,
             attempts: vec![vec![build_started(), build_finished(39, true)]],
             exit: ExitBehavior::Code(0),
+            stderr_lines: &[],
         },
 
         // Reference scenario: REMOTE_CACHE_EVICTED followed by a successful
@@ -225,6 +249,7 @@ fn scenario(name: &str) -> Scenario {
                 vec![build_started(), build_finished(0, true)],
             ],
             exit: ExitBehavior::Code(0),
+            stderr_lines: &[],
         },
 
         // Like `success`, but basil exits with code 2 (a genuine Bazel
@@ -235,6 +260,7 @@ fn scenario(name: &str) -> Scenario {
             open_delay: Duration::ZERO,
             attempts: vec![vec![build_started(), build_finished(2, true)]],
             exit: ExitBehavior::Code(2),
+            stderr_lines: &[],
         },
 
         // Like `success`, but basil is killed by SIGKILL after the event
@@ -248,6 +274,7 @@ fn scenario(name: &str) -> Scenario {
             // SIGKILL: signal 9 on every Unix. Hard-coded to avoid a
             // libc dep for a single constant.
             exit: ExitBehavior::Signal(9),
+            stderr_lines: &[],
         },
 
         other => {

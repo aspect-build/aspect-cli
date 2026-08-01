@@ -1,6 +1,8 @@
 pub mod broadcaster;
 pub mod build_event;
 pub mod execlog;
+pub mod output;
+pub mod processors;
 pub mod redaction;
 mod util;
 pub mod workspace_event;
@@ -8,4 +10,5 @@ pub mod workspace_event;
 pub use broadcaster::Subscriber;
 pub use build_event::BuildEventStream;
 pub use execlog::ExecLogStream;
+pub use output::OutputStream;
 pub use workspace_event::WorkspaceEventStream;
