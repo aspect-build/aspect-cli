@@ -17,16 +17,28 @@ use super::retry::SinkOutcome;
 #[derive(Debug)]
 pub struct Tracing {}
 
+fn now_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+}
+
 fn timestamp_or_now(timestamp: Option<&Timestamp>) -> i64 {
-    timestamp.map_or_else(
-        || {
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_secs() as i64
-        },
-        |t| t.seconds,
-    )
+    timestamp.map_or_else(now_secs, |t| t.seconds)
+}
+
+/// Seconds since the Unix epoch, preferring the modern `Timestamp` field and
+/// falling back to the deprecated `*_millis` field before `now`. Older Bazel
+/// versions and cached test summaries populate only the millis field; using
+/// `now` there would export the span at consume time rather than the real test
+/// window.
+fn timestamp_secs_or_now(timestamp: Option<&Timestamp>, legacy_millis: i64) -> i64 {
+    match timestamp {
+        Some(t) => t.seconds,
+        None if legacy_millis != 0 => legacy_millis / 1000,
+        None => now_secs(),
+    }
 }
 
 /// OTel span status code (`otel.status_code`) for a Bazel test outcome.
@@ -154,8 +166,16 @@ impl Tracing {
                         // span status to error when the test failed.
                         let status =
                             TestStatus::try_from(summary.overall_status).unwrap_or(TestStatus::NoStatus);
-                        let start_time = timestamp_or_now(summary.first_start_time.as_ref());
-                        let end_time = timestamp_or_now(summary.last_stop_time.as_ref());
+                        #[allow(deprecated)]
+                        let start_time = timestamp_secs_or_now(
+                            summary.first_start_time.as_ref(),
+                            summary.first_start_time_millis,
+                        );
+                        #[allow(deprecated)]
+                        let end_time = timestamp_secs_or_now(
+                            summary.last_stop_time.as_ref(),
+                            summary.last_stop_time_millis,
+                        );
                         let _test = tracing::info_span!(
                             "test",
                             otel.start_time = start_time,
@@ -178,9 +198,17 @@ impl Tracing {
                         // (a failing attempt that later passes is visible here as
                         // an error span while the summary reports FLAKY).
                         let status = TestStatus::try_from(result.status).unwrap_or(TestStatus::NoStatus);
-                        let start_time = timestamp_or_now(result.test_attempt_start.as_ref());
+                        #[allow(deprecated)]
+                        let start_time = timestamp_secs_or_now(
+                            result.test_attempt_start.as_ref(),
+                            result.test_attempt_start_millis_epoch,
+                        );
+                        #[allow(deprecated)]
                         let end_time = start_time
-                            + result.test_attempt_duration.as_ref().map_or(0, |d| d.seconds);
+                            + result.test_attempt_duration.as_ref().map_or_else(
+                                || result.test_attempt_duration_millis / 1000,
+                                |d| d.seconds,
+                            );
                         let _test_attempt = tracing::info_span!(
                             "test_attempt",
                             otel.start_time = start_time,
@@ -239,5 +267,23 @@ mod tests {
     fn indeterminate_statuses_stay_unset() {
         assert_eq!(test_status_code(TestStatus::NoStatus), "unset");
         assert_eq!(test_status_code(TestStatus::Incomplete), "unset");
+    }
+
+    #[test]
+    fn timestamp_prefers_modern_field() {
+        let ts = Timestamp { seconds: 42, nanos: 0 };
+        assert_eq!(timestamp_secs_or_now(Some(&ts), 999_000), 42);
+    }
+
+    #[test]
+    fn timestamp_falls_back_to_legacy_millis() {
+        assert_eq!(timestamp_secs_or_now(None, 1_723_000_000_000), 1_723_000_000);
+    }
+
+    #[test]
+    fn timestamp_uses_now_when_nothing_populated() {
+        let before = now_secs();
+        let got = timestamp_secs_or_now(None, 0);
+        assert!(got >= before, "expected a current timestamp, got {got}");
     }
 }
