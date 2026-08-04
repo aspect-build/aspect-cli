@@ -15,7 +15,7 @@ applies uniformly to both tasks.
 load("@aspect//bazel/build_events.axl", "announce_bes_results_url", "announce_bes_sinks", "announce_dropped_bes_sinks", "bes_streamed_by_bazel", "collect_bes_sinks", "dropped_bes_backends", "summarize_bes_upload")
 load("@aspect//bazel.axl", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
 load("@std//time.axl", "sleep_iter")
-load("./bazel_flags.axl", "aspect_endpoint_auth_flags", "forwarded_flag_value", "resolve_bazel_announce")
+load("./bazel_flags.axl", "aspect_endpoint_auth_flags", "resolve_bazel_announce")
 load("./bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "collapse_repro_targets", "failed_labels", "failed_labels_by_subcommand", "init_data", "now_ms", "process_event", bazel_conclusion = "conclusion")
 load("./deployment_flags.axl", "advertised_results_url", "announce_deployment_flags", "bes_results_url_flag", "deployment_endpoint_flags")
 load("./health_check.axl", "HealthCheckTrait")
@@ -266,13 +266,6 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
                  `--target-pattern-file` (if the task declares it) by
                  forwarding `--target_pattern_file=<path>` to Bazel
                  directly, and otherwise reads `ctx.args.targets`.
-
-                 A caller who forwards Bazel's own spelling
-                 (`--bazel-flag=--target_pattern_file=<path>`) is honored too:
-                 the `ctx.args.targets` default is suppressed so Bazel doesn't
-                 see a command-line pattern alongside the file. This is what
-                 makes IDE / BSP tooling work through the `tools/bazel` wrapper,
-                 which rewrites every Bazel-native flag to `--bazel-flag=`.
     """
     hc_trait = ctx.traits[HealthCheckTrait]
     bazel_trait = ctx.traits[BazelTrait]
@@ -300,19 +293,6 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
             if not ctx.std.fs.exists(pattern_file):
                 fail("--target-pattern-file: file not found: " + pattern_file)
             base_flags.append("--target_pattern_file=" + pattern_file)
-            targets = []
-        elif not ctx.args.is_explicit("targets") and forwarded_flag_value(ctx.args.bazel_flags, "--target_pattern_file"):
-            # The caller forwarded Bazel's own `--target_pattern_file` instead of
-            # the aspect flag above — what the IntelliJ Bazel plugin does through
-            # the `tools/bazel` wrapper. The file supplies the patterns, so
-            # injecting the `targets` default would make Bazel reject the
-            # invocation ("Command-line target pattern and --target_pattern_file
-            # cannot both be specified"). Nothing to add to `base_flags`: the
-            # flag is already among the caller's `--bazel-flag`s.
-            #
-            # Only the *default* is suppressed. Explicit patterns still reach
-            # Bazel alongside the flag so Bazel emits that error itself, rather
-            # than this runner growing a second spelling of it.
             targets = []
         else:
             targets = ctx.args.targets

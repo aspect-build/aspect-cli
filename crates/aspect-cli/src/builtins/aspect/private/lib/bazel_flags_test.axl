@@ -4,7 +4,7 @@ Run with:
   aspect dev test-bazel-flags
 """
 
-load("./bazel_flags.axl", "announce_bazel_args", "aspect_endpoint_auth_flags", "bes_backend_auth_flags", "flags_delta", "forwarded_flag_value", "remote_cache_auth_flags", "requested_config_names", "resolve_announce", "resolve_bazel_announce", "resolve_flags", "resolve_startup_flags", "setup_bazel_command", "sibling_rc")
+load("./bazel_flags.axl", "announce_bazel_args", "aspect_endpoint_auth_flags", "bes_backend_auth_flags", "flags_delta", "remote_cache_auth_flags", "requested_config_names", "resolve_announce", "resolve_bazel_announce", "resolve_flags", "resolve_startup_flags", "setup_bazel_command", "sibling_rc")
 
 def _eq(label, got, want):
     if got != want:
@@ -194,37 +194,6 @@ def _test_requested_config_names(ctx):
         requested_config_names(["--config=a", "--foo", ("--config=b", "<7"), "--config=c"]),
         ["a", "b", "c"],
     )
-
-def _test_forwarded_flag_value(ctx):
-    """Reads a Bazel flag out of the caller's `--bazel-flag` list, last-wins.
-
-    The case that matters: the `tools/bazel` wrapper rewrites every Bazel-native
-    flag to `--bazel-flag=<flag>`, so an IDE's `--target_pattern_file` arrives
-    here and the runner has to see it before the rc exists."""
-    name = "--target_pattern_file"
-
-    _eq("absent", forwarded_flag_value(["--keep_going"], name), "")
-    _eq("empty list", forwarded_flag_value([], name), "")
-    _eq("eq form", forwarded_flag_value(["--keep_going", name + "=/tmp/pat"], name), "/tmp/pat")
-    _eq(
-        "last occurrence wins",
-        forwarded_flag_value([name + "=/tmp/first", name + "=/tmp/second"], name),
-        "/tmp/second",
-    )
-
-    # The two-token spelling, split across consecutive `--bazel-flag` entries.
-    _eq("two-token form", forwarded_flag_value([name, "/tmp/pat"], name), "/tmp/pat")
-    _eq("two-token with no value left", forwarded_flag_value([name], name), "")
-    _eq("next token is a flag, not a value", forwarded_flag_value([name, "--keep_going"], name), "")
-
-    # Prefix near-misses: matching must end at the `=`.
-    _eq("longer flag name", forwarded_flag_value([name + "_foo=/tmp/pat"], name), "")
-    _eq("bare longer flag name", forwarded_flag_value([name + "_foo", "/tmp/pat"], name), "")
-
-    # An empty value is a real value ("unset the flag"), not an absent flag —
-    # but it reads back as `""`, so callers treat it as unset. Pinned so a
-    # future caller that cares knows the limit.
-    _eq("explicitly empty value", forwarded_flag_value([name + "="], name), "")
 
 def _test_flags_delta(ctx):
     """`flags_delta` returns the multiset difference full − base in full's order.
@@ -436,7 +405,6 @@ def _test_impl(ctx):
     _test_resolve_bazel_announce_maps_args_to_tuple(ctx)
     _test_announce_bazel_args_shape(ctx)
     _test_requested_config_names(ctx)
-    _test_forwarded_flag_value(ctx)
     _test_flags_delta(ctx)
     _test_remote_cache_auth_flags(ctx)
     _test_bes_backend_auth_flags(ctx)
@@ -446,7 +414,7 @@ def _test_impl(ctx):
     # after the pure subtests prevents bleed-through.
     _test_setup_bazel_command_applies_to_ctx_bazel(ctx)
     _test_sibling_rc_transforms_startup(ctx)
-    print("bazel_flags_test.axl: OK (19 sections)")
+    print("bazel_flags_test.axl: OK (18 sections)")
     return 0
 
 bazel_flags_tests = task(
