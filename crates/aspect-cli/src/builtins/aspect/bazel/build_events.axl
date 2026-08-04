@@ -20,9 +20,9 @@ resolution. (The companion case — BES routed through Bazel via
 `bazel_flags.axl` instead.)
 """
 
-load("./aspect_endpoint_auth.axl", "endpoint_host", "headers_have_auth", "is_aspect_host", "resolve_aspect_bearer", "same_bes_endpoint")
-load("./environment.axl", "info")
-load("./text.axl", "join_url")
+load("../private/lib/aspect_endpoint_auth.axl", "endpoint_host", "headers_have_auth", "is_aspect_host", "resolve_aspect_bearer", "same_bes_endpoint")
+load("../private/lib/environment.axl", "info")
+load("../private/lib/text.axl", "join_url")
 
 def bes_args() -> dict:
     """The `bes_backends` / `bes_headers` CLI args every BES-capable task
@@ -49,7 +49,7 @@ def bazel_bes_backend(rc, command: str) -> str:
     `--bazel-flag=--bes_backend=…`, a `.bazelrc`, or an expanded `--config`.
     `rc` may be `None` for a caller with no run command to consult.
 
-    Public so `bes_sinks_test.axl` can assert the resolution.
+    Public so `build_events_test.axl` can assert the resolution.
     """
     if rc == None:
         return ""
@@ -207,7 +207,7 @@ def bes_upload_line(uri: str, sent: int, acked: int, failed: bool) -> str:
       - failed with events left unconfirmed → `Uploaded <acked> of <sent> … before
         the stream failed`
 
-    Public so `bes_sinks_test.axl` can assert the message shapes."""
+    Public so `build_events_test.axl` can assert the message shapes."""
     backend = uri or "the BES backend"
     plural = "" if sent == 1 else "s"
 

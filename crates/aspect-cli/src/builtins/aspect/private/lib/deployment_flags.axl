@@ -68,8 +68,8 @@ match the endpoint-auth host gate and receive its login JWT (see
 `aspect_endpoint_auth.axl`).
 """
 
+load("@aspect//bazel/build_events.axl", "bazel_bes_backend")
 load("./aspect_endpoint_auth.axl", "same_bes_endpoint")
-load("./bes_sinks.axl", "bazel_bes_backend")
 load("./environment.axl", "info")
 
 # Bazel-facing Aspect endpoints are TLS gRPC.

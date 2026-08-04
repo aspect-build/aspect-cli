@@ -12,11 +12,11 @@ any change to how build events are processed or how status updates are emitted
 applies uniformly to both tasks.
 """
 
+load("@aspect//bazel/build_events.axl", "announce_bes_results_url", "announce_bes_sinks", "announce_dropped_bes_sinks", "bes_streamed_by_bazel", "collect_bes_sinks", "dropped_bes_backends", "summarize_bes_upload")
 load("@aspect//bazel.axl", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
 load("@std//time.axl", "sleep_iter")
 load("./bazel_flags.axl", "aspect_endpoint_auth_flags", "resolve_bazel_announce")
 load("./bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "collapse_repro_targets", "failed_labels", "failed_labels_by_subcommand", "init_data", "now_ms", "process_event", bazel_conclusion = "conclusion")
-load("./bes_sinks.axl", "announce_bes_results_url", "announce_bes_sinks", "announce_dropped_bes_sinks", "bes_streamed_by_bazel", "collect_bes_sinks", "dropped_bes_backends", "summarize_bes_upload")
 load("./deployment_flags.axl", "advertised_results_url", "announce_deployment_flags", "bes_results_url_flag", "deployment_endpoint_flags")
 load("./health_check.axl", "HealthCheckTrait")
 load("./lifecycle.axl", "Phase", "ProgressStyles", "ReproFixCommand", "TaskLifecycleTrait", "TaskUpdate", "apply_repro_fix_hooks", "dispatch_task_update", "setup_phase", "task_update")
