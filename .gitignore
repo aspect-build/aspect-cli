@@ -15,3 +15,7 @@ site
 .DS_Store
 
 .claude
+
+# IDE project state and the JetBrains Bazel plugin's generated aspect files
+.idea/
+.bazelbsp/
