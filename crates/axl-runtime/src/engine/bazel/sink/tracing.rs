@@ -6,7 +6,7 @@ use std::{
 
 use axl_proto::{
     Timestamp,
-    build_event_stream::{BuildEvent, build_event::Payload, build_event_id::Id},
+    build_event_stream::{BuildEvent, TestStatus, build_event::Payload, build_event_id::Id},
 };
 
 use tracing::{Level, span::EnteredSpan};
@@ -27,6 +27,27 @@ fn timestamp_or_now(timestamp: Option<&Timestamp>) -> i64 {
         },
         |t| t.seconds,
     )
+}
+
+/// OTel span status code (`otel.status_code`) for a Bazel test outcome.
+///
+/// The tracing→OTel layer maps this field's value through `str_to_status`:
+/// `"ok"` → `Status::Ok`, `"error"` → `Status::Error`, anything else →
+/// `Status::Unset`. Failing outcomes (`FAILED`/`TIMEOUT`/`FAILED_TO_BUILD`/
+/// `REMOTE_FAILURE`/`TOOL_HALTED_BEFORE_TESTING`) become errors so failing tests
+/// surface as error spans; `PASSED`/`FLAKY` are `ok` (flaky ultimately passed);
+/// `NO_STATUS`/`INCOMPLETE` stay unset. Mirrors `bazel_results.axl`'s
+/// `_FAILED_STATUSES`.
+fn test_status_code(status: TestStatus) -> &'static str {
+    match status {
+        TestStatus::Passed | TestStatus::Flaky => "ok",
+        TestStatus::Failed
+        | TestStatus::Timeout
+        | TestStatus::FailedToBuild
+        | TestStatus::RemoteFailure
+        | TestStatus::ToolHaltedBeforeTesting => "error",
+        _ => "unset",
+    }
 }
 
 impl Tracing {
@@ -74,6 +95,7 @@ impl Tracing {
                                 "action",
                                 otel.start_time = start_time,
                                 otel.end_time = end_time,
+                                otel.status_code = if action.success { "unset" } else { "error" },
                                 label = ?id.label,
                                 success = action.success,
                                 mnemonic = action.r#type,
@@ -124,10 +146,98 @@ impl Tracing {
                             success = target.success
                         );
                     }
-                    _ => {}
+                    (Payload::TestSummary(summary), Id::TestSummary(id)) => {
+                        // The authoritative per-target test outcome. Unlike the
+                        // TestRunner `action` span (which carries the spawn's
+                        // exit code — 0 for a spawn that merely executed), this
+                        // span carries the real BlazeTestStatus and sets the OTel
+                        // span status to error when the test failed.
+                        let status =
+                            TestStatus::try_from(summary.overall_status).unwrap_or(TestStatus::NoStatus);
+                        let start_time = timestamp_or_now(summary.first_start_time.as_ref());
+                        let end_time = timestamp_or_now(summary.last_stop_time.as_ref());
+                        let _test = tracing::info_span!(
+                            "test",
+                            otel.start_time = start_time,
+                            otel.end_time = end_time,
+                            otel.status_code = test_status_code(status),
+                            label = id.label.as_str(),
+                            status = status.as_str_name(),
+                            success = matches!(status, TestStatus::Passed | TestStatus::Flaky),
+                            run_count = summary.run_count,
+                            shard_count = summary.shard_count,
+                            attempt_count = summary.attempt_count,
+                            total_run_count = summary.total_run_count,
+                            cached = summary.total_num_cached,
+                        )
+                        .entered();
+                    }
+                    (Payload::TestResult(result), Id::TestResult(id)) => {
+                        // Per shard/run/attempt outcome. TestSummary is the
+                        // final target verdict; these are the individual attempts
+                        // (a failing attempt that later passes is visible here as
+                        // an error span while the summary reports FLAKY).
+                        let status = TestStatus::try_from(result.status).unwrap_or(TestStatus::NoStatus);
+                        let start_time = timestamp_or_now(result.test_attempt_start.as_ref());
+                        let end_time = start_time
+                            + result.test_attempt_duration.as_ref().map_or(0, |d| d.seconds);
+                        let _test_attempt = tracing::info_span!(
+                            "test_attempt",
+                            otel.start_time = start_time,
+                            otel.end_time = end_time,
+                            otel.status_code = test_status_code(status),
+                            label = id.label.as_str(),
+                            status = status.as_str_name(),
+                            cached = result.cached_locally,
+                            run = id.run,
+                            shard = id.shard,
+                            attempt = id.attempt,
+                        )
+                        .entered();
+                    }
+                    // High-volume streaming events (progress stdout/stderr chunks
+                    // and the NamedSetOfFiles fan-out) fire thousands of times per
+                    // build; representing each in the trace would flood the
+                    // exporter with no observability value. Everything else is
+                    // recorded as a lightweight span-event keyed by BES event kind
+                    // so no meaningful build event is silently dropped.
+                    (Payload::Progress(_), _) | (Payload::NamedSetOfFiles(_), _) => {}
+                    (_, id) => {
+                        tracing::event!(name: "bes_event", Level::INFO, kind = id.as_str_name());
+                    }
                 }
             }
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failing_statuses_map_to_error() {
+        for s in [
+            TestStatus::Failed,
+            TestStatus::Timeout,
+            TestStatus::FailedToBuild,
+            TestStatus::RemoteFailure,
+            TestStatus::ToolHaltedBeforeTesting,
+        ] {
+            assert_eq!(test_status_code(s), "error", "{s:?} should be an error span");
+        }
+    }
+
+    #[test]
+    fn passing_and_flaky_map_to_ok() {
+        assert_eq!(test_status_code(TestStatus::Passed), "ok");
+        assert_eq!(test_status_code(TestStatus::Flaky), "ok");
+    }
+
+    #[test]
+    fn indeterminate_statuses_stay_unset() {
+        assert_eq!(test_status_code(TestStatus::NoStatus), "unset");
+        assert_eq!(test_status_code(TestStatus::Incomplete), "unset");
     }
 }
