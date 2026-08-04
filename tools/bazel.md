@@ -151,7 +151,11 @@ The fix: aspect sets `ASPECT_CLI_RUNNING=1` on every child `bazel` it spawns. `t
 Two lists at the top of the script drive every routing decision; edit them in your repo copy:
 
 - `ASPECT_VERBS_WITH_BAZEL_FLAGS` — verbs routed to `aspect` with bazel-flag rewriting. Default: `build buildifier delivery format gazelle lint test`. Add your own bazel-flag-aware aspect commands (e.g. a custom task that shells out to bazel) — including `run`, once you're ready for `aspect run` to shadow `bazel run` in your workspace. (`ASPECT_WRAPPER_SKIP=1` bypasses this entirely — everything goes to vanilla bazel.)
-- `BAZEL_VERBS` — the closed set of Bazel commands. A verb here that's *not* in the list above forwards to vanilla bazel. A verb in *neither* list is treated as a custom aspect task and routed to aspect verbatim. Update this only if Bazel adds a command.
+- `BAZEL_VERBS` — the closed set of Bazel commands. A verb here that's *not* in the list above forwards to vanilla bazel. A verb in *neither* list is treated as a custom aspect task and routed to aspect verbatim. Update this only if Bazel adds a command, and regenerate it from `bazel help completion`'s `BAZEL_COMMAND_LIST` rather than `bazel help` — the latter hides some commands (`config`), and a hidden command missing here gets misrouted to `aspect`:
+
+  ```
+  bazel help completion | sed -n 's/^BAZEL_COMMAND_LIST="\(.*\)"$/\1/p'
+  ```
 
 Plus the embedded Bazel flag lists (`BAZEL_VALUE_FLAGS`, `BAZEL_BOOL_FLAGS`, `BAZEL_SHORT_VALUE_FLAGS`, `BAZEL_SHORT_BOOL_FLAGS`) covered above. There is no aspect-flag list — anything not recognized as a Bazel flag passes through to aspect.
 
