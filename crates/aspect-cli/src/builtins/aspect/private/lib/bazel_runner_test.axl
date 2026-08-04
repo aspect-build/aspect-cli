@@ -6,11 +6,16 @@ bazel-driving task calls after `build.wait()` / `test.wait()` to fire
 helpers are short, but they're the contract every task depends on —
 silent breakage here would skip every Workflows-feature recovery hook.
 
+Also covers `target_patterns`, which decides whether the `targets` arg's
+default reaches Bazel — get that wrong and a caller-forwarded
+`--target_pattern_file` collides with an invented pattern, which Bazel
+rejects outright.
+
 Run with:
   aspect dev test-bazel-runner
 """
 
-load("./bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
+load("./bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end", "target_patterns")
 
 def _eq(label, got, want):
     if got != want:
@@ -84,13 +89,65 @@ def _test_attempt_dispatch_does_not_fire_build_end(_):
     _eq("attempt fired", recorder["attempt"], [("a", 0)])
     _eq("build_end not fired", recorder["build_end"], [])
 
+def _fake_rc(values = {}):
+    """Stand-in for a `RunCommand`: `target_patterns` calls only `flag_value`.
+    Same shape as the fakes in `bazel_flags_test.axl` /
+    `deployment_flags_test.axl`, keyed `{command: {flag: value}}` so a test can
+    pin that the lookup is command-scoped. The real last-wins / `=`-form /
+    two-token matching lives in `crates/bazelrc` and is tested there."""
+    return struct(flag_value = lambda name, command: values.get(command, {}).get(name))
+
+def _test_default_reaches_bazel_when_nothing_else_supplies_patterns(_):
+    """No pattern file anywhere → the arg default is the target list."""
+    _eq(
+        "default pattern forwarded",
+        target_patterns(False, ["..."], "", _fake_rc(), "build"),
+        ["..."],
+    )
+
+def _test_forwarded_flag_suppresses_the_default(_):
+    """`--bazel-flag=--target_pattern_file=…` with no positionals: Bazel must
+    see the flag and no residue, or it fails the invocation outright."""
+    rc = _fake_rc({"build": {"--target_pattern_file": "/tmp/p"}})
+    _eq("default suppressed", target_patterns(False, ["..."], "", rc, "build"), [])
+
+def _test_explicit_patterns_always_reach_bazel(_):
+    """Explicit patterns alongside a forwarded pattern file are forwarded as-is
+    so Bazel reports the conflict — the runner owns no second spelling of it."""
+    rc = _fake_rc({"build": {"--target_pattern_file": "/tmp/p"}})
+    _eq(
+        "explicit patterns preserved",
+        target_patterns(True, ["//foo:bar"], "", rc, "build"),
+        ["//foo:bar"],
+    )
+
+def _test_aspect_own_flag_suppresses_the_default(_):
+    """aspect's own `--target-pattern-file` is resolved before the rc exists, so
+    it is passed in directly rather than read back off `rc`."""
+    _eq(
+        "default suppressed",
+        target_patterns(False, ["..."], "/tmp/p", _fake_rc(), "build"),
+        [],
+    )
+
+def _test_lookup_is_command_scoped(_):
+    """A pattern file set for `build` must not suppress the default for a
+    `test` run — `flag_value` is asked about the running subcommand."""
+    rc = _fake_rc({"build": {"--target_pattern_file": "/tmp/p"}})
+    _eq("test unaffected", target_patterns(False, ["..."], "", rc, "test"), ["..."])
+
 def _test_impl(ctx):
     _test_attempt_dispatch_empty_is_noop(ctx)
     _test_build_end_dispatch_empty_is_noop(ctx)
     _test_attempt_dispatch_invokes_in_order(ctx)
     _test_build_end_dispatch_invokes_in_order(ctx)
     _test_attempt_dispatch_does_not_fire_build_end(ctx)
-    print("bazel_runner_test.axl: OK (5 sections)")
+    _test_default_reaches_bazel_when_nothing_else_supplies_patterns(ctx)
+    _test_forwarded_flag_suppresses_the_default(ctx)
+    _test_explicit_patterns_always_reach_bazel(ctx)
+    _test_aspect_own_flag_suppresses_the_default(ctx)
+    _test_lookup_is_command_scoped(ctx)
+    print("bazel_runner_test.axl: OK (10 sections)")
     return 0
 
 bazel_runner_tests = task(
