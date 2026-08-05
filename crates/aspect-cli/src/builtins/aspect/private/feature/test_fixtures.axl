@@ -97,7 +97,7 @@ def make_test_failed():
 def make_build_failing_actions():
     """Build invocation in flight, BES has already reported a failed action.
 
-    Mirrors the live `bazel_runner.axl` path that emits `status="failing"`
+    Mirrors the live bazel build that emits `status="failing"`
     when `failed_actions_total > 0` — used to drive the early-feedback red
     stripe before the bazel invocation completes.
     """
@@ -122,7 +122,7 @@ def make_test_failing_test_fails():
 def make_test_running_flaky_only():
     """Test invocation streaming events, BES has reported flakes but no real failures.
 
-    `bazel_runner.axl` keeps the live status as "running" (not "failing")
+    the bazel build keeps the live status as "running" (not "failing")
     when only flakes are observed, so the stripe should be yellow rather
     than red.
     """
