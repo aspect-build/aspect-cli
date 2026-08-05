@@ -714,9 +714,23 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// Run `bazel info` and return all key/value pairs as a dict.
     ///
     /// Blocks until the command completes. Raises an error if Bazel exits
-    /// with a non-zero code.
+    /// with a non-zero code; the error carries Bazel's own stderr, since the
+    /// exit code alone (`2` for every command-line error) doesn't say what
+    /// went wrong.
+    ///
+    /// Runs under the active `RunCommand` (`use_rc`) or the per-call `rc=`,
+    /// exactly like `build` / `query`: both its startup flags and its
+    /// `info`-applicable command flags are replayed. That matters because
+    /// those startup flags carry `--ignore_all_rc_files` — without the command
+    /// flags the on-disk rc would be suppressed and nothing put back, so this
+    /// invocation would resolve keys like `output_path` under different flags
+    /// than the build it is reporting on.
     ///
     /// # Arguments
+    /// * `keys`: `info` keys to request (default: all). Narrowing to the keys
+    ///   actually needed keeps an unknown-key error from a Bazel version that
+    ///   dropped some unrelated key out of the picture.
+    /// * `rc`: run command to resolve flags from; overrides the active one.
     /// * `directory`: working directory to run `bazel info` in; selects the
     ///   workspace / server (default: the parent process cwd).
     ///
@@ -727,21 +741,33 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///     info = ctx.bazel.info()
     ///     print(info["output_base"])
     ///     print(info["execution_root"])
+    ///     only = ctx.bazel.info(keys = ["output_path"])
     /// ```
     fn info<'v>(
         this: values::Value<'v>,
+        #[starlark(require = named, default = UnpackList::default())] keys: UnpackList<
+            values::StringValue<'v>,
+        >,
+        #[starlark(require = named, default = NoneOr::None)] rc: NoneOr<values::Value<'v>>,
         #[starlark(require = named, default = NoneOr::None)] directory: NoneOr<String>,
     ) -> anyhow::Result<SmallMap<String, String>> {
-        let startup_flags = read_startup_flags(this)?;
+        let (startup_flags, command_flags) = match effective_rc(this, rc) {
+            Some(rc) => rc.resolve_for_command("info")?,
+            None => (read_startup_flags(this)?, Vec::new()),
+        };
 
         let mut cmd = bazel_command();
         cmd.args(&startup_flags);
         cmd.arg("info");
+        cmd.args(&command_flags);
+        for key in &keys.items {
+            cmd.arg(key.as_str());
+        }
         if let Some(dir) = directory.into_option() {
             cmd.current_dir(dir);
         }
         cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::null());
+        cmd.stderr(Stdio::piped());
         cmd.stdin(Stdio::null());
         // Register with the live-bazel registry so OS-signal cancellation
         // can reach this `bazel info` even if the daemon is busy.
@@ -752,9 +778,16 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             .map_err(|e| anyhow::anyhow!("failed to wait on bazel: {}", e))?;
 
         if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let detail = stderr.trim();
             anyhow::bail!(
-                "bazel info failed with exit code {:?}",
-                output.status.code()
+                "bazel info failed with exit code {:?}{}",
+                output.status.code(),
+                if detail.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n{detail}")
+                }
             );
         }
 

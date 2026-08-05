@@ -25,7 +25,7 @@ _REPORT_PLACEHOLDERS = ["{report}", "{lcov}"]
 
 def _resolve_report(ctx):
     """Locate the merged LCOV report; empty string when unavailable."""
-    output_path = ctx.bazel.info().get("output_path")
+    output_path = ctx.bazel.info(keys = ["output_path"]).get("output_path")
     if not output_path:
         return ""
     report = output_path + "/" + _COMBINED_REPORT_RELPATH
