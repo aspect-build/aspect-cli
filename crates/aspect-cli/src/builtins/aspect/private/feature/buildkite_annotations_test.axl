@@ -18,7 +18,7 @@ contracts a config writes against:
     "details" are independent, per-task-kind blocks overlay the flat keys,
     every renderer module exports the templates a config patches, and a broken
     template degrades to a fallback.
-  - `TaskLifecycleTrait.status_surface_update` — verdicts resolve, chain, and
+  - `Phases.status_surface_update` — verdicts resolve, chain, and
     compose across surfaces, and a `remove` no surface can honor downgrades to
     a publish.
 """

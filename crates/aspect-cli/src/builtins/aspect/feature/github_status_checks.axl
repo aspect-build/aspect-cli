@@ -10,13 +10,13 @@ new task kinds plug in there.
 
 ## Restyling or rewriting the check run
 
-`TaskLifecycleTrait.status_surface_update` is consulted before every write and
+`Phases.status_surface_update` is consulted before every write and
 returns a verdict — publish, or publish with a different style or body. Here
 `update.body` is the check run's details text and `update.style` is the conclusion
 this write would land (`""` when it lands none, e.g. a mid-run PATCH). A
 restyle overrides the conclusion, which decides whether the check blocks a PR:
 
-    load("@aspect//traits.axl", "SURFACE_PUBLISH", "StatusSurfaceUpdate", "TaskLifecycleTrait", "surface_restyle")
+    load("@aspect//traits.axl", "SURFACE_PUBLISH", "StatusSurfaceUpdate", "Phases", "surface_restyle")
 
     # Report lint findings without blocking the PR.
     def _lint_never_blocks(ctx: TaskContext, info: StatusSurfaceUpdate):
@@ -25,7 +25,7 @@ restyle overrides the conclusion, which decides whether the check blocks a PR:
         return SURFACE_PUBLISH
 
     def config(ctx):
-        ctx.traits[TaskLifecycleTrait].status_surface_update.append(_lint_never_blocks)
+        ctx.traits[Phases].status_surface_update.append(_lint_never_blocks)
 
 `remove` isn't supported — GitHub can't delete a check run — so a removal is
 downgraded to a publish and logged. Only `BuildkiteAnnotations` honors it.
@@ -71,7 +71,7 @@ load("../private/lib/environment.axl", "feature_logger", "workflows_results_url"
 load("../private/lib/github.axl", "detect_commit_sha", "detect_github_repo", "github")
 load(
     "../private/lib/lifecycle.axl",
-    "TaskLifecycleTrait",
+    "Phases",
     "TaskUpdate",
     "resolve_surface_update",
 )
@@ -159,7 +159,7 @@ def _collect_ci_links(ctx, results_base_url):
     }
 
 def _github_status_checks(ctx: FeatureContext):
-    lifecycle = ctx.traits[TaskLifecycleTrait]
+    lifecycle = ctx.traits[Phases]
 
     templates = ctx.args.templates or {}
     metadata_keys = list(ctx.args.metadata_keys or [])
@@ -424,7 +424,7 @@ def _github_status_checks(ctx: FeatureContext):
         # under budget pressure; the conclusion-setting calls above always land.
         github.status_checks.update(ctx, token, owner, repo, check_run_id, output = output, skippable = True)
 
-    # TaskLifecycleTrait hooks
+    # Phases hooks
 
     def _init(ctx):
         # One-time init on first task_update: stash the task name (FeatureContext

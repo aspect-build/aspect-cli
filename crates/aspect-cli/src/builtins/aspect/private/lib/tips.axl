@@ -156,7 +156,7 @@ def tip_shows_on(tip, surface):
 #
 # A `tip_suggestion` hook (on the public `TipsTrait`) fires on every
 # `add_tip`, letting `config.axl` accept/reject/rewrite any tip — same
-# shape as `repro_fix_suggestion` on `TaskLifecycleTrait`.
+# shape as `repro_fix_suggestion` on `Phases`.
 
 # `accept` keeps, `reject` drops (never stored/surfaced), `replace`
 # overrides the set fields on the returned `TipSuggestion`.
