@@ -24,6 +24,7 @@ use_task("runner_health_check.axl", "runner_health_check")
 
 use_feature("feature/artifacts.axl", "ArtifactUpload")
 use_feature("feature/circleci_test_results.axl", "CircleCITestResults")
+use_feature("feature/deployment.axl", "Deployment")
 use_feature("feature/github_lint_comments.axl", "GithubLintComments")
 use_feature("feature/github_status_checks.axl", "GithubStatusChecks")
 use_feature("feature/github_status_comments.axl", "GithubStatusComments")

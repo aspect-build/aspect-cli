@@ -198,6 +198,48 @@ def collect_bes_from_args(ctx, extra_backends = [], bazel_backend: str = "") -> 
         )
     return sinks
 
+def advertised_results_url(sources: list[(str, str)], rc, bes_sinks: list, command: str = "build") -> str:
+    """The build-result viewer for this invocation, or `""`.
+
+    `sources` are the `(backend, viewer)` pairs features registered on
+    `BazelTrait.bes_results_sources`, in priority order. Keeping each pair together
+    means the URL always belongs to the BES that actually received the invocation: a
+    build streaming to a deployment's BES gets that deployment's viewer even on a
+    runner whose environment advertises a different backend.
+
+    `""` when nothing this build reports to has an advertised viewer — a third-party
+    BES, or a source naming only one half of the pair.
+    """
+
+    # Everywhere this invocation reports BES: the CLI's own sinks (internal client)
+    # plus whatever Bazel uploads to itself.
+    reporting_to = [sink.uri for sink in bes_sinks if sink.uri] + [bazel_bes_backend(rc, command)]
+
+    for (backend, results_url) in sources:
+        if [target for target in reporting_to if same_bes_endpoint(backend, target)]:
+            return results_url
+    return ""
+
+def bes_results_url_flag(sources: list[(str, str)], rc, bes_sinks: list, command: str = "build") -> list:
+    """`["--bes_results_url=<url>"]` when *Bazel* uploads the BES itself, else `[]`.
+
+    Only Bazel consumes this flag, and only its BES module — the one `--bes_backend`
+    activates — reads it, to print "Streaming build results to: …" and to key the link
+    on its own `invocation_id`. Passing it on the CLI-streamed path would inject a flag
+    nothing acts on, so that path announces the URL itself; see
+    `announce_bes_results_url`.
+
+    A `--bes_results_url` the user already set — command line, `.bazelrc`, or an
+    expanded `--config`, all seen through `rc` — is never overridden.
+    """
+    if rc != None and rc.flag_value("--bes_results_url", command = command):
+        return []
+    if not bazel_bes_backend(rc, command):
+        return []
+
+    results_url = advertised_results_url(sources, rc, bes_sinks, command)
+    return ["--bes_results_url=" + results_url] if results_url else []
+
 def bes_upload_line(uri: str, sent: int, acked: int, failed: bool) -> str:
     """The one-line summary of a CLI-streamed BES backend's upload:
 

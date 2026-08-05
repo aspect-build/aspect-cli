@@ -7,7 +7,7 @@ Run with:
   aspect dev test-bes-sinks
 """
 
-load("@aspect//bazel/build_events.axl", "bazel_bes_backend", "bes_results_line", "bes_streamed_by_bazel", "bes_upload_line", "collect_bes_from_args", "collect_bes_sinks", "dropped_bes_backends", "grpc_backends")
+load("@aspect//bazel/build_events.axl", "advertised_results_url", "bazel_bes_backend", "bes_results_line", "bes_results_url_flag", "bes_streamed_by_bazel", "bes_upload_line", "collect_bes_from_args", "collect_bes_sinks", "dropped_bes_backends", "grpc_backends")
 
 def _eq(label, got, want):
     if got != want:
@@ -35,6 +35,15 @@ def _fake_rc(values):
     """Stand-in for a `RunCommand`: `bazel_bes_backend` calls only `flag_value`.
     `values` maps a flag name to its effective value."""
     return struct(flag_value = lambda name, command: values.get(name))
+
+def _sinks(*uris):
+    """Fake CLI-streamed BES sinks; the results-url resolver reads only `.uri`."""
+    return [struct(uri = uri) for uri in uris]
+
+# `(backend, viewer)` pairs as a feature would register them on
+# `BazelTrait.bes_results_sources`, in priority order.
+_GCP = ("grpcs://bes.gcp", "https://app.gcp/i/")
+_RUNNER = ("grpcs://bes.runner", "https://app.runner")
 
 def _fake_trait(sinks):
     """Stand-in for `BazelTrait`: `collect_bes_sinks` reads only its sink list."""
@@ -268,6 +277,90 @@ def _test_bes_streamed_by_bazel(_):
     _eq("no bazel backend", check(""), False)
     _eq("off a runner", check(aspect_backend, runner_backend = ""), False)
 
+def _test_bes_flag_only_when_bazel_uploads(_):
+    """Only Bazel reads `--bes_results_url`, and only when its own `--bes_backend`
+    activates the BES module — so the CLI-streamed path gets no flag (it announces the
+    URL itself instead)."""
+    _eq(
+        "bazel-side upload → wired",
+        bes_results_url_flag([_GCP], _fake_rc({"--bes_backend": "grpcs://bes.gcp"}), []),
+        ["--bes_results_url=https://app.gcp/i/"],
+    )
+    _eq(
+        "cli internal client → no flag for Bazel to read",
+        bes_results_url_flag([_GCP], _fake_rc({}), _sinks("grpcs://bes.gcp")),
+        [],
+    )
+
+def _test_bes_flag_needs_an_advertised_backend(_):
+    """Bazel uploading to some third-party BES gets nothing — no results URL describes
+    it."""
+    _eq(
+        "third-party bazel backend → not wired",
+        bes_results_url_flag([_GCP], _fake_rc({"--bes_backend": "grpcs://bes.elsewhere"}), []),
+        [],
+    )
+    _eq("no forwarding at all → not wired", bes_results_url_flag([_GCP], _fake_rc({}), []), [])
+
+def _test_bes_flag_yields_to_user_flag(_):
+    _eq(
+        "a user-set --bes_results_url is never overridden",
+        bes_results_url_flag(
+            [_GCP],
+            _fake_rc({"--bes_results_url": "https://mine.example", "--bes_backend": "grpcs://bes.gcp"}),
+            _sinks("grpcs://bes.gcp"),
+        ),
+        [],
+    )
+
+def _test_results_url_matches_backend_source(_):
+    """The viewer comes from whichever source advertised the backend being reported to,
+    so it is never quoted for a BES it doesn't serve."""
+    both = [_RUNNER, _GCP]
+    _eq(
+        "deployment backend → deployment viewer",
+        advertised_results_url(both, _fake_rc({}), _sinks("grpcs://bes.gcp")),
+        "https://app.gcp/i/",
+    )
+    _eq(
+        "env backend → env viewer",
+        advertised_results_url(both, _fake_rc({}), _sinks("grpcs://bes.runner")),
+        "https://app.runner",
+    )
+
+def _test_results_url_first_source_wins(_):
+    """Two sources naming the SAME backend: the earlier registration wins, which is how
+    a runner's environment takes precedence over a `--remote` deployment."""
+    same = [("grpcs://bes.gcp", "https://app.runner"), _GCP]
+    _eq(
+        "same backend from both → first viewer wins",
+        advertised_results_url(same, _fake_rc({}), _sinks("grpcs://bes.gcp")),
+        "https://app.runner",
+    )
+    _eq(
+        "both streamed → first viewer wins",
+        advertised_results_url([_RUNNER, _GCP], _fake_rc({}), _sinks("grpcs://bes.gcp", "grpcs://bes.runner")),
+        "https://app.runner",
+    )
+
+def _test_results_url_absent_without_a_match(_):
+    _eq(
+        "third-party BES → no base",
+        advertised_results_url([_GCP], _fake_rc({}), _sinks("grpcs://bes.elsewhere")),
+        "",
+    )
+    _eq("no forwarding at all → no base", advertised_results_url([_GCP], _fake_rc({}), []), "")
+    _eq(
+        "a source with no viewer contributes no URL",
+        advertised_results_url([("grpcs://bes.aws", "")], _fake_rc({}), _sinks("grpcs://bes.aws")),
+        "",
+    )
+    _eq(
+        "a viewer with no backend matches nothing",
+        advertised_results_url([("", "https://app.runner")], _fake_rc({}), _sinks("grpcs://bes.aws")),
+        "",
+    )
+
 _UNIT_TESTS = [
     _test_clean_stream,
     _test_failed_stream,
@@ -281,6 +374,12 @@ _UNIT_TESTS = [
     _test_collect_drops_duplicate_backends,
     _test_collect_bes_sinks,
     _test_bes_streamed_by_bazel,
+    _test_bes_flag_only_when_bazel_uploads,
+    _test_bes_flag_needs_an_advertised_backend,
+    _test_bes_flag_yields_to_user_flag,
+    _test_results_url_matches_backend_source,
+    _test_results_url_first_source_wins,
+    _test_results_url_absent_without_a_match,
 ]
 
 def _test_impl(ctx):

@@ -4,7 +4,8 @@ Run with:
   aspect dev test-bazel-flags
 """
 
-load("@aspect//bazel.axl", "BazelTrait", "aspect_endpoint_auth_flags", "bazel", "testonly_config_names", "testonly_flags_delta")
+load("@aspect//bazel.axl", "BazelTrait", "bazel", "testonly_config_names", "testonly_flags_delta")
+load("./deployment_flags.axl", "deployment_auth_flags")
 
 def _eq(label, got, want):
     if got != want:
@@ -234,41 +235,41 @@ _CACHE = "remote.acme.aspect.build"
 _BES = "bes.acme.aspect.build"
 
 def _test_auth_flags(ctx):
-    """`aspect_endpoint_auth_flags` attaches `--remote_header`/`--bes_header` only for an
+    """`deployment_auth_flags` attaches `--remote_header`/`--bes_header` only for an
     endpoint owned by a configured deployment, lacking a user authorization
     header, and only when a credential resolves. Covers the cache path, the BES
     path, and their combination through the one public entry point."""
     both = _fake_auth_ctx(access_token = _TOK, owned_hosts = [_CACHE, _BES])
 
-    _eq("no endpoints", aspect_endpoint_auth_flags(both, _fake_rc(), "build"), [])
+    _eq("no endpoints", deployment_auth_flags(both, _fake_rc(), "build"), [])
     _eq(
         "unowned endpoints",
-        aspect_endpoint_auth_flags(both, _fake_rc({"--remote_cache": "grpcs://remote.buildbuddy.io", "--bes_backend": "grpcs://bes.buildbuddy.io"}), "build"),
+        deployment_auth_flags(both, _fake_rc({"--remote_cache": "grpcs://remote.buildbuddy.io", "--bes_backend": "grpcs://bes.buildbuddy.io"}), "build"),
         [],
     )
     _eq(
         "owned cache only",
-        aspect_endpoint_auth_flags(both, _fake_rc({"--remote_cache": "grpcs://" + _CACHE}), "build"),
+        deployment_auth_flags(both, _fake_rc({"--remote_cache": "grpcs://" + _CACHE}), "build"),
         ["--remote_header=authorization=Bearer " + _TOK],
     )
     _eq(
         "owned bes only",
-        aspect_endpoint_auth_flags(both, _fake_rc({"--bes_backend": "grpcs://" + _BES}), "build"),
+        deployment_auth_flags(both, _fake_rc({"--bes_backend": "grpcs://" + _BES}), "build"),
         ["--bes_header=authorization=Bearer " + _TOK],
     )
     _eq(
         "owned cache + bes together",
-        aspect_endpoint_auth_flags(both, _fake_rc({"--remote_cache": "grpcs://" + _CACHE, "--bes_backend": "grpcs://" + _BES}), "build"),
+        deployment_auth_flags(both, _fake_rc({"--remote_cache": "grpcs://" + _CACHE, "--bes_backend": "grpcs://" + _BES}), "build"),
         ["--remote_header=authorization=Bearer " + _TOK, "--bes_header=authorization=Bearer " + _TOK],
     )
     _eq(
         "user authorization header skips",
-        aspect_endpoint_auth_flags(both, _fake_rc({"--remote_cache": "grpcs://" + _CACHE, "--remote_header": ["authorization=Bearer user"]}), "build"),
+        deployment_auth_flags(both, _fake_rc({"--remote_cache": "grpcs://" + _CACHE, "--remote_header": ["authorization=Bearer user"]}), "build"),
         [],
     )
     _eq(
         "owned cache + credential helper for host",
-        aspect_endpoint_auth_flags(
+        deployment_auth_flags(
             both,
             _fake_rc({"--remote_cache": "grpcs://" + _CACHE, "--credential_helper": ["*.acme.aspect.build=/usr/bin/helper"]}),
             "build",
@@ -277,7 +278,7 @@ def _test_auth_flags(ctx):
     )
     _eq(
         "not logged in",
-        aspect_endpoint_auth_flags(
+        deployment_auth_flags(
             _fake_auth_ctx(owned_hosts = [_CACHE]),
             _fake_rc({"--remote_cache": "grpcs://" + _CACHE}),
             "build",
@@ -289,7 +290,7 @@ def _test_auth_flags(ctx):
     # own `authorization`, so the CLI must not inject a second one (issue #1325).
     _eq(
         "owned bes + credential helper for host",
-        aspect_endpoint_auth_flags(
+        deployment_auth_flags(
             both,
             _fake_rc({"--bes_backend": "grpcs://" + _BES, "--credential_helper": [_BES + "=/usr/bin/helper"]}),
             "build",
@@ -298,7 +299,7 @@ def _test_auth_flags(ctx):
     )
     _eq(
         "owned bes + unscoped credential helper",
-        aspect_endpoint_auth_flags(
+        deployment_auth_flags(
             both,
             _fake_rc({"--bes_backend": "grpcs://" + _BES, "--credential_helper": ["/usr/bin/helper"]}),
             "build",
@@ -310,7 +311,7 @@ def _test_auth_flags(ctx):
     # Bazel option, so it must suppress the injected auth too.
     _eq(
         "owned bes + experimental credential helper for host",
-        aspect_endpoint_auth_flags(
+        deployment_auth_flags(
             both,
             _fake_rc({"--bes_backend": "grpcs://" + _BES, "--experimental_credential_helper": [_BES + "=/usr/bin/helper"]}),
             "build",
@@ -321,7 +322,7 @@ def _test_auth_flags(ctx):
     # A credential helper for a different host does not suppress the injected auth.
     _eq(
         "owned bes + credential helper for other host still injects",
-        aspect_endpoint_auth_flags(
+        deployment_auth_flags(
             both,
             _fake_rc({"--bes_backend": "grpcs://" + _BES, "--credential_helper": ["remote.buildbuddy.io=/usr/bin/helper"]}),
             "build",
