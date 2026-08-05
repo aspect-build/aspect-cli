@@ -1,4 +1,5 @@
-"""The `BazelTrait` interface, Bazel exit codes, and the retry budget constants.
+"""The `BazelTrait` interface, Bazel exit codes, the retry budget constants, and
+the `dispatch_*` helpers that fire the trait's lifecycle hooks.
 
 Exit codes correspond to Bazel's ExitCode.java:
 https://github.com/bazelbuild/bazel/blob/master/src/main/java/com/google/devtools/build/lib/util/ExitCode.java
@@ -85,3 +86,13 @@ BazelTrait = trait(
     bazel_attempt_end = attr(list[typing.Callable[[TaskContext, int], None]], default = [], description = "Hooks called once after EACH Bazel invocation attempt (including retries), with that attempt's exit code. Runs after the wait() returns and before the retry decision, so a hook can take corrective action (e.g. clean stranded sandbox state) that might let the next retry succeed. Distinct from `build_end`, which fires once after the final attempt."),
     build_end = attr(list[typing.Callable[[TaskContext, int], None]], default = [], description = "Hooks called once after the Bazel invocation completes (after all retries), with the final exit code"),
 )
+
+def dispatch_bazel_attempt_end(ctx: TaskContext, bazel_trait: BazelTrait, exit_code: int) -> None:
+    """Fire every `bazel_attempt_end` hook with `exit_code`."""
+    for handler in bazel_trait.bazel_attempt_end:
+        handler(ctx, exit_code)
+
+def dispatch_bazel_build_end(ctx: TaskContext, bazel_trait: BazelTrait, exit_code: int) -> None:
+    """Fire every `build_end` hook with `exit_code`."""
+    for handler in bazel_trait.build_end:
+        handler(ctx, exit_code)

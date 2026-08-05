@@ -10,7 +10,7 @@ Run with:
   aspect dev test-bazel-runner
 """
 
-load("./bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
+load("@aspect//bazel.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
 
 def _eq(label, got, want):
     if got != want:

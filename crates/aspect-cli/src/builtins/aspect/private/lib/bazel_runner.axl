@@ -13,7 +13,7 @@ applies uniformly to both tasks.
 """
 
 load("@aspect//bazel/build_events.axl", "announce_bes_results_url", "announce_bes_sinks", "announce_dropped_bes_sinks", "bes_streamed_by_bazel", "collect_bes_sinks", "dropped_bes_backends", "summarize_bes_upload")
-load("@aspect//bazel.axl", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
+load("@aspect//bazel.axl", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
 load("@std//time.axl", "sleep_iter")
 load("./bazel_flags.axl", "aspect_endpoint_auth_flags", "resolve_bazel_announce")
 load("./bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "collapse_repro_targets", "failed_labels", "failed_labels_by_subcommand", "init_data", "now_ms", "process_event", bazel_conclusion = "conclusion")
@@ -217,32 +217,6 @@ def _emit_terminal(ctx, lifecycle, command, data, exit_code, targets = []):
         text = bookend,
         flagged = final_status == "warning",
     )
-
-def dispatch_bazel_attempt_end(ctx, bazel_trait, exit_code):
-    """Fire every `bazel_trait.bazel_attempt_end` hook with `exit_code`.
-
-    Call after a `ctx.bazel.build(...).wait()` (or `ctx.bazel.test(...).wait()`)
-    has returned and any per-invocation work that must complete before the
-    NEXT attempt is done (notably BES sink draining — re-binding a Live sink
-    errors). Inside a retry loop, fires BEFORE the retry decision so a hook
-    can repair state that would otherwise make the next attempt fail the same
-    way (e.g. `bazel.recover_poisoned_sandbox` for bazelbuild/bazel#23880).
-    Outside a retry loop (single-attempt tasks), fires exactly once.
-    """
-    for handler in bazel_trait.bazel_attempt_end:
-        handler(ctx, exit_code)
-
-def dispatch_bazel_build_end(ctx, bazel_trait, exit_code):
-    """Fire every `bazel_trait.build_end` hook with the FINAL `exit_code`.
-
-    Call after the retry loop has exited (or, for single-attempt tasks, after
-    the only `wait()`). Features hang task-finalization logic on this hook —
-    e.g. `ArtifactUpload._on_build_end` runs the Profile / BEP / Execlog /
-    Testlogs upload step here, and `sandbox_recovery.make_final_status_hook`
-    signals the runner unhealthy on a final server-internal-error exit.
-    """
-    for handler in bazel_trait.build_end:
-        handler(ctx, exit_code)
 
 def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclusion:
     """Shared impl for build/test tasks.
