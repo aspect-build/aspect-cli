@@ -2,7 +2,7 @@
 
 `GithubStatusChecks` (`feature/github_status_checks.axl`) and
 `BuildkiteAnnotations` (`feature/buildkite_annotations.axl`) both
-subscribe to the same `TaskLifecycleTrait` slots, dispatch on
+subscribe to the same `Phases` slots, dispatch on
 `task_update.kind`, and share the same throttle / link-augmentation
 logic. This module hosts the parts that should stay in lockstep when a
 new task kind is added or a renderer's signature evolves.
