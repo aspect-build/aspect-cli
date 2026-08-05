@@ -270,6 +270,31 @@ impl<'v> values::StarlarkValue<'v> for FrozenBazel {
     }
 }
 
+/// Parse `bazel info` stdout into a key/value map.
+///
+/// Bazel formats the output differently depending on how many keys were asked
+/// for: requesting exactly one key prints the bare value with no `key: ` prefix,
+/// while zero keys (all of them) or two or more print `key: value` lines. The
+/// single-key case is therefore keyed from the request rather than the output —
+/// parsing it would yield nothing, or worse, split a value that itself contains
+/// `": "`.
+fn parse_info_output<S: AsRef<str>>(stdout: &str, keys: &[S]) -> SmallMap<String, String> {
+    let mut map = SmallMap::new();
+    if let [key] = keys {
+        let value = stdout.trim();
+        if !value.is_empty() {
+            map.insert(key.as_ref().to_string(), value.to_string());
+        }
+        return map;
+    }
+    for line in stdout.lines() {
+        if let Some((key, value)) = line.split_once(": ") {
+            map.insert(key.trim().to_string(), value.trim().to_string());
+        }
+    }
+    map
+}
+
 /// The startup flags for an invocation: sourced from the active `RunCommand`
 /// (set by `use_rc`), or empty when none is active.
 fn read_startup_flags<'v>(this: values::Value<'v>) -> anyhow::Result<Vec<String>> {
@@ -729,7 +754,9 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// # Arguments
     /// * `keys`: `info` keys to request (default: all). Narrowing to the keys
     ///   actually needed keeps an unknown-key error from a Bazel version that
-    ///   dropped some unrelated key out of the picture.
+    ///   dropped some unrelated key out of the picture. The result is keyed the
+    ///   same way regardless of how many keys are requested, even though Bazel
+    ///   prints a bare value for a single key and `key: value` lines otherwise.
     /// * `rc`: run command to resolve flags from; overrides the active one.
     /// * `directory`: working directory to run `bazel info` in; selects the
     ///   workspace / server (default: the parent process cwd).
@@ -792,13 +819,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let mut map = SmallMap::new();
-        for line in stdout.lines() {
-            if let Some((key, value)) = line.split_once(": ") {
-                map.insert(key.trim().to_string(), value.trim().to_string());
-            }
-        }
-        Ok(map)
+        let requested: Vec<&str> = keys.items.iter().map(|k| k.as_str()).collect();
+        Ok(parse_info_output(&stdout, &requested))
     }
 
     /// Shut down the Bazel server for the active run command (`bazel shutdown`),
@@ -1309,10 +1331,52 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
 
 #[cfg(test)]
 mod tests {
-    use super::constraint_matches;
+    use super::{constraint_matches, parse_info_output};
 
     fn version(s: &str) -> semver::Version {
         semver::Version::parse(s).unwrap()
+    }
+
+    #[test]
+    fn single_key_output_is_keyed_from_the_request() {
+        // `bazel info <key>` prints the bare value with no `key: ` prefix, so
+        // parsing it as `key: value` would return an empty map and silently
+        // strand callers like the `--coverage` report lookup.
+        let map = parse_info_output("/tmp/ws/bazel-out\n", &["output_path"]);
+        assert_eq!(
+            map.get("output_path").map(String::as_str),
+            Some("/tmp/ws/bazel-out")
+        );
+    }
+
+    #[test]
+    fn single_key_value_containing_a_colon_is_not_split() {
+        let map = parse_info_output("C:\\ws\\out: dir/command.log\n", &["command_log"]);
+        assert_eq!(
+            map.get("command_log").map(String::as_str),
+            Some("C:\\ws\\out: dir/command.log")
+        );
+    }
+
+    #[test]
+    fn multi_key_and_all_key_output_is_parsed_as_pairs() {
+        let stdout = "output_path: /tmp/ws/bazel-out\noutput_base: /tmp/ws\n";
+
+        let map = parse_info_output(stdout, &["output_path", "output_base"]);
+        assert_eq!(
+            map.get("output_path").map(String::as_str),
+            Some("/tmp/ws/bazel-out")
+        );
+        assert_eq!(map.get("output_base").map(String::as_str), Some("/tmp/ws"));
+
+        // No keys requested: Bazel prints every key in the same pair form.
+        let map = parse_info_output::<&str>(stdout, &[]);
+        assert_eq!(map.len(), 2);
+    }
+
+    #[test]
+    fn empty_single_key_output_yields_no_entry() {
+        assert!(parse_info_output("\n", &["output_path"]).is_empty());
     }
 
     #[test]
