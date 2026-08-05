@@ -344,7 +344,9 @@ def _impl(ctx: TaskContext) -> int:
 
     bazel_trait = ctx.traits[BazelTrait]
     startup_flags = bzl.flags.resolve_startup(ctx)
-    flags = bzl.flags.resolve(ctx)
+
+    # Trait base flags first — same composition as `bazel.setup_command`.
+    flags = list(bazel_trait.base_flags) + bzl.flags.resolve(ctx)
     announce_version, announce_command = bzl.announce.resolve(ctx)
 
     # One run command for the queries, the precise pre-build, and the probe — all
@@ -361,7 +363,7 @@ def _impl(ctx: TaskContext) -> int:
 
     # Attach the Aspect login JWT when the cache is an Aspect-owned endpoint;
     # the probe and pre-build below both hit it.
-    endpoint_auth_flags = bzl.endpoint_auth_flags(ctx, rc, "test")
+    endpoint_auth_flags = bzl.rc_flags(ctx, rc, "test")
 
     # Enumerate + reverse-dep under the same resolved flags as the probe/build,
     # so a `--config`/`--bazel-flag` that changes package loading or the test set

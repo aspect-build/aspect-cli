@@ -1,15 +1,14 @@
 """Everything about Bazel flags: the `--bazel-flag` / `--bazel-startup-flag` /
 `announce-bazel-*` CLI args, the task-facing arg bundles (`core_args` /
 `targets_arg`), startup+command flag composition, `.bazelrc` parsing
-(`setup_command` / `sibling_rc`), `--config=` expansion, and per-invocation
-endpoint auth flags.
+(`setup_command` / `sibling_rc`), `--config=` expansion, and the post-rc
+`rc_flags` hook seam.
 
 Stateless functions taking `ctx` and deriving the active `BazelTrait` from
 `ctx.traits` themselves (no `trait` argument to pass)."""
 
 load("@aspect//bazel/build_events.axl", "bes_args")
 load("@aspect//bazel/trait.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
-load("../private/lib/aspect_endpoint_auth.axl", "credential_helper_covers_host", "endpoint_host", "headers_have_auth", "needs_aspect_token", "resolve_aspect_bearer")
 load("../private/lib/environment.axl", "color_enabled", "detect_ci")
 
 def _require_arg(ctx, name: str) -> None:
@@ -148,14 +147,15 @@ def _setup_command(ctx, command: str, base_flags: list = []):
     `RunCommand`, registers it via `ctx.bazel.use_rc`, and emits the parsed-rc
     disclosure. Subsequent `ctx.bazel.build`/`test`/`query` use the active run
     command — each self-expands and adds `--ignore_all_rc_files`. `base_flags`
-    are task-injected defaults the user can override via `--bazel-flag=...`.
+    are task-injected defaults the user can override via `--bazel-flag=...`;
+    `trait.base_flags` (feature-injected defaults) are prepended ahead of them.
 
     Built-in tasks reach this through `phases.setup`, which
     calls it before the Bazel health-check hooks so the check inspects the same
     active run command every Bazel call uses.
     """
     startup_flags = _resolve_startup_flags(ctx)
-    flags = list(base_flags) + _resolve_flags(ctx)
+    flags = list(ctx.traits[BazelTrait].base_flags) + list(base_flags) + _resolve_flags(ctx)
     rc = ctx.bazel.parse_rc(
         startup_flags = startup_flags,
         flags = flags,
@@ -181,7 +181,7 @@ def _sibling_rc(ctx, startup_transform, command: str = "build", base_flags: list
     the disclosure — pass the returned rc as a per-call `rc=` on `ctx.bazel.build`.
     """
     startup_flags = startup_transform(_resolve_startup_flags(ctx))
-    flags = list(base_flags) + _resolve_flags(ctx)
+    flags = list(ctx.traits[BazelTrait].base_flags) + list(base_flags) + _resolve_flags(ctx)
     return ctx.bazel.parse_rc(
         startup_flags = startup_flags,
         flags = flags,
@@ -241,72 +241,14 @@ def _expand_config_flags(ctx, extra_flags: list, command: str = "build") -> list
 
     return _flags_delta(base, full)
 
-def _endpoint_auth_flags(ctx, rc, command, endpoint_flag, header_flag, what):
-    """Per-invocation `<header_flag>=authorization=Bearer <jwt>` flags for an
-    endpoint owned by a configured deployment named by `endpoint_flag`, or `[]`.
-
-    Reads the effective `endpoint_flag` (from `--bazel-flag`, a first-class flag,
-    or `.bazelrc` — all resolved through `rc`). When a configured deployment owns
-    its host (see `aspect_endpoint_auth.axl`) and the stream will not already carry
-    an `authorization` — neither an explicit `<header_flag>=authorization=…` nor a
-    `--credential_helper` registered for the host — returns the one auth header
-    flag. Suppressing on a matching credential helper keeps Bazel from adding a
-    second `authorization` alongside the injected one, which gRPC would comma-join
-    into a token a JWT-validating proxy rejects. Best-effort: an owned endpoint
-    with no usable credential warns and returns `[]`. `what` describes the endpoint
-    in that warning.
-    """
-    endpoint = rc.flag_value(endpoint_flag, command = command)
-    if not endpoint:
-        return []
-
-    # `--credential_helper` carries Bazel's `oldName` alias
-    # `--experimental_credential_helper`; both populate the same option, so a
-    # helper configured under either spelling makes Bazel add its own auth.
-    credential_helpers = (
-        rc.flag_values("--credential_helper", command = command) +
-        rc.flag_values("--experimental_credential_helper", command = command)
-    )
-    already_authenticated = (
-        headers_have_auth(rc.flag_values(header_flag, command = command)) or
-        credential_helper_covers_host(credential_helpers, endpoint_host(endpoint))
-    )
-    if not needs_aspect_token(ctx, [endpoint], already_authenticated):
-        return []
-    bearer = resolve_aspect_bearer(ctx, what, endpoint)
-    if not bearer:
-        return []
-    return [header_flag + "=authorization=" + bearer]
-
-def remote_cache_auth_flags(ctx, rc, command):
-    """Per-invocation flags attaching the Aspect login JWT to a configured
-    deployment's `--remote_cache` via `--remote_header`, or `[]`. See
-    `_endpoint_auth_flags`. Most callers want the combined
-    `aspect_endpoint_auth_flags`.
-    """
-    return _endpoint_auth_flags(ctx, rc, command, "--remote_cache", "--remote_header", "the remote cache")
-
-def bes_backend_auth_flags(ctx, rc, command):
-    """Per-invocation flags attaching the Aspect login JWT to a Bazel-streamed
-    `--bes_backend` owned by a configured deployment, via `--bes_header`, or `[]`.
-    See `_endpoint_auth_flags`.
-
-    For the CLI's own BES sink (`--bes-backend`) the JWT is attached to the sink
-    metadata instead; this covers the case where the user routes BES through
-    Bazel via `--bazel-flag=--bes_backend=…`.
-    """
-    return _endpoint_auth_flags(ctx, rc, command, "--bes_backend", "--bes_header", "build events")
-
-def aspect_endpoint_auth_flags(ctx, rc, command):
-    """Per-invocation flags attaching the Aspect login JWT to every Bazel-facing
-    endpoint a configured deployment owns: the remote cache (`--remote_header`)
-    and a Bazel-streamed BES backend (`--bes_header`). The one call every
-    bazel-spawning task adds to its `flags = [...]`.
-    """
-    return (
-        remote_cache_auth_flags(ctx, rc, command) +
-        bes_backend_auth_flags(ctx, rc, command)
-    )
+def _resolve_rc_flags(ctx, rc, command: str) -> list:
+    """Fire the trait's post-rc `rc_flags` hooks against the resolved `rc` and
+    concatenate the flags they return. Applied by every bazel-driving task after
+    resolving its rc."""
+    out = []
+    for hook in ctx.traits[BazelTrait].rc_flags:
+        out.extend(hook(ctx, rc, command))
+    return out
 
 flags = namespace(
     resolve = _resolve_flags,
@@ -324,6 +266,7 @@ announce = namespace(
 # tests. `_`-private to task authors, who reach these through the assembled
 # `bazel` namespace.
 setup_command = _setup_command
+resolve_rc_flags = _resolve_rc_flags
 sibling_rc = _sibling_rc
 resolve_announce = _resolve_announce
 core_args = _core_args
