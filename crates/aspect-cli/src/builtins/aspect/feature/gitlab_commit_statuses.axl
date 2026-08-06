@@ -78,7 +78,7 @@ load("../private/lib/environment.axl", "feature_logger", "workflows_results_url"
 load("../private/lib/gitlab.axl", "gitlab")
 load("../private/lib/gitlab_detect.axl", "detect_gitlab_mr")
 load("../private/lib/gitlab_token_cache.axl", "gitlab_token_cache")
-load("../private/lib/lifecycle.axl", "TaskLifecycleTrait", "TaskUpdate")
+load("../private/lib/lifecycle.axl", "Phases", "TaskUpdate")
 load(
     "../private/lib/rate_limit.axl",
     "BUCKET_APP",
@@ -150,7 +150,7 @@ def _state_for(status, final):
     return None
 
 def _gitlab_commit_statuses(ctx: FeatureContext):
-    lifecycle = ctx.traits[TaskLifecycleTrait]
+    lifecycle = ctx.traits[Phases]
 
     templates = ctx.args.templates or {}
     metadata_keys = list(ctx.args.metadata_keys or [])
@@ -307,7 +307,7 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
         _post_status(ctx, "pending", initial_output, initial_links)
 
     def _task_update(ctx, update):
-        # Latch the subject (raw) before init/render: setup_phase sets
+        # Latch the subject (raw) before init/render: phases.setup sets
         # it on the first update, but a later update may refine it.
         # Empty means "no change", keep prior.
         if update.subject:
