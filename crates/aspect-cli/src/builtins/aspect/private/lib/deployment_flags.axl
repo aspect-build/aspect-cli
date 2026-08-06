@@ -68,8 +68,8 @@ match the endpoint-auth host gate and receive its login JWT (see
 `aspect_endpoint_auth.axl`).
 """
 
-load("@aspect//bazel/build_events.axl", "bazel_bes_backend")
-load("./aspect_endpoint_auth.axl", "same_bes_endpoint")
+load("@aspect//bazel.axl", "BazelTrait")
+load("./aspect_endpoint_auth.axl", "credential_helper_covers_host", "endpoint_host", "headers_have_auth", "needs_aspect_token", "resolve_aspect_bearer", "same_bes_endpoint")
 load("./environment.axl", "info")
 
 # Bazel-facing Aspect endpoints are TLS gRPC.
@@ -191,9 +191,14 @@ def deployment_flag_args() -> dict:
     `deployment_endpoint_flags`."""
     return {
         "deployment": args.string(
+            # Spelled out so the flags keep their task-level names now that the
+            # `Deployment` feature owns them — a feature arg is otherwise exposed
+            # as `--<feature>:<arg>`.
+            long = "deployment",
             description = "Configured Aspect Workflows deployment (see `aspect auth configure`) to draw remote endpoints from. Defaults to the current default deployment. Requires --remote, which says what to wire from it.",
         ),
         "remote": args.string(
+            long = "remote",
             default = "",
             # A bare `--remote` resolves to the default capability set. Empty stays
             # the "flag absent" value, so `parse_remote` can tell the two apart.
@@ -336,47 +341,6 @@ def _advertised_bes_sources(ctx, flags: DeploymentFlags) -> list[(str, str)]:
     ]
     return [(backend, url) for (backend, url) in pairs if backend and url]
 
-def advertised_results_url(ctx, rc, bes_sinks: list, flags: DeploymentFlags, command: str = "build") -> str:
-    """The build-result viewer for this invocation, or `""`.
-
-    Keeping each `(backend, viewer)` pair together means the URL always belongs to the
-    BES that actually received the invocation: a build streaming to the deployment's
-    BES gets the deployment's viewer even on a runner whose environment advertises a
-    different backend. The environment wins when both sources name the same backend.
-
-    `""` when nothing this build reports to has an advertised viewer — a third-party
-    BES, or a source naming only one half of the pair.
-    """
-
-    # Everywhere this invocation reports BES: the CLI's own sinks (internal client)
-    # plus whatever Bazel uploads to itself.
-    reporting_to = [sink.uri for sink in bes_sinks if sink.uri] + [bazel_bes_backend(rc, command)]
-
-    for (backend, results_url) in _advertised_bes_sources(ctx, flags):
-        if [target for target in reporting_to if same_bes_endpoint(backend, target)]:
-            return results_url
-    return ""
-
-def bes_results_url_flag(ctx, rc, bes_sinks: list, flags: DeploymentFlags, command: str = "build") -> list:
-    """`["--bes_results_url=<url>"]` when *Bazel* uploads the BES itself, else `[]`.
-
-    Only Bazel consumes this flag, and only its BES module — the one `--bes_backend`
-    activates — reads it, to print "Streaming build results to: …" and to key the link
-    on its own `invocation_id`. Passing it on the CLI-streamed path would inject a flag
-    nothing acts on, so that path announces the URL itself; see
-    `bes_sinks.axl::announce_bes_results_url`.
-
-    A `--bes_results_url` the user already set — command line, `.bazelrc`, or an
-    expanded `--config`, all seen through `rc` — is never overridden.
-    """
-    if rc != None and rc.flag_value("--bes_results_url", command = command):
-        return []
-    if not bazel_bes_backend(rc, command):
-        return []
-
-    results_url = advertised_results_url(ctx, rc, bes_sinks, flags, command)
-    return ["--bes_results_url=" + results_url] if results_url else []
-
 def join_and(items: list[str], oxford: bool = False) -> str:
     """Join with commas and a trailing "and": [a] → "a"; [a,b,c] → "a, b, and c".
     For two items, `oxford` chooses "a, and b" (uniform per-item comma, for a list
@@ -408,3 +372,73 @@ def announce_deployment_flags(ctx, flags: DeploymentFlags):
     line = deployment_announcement(flags)
     if line:
         info(ctx.std, line)
+
+def _endpoint_auth_flags(ctx, rc, command: str, endpoint_flag: str, header_flag: str, what: str) -> list:
+    """Per-invocation `<header_flag>=authorization=Bearer <jwt>` flags for an
+    endpoint owned by a configured deployment named by `endpoint_flag`, or `[]`.
+
+    Reads the effective `endpoint_flag` through `rc`. When a configured deployment
+    owns its host and the stream will not already carry an `authorization` —
+    neither an explicit `<header_flag>=authorization=…` nor a
+    `--credential_helper` registered for the host — returns the one auth header
+    flag. Suppressing on a matching credential helper keeps Bazel from adding a
+    second `authorization` alongside the injected one, which gRPC would comma-join
+    into a token a JWT-validating proxy rejects. Best-effort: an owned endpoint
+    with no usable credential warns and returns `[]`. `what` describes the endpoint
+    in the warning.
+    """
+    endpoint = rc.flag_value(endpoint_flag, command = command)
+    if not endpoint:
+        return []
+
+    # `--credential_helper` carries Bazel's `oldName` alias
+    # `--experimental_credential_helper`; both populate the same option, so a
+    # helper configured under either spelling makes Bazel add its own auth.
+    credential_helpers = (
+        rc.flag_values("--credential_helper", command = command) +
+        rc.flag_values("--experimental_credential_helper", command = command)
+    )
+    already_authenticated = (
+        headers_have_auth(rc.flag_values(header_flag, command = command)) or
+        credential_helper_covers_host(credential_helpers, endpoint_host(endpoint))
+    )
+    if not needs_aspect_token(ctx, [endpoint], already_authenticated):
+        return []
+    bearer = resolve_aspect_bearer(ctx, what, endpoint)
+    if not bearer:
+        return []
+    return [header_flag + "=authorization=" + bearer]
+
+def deployment_auth_flags(ctx, rc, command: str) -> list:
+    """Per-invocation `--remote_header`/`--bes_header` auth for every Bazel-facing
+    endpoint (remote cache + Bazel-streamed BES) a configured deployment owns and
+    the resolved `rc` points at. Registered on `BazelTrait.rc_flags` by the
+    `Deployment` feature, so every bazel-driving task picks it up through
+    `bazel.rc_flags(ctx, rc, command)`."""
+    return (
+        _endpoint_auth_flags(ctx, rc, command, "--remote_cache", "--remote_header", "the remote cache") +
+        _endpoint_auth_flags(ctx, rc, command, "--bes_backend", "--bes_header", "build events")
+    )
+
+def _deployment_impl(ctx):
+    """Feature setup: resolve the selected deployment's endpoints and wire them
+    into the `BazelTrait` — injected `--remote_cache`/`--remote_executor` base
+    flags, extra BES backends, and the post-rc auth-header hook. The auth hook is
+    registered unconditionally (it also authenticates user-set Aspect endpoints);
+    the announce line fires only when a capability was actually injected."""
+    t = ctx.traits[BazelTrait]
+    dep = deployment_endpoint_flags(ctx)
+    t.base_flags.extend(dep.base_flags)
+    t.bes_backends.extend(dep.bes_backends)
+    t.bes_results_sources.extend(_advertised_bes_sources(ctx, dep))
+    t.rc_flags.append(deployment_auth_flags)
+    if dep.capabilities:
+        t.build_start.append(lambda tctx: announce_deployment_flags(tctx, dep))
+
+Deployment = feature(
+    name = "deployment",
+    display_name = "Deployment",
+    summary = "Wire builds to a configured Aspect Workflows deployment's remote cache, BES backend, and remote execution.",
+    implementation = _deployment_impl,
+    args = deployment_flag_args(),
+)

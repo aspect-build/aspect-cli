@@ -6,7 +6,6 @@ load("@aspect//bazel/build_events.axl", "bes_args")
 load("@aspect//bazel.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS", bzl = "bazel")
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_runner.axl", "run_bazel_task")
-load("./private/lib/deployment_flags.axl", "deployment_flag_args")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "TaskLifecycleTrait")
 load("./private/lib/repro_commands.axl", "repro_flavor_args")
@@ -135,7 +134,7 @@ test = task(
             default = False,
             description = "Cancel any running Bazel invocation before starting the test.",
         ),
-    } | bzl.flags.args("the test invocation") | bzl.announce.args("the test") | bes_args() | deployment_flag_args() | repro_flavor_args(),
+    } | bzl.flags.args("the test invocation") | bzl.announce.args("the test") | bes_args() | repro_flavor_args(),
     traits = [
         BazelTrait,
         HealthCheckTrait,

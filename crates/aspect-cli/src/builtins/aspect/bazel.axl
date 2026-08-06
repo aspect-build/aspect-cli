@@ -16,14 +16,12 @@ must alias this import — `load("@aspect//bazel.axl", bzl = "bazel")` — so th
 
 load(
     "@aspect//bazel/flags.axl",
-    "aspect_endpoint_auth_flags",
-    "bes_backend_auth_flags",
-    "remote_cache_auth_flags",
     "testonly_config_names",
     "testonly_flags_delta",
     _announce = "announce",
     _core_args = "core_args",
     _flags = "flags",
+    _resolve_rc_flags = "resolve_rc_flags",
     _setup_command = "setup_command",
     _sibling_rc = "sibling_rc",
     _targets_arg = "targets_arg",
@@ -45,5 +43,5 @@ bazel = namespace(
     TRAITS = [BazelTrait],
     flags = _flags,
     announce = _announce,
-    endpoint_auth_flags = aspect_endpoint_auth_flags,
+    rc_flags = _resolve_rc_flags,
 )

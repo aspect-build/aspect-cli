@@ -81,7 +81,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # rejects as unrecognized (e.g. `--script_path`).
     rc = setup_phase(ctx, lifecycle, target, "bazel_results", data, hc_trait, bazel_trait, "build")
     announce_version, announce_command = bzl.announce.resolve(ctx)
-    endpoint_auth_flags = bzl.endpoint_auth_flags(ctx, rc, "build")
+    endpoint_auth_flags = bzl.rc_flags(ctx, rc, "build")
 
     # `rc=` opts into the runinfo aspect: `r.flags` then carries the spawn
     # flags + aspect injection that capture the executable, the `args` attribute,
