@@ -36,12 +36,12 @@ struct Deployment {
     #[serde(default, skip_serializing_if = "is_false")]
     default: bool,
     /// Whether this is the built-in Aspect account rather than a configured
-    /// Workflows deployment. Set only by [`default_deployment`] and never
-    /// deserialized — `#[serde(skip)]` keeps a hand-edited `config.json` from
-    /// claiming account status, and keeps the flag out of the written file.
-    /// Identity lives here rather than in a `name == "aspect"` comparison so a
-    /// deployment that happens to be *named* `aspect` is still an ordinary
-    /// deployment.
+    /// Workflows deployment. Set only by [`default_deployment`]; `#[serde(skip)]`
+    /// keeps a hand-edited `config.json` from claiming account status and keeps the
+    /// flag out of the written file.
+    ///
+    /// Account identity is this flag, never the name, so a deployment that happens
+    /// to be *named* `aspect` is still an ordinary deployment.
     #[serde(skip)]
     builtin: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -138,6 +138,12 @@ const DEFAULT_ISSUER: &str = "https://auth.aspect.build";
 const DEFAULT_CLIENT_ID: &str = "771ff228-18a1-43f0-bc83-62c9df0d72ca";
 const DEFAULT_API_URL: &str = "https://api.aspect.build";
 
+/// The dot-anchored suffix for Aspect's own domain, which Aspect-hosted endpoints
+/// sit under (`remote.<deployment>.aspect.build`).
+/// [`deployment_name_from_host`] strips it so an Aspect-hosted endpoint yields a
+/// bare deployment name, while a self-hosted one keeps its full domain.
+const ASPECT_DOMAIN_SUFFIX: &str = ".aspect.build";
+
 /// Names a configured deployment may not take, because each would shadow the
 /// built-in Aspect account: [`DEFAULT_DEPLOYMENT_NAME`] is the account's own
 /// name, and [`DEFAULT_PROFILE`] is the credential profile the account files
@@ -149,13 +155,14 @@ fn is_reserved_name(name: &str) -> bool {
     RESERVED_NAMES.contains(&name)
 }
 
-/// The error for a configured deployment claiming a [`RESERVED_NAMES`] entry.
-/// `configure` reaches this only via an explicit `--deployment`; derived names
-/// avoid it in [`deployment_name_from_host`].
+/// The error for a configured deployment claiming a [`RESERVED_NAMES`] entry,
+/// whether the name came from an explicit `--deployment` or was derived from an
+/// Aspect-hosted endpoint (see [`deployment_name_from_host`]). Either way the
+/// remedy is an explicit name, so the message asks for one.
 fn reserved_name_error(name: &str) -> anyhow::Error {
     anyhow::anyhow!(
         "deployment name {name:?} is reserved for the built-in Aspect account\n\n\
-         Choose a different --deployment name, or omit it to derive one from the host."
+         Pass --deployment <name> to `aspect auth configure` with a different name."
     )
 }
 
@@ -202,101 +209,105 @@ fn load_config_file(path: &PathBuf) -> anyhow::Result<Vec<Deployment>> {
     }
 }
 
-/// The effective deployment list: the built-in default, overlaid by the repo's
-/// `.aspect/config.json` (when `$ASPECT_WORKSPACE` names one), overlaid by the
-/// user's `~/.aspect/config.json`. Overlay is by `name` (a later entry with the
-/// same name replaces an earlier one), so a user can override a repo-declared
-/// deployment. The built-in seed is the exception: an entry claiming a
-/// [`RESERVED_NAMES`] name is skipped with a warning rather than allowed to
-/// replace it, since shadowing the account is silent and confusing (`auth status`
-/// would render the impostor in the account's section).
+/// One config file in the overlay chain, in precedence order (repo before user).
+/// `user` marks `~/.aspect/config.json` — the only file `aspect auth remove`
+/// edits, which decides the recovery advice for a shadowed entry.
+struct ConfigSource {
+    path: PathBuf,
+    entries: Vec<Deployment>,
+    user: bool,
+}
+
+/// The config files overlaying the built-in seed, read in precedence order: the
+/// repo's `.aspect/config.json` (when `$ASPECT_WORKSPACE` names one), then the
+/// user's `~/.aspect/config.json`. A missing file reads as no entries.
+fn config_sources() -> anyhow::Result<Vec<ConfigSource>> {
+    let mut sources = Vec::new();
+    if let Some(path) = repo_config_path() {
+        let entries = load_config_file(&path)?;
+        sources.push(ConfigSource {
+            path,
+            entries,
+            user: false,
+        });
+    }
+    let path = config_path()?;
+    let entries = load_config_file(&path)?;
+    sources.push(ConfigSource {
+        path,
+        entries,
+        user: true,
+    });
+    Ok(sources)
+}
+
+/// The effective deployment list plus the entries ignored for taking a reserved
+/// name: the built-in seed, overlaid by each [`config_sources`] file in turn.
 ///
-/// Skipping — rather than erroring — is deliberate: a pre-existing `config.json`
-/// written before this was enforced would otherwise fail *every* auth command,
-/// including the `auth remove` needed to clean it up. Exactly one entry stays
-/// `default` — [`select_deployment`] re-derives the default rather than trusting
-/// the flag on every entry.
-fn load_deployments() -> anyhow::Result<Vec<Deployment>> {
+/// Overlay is by `name` (a later entry replaces an earlier one), so a user can
+/// override a repo-declared deployment. The seed is the exception — an entry
+/// claiming a [`RESERVED_NAMES`] name is skipped rather than allowed to replace
+/// it, since shadowing the account is silent and confusing (`auth status` would
+/// render the impostor in the account's section).
+///
+/// Skipping rather than erroring keeps a config that already holds such an entry
+/// usable: erroring would fail *every* auth command, including the `auth remove`
+/// needed to clean it up. `auth status` reports the skipped entries instead.
+///
+/// Exactly one entry stays `default` — [`select_deployment`] re-derives the
+/// default rather than trusting the flag on every entry.
+fn load_deployments_and_shadowed() -> anyhow::Result<(Vec<Deployment>, Vec<ShadowedDeployment>)> {
+    Ok(overlay_config_sources(config_sources()?))
+}
+
+/// The pure overlay: fold `sources` onto the built-in seed in order, returning the
+/// merged list and the entries skipped for taking a reserved name. Separated from
+/// [`config_sources`] (which reads the real filesystem) so the overlay and
+/// shadowing rules are directly testable.
+fn overlay_config_sources(
+    sources: Vec<ConfigSource>,
+) -> (Vec<Deployment>, Vec<ShadowedDeployment>) {
     let mut merged: Vec<Deployment> = vec![default_deployment()];
-    if let Some(repo_cfg) = repo_config_path() {
-        overlay_deployments(&mut merged, load_config_file(&repo_cfg)?);
-    }
-    overlay_deployments(&mut merged, load_config_file(&config_path()?)?);
-    reconcile_seed_default(&mut merged);
-    Ok(merged)
-}
-
-/// Overlay `entries` (one config file's contents) onto `merged` by name, skipping
-/// any entry under a [`RESERVED_NAMES`] name and returning the names skipped.
-/// Split out of [`load_deployments`] — which reads real files — so the shadowing
-/// rule is directly testable.
-///
-/// Callers surface the skipped names to the user (`auth status` prints a warning):
-/// a silently vanishing deployment is the same confusing failure the reserved-name
-/// rule exists to prevent.
-fn overlay_deployments(merged: &mut Vec<Deployment>, entries: Vec<Deployment>) -> Vec<String> {
-    let mut skipped = Vec::new();
-    for entry in entries {
-        if is_reserved_name(&entry.name) {
-            tracing::warn!(
-                "ignoring deployment {:?} from config.json: the name is reserved for the \
-                 built-in Aspect account",
-                entry.name
-            );
-            skipped.push(entry.name);
-            continue;
-        }
-        if let Some(existing) = merged.iter_mut().find(|d| d.name == entry.name) {
-            *existing = entry;
-        } else {
-            merged.push(entry);
-        }
-    }
-    skipped
-}
-
-/// The [`RESERVED_NAMES`] entries present in the user's or repo's `config.json`,
-/// which [`load_deployments`] skips — each paired with the file it came from, and
-/// whether that file is the user's (the only one `auth remove` edits).
-///
-/// Surfaced by `auth status` so a shadowed deployment reports itself instead of
-/// silently disappearing. The source matters for the advice: a repo-config entry
-/// is checked in, so `auth remove` would not touch it (and could delete an
-/// unrelated user entry of the same name) — that case must be told to edit the
-/// file directly.
-fn shadowed_deployments() -> anyhow::Result<Vec<ShadowedDeployment>> {
-    let repo_cfg = repo_config_path();
-    let user_cfg = config_path()?;
-    let mut sources: Vec<(PathBuf, Vec<Deployment>, bool)> = Vec::new();
-    if let Some(repo_cfg) = repo_cfg {
-        sources.push((repo_cfg.clone(), load_config_file(&repo_cfg)?, false));
-    }
-    sources.push((user_cfg.clone(), load_config_file(&user_cfg)?, true));
-    Ok(attribute_shadowed(sources))
-}
-
-/// Pair each skipped reserved-name entry with the config file that declared it,
-/// in overlay order (repo before user). Split from [`shadowed_deployments`] —
-/// which reads the real `~/.aspect/config.json` — so the source attribution is
-/// testable.
-///
-/// A name appearing in both files is reported once, against the *first* file, so
-/// the advice names a file that really declares it.
-fn attribute_shadowed(sources: Vec<(PathBuf, Vec<Deployment>, bool)>) -> Vec<ShadowedDeployment> {
-    let mut merged: Vec<Deployment> = vec![default_deployment()];
-    let mut found: Vec<ShadowedDeployment> = Vec::new();
-    for (path, entries, user_config) in sources {
-        for name in overlay_deployments(&mut merged, entries) {
-            if !found.iter().any(|s| s.name == name) {
-                found.push(ShadowedDeployment {
-                    name,
-                    path: path.display().to_string(),
-                    user_config,
-                });
+    let mut shadowed: Vec<ShadowedDeployment> = Vec::new();
+    for source in sources {
+        for entry in source.entries {
+            if is_reserved_name(&entry.name) {
+                tracing::warn!(
+                    "ignoring deployment {:?} from {}: the name is reserved for the \
+                     built-in Aspect account",
+                    entry.name,
+                    source.path.display()
+                );
+                // Reported once, against the first file declaring it, so the
+                // advice names a file that really shadows.
+                if !shadowed.iter().any(|s| s.name == entry.name) {
+                    shadowed.push(ShadowedDeployment {
+                        name: entry.name,
+                        path: source.path.display().to_string(),
+                        user_config: source.user,
+                    });
+                }
+                continue;
+            }
+            if let Some(existing) = merged.iter_mut().find(|d| d.name == entry.name) {
+                *existing = entry;
+            } else {
+                merged.push(entry);
             }
         }
     }
-    found
+    reconcile_seed_default(&mut merged);
+    (merged, shadowed)
+}
+
+fn load_deployments() -> anyhow::Result<Vec<Deployment>> {
+    Ok(load_deployments_and_shadowed()?.0)
+}
+
+/// The `config.json` entries ignored for taking a reserved name, for the
+/// `auth status` warning. See [`load_deployments_and_shadowed`].
+fn shadowed_deployments() -> anyhow::Result<Vec<ShadowedDeployment>> {
+    Ok(load_deployments_and_shadowed()?.1)
 }
 
 /// The seed is re-created `default = true` on every load, but a configured
@@ -360,8 +371,7 @@ fn select_account_or_deployment(
 ) -> anyhow::Result<Deployment> {
     match name.filter(|n| !n.is_empty()) {
         Some(_) => select_deployment(deployments, name),
-        // The account is found by its `builtin` flag, not by name — the seed is
-        // always present in a loaded list, so this cannot fall through.
+        // A loaded list always contains the seed, so this cannot fall through.
         None => deployments
             .iter()
             .find(|d| d.builtin)
@@ -672,66 +682,38 @@ fn transport_error_reason(e: &reqwest::Error) -> String {
     }
 }
 
-/// Derive a deployment name from an endpoint host: drop the leading service
-/// label (the per-endpoint prefix like `remote`/`bes`) and keep the rest of the
-/// subdomain down to — but not including — the registrable domain.
+/// Derive a deployment name from an endpoint host: drop the leading service label
+/// (the per-endpoint prefix like `remote`/`bes`), then drop a trailing
+/// [`ASPECT_DOMAIN_SUFFIX`] if present. Everything else is kept verbatim.
 ///
 ///   `bes.gcp.awd-gha-test-dev.aspect.build` → `gcp.awd-gha-test-dev`
+///   `remote.foo.bar.com`                   → `foo.bar.com`
+///   `remote.aspect.build`                  → `aspect.build`
 ///
-/// When dropping the first label leaves only the registrable domain, use that
-/// domain (a deployment served directly under it, e.g. `remote.aspect.build` →
-/// `aspect.build`). The registrable domain is found via the public-suffix list;
-/// when the host has no recognized suffix (an unknown TLD, an internal name, or
-/// an IP), fall back to dropping the first label and keeping the remainder
+/// Only Aspect's own domain is stripped, because only there does the remainder
+/// name the deployment; a self-hosted host keeps its full domain, which reads
+/// unambiguously and can never collide with [`RESERVED_NAMES`]
+/// (`remote.aspect.foo.com` → `aspect.foo.com`, not the account's `aspect`).
+///
+/// An Aspect-hosted host still can collide — `remote.aspect.aspect.build` →
+/// `aspect` — so this does not itself guarantee a usable name;
+/// [`upsert_deployment`] rejects a reserved one.
+///
+/// An IP literal or single-label host has no service label to drop and is used
 /// verbatim.
-///
-/// A derived name that would collide with [`RESERVED_NAMES`] keeps the registrable
-/// domain to stay distinct — `remote.aspect.foo.com` yields
-/// `aspect.foo.com`, not `aspect`, which would otherwise shadow the
-/// built-in Aspect account.
 fn deployment_name_from_host(host: &str) -> String {
-    let name = deployment_name_from_host_inner(host);
-    if !is_reserved_name(&name) {
-        return name;
-    }
-    // Reserved: fall back to the full host minus its service label, which keeps
-    // the registrable domain and so cannot collide.
-    match host.trim_matches('.').split_once('.') {
-        Some((_service, rest)) if !rest.is_empty() => rest.to_string(),
-        _ => name,
-    }
-}
-
-fn deployment_name_from_host_inner(host: &str) -> String {
     let host = host.trim_matches('.');
-    // An IP literal has no meaningful subdomain to strip — use it verbatim (the
-    // public-suffix list would otherwise treat the trailing octets as a domain).
     if host.parse::<std::net::IpAddr>().is_ok() {
         return host.to_string();
     }
-    let rest = match host.split_once('.') {
-        Some((_first, rest)) => rest,
-        // A single label (no dot) — nothing to strip; use it as-is.
-        None => return host.to_string(),
+    let Some((_service, rest)) = host.split_once('.') else {
+        return host.to_string();
     };
-    match psl::domain_str(host)
-        .and_then(|registrable| rest.strip_suffix(registrable).map(|p| (p, registrable)))
-    {
-        // `rest` is the subdomain-minus-first-label plus the registrable domain;
-        // trim the trailing registrable domain to leave the deployment segment.
-        // Nothing left (the endpoint sits directly under the registrable domain)
-        // → name it after the domain itself.
-        Some((prefix, registrable)) => {
-            let name = prefix.trim_end_matches('.');
-            if name.is_empty() {
-                registrable.to_string()
-            } else {
-                name.to_string()
-            }
-        }
-        // No recognized public suffix, or it isn't a suffix of `rest` (host *is*
-        // the registrable domain): keep everything after the first label.
-        None => rest.to_string(),
+    match rest.strip_suffix(ASPECT_DOMAIN_SUFFIX) {
+        // Directly under Aspect's domain (`remote.aspect.build`) — nothing would
+        // remain, so name it after the domain itself.
+        Some("") | None => rest.to_string(),
+        Some(name) => name.trim_end_matches('.').to_string(),
     }
 }
 
@@ -795,10 +777,9 @@ fn deployment_from_discovery(
 /// default does not silently clear it). Returns whether the written record is
 /// the effective default.
 ///
-/// Errors on a [`RESERVED_NAMES`] name. This is the single choke point every
-/// `configure` path funnels through — a derived name (guarded in
-/// [`deployment_name_from_host`]) and an explicit `--deployment` alike — so the
-/// check lives here rather than only at the callers.
+/// Errors on a [`RESERVED_NAMES`] name. Every `configure` path funnels through
+/// here — derived names and an explicit `--deployment` alike — so this is the one
+/// place the check has to live.
 fn upsert_deployment(
     existing: &mut Vec<Deployment>,
     mut deployment: Deployment,
@@ -854,12 +835,11 @@ fn save_user_deployment(deployment: Deployment) -> anyhow::Result<bool> {
 }
 
 /// Drop the entry named `name` from a configured-deployment list (the file's
-/// contents, excluding the seed). Split from [`remove_deployment`] — which reads
-/// and writes real files — so the reserved-name asymmetry is testable.
+/// contents, which never include the seed).
 ///
-/// A [`RESERVED_NAMES`] name means the built-in account *unless* the file really
-/// holds an entry under it, in which case removing that entry is the documented
-/// way to clean up a shadowed `config.json`.
+/// A [`RESERVED_NAMES`] name means the built-in account — and is refused — *unless*
+/// the file really holds an entry under it, which is how a shadowed `config.json`
+/// is cleaned up.
 fn apply_remove(deployments: &mut Vec<Deployment>, name: &str) -> anyhow::Result<()> {
     if is_reserved_name(name) && !deployments.iter().any(|d| d.name == name) {
         return Err(anyhow::anyhow!(
@@ -2340,48 +2320,6 @@ fn one_deployment_summary(name: &str) -> anyhow::Result<Option<DeploymentSummary
 ///
 /// `results_url` is a full URL rather than a host — the build-result viewer
 /// (→ --bes_results_url), "" when the deployment advertises no web UI.
-/// One ignored `config.json` deployment, for the `auth status` warning: the
-/// reserved `name` it claimed, the `path` that declares it, and whether that path
-/// is the user's config (so the task knows whether `auth remove` can fix it).
-#[derive(Debug, Display, Clone, PartialEq, ProvidesStaticType, NoSerialize, Allocative)]
-#[display("<aspect.ShadowedDeployment>")]
-pub struct ShadowedDeployment {
-    pub name: String,
-    pub path: String,
-    pub user_config: bool,
-}
-
-starlark_simple_value!(ShadowedDeployment);
-
-#[starlark_value(type = "aspect.ShadowedDeployment")]
-impl<'v> values::StarlarkValue<'v> for ShadowedDeployment {
-    fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(shadowed_deployment_methods)
-    }
-}
-
-#[starlark_module]
-fn shadowed_deployment_methods(registry: &mut MethodsBuilder) {
-    #[starlark(attribute)]
-    fn name<'v>(this: values::Value<'v>) -> anyhow::Result<String> {
-        attr_str!(this, ShadowedDeployment, name)
-    }
-
-    #[starlark(attribute)]
-    fn path<'v>(this: values::Value<'v>) -> anyhow::Result<String> {
-        attr_str!(this, ShadowedDeployment, path)
-    }
-
-    #[starlark(attribute)]
-    fn user_config<'v>(this: values::Value<'v>) -> anyhow::Result<bool> {
-        Ok(this
-            .downcast_ref_err::<ShadowedDeployment>()
-            .into_anyhow_result()?
-            .user_config)
-    }
-}
-
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative, Clone)]
 #[display("<aspect.DeploymentEndpoints>")]
 pub struct DeploymentEndpoints {
@@ -2427,6 +2365,45 @@ fn deployment_endpoints_methods(registry: &mut MethodsBuilder) {
     #[starlark(attribute)]
     fn results_url<'v>(this: values::Value<'v>) -> anyhow::Result<String> {
         attr_str!(this, DeploymentEndpoints, results_url)
+    }
+}
+
+/// One ignored `config.json` deployment, for the `auth status` warning: the
+/// reserved `name` it claimed, the `path` that declares it, and whether that path
+/// is the user's config (so the task knows whether `auth remove` can fix it).
+#[derive(Debug, Display, Clone, PartialEq, ProvidesStaticType, NoSerialize, Allocative)]
+#[display("<aspect.ShadowedDeployment>")]
+pub struct ShadowedDeployment {
+    pub name: String,
+    pub path: String,
+    pub user_config: bool,
+}
+
+starlark_simple_value!(ShadowedDeployment);
+
+#[starlark_value(type = "aspect.ShadowedDeployment")]
+impl<'v> values::StarlarkValue<'v> for ShadowedDeployment {
+    fn get_methods() -> Option<&'static Methods> {
+        static RES: MethodsStatic = MethodsStatic::new();
+        RES.methods(shadowed_deployment_methods)
+    }
+}
+
+#[starlark_module]
+fn shadowed_deployment_methods(registry: &mut MethodsBuilder) {
+    #[starlark(attribute)]
+    fn name<'v>(this: values::Value<'v>) -> anyhow::Result<String> {
+        attr_str!(this, ShadowedDeployment, name)
+    }
+
+    #[starlark(attribute)]
+    fn path<'v>(this: values::Value<'v>) -> anyhow::Result<String> {
+        attr_str!(this, ShadowedDeployment, path)
+    }
+
+    #[starlark(attribute)]
+    fn user_config<'v>(this: values::Value<'v>) -> anyhow::Result<bool> {
+        attr_bool!(this, ShadowedDeployment, user_config)
     }
 }
 
@@ -2983,6 +2960,14 @@ mod tests {
         }
     }
 
+    fn src(path: &str, entries: Vec<Deployment>, user: bool) -> ConfigSource {
+        ConfigSource {
+            path: PathBuf::from(path),
+            entries,
+            user,
+        }
+    }
+
     #[test]
     fn select_deployment_by_explicit_name() {
         let deployments = vec![default_deployment(), dep("acme", false)];
@@ -3076,85 +3061,73 @@ mod tests {
     }
 
     #[test]
-    fn deployment_name_from_host_keeps_subdomain_minus_first_label() {
-        // Drop the first label, keep the rest of the subdomain (down to the
-        // registrable domain).
-        assert_eq!(
-            deployment_name_from_host("remote.acme.aspect.build"),
-            "acme"
-        );
-        assert_eq!(deployment_name_from_host("bes.acme.aspect.build"), "acme");
-        assert_eq!(
-            deployment_name_from_host("bes.gcp.awd-gha-test-dev.aspect.build"),
-            "gcp.awd-gha-test-dev"
-        );
-        assert_eq!(deployment_name_from_host("cache.app.corp.io"), "app");
-
-        // Only the registrable domain remains after dropping the first label →
-        // name it after the domain.
-        assert_eq!(
-            deployment_name_from_host("remote.aspect.build"),
-            "aspect.build"
-        );
-        assert_eq!(deployment_name_from_host("cache.corp.io"), "corp.io");
-
-        // Multi-part public suffix (.co.uk) is handled by the PSL: the
-        // registrable domain is acme.co.uk, so the middle labels survive.
-        assert_eq!(deployment_name_from_host("cache.team.acme.co.uk"), "team");
-
-        // An IP literal is used verbatim (no subdomain to strip).
-        assert_eq!(deployment_name_from_host("192.168.1.1"), "192.168.1.1");
-
-        // A single label has nothing to strip.
-        assert_eq!(deployment_name_from_host("localhost"), "localhost");
+    fn deployment_name_from_host_strips_service_label_and_aspect_domain() {
+        for (host, want) in [
+            // Aspect-hosted: the service label and `.aspect.build` both go, so
+            // the deployment segment is left bare.
+            ("remote.acme.aspect.build", "acme"),
+            ("bes.acme.aspect.build", "acme"),
+            (
+                "bes.gcp.awd-gha-test-dev.aspect.build",
+                "gcp.awd-gha-test-dev",
+            ),
+            // Directly under Aspect's domain — nothing would remain, so the
+            // domain itself names it.
+            ("remote.aspect.build", "aspect.build"),
+            // Self-hosted: only the service label goes; the domain is kept, which
+            // is what keeps these names distinct from the built-in account.
+            ("remote.foo.bar.com", "foo.bar.com"),
+            ("cache.app.corp.io", "app.corp.io"),
+            ("cache.team.acme.co.uk", "team.acme.co.uk"),
+            ("remote.aspect.foo.com", "aspect.foo.com"),
+            ("remote.default.corp.io", "default.corp.io"),
+            // Nothing to strip.
+            ("192.168.1.1", "192.168.1.1"),
+            ("localhost", "localhost"),
+            // A trailing dot (absolute FQDN) does not change the result.
+            ("remote.acme.aspect.build.", "acme"),
+            // The suffix is dot-anchored: a domain merely *ending* in the same
+            // letters is not Aspect's, so it is kept whole.
+            ("remote.acme.notaspect.build", "acme.notaspect.build"),
+            ("remote.notaspect.build", "notaspect.build"),
+        ] {
+            assert_eq!(deployment_name_from_host(host), want, "host {host:?}");
+        }
     }
 
     #[test]
-    fn deployment_name_from_host_avoids_reserved_names() {
-        // The bug this guards: stripping the registrable domain from
-        // `aspect.foo.com` leaves `aspect`, the built-in account's name,
-        // which silently shadowed it in config.json. Keep the domain instead.
-        assert_eq!(
-            deployment_name_from_host("remote.aspect.foo.com"),
-            "aspect.foo.com"
-        );
-        // Same collision under Aspect's own domain.
-        assert_eq!(
-            deployment_name_from_host("remote.aspect.aspect.build"),
-            "aspect.aspect.build"
-        );
-        // `default` is reserved too (it is the account's credential profile).
-        assert_eq!(
-            deployment_name_from_host("remote.default.corp.io"),
-            "default.corp.io"
-        );
-        // A host whose *registrable domain* is the reserved word is untouched —
-        // `aspect.build` is not itself a reserved name.
-        assert_eq!(
-            deployment_name_from_host("remote.aspect.build"),
-            "aspect.build"
-        );
-        // A bare reserved word as the whole host has no domain to fall back to;
-        // the name survives as-is and is caught later by upsert_deployment.
-        assert_eq!(deployment_name_from_host("aspect"), "aspect");
-        assert_eq!(deployment_name_from_host("default"), "default");
-
-        // Every derived name from a real (dotted) host is usable: none is reserved.
+    fn deployment_name_from_host_collides_only_under_aspects_own_domain() {
+        // A self-hosted host can never derive a reserved name, because its domain
+        // is kept.
         for host in [
             "remote.aspect.foo.com",
-            "remote.aspect.aspect.build",
             "remote.default.corp.io",
-            "bes.acme.aspect.build",
+            "remote.foo.bar.com",
         ] {
-            assert!(!is_reserved_name(&deployment_name_from_host(host)));
+            assert!(
+                !is_reserved_name(&deployment_name_from_host(host)),
+                "host {host:?} must not derive a reserved name"
+            );
+        }
+
+        // Under Aspect's own domain the stripped remainder still can be reserved,
+        // so derivation alone is not a guarantee — `upsert_deployment` rejects it.
+        for (host, want) in [
+            ("remote.aspect.aspect.build", DEFAULT_DEPLOYMENT_NAME),
+            ("remote.default.aspect.build", DEFAULT_PROFILE),
+        ] {
+            let name = deployment_name_from_host(host);
+            assert_eq!(name, want);
+            assert!(is_reserved_name(&name));
+            assert!(upsert_deployment(&mut vec![], dep(&name, false)).is_err());
         }
     }
 
     #[test]
     fn upsert_deployment_rejects_reserved_names() {
-        // Layer 2: the write choke point refuses a reserved name whatever its
-        // origin — reachable via an explicit `--deployment=aspect`, since
-        // derivation already avoids it.
+        // The write choke point refuses a reserved name whatever its origin: an
+        // explicit `--deployment=aspect`, or a name derived from an
+        // `aspect.aspect.build`-style host.
         for name in ["aspect", "default"] {
             let mut existing = vec![dep("acme", true)];
             let err = upsert_deployment(&mut existing, dep(name, false)).unwrap_err();
@@ -3183,12 +3156,11 @@ mod tests {
         assert!(seed.builtin);
     }
 
-    /// The exact `config.json` shape the bug produced: `aspect auth configure
-    /// remote.aspect.foo.com` derived the name `aspect`, whose entry then
-    /// replaced the built-in account on load — so `auth status` rendered the
-    /// deployment in the account's section and the account itself vanished.
+    /// A `config.json` entry that took the account's name must not replace the
+    /// built-in account on load — that is what made the account vanish from
+    /// `auth status` with the deployment rendered in its place.
     #[test]
-    fn reported_config_json_no_longer_shadows_the_account() {
+    fn config_json_entry_cannot_shadow_the_account() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
         std::fs::write(
@@ -3204,10 +3176,14 @@ mod tests {
         .unwrap();
 
         let entries = load_config_file(&path).unwrap();
-        let mut merged = vec![default_deployment()];
-        overlay_deployments(&mut merged, entries);
+        let (merged, shadowed) =
+            overlay_config_sources(vec![src(&path.display().to_string(), entries, true)]);
 
-        // Exactly one account, and it is the real one — not the foo.com entry.
+        // The ignored entry is reported so `auth status` can explain the absence.
+        assert_eq!(shadowed.len(), 1);
+        assert_eq!(shadowed[0].name, "aspect");
+
+        // Exactly one account, carrying the seed's own issuer and no hosts.
         let accounts: Vec<_> = merged.iter().filter(|d| d.builtin).collect();
         assert_eq!(accounts.len(), 1);
         assert_eq!(accounts[0].issuer.as_deref(), Some(DEFAULT_ISSUER));
@@ -3220,47 +3196,68 @@ mod tests {
 
     #[test]
     fn shadowed_entries_are_attributed_to_their_config_file() {
-        let repo = PathBuf::from("/repo/.aspect/config.json");
-        let user = PathBuf::from("/home/u/.aspect/config.json");
+        const REPO: &str = "/repo/.aspect/config.json";
+        const USER: &str = "/home/u/.aspect/config.json";
 
         // A repo-config entry is checked in: `auth remove` only edits the user
         // file, so the advice must point at the repo path instead.
-        let found = attribute_shadowed(vec![
-            (repo.clone(), vec![dep("aspect", false)], false),
-            (user.clone(), vec![dep("acme", false)], true),
+        let (_, found) = overlay_config_sources(vec![
+            src(REPO, vec![dep("aspect", false)], false),
+            src(USER, vec![dep("acme", false)], true),
         ]);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].name, "aspect");
         assert!(!found[0].user_config);
-        assert_eq!(found[0].path, repo.display().to_string());
+        assert_eq!(found[0].path, REPO);
 
         // A user-config entry is removable.
-        let found = attribute_shadowed(vec![(user.clone(), vec![dep("aspect", false)], true)]);
+        let (_, found) = overlay_config_sources(vec![src(USER, vec![dep("aspect", false)], true)]);
         assert_eq!(found.len(), 1);
         assert!(found[0].user_config);
 
         // Declared in both files → reported once, against the first (repo).
-        let found = attribute_shadowed(vec![
-            (repo.clone(), vec![dep("aspect", false)], false),
-            (user.clone(), vec![dep("aspect", false)], true),
+        let (_, found) = overlay_config_sources(vec![
+            src(REPO, vec![dep("aspect", false)], false),
+            src(USER, vec![dep("aspect", false)], true),
         ]);
         assert_eq!(found.len(), 1);
         assert!(!found[0].user_config);
 
         // Both reserved names, from different files, are each reported.
-        let found = attribute_shadowed(vec![
-            (repo, vec![dep("aspect", false)], false),
-            (user, vec![dep("default", false)], true),
+        let (_, found) = overlay_config_sources(vec![
+            src(REPO, vec![dep("aspect", false)], false),
+            src(USER, vec![dep("default", false)], true),
         ]);
         assert_eq!(found.len(), 2);
         assert!(!found[0].user_config && found[1].user_config);
     }
 
     #[test]
+    fn overlay_replaces_by_name_in_source_order() {
+        // A user entry overrides a repo entry of the same name; distinct names
+        // accumulate. This is the overlay behavior the shadowing rule sits on top of.
+        let (merged, shadowed) = overlay_config_sources(vec![
+            src(
+                "/repo/c.json",
+                vec![dep("acme", false), dep("shared", false)],
+                false,
+            ),
+            src("/user/c.json", vec![dep("shared", true)], true),
+        ]);
+        assert!(shadowed.is_empty());
+        let names: Vec<_> = merged.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, [DEFAULT_DEPLOYMENT_NAME, "acme", "shared"]);
+        // The user entry won, so its `default` claim is the one that took effect.
+        let shared = merged.iter().find(|d| d.name == "shared").unwrap();
+        assert!(shared.default);
+        // ...and it displaced the seed's default (reconcile_seed_default ran).
+        assert!(!merged.iter().find(|d| d.builtin).unwrap().default);
+    }
+
+    #[test]
     fn remove_clears_a_shadowed_entry_but_protects_the_account() {
-        // A reserved name with a real file entry: removing it is the recovery path
-        // for an already-shadowed config.json (load_deployments skips it, so this
-        // is the only way to clean it up).
+        // A reserved name with a real file entry: `remove` deletes it, the only
+        // way to clear a config the loader skips.
         let mut ds = vec![dep("acme", true), dep("aspect", false)];
         apply_remove(&mut ds, "aspect").unwrap();
         assert_eq!(ds.len(), 1);
@@ -3287,18 +3284,35 @@ mod tests {
     }
 
     #[test]
-    fn reserved_name_entries_do_not_shadow_the_seed() {
-        // Layer 3: a config.json entry under a reserved name is skipped, so the
-        // real account survives with its own issuer rather than the impostor's.
-        // This is the exact state the reported bug left ~/.aspect/config.json in.
-        let mut merged = vec![default_deployment()];
-        overlay_deployments(&mut merged, vec![dep("aspect", false), dep("acme", false)]);
-        let account = merged.iter().find(|d| d.builtin).unwrap();
-        assert_eq!(account.issuer.as_deref(), Some(DEFAULT_ISSUER));
-        assert_eq!(merged.iter().filter(|d| d.builtin).count(), 1);
-        assert!(merged.iter().any(|d| d.name == "acme"));
+    fn issuers_match_ignores_scheme_slash_and_case() {
+        assert!(issuers_match(
+            "https://auth.dev.aspect.build",
+            "auth.dev.aspect.build"
+        ));
+        assert!(issuers_match(
+            "https://auth.dev.aspect.build",
+            "https://auth.dev.aspect.build/"
+        ));
+        assert!(issuers_match(
+            "https://Auth.Dev.Aspect.Build",
+            "http://auth.dev.aspect.build"
+        ));
+        // The scheme strip is case-insensitive too.
+        assert!(issuers_match(
+            "HTTPS://auth.dev.aspect.build",
+            "auth.dev.aspect.build"
+        ));
+        assert!(!issuers_match(
+            "https://auth.dev.aspect.build",
+            "https://auth.prod.aspect.build"
+        ));
     }
 
+    /// The wire contract with the deployment's `/.well-known/oauth-protected-resource`
+    /// document (see aspect-build/silo#11571): `aspect_bes_results_url` is top-level,
+    /// beside `aspect_endpoints`, because it is a full URL rather than a bare host.
+    /// Parsing it by the wrong name would silently drop the Web UI link, so assert the
+    /// JSON shape rather than only the struct.
     fn nested(issuer: &str, client_id: &str) -> AspectAuthServer {
         AspectAuthServer {
             issuer: issuer.to_string(),
@@ -3354,36 +3368,6 @@ mod tests {
         )
     }
 
-    #[test]
-    fn issuers_match_ignores_scheme_slash_and_case() {
-        assert!(issuers_match(
-            "https://auth.dev.aspect.build",
-            "auth.dev.aspect.build"
-        ));
-        assert!(issuers_match(
-            "https://auth.dev.aspect.build",
-            "https://auth.dev.aspect.build/"
-        ));
-        assert!(issuers_match(
-            "https://Auth.Dev.Aspect.Build",
-            "http://auth.dev.aspect.build"
-        ));
-        // The scheme strip is case-insensitive too.
-        assert!(issuers_match(
-            "HTTPS://auth.dev.aspect.build",
-            "auth.dev.aspect.build"
-        ));
-        assert!(!issuers_match(
-            "https://auth.dev.aspect.build",
-            "https://auth.prod.aspect.build"
-        ));
-    }
-
-    /// The wire contract with the deployment's `/.well-known/oauth-protected-resource`
-    /// document (see aspect-build/silo#11571): `aspect_bes_results_url` is top-level,
-    /// beside `aspect_endpoints`, because it is a full URL rather than a bare host.
-    /// Parsing it by the wrong name would silently drop the Web UI link, so assert the
-    /// JSON shape rather than only the struct.
     #[test]
     fn parses_advertised_bes_results_url_from_discovery_json() {
         let doc = r#"{
