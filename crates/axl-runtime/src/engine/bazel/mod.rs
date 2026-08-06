@@ -270,29 +270,21 @@ impl<'v> values::StarlarkValue<'v> for FrozenBazel {
     }
 }
 
-/// Parse `bazel info` stdout into a key/value map.
+/// Bazel's `stderr` rendered as a trailing detail for a spawn-failure error,
+/// on its own line. Empty when Bazel wrote nothing, so a command that died
+/// without diagnostics still yields a clean exit-code message.
 ///
-/// Bazel formats the output differently depending on how many keys were asked
-/// for: requesting exactly one key prints the bare value with no `key: ` prefix,
-/// while zero keys (all of them) or two or more print `key: value` lines. The
-/// single-key case is therefore keyed from the request rather than the output —
-/// parsing it would yield nothing, or worse, split a value that itself contains
-/// `": "`.
-fn parse_info_output<S: AsRef<str>>(stdout: &str, keys: &[S]) -> SmallMap<String, String> {
-    let mut map = SmallMap::new();
-    if let [key] = keys {
-        let value = stdout.trim();
-        if !value.is_empty() {
-            map.insert(key.as_ref().to_string(), value.to_string());
-        }
-        return map;
+/// Bazel reuses a handful of exit codes across unrelated causes (`2` covers
+/// every command-line error — unknown startup option, unrecognized flag,
+/// unknown `info` key, running outside a workspace), so the code alone rarely
+/// identifies the failure.
+pub(crate) fn stderr_detail(stderr: &str) -> String {
+    let stderr = stderr.trim();
+    if stderr.is_empty() {
+        String::new()
+    } else {
+        format!("\n{stderr}")
     }
-    for line in stdout.lines() {
-        if let Some((key, value)) = line.split_once(": ") {
-            map.insert(key.trim().to_string(), value.trim().to_string());
-        }
-    }
-    map
 }
 
 /// The startup flags for an invocation: sourced from the active `RunCommand`
@@ -736,27 +728,23 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         )
     }
 
-    /// Run `bazel info` and return all key/value pairs as a dict.
+    /// Run `bazel info` and return its key/value pairs as a dict.
     ///
-    /// Blocks until the command completes. Raises an error if Bazel exits
-    /// with a non-zero code; the error carries Bazel's own stderr, since the
-    /// exit code alone (`2` for every command-line error) doesn't say what
-    /// went wrong.
+    /// Blocks until the command completes. Raises an error carrying Bazel's own
+    /// stderr if it exits non-zero.
     ///
     /// Runs under the active `RunCommand` (`use_rc`) or the per-call `rc=`,
-    /// exactly like `build` / `query`: both its startup flags and its
-    /// `info`-applicable command flags are replayed. That matters because
-    /// those startup flags carry `--ignore_all_rc_files` — without the command
-    /// flags the on-disk rc would be suppressed and nothing put back, so this
-    /// invocation would resolve keys like `output_path` under different flags
-    /// than the build it is reporting on.
+    /// replaying both its startup flags and its `info`-applicable command flags
+    /// exactly like `build` / `query`. Those startup flags carry
+    /// `--ignore_all_rc_files`, so the command flags are what put the rc's
+    /// options back — without them this would resolve flag-sensitive keys like
+    /// `output_path` under different flags than the build it describes.
     ///
     /// # Arguments
     /// * `keys`: `info` keys to request (default: all). Narrowing to the keys
     ///   actually needed keeps an unknown-key error from a Bazel version that
-    ///   dropped some unrelated key out of the picture. The result is keyed the
-    ///   same way regardless of how many keys are requested, even though Bazel
-    ///   prints a bare value for a single key and `key: value` lines otherwise.
+    ///   dropped some unrelated key out of the picture. The result is keyed
+    ///   identically however many keys are requested.
     /// * `rc`: run command to resolve flags from; overrides the active one.
     /// * `directory`: working directory to run `bazel info` in; selects the
     ///   workspace / server (default: the parent process cwd).
@@ -783,13 +771,13 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             None => (read_startup_flags(this)?, Vec::new()),
         };
 
+        let requested: Vec<&str> = keys.items.iter().map(|k| k.as_str()).collect();
+
         let mut cmd = bazel_command();
         cmd.args(&startup_flags);
         cmd.arg("info");
         cmd.args(&command_flags);
-        for key in &keys.items {
-            cmd.arg(key.as_str());
-        }
+        cmd.args(&requested);
         if let Some(dir) = directory.into_option() {
             cmd.current_dir(dir);
         }
@@ -805,22 +793,17 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             .map_err(|e| anyhow::anyhow!("failed to wait on bazel: {}", e))?;
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let detail = stderr.trim();
+            let detail = stderr_detail(&String::from_utf8_lossy(&output.stderr));
             anyhow::bail!(
-                "bazel info failed with exit code {:?}{}",
-                output.status.code(),
-                if detail.is_empty() {
-                    String::new()
-                } else {
-                    format!("\n{detail}")
-                }
+                "bazel info failed with exit code {:?}{detail}",
+                output.status.code()
             );
         }
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let requested: Vec<&str> = keys.items.iter().map(|k| k.as_str()).collect();
-        Ok(parse_info_output(&stdout, &requested))
+        Ok(info::parse_output(
+            &String::from_utf8_lossy(&output.stdout),
+            &requested,
+        ))
     }
 
     /// Shut down the Bazel server for the active run command (`bazel shutdown`),
@@ -1331,52 +1314,21 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
 
 #[cfg(test)]
 mod tests {
-    use super::{constraint_matches, parse_info_output};
+    use super::{constraint_matches, stderr_detail};
 
     fn version(s: &str) -> semver::Version {
         semver::Version::parse(s).unwrap()
     }
 
     #[test]
-    fn single_key_output_is_keyed_from_the_request() {
-        // `bazel info <key>` prints the bare value with no `key: ` prefix, so
-        // parsing it as `key: value` would return an empty map and silently
-        // strand callers like the `--coverage` report lookup.
-        let map = parse_info_output("/tmp/ws/bazel-out\n", &["output_path"]);
-        assert_eq!(
-            map.get("output_path").map(String::as_str),
-            Some("/tmp/ws/bazel-out")
-        );
+    fn stderr_detail_is_a_trailing_line_when_present() {
+        assert_eq!(stderr_detail("ERROR: boom\n"), "\nERROR: boom");
     }
 
     #[test]
-    fn single_key_value_containing_a_colon_is_not_split() {
-        let map = parse_info_output("C:\\ws\\out: dir/command.log\n", &["command_log"]);
-        assert_eq!(
-            map.get("command_log").map(String::as_str),
-            Some("C:\\ws\\out: dir/command.log")
-        );
-    }
-
-    #[test]
-    fn multi_key_and_all_key_output_is_parsed_as_pairs() {
-        let stdout = "output_path: /tmp/ws/bazel-out\noutput_base: /tmp/ws\n";
-
-        let map = parse_info_output(stdout, &["output_path", "output_base"]);
-        assert_eq!(
-            map.get("output_path").map(String::as_str),
-            Some("/tmp/ws/bazel-out")
-        );
-        assert_eq!(map.get("output_base").map(String::as_str), Some("/tmp/ws"));
-
-        // No keys requested: Bazel prints every key in the same pair form.
-        let map = parse_info_output::<&str>(stdout, &[]);
-        assert_eq!(map.len(), 2);
-    }
-
-    #[test]
-    fn empty_single_key_output_yields_no_entry() {
-        assert!(parse_info_output("\n", &["output_path"]).is_empty());
+    fn stderr_detail_is_empty_without_diagnostics() {
+        assert_eq!(stderr_detail(""), "");
+        assert_eq!(stderr_detail("  \n\t "), "");
     }
 
     #[test]

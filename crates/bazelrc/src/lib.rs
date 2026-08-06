@@ -1643,11 +1643,9 @@ build:opt --compilation_mode=opt
 
     #[test]
     fn info_resolves_its_own_command_flags() {
-        // Regression: `ctx.bazel.info()` replayed only the startup flags, which
-        // carry `--ignore_all_rc_files`. The on-disk rc was suppressed with
-        // nothing put back, so `info` resolved keys like `output_path` under
-        // different flags than the build it reports on (and a `common:` entry
-        // the workspace needs went missing entirely).
+        // The startup flags suppress the on-disk rc, so the command flags are
+        // what put its options back. `info` must get both, or it resolves
+        // flag-sensitive keys like `output_path` under the wrong flags.
         let dir = make_workspace();
         let root = dir.path();
         fs::write(
