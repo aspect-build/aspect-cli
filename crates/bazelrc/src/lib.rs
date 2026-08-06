@@ -1642,6 +1642,37 @@ build:opt --compilation_mode=opt
     }
 
     #[test]
+    fn info_resolves_its_own_command_flags() {
+        // The startup flags suppress the on-disk rc, so the command flags are
+        // what put its options back. `info` must get both, or it resolves
+        // flag-sensitive keys like `output_path` under the wrong flags.
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(
+            &root.join(".bazelrc"),
+            "common --remote_download_outputs=minimal\ninfo --show_make_env\n",
+        )
+        .unwrap();
+
+        let rc = BazelRC::new(root, ISOLATE, &[]).unwrap();
+        let (startup, command_flags) = rc.resolve_for_command("info").unwrap();
+        assert!(
+            startup.contains(&"--ignore_all_rc_files".to_string()),
+            "the rc is absorbed, so the spawn must suppress the on-disk one: {startup:?}",
+        );
+        assert!(
+            command_flags.contains(
+                &"--default_override=0:common=--remote_download_outputs=minimal".to_string()
+            ),
+            "`common` options must reach info, not just build: {command_flags:?}",
+        );
+        assert!(
+            command_flags.contains(&"--show_make_env".to_string()),
+            "`info`-section options must reach info: {command_flags:?}",
+        );
+    }
+
+    #[test]
     fn config_expansion_cycle_detected() {
         let dir = make_workspace();
         let root = dir.path();

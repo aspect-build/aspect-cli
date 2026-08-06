@@ -270,6 +270,23 @@ impl<'v> values::StarlarkValue<'v> for FrozenBazel {
     }
 }
 
+/// Bazel's `stderr` rendered as a trailing detail for a spawn-failure error,
+/// on its own line. Empty when Bazel wrote nothing, so a command that died
+/// without diagnostics still yields a clean exit-code message.
+///
+/// Bazel reuses a handful of exit codes across unrelated causes (`2` covers
+/// every command-line error — unknown startup option, unrecognized flag,
+/// unknown `info` key, running outside a workspace), so the code alone rarely
+/// identifies the failure.
+pub(crate) fn stderr_detail(stderr: &str) -> String {
+    let stderr = stderr.trim();
+    if stderr.is_empty() {
+        String::new()
+    } else {
+        format!("\n{stderr}")
+    }
+}
+
 /// The startup flags for an invocation: sourced from the active `RunCommand`
 /// (set by `use_rc`), or empty when none is active.
 fn read_startup_flags<'v>(this: values::Value<'v>) -> anyhow::Result<Vec<String>> {
@@ -711,12 +728,24 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         )
     }
 
-    /// Run `bazel info` and return all key/value pairs as a dict.
+    /// Run `bazel info` and return its key/value pairs as a dict.
     ///
-    /// Blocks until the command completes. Raises an error if Bazel exits
-    /// with a non-zero code.
+    /// Blocks until the command completes. Raises an error carrying Bazel's own
+    /// stderr if it exits non-zero.
+    ///
+    /// Runs under the active `RunCommand` (`use_rc`) or the per-call `rc=`,
+    /// replaying both its startup flags and its `info`-applicable command flags
+    /// exactly like `build` / `query`. Those startup flags carry
+    /// `--ignore_all_rc_files`, so the command flags are what put the rc's
+    /// options back — without them this would resolve flag-sensitive keys like
+    /// `output_path` under different flags than the build it describes.
     ///
     /// # Arguments
+    /// * `keys`: `info` keys to request (default: all). Narrowing to the keys
+    ///   actually needed keeps an unknown-key error from a Bazel version that
+    ///   dropped some unrelated key out of the picture. The result is keyed
+    ///   identically however many keys are requested.
+    /// * `rc`: run command to resolve flags from; overrides the active one.
     /// * `directory`: working directory to run `bazel info` in; selects the
     ///   workspace / server (default: the parent process cwd).
     ///
@@ -727,21 +756,33 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///     info = ctx.bazel.info()
     ///     print(info["output_base"])
     ///     print(info["execution_root"])
+    ///     only = ctx.bazel.info(keys = ["output_path"])
     /// ```
     fn info<'v>(
         this: values::Value<'v>,
+        #[starlark(require = named, default = UnpackList::default())] keys: UnpackList<
+            values::StringValue<'v>,
+        >,
+        #[starlark(require = named, default = NoneOr::None)] rc: NoneOr<values::Value<'v>>,
         #[starlark(require = named, default = NoneOr::None)] directory: NoneOr<String>,
     ) -> anyhow::Result<SmallMap<String, String>> {
-        let startup_flags = read_startup_flags(this)?;
+        let (startup_flags, command_flags) = match effective_rc(this, rc) {
+            Some(rc) => rc.resolve_for_command("info")?,
+            None => (read_startup_flags(this)?, Vec::new()),
+        };
+
+        let requested: Vec<&str> = keys.items.iter().map(|k| k.as_str()).collect();
 
         let mut cmd = bazel_command();
         cmd.args(&startup_flags);
         cmd.arg("info");
+        cmd.args(&command_flags);
+        cmd.args(&requested);
         if let Some(dir) = directory.into_option() {
             cmd.current_dir(dir);
         }
         cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::null());
+        cmd.stderr(Stdio::piped());
         cmd.stdin(Stdio::null());
         // Register with the live-bazel registry so OS-signal cancellation
         // can reach this `bazel info` even if the daemon is busy.
@@ -752,20 +793,17 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             .map_err(|e| anyhow::anyhow!("failed to wait on bazel: {}", e))?;
 
         if !output.status.success() {
+            let detail = stderr_detail(&String::from_utf8_lossy(&output.stderr));
             anyhow::bail!(
-                "bazel info failed with exit code {:?}",
+                "bazel info failed with exit code {:?}{detail}",
                 output.status.code()
             );
         }
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let mut map = SmallMap::new();
-        for line in stdout.lines() {
-            if let Some((key, value)) = line.split_once(": ") {
-                map.insert(key.trim().to_string(), value.trim().to_string());
-            }
-        }
-        Ok(map)
+        Ok(info::parse_output(
+            &String::from_utf8_lossy(&output.stdout),
+            &requested,
+        ))
     }
 
     /// Shut down the Bazel server for the active run command (`bazel shutdown`),
@@ -1282,10 +1320,21 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
 
 #[cfg(test)]
 mod tests {
-    use super::constraint_matches;
+    use super::{constraint_matches, stderr_detail};
 
     fn version(s: &str) -> semver::Version {
         semver::Version::parse(s).unwrap()
+    }
+
+    #[test]
+    fn stderr_detail_is_a_trailing_line_when_present() {
+        assert_eq!(stderr_detail("ERROR: boom\n"), "\nERROR: boom");
+    }
+
+    #[test]
+    fn stderr_detail_is_empty_without_diagnostics() {
+        assert_eq!(stderr_detail(""), "");
+        assert_eq!(stderr_detail("  \n\t "), "");
     }
 
     #[test]
