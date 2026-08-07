@@ -1881,32 +1881,26 @@ mod tests {
     }
 
     /// The runtime warning skips `@aspect//` tasks, so enforce the rule here.
+    ///
+    /// Reads the `include_dir!` embed, not the filesystem, so it works under
+    /// Bazel's sandbox where the cargo layout isn't on disk.
     #[test]
     fn every_builtin_task_declares_a_summary() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/builtins/aspect");
-        let mut offenders = Vec::new();
+        use include_dir::{Dir, include_dir};
+        static ASPECT_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/src/builtins/aspect");
 
-        let mut stack = vec![root.clone()];
-        while let Some(dir) = stack.pop() {
-            for entry in std::fs::read_dir(&dir).expect("readable builtin dir") {
-                let path = entry.expect("readable entry").path();
-                if path.is_dir() {
-                    stack.push(path);
-                    continue;
-                }
-                if path.extension().is_none_or(|e| e != "axl") {
-                    continue;
-                }
-                let text = std::fs::read_to_string(&path).expect("readable .axl");
-                // `<var> = task(` at column 0, keywords at one indent.
-                for (idx, _) in text.match_indices(" = task(\n") {
-                    let body = &text[idx..];
-                    let end = body.find("\n)").unwrap_or(body.len());
-                    if !body[..end].contains("\n    summary = ") {
-                        let line = text[..idx].lines().count() + 1;
-                        let rel = path.strip_prefix(&root).unwrap_or(&path);
-                        offenders.push(format!("{}:{}", rel.display(), line));
-                    }
+        let mut offenders = Vec::new();
+        for f in ASPECT_DIR.find("**/*.axl").unwrap() {
+            let Some(text) = f.as_file().and_then(|file| file.contents_utf8()) else {
+                continue;
+            };
+            // `<var> = task(` at column 0, keywords at one indent.
+            for (idx, _) in text.match_indices(" = task(\n") {
+                let body = &text[idx..];
+                let end = body.find("\n)").unwrap_or(body.len());
+                if !body[..end].contains("\n    summary = ") {
+                    let line = text[..idx].lines().count() + 1;
+                    offenders.push(format!("{}:{}", f.path().display(), line));
                 }
             }
         }
