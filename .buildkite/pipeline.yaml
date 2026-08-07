@@ -234,8 +234,13 @@ steps:
         - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
           limit: 1
     command: |
-      ASPECT_DEBUG=1 aspect buildifier --task:name buildifier-bk-debug
-      aspect buildifier --task:name buildifier-bk
+      ASPECT_DEBUG=1 aspect buildifier --task-key buildifier-bk-debug
+      aspect buildifier --task-key buildifier-bk
+      ASPECT_DEBUG=1 aspect buildifier --scope=tracked --task-key buildifier-bk-tracked-debug
+      aspect buildifier --scope=tracked --task-key buildifier-bk-tracked
+      ASPECT_DEBUG=1 aspect buildifier --scope=all --task-key buildifier-bk-all-debug
+      aspect buildifier --scope=all --task-key buildifier-bk-all
+
   - key: format-task
     label: ":aspect: Format Task"
     depends_on:
@@ -252,8 +257,13 @@ steps:
     # Starlark patterns are handled by buildifier-task; ignore them here so
     # the two steps don't do duplicate work.
     command: |
-      ASPECT_DEBUG=1 aspect format --task:name format-bk-debug
-      aspect format --task:name format-bk
+      ASPECT_DEBUG=1 aspect format --task-key format-bk-debug
+      aspect format --task-key format-bk
+      ASPECT_DEBUG=1 aspect format --scope=tracked --task-key format-bk-tracked-debug
+      aspect format --scope=tracked --task-key format-bk-tracked
+      ASPECT_DEBUG=1 aspect format --scope=all --task-key format-bk-all-debug
+      aspect format --scope=all --task-key format-bk-all
+
   - key: gazelle-task
     label: ":aspect: Gazelle Task"
     depends_on:

@@ -118,6 +118,10 @@ jobs:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Buildifier Task
         run: aspect buildifier --task:name buildifier-gha
+      - name: Buildifier Task (scope=tracked)
+        run: aspect buildifier --scope=tracked --task:name buildifier-gha-tracked
+      - name: Buildifier Task (scope=all)
+        run: aspect buildifier --scope=all --task:name buildifier-gha-all
   buildifier-debug-task:
     runs-on: ubuntu-latest
     needs: [pre-build]
@@ -144,6 +148,10 @@ jobs:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Format Task
         run: bazel format --task:name format-gha
+      - name: Format Task (scope=tracked)
+        run: bazel format --scope=tracked --task:name format-gha-tracked
+      - name: Format Task (scope=all)
+        run: bazel format --scope=all --task:name format-gha-all
   format-debug-task:
     runs-on: ubuntu-latest
     needs: [pre-build]
