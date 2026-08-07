@@ -17,7 +17,6 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     return run_bazel_task(ctx, command = "build")
 
 build = task(
-    summary = "Build Bazel targets. Wraps `bazel build` with retries, remote cache/BES wiring, and CI status reporting.",
     args = {
         # TODO: Support - (list from stdin)
         "targets": args.positional(
@@ -39,6 +38,7 @@ build = task(
             description = "Cancel any running Bazel invocation before starting the build.",
         ),
     } | bazel_flag_args("the build") | announce_bazel_args("the build") | bes_args() | deployment_flag_args() | repro_flavor_args(),
+    summary = "Build Bazel targets. Wraps `bazel build` with retries, remote cache/BES wiring, and CI status reporting.",
     traits = [
         BazelTrait,
         HealthCheckTrait,
