@@ -396,13 +396,12 @@ def _impl(ctx: TaskContext) -> int:
         return 1
 
     # `--format` is the pre-`--output` spelling, kept working so existing
-    # scripts don't break. It loses to an explicit `--output`; since an
-    # unset `--output` is indistinguishable from one passed as its default,
-    # "still at the default" is what yields to it.
+    # scripts don't break. An explicitly typed `--output` always wins, even
+    # when its value happens to equal the default.
     fmt = ctx.args.output
     if ctx.args.format:
         warn(ctx.std, "`--format` is deprecated; use `--output` instead.")
-        if ctx.args.output == _OUTPUT_DEFAULT:
+        if not ctx.args.is_explicit("output"):
             fmt = ctx.args.format
     using_exec = bool(ctx.args.exec)
 

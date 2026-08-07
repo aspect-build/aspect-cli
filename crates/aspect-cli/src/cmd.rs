@@ -902,12 +902,25 @@ fn describe_arg(scope: Scope<'_>, name: &str, arg: &Arg) -> serde_json::Value {
         // Filtered out by `is_cli_exposed` before reaching here.
         Arg::Custom { description, .. } => ("custom", json!(null), json!(null), description, &None),
     };
+    // `Arg::is_required` reports false for positionals — they carry cardinality
+    // instead of a `required` flag — so a `minimum = 1` positional would read as
+    // optional. Derive requiredness from the cardinality and report the bounds,
+    // or a caller cannot tell `aspect run` (exactly one target) from a task that
+    // takes none.
+    let (required, minimum, maximum) = match arg {
+        Arg::Positional {
+            minimum, maximum, ..
+        } => (*minimum >= 1, json!(minimum), json!(maximum)),
+        _ => (arg.is_required(), json!(null), json!(null)),
+    };
     json!({
         "name": name,
         "type": kind,
         "flag": flag,
         "short": short.as_ref().map(|s| format!("-{s}")),
-        "required": arg.is_required(),
+        "required": required,
+        "minimum": minimum,
+        "maximum": maximum,
         "default": default,
         "allowed_values": values,
         "description": description,
@@ -924,9 +937,18 @@ fn override_as_default(arg: &Arg, over: &[String]) -> serde_json::Value {
     use serde_json::json;
 
     match arg {
-        Arg::StringList { .. } => json!(over),
+        // Positional values are genuinely strings (target patterns), so they
+        // stay as they came.
+        Arg::StringList { .. } | Arg::Positional { .. } => json!(over),
         Arg::BooleanList { .. } => json!(over.iter().map(|v| v == "true").collect::<Vec<_>>()),
-        Arg::IntList { .. } | Arg::UIntList { .. } | Arg::Positional { .. } => json!(over),
+        Arg::IntList { .. } | Arg::UIntList { .. } => json!(
+            over.iter()
+                .map(|v| v
+                    .parse::<i64>()
+                    .map(|n| json!(n))
+                    .unwrap_or_else(|_| json!(v)))
+                .collect::<Vec<_>>()
+        ),
         _ => match over.first() {
             None => json!(null),
             Some(first) => match arg {
@@ -995,10 +1017,24 @@ fn describe_json(
         .iter()
         .filter_map(|feat| {
             let block = feature_block(*feat)?;
+            // `feature_block` bakes scalar overrides into its schema but skips
+            // list-valued ones, so re-apply them here for the same reason task
+            // args do it: a caller must see the default execution will use, not
+            // one it can never observe.
+            let overrides = stringify_overrides(feat.overrides());
             let flags: Vec<serde_json::Value> = block
                 .args
                 .iter()
-                .map(|(arg_name, arg)| describe_arg(Scope::Feature(&block.prefix), arg_name, arg))
+                .map(|(arg_name, arg)| {
+                    let mut described = describe_arg(Scope::Feature(&block.prefix), arg_name, arg);
+                    if let Some(over) = overrides.get(arg_name)
+                        && let Some(obj) = described.as_object_mut()
+                    {
+                        obj.insert("default".into(), override_as_default(arg, over));
+                        obj.insert("default_from_config".into(), json!(true));
+                    }
+                    described
+                })
                 .collect();
             Some(json!({
                 "name": feat.name(),
@@ -1806,6 +1842,53 @@ mod tests {
         // Positionals have no flag to type.
         assert_eq!(by_name("targets")["flag"], serde_json::Value::Null);
         assert_eq!(by_name("targets")["type"], "positional");
+        // A flag arg carries no cardinality.
+        assert_eq!(by_name("base_ref")["minimum"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn describe_reports_positional_cardinality_and_derives_requiredness() {
+        let mut args: SmallMap<String, Arg> = SmallMap::new();
+        // `Arg::is_required` returns false for every positional, so a required
+        // one is only distinguishable via its cardinality.
+        args.insert(
+            "target".to_owned(),
+            Arg::Positional {
+                minimum: 1,
+                maximum: 1,
+                default: None,
+                description: None,
+            },
+        );
+        args.insert(
+            "extras".to_owned(),
+            Arg::Positional {
+                minimum: 0,
+                maximum: 8,
+                default: None,
+                description: None,
+            },
+        );
+        let task = stub_task("run", &[], args);
+        let tasks: Vec<&dyn TaskLike> = vec![&task];
+        let doc = describe_json("1.2.3", &tasks, &[], Path::new("/repo"), &[]);
+        let by_name = |n: &str| {
+            doc["tasks"][0]["args"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|a| a["name"] == n)
+                .unwrap()
+                .clone()
+        };
+
+        assert_eq!(by_name("target")["required"], true);
+        assert_eq!(by_name("target")["minimum"], 1);
+        assert_eq!(by_name("target")["maximum"], 1);
+
+        assert_eq!(by_name("extras")["required"], false);
+        assert_eq!(by_name("extras")["minimum"], 0);
+        assert_eq!(by_name("extras")["maximum"], 8);
     }
 
     #[test]
@@ -1845,6 +1928,31 @@ mod tests {
         assert_eq!(
             override_as_default(&list_arg, &["a".to_owned(), "b".to_owned()]),
             serde_json::json!(["a", "b"])
+        );
+
+        // …and numeric lists are re-typed elementwise, not left as strings.
+        let int_list = Arg::IntList {
+            required: false,
+            default: vec![],
+            short: None,
+            long: None,
+            description: None,
+        };
+        assert_eq!(
+            override_as_default(&int_list, &["1".to_owned(), "2".to_owned()]),
+            serde_json::json!([1, 2])
+        );
+
+        // Positional values are target patterns — genuinely strings.
+        let positional = Arg::Positional {
+            minimum: 0,
+            maximum: 8,
+            default: None,
+            description: None,
+        };
+        assert_eq!(
+            override_as_default(&positional, &["//...".to_owned()]),
+            serde_json::json!(["//..."])
         );
     }
 
