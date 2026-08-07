@@ -104,7 +104,6 @@ impl<'a, 'v> Cmd<'a, 'v> {
         let mut tree = Tree::default();
         for (idx, task) in self.tasks.iter().enumerate() {
             let label = defined_in_label(task.path(), self.aspect_root, self.modules);
-            warn_missing_summary(*task, &label);
             let task_cmd = task_command(idx, *task, &label, &feature_blocks, &cli_header);
             tree.insert(*task, &label, task_cmd)?;
         }
@@ -1154,6 +1153,11 @@ fn task_command(
         kind, label,
     );
     let about = if task.summary().is_empty() {
+        // Warn beside the fallback rather than at the call site, so the
+        // diagnostic and the text it quotes cannot drift apart.
+        if needs_summary_warning(task.summary(), label) {
+            warn_missing_summary(&kind, label);
+        }
         context_line.clone()
     } else {
         task.summary().clone()
@@ -1370,16 +1374,22 @@ fn group_section(group_names: &[String]) -> String {
 /// cannot fix it. Built-in `@aspect//` tasks are held to the rule by
 /// `every_builtin_task_declares_a_summary` instead, so a regression there fails
 /// our CI rather than printing in a customer's terminal.
-fn warn_missing_summary(task: &dyn TaskLike<'_>, defined_in: &str) {
-    if !task.summary().is_empty() || defined_in.starts_with('@') {
-        return;
-    }
-    let kind = task.kind();
+fn warn_missing_summary(kind: &str, defined_in: &str) {
     diag::warn(&format!(
         "task {kind:?} in {defined_in} has no summary, so it shows as \
          \"{kind} task defined in {defined_in}\" in `aspect --help`. \
          Add summary = \"…\" to task(...) — this becomes an error in a future release."
     ));
+}
+
+/// Pure core of the [`warn_missing_summary`] gate, parameterized over its
+/// inputs so the rule is testable without capturing stderr.
+///
+/// Only first-party tasks qualify: [`defined_in_label`] reports a module's
+/// tasks as `@mod//…`, and warning about a third-party module's task would be
+/// noise the reader cannot act on.
+fn needs_summary_warning(summary: &str, defined_in: &str) -> bool {
+    summary.is_empty() && !defined_in.starts_with('@')
 }
 
 fn defined_in_label(path: &Path, aspect_root: &Path, modules: &[Mod]) -> String {
@@ -1483,6 +1493,7 @@ mod tests {
         group: Vec<String>,
         args: SmallMap<String, Arg>,
         path: PathBuf,
+        summary: String,
     }
 
     impl<'v> TaskLike<'v> for StubTask {
@@ -1490,7 +1501,7 @@ mod tests {
             &self.args
         }
         fn summary(&self) -> &String {
-            empty_string()
+            &self.summary
         }
         fn description(&self) -> &String {
             empty_string()
@@ -1521,12 +1532,16 @@ mod tests {
         }
     }
 
+    /// Carries a non-empty summary so building the CLI surface stays quiet —
+    /// an empty one trips the deprecation warning and floods test output.
+    /// `needs_summary_warning` covers that rule directly instead.
     fn stub_task(name: &str, group: &[&str], args: SmallMap<String, Arg>) -> StubTask {
         StubTask {
             name: name.to_owned(),
             group: group.iter().map(|s| s.to_string()).collect(),
             args,
             path: PathBuf::from("/repo/tasks/test.axl"),
+            summary: format!("Stub {name} task."),
         }
     }
 
@@ -1870,6 +1885,24 @@ mod tests {
         assert_eq!(by_name("targets")["type"], "positional");
         // A flag arg carries no cardinality.
         assert_eq!(by_name("base_ref")["minimum"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn summary_warning_fires_only_for_undocumented_first_party_tasks() {
+        // The case worth warning about: our own task, no summary.
+        assert!(needs_summary_warning("", ".aspect/deploy.axl"));
+
+        // A documented task never warns, wherever it came from.
+        assert!(!needs_summary_warning(
+            "Deploy the app.",
+            ".aspect/deploy.axl"
+        ));
+        assert!(!needs_summary_warning("Build it.", "@aspect//build.axl"));
+
+        // A module's undocumented task is not the reader's to fix, so warning
+        // about it would be pure noise.
+        assert!(!needs_summary_warning("", "@aspect//build.axl"));
+        assert!(!needs_summary_warning("", "@some_third_party//task.axl"));
     }
 
     /// `warn_missing_summary` deliberately stays quiet for `@mod//` tasks, so
