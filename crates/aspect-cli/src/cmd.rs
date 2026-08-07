@@ -19,6 +19,7 @@ use std::process::ExitCode;
 
 use aspect_telemetry::cargo_pkg_display_version;
 use axl_runtime::banner;
+use axl_runtime::color;
 use axl_runtime::diag;
 use axl_runtime::engine::arg::Arg;
 use axl_runtime::engine::arguments::Arguments;
@@ -262,7 +263,10 @@ impl<'a, 'v> Cmd<'a, 'v> {
 
         match name {
             None => {
-                print!("{}", render_feature_list(version, &blocks));
+                print!(
+                    "{}",
+                    render_feature_list(version, &blocks, color::stdout_supports_color())
+                );
                 ExitCode::SUCCESS
             }
             Some(name) => match blocks.iter().find(|(f, _)| f.name() == name) {
@@ -756,18 +760,30 @@ fn feature_block(feat: &dyn FeatureLike<'_>) -> Option<FeatureBlock> {
 
 /// Render the `aspect feature` listing: one row per feature, keyed by the
 /// kebab slug the user passes to `aspect feature <name>`, with its summary.
-fn render_feature_list(version: &str, blocks: &[(&dyn FeatureLike<'_>, FeatureBlock)]) -> String {
+fn render_feature_list(
+    version: &str,
+    blocks: &[(&dyn FeatureLike<'_>, FeatureBlock)],
+    color: bool,
+) -> String {
     let width = blocks
         .iter()
         .map(|(f, _)| f.name().len())
         .max()
         .unwrap_or(0);
-    let mut out = format!("{}\n\n\x1b[1;4mFeatures:\x1b[0m\n", banner::line(version));
+    let (bold, bold_underline, reset) = if color {
+        ("\x1b[1m", "\x1b[1;4m", "\x1b[0m")
+    } else {
+        ("", "", "")
+    };
+    let mut out = format!(
+        "{}\n\n{bold_underline}Features:{reset}\n",
+        banner::line_colored(version, color)
+    );
     for (feat, _) in blocks {
         let slug = feat.name();
         let pad = " ".repeat(width - slug.len() + 2);
         out.push_str(&format!(
-            "  \x1b[1m{}\x1b[0m{}{}\n",
+            "  {bold}{}{reset}{}{}\n",
             slug,
             pad,
             feat.summary()
@@ -1482,7 +1498,7 @@ mod tests {
             .collect();
         let mut sorted = blocks;
         sorted.sort_by(|(a, _), (b, _)| a.name().cmp(&b.name()));
-        let out = render_feature_list("1.2.3", &sorted);
+        let out = render_feature_list("1.2.3", &sorted, true);
         let au_at = out.find("artifact-upload").expect("artifact-upload listed");
         let tips_at = out.find("tips").expect("tips listed");
         assert!(au_at < tips_at, "rows should be alphabetical by slug");

@@ -101,6 +101,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     return conclusion
 
 test = task(
+    summary = "Run Bazel tests. Wraps `bazel test` with retries, remote cache/BES wiring, and CI status reporting.",
     args = {
         # TODO: Support - (list from stdin)
         "targets": args.positional(

@@ -1201,6 +1201,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     )
 
 lint = task(
+    summary = "Lint targets using rules_lint aspects and report findings on the terminal or as code-review comments.",
     args = {
         "aspects": args.string_list(
             long = "aspect",

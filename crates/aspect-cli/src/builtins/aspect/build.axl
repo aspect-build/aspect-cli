@@ -17,6 +17,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     return run_bazel_task(ctx, command = "build")
 
 build = task(
+    summary = "Build Bazel targets. Wraps `bazel build` with retries, remote cache/BES wiring, and CI status reporting.",
     args = {
         # TODO: Support - (list from stdin)
         "targets": args.positional(
