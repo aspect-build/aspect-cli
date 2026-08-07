@@ -418,6 +418,7 @@ def _test_impl(ctx):
     return 0
 
 bazel_flags_tests = task(
+    summary = "Run the bazel flags AXL unit tests.",
     kind = "test-bazel-flags",
     group = ["dev"],
     implementation = _test_impl,

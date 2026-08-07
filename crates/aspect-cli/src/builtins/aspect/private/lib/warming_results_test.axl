@@ -196,6 +196,7 @@ def _check_failed_actions_invoke_snippet_macro(ctx):
         fail("failed action label missing — Bazel-targets block did not render: %r" % out["text"][:600])
 
 warming_template_snapshot_tests = task(
+    summary = "Run the warming template snapshots AXL unit tests.",
     kind = "test-warming-template-snapshots",
     group = ["dev"],
     implementation = _test_impl,

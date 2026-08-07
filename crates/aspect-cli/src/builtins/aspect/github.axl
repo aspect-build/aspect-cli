@@ -59,6 +59,7 @@ def _token_impl(ctx: TaskContext) -> int:
 
 token = task(
     group = ["github"],
+    summary = "Mint a short-lived GitHub App token for a repository and print it to stdout.",
     implementation = _token_impl,
     args = {
         "repo": args.positional(

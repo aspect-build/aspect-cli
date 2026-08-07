@@ -51,6 +51,7 @@ def _user_task_impl(ctx: TaskContext) -> int:
 
 _user_task = task(
     kind = "user-task-added-by-config",
+    summary = "Test fixture: a user task added from config.axl rather than its own file.",
     group = ["user"],
     implementation = _user_task_impl,
     args = {},

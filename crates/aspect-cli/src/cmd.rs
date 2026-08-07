@@ -104,6 +104,7 @@ impl<'a, 'v> Cmd<'a, 'v> {
         let mut tree = Tree::default();
         for (idx, task) in self.tasks.iter().enumerate() {
             let label = defined_in_label(task.path(), self.aspect_root, self.modules);
+            warn_missing_summary(*task, &label);
             let task_cmd = task_command(idx, *task, &label, &feature_blocks, &cli_header);
             tree.insert(*task, &label, task_cmd)?;
         }
@@ -1356,6 +1357,31 @@ fn group_section(group_names: &[String]) -> String {
 
 // ── Misc helpers ───────────────────────────────────────────────────────────
 
+/// Warn once for a task declared without a `summary`.
+///
+/// A task with no summary renders as `"<kind> task defined in <file>"` in
+/// `aspect --help` — the level at which a reader chooses a task at all, so an
+/// undocumented task is effectively invisible. This is a deprecation warning:
+/// `summary` is slated to become required.
+///
+/// Scoped to tasks defined in this repo, which [`defined_in_label`] reports as
+/// a bare relative path (a module's tasks come back as `@mod//…`). Warning
+/// about a third-party module's task would be pure noise — the reader seeing it
+/// cannot fix it. Built-in `@aspect//` tasks are held to the rule by
+/// `every_builtin_task_declares_a_summary` instead, so a regression there fails
+/// our CI rather than printing in a customer's terminal.
+fn warn_missing_summary(task: &dyn TaskLike<'_>, defined_in: &str) {
+    if !task.summary().is_empty() || defined_in.starts_with('@') {
+        return;
+    }
+    let kind = task.kind();
+    diag::warn(&format!(
+        "task {kind:?} in {defined_in} has no summary, so it shows as \
+         \"{kind} task defined in {defined_in}\" in `aspect --help`. \
+         Add summary = \"…\" to task(...) — this becomes an error in a future release."
+    ));
+}
+
 fn defined_in_label(path: &Path, aspect_root: &Path, modules: &[Mod]) -> String {
     for r#mod in modules {
         if r#mod.is_root() || !path.starts_with(&r#mod.root) {
@@ -1844,6 +1870,52 @@ mod tests {
         assert_eq!(by_name("targets")["type"], "positional");
         // A flag arg carries no cardinality.
         assert_eq!(by_name("base_ref")["minimum"], serde_json::Value::Null);
+    }
+
+    /// `warn_missing_summary` deliberately stays quiet for `@mod//` tasks, so
+    /// nothing at runtime holds our own built-ins to the rule. This does: it
+    /// scans the built-in source tree for a `task(` call with no `summary`.
+    ///
+    /// Kept as a source scan rather than an evaluation of the task tree because
+    /// it must fail in CI on the file a contributor just wrote, and name it.
+    #[test]
+    fn every_builtin_task_declares_a_summary() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/builtins/aspect");
+        let mut offenders = Vec::new();
+
+        let mut stack = vec![root.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("readable builtin dir") {
+                let path = entry.expect("readable entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|e| e != "axl") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).expect("readable .axl");
+                // Task calls are declared at column 0 as `<var> = task(`; the
+                // body's keywords sit at one indent level.
+                for (idx, _) in text.match_indices(" = task(\n") {
+                    let body = &text[idx..];
+                    let end = body.find("\n)").unwrap_or(body.len());
+                    if !body[..end].contains("\n    summary = ") {
+                        let line = text[..idx].lines().count() + 1;
+                        let rel = path.strip_prefix(&root).unwrap_or(&path);
+                        offenders.push(format!("{}:{}", rel.display(), line));
+                    }
+                }
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "every built-in task must declare a summary — it is what `aspect --help` \
+             shows, and a reader (or an AI agent) picks a task from that line. \
+             Add `summary = \"…\"` at:\n  {}",
+            offenders.join("\n  ")
+        );
     }
 
     #[test]
