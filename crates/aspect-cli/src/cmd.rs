@@ -1153,6 +1153,9 @@ fn task_command(
         kind, label,
     );
     let about = if task.summary().is_empty() {
+        if needs_summary_warning(task.summary(), label) {
+            warn_missing_summary(&kind, label);
+        }
         context_line.clone()
     } else {
         task.summary().clone()
@@ -1356,6 +1359,21 @@ fn group_section(group_names: &[String]) -> String {
 
 // ── Misc helpers ───────────────────────────────────────────────────────────
 
+/// Warn that a task has no `summary`, which will become required.
+fn warn_missing_summary(kind: &str, defined_in: &str) {
+    diag::warn(&format!(
+        "task {kind:?} in {defined_in} has no summary, so it shows as \
+         \"{kind} task defined in {defined_in}\" in `aspect --help`. \
+         Add summary = \"…\" to task(...) — this becomes an error in a future release."
+    ));
+}
+
+/// Undocumented, and defined in this repo rather than a module (`@mod//…`) —
+/// a module's task is not the reader's to fix.
+fn needs_summary_warning(summary: &str, defined_in: &str) -> bool {
+    summary.is_empty() && !defined_in.starts_with('@')
+}
+
 fn defined_in_label(path: &Path, aspect_root: &Path, modules: &[Mod]) -> String {
     for r#mod in modules {
         if r#mod.is_root() || !path.starts_with(&r#mod.root) {
@@ -1457,6 +1475,7 @@ mod tests {
         group: Vec<String>,
         args: SmallMap<String, Arg>,
         path: PathBuf,
+        summary: String,
     }
 
     impl<'v> TaskLike<'v> for StubTask {
@@ -1464,7 +1483,7 @@ mod tests {
             &self.args
         }
         fn summary(&self) -> &String {
-            empty_string()
+            &self.summary
         }
         fn description(&self) -> &String {
             empty_string()
@@ -1495,12 +1514,14 @@ mod tests {
         }
     }
 
+    /// Summary is non-empty so `Cmd::build` doesn't warn in every test.
     fn stub_task(name: &str, group: &[&str], args: SmallMap<String, Arg>) -> StubTask {
         StubTask {
             name: name.to_owned(),
             group: group.iter().map(|s| s.to_string()).collect(),
             args,
             path: PathBuf::from("/repo/tasks/test.axl"),
+            summary: format!("Stub {name} task."),
         }
     }
 
@@ -1844,6 +1865,51 @@ mod tests {
         assert_eq!(by_name("targets")["type"], "positional");
         // A flag arg carries no cardinality.
         assert_eq!(by_name("base_ref")["minimum"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn summary_warning_fires_only_for_undocumented_first_party_tasks() {
+        assert!(needs_summary_warning("", ".aspect/deploy.axl"));
+
+        assert!(!needs_summary_warning(
+            "Deploy the app.",
+            ".aspect/deploy.axl"
+        ));
+        assert!(!needs_summary_warning("Build it.", "@aspect//build.axl"));
+        assert!(!needs_summary_warning("", "@aspect//build.axl"));
+        assert!(!needs_summary_warning("", "@some_third_party//task.axl"));
+    }
+
+    /// The runtime warning skips `@aspect//` tasks, so enforce the rule here.
+    ///
+    /// Reads the `include_dir!` embed, not the filesystem, so it works under
+    /// Bazel's sandbox where the cargo layout isn't on disk.
+    #[test]
+    fn every_builtin_task_declares_a_summary() {
+        use include_dir::{Dir, include_dir};
+        static ASPECT_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/src/builtins/aspect");
+
+        let mut offenders = Vec::new();
+        for f in ASPECT_DIR.find("**/*.axl").unwrap() {
+            let Some(text) = f.as_file().and_then(|file| file.contents_utf8()) else {
+                continue;
+            };
+            // `<var> = task(` at column 0, keywords at one indent.
+            for (idx, _) in text.match_indices(" = task(\n") {
+                let body = &text[idx..];
+                let end = body.find("\n)").unwrap_or(body.len());
+                if !body[..end].contains("\n    summary = ") {
+                    let line = text[..idx].lines().count() + 1;
+                    offenders.push(format!("{}:{}", f.path().display(), line));
+                }
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "built-in tasks must declare a summary; add `summary = \"…\"` at:\n  {}",
+            offenders.join("\n  ")
+        );
     }
 
     #[test]

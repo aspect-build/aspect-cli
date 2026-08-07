@@ -212,6 +212,7 @@ def _test_impl(ctx):
     return 0
 
 bk_annotation_snapshot_tests = task(
+    summary = "Run the bk annotation snapshots AXL unit tests.",
     kind = "test-bk-annotation-snapshots",
     group = ["dev"],
     implementation = _test_impl,

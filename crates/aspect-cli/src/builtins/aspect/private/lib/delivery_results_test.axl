@@ -404,6 +404,7 @@ def _check_long_subject_title_is_capped(ctx):
         fail("title unexpectedly long (%d chars): %r" % (len(title), title))
 
 delivery_template_snapshot_tests = task(
+    summary = "Run the delivery template snapshots AXL unit tests.",
     kind = "test-delivery-template-snapshots",
     group = ["dev"],
     implementation = _test_impl,
@@ -596,6 +597,7 @@ def _unit_test_impl(ctx):
     return 0
 
 delivery_results_unit_tests = task(
+    summary = "Run the delivery results AXL unit tests.",
     kind = "test-delivery-results",
     group = ["dev"],
     implementation = _unit_test_impl,

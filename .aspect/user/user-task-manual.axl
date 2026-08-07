@@ -4,6 +4,7 @@ def _impl(ctx: TaskContext) -> int:
 
 user_task_manual = task(
     kind = "user-task-man",
+    summary = "Test fixture: a user task registered manually rather than by directory scan.",
     group = ["user"],
     implementation = _impl,
     args = {},

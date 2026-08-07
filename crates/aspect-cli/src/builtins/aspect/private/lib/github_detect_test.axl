@@ -1238,6 +1238,7 @@ def _test_resolve_merge_base_integration(ctx):
     ctx.std.fs.remove_dir_all(repo)
 
 github_detect_tests = task(
+    summary = "Run the github detect AXL unit tests.",
     kind = "test-github-detect",
     group = ["dev"],
     implementation = _test_impl,

@@ -290,6 +290,7 @@ def _test_impl(ctx):
     return 0
 
 bes_sinks_tests = task(
+    summary = "Run the bes sinks AXL unit tests.",
     kind = "test-bes-sinks",
     group = ["dev"],
     implementation = _test_impl,

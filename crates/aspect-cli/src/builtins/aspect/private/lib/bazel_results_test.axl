@@ -629,6 +629,7 @@ def _test_impl(ctx):
     return 0
 
 template_snapshot_tests = task(
+    summary = "Run the template snapshots AXL unit tests.",
     kind = "test-template-snapshots",
     group = ["dev"],
     implementation = _test_impl,
@@ -1420,6 +1421,7 @@ def _unit_test_impl(ctx):
     return 0
 
 bazel_results_unit_tests = task(
+    summary = "Run the bazel results AXL unit tests.",
     kind = "test-bazel-results",
     group = ["dev"],
     implementation = _unit_test_impl,
