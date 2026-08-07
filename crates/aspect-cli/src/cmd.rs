@@ -1153,8 +1153,6 @@ fn task_command(
         kind, label,
     );
     let about = if task.summary().is_empty() {
-        // Warn beside the fallback rather than at the call site, so the
-        // diagnostic and the text it quotes cannot drift apart.
         if needs_summary_warning(task.summary(), label) {
             warn_missing_summary(&kind, label);
         }
@@ -1361,19 +1359,7 @@ fn group_section(group_names: &[String]) -> String {
 
 // ── Misc helpers ───────────────────────────────────────────────────────────
 
-/// Warn once for a task declared without a `summary`.
-///
-/// A task with no summary renders as `"<kind> task defined in <file>"` in
-/// `aspect --help` — the level at which a reader chooses a task at all, so an
-/// undocumented task is effectively invisible. This is a deprecation warning:
-/// `summary` is slated to become required.
-///
-/// Scoped to tasks defined in this repo, which [`defined_in_label`] reports as
-/// a bare relative path (a module's tasks come back as `@mod//…`). Warning
-/// about a third-party module's task would be pure noise — the reader seeing it
-/// cannot fix it. Built-in `@aspect//` tasks are held to the rule by
-/// `every_builtin_task_declares_a_summary` instead, so a regression there fails
-/// our CI rather than printing in a customer's terminal.
+/// Warn that a task has no `summary`, which will become required.
 fn warn_missing_summary(kind: &str, defined_in: &str) {
     diag::warn(&format!(
         "task {kind:?} in {defined_in} has no summary, so it shows as \
@@ -1382,12 +1368,8 @@ fn warn_missing_summary(kind: &str, defined_in: &str) {
     ));
 }
 
-/// Pure core of the [`warn_missing_summary`] gate, parameterized over its
-/// inputs so the rule is testable without capturing stderr.
-///
-/// Only first-party tasks qualify: [`defined_in_label`] reports a module's
-/// tasks as `@mod//…`, and warning about a third-party module's task would be
-/// noise the reader cannot act on.
+/// Undocumented, and defined in this repo rather than a module (`@mod//…`) —
+/// a module's task is not the reader's to fix.
 fn needs_summary_warning(summary: &str, defined_in: &str) -> bool {
     summary.is_empty() && !defined_in.starts_with('@')
 }
@@ -1532,9 +1514,7 @@ mod tests {
         }
     }
 
-    /// Carries a non-empty summary so building the CLI surface stays quiet —
-    /// an empty one trips the deprecation warning and floods test output.
-    /// `needs_summary_warning` covers that rule directly instead.
+    /// Summary is non-empty so `Cmd::build` doesn't warn in every test.
     fn stub_task(name: &str, group: &[&str], args: SmallMap<String, Arg>) -> StubTask {
         StubTask {
             name: name.to_owned(),
@@ -1889,28 +1869,18 @@ mod tests {
 
     #[test]
     fn summary_warning_fires_only_for_undocumented_first_party_tasks() {
-        // The case worth warning about: our own task, no summary.
         assert!(needs_summary_warning("", ".aspect/deploy.axl"));
 
-        // A documented task never warns, wherever it came from.
         assert!(!needs_summary_warning(
             "Deploy the app.",
             ".aspect/deploy.axl"
         ));
         assert!(!needs_summary_warning("Build it.", "@aspect//build.axl"));
-
-        // A module's undocumented task is not the reader's to fix, so warning
-        // about it would be pure noise.
         assert!(!needs_summary_warning("", "@aspect//build.axl"));
         assert!(!needs_summary_warning("", "@some_third_party//task.axl"));
     }
 
-    /// `warn_missing_summary` deliberately stays quiet for `@mod//` tasks, so
-    /// nothing at runtime holds our own built-ins to the rule. This does: it
-    /// scans the built-in source tree for a `task(` call with no `summary`.
-    ///
-    /// Kept as a source scan rather than an evaluation of the task tree because
-    /// it must fail in CI on the file a contributor just wrote, and name it.
+    /// The runtime warning skips `@aspect//` tasks, so enforce the rule here.
     #[test]
     fn every_builtin_task_declares_a_summary() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/builtins/aspect");
@@ -1928,8 +1898,7 @@ mod tests {
                     continue;
                 }
                 let text = std::fs::read_to_string(&path).expect("readable .axl");
-                // Task calls are declared at column 0 as `<var> = task(`; the
-                // body's keywords sit at one indent level.
+                // `<var> = task(` at column 0, keywords at one indent.
                 for (idx, _) in text.match_indices(" = task(\n") {
                     let body = &text[idx..];
                     let end = body.find("\n)").unwrap_or(body.len());
@@ -1944,9 +1913,7 @@ mod tests {
 
         assert!(
             offenders.is_empty(),
-            "every built-in task must declare a summary — it is what `aspect --help` \
-             shows, and a reader (or an AI agent) picks a task from that line. \
-             Add `summary = \"…\"` at:\n  {}",
+            "built-in tasks must declare a summary; add `summary = \"…\"` at:\n  {}",
             offenders.join("\n  ")
         );
     }
