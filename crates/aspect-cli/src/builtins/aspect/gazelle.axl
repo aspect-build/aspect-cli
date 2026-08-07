@@ -690,6 +690,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     return _emit_final(ctx, lifecycle, data, 0)
 
 gazelle = task(
+    summary = "Generate and update BUILD files with gazelle. Applies the patch locally; detect-only on CI (`--check-only`).",
     args = {
         "severity": args.string(
             default = "auto",

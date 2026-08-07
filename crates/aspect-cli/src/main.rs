@@ -235,6 +235,9 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                     cmd_for_help.print_help()?;
                     return Ok(ExitCode::SUCCESS);
                 }
+                Some("describe") => {
+                    return Ok(cmd.print_describe(&cli_version));
+                }
                 Some("feature") => {
                     let name = matches
                         .subcommand_matches("feature")

@@ -275,6 +275,32 @@ logout = task(
     },
 )
 
+def _entry_json(d) -> dict:
+    """One credential entry as a JSON object.
+
+    `login_command` is the point of the whole document: a caller that finds
+    `logged_in = False` (or a non-empty `status` like "expired") gets the exact
+    command that fixes it, with no string parsing.
+    """
+    doc = {
+        "name": d.name,
+        "builtin": d.builtin,
+        "default": d.default and not d.builtin,
+        "logged_in": d.logged_in,
+        "status": d.status,
+        "identity": identity(d),
+        "display_name": d.display_name,
+        "email": d.email,
+        "issuer": d.issuer,
+        "login_command": login_command(d),
+    }
+    if not d.builtin:
+        doc["cache"] = d.cache
+        doc["exec"] = d.exec
+        doc["bes"] = d.bes
+        doc["results_url"] = d.results_url
+    return doc
+
 def _status_impl(ctx: TaskContext) -> int:
     entries = ctx.aspect.auth.list()
 
@@ -282,6 +308,16 @@ def _status_impl(ctx: TaskContext) -> int:
     # Workflows *deployments* are two different things — show them apart.
     account = [d for d in entries if d.builtin]
     deployments = [d for d in entries if not d.builtin]
+
+    if ctx.args.output == "json":
+        default_names = [d.name for d in deployments if d.default]
+        doc = {
+            "account": [_entry_json(d) for d in account],
+            "deployments": [_entry_json(d) for d in deployments],
+            "default_deployment": default_names[0] if default_names else None,
+        }
+        ctx.std.io.stdout.write(json.encode(doc, indent = 2) + "\n")
+        return 0
 
     print("Aspect account:")
     for d in account:
@@ -306,7 +342,13 @@ status = task(
     summary = "Show your Aspect account and deployment login status",
     description = "Show your Aspect account and every configured Workflows deployment — the identity and token status of each, the default deployment (●), and how to log in to any that are logged out.",
     implementation = _status_impl,
-    args = {},
+    args = {
+        "output": args.string(
+            default = "text",
+            values = ["text", "json"],
+            description = "stdout format. `text` (default): the aligned human-readable listing. `json`: one document with `{account, deployments, default_deployment}`, each entry carrying `logged_in`, `status`, `identity`, the endpoints, and the `login_command` that re-authenticates it — so a script or agent can decide what to do without parsing prose.",
+        ),
+    },
 )
 
 def _use_impl(ctx: TaskContext) -> int:

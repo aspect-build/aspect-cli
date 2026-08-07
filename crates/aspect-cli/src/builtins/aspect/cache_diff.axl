@@ -13,7 +13,7 @@ Output contract (built for pipes):
   - stdout — the affected test labels, one per line, nothing else. Pipe it:
         aspect cache diff | xargs bazel test
   - stderr — progress, per-target reasons, the summary, and errors.
-  - --format=json — one document on stdout instead of bare lines.
+  - --output=json — one document on stdout instead of bare lines.
   - --exec="<cmd>" — run `<cmd> <labels...>` instead of writing stdout.
 
 Modes (`--mode`):
@@ -73,10 +73,11 @@ load(
     "resolve_flags",
     "resolve_startup_flags",
 )
-load("./private/lib/environment.axl", "color_enabled")
+load("./private/lib/environment.axl", "color_enabled", "warn")
 load("./private/lib/remote_executor.axl", "start_dummy_executor", "stop_dummy_executor")
 load("./private/lib/runnable.axl", "apparent_label")
 
+_OUTPUT_DEFAULT = "lines"
 _GRPC_GET_ACTION_RESULT = "build.bazel.remote.execution.v2.ActionCache/GetActionResult"
 _TEST_MNEMONIC = "TestRunner"
 
@@ -394,7 +395,14 @@ def _impl(ctx: TaskContext) -> int:
     if entries == None:
         return 1
 
-    fmt = ctx.args.format
+    # `--format` is the pre-`--output` spelling, kept working so existing
+    # scripts don't break. An explicitly typed `--output` always wins, even
+    # when its value happens to equal the default.
+    fmt = ctx.args.output
+    if ctx.args.format:
+        warn(ctx.std, "`--format` is deprecated; use `--output` instead.")
+        if not ctx.args.is_explicit("output"):
+            fmt = ctx.args.format
     using_exec = bool(ctx.args.exec)
 
     # stdout carries the result: stream bare labels only for `lines` (and not
@@ -484,8 +492,8 @@ diff = task(
                 "genuine input change)."
             ),
         ),
-        "format": args.string(
-            default = "lines",
+        "output": args.string(
+            default = _OUTPUT_DEFAULT,
             values = ["lines", "json"],
             description = (
                 "stdout format. `lines`: affected labels, one per line (pipeable; " +
@@ -494,12 +502,20 @@ diff = task(
                 "[{target, mnemonic}]}]}` for scripting (parse with jq)."
             ),
         ),
+        "format": args.string(
+            default = "",
+            values = ["", "lines", "json"],
+            description = (
+                "Deprecated alias for --output; still accepted, and warns when " +
+                "set. Use --output instead."
+            ),
+        ),
         "exec": args.string(
             default = "",
             description = (
                 "Run this command with the affected labels appended as arguments " +
                 "(e.g. --exec=\"bazel test\") instead of writing stdout. No-op when " +
-                "nothing is affected. Overrides --format. For anything fancier, omit " +
+                "nothing is affected. Overrides --output. For anything fancier, omit " +
                 "it and pipe stdout."
             ),
         ),
