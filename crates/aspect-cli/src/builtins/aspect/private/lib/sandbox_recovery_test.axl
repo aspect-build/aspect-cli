@@ -192,6 +192,7 @@ def _test_impl(ctx):
     return 0
 
 sandbox_recovery_tests = task(
+    summary = "Run the sandbox recovery AXL unit tests.",
     kind = "test-sandbox-recovery",
     group = ["dev"],
     implementation = _test_impl,

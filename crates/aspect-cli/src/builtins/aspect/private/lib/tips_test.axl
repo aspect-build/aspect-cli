@@ -737,6 +737,7 @@ def _test_impl(ctx):
 tips_tests = task(
     kind = "test-tips",
     group = ["dev"],
+    summary = "Run the tips AXL unit tests.",
     implementation = _test_impl,
     args = {},
     traits = tips.TRAITS,

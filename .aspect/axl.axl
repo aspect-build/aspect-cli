@@ -3824,6 +3824,7 @@ def test_gitlab_token_cache(ctx: TaskContext, tc: int, temp_dir: str) -> int:
 
 axl = task(
     group = ["tests"],
+    summary = "Run the AXL unit test suite defined in .aspect/axl.axl.",
     implementation = impl,
     args = {},
     # tips.TRAITS must be in the trait list because several tested

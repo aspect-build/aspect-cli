@@ -2456,6 +2456,7 @@ def _delivery_partial(data, total):
     return data
 
 pr_comment_snapshot_tests = task(
+    summary = "Run the pr comment snapshots AXL unit tests.",
     kind = "test-pr-comment-snapshots",
     group = ["dev"],
     implementation = _test_impl,

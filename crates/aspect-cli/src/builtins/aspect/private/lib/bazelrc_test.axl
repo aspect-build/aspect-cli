@@ -202,6 +202,7 @@ def _test_impl(ctx):
     return 0
 
 bazelrc_tests = task(
+    summary = "Run the bazelrc AXL unit tests.",
     kind = "test-bazelrc",
     group = ["dev"],
     implementation = _test_impl,

@@ -170,6 +170,7 @@ def _test_impl(ctx):
     return 0
 
 aspect_endpoint_auth_tests = task(
+    summary = "Run the aspect endpoint auth AXL unit tests.",
     kind = "test-aspect-endpoint-auth",
     group = ["dev"],
     implementation = _test_impl,

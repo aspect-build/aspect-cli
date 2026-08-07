@@ -1551,6 +1551,7 @@ def _test_impl(ctx):
     return 0
 
 rate_limit_tests = task(
+    summary = "Run the rate limit AXL unit tests.",
     kind = "test-rate-limit",
     group = ["dev"],
     implementation = _test_impl,

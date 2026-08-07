@@ -155,6 +155,7 @@ def _test_impl(ctx):
     return 0
 
 lint_comments_tests = task(
+    summary = "Run the lint comments AXL unit tests.",
     kind = "test-lint-comments",
     group = ["dev"],
     implementation = _test_impl,
