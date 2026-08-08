@@ -186,6 +186,18 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         r#mod.features.push((absolute_path, symbol));
         Ok(values::none::NoneType)
     }
+
+    /// Declares a guidance topic exported by `label` under `symbol`.
+    fn use_guidance<'v>(
+        #[starlark(require = pos)] label: String,
+        #[starlark(require = pos)] symbol: String,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<values::none::NoneType> {
+        let r#mod = Mod::from_eval(eval)?;
+        let absolute_path = join_confined(&r#mod.root, Path::new(&label))?;
+        r#mod.guidance.push((absolute_path, symbol));
+        Ok(values::none::NoneType)
+    }
 }
 
 pub const AXL_MODULE_FILE: &str = "MODULE.aspect";

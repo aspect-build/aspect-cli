@@ -35,6 +35,7 @@ use super::task_map::TaskMap;
 #[display("<ConfigContext>")]
 pub struct ConfigContext<'v> {
     tasks: values::Value<'v>,
+    guidance: values::Value<'v>,
     trait_map: values::Value<'v>,
     feature_map: values::Value<'v>,
     telemetry: values::Value<'v>,
@@ -45,12 +46,14 @@ impl<'v> ConfigContext<'v> {
     /// trait, feature, and telemetry values.
     pub fn new(
         tasks: values::Value<'v>,
+        guidance: values::Value<'v>,
         trait_map: values::Value<'v>,
         feature_map: values::Value<'v>,
         telemetry: values::Value<'v>,
     ) -> Self {
         Self {
             tasks,
+            guidance,
             trait_map,
             feature_map,
             telemetry,
@@ -167,6 +170,16 @@ pub(crate) fn config_context_methods(registry: &mut MethodsBuilder) {
             .downcast_ref_err::<ConfigContext>()
             .into_anyhow_result()?;
         Ok(ctx.tasks)
+    }
+
+    /// Guidance topics this repo exposes. `ctx.guidance.add(guidance(...))`
+    /// contributes one, or replaces a module's by reusing its id.
+    #[starlark(attribute)]
+    fn guidance<'v>(this: values::Value<'v>) -> anyhow::Result<values::Value<'v>> {
+        let ctx = this
+            .downcast_ref_err::<ConfigContext>()
+            .into_anyhow_result()?;
+        Ok(ctx.guidance)
     }
 
     /// Access to the trait map for configuring trait instances.

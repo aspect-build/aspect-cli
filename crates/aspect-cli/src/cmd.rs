@@ -24,6 +24,7 @@ use axl_runtime::diag;
 use axl_runtime::engine::arg::Arg;
 use axl_runtime::engine::arguments::Arguments;
 use axl_runtime::engine::feature::FeatureLike;
+use axl_runtime::engine::guidance::Guidance;
 use axl_runtime::engine::names::to_display_name;
 use axl_runtime::engine::task::{MAX_TASK_GROUPS, TaskLike};
 use axl_runtime::eval::TimingMode;
@@ -42,6 +43,8 @@ const TASK_ID_KEY: &str = "@@@$'__AXL_TASK_ID__'$@@@";
 const FEATURE_COMMAND: &str = "feature";
 /// `aspect describe`: routed to the machine-readable surface dump in `main`.
 const DESCRIBE_COMMAND: &str = "describe";
+/// Selectable `aspect describe` sections, in `--include` order.
+const DESCRIBE_SECTIONS: &[&str] = &["tasks", "features", "guidance", "all"];
 /// Top-level command names `main` intercepts before task parsing; a top-level
 /// task of any of these kinds would be unreachable, so it is rejected at build
 /// time (see `Tree::insert`). Reachable when nested under a group.
@@ -72,6 +75,7 @@ pub enum CmdError {
 pub struct Cmd<'a, 'v> {
     pub tasks: Vec<&'v dyn TaskLike<'v>>,
     pub features: Vec<&'v dyn FeatureLike<'v>>,
+    pub guidance: &'a [Guidance],
     pub aspect_root: &'a Path,
     pub modules: &'a [Mod],
 }
@@ -205,6 +209,42 @@ impl<'a, 'v> Cmd<'a, 'v> {
                             .default_value("json")
                             .value_parser(PossibleValuesParser::new(["json"]))
                             .help("Output format."),
+                    )
+                    .arg(
+                        // The whole surface is large enough that dumping it
+                        // unconditionally is its own problem: a caller that
+                        // wants one task should not pay for every other.
+                        ClapArg::new("include")
+                            .long("include")
+                            .value_name("SECTION")
+                            .value_delimiter(',')
+                            .action(ArgAction::Append)
+                            .default_value("all")
+                            .value_parser(PossibleValuesParser::new(DESCRIBE_SECTIONS))
+                            .help(
+                                "Sections to emit, comma-separated. Omitted sections are \
+                                 absent from the document rather than empty.",
+                            ),
+                    )
+                    .arg(
+                        ClapArg::new("guidance")
+                            .long("guidance")
+                            .value_name("ID")
+                            .help(
+                                "Emit this guidance topic with its body. Without it the \
+                                 guidance section is an index only — bodies are not read.",
+                            ),
+                    )
+                    .arg(
+                        ClapArg::new("task")
+                            .long("task")
+                            .value_name("NAME")
+                            .help(
+                                "Emit only this task. Accepts the group path joined by \
+                                 spaces or hyphens ('cache diff', 'cache-diff') or the bare \
+                                 kind ('diff'). Implies --include=tasks unless --include is \
+                                 given explicitly.",
+                            ),
                     ),
             )
             .subcommand(Command::new("version").about("Print version").hide(true))
@@ -272,22 +312,56 @@ impl<'a, 'v> Cmd<'a, 'v> {
         })
     }
 
-    /// Render `aspect feature [<name>]` and return the process exit code.
-    ///
-    /// With no name, lists every active feature (keyed by the kebab slug the
-    /// user passes back in). With a name, prints just that feature's flags. An
-    /// unknown name lists the valid ones on stderr and exits 2.
     /// Print the resolved surface as JSON (`aspect describe`).
     ///
     /// Pretty-printed rather than compact: the output is read far more often
     /// than it is piped into another program, and diffs of it are useful.
-    pub fn print_describe(&self, version: &str) -> ExitCode {
+    ///
+    /// `matches` is the `describe` subcommand's own matches, carrying
+    /// `--include` and `--task`. `None` means no filtering, which keeps the
+    /// unfiltered dump reachable from callers that have no matches to hand.
+    /// An unknown `--task` lists the valid commands on stderr and exits 2, the
+    /// same contract `aspect feature <name>` uses.
+    pub fn print_describe(&self, version: &str, matches: Option<&ArgMatches>) -> ExitCode {
+        let filter = match matches.map(DescribeFilter::from_matches) {
+            Some(f) => f,
+            None => DescribeFilter::all(),
+        };
+
+        if let Some(needle) = filter.task
+            && !self.tasks.iter().any(|t| task_matches(t, needle))
+        {
+            let mut known: Vec<String> = self.tasks.iter().map(task_command_path).collect();
+            known.sort();
+            eprintln!("error: no task named {needle:?}");
+            eprintln!("valid tasks:");
+            for k in known {
+                eprintln!("  {k}");
+            }
+            return ExitCode::from(2);
+        }
+
+        if let Some(id) = filter.guidance_id
+            && !self.guidance.iter().any(|t| t.id() == id)
+        {
+            let mut known: Vec<&str> = self.guidance.iter().map(|t| t.id()).collect();
+            known.sort();
+            eprintln!("error: no guidance topic named {id:?}");
+            eprintln!("valid topics:");
+            for k in known {
+                eprintln!("  {k}");
+            }
+            return ExitCode::from(2);
+        }
+
         let doc = describe_json(
             version,
             &self.tasks,
             &self.features,
+            self.guidance,
             self.aspect_root,
             self.modules,
+            &filter,
         );
         match serde_json::to_string_pretty(&doc) {
             Ok(s) => {
@@ -300,6 +374,12 @@ impl<'a, 'v> Cmd<'a, 'v> {
             }
         }
     }
+
+    /// Render `aspect feature [<name>]` and return the process exit code.
+    ///
+    /// With no name, lists every active feature (keyed by the kebab slug the
+    /// user passes back in). With a name, prints just that feature's flags. An
+    /// unknown name lists the valid ones on stderr and exits 2.
 
     pub fn print_feature_help(&self, version: &str, name: Option<&str>) -> ExitCode {
         let mut blocks: Vec<(&dyn FeatureLike<'_>, FeatureBlock)> = self
@@ -923,7 +1003,9 @@ fn describe_arg(scope: Scope<'_>, name: &str, arg: &Arg) -> serde_json::Value {
         "maximum": maximum,
         "default": default,
         "allowed_values": values,
-        "description": description,
+        // `as_deref().map(...)` rather than a plain strip: the field is
+        // `Option<String>` and must stay null when absent, not become "".
+        "description": description.as_deref().map(color::strip_ansi),
     })
 }
 
@@ -968,17 +1050,89 @@ fn override_as_default(arg: &Arg, over: &[String]) -> serde_json::Value {
 ///
 /// This exists because the Aspect surface is per-repo — a caller cannot know
 /// what `aspect <task>` means here without asking. One call answers it.
+/// Which parts of the surface `aspect describe` should emit.
+pub struct DescribeFilter<'a> {
+    tasks: bool,
+    features: bool,
+    guidance: bool,
+    task: Option<&'a str>,
+    /// `Some` selects one topic *and* asks for its body; the index alone never
+    /// reads bodies.
+    guidance_id: Option<&'a str>,
+}
+
+impl<'a> DescribeFilter<'a> {
+    /// The whole surface — the default, and what a caller with no matches gets.
+    fn all() -> Self {
+        Self {
+            tasks: true,
+            features: true,
+            guidance: true,
+            task: None,
+            guidance_id: None,
+        }
+    }
+
+    /// Read `--include` and `--task` off the `describe` subcommand's matches.
+    ///
+    /// `--task` and `--guidance` each narrow `--include` to their own section,
+    /// so asking about one thing does not also pay for everything else — but
+    /// only when `--include` was left at its default, so an explicit
+    /// `--include` always wins.
+    fn from_matches(m: &'a ArgMatches) -> Self {
+        let sections: Vec<&str> = m
+            .get_many::<String>("include")
+            .map(|vals| vals.map(String::as_str).collect())
+            .unwrap_or_default();
+        let all = sections.contains(&"all");
+        let explicit = m.value_source("include") == Some(ValueSource::CommandLine);
+        let task = m.get_one::<String>("task").map(String::as_str);
+        let guidance_id = m.get_one::<String>("guidance").map(String::as_str);
+        let narrowed = !explicit && (task.is_some() || guidance_id.is_some());
+
+        Self {
+            tasks: (all || sections.contains(&"tasks")) && (!narrowed || task.is_some()),
+            features: (all || sections.contains(&"features")) && !narrowed,
+            guidance: (all || sections.contains(&"guidance"))
+                && (!narrowed || guidance_id.is_some()),
+            task,
+            guidance_id,
+        }
+    }
+}
+
+/// The group path plus kind, space-joined — `"cache diff"`, `"build"`.
+fn task_command_path(task: &&dyn TaskLike<'_>) -> String {
+    let mut path = task.group().clone();
+    path.push(task.kind().clone());
+    path.join(" ")
+}
+
+/// Whether `needle` names `task`.
+///
+/// Accepts the space- or hyphen-joined path and the bare kind, so a caller can
+/// pass back whatever it saw — `command` reads `aspect cache diff`, while a
+/// human is at least as likely to type `cache-diff`.
+fn task_matches(task: &&dyn TaskLike<'_>, needle: &str) -> bool {
+    let mut path = task.group().clone();
+    path.push(task.kind().clone());
+    path.join(" ") == needle || path.join("-") == needle || task.kind() == needle
+}
+
 fn describe_json(
     version: &str,
     tasks: &[&dyn TaskLike<'_>],
     features: &[&dyn FeatureLike<'_>],
+    guidance: &[Guidance],
     aspect_root: &Path,
     modules: &[Mod],
+    filter: &DescribeFilter<'_>,
 ) -> serde_json::Value {
     use serde_json::json;
 
     let described_tasks: Vec<serde_json::Value> = tasks
         .iter()
+        .filter(|task| filter.task.is_none_or(|needle| task_matches(task, needle)))
         .map(|task| {
             let kind = task.kind();
             let mut path = task.group().clone();
@@ -1005,8 +1159,8 @@ fn describe_json(
                 "command": format!("aspect {}", path.join(" ")),
                 "path": path,
                 "name": kind,
-                "summary": task.summary(),
-                "description": task.description(),
+                "summary": color::strip_ansi(&task.summary()),
+                "description": color::strip_ansi(&task.description()),
                 "defined_in": defined_in_label(task.path(), aspect_root, modules),
                 "args": args,
             })
@@ -1038,19 +1192,61 @@ fn describe_json(
                 .collect();
             Some(json!({
                 "name": feat.name(),
-                "summary": feat.summary(),
-                "description": feat.description(),
+                "summary": color::strip_ansi(&feat.summary()),
+                "description": color::strip_ansi(&feat.description()),
                 "defined_in": defined_in_label(feat.path(), aspect_root, modules),
                 "flags": flags,
             }))
         })
         .collect();
 
-    json!({
-        "aspect_cli_version": version,
-        "tasks": described_tasks,
-        "features": described_features,
-    })
+    let described_guidance: Vec<serde_json::Value> = guidance
+        .iter()
+        .filter(|t| filter.guidance_id.is_none_or(|id| t.id() == id))
+        .map(|t| {
+            let mut entry = serde_json::Map::new();
+            entry.insert("id".into(), json!(t.id()));
+            entry.insert("title".into(), json!(color::strip_ansi(t.title())));
+            entry.insert("summary".into(), json!(color::strip_ansi(t.summary())));
+            entry.insert("applies_to".into(), json!(t.applies_to()));
+            entry.insert("stability".into(), json!(t.stability().as_str()));
+            entry.insert(
+                "defined_in".into(),
+                json!(defined_in_label(t.body_file(), aspect_root, modules)),
+            );
+            entry.insert("bytes".into(), json!(t.body_len()));
+            // The body is read only for a topic the caller named. Reading every
+            // one to answer an index request is the cost this design exists to
+            // avoid.
+            if filter.guidance_id.is_some() {
+                match t.read_body() {
+                    Ok(body) => {
+                        entry.insert("body".into(), json!(body));
+                    }
+                    Err(e) => {
+                        entry.insert("body".into(), serde_json::Value::Null);
+                        entry.insert("error".into(), json!(e.to_string()));
+                    }
+                }
+            }
+            serde_json::Value::Object(entry)
+        })
+        .collect();
+
+    // Sections the caller excluded are absent, not empty: an empty array reads
+    // as "this repo has none", which is a different and wrong answer.
+    let mut doc = serde_json::Map::new();
+    doc.insert("aspect_cli_version".into(), json!(version));
+    if filter.tasks {
+        doc.insert("tasks".into(), json!(described_tasks));
+    }
+    if filter.features {
+        doc.insert("features".into(), json!(described_features));
+    }
+    if filter.guidance {
+        doc.insert("guidance".into(), json!(described_guidance));
+    }
+    serde_json::Value::Object(doc)
 }
 
 // ── `aspect feature` rendering ─────────────────────────────────────────────
@@ -1615,6 +1811,7 @@ mod tests {
         let cmd = Cmd {
             tasks: vec![&t as &dyn TaskLike],
             features: vec![],
+            guidance: &[],
             aspect_root: Path::new("/repo"),
             modules: &[],
         };
@@ -1629,6 +1826,7 @@ mod tests {
         let cmd = Cmd {
             tasks: vec![&t1, &t2],
             features: vec![],
+            guidance: &[],
             aspect_root: Path::new("/repo"),
             modules: &[],
         };
@@ -1647,6 +1845,7 @@ mod tests {
         let cmd = Cmd {
             tasks: vec![&t],
             features: vec![],
+            guidance: &[],
             aspect_root: Path::new("/repo"),
             modules: &[],
         };
@@ -1684,6 +1883,7 @@ mod tests {
         let cmd = Cmd {
             tasks: vec![&t1, &t2],
             features: vec![],
+            guidance: &[],
             aspect_root: Path::new("/repo"),
             modules: &[],
         };
@@ -1699,6 +1899,7 @@ mod tests {
         let cmd = Cmd {
             tasks: vec![&t],
             features: vec![],
+            guidance: &[],
             aspect_root: Path::new("/repo"),
             modules: &[],
         };
@@ -1721,6 +1922,7 @@ mod tests {
         let cmd = Cmd {
             tasks: vec![&t],
             features: vec![],
+            guidance: &[],
             aspect_root: Path::new("/repo"),
             modules: &[],
         };
@@ -1738,6 +1940,7 @@ mod tests {
         let cmd = Cmd {
             tasks: vec![&t],
             features: vec![],
+            guidance: &[],
             aspect_root: Path::new("/repo"),
             modules: &[],
         };
@@ -1753,6 +1956,7 @@ mod tests {
         let cmd = Cmd {
             tasks: vec![&t],
             features: vec![],
+            guidance: &[],
             aspect_root: Path::new("/repo"),
             modules: &[],
         };
@@ -1775,6 +1979,7 @@ mod tests {
         let cmd = Cmd {
             tasks: vec![&t],
             features: vec![&f as &dyn FeatureLike],
+            guidance: &[],
             aspect_root: Path::new("/repo"),
             modules: &[],
         };
@@ -1824,6 +2029,222 @@ mod tests {
         assert!(out.contains("aspect feature <NAME>"), "footer missing");
     }
 
+    /// Parse `aspect describe <args>` through the real root command, so the
+    /// flags under test are the ones a caller actually types.
+    fn describe_matches(argv: &[&str]) -> ArgMatches {
+        let t = stub_task("greet", &[], SmallMap::new());
+        let cmd = Cmd {
+            tasks: vec![&t as &dyn TaskLike],
+            features: vec![],
+            guidance: &[],
+            aspect_root: Path::new("/repo"),
+            modules: &[],
+        };
+        let root = cmd.build("0.0.0").expect("build ok");
+        let mut argv_full = vec!["aspect", "describe"];
+        argv_full.extend_from_slice(argv);
+        root.try_get_matches_from(argv_full)
+            .expect("describe parses")
+            .subcommand_matches("describe")
+            .expect("describe matches")
+            .clone()
+    }
+
+    #[test]
+    fn describe_task_filter_implies_tasks_only_unless_include_is_explicit() {
+        // Each `ArgMatches` needs its own binding: `DescribeFilter` borrows the
+        // `--task` string out of it.
+        let m = describe_matches(&[]);
+        let bare = DescribeFilter::from_matches(&m);
+        assert!(bare.tasks && bare.features, "default emits everything");
+        assert_eq!(bare.task, None);
+
+        // The common agent call: one task, and no reason to pay for 22 KB of
+        // feature schema alongside it.
+        let m = describe_matches(&["--task", "greet"]);
+        let one = DescribeFilter::from_matches(&m);
+        assert!(one.tasks);
+        assert!(!one.features, "--task alone should not emit features");
+        assert_eq!(one.task, Some("greet"));
+
+        // An explicit --include always wins over that implication.
+        let m = describe_matches(&["--task", "greet", "--include", "tasks,features"]);
+        let both = DescribeFilter::from_matches(&m);
+        assert!(both.tasks && both.features);
+
+        let m = describe_matches(&["--include", "features"]);
+        let feats = DescribeFilter::from_matches(&m);
+        assert!(!feats.tasks && feats.features);
+    }
+
+    #[test]
+    fn describe_omits_unselected_sections_rather_than_emptying_them() {
+        let task = stub_task("greet", &[], SmallMap::new());
+        let tasks: Vec<&dyn TaskLike> = vec![&task];
+        let filter = DescribeFilter {
+            tasks: true,
+            features: false,
+            guidance: false,
+            task: None,
+            guidance_id: None,
+        };
+        let doc = describe_json("1.2.3", &tasks, &[], &[], Path::new("/repo"), &[], &filter);
+
+        // Absent, not `[]` — an empty array would claim this repo has no
+        // features, which is a different and wrong answer.
+        assert!(doc.get("features").is_none());
+        assert!(doc.get("tasks").is_some());
+        assert_eq!(doc["aspect_cli_version"], "1.2.3");
+    }
+
+    #[test]
+    fn describe_task_filter_accepts_path_hyphens_and_bare_kind() {
+        let diff = stub_task("diff", &["cache"], SmallMap::new());
+        let build = stub_task("build", &[], SmallMap::new());
+        let tasks: Vec<&dyn TaskLike> = vec![&diff, &build];
+
+        let only = |needle: &str| {
+            let filter = DescribeFilter {
+                tasks: true,
+                features: false,
+                guidance: false,
+                task: Some(needle),
+                guidance_id: None,
+            };
+            let doc = describe_json("1.2.3", &tasks, &[], &[], Path::new("/repo"), &[], &filter);
+            doc["tasks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["command"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+
+        // All three spellings a caller might plausibly produce.
+        assert_eq!(only("cache diff"), vec!["aspect cache diff"]);
+        assert_eq!(only("cache-diff"), vec!["aspect cache diff"]);
+        assert_eq!(only("diff"), vec!["aspect cache diff"]);
+        assert_eq!(only("build"), vec!["aspect build"]);
+        assert!(only("nonexistent").is_empty());
+    }
+
+    use axl_runtime::engine::guidance::GuidanceStability;
+
+    /// A body on disk, so `bytes` and `read_body` have something real to read.
+    fn stub_guidance(dir: &Path, id: &str, body: &str) -> Guidance {
+        let body_file = dir.join(format!("{id}.md"));
+        std::fs::write(&body_file, body).expect("write body");
+        Guidance::new(
+            id.to_owned(),
+            format!("Title for {id}"),
+            format!("Summary for {id}"),
+            body_file,
+            vec!["go.mod".to_owned()],
+            GuidanceStability::Stable,
+            dir.join("topics.axl"),
+        )
+    }
+
+    /// The whole point of index-then-fetch: listing topics must not read their
+    /// bodies. A `body` key in the index would mean we had paid for every one.
+    #[test]
+    fn describe_guidance_index_omits_bodies_and_the_fetch_includes_one() {
+        let dir = std::env::temp_dir().join("axl-guidance-index-test");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let topics = vec![
+            stub_guidance(&dir, "bazelify-go", "# Go\n"),
+            stub_guidance(&dir, "cache-miss-triage", "# Cache\n"),
+        ];
+
+        let index = describe_json(
+            "1.2.3",
+            &[],
+            &[],
+            &topics,
+            Path::new("/repo"),
+            &[],
+            &DescribeFilter {
+                tasks: false,
+                features: false,
+                guidance: true,
+                task: None,
+                guidance_id: None,
+            },
+        );
+        let listed = index["guidance"].as_array().unwrap();
+        assert_eq!(listed.len(), 2);
+        for entry in listed {
+            assert!(entry.get("body").is_none(), "index must not read bodies");
+            // The index still reports size — from metadata, not a read.
+            assert!(entry["bytes"].as_u64().unwrap() > 0);
+        }
+
+        let fetched = describe_json(
+            "1.2.3",
+            &[],
+            &[],
+            &topics,
+            Path::new("/repo"),
+            &[],
+            &DescribeFilter {
+                tasks: false,
+                features: false,
+                guidance: true,
+                task: None,
+                guidance_id: Some("bazelify-go"),
+            },
+        );
+        let only = fetched["guidance"].as_array().unwrap();
+        assert_eq!(only.len(), 1, "a fetch returns just the named topic");
+        assert_eq!(only[0]["id"], "bazelify-go");
+        assert_eq!(only[0]["body"], "# Go\n");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn describe_guidance_flag_narrows_to_guidance_unless_include_is_explicit() {
+        let m = describe_matches(&["--guidance", "bazelify-go"]);
+        let one = DescribeFilter::from_matches(&m);
+        assert!(one.guidance);
+        assert!(
+            !one.tasks && !one.features,
+            "--guidance pays for nothing else"
+        );
+        assert_eq!(one.guidance_id, Some("bazelify-go"));
+
+        let m = describe_matches(&["--guidance", "bazelify-go", "--include", "all"]);
+        let all = DescribeFilter::from_matches(&m);
+        assert!(all.tasks && all.features && all.guidance);
+
+        // Bare `--include=guidance` is an index request: no id, so no bodies.
+        let m = describe_matches(&["--include", "guidance"]);
+        let idx = DescribeFilter::from_matches(&m);
+        assert!(idx.guidance && !idx.tasks && !idx.features);
+        assert_eq!(idx.guidance_id, None);
+    }
+
+    #[test]
+    fn describe_strips_ansi_from_prose() {
+        let mut task = stub_task("delivery", &[], SmallMap::new());
+        task.summary = "Currently \x1b[3monly\x1b[23m supported on runners.".to_owned();
+        let tasks: Vec<&dyn TaskLike> = vec![&task];
+
+        let doc = describe_json(
+            "1.2.3",
+            &tasks,
+            &[],
+            &[],
+            Path::new("/repo"),
+            &[],
+            &DescribeFilter::all(),
+        );
+        assert_eq!(
+            doc["tasks"][0]["summary"],
+            "Currently only supported on runners."
+        );
+    }
+
     #[test]
     fn describe_emits_runnable_commands_and_real_flag_strings() {
         let mut args: SmallMap<String, Arg> = SmallMap::new();
@@ -1840,7 +2261,15 @@ mod tests {
         let task = stub_task("login", &["auth"], args);
         let tasks: Vec<&dyn TaskLike> = vec![&task];
 
-        let doc = describe_json("1.2.3", &tasks, &[], Path::new("/repo"), &[]);
+        let doc = describe_json(
+            "1.2.3",
+            &tasks,
+            &[],
+            &[],
+            Path::new("/repo"),
+            &[],
+            &DescribeFilter::all(),
+        );
         let t = &doc["tasks"][0];
 
         // The command string is the whole point: an agent copies it verbatim.
@@ -1937,7 +2366,15 @@ mod tests {
         );
         let task = stub_task("run", &[], args);
         let tasks: Vec<&dyn TaskLike> = vec![&task];
-        let doc = describe_json("1.2.3", &tasks, &[], Path::new("/repo"), &[]);
+        let doc = describe_json(
+            "1.2.3",
+            &tasks,
+            &[],
+            &[],
+            Path::new("/repo"),
+            &[],
+            &DescribeFilter::all(),
+        );
         let by_name = |n: &str| {
             doc["tasks"][0]["args"]
                 .as_array()
@@ -2043,6 +2480,7 @@ mod tests {
         let cmd = Cmd {
             tasks: vec![],
             features: vec![&f as &dyn FeatureLike],
+            guidance: &[],
             aspect_root: Path::new("/repo"),
             modules: &[],
         };
@@ -2065,6 +2503,7 @@ mod tests {
         let cmd = Cmd {
             tasks: vec![&t],
             features: vec![],
+            guidance: &[],
             aspect_root: Path::new("/repo"),
             modules: &[],
         };
@@ -2084,6 +2523,7 @@ mod tests {
         let cmd = Cmd {
             tasks: vec![&t],
             features: vec![],
+            guidance: &[],
             aspect_root: Path::new("/repo"),
             modules: &[],
         };
@@ -2107,6 +2547,7 @@ mod tests {
         let cmd = Cmd {
             tasks: vec![&t],
             features: vec![],
+            guidance: &[],
             aspect_root: Path::new("/repo"),
             modules: &[],
         };
@@ -2124,6 +2565,7 @@ mod tests {
         let cmd = Cmd {
             tasks: vec![&t],
             features: vec![],
+            guidance: &[],
             aspect_root: Path::new("/repo"),
             modules: &[],
         };
@@ -2141,6 +2583,7 @@ mod tests {
         let cmd = Cmd {
             tasks: vec![&t],
             features: vec![],
+            guidance: &[],
             aspect_root: Path::new("/repo"),
             modules: &[],
         };
@@ -2170,6 +2613,7 @@ mod tests {
         let cmd = Cmd {
             tasks: vec![&t],
             features: vec![],
+            guidance: &[],
             aspect_root: Path::new("/repo"),
             modules: &[],
         };
@@ -2188,6 +2632,7 @@ mod tests {
         let cmd = Cmd {
             tasks: vec![&t],
             features: vec![],
+            guidance: &[],
             aspect_root: Path::new("/repo"),
             modules: &[],
         };
@@ -2218,6 +2663,7 @@ mod tests {
         let cmd = Cmd {
             tasks: vec![&t],
             features: vec![],
+            guidance: &[],
             aspect_root: Path::new("/repo"),
             modules: &[],
         };
