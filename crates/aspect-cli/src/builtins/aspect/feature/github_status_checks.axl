@@ -594,7 +594,8 @@ GithubStatusChecks = feature(
             default = [],
             long = "github-status-checks:metadata-key",
             description = "Additional BES build_metadata keys to surface in the check run summary, " +
-                          "beyond the built-in set (BRANCH, COMMIT_SHA, TAG, COMMIT_MESSAGE). Use " +
+                          "beyond the standard keys already rendered in the invocation rows " +
+                          "(BRANCH_NAME, COMMIT_SHA, TAG, COMMIT_MESSAGE, COMMIT_AUTHOR, …). Use " +
                           "[\"*\"] to show ALL metadata keys from the BES stream. Users inject " +
                           "custom keys via --bes_metadata=MY_KEY=value or --build_metadata=MY_KEY=value " +
                           "on their Bazel invocation.",
