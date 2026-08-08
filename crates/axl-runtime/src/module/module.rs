@@ -24,6 +24,7 @@ pub struct Mod {
     pub deps: HashSet<Dep>,
     pub tasks: HashMap<PathBuf, (String, Vec<String>)>,
     pub features: Vec<(PathBuf, String)>,
+    pub guidance: Vec<(PathBuf, String)>,
 }
 
 impl Mod {
@@ -35,6 +36,7 @@ impl Mod {
             deps: HashSet::new(),
             tasks: HashMap::new(),
             features: Vec::new(),
+            guidance: Vec::new(),
         }
     }
 

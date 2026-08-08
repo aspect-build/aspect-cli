@@ -15,6 +15,8 @@ use crate::engine::config_context::ConfigContext;
 use crate::engine::feature::{Feature, FeatureLike, FrozenFeature};
 use crate::engine::feature_context::FeatureContext;
 use crate::engine::feature_map::FeatureMap;
+use crate::engine::guidance::Guidance;
+use crate::engine::guidance_list::GuidanceList;
 use crate::engine::task::{FrozenTask, Task, TaskLike};
 use crate::engine::task_context::TaskContext;
 use crate::engine::task_info::PhaseRecord;
@@ -24,6 +26,7 @@ use crate::engine::telemetry::{self, ExporterSpec, Telemetry};
 use crate::engine::r#trait::extract_trait_type_id;
 use crate::engine::trait_map::TraitMap;
 use crate::eval::error::EvalError;
+use crate::eval::guidance::FrozenGuidanceModuleLike;
 use crate::eval::load::AxlLoader;
 use crate::eval::task::FrozenTaskModuleLike;
 use crate::module::Mod;
@@ -145,6 +148,10 @@ pub struct MultiPhaseEval<'v, 'l> {
     /// Global feature map on the shared heap. Eagerly allocated empty in `new()`;
     /// Phase 1 inserts each discovered feature.
     features: Value<'v>,
+    /// Guidance topics. On the heap because Phase 2 `config.axl` files add to
+    /// it through `ctx.guidance.add(...)`; the entries themselves are plain
+    /// data, so the list needs no thawing and nothing to trace.
+    guidance: Value<'v>,
     /// Global trait map allocated on the shared heap during Phase 2.
     trait_map_value: Option<Value<'v>>,
     /// Telemetry handle allocated on the heap and shared between
@@ -162,6 +169,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             loader,
             tasks: heap.alloc(TaskMap::new()),
             features: heap.alloc(FeatureMap::new()),
+            guidance: heap.alloc(GuidanceList::new()),
             trait_map_value: None,
             telemetry_value,
         }
@@ -206,6 +214,10 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             .features
             .downcast_ref::<FeatureMap>()
             .expect("self.features is a FeatureMap");
+        let guidance_list = self
+            .guidance
+            .downcast_ref::<GuidanceList>()
+            .expect("self.guidance is a GuidanceList");
 
         // Evaluate auto-discovered AXL scripts (axl_sources in repo root)
         for path in scripts {
@@ -221,6 +233,9 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
                 heap.access_owned_frozen_value(&owned);
                 let live_task = Task::from_frozen(frozen_value, heap);
                 task_map.insert(heap.alloc(live_task));
+            }
+            for topic in frozen.guidance() {
+                guidance_list.insert(topic);
             }
         }
 
@@ -283,6 +298,25 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
                 let live_feature = Feature::from_frozen(frozen_value, heap);
                 feature_map.insert(heap.alloc(live_feature));
             }
+
+            for (abs_path, symbol) in mode.guidance.iter() {
+                let frozen = self.eval_file(&mode, &abs_path)?;
+                let owned = frozen
+                    .get(symbol.as_str())
+                    .map_err(|_| EvalError::MissingSymbol(symbol.clone()))?;
+                let topic = owned
+                    .value()
+                    .downcast_ref::<Guidance>()
+                    .cloned()
+                    .ok_or_else(|| {
+                        EvalError::UnknownError(anyhow!(
+                            "symbol {:?} in {:?} is not guidance",
+                            symbol,
+                            abs_path
+                        ))
+                    })?;
+                guidance_list.insert(topic);
+            }
         }
 
         Ok(())
@@ -310,6 +344,24 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
     }
 
     /// Snapshot of all features discovered in Phase 1, borrowed as `&dyn FeatureLike`.
+    /// Guidance topics, de-duplicated by id — last declaration wins, so a
+    /// repo-local topic can replace one a module shipped.
+    pub fn guidance(&self) -> Vec<Guidance> {
+        let declared = self
+            .guidance
+            .downcast_ref::<GuidanceList>()
+            .expect("self.guidance is a GuidanceList")
+            .values();
+        let mut out: Vec<Guidance> = Vec::new();
+        for topic in &declared {
+            match out.iter().position(|t| t.id() == topic.id()) {
+                Some(i) => out[i] = topic.clone(),
+                None => out.push(topic.clone()),
+            }
+        }
+        out
+    }
+
     pub fn features(&self) -> Vec<&'v dyn FeatureLike<'v>> {
         self.features
             .downcast_ref::<FeatureMap>()
@@ -366,6 +418,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
 
         let context_value = heap.alloc(ConfigContext::new(
             self.tasks,
+            self.guidance,
             self.trait_map_value.unwrap(),
             self.features,
             self.telemetry_value,

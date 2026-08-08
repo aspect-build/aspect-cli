@@ -29,6 +29,8 @@ pub(crate) mod builtins;
 pub mod config_context;
 pub mod feature_context;
 pub mod feature_map;
+pub mod guidance;
+pub mod guidance_list;
 pub mod store;
 pub mod task;
 pub mod task_context;
@@ -65,6 +67,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     task::register_globals(globals);
     task_info::register_globals(globals);
     feature::register_globals(globals);
+    guidance::register_globals(globals);
     grpc::register_globals(globals);
 
     globals.namespace("args", arg::register_globals);

@@ -209,9 +209,11 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                 .map_err(anyhow::Error::from)?;
 
             // Build the CLI surface from current eval state.
+            let guidance = mpe.guidance();
             let cmd = Cmd {
                 tasks: mpe.tasks(),
                 features: mpe.features(),
+                guidance: &guidance,
                 aspect_root: &aspect_root,
                 modules: &modules,
             };
@@ -236,7 +238,9 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                     return Ok(ExitCode::SUCCESS);
                 }
                 Some("describe") => {
-                    return Ok(cmd.print_describe(&cli_version));
+                    return Ok(
+                        cmd.print_describe(&cli_version, matches.subcommand_matches("describe"))
+                    );
                 }
                 Some("feature") => {
                     let name = matches
