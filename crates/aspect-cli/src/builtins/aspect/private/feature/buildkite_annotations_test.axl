@@ -1,18 +1,21 @@
-"""Snapshot tests for `feature/buildkite_annotations.axl`.
+"""Tests for `feature/buildkite_annotations.axl`.
 
-Run with:
-  aspect dev test-bk-annotation-snapshots
+Two suites, both dry-run — we never invoke `buildkite-agent annotate`, and
+instead drive the per-kind renderers plus the feature's `format_body` /
+`severity_for_status` helpers directly.
 
-Dry-run style — we don't actually invoke `buildkite-agent annotate`. Instead,
-we call the per-kind renderers + the feature's `format_body` / `severity_for_status`
-helpers directly and print what *would* be sent to BK for each scenario.
-
-Coverage:
+`aspect dev test-bk-annotation-snapshots` prints what *would* be sent to BK
+for each scenario, so a rendering regression shows up as a visible diff:
   - Each task kind (bazel_results, lint_results, delivery_results,
     format_results, gazelle_results, warming_results)
   - Each terminal status (passed, failed)
   - Style selection edge cases: soft-lint passing with warnings, delivery
     all-skipped, delivery all-failed, soft-format passing with files.
+
+`aspect dev test-bk-annotation-templates` asserts the customization contract
+`args.templates` exposes: overrides reach the rendered body, "summary" and
+"details" are independent, every renderer module exports the templates a
+config patches, and a broken template degrades to the fallback body.
 """
 
 load("@aspect//feature/buildkite_annotations.axl", "format_body")
@@ -43,28 +46,47 @@ load(
 )
 load(
     "../lib/bazel_results.axl",
+    BAZEL_DETAILS_TEMPLATE = "DETAILS_TEMPLATE",
+    BAZEL_SUMMARY_TEMPLATE = "SUMMARY_TEMPLATE",
     bazel_render_check_output = "render_check_output",
 )
-load("../lib/check_dispatch.axl", "make_render_ctx")
+load(
+    "../lib/check_dispatch.axl",
+    "TEMPLATE_SCOPE_KEYS",
+    "kind_for_task",
+    "make_render_ctx",
+    "renderer_for_kind",
+    "resolve_templates",
+)
 load(
     "../lib/delivery_results.axl",
+    DELIVERY_DETAILS_TEMPLATE = "DETAILS_TEMPLATE",
+    DELIVERY_SUMMARY_TEMPLATE = "SUMMARY_TEMPLATE",
     delivery_render_check_output = "render_check_output",
 )
 load(
     "../lib/format_results.axl",
+    FORMAT_DETAILS_TEMPLATE = "DETAILS_TEMPLATE",
+    FORMAT_SUMMARY_TEMPLATE = "SUMMARY_TEMPLATE",
     format_render_check_output = "render_check_output",
 )
 load(
     "../lib/gazelle_results.axl",
+    GAZELLE_DETAILS_TEMPLATE = "DETAILS_TEMPLATE",
+    GAZELLE_SUMMARY_TEMPLATE = "SUMMARY_TEMPLATE",
     gazelle_render_check_output = "render_check_output",
 )
 load(
     "../lib/lint_results.axl",
+    LINT_DETAILS_TEMPLATE = "DETAILS_TEMPLATE",
+    LINT_SUMMARY_TEMPLATE = "SUMMARY_TEMPLATE",
     lint_render_check_output = "render_check_output",
 )
 load("../lib/result_text.axl", "severity_for_status")
 load(
     "../lib/warming_results.axl",
+    WARMING_DETAILS_TEMPLATE = "DETAILS_TEMPLATE",
+    WARMING_SUMMARY_TEMPLATE = "SUMMARY_TEMPLATE",
     warming_init_data = "init_data",
     warming_render_check_output = "render_check_output",
 )
@@ -202,9 +224,13 @@ def _test_impl(ctx):
 
         # Show first 2500 chars of the formatted body — enough to see the
         # title/summary and the first chunk of the body without flooding.
+        # The exact length is deliberately not printed: the summary carries a
+        # live `ctx.task.elapsed_ms` reading, so it shifts by a character
+        # whenever the run crosses a digit boundary (99ms -> 100ms) and would
+        # make this snapshot flap between runs.
         print(body[:2500])
         if len(body) > 2500:
-            print("... [truncated, full length: %d chars]" % len(body))
+            print("... [truncated]")
         print("")
 
     print(sep)
@@ -216,5 +242,154 @@ bk_annotation_snapshot_tests = task(
     kind = "test-bk-annotation-snapshots",
     group = ["dev"],
     implementation = _test_impl,
+    args = {},
+)
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _contains(label, haystack, needle):
+    if needle not in haystack:
+        fail("%s: %r not found in %r" % (label, needle, haystack[:400]))
+
+def _not_contains(label, haystack, needle):
+    if needle in haystack:
+        fail("%s: %r unexpectedly present in %r" % (label, needle, haystack[:400]))
+
+# renderer kind -> its exported (SUMMARY_TEMPLATE, DETAILS_TEMPLATE). Importing
+# these at all is half the assertion: a config can only patch a built-in the
+# module actually exports.
+_KIND_TEMPLATES = {
+    "bazel_results": (BAZEL_SUMMARY_TEMPLATE, BAZEL_DETAILS_TEMPLATE),
+    "lint_results": (LINT_SUMMARY_TEMPLATE, LINT_DETAILS_TEMPLATE),
+    "format_results": (FORMAT_SUMMARY_TEMPLATE, FORMAT_DETAILS_TEMPLATE),
+    "gazelle_results": (GAZELLE_SUMMARY_TEMPLATE, GAZELLE_DETAILS_TEMPLATE),
+    "delivery_results": (DELIVERY_SUMMARY_TEMPLATE, DELIVERY_DETAILS_TEMPLATE),
+    "warming_results": (WARMING_SUMMARY_TEMPLATE, WARMING_DETAILS_TEMPLATE),
+}
+
+def _test_templates_impl(ctx: TaskContext) -> int:
+    """`args.templates` overrides reach the rendered annotation body, and each
+    renderer's built-in templates are importable so configs can patch them.
+
+    Guards the customization contract documented in the feature docstring:
+    the summary template is shared across kinds (so one override applies
+    everywhere), and every kind re-exports it for patching.
+    """
+    data = _make_build_passed()
+    rc = _render_ctx("//...", "build")
+
+    default_out = bazel_render_check_output(ctx, data, "passed", rc, _bk_links(), None, None)
+    default_body = format_body(default_out, "bazel_results", "passed", final = True)
+    _contains("default summary line", default_body, ":speech_balloon: **Last update:**")
+
+    # The patch-the-default pattern from the feature docstring: anchor on the
+    # built-in's last-update line and swap it for a Buildkite-native one.
+    anchor = ":speech_balloon: **Last update:** `{{ last_update }}`{% endif %}"
+    _contains("anchor present in exported template", BAZEL_SUMMARY_TEMPLATE, anchor)
+    patched = BAZEL_SUMMARY_TEMPLATE.replace(
+        anchor,
+        ":buildkite: **Status:** `{{ last_update }}`{% endif %}",
+    )
+
+    custom_out = bazel_render_check_output(ctx, data, "passed", rc, _bk_links(), {"summary": patched}, None)
+    custom_body = format_body(custom_out, "bazel_results", "passed", final = True)
+    _contains("custom summary line rendered", custom_body, ":buildkite: **Status:**")
+    _not_contains("default summary line replaced", custom_body, ":speech_balloon: **Last update:**")
+
+    # An override of one key must leave the other's output untouched. The
+    # summary is asserted by substring, not equality — it embeds a live
+    # elapsed-time reading that ticks between renders.
+    _eq("details untouched by summary override", custom_out.get("text"), default_out.get("text"))
+
+    details_out = bazel_render_check_output(
+        ctx,
+        data,
+        "passed",
+        rc,
+        _bk_links(),
+        {"details": "CUSTOM DETAILS BODY"},
+        None,
+    )
+    _eq("details override applied", details_out.get("text"), "CUSTOM DETAILS BODY")
+    _contains(
+        "summary untouched by details override",
+        details_out.get("summary"),
+        ":speech_balloon: **Last update:** `build task complete`",
+    )
+
+    # The summary being byte-identical across kinds is what lets one
+    # `templates` override serve every task kind a feature renders.
+    for kind, (summary_tmpl, details_tmpl) in _KIND_TEMPLATES.items():
+        if not summary_tmpl:
+            fail("%s: SUMMARY_TEMPLATE is empty" % kind)
+        if not details_tmpl:
+            fail("%s: DETAILS_TEMPLATE is empty" % kind)
+        _eq("%s summary matches bazel_results" % kind, summary_tmpl, BAZEL_SUMMARY_TEMPLATE)
+        _contains("%s summary carries the patch anchor" % kind, summary_tmpl, anchor)
+
+    # Details templates are kind-specific — a shared details body would mean
+    # the per-kind renderers had collapsed into one.
+    if LINT_DETAILS_TEMPLATE == BAZEL_DETAILS_TEMPLATE:
+        fail("lint and bazel details templates should differ")
+
+    # A broken template degrades to the fallback body instead of aborting.
+    broken_out = bazel_render_check_output(
+        ctx,
+        data,
+        "passed",
+        rc,
+        _bk_links(),
+        {"summary": "{% if unclosed %}"},
+        None,
+    )
+    _contains("broken summary degrades to fallback", broken_out.get("summary"), "unavailable")
+
+    _assert_resolve_templates()
+
+    print("All template-customization assertions passed for %d kinds." % len(_KIND_TEMPLATES))
+    return 0
+
+def _assert_resolve_templates():
+    """`resolve_templates` narrows a feature's `args.templates` to the flat
+    dict the renderers take, honoring per-task-kind scoping."""
+    _eq("empty stays None", resolve_templates({}, "build"), None)
+    _eq("None stays None", resolve_templates(None, "build"), None)
+
+    # Flat keys are the pre-scoping shape and must keep applying to every kind.
+    flat = {"summary": "S", "details": "D"}
+    for kind in ["build", "test", "lint", "format", "gazelle", "delivery", "warming"]:
+        _eq("flat applies to %s" % kind, resolve_templates(flat, kind), {"summary": "S", "details": "D"})
+
+    # A scoped block applies to its own kind and is invisible to others.
+    scoped = {"lint": {"details": "LINT"}}
+    _eq("scoped hits its kind", resolve_templates(scoped, "lint"), {"details": "LINT"})
+    _eq("scoped misses other kinds", resolve_templates(scoped, "build"), None)
+
+    # Scoped overlays flat: shared default, one kind special-cased.
+    both = {"summary": "S", "details": "D", "lint": {"details": "LINT"}}
+    _eq("overlay replaces details", resolve_templates(both, "lint"), {"summary": "S", "details": "LINT"})
+    _eq("overlay leaves others flat", resolve_templates(both, "build"), {"summary": "S", "details": "D"})
+
+    # build and test are separable even though both render via bazel_results.
+    split = {"build": {"summary": "B"}, "test": {"summary": "T"}}
+    _eq("build scope", resolve_templates(split, "build"), {"summary": "B"})
+    _eq("test scope", resolve_templates(split, "test"), {"summary": "T"})
+
+    # An unknown task kind sees only the flat keys — no crash, no scoped block.
+    _eq("unknown kind falls back to flat", resolve_templates(both, "mystery"), {"summary": "S", "details": "D"})
+
+    # Every scope key must name a task kind that actually has a renderer,
+    # else a config could scope an override that never fires.
+    for kind in TEMPLATE_SCOPE_KEYS:
+        if renderer_for_kind(kind_for_task(kind)) == None:
+            fail("scope key %r has no renderer" % kind)
+
+bk_annotation_template_tests = task(
+    summary = "Run the bk annotation template customization AXL unit tests.",
+    kind = "test-bk-annotation-templates",
+    group = ["dev"],
+    implementation = _test_templates_impl,
     args = {},
 )

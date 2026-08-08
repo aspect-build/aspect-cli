@@ -19,6 +19,25 @@ Usage in `.aspect/config.axl`:
         ctx.features[BuildkiteAnnotations].args.enabled = True
         # Open the build + test phase log sections by default (else collapsed).
         ctx.features[BuildkiteAnnotations].args.expand_phases = ["build", "test"]
+
+## Templates and metadata
+
+Rendering goes through the shared `check_dispatch.RENDERERS` table, so
+`templates` and `metadata_keys` configure exactly as they do for
+`GithubStatusChecks` and `GitlabCommitStatuses`. Each per-kind renderer
+module exports its `SUMMARY_TEMPLATE` / `DETAILS_TEMPLATE` so a config can
+patch the built-in rather than re-author it.
+
+Flat "summary"/"details" keys apply to every task kind; a per-task-kind
+block ("build", "lint", …) overlays them for that kind alone, so a config
+can set a shared default and still special-case one task (see
+`check_dispatch.resolve_templates`):
+
+    ctx.features[BuildkiteAnnotations].args.templates = {
+        "summary": my_shared_summary_template,
+        "lint": {"details": my_lint_details_template},
+    }
+    ctx.features[BuildkiteAnnotations].args.metadata_keys = ["DEPLOY_ENV"]
 """
 
 load("../private/lib/bazel_results.axl", "format_run_date", "html_escape", "now_ms", "render_bes_url", "resolve_aspect_url")
@@ -28,6 +47,7 @@ load(
     "apply_artifact_links",
     "make_render_ctx",
     "renderer_for_kind",
+    "resolve_templates",
     "should_emit_update",
     "snippet_budget_for",
 )
@@ -204,6 +224,9 @@ def _write_annotation(ctx, style, body, context_id):
 def _buildkite_annotations(ctx: FeatureContext):
     lifecycle = ctx.traits[TaskLifecycleTrait]
 
+    templates = ctx.args.templates or {}
+    metadata_keys = list(ctx.args.metadata_keys or [])
+
     mode = ctx.args.mode
     is_bk = bool(ctx.std.env.var("BUILDKITE"))
 
@@ -331,8 +354,8 @@ def _buildkite_annotations(ctx: FeatureContext):
             status,
             make_render_ctx(_state, tips = collect_tips_sorted(ctx, surface = SURFACE_BUILDKITE_ANNOTATIONS), api_usage = usage_footer(ctx), last_updated_at = format_run_date(ctx, now_ms(ctx))),
             _make_links(data),
-            None,
-            None,
+            resolve_templates(templates, ctx.task.kind),
+            metadata_keys,
             snippet_options = _snippet_opts,
             max_snippets = _max_snippets,
         )
@@ -378,6 +401,26 @@ BuildkiteAnnotations = feature(
                           "only the last collapsed section when none is explicitly expanded, so expanding " +
                           "an earlier phase suppresses that auto-expansion of the closing timing-summary " +
                           "section. Empty (default) leaves each phase's own `Phase.expanded`.",
+        ),
+        "templates": args.custom(
+            dict,
+            default = {},
+            description = "Map of template overrides for the rendered annotation body. " +
+                          "Flat keys \"summary\" / \"details\" (Jinja2 strings) apply to every " +
+                          "task kind; a per-task-kind block (\"build\", \"test\", \"lint\", " +
+                          "\"format\", \"gazelle\", \"delivery\", \"warming\") overlays them for " +
+                          "that kind alone, e.g. {\"summary\": ..., \"lint\": {\"details\": ...}}. " +
+                          "Empty dict (default) uses the feature's built-in templates. The renderer's title, summary and details are concatenated into one Markdown annotation, hard-capped at Buildkite's 1 MiB limit.",
+        ),
+        "metadata_keys": args.string_list(
+            default = [],
+            long = "buildkite-annotations:metadata-key",
+            description = "Additional BES build_metadata keys to surface in the annotation summary, " +
+                          "beyond the standard keys already rendered in the invocation rows " +
+                          "(BRANCH_NAME, COMMIT_SHA, TAG, COMMIT_MESSAGE, COMMIT_AUTHOR, …). Use " +
+                          "[\"*\"] to show ALL metadata keys from the BES stream. Users inject " +
+                          "custom keys via --bes_metadata=MY_KEY=value or --build_metadata=MY_KEY=value " +
+                          "on their Bazel invocation.",
         ),
     },
 )

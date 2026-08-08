@@ -19,7 +19,7 @@ load(
     "FIX_COMMANDS_BLOCK",
     "REPRO_COMMANDS_BLOCK",
     "SHARED_DETAILS_BODY_TEMPLATE",
-    "TIPS_BLOCK",
+    "SUMMARY_TEMPLATE",
     "active_phase_data",
     "build_details_data",
     "build_summary_data",
@@ -164,14 +164,7 @@ def conclusion(status, data):
 
 # ─── Templates ────────────────────────────────────────────────────────────────
 
-_SUMMARY_TEMPLATE = """{% if detail_rows %}{% for row in detail_rows %}
-{% for item in row %}{{ item.icon }} {{ item.value }}{% if not loop.last %} · {% endif %}{% endfor %}{% if not loop.last %}  {% endif %}
-{%- endfor %}{% endif %}
-{% if config_items %}
-:gear: {% for item in config_items %}**{{ item.key }}:** `{{ item.value }}`{% if not loop.last %} · {% endif %}{% endfor %}{% if last_update %}  {% endif %}{% endif %}{% if last_update %}
-:speech_balloon: **Last update:** `{{ last_update }}`{% endif %}""" + TIPS_BLOCK
-
-_DETAILS_TEMPLATE = """{% if is_running %}
+DETAILS_TEMPLATE = """{% if is_running %}
 > 🔄 Format task in progress...
 
 {% elif formatter_error %}
@@ -358,8 +351,8 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
     details_data = dict(shared_data)
     details_data.update(_build_details_data(data, status))
 
-    summary_tmpl = t.get("summary") or _SUMMARY_TEMPLATE
-    details_tmpl = t.get("details") or _DETAILS_TEMPLATE
+    summary_tmpl = t.get("summary") or SUMMARY_TEMPLATE
+    details_tmpl = t.get("details") or DETAILS_TEMPLATE
 
     (summary_text, _summary_ok) = render_summary_or_fallback(ctx, summary_tmpl, summary_data, surface = "format")
 

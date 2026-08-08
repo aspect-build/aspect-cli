@@ -121,6 +121,41 @@ def kind_for_task(task_kind):
     """
     return _TASK_KIND_DEFAULTS.get(task_kind, "bazel_results")
 
+# Task-kind keys a `templates` dict may nest an override under, as opposed to
+# the flat "summary"/"details" keys that address every kind at once.
+TEMPLATE_SCOPE_KEYS = sorted(_TASK_KIND_DEFAULTS.keys())
+
+def resolve_templates(templates, task_kind):
+    """Narrow a feature's `args.templates` to the flat {"summary", "details"}
+    dict the per-kind renderers accept.
+
+    Two shapes are supported, and they compose:
+
+      {"summary": ...}                     — applies to every task kind
+      {"lint": {"summary": ...}}           — applies to `lint` tasks only
+
+    A per-kind block overlays the flat keys, so a config can set a shared
+    default and override one kind without restating the rest. `task_kind` is
+    the task's own kind ("build", "lint", …), not the renderer kind, since
+    that is how tasks are addressed everywhere else in config (`ctx.tasks[…]`);
+    it also keeps `build` and `test` separable even though both render through
+    `bazel_results`.
+
+    Returns None when nothing applies, matching what the renderers treat as
+    "use the built-ins".
+    """
+    if not templates:
+        return None
+
+    flat = {k: v for k, v in templates.items() if k not in TEMPLATE_SCOPE_KEYS}
+    scoped = templates.get(task_kind) or {}
+    if type(scoped) != "dict":
+        fail("templates[%r] must be a dict of template overrides, got %r" % (task_kind, scoped))
+
+    resolved = dict(flat)
+    resolved.update(scoped)
+    return resolved or None
+
 # Per-surface inline-snippet budgets (max snippets shown + per-snippet line cap).
 # Status checks / BK annotations are glanceable and bump the surface size caps
 # (GitHub 65 KB, BK 1 MiB), so they stay tight; the PR summary comment is the
