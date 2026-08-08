@@ -24,7 +24,7 @@ Plumbing:
     off-runner; we silently skip. Default on Workflows runners is
     `/etc/aspect/workflows/platform/runner_job_history`.
   - `append_runner_job_history(ctx)` — single entry-point, designed to
-    be called once per task from the lifecycle's `setup_phase`.
+    be called once per task from the lifecycle's `phases.setup`.
 
 Hard invariant: a failure to write the history file must NEVER fail
 the task. Every error path here is a silent no-op — missing env var,
