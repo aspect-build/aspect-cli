@@ -1,20 +1,49 @@
 """Public entrypoint for the Bazel library. The implementation lives in
-`./bazel/*.axl`; this facade re-exports the `BazelTrait` interface, the Bazel
-exit codes, and the retry constants so existing
+`./bazel/*.axl`; this facade assembles the `bazel` namespace and re-exports the
+`BazelTrait` interface, the Bazel exit codes, and the retry constants so existing
 `load("@aspect//bazel.axl", ...)` call sites are unchanged.
+
+`BazelTrait`, `exit_codes`, and the retry constants stay top-level (tasks index
+`ctx.traits[BazelTrait]` and read the constants directly). The flag/rc/auth
+helpers hang off the `bazel` namespace — stateless functions taking `ctx` and
+deriving the active `BazelTrait` from `ctx.traits` themselves (no `trait`
+argument to pass).
+
+A file that also uses the builtin `bazel` global (e.g. `bazel.execution_log`)
+must alias this import — `load("@aspect//bazel.axl", bzl = "bazel")` — so the two
+`bazel` names don't collide.
 """
 
 load(
+    "@aspect//bazel/flags.axl",
+    "aspect_endpoint_auth_flags",
+    "bes_backend_auth_flags",
+    "remote_cache_auth_flags",
+    "testonly_config_names",
+    "testonly_flags_delta",
+    _announce = "announce",
+    _core_args = "core_args",
+    _flags = "flags",
+    _setup_command = "setup_command",
+    _sibling_rc = "sibling_rc",
+    _targets_arg = "targets_arg",
+)
+load(
     "@aspect//bazel/trait.axl",
-    _BAZEL_RETRY_ATTEMPTS_DESCRIPTION = "BAZEL_RETRY_ATTEMPTS_DESCRIPTION",
-    _BazelTrait = "BazelTrait",
-    _DEFAULT_BAZEL_RETRY_ATTEMPTS = "DEFAULT_BAZEL_RETRY_ATTEMPTS",
-    _default_retry = "default_retry",
-    _exit_codes = "exit_codes",
+    "BAZEL_RETRY_ATTEMPTS_DESCRIPTION",
+    "BazelTrait",
+    "DEFAULT_BAZEL_RETRY_ATTEMPTS",
+    "default_retry",
+    "exit_codes",
 )
 
-BAZEL_RETRY_ATTEMPTS_DESCRIPTION = _BAZEL_RETRY_ATTEMPTS_DESCRIPTION
-BazelTrait = _BazelTrait
-DEFAULT_BAZEL_RETRY_ATTEMPTS = _DEFAULT_BAZEL_RETRY_ATTEMPTS
-default_retry = _default_retry
-exit_codes = _exit_codes
+bazel = namespace(
+    setup_command = _setup_command,
+    sibling_rc = _sibling_rc,
+    core_args = _core_args,
+    targets_arg = _targets_arg,
+    TRAITS = [BazelTrait],
+    flags = _flags,
+    announce = _announce,
+    endpoint_auth_flags = aspect_endpoint_auth_flags,
+)
