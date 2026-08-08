@@ -50,7 +50,14 @@ load(
     BAZEL_SUMMARY_TEMPLATE = "SUMMARY_TEMPLATE",
     bazel_render_check_output = "render_check_output",
 )
-load("../lib/check_dispatch.axl", "make_render_ctx")
+load(
+    "../lib/check_dispatch.axl",
+    "TEMPLATE_SCOPE_KEYS",
+    "kind_for_task",
+    "make_render_ctx",
+    "renderer_for_kind",
+    "resolve_templates",
+)
 load(
     "../lib/delivery_results.axl",
     DELIVERY_DETAILS_TEMPLATE = "DETAILS_TEMPLATE",
@@ -217,9 +224,13 @@ def _test_impl(ctx):
 
         # Show first 2500 chars of the formatted body — enough to see the
         # title/summary and the first chunk of the body without flooding.
+        # The exact length is deliberately not printed: the summary carries a
+        # live `ctx.task.elapsed_ms` reading, so it shifts by a character
+        # whenever the run crosses a digit boundary (99ms -> 100ms) and would
+        # make this snapshot flap between runs.
         print(body[:2500])
         if len(body) > 2500:
-            print("... [truncated, full length: %d chars]" % len(body))
+            print("... [truncated]")
         print("")
 
     print(sep)
@@ -335,8 +346,45 @@ def _test_templates_impl(ctx: TaskContext) -> int:
     )
     _contains("broken summary degrades to fallback", broken_out.get("summary"), "unavailable")
 
+    _assert_resolve_templates()
+
     print("All template-customization assertions passed for %d kinds." % len(_KIND_TEMPLATES))
     return 0
+
+def _assert_resolve_templates():
+    """`resolve_templates` narrows a feature's `args.templates` to the flat
+    dict the renderers take, honoring per-task-kind scoping."""
+    _eq("empty stays None", resolve_templates({}, "build"), None)
+    _eq("None stays None", resolve_templates(None, "build"), None)
+
+    # Flat keys are the pre-scoping shape and must keep applying to every kind.
+    flat = {"summary": "S", "details": "D"}
+    for kind in ["build", "test", "lint", "format", "gazelle", "delivery", "warming"]:
+        _eq("flat applies to %s" % kind, resolve_templates(flat, kind), {"summary": "S", "details": "D"})
+
+    # A scoped block applies to its own kind and is invisible to others.
+    scoped = {"lint": {"details": "LINT"}}
+    _eq("scoped hits its kind", resolve_templates(scoped, "lint"), {"details": "LINT"})
+    _eq("scoped misses other kinds", resolve_templates(scoped, "build"), None)
+
+    # Scoped overlays flat: shared default, one kind special-cased.
+    both = {"summary": "S", "details": "D", "lint": {"details": "LINT"}}
+    _eq("overlay replaces details", resolve_templates(both, "lint"), {"summary": "S", "details": "LINT"})
+    _eq("overlay leaves others flat", resolve_templates(both, "build"), {"summary": "S", "details": "D"})
+
+    # build and test are separable even though both render via bazel_results.
+    split = {"build": {"summary": "B"}, "test": {"summary": "T"}}
+    _eq("build scope", resolve_templates(split, "build"), {"summary": "B"})
+    _eq("test scope", resolve_templates(split, "test"), {"summary": "T"})
+
+    # An unknown task kind sees only the flat keys — no crash, no scoped block.
+    _eq("unknown kind falls back to flat", resolve_templates(both, "mystery"), {"summary": "S", "details": "D"})
+
+    # Every scope key must name a task kind that actually has a renderer,
+    # else a config could scope an override that never fires.
+    for kind in TEMPLATE_SCOPE_KEYS:
+        if renderer_for_kind(kind_for_task(kind)) == None:
+            fail("scope key %r has no renderer" % kind)
 
 bk_annotation_template_tests = task(
     summary = "Run the bk annotation template customization AXL unit tests.",

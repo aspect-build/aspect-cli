@@ -8,11 +8,14 @@ delivery_results → delivery). The per-kind dispatch table lives in
 `lib/check_dispatch.axl`, kept in lockstep with `BuildkiteAnnotations`;
 new task kinds plug in there.
 
-Templates and metadata_keys are feature args:
+Templates and metadata_keys are feature args. `templates` takes flat
+"summary"/"details" keys applying to every task kind, and/or per-task-kind
+blocks that overlay them (see `check_dispatch.resolve_templates`):
 
     def config(ctx: ConfigContext):
         ctx.features[GithubStatusChecks].args.templates = {
-            "summary": "my custom {{ status_label }} template",
+            "summary": my_shared_summary_template,
+            "lint": {"details": my_lint_details_template},
         }
         ctx.features[GithubStatusChecks].args.metadata_keys = ["DEPLOY_ENV", "WORKSPACE"]
         # Or ["*"] to show everything.
@@ -33,6 +36,7 @@ load(
     "kind_for_task",
     "make_render_ctx",
     "renderer_for_kind",
+    "resolve_templates",
     "should_emit_update",
     "snippet_budget_for",
 )
@@ -211,7 +215,7 @@ def _github_status_checks(ctx: FeatureContext):
             "running",
             make_render_ctx(_state, tips = collect_tips_sorted(ctx, surface = SURFACE_GITHUB_STATUS_CHECKS), api_usage = usage_footer(ctx), last_updated_at = format_run_date(ctx, now_ms(ctx))),
             dict(_ci_links_base),
-            templates,
+            resolve_templates(templates, ctx.task.kind),
             metadata_keys,
         )
 
@@ -511,7 +515,7 @@ def _github_status_checks(ctx: FeatureContext):
             status,
             make_render_ctx(_state, tips = collect_tips_sorted(ctx, surface = SURFACE_GITHUB_STATUS_CHECKS), api_usage = usage_footer(ctx), last_updated_at = format_run_date(ctx, now_ms(ctx))),
             _make_links(data),
-            templates,
+            resolve_templates(templates, ctx.task.kind),
             metadata_keys,
             snippet_options = _snippet_opts,
             max_snippets = _max_snippets,
@@ -587,8 +591,11 @@ GithubStatusChecks = feature(
             dict,
             default = {},
             description = "Map of template overrides for the rendered check-run output. " +
-                          "Keys: \"summary\", \"details\". Each value is a Jinja2 template " +
-                          "string. Empty dict (default) uses the feature's built-in templates.",
+                          "Flat keys \"summary\" / \"details\" (Jinja2 strings) apply to every " +
+                          "task kind; a per-task-kind block (\"build\", \"test\", \"lint\", " +
+                          "\"format\", \"gazelle\", \"delivery\", \"warming\") overlays them for " +
+                          "that kind alone, e.g. {\"summary\": ..., \"lint\": {\"details\": ...}}. " +
+                          "Empty dict (default) uses the feature's built-in templates.",
         ),
         "metadata_keys": args.string_list(
             default = [],
