@@ -10,6 +10,8 @@ load(
     _BazelTrait = "BazelTrait",
     _DEFAULT_BAZEL_RETRY_ATTEMPTS = "DEFAULT_BAZEL_RETRY_ATTEMPTS",
     _default_retry = "default_retry",
+    _dispatch_bazel_attempt_end = "dispatch_bazel_attempt_end",
+    _dispatch_bazel_build_end = "dispatch_bazel_build_end",
     _exit_codes = "exit_codes",
 )
 
@@ -17,4 +19,6 @@ BAZEL_RETRY_ATTEMPTS_DESCRIPTION = _BAZEL_RETRY_ATTEMPTS_DESCRIPTION
 BazelTrait = _BazelTrait
 DEFAULT_BAZEL_RETRY_ATTEMPTS = _DEFAULT_BAZEL_RETRY_ATTEMPTS
 default_retry = _default_retry
+dispatch_bazel_attempt_end = _dispatch_bazel_attempt_end
+dispatch_bazel_build_end = _dispatch_bazel_build_end
 exit_codes = _exit_codes
