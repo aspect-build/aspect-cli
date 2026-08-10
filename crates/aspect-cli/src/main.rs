@@ -236,7 +236,11 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                     return Ok(ExitCode::SUCCESS);
                 }
                 Some("describe") => {
-                    return Ok(cmd.print_describe(&cli_version));
+                    let task = matches
+                        .subcommand_matches("describe")
+                        .and_then(|m| m.get_one::<String>("task"))
+                        .map(String::as_str);
+                    return Ok(cmd.print_describe(&cli_version, task));
                 }
                 Some("feature") => {
                     let name = matches
