@@ -10,7 +10,7 @@ Run with:
   aspect dev test-bazel-runner
 """
 
-load("@aspect//bazel.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
+load("@aspect//bazel.axl", "BazelTrait", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
 
 def _eq(label, got, want):
     if got != want:
@@ -26,65 +26,65 @@ def _record_into(recorder, key, name):
 
     return _hook
 
-def _fake_trait(attempt_hooks = [], build_end_hooks = []):
-    """Stand-in for `BazelTrait`. The dispatchers read
-    `.bazel_attempt_end` and `.build_end` — that's the whole surface."""
-    return struct(
+def _trait(attempt_hooks = [], build_end_hooks = []) -> BazelTrait:
+    """A real `BazelTrait` carrying only the two hook lists the
+    dispatchers read; every other field takes its declared default."""
+    return BazelTrait(
         bazel_attempt_end = attempt_hooks,
         build_end = build_end_hooks,
     )
 
-def _test_attempt_dispatch_empty_is_noop(_):
+def _test_attempt_dispatch_empty_is_noop(ctx: TaskContext) -> None:
     """No hooks registered → dispatcher must not error."""
-    dispatch_bazel_attempt_end(None, _fake_trait(), 0)
+    dispatch_bazel_attempt_end(ctx, _trait(), 0)
 
-def _test_build_end_dispatch_empty_is_noop(_):
+def _test_build_end_dispatch_empty_is_noop(ctx: TaskContext) -> None:
     """No hooks registered → dispatcher must not error."""
-    dispatch_bazel_build_end(None, _fake_trait(), 0)
+    dispatch_bazel_build_end(ctx, _trait(), 0)
 
-def _test_attempt_dispatch_invokes_in_order(_):
+def _test_attempt_dispatch_invokes_in_order(ctx: TaskContext) -> None:
     """Multiple attempt_end hooks fire in registration order, each
     receiving the exit_code passed to the dispatcher."""
     recorder = {"attempt": []}
-    trait = _fake_trait(attempt_hooks = [
+    trait = _trait(attempt_hooks = [
         _record_into(recorder, "attempt", "first"),
         _record_into(recorder, "attempt", "second"),
         _record_into(recorder, "attempt", "third"),
     ])
-    dispatch_bazel_attempt_end(None, trait, 37)
+    dispatch_bazel_attempt_end(ctx, trait, 37)
     _eq(
         "ordered invocation with exit_code passthrough",
         recorder["attempt"],
         [("first", 37), ("second", 37), ("third", 37)],
     )
 
-def _test_build_end_dispatch_invokes_in_order(_):
+def _test_build_end_dispatch_invokes_in_order(ctx: TaskContext) -> None:
     """Same contract as attempt_end."""
     recorder = {"build_end": []}
-    trait = _fake_trait(build_end_hooks = [
+    trait = _trait(build_end_hooks = [
         _record_into(recorder, "build_end", "a"),
         _record_into(recorder, "build_end", "b"),
     ])
-    dispatch_bazel_build_end(None, trait, 0)
+    dispatch_bazel_build_end(ctx, trait, 0)
     _eq(
         "ordered invocation with exit_code passthrough",
         recorder["build_end"],
         [("a", 0), ("b", 0)],
     )
 
-def _test_attempt_dispatch_does_not_fire_build_end(_):
+def _test_attempt_dispatch_does_not_fire_build_end(ctx: TaskContext) -> None:
     """Dispatchers are separately addressable; calling attempt_end must
     not also fire the build_end list."""
     recorder = {"attempt": [], "build_end": []}
-    trait = _fake_trait(
+    trait = _trait(
         attempt_hooks = [_record_into(recorder, "attempt", "a")],
         build_end_hooks = [_record_into(recorder, "build_end", "b")],
     )
-    dispatch_bazel_attempt_end(None, trait, 0)
+    dispatch_bazel_attempt_end(ctx, trait, 0)
     _eq("attempt fired", recorder["attempt"], [("a", 0)])
     _eq("build_end not fired", recorder["build_end"], [])
 
-def _test_impl(ctx):
+def _test_impl(ctx: TaskContext) -> int:
     _test_attempt_dispatch_empty_is_noop(ctx)
     _test_build_end_dispatch_empty_is_noop(ctx)
     _test_attempt_dispatch_invokes_in_order(ctx)

@@ -9,15 +9,17 @@ use dupe::Dupe;
 use starlark::collections::StarlarkHasher;
 use starlark::environment::{GlobalsBuilder, Methods, MethodsBuilder, MethodsStatic};
 use starlark::starlark_module;
+use starlark::typing::{Ty, TyStarlarkValue, TyUser, TyUserFields, TyUserParams};
 use starlark::values::dict::AllocDict;
 use starlark::values::list::AllocList;
 use starlark::values::none::NoneOr;
-use starlark::values::typing::TypeCompiled;
+use starlark::values::typing::{TypeCompiled, TypeInstanceId, TypeMatcher, TypeMatcherFactory};
 use starlark::values::{
     AllocFrozenValue, AllocValue, Freeze, FreezeError, Freezer, FrozenHeap, FrozenValue, Heap,
     NoSerialize, ProvidesStaticType, StarlarkValue, Trace, Tracer, Value, ValueLike,
     starlark_value,
 };
+use starlark_derive::type_matcher;
 use starlark_map::small_map::SmallMap;
 
 use super::names::validate_trait_name;
@@ -26,6 +28,35 @@ static TRAIT_TYPE_ID: AtomicU64 = AtomicU64::new(0);
 
 fn next_trait_type_id() -> u64 {
     TRAIT_TYPE_ID.fetch_add(1, Ordering::SeqCst)
+}
+
+/// Matches instances of one trait type, frozen or not.
+#[derive(Hash, Debug, Eq, PartialEq, Clone, Dupe, Allocative)]
+struct TraitInstanceMatcher {
+    id: u64,
+}
+
+#[type_matcher]
+impl TypeMatcher for TraitInstanceMatcher {
+    fn matches(&self, value: Value) -> bool {
+        extract_trait_instance_type_id(value) == Some(self.id)
+    }
+}
+
+/// The `Ty` a trait type evaluates to as a type annotation.
+fn trait_instance_ty(id: u64, ty_id: TypeInstanceId, name: Option<&str>) -> Option<Ty> {
+    let user = TyUser::new(
+        name.unwrap_or("trait").to_owned(),
+        TyStarlarkValue::new::<TraitInstance>(),
+        ty_id,
+        TyUserParams {
+            matcher: Some(TypeMatcherFactory::new(TraitInstanceMatcher { id })),
+            fields: TyUserFields::unknown(),
+            ..TyUserParams::default()
+        },
+    )
+    .ok()?;
+    Some(Ty::custom(user))
 }
 
 /// A field definition for a trait, containing a type, optional default value, and optional description.
@@ -213,6 +244,8 @@ pub fn build_type_checkers<'v>(
 pub struct TraitType<'v> {
     /// Unique identifier for this trait type
     pub(crate) id: u64,
+    /// `Ty` identity, generated once so frozen copies compare equal
+    pub(crate) ty_id: TypeInstanceId,
     /// Name of the trait type (set when assigned to a variable)
     pub(crate) name: Option<String>,
     /// Fields with their types and optional defaults
@@ -256,6 +289,10 @@ impl<'v> StarlarkValue<'v> for TraitType<'v> {
 
     fn equals(&self, other: Value<'v>) -> starlark::Result<bool> {
         Ok(extract_trait_type_id(other) == Some(self.id))
+    }
+
+    fn eval_type(&self) -> Option<Ty> {
+        trait_instance_ty(self.id, self.ty_id, self.name.as_deref())
     }
 
     fn export_as(
@@ -350,6 +387,7 @@ fn trait_type_methods(_builder: &mut MethodsBuilder) {}
 #[derive(Debug, ProvidesStaticType, NoSerialize, Allocative)]
 pub struct FrozenTraitType {
     pub(crate) id: u64,
+    pub(crate) ty_id: TypeInstanceId,
     pub(crate) name: Option<String>,
     pub(crate) fields: SmallMap<String, FrozenAttr>,
 }
@@ -390,6 +428,10 @@ impl<'v> StarlarkValue<'v> for FrozenTraitType {
 
     fn equals(&self, other: Value<'v>) -> starlark::Result<bool> {
         Ok(extract_trait_type_id(other) == Some(self.id))
+    }
+
+    fn eval_type(&self) -> Option<Ty> {
+        trait_instance_ty(self.id, self.ty_id, self.name.as_deref())
     }
 
     fn invoke(
@@ -469,6 +511,7 @@ impl Freeze for TraitType<'_> {
         }
         Ok(FrozenTraitType {
             id: self.id,
+            ty_id: self.ty_id,
             name: self.name,
             fields: frozen_fields,
         })
@@ -917,6 +960,17 @@ pub fn extract_trait_type_id(value: Value) -> Option<u64> {
     }
 }
 
+/// The id of the trait type an instance belongs to.
+pub fn extract_trait_instance_type_id(value: Value) -> Option<u64> {
+    if let Some(inst) = value.downcast_ref::<TraitInstance>() {
+        extract_trait_type_id(inst.typ)
+    } else if let Some(inst) = value.downcast_ref::<FrozenTraitInstance>() {
+        extract_trait_type_id(inst.typ.to_value())
+    } else {
+        None
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Global functions: trait() and attr()
 // -----------------------------------------------------------------------------
@@ -974,6 +1028,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
 
         Ok(TraitType {
             id: next_trait_type_id(),
+            ty_id: TypeInstanceId::r#gen(),
             name: None,
             fields,
         })
@@ -1015,5 +1070,54 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
             default,
             description,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! A trait type as a type annotation, through real Starlark eval.
+    use crate::axl_check;
+
+    fn ok(code: &str) {
+        axl_check!(code).unwrap_or_else(|e| panic!("expected ok, got: {e}"));
+    }
+
+    fn err(code: &str) -> String {
+        axl_check!(code)
+            .expect_err("expected evaluation to fail")
+            .to_string()
+    }
+
+    #[test]
+    fn trait_type_annotation_accepts_its_own_instance() {
+        ok(r#"
+MyTrait = trait(count = attr(int, default = 0))
+
+def take(t: MyTrait) -> int:
+    return t.count
+
+def give() -> MyTrait:
+    return MyTrait(count = 7)
+
+if take(give()) != 7:
+    fail("expected 7")
+"#);
+    }
+
+    #[test]
+    fn trait_type_annotation_rejects_another_trait() {
+        let msg = err(r#"
+MyTrait = trait(count = attr(int, default = 0))
+OtherTrait = trait(count = attr(int, default = 0))
+
+def take(t: MyTrait) -> int:
+    return t.count
+
+take(OtherTrait(count = 7))
+"#);
+        assert!(
+            msg.contains("does not match the type annotation `MyTrait`"),
+            "unexpected error: {msg}"
+        );
     }
 }
