@@ -108,7 +108,7 @@ impl<'a, 'v> Cmd<'a, 'v> {
             tree.insert(*task, &label, task_cmd)?;
         }
 
-        let group_section = group_section(&tree.group_names());
+        let group_section = group_section(&tree.group_rows());
         let root = Command::new("aspect")
             .bin_name("aspect")
             .about("Aspect's programmable task runner built on top of Bazel\n{ Correct, Fast, Usable } -- Choose three")
@@ -198,6 +198,12 @@ impl<'a, 'v> Cmd<'a, 'v> {
                     .about("Print the resolved task, flag and feature surface as JSON")
                     .hide(true)
                     .arg(
+                        ClapArg::new("task")
+                            .value_name("TASK")
+                            .required(false)
+                            .help("Describe one task in full, e.g. `aspect describe 'cache diff'`. Omit for the index."),
+                    )
+                    .arg(
                         ClapArg::new("output")
                             .long("output")
                             .short('o')
@@ -281,14 +287,28 @@ impl<'a, 'v> Cmd<'a, 'v> {
     ///
     /// Pretty-printed rather than compact: the output is read far more often
     /// than it is piped into another program, and diffs of it are useful.
-    pub fn print_describe(&self, version: &str) -> ExitCode {
-        let doc = describe_json(
-            version,
-            &self.tasks,
-            &self.features,
-            self.aspect_root,
-            self.modules,
-        );
+    pub fn print_describe(&self, version: &str, task: Option<&str>) -> ExitCode {
+        let doc = match task {
+            None => describe_index(version, &self.tasks, &self.features),
+            Some(name) => {
+                let full = describe_json(
+                    version,
+                    &self.tasks,
+                    &self.features,
+                    self.aspect_root,
+                    self.modules,
+                );
+                match select_task(&full, name) {
+                    Some(t) => t,
+                    None => {
+                        eprintln!(
+                            "error: no task {name:?}. Run `aspect describe` for the list of commands."
+                        );
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+        };
         match serde_json::to_string_pretty(&doc) {
             Ok(s) => {
                 println!("{s}");
@@ -963,6 +983,48 @@ fn override_as_default(arg: &Arg, over: &[String]) -> serde_json::Value {
     }
 }
 
+/// Every runnable command with its summary, and nothing else.
+fn describe_index(
+    version: &str,
+    tasks: &[&dyn TaskLike<'_>],
+    features: &[&dyn FeatureLike<'_>],
+) -> serde_json::Value {
+    use serde_json::json;
+
+    let mut commands: Vec<serde_json::Value> = tasks
+        .iter()
+        .map(|task| {
+            let mut path = task.group().clone();
+            path.push(task.kind());
+            json!({
+                "command": format!("aspect {}", path.join(" ")),
+                "summary": task.summary(),
+            })
+        })
+        .collect();
+    commands.sort_by(|a, b| a["command"].as_str().cmp(&b["command"].as_str()));
+
+    json!({
+        "aspect_cli_version": version,
+        "commands": commands,
+        "features": features.iter().map(|f| f.name()).collect::<Vec<_>>(),
+        "next": {
+            "task_detail": "aspect describe '<command without the leading `aspect `>' — e.g. aspect describe 'cache diff'",
+            "feature_flags": "aspect feature <name>",
+        },
+    })
+}
+
+/// Pull one task out of a full [`describe_json`] document by its command path,
+/// with or without the leading `aspect `.
+fn select_task(full: &serde_json::Value, name: &str) -> Option<serde_json::Value> {
+    let want = name.trim().trim_start_matches("aspect ").trim();
+    full["tasks"].as_array()?.iter().find_map(|t| {
+        let cmd = t["command"].as_str()?;
+        (cmd.trim_start_matches("aspect ") == want).then(|| t.clone())
+    })
+}
+
 /// The full resolved surface as JSON: every task reachable in this repo, the
 /// flags each accepts, and the feature flags accepted everywhere.
 ///
@@ -1214,8 +1276,9 @@ fn task_command(
         Some(h) => format!("{h}\n"),
         None => "{about-with-newline}".to_string(),
     };
-    let feature_footer = "\x1b[2mFeature flags are accepted here but hidden. \
-         Run `aspect feature` to list features and their flags.\x1b[0m";
+    let feature_footer = "\x1b[2mFeatures add CI reporting and artifact integrations \
+         (GitHub, Buildkite, GitLab, CircleCI, telemetry). Their flags are accepted here \
+         but hidden; run `aspect feature` to list them.\x1b[0m";
     cmd = cmd.help_template(format!(
         "{cli_header}\n\n{about_block}\n{{usage-heading}} {{usage}}\n\n{{all-args}}\n\n{feature_footer}"
     ));
@@ -1289,35 +1352,42 @@ impl Tree {
         sub.insert_at(name, full_group, &remaining[1..], label, cmd)
     }
 
-    fn group_names(&self) -> Vec<String> {
-        self.subgroups.keys().cloned().collect()
+    /// What each subgroup contains, as a comma-joined list of its task kinds
+    /// and nested group names. A group has no summary of its own to show, and
+    /// "auth task group" tells a reader nothing about whether the command they
+    /// want is inside — listing the members does.
+    fn group_rows(&self) -> Vec<(String, String)> {
+        self.subgroups
+            .iter()
+            .map(|(name, sub)| (name.clone(), sub.member_list()))
+            .collect()
+    }
+
+    fn member_list(&self) -> String {
+        let mut members: Vec<String> = self.tasks.keys().cloned().collect();
+        members.extend(self.subgroups.keys().map(|g| format!("{g}/")));
+        elide(&members, MEMBER_LIST_WIDTH)
     }
 
     fn attach(self, mut root: Command, version: &str) -> Result<Command, CmdError> {
         // Subgroups (rendered hidden, with their own help template).
         let header = banner::line(version);
         for (name, sub) in self.subgroups {
-            let sub_groups = sub.group_names();
+            let sub_rows = sub.group_rows();
+            let about = format!("\x1b[3m{}\x1b[0m: {}", name, sub.member_list());
             let mut template =
                 format!("{header}\n\n{{about-with-newline}}\n{{usage-heading}} {{usage}}");
             if !sub.tasks.is_empty() {
                 template.push_str("\n\n\x1b[1;4mTasks:\x1b[0m\n{subcommands}");
             }
-            if !sub_groups.is_empty() {
-                let max_len = sub_groups.iter().map(|n| n.len()).max().unwrap_or(0);
-                template.push_str("\n\n\x1b[1;4mTask Groups:\x1b[0m\n");
-                for gname in &sub_groups {
-                    let pad = " ".repeat(max_len - gname.len() + 2);
-                    template.push_str(&format!("  \x1b[1m{}\x1b[0m{}task group\n", gname, pad));
-                }
-            }
+            template.push_str(&group_section(&sub_rows));
             let template = format!(
                 "{}\n\n\x1b[1;4mOptions:\x1b[0m\n{{options}}",
                 template.trim_end()
             );
             let mut subcmd = Command::new(name.clone())
                 .subcommand_value_name("TASK|GROUP")
-                .about(format!("\x1b[3m{}\x1b[0m task group", name))
+                .about(about)
                 .display_order(TASK_GROUP_DISPLAY_ORDER)
                 .hide(true)
                 .help_template(template);
@@ -1341,18 +1411,32 @@ impl Tree {
     }
 }
 
-fn group_section(group_names: &[String]) -> String {
-    if group_names.is_empty() {
+/// Width budget for a group's member list before it is elided.
+const MEMBER_LIST_WIDTH: usize = 58;
+
+/// Join `items`, trimming to `width` and appending `…` plus the count dropped.
+fn elide(items: &[String], width: usize) -> String {
+    let mut out = String::new();
+    for (i, item) in items.iter().enumerate() {
+        let sep = if i == 0 { "" } else { ", " };
+        if !out.is_empty() && out.len() + sep.len() + item.len() > width {
+            return format!("{out}, … (+{} more)", items.len() - i);
+        }
+        out.push_str(sep);
+        out.push_str(item);
+    }
+    out
+}
+
+fn group_section(rows: &[(String, String)]) -> String {
+    if rows.is_empty() {
         return String::new();
     }
-    let max_len = group_names.iter().map(|n| n.len()).max().unwrap_or(0);
+    let max_len = rows.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
     let mut s = String::from("\n\n\x1b[1;4mTask Groups:\x1b[0m\n");
-    for name in group_names {
+    for (name, members) in rows {
         let pad = " ".repeat(max_len - name.len() + 2);
-        s.push_str(&format!(
-            "  \x1b[1m{}\x1b[0m{}\x1b[3m{}\x1b[0m task group\n",
-            name, pad, name
-        ));
+        s.push_str(&format!("  \x1b[1m{}\x1b[0m{}{}\n", name, pad, members));
     }
     s
 }
