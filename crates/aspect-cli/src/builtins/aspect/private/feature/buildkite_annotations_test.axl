@@ -18,7 +18,7 @@ for each scenario, so a rendering regression shows up as a visible diff:
 config patches, and a broken template degrades to the fallback body.
 """
 
-load("@aspect//feature/buildkite_annotations.axl", "format_body")
+load("@aspect//feature/buildkite_annotations.axl", "format_body", "should_remove")
 
 # Shared fixture factories — also consumed by github_status_comments_test.axl.
 load(
@@ -348,9 +348,38 @@ def _test_templates_impl(ctx: TaskContext) -> int:
 
     _assert_title_overrides(ctx, data, rc)
     _assert_resolve_templates()
+    _assert_should_remove()
 
     print("All template-customization assertions passed for %d kinds." % len(_KIND_TEMPLATES))
     return 0
+
+_TERMINAL_STATUSES_UNDER_TEST = ["passed", "warning", "failed", "aborted"]
+
+def _assert_should_remove():
+    """`remove_on` retracts only on the terminal emit, and only for the
+    statuses it names."""
+    passed_only = {"passed": True}
+
+    # The whole point: a green task's annotation is retracted at the end.
+    _eq("terminal passed retracts", should_remove(passed_only, "passed", True), True)
+
+    # Live updates keep posting, so a long-running task stays visible while it
+    # runs — only its outcome decides whether the annotation survives.
+    _eq("live passed keeps posting", should_remove(passed_only, "passed", False), False)
+
+    # A status the config didn't name is always kept, terminal or not.
+    for st in ["failed", "warning", "aborted", "running", "failing"]:
+        _eq("terminal %s kept" % st, should_remove(passed_only, st, True), False)
+
+    # Empty config (the default) never retracts anything.
+    for st in _TERMINAL_STATUSES_UNDER_TEST:
+        _eq("default keeps %s" % st, should_remove({}, st, True), False)
+
+    # Several statuses can be named at once.
+    both = {"passed": True, "warning": True}
+    _eq("multi passed", should_remove(both, "passed", True), True)
+    _eq("multi warning", should_remove(both, "warning", True), True)
+    _eq("multi failed kept", should_remove(both, "failed", True), False)
 
 def _assert_title_overrides(ctx, data, rc):
     """A "title" override replaces the annotation title, renders with the
