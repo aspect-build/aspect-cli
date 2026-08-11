@@ -1222,17 +1222,29 @@ def title_vars(status, state, target_pattern = "", task_kind = ""):
 def compose_title(ctx, template, status, state, target_pattern = "", task_kind = ""):
     """Render a check-run / annotation title, honoring a `title` override.
 
-    Always renders through `render_title_or_fallback`, so a broken override
-    degrades to the built-in layout rather than aborting the task — a title is
-    the one field every surface needs, and a status check with no title is
-    worse than one with the default wording.
+    Never returns "". A title is the one field every surface needs — GitHub's
+    check-run API requires `output.title`, and it's the line reviewers scan —
+    so an override that can't produce one degrades to the built-in layout
+    rather than aborting the task or emitting a blank. Two ways that happens:
+
+      - the template fails to render (see `render_title_or_fallback`);
+      - it renders successfully but blank, which a *syntactically valid*
+        template can do whenever every variable it references is empty (e.g.
+        `"{{ subject }}"` on a task with no target pattern).
+
+    The fallback can't itself come up empty: `TITLE_TEMPLATE` always emits
+    `icon`, and `emoji_for_status` has a non-empty default for every status.
 
     Truncated to `_TITLE_MAX_LEN` after rendering: an override that ignores the
     caps still can't produce a title GitHub would reject.
     """
     data = title_vars(status, state, target_pattern = target_pattern, task_kind = task_kind)
-    text = render_title_or_fallback(ctx, template or TITLE_TEMPLATE, data)
-    return truncate_for_title(text.strip(), _TITLE_MAX_LEN)
+    text = render_title_or_fallback(ctx, template or TITLE_TEMPLATE, data).strip()
+    if not text:
+        if template:
+            _RENDER_LOG.warn(ctx.std, "title rendered blank, using the built-in layout: %r" % template)
+        text = ctx.template.jinja2(TITLE_TEMPLATE, data = data).strip()
+    return truncate_for_title(text, _TITLE_MAX_LEN)
 
 def summary_title(data, status, target_pattern = "", task_kind = ""):
     """Build the check run title in the form '<status_emoji> <task_kind> <subject> · <state>'.

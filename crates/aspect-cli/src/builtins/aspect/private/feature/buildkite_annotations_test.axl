@@ -392,6 +392,29 @@ def _assert_title_overrides(ctx, data, rc):
     # would replace the one line reviewers actually scan.
     _eq("broken title falls back to built-in", _title("{% if unclosed %}"), default_out.get("title"))
 
+    # A *syntactically valid* template can still render blank when every
+    # variable it references is empty. GitHub requires `output.title` on a check
+    # run, so that must fall back too rather than emit "".
+    _eq("blank title falls back to built-in", _title("   "), default_out.get("title"))
+    nosubject_rc = _render_ctx("", "build")
+    nosubject_default = bazel_render_check_output(ctx, data, "passed", nosubject_rc, _bk_links(), None, None)
+    nosubject_blank = bazel_render_check_output(
+        ctx,
+        data,
+        "passed",
+        nosubject_rc,
+        _bk_links(),
+        {"title": "{{ subject }}"},
+        None,
+    )
+    _eq(
+        "title referencing only an empty var falls back",
+        nosubject_blank.get("title"),
+        nosubject_default.get("title"),
+    )
+    if not nosubject_blank.get("title"):
+        fail("title must never be empty")
+
     # Titles are capped so an override can't produce one GitHub would reject.
     long_title = _title("{{ subject }}" + ("x" * 400))
     if len(long_title) > 160:
