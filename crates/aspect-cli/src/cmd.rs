@@ -984,10 +984,6 @@ fn override_as_default(arg: &Arg, over: &[String]) -> serde_json::Value {
 }
 
 /// Every runnable command with its summary, and nothing else.
-///
-/// This is the default because the full surface is ~185KB — too expensive to
-/// be the first thing a reader fetches. The index is ~9KB and answers "what
-/// can I run here"; `aspect describe <task>` answers "how do I run it".
 fn describe_index(
     version: &str,
     tasks: &[&dyn TaskLike<'_>],
