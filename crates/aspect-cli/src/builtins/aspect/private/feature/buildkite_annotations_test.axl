@@ -346,10 +346,56 @@ def _test_templates_impl(ctx: TaskContext) -> int:
     )
     _contains("broken summary degrades to fallback", broken_out.get("summary"), "unavailable")
 
+    _assert_title_overrides(ctx, data, rc)
     _assert_resolve_templates()
 
     print("All template-customization assertions passed for %d kinds." % len(_KIND_TEMPLATES))
     return 0
+
+def _assert_title_overrides(ctx, data, rc):
+    """A "title" override replaces the annotation title, renders with the
+    documented variables, and degrades to the built-in layout when broken."""
+    default_out = bazel_render_check_output(ctx, data, "passed", rc, _bk_links(), None, None)
+    _eq("default title", default_out.get("title"), "✅ build //... · Successful build")
+
+    def _title(tmpl, status = "passed"):
+        out = bazel_render_check_output(ctx, data, status, rc, _bk_links(), {"title": tmpl}, None)
+        return out.get("title")
+
+    _eq("plain override", _title("Build is done"), "Build is done")
+
+    # Every variable the arg description promises.
+    _eq(
+        "all title vars",
+        _title("{{ icon }}|{{ task_kind }}|{{ subject }}|{{ state }}|{{ status }}"),
+        "✅|build|//...|Successful build|passed",
+    )
+
+    # The per-kind `state` clause is what makes an override useful — it carries
+    # the verdict the renderer computed, so a config can reorder or reword the
+    # layout without reimplementing the status logic.
+    _eq("state tracks status", _title("{{ state }}", status = "running"), "Running...")
+
+    # An override of the title must not disturb the other fields. The summary is
+    # checked by substring, not equality — it embeds a live elapsed-time reading
+    # that ticks between renders.
+    override_out = bazel_render_check_output(ctx, data, "passed", rc, _bk_links(), {"title": "X"}, None)
+    _contains(
+        "summary untouched by title override",
+        override_out.get("summary"),
+        ":speech_balloon: **Last update:** `build task complete`",
+    )
+    _eq("details untouched by title override", override_out.get("text"), default_out.get("text"))
+
+    # Unlike summary/details — which surface a visible "unavailable" marker — a
+    # broken title falls back to the built-in layout, since an error string
+    # would replace the one line reviewers actually scan.
+    _eq("broken title falls back to built-in", _title("{% if unclosed %}"), default_out.get("title"))
+
+    # Titles are capped so an override can't produce one GitHub would reject.
+    long_title = _title("{{ subject }}" + ("x" * 400))
+    if len(long_title) > 160:
+        fail("title not truncated: %d chars" % len(long_title))
 
 def _assert_resolve_templates():
     """`resolve_templates` narrows a feature's `args.templates` to the flat

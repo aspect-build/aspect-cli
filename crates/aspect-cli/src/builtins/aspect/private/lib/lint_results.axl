@@ -22,6 +22,7 @@ load(
     "active_phase_data",
     "build_details_data",
     "build_summary_data",
+    "compose_title",
     "format_run_date",
     "html_escape",
     "merged_meta",
@@ -153,6 +154,29 @@ def _recount(data):
     data["lint"]["counts_by_severity"] = by_sev
     data["lint"]["counts_by_tool"] = by_tool
 
+def lint_summary_title_state(data, status):
+    """The verdict clause after `·` — "Passed", "Build failed",
+    "3 errors, 8 warnings", "Running...". Exposed as the `state` variable for a
+    `title` template override."""
+    if data["lint"].get("build_failed"):
+        return "Build failed"
+
+    counts = data["lint"].get("counts_by_severity", {})
+    errs = counts.get("error", 0)
+    warns = counts.get("warning", 0)
+    infos = counts.get("info", 0)
+    total = _sum_values(counts)
+
+    if status in ("running", "failing") and total > 0:
+        return _findings_phrase(errs, warns, infos) + " so far..."
+    if status == "running":
+        return "Running..."
+    if status == "failing":
+        return "Failing..."
+    if total == 0:
+        return "Passed"
+    return _findings_phrase(errs, warns, infos)
+
 def lint_summary_title(data, status, target_pattern = "", task_kind = ""):
     """Compute the check-run title, e.g. "⚠️ lint //... · 3 errors, 8 warnings",
     "✅ lint //... · Passed", "❌ lint //... · Build failed", "🔄 ... · Running...".
@@ -163,25 +187,7 @@ def lint_summary_title(data, status, target_pattern = "", task_kind = ""):
     display = emoji_for_status(status) + " " + (task_kind or "lint")
     target = target_pattern or data.get("target_pattern", "")
     base = display + ((" " + target) if target else "")
-
-    if data["lint"].get("build_failed"):
-        return base + " · Build failed"
-
-    counts = data["lint"].get("counts_by_severity", {})
-    errs = counts.get("error", 0)
-    warns = counts.get("warning", 0)
-    infos = counts.get("info", 0)
-    total = _sum_values(counts)
-
-    if status in ("running", "failing") and total > 0:
-        return base + " · " + _findings_phrase(errs, warns, infos) + " so far..."
-    if status == "running":
-        return base + " · Running..."
-    if status == "failing":
-        return base + " · Failing..."
-    if total == 0:
-        return base + " · Passed"
-    return base + " · " + _findings_phrase(errs, warns, infos)
+    return base + " · " + lint_summary_title_state(data, status)
 
 def conclusion(status, data):
     """Terminal bookend conclusion (see `lifecycle.task_update`): a findings
@@ -875,11 +881,13 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
     if not target_pattern:
         target_pattern = data.get("target_pattern", "")
     return {
-        "title": lint_summary_title(
-            data,
+        "title": compose_title(
+            ctx,
+            t.get("title"),
             status,
+            lint_summary_title_state(data, status),
             target_pattern = target_pattern,
-            task_kind = task_kind,
+            task_kind = task_kind or "lint",
         ),
         "summary": summary_text,
         "text": details_text,

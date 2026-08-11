@@ -22,6 +22,7 @@ load(
     "active_phase_data",
     "build_details_data",
     "build_summary_data",
+    "compose_title",
     "format_run_date",
     "render_details_or_fallback",
     "render_summary_or_fallback",
@@ -154,6 +155,38 @@ def dedupe_subtrees(dirs):
 
 # ─── Title ────────────────────────────────────────────────────────────────────
 
+def gazelle_summary_title_state(data, status):
+    """The verdict clause after `·`. Exposed as the `state` variable for a
+    `title` template override."""
+    if status == "running":
+        return "Running..."
+
+    if status == "failing":
+        return "Failing..."
+
+    if data["gazelle"].get("gazelle_error"):
+        code = data["gazelle"].get("gazelle_error_code", 0)
+        return "Configuration error (exit %s)" % str(code)
+
+    if data["gazelle"].get("apply_error"):
+        return "Apply error"
+
+    if status == "aborted":
+        return "Aborted"
+
+    affected = data["gazelle"].get("affected_files", [])
+    if not affected:
+        # `failed` with no specific failure recorded means an early-bail
+        # path before gazelle ran (bootstrap-build failed, entrypoint
+        # resolution failed). Don't claim "Passed".
+        if status == "failed":
+            return "Failed"
+        return "Passed"
+
+    count = len(affected)
+    noun = "BUILD file" if count == 1 else "BUILD files"
+    return "%s %s out of date" % (str(count), noun)
+
 def gazelle_summary_title(data, status, target_pattern = "", task_kind = ""):
     """Compute the check-run title.
 
@@ -175,35 +208,7 @@ def gazelle_summary_title(data, status, target_pattern = "", task_kind = ""):
     display = emoji_for_status(status) + " " + (task_kind or "gazelle")
     target = target_pattern or data["gazelle"].get("gazelle_target", "") or ""
     base = display + ((" " + target) if target else "")
-
-    if status == "running":
-        return base + " · Running..."
-
-    if status == "failing":
-        return base + " · Failing..."
-
-    if data["gazelle"].get("gazelle_error"):
-        code = data["gazelle"].get("gazelle_error_code", 0)
-        return base + " · Configuration error (exit %s)" % str(code)
-
-    if data["gazelle"].get("apply_error"):
-        return base + " · Apply error"
-
-    if status == "aborted":
-        return base + " · Aborted"
-
-    affected = data["gazelle"].get("affected_files", [])
-    if not affected:
-        # `failed` with no specific failure recorded means an early-bail
-        # path before gazelle ran (bootstrap-build failed, entrypoint
-        # resolution failed). Don't claim "Passed".
-        if status == "failed":
-            return base + " · Failed"
-        return base + " · Passed"
-
-    count = len(affected)
-    noun = "BUILD file" if count == 1 else "BUILD files"
-    return base + " · %s %s out of date" % (str(count), noun)
+    return base + " · " + gazelle_summary_title_state(data, status)
 
 def conclusion(status, data):
     """Gazelle task's terminal bookend conclusion. See
@@ -439,12 +444,16 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
 
     task_kind = render_ctx.get("task_kind", "") if render_ctx else ""
     target_pattern = render_ctx.get("subject", "") if render_ctx else ""
+    if not target_pattern:
+        target_pattern = data["gazelle"].get("gazelle_target", "") or ""
     return {
-        "title": gazelle_summary_title(
-            data,
+        "title": compose_title(
+            ctx,
+            t.get("title"),
             status,
+            gazelle_summary_title_state(data, status),
             target_pattern = target_pattern,
-            task_kind = task_kind,
+            task_kind = task_kind or "gazelle",
         ),
         "summary": summary_text,
         "text": details_text,

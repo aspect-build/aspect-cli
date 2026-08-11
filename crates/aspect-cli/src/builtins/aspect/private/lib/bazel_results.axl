@@ -1191,6 +1191,49 @@ def compute_reproducer_command(data, task_kind, max_chars = MAX_REPRO_CHARS):
 # GitHub check-run title cap. Subject within is capped tighter at SUBJECT_TITLE_MAX.
 _TITLE_MAX_LEN = 160
 
+# Default title layout, shared by every renderer kind: `{icon} {task_kind}
+# {subject} · {state}`, with each clause dropped when empty. Kept as a template
+# so `compose_title` renders the built-in through the same path as an override
+# — a config-supplied template can therefore only differ in layout, never in
+# which values are available.
+TITLE_TEMPLATE = (
+    "{% if icon %}{{ icon }}{% endif %}" +
+    "{% if task_kind %}{% if icon %} {% endif %}{{ task_kind }}{% endif %}" +
+    "{% if subject %} {{ subject }}{% endif %}" +
+    "{% if state %}{% if icon or task_kind or subject %} · {% endif %}{{ state }}{% endif %}"
+)
+
+def title_vars(status, state, target_pattern = "", task_kind = ""):
+    """Template variables for a `title` override.
+
+    `state` is the per-kind verdict clause the renderer computed (e.g. "Passed",
+    "3 errors, 8 warnings", "Running..."); the rest mirror what the built-in
+    layout uses. `subject` is pre-truncated to `SUBJECT_TITLE_MAX` so a long
+    target pattern can't blow the title cap on its own.
+    """
+    return {
+        "icon": emoji_for_status(status),
+        "task_kind": task_kind,
+        "subject": truncate_for_title(target_pattern, SUBJECT_TITLE_MAX) if target_pattern else "",
+        "state": state,
+        "status": status,
+    }
+
+def compose_title(ctx, template, status, state, target_pattern = "", task_kind = ""):
+    """Render a check-run / annotation title, honoring a `title` override.
+
+    Always renders through `render_title_or_fallback`, so a broken override
+    degrades to the built-in layout rather than aborting the task — a title is
+    the one field every surface needs, and a status check with no title is
+    worse than one with the default wording.
+
+    Truncated to `_TITLE_MAX_LEN` after rendering: an override that ignores the
+    caps still can't produce a title GitHub would reject.
+    """
+    data = title_vars(status, state, target_pattern = target_pattern, task_kind = task_kind)
+    text = render_title_or_fallback(ctx, template or TITLE_TEMPLATE, data)
+    return truncate_for_title(text.strip(), _TITLE_MAX_LEN)
+
 def summary_title(data, status, target_pattern = "", task_kind = ""):
     """Build the check run title in the form '<status_emoji> <task_kind> <subject> · <state>'.
 
@@ -1234,6 +1277,11 @@ def summary_title(data, status, target_pattern = "", task_kind = ""):
     else:
         title = state
     return truncate_for_title(title, _TITLE_MAX_LEN)
+
+def summary_title_state(data, status):
+    """The verdict clause `summary_title` puts after `·`, exposed as the
+    `state` variable for a `title` template override."""
+    return compute_invocation_state(data, status)
 
 def conclusion(status, data):
     """Bazel build/test task's terminal bookend conclusion. Delegates
@@ -3269,6 +3317,24 @@ def render_summary_or_fallback(ctx, template, data, surface = "check"):
     """
     return _render_or_fallback(ctx, template, data, _SUMMARY_FALLBACK_TEMPLATE, surface + " summary")
 
+def render_title_or_fallback(ctx, template, data):
+    """Render a title, degrading to the built-in layout on error.
+
+    Unlike the summary/details fallbacks — which surface a visible "unavailable"
+    marker — a failed title falls back to `TITLE_TEMPLATE` so the surface still
+    gets a correct, informative title. The marker approach would replace the one
+    line reviewers scan with an error string. The warning still names the
+    offending template so the config author can find it.
+
+    `TITLE_TEMPLATE` itself is trusted (no macros, only the `title_vars` keys),
+    so the fallback render can't fail in turn.
+    """
+    ok, text = ctx.template.try_jinja2(template, data = data)
+    if ok:
+        return text
+    _RENDER_LOG.warn(ctx.std, "title failed to render, using the built-in layout: %s" % text)
+    return ctx.template.jinja2(TITLE_TEMPLATE, data = data)
+
 def build_summary_data(ctx, data, status, render_ctx, links, metadata_keys, run_date = "", config_items = None, complete_suffix = ""):
     """Build Jinja2 template data for SUMMARY_TEMPLATE.
 
@@ -4508,9 +4574,11 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
     target_pattern = render_ctx.get("subject", "") if render_ctx else ""
     task_kind = render_ctx.get("task_kind", "") if render_ctx else ""
     return {
-        "title": summary_title(
-            data,
+        "title": compose_title(
+            ctx,
+            t.get("title"),
             status,
+            summary_title_state(data, status),
             target_pattern = target_pattern,
             task_kind = task_kind,
         ),
