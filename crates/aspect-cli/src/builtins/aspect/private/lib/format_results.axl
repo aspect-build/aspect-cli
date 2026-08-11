@@ -23,6 +23,7 @@ load(
     "active_phase_data",
     "build_details_data",
     "build_summary_data",
+    "compose_title",
     "format_run_date",
     "render_details_or_fallback",
     "render_summary_or_fallback",
@@ -65,6 +66,52 @@ def init_data():
 
 # ─── Title ────────────────────────────────────────────────────────────────────
 
+def format_summary_title_state(data, status):
+    """The verdict clause after `·`. Exposed as the `state` variable for a
+    `title` template override."""
+    if status == "running":
+        return "Running..."
+
+    if status == "failing":
+        return "Failing..."
+
+    if data["format"].get("formatter_error"):
+        code = data["format"].get("formatter_error_code", 0)
+        return "Formatter error (exit %s)" % str(code)
+
+    if status == "aborted":
+        return "Aborted"
+
+    if data["format"].get("no_git"):
+        return "Passed (no git context)"
+
+    if data["format"].get("no_files_to_format"):
+        return "No files to format"
+
+    affected = data["format"].get("affected_files", [])
+    if not affected:
+        # A `failed` status with no specific failure recorded in
+        # `data["format"]` (formatter_error etc.) means the task hit an
+        # early-bail path before the formatter ran (bootstrap-build
+        # failed, entrypoint resolution failed, …). Don't claim
+        # "Passed" — `_pick_status` set `failed` for a reason.
+        if status == "failed":
+            return "Failed"
+        return "Passed"
+
+    count = len(affected)
+    noun = "file" if count == 1 else "files"
+
+    # `applied=True` means the formatter rewrote files (format always
+    # applies — the formatter modifies the tree as part of its run).
+    # The title reflects what happened ("Formatted N file(s)") rather
+    # than what would be needed ("N files need formatting"), which is
+    # misleading when the work has just been done.
+    if data.get("applied"):
+        return "Formatted %s %s" % (str(count), noun)
+    verb = "needs" if count == 1 else "need"
+    return "%s %s %s formatting" % (str(count), noun, verb)
+
 def format_summary_title(data, status, target_pattern = "", task_kind = ""):
     """Compute the check-run title.
 
@@ -89,49 +136,7 @@ def format_summary_title(data, status, target_pattern = "", task_kind = ""):
     display = emoji_for_status(status) + " " + (task_kind or "format")
     target = target_pattern or data["format"].get("formatter_target", "") or ""
     base = display + ((" " + target) if target else "")
-
-    if status == "running":
-        return base + " · Running..."
-
-    if status == "failing":
-        return base + " · Failing..."
-
-    if data["format"].get("formatter_error"):
-        code = data["format"].get("formatter_error_code", 0)
-        return base + " · Formatter error (exit %s)" % str(code)
-
-    if status == "aborted":
-        return base + " · Aborted"
-
-    if data["format"].get("no_git"):
-        return base + " · Passed (no git context)"
-
-    if data["format"].get("no_files_to_format"):
-        return base + " · No files to format"
-
-    affected = data["format"].get("affected_files", [])
-    if not affected:
-        # A `failed` status with no specific failure recorded in
-        # `data["format"]` (formatter_error etc.) means the task hit an
-        # early-bail path before the formatter ran (bootstrap-build
-        # failed, entrypoint resolution failed, …). Don't claim
-        # "Passed" — `_pick_status` set `failed` for a reason.
-        if status == "failed":
-            return base + " · Failed"
-        return base + " · Passed"
-
-    count = len(affected)
-    noun = "file" if count == 1 else "files"
-
-    # `applied=True` means the formatter rewrote files (format always
-    # applies — the formatter modifies the tree as part of its run).
-    # The title reflects what happened ("Formatted N file(s)") rather
-    # than what would be needed ("N files need formatting"), which is
-    # misleading when the work has just been done.
-    if data.get("applied"):
-        return base + " · Formatted %s %s" % (str(count), noun)
-    verb = "needs" if count == 1 else "need"
-    return base + " · %s %s %s formatting" % (str(count), noun, verb)
+    return base + " · " + format_summary_title_state(data, status)
 
 def conclusion(status, data):
     """Format task's terminal bookend conclusion. See
@@ -383,10 +388,14 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
 
     task_kind = render_ctx.get("task_kind", "") if render_ctx else ""
     target_pattern = render_ctx.get("subject", "") if render_ctx else ""
+    if not target_pattern:
+        target_pattern = data["format"].get("formatter_target", "") or ""
     return {
-        "title": format_summary_title(
-            data,
+        "title": compose_title(
+            ctx,
+            t.get("title"),
             status,
+            format_summary_title_state(data, status),
             target_pattern = target_pattern,
             task_kind = task_kind,
         ),

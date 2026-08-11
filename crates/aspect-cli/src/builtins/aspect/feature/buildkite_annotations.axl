@@ -406,10 +406,12 @@ BuildkiteAnnotations = feature(
             dict,
             default = {},
             description = "Map of template overrides for the rendered annotation body. " +
-                          "Flat keys \"summary\" / \"details\" (Jinja2 strings) apply to every " +
+                          "Flat keys \"title\" / \"summary\" / \"details\" (Jinja2 strings) apply to every " +
                           "task kind; a per-task-kind block (\"build\", \"test\", \"lint\", " +
                           "\"format\", \"gazelle\", \"delivery\", \"warming\") overlays them for " +
                           "that kind alone, e.g. {\"summary\": ..., \"lint\": {\"details\": ...}}. " +
+                          "The \"title\" template renders with `icon`, `task_kind`, `subject`, " +
+                          "`state` and `status`; a broken title falls back to the built-in layout. " +
                           "Empty dict (default) uses the feature's built-in templates. The renderer's title, summary and details are concatenated into one Markdown annotation, hard-capped at Buildkite's 1 MiB limit.",
         ),
         "metadata_keys": args.string_list(

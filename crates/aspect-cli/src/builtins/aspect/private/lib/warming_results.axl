@@ -27,6 +27,7 @@ load(
     "active_phase_data",
     "build_details_data",
     "build_summary_data",
+    "compose_title",
     "format_run_date",
     "render_details_or_fallback",
     "render_summary_or_fallback",
@@ -67,25 +68,30 @@ def _title(data, status, target_pattern = "", task_kind = ""):
     """
     display = emoji_for_status(status) + " " + (task_kind or "warming")
     base = display + ((" " + target_pattern) if target_pattern else "")
+    return base + " · " + _title_state(data, status)
+
+def _title_state(data, status):
+    """The verdict clause after `·`. Exposed as the `state` variable for a
+    `title` template override."""
     w = data.get("warming", {}) or {}
 
     if status == "running":
-        return base + " · Running..."
+        return "Running..."
     if status == "failing":
-        return base + " · Failing..."
+        return "Failing..."
     if status == "aborted":
-        return base + " · Aborted"
+        return "Aborted"
     if w.get("build_failed"):
-        return base + " · Populate failed"
+        return "Populate failed"
     if w.get("archive_error"):
-        return base + " · Archive upload failed"
+        return "Archive upload failed"
     if status == "failed":
-        return base + " · Failed"
+        return "Failed"
     if w.get("archive_succeeded"):
-        return base + " · Warming complete"
+        return "Warming complete"
     if w.get("archive_skipped_reason"):
-        return base + " · Caches populated (archive skipped)"
-    return base + " · Passed"
+        return "Caches populated (archive skipped)"
+    return "Passed"
 
 def conclusion(status, data):
     """Terminal bookend conclusion. See `lifecycle.task_update` for the
@@ -190,9 +196,11 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
     task_kind = render_ctx.get("task_kind", "") if render_ctx else ""
     target_pattern = render_ctx.get("subject", "") if render_ctx else ""
     return {
-        "title": _title(
-            data,
+        "title": compose_title(
+            ctx,
+            t.get("title"),
             status,
+            _title_state(data, status),
             target_pattern = target_pattern,
             task_kind = task_kind,
         ),
