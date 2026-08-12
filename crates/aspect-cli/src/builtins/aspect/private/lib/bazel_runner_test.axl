@@ -15,7 +15,8 @@ Run with:
   aspect dev test-bazel-runner
 """
 
-load("@aspect//bazel.axl", "BazelTrait", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end", "target_patterns")
+load("@aspect//bazel.axl", "BazelTrait", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
+load("./bazel_runner.axl", "target_patterns")
 
 def _eq(label, got, want):
     if got != want:
