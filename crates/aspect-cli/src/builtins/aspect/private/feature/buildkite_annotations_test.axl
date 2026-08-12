@@ -18,7 +18,7 @@ for each scenario, so a rendering regression shows up as a visible diff:
 config patches, and a broken template degrades to the fallback body.
 """
 
-load("@aspect//feature/buildkite_annotations.axl", "format_body", "should_remove")
+load("@aspect//feature/buildkite_annotations.axl", "format_body")
 
 # Shared fixture factories — also consumed by github_status_comments_test.axl.
 load(
@@ -81,6 +81,16 @@ load(
     LINT_DETAILS_TEMPLATE = "DETAILS_TEMPLATE",
     LINT_SUMMARY_TEMPLATE = "SUMMARY_TEMPLATE",
     lint_render_check_output = "render_check_output",
+)
+load(
+    "../lib/lifecycle.axl",
+    "SURFACE_PUBLISH",
+    "SURFACE_REMOVE",
+    "StatusSurface",
+    "StatusSurfaceAction",
+    "StatusSurfaceInfo",
+    "apply_status_surface_hooks",
+    "surface_restyle",
 )
 load("../lib/result_text.axl", "severity_for_status")
 load(
@@ -348,38 +358,72 @@ def _test_templates_impl(ctx: TaskContext) -> int:
 
     _assert_title_overrides(ctx, data, rc)
     _assert_resolve_templates()
-    _assert_should_remove()
+    _assert_status_surface_hooks(ctx)
 
     print("All template-customization assertions passed for %d kinds." % len(_KIND_TEMPLATES))
     return 0
 
-_TERMINAL_STATUSES_UNDER_TEST = ["passed", "warning", "failed", "aborted"]
+def _fake_lifecycle(handlers):
+    """Minimal stand-in for the lifecycle trait — `apply_status_surface_hooks`
+    reads only `.status_surface_decision`."""
+    return struct(status_surface_decision = handlers)
 
-def _assert_should_remove():
-    """`remove_on` retracts only on the terminal emit, and only for the
-    statuses it names."""
-    passed_only = {"passed": True}
+def _surface_info(status, final, style = "info"):
+    return StatusSurfaceInfo(
+        surface = StatusSurface("buildkite_annotation"),
+        status = status,
+        final = final,
+        style = style,
+        task_kind = "build",
+        task_name = "build-test",
+    )
 
-    # The whole point: a green task's annotation is retracted at the end.
-    _eq("terminal passed retracts", should_remove(passed_only, "passed", True), True)
+def _assert_status_surface_hooks(ctx):
+    """`status_surface_decision` hooks decide publish / remove / restyle, chain
+    in order, and default to publishing."""
 
-    # Live updates keep posting, so a long-running task stays visible while it
-    # runs — only its outcome decides whether the annotation survives.
-    _eq("live passed keeps posting", should_remove(passed_only, "passed", False), False)
+    def _drop_passed(ctx, info):
+        if info.final and info.status == "passed":
+            return SURFACE_REMOVE
+        return SURFACE_PUBLISH
 
-    # A status the config didn't name is always kept, terminal or not.
-    for st in ["failed", "warning", "aborted", "running", "failing"]:
-        _eq("terminal %s kept" % st, should_remove(passed_only, st, True), False)
+    # No handlers → publish unchanged.
+    _eq("no handlers publishes", apply_status_surface_hooks(ctx, _fake_lifecycle([]), _surface_info("passed", True)).action, StatusSurfaceAction("publish"))
 
-    # Empty config (the default) never retracts anything.
-    for st in _TERMINAL_STATUSES_UNDER_TEST:
-        _eq("default keeps %s" % st, should_remove({}, st, True), False)
+    one = _fake_lifecycle([_drop_passed])
 
-    # Several statuses can be named at once.
-    both = {"passed": True, "warning": True}
-    _eq("multi passed", should_remove(both, "passed", True), True)
-    _eq("multi warning", should_remove(both, "warning", True), True)
-    _eq("multi failed kept", should_remove(both, "failed", True), False)
+    # The customer's case: a green task's annotation is retracted at the end.
+    _eq("terminal passed removes", apply_status_surface_hooks(ctx, one, _surface_info("passed", True)).action, StatusSurfaceAction("remove"))
+
+    # Live updates keep posting, so a long task stays visible while it runs.
+    _eq("live passed publishes", apply_status_surface_hooks(ctx, one, _surface_info("passed", False)).action, StatusSurfaceAction("publish"))
+
+    # Statuses the hook doesn't name are always kept.
+    for st in ["failed", "warning", "aborted"]:
+        _eq("terminal %s publishes" % st, apply_status_surface_hooks(ctx, one, _surface_info(st, True)).action, StatusSurfaceAction("publish"))
+
+    # A restyle publishes with the overridden style.
+    def _warn(ctx, info):
+        return surface_restyle("warning")
+
+    restyled = apply_status_surface_hooks(ctx, _fake_lifecycle([_warn]), _surface_info("passed", True))
+    _eq("restyle publishes", restyled.action, StatusSurfaceAction("publish"))
+    _eq("restyle sets style", restyled.style, "warning")
+
+    # `remove` short-circuits, so a later handler can't resurrect the write.
+    _eq(
+        "remove short-circuits",
+        apply_status_surface_hooks(ctx, _fake_lifecycle([_drop_passed, _warn]), _surface_info("passed", True)).action,
+        StatusSurfaceAction("remove"),
+    )
+
+    # A restyle threads into the next handler's info, so the last writer wins.
+    def _observe_style(ctx, info):
+        return surface_restyle(info.style + "+seen")
+
+    chained = apply_status_surface_hooks(ctx, _fake_lifecycle([_warn, _observe_style]), _surface_info("passed", True))
+    _eq("style threads through the chain", chained.style, "warning+seen")
+
 
 def _assert_title_overrides(ctx, data, rc):
     """A "title" override replaces the annotation title, renders with the

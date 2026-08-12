@@ -19,17 +19,42 @@ Usage in `.aspect/config.axl`:
         ctx.features[BuildkiteAnnotations].args.enabled = True
         # Open the build + test phase log sections by default (else collapsed).
         ctx.features[BuildkiteAnnotations].args.expand_phases = ["build", "test"]
-        # Keep the Annotations tab to tasks that need attention.
-        ctx.features[BuildkiteAnnotations].args.remove_on = ["passed"]
 
-## Removing an annotation on success
+## Suppressing or restyling an annotation
 
-`remove_on` names the terminal statuses whose annotation is retracted rather
-than finalized. This has to live in the feature: `task_update` handlers run in
+`TaskLifecycleTrait.status_surface_decision` is consulted immediately before
+every write and returns a verdict — publish (optionally restyled) or remove.
+To drop the annotation for tasks that finished clean, so the Annotations tab
+only lists what needs attention:
+
+    load(
+        "@aspect//traits.axl",
+        "SURFACE_PUBLISH",
+        "SURFACE_REMOVE",
+        "StatusSurfaceInfo",
+        "TaskLifecycleTrait",
+    )
+
+    def _drop_when_passed(ctx: TaskContext, info: StatusSurfaceInfo):
+        if info.final and info.status == "passed":
+            return SURFACE_REMOVE
+        return SURFACE_PUBLISH
+
+    def config(ctx):
+        ctx.traits[TaskLifecycleTrait].status_surface_decision.append(_drop_when_passed)
+
+A `remove` verdict *replaces* the write rather than following it, so the
+annotation never flickers into view and the body is never rendered just to be
+discarded. Anything this task already published is retracted.
+
+This can't be done from a `task_update` hook: those handlers run in
 registration order and features register before a config's own hooks, so a
 config hook that shells out to `annotation remove` is immediately followed by
-this feature re-posting the terminal annotation. Doing it here replaces the
-terminal write instead of racing it.
+this feature re-posting the terminal annotation.
+
+Hooks see live updates too, not just the terminal one, so a hook that ignores
+`info.final` retracts mid-run as well. Scope by `info.surface` when several
+status surfaces are enabled.
 
 ## Templates and metadata
 
@@ -64,7 +89,16 @@ load(
 )
 load("../private/lib/ci.axl", "resolve_build_url")
 load("../private/lib/environment.axl", "feature_logger", "workflows_results_url")
-load("../private/lib/lifecycle.axl", "TaskLifecycleTrait", "TaskUpdate", "publish_expanded_phases")
+load(
+    "../private/lib/lifecycle.axl",
+    "StatusSurface",
+    "StatusSurfaceAction",
+    "StatusSurfaceInfo",
+    "TaskLifecycleTrait",
+    "TaskUpdate",
+    "apply_status_surface_hooks",
+    "publish_expanded_phases",
+)
 load("../private/lib/rate_limit.axl", "usage_footer")
 load("../private/lib/result_text.axl", "severity_for_status")
 load("../private/lib/tips.axl", "SURFACE_BUILDKITE_ANNOTATIONS", "collect_tips_sorted")
@@ -75,25 +109,11 @@ def format_body(out, kind, status, task_label = "", final = False):
     """Public test hook; see `_format_body` for behavior."""
     return _format_body(out, kind, status, task_label = task_label, final = final)
 
-def should_remove(remove_on, status, final):
-    """Whether this update should retract the annotation instead of writing it.
-
-    Only the terminal emit retracts: live updates keep posting so a running
-    task stays visible, and a mid-run status isn't the task's outcome.
-    `remove_on` is the configured status set (see the `remove_on` arg).
-    """
-    return bool(final) and status in remove_on
-
 # ─── Body formatting ──────────────────────────────────────────────────────────
 
 _LOG = feature_logger("Buildkite annotations")
 
 _ANNOTATION_SIZE_LIMIT = 1024 * 1024  # 1 MiB, Buildkite's hard limit per annotation
-
-# Statuses a task can end on (the `final` emit) — the values `remove_on`
-# accepts. `running` / `failing` are live-only, so naming them would never
-# match. Mirrors `lifecycle.Status` minus those two.
-_TERMINAL_STATUSES = ["passed", "warning", "failed", "aborted"]
 
 def _unwrap_details_for_streaming(text):
     """Drop `<details>` collapsibility from a rendered body so the
@@ -317,16 +337,6 @@ def _buildkite_annotations(ctx: FeatureContext):
     min_update_interval_ms = max(1, ctx.args.min_update_interval_seconds) * 1000
     _state = {}
 
-    # Terminal statuses whose annotation is retracted instead of finalized.
-    # Validated here rather than left to silently never match: a status that
-    # can't be terminal (or a typo) would otherwise look configured and do
-    # nothing. Read into a set so the hook body stays a membership test.
-    for s in (ctx.args.remove_on or []):
-        if s not in _TERMINAL_STATUSES:
-            fail("buildkite-annotations:remove-on got %r; expected one of %s" %
-                 (s, ", ".join(_TERMINAL_STATUSES)))
-    _state["_remove_on"] = {s: True for s in (ctx.args.remove_on or [])}
-
     def _make_links(data):
         # The annotation IS on the BK job page, so we only need enough for
         # the rendered summary's CI link.
@@ -408,13 +418,22 @@ def _buildkite_annotations(ctx: FeatureContext):
         elif not should_emit_update(_state, now_ms(ctx), min_update_interval_ms, final):
             return
 
-        # Retract instead of posting the terminal state, when this task's
-        # outcome isn't one the config wants kept. Replaces the terminal write
-        # rather than following it: posting first and deleting after would leave
-        # the annotation briefly visible and burn two agent calls. Checked
-        # before rendering, since the body would only be discarded.
-        if should_remove(_state["_remove_on"], status, final):
-            _LOG.trace("removing %s on terminal status=%s" % (context_id, status))
+        # Ask the config what to do with this annotation before building it.
+        # A `remove` verdict replaces the write rather than following it, so
+        # the annotation never flickers into view and the body is never
+        # rendered just to be discarded — which is also why this can't be done
+        # from a `task_update` hook: those run after the feature has already
+        # posted (see the module docstring).
+        decision = apply_status_surface_hooks(ctx, lifecycle, StatusSurfaceInfo(
+            surface = StatusSurface("buildkite_annotation"),
+            status = status,
+            final = final,
+            style = severity_for_status(status),
+            task_kind = ctx.task.kind,
+            task_name = ctx.task.name,
+        ))
+        if decision.action == StatusSurfaceAction("remove"):
+            _LOG.trace("hook removed %s (status=%s final=%s)" % (context_id, status, final))
             _remove_annotation(ctx, context_id)
             return
 
@@ -431,7 +450,7 @@ def _buildkite_annotations(ctx: FeatureContext):
             max_snippets = _max_snippets,
         )
         body = _format_body(out, update.kind, status, task_label = _state.get("_task_label", ""), final = final)
-        style = severity_for_status(status)
+        style = decision.style or severity_for_status(status)
         if final:
             _LOG.trace("completing %s (style=%s len=%d)" %
                        (context_id, style, len(body)))
@@ -452,19 +471,6 @@ BuildkiteAnnotations = feature(
             default = "ci-only",
             values = ["ci-only", "local-only", "always"],
             description = "When to create Buildkite annotations: ci-only (default), local-only, or always.",
-        ),
-        "remove_on": args.string_list(
-            default = [],
-            long = "buildkite-annotations:remove-on",
-            description = "Terminal task statuses whose annotation is removed instead of finalized — " +
-                          "one or more of passed, warning, failed, aborted. " +
-                          "e.g. [\"passed\"] to keep the Annotations tab to tasks that need attention " +
-                          "(repeat the flag to name several: --buildkite-annotations:remove-on=passed " +
-                          "--buildkite-annotations:remove-on=warning). The removal replaces the terminal " +
-                          "post rather than following it, so the annotation never flickers into view, and " +
-                          "any annotation from this task's live updates is retracted. Live updates still " +
-                          "post while the task runs — a long task stays visible until it finishes. Empty " +
-                          "(default) keeps every annotation.",
         ),
         "min_update_interval_seconds": args.int(
             default = 5,

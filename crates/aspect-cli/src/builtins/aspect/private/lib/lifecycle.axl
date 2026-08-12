@@ -221,6 +221,69 @@ def repro_fix_replace(command: str | None = None, description: str | None = None
         description = description,
     )
 
+# Which status surface is about to write. Lets one hook scope itself to a
+# single surface when several are enabled.
+StatusSurface = enum("buildkite_annotation", "github_check", "gitlab_commit_status")
+
+# Verdict from a `status_surface_decision` hook. `publish` writes as normal;
+# `remove` suppresses the write and retracts anything already published for
+# this task on that surface. `style` (publish only) overrides the surface's
+# severity styling.
+StatusSurfaceAction = enum("publish", "remove")
+
+# Passed to each `status_surface_decision` hook alongside `ctx` — what the
+# surface knows at the instant it's about to write.
+StatusSurfaceInfo = record(
+    surface = field(StatusSurface),
+    # Lifecycle status ("passed", "failing", …) and whether this is the
+    # terminal emit. A hook that ignores `final` also fires mid-run.
+    status = field(str),
+    final = field(bool),
+    # Severity styling the surface resolved for `status`.
+    style = field(str),
+    # Task identity, so one hook can scope itself per task.
+    task_kind = field(str),
+    task_name = field(str),
+)
+
+StatusSurfaceDecision = record(
+    action = field(StatusSurfaceAction),
+    style = field(str | None, default = None),
+)
+
+# Shared singletons for the no-argument verdicts.
+SURFACE_PUBLISH = StatusSurfaceDecision(action = StatusSurfaceAction("publish"))
+SURFACE_REMOVE = StatusSurfaceDecision(action = StatusSurfaceAction("remove"))
+
+def surface_restyle(style: str) -> StatusSurfaceDecision:
+    """Publish, overriding the surface's severity styling. Values are
+    surface-specific — Buildkite takes `success|info|warning|error`."""
+    return StatusSurfaceDecision(action = StatusSurfaceAction("publish"), style = style)
+
+def apply_status_surface_hooks(ctx, lifecycle, info: StatusSurfaceInfo) -> StatusSurfaceDecision:
+    """Run `info` through every `status_surface_decision` hook.
+
+    Handlers chain in order; the first `remove` short-circuits, since there is
+    nothing left to restyle once the write is being suppressed. A `publish`
+    carrying a `style` is threaded into the next handler's `info`, so the last
+    writer wins. No handlers → `SURFACE_PUBLISH`.
+    """
+    decision = SURFACE_PUBLISH
+    for handler in lifecycle.status_surface_decision:
+        decision = handler(ctx, info)
+        if decision.action == StatusSurfaceAction("remove"):
+            return decision
+        if decision.style:
+            info = StatusSurfaceInfo(
+                surface = info.surface,
+                status = info.status,
+                final = info.final,
+                style = decision.style,
+                task_kind = info.task_kind,
+                task_name = info.task_name,
+            )
+    return decision
+
 # Lifecycle hooks any task can fire, so features like GithubStatusChecks
 # observe progress without coupling to Bazel-specific hooks.
 TaskLifecycleTrait = trait(
@@ -239,6 +302,20 @@ TaskLifecycleTrait = trait(
     # makes it idempotent. Handlers chain in order; `reject` short-circuits.
     # See `apply_repro_fix_hooks`.
     repro_fix_suggestion = attr(list[typing.Callable[[TaskContext, ReproFixInfo], ReproFixSuggestion]], default = []),
+
+    # `(ctx: TaskContext, info: StatusSurfaceInfo) -> StatusSurfaceDecision`,
+    # consulted by a status surface immediately before it writes, so a config
+    # can suppress or restyle the write itself.
+    #
+    # Lives on the lifecycle trait (not the surface's own) because a feature
+    # can't contribute a trait — `feature()` takes no `traits` — and tasks must
+    # not reference features. Every task already declares this trait, so a hook
+    # here is reachable from `.aspect/config.axl` with no task changes.
+    #
+    # A `task_update` handler can't do this job: handlers run in registration
+    # order and features register first, so a config hook always runs *after*
+    # the surface has posted. See `StatusSurfaceDecision`.
+    status_surface_decision = attr(list[typing.Callable[[TaskContext, StatusSurfaceInfo], StatusSurfaceDecision]], default = []),
 )
 
 # Lives next to `task_update()` so every surface emit routes through

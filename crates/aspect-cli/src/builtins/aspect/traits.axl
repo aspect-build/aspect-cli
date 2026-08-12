@@ -16,6 +16,11 @@ files can load the full trait set with a single import:
          "ReproFixCommandKind",
          "ReproFixInfo",
          "ReproFixSuggestion",
+         "SURFACE_PUBLISH",
+         "SURFACE_REMOVE",
+         "StatusSurface",
+         "StatusSurfaceDecision",
+         "StatusSurfaceInfo",
          "TaskUpdate",
          "repro_fix_replace")
 
@@ -44,9 +49,16 @@ load(
     _ReproFixCommandKind = "ReproFixCommandKind",
     _ReproFixInfo = "ReproFixInfo",
     _ReproFixSuggestion = "ReproFixSuggestion",
+    _SURFACE_PUBLISH = "SURFACE_PUBLISH",
+    _SURFACE_REMOVE = "SURFACE_REMOVE",
+    _StatusSurface = "StatusSurface",
+    _StatusSurfaceAction = "StatusSurfaceAction",
+    _StatusSurfaceDecision = "StatusSurfaceDecision",
+    _StatusSurfaceInfo = "StatusSurfaceInfo",
     _TaskLifecycleTrait = "TaskLifecycleTrait",
     _TaskUpdate = "TaskUpdate",
     _repro_fix_replace = "repro_fix_replace",
+    _surface_restyle = "surface_restyle",
 )
 
 BazelTrait = _BazelTrait
@@ -60,6 +72,13 @@ ReproFixCommand = _ReproFixCommand
 ReproFixCommandKind = _ReproFixCommandKind
 ReproFixInfo = _ReproFixInfo
 ReproFixSuggestion = _ReproFixSuggestion
+SURFACE_PUBLISH = _SURFACE_PUBLISH
+SURFACE_REMOVE = _SURFACE_REMOVE
+StatusSurface = _StatusSurface
+StatusSurfaceAction = _StatusSurfaceAction
+StatusSurfaceDecision = _StatusSurfaceDecision
+StatusSurfaceInfo = _StatusSurfaceInfo
 TaskLifecycleTrait = _TaskLifecycleTrait
 TaskUpdate = _TaskUpdate
 repro_fix_replace = _repro_fix_replace
+surface_restyle = _surface_restyle
