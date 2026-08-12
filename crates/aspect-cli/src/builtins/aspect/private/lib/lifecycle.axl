@@ -239,6 +239,18 @@ StatusSurface = enum("buildkite_annotation", "github_check", "gitlab_commit_stat
 # created) and GitLab commit statuses are post-only.
 _SURFACE_CAN_REMOVE = {"buildkite_annotation": True}
 
+# Styles each surface can express, i.e. what a `surface_restyle` may answer.
+# Anything else is refused and the surface's own style stands, because these
+# vocabularies don't overlap: Buildkite's "warning" reaching a check run matches
+# no conclusion (GitHub's client would conclude `failure`, turning a green check
+# red), and GitHub's "neutral" reaching GitLab is rejected by the API for the
+# rest of the task. An unscoped hook meant for one surface can't corrupt another.
+_SURFACE_STYLES = {
+    "buildkite_annotation": ["success", "info", "warning", "error"],
+    "github_check": ["success", "neutral", "failure"],
+    "gitlab_commit_status": ["pending", "running", "success", "failed", "canceled", "skipped"],
+}
+
 # Verdict from a `status_surface_decision` hook. `publish` writes (optionally
 # with a rewritten `body` or `style`); `remove` suppresses the write and
 # retracts anything already published for this task on that surface.
@@ -304,14 +316,34 @@ def surface_replace(body: str, style: str | None = None) -> StatusSurfaceDecisio
 
 _LOG = feature_logger("Status surface")
 
-def _threaded(info: StatusSurfaceInfo, decision: StatusSurfaceDecision) -> StatusSurfaceInfo:
+def _refuse(ctx, info: StatusSurfaceInfo, msg: str):
+    """Report a verdict this surface can't honor. Warn on the terminal emit so
+    an unscoped hook is noticed once per task, not once per update."""
+    full = ("status_surface_decision %s. Scope the hook with `info.surface`." % msg)
+    if info.final:
+        _LOG.warn(ctx.std, full)
+    else:
+        _LOG.trace(full)
+
+def _threaded(ctx, info: StatusSurfaceInfo, decision: StatusSurfaceDecision) -> StatusSurfaceInfo:
     """`info` with the decision's style/body applied, for the next handler.
-    Unset fields keep the incoming value."""
+
+    Unset fields keep the incoming value. A style outside this surface's
+    vocabulary (`_SURFACE_STYLES`) is refused, so a hook written for another
+    surface leaves this one's styling intact rather than corrupting it.
+    """
+    style = info.style
+    if decision.style and decision.style != info.style:
+        if decision.style in (_SURFACE_STYLES.get(info.surface) or []):
+            style = decision.style
+        else:
+            _refuse(ctx, info, "returned style %r, which %s can't express — keeping %r" %
+                               (decision.style, info.surface, info.style))
     return StatusSurfaceInfo(
         surface = info.surface,
         status = info.status,
         final = info.final,
-        style = decision.style or info.style,
+        style = style,
         body = decision.body if decision.body != None else info.body,
         task_kind = info.task_kind,
         task_name = info.task_name,
@@ -326,11 +358,13 @@ def apply_status_surface_hooks(ctx, lifecycle, info: StatusSurfaceInfo) -> Statu
     handler's `info`, so each handler sees its predecessor's edits and a later
     plain publish keeps them.
 
-    A `remove` the surface can't honor (see `_SURFACE_CAN_REMOVE`) is downgraded
-    to a publish so a hook written for Buildkite doesn't silently break the
-    other surfaces it also sees. The downgrade is logged — at warn on the
-    terminal emit, so it's noticed once per task rather than per update. Callers
-    on those surfaces therefore never see a `remove` and needn't handle one.
+    Verdicts a surface can't honor are refused rather than forwarded, so one
+    unscoped hook can't corrupt the other surfaces it also sees: a `remove`
+    becomes a publish where the artifact can't be retracted
+    (`_SURFACE_CAN_REMOVE`), and a style outside the surface's vocabulary
+    (`_SURFACE_STYLES`) leaves the incoming style standing. Both are reported by
+    `_refuse`. Callers therefore never see a `remove` on a surface that can't
+    retract, nor a style it can't express.
 
     Returns a resolved verdict: on `publish` the decision's `style` and `body`
     are always set (the incoming values when no hook rewrote them), so the
@@ -341,15 +375,9 @@ def apply_status_surface_hooks(ctx, lifecycle, info: StatusSurfaceInfo) -> Statu
         if decision.action == StatusSurfaceAction("remove"):
             if _SURFACE_CAN_REMOVE.get(info.surface):
                 return decision
-            msg = ("status_surface_decision asked to remove the %s artifact, which that " +
-                   "surface can't retract — publishing instead. Scope the hook with " +
-                   "`info.surface` to silence this.") % info.surface
-            if info.final:
-                _LOG.warn(ctx.std, msg)
-            else:
-                _LOG.trace(msg)
+            _refuse(ctx, info, "asked to remove the %s artifact, which that surface can't retract — publishing instead" % info.surface)
             break
-        info = _threaded(info, decision)
+        info = _threaded(ctx, info, decision)
     return StatusSurfaceDecision(
         action = StatusSurfaceAction("publish"),
         style = info.style,

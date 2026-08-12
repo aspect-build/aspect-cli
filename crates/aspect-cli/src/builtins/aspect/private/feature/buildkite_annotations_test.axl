@@ -427,12 +427,15 @@ def _assert_status_surface_hooks(ctx):
         StatusSurfaceAction("remove"),
     )
 
-    # A restyle threads into the next handler's info, so the last writer wins.
-    def _observe_style(ctx, info):
-        return surface_restyle(info.style + "+seen")
+    # A restyle threads into the next handler's info, so a handler reacting to
+    # its predecessor sees the edit and the last writer wins.
+    def _escalate_warning(ctx, info):
+        if info.style == "warning":
+            return surface_restyle("error")
+        return SURFACE_PUBLISH
 
-    chained = apply_status_surface_hooks(ctx, _fake_lifecycle([_warn, _observe_style]), _surface_info("passed", True))
-    _eq("style threads through the chain", chained.style, "warning+seen")
+    chained = apply_status_surface_hooks(ctx, _fake_lifecycle([_warn, _escalate_warning]), _surface_info("passed", True))
+    _eq("style threads through the chain", chained.style, "error")
 
     # A publish is returned resolved — style and body always set, falling back
     # to the incoming values — so the caller writes it without re-resolving.
@@ -471,16 +474,54 @@ def _assert_status_surface_hooks(ctx):
     _eq("replace can restyle", both.style, "error")
     _eq("replace sets body", both.body, "NEW")
 
-    # Restyle and rewrite work on every surface that consults the hook — a hook
-    # written once spans all of them.
-    for surface in ["buildkite_annotation", "github_check", "gitlab_commit_status"]:
+    # Rewrite works on every surface that consults the hook, and a restyle is
+    # honored when it answers in that surface's own vocabulary.
+    for (surface, style) in [
+        ("buildkite_annotation", "error"),
+        ("github_check", "neutral"),
+        ("gitlab_commit_status", "canceled"),
+    ]:
+        def _replace_for_surface(ctx, info):
+            return surface_replace("NEW", style = style)
+
         resolved = apply_status_surface_hooks(
             ctx,
-            _fake_lifecycle([_replace_and_restyle]),
+            _fake_lifecycle([_replace_for_surface]),
             _surface_info("passed", True, surface = surface),
         )
         _eq("%s honors replace" % surface, resolved.body, "NEW")
-        _eq("%s honors restyle" % surface, resolved.style, "error")
+        _eq("%s honors restyle" % surface, resolved.style, style)
+
+    # A style from another surface's vocabulary is refused, so an unscoped hook
+    # can't corrupt the surfaces it wasn't written for — Buildkite's "warning"
+    # matches no GitHub conclusion, and GitHub's client would conclude `failure`.
+    for (surface, incoming, foreign) in [
+        ("github_check", "success", "warning"),
+        ("gitlab_commit_status", "success", "neutral"),
+        ("buildkite_annotation", "info", "canceled"),
+    ]:
+        def _foreign_restyle(ctx, info):
+            return surface_restyle(foreign)
+
+        refused = apply_status_surface_hooks(
+            ctx,
+            _fake_lifecycle([_foreign_restyle]),
+            _surface_info("passed", True, style = incoming, surface = surface),
+        )
+        _eq("%s refuses a foreign style" % surface, refused.style, incoming)
+        _eq("%s still publishes" % surface, refused.action, StatusSurfaceAction("publish"))
+
+    # A refused style doesn't discard a body rewrite in the same verdict.
+    def _foreign_style_with_body(ctx, info):
+        return surface_replace("KEPT", style = "warning")
+
+    mixed = apply_status_surface_hooks(
+        ctx,
+        _fake_lifecycle([_foreign_style_with_body]),
+        _surface_info("passed", True, style = "success", surface = "github_check"),
+    )
+    _eq("refused style keeps the body rewrite", mixed.body, "KEPT")
+    _eq("refused style keeps the incoming style", mixed.style, "success")
 
     # `info.surface` is a plain string, so a hook scopes itself with a literal
     # (as it does for `info.status`) rather than needing the enum.
