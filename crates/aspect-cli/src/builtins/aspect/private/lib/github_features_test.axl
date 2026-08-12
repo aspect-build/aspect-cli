@@ -1,0 +1,55 @@
+"""Unit tests for pure `GithubStatusChecks` logic.
+
+Sibling of `gitlab_features_test.axl`: exercises the mapping functions the
+feature exposes as public test hooks, without standing up auth, the check-runs
+API, or the render pipeline.
+
+  * `conclusion_for(status, final)` — Aspect task status → GitHub check-run
+    conclusion, or "" when the update lands none.
+
+Run with:
+  aspect dev test-github-features
+"""
+
+load("@aspect//feature/github_status_checks.axl", "conclusion_for")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _test_impl(ctx):
+    # Early-fail concludes `failure` before the terminal update, so a broken
+    # build turns the check red without waiting for build.wait().
+    _eq("live failing", conclusion_for("failing", False), "failure")
+    _eq("terminal failing", conclusion_for("failing", True), "failure")
+
+    # Live updates otherwise land no conclusion — they only PATCH output, so the
+    # check stays in progress.
+    for status in ["running", "warning", "passed", "failed", "aborted"]:
+        _eq("live %s lands none" % status, conclusion_for(status, False), "")
+
+    _eq("terminal passed", conclusion_for("passed", True), "success")
+    _eq("terminal failed", conclusion_for("failed", True), "failure")
+    _eq("terminal aborted", conclusion_for("aborted", True), "failure")
+
+    # `neutral`, not `failure`: a task that ran with non-fatal findings
+    # shouldn't block a PR.
+    _eq("terminal warning", conclusion_for("warning", True), "neutral")
+
+    # `running` can't be terminal, but the map must still answer rather than
+    # crash if a producer emits it.
+    _eq("terminal running lands none", conclusion_for("running", True), "")
+
+    # Unknown statuses degrade to "no conclusion" instead of concluding wrongly.
+    _eq("unknown status", conclusion_for("bogus", True), "")
+
+    print("github features test: OK")
+    return 0
+
+github_features_tests = task(
+    summary = "Run the github features AXL unit tests.",
+    kind = "test-github-features",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

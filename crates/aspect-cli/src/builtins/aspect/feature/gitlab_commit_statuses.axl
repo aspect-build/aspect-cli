@@ -41,6 +41,28 @@ future feature that wants merge-blocking semantics.
 `skipped` is the GitLab-blessed mapping for "ran with non-fatal findings"
 — see `lib/gitlab.axl::_commit_status_skipped`. Renders without a red ✗.
 
+## Restyling or rewriting the commit status
+
+`TaskLifecycleTrait.status_surface_update` is consulted before every write and
+returns a verdict — publish, or publish with a different style or body. A commit
+status carries no body, only the one-line description, so that is `update.body`
+(re-truncated to 255 chars after a rewrite); `update.style` is the state this
+write would post, from the table above:
+
+    load("@aspect//traits.axl", "SURFACE_PUBLISH", "StatusSurfaceUpdate", "TaskLifecycleTrait", "surface_replace")
+
+    def _prefix_team(ctx: TaskContext, info: StatusSurfaceUpdate):
+        return surface_replace("[platform] " + info.body)
+
+    def config(ctx):
+        ctx.traits[TaskLifecycleTrait].status_surface_update.append(_prefix_team)
+
+`remove` isn't supported — commit statuses are post-only — so a removal is
+downgraded to a publish and logged. Only `BuildkiteAnnotations` honors it.
+
+Hooks see every surface that consults them, so scope with `update.surface` when
+more than one is enabled. See `StatusSurfaceUpdate` for the full field set.
+
 ## Templates and metadata
 
 Rendering goes through the shared `check_dispatch.RENDERERS` table —
@@ -82,7 +104,12 @@ load("../private/lib/environment.axl", "feature_logger", "workflows_results_url"
 load("../private/lib/gitlab.axl", "gitlab")
 load("../private/lib/gitlab_detect.axl", "detect_gitlab_mr")
 load("../private/lib/gitlab_token_cache.axl", "gitlab_token_cache")
-load("../private/lib/lifecycle.axl", "TaskLifecycleTrait", "TaskUpdate")
+load(
+    "../private/lib/lifecycle.axl",
+    "TaskLifecycleTrait",
+    "TaskUpdate",
+    "resolve_surface_update",
+)
 load(
     "../private/lib/rate_limit.axl",
     "BUCKET_APP",
@@ -218,7 +245,30 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
             (links.get("aspect_url") or "")
         )
 
-    def _post_status(ctx, state, output, links):
+    def _decide(ctx, status, final, state, output):
+        """Run this write past `status_surface_update`, returning the
+        `(state, description)` to post.
+
+        A commit status carries no body, only the 255-char description, so that
+        one line is what a hook sees and can rewrite (re-truncated after). A
+        `remove` is unreachable here — `resolve_surface_update` downgrades it for
+        surfaces that can't retract.
+        """
+        description = _truncate_description(
+            (output or {}).get("title", "") or (output or {}).get("summary", ""),
+        )
+        decision = resolve_surface_update(
+            ctx,
+            lifecycle,
+            "gitlab_commit_status",
+            status,
+            final,
+            state,
+            description,
+        )
+        return (decision.style, _truncate_description(decision.body))
+
+    def _post_status(ctx, state, description, links):
         token = _state.get("_gitlab_token")
         if not token:
             return
@@ -227,7 +277,6 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
         # the same (name, sha, ref) triple POSTs. We still track our
         # last-posted state so live-refresh callers can decide whether
         # to re-POST.
-        description = _truncate_description((output or {}).get("title", "") or (output or {}).get("summary", ""))
         target_url = _resolve_target_url(links)
         result = gitlab.commit_status.post(
             ctx,
@@ -308,7 +357,8 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
             resolve_templates(templates, ctx.task.kind),
             metadata_keys,
         )
-        _post_status(ctx, "pending", initial_output, initial_links)
+        (initial_state, initial_desc) = _decide(ctx, "running", False, "pending", initial_output)
+        _post_status(ctx, initial_state, initial_desc, initial_links)
 
     def _task_update(ctx, update):
         # Latch the subject (raw) before init/render: setup_phase sets
@@ -392,10 +442,14 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
         # GitlabStatusComments feature.
         if desired_state == None:
             return
-        if desired_state == _state.get("_last_state"):
-            return
 
-        _post_status(ctx, desired_state, output, links)
+        # Dedup on the state we'd actually POST, so a `status_surface_update`
+        # restyle is compared against what it last posted rather than against
+        # the state it overrode.
+        (post_state, description) = _decide(ctx, status, final, desired_state, output)
+        if post_state == _state.get("_last_state"):
+            return
+        _post_status(ctx, post_state, description, links)
 
     lifecycle.task_update.append(_task_update)
 

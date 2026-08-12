@@ -12,10 +12,15 @@ for each scenario, so a rendering regression shows up as a visible diff:
   - Style selection edge cases: soft-lint passing with warnings, delivery
     all-skipped, delivery all-failed, soft-format passing with files.
 
-`aspect dev test-bk-annotation-templates` asserts the customization contract
-`args.templates` exposes: overrides reach the rendered body, "summary" and
-"details" are independent, every renderer module exports the templates a
-config patches, and a broken template degrades to the fallback body.
+`aspect dev test-bk-annotation-templates` asserts the two customization
+contracts a config writes against:
+  - `args.templates` — overrides reach the rendered body, "title"/"summary"/
+    "details" are independent, per-task-kind blocks overlay the flat keys,
+    every renderer module exports the templates a config patches, and a broken
+    template degrades to a fallback.
+  - `TaskLifecycleTrait.status_surface_update` — verdicts resolve, chain, and
+    compose across surfaces, and a `remove` no surface can honor downgrades to
+    a publish.
 """
 
 load("@aspect//feature/buildkite_annotations.axl", "format_body")
@@ -75,6 +80,18 @@ load(
     GAZELLE_DETAILS_TEMPLATE = "DETAILS_TEMPLATE",
     GAZELLE_SUMMARY_TEMPLATE = "SUMMARY_TEMPLATE",
     gazelle_render_check_output = "render_check_output",
+)
+load(
+    "../lib/lifecycle.axl",
+    "SURFACE_PUBLISH",
+    "SURFACE_REMOVE",
+    "StatusSurface",
+    "StatusSurfaceAction",
+    "StatusSurfaceUpdate",
+    "apply_status_surface_hooks",
+    "resolve_surface_update",
+    "surface_replace",
+    "surface_restyle",
 )
 load(
     "../lib/lint_results.axl",
@@ -348,9 +365,260 @@ def _test_templates_impl(ctx: TaskContext) -> int:
 
     _assert_title_overrides(ctx, data, rc)
     _assert_resolve_templates()
+    _assert_status_surface_hooks(ctx)
 
     print("All template-customization assertions passed for %d kinds." % len(_KIND_TEMPLATES))
     return 0
+
+def _fake_lifecycle(handlers):
+    """Minimal stand-in for the lifecycle trait — `apply_status_surface_hooks`
+    reads only `.status_surface_update`."""
+    return struct(status_surface_update = handlers)
+
+def _surface_update(status, final, style = "info", body = "RENDERED", surface = "buildkite_annotation"):
+    return StatusSurfaceUpdate(
+        surface = StatusSurface(surface).value,
+        status = status,
+        final = final,
+        style = style,
+        body = body,
+        task_kind = "build",
+        task_name = "build-test",
+    )
+
+def _assert_status_surface_hooks(ctx):
+    """`status_surface_update` hooks decide publish / remove / restyle /
+    rewrite; they chain in order and resolve to exactly what the caller
+    writes. (The remove-latch — a removed surface never re-posts — lives in
+    feature state, covered by the stub-agent e2e runs, not here.)"""
+
+    def _drop_passed(ctx, info):
+        if info.final and info.status == "passed":
+            return SURFACE_REMOVE
+        return SURFACE_PUBLISH
+
+    # No handlers → publish unchanged.
+    _eq("no handlers publishes", apply_status_surface_hooks(ctx, _fake_lifecycle([]), _surface_update("passed", True)).action, StatusSurfaceAction("publish"))
+
+    one = _fake_lifecycle([_drop_passed])
+
+    # The customer's case: a green task's annotation is retracted at the end.
+    _eq("terminal passed removes", apply_status_surface_hooks(ctx, one, _surface_update("passed", True)).action, StatusSurfaceAction("remove"))
+
+    # Live updates keep posting, so a long task stays visible while it runs.
+    _eq("live passed publishes", apply_status_surface_hooks(ctx, one, _surface_update("passed", False)).action, StatusSurfaceAction("publish"))
+
+    # Statuses the hook doesn't name are always kept.
+    for st in ["failed", "warning", "aborted"]:
+        _eq("terminal %s publishes" % st, apply_status_surface_hooks(ctx, one, _surface_update(st, True)).action, StatusSurfaceAction("publish"))
+
+    # A restyle publishes with the overridden style.
+    def _warn(ctx, info):
+        return surface_restyle("warning")
+
+    restyled = apply_status_surface_hooks(ctx, _fake_lifecycle([_warn]), _surface_update("passed", True))
+    _eq("restyle publishes", restyled.action, StatusSurfaceAction("publish"))
+    _eq("restyle sets style", restyled.style, "warning")
+
+    # `remove` short-circuits, so a later handler can't resurrect the write.
+    _eq(
+        "remove short-circuits",
+        apply_status_surface_hooks(ctx, _fake_lifecycle([_drop_passed, _warn]), _surface_update("passed", True)).action,
+        StatusSurfaceAction("remove"),
+    )
+
+    # A restyle threads into the next handler's info, so a handler reacting to
+    # its predecessor sees the edit and the last writer wins.
+    def _escalate_warning(ctx, info):
+        if info.style == "warning":
+            return surface_restyle("error")
+        return SURFACE_PUBLISH
+
+    chained = apply_status_surface_hooks(ctx, _fake_lifecycle([_warn, _escalate_warning]), _surface_update("passed", True))
+    _eq("style threads through the chain", chained.style, "error")
+
+    # A publish is returned resolved — style and body always set, falling back
+    # to the incoming values — so the caller writes it without re-resolving.
+    untouched = apply_status_surface_hooks(ctx, _fake_lifecycle([]), _surface_update("passed", True))
+    _eq("body defaults to the rendered one", untouched.body, "RENDERED")
+    _eq("style defaults to the resolved severity", untouched.style, "info")
+    _eq("untouched body passes through", apply_status_surface_hooks(ctx, one, _surface_update("failed", True)).body, "RENDERED")
+
+    # Rewriting the content is the point of handing hooks `update.body`.
+    def _append_runbook(ctx, info):
+        return surface_replace(info.body + " +RUNBOOK")
+
+    replaced = apply_status_surface_hooks(ctx, _fake_lifecycle([_append_runbook]), _surface_update("failed", True))
+    _eq("replace publishes", replaced.action, StatusSurfaceAction("publish"))
+    _eq("replace rewrites body", replaced.body, "RENDERED +RUNBOOK")
+
+    # Each handler sees its predecessor's edit, so rewrites compose.
+    composed = apply_status_surface_hooks(ctx, _fake_lifecycle([_append_runbook, _append_runbook]), _surface_update("failed", True))
+    _eq("body edits compose", composed.body, "RENDERED +RUNBOOK +RUNBOOK")
+
+    # An edit earlier in the chain survives a later plain publish: the resolved
+    # verdict carries the threaded style/body, not just the last return value.
+    def _plain(ctx, info):
+        return SURFACE_PUBLISH
+
+    kept = apply_status_surface_hooks(ctx, _fake_lifecycle([_warn, _plain]), _surface_update("passed", True))
+    _eq("restyle survives a later plain publish", kept.style, "warning")
+    kept_body = apply_status_surface_hooks(ctx, _fake_lifecycle([_append_runbook, _plain]), _surface_update("failed", True))
+    _eq("rewrite survives a later plain publish", kept_body.body, "RENDERED +RUNBOOK")
+
+    # A rewrite can restyle at the same time.
+    def _replace_and_restyle(ctx, info):
+        return surface_replace("NEW", style = "error")
+
+    both = apply_status_surface_hooks(ctx, _fake_lifecycle([_replace_and_restyle]), _surface_update("passed", True))
+    _eq("replace can restyle", both.style, "error")
+    _eq("replace sets body", both.body, "NEW")
+
+    # Rewrite works on every surface that consults the hook, and a restyle is
+    # honored when it answers in that surface's own vocabulary.
+    for (surface, style) in [
+        ("buildkite_annotation", "error"),
+        ("github_check", "neutral"),
+        ("gitlab_commit_status", "canceled"),
+    ]:
+        def _replace_for_surface(ctx, info):
+            return surface_replace("NEW", style = style)
+
+        resolved = apply_status_surface_hooks(
+            ctx,
+            _fake_lifecycle([_replace_for_surface]),
+            _surface_update("passed", True, surface = surface),
+        )
+        _eq("%s honors replace" % surface, resolved.body, "NEW")
+        _eq("%s honors restyle" % surface, resolved.style, style)
+
+    # A style from another surface's vocabulary is refused, so an unscoped hook
+    # can't corrupt the surfaces it wasn't written for — Buildkite's "warning"
+    # matches no GitHub conclusion, and GitHub's client would conclude `failure`.
+    for (surface, incoming, foreign) in [
+        ("github_check", "success", "warning"),
+        ("gitlab_commit_status", "success", "neutral"),
+        ("buildkite_annotation", "info", "canceled"),
+    ]:
+        def _foreign_restyle(ctx, info):
+            return surface_restyle(foreign)
+
+        refused = apply_status_surface_hooks(
+            ctx,
+            _fake_lifecycle([_foreign_restyle]),
+            _surface_update("passed", True, style = incoming, surface = surface),
+        )
+        _eq("%s refuses a foreign style" % surface, refused.style, incoming)
+        _eq("%s still publishes" % surface, refused.action, StatusSurfaceAction("publish"))
+
+    # A refused style doesn't discard a body rewrite in the same verdict.
+    def _foreign_style_with_body(ctx, info):
+        return surface_replace("KEPT", style = "warning")
+
+    mixed = apply_status_surface_hooks(
+        ctx,
+        _fake_lifecycle([_foreign_style_with_body]),
+        _surface_update("passed", True, style = "success", surface = "github_check"),
+    )
+    _eq("refused style keeps the body rewrite", mixed.body, "KEPT")
+    _eq("refused style keeps the incoming style", mixed.style, "success")
+
+    # A handler that forgets to return — the `task_update` shape, which this
+    # hook's name parallels — degrades to publish-unchanged rather than failing
+    # the task, since the build itself is fine.
+    def _forgot_to_return(ctx, update):
+        pass
+
+    none_ret = apply_status_surface_hooks(ctx, _fake_lifecycle([_forgot_to_return]), _surface_update("passed", True))
+    _eq("None degrades to publish", none_ret.action, StatusSurfaceAction("publish"))
+    _eq("None keeps the body", none_ret.body, "RENDERED")
+    _eq("None keeps the style", none_ret.style, "info")
+
+    # `update.surface` is a plain string, so a hook scopes itself with a literal
+    # (as it does for `info.status`) rather than needing the enum.
+    def _bk_only(ctx, info):
+        if info.surface == "buildkite_annotation":
+            return surface_restyle("error")
+        return SURFACE_PUBLISH
+
+    scoped = _fake_lifecycle([_bk_only])
+    _eq(
+        "literal surface comparison matches",
+        apply_status_surface_hooks(ctx, scoped, _surface_update("passed", True)).style,
+        "error",
+    )
+    _eq(
+        "literal surface comparison skips others",
+        apply_status_surface_hooks(ctx, scoped, _surface_update("passed", True, surface = "github_check")).style,
+        "info",
+    )
+
+    # `resolve_surface_update` is what surfaces actually call: it builds the info
+    # record, validating the surface name, and reads task identity off `ctx`.
+    def _echo_identity(ctx, info):
+        return surface_replace("%s|%s|%s" % (info.surface, info.task_kind, info.task_name))
+
+    wrapped = resolve_surface_update(
+        ctx,
+        _fake_lifecycle([_echo_identity]),
+        "buildkite_annotation",
+        "passed",
+        True,
+        "success",
+        "RENDERED",
+    )
+    _eq(
+        "wrapper passes surface + task identity through",
+        wrapped.body,
+        "buildkite_annotation|%s|%s" % (ctx.task.kind, ctx.task.name),
+    )
+    _eq("wrapper resolves style when untouched", wrapped.style, "success")
+
+    # `remove` is Buildkite-only: the surfaces that can't retract downgrade to a
+    # publish rather than dropping the write or silently ignoring the verdict.
+    _eq(
+        "buildkite honors remove",
+        apply_status_surface_hooks(ctx, one, _surface_update("passed", True)).action,
+        StatusSurfaceAction("remove"),
+    )
+    for surface in ["github_check", "gitlab_commit_status"]:
+        downgraded = apply_status_surface_hooks(ctx, one, _surface_update("passed", True, surface = surface))
+        _eq("%s downgrades remove" % surface, downgraded.action, StatusSurfaceAction("publish"))
+        _eq("%s keeps its body when downgraded" % surface, downgraded.body, "RENDERED")
+        _eq("%s keeps its style when downgraded" % surface, downgraded.style, "info")
+
+    # A refused verdict is skipped, not chain-ending: one unscoped or buggy
+    # handler must not silence the handlers after it. Each of the three refusal
+    # kinds is followed here by a handler whose valid edit has to survive.
+    def _neutral(ctx, update):
+        return surface_restyle("neutral")
+
+    def _foreign_for_gh(ctx, update):
+        return surface_restyle("warning")  # a Buildkite style; refused here
+
+    for (label, first) in [
+        ("unsupported remove", _drop_passed),
+        ("None return", _forgot_to_return),
+        ("foreign style", _foreign_for_gh),
+    ]:
+        survived = apply_status_surface_hooks(
+            ctx,
+            _fake_lifecycle([first, _neutral]),
+            _surface_update("passed", True, surface = "github_check"),
+        )
+        _eq("later handler runs after a refused %s" % label, survived.style, "neutral")
+
+    # The supported case still short-circuits: once Buildkite's annotation is
+    # actually being retracted there is nothing left for a later hook to edit.
+    _eq(
+        "honored remove ends the chain",
+        apply_status_surface_hooks(
+            ctx,
+            _fake_lifecycle([_drop_passed, _neutral]),
+            _surface_update("passed", True),
+        ).action,
+        StatusSurfaceAction("remove"),
+    )
 
 def _assert_title_overrides(ctx, data, rc):
     """A "title" override replaces the annotation title, renders with the

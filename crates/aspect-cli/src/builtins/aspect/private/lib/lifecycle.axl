@@ -29,7 +29,7 @@ Status surfaces flip to the verdict via the task's own terminal
 
 load("./ansi.axl", "ansi")
 load("./bazel_flags.axl", "setup_bazel_command")
-load("./environment.axl", "color_enabled", "detect_ci")
+load("./environment.axl", "color_enabled", "detect_ci", "feature_logger")
 load("./health_check.axl", "run_health_checks")
 load("./runner_job_history.axl", "append_runner_job_history")
 
@@ -221,6 +221,211 @@ def repro_fix_replace(command: str | None = None, description: str | None = None
         description = description,
     )
 
+# Surfaces whose artifact a single task can retract on its own — the only ones
+# honoring a `remove`. GitHub check runs have no DELETE (update-only once
+# created) and GitLab commit statuses are post-only.
+_SURFACE_CAN_REMOVE = {"buildkite_annotation": True}
+
+# Every per-task status surface, and the styles each one can express — the
+# values a `surface_restyle` may answer with for that surface.
+#
+# A style outside its surface's list is refused and the surface's own style
+# stands, because the vocabularies don't overlap and forwarding blindly is
+# destructive: Buildkite's "warning" reaching a check run matches no conclusion
+# (GitHub's client would then conclude `failure`, turning a green check red),
+# and GitHub's "neutral" reaching GitLab is rejected by the API for the rest of
+# the task. So an unscoped hook can't corrupt the surfaces it wasn't written for.
+_SURFACE_STYLES = {
+    "buildkite_annotation": ["success", "info", "warning", "error"],
+    "github_check": ["success", "neutral", "failure"],
+    "gitlab_commit_status": ["pending", "running", "success", "failed", "canceled", "skipped"],
+}
+
+# Which surface is consulting the hook. Derived from `_SURFACE_STYLES` so a new
+# surface can't be added to one without the other — an unlisted surface would
+# otherwise silently refuse every restyle.
+#
+# Surfaces validate their own name through this enum; `StatusSurfaceUpdate.surface`
+# stays `str` so hooks compare with plain literals (as `TaskUpdate.status` does).
+#
+# The aggregate PR/MR summary comments deliberately don't consult the hook: a
+# comment write merges every sibling task's status (a server elects one poster
+# per cycle), so the per-task `status` / `final` fields can't describe it. Those
+# surfaces customize through their `templates` arg ("body").
+StatusSurface = enum(*sorted(_SURFACE_STYLES.keys()))
+
+# Verdict from a `status_surface_update` hook. `publish` writes (optionally
+# with a rewritten `body` or `style`); `remove` suppresses the write and
+# retracts anything already published for this task on that surface.
+#
+# `remove` is honored only where the surface can retract (see
+# `_SURFACE_CAN_REMOVE`) and is terminal for the task's artifact there: once
+# retracted, the surface stops rendering and stops consulting hooks for the
+# rest of the task. A hook that wants the artifact back later shouldn't remove
+# it — restyle it instead.
+StatusSurfaceAction = enum("publish", "remove")
+
+# Passed to each `status_surface_update` hook alongside `ctx` — what the
+# surface knows at the instant it's about to write.
+StatusSurfaceUpdate = record(
+    surface = field(str),
+    # Lifecycle status ("passed", "failing", …) and whether this is the
+    # terminal emit. A hook that ignores `final` also fires mid-run.
+    status = field(str),
+    final = field(bool),
+    # The styling this write would carry, in the surface's own vocabulary — a
+    # restyle must answer in the same one:
+    #   buildkite_annotation   annotation style: success|info|warning|error
+    #   github_check           conclusion: success|neutral|failure, or "" when
+    #                          this write lands no conclusion (mid-run PATCH; a
+    #                          restyle is a no-op there)
+    #   gitlab_commit_status   state: pending|running|success|failed|canceled|
+    #                          skipped
+    style = field(str),
+    # The rendered content this write would publish, in the surface's own unit:
+    # the whole annotation body (buildkite_annotation), the check run's details
+    # text (github_check), the one-line description (gitlab_commit_status).
+    # Hooks see it post-render so they can edit it — `surface_replace` carries
+    # the edited copy. Authoring a body wholesale is better done with the
+    # surface's `templates` arg, which renders from structured data.
+    body = field(str),
+    # Task identity, so one hook can scope itself per task.
+    task_kind = field(str),
+    task_name = field(str),
+)
+
+StatusSurfaceDecision = record(
+    action = field(StatusSurfaceAction),
+    # `publish` only; None keeps the incoming value. `apply_status_surface_hooks`
+    # resolves both before returning, so surface code reads concrete values.
+    style = field(str | None, default = None),
+    body = field(str | None, default = None),
+)
+
+# Shared singletons for the no-argument verdicts.
+SURFACE_PUBLISH = StatusSurfaceDecision(action = StatusSurfaceAction("publish"))
+SURFACE_REMOVE = StatusSurfaceDecision(action = StatusSurfaceAction("remove"))
+
+def surface_restyle(style: str) -> StatusSurfaceDecision:
+    """Publish, overriding the styling. Values are per-surface — see
+    `StatusSurfaceUpdate.style`."""
+    return StatusSurfaceDecision(action = StatusSurfaceAction("publish"), style = style)
+
+def surface_replace(body: str, style: str | None = None) -> StatusSurfaceDecision:
+    """Publish `body` in place of what the surface rendered, optionally
+    restyling too. Build it from `update.body` to post-process, or pass a fresh
+    string to author it outright."""
+    return StatusSurfaceDecision(action = StatusSurfaceAction("publish"), style = style, body = body)
+
+_LOG = feature_logger("Status surface")
+
+def _refuse(ctx, update: StatusSurfaceUpdate, msg: str):
+    """Report a verdict this surface can't honor. Warn on the terminal emit so
+    an unscoped hook is noticed once per task, not once per update."""
+    full = ("status_surface_update %s. Scope the hook with `update.surface`." % msg)
+    if update.final:
+        _LOG.warn(ctx.std, full)
+    else:
+        _LOG.trace(full)
+
+def _threaded(ctx, update: StatusSurfaceUpdate, decision: StatusSurfaceDecision) -> StatusSurfaceUpdate:
+    """`update` with the decision's style/body applied, for the next handler.
+
+    Unset fields keep the incoming value. A style outside this surface's
+    vocabulary (`_SURFACE_STYLES`) is refused, so a hook written for another
+    surface leaves this one's styling intact rather than corrupting it.
+    """
+    style = update.style
+    if decision.style and decision.style != update.style:
+        if decision.style in (_SURFACE_STYLES.get(update.surface) or []):
+            style = decision.style
+        else:
+            _refuse(ctx, update, "returned style %r, which %s can't express — keeping %r" %
+                                 (decision.style, update.surface, update.style))
+    return StatusSurfaceUpdate(
+        surface = update.surface,
+        status = update.status,
+        final = update.final,
+        style = style,
+        body = decision.body if decision.body != None else update.body,
+        task_kind = update.task_kind,
+        task_name = update.task_name,
+    )
+
+def apply_status_surface_hooks(ctx, lifecycle, update: StatusSurfaceUpdate) -> StatusSurfaceDecision:
+    """Run `update` through every `status_surface_update` hook.
+
+    Handlers chain in order and the first `remove` short-circuits — there is
+    nothing left to edit once the write is being suppressed. A `publish`
+    carrying a rewritten `body` and/or `style` is threaded into the next
+    handler's `update`, so each handler sees its predecessor's edits and a later
+    plain publish keeps them.
+
+    A handler returning None (the `task_update` shape) is reported and treated
+    as publish-unchanged, so a config bug degrades rather than failing the task.
+
+    Refused verdicts — a None, an unsupported `remove`, a foreign style — are
+    skipped rather than ending the chain, so one unscoped or buggy handler can't
+    silence the handlers after it.
+
+    Verdicts a surface can't honor are refused rather than forwarded, so one
+    unscoped hook can't corrupt the other surfaces it also sees: a `remove`
+    becomes a publish where the artifact can't be retracted
+    (`_SURFACE_CAN_REMOVE`), and a style outside the surface's vocabulary
+    (`_SURFACE_STYLES`) leaves the incoming style standing. Both are reported by
+    `_refuse`. Callers therefore never see a `remove` on a surface that can't
+    retract, nor a style it can't express.
+
+    Returns a resolved verdict: on `publish` the decision's `style` and `body`
+    are always set (the incoming values when no hook rewrote them), so the
+    caller writes exactly what the chain settled on.
+    """
+    for handler in lifecycle.status_surface_update:
+        decision = handler(ctx, update)
+
+        # Likeliest hook bug, and likelier still because the name parallels
+        # `task_update`, whose handlers return nothing. Degrade rather than fail
+        # the task: the build itself is fine, only the reporting hook is wrong.
+        # One broken handler doesn't silence the rest, so skip just this verdict.
+        if decision == None:
+            _refuse(ctx, update, "returned None — return SURFACE_PUBLISH to leave the write unchanged (unlike task_update, these handlers must return a verdict)")
+            continue
+
+        if decision.action == StatusSurfaceAction("remove"):
+            # A removal the surface CAN honor ends the chain — there's nothing
+            # left to edit. One it can't is merely inapplicable here, so it's
+            # skipped like any other refused verdict and later handlers (often
+            # scoped to this surface) still get their say.
+            if _SURFACE_CAN_REMOVE.get(update.surface):
+                return decision
+            _refuse(ctx, update, "asked to remove the %s artifact, which that surface can't retract — publishing instead" % update.surface)
+            continue
+
+        update = _threaded(ctx, update, decision)
+    return StatusSurfaceDecision(
+        action = StatusSurfaceAction("publish"),
+        style = update.style,
+        body = update.body,
+    )
+
+def resolve_surface_update(ctx, lifecycle, surface, status, final, style, body) -> StatusSurfaceDecision:
+    """`apply_status_surface_hooks` with the `StatusSurfaceUpdate` built for you.
+
+    What a surface calls at its write site. `surface` is validated against
+    `StatusSurface` here, and task identity is read off `ctx`, so a surface
+    passes only what it alone knows: its `status`/`final`, plus the `style` and
+    `body` it was about to write in its own vocabulary.
+    """
+    return apply_status_surface_hooks(ctx, lifecycle, StatusSurfaceUpdate(
+        surface = StatusSurface(surface).value,
+        status = status,
+        final = final,
+        style = style,
+        body = body,
+        task_kind = ctx.task.kind,
+        task_name = ctx.task.name,
+    ))
+
 # Lifecycle hooks any task can fire, so features like GithubStatusChecks
 # observe progress without coupling to Bazel-specific hooks.
 TaskLifecycleTrait = trait(
@@ -239,6 +444,28 @@ TaskLifecycleTrait = trait(
     # makes it idempotent. Handlers chain in order; `reject` short-circuits.
     # See `apply_repro_fix_hooks`.
     repro_fix_suggestion = attr(list[typing.Callable[[TaskContext, ReproFixInfo], ReproFixSuggestion]], default = []),
+
+    # `(ctx: TaskContext, update: StatusSurfaceUpdate) -> StatusSurfaceDecision`,
+    # consulted by a status surface immediately before it writes, so a config
+    # can suppress the write, restyle it, or rewrite its rendered body
+    # (`update.body`).
+    #
+    # Note the contract differs from `task_update` above despite the parallel
+    # name: `task_update` handlers observe and return nothing, while these
+    # RETURN a verdict that decides what the surface actually writes. A handler
+    # that falls off the end returns None, which is reported and treated as
+    # publish-unchanged — return `SURFACE_PUBLISH` explicitly to leave a write
+    # alone.
+    #
+    # `task_update` also can't do this job: handlers run in registration order
+    # and features register first, so a config hook always runs *after* the
+    # surface has posted.
+    #
+    # Lives on the lifecycle trait (not the surface's own) because a feature
+    # can't contribute a trait — `feature()` takes no `traits` — and tasks must
+    # not reference features. Every task already declares this trait, so a hook
+    # here is reachable from `.aspect/config.axl` with no task changes.
+    status_surface_update = attr(list[typing.Callable[[TaskContext, StatusSurfaceUpdate], StatusSurfaceDecision]], default = []),
 )
 
 # Lives next to `task_update()` so every surface emit routes through

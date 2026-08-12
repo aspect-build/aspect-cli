@@ -22,6 +22,7 @@ load("@aspect//private/lib/format_results_test.axl", "format_template_snapshot_t
 load("@aspect//private/lib/format_spawn_test.axl", "format_spawn_tests")
 load("@aspect//private/lib/gazelle_results_test.axl", "gazelle_template_snapshot_tests")
 load("@aspect//private/lib/github_detect_test.axl", "github_detect_tests")
+load("@aspect//private/lib/github_features_test.axl", "github_features_tests")
 load("@aspect//private/lib/gitlab_detect_test.axl", "gitlab_detect_tests")
 load("@aspect//private/lib/gitlab_features_test.axl", "gitlab_features_tests")
 load("@aspect//private/lib/gitlab_lint_comments_test.axl", "gitlab_lint_comments_tests")
@@ -272,6 +273,10 @@ def config(ctx: ConfigContext):
     # GitLab features unit: state mapping + description truncation + marker shape.
     # Run with: aspect dev test-gitlab-features
     ctx.tasks.add(gitlab_features_tests)
+
+    # GitHub features unit: check-run conclusion mapping.
+    # Run with: aspect dev test-github-features
+    ctx.tasks.add(github_features_tests)
 
     # GitHub event detection smoke: PR/merge_group/push shapes for detect_changed_files.
     # Run with: aspect dev test-github-detect
