@@ -68,7 +68,9 @@ config hook that shells out to `annotation remove` is immediately followed by
 this feature re-posting the terminal annotation.
 
 Hooks see live updates too, not just the terminal one, so a hook that ignores
-`info.final` retracts mid-run as well.
+`info.final` retracts mid-run as well — and a removal is final: the feature
+stops rendering and stops consulting hooks for the rest of that task rather
+than re-posting what the hook asked to hide.
 
 The Buildkite annotation is the only surface that consults this hook. A
 `remove` needs a surface a single task can retract on its own, and the other
@@ -405,6 +407,13 @@ def _buildkite_annotations(ctx: FeatureContext):
         status = update.status
         final = update.final
 
+        # A removal is terminal for this task's annotation: re-posting after
+        # retracting it would resurrect what the hook just asked to hide, and
+        # re-deciding would re-render a body only to throw it away again. Bail
+        # before any work — the hook already had its say.
+        if _state.get("_removed"):
+            return
+
         # Keep the most recent phase label on bare refreshes (empty
         # progress styles). BK renders the narrative `body` form.
         progress_text = update.progress.body
@@ -467,6 +476,7 @@ def _buildkite_annotations(ctx: FeatureContext):
         if decision.action == StatusSurfaceAction("remove"):
             _LOG.trace("hook removed %s (status=%s final=%s)" % (context_id, status, final))
             _remove_annotation(ctx, context_id)
+            _state["_removed"] = True
             return
 
         body = decision.body

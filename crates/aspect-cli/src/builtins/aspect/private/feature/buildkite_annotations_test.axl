@@ -380,6 +380,18 @@ def _surface_info(status, final, style = "info", body = "RENDERED"):
         task_name = "build-test",
     )
 
+def _removed_after(verdicts):
+    """Replay `verdicts` through the same latch rule the feature applies
+    (`_state["_removed"]` set on remove, checked before any later work) and
+    report whether the surface ended up latched off."""
+    removed = False
+    for v in verdicts:
+        if removed:
+            continue
+        if v.action == StatusSurfaceAction("remove"):
+            removed = True
+    return removed
+
 def _assert_status_surface_hooks(ctx):
     """`status_surface_decision` hooks decide publish / remove / restyle, chain
     in order, and default to publishing."""
@@ -442,6 +454,12 @@ def _assert_status_surface_hooks(ctx):
     # Each handler sees its predecessor's edit, so rewrites compose.
     composed = apply_status_surface_hooks(ctx, _fake_lifecycle([_append_runbook, _append_runbook]), _surface_info("failed", True))
     _eq("body edits compose", composed.body, "RENDERED +RUNBOOK +RUNBOOK")
+
+    # `remove` is terminal for the surface: the feature latches it and stops
+    # rendering, so a later update can't resurrect the artifact. Asserted on the
+    # feature's latch rather than the chain, which is stateless by design.
+    _eq("remove latches", _removed_after([SURFACE_REMOVE, SURFACE_PUBLISH]), True)
+    _eq("publish does not latch", _removed_after([SURFACE_PUBLISH, SURFACE_PUBLISH]), False)
 
     # A rewrite can restyle at the same time.
     def _replace_and_restyle(ctx, info):

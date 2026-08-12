@@ -244,6 +244,12 @@ StatusSurface = enum("buildkite_annotation")
 # Verdict from a `status_surface_decision` hook. `publish` writes (optionally
 # with a rewritten `body` or `style`); `remove` suppresses the write and
 # retracts anything already published for this task on that surface.
+#
+# `remove` is terminal for the task's artifact on that surface: once retracted,
+# the surface stops rendering and stops consulting hooks for the rest of the
+# task. Re-posting would resurrect what the hook asked to hide, and re-deciding
+# would render bodies only to discard them. A hook that wants the artifact back
+# later shouldn't remove it — restyle it instead.
 StatusSurfaceAction = enum("publish", "remove")
 
 # Passed to each `status_surface_decision` hook alongside `ctx` — what the
