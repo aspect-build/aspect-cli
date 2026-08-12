@@ -8,6 +8,31 @@ delivery_results → delivery). The per-kind dispatch table lives in
 `lib/check_dispatch.axl`, kept in lockstep with `BuildkiteAnnotations`;
 new task kinds plug in there.
 
+## Restyling or rewriting the check run
+
+`TaskLifecycleTrait.status_surface_decision` is consulted before every write and
+returns a verdict — publish, or publish with a different style or body. Here
+`info.body` is the check run's details text and `info.style` is the conclusion
+this write would land (`""` when it lands none, e.g. a mid-run PATCH). A
+restyle overrides the conclusion, which decides whether the check blocks a PR:
+
+    load("@aspect//traits.axl", "SURFACE_PUBLISH", "StatusSurfaceInfo", "TaskLifecycleTrait", "surface_restyle")
+
+    # Report lint findings without blocking the PR.
+    def _lint_never_blocks(ctx: TaskContext, info: StatusSurfaceInfo):
+        if info.task_kind == "lint" and info.style == "failure":
+            return surface_restyle("neutral")
+        return SURFACE_PUBLISH
+
+    def config(ctx):
+        ctx.traits[TaskLifecycleTrait].status_surface_decision.append(_lint_never_blocks)
+
+`remove` isn't supported — GitHub can't delete a check run — so a removal is
+downgraded to a publish and logged. Only `BuildkiteAnnotations` honors it.
+
+Hooks see every surface that consults them, so scope with `info.surface` when
+more than one is enabled. See `StatusSurfaceInfo` for the full field set.
+
 Templates and metadata_keys are feature args. `templates` takes flat
 "summary"/"details" keys applying to every task kind, and/or per-task-kind
 blocks that overlay them (see `check_dispatch.resolve_templates`):
@@ -44,7 +69,15 @@ load("../private/lib/checkrun.axl", "checkrun")
 load("../private/lib/ci.axl", "detect_ci_host", "resolve_build_url")
 load("../private/lib/environment.axl", "feature_logger", "workflows_results_url")
 load("../private/lib/github.axl", "detect_commit_sha", "detect_github_repo", "github")
-load("../private/lib/lifecycle.axl", "TaskLifecycleTrait", "TaskUpdate")
+load(
+    "../private/lib/lifecycle.axl",
+    "StatusSurface",
+    "StatusSurfaceAction",
+    "StatusSurfaceInfo",
+    "TaskLifecycleTrait",
+    "TaskUpdate",
+    "apply_status_surface_hooks",
+)
 load(
     "../private/lib/lint_results.axl",
     "lint_annotation_plan",
@@ -165,6 +198,32 @@ def _github_status_checks(ctx: FeatureContext):
         apply_artifact_links(ctx, links)
         return links
 
+    def _decide(ctx, status, final, output, conclusion):
+        """Run this write past `status_surface_decision`, returning
+        `(output, conclusion, publish)`.
+
+        The check run's `text` is the hook-visible body; `style` is the
+        conclusion this write would land ("" when it lands none). A `remove` is
+        downgraded to a publish by `apply_status_surface_hooks` — check runs
+        can't be deleted — so `publish` is always True today; it's threaded so
+        the caller reads the verdict rather than assuming it.
+        """
+        decision = apply_status_surface_hooks(ctx, lifecycle, StatusSurfaceInfo(
+            surface = StatusSurface("github_check").value,
+            status = status,
+            final = final,
+            style = conclusion,
+            body = (output or {}).get("text", "") or "",
+            task_kind = ctx.task.kind,
+            task_name = ctx.task.name,
+        ))
+        if decision.action == StatusSurfaceAction("remove"):
+            return (output, conclusion, False)
+        if output != None and decision.body != (output.get("text", "") or ""):
+            output = dict(output)
+            output["text"] = decision.body
+        return (output, decision.style, True)
+
     def _create_check_run(ctx):
         """Authenticate and create the check run with initial output.
 
@@ -239,6 +298,16 @@ def _github_status_checks(ctx: FeatureContext):
         html_url = result.get("html_url") or ""
         checkrun.set_url(ctx, html_url)
 
+        (initial_patch_output, _initial_style, initial_publish) = _decide(
+            ctx,
+            "running",
+            False,
+            initial_output,
+            "",
+        )
+        if not initial_publish:
+            return
+
         # Point details_url at the check-run page; otherwise GitHub
         # auto-fills it with the App's useless homepage URL.
         github.status_checks.update(
@@ -247,7 +316,7 @@ def _github_status_checks(ctx: FeatureContext):
             owner,
             repo,
             _state["_check_run_id"],
-            output = initial_output,
+            output = initial_patch_output,
             details_url = html_url or None,
         )
 
@@ -302,7 +371,7 @@ def _github_status_checks(ctx: FeatureContext):
         if now_ms(ctx) - last >= _HEARTBEAT_INTERVAL_MS:
             _register_check(ctx, final = False)
 
-    def _push_status(ctx, status, final, output = None):
+    def _push_status(ctx, status, final, output = None, conclusion_override = ""):
         """Send a check-run update for `(status, final)`. Idempotent re:
         conclusion via `_state["_gh_conclusion"]`. Map:
 
@@ -329,6 +398,11 @@ def _github_status_checks(ctx: FeatureContext):
                 desired = "neutral"
             elif status == "passed":
                 desired = "success"
+
+        # A `status_surface_decision` restyle replaces the conclusion, but only
+        # on writes that land one — see `StatusSurfaceInfo.style`.
+        if desired and conclusion_override:
+            desired = conclusion_override
 
         current = _state.get("_gh_conclusion")
         if desired and desired != current:
@@ -556,7 +630,16 @@ def _github_status_checks(ctx: FeatureContext):
                     _LOG.info(ctx.std, "Capping lint annotations at %d (of %d eligible)" %
                                        (len(annotations), total_eligible))
 
-        _push_status(ctx, status, final, output = output)
+        (output, conclusion_override, publish) = _decide(
+            ctx,
+            status,
+            final,
+            output,
+            desired_conclusion or "",
+        )
+        if not publish:
+            return
+        _push_status(ctx, status, final, output = output, conclusion_override = conclusion_override)
         if final and extra_batches:
             _send_extra_annotation_batches(ctx, token, check_run_id, output, extra_batches)
 

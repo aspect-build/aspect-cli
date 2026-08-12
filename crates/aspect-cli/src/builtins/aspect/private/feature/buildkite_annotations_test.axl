@@ -12,10 +12,15 @@ for each scenario, so a rendering regression shows up as a visible diff:
   - Style selection edge cases: soft-lint passing with warnings, delivery
     all-skipped, delivery all-failed, soft-format passing with files.
 
-`aspect dev test-bk-annotation-templates` asserts the customization contract
-`args.templates` exposes: overrides reach the rendered body, "summary" and
-"details" are independent, every renderer module exports the templates a
-config patches, and a broken template degrades to the fallback body.
+`aspect dev test-bk-annotation-templates` asserts the two customization
+contracts a config writes against:
+  - `args.templates` — overrides reach the rendered body, "title"/"summary"/
+    "details" are independent, per-task-kind blocks overlay the flat keys,
+    every renderer module exports the templates a config patches, and a broken
+    template degrades to a fallback.
+  - `TaskLifecycleTrait.status_surface_decision` — verdicts resolve, chain, and
+    compose across surfaces, and a `remove` no surface can honor downgrades to
+    a publish.
 """
 
 load("@aspect//feature/buildkite_annotations.axl", "format_body")
@@ -369,9 +374,9 @@ def _fake_lifecycle(handlers):
     reads only `.status_surface_decision`."""
     return struct(status_surface_decision = handlers)
 
-def _surface_info(status, final, style = "info", body = "RENDERED"):
+def _surface_info(status, final, style = "info", body = "RENDERED", surface = "buildkite_annotation"):
     return StatusSurfaceInfo(
-        surface = StatusSurface("buildkite_annotation"),
+        surface = StatusSurface(surface).value,
         status = status,
         final = final,
         style = style,
@@ -464,6 +469,61 @@ def _assert_status_surface_hooks(ctx):
     both = apply_status_surface_hooks(ctx, _fake_lifecycle([_replace_and_restyle]), _surface_info("passed", True))
     _eq("replace can restyle", both.style, "error")
     _eq("replace sets body", both.body, "NEW")
+
+    # Restyle and rewrite work on every surface that consults the hook — a hook
+    # written once spans all of them.
+    for surface in ["buildkite_annotation", "github_check", "gitlab_commit_status"]:
+        resolved = apply_status_surface_hooks(
+            ctx,
+            _fake_lifecycle([_replace_and_restyle]),
+            _surface_info("passed", True, surface = surface),
+        )
+        _eq("%s honors replace" % surface, resolved.body, "NEW")
+        _eq("%s honors restyle" % surface, resolved.style, "error")
+
+    # `info.surface` is a plain string, so a hook scopes itself with a literal
+    # (as it does for `info.status`) rather than needing the enum.
+    def _bk_only(ctx, info):
+        if info.surface == "buildkite_annotation":
+            return surface_restyle("error")
+        return SURFACE_PUBLISH
+
+    scoped = _fake_lifecycle([_bk_only])
+    _eq(
+        "literal surface comparison matches",
+        apply_status_surface_hooks(ctx, scoped, _surface_info("passed", True)).style,
+        "error",
+    )
+    _eq(
+        "literal surface comparison skips others",
+        apply_status_surface_hooks(ctx, scoped, _surface_info("passed", True, surface = "github_check")).style,
+        "info",
+    )
+
+    # `remove` is Buildkite-only: the surfaces that can't retract downgrade to a
+    # publish rather than dropping the write or silently ignoring the verdict.
+    _eq(
+        "buildkite honors remove",
+        apply_status_surface_hooks(ctx, one, _surface_info("passed", True)).action,
+        StatusSurfaceAction("remove"),
+    )
+    for surface in ["github_check", "gitlab_commit_status"]:
+        downgraded = apply_status_surface_hooks(ctx, one, _surface_info("passed", True, surface = surface))
+        _eq("%s downgrades remove" % surface, downgraded.action, StatusSurfaceAction("publish"))
+        _eq("%s keeps its body when downgraded" % surface, downgraded.body, "RENDERED")
+        _eq("%s keeps its style when downgraded" % surface, downgraded.style, "info")
+
+    # A downgrade stops the chain where the remove was returned, so a later
+    # handler can't quietly restyle a write the config tried to suppress.
+    _eq(
+        "downgrade halts the chain",
+        apply_status_surface_hooks(
+            ctx,
+            _fake_lifecycle([_drop_passed, _warn]),
+            _surface_info("passed", True, surface = "github_check"),
+        ).style,
+        "info",
+    )
 
 def _assert_title_overrides(ctx, data, rc):
     """A "title" override replaces the annotation title, renders with the

@@ -72,9 +72,10 @@ Hooks see live updates too, not just the terminal one, so a hook that ignores
 stops rendering and stops consulting hooks for the rest of that task rather
 than re-posting what the hook asked to hide.
 
-The Buildkite annotation is the only surface that consults this hook. A
-`remove` needs a surface a single task can retract on its own, and the other
-status surfaces don't qualify — see `StatusSurface`.
+`GithubStatusChecks` and `GitlabCommitStatuses` consult the same hook, so a
+restyle or rewrite can span all three; scope with `info.surface`. `remove` is
+Buildkite-only — the others can't retract what they've posted, so a removal
+there is downgraded to a publish and logged. See `StatusSurface`.
 
 ## Templates and metadata
 
@@ -460,7 +461,7 @@ def _buildkite_annotations(ctx: FeatureContext):
         # Consulted after rendering so hooks can rewrite the body; a `remove`
         # verdict discards the render, the cost of giving hooks that access.
         decision = apply_status_surface_hooks(ctx, lifecycle, StatusSurfaceInfo(
-            surface = StatusSurface("buildkite_annotation"),
+            surface = StatusSurface("buildkite_annotation").value,
             status = status,
             final = final,
             style = severity_for_status(status),

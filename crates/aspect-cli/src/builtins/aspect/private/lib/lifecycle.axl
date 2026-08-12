@@ -29,7 +29,7 @@ Status surfaces flip to the verdict via the task's own terminal
 
 load("./ansi.axl", "ansi")
 load("./bazel_flags.axl", "setup_bazel_command")
-load("./environment.axl", "color_enabled", "detect_ci")
+load("./environment.axl", "color_enabled", "detect_ci", "feature_logger")
 load("./health_check.axl", "run_health_checks")
 load("./runner_job_history.axl", "append_runner_job_history")
 
@@ -221,50 +221,61 @@ def repro_fix_replace(command: str | None = None, description: str | None = None
         description = description,
     )
 
-# Which status surface is about to write. Lets one hook scope itself to a
-# single surface once more than one consults this.
+# Which status surface is consulting the hook. Every per-task surface consults
+# it, so one hook can restyle or rewrite across all of them and scope itself by
+# `info.surface` or task identity.
 #
-# Only the Buildkite annotation, because `remove` is the reason the hook exists
-# and it's the only surface a single task can retract on its own:
+# Surfaces validate their own name through this enum; `StatusSurfaceInfo.surface`
+# stays `str` so hooks compare with plain literals (as `TaskUpdate.status` does).
 #
-#   - GitHub check runs / GitLab commit statuses have no delete at all (a check
-#     run can only be updated once created; commit statuses are post-only).
-#   - The PR comment and MR note *have* a delete endpoint, but they're a shared
-#     aggregate: every sibling job contributes its task's status to one comment
-#     and a server elects a poster each cycle. One task retracting it would
-#     erase every other task's status — including failures from other jobs —
-#     and the next elected poster would recreate it, flapping. The existing
-#     `delete_comment` call is for collapsing duplicate comments, never for
-#     retracting the live one.
-#
-# An enum (not a bare string) so adding a surface is a deliberate act that has
-# to answer "can one task retract this on its own?".
-StatusSurface = enum("buildkite_annotation")
+# The aggregate PR/MR summary comments deliberately do not consult it: a
+# comment write merges every sibling task's status (a server elects one poster
+# per cycle), so the per-task `status` / `final` fields can't describe it.
+# Those surfaces customize through their `templates` arg ("body").
+StatusSurface = enum("buildkite_annotation", "github_check", "gitlab_commit_status")
+
+_LOG = feature_logger("Status surface")
+
+# Surfaces whose artifact a single task can retract on its own — the only ones
+# a `remove` verdict is honored for. GitHub check runs have no DELETE (a check
+# run is update-only once created) and GitLab commit statuses are post-only, so
+# neither can honor a removal; refusing it loudly beats a verdict the surface
+# silently ignores.
+_SURFACE_CAN_REMOVE = {"buildkite_annotation": True}
 
 # Verdict from a `status_surface_decision` hook. `publish` writes (optionally
 # with a rewritten `body` or `style`); `remove` suppresses the write and
 # retracts anything already published for this task on that surface.
 #
-# `remove` is terminal for the task's artifact on that surface: once retracted,
-# the surface stops rendering and stops consulting hooks for the rest of the
-# task. Re-posting would resurrect what the hook asked to hide, and re-deciding
-# would render bodies only to discard them. A hook that wants the artifact back
-# later shouldn't remove it — restyle it instead.
+# `remove` is honored only where the surface can retract (see
+# `_SURFACE_CAN_REMOVE`) and is terminal for the task's artifact there: once
+# retracted, the surface stops rendering and stops consulting hooks for the
+# rest of the task. A hook that wants the artifact back later shouldn't remove
+# it — restyle it instead.
 StatusSurfaceAction = enum("publish", "remove")
 
 # Passed to each `status_surface_decision` hook alongside `ctx` — what the
 # surface knows at the instant it's about to write.
 StatusSurfaceInfo = record(
-    surface = field(StatusSurface),
+    surface = field(str),
     # Lifecycle status ("passed", "failing", …) and whether this is the
     # terminal emit. A hook that ignores `final` also fires mid-run.
     status = field(str),
     final = field(bool),
-    # Severity styling the surface resolved for `status`.
+    # The styling this write would carry, in the surface's own vocabulary — a
+    # restyle must answer in the same one:
+    #   buildkite_annotation   annotation style: success|info|warning|error
+    #   github_check           conclusion: success|neutral|failure, or "" when
+    #                          this write lands no conclusion (mid-run PATCH; a
+    #                          restyle is a no-op there)
+    #   gitlab_commit_status   state: pending|running|success|failed|canceled|
+    #                          skipped
     style = field(str),
-    # The fully rendered content this write would publish. Hooks get it after
-    # rendering precisely so they can post-process it; `surface_replace` builds
-    # a verdict carrying an edited copy.
+    # The rendered content this write would publish, in the surface's own unit:
+    # the whole annotation body (buildkite_annotation), the check run's details
+    # text (github_check), the one-line description (gitlab_commit_status).
+    # Hooks get it after rendering precisely so they can post-process it;
+    # `surface_replace` builds a verdict carrying an edited copy.
     #
     # For wholesale authoring, prefer the surface's `templates` arg — it renders
     # from structured data instead of string-editing finished markup, so it
@@ -309,6 +320,11 @@ def apply_status_surface_hooks(ctx, lifecycle, info: StatusSurfaceInfo) -> Statu
     handler's `info`, so each handler sees its predecessor's edits and a later
     plain publish keeps them.
 
+    A `remove` the surface can't honor (see `_SURFACE_CAN_REMOVE`) is downgraded
+    to a publish so a hook written for Buildkite doesn't silently break the
+    other surfaces it also sees. The downgrade is logged — at warn on the
+    terminal emit, so it's noticed once per task rather than per update.
+
     Returns a resolved verdict: on `publish` the decision's `style` and `body`
     are always set (the incoming values when no hook rewrote them), so the
     caller writes exactly what the chain settled on.
@@ -316,7 +332,16 @@ def apply_status_surface_hooks(ctx, lifecycle, info: StatusSurfaceInfo) -> Statu
     for handler in lifecycle.status_surface_decision:
         decision = handler(ctx, info)
         if decision.action == StatusSurfaceAction("remove"):
-            return decision
+            if _SURFACE_CAN_REMOVE.get(info.surface):
+                return decision
+            msg = ("status_surface_decision asked to remove the %s artifact, which that " +
+                   "surface can't retract — publishing instead. Scope the hook with " +
+                   "`info.surface` to silence this.") % info.surface
+            if info.final:
+                _LOG.warn(ctx.std, msg)
+            else:
+                _LOG.trace(msg)
+            break
         if decision.style or decision.body != None:
             info = StatusSurfaceInfo(
                 surface = info.surface,
