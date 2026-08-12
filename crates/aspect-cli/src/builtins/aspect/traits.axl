@@ -19,6 +19,7 @@ files can load the full trait set with a single import:
          "SURFACE_PUBLISH",
          "SURFACE_REMOVE",
          "StatusSurface",
+         "StatusSurfaceAction",
          "StatusSurfaceDecision",
          "StatusSurfaceInfo",
          "surface_replace",

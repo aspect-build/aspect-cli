@@ -279,10 +279,9 @@ StatusSurfaceInfo = record(
 
 StatusSurfaceDecision = record(
     action = field(StatusSurfaceAction),
+    # `publish` only; None keeps the incoming value. `apply_status_surface_hooks`
+    # resolves both before returning, so surface code reads concrete values.
     style = field(str | None, default = None),
-    # None on a `remove`, and on a `publish` that didn't rewrite anything —
-    # `apply_status_surface_hooks` resolves it to the incoming body before
-    # returning, so callers can always read `decision.body` on a publish.
     body = field(str | None, default = None),
 )
 
@@ -307,14 +306,13 @@ def apply_status_surface_hooks(ctx, lifecycle, info: StatusSurfaceInfo) -> Statu
     Handlers chain in order and the first `remove` short-circuits — there is
     nothing left to edit once the write is being suppressed. A `publish`
     carrying a rewritten `body` and/or `style` is threaded into the next
-    handler's `info`, so each handler sees its predecessor's edits and the last
-    writer wins.
+    handler's `info`, so each handler sees its predecessor's edits and a later
+    plain publish keeps them.
 
-    On a `publish` the returned decision always carries a `body` (falling back
-    to the incoming one), so callers don't have to re-resolve it. No handlers →
-    publish the body unchanged.
+    Returns a resolved verdict: on `publish` the decision's `style` and `body`
+    are always set (the incoming values when no hook rewrote them), so the
+    caller writes exactly what the chain settled on.
     """
-    decision = StatusSurfaceDecision(action = StatusSurfaceAction("publish"), body = info.body)
     for handler in lifecycle.status_surface_decision:
         decision = handler(ctx, info)
         if decision.action == StatusSurfaceAction("remove"):
@@ -329,15 +327,11 @@ def apply_status_surface_hooks(ctx, lifecycle, info: StatusSurfaceInfo) -> Statu
                 task_kind = info.task_kind,
                 task_name = info.task_name,
             )
-
-    # Normalize so a publish always carries the body that should be written.
-    if decision.action == StatusSurfaceAction("publish") and decision.body == None:
-        return StatusSurfaceDecision(
-            action = decision.action,
-            style = decision.style,
-            body = info.body,
-        )
-    return decision
+    return StatusSurfaceDecision(
+        action = StatusSurfaceAction("publish"),
+        style = info.style,
+        body = info.body,
+    )
 
 # Lifecycle hooks any task can fire, so features like GithubStatusChecks
 # observe progress without coupling to Bazel-specific hooks.
@@ -360,8 +354,8 @@ TaskLifecycleTrait = trait(
 
     # `(ctx: TaskContext, info: StatusSurfaceInfo) -> StatusSurfaceDecision`,
     # consulted by a status surface immediately before it writes, so a config
-    # can suppress or restyle the write itself. It does not carry the rendered
-    # content — use the surface's `templates` arg for that.
+    # can suppress the write, restyle it, or rewrite its rendered body
+    # (`info.body`).
     #
     # Lives on the lifecycle trait (not the surface's own) because a feature
     # can't contribute a trait — `feature()` takes no `traits` — and tasks must

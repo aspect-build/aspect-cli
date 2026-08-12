@@ -380,21 +380,11 @@ def _surface_info(status, final, style = "info", body = "RENDERED"):
         task_name = "build-test",
     )
 
-def _removed_after(verdicts):
-    """Replay `verdicts` through the same latch rule the feature applies
-    (`_state["_removed"]` set on remove, checked before any later work) and
-    report whether the surface ended up latched off."""
-    removed = False
-    for v in verdicts:
-        if removed:
-            continue
-        if v.action == StatusSurfaceAction("remove"):
-            removed = True
-    return removed
-
 def _assert_status_surface_hooks(ctx):
-    """`status_surface_decision` hooks decide publish / remove / restyle, chain
-    in order, and default to publishing."""
+    """`status_surface_decision` hooks decide publish / remove / restyle /
+    rewrite; they chain in order and resolve to exactly what the caller
+    writes. (The remove-latch — a removed surface never re-posts — lives in
+    feature state, covered by the stub-agent e2e runs, not here.)"""
 
     def _drop_passed(ctx, info):
         if info.final and info.status == "passed":
@@ -438,9 +428,11 @@ def _assert_status_surface_hooks(ctx):
     chained = apply_status_surface_hooks(ctx, _fake_lifecycle([_warn, _observe_style]), _surface_info("passed", True))
     _eq("style threads through the chain", chained.style, "warning+seen")
 
-    # A publish always carries the body to write, even when no hook touched it,
-    # so the caller never has to re-resolve it.
-    _eq("body defaults to the rendered one", apply_status_surface_hooks(ctx, _fake_lifecycle([]), _surface_info("passed", True)).body, "RENDERED")
+    # A publish is returned resolved — style and body always set, falling back
+    # to the incoming values — so the caller writes it without re-resolving.
+    untouched = apply_status_surface_hooks(ctx, _fake_lifecycle([]), _surface_info("passed", True))
+    _eq("body defaults to the rendered one", untouched.body, "RENDERED")
+    _eq("style defaults to the resolved severity", untouched.style, "info")
     _eq("untouched body passes through", apply_status_surface_hooks(ctx, one, _surface_info("failed", True)).body, "RENDERED")
 
     # Rewriting the content is the point of handing hooks `info.body`.
@@ -455,11 +447,15 @@ def _assert_status_surface_hooks(ctx):
     composed = apply_status_surface_hooks(ctx, _fake_lifecycle([_append_runbook, _append_runbook]), _surface_info("failed", True))
     _eq("body edits compose", composed.body, "RENDERED +RUNBOOK +RUNBOOK")
 
-    # `remove` is terminal for the surface: the feature latches it and stops
-    # rendering, so a later update can't resurrect the artifact. Asserted on the
-    # feature's latch rather than the chain, which is stateless by design.
-    _eq("remove latches", _removed_after([SURFACE_REMOVE, SURFACE_PUBLISH]), True)
-    _eq("publish does not latch", _removed_after([SURFACE_PUBLISH, SURFACE_PUBLISH]), False)
+    # An edit earlier in the chain survives a later plain publish: the resolved
+    # verdict carries the threaded style/body, not just the last return value.
+    def _plain(ctx, info):
+        return SURFACE_PUBLISH
+
+    kept = apply_status_surface_hooks(ctx, _fake_lifecycle([_warn, _plain]), _surface_info("passed", True))
+    _eq("restyle survives a later plain publish", kept.style, "warning")
+    kept_body = apply_status_surface_hooks(ctx, _fake_lifecycle([_append_runbook, _plain]), _surface_info("failed", True))
+    _eq("rewrite survives a later plain publish", kept_body.body, "RENDERED +RUNBOOK")
 
     # A rewrite can restyle at the same time.
     def _replace_and_restyle(ctx, info):
@@ -468,7 +464,6 @@ def _assert_status_surface_hooks(ctx):
     both = apply_status_surface_hooks(ctx, _fake_lifecycle([_replace_and_restyle]), _surface_info("passed", True))
     _eq("replace can restyle", both.style, "error")
     _eq("replace sets body", both.body, "NEW")
-
 
 def _assert_title_overrides(ctx, data, rc):
     """A "title" override replaces the annotation title, renders with the

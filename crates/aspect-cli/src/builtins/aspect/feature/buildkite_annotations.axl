@@ -175,7 +175,8 @@ def _format_body(out, kind, status, task_label = "", final = False):
     (https://forum.buildkite.community/t/3820). Terminal renders keep the
     `<details>` form so users can collapse what they're done with.
 
-    Hard-cap at 1 MiB; BK rejects larger annotations.
+    Size is not capped here — `_write_annotation` truncates at the send
+    boundary, after any `status_surface_decision` rewrite.
     """
     title = out.get("title", "") or ""
     summary = out.get("summary", "") or ""
@@ -216,13 +217,7 @@ def _format_body(out, kind, status, task_label = "", final = False):
         parts.append('<div class="border-top my3"></div>')
     if text:
         parts.append(text.strip())
-    body = "\n\n".join(parts)
-
-    if len(body) > _ANNOTATION_SIZE_LIMIT:
-        # Trim from the tail — the body (`text`) is where trim cascades live,
-        # and the summary/title are the most useful parts to preserve.
-        body = body[:_ANNOTATION_SIZE_LIMIT - 64] + "\n\n_… annotation truncated (1 MiB limit)._"
-    return body
+    return "\n\n".join(parts)
 
 def _task_label(task_name):
     """`:aspect: task <code>task-name</code>` — the leading pill that
@@ -247,7 +242,14 @@ def _write_annotation(ctx, style, body, context_id):
     `--context <id>` makes the call idempotent — re-running with the same
     context replaces the previous annotation rather than creating a new one.
     Body is passed on stdin to sidestep argv length limits.
+
+    Bodies past BK's 1 MiB hard limit are tail-truncated here, at the send
+    boundary, so a `status_surface_decision` rewrite can't push past it —
+    the head (title/summary) is the useful part to keep.
     """
+    if len(body) > _ANNOTATION_SIZE_LIMIT:
+        body = body[:_ANNOTATION_SIZE_LIMIT - 64] + "\n\n_… annotation truncated (1 MiB limit)._"
+
     _LOG.trace("invoking buildkite-agent annotate --style %s --context %s --scope=job (body=%d bytes)" %
                (style, context_id, len(body)))
 
@@ -291,9 +293,8 @@ def _remove_annotation(ctx, context_id):
     the removal targets exactly the annotation this task created.
 
     A failure is logged at trace, not warn: BK errors when the annotation
-    isn't there, which is the expected outcome whenever nothing was posted
-    (the task never streamed an update, or a prior cycle already removed it).
-    Nothing downstream depends on the removal succeeding.
+    isn't there, which is expected whenever the hook removed before the first
+    write went out. Nothing downstream depends on the removal succeeding.
     """
     _LOG.trace("invoking buildkite-agent annotation remove --context %s --scope=job" % context_id)
 
@@ -407,10 +408,8 @@ def _buildkite_annotations(ctx: FeatureContext):
         status = update.status
         final = update.final
 
-        # A removal is terminal for this task's annotation: re-posting after
-        # retracting it would resurrect what the hook just asked to hide, and
-        # re-deciding would re-render a body only to throw it away again. Bail
-        # before any work — the hook already had its say.
+        # A removal latches: re-posting would resurrect what the hook asked to
+        # hide, so bail before any further rendering or hook consults.
         if _state.get("_removed"):
             return
 
@@ -458,12 +457,8 @@ def _buildkite_annotations(ctx: FeatureContext):
             max_snippets = _max_snippets,
         )
 
-        # Ask the config what to do with this write. Consulted after rendering
-        # so the hook can rewrite `body`; a `remove` verdict therefore discards
-        # a body we already paid for, which is the accepted trade for letting
-        # hooks edit content. Still cheaper than the alternative a config has
-        # today — a `task_update` hook can't do this at all, since those run
-        # after the feature has already posted (see the module docstring).
+        # Consulted after rendering so hooks can rewrite the body; a `remove`
+        # verdict discards the render, the cost of giving hooks that access.
         decision = apply_status_surface_hooks(ctx, lifecycle, StatusSurfaceInfo(
             surface = StatusSurface("buildkite_annotation"),
             status = status,
@@ -480,7 +475,7 @@ def _buildkite_annotations(ctx: FeatureContext):
             return
 
         body = decision.body
-        style = decision.style or severity_for_status(status)
+        style = decision.style
         if final:
             _LOG.trace("completing %s (style=%s len=%d)" %
                        (context_id, style, len(body)))
