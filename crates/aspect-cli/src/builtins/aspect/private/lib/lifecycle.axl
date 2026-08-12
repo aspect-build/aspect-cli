@@ -221,35 +221,38 @@ def repro_fix_replace(command: str | None = None, description: str | None = None
         description = description,
     )
 
-# Which status surface is consulting the hook. Every per-task surface consults
-# it, so one hook can restyle or rewrite across all of them and scope itself by
-# `info.surface` or task identity.
-#
-# Surfaces validate their own name through this enum; `StatusSurfaceInfo.surface`
-# stays `str` so hooks compare with plain literals (as `TaskUpdate.status` does).
-#
-# The aggregate PR/MR summary comments deliberately do not consult it: a
-# comment write merges every sibling task's status (a server elects one poster
-# per cycle), so the per-task `status` / `final` fields can't describe it.
-# Those surfaces customize through their `templates` arg ("body").
-StatusSurface = enum("buildkite_annotation", "github_check", "gitlab_commit_status")
-
 # Surfaces whose artifact a single task can retract on its own — the only ones
 # honoring a `remove`. GitHub check runs have no DELETE (update-only once
 # created) and GitLab commit statuses are post-only.
 _SURFACE_CAN_REMOVE = {"buildkite_annotation": True}
 
-# Styles each surface can express, i.e. what a `surface_restyle` may answer.
-# Anything else is refused and the surface's own style stands, because these
-# vocabularies don't overlap: Buildkite's "warning" reaching a check run matches
-# no conclusion (GitHub's client would conclude `failure`, turning a green check
-# red), and GitHub's "neutral" reaching GitLab is rejected by the API for the
-# rest of the task. An unscoped hook meant for one surface can't corrupt another.
+# Every per-task status surface, and the styles each one can express — the
+# values a `surface_restyle` may answer with for that surface.
+#
+# A style outside its surface's list is refused and the surface's own style
+# stands, because the vocabularies don't overlap and forwarding blindly is
+# destructive: Buildkite's "warning" reaching a check run matches no conclusion
+# (GitHub's client would then conclude `failure`, turning a green check red),
+# and GitHub's "neutral" reaching GitLab is rejected by the API for the rest of
+# the task. So an unscoped hook can't corrupt the surfaces it wasn't written for.
 _SURFACE_STYLES = {
     "buildkite_annotation": ["success", "info", "warning", "error"],
     "github_check": ["success", "neutral", "failure"],
     "gitlab_commit_status": ["pending", "running", "success", "failed", "canceled", "skipped"],
 }
+
+# Which surface is consulting the hook. Derived from `_SURFACE_STYLES` so a new
+# surface can't be added to one without the other — an unlisted surface would
+# otherwise silently refuse every restyle.
+#
+# Surfaces validate their own name through this enum; `StatusSurfaceInfo.surface`
+# stays `str` so hooks compare with plain literals (as `TaskUpdate.status` does).
+#
+# The aggregate PR/MR summary comments deliberately don't consult the hook: a
+# comment write merges every sibling task's status (a server elects one poster
+# per cycle), so the per-task `status` / `final` fields can't describe it. Those
+# surfaces customize through their `templates` arg ("body").
+StatusSurface = enum(*sorted(_SURFACE_STYLES.keys()))
 
 # Verdict from a `status_surface_decision` hook. `publish` writes (optionally
 # with a rewritten `body` or `style`); `remove` suppresses the write and
