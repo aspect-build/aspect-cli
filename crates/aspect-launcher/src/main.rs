@@ -21,7 +21,7 @@ use aspect_telemetry::{
 use clap::{Arg, Command, arg};
 use fork::{Fork, fork};
 use futures_util::TryStreamExt;
-use miette::{Context, IntoDiagnostic, Result, miette};
+use miette::{Context, IntoDiagnostic, Report, Result, miette};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::{self, Client, Method, Request, RequestBuilder};
 use serde::Deserialize;
@@ -244,6 +244,68 @@ async fn download_with_retries(
     Err(last_err.expect("at least one attempt must have run"))
 }
 
+/// A failed attempt to obtain a tool from one of its sources.
+struct SourceFailure {
+    /// Human-readable identity of the source attempt, e.g. the download URL.
+    source: String,
+    error: Report,
+    /// Whether the failure looks like a transient network/service problem
+    /// (worth a retry) rather than a configuration problem.
+    transient: bool,
+}
+
+impl SourceFailure {
+    /// Build a failure, classifying `error`'s transience from its cause chain.
+    fn new(source: String, error: Report) -> Self {
+        let transient = is_transient_network_error(&error);
+        Self {
+            source,
+            error,
+            transient,
+        }
+    }
+}
+
+/// Render an error and its cause chain as a single line.
+fn error_chain(err: &Report) -> String {
+    err.chain()
+        .map(|cause| cause.to_string())
+        .collect::<Vec<_>>()
+        .join(": ")
+}
+
+/// Whether an error chain looks like a transient network or service failure
+/// (unreachable host, reset stream, timeout, 5xx/429) rather than a
+/// configuration problem.
+fn is_transient_network_error(err: &Report) -> bool {
+    err.chain().any(|cause| {
+        if let Some(e) = cause.downcast_ref::<std::io::Error>() {
+            use std::io::ErrorKind::*;
+            return matches!(
+                e.kind(),
+                ConnectionRefused
+                    | ConnectionReset
+                    | ConnectionAborted
+                    | TimedOut
+                    | HostUnreachable
+                    | NetworkUnreachable
+                    | NetworkDown
+            );
+        }
+        // Concrete error types can be erased behind opaque wrappers whose
+        // source() skips them, so fall back to message heuristics.
+        let msg = cause.to_string();
+        msg.contains("error sending request")
+            || msg.contains("http2 error")
+            || msg.contains("connection closed")
+            || msg.contains("connection reset")
+            || msg.contains("operation timed out")
+            || msg.contains("dns error")
+            || msg.contains("HTTP status server error")
+            || msg.contains("429 Too Many Requests")
+    })
+}
+
 #[derive(Deserialize, Debug)]
 struct Release {
     tag_name: String,
@@ -312,7 +374,7 @@ async fn configure_tool_task(
         String,
         HashMap<String, String>,
     )> {
-        let mut errs: Vec<Result<()>> = Vec::new();
+        let mut errs: Vec<SourceFailure> = Vec::new();
 
         let client = reqwest::Client::new();
 
@@ -357,10 +419,10 @@ async fn configure_tool_task(
                         );
                     };
                     let download_msg = format!("downloading aspect cli from {}", url);
-                    if let err @ Err(_) =
+                    if let Err(e) =
                         _download_into_cache(&client, &tool_dest_file, req, &download_msg).await
                     {
-                        errs.push(err);
+                        errs.push(SourceFailure::new(url.clone(), e));
                         continue;
                     };
                     return Ok((
@@ -486,69 +548,94 @@ async fn configure_tool_task(
                             )
                             .build()
                             .into_diagnostic()?;
-                        let releases_resp = client.execute(releases_req).await.into_diagnostic()?;
-                        let releases_status = releases_resp.status();
-                        if !releases_status.is_success() {
-                            let body = releases_resp.text().await.unwrap_or_default();
-                            // If we have a stale-but-readable hint whose binary is still present,
-                            // fall back to it and touch the hint so we don't hammer a down API.
-                            if let Ok(stale_tag) = fs::read_to_string(&hint_path) {
-                                let stale_tag = stale_tag.trim().to_owned();
-                                let stale_url = release_asset_url(org, repo, &stale_tag, &artifact);
-                                let stale_dest = cache.tool_path(&tool.name(), &stale_url);
-                                if stale_dest.exists() {
-                                    if debug_mode() {
-                                        eprintln!(
-                                            "{:} API error, falling back to stale cached tag {} ({})",
-                                            tool.name(),
-                                            stale_tag,
-                                            body.trim(),
-                                        );
-                                    }
-                                    // Reset the expiry so we retry after another HINT_MAX_AGE.
-                                    cache.touch_latest_tag(&hint_path);
-                                    let mut extra_envs = HashMap::new();
-                                    extra_envs.insert(
-                                        "ASPECT_LAUNCHER_ASPECT_CLI_ORG".to_string(),
-                                        org.clone(),
-                                    );
-                                    extra_envs.insert(
-                                        "ASPECT_LAUNCHER_ASPECT_CLI_REPO".to_string(),
-                                        repo.clone(),
-                                    );
-                                    extra_envs.insert(
-                                        "ASPECT_LAUNCHER_ASPECT_CLI_TAG".to_string(),
-                                        stale_tag,
-                                    );
-                                    extra_envs.insert(
-                                        "ASPECT_LAUNCHER_ASPECT_CLI_ARTIFACT".to_string(),
-                                        artifact.clone(),
-                                    );
-                                    return Ok((
-                                        stale_dest,
-                                        ASPECT_LAUNCHER_METHOD_GITHUB.to_string(),
-                                        extra_envs,
-                                    ));
+                        let api_source = format!("github.com/{org}/{repo} releases API");
+                        let releases_result: std::result::Result<Vec<Release>, SourceFailure> =
+                            async {
+                                let resp = client
+                                    .execute(releases_req)
+                                    .await
+                                    .into_diagnostic()
+                                    .map_err(|e| SourceFailure::new(api_source.clone(), e))?;
+                                let status = resp.status();
+                                if !status.is_success() {
+                                    let body = resp.text().await.unwrap_or_default();
+                                    return Err(SourceFailure {
+                                        source: api_source.clone(),
+                                        error: miette!(
+                                            "request failed with status {status}: {body}"
+                                        ),
+                                        transient: status.is_server_error()
+                                            || status == reqwest::StatusCode::TOO_MANY_REQUESTS,
+                                    });
                                 }
+                                resp.json::<Vec<Release>>()
+                                    .await
+                                    .into_diagnostic()
+                                    .map_err(|e| SourceFailure::new(api_source.clone(), e))
                             }
-                            errs.push(Err(miette!(
-                                "github releases list request for {org}/{repo} failed with status {}: {}",
-                                releases_status,
-                                body
-                            )));
-                            continue;
-                        }
-                        let releases: Vec<Release> =
-                            releases_resp.json().await.into_diagnostic()?;
+                            .await;
+                        let releases = match releases_result {
+                            Ok(releases) => releases,
+                            Err(failure) => {
+                                // If we have a stale-but-readable hint whose binary is still present,
+                                // fall back to it and touch the hint so we don't hammer a down API.
+                                if let Ok(stale_tag) = fs::read_to_string(&hint_path) {
+                                    let stale_tag = stale_tag.trim().to_owned();
+                                    let stale_url =
+                                        release_asset_url(org, repo, &stale_tag, &artifact);
+                                    let stale_dest = cache.tool_path(&tool.name(), &stale_url);
+                                    if stale_dest.exists() {
+                                        if debug_mode() {
+                                            eprintln!(
+                                                "{:} API error, falling back to stale cached tag {} ({})",
+                                                tool.name(),
+                                                stale_tag,
+                                                error_chain(&failure.error),
+                                            );
+                                        }
+                                        // Reset the expiry so we retry after another HINT_MAX_AGE.
+                                        cache.touch_latest_tag(&hint_path);
+                                        let mut extra_envs = HashMap::new();
+                                        extra_envs.insert(
+                                            "ASPECT_LAUNCHER_ASPECT_CLI_ORG".to_string(),
+                                            org.clone(),
+                                        );
+                                        extra_envs.insert(
+                                            "ASPECT_LAUNCHER_ASPECT_CLI_REPO".to_string(),
+                                            repo.clone(),
+                                        );
+                                        extra_envs.insert(
+                                            "ASPECT_LAUNCHER_ASPECT_CLI_TAG".to_string(),
+                                            stale_tag,
+                                        );
+                                        extra_envs.insert(
+                                            "ASPECT_LAUNCHER_ASPECT_CLI_ARTIFACT".to_string(),
+                                            artifact.clone(),
+                                        );
+                                        return Ok((
+                                            stale_dest,
+                                            ASPECT_LAUNCHER_METHOD_GITHUB.to_string(),
+                                            extra_envs,
+                                        ));
+                                    }
+                                }
+                                errs.push(failure);
+                                continue;
+                            }
+                        };
                         let found = releases.into_iter().find(|r| {
                             !r.prerelease && r.assets.iter().any(|a| a.name == *artifact)
                         });
                         let resolved = match found {
                             Some(release) => release.tag_name,
                             None => {
-                                errs.push(Err(miette!(
-                                    "unable to find release artifact {artifact} in any recent {org}/{repo} release"
-                                )));
+                                errs.push(SourceFailure {
+                                    source: format!("github.com/{org}/{repo} releases API"),
+                                    error: miette!(
+                                        "unable to find release artifact {artifact} in any recent release"
+                                    ),
+                                    transient: false,
+                                });
                                 continue;
                             }
                         };
@@ -643,7 +730,7 @@ async fn configure_tool_task(
                     }
 
                     if let Some(e) = download_err {
-                        errs.push(Err(e));
+                        errs.push(SourceFailure::new(direct_url.clone(), e));
                         continue;
                     }
                     return Ok((
@@ -695,14 +782,34 @@ async fn configure_tool_task(
                             extra_envs,
                         ));
                     }
+                    errs.push(SourceFailure {
+                        source: full_path.display().to_string(),
+                        error: miette!("file does not exist"),
+                        transient: false,
+                    });
                 }
             }
         }
-        Err(miette!(format!(
-            "exhausted tool sources {:?}; errors occurred {:?}",
-            tool.sources(),
-            errs
-        )))
+        let mut msg = format!("failed to download {}", tool.name());
+        if errs.is_empty() {
+            msg.push_str(": no tool sources are configured");
+        } else {
+            msg.push_str(" — every source failed:");
+            for failure in &errs {
+                msg.push_str(&format!(
+                    "\n  {}: {}",
+                    failure.source,
+                    error_chain(&failure.error)
+                ));
+            }
+        }
+        if errs.iter().any(|failure| failure.transient) {
+            return Err(miette!(
+                help = "these failures look like a network or GitHub outage — check https://www.githubstatus.com and retry. A previously downloaded CLI is reused from the launcher cache (ASPECT_LAUNCHER_CACHE), so pre-seeding that cache avoids the download entirely.",
+                "{msg}"
+            ));
+        }
+        Err(miette!("{msg}"))
     })(cache.clone(), root_dir.clone(), tool))
 }
 
