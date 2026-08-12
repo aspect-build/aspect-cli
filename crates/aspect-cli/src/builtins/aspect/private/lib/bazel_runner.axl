@@ -218,7 +218,6 @@ def _emit_terminal(ctx, lifecycle, command, data, exit_code, targets = []):
         flagged = final_status == "warning",
     )
 
-
 def target_patterns(explicit: bool, cli_targets: list[str], own_pattern_file: str, rc, command: str) -> list[str]:
     """The target patterns to place on Bazel's command line.
 
