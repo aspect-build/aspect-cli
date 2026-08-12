@@ -20,12 +20,12 @@ Usage in `.aspect/config.axl`:
         # Open the build + test phase log sections by default (else collapsed).
         ctx.features[BuildkiteAnnotations].args.expand_phases = ["build", "test"]
 
-## Suppressing or restyling an annotation
+## Suppressing, restyling or rewriting an annotation
 
-`TaskLifecycleTrait.status_surface_decision` is consulted immediately before
-every write and returns a verdict — publish (optionally restyled) or remove.
-To drop the annotation for tasks that finished clean, so the Annotations tab
-only lists what needs attention:
+`TaskLifecycleTrait.status_surface_decision` is consulted before every write
+and returns a verdict — publish (optionally with a rewritten body or style), or
+remove. To drop the annotation for tasks that finished clean, so the
+Annotations tab only lists what needs attention:
 
     load(
         "@aspect//traits.axl",
@@ -44,8 +44,23 @@ only lists what needs attention:
         ctx.traits[TaskLifecycleTrait].status_surface_decision.append(_drop_when_passed)
 
 A `remove` verdict *replaces* the write rather than following it, so the
-annotation never flickers into view and the body is never rendered just to be
-discarded. Anything this task already published is retracted.
+annotation never flickers into view. Anything this task already published is
+retracted.
+
+`info.body` carries the fully rendered annotation, so a hook can post-process
+it and publish the result:
+
+    load("@aspect//traits.axl", "surface_replace")
+
+    def _add_runbook(ctx: TaskContext, info: StatusSurfaceInfo):
+        if info.status in ("failed", "failing"):
+            return surface_replace(info.body + "\n\nRunbook: https://wiki/ci")
+        return SURFACE_PUBLISH
+
+For authoring a body wholesale, prefer the `templates` arg below — it renders
+from structured data rather than string-editing finished markup, so a layout
+change can't silently break it. Reach for `surface_replace` when the edit
+depends on what the body turned out to be.
 
 This can't be done from a `task_update` hook: those handlers run in
 registration order and features register before a config's own hooks, so a
@@ -53,8 +68,11 @@ config hook that shells out to `annotation remove` is immediately followed by
 this feature re-posting the terminal annotation.
 
 Hooks see live updates too, not just the terminal one, so a hook that ignores
-`info.final` retracts mid-run as well. Scope by `info.surface` when several
-status surfaces are enabled.
+`info.final` retracts mid-run as well.
+
+The Buildkite annotation is the only surface that consults this hook. A
+`remove` needs a surface a single task can retract on its own, and the other
+status surfaces don't qualify — see `StatusSurface`.
 
 ## Templates and metadata
 
@@ -418,25 +436,6 @@ def _buildkite_annotations(ctx: FeatureContext):
         elif not should_emit_update(_state, now_ms(ctx), min_update_interval_ms, final):
             return
 
-        # Ask the config what to do with this annotation before building it.
-        # A `remove` verdict replaces the write rather than following it, so
-        # the annotation never flickers into view and the body is never
-        # rendered just to be discarded — which is also why this can't be done
-        # from a `task_update` hook: those run after the feature has already
-        # posted (see the module docstring).
-        decision = apply_status_surface_hooks(ctx, lifecycle, StatusSurfaceInfo(
-            surface = StatusSurface("buildkite_annotation"),
-            status = status,
-            final = final,
-            style = severity_for_status(status),
-            task_kind = ctx.task.kind,
-            task_name = ctx.task.name,
-        ))
-        if decision.action == StatusSurfaceAction("remove"):
-            _LOG.trace("hook removed %s (status=%s final=%s)" % (context_id, status, final))
-            _remove_annotation(ctx, context_id)
-            return
-
         _snippet_opts, _max_snippets = snippet_budget_for(SURFACE_BUILDKITE)
         out = renderer.render(
             ctx,
@@ -449,7 +448,28 @@ def _buildkite_annotations(ctx: FeatureContext):
             snippet_options = _snippet_opts,
             max_snippets = _max_snippets,
         )
-        body = _format_body(out, update.kind, status, task_label = _state.get("_task_label", ""), final = final)
+
+        # Ask the config what to do with this write. Consulted after rendering
+        # so the hook can rewrite `body`; a `remove` verdict therefore discards
+        # a body we already paid for, which is the accepted trade for letting
+        # hooks edit content. Still cheaper than the alternative a config has
+        # today — a `task_update` hook can't do this at all, since those run
+        # after the feature has already posted (see the module docstring).
+        decision = apply_status_surface_hooks(ctx, lifecycle, StatusSurfaceInfo(
+            surface = StatusSurface("buildkite_annotation"),
+            status = status,
+            final = final,
+            style = severity_for_status(status),
+            body = _format_body(out, update.kind, status, task_label = _state.get("_task_label", ""), final = final),
+            task_kind = ctx.task.kind,
+            task_name = ctx.task.name,
+        ))
+        if decision.action == StatusSurfaceAction("remove"):
+            _LOG.trace("hook removed %s (status=%s final=%s)" % (context_id, status, final))
+            _remove_annotation(ctx, context_id)
+            return
+
+        body = decision.body
         style = decision.style or severity_for_status(status)
         if final:
             _LOG.trace("completing %s (style=%s len=%d)" %

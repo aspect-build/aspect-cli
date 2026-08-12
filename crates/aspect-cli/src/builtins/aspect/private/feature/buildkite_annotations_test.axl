@@ -90,6 +90,7 @@ load(
     "StatusSurfaceAction",
     "StatusSurfaceInfo",
     "apply_status_surface_hooks",
+    "surface_replace",
     "surface_restyle",
 )
 load("../lib/result_text.axl", "severity_for_status")
@@ -368,12 +369,13 @@ def _fake_lifecycle(handlers):
     reads only `.status_surface_decision`."""
     return struct(status_surface_decision = handlers)
 
-def _surface_info(status, final, style = "info"):
+def _surface_info(status, final, style = "info", body = "RENDERED"):
     return StatusSurfaceInfo(
         surface = StatusSurface("buildkite_annotation"),
         status = status,
         final = final,
         style = style,
+        body = body,
         task_kind = "build",
         task_name = "build-test",
     )
@@ -423,6 +425,31 @@ def _assert_status_surface_hooks(ctx):
 
     chained = apply_status_surface_hooks(ctx, _fake_lifecycle([_warn, _observe_style]), _surface_info("passed", True))
     _eq("style threads through the chain", chained.style, "warning+seen")
+
+    # A publish always carries the body to write, even when no hook touched it,
+    # so the caller never has to re-resolve it.
+    _eq("body defaults to the rendered one", apply_status_surface_hooks(ctx, _fake_lifecycle([]), _surface_info("passed", True)).body, "RENDERED")
+    _eq("untouched body passes through", apply_status_surface_hooks(ctx, one, _surface_info("failed", True)).body, "RENDERED")
+
+    # Rewriting the content is the point of handing hooks `info.body`.
+    def _append_runbook(ctx, info):
+        return surface_replace(info.body + " +RUNBOOK")
+
+    replaced = apply_status_surface_hooks(ctx, _fake_lifecycle([_append_runbook]), _surface_info("failed", True))
+    _eq("replace publishes", replaced.action, StatusSurfaceAction("publish"))
+    _eq("replace rewrites body", replaced.body, "RENDERED +RUNBOOK")
+
+    # Each handler sees its predecessor's edit, so rewrites compose.
+    composed = apply_status_surface_hooks(ctx, _fake_lifecycle([_append_runbook, _append_runbook]), _surface_info("failed", True))
+    _eq("body edits compose", composed.body, "RENDERED +RUNBOOK +RUNBOOK")
+
+    # A rewrite can restyle at the same time.
+    def _replace_and_restyle(ctx, info):
+        return surface_replace("NEW", style = "error")
+
+    both = apply_status_surface_hooks(ctx, _fake_lifecycle([_replace_and_restyle]), _surface_info("passed", True))
+    _eq("replace can restyle", both.style, "error")
+    _eq("replace sets body", both.body, "NEW")
 
 
 def _assert_title_overrides(ctx, data, rc):

@@ -222,30 +222,28 @@ def repro_fix_replace(command: str | None = None, description: str | None = None
     )
 
 # Which status surface is about to write. Lets one hook scope itself to a
-# single surface when several are enabled.
+# single surface once more than one consults this.
 #
-# Only surfaces whose API can retract a published artifact are listed, because
-# `remove` is the reason this hook exists:
+# Only the Buildkite annotation, because `remove` is the reason the hook exists
+# and it's the only surface a single task can retract on its own:
 #
-#   buildkite_annotation  — `buildkite-agent annotation remove`
-#   github_pr_comment     — DELETE issue comment
-#   gitlab_mr_note        — DELETE note
+#   - GitHub check runs / GitLab commit statuses have no delete at all (a check
+#     run can only be updated once created; commit statuses are post-only).
+#   - The PR comment and MR note *have* a delete endpoint, but they're a shared
+#     aggregate: every sibling job contributes its task's status to one comment
+#     and a server elects a poster each cycle. One task retracting it would
+#     erase every other task's status — including failures from other jobs —
+#     and the next elected poster would recreate it, flapping. The existing
+#     `delete_comment` call is for collapsing duplicate comments, never for
+#     retracting the live one.
 #
-# Deliberately absent: GitHub check runs (the REST API has no DELETE — a check
-# run can only be updated once created) and GitLab commit statuses (post-only).
-# Those surfaces can't honor `remove` at all, so letting a hook ask for it
-# would only produce a verdict they'd have to ignore.
-StatusSurface = enum("buildkite_annotation", "github_pr_comment", "gitlab_mr_note")
+# An enum (not a bare string) so adding a surface is a deliberate act that has
+# to answer "can one task retract this on its own?".
+StatusSurface = enum("buildkite_annotation")
 
-# Verdict from a `status_surface_decision` hook. `publish` writes as normal;
-# `remove` suppresses the write and retracts anything already published for
-# this task on that surface. `style` (publish only) overrides the surface's
-# severity styling.
-#
-# There is no "replace the content" verdict: the hook runs before the body is
-# rendered (so a `remove` doesn't pay for a render it discards), which means
-# there is no content to hand it. Content is customized through the surface's
-# `templates` arg instead — see `check_dispatch.resolve_templates`.
+# Verdict from a `status_surface_decision` hook. `publish` writes (optionally
+# with a rewritten `body` or `style`); `remove` suppresses the write and
+# retracts anything already published for this task on that surface.
 StatusSurfaceAction = enum("publish", "remove")
 
 # Passed to each `status_surface_decision` hook alongside `ctx` — what the
@@ -258,6 +256,16 @@ StatusSurfaceInfo = record(
     final = field(bool),
     # Severity styling the surface resolved for `status`.
     style = field(str),
+    # The fully rendered content this write would publish. Hooks get it after
+    # rendering precisely so they can post-process it; `surface_replace` builds
+    # a verdict carrying an edited copy.
+    #
+    # For wholesale authoring, prefer the surface's `templates` arg — it renders
+    # from structured data instead of string-editing finished markup, so it
+    # can't be broken by a layout change. This is the escape hatch for the cases
+    # templates can't reach (appending to whatever the body turned out to be,
+    # redacting a pattern across every kind, …).
+    body = field(str),
     # Task identity, so one hook can scope itself per task.
     task_kind = field(str),
     task_name = field(str),
@@ -266,6 +274,10 @@ StatusSurfaceInfo = record(
 StatusSurfaceDecision = record(
     action = field(StatusSurfaceAction),
     style = field(str | None, default = None),
+    # None on a `remove`, and on a `publish` that didn't rewrite anything —
+    # `apply_status_surface_hooks` resolves it to the incoming body before
+    # returning, so callers can always read `decision.body` on a publish.
+    body = field(str | None, default = None),
 )
 
 # Shared singletons for the no-argument verdicts.
@@ -277,28 +289,48 @@ def surface_restyle(style: str) -> StatusSurfaceDecision:
     surface-specific — Buildkite takes `success|info|warning|error`."""
     return StatusSurfaceDecision(action = StatusSurfaceAction("publish"), style = style)
 
+def surface_replace(body: str, style: str | None = None) -> StatusSurfaceDecision:
+    """Publish `body` in place of what the surface rendered, optionally
+    restyling too. Build it from `info.body` to post-process, or pass a fresh
+    string to author it outright."""
+    return StatusSurfaceDecision(action = StatusSurfaceAction("publish"), style = style, body = body)
+
 def apply_status_surface_hooks(ctx, lifecycle, info: StatusSurfaceInfo) -> StatusSurfaceDecision:
     """Run `info` through every `status_surface_decision` hook.
 
-    Handlers chain in order; the first `remove` short-circuits, since there is
-    nothing left to restyle once the write is being suppressed. A `publish`
-    carrying a `style` is threaded into the next handler's `info`, so the last
-    writer wins. No handlers → `SURFACE_PUBLISH`.
+    Handlers chain in order and the first `remove` short-circuits — there is
+    nothing left to edit once the write is being suppressed. A `publish`
+    carrying a rewritten `body` and/or `style` is threaded into the next
+    handler's `info`, so each handler sees its predecessor's edits and the last
+    writer wins.
+
+    On a `publish` the returned decision always carries a `body` (falling back
+    to the incoming one), so callers don't have to re-resolve it. No handlers →
+    publish the body unchanged.
     """
-    decision = SURFACE_PUBLISH
+    decision = StatusSurfaceDecision(action = StatusSurfaceAction("publish"), body = info.body)
     for handler in lifecycle.status_surface_decision:
         decision = handler(ctx, info)
         if decision.action == StatusSurfaceAction("remove"):
             return decision
-        if decision.style:
+        if decision.style or decision.body != None:
             info = StatusSurfaceInfo(
                 surface = info.surface,
                 status = info.status,
                 final = info.final,
-                style = decision.style,
+                style = decision.style or info.style,
+                body = decision.body if decision.body != None else info.body,
                 task_kind = info.task_kind,
                 task_name = info.task_name,
             )
+
+    # Normalize so a publish always carries the body that should be written.
+    if decision.action == StatusSurfaceAction("publish") and decision.body == None:
+        return StatusSurfaceDecision(
+            action = decision.action,
+            style = decision.style,
+            body = info.body,
+        )
     return decision
 
 # Lifecycle hooks any task can fire, so features like GithubStatusChecks
