@@ -139,17 +139,9 @@ impl<'v> values::StarlarkValue<'v> for Query {
 ///
 /// A failed query (bad expression, BUILD evaluation error, …) must not
 /// be mistaken for one that legitimately matched nothing, so the error
-/// carries Bazel's own `stderr` when it's available. `stderr` is
-/// best-effort: it's trimmed and appended only when non-empty, so a
-/// query that died without writing diagnostics still yields a usable
-/// exit-code message.
+/// carries Bazel's own `stderr` when it's available.
 fn query_failure_error(expr: &str, exit_code: Option<i32>, stderr: &str) -> anyhow::Error {
-    let stderr = stderr.trim();
-    let detail = if stderr.is_empty() {
-        String::new()
-    } else {
-        format!("\n{stderr}")
-    };
+    let detail = super::stderr_detail(stderr);
     anyhow!("bazel query failed with exit code {exit_code:?}: {expr}{detail}")
 }
 

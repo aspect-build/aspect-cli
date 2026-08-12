@@ -25,7 +25,8 @@ _REPORT_PLACEHOLDERS = ["{report}", "{lcov}"]
 
 def _resolve_report(ctx):
     """Locate the merged LCOV report; empty string when unavailable."""
-    output_path = ctx.bazel.info().get("output_path")
+    key = "output_path"
+    output_path = ctx.bazel.info(keys = [key]).get(key)
     if not output_path:
         return ""
     report = output_path + "/" + _COMBINED_REPORT_RELPATH
@@ -100,6 +101,8 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     return conclusion
 
 test = task(
+    summary = "Run Bazel tests. Wraps `bazel test` with retries, remote cache/BES wiring, and CI status reporting.",
+    description = "Run Bazel tests. Wraps `bazel test` with retries, remote cache/BES wiring, and CI status reporting.\n\nSee also: `aspect cache diff` lists only the test targets affected by the current working tree, and can run them via its --exec flag.",
     args = {
         # TODO: Support - (list from stdin)
         "targets": args.positional(

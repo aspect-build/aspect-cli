@@ -7,7 +7,7 @@ use std::env;
 use std::env::var;
 use std::fs;
 use std::fs::File;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
@@ -84,8 +84,8 @@ const ASPECT_LAUNCHER_METHOD_HTTP: &str = "http";
 const ASPECT_LAUNCHER_METHOD_GITHUB: &str = "github";
 const ASPECT_LAUNCHER_METHOD_LOCAL: &str = "local";
 
-/// Minimum interval between download-progress prints when running on CI.
-const CI_DOWNLOAD_PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+/// Minimum interval between download-progress prints when stderr is not a terminal.
+const DOWNLOAD_PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
 async fn _download_into_cache(
     client: &Client,
@@ -120,9 +120,11 @@ async fn _download_into_cache(
 
     let mut downloaded: u64 = 0;
 
-    // On CI, terminals don't process `\r` line resets so per-chunk progress
-    // is spammy. Throttle update on its own line.
+    // `\r` line resets only redraw in place on a terminal. Anywhere else — a CI
+    // log, a pipe, an AI agent capturing stderr — every chunk accumulates instead,
+    // so fall back to a throttled line-per-update.
     let is_ci = var("CI").map(|v| !v.is_empty()).unwrap_or(false);
+    let redraw_in_place = io::stderr().is_terminal() && !is_ci;
     let download_start = std::time::Instant::now();
     let mut last_progress = download_start;
 
@@ -140,9 +142,9 @@ async fn _download_into_cache(
 
         downloaded += chunk_size;
 
-        if !is_ci || last_progress.elapsed() >= CI_DOWNLOAD_PROGRESS_INTERVAL {
-            let line_start = if is_ci { "" } else { "\r" };
-            let line_end = if is_ci { "\n" } else { "" };
+        if redraw_in_place || last_progress.elapsed() >= DOWNLOAD_PROGRESS_INTERVAL {
+            let line_start = if redraw_in_place { "\r" } else { "" };
+            let line_end = if redraw_in_place { "" } else { "\n" };
             if let Some(total) = total_size {
                 let percent = ((downloaded as f64 / total as f64) * 100.0) as u64;
                 eprint!(
@@ -171,12 +173,12 @@ async fn _download_into_cache(
     } else {
         format!("{}ms", elapsed.as_millis())
     };
-    if is_ci {
-        eprintln!("downloaded {size_str} in {time_str}");
-    } else {
+    if redraw_in_place {
         // \r overwrites the in-progress KB line; \x1b[K clears any stale tail
         // when the summary is shorter than the last progress print.
         eprintln!("\rdownloaded {size_str} in {time_str}\x1b[K");
+    } else {
+        eprintln!("downloaded {size_str} in {time_str}");
     }
 
     // A 0-byte (or truncated) body would `exec` into an ENOEXEC "Exec format

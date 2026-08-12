@@ -23,10 +23,11 @@ load(
     "./bazel_results.axl",
     "REPRO_COMMANDS_BLOCK",
     "SHARED_DETAILS_BODY_TEMPLATE",
-    "TIPS_BLOCK",
+    "SUMMARY_TEMPLATE",
     "active_phase_data",
     "build_details_data",
     "build_summary_data",
+    "compose_title",
     "format_run_date",
     "render_details_or_fallback",
     "render_summary_or_fallback",
@@ -67,25 +68,30 @@ def _title(data, status, target_pattern = "", task_kind = ""):
     """
     display = emoji_for_status(status) + " " + (task_kind or "warming")
     base = display + ((" " + target_pattern) if target_pattern else "")
+    return base + " · " + _title_state(data, status)
+
+def _title_state(data, status):
+    """The verdict clause after `·`. Exposed as the `state` variable for a
+    `title` template override."""
     w = data.get("warming", {}) or {}
 
     if status == "running":
-        return base + " · Running..."
+        return "Running..."
     if status == "failing":
-        return base + " · Failing..."
+        return "Failing..."
     if status == "aborted":
-        return base + " · Aborted"
+        return "Aborted"
     if w.get("build_failed"):
-        return base + " · Populate failed"
+        return "Populate failed"
     if w.get("archive_error"):
-        return base + " · Archive upload failed"
+        return "Archive upload failed"
     if status == "failed":
-        return base + " · Failed"
+        return "Failed"
     if w.get("archive_succeeded"):
-        return base + " · Warming complete"
+        return "Warming complete"
     if w.get("archive_skipped_reason"):
-        return base + " · Caches populated (archive skipped)"
-    return base + " · Passed"
+        return "Caches populated (archive skipped)"
+    return "Passed"
 
 def conclusion(status, data):
     """Terminal bookend conclusion. See `lifecycle.task_update` for the
@@ -106,14 +112,7 @@ def conclusion(status, data):
         return "Caches populated"
     return ""
 
-_SUMMARY_TEMPLATE = """{% if detail_rows %}{% for row in detail_rows %}
-{% for item in row %}{{ item.icon }} {{ item.value }}{% if not loop.last %} · {% endif %}{% endfor %}{% if not loop.last %}  {% endif %}
-{%- endfor %}{% endif %}
-{% if config_items %}
-:gear: {% for item in config_items %}**{{ item.key }}:** `{{ item.value }}`{% if not loop.last %} · {% endif %}{% endfor %}{% if last_update %}  {% endif %}{% endif %}{% if last_update %}
-:speech_balloon: **Last update:** `{{ last_update }}`{% endif %}""" + TIPS_BLOCK
-
-_DETAILS_TEMPLATE = """{% if is_running %}
+DETAILS_TEMPLATE = """{% if is_running %}
 > 🔄 Warming task in progress...
 
 {% elif is_aborted %}
@@ -183,8 +182,8 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
     details_data = dict(shared_data)
     details_data.update(_build_details_data(data, status))
 
-    summary_tmpl = t.get("summary") or _SUMMARY_TEMPLATE
-    details_tmpl = t.get("details") or _DETAILS_TEMPLATE
+    summary_tmpl = t.get("summary") or SUMMARY_TEMPLATE
+    details_tmpl = t.get("details") or DETAILS_TEMPLATE
 
     (summary_text, _summary_ok) = render_summary_or_fallback(ctx, summary_tmpl, summary_data, surface = "warming")
     (details_text, _rendered_ok) = render_details_or_fallback(ctx, details_tmpl, details_data, surface = "warming")
@@ -197,9 +196,11 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
     task_kind = render_ctx.get("task_kind", "") if render_ctx else ""
     target_pattern = render_ctx.get("subject", "") if render_ctx else ""
     return {
-        "title": _title(
-            data,
+        "title": compose_title(
+            ctx,
+            t.get("title"),
             status,
+            _title_state(data, status),
             target_pattern = target_pattern,
             task_kind = task_kind,
         ),

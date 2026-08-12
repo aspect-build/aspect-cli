@@ -6,7 +6,7 @@ load("@aspect//feature/circleci_test_results.axl", "CircleCITestResults")
 load("@aspect//feature/github_status_checks.axl", "GithubStatusChecks")
 load("@aspect//format.axl", "format")
 load("@aspect//helpers.axl", "aspect_web_ui_url", "detect_build_url", "detect_ci_host", "render_bes_url")
-load("@aspect//private/feature/buildkite_annotations_test.axl", "bk_annotation_snapshot_tests")
+load("@aspect//private/feature/buildkite_annotations_test.axl", "bk_annotation_snapshot_tests", "bk_annotation_template_tests")
 load("@aspect//private/feature/github_status_comments_test.axl", "pr_comment_snapshot_tests")
 load("@aspect//private/helpers_test.axl", "helpers_facade_tests")
 load("@aspect//private/lib/aspect_endpoint_auth_test.axl", "aspect_endpoint_auth_tests")
@@ -51,6 +51,7 @@ def _user_task_impl(ctx: TaskContext) -> int:
 
 _user_task = task(
     kind = "user-task-added-by-config",
+    summary = "Test fixture: a user task added from config.axl rather than its own file.",
     group = ["user"],
     implementation = _user_task_impl,
     args = {},
@@ -409,6 +410,11 @@ def config(ctx: ConfigContext):
     # Buildkite annotations: snapshots the annotate body per kind × status.
     # Run with: aspect dev test-bk-annotation-snapshots
     ctx.tasks.add(bk_annotation_snapshot_tests)
+
+    # Template customization: `args.templates` overrides + the per-kind
+    # SUMMARY_TEMPLATE / DETAILS_TEMPLATE exports configs patch.
+    # Run with: aspect dev test-bk-annotation-templates
+    ctx.tasks.add(bk_annotation_template_tests)
 
     # GitHub PR comment: aggregate-status body across kinds/statuses/links/phases.
     # Run with: aspect dev test-pr-comment-snapshots

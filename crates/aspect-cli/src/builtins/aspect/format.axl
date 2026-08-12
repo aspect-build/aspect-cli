@@ -16,12 +16,11 @@ Usage:
 """
 
 load("@aspect//bazel/build_events.axl", "announce_bes_sinks", "bes_args", "bes_streamed_by_bazel", "collect_bes_sinks", "summarize_bes_upload")
-load("@aspect//bazel.axl", "BazelTrait")
+load("@aspect//bazel.axl", "BazelTrait", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
 load("@std//time.axl", "sleep_iter")
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_flags.axl", "announce_bazel_args", "aspect_endpoint_auth_flags", "bazel_flag_args", "resolve_bazel_announce")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "process_event")
-load("./private/lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
 load("./private/lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
 load("./private/lib/environment.axl", "color_enabled", "error", "info", "warn")
 load("./private/lib/format_results.axl", fmt_init_data = "init_data", format_conclusion = "conclusion")
@@ -649,6 +648,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     return _emit_final(ctx, lifecycle, data, 0)
 
 format = task(
+    summary = "Format source files with the configured formatter target. Formats changed files by default; `--scope=all` for the whole tree.",
     args = {
         "scope": args.string(
             default = "changed",

@@ -17,13 +17,12 @@ Usage:
 """
 
 load("@aspect//bazel/build_events.axl", "announce_bes_sinks", "bes_args", "bes_streamed_by_bazel", "collect_bes_sinks", "summarize_bes_upload")
-load("@aspect//bazel.axl", "BazelTrait")
+load("@aspect//bazel.axl", "BazelTrait", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
 load("@std//time.axl", "sleep", "sleep_iter")
 load("./private/lib/ansi.axl", "ansi")
 load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_flags.axl", "announce_bazel_args", "aspect_endpoint_auth_flags", "bazel_flag_args", "resolve_bazel_announce")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "bb_clientd_root", "bes_get", "file_uri_to_path", "now_ms", "process_event")
-load("./private/lib/bazel_runner.axl", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
 load("./private/lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
 load("./private/lib/environment.axl", "color_enabled", "detect_ci", "error", "warn")
 load("./private/lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_changed_files_listing")
@@ -1201,6 +1200,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     )
 
 lint = task(
+    summary = "Lint targets using rules_lint aspects and report findings on the terminal or as code-review comments.",
     args = {
         "aspects": args.string_list(
             long = "aspect",

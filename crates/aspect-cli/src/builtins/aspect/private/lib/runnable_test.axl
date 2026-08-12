@@ -945,6 +945,7 @@ def _test_impl(ctx):
     return 0
 
 runnable_tests = task(
+    summary = "Run the runnable AXL unit tests.",
     kind = "test-runnable",
     group = ["dev"],
     implementation = _test_impl,

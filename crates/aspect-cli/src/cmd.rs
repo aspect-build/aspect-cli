@@ -19,6 +19,7 @@ use std::process::ExitCode;
 
 use aspect_telemetry::cargo_pkg_display_version;
 use axl_runtime::banner;
+use axl_runtime::color;
 use axl_runtime::diag;
 use axl_runtime::engine::arg::Arg;
 use axl_runtime::engine::arguments::Arguments;
@@ -39,11 +40,16 @@ use thiserror::Error;
 const TASK_ID_KEY: &str = "@@@$'__AXL_TASK_ID__'$@@@";
 /// `aspect feature [<name>]`: routed to the feature-help renderer in `main`.
 const FEATURE_COMMAND: &str = "feature";
+/// `aspect describe`: routed to the machine-readable surface dump in `main`.
+const DESCRIBE_COMMAND: &str = "describe";
 /// Top-level command names `main` intercepts before task parsing; a top-level
 /// task of any of these kinds would be unreachable, so it is rejected at build
 /// time (see `Tree::insert`). Reachable when nested under a group.
-const RESERVED_TOP_LEVEL_COMMANDS: &[&str] =
-    &[FEATURE_COMMAND, crate::credential_helper::GET_COMMAND];
+const RESERVED_TOP_LEVEL_COMMANDS: &[&str] = &[
+    FEATURE_COMMAND,
+    DESCRIBE_COMMAND,
+    crate::credential_helper::GET_COMMAND,
+];
 const TASK_COMMAND_DISPLAY_ORDER: usize = 0;
 const TASK_GROUP_DISPLAY_ORDER: usize = 1;
 
@@ -102,7 +108,7 @@ impl<'a, 'v> Cmd<'a, 'v> {
             tree.insert(*task, &label, task_cmd)?;
         }
 
-        let group_section = group_section(&tree.group_names());
+        let group_section = group_section(&tree.group_rows());
         let root = Command::new("aspect")
             .bin_name("aspect")
             .about("Aspect's programmable task runner built on top of Bazel\n{ Correct, Fast, Usable } -- Choose three")
@@ -182,6 +188,31 @@ impl<'a, 'v> Cmd<'a, 'v> {
                             .hide(true),
                     ),
             )
+            .subcommand(
+                // `describe` is not a task: parsing exists only so `main` can
+                // route to `Cmd::print_describe`. The whole point is that a
+                // reader with no prior knowledge of this repo can enumerate the
+                // surface in one call, so it defaults to JSON rather than
+                // requiring the flag to be known up front.
+                Command::new(DESCRIBE_COMMAND)
+                    .about("Print the resolved task, flag and feature surface as JSON")
+                    .hide(true)
+                    .arg(
+                        ClapArg::new("task")
+                            .value_name("TASK")
+                            .required(false)
+                            .help("Describe one task in full, e.g. `aspect describe 'cache diff'`. Omit for the index."),
+                    )
+                    .arg(
+                        ClapArg::new("output")
+                            .long("output")
+                            .short('o')
+                            .value_name("FORMAT")
+                            .default_value("json")
+                            .value_parser(PossibleValuesParser::new(["json"]))
+                            .help("Output format."),
+                    ),
+            )
             .subcommand(Command::new("version").about("Print version").hide(true))
             .subcommand(
                 Command::new("help")
@@ -189,7 +220,7 @@ impl<'a, 'v> Cmd<'a, 'v> {
                     .hide(true),
             )
             .help_template(format!(
-                "{cli_header}\n\n{{about-with-newline}}\n{{usage-heading}} {{usage}}\n\n\x1b[1;4mTasks:\x1b[0m\n{{subcommands}}{group_section}\n\x1b[1;4mCommands:\x1b[0m\n  \x1b[1mfeature\x1b[0m  List features and their flags\n  \x1b[1mversion\x1b[0m  Print version\n  \x1b[1mhelp\x1b[0m     Print this message or the help of the given subcommand(s)\n\n\x1b[1;4mOptions:\x1b[0m\n{{options}}"
+                "{cli_header}\n\n{{about-with-newline}}\n{{usage-heading}} {{usage}}\n\n\x1b[1;4mTasks:\x1b[0m\n{{subcommands}}{group_section}\n\x1b[1;4mCommands:\x1b[0m\n  \x1b[1mdescribe\x1b[0m  Print the resolved task, flag and feature surface as JSON\n  \x1b[1mfeature\x1b[0m   List features and their flags\n  \x1b[1mversion\x1b[0m   Print version\n  \x1b[1mhelp\x1b[0m      Print this message or the help of the given subcommand(s)\n\n\x1b[1;4mOptions:\x1b[0m\n{{options}}"
             ));
 
         tree.attach(root, version)
@@ -252,6 +283,44 @@ impl<'a, 'v> Cmd<'a, 'v> {
     /// With no name, lists every active feature (keyed by the kebab slug the
     /// user passes back in). With a name, prints just that feature's flags. An
     /// unknown name lists the valid ones on stderr and exits 2.
+    /// Print the resolved surface as JSON (`aspect describe`).
+    ///
+    /// Pretty-printed rather than compact: the output is read far more often
+    /// than it is piped into another program, and diffs of it are useful.
+    pub fn print_describe(&self, version: &str, task: Option<&str>) -> ExitCode {
+        let doc = match task {
+            None => describe_index(version, &self.tasks, &self.features),
+            Some(name) => {
+                let full = describe_json(
+                    version,
+                    &self.tasks,
+                    &self.features,
+                    self.aspect_root,
+                    self.modules,
+                );
+                match select_task(&full, name) {
+                    Some(t) => t,
+                    None => {
+                        eprintln!(
+                            "error: no task {name:?}. Run `aspect describe` for the list of commands."
+                        );
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+        };
+        match serde_json::to_string_pretty(&doc) {
+            Ok(s) => {
+                println!("{s}");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("error: failed to serialize the CLI surface: {e}");
+                ExitCode::FAILURE
+            }
+        }
+    }
+
     pub fn print_feature_help(&self, version: &str, name: Option<&str>) -> ExitCode {
         let mut blocks: Vec<(&dyn FeatureLike<'_>, FeatureBlock)> = self
             .features
@@ -262,7 +331,10 @@ impl<'a, 'v> Cmd<'a, 'v> {
 
         match name {
             None => {
-                print!("{}", render_feature_list(version, &blocks));
+                print!(
+                    "{}",
+                    render_feature_list(version, &blocks, color::stdout_supports_color())
+                );
                 ExitCode::SUCCESS
             }
             Some(name) => match blocks.iter().find(|(f, _)| f.name() == name) {
@@ -752,22 +824,325 @@ fn feature_block(feat: &dyn FeatureLike<'_>) -> Option<FeatureBlock> {
     })
 }
 
+// ── `aspect describe` rendering ────────────────────────────────────────────
+
+/// One CLI argument, described by the flag string a caller would actually type.
+///
+/// `scope` decides that string: task args are bare kebab (`--scope`), feature
+/// args carry their feature prefix (`--tips:silence`). Both go through
+/// [`long_flag`], the same helper that builds the real Clap arg, so what is
+/// described and what parses cannot drift.
+fn describe_arg(scope: Scope<'_>, name: &str, arg: &Arg) -> serde_json::Value {
+    use serde_json::json;
+
+    let flag = match arg {
+        Arg::Positional { .. } | Arg::TrailingVarArgs { .. } => None,
+        _ => Some(format!("--{}", long_flag(scope, name, arg))),
+    };
+    let (kind, default, values, description, short) = match arg {
+        Arg::String {
+            default,
+            values,
+            description,
+            short,
+            ..
+        } => ("string", json!(default), json!(values), description, short),
+        Arg::Boolean {
+            default,
+            description,
+            short,
+            ..
+        } => ("boolean", json!(default), json!(null), description, short),
+        Arg::Int {
+            default,
+            description,
+            short,
+            ..
+        } => ("int", json!(default), json!(null), description, short),
+        Arg::UInt {
+            default,
+            description,
+            short,
+            ..
+        } => ("uint", json!(default), json!(null), description, short),
+        Arg::StringList {
+            default,
+            description,
+            short,
+            ..
+        } => (
+            "string_list",
+            json!(default),
+            json!(null),
+            description,
+            short,
+        ),
+        Arg::BooleanList {
+            default,
+            description,
+            short,
+            ..
+        } => (
+            "boolean_list",
+            json!(default),
+            json!(null),
+            description,
+            short,
+        ),
+        Arg::IntList {
+            default,
+            description,
+            short,
+            ..
+        } => ("int_list", json!(default), json!(null), description, short),
+        Arg::UIntList {
+            default,
+            description,
+            short,
+            ..
+        } => ("uint_list", json!(default), json!(null), description, short),
+        Arg::Positional {
+            default,
+            description,
+            ..
+        } => (
+            "positional",
+            json!(default),
+            json!(null),
+            description,
+            &None,
+        ),
+        Arg::TrailingVarArgs { description } => (
+            "trailing_var_args",
+            json!(null),
+            json!(null),
+            description,
+            &None,
+        ),
+        // Filtered out by `is_cli_exposed` before reaching here.
+        Arg::Custom { description, .. } => ("custom", json!(null), json!(null), description, &None),
+    };
+    // `Arg::is_required` reports false for positionals — they carry cardinality
+    // instead of a `required` flag — so a `minimum = 1` positional would read as
+    // optional. Derive requiredness from the cardinality and report the bounds,
+    // or a caller cannot tell `aspect run` (exactly one target) from a task that
+    // takes none.
+    let (required, minimum, maximum) = match arg {
+        Arg::Positional {
+            minimum, maximum, ..
+        } => (*minimum >= 1, json!(minimum), json!(maximum)),
+        _ => (arg.is_required(), json!(null), json!(null)),
+    };
+    json!({
+        "name": name,
+        "type": kind,
+        "flag": flag,
+        "short": short.as_ref().map(|s| format!("-{s}")),
+        "required": required,
+        "minimum": minimum,
+        "maximum": maximum,
+        "default": default,
+        "allowed_values": values,
+        "description": description,
+    })
+}
+
+/// Re-type a `config.axl` override for the JSON `default` field.
+///
+/// [`stringify_overrides`] flattens every override to `Vec<String>` for Clap's
+/// benefit. Handing that back verbatim would describe an int default as
+/// `["2"]`, so scalars collapse to a single value parsed back to the arg's own
+/// type and only genuine list args stay arrays.
+fn override_as_default(arg: &Arg, over: &[String]) -> serde_json::Value {
+    use serde_json::json;
+
+    match arg {
+        // Positional values are genuinely strings (target patterns), so they
+        // stay as they came.
+        Arg::StringList { .. } | Arg::Positional { .. } => json!(over),
+        Arg::BooleanList { .. } => json!(over.iter().map(|v| v == "true").collect::<Vec<_>>()),
+        Arg::IntList { .. } | Arg::UIntList { .. } => json!(
+            over.iter()
+                .map(|v| v
+                    .parse::<i64>()
+                    .map(|n| json!(n))
+                    .unwrap_or_else(|_| json!(v)))
+                .collect::<Vec<_>>()
+        ),
+        _ => match over.first() {
+            None => json!(null),
+            Some(first) => match arg {
+                Arg::Boolean { .. } => json!(first == "true"),
+                Arg::Int { .. } | Arg::UInt { .. } => first
+                    .parse::<i64>()
+                    .map(|n| json!(n))
+                    .unwrap_or_else(|_| json!(first)),
+                _ => json!(first),
+            },
+        },
+    }
+}
+
+/// Every runnable command with its summary, and nothing else.
+fn describe_index(
+    version: &str,
+    tasks: &[&dyn TaskLike<'_>],
+    features: &[&dyn FeatureLike<'_>],
+) -> serde_json::Value {
+    use serde_json::json;
+
+    let mut commands: Vec<serde_json::Value> = tasks
+        .iter()
+        .map(|task| {
+            let mut path = task.group().clone();
+            path.push(task.kind());
+            json!({
+                "command": format!("aspect {}", path.join(" ")),
+                "summary": task.summary(),
+            })
+        })
+        .collect();
+    commands.sort_by(|a, b| a["command"].as_str().cmp(&b["command"].as_str()));
+
+    json!({
+        "aspect_cli_version": version,
+        "commands": commands,
+        "features": features.iter().map(|f| f.name()).collect::<Vec<_>>(),
+        "next": {
+            "task_detail": "aspect describe '<command without the leading `aspect `>' — e.g. aspect describe 'cache diff'",
+            "feature_flags": "aspect feature <name>",
+        },
+    })
+}
+
+/// Pull one task out of a full [`describe_json`] document by its command path,
+/// with or without the leading `aspect `.
+fn select_task(full: &serde_json::Value, name: &str) -> Option<serde_json::Value> {
+    let want = name.trim().trim_start_matches("aspect ").trim();
+    full["tasks"].as_array()?.iter().find_map(|t| {
+        let cmd = t["command"].as_str()?;
+        (cmd.trim_start_matches("aspect ") == want).then(|| t.clone())
+    })
+}
+
+/// The full resolved surface as JSON: every task reachable in this repo, the
+/// flags each accepts, and the feature flags accepted everywhere.
+///
+/// This exists because the Aspect surface is per-repo — a caller cannot know
+/// what `aspect <task>` means here without asking. One call answers it.
+fn describe_json(
+    version: &str,
+    tasks: &[&dyn TaskLike<'_>],
+    features: &[&dyn FeatureLike<'_>],
+    aspect_root: &Path,
+    modules: &[Mod],
+) -> serde_json::Value {
+    use serde_json::json;
+
+    let described_tasks: Vec<serde_json::Value> = tasks
+        .iter()
+        .map(|task| {
+            let kind = task.kind();
+            let mut path = task.group().clone();
+            path.push(kind.clone());
+            let overrides = stringify_overrides(task.overrides());
+            let args: Vec<serde_json::Value> = task
+                .cli_args()
+                .into_iter()
+                .map(|(arg_name, arg)| {
+                    let mut described = describe_arg(Scope::Task, arg_name, arg);
+                    // A config.axl override is what the caller will actually
+                    // get, so report it as the default and say where it came
+                    // from rather than showing the unreachable schema value.
+                    if let Some(over) = overrides.get(arg_name)
+                        && let Some(obj) = described.as_object_mut()
+                    {
+                        obj.insert("default".into(), override_as_default(arg, over));
+                        obj.insert("default_from_config".into(), json!(true));
+                    }
+                    described
+                })
+                .collect();
+            json!({
+                "command": format!("aspect {}", path.join(" ")),
+                "path": path,
+                "name": kind,
+                "summary": task.summary(),
+                "description": task.description(),
+                "defined_in": defined_in_label(task.path(), aspect_root, modules),
+                "args": args,
+            })
+        })
+        .collect();
+
+    let described_features: Vec<serde_json::Value> = features
+        .iter()
+        .filter_map(|feat| {
+            let block = feature_block(*feat)?;
+            // `feature_block` bakes scalar overrides into its schema but skips
+            // list-valued ones, so re-apply them here for the same reason task
+            // args do it: a caller must see the default execution will use, not
+            // one it can never observe.
+            let overrides = stringify_overrides(feat.overrides());
+            let flags: Vec<serde_json::Value> = block
+                .args
+                .iter()
+                .map(|(arg_name, arg)| {
+                    let mut described = describe_arg(Scope::Feature(&block.prefix), arg_name, arg);
+                    if let Some(over) = overrides.get(arg_name)
+                        && let Some(obj) = described.as_object_mut()
+                    {
+                        obj.insert("default".into(), override_as_default(arg, over));
+                        obj.insert("default_from_config".into(), json!(true));
+                    }
+                    described
+                })
+                .collect();
+            Some(json!({
+                "name": feat.name(),
+                "summary": feat.summary(),
+                "description": feat.description(),
+                "defined_in": defined_in_label(feat.path(), aspect_root, modules),
+                "flags": flags,
+            }))
+        })
+        .collect();
+
+    json!({
+        "aspect_cli_version": version,
+        "tasks": described_tasks,
+        "features": described_features,
+    })
+}
+
 // ── `aspect feature` rendering ─────────────────────────────────────────────
 
 /// Render the `aspect feature` listing: one row per feature, keyed by the
 /// kebab slug the user passes to `aspect feature <name>`, with its summary.
-fn render_feature_list(version: &str, blocks: &[(&dyn FeatureLike<'_>, FeatureBlock)]) -> String {
+fn render_feature_list(
+    version: &str,
+    blocks: &[(&dyn FeatureLike<'_>, FeatureBlock)],
+    color: bool,
+) -> String {
     let width = blocks
         .iter()
         .map(|(f, _)| f.name().len())
         .max()
         .unwrap_or(0);
-    let mut out = format!("{}\n\n\x1b[1;4mFeatures:\x1b[0m\n", banner::line(version));
+    let (bold, bold_underline, reset) = if color {
+        ("\x1b[1m", "\x1b[1;4m", "\x1b[0m")
+    } else {
+        ("", "", "")
+    };
+    let mut out = format!(
+        "{}\n\n{bold_underline}Features:{reset}\n",
+        banner::line_colored(version, color)
+    );
     for (feat, _) in blocks {
         let slug = feat.name();
         let pad = " ".repeat(width - slug.len() + 2);
         out.push_str(&format!(
-            "  \x1b[1m{}\x1b[0m{}{}\n",
+            "  {bold}{}{reset}{}{}\n",
             slug,
             pad,
             feat.summary()
@@ -840,6 +1215,9 @@ fn task_command(
         kind, label,
     );
     let about = if task.summary().is_empty() {
+        if needs_summary_warning(task.summary(), label) {
+            warn_missing_summary(&kind, label);
+        }
         context_line.clone()
     } else {
         task.summary().clone()
@@ -898,8 +1276,9 @@ fn task_command(
         Some(h) => format!("{h}\n"),
         None => "{about-with-newline}".to_string(),
     };
-    let feature_footer = "\x1b[2mFeature flags are accepted here but hidden. \
-         Run `aspect feature` to list features and their flags.\x1b[0m";
+    let feature_footer = "\x1b[2mFeatures add CI reporting and artifact integrations \
+         (GitHub, Buildkite, GitLab, CircleCI, telemetry). Their flags are accepted here \
+         but hidden; run `aspect feature` to list them.\x1b[0m";
     cmd = cmd.help_template(format!(
         "{cli_header}\n\n{about_block}\n{{usage-heading}} {{usage}}\n\n{{all-args}}\n\n{feature_footer}"
     ));
@@ -973,35 +1352,42 @@ impl Tree {
         sub.insert_at(name, full_group, &remaining[1..], label, cmd)
     }
 
-    fn group_names(&self) -> Vec<String> {
-        self.subgroups.keys().cloned().collect()
+    /// What each subgroup contains, as a comma-joined list of its task kinds
+    /// and nested group names. A group has no summary of its own to show, and
+    /// "auth task group" tells a reader nothing about whether the command they
+    /// want is inside — listing the members does.
+    fn group_rows(&self) -> Vec<(String, String)> {
+        self.subgroups
+            .iter()
+            .map(|(name, sub)| (name.clone(), sub.member_list()))
+            .collect()
+    }
+
+    fn member_list(&self) -> String {
+        let mut members: Vec<String> = self.tasks.keys().cloned().collect();
+        members.extend(self.subgroups.keys().map(|g| format!("{g}/")));
+        elide(&members, MEMBER_LIST_WIDTH)
     }
 
     fn attach(self, mut root: Command, version: &str) -> Result<Command, CmdError> {
         // Subgroups (rendered hidden, with their own help template).
         let header = banner::line(version);
         for (name, sub) in self.subgroups {
-            let sub_groups = sub.group_names();
+            let sub_rows = sub.group_rows();
+            let about = format!("\x1b[3m{}\x1b[0m: {}", name, sub.member_list());
             let mut template =
                 format!("{header}\n\n{{about-with-newline}}\n{{usage-heading}} {{usage}}");
             if !sub.tasks.is_empty() {
                 template.push_str("\n\n\x1b[1;4mTasks:\x1b[0m\n{subcommands}");
             }
-            if !sub_groups.is_empty() {
-                let max_len = sub_groups.iter().map(|n| n.len()).max().unwrap_or(0);
-                template.push_str("\n\n\x1b[1;4mTask Groups:\x1b[0m\n");
-                for gname in &sub_groups {
-                    let pad = " ".repeat(max_len - gname.len() + 2);
-                    template.push_str(&format!("  \x1b[1m{}\x1b[0m{}task group\n", gname, pad));
-                }
-            }
+            template.push_str(&group_section(&sub_rows));
             let template = format!(
                 "{}\n\n\x1b[1;4mOptions:\x1b[0m\n{{options}}",
                 template.trim_end()
             );
             let mut subcmd = Command::new(name.clone())
                 .subcommand_value_name("TASK|GROUP")
-                .about(format!("\x1b[3m{}\x1b[0m task group", name))
+                .about(about)
                 .display_order(TASK_GROUP_DISPLAY_ORDER)
                 .hide(true)
                 .help_template(template);
@@ -1025,23 +1411,52 @@ impl Tree {
     }
 }
 
-fn group_section(group_names: &[String]) -> String {
-    if group_names.is_empty() {
+/// Width budget for a group's member list before it is elided.
+const MEMBER_LIST_WIDTH: usize = 58;
+
+/// Join `items`, trimming to `width` and appending `…` plus the count dropped.
+fn elide(items: &[String], width: usize) -> String {
+    let mut out = String::new();
+    for (i, item) in items.iter().enumerate() {
+        let sep = if i == 0 { "" } else { ", " };
+        if !out.is_empty() && out.len() + sep.len() + item.len() > width {
+            return format!("{out}, … (+{} more)", items.len() - i);
+        }
+        out.push_str(sep);
+        out.push_str(item);
+    }
+    out
+}
+
+fn group_section(rows: &[(String, String)]) -> String {
+    if rows.is_empty() {
         return String::new();
     }
-    let max_len = group_names.iter().map(|n| n.len()).max().unwrap_or(0);
+    let max_len = rows.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
     let mut s = String::from("\n\n\x1b[1;4mTask Groups:\x1b[0m\n");
-    for name in group_names {
+    for (name, members) in rows {
         let pad = " ".repeat(max_len - name.len() + 2);
-        s.push_str(&format!(
-            "  \x1b[1m{}\x1b[0m{}\x1b[3m{}\x1b[0m task group\n",
-            name, pad, name
-        ));
+        s.push_str(&format!("  \x1b[1m{}\x1b[0m{}{}\n", name, pad, members));
     }
     s
 }
 
 // ── Misc helpers ───────────────────────────────────────────────────────────
+
+/// Warn that a task has no `summary`, which will become required.
+fn warn_missing_summary(kind: &str, defined_in: &str) {
+    diag::warn(&format!(
+        "task {kind:?} in {defined_in} has no summary, so it shows as \
+         \"{kind} task defined in {defined_in}\" in `aspect --help`. \
+         Add summary = \"…\" to task(...) — this becomes an error in a future release."
+    ));
+}
+
+/// Undocumented, and defined in this repo rather than a module (`@mod//…`) —
+/// a module's task is not the reader's to fix.
+fn needs_summary_warning(summary: &str, defined_in: &str) -> bool {
+    summary.is_empty() && !defined_in.starts_with('@')
+}
 
 fn defined_in_label(path: &Path, aspect_root: &Path, modules: &[Mod]) -> String {
     for r#mod in modules {
@@ -1144,6 +1559,7 @@ mod tests {
         group: Vec<String>,
         args: SmallMap<String, Arg>,
         path: PathBuf,
+        summary: String,
     }
 
     impl<'v> TaskLike<'v> for StubTask {
@@ -1151,7 +1567,7 @@ mod tests {
             &self.args
         }
         fn summary(&self) -> &String {
-            empty_string()
+            &self.summary
         }
         fn description(&self) -> &String {
             empty_string()
@@ -1182,12 +1598,14 @@ mod tests {
         }
     }
 
+    /// Summary is non-empty so `Cmd::build` doesn't warn in every test.
     fn stub_task(name: &str, group: &[&str], args: SmallMap<String, Arg>) -> StubTask {
         StubTask {
             name: name.to_owned(),
             group: group.iter().map(|s| s.to_string()).collect(),
             args,
             path: PathBuf::from("/repo/tasks/test.axl"),
+            summary: format!("Stub {name} task."),
         }
     }
 
@@ -1482,12 +1900,210 @@ mod tests {
             .collect();
         let mut sorted = blocks;
         sorted.sort_by(|(a, _), (b, _)| a.name().cmp(&b.name()));
-        let out = render_feature_list("1.2.3", &sorted);
+        let out = render_feature_list("1.2.3", &sorted, true);
         let au_at = out.find("artifact-upload").expect("artifact-upload listed");
         let tips_at = out.find("tips").expect("tips listed");
         assert!(au_at < tips_at, "rows should be alphabetical by slug");
         assert!(out.contains("Upload artifacts."), "summary missing");
         assert!(out.contains("aspect feature <NAME>"), "footer missing");
+    }
+
+    #[test]
+    fn describe_emits_runnable_commands_and_real_flag_strings() {
+        let mut args: SmallMap<String, Arg> = SmallMap::new();
+        args.insert("base_ref".to_owned(), arg_string("main"));
+        args.insert(
+            "targets".to_owned(),
+            Arg::Positional {
+                minimum: 0,
+                maximum: 8,
+                default: Some(vec!["//...".to_owned()]),
+                description: None,
+            },
+        );
+        let task = stub_task("login", &["auth"], args);
+        let tasks: Vec<&dyn TaskLike> = vec![&task];
+
+        let doc = describe_json("1.2.3", &tasks, &[], Path::new("/repo"), &[]);
+        let t = &doc["tasks"][0];
+
+        // The command string is the whole point: an agent copies it verbatim.
+        assert_eq!(t["command"], "aspect auth login");
+        assert_eq!(t["path"], serde_json::json!(["auth", "login"]));
+        assert_eq!(doc["aspect_cli_version"], "1.2.3");
+
+        let by_name = |n: &str| {
+            t["args"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|a| a["name"] == n)
+                .unwrap()
+                .clone()
+        };
+        // `_` becomes `-` in the flag, matching what Clap actually parses.
+        assert_eq!(by_name("base_ref")["flag"], "--base-ref");
+        assert_eq!(by_name("base_ref")["default"], "main");
+        // Positionals have no flag to type.
+        assert_eq!(by_name("targets")["flag"], serde_json::Value::Null);
+        assert_eq!(by_name("targets")["type"], "positional");
+        // A flag arg carries no cardinality.
+        assert_eq!(by_name("base_ref")["minimum"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn summary_warning_fires_only_for_undocumented_first_party_tasks() {
+        assert!(needs_summary_warning("", ".aspect/deploy.axl"));
+
+        assert!(!needs_summary_warning(
+            "Deploy the app.",
+            ".aspect/deploy.axl"
+        ));
+        assert!(!needs_summary_warning("Build it.", "@aspect//build.axl"));
+        assert!(!needs_summary_warning("", "@aspect//build.axl"));
+        assert!(!needs_summary_warning("", "@some_third_party//task.axl"));
+    }
+
+    /// The runtime warning skips `@aspect//` tasks, so enforce the rule here.
+    ///
+    /// Reads the `include_dir!` embed, not the filesystem, so it works under
+    /// Bazel's sandbox where the cargo layout isn't on disk.
+    #[test]
+    fn every_builtin_task_declares_a_summary() {
+        use include_dir::{Dir, include_dir};
+        static ASPECT_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/src/builtins/aspect");
+
+        let mut offenders = Vec::new();
+        for f in ASPECT_DIR.find("**/*.axl").unwrap() {
+            let Some(text) = f.as_file().and_then(|file| file.contents_utf8()) else {
+                continue;
+            };
+            // `<var> = task(` at column 0, keywords at one indent.
+            for (idx, _) in text.match_indices(" = task(\n") {
+                let body = &text[idx..];
+                let end = body.find("\n)").unwrap_or(body.len());
+                if !body[..end].contains("\n    summary = ") {
+                    let line = text[..idx].lines().count() + 1;
+                    offenders.push(format!("{}:{}", f.path().display(), line));
+                }
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "built-in tasks must declare a summary; add `summary = \"…\"` at:\n  {}",
+            offenders.join("\n  ")
+        );
+    }
+
+    #[test]
+    fn describe_reports_positional_cardinality_and_derives_requiredness() {
+        let mut args: SmallMap<String, Arg> = SmallMap::new();
+        // `Arg::is_required` returns false for every positional, so a required
+        // one is only distinguishable via its cardinality.
+        args.insert(
+            "target".to_owned(),
+            Arg::Positional {
+                minimum: 1,
+                maximum: 1,
+                default: None,
+                description: None,
+            },
+        );
+        args.insert(
+            "extras".to_owned(),
+            Arg::Positional {
+                minimum: 0,
+                maximum: 8,
+                default: None,
+                description: None,
+            },
+        );
+        let task = stub_task("run", &[], args);
+        let tasks: Vec<&dyn TaskLike> = vec![&task];
+        let doc = describe_json("1.2.3", &tasks, &[], Path::new("/repo"), &[]);
+        let by_name = |n: &str| {
+            doc["tasks"][0]["args"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|a| a["name"] == n)
+                .unwrap()
+                .clone()
+        };
+
+        assert_eq!(by_name("target")["required"], true);
+        assert_eq!(by_name("target")["minimum"], 1);
+        assert_eq!(by_name("target")["maximum"], 1);
+
+        assert_eq!(by_name("extras")["required"], false);
+        assert_eq!(by_name("extras")["minimum"], 0);
+        assert_eq!(by_name("extras")["maximum"], 8);
+    }
+
+    #[test]
+    fn describe_retypes_config_overrides_rather_than_stringifying_them() {
+        let int_arg = Arg::Int {
+            required: false,
+            default: 1,
+            short: None,
+            long: None,
+            description: None,
+        };
+        assert_eq!(
+            override_as_default(&int_arg, &["2".to_owned()]),
+            serde_json::json!(2)
+        );
+
+        let bool_arg = Arg::Boolean {
+            required: false,
+            default: false,
+            short: None,
+            long: None,
+            description: None,
+        };
+        assert_eq!(
+            override_as_default(&bool_arg, &["true".to_owned()]),
+            serde_json::json!(true)
+        );
+
+        // Genuine list args keep their array shape.
+        let list_arg = Arg::StringList {
+            required: false,
+            default: vec![],
+            short: None,
+            long: None,
+            description: None,
+        };
+        assert_eq!(
+            override_as_default(&list_arg, &["a".to_owned(), "b".to_owned()]),
+            serde_json::json!(["a", "b"])
+        );
+
+        // …and numeric lists are re-typed elementwise, not left as strings.
+        let int_list = Arg::IntList {
+            required: false,
+            default: vec![],
+            short: None,
+            long: None,
+            description: None,
+        };
+        assert_eq!(
+            override_as_default(&int_list, &["1".to_owned(), "2".to_owned()]),
+            serde_json::json!([1, 2])
+        );
+
+        // Positional values are target patterns — genuinely strings.
+        let positional = Arg::Positional {
+            minimum: 0,
+            maximum: 8,
+            default: None,
+            description: None,
+        };
+        assert_eq!(
+            override_as_default(&positional, &["//...".to_owned()]),
+            serde_json::json!(["//..."])
+        );
     }
 
     #[test]

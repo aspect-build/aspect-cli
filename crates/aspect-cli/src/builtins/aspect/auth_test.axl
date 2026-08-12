@@ -81,6 +81,7 @@ def _test_impl(ctx):
     return 0
 
 auth_tests = task(
+    summary = "Run the auth AXL unit tests.",
     kind = "test-auth",
     group = ["dev"],
     implementation = _test_impl,

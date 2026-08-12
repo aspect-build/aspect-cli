@@ -45,11 +45,14 @@ future feature that wants merge-blocking semantics.
 
 Rendering goes through the shared `check_dispatch.RENDERERS` table —
 templates and `metadata_keys` configure exactly as they do for
-`GithubStatusChecks`:
+`GithubStatusChecks`. Flat "summary"/"details" keys apply to every task
+kind; a per-task-kind block overlays them for that kind alone (see
+`check_dispatch.resolve_templates`):
 
     def config(ctx: ConfigContext):
         ctx.features[GitlabCommitStatuses].args.templates = {
-            "summary": "my custom {{ status_label }} template",
+            "summary": my_shared_summary_template,
+            "lint": {"details": my_lint_details_template},
         }
         ctx.features[GitlabCommitStatuses].args.metadata_keys = ["DEPLOY_ENV"]
 
@@ -71,6 +74,7 @@ load(
     "kind_for_task",
     "make_render_ctx",
     "renderer_for_kind",
+    "resolve_templates",
     "should_emit_update",
 )
 load("../private/lib/ci.axl", "detect_ci_host", "resolve_build_url")
@@ -301,7 +305,7 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
             "running",
             make_render_ctx(_state, last_updated_at = format_run_date(ctx, now_ms(ctx))),
             initial_links,
-            templates,
+            resolve_templates(templates, ctx.task.kind),
             metadata_keys,
         )
         _post_status(ctx, "pending", initial_output, initial_links)
@@ -375,7 +379,7 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
             status,
             make_render_ctx(_state, last_updated_at = format_run_date(ctx, now_ms(ctx))),
             links,
-            templates,
+            resolve_templates(templates, ctx.task.kind),
             metadata_keys,
         )
 
@@ -433,11 +437,13 @@ GitlabCommitStatuses = feature(
             dict,
             default = {},
             description = "Map of template overrides for the rendered status output. " +
-                          "Keys: \"summary\", \"details\". Each value is a Jinja2 template " +
-                          "string. Empty dict (default) uses the feature's built-in templates. " +
-                          "Note: only the rendered `title` lands on the commit status (in " +
-                          "`description`, truncated to 255 chars) — the full body is rendered " +
-                          "into the GitlabStatusComments rolling note.",
+                          "Flat keys \"title\" / \"summary\" / \"details\" (Jinja2 strings) apply to every " +
+                          "task kind; a per-task-kind block (\"build\", \"test\", \"lint\", " +
+                          "\"format\", \"gazelle\", \"delivery\", \"warming\") overlays them for " +
+                          "that kind alone, e.g. {\"summary\": ..., \"lint\": {\"details\": ...}}. " +
+                          "The \"title\" template renders with `icon`, `task_kind`, `subject`, " +
+                          "`state` and `status`; a broken title falls back to the built-in layout. " +
+                          "Empty dict (default) uses the feature's built-in templates. Note: only the rendered `title` lands on the commit status (in `description`, truncated to 255 chars) \u2014 the full body is rendered into the GitlabStatusComments rolling note.",
         ),
         "metadata_keys": args.string_list(
             default = [],
