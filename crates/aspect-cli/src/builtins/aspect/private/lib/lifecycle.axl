@@ -223,12 +223,29 @@ def repro_fix_replace(command: str | None = None, description: str | None = None
 
 # Which status surface is about to write. Lets one hook scope itself to a
 # single surface when several are enabled.
-StatusSurface = enum("buildkite_annotation", "github_check", "gitlab_commit_status")
+#
+# Only surfaces whose API can retract a published artifact are listed, because
+# `remove` is the reason this hook exists:
+#
+#   buildkite_annotation  — `buildkite-agent annotation remove`
+#   github_pr_comment     — DELETE issue comment
+#   gitlab_mr_note        — DELETE note
+#
+# Deliberately absent: GitHub check runs (the REST API has no DELETE — a check
+# run can only be updated once created) and GitLab commit statuses (post-only).
+# Those surfaces can't honor `remove` at all, so letting a hook ask for it
+# would only produce a verdict they'd have to ignore.
+StatusSurface = enum("buildkite_annotation", "github_pr_comment", "gitlab_mr_note")
 
 # Verdict from a `status_surface_decision` hook. `publish` writes as normal;
 # `remove` suppresses the write and retracts anything already published for
 # this task on that surface. `style` (publish only) overrides the surface's
 # severity styling.
+#
+# There is no "replace the content" verdict: the hook runs before the body is
+# rendered (so a `remove` doesn't pay for a render it discards), which means
+# there is no content to hand it. Content is customized through the surface's
+# `templates` arg instead — see `check_dispatch.resolve_templates`.
 StatusSurfaceAction = enum("publish", "remove")
 
 # Passed to each `status_surface_decision` hook alongside `ctx` — what the
@@ -305,7 +322,8 @@ TaskLifecycleTrait = trait(
 
     # `(ctx: TaskContext, info: StatusSurfaceInfo) -> StatusSurfaceDecision`,
     # consulted by a status surface immediately before it writes, so a config
-    # can suppress or restyle the write itself.
+    # can suppress or restyle the write itself. It does not carry the rendered
+    # content — use the surface's `templates` arg for that.
     #
     # Lives on the lifecycle trait (not the surface's own) because a feature
     # can't contribute a trait — `feature()` takes no `traits` — and tasks must
