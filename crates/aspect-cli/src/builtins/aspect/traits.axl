@@ -21,7 +21,7 @@ files can load the full trait set with a single import:
          "StatusSurface",
          "StatusSurfaceAction",
          "StatusSurfaceDecision",
-         "StatusSurfaceInfo",
+         "StatusSurfaceUpdate",
          "surface_replace",
          "surface_restyle",
          "TaskUpdate",
@@ -57,7 +57,7 @@ load(
     _StatusSurface = "StatusSurface",
     _StatusSurfaceAction = "StatusSurfaceAction",
     _StatusSurfaceDecision = "StatusSurfaceDecision",
-    _StatusSurfaceInfo = "StatusSurfaceInfo",
+    _StatusSurfaceUpdate = "StatusSurfaceUpdate",
     _TaskLifecycleTrait = "TaskLifecycleTrait",
     _TaskUpdate = "TaskUpdate",
     _repro_fix_replace = "repro_fix_replace",
@@ -81,7 +81,7 @@ SURFACE_REMOVE = _SURFACE_REMOVE
 StatusSurface = _StatusSurface
 StatusSurfaceAction = _StatusSurfaceAction
 StatusSurfaceDecision = _StatusSurfaceDecision
-StatusSurfaceInfo = _StatusSurfaceInfo
+StatusSurfaceUpdate = _StatusSurfaceUpdate
 TaskLifecycleTrait = _TaskLifecycleTrait
 TaskUpdate = _TaskUpdate
 repro_fix_replace = _repro_fix_replace

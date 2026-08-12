@@ -22,7 +22,7 @@ Usage in `.aspect/config.axl`:
 
 ## Suppressing, restyling or rewriting an annotation
 
-`TaskLifecycleTrait.status_surface_decision` is consulted before every write
+`TaskLifecycleTrait.status_surface_update` is consulted before every write
 and returns a verdict — publish (optionally with a rewritten body or style), or
 remove. To drop the annotation for tasks that finished clean, so the
 Annotations tab only lists what needs attention:
@@ -31,28 +31,28 @@ Annotations tab only lists what needs attention:
         "@aspect//traits.axl",
         "SURFACE_PUBLISH",
         "SURFACE_REMOVE",
-        "StatusSurfaceInfo",
+        "StatusSurfaceUpdate",
         "TaskLifecycleTrait",
     )
 
-    def _drop_when_passed(ctx: TaskContext, info: StatusSurfaceInfo):
+    def _drop_when_passed(ctx: TaskContext, info: StatusSurfaceUpdate):
         if info.final and info.status == "passed":
             return SURFACE_REMOVE
         return SURFACE_PUBLISH
 
     def config(ctx):
-        ctx.traits[TaskLifecycleTrait].status_surface_decision.append(_drop_when_passed)
+        ctx.traits[TaskLifecycleTrait].status_surface_update.append(_drop_when_passed)
 
 A `remove` verdict *replaces* the write rather than following it, so the
 annotation never flickers into view. Anything this task already published is
 retracted.
 
-`info.body` carries the fully rendered annotation, so a hook can post-process
+`update.body` carries the fully rendered annotation, so a hook can post-process
 it and publish the result:
 
     load("@aspect//traits.axl", "surface_replace")
 
-    def _add_runbook(ctx: TaskContext, info: StatusSurfaceInfo):
+    def _add_runbook(ctx: TaskContext, info: StatusSurfaceUpdate):
         if info.status in ("failed", "failing"):
             return surface_replace(info.body + "\n\nRunbook: https://wiki/ci")
         return SURFACE_PUBLISH
@@ -68,12 +68,12 @@ config hook that shells out to `annotation remove` is immediately followed by
 this feature re-posting the terminal annotation.
 
 Hooks see live updates too, not just the terminal one, so a hook that ignores
-`info.final` retracts mid-run as well — and a removal is final: the feature
+`update.final` retracts mid-run as well — and a removal is final: the feature
 stops rendering and stops consulting hooks for the rest of that task rather
 than re-posting what the hook asked to hide.
 
 `GithubStatusChecks` and `GitlabCommitStatuses` consult the same hook, so a
-restyle or rewrite can span all three; scope with `info.surface`. `remove` is
+restyle or rewrite can span all three; scope with `update.surface`. `remove` is
 Buildkite-only — the others can't retract what they've posted, so a removal
 there is downgraded to a publish and logged. See `StatusSurface`.
 
@@ -116,7 +116,7 @@ load(
     "TaskLifecycleTrait",
     "TaskUpdate",
     "publish_expanded_phases",
-    "resolve_surface_write",
+    "resolve_surface_update",
 )
 load("../private/lib/rate_limit.axl", "usage_footer")
 load("../private/lib/result_text.axl", "severity_for_status")
@@ -175,7 +175,7 @@ def _format_body(out, kind, status, task_label = "", final = False):
     `<details>` form so users can collapse what they're done with.
 
     Size is not capped here — `_write_annotation` truncates at the send
-    boundary, after any `status_surface_decision` rewrite.
+    boundary, after any `status_surface_update` rewrite.
     """
     title = out.get("title", "") or ""
     summary = out.get("summary", "") or ""
@@ -243,7 +243,7 @@ def _write_annotation(ctx, style, body, context_id):
     Body is passed on stdin to sidestep argv length limits.
 
     Bodies past BK's 1 MiB hard limit are tail-truncated here, at the send
-    boundary, so a `status_surface_decision` rewrite can't push past it —
+    boundary, so a `status_surface_update` rewrite can't push past it —
     the head (title/summary) is the useful part to keep.
     """
     if len(body) > _ANNOTATION_SIZE_LIMIT:
@@ -458,7 +458,7 @@ def _buildkite_annotations(ctx: FeatureContext):
 
         # Consulted after rendering so hooks can rewrite the body; a `remove`
         # verdict discards the render, the cost of giving hooks that access.
-        decision = resolve_surface_write(
+        decision = resolve_surface_update(
             ctx,
             lifecycle,
             "buildkite_annotation",

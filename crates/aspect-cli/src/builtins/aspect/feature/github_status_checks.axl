@@ -10,28 +10,28 @@ new task kinds plug in there.
 
 ## Restyling or rewriting the check run
 
-`TaskLifecycleTrait.status_surface_decision` is consulted before every write and
+`TaskLifecycleTrait.status_surface_update` is consulted before every write and
 returns a verdict — publish, or publish with a different style or body. Here
-`info.body` is the check run's details text and `info.style` is the conclusion
+`update.body` is the check run's details text and `update.style` is the conclusion
 this write would land (`""` when it lands none, e.g. a mid-run PATCH). A
 restyle overrides the conclusion, which decides whether the check blocks a PR:
 
-    load("@aspect//traits.axl", "SURFACE_PUBLISH", "StatusSurfaceInfo", "TaskLifecycleTrait", "surface_restyle")
+    load("@aspect//traits.axl", "SURFACE_PUBLISH", "StatusSurfaceUpdate", "TaskLifecycleTrait", "surface_restyle")
 
     # Report lint findings without blocking the PR.
-    def _lint_never_blocks(ctx: TaskContext, info: StatusSurfaceInfo):
+    def _lint_never_blocks(ctx: TaskContext, info: StatusSurfaceUpdate):
         if info.task_kind == "lint" and info.style == "failure":
             return surface_restyle("neutral")
         return SURFACE_PUBLISH
 
     def config(ctx):
-        ctx.traits[TaskLifecycleTrait].status_surface_decision.append(_lint_never_blocks)
+        ctx.traits[TaskLifecycleTrait].status_surface_update.append(_lint_never_blocks)
 
 `remove` isn't supported — GitHub can't delete a check run — so a removal is
 downgraded to a publish and logged. Only `BuildkiteAnnotations` honors it.
 
-Hooks see every surface that consults them, so scope with `info.surface` when
-more than one is enabled. See `StatusSurfaceInfo` for the full field set.
+Hooks see every surface that consults them, so scope with `update.surface` when
+more than one is enabled. See `StatusSurfaceUpdate` for the full field set.
 
 Templates and metadata_keys are feature args. `templates` takes flat
 "summary"/"details" keys applying to every task kind, and/or per-task-kind
@@ -73,7 +73,7 @@ load(
     "../private/lib/lifecycle.axl",
     "TaskLifecycleTrait",
     "TaskUpdate",
-    "resolve_surface_write",
+    "resolve_surface_update",
 )
 load(
     "../private/lib/lint_results.axl",
@@ -218,15 +218,15 @@ def _github_status_checks(ctx: FeatureContext):
         return links
 
     def _decide(ctx, status, final, output, conclusion):
-        """Run this write past `status_surface_decision`, returning the
+        """Run this write past `status_surface_update`, returning the
         `(output, conclusion)` to send.
 
         The check run's details `text` is the hook-visible body. `remove` is
-        unreachable here — `resolve_surface_write` downgrades it for surfaces
+        unreachable here — `resolve_surface_update` downgrades it for surfaces
         that can't retract — so only style/body come back.
         """
         text = (output or {}).get("text", "") or ""
-        decision = resolve_surface_write(
+        decision = resolve_surface_update(
             ctx,
             lifecycle,
             "github_check",

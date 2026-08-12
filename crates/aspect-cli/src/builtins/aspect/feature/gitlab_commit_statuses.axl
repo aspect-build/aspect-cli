@@ -43,25 +43,25 @@ future feature that wants merge-blocking semantics.
 
 ## Restyling or rewriting the commit status
 
-`TaskLifecycleTrait.status_surface_decision` is consulted before every write and
+`TaskLifecycleTrait.status_surface_update` is consulted before every write and
 returns a verdict — publish, or publish with a different style or body. A commit
-status carries no body, only the one-line description, so that is `info.body`
-(re-truncated to 255 chars after a rewrite); `info.style` is the state this
+status carries no body, only the one-line description, so that is `update.body`
+(re-truncated to 255 chars after a rewrite); `update.style` is the state this
 write would post, from the table above:
 
-    load("@aspect//traits.axl", "SURFACE_PUBLISH", "StatusSurfaceInfo", "TaskLifecycleTrait", "surface_replace")
+    load("@aspect//traits.axl", "SURFACE_PUBLISH", "StatusSurfaceUpdate", "TaskLifecycleTrait", "surface_replace")
 
-    def _prefix_team(ctx: TaskContext, info: StatusSurfaceInfo):
+    def _prefix_team(ctx: TaskContext, info: StatusSurfaceUpdate):
         return surface_replace("[platform] " + info.body)
 
     def config(ctx):
-        ctx.traits[TaskLifecycleTrait].status_surface_decision.append(_prefix_team)
+        ctx.traits[TaskLifecycleTrait].status_surface_update.append(_prefix_team)
 
 `remove` isn't supported — commit statuses are post-only — so a removal is
 downgraded to a publish and logged. Only `BuildkiteAnnotations` honors it.
 
-Hooks see every surface that consults them, so scope with `info.surface` when
-more than one is enabled. See `StatusSurfaceInfo` for the full field set.
+Hooks see every surface that consults them, so scope with `update.surface` when
+more than one is enabled. See `StatusSurfaceUpdate` for the full field set.
 
 ## Templates and metadata
 
@@ -108,7 +108,7 @@ load(
     "../private/lib/lifecycle.axl",
     "TaskLifecycleTrait",
     "TaskUpdate",
-    "resolve_surface_write",
+    "resolve_surface_update",
 )
 load(
     "../private/lib/rate_limit.axl",
@@ -246,18 +246,18 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
         )
 
     def _decide(ctx, status, final, state, output):
-        """Run this write past `status_surface_decision`, returning the
+        """Run this write past `status_surface_update`, returning the
         `(state, description)` to post.
 
         A commit status carries no body, only the 255-char description, so that
         one line is what a hook sees and can rewrite (re-truncated after). A
-        `remove` is unreachable here — `resolve_surface_write` downgrades it for
+        `remove` is unreachable here — `resolve_surface_update` downgrades it for
         surfaces that can't retract.
         """
         description = _truncate_description(
             (output or {}).get("title", "") or (output or {}).get("summary", ""),
         )
-        decision = resolve_surface_write(
+        decision = resolve_surface_update(
             ctx,
             lifecycle,
             "gitlab_commit_status",
@@ -443,7 +443,7 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
         if desired_state == None:
             return
 
-        # Dedup on the state we'd actually POST, so a `status_surface_decision`
+        # Dedup on the state we'd actually POST, so a `status_surface_update`
         # restyle is compared against what it last posted rather than against
         # the state it overrode.
         (post_state, description) = _decide(ctx, status, final, desired_state, output)

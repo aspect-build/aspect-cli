@@ -18,7 +18,7 @@ contracts a config writes against:
     "details" are independent, per-task-kind blocks overlay the flat keys,
     every renderer module exports the templates a config patches, and a broken
     template degrades to a fallback.
-  - `TaskLifecycleTrait.status_surface_decision` — verdicts resolve, chain, and
+  - `TaskLifecycleTrait.status_surface_update` — verdicts resolve, chain, and
     compose across surfaces, and a `remove` no surface can honor downgrades to
     a publish.
 """
@@ -87,9 +87,9 @@ load(
     "SURFACE_REMOVE",
     "StatusSurface",
     "StatusSurfaceAction",
-    "StatusSurfaceInfo",
+    "StatusSurfaceUpdate",
     "apply_status_surface_hooks",
-    "resolve_surface_write",
+    "resolve_surface_update",
     "surface_replace",
     "surface_restyle",
 )
@@ -372,11 +372,11 @@ def _test_templates_impl(ctx: TaskContext) -> int:
 
 def _fake_lifecycle(handlers):
     """Minimal stand-in for the lifecycle trait — `apply_status_surface_hooks`
-    reads only `.status_surface_decision`."""
-    return struct(status_surface_decision = handlers)
+    reads only `.status_surface_update`."""
+    return struct(status_surface_update = handlers)
 
-def _surface_info(status, final, style = "info", body = "RENDERED", surface = "buildkite_annotation"):
-    return StatusSurfaceInfo(
+def _surface_update(status, final, style = "info", body = "RENDERED", surface = "buildkite_annotation"):
+    return StatusSurfaceUpdate(
         surface = StatusSurface(surface).value,
         status = status,
         final = final,
@@ -387,7 +387,7 @@ def _surface_info(status, final, style = "info", body = "RENDERED", surface = "b
     )
 
 def _assert_status_surface_hooks(ctx):
-    """`status_surface_decision` hooks decide publish / remove / restyle /
+    """`status_surface_update` hooks decide publish / remove / restyle /
     rewrite; they chain in order and resolve to exactly what the caller
     writes. (The remove-latch — a removed surface never re-posts — lives in
     feature state, covered by the stub-agent e2e runs, not here.)"""
@@ -398,32 +398,32 @@ def _assert_status_surface_hooks(ctx):
         return SURFACE_PUBLISH
 
     # No handlers → publish unchanged.
-    _eq("no handlers publishes", apply_status_surface_hooks(ctx, _fake_lifecycle([]), _surface_info("passed", True)).action, StatusSurfaceAction("publish"))
+    _eq("no handlers publishes", apply_status_surface_hooks(ctx, _fake_lifecycle([]), _surface_update("passed", True)).action, StatusSurfaceAction("publish"))
 
     one = _fake_lifecycle([_drop_passed])
 
     # The customer's case: a green task's annotation is retracted at the end.
-    _eq("terminal passed removes", apply_status_surface_hooks(ctx, one, _surface_info("passed", True)).action, StatusSurfaceAction("remove"))
+    _eq("terminal passed removes", apply_status_surface_hooks(ctx, one, _surface_update("passed", True)).action, StatusSurfaceAction("remove"))
 
     # Live updates keep posting, so a long task stays visible while it runs.
-    _eq("live passed publishes", apply_status_surface_hooks(ctx, one, _surface_info("passed", False)).action, StatusSurfaceAction("publish"))
+    _eq("live passed publishes", apply_status_surface_hooks(ctx, one, _surface_update("passed", False)).action, StatusSurfaceAction("publish"))
 
     # Statuses the hook doesn't name are always kept.
     for st in ["failed", "warning", "aborted"]:
-        _eq("terminal %s publishes" % st, apply_status_surface_hooks(ctx, one, _surface_info(st, True)).action, StatusSurfaceAction("publish"))
+        _eq("terminal %s publishes" % st, apply_status_surface_hooks(ctx, one, _surface_update(st, True)).action, StatusSurfaceAction("publish"))
 
     # A restyle publishes with the overridden style.
     def _warn(ctx, info):
         return surface_restyle("warning")
 
-    restyled = apply_status_surface_hooks(ctx, _fake_lifecycle([_warn]), _surface_info("passed", True))
+    restyled = apply_status_surface_hooks(ctx, _fake_lifecycle([_warn]), _surface_update("passed", True))
     _eq("restyle publishes", restyled.action, StatusSurfaceAction("publish"))
     _eq("restyle sets style", restyled.style, "warning")
 
     # `remove` short-circuits, so a later handler can't resurrect the write.
     _eq(
         "remove short-circuits",
-        apply_status_surface_hooks(ctx, _fake_lifecycle([_drop_passed, _warn]), _surface_info("passed", True)).action,
+        apply_status_surface_hooks(ctx, _fake_lifecycle([_drop_passed, _warn]), _surface_update("passed", True)).action,
         StatusSurfaceAction("remove"),
     )
 
@@ -434,26 +434,26 @@ def _assert_status_surface_hooks(ctx):
             return surface_restyle("error")
         return SURFACE_PUBLISH
 
-    chained = apply_status_surface_hooks(ctx, _fake_lifecycle([_warn, _escalate_warning]), _surface_info("passed", True))
+    chained = apply_status_surface_hooks(ctx, _fake_lifecycle([_warn, _escalate_warning]), _surface_update("passed", True))
     _eq("style threads through the chain", chained.style, "error")
 
     # A publish is returned resolved — style and body always set, falling back
     # to the incoming values — so the caller writes it without re-resolving.
-    untouched = apply_status_surface_hooks(ctx, _fake_lifecycle([]), _surface_info("passed", True))
+    untouched = apply_status_surface_hooks(ctx, _fake_lifecycle([]), _surface_update("passed", True))
     _eq("body defaults to the rendered one", untouched.body, "RENDERED")
     _eq("style defaults to the resolved severity", untouched.style, "info")
-    _eq("untouched body passes through", apply_status_surface_hooks(ctx, one, _surface_info("failed", True)).body, "RENDERED")
+    _eq("untouched body passes through", apply_status_surface_hooks(ctx, one, _surface_update("failed", True)).body, "RENDERED")
 
-    # Rewriting the content is the point of handing hooks `info.body`.
+    # Rewriting the content is the point of handing hooks `update.body`.
     def _append_runbook(ctx, info):
         return surface_replace(info.body + " +RUNBOOK")
 
-    replaced = apply_status_surface_hooks(ctx, _fake_lifecycle([_append_runbook]), _surface_info("failed", True))
+    replaced = apply_status_surface_hooks(ctx, _fake_lifecycle([_append_runbook]), _surface_update("failed", True))
     _eq("replace publishes", replaced.action, StatusSurfaceAction("publish"))
     _eq("replace rewrites body", replaced.body, "RENDERED +RUNBOOK")
 
     # Each handler sees its predecessor's edit, so rewrites compose.
-    composed = apply_status_surface_hooks(ctx, _fake_lifecycle([_append_runbook, _append_runbook]), _surface_info("failed", True))
+    composed = apply_status_surface_hooks(ctx, _fake_lifecycle([_append_runbook, _append_runbook]), _surface_update("failed", True))
     _eq("body edits compose", composed.body, "RENDERED +RUNBOOK +RUNBOOK")
 
     # An edit earlier in the chain survives a later plain publish: the resolved
@@ -461,16 +461,16 @@ def _assert_status_surface_hooks(ctx):
     def _plain(ctx, info):
         return SURFACE_PUBLISH
 
-    kept = apply_status_surface_hooks(ctx, _fake_lifecycle([_warn, _plain]), _surface_info("passed", True))
+    kept = apply_status_surface_hooks(ctx, _fake_lifecycle([_warn, _plain]), _surface_update("passed", True))
     _eq("restyle survives a later plain publish", kept.style, "warning")
-    kept_body = apply_status_surface_hooks(ctx, _fake_lifecycle([_append_runbook, _plain]), _surface_info("failed", True))
+    kept_body = apply_status_surface_hooks(ctx, _fake_lifecycle([_append_runbook, _plain]), _surface_update("failed", True))
     _eq("rewrite survives a later plain publish", kept_body.body, "RENDERED +RUNBOOK")
 
     # A rewrite can restyle at the same time.
     def _replace_and_restyle(ctx, info):
         return surface_replace("NEW", style = "error")
 
-    both = apply_status_surface_hooks(ctx, _fake_lifecycle([_replace_and_restyle]), _surface_info("passed", True))
+    both = apply_status_surface_hooks(ctx, _fake_lifecycle([_replace_and_restyle]), _surface_update("passed", True))
     _eq("replace can restyle", both.style, "error")
     _eq("replace sets body", both.body, "NEW")
 
@@ -487,7 +487,7 @@ def _assert_status_surface_hooks(ctx):
         resolved = apply_status_surface_hooks(
             ctx,
             _fake_lifecycle([_replace_for_surface]),
-            _surface_info("passed", True, surface = surface),
+            _surface_update("passed", True, surface = surface),
         )
         _eq("%s honors replace" % surface, resolved.body, "NEW")
         _eq("%s honors restyle" % surface, resolved.style, style)
@@ -506,7 +506,7 @@ def _assert_status_surface_hooks(ctx):
         refused = apply_status_surface_hooks(
             ctx,
             _fake_lifecycle([_foreign_restyle]),
-            _surface_info("passed", True, style = incoming, surface = surface),
+            _surface_update("passed", True, style = incoming, surface = surface),
         )
         _eq("%s refuses a foreign style" % surface, refused.style, incoming)
         _eq("%s still publishes" % surface, refused.action, StatusSurfaceAction("publish"))
@@ -518,12 +518,23 @@ def _assert_status_surface_hooks(ctx):
     mixed = apply_status_surface_hooks(
         ctx,
         _fake_lifecycle([_foreign_style_with_body]),
-        _surface_info("passed", True, style = "success", surface = "github_check"),
+        _surface_update("passed", True, style = "success", surface = "github_check"),
     )
     _eq("refused style keeps the body rewrite", mixed.body, "KEPT")
     _eq("refused style keeps the incoming style", mixed.style, "success")
 
-    # `info.surface` is a plain string, so a hook scopes itself with a literal
+    # A handler that forgets to return — the `task_update` shape, which this
+    # hook's name parallels — degrades to publish-unchanged rather than failing
+    # the task, since the build itself is fine.
+    def _forgot_to_return(ctx, update):
+        pass
+
+    none_ret = apply_status_surface_hooks(ctx, _fake_lifecycle([_forgot_to_return]), _surface_update("passed", True))
+    _eq("None degrades to publish", none_ret.action, StatusSurfaceAction("publish"))
+    _eq("None keeps the body", none_ret.body, "RENDERED")
+    _eq("None keeps the style", none_ret.style, "info")
+
+    # `update.surface` is a plain string, so a hook scopes itself with a literal
     # (as it does for `info.status`) rather than needing the enum.
     def _bk_only(ctx, info):
         if info.surface == "buildkite_annotation":
@@ -533,21 +544,21 @@ def _assert_status_surface_hooks(ctx):
     scoped = _fake_lifecycle([_bk_only])
     _eq(
         "literal surface comparison matches",
-        apply_status_surface_hooks(ctx, scoped, _surface_info("passed", True)).style,
+        apply_status_surface_hooks(ctx, scoped, _surface_update("passed", True)).style,
         "error",
     )
     _eq(
         "literal surface comparison skips others",
-        apply_status_surface_hooks(ctx, scoped, _surface_info("passed", True, surface = "github_check")).style,
+        apply_status_surface_hooks(ctx, scoped, _surface_update("passed", True, surface = "github_check")).style,
         "info",
     )
 
-    # `resolve_surface_write` is what surfaces actually call: it builds the info
+    # `resolve_surface_update` is what surfaces actually call: it builds the info
     # record, validating the surface name, and reads task identity off `ctx`.
     def _echo_identity(ctx, info):
         return surface_replace("%s|%s|%s" % (info.surface, info.task_kind, info.task_name))
 
-    wrapped = resolve_surface_write(
+    wrapped = resolve_surface_update(
         ctx,
         _fake_lifecycle([_echo_identity]),
         "buildkite_annotation",
@@ -567,11 +578,11 @@ def _assert_status_surface_hooks(ctx):
     # publish rather than dropping the write or silently ignoring the verdict.
     _eq(
         "buildkite honors remove",
-        apply_status_surface_hooks(ctx, one, _surface_info("passed", True)).action,
+        apply_status_surface_hooks(ctx, one, _surface_update("passed", True)).action,
         StatusSurfaceAction("remove"),
     )
     for surface in ["github_check", "gitlab_commit_status"]:
-        downgraded = apply_status_surface_hooks(ctx, one, _surface_info("passed", True, surface = surface))
+        downgraded = apply_status_surface_hooks(ctx, one, _surface_update("passed", True, surface = surface))
         _eq("%s downgrades remove" % surface, downgraded.action, StatusSurfaceAction("publish"))
         _eq("%s keeps its body when downgraded" % surface, downgraded.body, "RENDERED")
         _eq("%s keeps its style when downgraded" % surface, downgraded.style, "info")
@@ -583,7 +594,7 @@ def _assert_status_surface_hooks(ctx):
         apply_status_surface_hooks(
             ctx,
             _fake_lifecycle([_drop_passed, _warn]),
-            _surface_info("passed", True, surface = "github_check"),
+            _surface_update("passed", True, surface = "github_check"),
         ).style,
         "info",
     )
