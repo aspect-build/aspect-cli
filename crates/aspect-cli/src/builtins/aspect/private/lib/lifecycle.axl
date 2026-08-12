@@ -364,6 +364,10 @@ def apply_status_surface_hooks(ctx, lifecycle, update: StatusSurfaceUpdate) -> S
     A handler returning None (the `task_update` shape) is reported and treated
     as publish-unchanged, so a config bug degrades rather than failing the task.
 
+    Refused verdicts — a None, an unsupported `remove`, a foreign style — are
+    skipped rather than ending the chain, so one unscoped or buggy handler can't
+    silence the handlers after it.
+
     Verdicts a surface can't honor are refused rather than forwarded, so one
     unscoped hook can't corrupt the other surfaces it also sees: a `remove`
     becomes a publish where the artifact can't be retracted
@@ -382,15 +386,21 @@ def apply_status_surface_hooks(ctx, lifecycle, update: StatusSurfaceUpdate) -> S
         # Likeliest hook bug, and likelier still because the name parallels
         # `task_update`, whose handlers return nothing. Degrade rather than fail
         # the task: the build itself is fine, only the reporting hook is wrong.
+        # One broken handler doesn't silence the rest, so skip just this verdict.
         if decision == None:
             _refuse(ctx, update, "returned None — return SURFACE_PUBLISH to leave the write unchanged (unlike task_update, these handlers must return a verdict)")
-            break
+            continue
 
         if decision.action == StatusSurfaceAction("remove"):
+            # A removal the surface CAN honor ends the chain — there's nothing
+            # left to edit. One it can't is merely inapplicable here, so it's
+            # skipped like any other refused verdict and later handlers (often
+            # scoped to this surface) still get their say.
             if _SURFACE_CAN_REMOVE.get(update.surface):
                 return decision
             _refuse(ctx, update, "asked to remove the %s artifact, which that surface can't retract — publishing instead" % update.surface)
-            break
+            continue
+
         update = _threaded(ctx, update, decision)
     return StatusSurfaceDecision(
         action = StatusSurfaceAction("publish"),

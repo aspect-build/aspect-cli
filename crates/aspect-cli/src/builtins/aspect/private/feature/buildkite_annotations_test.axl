@@ -587,16 +587,37 @@ def _assert_status_surface_hooks(ctx):
         _eq("%s keeps its body when downgraded" % surface, downgraded.body, "RENDERED")
         _eq("%s keeps its style when downgraded" % surface, downgraded.style, "info")
 
-    # A downgrade stops the chain where the remove was returned, so a later
-    # handler can't quietly restyle a write the config tried to suppress.
+    # A refused verdict is skipped, not chain-ending: one unscoped or buggy
+    # handler must not silence the handlers after it. Each of the three refusal
+    # kinds is followed here by a handler whose valid edit has to survive.
+    def _neutral(ctx, update):
+        return surface_restyle("neutral")
+
+    def _foreign_for_gh(ctx, update):
+        return surface_restyle("warning")  # a Buildkite style; refused here
+
+    for (label, first) in [
+        ("unsupported remove", _drop_passed),
+        ("None return", _forgot_to_return),
+        ("foreign style", _foreign_for_gh),
+    ]:
+        survived = apply_status_surface_hooks(
+            ctx,
+            _fake_lifecycle([first, _neutral]),
+            _surface_update("passed", True, surface = "github_check"),
+        )
+        _eq("later handler runs after a refused %s" % label, survived.style, "neutral")
+
+    # The supported case still short-circuits: once Buildkite's annotation is
+    # actually being retracted there is nothing left for a later hook to edit.
     _eq(
-        "downgrade halts the chain",
+        "honored remove ends the chain",
         apply_status_surface_hooks(
             ctx,
-            _fake_lifecycle([_drop_passed, _warn]),
-            _surface_update("passed", True, surface = "github_check"),
-        ).style,
-        "info",
+            _fake_lifecycle([_drop_passed, _neutral]),
+            _surface_update("passed", True),
+        ).action,
+        StatusSurfaceAction("remove"),
     )
 
 def _assert_title_overrides(ctx, data, rc):
