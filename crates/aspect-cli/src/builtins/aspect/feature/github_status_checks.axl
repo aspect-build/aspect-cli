@@ -71,12 +71,9 @@ load("../private/lib/environment.axl", "feature_logger", "workflows_results_url"
 load("../private/lib/github.axl", "detect_commit_sha", "detect_github_repo", "github")
 load(
     "../private/lib/lifecycle.axl",
-    "StatusSurface",
-    "StatusSurfaceAction",
-    "StatusSurfaceInfo",
     "TaskLifecycleTrait",
     "TaskUpdate",
-    "apply_status_surface_hooks",
+    "resolve_surface_write",
 )
 load(
     "../private/lib/lint_results.axl",
@@ -126,6 +123,28 @@ def _detect_triggered_by(env):
         return env.var("CIRCLE_USERNAME") or "CircleCI"
     if env.var("GITLAB_CI"):
         return env.var("GITLAB_USER_LOGIN") or "GitLab CI"
+    return ""
+
+def _conclusion_for(status, final):
+    """Map Aspect `(status, final)` to a GitHub check-run conclusion, or "" when
+    this update lands none (a mid-run PATCH that only refreshes output).
+
+      `failing`                  → `failure` (early red, before build.wait)
+      final `failed` / `aborted` → `failure`
+      final `warning`            → `neutral` (ran with non-fatal findings)
+      final `passed`             → `success` (may flip back from an early
+                                   `failure`; GitHub allows it for retries)
+    """
+    if status == "failing":
+        return "failure"
+    if not final:
+        return ""
+    if status == "failed" or status == "aborted":
+        return "failure"
+    if status == "warning":
+        return "neutral"
+    if status == "passed":
+        return "success"
     return ""
 
 def _collect_ci_links(ctx, results_base_url):
@@ -199,30 +218,27 @@ def _github_status_checks(ctx: FeatureContext):
         return links
 
     def _decide(ctx, status, final, output, conclusion):
-        """Run this write past `status_surface_decision`, returning
-        `(output, conclusion, publish)`.
+        """Run this write past `status_surface_decision`, returning the
+        `(output, conclusion)` to send.
 
-        The check run's `text` is the hook-visible body; `style` is the
-        conclusion this write would land ("" when it lands none). A `remove` is
-        downgraded to a publish by `apply_status_surface_hooks` — check runs
-        can't be deleted — so `publish` is always True today; it's threaded so
-        the caller reads the verdict rather than assuming it.
+        The check run's details `text` is the hook-visible body. `remove` is
+        unreachable here — `resolve_surface_write` downgrades it for surfaces
+        that can't retract — so only style/body come back.
         """
-        decision = apply_status_surface_hooks(ctx, lifecycle, StatusSurfaceInfo(
-            surface = StatusSurface("github_check").value,
-            status = status,
-            final = final,
-            style = conclusion,
-            body = (output or {}).get("text", "") or "",
-            task_kind = ctx.task.kind,
-            task_name = ctx.task.name,
-        ))
-        if decision.action == StatusSurfaceAction("remove"):
-            return (output, conclusion, False)
-        if output != None and decision.body != (output.get("text", "") or ""):
+        text = (output or {}).get("text", "") or ""
+        decision = resolve_surface_write(
+            ctx,
+            lifecycle,
+            "github_check",
+            status,
+            final,
+            conclusion,
+            text,
+        )
+        if output != None and decision.body != text:
             output = dict(output)
             output["text"] = decision.body
-        return (output, decision.style, True)
+        return (output, decision.style)
 
     def _create_check_run(ctx):
         """Authenticate and create the check run with initial output.
@@ -298,15 +314,7 @@ def _github_status_checks(ctx: FeatureContext):
         html_url = result.get("html_url") or ""
         checkrun.set_url(ctx, html_url)
 
-        (initial_patch_output, _initial_style, initial_publish) = _decide(
-            ctx,
-            "running",
-            False,
-            initial_output,
-            "",
-        )
-        if not initial_publish:
-            return
+        (initial_patch_output, _) = _decide(ctx, "running", False, initial_output, "")
 
         # Point details_url at the check-run page; otherwise GitHub
         # auto-fills it with the App's useless homepage URL.
@@ -371,38 +379,16 @@ def _github_status_checks(ctx: FeatureContext):
         if now_ms(ctx) - last >= _HEARTBEAT_INTERVAL_MS:
             _register_check(ctx, final = False)
 
-    def _push_status(ctx, status, final, output = None, conclusion_override = ""):
-        """Send a check-run update for `(status, final)`. Idempotent re:
-        conclusion via `_state["_gh_conclusion"]`. Map:
+    def _push_status(ctx, status, final, desired, output = None):
+        """Send a check-run update, concluding the run when `desired` is a
+        conclusion (see `_conclusion_for`) and PATCHing output only when it's "".
 
-          - `failing` → early-complete `failure` (red ❌ before build.wait).
-          - live `running`/`warning` → PATCH output only, no conclusion.
-          - terminal `passed` → `success` (may flip back from an early
-            `failing`; GitHub's PATCH allows this for retry recovery).
-          - terminal `warning` → `neutral` (ran with non-fatal findings).
-          - terminal `failed`/`aborted` → `failure`.
+        Idempotent re: conclusion via `_state["_gh_conclusion"]`.
         """
         token = _state.get("_github_token")
         check_run_id = _state.get("_check_run_id")
         if not token or not check_run_id:
             return
-
-        # (status, final) → conclusion map. None = no conclusion change.
-        desired = None
-        if status == "failing":
-            desired = "failure"  # early-fail
-        elif final:
-            if status == "failed" or status == "aborted":
-                desired = "failure"
-            elif status == "warning":
-                desired = "neutral"
-            elif status == "passed":
-                desired = "success"
-
-        # A `status_surface_decision` restyle replaces the conclusion, but only
-        # on writes that land one — see `StatusSurfaceInfo.style`.
-        if desired and conclusion_override:
-            desired = conclusion_override
 
         current = _state.get("_gh_conclusion")
         if desired and desired != current:
@@ -538,18 +524,9 @@ def _github_status_checks(ctx: FeatureContext):
 
         # Bypass throttle on conclusion-flipping updates and on the first
         # caller-priority update (e.g. the first BES event).
-        desired_conclusion = None
-        if status == "failing":
-            desired_conclusion = "failure"
-        elif final:
-            if status == "failed" or status == "aborted":
-                desired_conclusion = "failure"
-            elif status == "warning":
-                desired_conclusion = "neutral"
-            elif status == "passed":
-                desired_conclusion = "success"
+        desired_conclusion = _conclusion_for(status, final)
         is_conclusion_transition = (
-            desired_conclusion != None and
+            desired_conclusion != "" and
             desired_conclusion != _state.get("_gh_conclusion")
         )
 
@@ -630,20 +607,19 @@ def _github_status_checks(ctx: FeatureContext):
                     _LOG.info(ctx.std, "Capping lint annotations at %d (of %d eligible)" %
                                        (len(annotations), total_eligible))
 
-        (output, conclusion_override, publish) = _decide(
-            ctx,
-            status,
-            final,
-            output,
-            desired_conclusion or "",
-        )
-        if not publish:
-            return
-        _push_status(ctx, status, final, output = output, conclusion_override = conclusion_override)
+        (output, conclusion) = _decide(ctx, status, final, output, desired_conclusion)
+        _push_status(ctx, status, final, conclusion, output = output)
         if final and extra_batches:
             _send_extra_annotation_batches(ctx, token, check_run_id, output, extra_batches)
 
     lifecycle.task_update.append(_task_update)
+
+# Public test hooks, mirroring `GitlabCommitStatuses` — let the unit suite
+# exercise pure logic without standing up the whole feature machinery.
+
+def conclusion_for(status, final):
+    """Public test hook; see `_conclusion_for`."""
+    return _conclusion_for(status, final)
 
 GithubStatusChecks = feature(
     summary = "Report live task status as GitHub check runs.",

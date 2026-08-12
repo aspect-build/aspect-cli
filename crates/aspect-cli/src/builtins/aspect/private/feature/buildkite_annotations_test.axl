@@ -82,12 +82,6 @@ load(
     gazelle_render_check_output = "render_check_output",
 )
 load(
-    "../lib/lint_results.axl",
-    LINT_DETAILS_TEMPLATE = "DETAILS_TEMPLATE",
-    LINT_SUMMARY_TEMPLATE = "SUMMARY_TEMPLATE",
-    lint_render_check_output = "render_check_output",
-)
-load(
     "../lib/lifecycle.axl",
     "SURFACE_PUBLISH",
     "SURFACE_REMOVE",
@@ -95,8 +89,15 @@ load(
     "StatusSurfaceAction",
     "StatusSurfaceInfo",
     "apply_status_surface_hooks",
+    "resolve_surface_write",
     "surface_replace",
     "surface_restyle",
+)
+load(
+    "../lib/lint_results.axl",
+    LINT_DETAILS_TEMPLATE = "DETAILS_TEMPLATE",
+    LINT_SUMMARY_TEMPLATE = "SUMMARY_TEMPLATE",
+    lint_render_check_output = "render_check_output",
 )
 load("../lib/result_text.axl", "severity_for_status")
 load(
@@ -499,6 +500,27 @@ def _assert_status_surface_hooks(ctx):
         apply_status_surface_hooks(ctx, scoped, _surface_info("passed", True, surface = "github_check")).style,
         "info",
     )
+
+    # `resolve_surface_write` is what surfaces actually call: it builds the info
+    # record, validating the surface name, and reads task identity off `ctx`.
+    def _echo_identity(ctx, info):
+        return surface_replace("%s|%s|%s" % (info.surface, info.task_kind, info.task_name))
+
+    wrapped = resolve_surface_write(
+        ctx,
+        _fake_lifecycle([_echo_identity]),
+        "buildkite_annotation",
+        "passed",
+        True,
+        "success",
+        "RENDERED",
+    )
+    _eq(
+        "wrapper passes surface + task identity through",
+        wrapped.body,
+        "buildkite_annotation|%s|%s" % (ctx.task.kind, ctx.task.name),
+    )
+    _eq("wrapper resolves style when untouched", wrapped.style, "success")
 
     # `remove` is Buildkite-only: the surfaces that can't retract downgrade to a
     # publish rather than dropping the write or silently ignoring the verdict.

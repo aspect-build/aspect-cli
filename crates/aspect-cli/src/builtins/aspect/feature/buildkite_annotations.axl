@@ -112,13 +112,11 @@ load("../private/lib/ci.axl", "resolve_build_url")
 load("../private/lib/environment.axl", "feature_logger", "workflows_results_url")
 load(
     "../private/lib/lifecycle.axl",
-    "StatusSurface",
     "StatusSurfaceAction",
-    "StatusSurfaceInfo",
     "TaskLifecycleTrait",
     "TaskUpdate",
-    "apply_status_surface_hooks",
     "publish_expanded_phases",
+    "resolve_surface_write",
 )
 load("../private/lib/rate_limit.axl", "usage_footer")
 load("../private/lib/result_text.axl", "severity_for_status")
@@ -460,15 +458,15 @@ def _buildkite_annotations(ctx: FeatureContext):
 
         # Consulted after rendering so hooks can rewrite the body; a `remove`
         # verdict discards the render, the cost of giving hooks that access.
-        decision = apply_status_surface_hooks(ctx, lifecycle, StatusSurfaceInfo(
-            surface = StatusSurface("buildkite_annotation").value,
-            status = status,
-            final = final,
-            style = severity_for_status(status),
-            body = _format_body(out, update.kind, status, task_label = _state.get("_task_label", ""), final = final),
-            task_kind = ctx.task.kind,
-            task_name = ctx.task.name,
-        ))
+        decision = resolve_surface_write(
+            ctx,
+            lifecycle,
+            "buildkite_annotation",
+            status,
+            final,
+            severity_for_status(status),
+            _format_body(out, update.kind, status, task_label = _state.get("_task_label", ""), final = final),
+        )
         if decision.action == StatusSurfaceAction("remove"):
             _LOG.trace("hook removed %s (status=%s final=%s)" % (context_id, status, final))
             _remove_annotation(ctx, context_id)

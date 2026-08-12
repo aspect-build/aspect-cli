@@ -106,12 +106,9 @@ load("../private/lib/gitlab_detect.axl", "detect_gitlab_mr")
 load("../private/lib/gitlab_token_cache.axl", "gitlab_token_cache")
 load(
     "../private/lib/lifecycle.axl",
-    "StatusSurface",
-    "StatusSurfaceAction",
-    "StatusSurfaceInfo",
     "TaskLifecycleTrait",
     "TaskUpdate",
-    "apply_status_surface_hooks",
+    "resolve_surface_write",
 )
 load(
     "../private/lib/rate_limit.axl",
@@ -248,32 +245,28 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
             (links.get("aspect_url") or "")
         )
 
-    def _decide(ctx, status, final, state, output, links):
-        """Run this write past `status_surface_decision`, returning
-        `(state, description, publish)`.
+    def _decide(ctx, status, final, state, output):
+        """Run this write past `status_surface_decision`, returning the
+        `(state, description)` to post.
 
-        GitLab carries no body — only a 255-char `description` — so that one
-        line is what a hook sees and can rewrite. `style` is the commit-status
-        state this write would post. A `remove` is downgraded to a publish by
-        `apply_status_surface_hooks` (commit statuses are post-only), so
-        `publish` is always True today; it's threaded so the caller reads the
-        verdict rather than assuming it.
+        A commit status carries no body, only the 255-char description, so that
+        one line is what a hook sees and can rewrite (re-truncated after). A
+        `remove` is unreachable here — `resolve_surface_write` downgrades it for
+        surfaces that can't retract.
         """
         description = _truncate_description(
             (output or {}).get("title", "") or (output or {}).get("summary", ""),
         )
-        decision = apply_status_surface_hooks(ctx, lifecycle, StatusSurfaceInfo(
-            surface = StatusSurface("gitlab_commit_status").value,
-            status = status,
-            final = final,
-            style = state,
-            body = description,
-            task_kind = ctx.task.kind,
-            task_name = ctx.task.name,
-        ))
-        if decision.action == StatusSurfaceAction("remove"):
-            return (state, description, False)
-        return (decision.style, _truncate_description(decision.body), True)
+        decision = resolve_surface_write(
+            ctx,
+            lifecycle,
+            "gitlab_commit_status",
+            status,
+            final,
+            state,
+            description,
+        )
+        return (decision.style, _truncate_description(decision.body))
 
     def _post_status(ctx, state, description, links):
         token = _state.get("_gitlab_token")
@@ -364,16 +357,8 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
             resolve_templates(templates, ctx.task.kind),
             metadata_keys,
         )
-        (initial_state, initial_desc, initial_publish) = _decide(
-            ctx,
-            "running",
-            False,
-            "pending",
-            initial_output,
-            initial_links,
-        )
-        if initial_publish:
-            _post_status(ctx, initial_state, initial_desc, initial_links)
+        (initial_state, initial_desc) = _decide(ctx, "running", False, "pending", initial_output)
+        _post_status(ctx, initial_state, initial_desc, initial_links)
 
     def _task_update(ctx, update):
         # Latch the subject (raw) before init/render: setup_phase sets
@@ -461,16 +446,7 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
         # Dedup on the state we'd actually POST, so a `status_surface_decision`
         # restyle is compared against what it last posted rather than against
         # the state it overrode.
-        (post_state, description, publish) = _decide(
-            ctx,
-            status,
-            final,
-            desired_state,
-            output,
-            links,
-        )
-        if not publish:
-            return
+        (post_state, description) = _decide(ctx, status, final, desired_state, output)
         if post_state == _state.get("_last_state"):
             return
         _post_status(ctx, post_state, description, links)

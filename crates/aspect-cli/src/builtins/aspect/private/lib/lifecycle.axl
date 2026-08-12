@@ -234,13 +234,9 @@ def repro_fix_replace(command: str | None = None, description: str | None = None
 # Those surfaces customize through their `templates` arg ("body").
 StatusSurface = enum("buildkite_annotation", "github_check", "gitlab_commit_status")
 
-_LOG = feature_logger("Status surface")
-
 # Surfaces whose artifact a single task can retract on its own — the only ones
-# a `remove` verdict is honored for. GitHub check runs have no DELETE (a check
-# run is update-only once created) and GitLab commit statuses are post-only, so
-# neither can honor a removal; refusing it loudly beats a verdict the surface
-# silently ignores.
+# honoring a `remove`. GitHub check runs have no DELETE (update-only once
+# created) and GitLab commit statuses are post-only.
 _SURFACE_CAN_REMOVE = {"buildkite_annotation": True}
 
 # Verdict from a `status_surface_decision` hook. `publish` writes (optionally
@@ -274,14 +270,9 @@ StatusSurfaceInfo = record(
     # The rendered content this write would publish, in the surface's own unit:
     # the whole annotation body (buildkite_annotation), the check run's details
     # text (github_check), the one-line description (gitlab_commit_status).
-    # Hooks get it after rendering precisely so they can post-process it;
-    # `surface_replace` builds a verdict carrying an edited copy.
-    #
-    # For wholesale authoring, prefer the surface's `templates` arg — it renders
-    # from structured data instead of string-editing finished markup, so it
-    # can't be broken by a layout change. This is the escape hatch for the cases
-    # templates can't reach (appending to whatever the body turned out to be,
-    # redacting a pattern across every kind, …).
+    # Hooks see it post-render so they can edit it — `surface_replace` carries
+    # the edited copy. Authoring a body wholesale is better done with the
+    # surface's `templates` arg, which renders from structured data.
     body = field(str),
     # Task identity, so one hook can scope itself per task.
     task_kind = field(str),
@@ -301,8 +292,8 @@ SURFACE_PUBLISH = StatusSurfaceDecision(action = StatusSurfaceAction("publish"))
 SURFACE_REMOVE = StatusSurfaceDecision(action = StatusSurfaceAction("remove"))
 
 def surface_restyle(style: str) -> StatusSurfaceDecision:
-    """Publish, overriding the surface's severity styling. Values are
-    surface-specific — Buildkite takes `success|info|warning|error`."""
+    """Publish, overriding the styling. Values are per-surface — see
+    `StatusSurfaceInfo.style`."""
     return StatusSurfaceDecision(action = StatusSurfaceAction("publish"), style = style)
 
 def surface_replace(body: str, style: str | None = None) -> StatusSurfaceDecision:
@@ -310,6 +301,21 @@ def surface_replace(body: str, style: str | None = None) -> StatusSurfaceDecisio
     restyling too. Build it from `info.body` to post-process, or pass a fresh
     string to author it outright."""
     return StatusSurfaceDecision(action = StatusSurfaceAction("publish"), style = style, body = body)
+
+_LOG = feature_logger("Status surface")
+
+def _threaded(info: StatusSurfaceInfo, decision: StatusSurfaceDecision) -> StatusSurfaceInfo:
+    """`info` with the decision's style/body applied, for the next handler.
+    Unset fields keep the incoming value."""
+    return StatusSurfaceInfo(
+        surface = info.surface,
+        status = info.status,
+        final = info.final,
+        style = decision.style or info.style,
+        body = decision.body if decision.body != None else info.body,
+        task_kind = info.task_kind,
+        task_name = info.task_name,
+    )
 
 def apply_status_surface_hooks(ctx, lifecycle, info: StatusSurfaceInfo) -> StatusSurfaceDecision:
     """Run `info` through every `status_surface_decision` hook.
@@ -323,7 +329,8 @@ def apply_status_surface_hooks(ctx, lifecycle, info: StatusSurfaceInfo) -> Statu
     A `remove` the surface can't honor (see `_SURFACE_CAN_REMOVE`) is downgraded
     to a publish so a hook written for Buildkite doesn't silently break the
     other surfaces it also sees. The downgrade is logged — at warn on the
-    terminal emit, so it's noticed once per task rather than per update.
+    terminal emit, so it's noticed once per task rather than per update. Callers
+    on those surfaces therefore never see a `remove` and needn't handle one.
 
     Returns a resolved verdict: on `publish` the decision's `style` and `body`
     are always set (the incoming values when no hook rewrote them), so the
@@ -342,21 +349,30 @@ def apply_status_surface_hooks(ctx, lifecycle, info: StatusSurfaceInfo) -> Statu
             else:
                 _LOG.trace(msg)
             break
-        if decision.style or decision.body != None:
-            info = StatusSurfaceInfo(
-                surface = info.surface,
-                status = info.status,
-                final = info.final,
-                style = decision.style or info.style,
-                body = decision.body if decision.body != None else info.body,
-                task_kind = info.task_kind,
-                task_name = info.task_name,
-            )
+        info = _threaded(info, decision)
     return StatusSurfaceDecision(
         action = StatusSurfaceAction("publish"),
         style = info.style,
         body = info.body,
     )
+
+def resolve_surface_write(ctx, lifecycle, surface, status, final, style, body) -> StatusSurfaceDecision:
+    """`apply_status_surface_hooks` with the `StatusSurfaceInfo` built for you.
+
+    What a surface calls at its write site. `surface` is validated against
+    `StatusSurface` here, and task identity is read off `ctx`, so a surface
+    passes only what it alone knows: its `status`/`final`, plus the `style` and
+    `body` it was about to write in its own vocabulary.
+    """
+    return apply_status_surface_hooks(ctx, lifecycle, StatusSurfaceInfo(
+        surface = StatusSurface(surface).value,
+        status = status,
+        final = final,
+        style = style,
+        body = body,
+        task_kind = ctx.task.kind,
+        task_name = ctx.task.name,
+    ))
 
 # Lifecycle hooks any task can fire, so features like GithubStatusChecks
 # observe progress without coupling to Bazel-specific hooks.
