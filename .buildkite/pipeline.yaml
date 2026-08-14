@@ -329,16 +329,12 @@ steps:
       aspect test --task:name test-bk
   # Smoke-tests the new test-task flags. `--target-pattern-file` is forwarded
   # to Bazel verbatim, so the assertion is just that aspect resolves the file
-  # and the run completes. The IDE/BSP step re-runs a build in the shape the
+  # and the run completes. The IDE/BSP steps re-run a build in the shape the
   # IntelliJ Bazel plugin produces through the tools/bazel wrapper — Bazel's
-  # own flag spellings behind `--bazel-flag` — and asserts the caller's BEP
-  # file is actually written. The CLI appends its own
-  # `--build_event_binary_file` last, and the Bazel option is single-valued.
-  # `--coverage` is exercised against an sh_test rather
-  # and the run completes. The IDE/BSP step re-runs the same pattern file in
-  # the shape the IntelliJ Bazel plugin produces through the tools/bazel
-  # wrapper — Bazel's own flag spellings behind `--bazel-flag` — asserting
-  # that the composed command line is one Bazel accepts.
+  # own flag spellings behind `--bazel-flag` — asserting that the composed
+  # command line is one Bazel accepts, and that the caller's
+  # `--build_event_binary_file` is actually written (the CLI appends its own
+  # last, and the Bazel option is single-valued).
   # `--coverage` is exercised against an sh_test rather
   # than a rust_test: `toolchains_llvm_bootstrapped` 0.5.2 (pinned in
   # MODULE.bazel) ships without `libclang_rt.profile.a`, so any rust_test under
