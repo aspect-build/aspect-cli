@@ -367,7 +367,8 @@ def config(ctx: ConfigContext):
     # Run with: aspect dev test-bazel-flags
     ctx.tasks.add(bazel_flags_tests)
 
-    # bazel_runner.axl dispatch helpers: the bazel_attempt_end/build_end seam.
+    # bazel_runner.axl: the bazel_attempt_end/build_end dispatch seam, plus
+    # target_patterns (when the `targets` default is suppressed).
     # Run with: aspect dev test-bazel-runner
     ctx.tasks.add(bazel_runner_tests)
 

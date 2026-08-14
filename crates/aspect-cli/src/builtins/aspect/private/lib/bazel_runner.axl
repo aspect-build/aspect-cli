@@ -218,6 +218,37 @@ def _emit_terminal(ctx, lifecycle, command, data, exit_code, targets = []):
         flagged = final_status == "warning",
     )
 
+def target_patterns(explicit: bool, cli_targets: list[str], own_pattern_file: str, rc, command: str) -> list[str]:
+    """The target patterns to place on Bazel's command line.
+
+    Bazel rejects an invocation carrying both command-line patterns and
+    `--target_pattern_file` — that pair has no last-wins rule — so the single
+    decision here is whether to materialize the `targets` arg's declared
+    default (`["..."]`), a pattern the user never typed. Explicit patterns
+    always pass through: when they conflict with a pattern file, Bazel reports
+    it, and this runner does not grow a second spelling of that error.
+
+    A pattern file counts no matter which spelling delivered it: aspect's own
+    `--target-pattern-file` arrives as `own_pattern_file`, while Bazel's
+    `--target_pattern_file` reaches `rc` — from `--bazel-flag`, `.bazelrc`, or
+    a `--config` expansion alike, resolved with Bazel's own last-wins parsing.
+
+    Args:
+        explicit:         whether the user actually passed target patterns
+                          (`ctx.args.is_explicit("targets")`) rather than
+                          inheriting the arg's default.
+        cli_targets:      `ctx.args.targets` — never empty (the arg declares
+                          `default = ["..."]`, `minimum = 1`).
+        own_pattern_file: value of aspect's `--target-pattern-file`, or `""`.
+        rc:               the active `RunCommand`; only `flag_value` is used.
+        command:          Bazel subcommand whose options `rc` resolves.
+    """
+    if explicit:
+        return cli_targets
+    if own_pattern_file or rc.flag_value("--target_pattern_file", command = command):
+        return []
+    return cli_targets
+
 def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclusion:
     """Shared impl for build/test tasks.
 
@@ -258,18 +289,14 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
     deployment = deployment_endpoint_flags(ctx)
     base_flags.extend(deployment.base_flags)
 
-    if targets == None:
-        # --target-pattern-file is only honored when the task declares it.
-        pattern_file = getattr(ctx.args, "target_pattern_file", "") if hasattr(ctx.args, "target_pattern_file") else ""
-        if pattern_file:
-            if ctx.args.is_explicit("targets"):
-                fail("--target-pattern-file cannot be combined with command-line target patterns")
-            if not ctx.std.fs.exists(pattern_file):
-                fail("--target-pattern-file: file not found: " + pattern_file)
-            base_flags.append("--target_pattern_file=" + pattern_file)
-            targets = []
-        else:
-            targets = ctx.args.targets
+    # Patterns resolve after the rc parse below, so `setup` opens with what the
+    # user stated and the spawn refines it to the resolved list.
+    if targets != None:
+        subject = " ".join(targets)
+    elif ctx.args.is_explicit("targets"):
+        subject = " ".join(ctx.args.targets)
+    else:
+        subject = ""
 
     data = init_data()
 
@@ -277,7 +304,7 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
     # parse + `use_rc`, health checks. The active run command drives the
     # build/test below (a failed health check concludes the surface and fails
     # the task inside setup_phase).
-    rc = setup_phase(ctx, lifecycle, " ".join(targets), "bazel_results", data, hc_trait, bazel_trait, command, bazel_base_flags = base_flags)
+    rc = setup_phase(ctx, lifecycle, subject, "bazel_results", data, hc_trait, bazel_trait, command, bazel_base_flags = base_flags)
     announce_version, announce_command = resolve_bazel_announce(ctx)
 
     # Announced with the first spawn below (the streams belong to the spawn) and
@@ -298,6 +325,26 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
     # build forwards BES to an advertised backend.
     invocation_flags = aspect_endpoint_auth_flags(ctx, rc, command)
     invocation_flags.extend(bes_results_url_flag(ctx, rc, bes_sinks, deployment, command))
+
+    if targets == None:
+        # aspect's own `--target-pattern-file` (declared by build/test only) is a
+        # per-invocation flag, not rc material — and keeping it out of the parsed
+        # rc is what lets `target_patterns` ask `rc` about the forwarded
+        # spelling. Forwarded rather than expanded into argv, since the flag
+        # exists to bypass OS command-line length limits.
+        own_pattern_file = getattr(ctx.args, "target_pattern_file", "") if hasattr(ctx.args, "target_pattern_file") else ""
+        if own_pattern_file:
+            if not ctx.std.fs.exists(own_pattern_file):
+                fail("--target-pattern-file: file not found: " + own_pattern_file)
+            invocation_flags.append("--target_pattern_file=" + own_pattern_file)
+
+        targets = target_patterns(
+            ctx.args.is_explicit("targets"),
+            ctx.args.targets,
+            own_pattern_file,
+            rc,
+            command,
+        )
 
     # The same viewer reaches the CI surfaces through `data` — they key the link on the
     # sink's own id rather than reading it off the command line. A property of the
@@ -369,6 +416,10 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
                 # work, just attempted again.
                 emoji = "🧪" if command == "test" else "🔨",
             ),
+            # The resolved patterns are only known after the rc parse, so the
+            # `setup` surface opened without them; name them here. A pattern-file
+            # run resolves to no patterns, and `""` means "no change".
+            subject = " ".join(targets),
         )
 
         # Disclose what this bazel call was wired with, after the spawn phase

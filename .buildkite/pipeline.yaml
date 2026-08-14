@@ -335,6 +335,11 @@ steps:
   # file is actually written. The CLI appends its own
   # `--build_event_binary_file` last, and the Bazel option is single-valued.
   # `--coverage` is exercised against an sh_test rather
+  # and the run completes. The IDE/BSP step re-runs the same pattern file in
+  # the shape the IntelliJ Bazel plugin produces through the tools/bazel
+  # wrapper — Bazel's own flag spellings behind `--bazel-flag` — asserting
+  # that the composed command line is one Bazel accepts.
+  # `--coverage` is exercised against an sh_test rather
   # than a rust_test: `toolchains_llvm_bootstrapped` 0.5.2 (pinned in
   # MODULE.bazel) ships without `libclang_rt.profile.a`, so any rust_test under
   # --collect_code_coverage fails CppLink on libld/libc shared libs (upstream
@@ -361,6 +366,11 @@ steps:
       echo "# smoke: targets forwarded via --target_pattern_file" > $$PATTERNS
       echo "//examples/test_states:always_pass" >> $$PATTERNS
       aspect test --task:name test-bk-target-pattern-file --target-pattern-file=$$PATTERNS
+
+      echo "--- :aspect: IDE/BSP shape — forwarded --target_pattern_file"
+      aspect build --task:name test-bk-ide-target-pattern-file \
+        --bazel-flag=--target_pattern_file=$$PATTERNS \
+        --bazel-flag=--tool_tag=bazelbsp:3.2.0
       rm -f $$PATTERNS
 
       echo "--- :aspect: IDE/BSP shape — forwarded --build_event_binary_file"

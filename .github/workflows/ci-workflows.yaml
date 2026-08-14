@@ -641,6 +641,11 @@ jobs:
           echo "# smoke: targets forwarded via --target_pattern_file" > "$PATTERNS"
           echo "//examples/test_states:always_pass" >> "$PATTERNS"
           aspect test --task:name test-gha-target-pattern-file --target-pattern-file="$PATTERNS"
+
+          echo "--- IDE/BSP shape — forwarded --target_pattern_file"
+          aspect build --task:name test-gha-ide-target-pattern-file \
+            --bazel-flag=--target_pattern_file="$PATTERNS" \
+            --bazel-flag=--tool_tag=bazelbsp:3.2.0
           rm -f "$PATTERNS"
 
           echo "--- IDE/BSP shape — forwarded --build_event_binary_file"
