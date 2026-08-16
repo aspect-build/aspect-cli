@@ -1,6 +1,6 @@
 # Bazel-ify these container images
 
-Inspect each Dockerfile, compose/deployment configuration, image consumers, base images, system packages, entrypoints, environment, ports, volumes, users, architecture requirements, registry, and CI publishing contract. Treat the Dockerfile as the current behaviour to reproduce, not as input for a blind syntax translation. Preserve it until one representative image has equivalent build, load, and runtime behaviour.
+Inspect each Dockerfile, compose/deployment configuration, image consumers, base images, system packages, entrypoints, environment, ports, volumes, users, architecture requirements, registry, and CI publishing contract. Treat the Dockerfile as the current behaviour to reproduce, not as input for a blind syntax translation. Inspection of CI is read-only: derive and preserve its image names, tags, architectures, and publishing behaviour, but do not modify CI workflows unless the user explicitly requests it. Preserve the Dockerfile until one representative image has equivalent build, load, and runtime behaviour.
 
 For a new Bazel-owned image, use `rules_img` `0.3.19`. Prefer `image_from_binary` when the application is already a Bazel `*_binary`; it carries the binary, runfiles, entrypoint, arguments, and run environment into the image. For explicit layout, use `image_layer` and `image_manifest`. Use Bazel target platforms and `image_index` for multi-platform images; do not set an image architecture that disagrees with the binary's build platform.
 
@@ -45,6 +45,6 @@ image_manifest(
 )
 ```
 
-For an image where package-manager metadata matters, generate `/var/lib/dpkg/status` from each installed package's `:control` target with `@rules_distroless//apt:defs.bzl` `dpkg_status`, then include that output as another layer. Select package targets per architecture; do not put an amd64 Debian payload in an arm64 image. Validate package files and metadata with an image structure test, then run a native container test only where a daemon is available.
+Do not generate, merge, replace, validate, or otherwise manage `/var/lib/dpkg/status`; Bazel owns the declared package payload layers, not package-manager state. Select package targets per architecture; do not put an amd64 Debian payload in an arm64 image. Validate the package files with an image structure test, then run a native container test only where a daemon is available.
 
 If parity with a complex Dockerfile is required before its provisioning can be modelled declaratively, retain the Dockerfile temporarily and use a Buildx-based Bazel wrapper as an explicit transitional path. Do not claim it is hermetic or remote-execution-ready. Migrate one concern at a time—base image, application binary, package layers, configuration, and entrypoint—then delete the Dockerfile only after the Bazel image has passed the equivalent load and runtime checks.
