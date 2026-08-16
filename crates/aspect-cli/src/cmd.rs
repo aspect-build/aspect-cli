@@ -42,12 +42,15 @@ const TASK_ID_KEY: &str = "@@@$'__AXL_TASK_ID__'$@@@";
 const FEATURE_COMMAND: &str = "feature";
 /// `aspect describe`: routed to the machine-readable surface dump in `main`.
 const DESCRIBE_COMMAND: &str = "describe";
+/// `aspect prompts`: routed before AXL evaluation so it works in any repository.
+const PROMPTS_COMMAND: &str = "prompts";
 /// Top-level command names `main` intercepts before task parsing; a top-level
 /// task of any of these kinds would be unreachable, so it is rejected at build
 /// time (see `Tree::insert`). Reachable when nested under a group.
 const RESERVED_TOP_LEVEL_COMMANDS: &[&str] = &[
     FEATURE_COMMAND,
     DESCRIBE_COMMAND,
+    PROMPTS_COMMAND,
     crate::credential_helper::GET_COMMAND,
 ];
 const TASK_COMMAND_DISPLAY_ORDER: usize = 0;
@@ -213,6 +216,11 @@ impl<'a, 'v> Cmd<'a, 'v> {
                             .help("Output format."),
                     ),
             )
+            .subcommand(
+                Command::new(PROMPTS_COMMAND)
+                    .about("Discover and print bundled agent prompts")
+                    .hide(true),
+            )
             .subcommand(Command::new("version").about("Print version").hide(true))
             .subcommand(
                 Command::new("help")
@@ -220,7 +228,7 @@ impl<'a, 'v> Cmd<'a, 'v> {
                     .hide(true),
             )
             .help_template(format!(
-                "{cli_header}\n\n{{about-with-newline}}\n{{usage-heading}} {{usage}}\n\n\x1b[1;4mTasks:\x1b[0m\n{{subcommands}}{group_section}\n\x1b[1;4mCommands:\x1b[0m\n  \x1b[1mdescribe\x1b[0m  Print the resolved task, flag and feature surface as JSON\n  \x1b[1mfeature\x1b[0m   List features and their flags\n  \x1b[1mversion\x1b[0m   Print version\n  \x1b[1mhelp\x1b[0m      Print this message or the help of the given subcommand(s)\n\n\x1b[1;4mOptions:\x1b[0m\n{{options}}"
+                "{cli_header}\n\n{{about-with-newline}}\n{{usage-heading}} {{usage}}\n\n\x1b[1;4mTasks:\x1b[0m\n{{subcommands}}{group_section}\n\x1b[1;4mCommands:\x1b[0m\n  \x1b[1mdescribe\x1b[0m  Print the resolved task and feature surface as JSON\n  \x1b[1mprompts\x1b[0m   Discover and print bundled agent prompts\n  \x1b[1mfeature\x1b[0m   List features and their flags\n  \x1b[1mversion\x1b[0m   Print version\n  \x1b[1mhelp\x1b[0m      Print this message or the help of the given subcommand(s)\n\n\x1b[1;4mOptions:\x1b[0m\n{{options}}"
             ));
 
         tree.attach(root, version)
@@ -278,11 +286,6 @@ impl<'a, 'v> Cmd<'a, 'v> {
         })
     }
 
-    /// Render `aspect feature [<name>]` and return the process exit code.
-    ///
-    /// With no name, lists every active feature (keyed by the kebab slug the
-    /// user passes back in). With a name, prints just that feature's flags. An
-    /// unknown name lists the valid ones on stderr and exits 2.
     /// Print the resolved surface as JSON (`aspect describe`).
     ///
     /// Pretty-printed rather than compact: the output is read far more often
@@ -320,6 +323,12 @@ impl<'a, 'v> Cmd<'a, 'v> {
             }
         }
     }
+
+    /// Render `aspect feature [<name>]` and return the process exit code.
+    ///
+    /// With no name, lists every active feature (keyed by the kebab slug the
+    /// user passes back in). With a name, prints just that feature's flags. An
+    /// unknown name lists the valid ones on stderr and exits 2.
 
     pub fn print_feature_help(&self, version: &str, name: Option<&str>) -> ExitCode {
         let mut blocks: Vec<(&dyn FeatureLike<'_>, FeatureBlock)> = self
@@ -943,7 +952,9 @@ fn describe_arg(scope: Scope<'_>, name: &str, arg: &Arg) -> serde_json::Value {
         "maximum": maximum,
         "default": default,
         "allowed_values": values,
-        "description": description,
+        // `as_deref().map(...)` rather than a plain strip: the field is
+        // `Option<String>` and must stay null when absent, not become "".
+        "description": description.as_deref().map(color::strip_ansi),
     })
 }
 
@@ -998,7 +1009,7 @@ fn describe_index(
             path.push(task.kind());
             json!({
                 "command": format!("aspect {}", path.join(" ")),
-                "summary": task.summary(),
+                "summary": color::strip_ansi(&task.summary()),
             })
         })
         .collect();
@@ -1067,8 +1078,8 @@ fn describe_json(
                 "command": format!("aspect {}", path.join(" ")),
                 "path": path,
                 "name": kind,
-                "summary": task.summary(),
-                "description": task.description(),
+                "summary": color::strip_ansi(&task.summary()),
+                "description": color::strip_ansi(&task.description()),
                 "defined_in": defined_in_label(task.path(), aspect_root, modules),
                 "args": args,
             })
@@ -1100,8 +1111,8 @@ fn describe_json(
                 .collect();
             Some(json!({
                 "name": feat.name(),
-                "summary": feat.summary(),
-                "description": feat.description(),
+                "summary": color::strip_ansi(&feat.summary()),
+                "description": color::strip_ansi(&feat.description()),
                 "defined_in": defined_in_label(feat.path(), aspect_root, modules),
                 "flags": flags,
             }))
@@ -1906,6 +1917,19 @@ mod tests {
         assert!(au_at < tips_at, "rows should be alphabetical by slug");
         assert!(out.contains("Upload artifacts."), "summary missing");
         assert!(out.contains("aspect feature <NAME>"), "footer missing");
+    }
+
+    #[test]
+    fn describe_strips_ansi_from_prose() {
+        let mut task = stub_task("delivery", &[], SmallMap::new());
+        task.summary = "Currently \x1b[3monly\x1b[23m supported on runners.".to_owned();
+        let tasks: Vec<&dyn TaskLike> = vec![&task];
+
+        let doc = describe_json("1.2.3", &tasks, &[], Path::new("/repo"), &[]);
+        assert_eq!(
+            doc["tasks"][0]["summary"],
+            "Currently only supported on runners."
+        );
     }
 
     #[test]

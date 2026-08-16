@@ -45,6 +45,7 @@ SRCS = glob(["src/**/*.rs"])
 COMPILE_DATA = glob([
     "src/builtins/**/*.axl",
     "src/builtins/**/*.aspect",
+    "src/prompts/**/*.md",
 ])
 
 rust_binary(
@@ -64,6 +65,7 @@ rust_test(
     compile_data = glob([
         "src/builtins/**/*.axl",
         "src/builtins/**/*.aspect",
+        "src/prompts/**/*.md",
     ]),
     crate = ":aspect-cli",
     deps = [

@@ -25,6 +25,52 @@ fn supports_color_from(is_tty: bool, no_color_set: bool) -> bool {
     is_tty && !no_color_set
 }
 
+/// Remove ANSI escape sequences from `s`.
+///
+/// [`stdout_supports_color`] gates output we assemble ourselves, but prose
+/// authored in AXL can carry its own escapes — `aspect delivery`'s description
+/// contains `\x1b[3m…\x1b[23m` — and that prose is copied verbatim into
+/// `aspect describe`, which is machine-readable by construction. Escapes are
+/// stripped there rather than at the author's keyboard, so a task may still be
+/// italic in `--help` and clean in JSON.
+///
+/// Handles CSI (`ESC [ … 0x40..=0x7E`), OSC (`ESC ] … BEL | ESC \`) and
+/// two-character escapes.
+pub fn strip_ansi(s: &str) -> String {
+    if !s.contains('\x1b') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('[') => {
+                for c in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                let mut prev_esc = false;
+                for c in chars.by_ref() {
+                    if c == '\u{7}' || (prev_esc && c == '\\') {
+                        break;
+                    }
+                    prev_esc = c == '\x1b';
+                }
+            }
+            // A two-character escape is fully consumed by taking the second char.
+            Some(_) | None => {}
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -35,5 +81,27 @@ mod tests {
         assert!(!supports_color_from(false, false));
         assert!(!supports_color_from(true, true));
         assert!(!supports_color_from(false, true));
+    }
+
+    #[test]
+    fn strip_ansi_removes_escapes_and_leaves_plain_text_untouched() {
+        // The real case: `aspect delivery`'s description.
+        assert_eq!(
+            strip_ansi("Currently \x1b[3monly\x1b[23m supported on runners."),
+            "Currently only supported on runners."
+        );
+        // Untouched, and allocation-cheap because it short-circuits.
+        assert_eq!(strip_ansi("no escapes here"), "no escapes here");
+        // Multi-parameter SGR, and a reset.
+        assert_eq!(strip_ansi("\x1b[1;4mbold\x1b[0m"), "bold");
+        // OSC 8 hyperlink, terminated by BEL and by ST.
+        assert_eq!(strip_ansi("\x1b]8;;http://x\x07link"), "link");
+        assert_eq!(strip_ansi("\x1b]0;title\x1b\\rest"), "rest");
+        // Two-character escape.
+        assert_eq!(strip_ansi("a\x1bMb"), "ab");
+        // A trailing lone ESC must not panic or emit anything.
+        assert_eq!(strip_ansi("tail\x1b"), "tail");
+        // An unterminated CSI swallows the remainder rather than leaking it.
+        assert_eq!(strip_ansi("x\x1b[1;2"), "x");
     }
 }
