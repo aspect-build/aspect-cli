@@ -1,4 +1,4 @@
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -188,15 +188,7 @@ fn command() -> Command {
         .about("Discover and print bundled agent prompts")
         .subcommand_required(true)
         .arg_required_else_help(true)
-        .after_help(
-            "Prompts are instruction documents for a coding agent. Use `detect` to infer prompts, then give the Markdown from `show` to the agent with the work you want it to do.\n\n\
-             These prompts are a starting point for simple and moderately complex repositories. Review and validate every generated change in your repository. For large monorepos, custom toolchains, multi-language dependency graphs, or production-critical migrations, use them to establish a bounded first slice rather than as a complete migration plan. Aspect offers Bazel support and consulting: https://www.aspect.build/services\n\n\
-             Examples:\n\
-               aspect prompts list\n\
-               aspect prompts detect\n\
-               aspect prompts show bazelify-rust\n\
-               aspect prompts detect --json",
-        )
+        .after_help(after_help())
         .subcommand(
             Command::new("list")
                 .about("List every available prompt")
@@ -209,6 +201,7 @@ fn command() -> Command {
                     Arg::new("prompt")
                         .value_name("PROMPT")
                         .required(true)
+                        .value_parser(PROMPTS.iter().map(|prompt| prompt.id).collect::<Vec<_>>())
                         .help("Prompt ID from `aspect prompts list`."),
                 )
                 .arg(json_arg()),
@@ -246,15 +239,36 @@ fn print_json(doc: &Value) -> ExitCode {
     }
 }
 
+fn after_help() -> String {
+    let examples = [
+        "aspect prompts list",
+        "aspect prompts detect",
+        "aspect prompts show bazelify-rust",
+        "aspect prompts detect --json",
+    ]
+    .map(|example| format!("  {example}\n"))
+    .concat();
+    format!(
+        "Prompts are instruction documents for a coding agent. Use `detect` to infer prompts, or name one yourself, then give the Markdown from `show` to the agent with the work you want it to do.\n\n\
+         These prompts are a starting point for simple and moderately complex repositories. Review and validate every generated change in your repository. For large monorepos, custom toolchains, multi-language dependency graphs, or production-critical migrations, use them to establish a bounded first slice rather than as a complete migration plan. Aspect offers Bazel support and consulting: https://www.aspect.build/services\n\n\
+         Available prompts:\n\n{catalog}\n\
+         Examples:\n{examples}",
+        catalog = catalog_lines(),
+    )
+}
+
+fn catalog_lines() -> String {
+    PROMPTS
+        .iter()
+        .map(|prompt| format!("  {:<24} {}\n", prompt.id, prompt.summary))
+        .collect()
+}
+
 fn render_catalog() -> String {
-    let mut output = String::from("Available prompts:\n\n");
-    for prompt in PROMPTS {
-        output.push_str(&format!("  {:<24} {}\n", prompt.id, prompt.summary));
-    }
-    output.push_str(
-        "\nRun `aspect prompts show <PROMPT>`, then give its Markdown output to your coding agent.\n",
-    );
-    output
+    format!(
+        "Available prompts:\n\n{}\nRun `aspect prompts show <PROMPT>`, then give its Markdown output to your coding agent.\n",
+        catalog_lines(),
+    )
 }
 
 fn render_detection(root: &Path) -> String {
@@ -441,9 +455,7 @@ fn recommended_prompts(root: &Path) -> Vec<&'static Prompt> {
     prompts
 }
 
-/// Why this prompt is being recommended. A partly migrated language gets a
-/// reason that says so, rather than the no-Bazel-root wording that would be
-/// plainly false in a repository that already has one.
+/// Explains migration progress for a partially modelled language.
 fn recommendation_reason(id: &str, root: &Path) -> String {
     let coverage = repo_coverage(root);
     let language = match id {
@@ -456,10 +468,10 @@ fn recommendation_reason(id: &str, root: &Path) -> String {
         "bazelify-scala" => Some(("JVM source roots", coverage.jvm)),
         _ => None,
     };
+    // A Bazel root with no modelled units is still a partial migration.
     if let Some((unit, coverage)) = language
         && has_any(root, BAZEL_ROOT_MARKERS)
         && !coverage.complete()
-        && coverage.with_build_files > 0
     {
         return format!(
             "Bazel models {} of {} {unit}; finish the remaining ones before treating the migration as done.",
@@ -520,9 +532,7 @@ fn candidate(id: &str, order: usize, root: &Path) -> Value {
     })
 }
 
-/// The markers that selected this prompt, as opposed to every marker in the
-/// repository. A caller reading `because` is asking why *this* candidate
-/// appeared; the full set is already on the response as `evidence`.
+/// Returns evidence for this prompt, rather than the repository-wide evidence.
 fn candidate_markers(id: &str, root: &Path) -> Vec<String> {
     let mut markers: Vec<String> = Vec::new();
     let mut push = |marker: &str| markers.push(marker.to_owned());
@@ -612,7 +622,7 @@ fn detected_build_systems(root: &Path) -> Vec<&'static str> {
     }
     if uses_sbt_2(root) {
         build_systems.push("sbt 2.x");
-    } else if root.join("build.sbt").is_file() {
+    } else if uses_sbt(root) {
         build_systems.push("sbt");
     }
     // Root-level only. A `pom.xml` or `build.gradle` inside an examples or
@@ -667,6 +677,8 @@ fn evidence(root: &Path) -> Vec<String> {
     }
     if root.join("build.sbt").is_file() {
         found.push("build.sbt".to_owned());
+    } else if declared_sbt_version(root).is_some() {
+        found.push("project/build.properties".to_owned());
     }
     if has_source_with_extension(root, "scala") {
         found.push("*.scala".to_owned());
@@ -699,71 +711,61 @@ fn has_node_package_manifest(root: &Path) -> bool {
     has_file_named(root, "package.json")
 }
 
-fn has_file_named(root: &Path, name: &str) -> bool {
-    fn visit_named(dir: &Path, name: &str) -> bool {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return false;
-        };
+/// Trees that must not contribute repository-language or build-system evidence.
+const EXCLUDED_DIRS: &[&str] = &[
+    "node_modules",
+    "vendor",
+    "target",
+    "third_party",
+    "example",
+    "examples",
+    "sample",
+    "samples",
+    "doc",
+    "docs",
+    "testdata",
+    "fixtures",
+    "test-fixtures",
+];
 
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if entry.file_name() == name && path.is_file() {
-                return true;
-            }
-
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if file_type.is_dir()
-                && !matches!(
-                    entry.file_name().to_str(),
-                    Some(".git" | "node_modules" | "vendor")
-                )
-                && !entry.file_name().to_string_lossy().starts_with("bazel-")
-                && visit_named(&path, name)
-            {
-                return true;
-            }
-        }
-        false
+fn is_source_dir(entry: &std::fs::DirEntry) -> bool {
+    if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+        return false;
     }
+    let name = entry.file_name();
+    let name = name.to_string_lossy();
+    !EXCLUDED_DIRS.contains(&name.as_ref()) && !name.starts_with("bazel-") && !name.starts_with('.')
+}
 
-    visit_named(root, name)
+fn any_source_file(root: &Path, matches: &dyn Fn(&Path, &OsStr) -> bool) -> bool {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return false;
+    };
+
+    let mut directories = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if matches(&path, &entry.file_name()) {
+            return true;
+        }
+        if is_source_dir(&entry) {
+            directories.push(path);
+        }
+    }
+    directories
+        .into_iter()
+        .any(|directory| any_source_file(&directory, matches))
+}
+
+fn has_file_named(root: &Path, name: &str) -> bool {
+    any_source_file(root, &|path, found| found == name && path.is_file())
 }
 
 fn has_source_with_extension(root: &Path, extension: &str) -> bool {
-    fn visit(dir: &Path, extension: &str) -> bool {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return false;
-        };
-
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path
-                .extension()
-                .is_some_and(|candidate| candidate == extension)
-            {
-                return true;
-            }
-
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if file_type.is_dir()
-                && !matches!(
-                    entry.file_name().to_str(),
-                    Some(".git" | "node_modules" | "vendor")
-                )
-                && !entry.file_name().to_string_lossy().starts_with("bazel-")
-                && visit(&path, extension)
-            {
-                return true;
-            }
-        }
-        false
-    }
-
-    visit(root, extension)
+    any_source_file(root, &|path, _| {
+        path.extension()
+            .is_some_and(|candidate| candidate == extension)
+    })
 }
 
 fn has_scala_project(root: &Path) -> bool {
@@ -777,83 +779,32 @@ fn has_java_project(root: &Path) -> bool {
             .any(|marker| has_file_named(root, marker))
 }
 
-fn uses_sbt_2(root: &Path) -> bool {
+/// Reads the sbt version from the build's canonical properties file.
+fn declared_sbt_version(root: &Path) -> Option<String> {
     std::fs::read_to_string(root.join("project/build.properties"))
-        .ok()
-        .is_some_and(|contents| {
-            contents.lines().any(|line| {
-                line.trim()
-                    .strip_prefix("sbt.version=")
-                    .is_some_and(|version| version.trim().starts_with("2."))
-            })
+        .ok()?
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("sbt.version=")
+                .map(|version| version.trim().to_owned())
         })
 }
 
+fn uses_sbt(root: &Path) -> bool {
+    root.join("build.sbt").is_file() || declared_sbt_version(root).is_some()
+}
+
+fn uses_sbt_2(root: &Path) -> bool {
+    declared_sbt_version(root).is_some_and(|version| version.starts_with("2."))
+}
+
 fn has_proto_sources(root: &Path) -> bool {
-    fn visit(dir: &Path) -> bool {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return false;
-        };
-
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path
-                .extension()
-                .is_some_and(|extension| extension == "proto")
-            {
-                return true;
-            }
-
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if file_type.is_dir()
-                && !matches!(
-                    entry.file_name().to_str(),
-                    Some(".git" | "node_modules" | "vendor")
-                )
-                && !entry.file_name().to_string_lossy().starts_with("bazel-")
-                && visit(&path)
-            {
-                return true;
-            }
-        }
-        false
-    }
-
-    visit(root)
+    has_source_with_extension(root, "proto")
 }
 
 fn has_dockerfiles(root: &Path) -> bool {
-    fn visit(dir: &Path) -> bool {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return false;
-        };
-
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if entry.file_name() == "Dockerfile" && path.is_file() {
-                return true;
-            }
-
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if file_type.is_dir()
-                && !matches!(
-                    entry.file_name().to_str(),
-                    Some(".git" | "node_modules" | "vendor")
-                )
-                && !entry.file_name().to_string_lossy().starts_with("bazel-")
-                && visit(&path)
-            {
-                return true;
-            }
-        }
-        false
-    }
-
-    visit(root)
+    has_file_named(root, "Dockerfile")
 }
 
 fn uses_legacy_python_rules(root: &Path) -> bool {
@@ -878,7 +829,6 @@ fn uses_go_rules(root: &Path) -> bool {
     })
 }
 
-/// BUILD files found against BUILD files expected, for one language.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 struct Coverage {
     units: usize,
@@ -906,28 +856,18 @@ impl Coverage {
     }
 }
 
-/// How much of the repository is actually modelled in Bazel. A `MODULE.bazel`
-/// alone says the migration started, not that it finished, and the migration
-/// prompts must not disappear the moment the first module file lands.
-///
-/// A unit is one directory that is expected to own a BUILD file, which is the
-/// unit the language itself compiles — not every directory holding a source
-/// file. Getting this wrong makes the number unreachable rather than merely
-/// imprecise: a Cargo package owns its whole `src/` module tree from the
-/// package root, so counting `src/` and `src/net/` as units of their own
-/// leaves a fully migrated Rust repository scoring zero forever.
+/// Tracks compilation units and whether Bazel models them.
 #[derive(Clone, Copy, Default)]
 struct RepoCoverage {
-    /// One per Cargo package; the package root owns `src/`.
+    /// One per Cargo package.
     rust: Coverage,
-    /// One per directory of `.go` files, which is what Gazelle generates.
+    /// One per directory containing Go source files.
     go: Coverage,
-    /// One per directory of `.py` files.
+    /// One per directory containing Python source files.
     python: Coverage,
-    /// One per directory of `.ts` or `.js` sources.
+    /// One per directory containing JavaScript or TypeScript source files.
     javascript: Coverage,
-    /// One per JVM source root. Java and Scala packages are routinely
-    /// mutually recursive, so the root owns the tree below it.
+    /// One per Java or Scala source root.
     jvm: Coverage,
 }
 
@@ -990,21 +930,14 @@ fn repo_coverage(root: &Path) -> RepoCoverage {
             let path = entry.path();
             let name = entry.file_name();
             match name.to_str() {
-                Some("BUILD" | "BUILD.bazel") => has_build_file = true,
+                Some("BUILD" | "BUILD.bazel") => has_build_file |= models_bazel_targets(&path),
                 Some("Cargo.toml") => has_cargo_manifest = true,
                 _ => {}
             }
             if let Some(extension) = path.extension().and_then(|extension| extension.to_str()) {
                 extensions.push(extension.to_owned());
             }
-            if entry.file_type().is_ok_and(|kind| kind.is_dir())
-                && !matches!(
-                    name.to_str(),
-                    Some(".git" | "node_modules" | "vendor" | "target" | "third_party")
-                )
-                && !name.to_string_lossy().starts_with("bazel-")
-                && !name.to_string_lossy().starts_with('.')
-            {
+            if is_source_dir(&entry) {
                 children.push(path);
             }
         }
@@ -1014,7 +947,6 @@ fn repo_coverage(root: &Path) -> RepoCoverage {
                 .any(|extension| wanted.contains(&extension.as_str()))
         };
 
-        // A virtual workspace manifest declares no package and owns no sources.
         let cargo_package = has_cargo_manifest && declares_cargo_package(dir);
         if cargo_package {
             coverage.rust.count(has_build_file);
@@ -1059,6 +991,15 @@ fn repo_coverage(root: &Path) -> RepoCoverage {
         0,
     );
     coverage
+}
+
+/// Pants also uses `BUILD` and `BUILD.bazel`; a `load` indicates Bazel owns it.
+fn models_bazel_targets(path: &Path) -> bool {
+    std::fs::read_to_string(path).is_ok_and(|contents| {
+        contents
+            .lines()
+            .any(|line| line.trim_start().starts_with("load("))
+    })
 }
 
 fn declares_cargo_package(dir: &Path) -> bool {
@@ -1111,6 +1052,14 @@ fn render_prompt(prompt: &Prompt) -> String {
 mod tests {
     use super::*;
 
+    fn write_build_file(dir: &Path) {
+        std::fs::write(
+            dir.join("BUILD.bazel"),
+            "load(\"@rules_rs//rust:defs.bzl\", \"rust_library\")\n\nrust_library(name = \"lib\")\n",
+        )
+        .unwrap();
+    }
+
     #[test]
     fn detects_rust_without_bazel() {
         let root = tempfile::tempdir().unwrap();
@@ -1123,9 +1072,6 @@ mod tests {
         assert_eq!(detected_prompts(root.path())[0].id, "bazelify-rust");
     }
 
-    /// A Cargo package owns its whole `src/` tree from the package root, so a
-    /// migrated package is one covered unit — not one covered directory and
-    /// two uncovered ones, which no correct migration could ever satisfy.
     #[test]
     fn a_cargo_package_is_one_coverage_unit() {
         let root = tempfile::tempdir().unwrap();
@@ -1136,7 +1082,7 @@ mod tests {
             "[package]\nname = \"matcher\"\n",
         )
         .unwrap();
-        std::fs::write(root.path().join("crates/matcher/BUILD.bazel"), "").unwrap();
+        write_build_file(&root.path().join("crates/matcher"));
         std::fs::write(root.path().join("crates/matcher/src/lib.rs"), "").unwrap();
         std::fs::write(root.path().join("crates/matcher/src/net/tcp.rs"), "").unwrap();
 
@@ -1145,7 +1091,6 @@ mod tests {
         assert!(coverage.complete());
     }
 
-    /// A virtual workspace manifest declares no package and compiles nothing.
     #[test]
     fn a_virtual_workspace_root_is_not_a_coverage_unit() {
         let root = tempfile::tempdir().unwrap();
@@ -1165,8 +1110,6 @@ mod tests {
         assert_eq!(repo_coverage(root.path()).rust.units, 1);
     }
 
-    /// Naming `rules_rs` in `MODULE.bazel` proves one package was migrated, not
-    /// the workspace. The prompt has to survive a partial migration.
     #[test]
     fn a_partly_migrated_workspace_keeps_its_migration_prompt() {
         let root = tempfile::tempdir().unwrap();
@@ -1189,7 +1132,7 @@ mod tests {
             .unwrap();
             std::fs::write(root.path().join(package).join("src/lib.rs"), "").unwrap();
             if build_file {
-                std::fs::write(root.path().join(package).join("BUILD.bazel"), "").unwrap();
+                write_build_file(&root.path().join(package));
             }
         }
 
@@ -1224,7 +1167,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(root.path().join("api/src/lib.rs"), "").unwrap();
-        std::fs::write(root.path().join("api/BUILD.bazel"), "").unwrap();
+        write_build_file(&root.path().join("api"));
 
         assert!(
             !detected_prompts(root.path())
@@ -1233,14 +1176,12 @@ mod tests {
         );
     }
 
-    /// Go is the opposite case: Gazelle writes one BUILD file per directory of
-    /// `.go` files, so each of those directories is its own unit.
     #[test]
     fn go_counts_one_coverage_unit_per_directory() {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("go.mod"), "module example.com/demo\n").unwrap();
         std::fs::write(root.path().join("main.go"), "package main\n").unwrap();
-        std::fs::write(root.path().join("BUILD.bazel"), "").unwrap();
+        write_build_file(root.path());
         std::fs::create_dir_all(root.path().join("internal/store")).unwrap();
         std::fs::write(
             root.path().join("internal/store/store.go"),
@@ -1431,7 +1372,7 @@ mod tests {
         // Bazel models Rust only; the Go module is still unmigrated. The BUILD
         // file is what makes the Cargo package modelled — naming `rules_rs` in
         // `MODULE.bazel` on its own no longer counts.
-        std::fs::write(root.path().join("BUILD.bazel"), "").unwrap();
+        write_build_file(root.path());
         std::fs::write(
             root.path().join("MODULE.bazel"),
             "module(name = \"demo\")\nbazel_dep(name = \"rules_rs\", version = \"0.0.102\")\n",
@@ -1584,7 +1525,7 @@ mod tests {
         )
         .unwrap();
         // The package is modelled, so `bazelify-rust` is not expected either.
-        std::fs::write(root.path().join("BUILD.bazel"), "").unwrap();
+        write_build_file(root.path());
         std::fs::write(
             root.path().join("MODULE.bazel"),
             "module(name = \"demo\")\nbazel_dep(name = \"rules_rs\", version = \"0.0.102\")\n",
@@ -1689,11 +1630,250 @@ mod tests {
     }
 
     #[test]
+    fn a_sample_tree_does_not_define_the_repository_languages() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("pyproject.toml"), "[project]\n").unwrap();
+        let snippet = root.path().join("examples/docs_snippets/pipes/scalaspark");
+        std::fs::create_dir_all(&snippet).unwrap();
+        std::fs::write(snippet.join("Example.scala"), "object Example\n").unwrap();
+        std::fs::write(snippet.join("build.gradle"), "plugins {}\n").unwrap();
+        std::fs::create_dir_all(root.path().join("docs/deployment")).unwrap();
+        std::fs::write(
+            root.path().join("docs/deployment/Dockerfile"),
+            "FROM scratch\n",
+        )
+        .unwrap();
+
+        assert_eq!(detected_languages(root.path()), ["Python"]);
+        assert!(detected_build_systems(root.path()).is_empty());
+        assert_eq!(
+            recommended_prompts(root.path())
+                .into_iter()
+                .map(|prompt| prompt.id)
+                .collect::<Vec<_>>(),
+            ["bazelify-python"]
+        );
+    }
+
+    #[test]
+    fn sbt_is_recognised_without_a_root_build_sbt() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("project")).unwrap();
+        std::fs::write(
+            root.path().join("project/build.properties"),
+            "sbt.version=1.12.13\n",
+        )
+        .unwrap();
+        std::fs::write(root.path().join("project/Build.scala"), "object Build\n").unwrap();
+        std::fs::write(root.path().join("pom.xml"), "<project />\n").unwrap();
+
+        assert_eq!(detected_build_systems(root.path()), ["sbt", "Maven"]);
+        assert!(
+            evidence(root.path()).contains(&"project/build.properties".to_owned()),
+            "the sbt claim needs a marker behind it"
+        );
+        assert!(
+            !detected_prompts(root.path())
+                .iter()
+                .any(|prompt| prompt.id == "configure-remote-sbt")
+        );
+    }
+
+    #[test]
+    fn partial_coverage_is_reported_and_remote_configuration_comes_last() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"api\", \"cli\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("MODULE.bazel"),
+            "bazel_dep(name = \"rules_rs\", version = \"0.0.102\")\n",
+        )
+        .unwrap();
+        std::fs::write(root.path().join("Dockerfile"), "FROM scratch\n").unwrap();
+        for (package, build_file) in [("api", true), ("cli", false)] {
+            std::fs::create_dir_all(root.path().join(package).join("src")).unwrap();
+            std::fs::write(
+                root.path().join(package).join("Cargo.toml"),
+                format!("[package]\nname = \"{package}\"\n"),
+            )
+            .unwrap();
+            std::fs::write(root.path().join(package).join("src/lib.rs"), "").unwrap();
+            if build_file {
+                write_build_file(&root.path().join(package));
+            }
+        }
+
+        assert_eq!(
+            recommended_prompts(root.path())
+                .into_iter()
+                .map(|prompt| prompt.id)
+                .collect::<Vec<_>>(),
+            [
+                "bazelify-rust",
+                "bazelify-containers",
+                "configure-remote-bazel"
+            ]
+        );
+        assert!(
+            render_detection(root.path())
+                .contains("Bazel coverage: 1 of 2 build units have a BUILD file.")
+        );
+    }
+
+    #[test]
+    fn complete_coverage_reports_no_coverage_line() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("MODULE.bazel"),
+            "module(name = \"demo\")\n",
+        )
+        .unwrap();
+        std::fs::write(root.path().join("go.mod"), "module example.com/demo\n").unwrap();
+        std::fs::write(root.path().join("main.go"), "package main\n").unwrap();
+        write_build_file(root.path());
+
+        assert!(!render_detection(root.path()).contains("Bazel coverage:"));
+    }
+
+    #[test]
+    fn a_jvm_source_root_owns_the_tree_below_it() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("MODULE.bazel"),
+            "module(name = \"demo\")\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("build.sbt"),
+            "scalaVersion := \"2.13.18\"\n",
+        )
+        .unwrap();
+        for (module, build_file) in [("core", true), ("sql", false)] {
+            let sources = root.path().join(module).join("src/main/scala/example/net");
+            std::fs::create_dir_all(&sources).unwrap();
+            std::fs::write(
+                root.path().join(module).join("src/main/scala/App.scala"),
+                "package example\n",
+            )
+            .unwrap();
+            std::fs::write(sources.join("Tcp.scala"), "package example.net\n").unwrap();
+            std::fs::write(sources.join("Codec.java"), "class Codec {}\n").unwrap();
+            if build_file {
+                write_build_file(&root.path().join(module).join("src/main/scala"));
+            }
+        }
+
+        let coverage = repo_coverage(root.path()).jvm;
+        assert_eq!((coverage.units, coverage.with_build_files), (2, 1));
+        assert_eq!(
+            recommendation_reason("bazelify-scala", root.path()),
+            "Bazel models 1 of 2 JVM source roots; finish the remaining ones before treating the migration as done."
+        );
+    }
+
+    #[test]
+    fn coverage_is_reported_for_each_language_separately() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("MODULE.bazel"),
+            "bazel_dep(name = \"rules_py\", version = \"1.6.3\")\nbazel_dep(name = \"aspect_rules_js\", version = \"2.0.0\")\n",
+        )
+        .unwrap();
+        std::fs::write(root.path().join("pyproject.toml"), "[project]\n").unwrap();
+        std::fs::create_dir_all(root.path().join("service")).unwrap();
+        std::fs::write(root.path().join("service/main.py"), "").unwrap();
+        write_build_file(&root.path().join("service"));
+        std::fs::create_dir_all(root.path().join("web")).unwrap();
+        std::fs::write(root.path().join("web/package.json"), "{}\n").unwrap();
+        std::fs::write(root.path().join("web/index.ts"), "").unwrap();
+
+        let coverage = detected_json(root.path())["bazel_coverage"].clone();
+        assert_eq!(coverage["by_language"]["Python"]["complete"], json!(true));
+        assert_eq!(
+            coverage["by_language"]["JavaScript or TypeScript"]["complete"],
+            json!(false)
+        );
+        assert_eq!(coverage["complete"], json!(false));
+        assert_eq!(
+            recommended_prompts(root.path())
+                .into_iter()
+                .map(|prompt| prompt.id)
+                .collect::<Vec<_>>(),
+            ["bazelify-javascript", "configure-remote-bazel"]
+        );
+    }
+
+    #[test]
     fn prompts_requires_a_subcommand_and_show_requires_a_prompt() {
         assert!(command().try_get_matches_from(["aspect prompts"]).is_err());
         assert!(
             command()
                 .try_get_matches_from(["aspect prompts", "show"])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn another_build_systems_build_files_are_not_bazel_coverage() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("MODULE.bazel"),
+            "module(name = \"util\")\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("build.sbt"),
+            "scalaVersion := \"2.13.18\"\n",
+        )
+        .unwrap();
+        for module in ["util-app", "util-core"] {
+            let sources = root.path().join(module).join("src/main/scala");
+            std::fs::create_dir_all(&sources).unwrap();
+            std::fs::write(sources.join("App.scala"), "package example\n").unwrap();
+            std::fs::write(
+                sources.join("BUILD"),
+                "target(\n    tags = [\"bazel-compatible\"],\n    dependencies = [\"util/util-app\"],\n)\n",
+            )
+            .unwrap();
+        }
+        assert_eq!(repo_coverage(root.path()).jvm.with_build_files, 0);
+
+        write_build_file(&root.path().join("util-app/src/main/scala"));
+        let coverage = repo_coverage(root.path()).jvm;
+        assert_eq!((coverage.units, coverage.with_build_files), (2, 1));
+        assert!(
+            recommended_prompts(root.path())
+                .iter()
+                .any(|prompt| prompt.id == "bazelify-scala")
+        );
+    }
+
+    #[test]
+    fn help_names_every_prompt_so_one_can_be_chosen_without_detection() {
+        let help = after_help();
+        for prompt in PROMPTS {
+            assert!(
+                help.contains(prompt.id),
+                "{} is missing from --help",
+                prompt.id
+            );
+            assert!(help.contains(prompt.summary));
+        }
+    }
+
+    #[test]
+    fn show_accepts_only_catalogued_prompts() {
+        assert!(
+            command()
+                .try_get_matches_from(["aspect prompts", "show", "bazelify-rust"])
+                .is_ok()
+        );
+        assert!(
+            command()
+                .try_get_matches_from(["aspect prompts", "show", "bazelify-rst"])
                 .is_err()
         );
     }

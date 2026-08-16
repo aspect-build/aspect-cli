@@ -27,6 +27,19 @@ Create the root `BUILD.bazel` before evaluating these extensions. Add the root G
 
 Gazelle emits neither `size` nor `timeout` on generated `go_test` targets, so every test lands on the default moderate timeout. Set them where the repository's tests are known to be faster or slower than that.
 
+Inventory `//go:embed` directives before generating. Gazelle maps them to `embedsrcs` on the owning `go_library`, including whole-directory and glob patterns:
+
+```starlark
+go_library(
+    name = "migrator",
+    srcs = ["migrator.go"],
+    embedsrcs = ["migrations/0001_enums.up.sql"],
+    importpath = "<module-path>/migrator",
+)
+```
+
+After the first Gazelle run, check each `//go:embed` line against the generated `embedsrcs`; an embed that resolves under `go build` but is missing here fails at analysis time. Assets embedded in another language — `.sql`, `.js`, `.html` — are inputs to the Go library, not a separate build unit, and are not modelled with that language's rules.
+
 For the first target, add only the `use_repo(go_deps, ...)` repositories that its generated dependencies reference. Once that target builds, `bazel mod tidy` can derive the complete set. The shared `.bazelrc` baseline is a completion-policy proposal: do not let it delay proving the first target, and add it before CI/remote configuration rather than copying broad policy into an exploratory slice.
 
 ```starlark
