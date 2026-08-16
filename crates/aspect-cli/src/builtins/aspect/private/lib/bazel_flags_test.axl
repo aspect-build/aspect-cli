@@ -161,10 +161,9 @@ def _test_setup_command_applies_to_ctx_bazel(ctx):
         fail("setup_command — --ignore_all_rc_files not present: %r" % startup)
 
 def _test_setup_command_trait_base_flags(ctx):
-    """`trait.base_flags` (feature-injected defaults, e.g. a deployment's
-    `--remote_cache`) enter setup_command's composition ahead of the caller's
-    base flags, so every task setting up through it honors them and later flags
-    still win last-wins."""
+    """`trait.base_flags` (feature-injected defaults) enter setup_command's
+    composition ahead of the caller's base flags, so later flags still win
+    last-wins."""
     ctx.traits[BazelTrait] = _trait(base = ["--trait-base"])
     rc = bazel.setup_command(ctx, "build", base_flags = ["--from-base"])
     expanded = rc.expand(command = "build")

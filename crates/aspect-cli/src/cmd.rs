@@ -389,10 +389,9 @@ enum Scope<'a> {
 fn clap_id(scope: Scope<'_>, name: &str, arg: &Arg) -> String {
     match scope {
         Scope::Task => name.to_owned(),
-        // Always prefixed, even under a `long` override: task arg IDs are bare
-        // names, so a prefixed feature ID can never collide with one — only the
-        // *long flag* can, and `task_command` resolves that by skipping the
-        // feature arg on tasks whose own args already claim the flag.
+        // Always prefixed, even under a `long` override, so a feature ID can
+        // never collide with a bare task arg ID. Long-flag collisions are
+        // resolved in `task_command` (the task's arg wins).
         Scope::Feature(prefix) => {
             let long = arg
                 .long_override()
@@ -1300,11 +1299,10 @@ fn task_command(
     // `--help`; `aspect feature [<name>]` surfaces them instead (see the footer
     // appended to the help template below).
     //
-    // A task's own args win any collision: a feature arg whose long flag matches
+    // A task's own args win a collision: a feature arg whose long flag matches
     // a task arg's name or long (e.g. a `long`-overridden `--deployment` vs the
-    // auth tasks' `deployment`) is not registered here — `merge_args` then falls
-    // back to the feature arg's schema default, leaving the feature inert on
-    // that task rather than panicking on a duplicate Clap arg.
+    // auth tasks' `deployment`) is skipped, and `merge_args` falls back to its
+    // schema default — the feature goes inert on that task.
     let claimed: HashSet<String> = task
         .cli_args()
         .into_iter()

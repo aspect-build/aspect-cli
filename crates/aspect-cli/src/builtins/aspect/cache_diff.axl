@@ -345,8 +345,7 @@ def _impl(ctx: TaskContext) -> int:
     bazel_trait = ctx.traits[BazelTrait]
     startup_flags = bzl.flags.resolve_startup(ctx)
 
-    # Trait base flags first (feature-injected defaults, e.g. a deployment's
-    # --remote_cache), same composition as `bazel.setup_command`.
+    # Trait base flags first — same composition as `bazel.setup_command`.
     flags = list(bazel_trait.base_flags) + bzl.flags.resolve(ctx)
     announce_version, announce_command = bzl.announce.resolve(ctx)
 
