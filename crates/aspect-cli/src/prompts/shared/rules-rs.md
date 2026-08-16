@@ -33,6 +33,8 @@ use_repo(crate, "crates")
 
 `crate.from_cargo` resolves the entire lockfile graph, including optional crates and platforms unrelated to the first target. Do not change global configuration to silence those failures until a selected target demonstrates the need.
 
+Identify private Git dependencies during lockfile resolution. If they cannot be fetched reproducibly in Bazel and CI, exclude the affected independent workspace explicitly and report the authentication or repository arrangement it requires; a private source does not by itself require a separate migration.
+
 A `-sys` crate whose build script probes the host for a native library does not build hermetically. Annotate it once a selected target demonstrates the need:
 
 ```starlark
@@ -45,6 +47,16 @@ inject_repo(crate, "postgres")
 ```
 
 Either turn the generated build script off and point the crate at a library another module provides, or keep the script and supply what it probes for through `build_script_env` and `build_script_data`. `inject_repo` makes a `bazel_dep` repository visible to the extension. Where a crate's binaries are needed by a toolchain rather than by a target, expose them with `gen_binaries`.
+
+`rules_rs` prints `WARNING: A well-known crate annotation exists for <crate>!` whenever a crate's build script is still `auto` and a snippet exists at `3rd_party/<crate>/include.MODULE.bazel`. Those snippets are starting points, not evidence that the annotation preserves the crate's Cargo semantics for the repository's target platform. The shipped `tikv-jemalloc-sys` snippet disables the build script without restoring the prefixed allocator ABI that Apple targets require.
+
+Turning a generated build script off transfers its relevant contract to the Bazel replacement, not merely its choice of native library. Inspect both the build-script source and its actual Cargo output for `rustc-cfg`, `rustc-env`, linker directives, generated files, target-dependent behaviour, and native configuration options. Model target-dependent configuration explicitly with facilities such as `rustc_flags_select`.
+
+In `rules_rs` `0.0.102`, `crate.annotation` does not expose `rustc_env`. If disabling a build script removes required `cargo::rustc-env` output, keep the script or provide another explicit, validated mechanism.
+
+Native-library ABI choices, including symbol prefixes, private namespaces, and feature toggles, belong on the target providing that library. Compare the crate's declared external symbols with those present in the linked binary. For global allocators, verify the intended symbol namespace and execute a representative binary; successful analysis, compilation, and linking are insufficient.
+
+Build scripts using compile-time `env!("CARGO_MANIFEST_DIR")` or `env!("OUT_DIR")` can embed paths belonging to their compilation action rather than their execution action. Compare the embedded path, staged inputs, and execution sandbox before deciding whether the remedy belongs in the crate, its annotation, or `rules_rs`. Adding `build_script_data` does not repair a stale embedded path when the required file is already staged for the execution action.
 
 For an existing `@rules_rust` build, retain its loads temporarily through the compatibility facade:
 
@@ -97,3 +109,5 @@ The target name follows the Cargo package name; `crate_name` is that name's Rust
 The generated hub does not infer first-party feature selections. Derive each target's features from the package manifest and resolved Cargo feature graph; a generic `default` feature list can compile while changing behaviour.
 
 Use `compile_data` for `include_str!` and `include_bytes!`, and `data` for runtime runfiles. Integration tests need both normal and development dependencies. A test that spawns a Bazel binary must resolve its `$(rlocationpath :binary)` from runfiles at runtime; `CARGO_BIN_EXE_<name>` is compile-time-only. Confirm every test log reports a non-zero test count.
+
+Manually declared first-party Rust targets do not automatically receive Cargo's `CARGO_PKG_*` variables. Supply required values through `rustc_env`, derive them from the authoritative manifest, and record that derivation so a copied literal is not mistaken for an independently chosen value.
