@@ -191,9 +191,8 @@ def deployment_flag_args() -> dict:
     `deployment_endpoint_flags`."""
     return {
         "deployment": args.string(
-            # Spelled out so the flags keep their task-level names now that the
-            # `Deployment` feature owns them — a feature arg is otherwise exposed
-            # as `--<feature>:<arg>`.
+            # A feature arg is otherwise exposed as `--<feature>:<arg>`; `long`
+            # keeps the unprefixed name.
             long = "deployment",
             description = "Configured Aspect Workflows deployment (see `aspect auth configure`) to draw remote endpoints from. Defaults to the current default deployment. Requires --remote, which says what to wire from it.",
         ),
@@ -412,20 +411,17 @@ def _endpoint_auth_flags(ctx, rc, command: str, endpoint_flag: str, header_flag:
 def deployment_auth_flags(ctx, rc, command: str) -> list:
     """Per-invocation `--remote_header`/`--bes_header` auth for every Bazel-facing
     endpoint (remote cache + Bazel-streamed BES) a configured deployment owns and
-    the resolved `rc` points at. Registered on `BazelTrait.rc_flags` by the
-    `Deployment` feature, so every bazel-driving task picks it up through
-    `bazel.rc_flags(ctx, rc, command)`."""
+    the resolved `rc` points at. Registered on `BazelTrait.rc_flags`."""
     return (
         _endpoint_auth_flags(ctx, rc, command, "--remote_cache", "--remote_header", "the remote cache") +
         _endpoint_auth_flags(ctx, rc, command, "--bes_backend", "--bes_header", "build events")
     )
 
 def _deployment_impl(ctx):
-    """Feature setup: resolve the selected deployment's endpoints and wire them
-    into the `BazelTrait` — injected `--remote_cache`/`--remote_executor` base
-    flags, extra BES backends, and the post-rc auth-header hook. The auth hook is
-    registered unconditionally (it also authenticates user-set Aspect endpoints);
-    the announce line fires only when a capability was actually injected."""
+    """Wire the selected deployment's endpoints into the `BazelTrait`. The auth
+    hook is registered unconditionally (it also authenticates user-set Aspect
+    endpoints); the announce line fires only when a capability was actually
+    injected."""
     t = ctx.traits[BazelTrait]
     dep = deployment_endpoint_flags(ctx)
     t.base_flags.extend(dep.base_flags)

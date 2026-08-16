@@ -1,8 +1,8 @@
 """Everything about Bazel flags: the `--bazel-flag` / `--bazel-startup-flag` /
 `announce-bazel-*` CLI args, the task-facing arg bundles (`core_args` /
 `targets_arg`), startup+command flag composition, `.bazelrc` parsing
-(`setup_command` / `sibling_rc`), `--config=` expansion, and per-invocation
-the post-rc `rc_flags` hook seam.
+(`setup_command` / `sibling_rc`), `--config=` expansion, and the post-rc
+`rc_flags` hook seam.
 
 Stateless functions taking `ctx` and deriving the active `BazelTrait` from
 `ctx.traits` themselves (no `trait` argument to pass)."""
@@ -236,9 +236,8 @@ def _expand_config_flags(ctx, extra_flags: list, command: str = "build") -> list
 
 def _resolve_rc_flags(ctx, rc, command: str) -> list:
     """Fire the trait's post-rc `rc_flags` hooks against the resolved `rc` and
-    concatenate the flags they return. The seam every bazel-driving task applies
-    after resolving its rc — features (e.g. deployment auth) inject through
-    `BazelTrait.rc_flags`, and the task stays ignorant of what."""
+    concatenate the flags they return. Applied by every bazel-driving task after
+    resolving its rc."""
     out = []
     for hook in ctx.traits[BazelTrait].rc_flags:
         out.extend(hook(ctx, rc, command))

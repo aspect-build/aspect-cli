@@ -40,8 +40,7 @@ def _sinks(*uris):
     """Fake CLI-streamed BES sinks; the results-url resolver reads only `.uri`."""
     return [struct(uri = uri) for uri in uris]
 
-# `(backend, viewer)` pairs as a feature would register them on
-# `BazelTrait.bes_results_sources`, in priority order.
+# `(backend, viewer)` pairs as registered on `BazelTrait.bes_results_sources`.
 _GCP = ("grpcs://bes.gcp", "https://app.gcp/i/")
 _RUNNER = ("grpcs://bes.runner", "https://app.runner")
 
