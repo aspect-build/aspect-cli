@@ -73,4 +73,4 @@ Publishing build events is a separate permission from uploading cache entries. D
 
 Never commit a bearer token, client key, or private certificate. Machine-specific values — an absolute credential-helper path, a personal endpoint override — belong in an ignored `.bazelrc.user` consumed by `try-import`, not in the committed `.bazelrc`.
 
-Report the exact repository changes, the CI and developer authorization model, and the rollback path: remove the `.bazelrc` block, delete `.aspect/config.axl`, run `aspect wrapper uninstall`, and `aspect auth remove <deployment>`.
+Leave every change in the working tree: do not commit, branch, or push. Report the exact repository changes, the CI and developer authorization model, and the rollback path: remove the `.bazelrc` block, delete `.aspect/config.axl`, run `aspect wrapper uninstall`, and `aspect auth remove <deployment>`.

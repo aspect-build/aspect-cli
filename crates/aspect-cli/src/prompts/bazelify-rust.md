@@ -1,6 +1,6 @@
 # Bazel-ify this Rust repository
 
-Use the bundled `rules_rs` Paved Path with the repository's `Cargo.toml` and `Cargo.lock`; do not create a second Bazel-specific Cargo lockfile. Start with one meaningful library, binary, or test rather than the whole workspace.
+Use the bundled `rules_rs` Paved Path with the repository's `Cargo.toml` and `Cargo.lock`; do not create a second Bazel-specific Cargo lockfile. Establish the foundation on one meaningful library, binary, or test, then migrate the remaining workspace members in stages.
 
 Make build scripts, proc macros, generated sources, native dependencies, feature variants, and platform constraints explicit. When cross-compiling, distinguish execution platforms for build scripts and proc macros from target platforms for the produced binary.
 

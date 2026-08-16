@@ -13,18 +13,19 @@ struct Prompt {
     prompt: &'static str,
 }
 
+const WORKING_AGREEMENT: &str = include_str!("prompts/shared/working-agreement.md");
 const BAZEL_FOUNDATIONS: &str = include_str!("prompts/shared/bazel-foundations.md");
 const RULES_GO_RECIPE: &str = include_str!("prompts/shared/rules-go.md");
 const RULES_RS_RECIPE: &str = include_str!("prompts/shared/rules-rs.md");
 const RULES_PY_2_RECIPE: &str = include_str!("prompts/shared/rules-py-2.md");
 const RULES_JS_RECIPE: &str = include_str!("prompts/shared/rules-js.md");
 const RULES_SCALA_RECIPE: &str = include_str!("prompts/shared/rules-scala.md");
-const BAZELIFY_PREAMBLES: &[&str] = &[BAZEL_FOUNDATIONS];
-const GO_PREAMBLES: &[&str] = &[BAZEL_FOUNDATIONS, RULES_GO_RECIPE];
-const RUST_PREAMBLES: &[&str] = &[BAZEL_FOUNDATIONS, RULES_RS_RECIPE];
-const PYTHON_PREAMBLES: &[&str] = &[BAZEL_FOUNDATIONS, RULES_PY_2_RECIPE];
-const JAVASCRIPT_PREAMBLES: &[&str] = &[BAZEL_FOUNDATIONS, RULES_JS_RECIPE];
-const SCALA_PREAMBLES: &[&str] = &[BAZEL_FOUNDATIONS, RULES_SCALA_RECIPE];
+const BAZELIFY_PREAMBLES: &[&str] = &[WORKING_AGREEMENT, BAZEL_FOUNDATIONS];
+const GO_PREAMBLES: &[&str] = &[WORKING_AGREEMENT, BAZEL_FOUNDATIONS, RULES_GO_RECIPE];
+const RUST_PREAMBLES: &[&str] = &[WORKING_AGREEMENT, BAZEL_FOUNDATIONS, RULES_RS_RECIPE];
+const PYTHON_PREAMBLES: &[&str] = &[WORKING_AGREEMENT, BAZEL_FOUNDATIONS, RULES_PY_2_RECIPE];
+const JAVASCRIPT_PREAMBLES: &[&str] = &[WORKING_AGREEMENT, BAZEL_FOUNDATIONS, RULES_JS_RECIPE];
+const SCALA_PREAMBLES: &[&str] = &[WORKING_AGREEMENT, BAZEL_FOUNDATIONS, RULES_SCALA_RECIPE];
 
 const BAZEL_ROOT_MARKERS: &[&str] = &["MODULE.bazel", "WORKSPACE", "WORKSPACE.bazel"];
 const JAVA_BUILD_MARKERS: &[&str] = &[

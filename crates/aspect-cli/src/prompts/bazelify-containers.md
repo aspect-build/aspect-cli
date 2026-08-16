@@ -2,7 +2,7 @@
 
 Inspect each Dockerfile, compose/deployment configuration, image consumers, base images, system packages, entrypoints, environment, ports, volumes, users, architecture requirements, registry, and CI publishing contract. Treat the Dockerfile as the current behaviour to reproduce, not as input for a blind syntax translation. Preserve it until one representative image has equivalent build, load, and runtime behaviour.
 
-For a new Bazel-owned image, use `rules_img` `0.3.19`, after verifying compatibility with the repository's pinned Bazel version. Prefer `image_from_binary` when the application is already a Bazel `*_binary`; it carries the binary, runfiles, entrypoint, arguments, and run environment into the image. For explicit layout, use `image_layer` and `image_manifest`. Use Bazel target platforms and `image_index` for multi-platform images; do not set an image architecture that disagrees with the binary's build platform.
+For a new Bazel-owned image, use `rules_img` `0.3.19`. Prefer `image_from_binary` when the application is already a Bazel `*_binary`; it carries the binary, runfiles, entrypoint, arguments, and run environment into the image. For explicit layout, use `image_layer` and `image_manifest`. Use Bazel target platforms and `image_index` for multi-platform images; do not set an image architecture that disagrees with the binary's build platform.
 
 ```starlark
 bazel_dep(name = "rules_img", version = "0.3.19")

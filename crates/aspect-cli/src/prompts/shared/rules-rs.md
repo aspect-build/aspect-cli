@@ -1,6 +1,6 @@
 ## rules_rs Paved Path
 
-Use `rules_rs` `0.0.102` after checking it is compatible with the repository's Bazel version. Derive Rust edition and minimum compiler version from the repository; do not lower the toolchain below its declared `rust-version`.
+Use `rules_rs` `0.0.102`. Derive Rust edition and minimum compiler version from the repository; do not lower the toolchain below its declared `rust-version`.
 
 ```starlark
 bazel_dep(name = "rules_rs", version = "0.0.102")

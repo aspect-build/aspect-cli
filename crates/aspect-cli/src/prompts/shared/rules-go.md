@@ -1,6 +1,6 @@
 ## rules_go and Gazelle
 
-Use the current `rules_go` and Gazelle baseline only after confirming that it supports the repository's pinned Bazel version. This catalogue pins `rules_go` `0.62.0` and Gazelle `0.52.2`; do not substitute an unverified newer release or alter the Bazel major as part of this work.
+This catalogue pins `rules_go` `0.62.0` and Gazelle `0.52.2`; do not substitute an unverified newer release, and do not alter the repository's Bazel version as part of this work. If the baseline proves incompatible with the pinned Bazel, move the `rules_go` and Gazelle versions.
 
 Before validation, ensure the available Bazel/Bazelisk resolves the `.bazelversion` value. If only a different plain `bazel` is available, continue inspection and drafting, but stop before validation or label it explicitly non-authoritative; do not claim the pinned baseline passed under another Bazel version.
 

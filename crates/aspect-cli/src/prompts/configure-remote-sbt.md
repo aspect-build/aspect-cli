@@ -52,4 +52,4 @@ Default to letting developers populate the cache — a repository whose CI does 
 
 Whether a given identity may upload is enforced by the deployment, not by the client. Refer questions about who may upload to whoever operates it, and do not probe for denial by attempting an upload against a shared cache.
 
-Report the exact repository changes, the CI and developer authorization model, and the rollback path: remove the plugin line and the `remoteCache` settings, and `aspect auth remove <deployment>`.
+Leave every change in the working tree: do not commit, branch, or push. Report the exact repository changes, the CI and developer authorization model, and the rollback path: remove the plugin line and the `remoteCache` settings, and `aspect auth remove <deployment>`.

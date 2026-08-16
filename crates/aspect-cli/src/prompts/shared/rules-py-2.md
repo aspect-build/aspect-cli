@@ -1,6 +1,6 @@
 ## Aspect rules_py 2.x recipe
 
-Use `aspect_rules_py` `2.0.0-alpha.4` only after checking it is compatible with the repository's Bazel version. The Bazel-managed `uv` toolchain does not require host `uv`; refresh the lock from the workspace rather than Bazel's runfiles tree:
+Use `aspect_rules_py` `2.0.0-alpha.4`. The Bazel-managed `uv` toolchain does not require host `uv`; refresh the lock from the workspace rather than Bazel's runfiles tree:
 
 ```text
 bazel run @uv//:uv -- lock --project $(bazel info workspace)
