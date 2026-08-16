@@ -12,6 +12,13 @@ common:linux --host_platform=//bazel/platforms:linux_host_platform
 common --@rules_cc//cc/toolchains/args/archiver_flags:use_libtool_on_macos=False
 common --@toolchains_llvm_bootstrapped//config:experimental_stub_libgcc_s=True
 
+# Rewrite flaky download hosts to mirrors (musl.libc.org times out from CI,
+# stalling the musl_libc repository fetch until the job timeout kills it).
+# See bazel/downloader.cfg for the rules; pinned integrity checksums keep
+# mirrors honest. Complements --module_mirrors (bazel/defaults.bazelrc),
+# which only covers BCR module sources, not extension-fetched archives.
+common --downloader_config=bazel/downloader.cfg
+
 common:release --stamp
 common:release --workspace_status_command "${PWD}/bazel/workspace_status.sh"
 common:release --compilation_mode=opt
