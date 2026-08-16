@@ -18,7 +18,10 @@ scala_deps = use_extension(
     "scala_deps",
 )
 scala_deps.scala()
+scala_deps.scalatest()
 ```
+
+Every toolchain is off until a tag enables it. `scala_test` needs the tag matching the repository's declared test framework — `scala_deps.scalatest()`, `scala_deps.junit()`, or `scala_deps.specs2()` — and without it the target fails toolchain resolution before any test runs, with `No matching toolchains found for types: @@rules_scala+//testing/toolchain:testing_toolchain_type`.
 
 `rules_scala` pins one patch release per Scala minor line — 7.2.6 ships 2.13.18 — and validates the configured version against it, so a config naming any other patch fails analysis with `Scala config (2.13.6) version does not match repository version (2.13.18)`. Keep the repository's declared version and supply its artifacts instead of lowering the declaration:
 
