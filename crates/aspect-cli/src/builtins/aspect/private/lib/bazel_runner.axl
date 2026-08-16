@@ -281,10 +281,6 @@ def run_bazel_task(ctx: TaskContext, command: str, targets = None) -> TaskConclu
     # user can still override via --bazel-flag=...
     base_flags = ["--isatty=" + str(int(ctx.std.io.stdout.is_tty))]
 
-    # Feature-injected defaults, prepended so a user `--bazel-flag` still wins
-    # (last-wins).
-    base_flags.extend(bazel_trait.base_flags)
-
     # Patterns resolve after the rc parse below, so `setup` opens with what the
     # user stated and the spawn refines it to the resolved list.
     if targets != None:

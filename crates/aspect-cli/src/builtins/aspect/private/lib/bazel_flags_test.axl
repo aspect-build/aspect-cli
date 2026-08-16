@@ -11,13 +11,16 @@ def _eq(label, got, want):
     if got != want:
         fail("%s: got %r, want %r" % (label, got, want))
 
-def _trait(extra_startup = [], extra = [], task_flags = []):
+def _trait(extra_startup = [], extra = [], task_flags = [], base = [], flags = None, startup_flags = None):
     """A real `BazelTrait` with just the startup/command-flag fields the helpers
     read."""
     return BazelTrait(
         extra_startup_flags = extra_startup,
         extra_flags = extra,
         task_flags = task_flags,
+        base_flags = base,
+        flags = flags,
+        startup_flags = startup_flags,
     )
 
 def _fake_ctx(bazel_startup_flags = [], bazel_flags = [], trait = None):
@@ -102,6 +105,26 @@ def _test_flags_full_chain_order(ctx):
         ["--cli", "--trait-extra", "--from-hook"],
     )
 
+def _test_flag_transforms(ctx):
+    """The optional `trait.flags` / `trait.startup_flags` transforms run last and
+    replace the whole list — the exported seam a user `config.axl` rewrites
+    flags through."""
+    t = _trait(
+        extra = ["--trait-extra"],
+        flags = lambda flags: [f for f in flags if f != "--trait-extra"] + ["--rewritten"],
+        startup_flags = lambda flags: flags + ["--startup-rewritten"],
+    )
+    _eq(
+        "flags transform replaces the list",
+        bazel.flags.resolve(_fake_ctx(bazel_flags = ["--cli"], trait = t)),
+        ["--cli", "--rewritten"],
+    )
+    _eq(
+        "startup transform replaces the list",
+        bazel.flags.resolve_startup(_fake_ctx(bazel_startup_flags = ["--client"], trait = t)),
+        ["--client", "--startup-rewritten"],
+    )
+
 def _test_flags_empty_defaults(ctx):
     """No CLI flags, no trait additions → empty result."""
     _eq(
@@ -136,6 +159,19 @@ def _test_setup_command_applies_to_ctx_bazel(ctx):
         fail("setup_command — trait --output_base not on rc startup flags: %r" % startup)
     if "--ignore_all_rc_files" not in startup:
         fail("setup_command — --ignore_all_rc_files not present: %r" % startup)
+
+def _test_setup_command_trait_base_flags(ctx):
+    """`trait.base_flags` (feature-injected defaults, e.g. a deployment's
+    `--remote_cache`) enter setup_command's composition ahead of the caller's
+    base flags, so every task setting up through it honors them and later flags
+    still win last-wins."""
+    ctx.traits[BazelTrait] = _trait(base = ["--trait-base"])
+    rc = bazel.setup_command(ctx, "build", base_flags = ["--from-base"])
+    expanded = rc.expand(command = "build")
+    if "--trait-base" not in expanded:
+        fail("setup_command — trait base_flag not in build expansion: %r" % expanded)
+    if expanded.index("--trait-base") > expanded.index("--from-base"):
+        fail("setup_command — trait base_flags must precede caller base_flags: %r" % expanded)
 
 def _test_sibling_rc_transforms_startup(ctx):
     """`bazel.sibling_rc` mirrors setup_command's flags but runs the startup
@@ -339,6 +375,7 @@ def _test_impl(ctx):
     _test_startup_trait_extra_appended(ctx)
     _test_startup_input_list_not_mutated(ctx)
     _test_flags_full_chain_order(ctx)
+    _test_flag_transforms(ctx)
     _test_flags_empty_defaults(ctx)
     _test_announce_auto_follows_ci(ctx)
     _test_announce_explicit_overrides_ci(ctx)
@@ -350,8 +387,9 @@ def _test_impl(ctx):
     # Run last: these register a real active rc on `ctx.bazel`, so keeping them
     # after the pure subtests prevents bleed-through.
     _test_setup_command_applies_to_ctx_bazel(ctx)
+    _test_setup_command_trait_base_flags(ctx)
     _test_sibling_rc_transforms_startup(ctx)
-    print("bazel_flags_test.axl: OK (13 sections)")
+    print("bazel_flags_test.axl: OK (15 sections)")
     return 0
 
 bazel_flags_tests = task(

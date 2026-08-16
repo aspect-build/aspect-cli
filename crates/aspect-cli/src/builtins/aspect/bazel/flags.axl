@@ -114,23 +114,29 @@ def _targets_arg(verb: str) -> dict:
     }
 
 def _resolve_startup_flags(ctx) -> list:
-    """`ctx.args.bazel_startup_flags + trait.extra_startup_flags`. Requires a
-    `bazel_startup_flags` CLI arg."""
+    """`ctx.args.bazel_startup_flags + trait.extra_startup_flags`, then the
+    `trait.startup_flags(flags)` transform if set. Requires a `bazel_startup_flags`
+    CLI arg."""
     bazel_trait = ctx.traits[BazelTrait]
     _require_arg(ctx, "bazel_startup_flags")
     flags = list(ctx.args.bazel_startup_flags)
     flags.extend(bazel_trait.extra_startup_flags)
+    if bazel_trait.startup_flags:
+        flags = bazel_trait.startup_flags(flags)
     return flags
 
 def _resolve_flags(ctx) -> list:
-    """`ctx.args.bazel_flags + trait.extra_flags + trait.task_flags(ctx) hooks`.
-    Requires a `bazel_flags` CLI arg."""
+    """`ctx.args.bazel_flags + trait.extra_flags + trait.task_flags(ctx) hooks`,
+    then the `trait.flags(flags)` transform if set. Requires a `bazel_flags` CLI
+    arg."""
     bazel_trait = ctx.traits[BazelTrait]
     _require_arg(ctx, "bazel_flags")
     flags = list(ctx.args.bazel_flags)
     flags.extend(bazel_trait.extra_flags)
     for hook in bazel_trait.task_flags:
         flags.extend(hook(ctx))
+    if bazel_trait.flags:
+        flags = bazel_trait.flags(flags)
     return flags
 
 def _setup_command(ctx, command: str, base_flags: list = []):
@@ -141,14 +147,16 @@ def _setup_command(ctx, command: str, base_flags: list = []):
     `RunCommand`, registers it via `ctx.bazel.use_rc`, and emits the parsed-rc
     disclosure. Subsequent `ctx.bazel.build`/`test`/`query` use the active run
     command — each self-expands and adds `--ignore_all_rc_files`. `base_flags`
-    are task-injected defaults the user can override via `--bazel-flag=...`.
+    are task-injected defaults the user can override via `--bazel-flag=...`;
+    `trait.base_flags` (feature-injected defaults) are prepended ahead of them,
+    so every task setting up through here honors them.
 
     Built-in tasks reach this through `phases.setup`, which
     calls it before the Bazel health-check hooks so the check inspects the same
     active run command every Bazel call uses.
     """
     startup_flags = _resolve_startup_flags(ctx)
-    flags = list(base_flags) + _resolve_flags(ctx)
+    flags = list(ctx.traits[BazelTrait].base_flags) + list(base_flags) + _resolve_flags(ctx)
     rc = ctx.bazel.parse_rc(
         startup_flags = startup_flags,
         flags = flags,
@@ -174,7 +182,7 @@ def _sibling_rc(ctx, startup_transform, command: str = "build", base_flags: list
     the disclosure — pass the returned rc as a per-call `rc=` on `ctx.bazel.build`.
     """
     startup_flags = startup_transform(_resolve_startup_flags(ctx))
-    flags = list(base_flags) + _resolve_flags(ctx)
+    flags = list(ctx.traits[BazelTrait].base_flags) + list(base_flags) + _resolve_flags(ctx)
     return ctx.bazel.parse_rc(
         startup_flags = startup_flags,
         flags = flags,
