@@ -319,11 +319,16 @@ def s3_failure_is_retryable(http_code: str, body: str) -> bool:
     4xx is only when its `<Code>` names a rotation, skew, or throttle (see
     `_RETRYABLE_S3_ERROR_CODES`).
 
+    A 2xx counts as retryable too, because reaching here with one means curl
+    exited nonzero *after* S3 answered — the response transfer was cut short
+    (`curl: (18) Partial file`, or a reset mid-body). That's the network, not
+    something about the request that a retry would hit again.
+
     Public (not `_`-prefixed) so `circleci_test.axl` can load it.
     """
     if not http_code or http_code == "000":
         return True
-    if http_code.startswith("5") or http_code in ("408", "429"):
+    if http_code.startswith("2") or http_code.startswith("5") or http_code in ("408", "429"):
         return True
     return s3_extract_error_code(body) in _RETRYABLE_S3_ERROR_CODES
 

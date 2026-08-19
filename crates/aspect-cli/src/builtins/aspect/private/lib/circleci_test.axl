@@ -196,6 +196,13 @@ def _test_retryable_transport_error(_ctx):
     if not s3_failure_is_retryable("000", ""):
         fail("transport failure must be retryable")
 
+def _test_retryable_interrupted_after_2xx(_ctx):
+    """`_run_s3_put` fails a PUT whose curl exit is nonzero even when S3
+    answered 2xx — an interrupted response transfer (`curl: (18) Partial
+    file`). The upload never completed, and the next attempt can still work."""
+    if not s3_failure_is_retryable("200", ""):
+        fail("a 2xx with a nonzero curl exit must be retryable")
+
 def _test_retryable_server_error(_ctx):
     if not s3_failure_is_retryable("503", ""):
         fail("5xx must be retryable")
@@ -423,6 +430,7 @@ _UNIT_TESTS = [
     _test_not_retryable_signature_mismatch,
     _test_not_retryable_access_denied,
     _test_retryable_transport_error,
+    _test_retryable_interrupted_after_2xx,
     _test_retryable_server_error,
     _test_retryable_throttled,
     _test_not_retryable_unknown_4xx,
