@@ -11,6 +11,11 @@ credentials:
 Neither is pre-signed by the runner; the client signs both — see `_s3_put`
 and `_s3_put_object`.
 
+Because we sign with curl's `--aws-sigv4`, which signs the URL path exactly
+as written, every object key goes through `aws_uri_encode` first — otherwise
+a key holding anything outside `A-Za-z0-9-_.~/` is canonicalized differently
+by S3 and the PUT fails with `403 SignatureDoesNotMatch`.
+
 Credential lifetime: the runner mints the temporary S3 (STS) credentials
 returned by `/api/v2/output/credentials` with a short TTL (≈10 min) and
 hands back those same job-scoped credentials on every call. A task that
@@ -28,6 +33,7 @@ fails (see `session_cache_get` / `session_cache_clear`). A standalone
 call (`cache = None`) keeps the original fetch-per-call behavior.
 """
 
+load("@std//base64.axl", "base64")
 load("@std//time.axl", "time")
 load("./environment.axl", "warn")
 
@@ -231,9 +237,95 @@ def _header_args(headers):
         args = args + ["-H", k + ": " + v]
     return args
 
+_UNRESERVED = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~"
+_B64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+_HEX_DIGITS = "0123456789ABCDEF"
+
+def _utf8_bytes(s: str) -> list[int]:
+    """The UTF-8 bytes of `s`, as ints.
+
+    AXL exposes no codepoint or byte primitive and `elems()` yields whole
+    characters, so base64 — which encodes the UTF-8 bytes — is the only route
+    to the byte values `aws_uri_encode` has to percent-encode one by one.
+    """
+    acc = 0
+    bits = 0
+    out = []
+    for c in base64.encode(s).elems():
+        if c == "=":
+            break
+        acc = (acc << 6) | _B64_ALPHABET.find(c)
+        bits += 6
+        if bits >= 8:
+            bits -= 8
+            out.append((acc >> bits) & 0xFF)
+    return out
+
+def aws_uri_encode(key: str) -> str:
+    """Percent-encode an S3 object key the way SigV4 canonicalization does.
+
+    AWS `UriEncode` escapes every byte outside `A-Za-z0-9-_.~`, leaving `/`
+    as a path separator. S3 verifies a signature against that canonical form,
+    while curl's `--aws-sigv4` signs — and sends — the URL path verbatim. So a
+    key carrying anything else (`@`, `(`, `)`, `{`, a space, any non-ASCII
+    byte) is signed as one string and canonicalized by S3 as another, and the
+    PUT fails with `403 SignatureDoesNotMatch`. Encoding here makes the two
+    agree: S3 decodes the path back to the intended key, re-encodes it, and
+    lands on exactly what we signed.
+
+    `%` is escaped to `%25` like any other byte, so a filename that already
+    contains a percent sequence (Cucumber writes screenshot names as
+    `%7BSMOKE%7D…`) is stored under its literal name instead of being silently
+    decoded into `{SMOKE}`.
+
+    Public (not `_`-prefixed) so `circleci_test.axl` can load it.
+    """
+    out = ""
+    for c in key.elems():
+        if c == "/" or c in _UNRESERVED:
+            out += c
+        else:
+            for b in _utf8_bytes(c):
+                out += "%" + _HEX_DIGITS[b // 16] + _HEX_DIGITS[b % 16]
+    return out
+
 def _s3_object_url(bucket, region, key):
-    """Virtual-hosted S3 URL for `key` in `bucket`/`region`."""
-    return "https://" + bucket + ".s3." + region + ".amazonaws.com/" + key
+    """Virtual-hosted S3 URL for `key` in `bucket`/`region`.
+
+    The key is `aws_uri_encode`d so the signed path survives S3's canonical
+    form — see `aws_uri_encode`.
+    """
+    return "https://" + bucket + ".s3." + region + ".amazonaws.com/" + aws_uri_encode(key)
+
+# S3 conditions worth another attempt: the job-scoped credentials rotated or
+# the clock drifted, or S3 itself asked us to come back. Anything else 4xx
+# (`SignatureDoesNotMatch`, `AccessDenied`, a malformed key) fails the same
+# way on every attempt, so retrying only multiplies the log noise.
+_RETRYABLE_S3_ERROR_CODES = [
+    "ExpiredToken",
+    "ExpiredTokenException",
+    "TokenRefreshRequired",
+    "RequestTimeTooSkewed",
+    "RequestTimeout",
+    "InternalError",
+    "ServiceUnavailable",
+    "SlowDown",
+]
+
+def s3_failure_is_retryable(http_code: str, body: str) -> bool:
+    """Whether a failed S3 PUT is worth re-attempting with fresh credentials.
+
+    Transport failures (`http_code == "000"`) and 5xx/408/429 always are; a
+    4xx is only when its `<Code>` names a rotation, skew, or throttle (see
+    `_RETRYABLE_S3_ERROR_CODES`).
+
+    Public (not `_`-prefixed) so `circleci_test.axl` can load it.
+    """
+    if not http_code or http_code == "000":
+        return True
+    if http_code.startswith("5") or http_code in ("408", "429"):
+        return True
+    return s3_extract_error_code(body) in _RETRYABLE_S3_ERROR_CODES
 
 def s3_sigv4_put_args(region, aws_creds, path, headers = None):
     """curl args for a sigv4-signed PUT using the job-scoped STS credentials.
@@ -328,8 +420,9 @@ def _run_s3_put(ctx, curl_args, url):
 def _s3_put(ctx, session, path, name):
     """Register the artifact with the runner and PUT it to S3.
 
-    Returns `(success, detail, download_url)`. `detail` is a human-readable
-    failure reason on `success == False`. Uses the credentials in
+    Returns `(success, detail, download_url, retryable)`. `detail` is a
+    human-readable failure reason on `success == False`, and `retryable` says
+    whether another attempt could plausibly succeed. Uses the credentials in
     `session`; callers re-fetch the session between attempts.
     """
     token = session["token"]
@@ -344,7 +437,7 @@ def _s3_put(ctx, session, path, name):
         "artifactType": "application/octet-stream",
     })
     if not artifact_resp:
-        return (False, "failed to register artifact with runner API", "")
+        return (False, "failed to register artifact with runner API", "", True)
     prefix = artifact_resp["prefix"]
     tags = artifact_resp.get("key", {}).get("tags", {})
 
@@ -360,17 +453,22 @@ def _s3_put(ctx, session, path, name):
         s3_url,
     )
     if not ok:
-        return (False, s3_upload_error_detail(http_code, curl_err, body), "")
+        return (
+            False,
+            s3_upload_error_detail(http_code, curl_err, body),
+            "",
+            s3_failure_is_retryable(http_code, body),
+        )
 
     # Stable public CircleCI artifact URL so callers can link to individual
     # files. CIRCLE_WORKFLOW_JOB_ID is always set by the runner; fall back to
     # the signed S3 URL if it's ever absent.
     job_id = ctx.std.env.var("CIRCLE_WORKFLOW_JOB_ID") or ""
     if job_id:
-        download_url = "https://output.circle-artifacts.com/output/job/" + job_id + "/artifacts/0/" + name
+        download_url = "https://output.circle-artifacts.com/output/job/" + job_id + "/artifacts/0/" + aws_uri_encode(name)
     else:
         download_url = s3_url
-    return (True, "", download_url)
+    return (True, "", download_url, False)
 
 def _upload_artifact(ctx, path, name, cache = None):
     """Upload a file to CircleCI via the runner API and S3.
@@ -384,11 +482,17 @@ def _upload_artifact(ctx, path, name, cache = None):
     omit it (`cache = None`) for a one-off, un-cached upload. Retries up to
     `_UPLOAD_MAX_ATTEMPTS` with exponential backoff; the returned `errors`
     carry the real HTTP status / S3 error code from the last attempt.
+
+    A failure S3 will reject identically every time (`SignatureDoesNotMatch`,
+    `AccessDenied` — see `s3_failure_is_retryable`) stops after the first
+    attempt and comes back with `permanent = True`, so the caller can drop
+    this file and move on instead of re-attempting it for the rest of the run.
     """
     if not ctx.std.fs.exists(path):
-        return {"success": False, "artifact_ref": None, "download_url": "", "errors": ["file not found: " + path]}
+        return {"success": False, "artifact_ref": None, "download_url": "", "errors": ["file not found: " + path], "permanent": True}
 
     last_detail = "unknown error"
+    permanent = False
     backoff_ms = _UPLOAD_BACKOFF_BASE_MS
     for attempt in range(_UPLOAD_MAX_ATTEMPTS):
         session = session_cache_get(cache)
@@ -401,10 +505,15 @@ def _upload_artifact(ctx, path, name, cache = None):
             last_detail = session["error"]
             session_cache_clear(cache)
         else:
-            ok, detail, download_url = _s3_put(ctx, session, path, name)
+            ok, detail, download_url, retryable = _s3_put(ctx, session, path, name)
             if ok:
-                return {"success": True, "artifact_ref": name, "download_url": download_url, "errors": []}
+                return {"success": True, "artifact_ref": name, "download_url": download_url, "errors": [], "permanent": False}
             last_detail = detail
+            if not retryable:
+                # The credentials are fine — this file is what S3 objects to.
+                # Keep the session for the next file and stop here.
+                permanent = True
+                break
 
             # The cached creds may have expired — drop them so the next
             # attempt (and the next file) re-mints rather than reusing a
@@ -415,7 +524,7 @@ def _upload_artifact(ctx, path, name, cache = None):
             time.sleep(backoff_ms)
             backoff_ms = backoff_ms * 2
 
-    return {"success": False, "artifact_ref": None, "download_url": "", "errors": [last_detail]}
+    return {"success": False, "artifact_ref": None, "download_url": "", "errors": [last_detail], "permanent": permanent}
 
 def _delete_artifact(ctx, name):
     """CircleCI has no artifact deletion API — no-op."""
@@ -450,7 +559,9 @@ def test_results_object_url(bucket: str, region: str, location: str) -> str:
     """Resolve a test-result Key.location to a PUT URL.
 
     The Key returns a relative S3 object key; join it with the config
-    bucket/region. An already-absolute (http/https) location passes through.
+    bucket/region (and `aws_uri_encode` it, as with any other key). An
+    already-absolute (http/https) location passes through untouched — it
+    carries its own encoding, and may carry its own signature.
     """
     if location.startswith("http://") or location.startswith("https://"):
         return location
