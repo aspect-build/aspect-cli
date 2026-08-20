@@ -309,7 +309,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # returns resolved flags (a failed health check fails the task inside).
     rc = setup_phase(ctx, lifecycle, ctx.args.formatter_target, "format_results", data, hc_trait, bazel_trait)
     announce_version, announce_command = bzl.announce.resolve(ctx)
-    endpoint_auth_flags = bzl.endpoint_auth_flags(ctx, rc, "build")
+    endpoint_auth_flags = bzl.rc_flags(ctx, rc, "build")
 
     # `rc=` opts into the runinfo aspect: `r.flags` captures the formatter's
     # executable + `args` attribute + env so `r.spawn` replays them ahead of the
