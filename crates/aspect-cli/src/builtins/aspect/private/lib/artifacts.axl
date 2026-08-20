@@ -393,7 +393,14 @@ def _upload_group_per_file(ctx, provider, group, entries, name):
         else:
             for err in result["errors"]:
                 _print_upload_error(ctx, dest, err)
-            break
+
+            # A permanent rejection (this file, every time) is counted as
+            # handled: retrying it on each later snapshot would warn again and
+            # again, and stopping here would strand every file behind it. A
+            # transient failure keeps its slot so the next snapshot retries it.
+            if not result.get("permanent", False):
+                break
+            group["last_count"] += 1
 
     return any_success
 
