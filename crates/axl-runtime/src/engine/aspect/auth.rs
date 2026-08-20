@@ -321,7 +321,7 @@ fn auth_env_from(deployment: &Deployment) -> anyhow::Result<AuthEnv> {
             // A self-hosted deployment owns endpoint hosts and relies on refresh;
             // the built-in cloud seed (no hosts) reissues without a refresh token
             // and deliberately omits offline_access, so honor its scopes verbatim.
-            scopes: login_scopes(&deployment.scopes, !deployment.hosts.is_empty()),
+            scopes: login_scopes(&deployment.scopes, !deployment.hosts.is_empty(), domain),
         }),
         _ => Err(anyhow::anyhow!(
             "deployment {:?} advertised no login config, so the CLI cannot log in \
@@ -336,19 +336,53 @@ fn auth_env_from(deployment: &Deployment) -> anyhow::Result<AuthEnv> {
 /// (a self-hosted deployment), `offline_access` is guaranteed so the credential
 /// can refresh — a discovery document that omits it from `scopes_supported` would
 /// otherwise silently disable refresh, turning every expiry into a forced
-/// re-login. An IdP that doesn't support it ignores it (OIDC), so it's safe to
-/// add. The built-in cloud flow passes `needs_refresh = false` to keep its
+/// re-login. The built-in cloud flow passes `needs_refresh = false` to keep its
 /// deliberate no-`offline_access` scope set.
-fn login_scopes(advertised: &[String], needs_refresh: bool) -> Vec<String> {
+///
+/// `issuer` is consulted because that guarantee is not portable: Google answers
+/// `invalid_scope` rather than ignoring the scope, so appending it there does not
+/// degrade the login, it BREAKS it. Google is therefore stripped of it in both
+/// directions — out of the standard set and out of an advertised set that names it
+/// — and asks for its refresh token through [`extra_authorize_params`] instead.
+fn login_scopes(advertised: &[String], needs_refresh: bool, issuer: &str) -> Vec<String> {
     let mut scopes: Vec<String> = if advertised.is_empty() {
         DEFAULT_LOGIN_SCOPES.iter().map(|s| s.to_string()).collect()
     } else {
         advertised.to_vec()
     };
-    if needs_refresh && !scopes.iter().any(|s| s == "offline_access") {
+    if issuer_is_google(issuer) {
+        scopes.retain(|s| s != "offline_access");
+    } else if needs_refresh && !scopes.iter().any(|s| s == "offline_access") {
         scopes.push("offline_access".to_string());
     }
     scopes
+}
+
+/// The one issuer whose refresh-token request is spelled outside the scope list.
+const GOOGLE_ISSUER: &str = "https://accounts.google.com";
+
+/// Whether `issuer` is Google. Compared as a literal because there is only one
+/// spelling to match: the value is what [`resolve_oidc_endpoints`] runs discovery
+/// against, so it has to be the issuer URL Google publishes in its own discovery
+/// document. A trailing slash is trimmed, matching how `AuthEnv::domain` is stored.
+fn issuer_is_google(issuer: &str) -> bool {
+    issuer
+        .trim_end_matches('/')
+        .eq_ignore_ascii_case(GOOGLE_ISSUER)
+}
+
+/// Authorize-request parameters this issuer needs beyond the standard set.
+///
+/// Google gates a refresh token on `access_type=offline` — a request parameter,
+/// not a scope — and reissues one only when it actually re-prompts, hence
+/// `prompt=consent`. Every other provider here takes the `offline_access` scope
+/// [`login_scopes`] adds, and gets nothing extra.
+fn extra_authorize_params(issuer: &str) -> &'static [(&'static str, &'static str)] {
+    if issuer_is_google(issuer) {
+        &[("access_type", "offline"), ("prompt", "consent")]
+    } else {
+        &[]
+    }
 }
 
 fn resolve_aspect_env() -> anyhow::Result<AuthEnv> {
@@ -1380,6 +1414,11 @@ fn login_state(nonce: &str, port: u16) -> String {
 /// self-hosted flow uses it, the cloud flow does not). `authorize_endpoint` may
 /// already carry a query (OIDC discovery can return one), so the parameter
 /// separator is chosen accordingly.
+///
+/// `extra` carries per-issuer request parameters that have no scope equivalent —
+/// see [`extra_authorize_params`]. They are appended before `state` so `state`
+/// stays last, which the tests and the callback's own parsing both read as the
+/// tail of the URL.
 fn build_authorize_url(
     authorize_endpoint: &str,
     client_id: &str,
@@ -1387,6 +1426,7 @@ fn build_authorize_url(
     scopes: &[String],
     code_challenge: &str,
     state: Option<&str>,
+    extra: &[(&str, &str)],
 ) -> String {
     let mut url = format!(
         "{}{}client_id={}&redirect_uri={}&response_type=code&scope={}&code_challenge={}&code_challenge_method=S256",
@@ -1401,6 +1441,9 @@ fn build_authorize_url(
         urlencode(&scopes.join(" ")),
         urlencode(code_challenge),
     );
+    for (key, value) in extra {
+        url.push_str(&format!("&{}={}", urlencode(key), urlencode(value)));
+    }
     if let Some(state) = state {
         url.push_str(&format!("&state={}", urlencode(state)));
     }
@@ -1426,6 +1469,7 @@ fn build_cloud_session(env: AuthEnv) -> anyhow::Result<AuthSession> {
         &env.scopes,
         &code_challenge,
         None,
+        extra_authorize_params(&env.domain),
     );
     Ok(AuthSession {
         url: authorize_url,
@@ -1465,6 +1509,7 @@ fn build_endpoint_session(env: AuthEnv, host: &str) -> anyhow::Result<AuthSessio
         &env.scopes,
         &code_challenge,
         Some(&state),
+        extra_authorize_params(&env.domain),
     );
     Ok(AuthSession {
         url: authorize_url,
@@ -3334,6 +3379,7 @@ mod tests {
             &scopes(&["openid", "profile", "email"]),
             "chal",
             None,
+            &[],
         );
         assert!(cloud.starts_with("https://auth.aspect.build/oauth/authorize?client_id=client-1&"));
         assert!(cloud.contains("redirect_uri=http%3A%2F%2Flocalhost%3A19556%2Fcallback"));
@@ -3349,6 +3395,7 @@ mod tests {
             &scopes(&["openid", "offline_access"]),
             "chal",
             Some("nonce.5000"),
+            &[],
         );
         assert!(with_state.contains("/authorize?foo=bar&client_id=c%2F2"));
         assert!(with_state.contains("scope=openid%20offline_access"));
@@ -3524,19 +3571,24 @@ mod tests {
 
     #[test]
     fn login_scopes_guarantees_offline_access_for_self_hosted() {
+        const ISS: &str = "https://acme.auth.aspect.build";
         // No advertised scopes → the standard set (which includes offline_access).
-        assert_eq!(login_scopes(&[], true), DEFAULT_LOGIN_SCOPES);
+        assert_eq!(login_scopes(&[], true, ISS), DEFAULT_LOGIN_SCOPES);
 
         // Self-hosted: advertised scopes are honored (BYO-IdP) but offline_access
         // is appended when missing, so refresh always works.
         assert_eq!(
-            login_scopes(&["openid".to_string(), "profile".to_string()], true),
+            login_scopes(&["openid".to_string(), "profile".to_string()], true, ISS),
             vec!["openid", "profile", "offline_access"]
         );
 
         // Already present → not duplicated, order preserved.
         assert_eq!(
-            login_scopes(&["openid".to_string(), "offline_access".to_string()], true),
+            login_scopes(
+                &["openid".to_string(), "offline_access".to_string()],
+                true,
+                ISS
+            ),
             vec!["openid", "offline_access"]
         );
 
@@ -3549,10 +3601,73 @@ mod tests {
                     "profile".to_string(),
                     "email".to_string()
                 ],
-                false
+                false,
+                ISS
             ),
             vec!["openid", "profile", "email"]
         );
+    }
+
+    #[test]
+    fn google_asks_for_offline_access_by_request_param_not_scope() {
+        // Google answers invalid_scope for `offline_access`, so it must never reach
+        // the scope list — not from the standard set...
+        assert_eq!(
+            login_scopes(&[], true, GOOGLE_ISSUER),
+            vec!["openid", "profile", "email"]
+        );
+        // ...and not from an advertised set that names it either. A deployment
+        // pointed at Google should not be able to reintroduce the failure.
+        assert_eq!(
+            login_scopes(
+                &[
+                    "openid".to_string(),
+                    "offline_access".to_string(),
+                    "email".to_string()
+                ],
+                true,
+                GOOGLE_ISSUER
+            ),
+            vec!["openid", "email"]
+        );
+        // The request it does make instead.
+        assert_eq!(
+            extra_authorize_params(GOOGLE_ISSUER),
+            &[("access_type", "offline"), ("prompt", "consent")]
+        );
+        // Everyone else keeps the scope and gains no extra params, so the Google
+        // carve-out cannot leak into another IdP's request.
+        let other = "https://acme.auth.aspect.build";
+        assert!(login_scopes(&[], true, other).contains(&"offline_access".to_string()));
+        assert!(extra_authorize_params(other).is_empty());
+    }
+
+    #[test]
+    fn issuer_is_google_matches_only_googles_own_issuer() {
+        assert!(issuer_is_google("https://accounts.google.com"));
+        assert!(issuer_is_google("https://accounts.google.com/")); // trailing slash
+        // Identity Platform / Firebase is a different issuer and a different flow.
+        assert!(!issuer_is_google("https://securetoken.google.com/proj"));
+        assert!(!issuer_is_google("https://accounts.google.com.evil.test"));
+        assert!(!issuer_is_google("http://accounts.google.com")); // scheme is load-bearing
+    }
+
+    #[test]
+    fn google_authorize_url_carries_access_type_before_state() {
+        let url = build_authorize_url(
+            "https://accounts.google.com/o/oauth2/v2/auth",
+            "client-1",
+            "https://remote.acme.aspect.build/oauth2/callback",
+            &["openid".to_string(), "email".to_string()],
+            "chal",
+            Some("nonce.5000"),
+            extra_authorize_params(GOOGLE_ISSUER),
+        );
+        assert!(url.contains("&access_type=offline"));
+        assert!(url.contains("&prompt=consent"));
+        assert!(!url.contains("offline_access"));
+        // state stays last.
+        assert!(url.ends_with("&state=nonce.5000"));
     }
 
     #[test]
