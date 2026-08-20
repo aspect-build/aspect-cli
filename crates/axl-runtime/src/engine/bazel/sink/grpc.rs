@@ -17,6 +17,7 @@ use build_event_stream::{
     lifecycle,
 };
 
+use futures::FutureExt;
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tonic::Streaming;
 
@@ -730,6 +731,10 @@ async fn drive_stream(
     // numbers. The server dedups via OrderedBuildEvent.sequence_number.
     // Skip the entry `preload_first_event` already sent — server would
     // dedup anyway, but resending wastes bytes.
+    // Acks are read as they land — leaving them unread through a long replay
+    // fills the connection window and trips `send_stall_timeout` — and applied
+    // once the loop releases its borrow of `state.buffer`.
+    let mut replayed_acks: Vec<i64> = Vec::new();
     let mut replay_failure = None;
     for (seq, req) in state.buffer.iter() {
         if Some(*seq) == preloaded_seq {
@@ -746,6 +751,13 @@ async fn drive_stream(
             replay_failure = Some(outcome);
             break;
         }
+        // Only what is already buffered — waiting would slow the replay.
+        while let Some(Some(Ok(resp))) = response_stream.next().now_or_never() {
+            replayed_acks.push(resp.sequence_number);
+        }
+    }
+    for seq in replayed_acks {
+        state.record_ack(seq);
     }
     if let Some(outcome) = replay_failure {
         drain_acks(&mut response_stream, state).await;
@@ -843,6 +855,14 @@ async fn drive_stream(
                         state.record_ack(r.sequence_number);
                         ack_deadline = (!state.buffer.is_empty())
                             .then(|| tokio::time::Instant::now() + retry.ack_progress_timeout);
+                        // Half-close budgets silence, not drain time: a build
+                        // can end with a large unacked backlog, and a flat
+                        // deadline would tear down a backend that is acking
+                        // fine, just not fast enough to finish inside it.
+                        if half_close_deadline.is_some() && !state.buffer.is_empty() {
+                            half_close_deadline =
+                                Some(tokio::time::Instant::now() + retry.half_close_timeout);
+                        }
                         // Once we've sent last_message AND every event we
                         // sent has been ack'd, we're done — exit without
                         // waiting for the server to close the response
