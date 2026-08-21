@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
@@ -47,12 +47,19 @@ struct Deployment {
     api_url: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     hosts: Vec<String>,
-    /// OAuth scopes the login flow requests, from the deployment's advertised
-    /// `scopes_supported` — overridable per deployment for a bring-your-own IdP
-    /// that doesn't accept the standard OIDC set. Empty falls back to
-    /// [`DEFAULT_LOGIN_SCOPES`].
+    /// OAuth scopes the login flow requests, exactly as the deployment advertised
+    /// them. The deployment is authoritative: it knows its own IdP, so an advertised
+    /// set is sent verbatim and never topped up here. Empty (nothing advertised)
+    /// falls back to [`DEFAULT_LOGIN_SCOPES`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     scopes: Vec<String>,
+    /// Extra authorization-request parameters the deployment advertised, appended
+    /// to the authorize URL verbatim. This is where a provider whose refresh token
+    /// is not gated on a scope asks for one — Google wants `access_type=offline`
+    /// and `prompt=consent`, neither of which is expressible as a scope. Sorted, so
+    /// the URL and the persisted config are stable.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    authorize_params: BTreeMap<String, String>,
     /// The capability → host map the deployment advertised (`cache`, `bes`, and
     /// `exec` when it serves remote execution), so `aspect <build|test>
     /// --deployment <name>` wires each to the right Bazel flag. Absent for the
@@ -63,9 +70,12 @@ struct Deployment {
     endpoints: Endpoints,
 }
 
-/// The OAuth scopes the login flow requests when the deployment advertises none.
-/// `offline_access` requests a refresh token so the credential renews without
-/// re-login.
+/// The OAuth scopes the login flow requests when the deployment advertises none,
+/// and the set [`default_deployment`] states for the built-in Aspect account.
+/// A deployment that advertises its own set is authoritative and this does not
+/// apply to it. `offline_access` requests a refresh token so the credential renews
+/// without re-login; a provider that gates one differently (Google) advertises the
+/// parameters for it in `authorize_params` instead.
 const DEFAULT_LOGIN_SCOPES: &[&str] = &["openid", "profile", "email", "offline_access"];
 
 /// The Bazel-facing endpoints a deployment serves, keyed by capability. `cache`
@@ -113,9 +123,12 @@ fn is_false(b: &bool) -> bool {
 struct AuthEnv {
     domain: String,
     client_id: String,
-    /// OAuth scopes to request at login (the deployment's advertised
-    /// `scopes_supported`, or [`DEFAULT_LOGIN_SCOPES`] when it advertised none).
+    /// OAuth scopes to request at login: the deployment's advertised set verbatim,
+    /// or [`DEFAULT_LOGIN_SCOPES`] when it advertised none.
     scopes: Vec<String>,
+    /// Extra authorize-request parameters the deployment advertised, appended to
+    /// the authorize URL as-is.
+    authorize_params: BTreeMap<String, String>,
 }
 
 /// The built-in Aspect production deployment, seeded so a fresh install can
@@ -135,12 +148,15 @@ fn default_deployment() -> Deployment {
         client_id: Some(DEFAULT_CLIENT_ID.to_string()),
         api_url: Some(DEFAULT_API_URL.to_string()),
         hosts: Vec::new(),
-        // The Aspect cloud reissues access tokens without a refresh token, so the
-        // built-in flow requests the base OIDC scopes (no offline_access).
-        scopes: ["openid", "profile", "email"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
+        // The same set a deployment gets when it advertises nothing: this seed is
+        // not discovered from anywhere, so it states what that fallback would give
+        // it rather than keeping a second list to drift from. `offline_access`
+        // included — the cloud login is an ordinary Authorization-Code flow whose
+        // credential expires like any other, and the refresh path below is issuer
+        // -agnostic, so the only thing that ever stopped it refreshing was not
+        // asking for the token.
+        scopes: DEFAULT_LOGIN_SCOPES.iter().map(|s| s.to_string()).collect(),
+        authorize_params: BTreeMap::new(),
         endpoints: Endpoints::default(),
     }
 }
@@ -318,10 +334,8 @@ fn auth_env_from(deployment: &Deployment) -> anyhow::Result<AuthEnv> {
         (Some(domain), Some(client_id)) => Ok(AuthEnv {
             domain: domain.trim_end_matches('/').to_string(),
             client_id: client_id.clone(),
-            // A self-hosted deployment owns endpoint hosts and relies on refresh;
-            // the built-in cloud seed (no hosts) reissues without a refresh token
-            // and deliberately omits offline_access, so honor its scopes verbatim.
-            scopes: login_scopes(&deployment.scopes, !deployment.hosts.is_empty(), domain),
+            scopes: login_scopes(&deployment.scopes),
+            authorize_params: deployment.authorize_params.clone(),
         }),
         _ => Err(anyhow::anyhow!(
             "deployment {:?} advertised no login config, so the CLI cannot log in \
@@ -331,57 +345,19 @@ fn auth_env_from(deployment: &Deployment) -> anyhow::Result<AuthEnv> {
     }
 }
 
-/// The scopes the login flow requests: the deployment's advertised scopes when it
-/// has any (a BYO-IdP override), else the standard OIDC set. When `needs_refresh`
-/// (a self-hosted deployment), `offline_access` is guaranteed so the credential
-/// can refresh — a discovery document that omits it from `scopes_supported` would
-/// otherwise silently disable refresh, turning every expiry into a forced
-/// re-login. The built-in cloud flow passes `needs_refresh = false` to keep its
-/// deliberate no-`offline_access` scope set.
+/// The scopes the login flow requests: whatever the deployment advertised, sent
+/// verbatim, else [`DEFAULT_LOGIN_SCOPES`] when it advertised nothing.
 ///
-/// `issuer` is consulted because that guarantee is not portable: Google answers
-/// `invalid_scope` rather than ignoring the scope, so appending it there does not
-/// degrade the login, it BREAKS it. Google is therefore stripped of it in both
-/// directions — out of the standard set and out of an advertised set that names it
-/// — and asks for its refresh token through [`extra_authorize_params`] instead.
-fn login_scopes(advertised: &[String], needs_refresh: bool, issuer: &str) -> Vec<String> {
-    let mut scopes: Vec<String> = if advertised.is_empty() {
+/// The advertised set is authoritative and nothing is added to it. Topping it up
+/// with `offline_access` would break any issuer that rejects that scope rather than
+/// ignoring it — Google answers `invalid_scope` — and the deployment, not this
+/// client, is what knows its own IdP. A provider whose refresh token is gated on a
+/// request parameter rather than a scope advertises that in `authorize_params`.
+fn login_scopes(advertised: &[String]) -> Vec<String> {
+    if advertised.is_empty() {
         DEFAULT_LOGIN_SCOPES.iter().map(|s| s.to_string()).collect()
     } else {
         advertised.to_vec()
-    };
-    if issuer_is_google(issuer) {
-        scopes.retain(|s| s != "offline_access");
-    } else if needs_refresh && !scopes.iter().any(|s| s == "offline_access") {
-        scopes.push("offline_access".to_string());
-    }
-    scopes
-}
-
-/// The one issuer whose refresh-token request is spelled outside the scope list.
-const GOOGLE_ISSUER: &str = "https://accounts.google.com";
-
-/// Whether `issuer` is Google. Compared as a literal because there is only one
-/// spelling to match: the value is what [`resolve_oidc_endpoints`] runs discovery
-/// against, so it has to be the issuer URL Google publishes in its own discovery
-/// document. A trailing slash is trimmed, matching how `AuthEnv::domain` is stored.
-fn issuer_is_google(issuer: &str) -> bool {
-    issuer
-        .trim_end_matches('/')
-        .eq_ignore_ascii_case(GOOGLE_ISSUER)
-}
-
-/// Authorize-request parameters this issuer needs beyond the standard set.
-///
-/// Google gates a refresh token on `access_type=offline` — a request parameter,
-/// not a scope — and reissues one only when it actually re-prompts, hence
-/// `prompt=consent`. Every other provider here takes the `offline_access` scope
-/// [`login_scopes`] adds, and gets nothing extra.
-fn extra_authorize_params(issuer: &str) -> &'static [(&'static str, &'static str)] {
-    if issuer_is_google(issuer) {
-        &[("access_type", "offline"), ("prompt", "consent")]
-    } else {
-        &[]
     }
 }
 
@@ -406,6 +382,10 @@ struct AspectAuthServer {
     client_id: String,
     #[serde(default)]
     scopes: Vec<String>,
+    /// Authorize-request parameters this issuer needs that no scope can express;
+    /// see [`Deployment::authorize_params`].
+    #[serde(default)]
+    authorize_params: BTreeMap<String, String>,
 }
 
 /// A usable OAuth config the CLI can log in with: an issuer paired with its PKCE
@@ -417,6 +397,7 @@ struct AuthServer {
     issuer: String,
     client_id: String,
     scopes: Vec<String>,
+    authorize_params: BTreeMap<String, String>,
 }
 
 /// Whether two issuers name the same authorization server, tolerant of how a
@@ -488,6 +469,7 @@ impl ProtectedResource {
                 issuer: s.issuer.clone(),
                 client_id: s.client_id.clone(),
                 scopes: s.scopes.clone(),
+                authorize_params: s.authorize_params.clone(),
             })
             .collect();
         if !nested.is_empty() {
@@ -500,6 +482,9 @@ impl ProtectedResource {
                 issuer: issuer.clone(),
                 client_id: self.client_id.clone(),
                 scopes: self.scopes_supported.clone(),
+                // The flat RFC 9728 shape has no slot for these; only the
+                // aspect_authorization_servers extension carries them.
+                authorize_params: BTreeMap::new(),
             })
             .collect()
     }
@@ -697,6 +682,9 @@ fn deployment_from_discovery(
         api_url: None,
         hosts,
         scopes: selected.map(|s| s.scopes.clone()).unwrap_or_default(),
+        authorize_params: selected
+            .map(|s| s.authorize_params.clone())
+            .unwrap_or_default(),
         endpoints,
     }
 }
@@ -1415,9 +1403,9 @@ fn login_state(nonce: &str, port: u16) -> String {
 /// already carry a query (OIDC discovery can return one), so the parameter
 /// separator is chosen accordingly.
 ///
-/// `extra` carries per-issuer request parameters that have no scope equivalent —
-/// see [`extra_authorize_params`]. They are appended before `state` so `state`
-/// stays last, which the tests and the callback's own parsing both read as the
+/// `authorize_params` carries the deployment-advertised parameters that have no scope
+/// equivalent (see [`Deployment::authorize_params`]), appended before `state` so
+/// `state` stays last — the tests and the callback's own parsing both read it as the
 /// tail of the URL.
 fn build_authorize_url(
     authorize_endpoint: &str,
@@ -1426,7 +1414,7 @@ fn build_authorize_url(
     scopes: &[String],
     code_challenge: &str,
     state: Option<&str>,
-    extra: &[(&str, &str)],
+    authorize_params: &BTreeMap<String, String>,
 ) -> String {
     let mut url = format!(
         "{}{}client_id={}&redirect_uri={}&response_type=code&scope={}&code_challenge={}&code_challenge_method=S256",
@@ -1441,7 +1429,7 @@ fn build_authorize_url(
         urlencode(&scopes.join(" ")),
         urlencode(code_challenge),
     );
-    for (key, value) in extra {
+    for (key, value) in authorize_params {
         url.push_str(&format!("&{}={}", urlencode(key), urlencode(value)));
     }
     if let Some(state) = state {
@@ -1469,7 +1457,7 @@ fn build_cloud_session(env: AuthEnv) -> anyhow::Result<AuthSession> {
         &env.scopes,
         &code_challenge,
         None,
-        extra_authorize_params(&env.domain),
+        &env.authorize_params,
     );
     Ok(AuthSession {
         url: authorize_url,
@@ -1509,7 +1497,7 @@ fn build_endpoint_session(env: AuthEnv, host: &str) -> anyhow::Result<AuthSessio
         &env.scopes,
         &code_challenge,
         Some(&state),
-        extra_authorize_params(&env.domain),
+        &env.authorize_params,
     );
     Ok(AuthSession {
         url: authorize_url,
@@ -2817,6 +2805,7 @@ mod tests {
             api_url: None,
             hosts: vec![format!("remote.{}.aspect.build", name)],
             scopes: Vec::new(),
+            authorize_params: BTreeMap::new(),
             endpoints: Endpoints::default(),
         }
     }
@@ -2952,6 +2941,7 @@ mod tests {
             issuer: issuer.to_string(),
             client_id: client_id.to_string(),
             scopes: vec!["openid".to_string()],
+            authorize_params: BTreeMap::new(),
         }
     }
 
@@ -3089,16 +3079,17 @@ mod tests {
         assert_eq!(d.client_id.as_deref(), Some("abc"));
         // A BYO-IdP scope override is recorded verbatim...
         assert_eq!(d.scopes, vec!["openid".to_string(), "groups".to_string()]);
-        // ...and drives the login flow, with offline_access guaranteed so the
-        // credential can refresh even when the IdP omits it from scopes_supported.
+        // ...and drives the login flow unchanged. Nothing is appended on top: an
+        // issuer that rejects a scope rather than ignoring it must be able to keep it
+        // out by not advertising it.
         assert_eq!(
             auth_env_from(&d).unwrap().scopes,
-            vec![
-                "openid".to_string(),
-                "groups".to_string(),
-                "offline_access".to_string()
-            ]
+            vec!["openid".to_string(), "groups".to_string()]
         );
+        // The flat shape has no slot for authorize params, so a deployment advertising
+        // only that shape carries none and the authorize URL gains nothing.
+        assert!(d.authorize_params.is_empty());
+        assert!(auth_env_from(&d).unwrap().authorize_params.is_empty());
         assert_eq!(
             d.hosts,
             vec![
@@ -3157,6 +3148,7 @@ mod tests {
                 issuer: "https://auth.dev.aspect.build".to_string(),
                 client_id: "nested-client".to_string(),
                 scopes: vec!["openid".to_string(), "email".to_string()],
+                authorize_params: BTreeMap::new(),
             }],
             vec!["https://legacy.auth.aspect.build"],
             "legacy-client",
@@ -3284,6 +3276,7 @@ mod tests {
             hosts: vec![],
             scopes: vec![],
             endpoints: Endpoints::default(),
+            authorize_params: BTreeMap::new(),
         };
         // No advertised scopes → the standard OIDC login set.
         assert_eq!(auth_env_from(&d).unwrap().scopes, DEFAULT_LOGIN_SCOPES);
@@ -3379,7 +3372,7 @@ mod tests {
             &scopes(&["openid", "profile", "email"]),
             "chal",
             None,
-            &[],
+            &BTreeMap::new(),
         );
         assert!(cloud.starts_with("https://auth.aspect.build/oauth/authorize?client_id=client-1&"));
         assert!(cloud.contains("redirect_uri=http%3A%2F%2Flocalhost%3A19556%2Fcallback"));
@@ -3395,7 +3388,7 @@ mod tests {
             &scopes(&["openid", "offline_access"]),
             "chal",
             Some("nonce.5000"),
-            &[],
+            &BTreeMap::new(),
         );
         assert!(with_state.contains("/authorize?foo=bar&client_id=c%2F2"));
         assert!(with_state.contains("scope=openid%20offline_access"));
@@ -3570,114 +3563,127 @@ mod tests {
     }
 
     #[test]
-    fn login_scopes_guarantees_offline_access_for_self_hosted() {
-        const ISS: &str = "https://acme.auth.aspect.build";
-        // No advertised scopes → the standard set (which includes offline_access).
-        assert_eq!(login_scopes(&[], true, ISS), DEFAULT_LOGIN_SCOPES);
+    fn login_scopes_sends_the_advertised_set_verbatim() {
+        // Nothing advertised → the standard set, the only case the client chooses.
+        assert_eq!(login_scopes(&[]), DEFAULT_LOGIN_SCOPES);
 
-        // Self-hosted: advertised scopes are honored (BYO-IdP) but offline_access
-        // is appended when missing, so refresh always works.
+        // Advertised sets go out untouched, including one that omits offline_access —
+        // the deployment knows its IdP and this must not second-guess it. Appending
+        // that scope is what Google answers invalid_scope for.
         assert_eq!(
-            login_scopes(&["openid".to_string(), "profile".to_string()], true, ISS),
-            vec!["openid", "profile", "offline_access"]
+            login_scopes(&["openid".to_string(), "profile".to_string()]),
+            vec!["openid", "profile"]
         );
-
-        // Already present → not duplicated, order preserved.
+        // Order and duplicates are the server's business too.
         assert_eq!(
-            login_scopes(
-                &["openid".to_string(), "offline_access".to_string()],
-                true,
-                ISS
-            ),
-            vec!["openid", "offline_access"]
-        );
-
-        // Cloud flow (needs_refresh = false): scopes are left exactly as given, so
-        // the built-in seed keeps its deliberate no-offline_access set.
-        assert_eq!(
-            login_scopes(
-                &[
-                    "openid".to_string(),
-                    "profile".to_string(),
-                    "email".to_string()
-                ],
-                false,
-                ISS
-            ),
-            vec!["openid", "profile", "email"]
+            login_scopes(&["offline_access".to_string(), "openid".to_string()]),
+            vec!["offline_access", "openid"]
         );
     }
 
     #[test]
-    fn google_asks_for_offline_access_by_request_param_not_scope() {
-        // Google answers invalid_scope for `offline_access`, so it must never reach
-        // the scope list — not from the standard set...
-        assert_eq!(
-            login_scopes(&[], true, GOOGLE_ISSUER),
-            vec!["openid", "profile", "email"]
+    fn advertised_authorize_params_reach_the_authorize_url() {
+        // The Google shape, as a deployment advertises it: no offline_access scope,
+        // and the two parameters that ask for a refresh token instead.
+        let advertised = protected_resource(
+            vec![AspectAuthServer {
+                issuer: "https://accounts.google.com".to_string(),
+                client_id: "c.apps.googleusercontent.com".to_string(),
+                scopes: vec!["openid".to_string(), "email".to_string()],
+                authorize_params: BTreeMap::from([
+                    ("access_type".to_string(), "offline".to_string()),
+                    ("prompt".to_string(), "consent".to_string()),
+                ]),
+            }],
+            vec![],
+            "",
+            vec![],
         );
-        // ...and not from an advertised set that names it either. A deployment
-        // pointed at Google should not be able to reintroduce the failure.
-        assert_eq!(
-            login_scopes(
-                &[
-                    "openid".to_string(),
-                    "offline_access".to_string(),
-                    "email".to_string()
-                ],
-                true,
-                GOOGLE_ISSUER
-            ),
-            vec!["openid", "email"]
-        );
-        // The request it does make instead.
-        assert_eq!(
-            extra_authorize_params(GOOGLE_ISSUER),
-            &[("access_type", "offline"), ("prompt", "consent")]
-        );
-        // Everyone else keeps the scope and gains no extra params, so the Google
-        // carve-out cannot leak into another IdP's request.
-        let other = "https://acme.auth.aspect.build";
-        assert!(login_scopes(&[], true, other).contains(&"offline_access".to_string()));
-        assert!(extra_authorize_params(other).is_empty());
-    }
+        let servers = advertised.auth_servers();
+        assert_eq!(servers.len(), 1);
 
-    #[test]
-    fn issuer_is_google_matches_only_googles_own_issuer() {
-        assert!(issuer_is_google("https://accounts.google.com"));
-        assert!(issuer_is_google("https://accounts.google.com/")); // trailing slash
-        // Identity Platform / Firebase is a different issuer and a different flow.
-        assert!(!issuer_is_google("https://securetoken.google.com/proj"));
-        assert!(!issuer_is_google("https://accounts.google.com.evil.test"));
-        assert!(!issuer_is_google("http://accounts.google.com")); // scheme is load-bearing
-    }
+        let dep = deployment_from_discovery(
+            "google".to_string(),
+            "remote.acme.aspect.build",
+            &advertised,
+            Some(&servers[0]),
+        );
+        // Persisted on the deployment, so a later `login` uses them without re-discovering.
+        assert_eq!(dep.scopes, vec!["openid", "email"]);
+        assert_eq!(
+            dep.authorize_params,
+            BTreeMap::from([
+                ("access_type".to_string(), "offline".to_string()),
+                ("prompt".to_string(), "consent".to_string()),
+            ])
+        );
 
-    #[test]
-    fn google_authorize_url_carries_access_type_before_state() {
+        let env = auth_env_from(&dep).unwrap();
         let url = build_authorize_url(
             "https://accounts.google.com/o/oauth2/v2/auth",
-            "client-1",
+            &env.client_id,
             "https://remote.acme.aspect.build/oauth2/callback",
-            &["openid".to_string(), "email".to_string()],
+            &env.scopes,
             "chal",
             Some("nonce.5000"),
-            extra_authorize_params(GOOGLE_ISSUER),
+            &env.authorize_params,
         );
         assert!(url.contains("&access_type=offline"));
         assert!(url.contains("&prompt=consent"));
+        // Nothing is added on top of the advertised set.
         assert!(!url.contains("offline_access"));
         // state stays last.
         assert!(url.ends_with("&state=nonce.5000"));
     }
 
     #[test]
-    fn builtin_seed_login_omits_offline_access() {
-        // The built-in cloud seed has no endpoint hosts, so its login must not
-        // request offline_access (the Aspect cloud reissues without a refresh
-        // token). Guards against forcing offline_access onto the cloud flow.
+    fn no_advertised_authorize_params_leaves_the_url_unchanged() {
+        let url = build_authorize_url(
+            "https://auth.acme.aspect.build/oauth/authorize",
+            "c",
+            "https://remote.acme.aspect.build/oauth2/callback",
+            &["openid".to_string(), "offline_access".to_string()],
+            "chal",
+            None,
+            &BTreeMap::new(),
+        );
+        assert!(url.contains("scope=openid%20offline_access"));
+        assert!(!url.contains("access_type"));
+        assert!(!url.contains("prompt"));
+    }
+
+    #[test]
+    fn builtin_seed_login_asks_for_a_refresh_token() {
+        // The cloud login is an ordinary Authorization-Code flow whose credential
+        // expires like any other, so it asks for offline_access; without the scope an
+        // expired cloud credential forces an interactive re-login, since the
+        // issuer-agnostic refresh path has nothing to refresh from.
         let scopes = auth_env_from(&default_deployment()).unwrap().scopes;
-        assert!(!scopes.iter().any(|s| s == "offline_access"));
-        assert_eq!(scopes, vec!["openid", "profile", "email"]);
+        assert!(scopes.iter().any(|s| s == "offline_access"));
+        // One list, shared with the no-advertisement fallback.
+        assert_eq!(scopes, DEFAULT_LOGIN_SCOPES);
+        // And nothing extra on the wire: the cloud IdP gates refresh on the scope.
+        assert!(default_deployment().authorize_params.is_empty());
+    }
+
+    #[test]
+    fn a_cloud_credential_with_a_refresh_token_is_refreshable() {
+        // The seed asking for offline_access only helps if the rest of the pipeline
+        // treats a cloud entry as refreshable. It is kind-agnostic: the browser flow
+        // records the refresh_token, domain and client_id for Cloud and Endpoint
+        // alike, and that is all can_refresh/classify_token look at.
+        let expired = jwt_with_exp(Some(now() - 1));
+        let cloud = CredentialsEntry::from_bearer(
+            expired,
+            "a-refresh-token".to_string(),
+            Some(DEFAULT_ISSUER.to_string()),
+            Some(DEFAULT_CLIENT_ID.to_string()),
+            // Cloud sends the access_token, not the id_token.
+            false,
+        )
+        .unwrap();
+        assert!(can_refresh(&cloud));
+        assert!(matches!(classify_token(&cloud), TokenAction::Refresh));
     }
 
     #[test]
