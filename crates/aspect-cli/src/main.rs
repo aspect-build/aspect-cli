@@ -3,6 +3,7 @@ mod cmd;
 mod crash_handler;
 mod credential_helper;
 mod helpers;
+mod prompts;
 mod trace;
 mod trace_buffer;
 
@@ -132,6 +133,14 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
     .entered();
 
     let current_work_dir = std::env::current_dir()?;
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    if prompts::is_invocation(&args) {
+        return Ok(prompts::run(
+            &args,
+            &prompts::invocation_root(&current_work_dir),
+        ));
+    }
+
     // `Env` requires both roots; cwd is the last-resort fallback when no
     // marker file exists anywhere up the tree.
     let aspect_root = find_aspect_root(&current_work_dir)
