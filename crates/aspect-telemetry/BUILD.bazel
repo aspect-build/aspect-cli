@@ -1,5 +1,5 @@
 load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
-load("//bazel/rust:defs.bzl", "rust_library")
+load("//bazel/rust:defs.bzl", "rust_library", "rust_test")
 
 cargo_build_script(
     name = "build_rs",
@@ -17,8 +17,17 @@ rust_library(
     ],
     deps = [
         ":build_rs",
+        "@crates//:chrono",
         "@crates//:reqwest",
         "@crates//:serde_json",
         "@crates//:sha1",
+    ],
+)
+
+rust_test(
+    name = "test",
+    crate = ":aspect-telemetry",
+    deps = [
+        "@crates//:tempfile",
     ],
 )
