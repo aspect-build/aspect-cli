@@ -70,10 +70,11 @@ struct Deployment {
     endpoints: Endpoints,
 }
 
-/// The OAuth scopes the login flow requests when the deployment advertises none —
-/// a last resort, since a deployment that advertises its own set is authoritative.
-/// `offline_access` requests a refresh token so the credential renews without
-/// re-login; a provider that gates one differently (Google) advertises the
+/// The OAuth scopes the login flow requests when the deployment advertises none,
+/// and the set [`default_deployment`] states for the built-in Aspect account.
+/// A deployment that advertises its own set is authoritative and this does not
+/// apply to it. `offline_access` requests a refresh token so the credential renews
+/// without re-login; a provider that gates one differently (Google) advertises the
 /// parameters for it in `authorize_params` instead.
 const DEFAULT_LOGIN_SCOPES: &[&str] = &["openid", "profile", "email", "offline_access"];
 
@@ -147,12 +148,14 @@ fn default_deployment() -> Deployment {
         client_id: Some(DEFAULT_CLIENT_ID.to_string()),
         api_url: Some(DEFAULT_API_URL.to_string()),
         hosts: Vec::new(),
-        // The Aspect cloud reissues access tokens without a refresh token, so the
-        // built-in flow requests the base OIDC scopes (no offline_access).
-        scopes: ["openid", "profile", "email"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
+        // The same set a deployment gets when it advertises nothing: this seed is
+        // not discovered from anywhere, so it states what that fallback would give
+        // it rather than keeping a second list to drift from. `offline_access`
+        // included — the cloud login is an ordinary Authorization-Code flow whose
+        // credential expires like any other, and the refresh path below is issuer
+        // -agnostic, so the only thing that ever stopped it refreshing was not
+        // asking for the token.
+        scopes: DEFAULT_LOGIN_SCOPES.iter().map(|s| s.to_string()).collect(),
         authorize_params: BTreeMap::new(),
         endpoints: Endpoints::default(),
     }
@@ -345,12 +348,10 @@ fn auth_env_from(deployment: &Deployment) -> anyhow::Result<AuthEnv> {
 /// The scopes the login flow requests: whatever the deployment advertised, sent
 /// verbatim, else [`DEFAULT_LOGIN_SCOPES`] when it advertised nothing.
 ///
-/// The deployment is authoritative deliberately. This used to append
-/// `offline_access` to any self-hosted deployment's set that lacked it, on the
-/// premise that a provider not supporting it would ignore it — but Google answers
-/// `invalid_scope`, so the append broke the login it meant to protect, and no
-/// advertised value could opt out of it. The server knows its own IdP; the client
-/// does not, and now does not guess. A provider whose refresh token is gated on a
+/// The advertised set is authoritative and nothing is added to it. Topping it up
+/// with `offline_access` would break any issuer that rejects that scope rather than
+/// ignoring it — Google answers `invalid_scope` — and the deployment, not this
+/// client, is what knows its own IdP. A provider whose refresh token is gated on a
 /// request parameter rather than a scope advertises that in `authorize_params`.
 fn login_scopes(advertised: &[String]) -> Vec<String> {
     if advertised.is_empty() {
@@ -1402,10 +1403,10 @@ fn login_state(nonce: &str, port: u16) -> String {
 /// already carry a query (OIDC discovery can return one), so the parameter
 /// separator is chosen accordingly.
 ///
-/// `extra` carries the deployment-advertised request parameters that have no scope
-/// equivalent (see [`Deployment::authorize_params`]). They are appended before
-/// `state` so `state` stays last, which the tests and the callback's own parsing
-/// both read as the tail of the URL.
+/// `authorize_params` carries the deployment-advertised parameters that have no scope
+/// equivalent (see [`Deployment::authorize_params`]), appended before `state` so
+/// `state` stays last — the tests and the callback's own parsing both read it as the
+/// tail of the URL.
 fn build_authorize_url(
     authorize_endpoint: &str,
     client_id: &str,
@@ -1413,7 +1414,7 @@ fn build_authorize_url(
     scopes: &[String],
     code_challenge: &str,
     state: Option<&str>,
-    extra: &BTreeMap<String, String>,
+    authorize_params: &BTreeMap<String, String>,
 ) -> String {
     let mut url = format!(
         "{}{}client_id={}&redirect_uri={}&response_type=code&scope={}&code_challenge={}&code_challenge_method=S256",
@@ -1428,7 +1429,7 @@ fn build_authorize_url(
         urlencode(&scopes.join(" ")),
         urlencode(code_challenge),
     );
-    for (key, value) in extra {
+    for (key, value) in authorize_params {
         url.push_str(&format!("&{}={}", urlencode(key), urlencode(value)));
     }
     if let Some(state) = state {
@@ -3078,13 +3079,17 @@ mod tests {
         assert_eq!(d.client_id.as_deref(), Some("abc"));
         // A BYO-IdP scope override is recorded verbatim...
         assert_eq!(d.scopes, vec!["openid".to_string(), "groups".to_string()]);
-        // ...and drives the login flow unchanged. Nothing is appended: this used to
-        // gain offline_access here, which broke every IdP that rejects the scope
-        // rather than ignoring it, and no advertised value could prevent it.
+        // ...and drives the login flow unchanged. Nothing is appended on top: an
+        // issuer that rejects a scope rather than ignoring it must be able to keep it
+        // out by not advertising it.
         assert_eq!(
             auth_env_from(&d).unwrap().scopes,
             vec!["openid".to_string(), "groups".to_string()]
         );
+        // The flat shape has no slot for authorize params, so a deployment advertising
+        // only that shape carries none and the authorize URL gains nothing.
+        assert!(d.authorize_params.is_empty());
+        assert!(auth_env_from(&d).unwrap().authorize_params.is_empty());
         assert_eq!(
             d.hosts,
             vec![
@@ -3562,10 +3567,9 @@ mod tests {
         // Nothing advertised → the standard set, the only case the client chooses.
         assert_eq!(login_scopes(&[]), DEFAULT_LOGIN_SCOPES);
 
-        // Advertised sets go out untouched, including one that omits offline_access.
-        // This is the regression that matters: the client used to append it here,
-        // which Google answers invalid_scope for, and no advertised value could
-        // opt out. The deployment knows its IdP; this must not second-guess it.
+        // Advertised sets go out untouched, including one that omits offline_access —
+        // the deployment knows its IdP and this must not second-guess it. Appending
+        // that scope is what Google answers invalid_scope for.
         assert_eq!(
             login_scopes(&["openid".to_string(), "profile".to_string()]),
             vec!["openid", "profile"]
@@ -3626,7 +3630,7 @@ mod tests {
         );
         assert!(url.contains("&access_type=offline"));
         assert!(url.contains("&prompt=consent"));
-        // The scope the client used to force on is gone, and stays gone.
+        // Nothing is added on top of the advertised set.
         assert!(!url.contains("offline_access"));
         // state stays last.
         assert!(url.ends_with("&state=nonce.5000"));
@@ -3649,13 +3653,37 @@ mod tests {
     }
 
     #[test]
-    fn builtin_seed_login_omits_offline_access() {
-        // The built-in cloud seed has no endpoint hosts, so its login must not
-        // request offline_access (the Aspect cloud reissues without a refresh
-        // token). Guards against forcing offline_access onto the cloud flow.
+    fn builtin_seed_login_asks_for_a_refresh_token() {
+        // The cloud login is an ordinary Authorization-Code flow whose credential
+        // expires like any other, so it asks for offline_access; without the scope an
+        // expired cloud credential forces an interactive re-login, since the
+        // issuer-agnostic refresh path has nothing to refresh from.
         let scopes = auth_env_from(&default_deployment()).unwrap().scopes;
-        assert!(!scopes.iter().any(|s| s == "offline_access"));
-        assert_eq!(scopes, vec!["openid", "profile", "email"]);
+        assert!(scopes.iter().any(|s| s == "offline_access"));
+        // One list, shared with the no-advertisement fallback.
+        assert_eq!(scopes, DEFAULT_LOGIN_SCOPES);
+        // And nothing extra on the wire: the cloud IdP gates refresh on the scope.
+        assert!(default_deployment().authorize_params.is_empty());
+    }
+
+    #[test]
+    fn a_cloud_credential_with_a_refresh_token_is_refreshable() {
+        // The seed asking for offline_access only helps if the rest of the pipeline
+        // treats a cloud entry as refreshable. It is kind-agnostic: the browser flow
+        // records the refresh_token, domain and client_id for Cloud and Endpoint
+        // alike, and that is all can_refresh/classify_token look at.
+        let expired = jwt_with_exp(Some(now() - 1));
+        let cloud = CredentialsEntry::from_bearer(
+            expired,
+            "a-refresh-token".to_string(),
+            Some(DEFAULT_ISSUER.to_string()),
+            Some(DEFAULT_CLIENT_ID.to_string()),
+            // Cloud sends the access_token, not the id_token.
+            false,
+        )
+        .unwrap();
+        assert!(can_refresh(&cloud));
+        assert!(matches!(classify_token(&cloud), TokenAction::Refresh));
     }
 
     #[test]
