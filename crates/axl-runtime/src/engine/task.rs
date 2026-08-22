@@ -952,6 +952,25 @@ t = task(
         .expect("both positions accepted");
     }
 
+    /// `config_only` describes an arg with no command-line spelling, so the
+    /// knobs that name or require one are contradictions.
+    #[test]
+    fn config_only_rejects_command_line_knobs() {
+        for conflicting in [r#"long = "vals""#, r#"short = "v""#, "required = True"] {
+            assert_eval_err_contains(
+                &format!(
+                    r#"
+t = task(
+    implementation = _impl,
+    args = {{"vals": args.string_list(config_only = True, {conflicting})}},
+)
+"#
+                ),
+                "`config_only` cannot be combined with",
+            );
+        }
+    }
+
     #[test]
     fn passthrough_position_must_be_known() {
         assert_eval_err_contains(

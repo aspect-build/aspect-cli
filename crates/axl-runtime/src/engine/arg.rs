@@ -107,9 +107,11 @@ pub enum Arg {
     /// argument". `position` selects which side of the task name it collects
     /// from; a task may declare one bucket per position.
     ///
-    /// Tokens are collected verbatim, one argv token each — a collected flag
-    /// never swallows the token that follows it, so one carrying a value must
-    /// attach it (`--flag=value`).
+    /// Tokens are collected verbatim: nothing is rewritten, so the wrapped tool
+    /// sees what was typed. A collected flag claims the token after it only when
+    /// `value_flags_from` lists it as taking a separate value — the arity of a
+    /// flag nobody declared is otherwise unknowable, so `--unknown 8` collects
+    /// the flag and leaves `8` as a positional.
     ///
     /// Declaring a bucket comes with an obligation: the task must claim it
     /// (`ctx.args.claim(name)`) to say those flags are its to act on. A run that
@@ -117,6 +119,12 @@ pub enum Arg {
     /// dropping them silently.
     Passthrough {
         position: PassthroughPosition,
+        /// Name of a sibling `args.string_list` arg listing the flags that take
+        /// a separate value (`-c opt`), so those two tokens are collected
+        /// together instead of the value being left behind as a positional.
+        /// Reading it from a sibling arg rather than inline is what lets
+        /// `config.axl` replace the list.
+        value_flags_from: Option<String>,
         description: Option<String>,
     },
     StringList {
@@ -125,6 +133,12 @@ pub enum Arg {
         short: Option<String>,
         long: Option<String>,
         description: Option<String>,
+        /// Keep this arg off the CLI: settable from `config.axl` only, like
+        /// [`Arg::Custom`]. For a list-valued setting a task reads but nobody
+        /// should type — `args.custom` cannot carry a list default (its value
+        /// must be frozen at declaration time). Add to the other list kinds
+        /// when one needs it.
+        config_only: bool,
     },
     BooleanList {
         required: bool,
@@ -191,10 +205,18 @@ impl Arg {
         }
     }
 
-    /// Returns `true` if this arg is exposed on the CLI (flags, positional, or trailing).
-    /// Only `Custom` is not CLI-exposed (config.axl only).
+    /// Returns `true` if this arg is exposed on the CLI (flags, positional, or
+    /// trailing). `Custom` never is, and `args.string_list(config_only = True)`
+    /// opts out — both are set from config.axl only.
     pub fn is_cli_exposed(&self) -> bool {
-        !matches!(self, Self::Custom { .. })
+        !matches!(
+            self,
+            Self::Custom { .. }
+                | Self::StringList {
+                    config_only: true,
+                    ..
+                }
+        )
     }
 
     /// Returns the `long` override if set, otherwise `None`.
@@ -238,6 +260,27 @@ impl Arg {
     pub fn passthrough_position(&self) -> Option<PassthroughPosition> {
         match self {
             Self::Passthrough { position, .. } => Some(*position),
+            _ => None,
+        }
+    }
+
+    /// The sibling arg an `args.passthrough()` reads its value-taking flag list
+    /// from, if it declares one.
+    pub fn value_flags_from(&self) -> Option<&str> {
+        match self {
+            Self::Passthrough {
+                value_flags_from, ..
+            } => value_flags_from.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// This arg's declared list default, for the kinds that carry one. The
+    /// schema-level value of a `config_only` list before any config.axl
+    /// override is layered on.
+    pub fn string_list_default(&self) -> Option<&[String]> {
+        match self {
+            Self::StringList { default, .. } => Some(default),
             _ => None,
         }
     }
@@ -474,10 +517,15 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     /// command-line order. Keeping them separate is what lets a task forward
     /// each set to the slot it was typed for.
     ///
-    /// Collected flags are forwarded verbatim, one argv token each, and never
-    /// swallow the token that follows — so a collected flag carrying a value
-    /// must attach it (`--jobs=8`, not `--jobs 8`), otherwise the value is left
-    /// behind as a positional.
+    /// `value_flags_from` names a sibling `args.string_list` of the flags that
+    /// take a separate value, so `-c opt` is collected as a pair. Without it — or
+    /// for a flag the list omits — the token after a collected flag is left
+    /// alone, since the arity of a flag nobody declared is unknowable: `--jobs 8`
+    /// would collect `--jobs` and leave `8` as a positional. Keeping the list in
+    /// a sibling arg rather than inline is what lets `config.axl` replace it.
+    ///
+    /// Nothing is rewritten on the way through: what the wrapped tool receives
+    /// is what was typed.
     ///
     /// **Read a bucket with `ctx.args.claim(name)`**, which both returns the
     /// list and tells the runtime this task is responsible for those flags.
@@ -503,6 +551,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     /// ```
     fn passthrough<'v>(
         #[starlark(require = named)] position: String,
+        #[starlark(require = named, default = NoneOr::None)] value_flags_from: NoneOr<String>,
         #[starlark(require = named, default = NoneOr::None)] description: NoneOr<String>,
     ) -> starlark::Result<Arg> {
         let Some(position) = PassthroughPosition::parse(&position) else {
@@ -517,6 +566,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         };
         Ok(Arg::Passthrough {
             position,
+            value_flags_from: value_flags_from.into_option(),
             description: description.into_option(),
         })
     }
@@ -573,12 +623,18 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     /// Defines a string list flag that can be specified multiple times.
     ///
     /// Use `long = "override-name"` to override the default kebab-case derivation.
+    ///
+    /// `config_only = True` keeps the arg off the command line entirely — it is
+    /// then settable only from `config.axl`, for a list a task reads but nobody
+    /// should type. (`args.custom` is the equivalent for values the CLI cannot
+    /// express, but it cannot carry a list default.)
     fn string_list<'v>(
         #[starlark(require = named, default = false)] required: bool,
         #[starlark(require = named, default = NoneOr::None)] default: NoneOr<UnpackList<String>>,
         #[starlark(require = named, default = NoneOr::None)] short: NoneOr<String>,
         #[starlark(require = named, default = NoneOr::None)] long: NoneOr<String>,
         #[starlark(require = named, default = NoneOr::None)] description: NoneOr<String>,
+        #[starlark(require = named, default = false)] config_only: bool,
     ) -> starlark::Result<Arg> {
         if required && !default.is_none() {
             return Err(starlark::Error::new_kind(starlark::ErrorKind::Function(
@@ -590,12 +646,21 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
                 anyhow::anyhow!("`short` must be a 1-character string."),
             )));
         }
+        if config_only && (required || !short.is_none() || !long.is_none()) {
+            return Err(starlark::Error::new_kind(starlark::ErrorKind::Function(
+                anyhow::anyhow!(
+                    "`config_only` cannot be combined with `required`, `short` or `long` — \
+                     the arg has no command-line spelling to require or name."
+                ),
+            )));
+        }
         Ok(Arg::StringList {
             required,
             default: default.into_option().map(|it| it.items).unwrap_or_default(),
             short: short.into_option(),
             long: validated_long(long)?,
             description: description.into_option(),
+            config_only,
         })
     }
 
@@ -812,7 +877,8 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         // so `args.custom(dict, default = {})` ends up with `default = None` at access time.
         // Callers must defensively `or {}` / `or []`. A proper fix needs to deep-freeze
         // freezable values (dict/list/string/int/bool/tuple) into the frozen heap before
-        // storing.
+        // storing. For a list of strings, `args.string_list(config_only = True)` is
+        // config-only in the same way and does carry its default.
         let default_frozen = match default {
             None => None,
             Some(d) => {

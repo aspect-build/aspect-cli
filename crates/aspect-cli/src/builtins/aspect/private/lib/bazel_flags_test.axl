@@ -25,12 +25,14 @@ def _fake_ctx(bazel_startup_flags = [], bazel_flags = [], trait = None):
     are hashable, so a dict keyed by `BazelTrait` mimics the real trait map.
     `hasattr` returns True for declared args, satisfying `_require_arg`.
 
-    Deliberately carries no passthrough buckets: a task may declare the flag
-    args without them, and the resolve helpers must tolerate that."""
+    Deliberately declares no passthrough buckets: a task may take the flag args
+    without them, and the resolve helpers must tolerate that — so `claim` answers
+    `[]` the way the real args store does for an arg the task never declared."""
     return struct(
         args = struct(
             bazel_startup_flags = bazel_startup_flags,
             bazel_flags = bazel_flags,
+            claim = lambda name: [],
         ),
         traits = {BazelTrait: trait if trait != None else _trait()},
     )
@@ -174,13 +176,35 @@ def _test_passthrough_buckets_are_optional(ctx):
     _eq("no buckets, flags", bazel.flags.resolve(_fake_ctx(bazel_flags = ["--cli"])), ["--cli"])
 
 def _test_passthrough_args_shape(ctx):
-    """`bazel.flags.args` declares both buckets, one per command-line slot."""
+    """`bazel.flags.args` declares both buckets, one per command-line slot, plus
+    the value-flag list the post-command bucket reads arities from."""
     fa = bazel.flags.args("the build")
     _eq(
         "flag arg keys",
         sorted(fa.keys()),
-        ["bazel_flags", "bazel_passthrough_flags", "bazel_passthrough_startup_flags", "bazel_startup_flags"],
+        [
+            "bazel_flags",
+            "bazel_passthrough_flags",
+            "bazel_passthrough_startup_flags",
+            "bazel_startup_flags",
+            "bazel_value_flags",
+        ],
     )
+
+def _test_value_flags_mirror_bazel(ctx):
+    """The generated list carries Bazel's value-taking flags and none of its
+    booleans — a boolean in here would swallow the following target pattern."""
+    listed = bazel.flags.BAZEL_VALUE_FLAGS
+    for flag in ["-c", "-j", "--jobs", "--config", "--compilation_mode", "--test_output"]:
+        if flag not in listed:
+            fail("expected %s in BAZEL_VALUE_FLAGS" % flag)
+    for flag in ["-k", "--keep_going", "--remote_download_all", "--nobuild"]:
+        if flag in listed:
+            fail("%s takes no value; listing it would eat the next argument" % flag)
+    # Label-shaped flags are excluded on purpose: Bazel requires `=` for them.
+    for flag in listed:
+        if flag.startswith("--//") or ":" in flag:
+            fail("label-shaped flag %s must not be listed" % flag)
 
 def _test_flags_empty_defaults(ctx):
     """No CLI flags, no trait additions → empty result."""
@@ -249,6 +273,13 @@ def _test_config_names(ctx):
         testonly_config_names(["--config=a", "--foo", ("--config=b", "<7"), "--config=c"]),
         ["a", "b", "c"],
     )
+
+    # Bazel accepts `--config NAME` too, and a flag forwarded verbatim from the
+    # command line arrives in exactly that shape.
+    _eq("space form", testonly_config_names(["--config", "ci"]), ["ci"])
+    _eq("space form mid-list", testonly_config_names(["--keep_going", "--config", "ci", "--jobs=8"]), ["ci"])
+    _eq("space form, no value", testonly_config_names(["--config"]), [])
+    _eq("space form, flag follows", testonly_config_names(["--config", "--keep_going"]), [])
 
 def _test_flags_delta(ctx):
     """`testonly_flags_delta` returns the multiset difference full − base in
@@ -424,6 +455,7 @@ def _test_impl(ctx):
     _test_disclaim_accounts_for_both_buckets(ctx)
     _test_passthrough_buckets_are_optional(ctx)
     _test_passthrough_args_shape(ctx)
+    _test_value_flags_mirror_bazel(ctx)
     _test_flags_empty_defaults(ctx)
     _test_announce_auto_follows_ci(ctx)
     _test_announce_explicit_overrides_ci(ctx)
@@ -436,7 +468,7 @@ def _test_impl(ctx):
     # after the pure subtests prevents bleed-through.
     _test_setup_command_applies_to_ctx_bazel(ctx)
     _test_sibling_rc_transforms_startup(ctx)
-    print("bazel_flags_test.axl: OK (18 sections)")
+    print("bazel_flags_test.axl: OK (19 sections)")
     return 0
 
 bazel_flags_tests = task(

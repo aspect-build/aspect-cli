@@ -591,40 +591,25 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         let (exit_code, flagged, conclusion) = unpack_task_return(ret);
 
         // The task has now had its chance to act on the flags the CLI could not
-        // attribute to a declared arg. Anything left unclaimed had no effect on
-        // this run, which the user has to hear about either way — but only a run
-        // that otherwise succeeded fails over it. A task that concluded with its
-        // own non-zero code has a more informative story to tell, and a task
-        // that hard-errored never reaches here at all (`impl_result?` above), so
-        // a real failure is never masked by this.
+        // attribute to a declared arg.
         let unclaimed = unclaimed_passthrough(task, task_args_val);
-        let already_failed = matches!(exit_code, Some(code) if code != 0);
         let exit_code = if unclaimed.is_empty() {
             exit_code
         } else {
+            // A task that concluded with its own non-zero code has the more
+            // informative story, so it keeps it; only an otherwise-successful
+            // run fails over dropped flags. A hard error never reaches here at
+            // all (`impl_result?` above), so a real failure is never masked.
+            let failed_on_its_own = matches!(exit_code, Some(code) if code != 0);
             for (name, flags) in &unclaimed {
-                let report = if already_failed {
-                    diag::warn
+                let message = unclaimed_passthrough_message(&task_kind, name, flags);
+                if failed_on_its_own {
+                    diag::warn(&message);
                 } else {
-                    diag::error
-                };
-                report(&format!(
-                    "the flag{} {} had no effect: {} collected {} into its `{}` passthrough \
-                     arg and never claimed {} (`ctx.args.claim(\"{}\")`), so nothing forwarded \
-                     {} anywhere. Either forward the flag{} or claim the arg to say this run \
-                     deliberately ignores them.",
-                    if flags.len() == 1 { "" } else { "s" },
-                    flags.join(" "),
-                    task_kind,
-                    if flags.len() == 1 { "it" } else { "them" },
-                    name,
-                    if flags.len() == 1 { "it" } else { "them" },
-                    name,
-                    if flags.len() == 1 { "it" } else { "them" },
-                    if flags.len() == 1 { "" } else { "s" },
-                ));
+                    diag::error(&message);
+                }
             }
-            if already_failed {
+            if failed_on_its_own {
                 exit_code
             } else {
                 Some(EXIT_UNCLAIMED_PASSTHROUGH)
@@ -806,6 +791,24 @@ impl<'a> Verdict<'a> {
 /// code a task returns itself, and matches the CLI's usage-error code: the
 /// invocation named flags that went nowhere.
 const EXIT_UNCLAIMED_PASSTHROUGH: u8 = 2;
+
+/// What the user is told when their flags went nowhere: which flags, which task
+/// dropped them, and the two ways to resolve it.
+fn unclaimed_passthrough_message(task_kind: &str, arg_name: &str, flags: &[String]) -> String {
+    let (flag_noun, them) = if flags.len() == 1 {
+        ("flag", "it")
+    } else {
+        ("flags", "them")
+    };
+    format!(
+        "the {flag_noun} {} had no effect: {task_kind} collected {them} into its \
+         `{arg_name}` passthrough arg and never claimed {them} \
+         (`ctx.args.claim(\"{arg_name}\")`), so nothing forwarded {them} anywhere. \
+         Either forward the {flag_noun} or claim the arg to say this run deliberately \
+         ignores {them}.",
+        flags.join(" "),
+    )
+}
 
 /// The task's `args.passthrough()` buckets that hold flags but were never
 /// claimed, as `(arg name, flags)`.
@@ -1097,6 +1100,7 @@ mod tests {
     use super::{
         EXIT_UNCLAIMED_PASSTHROUGH, ModuleEnv, MultiPhaseEval, TimingMode, display_width,
         format_duration, render_phase_breakdown, render_timing_segment, task_label_for,
+        unclaimed_passthrough_message,
     };
     use crate::engine::arguments::Arguments;
     use crate::engine::task_info::PhaseRecord;
@@ -1131,6 +1135,17 @@ fails = task(implementation = _fails, args = {"rest": args.passthrough(position 
             .with_string_list_args([("rest", routed)])
             .run_task(index)
             .expect("task runs")
+    }
+
+    #[test]
+    fn unclaimed_message_names_the_flags_and_both_remedies() {
+        let one = unclaimed_passthrough_message("build", "rest", &["--jobs=8".to_owned()]);
+        assert!(one.contains("the flag --jobs=8 had no effect"), "{one}");
+        assert!(one.contains("ctx.args.claim(\"rest\")"), "{one}");
+
+        let many =
+            unclaimed_passthrough_message("build", "rest", &["-c".to_owned(), "opt".to_owned()]);
+        assert!(many.contains("the flags -c opt had no effect"), "{many}");
     }
 
     #[test]

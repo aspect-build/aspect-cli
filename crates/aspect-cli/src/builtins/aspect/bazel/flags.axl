@@ -7,7 +7,10 @@ per-invocation endpoint auth flags.
 
 A flag the CLI parser does not recognize is routed by where it was typed, the
 same way Bazel splits its own command line: before the task name it joins the
-startup flags, after it joins the command flags. `resolve_startup` / `resolve`
+startup flags, after it joins the command flags. `bazel_value_flags` (from the
+generated `value_flags.axl`) tells the router which of those flags take a
+separate value, so `-c opt` is collected as a pair rather than leaving `opt`
+behind as a target pattern. `resolve_startup` / `resolve`
 fold each bucket in alongside the explicit `--bazel-startup-flag` /
 `--bazel-flag` values, and claim it as they go — the runtime fails a run that
 left routed flags unclaimed, so claiming is what records that they were
@@ -21,6 +24,7 @@ load("@aspect//bazel/build_events.axl", "bes_args")
 load("@aspect//bazel/trait.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
 load("../private/lib/aspect_endpoint_auth.axl", "credential_helper_covers_host", "endpoint_host", "headers_have_auth", "needs_aspect_token", "resolve_aspect_bearer")
 load("../private/lib/environment.axl", "color_enabled", "detect_ci")
+load("@aspect//bazel/value_flags.axl", "BAZEL_VALUE_FLAGS")
 
 def _require_arg(ctx, name: str) -> None:
     """Fail with a clear contract error when a helper's required CLI arg is
@@ -96,13 +100,19 @@ def _flag_args(build_phrase: str) -> dict:
             long = "bazel-startup-flag",
             description = "Additional Bazel startup flags (e.g. --bazel-startup-flag=--host_jvm_args=-Xmx2g). Repeat the flag to pass multiple. Note: changing startup flags restarts the Bazel server.",
         ),
+        "bazel_value_flags": args.string_list(
+            default = BAZEL_VALUE_FLAGS,
+            config_only = True,
+            description = "Forwarded Bazel flags that take a separate value (`-c opt`), so the value is collected with its flag instead of being read as a target pattern. Mirrors Bazel's own arities; set from `.aspect/config.axl` to extend it for a wrapper's flags.",
+        ),
         "bazel_passthrough_flags": args.passthrough(
             position = "post_command",
+            value_flags_from = "bazel_value_flags",
             description = "A flag this task does not recognize is forwarded to Bazel rather than rejected. Typed after the task name it becomes a Bazel command option, so `aspect build --remote_download_all //...` runs `bazel build --remote_download_all //...`.",
         ),
         "bazel_passthrough_startup_flags": args.passthrough(
             position = "pre_command",
-            description = "Typed before the task name, an unrecognized flag becomes a Bazel startup option — the same slot Bazel takes them in: `aspect --output_base=/tmp/o build //...`. Attach a forwarded flag's value with `=` (`--jobs=8`): a forwarded flag never claims the next argument, so a space-separated value would be read as a target pattern instead.",
+            description = "Typed before the task name, an unrecognized flag becomes a Bazel startup option — the same slot Bazel takes them in: `aspect --output_base=/tmp/o build //...`. Startup options take their value with `=`; after the task name, Bazel's own spellings all work (`-c opt`, `--jobs 8`, `--jobs=8`).",
         ),
     }
 
@@ -149,13 +159,11 @@ def _passthrough(ctx, name: str) -> list:
     Calling this is therefore the act of forwarding, and the only place the
     Bazel flag pipeline reads a bucket.
 
-    Read tolerantly rather than through `_require_arg`: the buckets are purely
-    additive, so a task that hand-declares `bazel_flags` without them keeps
-    working (it just rejects unrecognized flags the way it always did). The
-    `getattr` fallback covers `ctx` stand-ins in AXL unit tests, which are
-    structs rather than the real args store and so have no `claim`."""
-    claim = getattr(ctx.args, "claim", None)
-    return list(claim(name)) if claim else list(getattr(ctx.args, name, []))
+    Claiming an arg the task does not declare is a no-op returning `[]`, so the
+    buckets stay purely additive: a task that hand-declares `bazel_flags` without
+    them keeps working, and simply rejects unrecognized flags the way it always
+    did."""
+    return list(ctx.args.claim(name))
 
 _PASSTHROUGH_ARGS = ["bazel_passthrough_flags", "bazel_passthrough_startup_flags"]
 
@@ -251,17 +259,21 @@ def _sibling_rc(ctx, startup_transform, command: str = "build", base_flags: list
         skip_config_if_missing = _requested_config_names(flags),
     )
 
-_CONFIG_PREFIX = "--config="
+_CONFIG_FLAG = "--config"
+_CONFIG_PREFIX = _CONFIG_FLAG + "="
 
 def _requested_config_names(flags: list) -> list:
-    """The `--config=NAME` names in `flags` (items are `str` or `(value, cond)`
+    """The config names `flags` requests, in either spelling Bazel accepts —
+    `--config=NAME` or `--config NAME` (items are `str` or `(value, cond)`
     tuples). Fed to `parse_rc(skip_config_if_missing=...)` so a sidecar `query`
     drops a build-only config instead of erroring."""
+    values = [flag[0] if type(flag) == "tuple" else flag for flag in flags]
     names = []
-    for flag in flags:
-        value = flag[0] if type(flag) == "tuple" else flag
+    for i, value in enumerate(values):
         if value.startswith(_CONFIG_PREFIX):
             names.append(value[len(_CONFIG_PREFIX):])
+        elif value == _CONFIG_FLAG and i + 1 < len(values) and not values[i + 1].startswith("-"):
+            names.append(values[i + 1])
     return names
 
 def _flags_delta(base_flags: list, full_flags: list) -> list:
@@ -372,6 +384,7 @@ def aspect_endpoint_auth_flags(ctx, rc, command):
     )
 
 flags = namespace(
+    BAZEL_VALUE_FLAGS = BAZEL_VALUE_FLAGS,
     resolve = _resolve_flags,
     resolve_startup = _resolve_startup_flags,
     args = _flag_args,
