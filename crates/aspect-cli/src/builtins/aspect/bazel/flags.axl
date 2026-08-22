@@ -2,19 +2,20 @@
 `announce-bazel-*` CLI args, the two `args.passthrough()` buckets that let a
 plain Bazel flag be typed directly on an aspect command line, the task-facing
 arg bundles (`core_args` / `targets_arg`), startup+command flag composition,
-`.bazelrc` parsing (`setup_command` / `sibling_rc`), `--config=` expansion, and
+`.bazelrc` parsing (`setup_command` / `sibling_rc`), `--config` expansion, and
 per-invocation endpoint auth flags.
 
 A flag the CLI parser does not recognize is routed by where it was typed, the
 same way Bazel splits its own command line: before the task name it joins the
-startup flags, after it joins the command flags. `bazel_value_flags` (from the
-generated `value_flags.axl`) tells the router which of those flags take a
-separate value, so `-c opt` is collected as a pair rather than leaving `opt`
-behind as a target pattern. `resolve_startup` / `resolve`
-fold each bucket in alongside the explicit `--bazel-startup-flag` /
-`--bazel-flag` values, and claim it as they go — the runtime fails a run that
-left routed flags unclaimed, so claiming is what records that they were
-forwarded. A task path that spawns no Bazel at all calls
+startup flags, after it joins the command flags. `bazel_value_flags` — the
+generated `value_flags.axl` list, replaceable from `config.axl` — tells the
+router which flags take a separate value, so `-c opt` is collected as a pair
+instead of leaving `opt` behind as a target pattern.
+
+`resolve_startup` / `resolve` fold each bucket in alongside the explicit
+`--bazel-startup-flag` / `--bazel-flag` values and claim it as they go: the
+runtime fails a run that left routed flags unclaimed, so claiming is what
+records that they were forwarded. A task path that spawns no Bazel calls
 `disclaim_passthrough` to say the omission was deliberate.
 
 Stateless functions taking `ctx` and deriving the active `BazelTrait` from
@@ -82,6 +83,13 @@ def _announce_args(rc_phrase: str) -> dict:
         ),
     }
 
+# The passthrough arg names, shared by the declarations below and every helper
+# that reads a bucket, so a rename cannot leave one of them behind.
+_PASSTHROUGH_FLAGS_ARG = "bazel_passthrough_flags"
+_PASSTHROUGH_STARTUP_FLAGS_ARG = "bazel_passthrough_startup_flags"
+_PASSTHROUGH_ARGS = [_PASSTHROUGH_FLAGS_ARG, _PASSTHROUGH_STARTUP_FLAGS_ARG]
+_VALUE_FLAGS_ARG = "bazel_value_flags"
+
 def _flag_args(build_phrase: str) -> dict:
     """The `bazel_flags` / `bazel_startup_flags` CLI args every Bazel-spawning
     task declares, plus the two passthrough buckets that let a plain Bazel flag
@@ -100,17 +108,17 @@ def _flag_args(build_phrase: str) -> dict:
             long = "bazel-startup-flag",
             description = "Additional Bazel startup flags (e.g. --bazel-startup-flag=--host_jvm_args=-Xmx2g). Repeat the flag to pass multiple. Note: changing startup flags restarts the Bazel server.",
         ),
-        "bazel_value_flags": args.string_list(
+        _VALUE_FLAGS_ARG: args.string_list(
             default = BAZEL_VALUE_FLAGS,
             config_only = True,
             description = "Forwarded Bazel flags that take a separate value (`-c opt`), so the value is collected with its flag instead of being read as a target pattern. Mirrors Bazel's own arities; set from `.aspect/config.axl` to extend it for a wrapper's flags.",
         ),
-        "bazel_passthrough_flags": args.passthrough(
+        _PASSTHROUGH_FLAGS_ARG: args.passthrough(
             position = "post_command",
-            value_flags_from = "bazel_value_flags",
+            value_flags_from = _VALUE_FLAGS_ARG,
             description = "A flag this task does not recognize is forwarded to Bazel rather than rejected. Typed after the task name it becomes a Bazel command option, so `aspect build --remote_download_all //...` runs `bazel build --remote_download_all //...`.",
         ),
-        "bazel_passthrough_startup_flags": args.passthrough(
+        _PASSTHROUGH_STARTUP_FLAGS_ARG: args.passthrough(
             position = "pre_command",
             description = "Typed before the task name, an unrecognized flag becomes a Bazel startup option — the same slot Bazel takes them in: `aspect --output_base=/tmp/o build //...`. Startup options take their value with `=`; after the task name, Bazel's own spellings all work (`-c opt`, `--jobs 8`, `--jobs=8`).",
         ),
@@ -165,8 +173,6 @@ def _passthrough(ctx, name: str) -> list:
     did."""
     return list(ctx.args.claim(name))
 
-_PASSTHROUGH_ARGS = ["bazel_passthrough_flags", "bazel_passthrough_startup_flags"]
-
 def _disclaim_passthrough(ctx) -> None:
     """Account for both passthrough buckets on a path that spawns no Bazel at
     all, so the runtime does not report the user's flags as silently dropped.
@@ -186,7 +192,7 @@ def _resolve_startup_flags(ctx) -> list:
     bazel_trait = ctx.traits[BazelTrait]
     _require_arg(ctx, "bazel_startup_flags")
     flags = list(ctx.args.bazel_startup_flags)
-    flags.extend(_passthrough(ctx, "bazel_passthrough_startup_flags"))
+    flags.extend(_passthrough(ctx, _PASSTHROUGH_STARTUP_FLAGS_ARG))
     flags.extend(bazel_trait.extra_startup_flags)
     if bazel_trait.startup_flags:
         flags = bazel_trait.startup_flags(flags)
@@ -203,7 +209,7 @@ def _resolve_flags(ctx) -> list:
     bazel_trait = ctx.traits[BazelTrait]
     _require_arg(ctx, "bazel_flags")
     flags = list(ctx.args.bazel_flags)
-    flags.extend(_passthrough(ctx, "bazel_passthrough_flags"))
+    flags.extend(_passthrough(ctx, _PASSTHROUGH_FLAGS_ARG))
     flags.extend(bazel_trait.extra_flags)
     for hook in bazel_trait.task_flags:
         flags.extend(hook(ctx))

@@ -38,6 +38,11 @@ use starlark::values::starlark_value;
 /// config-time override store role — nothing is "explicit on the CLI"
 /// there.
 ///
+/// `claimed_keys` is the parallel side-set for [`Arguments::claim`], recording
+/// the args a task took responsibility for. It exists so the runtime can fail an
+/// invocation that collected flags into an `args.passthrough()` bucket nobody
+/// acted on; it is per-invocation and so is not carried across a freeze.
+///
 /// `valid_keys` constrains which attribute names `set_attr` will accept:
 ///
 /// - `Some(set)` — config-time override store. Assigning `.args.<name> = ...`
@@ -119,12 +124,9 @@ impl<'v> Arguments<'v> {
 
     /// Take responsibility for `key`, returning its value.
     ///
-    /// The value is left in place — what is "taken" is ownership of acting on
-    /// it, not the data. This is how an `args.passthrough()` bucket is meant to
-    /// be read: the runtime checks after the task returns that every bucket
-    /// holding routed flags was claimed, so a task that forwards nothing fails
-    /// loudly instead of dropping the user's flags on the floor. See
-    /// `unclaimed_passthrough`.
+    /// What is taken is ownership of acting on the value, not the value itself,
+    /// which stays in place. Backs the `claim` Starlark method, whose doc
+    /// carries the contract; `unclaimed_passthrough` is where it is enforced.
     pub fn claim(&self, key: &str) -> Option<Value<'v>> {
         self.claimed_keys.borrow_mut().insert(key.to_owned(), ());
         self.get(key)

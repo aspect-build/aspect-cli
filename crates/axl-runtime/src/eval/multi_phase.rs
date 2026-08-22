@@ -590,7 +590,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         let ret = impl_result?;
         let (exit_code, flagged, conclusion) = unpack_task_return(ret);
 
-        // The task has now had its chance to act on the flags the CLI could not
+        // The task has had its chance to act on the flags the CLI could not
         // attribute to a declared arg.
         let unclaimed = unclaimed_passthrough(task, task_args_val);
         let exit_code = if unclaimed.is_empty() {
@@ -819,7 +819,7 @@ fn unclaimed_passthrough_message(task_kind: &str, arg_name: &str, flags: &[Strin
 /// bucket is deliberately not enough (a task may want to inspect the flags
 /// before deciding), the task must claim it — which the built-in Bazel flag
 /// helpers do as they resolve. An unclaimed bucket means the user typed a flag
-/// that changed nothing, the one outcome worse than the error this replaced.
+/// that changed nothing, which is worse than refusing it outright.
 fn unclaimed_passthrough<'v>(
     task: &dyn TaskLike<'v>,
     args: Value<'v>,

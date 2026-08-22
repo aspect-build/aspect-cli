@@ -725,6 +725,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     /// Defines a boolean flag. Use `--flag_name` (true) or `--flag_name=false`.
     ///
     /// Use `long = "override-name"` to override the default kebab-case derivation.
+    /// `config_only = True` keeps it off the command line (see `args.string`).
     fn boolean<'v>(
         #[starlark(require = named, default = false)] required: bool,
         #[starlark(require = named)] default: Option<bool>,
@@ -758,6 +759,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     /// Defines a boolean list flag that can be specified multiple times.
     ///
     /// Use `long = "override-name"` to override the default kebab-case derivation.
+    /// `config_only = True` keeps it off the command line (see `args.string`).
     fn boolean_list<'v>(
         #[starlark(require = named, default = false)] required: bool,
         #[starlark(require = named, default = NoneOr::None)] default: NoneOr<UnpackList<bool>>,
@@ -790,6 +792,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     /// Defines an integer flag.
     ///
     /// Use `long = "override-name"` to override the default kebab-case derivation.
+    /// `config_only = True` keeps it off the command line (see `args.string`).
     fn int<'v>(
         #[starlark(require = named, default = false)] required: bool,
         #[starlark(require = named)] default: Option<i32>,
@@ -822,6 +825,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     /// Defines an integer list flag that can be specified multiple times.
     ///
     /// Use `long = "override-name"` to override the default kebab-case derivation.
+    /// `config_only = True` keeps it off the command line (see `args.string`).
     fn int_list<'v>(
         #[starlark(require = named, default = false)] required: bool,
         #[starlark(require = named, default = NoneOr::None)] default: NoneOr<UnpackList<i32>>,
@@ -854,6 +858,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     /// Defines an unsigned integer flag.
     ///
     /// Use `long = "override-name"` to override the default kebab-case derivation.
+    /// `config_only = True` keeps it off the command line (see `args.string`).
     fn uint<'v>(
         #[starlark(require = named, default = false)] required: bool,
         #[starlark(require = named)] default: Option<u32>,
@@ -886,6 +891,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     /// Defines an unsigned integer list flag that can be specified multiple times.
     ///
     /// Use `long = "override-name"` to override the default kebab-case derivation.
+    /// `config_only = True` keeps it off the command line (see `args.string`).
     fn uint_list<'v>(
         #[starlark(require = named, default = false)] required: bool,
         #[starlark(require = named, default = NoneOr::None)] default: NoneOr<UnpackList<u32>>,

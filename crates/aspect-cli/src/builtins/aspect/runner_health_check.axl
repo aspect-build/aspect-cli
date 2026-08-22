@@ -33,9 +33,7 @@ def _impl(ctx: TaskContext) -> int:
     if environment.runner == None:
         info(ctx.std, "Not on an Aspect Workflows runner; no runner health check to run.")
 
-        # Nothing runs on this path, so nothing forwards the Bazel flags the
-        # parser routed here; say so rather than let the runtime report them as
-        # dropped.
+        # Nothing spawns Bazel here, so nothing forwards the routed flags.
         bzl.flags.disclaim_passthrough(ctx)
         return 0
 

@@ -531,10 +531,9 @@ fn arg_to_clap(scope: Scope<'_>, name: &str, arg: &Arg) -> ClapArg {
             .last(true)
             .num_args(0..),
         // Nobody types this flag: it is the channel `route_unrecognized_flags`
-        // rewrites an unrecognized token onto, so the collected tokens arrive
-        // through the same `ArgMatches` as everything else. Hidden from `--help`
-        // — what the reader needs is the prose footer `task_command` adds, not a
-        // flag they are never meant to spell.
+        // rewrites collected tokens onto, so they arrive through the same
+        // `ArgMatches` as everything else. `task_command`'s prose footer is what
+        // the reader gets instead.
         Arg::Passthrough { .. } => ClapArg::new(id)
             .long(long.clone())
             .value_name(long)
@@ -864,23 +863,6 @@ struct Selection<'c> {
     declared_anywhere: Vec<&'c ClapArg>,
 }
 
-impl Selection<'_> {
-    /// Index of the token naming the leaf task command. Routed pre-command flags
-    /// are re-inserted just after it, where Clap attributes them to the task.
-    fn leaf_token(&self) -> usize {
-        *self
-            .command_path
-            .last()
-            .expect("a selection always names at least the task command")
-    }
-
-    /// First index after the command path: everything from here was typed after
-    /// the task name.
-    fn boundary(&self) -> usize {
-        self.leaf_token() + 1
-    }
-}
-
 /// Walk argv the way Clap will, to the leaf task command.
 ///
 /// Descends through subcommand names, skipping over declared flags and any
@@ -898,20 +880,35 @@ fn select_command<'c>(root: &'c Command, tokens: &[Option<&str>]) -> Option<Sele
     let mut cur = root;
     let mut command_path = Vec::new();
     let mut index = 1;
+    // Set when the previous token was a flag nothing declares: the token after
+    // it may be its value (`aspect --output_base /tmp/o build`), which must not
+    // be read as a command name — nor end the walk, or the task after it would
+    // never be found. Whether it really is a value is the task's list to say,
+    // and the task is what we are still looking for.
+    let mut after_unrecognized_flag = false;
     while index < tokens.len() {
         let Some(token) = tokens[index] else { break };
         if token == "--" {
             break;
         }
         if let Some(flag) = parse_flag(token) {
-            index += declared_span(&anywhere, &flag).unwrap_or(1);
+            let span = declared_span(&anywhere, &flag);
+            after_unrecognized_flag = span.is_none();
+            index += span.unwrap_or(1);
             continue;
         }
-        // A token naming no subcommand is a positional, which only a task
-        // command has — so the command path is over either way.
         let Some(sub) = cur.find_subcommand(token) else {
-            break;
+            // A token naming no subcommand is a positional, which only a task
+            // command has — so the command path is over, unless it could be the
+            // value of the unrecognized flag before it.
+            if !after_unrecognized_flag {
+                break;
+            }
+            after_unrecognized_flag = false;
+            index += 1;
+            continue;
         };
+        after_unrecognized_flag = false;
         inherited.extend(recognized_flags(cur).filter(|arg| arg.is_global_set()));
         anywhere.extend(recognized_flags(sub));
         cur = sub;
@@ -933,51 +930,72 @@ fn select_command<'c>(root: &'c Command, tokens: &[Option<&str>]) -> Option<Sele
     None
 }
 
-/// The argv indices to route from `range`, stopping at `--`.
-///
-/// An unrecognized flag contributes its own index, plus the index of the token
-/// after it when that token is its value: the flag is listed in `value_flags`,
-/// carries no attached value, and what follows is neither hyphen-led nor part of
-/// the command path. Nothing is rewritten beyond the channel prefix, so what
-/// reaches the wrapped tool is what was typed.
-fn routable(
-    tokens: &[Option<&str>],
-    range: std::ops::Range<usize>,
-    selection: &Selection<'_>,
-    declared: &[&ClapArg],
-    value_flags: &[String],
-) -> Vec<usize> {
-    let mut routing = Vec::new();
-    let mut index = range.start;
-    while index < range.end {
-        let Some(token) = tokens[index] else {
-            index += 1;
-            continue;
+impl Selection<'_> {
+    /// Index of the token naming the leaf task command. Routed pre-command flags
+    /// are re-inserted just after it, where Clap attributes them to the task.
+    fn leaf_token(&self) -> usize {
+        *self
+            .command_path
+            .last()
+            .expect("a selection always names at least the task command")
+    }
+
+    /// The argv indices to route from one slot, stopping at `--`.
+    ///
+    /// The slot decides both halves at once — which tokens are in range, and
+    /// which declared flags they are judged against — so the two cannot be
+    /// paired the wrong way round.
+    ///
+    /// An unrecognized flag contributes its own index, plus the index of the
+    /// token after it when that token is its value: the flag is listed in
+    /// `value_flags`, carries no attached value, and what follows is neither
+    /// hyphen-led nor part of the command path. Nothing is rewritten beyond the
+    /// channel prefix, so what reaches the wrapped tool is what was typed.
+    fn routable(
+        &self,
+        tokens: &[Option<&str>],
+        slot: PassthroughPosition,
+        value_flags: &[String],
+    ) -> Vec<usize> {
+        let (range, declared) = match slot {
+            PassthroughPosition::PreCommand => (1..self.leaf_token(), &self.declared_anywhere),
+            PassthroughPosition::PostCommand => {
+                (self.leaf_token() + 1..tokens.len(), &self.declared_at_leaf)
+            }
         };
-        if token == "--" {
-            break;
-        }
-        let Some(flag) = parse_flag(token) else {
-            index += 1;
-            continue;
-        };
-        if let Some(span) = declared_span(declared, &flag) {
-            index += span;
-            continue;
-        }
-        routing.push(index);
-        index += 1;
-        if !flag.has_attached_value()
-            && value_flags.iter().any(|listed| listed == token)
-            && let Some(value) = tokens.get(index).copied().flatten()
-            && !value.starts_with('-')
-            && !selection.command_path.contains(&index)
-        {
+
+        let mut routing = Vec::new();
+        let mut index = range.start;
+        while index < range.end {
+            let Some(token) = tokens[index] else {
+                index += 1;
+                continue;
+            };
+            if token == "--" {
+                break;
+            }
+            let Some(flag) = parse_flag(token) else {
+                index += 1;
+                continue;
+            };
+            if let Some(span) = declared_span(declared, &flag) {
+                index += span;
+                continue;
+            }
             routing.push(index);
             index += 1;
+            if !flag.has_attached_value()
+                && value_flags.iter().any(|listed| listed == token)
+                && let Some(value) = tokens.get(index).copied().flatten()
+                && !value.starts_with('-')
+                && !self.command_path.contains(&index)
+            {
+                routing.push(index);
+                index += 1;
+            }
         }
+        routing
     }
-    routing
 }
 
 impl<'a, 'v> Cmd<'a, 'v> {
@@ -1017,24 +1035,13 @@ impl<'a, 'v> Cmd<'a, 'v> {
         let overrides = stringify_overrides(task.overrides());
         let pre = bucket(*task, PassthroughPosition::PreCommand, &overrides);
         let post = bucket(*task, PassthroughPosition::PostCommand, &overrides);
-        let pre_routing = pre.as_ref().map_or_else(Vec::new, |bucket| {
-            routable(
-                &tokens,
-                1..selection.boundary(),
-                &selection,
-                &selection.declared_anywhere,
-                &bucket.value_flags,
-            )
-        });
-        let post_routing = post.as_ref().map_or_else(Vec::new, |bucket| {
-            routable(
-                &tokens,
-                selection.boundary()..argv.len(),
-                &selection,
-                &selection.declared_at_leaf,
-                &bucket.value_flags,
-            )
-        });
+        let routing = |slot, bucket: Option<&Bucket>| {
+            bucket.map_or_else(Vec::new, |bucket| {
+                selection.routable(&tokens, slot, &bucket.value_flags)
+            })
+        };
+        let pre_routing = routing(PassthroughPosition::PreCommand, pre.as_ref());
+        let post_routing = routing(PassthroughPosition::PostCommand, post.as_ref());
         if pre_routing.is_empty() && post_routing.is_empty() {
             return argv;
         }
@@ -3029,6 +3036,29 @@ mod tests {
         ]
     }
 
+    /// Both buckets reading arities from the same config-only sibling arg, for
+    /// the pre-command paths the Bazel tasks do not exercise (startup options
+    /// have no space-form value flags, but the schema allows one).
+    fn both_buckets_value_flag_task(value_flags: &[&str]) -> StubTask {
+        let mut args: SmallMap<String, Arg> = SmallMap::new();
+        args.insert("targets".to_owned(), arg_positional());
+        args.insert("vals".to_owned(), arg_string_list(value_flags, true));
+        for (name, position) in [
+            ("post", PassthroughPosition::PostCommand),
+            ("pre", PassthroughPosition::PreCommand),
+        ] {
+            args.insert(
+                name.to_owned(),
+                Arg::Passthrough {
+                    position,
+                    value_flags_from: Some("vals".to_owned()),
+                    description: None,
+                },
+            );
+        }
+        stub_task("build", &[], args)
+    }
+
     /// `routing_task` plus a post-command bucket that reads flag arities from a
     /// config-only sibling arg — the shape `bzl.flags.args()` produces.
     fn value_flag_task(value_flags: &[&str]) -> StubTask {
@@ -3411,6 +3441,83 @@ mod tests {
         assert_eq!(
             route(&task, &["aspect", "build", "//...", "-c"]),
             ["aspect", "build", "//...", "--bazel-passthrough-flags=-c"]
+        );
+    }
+
+    /// A pre-command flag and its value move together, keeping their order, so
+    /// the pair still reads as a pair once Clap sees it after the task name.
+    #[test]
+    fn moves_a_pre_command_flag_and_its_value_together() {
+        let task = both_buckets_value_flag_task(&["--startup_opt"]);
+        assert_eq!(
+            route(
+                &task,
+                &["aspect", "--startup_opt", "on", "--bare", "build", "//..."]
+            ),
+            [
+                "aspect",
+                "build",
+                "--pre=--startup_opt",
+                "--pre=on",
+                "--pre=--bare",
+                "//..."
+            ]
+        );
+    }
+
+    /// The command name is never a flag's value, or the walk to the task would
+    /// swallow the task itself.
+    #[test]
+    fn does_not_take_a_command_name_as_a_value() {
+        let task = both_buckets_value_flag_task(&["--startup_opt"]);
+        assert_eq!(
+            route(&task, &["aspect", "--startup_opt", "build", "//..."]),
+            ["aspect", "build", "--pre=--startup_opt", "//..."],
+            "`build` names the task, so it stays the command",
+        );
+    }
+
+    /// A bare token that is not a command name ends the walk — unless it could
+    /// be the value of an unrecognized flag, which is the only way a task after
+    /// it is still reachable.
+    #[test]
+    fn a_stray_pre_command_token_still_ends_the_walk() {
+        let task = routing_task("build", &[]);
+        let argv = ["aspect", "nonsense", "build", "--keep_going"];
+        assert_eq!(
+            route(&task, &argv),
+            argv,
+            "no task is selected, so Clap reports the unknown command",
+        );
+    }
+
+    /// A token that is not valid UTF-8 cannot be a flag, and must not stop the
+    /// scan around it — target patterns and values are arbitrary OS strings.
+    #[test]
+    fn routes_around_a_non_utf8_token() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let task = routing_task("build", &[]);
+        let cmd = Cmd {
+            tasks: vec![&task],
+            features: vec![],
+            aspect_root: Path::new("/repo"),
+            modules: &[],
+        };
+        let mut root = cmd.build("0.0.0").expect("build ok");
+        root.build();
+        let argv = vec![
+            OsString::from("aspect"),
+            OsString::from("build"),
+            OsString::from_vec(vec![0xff, 0xfe]),
+            OsString::from("--keep_going"),
+        ];
+        let routed = cmd.route_unrecognized_flags(&root, argv.clone());
+        assert_eq!(routed[..3], argv[..3], "the opaque token is untouched");
+        assert_eq!(
+            routed[3],
+            OsString::from("--bazel-passthrough-flags=--keep_going"),
+            "a flag after it still routes",
         );
     }
 
