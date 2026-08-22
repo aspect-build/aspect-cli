@@ -9,7 +9,10 @@ A flag the CLI parser does not recognize is routed by where it was typed, the
 same way Bazel splits its own command line: before the task name it joins the
 startup flags, after it joins the command flags. `resolve_startup` / `resolve`
 fold each bucket in alongside the explicit `--bazel-startup-flag` /
-`--bazel-flag` values.
+`--bazel-flag` values, and claim it as they go — the runtime fails a run that
+left routed flags unclaimed, so claiming is what records that they were
+forwarded. A task path that spawns no Bazel at all calls
+`disclaim_passthrough` to say the omission was deliberate.
 
 Stateless functions taking `ctx` and deriving the active `BazelTrait` from
 `ctx.traits` themselves (no `trait` argument to pass)."""

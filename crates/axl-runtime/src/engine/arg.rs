@@ -110,6 +110,11 @@ pub enum Arg {
     /// Tokens are collected verbatim, one argv token each — a collected flag
     /// never swallows the token that follows it, so one carrying a value must
     /// attach it (`--flag=value`).
+    ///
+    /// Declaring a bucket comes with an obligation: the task must claim it
+    /// (`ctx.args.claim(name)`) to say those flags are its to act on. A run that
+    /// leaves collected flags unclaimed is failed by the runtime rather than
+    /// dropping them silently.
     Passthrough {
         position: PassthroughPosition,
         description: Option<String>,
@@ -474,8 +479,20 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     /// must attach it (`--jobs=8`, not `--jobs 8`), otherwise the value is left
     /// behind as a positional.
     ///
+    /// **Read a bucket with `ctx.args.claim(name)`**, which both returns the
+    /// list and tells the runtime this task is responsible for those flags.
+    /// Buying out of the "unexpected argument" error is only sound if something
+    /// acts on what was collected, so a run that ends with flags in an
+    /// unclaimed bucket fails — reading the value as a plain attribute is
+    /// inspecting, not forwarding. A path that deliberately runs nothing can
+    /// claim to say so.
+    ///
     /// Example:
     /// ```starlark
+    /// def _impl(ctx):
+    ///     tool_flags = ctx.args.claim("tool_flags")
+    ///     return ctx.std.process.command("some-tool").args(tool_flags).spawn().wait().code
+    ///
     /// my_task = task(
     ///     implementation = _impl,
     ///     args = {
