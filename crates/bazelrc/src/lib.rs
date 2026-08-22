@@ -1691,6 +1691,98 @@ build:b --config=a
         assert!(matches!(err, BazelRcError::ConfigCycle { .. }));
     }
 
+    /// Bazel accepts `--config NAME` as readily as `--config=NAME`, and the
+    /// space form reaches us from any tokenized source (an rc line, a repeated
+    /// `--bazel-flag`, a flag forwarded verbatim from the command line). Since a
+    /// `RunCommand` runs Bazel with `--ignore_all_rc_files`, a request we fail to
+    /// expand cannot be recovered downstream: Bazel would report the config as
+    /// undefined while it sits in the user's `.bazelrc`.
+    #[test]
+    fn config_expands_from_the_space_form() {
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(root.join(".bazelrc"), "build:ci --jobs=8\n").unwrap();
+
+        let rc = BazelRC::new(root, ISOLATE, &flags(&["--config", "ci"])).unwrap();
+        let expanded: Vec<String> = rc
+            .expand_configs("build", &[])
+            .unwrap()
+            .into_iter()
+            .map(|o| o.value)
+            .collect();
+        assert_eq!(expanded, vec!["--jobs=8".to_string()]);
+    }
+
+    /// The value token is consumed by the request, not emitted alongside it —
+    /// otherwise a bare `ci` would reach Bazel as a target pattern.
+    #[test]
+    fn config_space_form_consumes_only_its_value() {
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(root.join(".bazelrc"), "build:ci --jobs=8\n").unwrap();
+
+        let rc = BazelRC::new(
+            root,
+            ISOLATE,
+            &flags(&["--verbose_failures", "--config", "ci", "--keep_going"]),
+        )
+        .unwrap();
+        let expanded: Vec<String> = rc
+            .expand_configs("build", &[])
+            .unwrap()
+            .into_iter()
+            .map(|o| o.value)
+            .collect();
+        assert_eq!(
+            expanded,
+            vec![
+                "--verbose_failures".to_string(),
+                "--jobs=8".to_string(),
+                "--keep_going".to_string(),
+            ]
+        );
+    }
+
+    /// A `--config` with nothing usable after it is Bazel's to complain about —
+    /// it knows the flag's arity and words the error better than we can.
+    #[test]
+    fn config_without_a_value_passes_through() {
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(root.join(".bazelrc"), "build:ci --jobs=8\n").unwrap();
+
+        for tail in [vec!["--config"], vec!["--config", "--keep_going"]] {
+            let rc = BazelRC::new(root, ISOLATE, &flags(&tail)).unwrap();
+            let expanded: Vec<String> = rc
+                .expand_configs("build", &[])
+                .unwrap()
+                .into_iter()
+                .map(|o| o.value)
+                .collect();
+            let expected: Vec<String> = tail.iter().map(|s| s.to_string()).collect();
+            assert_eq!(expanded, expected, "for {tail:?}");
+        }
+    }
+
+    /// Cycle detection and `skip_config_if_missing` key off the config name, so
+    /// they must see it through either spelling.
+    #[test]
+    fn config_space_form_shares_cycle_and_skip_handling() {
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(root.join(".bazelrc"), "build:loop --config loop\n").unwrap();
+
+        let rc = BazelRC::new(root, ISOLATE, &flags(&["--config", "loop"])).unwrap();
+        assert!(matches!(
+            rc.expand_configs("build", &[]).unwrap_err(),
+            BazelRcError::ConfigCycle { .. }
+        ));
+
+        let rc = BazelRC::new(root, ISOLATE, &flags(&["--config", "absent"])).unwrap();
+        assert!(rc.expand_configs("build", &[]).is_err());
+        assert_eq!(rc.expand_configs("build", &["absent"]).unwrap().len(), 0);
+    }
+
     #[test]
     fn config_undefined_errors() {
         let dir = make_workspace();
