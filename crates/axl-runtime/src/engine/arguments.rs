@@ -56,6 +56,8 @@ pub struct Arguments<'v> {
     #[allocative(skip)]
     explicit_cli_keys: RefCell<SmallMap<String, ()>>,
     #[allocative(skip)]
+    claimed_keys: RefCell<SmallMap<String, ()>>,
+    #[allocative(skip)]
     valid_keys: Option<SmallMap<String, ()>>,
 }
 
@@ -65,6 +67,7 @@ impl<'v> Arguments<'v> {
         Self {
             args: RefCell::new(SmallMap::new()),
             explicit_cli_keys: RefCell::new(SmallMap::new()),
+            claimed_keys: RefCell::new(SmallMap::new()),
             valid_keys: None,
         }
     }
@@ -76,6 +79,7 @@ impl<'v> Arguments<'v> {
         Self {
             args: RefCell::new(SmallMap::new()),
             explicit_cli_keys: RefCell::new(SmallMap::new()),
+            claimed_keys: RefCell::new(SmallMap::new()),
             valid_keys: Some(valid_keys.into_iter().map(|k| (k, ())).collect()),
         }
     }
@@ -111,6 +115,24 @@ impl<'v> Arguments<'v> {
     /// merge (i.e. clap saw it as `ValueSource::CommandLine`).
     pub fn is_explicit_key(&self, key: &str) -> bool {
         self.explicit_cli_keys.borrow().contains_key(key)
+    }
+
+    /// Take responsibility for `key`, returning its value.
+    ///
+    /// The value is left in place — what is "taken" is ownership of acting on
+    /// it, not the data. This is how an `args.passthrough()` bucket is meant to
+    /// be read: the runtime checks after the task returns that every bucket
+    /// holding routed flags was claimed, so a task that forwards nothing fails
+    /// loudly instead of dropping the user's flags on the floor. See
+    /// `unclaimed_passthrough`.
+    pub fn claim(&self, key: &str) -> Option<Value<'v>> {
+        self.claimed_keys.borrow_mut().insert(key.to_owned(), ());
+        self.get(key)
+    }
+
+    /// Return `true` iff [`Arguments::claim`] was called for `key`.
+    pub fn is_claimed_key(&self, key: &str) -> bool {
+        self.claimed_keys.borrow().contains_key(key)
     }
 
     pub fn alloc_list<L>(items: L) -> AllocList<L> {
@@ -175,6 +197,9 @@ impl<'v> values::Freeze for Arguments<'v> {
             args: frozen,
             explicit_cli_keys: self.explicit_cli_keys.into_inner(),
         })
+        // `claimed_keys` is deliberately not carried over: claims are a
+        // per-invocation record the runtime reads back off the live store
+        // before it freezes anything.
     }
 }
 
@@ -242,6 +267,38 @@ fn arguments_methods(builder: &mut MethodsBuilder) {
         }
         Err(anyhow::anyhow!(
             "is_explicit: expected an Arguments value, got '{}'",
+            this.get_type(),
+        ))
+    }
+
+    /// Take responsibility for the arg `name` and return its value, or `[]`
+    /// when the task declares no such arg.
+    ///
+    /// This is how a task reads an `args.passthrough()` bucket. Claiming says
+    /// "these flags are mine to act on": after the task returns, the runtime
+    /// fails the invocation if any bucket that received routed flags was never
+    /// claimed, so an unrecognized flag can never be quietly dropped. Reading
+    /// the bucket as a plain attribute (`ctx.args.<name>`) does *not* claim it —
+    /// inspecting is not the same as forwarding, and a task is free to look
+    /// before deciding.
+    ///
+    /// Claiming an arg that is not a passthrough is harmless and does nothing.
+    fn claim<'v>(
+        this: Value<'v>,
+        #[starlark(require = pos)] name: &str,
+        heap: Heap<'v>,
+    ) -> anyhow::Result<Value<'v>> {
+        let empty = || heap.alloc(AllocList(Vec::<Value<'v>>::new()));
+        if let Some(a) = this.downcast_ref::<Arguments>() {
+            return Ok(a.claim(name).unwrap_or_else(empty));
+        }
+        // The frozen store is the config-time role, which has no routed flags to
+        // claim; answer consistently rather than erroring on a shared helper.
+        if let Some(a) = this.downcast_ref::<FrozenArguments>() {
+            return Ok(a.get(name).map(|v| v.to_value()).unwrap_or_else(empty));
+        }
+        Err(anyhow::anyhow!(
+            "claim: expected an Arguments value, got '{}'",
             this.get_type(),
         ))
     }

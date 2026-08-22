@@ -216,12 +216,21 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                 modules: &modules,
             };
             let mut root_cmd = cmd.build(&cli_version)?;
+            // Finalize the Clap surface before anything introspects it:
+            // `Command::build` is what injects the args Clap generates rather
+            // than takes as declarations (`--help`/`-h`, and `--version` where
+            // it is not disabled). Routing consults that surface to decide what
+            // is recognized, so building first is what keeps the answer honest
+            // — see `Cmd::route_unrecognized_flags`.
+            root_cmd.build();
             let mut cmd_for_help = root_cmd.clone();
 
             // Route the flags the selected task doesn't declare into its
             // passthrough buckets before Clap gets a chance to reject them, so
             // `aspect build --remote_download_all //...` reaches Bazel as
-            // typed. A command line with nothing to route comes back verbatim.
+            // typed. A command line with nothing to route comes back verbatim,
+            // which is what keeps an unknown flag on a task that forwards
+            // nothing (e.g. `delivery`) a parse error, exactly as before.
             let argv = cmd.route_unrecognized_flags(&root_cmd, std::env::args_os().collect());
 
             let matches = match root_cmd.try_get_matches_from_mut(argv) {

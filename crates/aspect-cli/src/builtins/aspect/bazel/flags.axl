@@ -135,14 +135,24 @@ def _targets_arg(verb: str) -> dict:
     }
 
 def _passthrough(ctx, name: str) -> list:
-    """The flags the CLI parser could not attribute to a declared arg and routed
-    into the task's `args.passthrough()` bucket `name`, or `[]` for a task that
-    declares no such bucket.
+    """Claim the flags the CLI parser could not attribute to a declared arg and
+    routed into the task's `args.passthrough()` bucket `name`, or `[]` for a task
+    that declares no such bucket.
+
+    `claim` rather than a plain read: it tells the runtime this task is now
+    responsible for those flags. After the task returns, the runtime fails the
+    invocation for any bucket that holds flags nobody claimed — so forgetting to
+    fold them into the Bazel command line is an error rather than a silent drop.
+    Calling this is therefore the act of forwarding, and the only place the
+    Bazel flag pipeline reads a bucket.
 
     Read tolerantly rather than through `_require_arg`: the buckets are purely
     additive, so a task that hand-declares `bazel_flags` without them keeps
-    working (it just rejects unrecognized flags the way it always did)."""
-    return list(getattr(ctx.args, name, []))
+    working (it just rejects unrecognized flags the way it always did). The
+    `getattr` fallback covers `ctx` stand-ins in AXL unit tests, which are
+    structs rather than the real args store and so have no `claim`."""
+    claim = getattr(ctx.args, "claim", None)
+    return list(claim(name)) if claim else list(getattr(ctx.args, name, []))
 
 def _resolve_startup_flags(ctx) -> list:
     """`ctx.args.bazel_startup_flags + pre-command passthrough +

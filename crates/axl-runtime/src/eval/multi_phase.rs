@@ -4,11 +4,13 @@ use std::path::{Path, PathBuf};
 use anyhow::anyhow;
 use starlark::environment::{FrozenModule, Module};
 use starlark::eval::Evaluator;
+use starlark::values::list::ListRef;
 use starlark::values::{Heap, Value, ValueLike};
 use uuid::Uuid;
 
 use crate::banner;
 use crate::ci::on_recognized_ci;
+use crate::diag;
 use crate::engine::arguments::Arguments;
 use crate::engine::bazel::Bazel;
 use crate::engine::config_context::ConfigContext;
@@ -569,8 +571,11 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         // `TaskInfo::started_at` is the authoritative task start (stamped
         // in `TaskInfo::new`), so we don't need a stack-local `task_start`.
         let task_info_val = heap.alloc(task_info);
+        // Keep the args Value too: `unclaimed_passthrough` reads the claim
+        // record back off it once `_impl` has had its chance at the flags.
+        let task_args_val = heap.alloc(task_args);
         let context = heap.alloc(TaskContext::new(
-            heap.alloc(task_args),
+            task_args_val,
             task_trait_map,
             task_info_val,
             bazel,
@@ -584,6 +589,29 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         run_deferred(context, &mut eval);
         let ret = impl_result?;
         let (exit_code, flagged, conclusion) = unpack_task_return(ret);
+
+        // The task has now had its chance to act on the flags the CLI could not
+        // attribute to a declared arg. Anything it left unclaimed would
+        // otherwise vanish silently, so fail the invocation instead.
+        let unclaimed = unclaimed_passthrough(task, task_args_val);
+        let exit_code = if unclaimed.is_empty() {
+            exit_code
+        } else {
+            for (name, flags) in &unclaimed {
+                diag::error(&format!(
+                    "{} did not forward the unrecognized flag{} {} anywhere. \
+                     The task declares the `{}` passthrough arg but never claimed it \
+                     (`ctx.args.claim(\"{}\")`), so those flags would have had no effect. \
+                     This is a bug in the task, not in the command line.",
+                    task_kind,
+                    if flags.len() == 1 { "" } else { "s" },
+                    flags.join(" "),
+                    name,
+                    name,
+                ));
+            }
+            Some(EXIT_UNCLAIMED_PASSTHROUGH)
+        };
 
         // Reads elapsed + phases off the heap-allocated TaskInfo. Closes
         // any phase still active when `_impl` returned so the breakdown
@@ -756,6 +784,45 @@ impl<'a> Verdict<'a> {
 /// exit_code=int)`) or a `TaskConclusion` record carrying the full
 /// terminal state. Anything else yields `(None, false, "")` — the
 /// runtime renders that as `✅ Passed` with no conclusion suffix.
+/// Exit code for a task that left routed flags unclaimed. Distinct from any
+/// code a task returns itself, and matches the CLI's usage-error code: the
+/// invocation named flags that went nowhere.
+const EXIT_UNCLAIMED_PASSTHROUGH: u8 = 2;
+
+/// The task's `args.passthrough()` buckets that hold flags but were never
+/// claimed, as `(arg name, flags)`.
+///
+/// `args.passthrough()` trades Clap's "unexpected argument" error for the
+/// promise that the task forwards what it collected. Only the task can keep
+/// that promise, so the runtime verifies it here rather than assuming: reading a
+/// bucket is deliberately not enough (a task may want to inspect the flags
+/// before deciding), the task must claim it — which the built-in Bazel flag
+/// helpers do as they resolve. An unclaimed bucket means the user typed a flag
+/// that changed nothing, the one outcome worse than the error this replaced.
+fn unclaimed_passthrough<'v>(
+    task: &dyn TaskLike<'v>,
+    args: Value<'v>,
+) -> Vec<(String, Vec<String>)> {
+    let Some(store) = args.downcast_ref::<Arguments>() else {
+        return vec![];
+    };
+    task.args()
+        .iter()
+        .filter(|(_, arg)| arg.passthrough_position().is_some())
+        .filter(|(name, _)| !store.is_claimed_key(name))
+        .filter_map(|(name, _)| {
+            let flags: Vec<String> = store
+                .get(name)
+                .and_then(|v| ListRef::from_value(v).map(|l| l.iter().collect::<Vec<_>>()))
+                .unwrap_or_default()
+                .iter()
+                .map(|v| v.to_str())
+                .collect();
+            (!flags.is_empty()).then(|| (name.clone(), flags))
+        })
+        .collect()
+}
+
 fn unpack_task_return<'v>(ret: starlark::values::Value<'v>) -> (Option<u8>, bool, String) {
     if let Some(tc) = ret.downcast_ref::<crate::engine::task_info::TaskConclusion>() {
         (Some(tc.exit_code as u8), tc.flagged, tc.text.clone())
@@ -1010,8 +1077,8 @@ fn display_width(s: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        ModuleEnv, MultiPhaseEval, TimingMode, display_width, format_duration,
-        render_phase_breakdown, render_timing_segment, task_label_for,
+        EXIT_UNCLAIMED_PASSTHROUGH, ModuleEnv, MultiPhaseEval, TimingMode, display_width,
+        format_duration, render_phase_breakdown, render_timing_segment, task_label_for,
     };
     use crate::engine::arguments::Arguments;
     use crate::engine::task_info::PhaseRecord;
@@ -1019,6 +1086,51 @@ mod tests {
     use crate::module::Mod;
     use starlark::values::ValueLike;
     use std::time::Duration;
+
+    /// A task declaring an `args.passthrough()` bucket promises to act on what
+    /// the CLI routes into it. These four pin the whole contract: the task gets
+    /// to run first (it may want to inspect the flags), a claim satisfies the
+    /// promise, a bare read does not, and an empty bucket is never a complaint.
+    const PASSTHROUGH_TASK: &str = r#"
+def _claims(ctx):
+    _ = ctx.args.claim("rest")
+    return 0
+
+def _reads(ctx):
+    _ = ctx.args.rest
+    return 0
+
+claims = task(implementation = _claims, args = {"rest": args.passthrough(position = "post_command")})
+reads = task(implementation = _reads, args = {"rest": args.passthrough(position = "post_command")})
+"#;
+
+    fn run_passthrough_task(index: usize, routed: Vec<&str>) -> Option<u8> {
+        crate::test::eval(PASSTHROUGH_TASK)
+            .with_string_list_args([("rest", routed)])
+            .run_task(index)
+            .expect("task runs")
+    }
+
+    #[test]
+    fn claiming_routed_flags_satisfies_the_contract() {
+        assert_eq!(run_passthrough_task(0, vec!["--jobs=8"]), Some(0));
+    }
+
+    /// Reading is inspecting, not forwarding — the flags still went nowhere.
+    #[test]
+    fn reading_routed_flags_without_claiming_fails_the_task() {
+        assert_eq!(
+            run_passthrough_task(1, vec!["--jobs=8"]),
+            Some(EXIT_UNCLAIMED_PASSTHROUGH)
+        );
+    }
+
+    /// The common case: a task declares a bucket, the user routed nothing into
+    /// it, and nobody had to claim anything.
+    #[test]
+    fn an_empty_bucket_is_not_a_failure() {
+        assert_eq!(run_passthrough_task(1, vec![]), Some(0));
+    }
 
     #[test]
     fn task_label_brackets_kind_when_name_carries_info() {

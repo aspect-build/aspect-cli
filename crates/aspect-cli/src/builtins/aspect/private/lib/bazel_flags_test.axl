@@ -37,14 +37,31 @@ def _fake_ctx(bazel_startup_flags = [], bazel_flags = [], trait = None):
 
 def _passthrough_ctx(startup = [], flags = [], passthrough_startup = [], passthrough = []):
     """`_fake_ctx` plus the two passthrough buckets the CLI parser fills with the
-    flags it could not attribute to a declared arg."""
+    flags it could not attribute to a declared arg.
+
+    Carries a `claim` that records what was claimed, mirroring the real args
+    store: the resolve helpers must claim a bucket they fold in, or the runtime
+    fails the invocation for dropping the user's flags. `claimed` is readable so
+    a test can assert the claim actually happened."""
+    buckets = {
+        "bazel_passthrough_startup_flags": passthrough_startup,
+        "bazel_passthrough_flags": passthrough,
+    }
+    claimed = []
+
+    def _claim(name):
+        claimed.append(name)
+        return buckets.get(name, [])
+
     return struct(
         args = struct(
             bazel_startup_flags = startup,
             bazel_flags = flags,
             bazel_passthrough_startup_flags = passthrough_startup,
             bazel_passthrough_flags = passthrough,
+            claim = _claim,
         ),
+        claimed = claimed,
         traits = {BazelTrait: _trait()},
     )
 
@@ -121,16 +138,23 @@ def _test_passthrough_flags_follow_explicit_ones(ctx):
     """A flag the parser routed into a passthrough bucket joins the slot it was
     typed for, after the explicit `--bazel-flag` / `--bazel-startup-flag` values
     so the direct spelling wins a collision."""
-    _eq(
-        "post-command passthrough",
-        bazel.flags.resolve(_passthrough_ctx(flags = ["--jobs=4"], passthrough = ["--jobs=8"])),
-        ["--jobs=4", "--jobs=8"],
-    )
-    _eq(
-        "pre-command passthrough",
-        bazel.flags.resolve_startup(_passthrough_ctx(startup = ["--client"], passthrough_startup = ["--output_base=/tmp/o"])),
-        ["--client", "--output_base=/tmp/o"],
-    )
+    post_ctx = _passthrough_ctx(flags = ["--jobs=4"], passthrough = ["--jobs=8"])
+    _eq("post-command passthrough", bazel.flags.resolve(post_ctx), ["--jobs=4", "--jobs=8"])
+
+    pre_ctx = _passthrough_ctx(startup = ["--client"], passthrough_startup = ["--output_base=/tmp/o"])
+    _eq("pre-command passthrough", bazel.flags.resolve_startup(pre_ctx), ["--client", "--output_base=/tmp/o"])
+
+def _test_resolving_claims_the_bucket(ctx):
+    """Folding a bucket into the flag list must also claim it — the runtime fails
+    the invocation for flags left unclaimed, so a resolve that forgot to claim
+    would turn a working command line into an error."""
+    post_ctx = _passthrough_ctx(passthrough = ["--jobs=8"])
+    bazel.flags.resolve(post_ctx)
+    _eq("resolve claims post-command bucket", post_ctx.claimed, ["bazel_passthrough_flags"])
+
+    pre_ctx = _passthrough_ctx(passthrough_startup = ["--output_base=/tmp/o"])
+    bazel.flags.resolve_startup(pre_ctx)
+    _eq("resolve_startup claims pre-command bucket", pre_ctx.claimed, ["bazel_passthrough_startup_flags"])
 
 def _test_passthrough_buckets_are_optional(ctx):
     """A task that declares the flag args without the passthrough buckets keeps
@@ -385,6 +409,7 @@ def _test_impl(ctx):
     _test_startup_input_list_not_mutated(ctx)
     _test_flags_full_chain_order(ctx)
     _test_passthrough_flags_follow_explicit_ones(ctx)
+    _test_resolving_claims_the_bucket(ctx)
     _test_passthrough_buckets_are_optional(ctx)
     _test_passthrough_args_shape(ctx)
     _test_flags_empty_defaults(ctx)
@@ -399,7 +424,7 @@ def _test_impl(ctx):
     # after the pure subtests prevents bleed-through.
     _test_setup_command_applies_to_ctx_bazel(ctx)
     _test_sibling_rc_transforms_startup(ctx)
-    print("bazel_flags_test.axl: OK (16 sections)")
+    print("bazel_flags_test.axl: OK (17 sections)")
     return 0
 
 bazel_flags_tests = task(
