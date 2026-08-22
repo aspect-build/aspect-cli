@@ -113,7 +113,9 @@ Use `name = "explicit-name"` to override the derived command name. Command names
 
 #### CLI arguments
 
-Argument types: `args.string()`, `args.int()`, `args.uint()`, `args.boolean()`, their `_list` variants, `args.positional()`, `args.trailing_var_args()`, and `args.custom(type, default = ...)` for non-CLI/config-only values (lambdas, dicts of complex shape, etc.). Scalar/list types support `required`, `default`, `description`, `long` (kebab-flag override), and (for scalar types) `short` for a single-character alias.
+Argument types: `args.string()`, `args.int()`, `args.uint()`, `args.boolean()`, their `_list` variants, `args.positional()`, `args.trailing_var_args()`, `args.passthrough(position = ...)`, and `args.custom(type, default = ...)` for non-CLI/config-only values (lambdas, dicts of complex shape, etc.). Scalar/list types support `required`, `default`, `description`, `long` (kebab-flag override), and (for scalar types) `short` for a single-character alias.
+
+`args.passthrough()` is how a task that wraps another tool accepts that tool's own flags without redeclaring them: instead of failing an undeclared flag with "unexpected argument", the CLI collects it into the bucket for the slot it was typed in — `position = "pre_command"` for flags before the task name (where Bazel takes its startup options: `aspect --output_base=/tmp/o build`), `position = "post_command"` for flags after it (`aspect build --remote_download_all`). A task may declare one bucket per position, and each arrives as a `list[str]` in command-line order; the built-in Bazel tasks fold them into their startup and command flags respectively. Collected flags are forwarded one argv token each and never claim the token that follows, so a forwarded flag carrying a value must attach it with `=`.
 
 ### Config File
 

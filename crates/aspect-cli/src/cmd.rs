@@ -3,10 +3,12 @@
 //! Public surface:
 //!
 //! * [`Cmd`] — value-passing input. Holds task & feature trait objects plus
-//!   filesystem context. `build()` produces the Clap [`Command`]. `dispatch()`
-//!   turns parsed [`ArgMatches`] into a [`Dispatch`]. `print_feature_help()`
-//!   renders `aspect feature [<name>]`, the discovery surface for feature flags
-//!   (which are hidden from each task's `--help`).
+//!   filesystem context. `build()` produces the Clap [`Command`].
+//!   `route_unrecognized_flags()` pre-processes argv so flags the selected task
+//!   does not declare reach its `args.passthrough()` buckets instead of failing
+//!   the parse. `dispatch()` turns parsed [`ArgMatches`] into a [`Dispatch`].
+//!   `print_feature_help()` renders `aspect feature [<name>]`, the discovery
+//!   surface for feature flags (which are hidden from each task's `--help`).
 //! * [`Dispatch`] — carries `task_id`, `task_name`, `task_friendly_name`, `task_uuid`, and the parsed
 //!   matches. `task_args(...)` and `feature_args(...)` produce the merged
 //!   runtime [`Arguments`] for a given task or feature.
@@ -14,6 +16,7 @@
 //! Everything else in this module is private.
 
 use std::collections::BTreeMap;
+use std::ffi::{OsStr, OsString};
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -21,7 +24,7 @@ use aspect_telemetry::cargo_pkg_display_version;
 use axl_runtime::banner;
 use axl_runtime::color;
 use axl_runtime::diag;
-use axl_runtime::engine::arg::Arg;
+use axl_runtime::engine::arg::{Arg, PassthroughPosition};
 use axl_runtime::engine::arguments::Arguments;
 use axl_runtime::engine::feature::FeatureLike;
 use axl_runtime::engine::names::to_display_name;
@@ -527,6 +530,19 @@ fn arg_to_clap(scope: Scope<'_>, name: &str, arg: &Arg) -> ClapArg {
             .allow_hyphen_values(true)
             .last(true)
             .num_args(0..),
+        // Nobody types this flag: it is the channel `route_unrecognized_flags`
+        // rewrites an unrecognized token onto, so the collected tokens arrive
+        // through the same `ArgMatches` as everything else. Hidden from `--help`
+        // — what the reader needs is the prose footer `task_command` adds, not a
+        // flag they are never meant to spell.
+        Arg::Passthrough { .. } => ClapArg::new(id)
+            .long(long.clone())
+            .value_name(long)
+            .action(ArgAction::Append)
+            .value_parser(value_parser!(String))
+            .allow_hyphen_values(true)
+            .require_equals(true)
+            .hide(true),
         Arg::StringList {
             required,
             default,
@@ -621,7 +637,8 @@ fn with_override(mut clap_arg: ClapArg, arg: &Arg, override_strings: &[String]) 
         | Arg::BooleanList { .. }
         | Arg::IntList { .. }
         | Arg::UIntList { .. }
-        | Arg::TrailingVarArgs { .. } => clap_arg.default_values(override_strings.iter().cloned()),
+        | Arg::TrailingVarArgs { .. }
+        | Arg::Passthrough { .. } => clap_arg.default_values(override_strings.iter().cloned()),
         _ => {
             if let Some(v) = override_strings.first() {
                 clap_arg.default_value(v.clone())
@@ -631,6 +648,261 @@ fn with_override(mut clap_arg: ClapArg, arg: &Arg, override_strings: &[String]) 
         }
     };
     clap_arg.required(false)
+}
+
+// ── Unrecognized-flag routing ──────────────────────────────────────────────
+//
+// Clap's contract is that an undeclared flag is a mistake, which is wrong for a
+// task that wraps another tool: `aspect build --remote_download_all //...` is a
+// perfectly good Bazel command line, and failing it with "unexpected argument"
+// forces the flag to be re-spelled as `--bazel-flag=--remote_download_all`.
+//
+// A task opts out by declaring `args.passthrough(position = …)`. Before argv
+// reaches Clap, the tokens Clap would reject are rewritten onto that arg's
+// hidden long flag, so the parse succeeds and the task reads them off
+// `ctx.args` like any other value. Which bucket a flag lands in is decided the
+// way Bazel decides it — by whether the flag was typed before or after the
+// command name.
+
+/// One flag token, reduced to what a lookup against the declared args needs.
+enum Flag<'t> {
+    Long(&'t str),
+    /// A short cluster's first character; the rest is either more shorts or an
+    /// attached value, neither of which changes which arg the token names.
+    Short(char),
+}
+
+/// Whether a flag token names something this command line already understands.
+enum Known<'c> {
+    /// A declared arg. Carried so the router can tell whether the argv token
+    /// after it is its value rather than a flag of its own.
+    Declared(&'c ClapArg),
+    /// `--help` / `-h`, which Clap injects while parsing rather than declaring
+    /// up front, so it is absent from `get_arguments`.
+    Builtin,
+    /// Not declared here — a candidate for routing.
+    No,
+}
+
+/// Split a flag token into the name Clap would look up, or `None` when the
+/// token is not a flag at all (`-` and `--` are values and separators).
+fn parse_flag(token: &str) -> Option<Flag<'_>> {
+    if let Some(long) = token.strip_prefix("--") {
+        let name = long.split('=').next().unwrap_or(long);
+        return (!name.is_empty()).then_some(Flag::Long(name));
+    }
+    let short = token.strip_prefix('-')?;
+    short.chars().next().map(Flag::Short)
+}
+
+fn classify<'c>(declared: &[&'c ClapArg], flag: &Flag<'_>) -> Known<'c> {
+    let hit = declared.iter().copied().find(|arg| match flag {
+        Flag::Long(name) => {
+            arg.get_long() == Some(name)
+                || arg
+                    .get_all_aliases()
+                    .is_some_and(|aliases| aliases.contains(name))
+        }
+        Flag::Short(c) => {
+            arg.get_short() == Some(*c)
+                || arg
+                    .get_all_short_aliases()
+                    .is_some_and(|aliases| aliases.contains(c))
+        }
+    });
+    match hit {
+        Some(arg) => Known::Declared(arg),
+        None if matches!(flag, Flag::Long("help") | Flag::Short('h')) => Known::Builtin,
+        None => Known::No,
+    }
+}
+
+/// Whether the argv token following `token` is this arg's value, and so must be
+/// skipped rather than examined as a flag of its own (`--coverage-tool genhtml`).
+fn consumes_next_token(arg: &ClapArg, flag: &Flag<'_>, token: &str) -> bool {
+    let value_attached = match flag {
+        Flag::Long(_) => token.contains('='),
+        // `-x` is bare; anything longer carries a cluster or a value.
+        Flag::Short(_) => token.len() > 2,
+    };
+    if value_attached || arg.is_require_equals_set() {
+        return false;
+    }
+    match arg.get_num_args() {
+        Some(range) => range.min_values() >= 1,
+        // Unset means Clap's per-action default: one value for the actions that
+        // take one, none for the flag-shaped actions.
+        None => matches!(arg.get_action(), ArgAction::Set | ArgAction::Append),
+    }
+}
+
+/// The `tasks` index a task command carries in its hidden id arg — the same
+/// channel [`Cmd::dispatch`] reads the selected task from after parsing.
+fn task_index(cmd: &Command) -> Option<usize> {
+    cmd.get_arguments()
+        .find(|a| a.get_id().as_str() == TASK_ID_KEY)
+        .and_then(|a| a.get_default_values().first())
+        .and_then(|v| v.to_str())
+        .and_then(|v| v.parse().ok())
+}
+
+/// The long flag routed tokens are rewritten onto for `position`, when the task
+/// declares a bucket for it.
+fn passthrough_channel(task: &dyn TaskLike<'_>, position: PassthroughPosition) -> Option<String> {
+    task.args().iter().find_map(|(name, arg)| {
+        (arg.passthrough_position() == Some(position)).then(|| long_flag(Scope::Task, name, arg))
+    })
+}
+
+fn route_onto(channel: &str, token: &OsStr) -> OsString {
+    let mut routed = OsString::from(format!("--{channel}="));
+    routed.push(token);
+    routed
+}
+
+impl<'a, 'v> Cmd<'a, 'v> {
+    /// Rewrite `argv` so the flags the selected task does not declare land in
+    /// its `args.passthrough()` buckets instead of failing the parse.
+    ///
+    /// Call with the `Command` from [`Cmd::build`], before handing argv to
+    /// Clap. Returns argv unchanged — including when nothing here can be made
+    /// sense of — so an unroutable command line still gets Clap's own error.
+    ///
+    /// The walk mirrors how Clap will read the same tokens: descend through
+    /// subcommand names to the leaf task, tracking the flags declared along the
+    /// way (which includes the root's globals and every feature's hidden args),
+    /// and stop at the first token that is neither. Flags seen before the leaf
+    /// command name go to the `pre_command` bucket and are moved to just after
+    /// it, where Clap will attribute them to the subcommand; flags seen after it
+    /// go to the `post_command` bucket and are rewritten in place. A `--`
+    /// ends routing on both sides: past it every token is a value.
+    ///
+    /// A routed flag is forwarded verbatim as one token and never claims the
+    /// token after it — there is no way to know the arity of a flag this CLI
+    /// has never heard of. `aspect build --jobs 8 //...` therefore forwards
+    /// `--jobs` and leaves `8` as a target pattern; the wrapped tool, which
+    /// does know the arity, is the one that reports it. `--jobs=8` is
+    /// unambiguous and always works.
+    pub fn route_unrecognized_flags(&self, root: &Command, argv: Vec<OsString>) -> Vec<OsString> {
+        let tokens: Vec<Option<&str>> = argv.iter().map(|t| t.to_str()).collect();
+        let token_at = |i: usize| tokens.get(i).copied().flatten();
+
+        let mut declared: Vec<&ClapArg> = root.get_arguments().collect();
+        let mut cur: &Command = root;
+        let mut selected: Option<(usize, usize)> = None;
+        let mut pre: Vec<usize> = Vec::new();
+        let mut i = 1;
+        while i < argv.len() {
+            let Some(token) = token_at(i) else { break };
+            if token == "--" {
+                break;
+            }
+            if let Some(flag) = parse_flag(token) {
+                i += match classify(&declared, &flag) {
+                    Known::Declared(arg) => 1 + usize::from(consumes_next_token(arg, &flag, token)),
+                    Known::Builtin => 1,
+                    Known::No => {
+                        pre.push(i);
+                        1
+                    }
+                };
+                continue;
+            }
+            // A token that names no subcommand is a positional, which only a
+            // task command has — so the command path is over either way.
+            let Some(sub) = cur.find_subcommand(token) else {
+                break;
+            };
+            declared.extend(sub.get_arguments());
+            cur = sub;
+            i += 1;
+            // Groups (`aspect cache …`) carry no task id, so keep descending;
+            // a flag typed between group levels is still pre-command.
+            if let Some(idx) = task_index(cur) {
+                selected = Some((idx, i));
+                break;
+            }
+        }
+
+        // No task selected (`aspect --nope`, `aspect describe`, a bare `aspect`,
+        // an unfinished group path): nothing to route to.
+        let Some((task_idx, boundary)) = selected else {
+            return argv;
+        };
+        let leaf_token = boundary - 1;
+        let Some(task) = self.tasks.get(task_idx) else {
+            return argv;
+        };
+        let pre_channel = passthrough_channel(*task, PassthroughPosition::PreCommand);
+        let post_channel = passthrough_channel(*task, PassthroughPosition::PostCommand);
+
+        let mut post: Vec<usize> = Vec::new();
+        if post_channel.is_some() {
+            let mut i = boundary;
+            while i < argv.len() {
+                let Some(token) = token_at(i) else {
+                    i += 1;
+                    continue;
+                };
+                if token == "--" {
+                    break;
+                }
+                let Some(flag) = parse_flag(token) else {
+                    i += 1;
+                    continue;
+                };
+                i += match classify(&declared, &flag) {
+                    Known::Declared(arg) => 1 + usize::from(consumes_next_token(arg, &flag, token)),
+                    Known::Builtin => 1,
+                    Known::No => {
+                        post.push(i);
+                        1
+                    }
+                };
+            }
+        }
+        if pre_channel.is_some() {
+            // A flag the *task* declares was not unrecognized, just misplaced
+            // (`aspect --deployment=prod build`). Leave it where it was typed so
+            // Clap reports it — and suggests the flag it knows — rather than
+            // forwarding an aspect flag to the wrapped tool.
+            pre.retain(|&i| {
+                token_at(i)
+                    .and_then(parse_flag)
+                    .is_none_or(|flag| matches!(classify(&declared, &flag), Known::No))
+            });
+        } else {
+            pre.clear();
+        }
+        if pre.is_empty() && post.is_empty() {
+            return argv;
+        }
+
+        let pre_channel = pre_channel.unwrap_or_default();
+        let post_channel = post_channel.unwrap_or_default();
+        // Clap only attributes a flag to the subcommand that declares it, so a
+        // pre-command flag cannot be routed where it was typed; it moves to
+        // just after the command name, keeping the order it was given in.
+        let moved: Vec<OsString> = pre
+            .iter()
+            .map(|&i| route_onto(&pre_channel, &argv[i]))
+            .collect();
+        let mut routed = Vec::with_capacity(argv.len());
+        for (i, token) in argv.into_iter().enumerate() {
+            if pre.contains(&i) {
+                continue;
+            }
+            if post.contains(&i) {
+                routed.push(route_onto(&post_channel, &token));
+            } else {
+                routed.push(token);
+            }
+            if i == leaf_token {
+                routed.extend(moved.iter().cloned());
+            }
+        }
+        routed
+    }
 }
 
 // ── Match → Arguments merge ────────────────────────────────────────────────
@@ -700,11 +972,12 @@ fn clap_to_value<'v>(
             .alloc(*matches.get_one::<u32>(key).unwrap_or(&0))
             .to_value(),
         Arg::Boolean { .. } => heap.alloc(*matches.get_one::<bool>(key).unwrap_or(&false)),
-        Arg::Positional { .. } | Arg::TrailingVarArgs { .. } => heap.alloc(AllocList(
-            matches
-                .get_many::<String>(key)
-                .map_or(vec![], |it| it.map(|s| s.as_str()).collect()),
-        )),
+        Arg::Positional { .. } | Arg::TrailingVarArgs { .. } | Arg::Passthrough { .. } => heap
+            .alloc(AllocList(
+                matches
+                    .get_many::<String>(key)
+                    .map_or(vec![], |it| it.map(|s| s.as_str()).collect()),
+            )),
         Arg::StringList { .. } => heap.alloc(AllocList(
             matches
                 .get_many::<String>(key)
@@ -835,8 +1108,11 @@ fn feature_block(feat: &dyn FeatureLike<'_>) -> Option<FeatureBlock> {
 fn describe_arg(scope: Scope<'_>, name: &str, arg: &Arg) -> serde_json::Value {
     use serde_json::json;
 
+    // A passthrough has a `long` internally (the channel routed tokens are
+    // rewritten onto) but it is not a flag a caller ever types, so it describes
+    // as flagless like the positionals do.
     let flag = match arg {
-        Arg::Positional { .. } | Arg::TrailingVarArgs { .. } => None,
+        Arg::Positional { .. } | Arg::TrailingVarArgs { .. } | Arg::Passthrough { .. } => None,
         _ => Some(format!("--{}", long_flag(scope, name, arg))),
     };
     let (kind, default, values, description, short) = match arg {
@@ -919,6 +1195,9 @@ fn describe_arg(scope: Scope<'_>, name: &str, arg: &Arg) -> serde_json::Value {
             description,
             &None,
         ),
+        Arg::Passthrough { description, .. } => {
+            ("passthrough", json!(null), json!(null), description, &None)
+        }
         // Filtered out by `is_cli_exposed` before reaching here.
         Arg::Custom { description, .. } => ("custom", json!(null), json!(null), description, &None),
     };
@@ -943,6 +1222,9 @@ fn describe_arg(scope: Scope<'_>, name: &str, arg: &Arg) -> serde_json::Value {
         "maximum": maximum,
         "default": default,
         "allowed_values": values,
+        // Only a passthrough carries one: which side of the task name it
+        // collects unrecognized flags from.
+        "position": arg.passthrough_position().map(|p| p.as_str()),
         "description": description,
     })
 }
@@ -1280,9 +1562,26 @@ fn task_command(
          (GitHub, Buildkite, GitLab, CircleCI, telemetry). Their flags are accepted here \
          but hidden; run `aspect feature` to list them.\x1b[0m";
     cmd = cmd.help_template(format!(
-        "{cli_header}\n\n{about_block}\n{{usage-heading}} {{usage}}\n\n{{all-args}}\n\n{feature_footer}"
+        "{cli_header}\n\n{about_block}\n{{usage-heading}} {{usage}}\n\n{{all-args}}\n\n{}{feature_footer}",
+        passthrough_footer(task),
     ));
     cmd
+}
+
+/// The prose that tells a reader unrecognized flags are forwarded rather than
+/// rejected, drawn from the descriptions of the task's `args.passthrough()`
+/// buckets (in declaration order) and empty when it declares none.
+///
+/// A passthrough has no flag to list, so `{all-args}` cannot surface it and
+/// this footer is the only place `--help` can explain the behavior. The text is
+/// the task author's, because only they know what the flags are forwarded to.
+fn passthrough_footer(task: &dyn TaskLike<'_>) -> String {
+    task.args()
+        .iter()
+        .filter(|(_, arg)| arg.passthrough_position().is_some())
+        .filter_map(|(_, arg)| arg.description())
+        .map(|line| format!("\x1b[2m{line}\x1b[0m\n\n"))
+        .collect()
 }
 
 // ── Subgroup tree ──────────────────────────────────────────────────────────
@@ -2409,6 +2708,264 @@ mod tests {
                 .try_get_matches_from(["--remote", "exec"])
                 .is_err()
         );
+    }
+
+    // ── Unrecognized-flag routing ─────────────────────────────────────────
+
+    fn arg_positional() -> Arg {
+        Arg::Positional {
+            minimum: 1,
+            maximum: 512,
+            default: Some(vec!["...".to_owned()]),
+            description: None,
+        }
+    }
+
+    fn arg_passthrough(position: PassthroughPosition) -> Arg {
+        Arg::Passthrough {
+            position,
+            description: None,
+        }
+    }
+
+    /// A task shaped like the `build` builtin: target patterns, a declared flag
+    /// that takes a value, and both passthrough buckets.
+    fn routing_task(name: &str, group: &[&str]) -> StubTask {
+        let mut args: SmallMap<String, Arg> = SmallMap::new();
+        args.insert("targets".to_owned(), arg_positional());
+        args.insert("deployment".to_owned(), arg_string(""));
+        args.insert(
+            "bazel_passthrough_flags".to_owned(),
+            arg_passthrough(PassthroughPosition::PostCommand),
+        );
+        args.insert(
+            "bazel_passthrough_startup_flags".to_owned(),
+            arg_passthrough(PassthroughPosition::PreCommand),
+        );
+        stub_task(name, group, args)
+    }
+
+    fn route(task: &StubTask, argv: &[&str]) -> Vec<String> {
+        let cmd = Cmd {
+            tasks: vec![task],
+            features: vec![],
+            aspect_root: Path::new("/repo"),
+            modules: &[],
+        };
+        let root = cmd.build("0.0.0").expect("build ok");
+        cmd.route_unrecognized_flags(&root, argv.iter().map(OsString::from).collect())
+            .iter()
+            .map(|t| t.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// A flag typed after the task name keeps its place in argv — it is a
+    /// command option of the wrapped tool, and the tool's own flags are
+    /// order-sensitive.
+    #[test]
+    fn routes_post_command_flags_in_place() {
+        let task = routing_task("build", &[]);
+        assert_eq!(
+            route(
+                &task,
+                &["aspect", "build", "--remote_download_all", "//..."]
+            ),
+            [
+                "aspect",
+                "build",
+                "--bazel-passthrough-flags=--remote_download_all",
+                "//..."
+            ]
+        );
+    }
+
+    /// A flag typed before the task name lands in the pre-command bucket, but has
+    /// to move: Clap only attributes a flag to the subcommand that declares it.
+    #[test]
+    fn routes_pre_command_flags_to_after_the_task_name() {
+        let task = routing_task("build", &[]);
+        assert_eq!(
+            route(
+                &task,
+                &[
+                    "aspect",
+                    "--output_base=/tmp/o",
+                    "--nohome_rc",
+                    "build",
+                    "//..."
+                ]
+            ),
+            [
+                "aspect",
+                "build",
+                "--bazel-passthrough-startup-flags=--output_base=/tmp/o",
+                "--bazel-passthrough-startup-flags=--nohome_rc",
+                "//..."
+            ]
+        );
+    }
+
+    /// A flag the task declares but typed on the wrong side of its name was
+    /// never unrecognized, so it stays put and Clap reports the misplacement
+    /// instead of the wrapped tool being handed an aspect flag.
+    #[test]
+    fn does_not_route_a_task_flag_typed_before_the_task_name() {
+        let task = routing_task("build", &[]);
+        let argv = ["aspect", "--deployment=prod", "build", "//..."];
+        assert_eq!(route(&task, &argv), argv);
+    }
+
+    /// Declared flags, their values, globals, and `--help` are Clap's business.
+    #[test]
+    fn leaves_recognized_tokens_alone() {
+        let task = routing_task("build", &[]);
+        let argv = [
+            "aspect",
+            "build",
+            "--deployment",
+            "prod",
+            "--task:name=x",
+            "--help",
+            "//...",
+        ];
+        assert_eq!(route(&task, &argv), argv);
+    }
+
+    /// The value of a declared flag is not a command name, even when it reads
+    /// like one — so the walk to the leaf must skip over it.
+    #[test]
+    fn a_declared_flags_value_does_not_end_the_command_path() {
+        let task = routing_task("build", &[]);
+        assert_eq!(
+            route(
+                &task,
+                &["aspect", "--task:name", "build", "build", "--keep_going"]
+            ),
+            [
+                "aspect",
+                "--task:name",
+                "build",
+                "build",
+                "--bazel-passthrough-flags=--keep_going"
+            ]
+        );
+    }
+
+    /// Past `--` every token is a value — that is what makes hyphen-led target
+    /// patterns (`-//experimental/...`) expressible.
+    #[test]
+    fn stops_routing_at_the_double_dash() {
+        let task = routing_task("build", &[]);
+        let argv = ["aspect", "build", "--", "//...", "-//experimental/..."];
+        assert_eq!(route(&task, &argv), argv);
+    }
+
+    #[test]
+    fn routes_for_a_task_nested_in_a_group() {
+        let task = routing_task("diff", &["cache"]);
+        assert_eq!(
+            route(&task, &["aspect", "cache", "diff", "--keep_going"]),
+            [
+                "aspect",
+                "cache",
+                "diff",
+                "--bazel-passthrough-flags=--keep_going"
+            ]
+        );
+    }
+
+    /// A short flag is forwarded whole and, like a long one, does not claim the
+    /// token after it — so `-k //...` stays a flag plus a target pattern.
+    #[test]
+    fn routes_short_flags_without_claiming_the_next_token() {
+        let task = routing_task("build", &[]);
+        assert_eq!(
+            route(&task, &["aspect", "build", "-k", "//..."]),
+            ["aspect", "build", "--bazel-passthrough-flags=-k", "//..."]
+        );
+    }
+
+    /// Nothing to route to: the task declares no bucket, so the command line is
+    /// handed to Clap as typed and still fails the way it always did.
+    #[test]
+    fn leaves_argv_alone_for_a_task_without_buckets() {
+        let mut args: SmallMap<String, Arg> = SmallMap::new();
+        args.insert("targets".to_owned(), arg_positional());
+        let task = stub_task("build", &[], args);
+        let argv = ["aspect", "build", "--remote_download_all"];
+        assert_eq!(route(&task, &argv), argv);
+
+        let cmd = Cmd {
+            tasks: vec![&task],
+            features: vec![],
+            aspect_root: Path::new("/repo"),
+            modules: &[],
+        };
+        assert!(
+            cmd.build("0.0.0")
+                .unwrap()
+                .try_get_matches_from(argv)
+                .is_err()
+        );
+    }
+
+    /// No task selected — an unknown flag before any command name could belong
+    /// to any task, so it stays Clap's error to report.
+    #[test]
+    fn leaves_argv_alone_when_no_task_is_selected() {
+        let task = routing_task("build", &[]);
+        let argv = ["aspect", "--remote_download_all"];
+        assert_eq!(route(&task, &argv), argv);
+    }
+
+    /// The whole point: routed flags arrive as ordinary `ctx.args` values, split
+    /// by the slot they were typed in, and the target patterns are untouched.
+    #[test]
+    fn routed_flags_reach_the_task_args_split_by_position() {
+        let task = routing_task("build", &[]);
+        let cmd = Cmd {
+            tasks: vec![&task],
+            features: vec![],
+            aspect_root: Path::new("/repo"),
+            modules: &[],
+        };
+        let root = cmd.build("0.0.0").expect("build ok");
+        let argv: Vec<OsString> = [
+            "aspect",
+            "--output_base=/tmp/o",
+            "build",
+            "--remote_download_all",
+            "--jobs=8",
+            "//foo/...",
+        ]
+        .iter()
+        .map(OsString::from)
+        .collect();
+        let matches = root
+            .clone()
+            .try_get_matches_from(cmd.route_unrecognized_flags(&root, argv))
+            .expect("routed argv parses");
+        let dispatch = cmd.dispatch(matches).expect("dispatch ok");
+
+        Heap::temp(|heap| {
+            let merged = dispatch.task_args(&task, heap);
+            let list = |name: &str| {
+                ListRef::from_value(merged.get(name).expect("present"))
+                    .expect("list")
+                    .iter()
+                    .map(|v| v.unpack_str().expect("str").to_owned())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                list("bazel_passthrough_flags"),
+                ["--remote_download_all", "--jobs=8"]
+            );
+            assert_eq!(
+                list("bazel_passthrough_startup_flags"),
+                ["--output_base=/tmp/o"]
+            );
+            assert_eq!(list("targets"), ["//foo/..."]);
+        });
     }
 
     /// Without `bare`, a string flag still requires its value — the pre-existing

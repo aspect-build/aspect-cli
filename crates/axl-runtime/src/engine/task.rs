@@ -681,6 +681,19 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
                     arg_name,
                 ));
             }
+            if let Some(position) = cli_arg.passthrough_position()
+                && let Some((existing, _)) = args_
+                    .iter()
+                    .find(|(_, a): &(&String, &Arg)| a.passthrough_position() == Some(position))
+            {
+                return Err(anyhow::anyhow!(
+                    "task arg {:?}: a passthrough arg at position {:?} is already declared as \
+                     {:?}; there is no way to decide which one an unrecognized flag belongs to",
+                    arg_name,
+                    position.as_str(),
+                    existing,
+                ));
+            }
             args_.insert(arg_name, cli_arg);
         }
 
@@ -886,6 +899,69 @@ base = task(
 buildifier = base.alias(defaults = {"tail": []})
 "#,
             "trailing_var_args",
+        );
+    }
+
+    #[test]
+    fn alias_passthrough_default_rejected() {
+        assert_eval_err_contains(
+            r#"
+base = task(
+    implementation = _impl,
+    args = {"rest": args.passthrough(position = "post_command")},
+)
+buildifier = base.alias(defaults = {"rest": ["--jobs=8"]})
+"#,
+            "cannot override a passthrough default",
+        );
+    }
+
+    /// Two buckets at the same position leave no rule for deciding which one an
+    /// unrecognized flag belongs to.
+    #[test]
+    fn duplicate_passthrough_position_rejected() {
+        assert_eval_err_contains(
+            r#"
+t = task(
+    implementation = _impl,
+    args = {
+        "rest": args.passthrough(position = "post_command"),
+        "more": args.passthrough(position = "post_command"),
+    },
+)
+"#,
+            "is already declared",
+        );
+    }
+
+    /// Both positions on one task is the shape every Bazel-wrapping task uses.
+    #[test]
+    fn both_passthrough_positions_allowed() {
+        eval_snippet(
+            r#"
+t = task(
+    implementation = _impl,
+    args = {
+        "startup": args.passthrough(position = "pre_command"),
+        "rest": args.passthrough(position = "post_command"),
+    },
+)
+"#,
+        )
+        .check()
+        .expect("both positions accepted");
+    }
+
+    #[test]
+    fn passthrough_position_must_be_known() {
+        assert_eval_err_contains(
+            r#"
+t = task(
+    implementation = _impl,
+    args = {"rest": args.passthrough(position = "anywhere")},
+)
+"#,
+            "`position` must be",
         );
     }
 

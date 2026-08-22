@@ -525,6 +525,17 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
                     arg_name
                 ));
             }
+            // A passthrough bucket is defined by what the *task* failed to
+            // recognize, and features inject their args into every task, so a
+            // feature-owned bucket would silently claim flags meant for any
+            // task it is active on.
+            if matches!(cli_arg, Arg::Passthrough { .. }) {
+                return Err(anyhow::anyhow!(
+                    "feature arg {:?}: passthrough args are not allowed in features — \
+                     declare one on the task that forwards them",
+                    arg_name
+                ));
+            }
             if cli_arg.is_required() {
                 return Err(anyhow::anyhow!(
                     "feature arg {:?}: CLI args in features must be optional (required = true \

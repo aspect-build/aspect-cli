@@ -22,6 +22,40 @@ use starlark::values::starlark_value;
 use starlark::values::starlark_value_as_type::StarlarkValueAsType;
 use starlark::values::typing::TypeCompiled;
 
+/// Which side of the task name an [`Arg::Passthrough`] collects from.
+///
+/// The split mirrors Bazel's own command line, where an option's meaning
+/// depends on whether it precedes the command: `bazel --output_base=/tmp build`
+/// vs `bazel build --keep_going`. A task wrapping another tool declares one
+/// bucket per slot so it can forward each to the right place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Allocative)]
+pub enum PassthroughPosition {
+    /// Flags typed before the task name (Bazel's startup-option slot).
+    PreCommand,
+    /// Flags typed after the task name.
+    PostCommand,
+}
+
+impl PassthroughPosition {
+    pub const PRE_COMMAND: &'static str = "pre_command";
+    pub const POST_COMMAND: &'static str = "post_command";
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            Self::PRE_COMMAND => Some(Self::PreCommand),
+            Self::POST_COMMAND => Some(Self::PostCommand),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PreCommand => Self::PRE_COMMAND,
+            Self::PostCommand => Self::POST_COMMAND,
+        }
+    }
+}
+
 #[derive(Clone, Debug, ProvidesStaticType, NoSerialize, Allocative)]
 pub enum Arg {
     String {
@@ -66,6 +100,18 @@ pub enum Arg {
         description: Option<String>,
     },
     TrailingVarArgs {
+        description: Option<String>,
+    },
+    /// Collects the hyphen-led tokens the task does not otherwise declare, in
+    /// command-line order, instead of failing the parse with "unexpected
+    /// argument". `position` selects which side of the task name it collects
+    /// from; a task may declare one bucket per position.
+    ///
+    /// Tokens are collected verbatim, one argv token each — a collected flag
+    /// never swallows the token that follows it, so one carrying a value must
+    /// attach it (`--flag=value`).
+    Passthrough {
+        position: PassthroughPosition,
         description: Option<String>,
     },
     StringList {
@@ -120,8 +166,9 @@ starlark_simple_value!(Arg);
 impl Arg {
     /// Returns `true` if this arg was declared with `required = true`.
     ///
-    /// Positional, TrailingVarArgs, and Custom do not carry a `required` field — callers
-    /// should disallow those in contexts where required args are not acceptable.
+    /// Positional, TrailingVarArgs, Passthrough, and Custom do not carry a `required`
+    /// field — callers should disallow those in contexts where required args are not
+    /// acceptable.
     pub fn is_required(&self) -> bool {
         match self {
             Self::String { required, .. }
@@ -132,7 +179,10 @@ impl Arg {
             | Self::BooleanList { required, .. }
             | Self::IntList { required, .. }
             | Self::UIntList { required, .. } => *required,
-            Self::Positional { .. } | Self::TrailingVarArgs { .. } | Self::Custom { .. } => false,
+            Self::Positional { .. }
+            | Self::TrailingVarArgs { .. }
+            | Self::Passthrough { .. }
+            | Self::Custom { .. } => false,
         }
     }
 
@@ -153,7 +203,37 @@ impl Arg {
             | Self::BooleanList { long, .. }
             | Self::IntList { long, .. }
             | Self::UIntList { long, .. } => long.as_deref(),
-            Self::Positional { .. } | Self::TrailingVarArgs { .. } | Self::Custom { .. } => None,
+            Self::Positional { .. }
+            | Self::TrailingVarArgs { .. }
+            | Self::Passthrough { .. }
+            | Self::Custom { .. } => None,
+        }
+    }
+
+    /// The `description = "…"` this arg was declared with, if any.
+    pub fn description(&self) -> Option<&str> {
+        match self {
+            Self::String { description, .. }
+            | Self::Boolean { description, .. }
+            | Self::Int { description, .. }
+            | Self::UInt { description, .. }
+            | Self::Positional { description, .. }
+            | Self::TrailingVarArgs { description }
+            | Self::Passthrough { description, .. }
+            | Self::StringList { description, .. }
+            | Self::BooleanList { description, .. }
+            | Self::IntList { description, .. }
+            | Self::UIntList { description, .. }
+            | Self::Custom { description, .. } => description.as_deref(),
+        }
+    }
+
+    /// The position an `args.passthrough()` arg collects from, or `None` for
+    /// every other kind.
+    pub fn passthrough_position(&self) -> Option<PassthroughPosition> {
+        match self {
+            Self::Passthrough { position, .. } => Some(*position),
+            _ => None,
         }
     }
 
@@ -240,6 +320,13 @@ impl Arg {
                     arg_name,
                 ));
             }
+            Self::Passthrough { .. } => {
+                return Err(anyhow::anyhow!(
+                    "arg {:?}: cannot override a passthrough default — it holds \
+                     whatever the command line was not otherwise able to parse",
+                    arg_name,
+                ));
+            }
         }
         Ok(next)
     }
@@ -287,6 +374,9 @@ impl Display for Arg {
             Self::Positional { .. } => write!(f, "<args.Arg: positional>"),
             Self::TrailingVarArgs { .. } => {
                 write!(f, "<args.Arg: trailing variable arguments>")
+            }
+            Self::Passthrough { position, .. } => {
+                write!(f, "<args.Arg: passthrough {}>", position.as_str())
             }
             Self::StringList { .. } => write!(f, "<args.Arg: string_list>"),
             Self::BooleanList { .. } => write!(f, "<args.Arg: boolean_list>"),
@@ -360,6 +450,56 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         #[starlark(require = named, default = NoneOr::None)] description: NoneOr<String>,
     ) -> anyhow::Result<Arg> {
         Ok(Arg::TrailingVarArgs {
+            description: description.into_option(),
+        })
+    }
+
+    /// Defines a bucket that collects the flags this task does not declare,
+    /// instead of failing the parse with "unexpected argument". For a task that
+    /// wraps another tool (`bazel`, `cargo`, …) and wants that tool's own flags
+    /// to work without being individually redeclared or wrapped.
+    ///
+    /// `position` selects which side of the task name a flag is collected from:
+    ///
+    /// * `"pre_command"` — before it: `aspect --output_base=/tmp build`. This is
+    ///   where Bazel takes its startup options.
+    /// * `"post_command"` — after it: `aspect build --remote_download_all`.
+    ///
+    /// A task may declare one bucket per position; both are lists of strings in
+    /// command-line order. Keeping them separate is what lets a task forward
+    /// each set to the slot it was typed for.
+    ///
+    /// Collected flags are forwarded verbatim, one argv token each, and never
+    /// swallow the token that follows — so a collected flag carrying a value
+    /// must attach it (`--jobs=8`, not `--jobs 8`), otherwise the value is left
+    /// behind as a positional.
+    ///
+    /// Example:
+    /// ```starlark
+    /// my_task = task(
+    ///     implementation = _impl,
+    ///     args = {
+    ///         "targets": args.positional(minimum = 1, maximum = 512),
+    ///         "tool_flags": args.passthrough(position = "post_command"),
+    ///     },
+    /// )
+    /// ```
+    fn passthrough<'v>(
+        #[starlark(require = named)] position: String,
+        #[starlark(require = named, default = NoneOr::None)] description: NoneOr<String>,
+    ) -> starlark::Result<Arg> {
+        let Some(position) = PassthroughPosition::parse(&position) else {
+            return Err(starlark::Error::new_kind(starlark::ErrorKind::Function(
+                anyhow::anyhow!(
+                    "`position` must be {:?} or {:?}; got {:?}",
+                    PassthroughPosition::PRE_COMMAND,
+                    PassthroughPosition::POST_COMMAND,
+                    position,
+                ),
+            )));
+        };
+        Ok(Arg::Passthrough {
+            position,
             description: description.into_option(),
         })
     }

@@ -218,7 +218,13 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
             let mut root_cmd = cmd.build(&cli_version)?;
             let mut cmd_for_help = root_cmd.clone();
 
-            let matches = match root_cmd.try_get_matches_from_mut(std::env::args_os()) {
+            // Route the flags the selected task doesn't declare into its
+            // passthrough buckets before Clap gets a chance to reject them, so
+            // `aspect build --remote_download_all //...` reaches Bazel as
+            // typed. A command line with nothing to route comes back verbatim.
+            let argv = cmd.route_unrecognized_flags(&root_cmd, std::env::args_os().collect());
+
+            let matches = match root_cmd.try_get_matches_from_mut(argv) {
                 Ok(m) => m,
                 Err(err) => {
                     err.print().ok();

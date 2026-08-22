@@ -1,8 +1,15 @@
 """Everything about Bazel flags: the `--bazel-flag` / `--bazel-startup-flag` /
-`announce-bazel-*` CLI args, the task-facing arg bundles (`core_args` /
-`targets_arg`), startup+command flag composition, `.bazelrc` parsing
-(`setup_command` / `sibling_rc`), `--config=` expansion, and per-invocation
-endpoint auth flags.
+`announce-bazel-*` CLI args, the two `args.passthrough()` buckets that let a
+plain Bazel flag be typed directly on an aspect command line, the task-facing
+arg bundles (`core_args` / `targets_arg`), startup+command flag composition,
+`.bazelrc` parsing (`setup_command` / `sibling_rc`), `--config=` expansion, and
+per-invocation endpoint auth flags.
+
+A flag the CLI parser does not recognize is routed by where it was typed, the
+same way Bazel splits its own command line: before the task name it joins the
+startup flags, after it joins the command flags. `resolve_startup` / `resolve`
+fold each bucket in alongside the explicit `--bazel-startup-flag` /
+`--bazel-flag` values.
 
 Stateless functions taking `ctx` and deriving the active `BazelTrait` from
 `ctx.traits` themselves (no `trait` argument to pass)."""
@@ -70,16 +77,29 @@ def _announce_args(rc_phrase: str) -> dict:
 
 def _flag_args(build_phrase: str) -> dict:
     """The `bazel_flags` / `bazel_startup_flags` CLI args every Bazel-spawning
-    task declares. Splat into a task's `args = {...}`; `build_phrase` names the
-    bazel invocation (e.g. `"the build"`, `"the test invocation"`)."""
+    task declares, plus the two passthrough buckets that let a plain Bazel flag
+    be typed directly. Splat into a task's `args = {...}`; `build_phrase` names
+    the bazel invocation (e.g. `"the build"`, `"the test invocation"`).
+
+    The passthrough descriptions are what `--help` shows as its
+    unrecognized-flag footer, so they are written for a reader, not as flag
+    help."""
     return {
         "bazel_flags": args.string_list(
             long = "bazel-flag",
-            description = "Additional Bazel flags forwarded to %s (e.g. --bazel-flag=--config=ci --bazel-flag=--keep_going). Repeat the flag to pass multiple." % build_phrase,
+            description = "Additional Bazel flags forwarded to %s (e.g. --bazel-flag=--config=ci --bazel-flag=--keep_going). Repeat the flag to pass multiple. Bazel flags can also be typed directly, without this wrapper." % build_phrase,
         ),
         "bazel_startup_flags": args.string_list(
             long = "bazel-startup-flag",
             description = "Additional Bazel startup flags (e.g. --bazel-startup-flag=--host_jvm_args=-Xmx2g). Repeat the flag to pass multiple. Note: changing startup flags restarts the Bazel server.",
+        ),
+        "bazel_passthrough_flags": args.passthrough(
+            position = "post_command",
+            description = "A flag this task does not recognize is forwarded to Bazel rather than rejected. Typed after the task name it becomes a Bazel command option, so `aspect build --remote_download_all //...` runs `bazel build --remote_download_all //...`.",
+        ),
+        "bazel_passthrough_startup_flags": args.passthrough(
+            position = "pre_command",
+            description = "Typed before the task name, an unrecognized flag becomes a Bazel startup option — the same slot Bazel takes them in: `aspect --output_base=/tmp/o build //...`. Attach a forwarded flag's value with `=` (`--jobs=8`): a forwarded flag never claims the next argument, so a space-separated value would be read as a target pattern instead.",
         ),
     }
 
@@ -114,25 +134,41 @@ def _targets_arg(verb: str) -> dict:
         ),
     }
 
+def _passthrough(ctx, name: str) -> list:
+    """The flags the CLI parser could not attribute to a declared arg and routed
+    into the task's `args.passthrough()` bucket `name`, or `[]` for a task that
+    declares no such bucket.
+
+    Read tolerantly rather than through `_require_arg`: the buckets are purely
+    additive, so a task that hand-declares `bazel_flags` without them keeps
+    working (it just rejects unrecognized flags the way it always did)."""
+    return list(getattr(ctx.args, name, []))
+
 def _resolve_startup_flags(ctx) -> list:
-    """`ctx.args.bazel_startup_flags + trait.extra_startup_flags`, then the
-    `trait.startup_flags(flags)` transform if set. Requires a `bazel_startup_flags`
-    CLI arg."""
+    """`ctx.args.bazel_startup_flags + pre-command passthrough +
+    trait.extra_startup_flags`, then the `trait.startup_flags(flags)` transform
+    if set. Requires a `bazel_startup_flags` CLI arg."""
     bazel_trait = ctx.traits[BazelTrait]
     _require_arg(ctx, "bazel_startup_flags")
     flags = list(ctx.args.bazel_startup_flags)
+    flags.extend(_passthrough(ctx, "bazel_passthrough_startup_flags"))
     flags.extend(bazel_trait.extra_startup_flags)
     if bazel_trait.startup_flags:
         flags = bazel_trait.startup_flags(flags)
     return flags
 
 def _resolve_flags(ctx) -> list:
-    """`ctx.args.bazel_flags + trait.extra_flags + trait.task_flags(ctx) hooks`,
-    then the `trait.flags(flags)` transform if set. Requires a `bazel_flags` CLI
-    arg."""
+    """`ctx.args.bazel_flags + post-command passthrough + trait.extra_flags +
+    trait.task_flags(ctx) hooks`, then the `trait.flags(flags)` transform if set.
+    Requires a `bazel_flags` CLI arg.
+
+    Passthrough flags follow the explicit `--bazel-flag` ones: both are
+    user-typed, and on a collision Bazel takes the last, so the direct spelling
+    wins."""
     bazel_trait = ctx.traits[BazelTrait]
     _require_arg(ctx, "bazel_flags")
     flags = list(ctx.args.bazel_flags)
+    flags.extend(_passthrough(ctx, "bazel_passthrough_flags"))
     flags.extend(bazel_trait.extra_flags)
     for hook in bazel_trait.task_flags:
         flags.extend(hook(ctx))

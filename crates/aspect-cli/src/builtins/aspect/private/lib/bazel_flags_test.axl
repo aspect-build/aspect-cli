@@ -23,13 +23,29 @@ def _fake_ctx(bazel_startup_flags = [], bazel_flags = [], trait = None):
     """Stand-in for `TaskContext` with the CLI args and trait map the helpers
     read. `ctx.traits[BazelTrait]` resolves against a plain dict — trait types
     are hashable, so a dict keyed by `BazelTrait` mimics the real trait map.
-    `hasattr` returns True for declared args, satisfying `_require_arg`."""
+    `hasattr` returns True for declared args, satisfying `_require_arg`.
+
+    Deliberately carries no passthrough buckets: a task may declare the flag
+    args without them, and the resolve helpers must tolerate that."""
     return struct(
         args = struct(
             bazel_startup_flags = bazel_startup_flags,
             bazel_flags = bazel_flags,
         ),
         traits = {BazelTrait: trait if trait != None else _trait()},
+    )
+
+def _passthrough_ctx(startup = [], flags = [], passthrough_startup = [], passthrough = []):
+    """`_fake_ctx` plus the two passthrough buckets the CLI parser fills with the
+    flags it could not attribute to a declared arg."""
+    return struct(
+        args = struct(
+            bazel_startup_flags = startup,
+            bazel_flags = flags,
+            bazel_passthrough_startup_flags = passthrough_startup,
+            bazel_passthrough_flags = passthrough,
+        ),
+        traits = {BazelTrait: _trait()},
     )
 
 def _announce_ctx(on_ci, version = "auto", command = "auto"):
@@ -99,6 +115,36 @@ def _test_flags_full_chain_order(ctx):
             _fake_ctx(bazel_flags = ["--cli"], trait = _trait(extra = ["--trait-extra"], task_flags = [task_hook])),
         ),
         ["--cli", "--trait-extra", "--from-hook"],
+    )
+
+def _test_passthrough_flags_follow_explicit_ones(ctx):
+    """A flag the parser routed into a passthrough bucket joins the slot it was
+    typed for, after the explicit `--bazel-flag` / `--bazel-startup-flag` values
+    so the direct spelling wins a collision."""
+    _eq(
+        "post-command passthrough",
+        bazel.flags.resolve(_passthrough_ctx(flags = ["--jobs=4"], passthrough = ["--jobs=8"])),
+        ["--jobs=4", "--jobs=8"],
+    )
+    _eq(
+        "pre-command passthrough",
+        bazel.flags.resolve_startup(_passthrough_ctx(startup = ["--client"], passthrough_startup = ["--output_base=/tmp/o"])),
+        ["--client", "--output_base=/tmp/o"],
+    )
+
+def _test_passthrough_buckets_are_optional(ctx):
+    """A task that declares the flag args without the passthrough buckets keeps
+    resolving — the buckets are additive, not part of the arg contract."""
+    _eq("no buckets, startup", bazel.flags.resolve_startup(_fake_ctx(bazel_startup_flags = ["--client"])), ["--client"])
+    _eq("no buckets, flags", bazel.flags.resolve(_fake_ctx(bazel_flags = ["--cli"])), ["--cli"])
+
+def _test_passthrough_args_shape(ctx):
+    """`bazel.flags.args` declares both buckets, one per command-line slot."""
+    fa = bazel.flags.args("the build")
+    _eq(
+        "flag arg keys",
+        sorted(fa.keys()),
+        ["bazel_flags", "bazel_passthrough_flags", "bazel_passthrough_startup_flags", "bazel_startup_flags"],
     )
 
 def _test_flags_empty_defaults(ctx):
@@ -338,6 +384,9 @@ def _test_impl(ctx):
     _test_startup_trait_extra_appended(ctx)
     _test_startup_input_list_not_mutated(ctx)
     _test_flags_full_chain_order(ctx)
+    _test_passthrough_flags_follow_explicit_ones(ctx)
+    _test_passthrough_buckets_are_optional(ctx)
+    _test_passthrough_args_shape(ctx)
     _test_flags_empty_defaults(ctx)
     _test_announce_auto_follows_ci(ctx)
     _test_announce_explicit_overrides_ci(ctx)
@@ -350,7 +399,7 @@ def _test_impl(ctx):
     # after the pure subtests prevents bleed-through.
     _test_setup_command_applies_to_ctx_bazel(ctx)
     _test_sibling_rc_transforms_startup(ctx)
-    print("bazel_flags_test.axl: OK (13 sections)")
+    print("bazel_flags_test.axl: OK (16 sections)")
     return 0
 
 bazel_flags_tests = task(
