@@ -668,10 +668,13 @@ fn with_override(mut clap_arg: ClapArg, arg: &Arg, override_strings: &[String]) 
 // ## Single source of truth
 //
 // "Recognized" means one thing here: present in the built Clap surface
-// ([`recognized_flags`]). Nothing in this module keeps its own list of flag
-// names, so a flag added anywhere in the Clap tree — a root global, a task arg,
-// a feature arg, or one Clap generates itself like `--help` — is excluded from
-// routing the moment it is declared, with no second place to update.
+// ([`recognized_flags`]) for the slot the token was typed in. Nothing in this
+// module keeps its own list of flag names, so a flag added anywhere in the Clap
+// tree — a root global, a task arg, a feature arg, or one Clap generates itself
+// like `--help` — is excluded from routing the moment it is declared, with no
+// second place to update. Clap propagates only globals into a subcommand, so a
+// root-only flag (`--version`) is recognized before the task name and forwarded
+// after it, matching what Clap itself would accept in each position.
 //
 // That is also the contract for the flags handled *outside* Clap. Today the only
 // argv inspection that precedes parsing is the credential-helper interception in
@@ -679,28 +682,45 @@ fn with_override(mut clap_arg: ClapArg, arg: &Arg, override_strings: &[String]) 
 // intercepted before Clap must still be declared to Clap** — hidden if it should
 // not appear in help — or the router will treat it as unrecognized and forward
 // it to the wrapped tool while the interception also acts on it. The
-// `no_declared_flag_is_ever_routed` test enforces the declared half of this.
+// `no_flag_is_routed_where_clap_accepts_it` test enforces the declared half of
+// this.
 
 /// One flag token, reduced to what a lookup against the declared args needs.
 enum Flag<'t> {
-    Long(&'t str),
-    /// A short cluster's first character; the rest is either more shorts or an
-    /// attached value, neither of which changes which arg the token names.
-    Short(char),
+    /// `--name`, and whether the token carries its value (`--name=value`).
+    Long { name: &'t str, has_value: bool },
+    /// The characters after a single `-`. Clap reads `-k` as one short, `-ks` as
+    /// a cluster of two, and `-j8` as a short with its value attached, so the
+    /// whole run has to be examined rather than just the first character.
+    Short(&'t str),
 }
 
-/// Split a flag token into the name Clap would look up, or `None` when the
-/// token is not a flag at all (`-` and `--` are values and separators).
+impl Flag<'_> {
+    /// Whether the token carries its own value, so the following argv token
+    /// cannot be it.
+    fn has_attached_value(&self) -> bool {
+        match self {
+            Self::Long { has_value, .. } => *has_value,
+            Self::Short(shorts) => shorts.chars().count() > 1,
+        }
+    }
+}
+
+/// Split a flag token into what Clap would look up, or `None` when the token is
+/// not a flag at all (`-` and `--` are values and separators).
 fn parse_flag(token: &str) -> Option<Flag<'_>> {
     if let Some(long) = token.strip_prefix("--") {
         let name = long.split('=').next().unwrap_or(long);
-        return (!name.is_empty()).then_some(Flag::Long(name));
+        return (!name.is_empty()).then_some(Flag::Long {
+            name,
+            has_value: long.len() > name.len(),
+        });
     }
-    let short = token.strip_prefix('-')?;
-    short.chars().next().map(Flag::Short)
+    let shorts = token.strip_prefix('-')?;
+    (!shorts.is_empty()).then_some(Flag::Short(shorts))
 }
 
-/// Every flag this command declares, for the router to match against.
+/// Every flag `cmd` declares, for the router to match against.
 ///
 /// Requires a [`Command::build`]-ed tree: the args Clap generates rather than
 /// receives — `--help`, `-h`, and `--version` where it is not disabled — only
@@ -711,44 +731,53 @@ fn recognized_flags(cmd: &Command) -> impl Iterator<Item = &ClapArg> {
 }
 
 /// How many argv tokens a declared flag occupies — itself, plus one when its
-/// value is a separate token — or `None` when nothing here declares it.
+/// value is a separate token — or `None` when `declared` does not declare it.
 ///
 /// The span is what both scans advance by: a declared flag's value must never be
 /// examined as a flag of its own (`--coverage-tool genhtml`) or mistaken for a
 /// command name (`--task:name build build`).
-fn declared_span(declared: &[&ClapArg], flag: &Flag<'_>, token: &str) -> Option<usize> {
-    let arg = declared_flag(declared, flag)?;
-    Some(1 + usize::from(takes_separate_value(arg, flag, token)))
+fn declared_span(declared: &[&ClapArg], flag: &Flag<'_>) -> Option<usize> {
+    match flag {
+        Flag::Long { name, has_value } => {
+            let arg = declared.iter().copied().find(|arg| {
+                arg.get_long() == Some(name)
+                    || arg
+                        .get_all_aliases()
+                        .is_some_and(|aliases| aliases.contains(name))
+            })?;
+            Some(1 + usize::from(!has_value && takes_separate_value(arg)))
+        }
+        Flag::Short(shorts) => short_span(declared, shorts),
+    }
 }
 
-/// The declared arg `flag` names, matching Clap's own lookup: exact long name or
-/// visible/hidden alias for `--name`, first character for a short cluster.
-fn declared_flag<'c>(declared: &[&'c ClapArg], flag: &Flag<'_>) -> Option<&'c ClapArg> {
-    declared.iter().copied().find(|arg| match flag {
-        Flag::Long(name) => {
-            arg.get_long() == Some(name)
-                || arg
-                    .get_all_aliases()
-                    .is_some_and(|aliases| aliases.contains(name))
-        }
-        Flag::Short(c) => {
-            arg.get_short() == Some(*c)
+/// The span of a short token, or `None` unless *every* character resolves to a
+/// declared short.
+///
+/// Clap accepts a run of shorts as a cluster, so a token is only recognized when
+/// the whole of it is: `-vv` is two declared `-v`, while `-vx` is neither a
+/// cluster nor a value and must be treated as unknown. The first character that
+/// takes a value ends the walk — the rest of the token is that value.
+fn short_span(declared: &[&ClapArg], shorts: &str) -> Option<usize> {
+    for (offset, c) in shorts.char_indices() {
+        let arg = declared.iter().copied().find(|arg| {
+            arg.get_short() == Some(c)
                 || arg
                     .get_all_short_aliases()
-                    .is_some_and(|aliases| aliases.contains(c))
+                    .is_some_and(|aliases| aliases.contains(&c))
+        })?;
+        if takes_separate_value(arg) {
+            let value_attached = offset + c.len_utf8() < shorts.len();
+            return Some(if value_attached { 1 } else { 2 });
         }
-    })
+    }
+    Some(1)
 }
 
-/// Whether this arg's value is the *next* argv token rather than attached to
-/// `token`.
-fn takes_separate_value(arg: &ClapArg, flag: &Flag<'_>, token: &str) -> bool {
-    let value_attached = match flag {
-        Flag::Long(_) => token.contains('='),
-        // `-x` is bare; anything longer carries a cluster or a value.
-        Flag::Short(_) => token.len() > 2,
-    };
-    if value_attached || arg.is_require_equals_set() {
+/// Whether this arg's value is a separate argv token rather than attachable to
+/// the flag itself.
+fn takes_separate_value(arg: &ClapArg) -> bool {
+    if arg.is_require_equals_set() {
         return false;
     }
     match arg.get_num_args() {
@@ -824,9 +853,15 @@ struct Selection<'c> {
     /// Indices naming a command — the group levels and the task itself. Never
     /// routable, and never a flag's value.
     command_path: Vec<usize>,
-    /// Every flag declared along the path: the root's globals and generated
-    /// args, each group's, then the task's own plus every feature's hidden args.
-    declared: Vec<&'c ClapArg>,
+    /// The flags Clap accepts *at the task command*: the task's own args, every
+    /// feature's hidden args, its generated `--help`, and the globals inherited
+    /// from the root and any group. What a post-command token is judged against.
+    declared_at_leaf: Vec<&'c ClapArg>,
+    /// Every flag declared anywhere on the path, including the ones only the
+    /// root accepts (`--version`). What a pre-command token is judged against —
+    /// a flag declared *somewhere* but typed in the wrong slot is a misplacement
+    /// for Clap to report, not something to forward.
+    declared_anywhere: Vec<&'c ClapArg>,
 }
 
 impl Selection<'_> {
@@ -854,9 +889,14 @@ impl Selection<'_> {
 /// task is selected — a bare `aspect`, `aspect describe`, an unfinished group
 /// path — which is also when there is nothing to route to.
 fn select_command<'c>(root: &'c Command, tokens: &[Option<&str>]) -> Option<Selection<'c>> {
-    let mut declared: Vec<&ClapArg> = recognized_flags(root).collect();
-    let mut command_path = Vec::new();
+    // Only a global arg reaches a subcommand, so the two sets diverge as we
+    // descend: `inherited` keeps what still applies, `anywhere` keeps everything
+    // seen. `aspect build --version` proves the difference — Clap declares
+    // `--version` at the root only and rejects it after a subcommand.
+    let mut inherited: Vec<&ClapArg> = Vec::new();
+    let mut anywhere: Vec<&ClapArg> = recognized_flags(root).collect();
     let mut cur = root;
+    let mut command_path = Vec::new();
     let mut index = 1;
     while index < tokens.len() {
         let Some(token) = tokens[index] else { break };
@@ -864,7 +904,7 @@ fn select_command<'c>(root: &'c Command, tokens: &[Option<&str>]) -> Option<Sele
             break;
         }
         if let Some(flag) = parse_flag(token) {
-            index += declared_span(&declared, &flag, token).unwrap_or(1);
+            index += declared_span(&anywhere, &flag).unwrap_or(1);
             continue;
         }
         // A token naming no subcommand is a positional, which only a task
@@ -872,17 +912,21 @@ fn select_command<'c>(root: &'c Command, tokens: &[Option<&str>]) -> Option<Sele
         let Some(sub) = cur.find_subcommand(token) else {
             break;
         };
-        declared.extend(recognized_flags(sub));
+        inherited.extend(recognized_flags(cur).filter(|arg| arg.is_global_set()));
+        anywhere.extend(recognized_flags(sub));
         cur = sub;
         command_path.push(index);
         index += 1;
         // Groups (`aspect cache …`) carry no task id, so keep descending; a flag
         // typed between group levels is still pre-command.
         if let Some(task_index) = task_index(cur) {
+            let mut declared_at_leaf = inherited;
+            declared_at_leaf.extend(recognized_flags(cur));
             return Some(Selection {
                 task_index,
                 command_path,
-                declared,
+                declared_at_leaf,
+                declared_anywhere: anywhere,
             });
         }
     }
@@ -900,6 +944,7 @@ fn routable(
     tokens: &[Option<&str>],
     range: std::ops::Range<usize>,
     selection: &Selection<'_>,
+    declared: &[&ClapArg],
     value_flags: &[String],
 ) -> Vec<usize> {
     let mut routing = Vec::new();
@@ -916,13 +961,13 @@ fn routable(
             index += 1;
             continue;
         };
-        if let Some(span) = declared_span(&selection.declared, &flag, token) {
+        if let Some(span) = declared_span(declared, &flag) {
             index += span;
             continue;
         }
         routing.push(index);
         index += 1;
-        if !token.contains('=')
+        if !flag.has_attached_value()
             && value_flags.iter().any(|listed| listed == token)
             && let Some(value) = tokens.get(index).copied().flatten()
             && !value.starts_with('-')
@@ -977,6 +1022,7 @@ impl<'a, 'v> Cmd<'a, 'v> {
                 &tokens,
                 1..selection.boundary(),
                 &selection,
+                &selection.declared_anywhere,
                 &bucket.value_flags,
             )
         });
@@ -985,6 +1031,7 @@ impl<'a, 'v> Cmd<'a, 'v> {
                 &tokens,
                 selection.boundary()..argv.len(),
                 &selection,
+                &selection.declared_at_leaf,
                 &bucket.value_flags,
             )
         });
@@ -2970,16 +3017,21 @@ mod tests {
         );
     }
 
-    /// The invariant that keeps flag handling from drifting: a flag this CLI
-    /// declares anywhere in the Clap tree is never routed to the wrapped tool.
+    /// The invariant that keeps flag handling from drifting: a flag is never
+    /// routed where Clap would accept it.
     ///
     /// Driven off the built surface rather than a list of names, so a flag added
     /// later — a new `--task:*` global, a task arg, a feature arg, or one Clap
-    /// generates like `--help` — is covered without anyone remembering to extend
-    /// this test. A flag intercepted before Clap must be declared to it (hidden
-    /// is fine) to be covered here; see the routing section's contract.
+    /// generates like `--help` — is covered without anyone remembering this
+    /// test. A flag intercepted before Clap must be declared to it (hidden is
+    /// fine) to be covered here; see the routing section's contract.
+    ///
+    /// The two slots are judged against different sets, because Clap propagates
+    /// only globals into a subcommand: after the task name a flag must be one
+    /// the *task* accepts, while before it anything declared anywhere stays put
+    /// so Clap can report the misplacement.
     #[test]
-    fn no_declared_flag_is_ever_routed() {
+    fn no_flag_is_routed_where_clap_accepts_it() {
         let task = routing_task("build", &[]);
         let feature = stub_feature("tips");
         let cmd = Cmd {
@@ -2990,40 +3042,102 @@ mod tests {
         };
         let mut root = cmd.build("0.0.0").expect("build ok");
         root.build();
-        let leaf = root.find_subcommand("build").expect("task command");
+        let selection = select_command(&root, &[Some("aspect"), Some("build")])
+            .expect("selects the task command");
 
-        // Every flag reachable on `aspect build`: the root's own args and
-        // generated help, plus the task's args and the feature's hidden args.
-        let flags: Vec<String> = recognized_flags(&root)
-            .chain(recognized_flags(leaf))
-            .filter_map(|arg| arg.get_long().map(|long| format!("--{long}")))
-            .collect();
+        let longs = |args: &[&ClapArg]| -> Vec<String> {
+            args.iter()
+                .filter_map(|arg| arg.get_long().map(|long| format!("--{long}")))
+                .collect()
+        };
+        let at_leaf = longs(&selection.declared_at_leaf);
+        let anywhere = longs(&selection.declared_anywhere);
         assert!(
-            flags.iter().any(|f| f == "--help"),
-            "Command::build should have injected --help; got {flags:?}",
+            at_leaf.iter().any(|f| f == "--help")
+                && at_leaf.iter().any(|f| f == "--task:name")
+                && at_leaf.iter().any(|f| f == "--tips:enabled"),
+            "expected the generated, global and feature flags at the leaf: {at_leaf:?}",
         );
         assert!(
-            flags.iter().any(|f| f == "--task:name") && flags.iter().any(|f| f == "--tips:enabled"),
-            "expected root globals and feature flags among {flags:?}",
+            anywhere.iter().any(|f| f == "--version") && !at_leaf.contains(&"--version".to_owned()),
+            "--version is declared at the root only, so the sets must differ",
         );
 
-        for flag in flags {
+        for flag in &at_leaf {
             let with_value = format!("{flag}=x");
-            // Both slots, and both spellings for the ones that take a value.
             for argv in [
                 vec!["aspect", "build", flag.as_str()],
-                vec!["aspect", flag.as_str(), "build"],
                 vec!["aspect", "build", with_value.as_str()],
             ] {
-                assert_eq!(
-                    route_with(&cmd, &argv),
-                    argv,
-                    "declared flag {flag:?} was rewritten",
-                );
+                assert_eq!(route_with(&cmd, &argv), argv, "{flag:?} was rewritten");
             }
+        }
+        for flag in &anywhere {
+            let argv = vec!["aspect", flag.as_str(), "build"];
+            assert_eq!(route_with(&cmd, &argv), argv, "{flag:?} was rewritten");
         }
     }
 
+    /// The mirror image: a flag only the *root* declares is not the task's, so
+    /// after the task name it is forwarded rather than left for Clap to reject.
+    #[test]
+    fn routes_a_root_only_flag_typed_after_the_task_name() {
+        let task = routing_task("build", &[]);
+        assert_eq!(
+            route(&task, &["aspect", "build", "--version"]),
+            ["aspect", "build", "--bazel-passthrough-flags=--version"]
+        );
+        // `-vv` reads as a cluster of the root's `-v`, which the task no more
+        // accepts than a single one — a wrapped tool's verbosity flag, not ours.
+        assert_eq!(
+            route(&task, &["aspect", "build", "-vv"]),
+            ["aspect", "build", "--bazel-passthrough-flags=-vv"]
+        );
+    }
+
+    /// Clap reads a run of shorts as a cluster, so a token counts as declared
+    /// only when every character does. `-bn` is the task's two booleans; `-bx`
+    /// is not a cluster it accepts and belongs to the wrapped tool.
+    #[test]
+    fn classifies_a_short_cluster_by_all_of_its_characters() {
+        let mut args: SmallMap<String, Arg> = SmallMap::new();
+        args.insert("targets".to_owned(), arg_positional());
+        args.insert(
+            "bare".to_owned(),
+            Arg::Boolean {
+                required: false,
+                default: false,
+                short: Some("b".to_owned()),
+                long: None,
+                description: None,
+            },
+        );
+        args.insert(
+            "nested".to_owned(),
+            Arg::Boolean {
+                required: false,
+                default: false,
+                short: Some("n".to_owned()),
+                long: None,
+                description: None,
+            },
+        );
+        args.insert(
+            "bazel_passthrough_flags".to_owned(),
+            arg_passthrough(PassthroughPosition::PostCommand),
+        );
+        let task = stub_task("build", &[], args);
+
+        let argv = ["aspect", "build", "-bn", "//..."];
+        assert_eq!(route(&task, &argv), argv, "a declared cluster is Clap's");
+        assert_eq!(
+            route(&task, &["aspect", "build", "-bx", "//..."]),
+            ["aspect", "build", "--bazel-passthrough-flags=-bx", "//..."],
+            "one undeclared character makes the whole token unknown",
+        );
+    }
+
+    /// A flag the task declares but typed on the wrong side of its name was
     /// A flag the task declares but typed on the wrong side of its name was
     /// never unrecognized, so it stays put and Clap reports the misplacement
     /// instead of the wrapped tool being handed an aspect flag.
