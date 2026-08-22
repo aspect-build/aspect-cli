@@ -952,21 +952,66 @@ t = task(
         .expect("both positions accepted");
     }
 
-    /// `config_only` describes an arg with no command-line spelling, so the
-    /// knobs that name or require one are contradictions.
+    /// Every flag-shaped kind takes `config_only`, and none of them accepts it
+    /// alongside a knob that names or demands the command-line spelling a
+    /// config-only arg does not have.
     #[test]
-    fn config_only_rejects_command_line_knobs() {
-        for conflicting in [r#"long = "vals""#, r#"short = "v""#, "required = True"] {
+    fn config_only_rejects_command_line_knobs_on_every_flag_kind() {
+        let kinds = [
+            ("string", "default = \"x\""),
+            ("boolean", "default = True"),
+            ("int", "default = 1"),
+            ("uint", "default = 1"),
+            ("string_list", "default = []"),
+            ("boolean_list", "default = []"),
+            ("int_list", "default = []"),
+            ("uint_list", "default = []"),
+        ];
+        for (kind, default) in kinds {
+            eval_snippet(&format!(
+                r#"
+t = task(
+    implementation = _impl,
+    args = {{"vals": args.{kind}({default}, config_only = True)}},
+)
+"#
+            ))
+            .check()
+            .unwrap_or_else(|e| panic!("args.{kind} should accept config_only: {e}"));
+
+            for conflicting in [r#"long = "vals""#, r#"short = "v""#, "required = True"] {
+                assert_eval_err_contains(
+                    &format!(
+                        r#"
+t = task(
+    implementation = _impl,
+    args = {{"vals": args.{kind}(config_only = True, {conflicting})}},
+)
+"#
+                    ),
+                    "`config_only` cannot be combined with",
+                );
+            }
+        }
+    }
+
+    /// The argv-shaped kinds have no `config_only`: their content comes from the
+    /// command line, so there would be nothing left to set.
+    #[test]
+    fn config_only_is_absent_from_the_argv_shaped_kinds() {
+        for declaration in [
+            "args.positional(config_only = True)",
+            "args.trailing_var_args(config_only = True)",
+            r#"args.passthrough(position = "post_command", config_only = True)"#,
+            r#"args.custom(str, default = "x", config_only = True)"#,
+        ] {
             assert_eval_err_contains(
                 &format!(
                     r#"
-t = task(
-    implementation = _impl,
-    args = {{"vals": args.string_list(config_only = True, {conflicting})}},
-)
+t = task(implementation = _impl, args = {{"vals": {declaration}}})
 "#
                 ),
-                "`config_only` cannot be combined with",
+                "config_only",
             );
         }
     }

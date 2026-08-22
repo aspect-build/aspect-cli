@@ -490,6 +490,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
             "enabled".to_owned(),
             Arg::Boolean {
                 required: false,
+                config_only: false,
                 default: enabled,
                 short: None,
                 long: None,

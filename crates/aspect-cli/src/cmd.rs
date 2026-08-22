@@ -1113,17 +1113,28 @@ fn merge_args<'v>(
 /// config.axl override is layered on top.
 ///
 /// Clap never saw these args, so their values cannot come from `ArgMatches` —
-/// asking it for one panics on an unknown id.
+/// asking it for one panics on an unknown id. Every kind that can be declared
+/// `config_only = True` therefore has to resolve here, in the same Starlark type
+/// its CLI-exposed twin would produce.
 fn schema_default<'v>(arg: &Arg, heap: Heap<'v>) -> Value<'v> {
     match arg {
         Arg::Custom { default, .. } => default
             .map(|frozen| frozen.to_value())
             .unwrap_or_else(|| heap.alloc(NoneType)),
+        Arg::String { default, .. } => heap.alloc_str(default).to_value(),
+        Arg::Boolean { default, .. } => heap.alloc(*default),
+        Arg::Int { default, .. } => heap.alloc(*default),
+        Arg::UInt { default, .. } => heap.alloc(*default),
         Arg::StringList { default, .. } => {
             heap.alloc(AllocList(default.iter().map(String::as_str)))
         }
-        // Only `Custom` and a `config_only` string_list are off the CLI today.
-        _ => heap.alloc(NoneType),
+        Arg::BooleanList { default, .. } => heap.alloc(AllocList(default.iter().copied())),
+        Arg::IntList { default, .. } => heap.alloc(AllocList(default.iter().copied())),
+        Arg::UIntList { default, .. } => heap.alloc(AllocList(default.iter().copied())),
+        // The argv-shaped kinds are always CLI-exposed, so they never land here.
+        Arg::Positional { .. } | Arg::TrailingVarArgs { .. } | Arg::Passthrough { .. } => {
+            heap.alloc(NoneType)
+        }
     }
 }
 
@@ -2089,6 +2100,7 @@ mod tests {
             values: None,
             description: None,
             bare: None,
+            config_only: false,
         }
     }
 
@@ -2148,6 +2160,7 @@ mod tests {
                 short: None,
                 long: None,
                 description: None,
+                config_only: false,
             },
         );
         StubFeature {
@@ -2520,6 +2533,7 @@ mod tests {
             short: None,
             long: None,
             description: None,
+            config_only: false,
         };
         assert_eq!(
             override_as_default(&int_arg, &["2".to_owned()]),
@@ -2532,6 +2546,7 @@ mod tests {
             short: None,
             long: None,
             description: None,
+            config_only: false,
         };
         assert_eq!(
             override_as_default(&bool_arg, &["true".to_owned()]),
@@ -2559,6 +2574,7 @@ mod tests {
             short: None,
             long: None,
             description: None,
+            config_only: false,
         };
         assert_eq!(
             override_as_default(&int_list, &["1".to_owned(), "2".to_owned()]),
@@ -2815,6 +2831,7 @@ mod tests {
             values: None,
             description: None,
             bare: None,
+            config_only: false,
         };
         assert_eq!(
             clap_id(Scope::Feature("artifact-upload"), "mode", &arg),
@@ -2837,6 +2854,7 @@ mod tests {
             values: None,
             description: None,
             bare: Some("default".to_owned()),
+            config_only: false,
         };
         let cmd = || {
             Command::new("t")
@@ -2911,6 +2929,104 @@ mod tests {
             description: None,
             config_only,
         }
+    }
+
+    /// One `config_only` arg per flag kind that accepts the knob, with the
+    /// `repr()` its declared default must resolve to.
+    fn config_only_kinds() -> Vec<(&'static str, Arg, &'static str)> {
+        vec![
+            (
+                "text",
+                Arg::String {
+                    required: false,
+                    default: "hi".to_owned(),
+                    short: None,
+                    long: None,
+                    values: None,
+                    description: None,
+                    bare: None,
+                    config_only: true,
+                },
+                "\"hi\"",
+            ),
+            (
+                "flag",
+                Arg::Boolean {
+                    required: false,
+                    default: true,
+                    short: None,
+                    long: None,
+                    description: None,
+                    config_only: true,
+                },
+                "True",
+            ),
+            (
+                "count",
+                Arg::Int {
+                    required: false,
+                    default: -3,
+                    short: None,
+                    long: None,
+                    description: None,
+                    config_only: true,
+                },
+                "-3",
+            ),
+            (
+                "size",
+                Arg::UInt {
+                    required: false,
+                    default: 7,
+                    short: None,
+                    long: None,
+                    description: None,
+                    config_only: true,
+                },
+                "7",
+            ),
+            (
+                "names",
+                arg_string_list(&["a", "b"], true),
+                "[\"a\", \"b\"]",
+            ),
+            (
+                "flags",
+                Arg::BooleanList {
+                    required: false,
+                    default: vec![true, false],
+                    short: None,
+                    long: None,
+                    description: None,
+                    config_only: true,
+                },
+                "[True, False]",
+            ),
+            (
+                "counts",
+                Arg::IntList {
+                    required: false,
+                    default: vec![-1, 2],
+                    short: None,
+                    long: None,
+                    description: None,
+                    config_only: true,
+                },
+                "[-1, 2]",
+            ),
+            (
+                "sizes",
+                Arg::UIntList {
+                    required: false,
+                    default: vec![1, 2],
+                    short: None,
+                    long: None,
+                    description: None,
+                    config_only: true,
+                },
+                "[1, 2]",
+            ),
+        ]
     }
 
     /// `routing_task` plus a post-command bucket that reads flag arities from a
@@ -3110,6 +3226,7 @@ mod tests {
                 short: Some("b".to_owned()),
                 long: None,
                 description: None,
+                config_only: false,
             },
         );
         args.insert(
@@ -3120,6 +3237,7 @@ mod tests {
                 short: Some("n".to_owned()),
                 long: None,
                 description: None,
+                config_only: false,
             },
         );
         args.insert(
@@ -3347,41 +3465,45 @@ mod tests {
         assert_eq!(from_config.value_flags, ["--my_wrapper_flag"]);
     }
 
-    /// `config_only` keeps an arg off the CLI while still delivering its declared
-    /// default to the task — the shape the value-flag list needs, since routing
-    /// consults it before Clap has parsed anything.
+    /// `config_only` keeps a flag off the CLI while still delivering its declared
+    /// default to the task, for every kind that accepts the knob.
+    ///
+    /// Both halves matter: the flag must be unparseable, so nobody can type a
+    /// value something already read past (routing consults `bazel_value_flags`
+    /// before Clap parses at all), and the default must arrive in the same
+    /// Starlark type its CLI-exposed twin would produce, since Clap is not there
+    /// to build it.
     #[test]
-    fn a_config_only_arg_is_not_a_flag_but_still_reaches_the_task() {
-        let task = value_flag_task(&["-c", "--jobs"]);
-        let cmd = Cmd {
-            tasks: vec![&task],
-            features: vec![],
-            aspect_root: Path::new("/repo"),
-            modules: &[],
-        };
-        let root = cmd.build("0.0.0").expect("build ok");
+    fn a_config_only_flag_is_unparseable_but_still_reaches_the_task() {
+        for (name, arg, expected) in config_only_kinds() {
+            let mut args: SmallMap<String, Arg> = SmallMap::new();
+            args.insert(name.to_owned(), arg);
+            let task = stub_task("build", &[], args);
+            let cmd = Cmd {
+                tasks: vec![&task],
+                features: vec![],
+                aspect_root: Path::new("/repo"),
+                modules: &[],
+            };
+            let root = cmd.build("0.0.0").expect("build ok");
 
-        assert!(
-            root.clone()
-                .try_get_matches_from(["aspect", "build", "--bazel-value-flags=-x", "//..."])
-                .is_err(),
-            "a config_only arg must not be settable on the command line",
-        );
+            assert!(
+                root.clone()
+                    .try_get_matches_from(["aspect", "build", &format!("--{name}=x")])
+                    .is_err(),
+                "{name}: a config_only arg must not be settable on the command line",
+            );
 
-        let matches = root
-            .try_get_matches_from(["aspect", "build", "//..."])
-            .expect("parse ok");
-        let dispatch = cmd.dispatch(matches).expect("dispatch ok");
-        Heap::temp(|heap| {
-            let merged = dispatch.task_args(&task, heap);
-            let listed: Vec<String> =
-                ListRef::from_value(merged.get("bazel_value_flags").expect("present"))
-                    .expect("list")
-                    .iter()
-                    .map(|v| v.unpack_str().expect("str").to_owned())
-                    .collect();
-            assert_eq!(listed, ["-c", "--jobs"]);
-        });
+            let matches = root
+                .try_get_matches_from(["aspect", "build"])
+                .expect("parse ok");
+            let dispatch = cmd.dispatch(matches).expect("dispatch ok");
+            Heap::temp(|heap| {
+                let merged = dispatch.task_args(&task, heap);
+                let value = merged.get(name).expect("present");
+                assert_eq!(value.to_repr(), expected, "{name}: wrong resolved default");
+            });
+        }
     }
 
     /// A bucket that names no sibling arg takes no values at all — the shape the
