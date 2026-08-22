@@ -201,6 +201,7 @@ def _test_value_flags_mirror_bazel(ctx):
     for flag in ["-k", "--keep_going", "--remote_download_all", "--nobuild"]:
         if flag in listed:
             fail("%s takes no value; listing it would eat the next argument" % flag)
+
     # Label-shaped flags are excluded on purpose: Bazel requires `=` for them.
     for flag in listed:
         if flag.startswith("--//") or ":" in flag:

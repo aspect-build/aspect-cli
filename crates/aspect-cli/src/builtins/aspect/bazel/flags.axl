@@ -22,9 +22,9 @@ Stateless functions taking `ctx` and deriving the active `BazelTrait` from
 
 load("@aspect//bazel/build_events.axl", "bes_args")
 load("@aspect//bazel/trait.axl", "BAZEL_RETRY_ATTEMPTS_DESCRIPTION", "BazelTrait", "DEFAULT_BAZEL_RETRY_ATTEMPTS")
+load("@aspect//bazel/value_flags.axl", "BAZEL_VALUE_FLAGS")
 load("../private/lib/aspect_endpoint_auth.axl", "credential_helper_covers_host", "endpoint_host", "headers_have_auth", "needs_aspect_token", "resolve_aspect_bearer")
 load("../private/lib/environment.axl", "color_enabled", "detect_ci")
-load("@aspect//bazel/value_flags.axl", "BAZEL_VALUE_FLAGS")
 
 def _require_arg(ctx, name: str) -> None:
     """Fail with a clear contract error when a helper's required CLI arg is
