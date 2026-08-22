@@ -765,6 +765,85 @@ pub struct AnnounceSpawn {
     pub command: bool,
 }
 
+/// Short because this runs on a `Drop` path, which cannot afford bazel's full
+/// cancellation protocol.
+const ABANDONED_CLIENT_GRACE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Stop a bazel client nothing will `wait()` on, and reap it.
+///
+/// SIGINT before SIGKILL so bazel releases the JVM-server lock — an orphan
+/// holding it is failure mode 2 in [`super::live`]. The trailing `wait()` is
+/// what reaps; killing alone leaves a zombie.
+fn terminate_abandoned_client(child: &mut Child) {
+    match child.try_wait() {
+        Ok(Some(_)) | Err(_) => return,
+        Ok(None) => {}
+    }
+
+    let pid = child.id();
+    tracing::warn!("bazel client PID {pid} abandoned before wait() — terminating");
+
+    // Nothing to wait out when the signal never went — including the non-unix
+    // stub, which can never send one.
+    if super::process::sigint(pid) {
+        let deadline = std::time::Instant::now() + ABANDONED_CLIENT_GRACE;
+        while std::time::Instant::now() < deadline {
+            match child.try_wait() {
+                Ok(Some(_)) | Err(_) => return,
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
+            }
+        }
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Owns a freshly spawned bazel client between `cmd.spawn()` and a constructed
+/// [`Build`]. Every `?` in that window would otherwise drop a bare `Child` —
+/// which does not kill on drop — orphaning a live client, and take the
+/// [`super::live::LiveBazelGuard`] with it, so the signal handler could not
+/// reach it either.
+struct SpawnedClient {
+    child: Option<Child>,
+    live_guard: Option<super::live::LiveBazelGuard>,
+}
+
+impl SpawnedClient {
+    fn new(child: Child) -> Self {
+        let live_guard = super::live::register(child.id());
+        Self {
+            child: Some(child),
+            live_guard: Some(live_guard),
+        }
+    }
+
+    fn id(&self) -> u32 {
+        self.child
+            .as_ref()
+            .expect("child present until defuse")
+            .id()
+    }
+
+    fn defuse(mut self) -> (Child, super::live::LiveBazelGuard) {
+        (
+            self.child.take().expect("child present until defuse"),
+            self.live_guard.take().expect("guard present until defuse"),
+        )
+    }
+}
+
+impl Drop for SpawnedClient {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            terminate_abandoned_client(&mut child);
+        }
+        // Reaped, so the PID is reusable — unregister before field-drop order
+        // gets to it.
+        self.live_guard.take();
+    }
+}
+
 #[derive(Debug, Display, ProvidesStaticType, Trace, NoSerialize, Allocative)]
 #[display("<bazel.build.Build>")]
 pub struct Build {
@@ -800,6 +879,28 @@ pub struct Build {
 
     #[allocative(skip)]
     span: RefCell<tracing::Span>,
+}
+
+/// Covers AXL that starts a build and then returns or fails without calling
+/// `wait()`. No-op on the normal path — `wait()` already reaped.
+///
+/// Fires at Starlark heap teardown (`Module::with_temp_heap` spans the whole
+/// AXL run), not when the abandoning task returns. Enough to keep a client from
+/// outliving aspect-cli; it does not shorten the in-run server-lock window.
+impl Drop for Build {
+    fn drop(&mut self) {
+        // Not `borrow_mut`: a panic in `Drop` aborts the process, and a stray
+        // client is never worth that.
+        if let Ok(mut child) = self.child.try_borrow_mut() {
+            terminate_abandoned_client(&mut child);
+        }
+        // Unregister here, not at field-drop time — `live_guard` is declared
+        // after the streams, so field order would leave a reaped (reusable)
+        // PID in `live_pids()` while they join their reader threads.
+        if let Ok(mut guard) = self.live_guard.try_borrow_mut() {
+            guard.take();
+        }
+    }
 }
 
 impl Build {
@@ -922,11 +1023,10 @@ impl Build {
             .spawn()
             .map_err(|e| io::Error::other(format!("failed to spawn bazel: {e}")))?;
 
-        // Register the bazel client with the live-subprocess registry so
-        // aspect-cli's OS-signal handler can forward SIGINT to it on
-        // CI cancellation. The guard is stored on `Self` and unregisters
-        // when the `Build` is dropped (after `wait()`).
-        let live_guard = super::live::register(child.id());
+        // Registers the PID so the OS-signal handler can forward SIGINT on CI
+        // cancellation. Every `?` below this line would otherwise orphan the
+        // child.
+        let client = SpawnedClient::new(child);
 
         // Now that we have the spawned child's pid, start the BES reader.
         // The child pid is the per-invocation liveness signal the BES thread
@@ -935,7 +1035,7 @@ impl Build {
         // galvanize stays alive across invocations and cannot signal
         // end-of-build, which is why we want a separate per-invocation pid.
         let build_event_stream = match bes_path {
-            Some(p) => Some(BuildEventStream::spawn(p, pid, child.id(), file_sinks)?),
+            Some(p) => Some(BuildEventStream::spawn(p, pid, client.id(), file_sinks)?),
             None => None,
         };
 
@@ -1006,6 +1106,7 @@ impl Build {
         }
 
         drop(_enter);
+        let (child, live_guard) = client.defuse();
         Ok(Self {
             child: RefCell::new(child),
             build_event_stream: RefCell::new(build_event_stream),
@@ -1274,6 +1375,67 @@ Test = task(implementation = _impl)
             err.to_string().contains("already bound"),
             "unexpected error: {err}"
         );
+    }
+
+    /// `iterator_handle_rejects_reuse` above is the reachable trigger, but
+    /// asserting through AXL means snapshotting the process-wide `live_pids()`,
+    /// which races every other test in this binary. Tested at the guard.
+    #[cfg(unix)]
+    #[test]
+    fn spawned_client_drop_terminates_and_reaps_the_child() {
+        let child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id();
+        assert!(super::super::process::is_pid_running(pid));
+
+        let client = super::SpawnedClient::new(child);
+        assert!(
+            super::super::live::live_pids().contains(&pid),
+            "the guard should register the client while it owns it",
+        );
+
+        drop(client);
+
+        // Reaped, not merely signalled: `kill(pid, 0)` still succeeds on a
+        // zombie, so this fails if the helper's trailing `wait()` is dropped.
+        assert!(
+            !super::super::process::is_pid_running(pid),
+            "PID {pid} outlived the guard",
+        );
+        assert!(!super::super::live::live_pids().contains(&pid));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn defused_spawned_client_leaves_the_child_running() {
+        let child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id();
+
+        let (mut child, live_guard) = super::SpawnedClient::new(child).defuse();
+        assert!(
+            super::super::process::is_pid_running(pid),
+            "defuse must not terminate the client — `Build::wait` still owns it",
+        );
+
+        let _ = child.kill();
+        let _ = child.wait();
+        drop(live_guard);
+    }
+
+    /// Guards against signalling a PID the OS may since have reused.
+    #[cfg(unix)]
+    #[test]
+    fn terminating_an_already_reaped_child_is_a_noop() {
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn true");
+        child.wait().expect("reap");
+        super::terminate_abandoned_client(&mut child);
     }
 
     #[test]
