@@ -591,26 +591,44 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         let (exit_code, flagged, conclusion) = unpack_task_return(ret);
 
         // The task has now had its chance to act on the flags the CLI could not
-        // attribute to a declared arg. Anything it left unclaimed would
-        // otherwise vanish silently, so fail the invocation instead.
+        // attribute to a declared arg. Anything left unclaimed had no effect on
+        // this run, which the user has to hear about either way — but only a run
+        // that otherwise succeeded fails over it. A task that concluded with its
+        // own non-zero code has a more informative story to tell, and a task
+        // that hard-errored never reaches here at all (`impl_result?` above), so
+        // a real failure is never masked by this.
         let unclaimed = unclaimed_passthrough(task, task_args_val);
+        let already_failed = matches!(exit_code, Some(code) if code != 0);
         let exit_code = if unclaimed.is_empty() {
             exit_code
         } else {
             for (name, flags) in &unclaimed {
-                diag::error(&format!(
-                    "{} did not forward the unrecognized flag{} {} anywhere. \
-                     The task declares the `{}` passthrough arg but never claimed it \
-                     (`ctx.args.claim(\"{}\")`), so those flags would have had no effect. \
-                     This is a bug in the task, not in the command line.",
-                    task_kind,
+                let report = if already_failed {
+                    diag::warn
+                } else {
+                    diag::error
+                };
+                report(&format!(
+                    "the flag{} {} had no effect: {} collected {} into its `{}` passthrough \
+                     arg and never claimed {} (`ctx.args.claim(\"{}\")`), so nothing forwarded \
+                     {} anywhere. Either forward the flag{} or claim the arg to say this run \
+                     deliberately ignores them.",
                     if flags.len() == 1 { "" } else { "s" },
                     flags.join(" "),
+                    task_kind,
+                    if flags.len() == 1 { "it" } else { "them" },
                     name,
+                    if flags.len() == 1 { "it" } else { "them" },
                     name,
+                    if flags.len() == 1 { "it" } else { "them" },
+                    if flags.len() == 1 { "" } else { "s" },
                 ));
             }
-            Some(EXIT_UNCLAIMED_PASSTHROUGH)
+            if already_failed {
+                exit_code
+            } else {
+                Some(EXIT_UNCLAIMED_PASSTHROUGH)
+            }
         };
 
         // Reads elapsed + phases off the heap-allocated TaskInfo. Closes
@@ -1100,8 +1118,12 @@ def _reads(ctx):
     _ = ctx.args.rest
     return 0
 
+def _fails(ctx):
+    return 1
+
 claims = task(implementation = _claims, args = {"rest": args.passthrough(position = "post_command")})
 reads = task(implementation = _reads, args = {"rest": args.passthrough(position = "post_command")})
+fails = task(implementation = _fails, args = {"rest": args.passthrough(position = "post_command")})
 "#;
 
     fn run_passthrough_task(index: usize, routed: Vec<&str>) -> Option<u8> {
@@ -1130,6 +1152,15 @@ reads = task(implementation = _reads, args = {"rest": args.passthrough(position 
     #[test]
     fn an_empty_bucket_is_not_a_failure() {
         assert_eq!(run_passthrough_task(1, vec![]), Some(0));
+    }
+
+    /// A task that concluded with its own non-zero code keeps it: its failure is
+    /// the more useful story, so the dropped flags are reported as a warning
+    /// rather than replacing the exit code. (A task that hard-errors never
+    /// reaches the check at all.)
+    #[test]
+    fn a_failing_task_keeps_its_own_exit_code() {
+        assert_eq!(run_passthrough_task(2, vec!["--jobs=8"]), Some(1));
     }
 
     #[test]

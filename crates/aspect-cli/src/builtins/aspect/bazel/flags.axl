@@ -154,6 +154,20 @@ def _passthrough(ctx, name: str) -> list:
     claim = getattr(ctx.args, "claim", None)
     return list(claim(name)) if claim else list(getattr(ctx.args, name, []))
 
+_PASSTHROUGH_ARGS = ["bazel_passthrough_flags", "bazel_passthrough_startup_flags"]
+
+def _disclaim_passthrough(ctx) -> None:
+    """Account for both passthrough buckets on a path that spawns no Bazel at
+    all, so the runtime does not report the user's flags as silently dropped.
+
+    For a task that legitimately concludes without running anything — the runner
+    health check off a Workflows runner, say. The flags genuinely had no effect,
+    but that is the run doing nothing rather than the task losing them, and
+    claiming is how a task says so. Any path that *does* reach
+    `resolve` / `resolve_startup` needs none of this: resolving claims."""
+    for name in _PASSTHROUGH_ARGS:
+        _passthrough(ctx, name)
+
 def _resolve_startup_flags(ctx) -> list:
     """`ctx.args.bazel_startup_flags + pre-command passthrough +
     trait.extra_startup_flags`, then the `trait.startup_flags(flags)` transform
@@ -358,6 +372,7 @@ flags = namespace(
     resolve = _resolve_flags,
     resolve_startup = _resolve_startup_flags,
     args = _flag_args,
+    disclaim_passthrough = _disclaim_passthrough,
     expand_config = _expand_config_flags,
 )
 

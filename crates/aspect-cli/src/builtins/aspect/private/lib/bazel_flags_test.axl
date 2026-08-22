@@ -156,6 +156,17 @@ def _test_resolving_claims_the_bucket(ctx):
     bazel.flags.resolve_startup(pre_ctx)
     _eq("resolve_startup claims pre-command bucket", pre_ctx.claimed, ["bazel_passthrough_startup_flags"])
 
+def _test_disclaim_accounts_for_both_buckets(ctx):
+    """A path that spawns no Bazel claims both buckets, so a legitimate no-op run
+    is not reported as having dropped the user's flags."""
+    c = _passthrough_ctx(passthrough = ["--jobs=8"], passthrough_startup = ["--output_base=/tmp/o"])
+    bazel.flags.disclaim_passthrough(c)
+    _eq(
+        "disclaim claims both buckets",
+        sorted(c.claimed),
+        ["bazel_passthrough_flags", "bazel_passthrough_startup_flags"],
+    )
+
 def _test_passthrough_buckets_are_optional(ctx):
     """A task that declares the flag args without the passthrough buckets keeps
     resolving — the buckets are additive, not part of the arg contract."""
@@ -410,6 +421,7 @@ def _test_impl(ctx):
     _test_flags_full_chain_order(ctx)
     _test_passthrough_flags_follow_explicit_ones(ctx)
     _test_resolving_claims_the_bucket(ctx)
+    _test_disclaim_accounts_for_both_buckets(ctx)
     _test_passthrough_buckets_are_optional(ctx)
     _test_passthrough_args_shape(ctx)
     _test_flags_empty_defaults(ctx)
@@ -424,7 +436,7 @@ def _test_impl(ctx):
     # after the pure subtests prevents bleed-through.
     _test_setup_command_applies_to_ctx_bazel(ctx)
     _test_sibling_rc_transforms_startup(ctx)
-    print("bazel_flags_test.axl: OK (17 sections)")
+    print("bazel_flags_test.axl: OK (18 sections)")
     return 0
 
 bazel_flags_tests = task(
