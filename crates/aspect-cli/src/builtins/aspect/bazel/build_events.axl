@@ -12,6 +12,11 @@ once rather than twice. Because that can leave no sink at all — and the Aspect
 Web UI link keys on an id only a sink mints — a task pairs the collect call with
 `bes_streamed_by_bazel`, which redirects the link to Bazel's invocation id.
 
+`collect_bes_sinks` also covers the one Bazel-facing BEP flag the CLI would
+otherwise clobber: a caller's `--build_event_binary_file` becomes a CLI file sink,
+because `Build::spawn` appends the CLI's own path to that single-valued option
+last and last wins. See `collect_bes_sinks` for what that changes.
+
 The Aspect login JWT is attached to an Aspect-owned backend's sink metadata when
 the user has not supplied their own `authorization` header — see
 `aspect_endpoint_auth.axl` for the host gate and best-effort credential
@@ -54,6 +59,22 @@ def bazel_bes_backend(rc, command: str) -> str:
     if rc == None:
         return ""
     return rc.flag_value("--bes_backend", command = command) or ""
+
+def bazel_bep_file(rc, command: str) -> str:
+    """The `--build_event_binary_file` path the caller asked Bazel to write, or `""`.
+
+    Reads through the run command, so it sees the flag wherever it came from —
+    `--bazel-flag=--build_event_binary_file=…`, a `.bazelrc`, or an expanded
+    `--config`. `rc` may be `None` for a caller with no run command to consult.
+
+    Nobody but the caller sets this: the CLI's own BEP file is appended inside
+    `Build::spawn`, after rc expansion, and never passes through the rc.
+
+    Public so `build_events_test.axl` can assert the resolution.
+    """
+    if rc == None:
+        return ""
+    return rc.flag_value("--build_event_binary_file", command = command) or ""
 
 def _drop_bazel_streamed(items: list, uri_of, bazel_backend: str) -> list:
     """`items` minus those whose `uri_of(item)` names the same endpoint as Bazel's
@@ -106,15 +127,37 @@ def collect_bes_sinks(ctx, bazel_trait, rc, command: str = "build", extra_backen
     Sinks to the endpoint Bazel's own `--bes_backend` uploads to are dropped from
     both groups so the invocation is streamed once — see `_drop_bazel_streamed`.
 
+    Last comes a file sink for the caller's own `--build_event_binary_file`, when
+    they asked for one. Bazel cannot write two: the option is single-valued and
+    `Build::spawn` appends the CLI's path last, so the caller's file would
+    silently never be written. Writing it as a sink instead re-creates it from
+    Bazel's own byte stream — the file sinks share the BES reader's raw-bytes
+    path, so the result is what Bazel would have written. This is what lets IDE /
+    BSP tooling (the IntelliJ Bazel plugin) drive builds through the
+    `tools/bazel` wrapper and still get its BEP back. Two consequences worth
+    knowing: `--build_event_binary_file_upload_mode` no longer governs that file
+    (the caller's `wait()` on the returned sinks is what completes it, before the
+    task concludes), and `--build_event_json_file` / `--build_event_text_file`
+    are untouched — different flags, so Bazel still writes those itself.
+
     The one call a bazel-spawning task makes; pair it with
     `bes_streamed_by_bazel` to keep the Aspect Web UI link resolvable. The caller
     `wait()`s the returned sinks after the build.
     """
     bazel_backend = bazel_bes_backend(rc, command)
-    return (
+    sinks = (
         collect_bes_from_args(ctx, extra_backends = extra_backends, bazel_backend = bazel_backend) +
         _drop_bazel_streamed(list(bazel_trait.build_event_sinks), lambda s: s.uri, bazel_backend)
     )
+
+    # Not routed through `_drop_bazel_streamed`: a file is a local dump, not a
+    # second upload to an endpoint Bazel already streams to.
+    bep_file = bazel_bep_file(rc, command)
+    if bep_file:
+        trace.event("bes.caller_bep_file", fields = {"path": bep_file, "command": command})
+        sinks.append(bazel.build_events.file(path = bep_file))
+
+    return sinks
 
 def dropped_bes_backends(ctx, bazel_trait, rc, command: str = "build", extra_backends = []) -> list[str]:
     """The BES endpoints `collect_bes_sinks` skipped because Bazel uploads to them
