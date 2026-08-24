@@ -31,8 +31,8 @@ use super::credential_store::CredentialStore;
 /// advertises no authorization server. `hosts` are the Bazel-facing endpoints
 /// (remote cache, BES) whose traffic receives this deployment's login JWT.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-struct Deployment {
-    name: String,
+pub(crate) struct Deployment {
+    pub(crate) name: String,
     #[serde(default, skip_serializing_if = "is_false")]
     default: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -67,7 +67,7 @@ struct Deployment {
     /// `config.json` entry that omits them — `configure` requires an advertised
     /// `aspect_endpoints` map, so a discovered deployment always has this.
     #[serde(default, skip_serializing_if = "Endpoints::is_empty")]
-    endpoints: Endpoints,
+    pub(crate) endpoints: Endpoints,
 }
 
 /// The OAuth scopes the login flow requests when the deployment advertises none,
@@ -92,7 +92,7 @@ const DEFAULT_LOGIN_SCOPES: &[&str] = &["openid", "profile", "email", "offline_a
 /// auth-gate `hosts` — it addresses a web UI, not a gRPC endpoint the login JWT
 /// is sent to. Empty when the deployment has no web UI.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-struct Endpoints {
+pub(crate) struct Endpoints {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     cache: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -100,7 +100,7 @@ struct Endpoints {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     exec: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
-    results_url: String,
+    pub(crate) results_url: String,
 }
 
 impl Endpoints {
@@ -191,7 +191,7 @@ fn load_config_file(path: &PathBuf) -> anyhow::Result<Vec<Deployment>> {
 /// same name replaces an earlier one), so a user can override the seed or a
 /// repo-declared deployment. Exactly one entry stays `default` — [`select_deployment`]
 /// re-derives the default rather than trusting the flag on every entry.
-fn load_deployments() -> anyhow::Result<Vec<Deployment>> {
+pub(crate) fn load_deployments() -> anyhow::Result<Vec<Deployment>> {
     let mut merged: Vec<Deployment> = vec![default_deployment()];
     let overlay = |merged: &mut Vec<Deployment>, entries: Vec<Deployment>| {
         for entry in entries {
@@ -243,7 +243,10 @@ fn repo_config_path() -> Option<PathBuf> {
 /// the built-in seed. The default flag is the single source of truth —
 /// configuring a deployment does not implicitly hijack selection away from an
 /// explicit default.
-fn select_deployment(deployments: &[Deployment], name: Option<&str>) -> anyhow::Result<Deployment> {
+pub(crate) fn select_deployment(
+    deployments: &[Deployment],
+    name: Option<&str>,
+) -> anyhow::Result<Deployment> {
     if let Some(name) = name.filter(|n| !n.is_empty()) {
         return deployments
             .iter()
@@ -1005,7 +1008,7 @@ fn extract_query_param(path: &str, key: &str) -> Option<String> {
     None
 }
 
-fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+pub(crate) fn block_on<F: std::future::Future>(fut: F) -> F::Output {
     Handle::current().block_on(fut)
 }
 
@@ -1564,7 +1567,7 @@ fn merged_refresh_token(prior: &str, fresh: &str) -> String {
 /// deployment stores under its name, so the profile is the deployment name and
 /// gets an explicit `--deployment`; the default profile (the built-in Aspect
 /// deployment, or a `$ASPECT_AUTH_PROFILE`) gets a bare `login`.
-fn login_hint(profile: &str) -> String {
+pub(crate) fn login_hint(profile: &str) -> String {
     if profile == DEFAULT_PROFILE {
         "aspect auth login".to_string()
     } else {
