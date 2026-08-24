@@ -530,6 +530,12 @@ struct BuildResultsServer {
     /// server still runs, and every tool answers with the version-gating
     /// message (see the module docs).
     api_available: bool,
+    /// The last resolved bearer, reused until its `exp` nears. Every
+    /// credential-store read can hit the OS keychain, and on macOS the
+    /// user-visible prompt for that is per code signature — an ad-hoc-signed
+    /// binary re-prompts on every rebuild — so a long agent session must not
+    /// read the keychain per tool call.
+    token_cache: std::sync::Mutex<Option<String>>,
     http: reqwest::Client,
 }
 
@@ -541,12 +547,24 @@ impl BuildResultsServer {
     /// calls `Handle::current().block_on`, which panics on a runtime worker
     /// thread — the same arrangement the credential helper uses.
     async fn bearer(&self) -> Result<String, String> {
+        if let Some(cached) = self
+            .token_cache
+            .lock()
+            .expect("token cache lock")
+            .as_ref()
+            .filter(|t| !auth::jwt_is_expired(t))
+        {
+            return Ok(cached.clone());
+        }
         let deployment = self.deployment.clone();
         let resolved = tokio::task::spawn_blocking(move || auth::resolve_access_token(&deployment))
             .await
             .map_err(|e| format!("token resolution failed: {e}"))?;
         match resolved {
-            Ok(Some(token)) => Ok(token),
+            Ok(Some(token)) => {
+                *self.token_cache.lock().expect("token cache lock") = Some(token.clone());
+                Ok(token)
+            }
             Ok(None) => Err(not_logged_in_message(&self.deployment)),
             // resolve_access_token's error already names the fix (expired
             // session → the login command); pass it through verbatim.
@@ -707,6 +725,7 @@ fn serve_blocking(deployment_name: Option<&str>) -> anyhow::Result<i32> {
         deployment: deployment.name.clone(),
         api_origin: origin.clone(),
         api_available,
+        token_cache: std::sync::Mutex::new(None),
         http,
     };
 

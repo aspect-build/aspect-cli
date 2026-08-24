@@ -916,10 +916,16 @@ fn format_token_status(exp: Option<u64>) -> String {
 }
 
 fn is_expired_jwt(entry: &CredentialsEntry) -> bool {
+    jwt_is_expired(&entry.access_token)
+}
+
+/// Whether `token`'s `exp` claim is within 60 seconds of now. A malformed
+/// token counts as expired; a well-formed token with no `exp` never does.
+pub(crate) fn jwt_is_expired(token: &str) -> bool {
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
-    let parts: Vec<&str> = entry.access_token.split('.').collect();
+    let parts: Vec<&str> = token.split('.').collect();
     if parts.len() != 3 {
         return true;
     }
