@@ -6,7 +6,7 @@ files can load the full trait set with a single import:
 
     load("@aspect//traits.axl",
          "BazelTrait",
-         "TaskLifecycleTrait",
+         "Phases",
          "DeliveryTrait",
          "HealthCheckTrait",
          "REPRO_FIX_ACCEPT",
@@ -45,6 +45,7 @@ load("@aspect//lint.axl", _LintTrait = "LintTrait")
 load("./private/lib/health_check.axl", _HealthCheckTrait = "HealthCheckTrait")
 load(
     "./private/lib/lifecycle.axl",
+    _Phases = "Phases",
     _REPRO_FIX_ACCEPT = "REPRO_FIX_ACCEPT",
     _REPRO_FIX_REJECT = "REPRO_FIX_REJECT",
     _ReproFixAction = "ReproFixAction",
@@ -58,7 +59,6 @@ load(
     _StatusSurfaceAction = "StatusSurfaceAction",
     _StatusSurfaceDecision = "StatusSurfaceDecision",
     _StatusSurfaceUpdate = "StatusSurfaceUpdate",
-    _TaskLifecycleTrait = "TaskLifecycleTrait",
     _TaskUpdate = "TaskUpdate",
     _repro_fix_replace = "repro_fix_replace",
     _surface_replace = "surface_replace",
@@ -76,13 +76,13 @@ ReproFixCommand = _ReproFixCommand
 ReproFixCommandKind = _ReproFixCommandKind
 ReproFixInfo = _ReproFixInfo
 ReproFixSuggestion = _ReproFixSuggestion
+Phases = _Phases
 SURFACE_PUBLISH = _SURFACE_PUBLISH
 SURFACE_REMOVE = _SURFACE_REMOVE
 StatusSurface = _StatusSurface
 StatusSurfaceAction = _StatusSurfaceAction
 StatusSurfaceDecision = _StatusSurfaceDecision
 StatusSurfaceUpdate = _StatusSurfaceUpdate
-TaskLifecycleTrait = _TaskLifecycleTrait
 TaskUpdate = _TaskUpdate
 repro_fix_replace = _repro_fix_replace
 surface_replace = _surface_replace
