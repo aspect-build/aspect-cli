@@ -526,10 +526,12 @@ struct BuildResultsServer {
     /// Scheme + host of the web/API edge (no path), from the deployment's
     /// advertised results URL.
     api_origin: String,
-    /// Whether the startup probe found the discovery document. When false the
-    /// server still runs, and every tool answers with the version-gating
-    /// message (see the module docs).
-    api_available: bool,
+    /// Whether a probe has confirmed the deployment serves the API. Only the
+    /// positive result is cached: a probe that fails conclusively (an HTTP
+    /// answer other than 200) or inconclusively (a transport error — DNS,
+    /// TLS, no network) is retried on the next tool call, so a session that
+    /// starts offline or mid-upgrade recovers without a restart.
+    api_confirmed: std::sync::atomic::AtomicBool,
     /// The last resolved bearer, reused until its `exp` nears. Every
     /// credential-store read can hit the OS keychain, and on macOS the
     /// user-visible prompt for that is per code signature — an ad-hoc-signed
@@ -572,10 +574,32 @@ impl BuildResultsServer {
         }
     }
 
-    async fn call(&self, def: &ToolDef, args: &Args<'_>) -> Result<String, String> {
-        if !self.api_available {
-            return Err(api_unavailable_message(&self.deployment, &self.api_origin));
+    /// Confirm the deployment serves the API, probing the discovery document
+    /// until it answers 200 once. A non-200 HTTP answer is the deployment
+    /// saying it cannot serve the API (version/flag gating); a transport
+    /// error says nothing about the deployment, so it gets a network message
+    /// instead of the misleading upgrade advice.
+    async fn ensure_api_available(&self) -> Result<(), String> {
+        use std::sync::atomic::Ordering;
+        if self.api_confirmed.load(Ordering::Relaxed) {
+            return Ok(());
         }
+        let probe_url = format!("{}{DISCOVERY_PATH}", self.api_origin);
+        match self.http.get(&probe_url).send().await {
+            Ok(r) if r.status().is_success() => {
+                self.api_confirmed.store(true, Ordering::Relaxed);
+                Ok(())
+            }
+            Ok(_) => Err(api_unavailable_message(&self.deployment, &self.api_origin)),
+            Err(e) => Err(format!(
+                "could not reach {probe_url} ({e}) — check the network/VPN and retry; the \
+                 deployment itself may be fine."
+            )),
+        }
+    }
+
+    async fn call(&self, def: &ToolDef, args: &Args<'_>) -> Result<String, String> {
+        self.ensure_api_available().await?;
         let path = (def.route)(args)?;
         let token = self.bearer().await?;
         let url = format!("{}/api/v1{}", self.api_origin, path);
@@ -702,20 +726,26 @@ fn serve_blocking(deployment_name: Option<&str>) -> anyhow::Result<i32> {
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
 
+    // Warm the availability check so a misconfigured deployment is visible in
+    // the server's own stderr at startup — but never latch a failure: the
+    // probe re-runs per tool call until it succeeds (see api_confirmed).
     let probe_url = format!("{origin}{DISCOVERY_PATH}");
-    let api_available = auth::block_on(async {
+    let api_confirmed = auth::block_on(async {
         match http.get(&probe_url).send().await {
             Ok(r) if r.status().is_success() => true,
             Ok(r) => {
                 eprintln!(
-                    "warning: {probe_url} answered HTTP {} — serving anyway; every tool will \
-                     explain what the deployment is missing.",
+                    "warning: {probe_url} answered HTTP {} — serving anyway; tools will explain \
+                     what the deployment is missing and re-check on every call.",
                     r.status()
                 );
                 false
             }
             Err(e) => {
-                eprintln!("warning: could not probe {probe_url} ({e}) — serving anyway.");
+                eprintln!(
+                    "warning: could not probe {probe_url} ({e}) — serving anyway; tools will \
+                     re-check on every call."
+                );
                 false
             }
         }
@@ -724,7 +754,7 @@ fn serve_blocking(deployment_name: Option<&str>) -> anyhow::Result<i32> {
     let server = BuildResultsServer {
         deployment: deployment.name.clone(),
         api_origin: origin.clone(),
-        api_available,
+        api_confirmed: std::sync::atomic::AtomicBool::new(api_confirmed),
         token_cache: std::sync::Mutex::new(None),
         http,
     };
