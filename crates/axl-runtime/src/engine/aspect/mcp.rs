@@ -186,11 +186,16 @@ fn offset_prop() -> serde_json::Value {
 }
 
 fn range_prop() -> serde_json::Value {
-    serde_json::json!({
-        "type": "string",
-        "description": "Lookback window for the statistics.",
-        "enum": ["d1", "d3", "d7", "m1", "m3", "y1"],
-    })
+    // Known values in the description, not a schema `enum`: the schema is
+    // enforced client-side by the AI tool, and this CLI ships on a different
+    // cadence than deployments — a hard enum would reject values a newer
+    // deployment accepts. The server stays authoritative (an unknown value is
+    // a 400 naming the valid ones), so steering beats enforcement here.
+    prop(
+        "Lookback window for the statistics, letter-first (day/month/year). Known values (as \
+         of Workflows 6.1; a deployment may accept more): `d1`, `d3`, `d7`, `m1`, `m3`, `y1`.",
+        "string",
+    )
 }
 
 fn label_prop() -> serde_json::Value {
@@ -217,7 +222,12 @@ fn tool_defs() -> &'static [ToolDef] {
                     serde_json::json!({
                         "limit": limit_prop(20),
                         "offset": offset_prop(),
-                        "status": prop("Filter by build status (e.g. `success`, `failure`).", "string"),
+                        "status": prop(
+                            "Filter by build status. Known values (as of Workflows 6.1; a \
+                             deployment may accept more): `success`, `failed`, `interrupted`, \
+                             `out_of_memory`, `aborted`, `in_progress`.",
+                            "string",
+                        ),
                         "invocation_id": prop(
                             "Filter by the Bazel-printed invocation UUID, to resolve it to the build's `id`.",
                             "string"),
@@ -338,7 +348,15 @@ fn tool_defs() -> &'static [ToolDef] {
                         "limit": limit_prop(20),
                         "offset": offset_prop(),
                         "search": prop("Substring filter on the target label.", "string"),
-                        "bucket": prop("Filter by outcome bucket (e.g. `failing`, `flaky`).", "string"),
+                        "bucket": prop(
+                            "Filter to one execution-state bucket; `TEST_FAILED` and \
+                             `FAILED_TO_BUILD` are the ones a failure hunt wants. Known values \
+                             (as of Workflows 6.1; a deployment may accept more): \
+                             `FAILED_TO_BUILD`, `TEST_FAILED`, `TEST_TIMEOUT`, `TEST_FLAKY`, \
+                             `TEST_PASSED`, `TEST_PASSED_CACHED`, `SUCCESSFUL_BUILD`, \
+                             `ABORTED_STATE`, `SKIPPED`, `PENDING`.",
+                            "string",
+                        ),
                         "is_test": {"type": "boolean", "description": "Only test targets (true) or only non-test targets (false)."},
                         "order_by": prop("Sort key.", "string"),
                     }),
