@@ -625,11 +625,16 @@ impl BuildResultsServer {
         let detail = body.trim();
         let hint = match status.as_u16() {
             // A bearer the edge redirects (302 → HTML) or the gateway rejects:
-            // either way the fix is a fresh login.
-            401 | 403 => format!(
-                " — the credential was not accepted; run `{}`",
-                auth::login_hint(&self.deployment)
-            ),
+            // either way the fix is a fresh login. Drop the cached token so
+            // the next call re-reads the credential store — a revoked bearer
+            // must not outlive the re-login it just asked the user to run.
+            401 | 403 => {
+                *self.token_cache.lock().expect("token cache lock") = None;
+                format!(
+                    " — the credential was not accepted; run `{}`",
+                    auth::login_hint(&self.deployment)
+                )
+            }
             404 => format!(
                 " — no such resource on deployment '{}'; ids come from list_invocations",
                 self.deployment

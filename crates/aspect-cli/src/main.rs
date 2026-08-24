@@ -274,7 +274,25 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
             // and logs to them before phase 4 starts emitting task traces.
             // No-op (and disables further OTel work for the rest of the run)
             // if no exporter was registered.
-            let exporters = mpe.drain_exporters();
+            let mut exporters = mpe.drain_exporters();
+            // The mcp task's stdout carries its JSON-RPC protocol stream, so
+            // a configured stdout telemetry sink would interleave with it and
+            // corrupt the session. Redirect such sinks to stderr for this
+            // task; every other configuration is untouched.
+            if dispatch.task_name == "mcp" {
+                use axl_runtime::engine::telemetry::{ExporterSpec, FileDestination};
+                for spec in &mut exporters {
+                    if let ExporterSpec::File(file) = spec {
+                        if file.destination == FileDestination::Stdout {
+                            eprintln!(
+                                "warning: a stdout telemetry exporter is configured, but `aspect \
+                                 mcp` owns stdout for the MCP protocol — redirecting it to stderr."
+                            );
+                            file.destination = FileDestination::Stderr;
+                        }
+                    }
+                }
+            }
             tokio::runtime::Handle::current().block_on(trace::install_late_exporters(exporters))?;
 
             // Phase 4: execute the selected task.
