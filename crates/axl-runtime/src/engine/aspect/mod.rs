@@ -15,6 +15,7 @@ use starlark::{environment::GlobalsBuilder, values::starlark_value_as_type::Star
 
 pub mod auth;
 mod credential_store;
+pub mod mcp;
 
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
 #[display("<aspect.Aspect>")]
@@ -36,6 +37,11 @@ pub(crate) fn aspect_methods(registry: &mut MethodsBuilder) {
     fn auth<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<auth::Auth> {
         Ok(auth::Auth {})
     }
+
+    #[starlark(attribute)]
+    fn mcp<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<mcp::Mcp> {
+        Ok(mcp::Mcp {})
+    }
 }
 
 #[starlark_module]
@@ -46,4 +52,5 @@ fn register_types(globals: &mut GlobalsBuilder) {
 pub fn register_globals(globals: &mut GlobalsBuilder) {
     register_types(globals);
     auth::register_globals(globals);
+    mcp::register_globals(globals);
 }

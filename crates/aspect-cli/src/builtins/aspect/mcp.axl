@@ -1,0 +1,24 @@
+def _mcp_impl(ctx: TaskContext) -> int:
+    # stdout belongs to the MCP protocol from here on: the server owns it, and
+    # anything else printed there corrupts the JSON-RPC stream. Diagnostics
+    # (including the serve banner) go to stderr inside serve().
+    return ctx.aspect.mcp.serve(deployment = ctx.args.deployment)
+
+mcp = task(
+    summary = "Serve build results to AI agents over MCP",
+    description = """Run a Model Context Protocol server over stdio exposing read-only build and test results from a Workflows deployment's REST API — invocations, logs, targets, and cross-invocation target statistics. Not interactive: an AI tool launches it and speaks MCP on stdin/stdout.
+
+Setup, once per developer:
+  1. `aspect auth configure remote.<deployment-domain>`   (records the deployment; often already done for the remote cache)
+  2. `aspect auth login --deployment <name>`              (browser login against the deployment's IdP; `configure` prints the name)
+  3. Register the server in the AI tool's MCP config, e.g. `.mcp.json`:
+       {"mcpServers": {"aspect": {"command": "aspect", "args": ["mcp"]}}}
+
+The server targets the default configured deployment; add `--deployment <name>` to the args to pin one. For several deployments, register one entry per deployment (e.g. `aspect-staging`, `aspect-prod`) with distinct `--deployment` args. Requires the deployment to run Aspect Workflows 6.1+ with `webapp.web.api_enabled = true`; each tool call authenticates with the stored credential and refreshes it automatically.""",
+    implementation = _mcp_impl,
+    args = {
+        "deployment": args.string(
+            description = "The configured Workflows deployment to serve build results from (see `aspect auth status`). Defaults to the default deployment.",
+        ),
+    },
+)

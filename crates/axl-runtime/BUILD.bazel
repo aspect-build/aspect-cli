@@ -53,6 +53,7 @@ rust_library(
         "@crates//:psl",
         "@crates//:rand",
         "@crates//:reqwest",
+        "@crates//:rmcp",
         "@crates//:semver",
         "@crates//:serde",
         "@crates//:serde_json",

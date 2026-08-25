@@ -86,6 +86,7 @@ tar = "0.4.44"
 tonic = "0.14.2"
 tracing = "0.1.41"
 uuid = { version = "1.18.1", features = ["v4"] }
+rmcp = { version = "3.1.4", features = ["server", "transport-io"] }
 
 [dev-dependencies]
 tempfile = "3"

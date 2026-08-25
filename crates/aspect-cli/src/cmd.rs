@@ -1214,11 +1214,15 @@ fn render_feature_detail(
     } else {
         format!("{body}\n\n{context}")
     };
+    // The about text goes through `before_help` (written verbatim), not into
+    // the template itself, where a `{`-segment with no closing `}` is
+    // silently dropped — same rule as the task help path.
     let mut cmd = Command::new(format!("feature {}", feat.name()))
         .no_binary_name(true)
         .disable_help_flag(true)
+        .before_help(about)
         .help_template(format!(
-            "{}\n\n{about}\n\n{{all-args}}",
+            "{}\n\n{{before-help}}{{all-args}}",
             banner::line(version)
         ));
     for (arg_name, arg) in block.args.iter() {
@@ -1320,17 +1324,25 @@ fn task_command(
 
     // Always use a custom template so the grey "Aspect CLI v… — docs URL"
     // header lands at the top. When the task supplies its own help_header
-    // body (summary/description), use that as the about block; otherwise
-    // fall back to clap's `{about-with-newline}`.
+    // body (summary/description), attach it via `before_help` — clap writes
+    // that verbatim, whereas text interpolated into the template itself is
+    // template-parsed, and a `{`-segment with no closing `}` is silently
+    // dropped (so a description could not carry literal JSON or code).
+    // Otherwise fall back to clap's `{about-with-newline}`.
+    // clap renders `{before-help}` as the text plus a blank line, so that arm
+    // adds no newline of its own; the fallback arm carries it explicitly.
     let about_block = match help_header {
-        Some(h) => format!("{h}\n"),
-        None => "{about-with-newline}".to_string(),
+        Some(h) => {
+            cmd = cmd.before_help(h);
+            "{before-help}".to_string()
+        }
+        None => "{about-with-newline}\n".to_string(),
     };
     let feature_footer = "\x1b[2mFeatures add CI reporting and artifact integrations \
          (GitHub, Buildkite, GitLab, CircleCI, telemetry). Their flags are accepted here \
          but hidden; run `aspect feature` to list them.\x1b[0m";
     cmd = cmd.help_template(format!(
-        "{cli_header}\n\n{about_block}\n{{usage-heading}} {{usage}}\n\n{{all-args}}\n\n{feature_footer}"
+        "{cli_header}\n\n{about_block}{{usage-heading}} {{usage}}\n\n{{all-args}}\n\n{feature_footer}"
     ));
     cmd
 }
@@ -1592,6 +1604,24 @@ fn short_char(short: &Option<String>) -> Resettable<char> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn help_body_with_braces_renders_verbatim_via_before_help() {
+        // A task description carrying literal JSON must render verbatim in
+        // --help. Interpolated into the template it would not: clap's
+        // template parser drops any `{`-segment with no closing `}` on it.
+        // The help builders therefore attach the body via before_help and
+        // reference it as the {before-help} tag.
+        let body = r#"{"mcpServers": {"aspect": {"command": "aspect"}}}"#;
+        let mut cmd = clap::Command::new("t")
+            .before_help(body)
+            .help_template("{before-help}\n{all-args}");
+        let rendered = cmd.render_help().to_string();
+        assert!(
+            rendered.contains(body),
+            "before_help body was mangled: {rendered}"
+        );
+    }
+
     use super::*;
     use axl_runtime::engine::arg::Arg;
     use starlark::collections::SmallMap;
