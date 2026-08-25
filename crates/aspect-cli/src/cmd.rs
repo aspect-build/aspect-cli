@@ -13,7 +13,7 @@
 //!
 //! Everything else in this module is private.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -389,11 +389,14 @@ enum Scope<'a> {
 fn clap_id(scope: Scope<'_>, name: &str, arg: &Arg) -> String {
     match scope {
         Scope::Task => name.to_owned(),
+        // Always prefixed, even under a `long` override, so a feature ID can
+        // never collide with a bare task arg ID. Long-flag collisions are
+        // resolved in `task_command` (the task's arg wins).
         Scope::Feature(prefix) => {
-            if let Some(lo) = arg.long_override() {
-                return lo.to_owned();
-            }
-            let long = name.replace('_', "-");
+            let long = arg
+                .long_override()
+                .map(str::to_owned)
+                .unwrap_or_else(|| name.replace('_', "-"));
             if prefix.is_empty() {
                 long
             } else {
@@ -653,6 +656,15 @@ fn merge_args<'v>(
             }
             cli => {
                 let key = clap_id(scope, name, cli);
+                // A feature arg loses its Clap registration on task commands
+                // whose own args claim its long flag (see `task_command`); fall
+                // back to the schema default there.
+                if matches.try_contains_id(&key).is_err() {
+                    if let Some(val) = schema_default_value(cli, heap) {
+                        args.insert(name.clone(), val);
+                    }
+                    continue;
+                }
                 if let Some(val) = clap_to_value(cli, &key, matches, heap) {
                     args.insert(name.clone(), val);
                 }
@@ -673,13 +685,38 @@ fn merge_args<'v>(
         let user_explicit = schema
             .get(&k)
             .filter(|a| a.is_cli_exposed())
-            .map(|a| matches.value_source(&clap_id(scope, &k, a)) == Some(ValueSource::CommandLine))
+            .map(|a| {
+                let key = clap_id(scope, &k, a);
+                matches.try_contains_id(&key).is_ok()
+                    && matches.value_source(&key) == Some(ValueSource::CommandLine)
+            })
             .unwrap_or(false);
         if !user_explicit {
             args.insert(k, v);
         }
     }
     args
+}
+
+/// The value an arg resolves to when it has no Clap registration at all —
+/// the schema default, mirroring what [`clap_to_value`] yields for an
+/// untouched flag. `None` for `Custom` (handled by the caller).
+fn schema_default_value<'v>(arg: &Arg, heap: Heap<'v>) -> Option<Value<'v>> {
+    Some(match arg {
+        Arg::Custom { .. } => return None,
+        Arg::String { default, .. } => heap.alloc_str(default).to_value(),
+        Arg::Boolean { default, .. } => heap.alloc(*default),
+        Arg::Int { default, .. } => heap.alloc(*default).to_value(),
+        Arg::UInt { default, .. } => heap.alloc(*default).to_value(),
+        Arg::Positional { default, .. } => {
+            heap.alloc(AllocList(default.clone().unwrap_or_default()))
+        }
+        Arg::TrailingVarArgs { .. } => heap.alloc(AllocList(Vec::<String>::new())),
+        Arg::StringList { default, .. } => heap.alloc(AllocList(default.clone())),
+        Arg::BooleanList { default, .. } => heap.alloc(AllocList(default.clone())),
+        Arg::IntList { default, .. } => heap.alloc(AllocList(default.clone())),
+        Arg::UIntList { default, .. } => heap.alloc(AllocList(default.clone())),
+    })
 }
 
 fn clap_to_value<'v>(
@@ -1261,8 +1298,21 @@ fn task_command(
     // Feature flags stay parseable on the task command but are hidden from
     // `--help`; `aspect feature [<name>]` surfaces them instead (see the footer
     // appended to the help template below).
+    //
+    // A task's own args win a collision: a feature arg whose long flag matches
+    // a task arg's name or long (e.g. a `long`-overridden `--deployment` vs the
+    // auth tasks' `deployment`) is skipped, and `merge_args` falls back to its
+    // schema default — the feature goes inert on that task.
+    let claimed: HashSet<String> = task
+        .cli_args()
+        .into_iter()
+        .flat_map(|(arg_name, arg)| [arg_name.to_owned(), long_flag(Scope::Task, arg_name, arg)])
+        .collect();
     for block in feature_blocks {
         for (arg_name, arg) in block.args.iter() {
+            if claimed.contains(&long_flag(Scope::Feature(&block.prefix), arg_name, arg)) {
+                continue;
+            }
             let clap_arg = arg_to_clap(Scope::Feature(&block.prefix), arg_name, arg).hide(true);
             cmd = cmd.arg(clap_arg);
         }
@@ -1621,6 +1671,18 @@ mod tests {
         }
     }
 
+    fn arg_string_with_long(default: &str, long: &str) -> Arg {
+        Arg::String {
+            required: false,
+            default: default.to_owned(),
+            short: None,
+            long: Some(long.to_owned()),
+            values: None,
+            description: None,
+            bare: None,
+        }
+    }
+
     struct StubFeature {
         name: String,
         export_name: String,
@@ -1679,6 +1741,14 @@ mod tests {
                 description: None,
             },
         );
+        feature_with_args(identifier, summary, args)
+    }
+
+    fn feature_with_args(
+        identifier: &str,
+        summary: &str,
+        args: SmallMap<String, Arg>,
+    ) -> StubFeature {
         StubFeature {
             name: axl_runtime::engine::names::to_command_name(identifier),
             export_name: identifier.to_owned(),
@@ -2333,8 +2403,11 @@ mod tests {
         );
     }
 
+    /// A `long` override changes the flag spelling but NOT the ID's namespace:
+    /// the ID stays feature-prefixed so it can never collide with a task arg ID
+    /// (only the long flag can, which `task_command` resolves by skipping).
     #[test]
-    fn clap_id_for_feature_respects_long_override() {
+    fn clap_id_for_feature_prefixes_long_override() {
         let arg = Arg::String {
             required: false,
             default: String::new(),
@@ -2346,8 +2419,91 @@ mod tests {
         };
         assert_eq!(
             clap_id(Scope::Feature("artifact-upload"), "mode", &arg),
+            "artifact-upload:custom-flag"
+        );
+        assert_eq!(
+            long_flag(Scope::Feature("artifact-upload"), "mode", &arg),
             "custom-flag"
         );
+    }
+
+    /// A feature arg `long`-overridden to a flag a task already owns (the
+    /// `Deployment` feature's `--deployment` vs `auth login --deployment`) must
+    /// not shadow or duplicate the task's arg: the task wins, and the feature
+    /// falls back to its schema defaults on that command.
+    #[test]
+    fn feature_long_override_yields_to_task_arg() {
+        let mut targs: SmallMap<String, Arg> = SmallMap::new();
+        targs.insert("deployment".to_owned(), arg_string(""));
+        let t = stub_task("login", &[], targs);
+
+        let mut fargs: SmallMap<String, Arg> = SmallMap::new();
+        fargs.insert(
+            "deployment".to_owned(),
+            arg_string_with_long("", "deployment"),
+        );
+        fargs.insert("remote".to_owned(), arg_string_with_long("", "remote"));
+        let f = feature_with_args("Deployment", "Stub feature.", fargs);
+
+        let cmd = Cmd {
+            tasks: vec![&t as &dyn TaskLike],
+            features: vec![&f as &dyn FeatureLike],
+            aspect_root: Path::new("/repo"),
+            modules: &[],
+        };
+        let root = cmd.build("0.0.0").expect("build ok");
+        // Panics in debug builds without the skip: duplicate `deployment` arg.
+        let matches = root
+            .try_get_matches_from(["aspect", "login", "--deployment", "prod"])
+            .expect("parse ok");
+        let dispatch = cmd.dispatch(matches).expect("dispatch ok");
+
+        Heap::temp(|heap| {
+            let task_args = dispatch.task_args(&t, heap);
+            assert_eq!(
+                task_args.get("deployment").expect("present").unpack_str(),
+                Some("prod")
+            );
+            let feat_args = dispatch.feature_args(&f, heap);
+            // Skipped on this command: schema default, not the task's value.
+            assert_eq!(
+                feat_args.get("deployment").expect("present").unpack_str(),
+                Some("")
+            );
+            // The non-colliding sibling arg stays registered and readable.
+            assert_eq!(
+                feat_args.get("remote").expect("present").unpack_str(),
+                Some("")
+            );
+        });
+    }
+
+    /// On a task without a colliding arg, the overridden long parses normally
+    /// and routes to the feature.
+    #[test]
+    fn feature_long_override_parses_on_non_colliding_task() {
+        let t = stub_task("greet", &[], SmallMap::new());
+        let mut fargs: SmallMap<String, Arg> = SmallMap::new();
+        fargs.insert("remote".to_owned(), arg_string_with_long("", "remote"));
+        let f = feature_with_args("Deployment", "Stub feature.", fargs);
+        let cmd = Cmd {
+            tasks: vec![&t as &dyn TaskLike],
+            features: vec![&f as &dyn FeatureLike],
+            aspect_root: Path::new("/repo"),
+            modules: &[],
+        };
+        let root = cmd.build("0.0.0").expect("build ok");
+        let matches = root
+            .try_get_matches_from(["aspect", "greet", "--remote=exec"])
+            .expect("parse ok");
+        let dispatch = cmd.dispatch(matches).expect("dispatch ok");
+        Heap::temp(|heap| {
+            let feat_args = dispatch.feature_args(&f, heap);
+            assert_eq!(
+                feat_args.get("remote").expect("present").unpack_str(),
+                Some("exec")
+            );
+        });
     }
 
     /// `args.string(bare = …)` makes a valueless `--flag` legal — what lets `--remote`

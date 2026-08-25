@@ -1,0 +1,11 @@
+"""Public entry point for the deployment feature.
+
+`Deployment` is implemented alongside the `--deployment` / `--aspect-*` wiring
+in `private/lib/deployment_flags.axl`; this file re-exports it at the stable
+public path — `load("@aspect//feature/deployment.axl", "Deployment")` — since
+the `private/` tree may change without notice.
+"""
+
+load("../private/lib/deployment_flags.axl", _Deployment = "Deployment")
+
+Deployment = _Deployment

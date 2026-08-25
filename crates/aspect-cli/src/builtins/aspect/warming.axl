@@ -112,7 +112,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # failed check concludes the surface and fails the task inside).
     rc = ph.setup(data["target_pattern"], _KIND, "build")
     announce_version, announce_command = bzl.announce.resolve(ctx)
-    endpoint_auth_flags = bzl.endpoint_auth_flags(ctx, rc, "build")
+    endpoint_auth_flags = bzl.rc_flags(ctx, rc, "build")
 
     # Clean the prior Bazel state under the runner storage mount AFTER
     # `phases.setup` — the health check must run first (the Workflows
