@@ -1,7 +1,8 @@
-"""Tests for `lib/bazel_runner.axl`.
+"""Tests for the `bazel.build(ctx)` invocation-handle seams.
 
 Exercises the public dispatch helpers, which are the seam every
-bazel-driving task calls after `build.wait()` / `test.wait()` to fire
+task that drives its own spawn loop calls after `build.wait()` /
+`test.wait()` to fire
 `bazel_trait.bazel_attempt_end` and `bazel_trait.build_end` hooks. The
 helpers are short, but they're the contract every task depends on —
 silent breakage here would skip every Workflows-feature recovery hook.
@@ -12,11 +13,11 @@ default reaches Bazel — get that wrong and a caller-forwarded
 rejects outright.
 
 Run with:
-  aspect dev test-bazel-runner
+  aspect dev test-bazel-invocation
 """
 
+load("@aspect//bazel/invocation.axl", "target_patterns")
 load("@aspect//bazel.axl", "BazelTrait", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end")
-load("./bazel_runner.axl", "target_patterns")
 
 def _eq(label, got, want):
     if got != want:
@@ -114,7 +115,7 @@ def _test_forwarded_flag_suppresses_the_default(_):
 
 def _test_explicit_patterns_always_reach_bazel(_):
     """Explicit patterns alongside a forwarded pattern file are forwarded as-is
-    so Bazel reports the conflict — the runner owns no second spelling of it."""
+    so Bazel reports the conflict — the handle owns no second spelling of it."""
     rc = _fake_rc({"build": {"--target_pattern_file": "/tmp/p"}})
     _eq(
         "explicit patterns preserved",
@@ -148,12 +149,12 @@ def _test_impl(ctx: TaskContext) -> int:
     _test_explicit_patterns_always_reach_bazel(ctx)
     _test_aspect_own_flag_suppresses_the_default(ctx)
     _test_lookup_is_command_scoped(ctx)
-    print("bazel_runner_test.axl: OK (10 sections)")
+    print("invocation_test.axl: OK (10 sections)")
     return 0
 
-bazel_runner_tests = task(
-    summary = "Run the bazel runner AXL unit tests.",
-    kind = "test-bazel-runner",
+invocation_tests = task(
+    summary = "Run the bazel invocation-handle AXL unit tests.",
+    kind = "test-bazel-invocation",
     group = ["dev"],
     implementation = _test_impl,
     args = {},

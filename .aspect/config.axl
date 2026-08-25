@@ -1,5 +1,6 @@
 load("@aspect//auth_test.axl", "auth_tests")
 load("@aspect//bazel/build_events_test.axl", "bes_sinks_tests")
+load("@aspect//bazel/invocation_test.axl", "invocation_tests")
 load("@aspect//feature/artifacts.axl", "ArtifactUpload")
 load("@aspect//feature/buildkite_annotations.axl", "BuildkiteAnnotations")
 load("@aspect//feature/circleci_test_results.axl", "CircleCITestResults")
@@ -12,7 +13,6 @@ load("@aspect//private/helpers_test.axl", "helpers_facade_tests")
 load("@aspect//private/lib/aspect_endpoint_auth_test.axl", "aspect_endpoint_auth_tests")
 load("@aspect//private/lib/bazel_flags_test.axl", "bazel_flags_tests")
 load("@aspect//private/lib/bazel_results_test.axl", "bazel_results_unit_tests", "template_snapshot_tests")
-load("@aspect//private/lib/bazel_runner_test.axl", "bazel_runner_tests")
 load("@aspect//private/lib/bazelrc_test.axl", "bazelrc_tests")
 load("@aspect//private/lib/ci_test.axl", "ci_tests")
 load("@aspect//private/lib/circleci_test.axl", "circleci_tests")
@@ -367,10 +367,10 @@ def config(ctx: ConfigContext):
     # Run with: aspect dev test-bazel-flags
     ctx.tasks.add(bazel_flags_tests)
 
-    # bazel_runner.axl: the bazel_attempt_end/build_end dispatch seam, plus
+    # bazel/invocation.axl: the bazel_attempt_end/build_end dispatch seam, plus
     # target_patterns (when the `targets` default is suppressed).
-    # Run with: aspect dev test-bazel-runner
-    ctx.tasks.add(bazel_runner_tests)
+    # Run with: aspect dev test-bazel-invocation
+    ctx.tasks.add(invocation_tests)
 
     # aspect_endpoint_auth.axl: host parsing, suffix matching, credential gate.
     # Run with: aspect dev test-aspect-endpoint-auth

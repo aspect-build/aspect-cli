@@ -32,7 +32,7 @@ exit_codes = struct(
 
 # Default attempt budget for the build/test/delivery retry loops. Tasks
 # that wire up `--bazel-retry-attempts` use this as their `args.int`
-# default; the `bazel_runner.axl` / `delivery.axl` retry loops also fall
+# default; the `bazel.build(ctx)` handle / `delivery.axl` retry loops also fall
 # back to it when a task doesn't define the arg at all, so adding a new
 # bazel-driving task doesn't silently inherit `range(0)` or fail at load
 # time.
@@ -78,8 +78,8 @@ BazelTrait = trait(
     # additional flags to append to the invocation. Fires late enough in the
     # task lifecycle (after the task is known but before Bazel is spawned) that
     # features can inject ctx.task-dependent flags (e.g. --build_metadata=
-    # ASPECT_TASK_NAME=...). Invoked by bazel_runner.axl for build/test and by
-    # each task's impl for lint/delivery.
+    # ASPECT_TASK_NAME=...). Invoked by the `bazel.build(ctx)` handle for
+    # build/test and by each task's impl for lint/delivery.
     task_flags = attr(list[typing.Callable[[TaskContext], list[str]]], default = [], description = "Hooks returning additional flags; called with TaskContext at invocation time"),
 
     # For flags that depend on the resolved rc rather than the CLI args. `rc` is
