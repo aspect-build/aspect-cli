@@ -164,8 +164,8 @@ impl Tracing {
                         // exit code — 0 for a spawn that merely executed), this
                         // span carries the real BlazeTestStatus and sets the OTel
                         // span status to error when the test failed.
-                        let status =
-                            TestStatus::try_from(summary.overall_status).unwrap_or(TestStatus::NoStatus);
+                        let status = TestStatus::try_from(summary.overall_status)
+                            .unwrap_or(TestStatus::NoStatus);
                         #[allow(deprecated)]
                         let start_time = timestamp_secs_or_now(
                             summary.first_start_time.as_ref(),
@@ -197,7 +197,8 @@ impl Tracing {
                         // final target verdict; these are the individual attempts
                         // (a failing attempt that later passes is visible here as
                         // an error span while the summary reports FLAKY).
-                        let status = TestStatus::try_from(result.status).unwrap_or(TestStatus::NoStatus);
+                        let status =
+                            TestStatus::try_from(result.status).unwrap_or(TestStatus::NoStatus);
                         #[allow(deprecated)]
                         let start_time = timestamp_secs_or_now(
                             result.test_attempt_start.as_ref(),
@@ -253,7 +254,11 @@ mod tests {
             TestStatus::RemoteFailure,
             TestStatus::ToolHaltedBeforeTesting,
         ] {
-            assert_eq!(test_status_code(s), "error", "{s:?} should be an error span");
+            assert_eq!(
+                test_status_code(s),
+                "error",
+                "{s:?} should be an error span"
+            );
         }
     }
 
@@ -271,13 +276,19 @@ mod tests {
 
     #[test]
     fn timestamp_prefers_modern_field() {
-        let ts = Timestamp { seconds: 42, nanos: 0 };
+        let ts = Timestamp {
+            seconds: 42,
+            nanos: 0,
+        };
         assert_eq!(timestamp_secs_or_now(Some(&ts), 999_000), 42);
     }
 
     #[test]
     fn timestamp_falls_back_to_legacy_millis() {
-        assert_eq!(timestamp_secs_or_now(None, 1_723_000_000_000), 1_723_000_000);
+        assert_eq!(
+            timestamp_secs_or_now(None, 1_723_000_000_000),
+            1_723_000_000
+        );
     }
 
     #[test]
