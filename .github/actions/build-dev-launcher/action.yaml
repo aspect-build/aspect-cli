@@ -46,7 +46,7 @@ runs:
         # FUSE cache), so without it the output stays remote and never lands in the
         # workspace (mirrors what bootstrap.sh does for //:cli).
         aspect build --task:name "${{ inputs.task-name }}" \
-          --bazel-flag=--remote_download_toplevel \
+          --remote_download_toplevel \
           //crates/aspect-launcher
         # Pick the HOST launcher and copy it to a stable target/ci/ path, before any
         # later build redirects bazel-out. //crates/aspect-launcher fans out through

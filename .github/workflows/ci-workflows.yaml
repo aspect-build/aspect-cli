@@ -220,7 +220,7 @@ jobs:
       # `--config=pure_go` is required on Linux: toolchains_llvm_bootstrapped's
       # lld can't accept Go's non-PIC relocations on x86_64.
       - name: Gazelle Task — from-source
-        run: aspect gazelle --gazelle-target=//tools/gazelle:gazelle_from_source --bazel-flag=--config=pure_go --task:name gazelle-from-source-gha
+        run: aspect gazelle --gazelle-target=//tools/gazelle:gazelle_from_source --config=pure_go --task:name gazelle-from-source-gha
   gazelle-from-source-debug-task:
     runs-on: ubuntu-latest
     needs: [pre-build]
@@ -233,7 +233,7 @@ jobs:
           launcher-install: false
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Gazelle Task — from-source (ASPECT_DEBUG=1)
-        run: ASPECT_DEBUG=1 aspect gazelle --gazelle-target=//tools/gazelle:gazelle_from_source --bazel-flag=--config=pure_go --task:name gazelle-from-source-gha-debug
+        run: ASPECT_DEBUG=1 aspect gazelle --gazelle-target=//tools/gazelle:gazelle_from_source --config=pure_go --task:name gazelle-from-source-gha-debug
   lint-task:
     runs-on: ubuntu-latest
     needs: [pre-build]
@@ -334,8 +334,8 @@ jobs:
       - name: Build Task (ephemeral)
         run: |
           aspect build --task:name build-gha-ephemeral \
-            --bazel-flag=--remote_cache= \
-            --bazel-flag=--disk_cache="$RUNNER_TEMP/aspect-disk-cache" \
+            --remote_cache= \
+            --disk_cache="$RUNNER_TEMP/aspect-disk-cache" \
             -- //examples/...
   test-task-ephemeral:
     runs-on: ubuntu-latest
@@ -355,8 +355,8 @@ jobs:
         # action (stderr snippet) surface together.
         run: |
           aspect test --task:name test-gha-ephemeral \
-            --bazel-flag=--remote_cache= \
-            --bazel-flag=--disk_cache="$RUNNER_TEMP/aspect-disk-cache" \
+            --remote_cache= \
+            --disk_cache="$RUNNER_TEMP/aspect-disk-cache" \
             -- //examples/...
   # Render each template preset with the freshly-built `aspect init` and build
   # the generated workspace. Catches CLI-side breakage of the init renderer
@@ -571,17 +571,28 @@ jobs:
           "$CLI" --version
           echo "--- aspect version"
           "$LAUNCHER" version
-          echo "--- invalid task-id"
-          "$LAUNCHER" build --task-id not-a-uuid //... && echo "ERROR: --task-id should reject non-UUID" && exit 1 || true
-          echo "--- invalid task-key"
-          "$LAUNCHER" build --task:name "bad key!" //... && echo "ERROR: --task:name should reject invalid chars" && exit 1 || true
+          # Both must be rejected by the CLI's own validation, before it spawns
+          # bazel. Match the message, not just a non-zero exit: an unrecognized
+          # *flag* is forwarded to bazel now, so a misspelled flag here would
+          # still "fail" — after a full bazel invocation.
+          echo "--- invalid --task:id"
+          "$LAUNCHER" build --task:id not-a-uuid //... 2>&1 | grep -q "is not a valid UUID" \
+            || { echo "ERROR: --task:id should reject a non-UUID"; exit 1; }
+          echo "--- invalid --task:name"
+          "$LAUNCHER" build --task:name "bad key!" //... 2>&1 | grep -q "contains invalid characters" \
+            || { echo "ERROR: --task:name should reject invalid chars"; exit 1; }
           # A flag Bazel rejects has to come back as Bazel's error. This is the
           # shape that used to hang: Bazel exits without opening the build-event
           # pipe, and the reader waited on it forever. `timeout` bounds a
           # regression to a clear failure instead of the whole job budget.
-          echo "--- flag rejected by Bazel"
+          # Both spellings have to behave identically: the explicit escape
+          # hatch, and the bare flag this routes to Bazel on its own.
+          echo "--- flag rejected by Bazel (--bazel-flag)"
           timeout 180 "$LAUNCHER" build --bazel-flag=--definitely_not_a_flag //... 2>&1 | grep -q "Unrecognized option" \
             || { echo "ERROR: a Bazel-rejected flag must fail, not hang"; exit 1; }
+          echo "--- flag rejected by Bazel (bare)"
+          timeout 180 "$LAUNCHER" build --definitely_not_a_flag //... 2>&1 | grep -q "Unrecognized option" \
+            || { echo "ERROR: a bare Bazel-rejected flag must fail the same way"; exit 1; }
           echo "--- aspect dev test-template-snapshots"
           "$LAUNCHER" dev test-template-snapshots
           echo "--- aspect dev test-lint-template-snapshots"
@@ -648,11 +659,18 @@ jobs:
           echo "//examples/test_states:always_pass" >> "$PATTERNS"
           aspect test --task:name test-gha-target-pattern-file --target-pattern-file="$PATTERNS"
 
-          echo "--- IDE/BSP shape — forwarded --target_pattern_file"
+          echo "--- IDE/BSP shape — bazel flags typed directly, and one still wrapped"
+          # --tool_tag stays wrapped on purpose: --bazel-flag= is still supported
+          # and this is the only place CI exercises that spelling.
           aspect build --task:name test-gha-ide-target-pattern-file \
-            --bazel-flag=--target_pattern_file="$PATTERNS" \
+            --target_pattern_file="$PATTERNS" \
             --bazel-flag=--tool_tag=bazelbsp:3.2.0
           rm -f "$PATTERNS"
+
+          echo "--- bazel flags in Bazel's own spellings, both slots"
+          aspect --output_base "$RUNNER_TEMP/aspect-space-form-ob" \
+            build --task:name test-gha-bazel-flag-spellings \
+            -c opt --jobs 8 --nobuild //examples/test_states:always_pass
 
           echo "--- aspect test --coverage (+ --coverage-report + --coverage-tool)"
           REPORT=$(mktemp)

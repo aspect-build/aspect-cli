@@ -51,7 +51,7 @@ Usage:
     aspect gazelle --severity=fail --check-only=true --upload-gazelle-diff
     # Override target (e.g. from-source; pair with --config=pure_go on Linux).
     aspect gazelle --severity=fail --check-only=true \\
-        --gazelle-target=//tools/gazelle:gazelle_from_source --bazel-flag=--config=pure_go
+        --gazelle-target=//tools/gazelle:gazelle_from_source --config=pure_go
 
 CAUTION — --scope=changed and its dir-shaping flags (--dirs,
 --scope-all-on-change, --changed-file-pattern) narrow gazelle's work; each is a

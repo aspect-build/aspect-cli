@@ -315,10 +315,11 @@ echo "Startup opts: ${BAZEL_STARTUP_OPTS}"
 # redaction.rs). The exported BAZEL_BUILD_OPTS keeps the real value.
 echo "Build opts: $(printf '%s' "${BAZEL_BUILD_OPTS}" | sed 's/x-identity=[^ ]*/x-identity=<REDACTED>/g')"
 
-if [ -f /etc/bazel.bazelrc ]; then
-    echo "/etc/bazel.bazelrc exists ($(wc -l </etc/bazel.bazelrc) lines)"
+USER_BAZELRC="${HOME}/.bazelrc"
+if [ -f "${USER_BAZELRC}" ]; then
+    echo "${USER_BAZELRC} exists ($(wc -l <"${USER_BAZELRC}") lines)"
 else
-    echo "/etc/bazel.bazelrc does not exist"
+    echo "${USER_BAZELRC} does not exist"
 fi
 
 # Wait for runner cache warming to complete before touching Bazel. Warming

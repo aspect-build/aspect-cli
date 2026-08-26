@@ -32,6 +32,9 @@ def _impl(ctx: TaskContext) -> int:
     environment = get_workflows_environment(ctx.std)
     if environment.runner == None:
         info(ctx.std, "Not on an Aspect Workflows runner; no runner health check to run.")
+
+        # Nothing spawns Bazel here, so nothing forwards the routed flags.
+        bzl.flags.disclaim_passthrough(ctx)
         return 0
 
     # Register the active run command before the health check — it carries the

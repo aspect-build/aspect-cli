@@ -78,7 +78,7 @@ steps:
       # runner defaults to --remote_download_outputs=minimal (bb_clientd FUSE cache),
       # so without it the output stays remote and isn't there to copy. Mirrors
       # bootstrap.sh's //:cli build.
-      ASPECT_DEBUG=1 aspect build --task:name build-bk-axl-tests-bootstrap --bazel-flag=--remote_download_toplevel //crates/aspect-launcher //crates/aspect-cli
+      ASPECT_DEBUG=1 aspect build --task:name build-bk-axl-tests-bootstrap --remote_download_toplevel //crates/aspect-launcher //crates/aspect-cli
       WORKSPACE_ROOT=$$(pwd)
       mkdir -p target/ci
       # The CLI has a single host output, so cquery resolves it directly. Copy to a
@@ -138,16 +138,24 @@ steps:
       $$CLI --version
       echo "--- :aspect: aspect version"
       $$LAUNCHER version
-      echo "--- :aspect: invalid task-id"
-      $$LAUNCHER build --task-id not-a-uuid //... && echo "ERROR: --task-id should reject non-UUID" && exit 1 || true
-      echo "--- :aspect: invalid task-key"
-      $$LAUNCHER build --task:name "bad key!" //... && echo "ERROR: --task:name should reject invalid chars" && exit 1 || true
+      # Both must be rejected by the CLI's own validation, before it spawns
+      # bazel. Match the message, not just a non-zero exit: an unrecognized
+      # *flag* is forwarded to bazel now, so a misspelled flag here would
+      # still "fail" — after a full bazel invocation.
+      echo "--- :aspect: invalid --task:id"
+      $$LAUNCHER build --task:id not-a-uuid //... 2>&1 | grep -q "is not a valid UUID" || { echo "ERROR: --task:id should reject a non-UUID"; exit 1; }
+      echo "--- :aspect: invalid --task:name"
+      $$LAUNCHER build --task:name "bad key!" //... 2>&1 | grep -q "contains invalid characters" || { echo "ERROR: --task:name should reject invalid chars"; exit 1; }
       # A flag Bazel rejects has to come back as Bazel's error. This is the
       # shape that used to hang: Bazel exits without opening the build-event
       # pipe, and the reader waited on it forever. `timeout` bounds a
       # regression to a clear failure instead of the whole job budget.
-      echo "--- :aspect: flag rejected by Bazel"
+      # Both spellings have to behave identically: the explicit escape
+      # hatch, and the bare flag this routes to Bazel on its own.
+      echo "--- :aspect: flag rejected by Bazel (--bazel-flag)"
       timeout 180 $$LAUNCHER build --bazel-flag=--definitely_not_a_flag //... 2>&1 | grep -q "Unrecognized option" || { echo "ERROR: a Bazel-rejected flag must fail, not hang"; exit 1; }
+      echo "--- :aspect: flag rejected by Bazel (bare)"
+      timeout 180 $$LAUNCHER build --definitely_not_a_flag //... 2>&1 | grep -q "Unrecognized option" || { echo "ERROR: a bare Bazel-rejected flag must fail the same way"; exit 1; }
       echo "--- :aspect: aspect dev test-template-snapshots"
       $$LAUNCHER dev test-template-snapshots
       echo "--- :aspect: aspect dev test-lint-template-snapshots"
@@ -299,8 +307,8 @@ steps:
       # `--config=pure_go` is required on Linux: toolchains_llvm_bootstrapped's
       # lld can't accept Go's non-PIC relocations on x86_64. Pure Go skips the
       # cc-toolchain link step entirely. See .bazelrc for the config definition.
-      ASPECT_DEBUG=1 aspect gazelle --gazelle-target=//tools/gazelle:gazelle_from_source --bazel-flag=--config=pure_go --task:name gazelle-from-source-bk-debug
-      aspect gazelle --gazelle-target=//tools/gazelle:gazelle_from_source --bazel-flag=--config=pure_go --task:name gazelle-from-source-bk
+      ASPECT_DEBUG=1 aspect gazelle --gazelle-target=//tools/gazelle:gazelle_from_source --config=pure_go --task:name gazelle-from-source-bk-debug
+      aspect gazelle --gazelle-target=//tools/gazelle:gazelle_from_source --config=pure_go --task:name gazelle-from-source-bk
   - key: build-task
     depends_on:
       - pre-build
@@ -369,8 +377,8 @@ steps:
 
       echo "--- :aspect: IDE/BSP shape — forwarded --target_pattern_file"
       aspect build --task:name test-bk-ide-target-pattern-file \
-        --bazel-flag=--target_pattern_file=$$PATTERNS \
-        --bazel-flag=--tool_tag=bazelbsp:3.2.0
+        --target_pattern_file=$$PATTERNS \
+        --tool_tag=bazelbsp:3.2.0
       rm -f $$PATTERNS
 
       echo "--- :aspect: aspect test --coverage (+ --coverage-report + --coverage-tool)"

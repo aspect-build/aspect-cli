@@ -1189,7 +1189,7 @@ lint = task(
     args = {
         "aspects": args.string_list(
             long = "aspect",
-            description = "Bazel aspect label(s) to apply for linting (e.g. //tools/lint:linters.bzl%eslint). Repeat the flag to run multiple aspects in a single invocation. Aspects may also be supplied via `--bazel-flag=--aspects=…` or a bazelrc `--config`; at least one rules_lint aspect must reach Bazel one way or another.",
+            description = "Bazel aspect label(s) to apply for linting (e.g. //tools/lint:linters.bzl%eslint). Repeat the flag to run multiple aspects in a single invocation. Aspects may also be supplied via `--aspects=…` (Bazel's own flag, forwarded) or a bazelrc `--config`; at least one rules_lint aspect must reach Bazel one way or another.",
         ),
         "fix": args.boolean(
             description = (
