@@ -140,20 +140,26 @@ impl Pipe {
 
     /// Release a reader parked in [`Pipe::open`] by briefly becoming the writer
     /// it is waiting for: open the write end and close it without writing.
-    /// The reader's open returns and its first read reports end-of-stream.
     ///
     /// For callers whose real writer may die before it ever opens the FIFO:
     /// that leaves the `open` parked in the kernel with no read for
     /// [`RetryPolicy`] to govern, and nothing short of a signal to call it off.
+    ///
+    /// Nothing here teaches the reader anything new. Its `open` returns, and
+    /// what the first read then finds is whatever the FIFO already implies: no
+    /// writer attached and no data, so end-of-stream — a plain `Ok(0)` under
+    /// [`RetryPolicy::Never`], surfaced as `BrokenPipe` by
+    /// [`RetryPolicy::IfOpenForPid`] once it confirms the pid is not holding
+    /// the path open either.
     ///
     /// Returns whether a reader was actually waiting. `O_NONBLOCK` keeps this
     /// from becoming the mirror image of the problem it solves: with no reader
     /// on the other side the open fails `ENXIO` rather than parking, reported
     /// here as `Ok(false)`.
     ///
-    /// Harmless to call when the real writer did arrive: a FIFO reports
-    /// end-of-stream only once *every* writer has closed, so a poke alongside
-    /// a live writer is invisible to the reader.
+    /// Harmless if the real writer turns out to have arrived after all — a
+    /// FIFO ends only once *every* writer has closed, so a poke alongside a
+    /// live writer is invisible and reading proceeds as normal.
     pub fn poke_writer(path: &Path) -> io::Result<bool> {
         use std::os::unix::fs::OpenOptionsExt;
 
