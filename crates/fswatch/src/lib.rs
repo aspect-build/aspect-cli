@@ -2,14 +2,15 @@
 //!
 //! Consumers depend only on the backend-agnostic surface here ([`Subscription`],
 //! [`ChangeBatch`], [`watch`]); the concrete watcher behind it is chosen by
-//! [`Backend`]. Today the only backend is the in-process `notify` crate
-//! (FSEvents/inotify/etc). A future backend (e.g. a watchman client) plugs in as
-//! another [`Backend`] variant without touching consumers.
+//! [`Backend`]: the in-process `notify` crate (FSEvents/inotify/etc) or the
+//! `watchman` CLI. Further backends plug in as another [`Backend`] variant
+//! without touching consumers.
 
 mod debounce;
 mod notify_backend;
+mod watchman_backend;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[derive(Debug, thiserror::Error)]
@@ -81,16 +82,50 @@ pub trait Subscription: Send {
 /// Watch backend selector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Backend {
-    /// In-process watcher via the `notify` crate.
+    /// Watchman when the watched root carries a `.watchmanconfig` itself
+    /// (no ancestor discovery — an enclosing monorepo's marker must not
+    /// switch backends for a nested workspace), falling back to notify when
+    /// watchman fails to start. Otherwise notify.
     #[default]
+    Auto,
+    /// In-process watcher via the `notify` crate.
     Notify,
+    /// Out-of-process watcher via the `watchman` CLI, assumed to be on `PATH`.
+    Watchman,
 }
 
 /// Start watching. The returned [`Subscription`] owns the backend resources.
 pub fn watch(backend: Backend, config: WatchConfig) -> Result<Box<dyn Subscription>, WatchError> {
     match backend {
+        Backend::Auto => {
+            if in_watchman_project(&config.root) {
+                match watchman_backend::subscribe(config.clone()) {
+                    Ok(subscription) => return Ok(subscription),
+                    Err(e) => {
+                        tracing::warn!("watchman backend unavailable ({e}); falling back to notify")
+                    }
+                }
+            }
+            notify_backend::subscribe(config)
+        }
         Backend::Notify => notify_backend::subscribe(config),
+        Backend::Watchman => watchman_backend::subscribe(config),
     }
+}
+
+/// Whether `root` opts into watchman: a `.watchmanconfig` file in the watched
+/// root itself. Deliberately no ancestor walk — a marker above the root (e.g.
+/// an enclosing monorepo) must not switch backends for a nested workspace
+/// that didn't ask for it. Canonicalized so relative/symlinked roots resolve.
+fn in_watchman_project(root: &Path) -> bool {
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    root.join(".watchmanconfig").is_file()
+}
+
+pub(crate) fn ignored(path: &Path, ignore_prefixes: &[PathBuf]) -> bool {
+    ignore_prefixes
+        .iter()
+        .any(|prefix| path.starts_with(prefix))
 }
 
 /// A batch whose changes were entirely filtered away (and which carries no

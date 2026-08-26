@@ -9,7 +9,7 @@ use notify::{
 };
 
 use crate::debounce::Pending;
-use crate::{ChangeBatch, ChangeKind, Subscription, WatchConfig, WatchError, non_empty};
+use crate::{ChangeBatch, ChangeKind, Subscription, WatchConfig, WatchError, ignored, non_empty};
 
 pub(crate) fn subscribe(config: WatchConfig) -> Result<Box<dyn Subscription>, WatchError> {
     let pending = Arc::new(Mutex::new(Pending::default()));
@@ -156,12 +156,6 @@ fn ingest(pending: &mut Pending, event: &Event, ignore_prefixes: &[PathBuf]) {
         };
         pending.record(path.clone(), kind);
     }
-}
-
-fn ignored(path: &Path, ignore_prefixes: &[PathBuf]) -> bool {
-    ignore_prefixes
-        .iter()
-        .any(|prefix| path.starts_with(prefix))
 }
 
 /// FSEvents coalesces flags per path (a created-then-removed file can surface
