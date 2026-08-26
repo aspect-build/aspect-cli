@@ -23,7 +23,6 @@ starlark_derive = "0.13.0"
 starlark_map = "0.13.0"
 
 anyhow = "1.0.98"
-psl = "2"
 serde = { version = "1", features = ["derive"] }
 semver = "1"
 thiserror = "2.0.12"
