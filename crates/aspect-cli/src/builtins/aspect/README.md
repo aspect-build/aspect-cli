@@ -32,15 +32,16 @@ Every task:
 aspect build                               # //... in the current package
 aspect build //my/pkg/...
 aspect build -- //... -//experimental/...   # exclusions need a `--` separator
-aspect build --bazel-flag=--config=ci --bazel-flag=--keep_going //...
+aspect build --config=ci --keep_going //...          # Bazel flags typed directly
+aspect build -c opt --jobs 8 //...                   # Bazel's own spellings work
 ```
 
 Key flags:
 
 | Flag                       | Default | Notes |
 |----------------------------|---------|-------|
-| `--bazel-flag`             | (none)  | Forwarded as-is. Repeatable. |
-| `--bazel-startup-flag`     | (none)  | Forwarded as a startup flag (server-restarting). |
+| `--bazel-flag`             | (none)  | Forwarded as-is. Repeatable. Rarely needed: type the Bazel flag directly. Reach for this when a Bazel flag collides with one of the task's own. |
+| `--bazel-startup-flag`     | (none)  | The same, as a startup flag (server-restarting). Typing a startup flag before the task name does this for you. |
 | `--bes-backend`            | (none)  | `--bes_backend=<value>`. Repeatable. |
 | `--bes-header`             | (none)  | `--bes_header=<value>`. Repeatable. |
 | `--cancel`                 | `false` | Cancels any running invocation first. |
@@ -149,7 +150,7 @@ aspect gazelle --check                               # CI mode: report only, don
 aspect gazelle --check tools/go services/api         # limit to specific subtrees
 aspect gazelle --gazelle-flag=-progress              # forward flags to gazelle
 aspect gazelle --gazelle-command=fix                 # use 'fix' subcommand
-aspect gazelle --gazelle-target=//tools/gazelle:gazelle_from_source --bazel-flag=--config=pure_go
+aspect gazelle --gazelle-target=//tools/gazelle:gazelle_from_source --config=pure_go
 ```
 
 Why a single `-mode=diff` invocation rather than a check-then-fix sibling target: `with_check = True` only exists on `aspect_gazelle()` from `aspect_gazelle_prebuilt`; upstream `gazelle()` from rules_go has no equivalent. `-mode=diff` works on both.

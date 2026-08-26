@@ -216,9 +216,16 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                 modules: &modules,
             };
             let mut root_cmd = cmd.build(&cli_version)?;
+            // Finalize the surface (this is what injects `--help`) so routing
+            // sees every flag Clap knows, then let the selected task collect the
+            // flags Clap would reject — see `Cmd::route_unrecognized_flags`.
+            // Nothing to route means argv comes back verbatim, so a task that
+            // forwards nothing still gets Clap's parse error.
+            root_cmd.build();
             let mut cmd_for_help = root_cmd.clone();
+            let argv = cmd.route_unrecognized_flags(&root_cmd, std::env::args_os().collect());
 
-            let matches = match root_cmd.try_get_matches_from_mut(std::env::args_os()) {
+            let matches = match root_cmd.try_get_matches_from_mut(argv) {
                 Ok(m) => m,
                 Err(err) => {
                     err.print().ok();

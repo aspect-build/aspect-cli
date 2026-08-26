@@ -521,6 +521,23 @@ F = feature(implementation = _impl, args = {"rest": args.trailing_var_args()})
         );
     }
 
+    /// A passthrough bucket is defined by what one task failed to recognize, and
+    /// a feature's args are injected into every task.
+    #[test]
+    fn feature_passthrough_rejected() {
+        let err = eval_err(
+            r#"
+def _impl(ctx): pass
+F = feature(implementation = _impl, args = {"rest": args.passthrough(position = "post_command")})
+"#,
+        );
+        assert!(
+            err.contains("passthrough args are not allowed in features"),
+            "expected passthrough-not-allowed error, got: {}",
+            err
+        );
+    }
+
     #[test]
     fn feature_camelcase_export_valid() {
         assert!(

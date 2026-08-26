@@ -3,7 +3,7 @@
 # Tests for tools/bazel. Stubs both aspect and bazel so we can assert exactly
 # what the wrapper exec's: each stub prints its argv, one `ARG:<value>` per
 # line, prefixed with `INVOKED:<name>`. Dispatch/flag assertions capture the
-# stub's stdout (via run()); trace assertions capture stderr (Section 9).
+# stub's stdout (via run()); trace assertions capture stderr.
 #
 # Run: ./tools/wrapper-test.sh
 # Run under macOS's bash 3.2 (the wrapper's compatibility floor):
@@ -193,113 +193,133 @@ ARG://foo:bin" \
     "$(run run //foo:bin)"
 
 # =====================================================================
-# Section 3: Post-verb flag rewriting — bazel flags
+# Section 3: Flags — forwarded verbatim
 # =====================================================================
+#
+# The wrapper knows nothing about Bazel's flags. Aspect takes a Bazel flag
+# directly and forwards what it does not recognize, in the slot it was typed
+# in, so every shape below has to arrive at aspect exactly as typed.
 
-check "post-verb bazel: boolean wrapped (--keep_going)" \
+check "post-verb bazel: boolean forwarded verbatim" \
     "INVOKED:aspect
 ARG:build
-ARG:--bazel-flag=--keep_going
+ARG:--keep_going
 ARG://..." \
     "$(run build --keep_going //...)"
 
-check "post-verb bazel: boolean negation wrapped (--nobuild)" \
+check "post-verb bazel: =value form forwarded verbatim" \
     "INVOKED:aspect
 ARG:build
-ARG:--bazel-flag=--nobuild
-ARG://..." \
-    "$(run build --nobuild //...)"
-
-check "post-verb bazel: =value form wrapped (--config=ci)" \
-    "INVOKED:aspect
-ARG:build
-ARG:--bazel-flag=--config=ci
+ARG:--config=ci
 ARG://..." \
     "$(run build --config=ci //...)"
 
-check "post-verb bazel: space-value form glued (--config ci)" \
+check "post-verb bazel: space-value form stays two tokens" \
     "INVOKED:aspect
 ARG:build
-ARG:--bazel-flag=--config=ci
+ARG:--config
+ARG:ci
 ARG://..." \
     "$(run build --config ci //...)"
 
-check "post-verb bazel: repeated --config space-value" \
+check "post-verb bazel: short flag with space-value stays two tokens" \
     "INVOKED:aspect
 ARG:build
-ARG:--bazel-flag=--config=ci
-ARG:--bazel-flag=--config=remote
+ARG:-c
+ARG:opt
 ARG://..." \
-    "$(run build --config ci --config remote //...)"
+    "$(run build -c opt //...)"
 
-check "post-verb bazel: --jobs with space-value (number)" \
+check "post-verb bazel: value containing spaces survives as one token" \
     "INVOKED:aspect
 ARG:build
-ARG:--bazel-flag=--jobs=4
+ARG:--copt=-DMSG=hello world
 ARG://..." \
-    "$(run build --jobs 4 //...)"
+    "$(run build "--copt=-DMSG=hello world" //...)"
 
-check "post-verb bazel: --jobs with =value" \
+check "mixed: aspect and bazel flags keep their order" \
     "INVOKED:aspect
 ARG:build
-ARG:--bazel-flag=--jobs=8
+ARG:--task:name=x
+ARG:--keep_going
+ARG:--config
+ARG:ci
 ARG://..." \
-    "$(run build --jobs=8 //...)"
+    "$(run build --task:name=x --keep_going --config ci //...)"
 
-check "post-verb bazel: --remote_executor with value containing colons" \
+check "pre-verb: bazel startup flag stays before the verb" \
+    "INVOKED:aspect
+ARG:--output_base=/tmp/o
+ARG:build
+ARG://..." \
+    "$(run --output_base=/tmp/o build //...)"
+
+check "pre-verb: bazel startup flag space-value stays two tokens, before the verb" \
+    "INVOKED:aspect
+ARG:--output_base
+ARG:/tmp/o
+ARG:build
+ARG://..." \
+    "$(run --output_base /tmp/o build //...)"
+
+check "pre-verb: aspect global and bazel startup keep their order" \
+    "INVOKED:aspect
+ARG:--task:name=x
+ARG:--output_base=/tmp/o
+ARG:build
+ARG://..." \
+    "$(run --task:name=x --output_base=/tmp/o build //...)"
+
+# A space-form startup option's value must not be read as the verb, or a
+# bazel-only command behind one would route to aspect.
+check "verb: --bazelrc value that looks like a verb does not become the verb" \
+    "INVOKED:bazel
+ARG:--bazelrc
+ARG:build
+ARG:query
+ARG:deps(//foo)" \
+    "$(run --bazelrc build query 'deps(//foo)')"
+
+check "verb: a boolean startup option consumes nothing, so the verb follows it" \
+    "INVOKED:bazel
+ARG:--batch
+ARG:query
+ARG:deps(//foo)" \
+    "$(run --batch query 'deps(//foo)')"
+
+check "verb: an =value startup option consumes nothing either" \
+    "INVOKED:bazel
+ARG:--bazelrc=build
+ARG:query
+ARG:deps(//foo)" \
+    "$(run --bazelrc=build query 'deps(//foo)')"
+
+# A space-form startup option before a *custom* verb leaves its value looking
+# like the verb. Harmless: both readings route to aspect, which does its own walk.
+check "pre-verb: space-value startup flag before a custom .axl verb still reaches aspect" \
+    "INVOKED:aspect
+ARG:--output_base
+ARG:/tmp/o
+ARG:mytask
+ARG://..." \
+    "$(run --output_base /tmp/o mytask //...)"
+
+check "pre-verb: space-value startup flag before an aspect-only verb" \
+    "INVOKED:aspect
+ARG:--output_base
+ARG:/tmp/o
+ARG:lint
+ARG://..." \
+    "$(run --output_base /tmp/o lint //...)"
+
+check "edge: -- with a bazel flag before it, positionals after" \
     "INVOKED:aspect
 ARG:build
-ARG:--bazel-flag=--remote_executor=grpc://exec.example.com:443
-ARG://..." \
-    "$(run build --remote_executor grpc://exec.example.com:443 //...)"
-
-check "post-verb bazel: --define KEY=VAL" \
-    "INVOKED:aspect
-ARG:build
-ARG:--bazel-flag=--define=foo=bar
-ARG://..." \
-    "$(run build --define foo=bar //...)"
-
-check "post-verb bazel: --action_env with space-value" \
-    "INVOKED:aspect
-ARG:test
-ARG:--bazel-flag=--action_env=HOME=/tmp
-ARG://..." \
-    "$(run test --action_env HOME=/tmp //...)"
-
-check "post-verb bazel: --test_arg with =value containing flag-shaped value" \
-    "INVOKED:aspect
-ARG:test
-ARG:--bazel-flag=--test_arg=--verbose
-ARG://..." \
-    "$(run test --test_arg=--verbose //...)"
-
-check "post-verb bazel: --test_output with space-value" \
-    "INVOKED:aspect
-ARG:test
-ARG:--bazel-flag=--test_output=errors
-ARG://..." \
-    "$(run test --test_output errors //...)"
-
-check "post-verb bazel: --test_filter with regex value" \
-    "INVOKED:aspect
-ARG:test
-ARG:--bazel-flag=--test_filter=^Foo.*Bar$
-ARG://..." \
-    "$(run test --test_filter '^Foo.*Bar$' //...)"
-
-check "post-verb bazel: --copt with space-value" \
-    "INVOKED:aspect
-ARG:build
-ARG:--bazel-flag=--copt=-O2
-ARG://..." \
-    "$(run build --copt -O2 //...)"
-
-check "post-verb bazel: trailing value-taking flag with no value" \
-    "INVOKED:aspect
-ARG:build
-ARG:--bazel-flag=--config" \
-    "$(run build --config)"
+ARG:--keep_going
+ARG:--
+ARG://...
+ARG:-//experimental/..." \
+    "$(run build --keep_going -- //... -//experimental/...)"
 
 check "post-verb: unknown flag (typo / unlisted) passes through to aspect" \
     "INVOKED:aspect
@@ -373,52 +393,9 @@ ARG://..." \
 # Section 5: Mixed aspect + bazel flags
 # =====================================================================
 
-check "mixed: aspect kebab + bazel boolean + bazel =value" \
-    "INVOKED:aspect
-ARG:build
-ARG:--task-key=mybuild
-ARG:--bazel-flag=--keep_going
-ARG:--bazel-flag=--config=ci
-ARG://..." \
-    "$(run build --task-key=mybuild --keep_going --config=ci //...)"
-
-check "mixed: bazel space-value sandwiched between aspect flags" \
-    "INVOKED:aspect
-ARG:build
-ARG:--task-key=mybuild
-ARG:--bazel-flag=--config=ci
-ARG:--timing=summary
-ARG://..." \
-    "$(run build --task-key=mybuild --config ci --timing=summary //...)"
-
-check "mixed: many flags in random order" \
-    "INVOKED:aspect
-ARG:test
-ARG:--bazel-flag=--keep_going
-ARG:--task-key=t1
-ARG:--bazel-flag=--config=ci
-ARG:--coverage
-ARG:--bazel-flag=--test_output=errors
-ARG://..." \
-    "$(run test --keep_going --task-key=t1 --config ci --coverage --test_output errors //...)"
-
 # =====================================================================
 # Section 6: Pre-verb (startup) flag handling
 # =====================================================================
-
-check "pre-verb: bazel startup flag → --bazel-startup-flag= (after verb)" \
-    "INVOKED:aspect
-ARG:build
-ARG:--bazel-startup-flag=--output_base=/tmp/foo
-ARG://..." \
-    "$(run --output_base=/tmp/foo build //...)"
-
-check "pre-verb: bazel startup flag space-value → glued and wrapped" \
-    "INVOKED:aspect
-ARG:build
-ARG:--bazel-startup-flag=--output_base=/tmp/foo
-ARG://..." \
-    "$(run --output_base /tmp/foo build //...)"
 
 check "pre-verb: aspect global flag (--task-key) before verb → pre-verb aspect" \
     "INVOKED:aspect
@@ -435,34 +412,11 @@ ARG:build
 ARG://..." \
     "$(run --task-key t1 build //...)"
 
-check "pre-verb: mixed aspect global + bazel startup" \
-    "INVOKED:aspect
-ARG:--task-key=t1
-ARG:build
-ARG:--bazel-startup-flag=--output_base=/tmp/x
-ARG://..." \
-    "$(run --task-key=t1 --output_base=/tmp/x build //...)"
-
-check "pre-verb: aspect global + bazel startup → bazel startup goes after verb" \
-    "INVOKED:aspect
-ARG:--task-key=t1
-ARG:build
-ARG:--bazel-startup-flag=--output_base=/tmp/x
-ARG:--bazel-flag=--keep_going
-ARG://..." \
-    "$(run --task-key=t1 --output_base=/tmp/x build --keep_going //...)"
-
 check "pre-verb: aspect verb (lint) with pre-verb aspect global" \
     "INVOKED:aspect
 ARG:--task-key=t1
 ARG:lint" \
     "$(run --task-key=t1 lint)"
-
-check "pre-verb: aspect verb (lint) with pre-verb bazel startup → moved post-verb" \
-    "INVOKED:aspect
-ARG:lint
-ARG:--bazel-startup-flag=--output_base=/tmp/x" \
-    "$(run --output_base=/tmp/x lint)"
 
 # =====================================================================
 # Section 7: Edge cases — `--`, positionals, hyphen-led targets
@@ -476,15 +430,6 @@ ARG://...
 ARG:-//experimental/..." \
     "$(run build -- //... -//experimental/...)"
 
-check "edge: -- with bazel flag before, both after" \
-    "INVOKED:aspect
-ARG:build
-ARG:--bazel-flag=--keep_going
-ARG:--
-ARG://...
-ARG:-//experimental/..." \
-    "$(run build --keep_going -- //... -//experimental/...)"
-
 check "edge: -- with run args (run forwards verbatim to bazel)" \
     "INVOKED:bazel
 ARG:run
@@ -494,27 +439,6 @@ ARG:--task-key
 ARG:value
 ARG:--keep_going" \
     "$(run run //foo:bin -- --task-key value --keep_going)"
-
-check "edge: target before any flag" \
-    "INVOKED:aspect
-ARG:build
-ARG://...
-ARG:--bazel-flag=--keep_going" \
-    "$(run build //... --keep_going)"
-
-check "edge: flag with empty value (--config=)" \
-    "INVOKED:aspect
-ARG:build
-ARG:--bazel-flag=--config=
-ARG://..." \
-    "$(run build --config= //...)"
-
-check "edge: flag with value containing spaces" \
-    "INVOKED:aspect
-ARG:build
-ARG:--bazel-flag=--workspace_status_command=/path/to/cmd arg1
-ARG://..." \
-    "$(run build --workspace_status_command '/path/to/cmd arg1' //...)"
 
 check "edge: target with embedded equals sign in label is positional, not flag" \
     "INVOKED:aspect
@@ -596,9 +520,9 @@ check "trace: aspect-only verb traces by default (non-TTY), docs but no nudge" \
     "$(trace lint)"
 
 # Shadowing verb (build): also a real bazel command, so the SKIP nudge fires.
-# Also asserts bazel flags are shown rewritten in the trace.
-check "trace: shadowing verb shows rewritten flags + SKIP nudge + docs" \
-    "[tools/bazel] aspect build --bazel-flag=--keep_going --bazel-flag=--config=ci //... | $SKIP_NUDGE — $DOCS" \
+# Also asserts the trace shows the command as typed.
+check "trace: shadowing verb shows the command as typed + SKIP nudge + docs" \
+    "[tools/bazel] aspect build --keep_going --config=ci //... | $SKIP_NUDGE — $DOCS" \
     "$(trace build --keep_going --config=ci //...)"
 
 check "trace: shadow nudge fires on 'test' too (verb in both lists)" \
@@ -800,65 +724,16 @@ ARG://..." \
 # Section 12: Bazel short-flag abbreviations that take a value (-c, -j)
 # =====================================================================
 
-check "short: -c opt (space) → --bazel-flag=-c=opt, opt not a target" \
-    "INVOKED:aspect
-ARG:build
-ARG:--bazel-flag=-c=opt
-ARG://..." \
-    "$(run build -c opt //...)"
-
-check "short: -j 8 (space) → --bazel-flag=-j=8" \
-    "INVOKED:aspect
-ARG:build
-ARG:--bazel-flag=-j=8
-ARG://..." \
-    "$(run build -j 8 //...)"
-
-check "short: -c=opt (already glued) → single token, unchanged" \
-    "INVOKED:aspect
-ARG:build
-ARG:--bazel-flag=-c=opt
-ARG://..." \
-    "$(run build -c=opt //...)"
-
-check "short: boolean shorts (-k -s) stay single tokens, don't eat next arg" \
-    "INVOKED:aspect
-ARG:build
-ARG:--bazel-flag=-k
-ARG:--bazel-flag=-s
-ARG://..." \
-    "$(run build -k -s //...)"
-
-check "short: -c at end of argv (no value) → passes as single token" \
-    "INVOKED:aspect
-ARG:build
-ARG://...
-ARG:--bazel-flag=-c" \
-    "$(run build //... -c)"
-
 # =====================================================================
-# Section 13: Aspect-verb bazel-flag forwarding (ASPECT_VERBS_WITH_BAZEL_FLAGS)
+# Section 13: Aspect-verb bazel-flag forwarding (ASPECT_VERBS)
 # =====================================================================
-
-check "fwd: format --keep_going → aspect format --bazel-flag=--keep_going" \
-    "INVOKED:aspect
-ARG:format
-ARG:--bazel-flag=--keep_going" \
-    "$(run format --keep_going)"
-
-check "fwd: lint space-value flag rewritten, aspect flag preserved" \
-    "INVOKED:aspect
-ARG:lint
-ARG:--github-lint-comments:enabled=true
-ARG:--bazel-flag=--config=ci" \
-    "$(run lint --github-lint-comments:enabled=true --config ci)"
 
 # =====================================================================
 # Section 15: Closed-set model — bazel is the known set, rest → aspect
 # =====================================================================
 
 # Unknown verb (custom .axl task): routes to aspect, args verbatim (no
-# bazel-flag rewriting — not in ASPECT_VERBS_WITH_BAZEL_FLAGS).
+# not in ASPECT_VERBS, so no vanilla-bazel fallback).
 check "model: unknown verb (custom task) → aspect, args verbatim" \
     "INVOKED:aspect
 ARG:mytask
@@ -874,13 +749,6 @@ ARG://..." \
     "$(run coverage //...)"
 
 # Boolean negation (--no<flag>) is recognized as a bazel flag and wrapped.
-check "model: --nokeep_going recognized as bazel boolean → wrapped" \
-    "INVOKED:aspect
-ARG:build
-ARG:--bazel-flag=--nokeep_going
-ARG://..." \
-    "$(run build --nokeep_going //...)"
-
 # A flag in no bazel list (aspect feature flag) passes through to aspect.
 check "model: aspect feature flag (colon-namespaced) passes through" \
     "INVOKED:aspect

@@ -20,6 +20,7 @@ pub use aspect::auth::{UriProfile, profile_for_uri, resolve_access_token, resolv
 pub mod feature;
 pub mod grpc;
 pub mod names;
+pub mod passthrough;
 pub mod r#trait;
 
 pub mod arg;

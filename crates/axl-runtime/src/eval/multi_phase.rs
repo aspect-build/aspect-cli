@@ -9,12 +9,14 @@ use uuid::Uuid;
 
 use crate::banner;
 use crate::ci::on_recognized_ci;
+use crate::diag;
 use crate::engine::arguments::Arguments;
-use crate::engine::bazel::Bazel;
+use crate::engine::bazel::{Bazel, ClaimCheck};
 use crate::engine::config_context::ConfigContext;
 use crate::engine::feature::{Feature, FeatureLike, FrozenFeature};
 use crate::engine::feature_context::FeatureContext;
 use crate::engine::feature_map::FeatureMap;
+use crate::engine::passthrough;
 use crate::engine::task::{FrozenTask, Task, TaskLike};
 use crate::engine::task_context::TaskContext;
 use crate::engine::task_info::PhaseRecord;
@@ -561,16 +563,24 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             None => heap.alloc(TraitMap::new()),
         };
 
-        let bazel = heap.alloc(Bazel {
-            active_rc: std::cell::RefCell::new(None),
-        });
         // Allocate `task_info` on the heap and keep the resulting Value
         // so we can read back timing + phases after `_impl` returns.
         // `TaskInfo::started_at` is the authoritative task start (stamped
         // in `TaskInfo::new`), so we don't need a stack-local `task_start`.
         let task_info_val = heap.alloc(task_info);
+        // Keep the args Value: the claim record is read back off it before every
+        // Bazel invocation and once more after `_impl` returns.
+        let task_args_val = heap.alloc(task_args);
+        let bazel = heap.alloc(Bazel {
+            active_rc: std::cell::RefCell::new(None),
+            claims: ClaimCheck {
+                task_kind: task_kind.clone(),
+                buckets: passthrough::bucket_names(task),
+                args: task_args_val,
+            },
+        });
         let context = heap.alloc(TaskContext::new(
-            heap.alloc(task_args),
+            task_args_val,
             task_trait_map,
             task_info_val,
             bazel,
@@ -584,6 +594,32 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         run_deferred(context, &mut eval);
         let ret = impl_result?;
         let (exit_code, flagged, conclusion) = unpack_task_return(ret);
+
+        // The task has had its chance to act on the flags the CLI could not
+        // attribute to a declared arg.
+        let unclaimed = passthrough::unclaimed(&passthrough::bucket_names(task), task_args_val);
+        let exit_code = if unclaimed.is_empty() {
+            exit_code
+        } else {
+            // A task that concluded with its own non-zero code has the more
+            // informative story, so it keeps it; only an otherwise-successful
+            // run fails over dropped flags. A hard error never reaches here at
+            // all (`impl_result?` above), so a real failure is never masked.
+            let failed_on_its_own = matches!(exit_code, Some(code) if code != 0);
+            for (bucket, flags) in &unclaimed {
+                let message = passthrough::message(&task_kind, "return", bucket, flags);
+                if failed_on_its_own {
+                    diag::warn(&message);
+                } else {
+                    diag::error(&message);
+                }
+            }
+            if failed_on_its_own {
+                exit_code
+            } else {
+                Some(passthrough::EXIT_UNCLAIMED)
+            }
+        };
 
         // Reads elapsed + phases off the heap-allocated TaskInfo. Closes
         // any phase still active when `_impl` returned so the breakdown
@@ -1014,11 +1050,125 @@ mod tests {
         render_phase_breakdown, render_timing_segment, task_label_for,
     };
     use crate::engine::arguments::Arguments;
+    use crate::engine::passthrough;
     use crate::engine::task_info::PhaseRecord;
     use crate::eval::Loader;
     use crate::module::Mod;
     use starlark::values::ValueLike;
     use std::time::Duration;
+
+    /// A task declaring an `args.passthrough()` bucket promises to act on what
+    /// the CLI routes into it. These four pin the whole contract: the task gets
+    /// to run first (it may want to inspect the flags), a claim satisfies the
+    /// promise, a bare read does not, and an empty bucket is never a complaint.
+    /// Anything that reaches a Bazel server must be stopped *before* it does:
+    /// the flags are missing from the command line we would run, and an
+    /// unclaimed startup option means we would even be talking to the wrong
+    /// server. Finding that out after a build costs the whole build.
+    #[test]
+    fn reaching_bazel_without_claiming_fails_before_the_spawn() {
+        for call in [
+            r#"ctx.bazel.build("//...", stdout = None, stderr = None).wait()"#,
+            r#"ctx.bazel.query("//...")"#,
+            r#"ctx.bazel.info()"#,
+            "ctx.bazel.shutdown()",
+            "ctx.bazel.health_check()",
+            "ctx.bazel.recover_poisoned_sandbox()",
+            "ctx.bazel.version()",
+        ] {
+            let code = format!(
+                r#"
+def _impl(ctx):
+    {call}
+    return 0
+
+t = task(implementation = _impl, args = {{"rest": args.passthrough(position = "post_command")}})
+"#
+            );
+            let err = crate::test::eval(&code)
+                .with_fake_bazel()
+                .with_string_list_args([("rest", vec!["--jobs=8"])])
+                .run_task(0)
+                .expect_err("the invocation must be refused");
+            let message = format!("{err:?}");
+            assert!(
+                message.contains("--jobs=8") && message.contains("about to run bazel"),
+                "{call}: expected the claim diagnostic, got: {message}",
+            );
+        }
+    }
+
+    /// Claiming first lets the same task through to the spawn.
+    #[test]
+    fn spawning_bazel_after_claiming_is_allowed() {
+        let code = r#"
+def _impl(ctx):
+    _ = ctx.args.claim("rest")
+    ctx.bazel.build("//...", stdout = None, stderr = None).wait()
+    return 0
+
+t = task(implementation = _impl, args = {"rest": args.passthrough(position = "post_command")})
+"#;
+        crate::test::eval(code)
+            .with_fake_bazel()
+            .with_string_list_args([("rest", vec!["--jobs=8"])])
+            .run_task(0)
+            .expect("a claimed bucket lets the invocation run");
+    }
+
+    const PASSTHROUGH_TASK: &str = r#"
+def _claims(ctx):
+    _ = ctx.args.claim("rest")
+    return 0
+
+def _reads(ctx):
+    _ = ctx.args.rest
+    return 0
+
+def _fails(ctx):
+    return 1
+
+claims = task(implementation = _claims, args = {"rest": args.passthrough(position = "post_command")})
+reads = task(implementation = _reads, args = {"rest": args.passthrough(position = "post_command")})
+fails = task(implementation = _fails, args = {"rest": args.passthrough(position = "post_command")})
+"#;
+
+    fn run_passthrough_task(index: usize, routed: Vec<&str>) -> Option<u8> {
+        crate::test::eval(PASSTHROUGH_TASK)
+            .with_string_list_args([("rest", routed)])
+            .run_task(index)
+            .expect("task runs")
+    }
+
+    #[test]
+    fn claiming_routed_flags_satisfies_the_contract() {
+        assert_eq!(run_passthrough_task(0, vec!["--jobs=8"]), Some(0));
+    }
+
+    /// Reading is inspecting, not forwarding — the flags still went nowhere.
+    #[test]
+    fn reading_routed_flags_without_claiming_fails_the_task() {
+        assert_eq!(
+            run_passthrough_task(1, vec!["--jobs=8"]),
+            Some(passthrough::EXIT_UNCLAIMED)
+        );
+    }
+
+    /// The common case: a task declares a bucket, the user routed nothing into
+    /// it, and nobody had to claim anything.
+    #[test]
+    fn an_empty_bucket_is_not_a_failure() {
+        assert_eq!(run_passthrough_task(1, vec![]), Some(0));
+    }
+
+    /// A task that concluded with its own non-zero code keeps it: its failure is
+    /// the more useful story, so the dropped flags are reported as a warning
+    /// rather than replacing the exit code. (A task that hard-errors never
+    /// reaches the check at all.)
+    #[test]
+    fn a_failing_task_keeps_its_own_exit_code() {
+        assert_eq!(run_passthrough_task(2, vec!["--jobs=8"]), Some(1));
+    }
 
     #[test]
     fn task_label_brackets_kind_when_name_carries_info() {

@@ -36,6 +36,7 @@ pub fn eval(code: &str) -> EvalBuilder {
         code: code.to_string(),
         with_loader: false,
         with_fake_bazel: false,
+        string_list_args: vec![],
     }
 }
 
@@ -43,6 +44,7 @@ pub struct EvalBuilder {
     code: String,
     with_loader: bool,
     with_fake_bazel: bool,
+    string_list_args: Vec<(String, Vec<String>)>,
 }
 
 impl EvalBuilder {
@@ -133,9 +135,29 @@ impl EvalBuilder {
         })
     }
 
+    /// Seed `ctx.args` for [`EvalBuilder::run_task`] with list-of-string values,
+    /// standing in for the CLI merge this harness skips. Enough to model an
+    /// `args.passthrough()` bucket the parser routed flags into.
+    pub fn with_string_list_args<'a>(
+        mut self,
+        args: impl IntoIterator<Item = (&'a str, Vec<&'a str>)>,
+    ) -> Self {
+        self.string_list_args = args
+            .into_iter()
+            .map(|(name, values)| {
+                (
+                    name.to_owned(),
+                    values.into_iter().map(str::to_owned).collect(),
+                )
+            })
+            .collect();
+        self
+    }
+
     /// Drive `MultiPhaseEval` Phase 1 (discover tasks) + Phase 4 (execute).
     /// Phase 2 (configs) and Phase 3 (features) are skipped — the snippet must
-    /// be self-contained. Task `idx` runs with empty `Arguments`.
+    /// be self-contained. Task `idx` runs with empty `Arguments` unless
+    /// [`EvalBuilder::with_string_list_args`] seeded some.
     ///
     /// Snippets that call `ctx.bazel.build` should opt in via
     /// `.with_fake_bazel()` so the runtime spawns the basil fake-bazel
@@ -177,7 +199,18 @@ impl EvalBuilder {
                     None,
                     None,
                     crate::eval::TimingMode::default(),
-                    |_t, _h| Arguments::new(),
+                    |_t, heap| {
+                        let args = Arguments::new();
+                        for (name, values) in &self.string_list_args {
+                            args.insert(
+                                name.clone(),
+                                heap.alloc(starlark::values::list::AllocList(
+                                    values.iter().map(String::as_str),
+                                )),
+                            );
+                        }
+                        args
+                    },
                 )
                 .map_err(anyhow::Error::from)?;
             Ok(exit)

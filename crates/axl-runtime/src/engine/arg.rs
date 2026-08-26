@@ -22,6 +22,40 @@ use starlark::values::starlark_value;
 use starlark::values::starlark_value_as_type::StarlarkValueAsType;
 use starlark::values::typing::TypeCompiled;
 
+/// Which side of the task name an [`Arg::Passthrough`] collects from.
+///
+/// The split mirrors Bazel's own command line, where an option's meaning
+/// depends on whether it precedes the command: `bazel --output_base=/tmp build`
+/// vs `bazel build --keep_going`. A task wrapping another tool declares one
+/// bucket per slot so it can forward each to the right place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Allocative)]
+pub enum PassthroughPosition {
+    /// Flags typed before the task name (Bazel's startup-option slot).
+    PreCommand,
+    /// Flags typed after the task name.
+    PostCommand,
+}
+
+impl PassthroughPosition {
+    pub const PRE_COMMAND: &'static str = "pre_command";
+    pub const POST_COMMAND: &'static str = "post_command";
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            Self::PRE_COMMAND => Some(Self::PreCommand),
+            Self::POST_COMMAND => Some(Self::PostCommand),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PreCommand => Self::PRE_COMMAND,
+            Self::PostCommand => Self::POST_COMMAND,
+        }
+    }
+}
+
 #[derive(Clone, Debug, ProvidesStaticType, NoSerialize, Allocative)]
 pub enum Arg {
     String {
@@ -37,6 +71,9 @@ pub enum Arg {
         /// which applies when the flag is absent entirely — a flag with both can
         /// tell "not passed" from "passed bare".
         bare: Option<String>,
+        /// Keep this arg off the CLI: settable from `config.axl` only. See
+        /// [`Arg::config_only`].
+        config_only: bool,
     },
     Boolean {
         required: bool,
@@ -44,6 +81,9 @@ pub enum Arg {
         short: Option<String>,
         long: Option<String>,
         description: Option<String>,
+        /// Keep this arg off the CLI: settable from `config.axl` only. See
+        /// [`Arg::config_only`].
+        config_only: bool,
     },
     Int {
         required: bool,
@@ -51,6 +91,9 @@ pub enum Arg {
         short: Option<String>,
         long: Option<String>,
         description: Option<String>,
+        /// Keep this arg off the CLI: settable from `config.axl` only. See
+        /// [`Arg::config_only`].
+        config_only: bool,
     },
     UInt {
         required: bool,
@@ -58,6 +101,9 @@ pub enum Arg {
         short: Option<String>,
         long: Option<String>,
         description: Option<String>,
+        /// Keep this arg off the CLI: settable from `config.axl` only. See
+        /// [`Arg::config_only`].
+        config_only: bool,
     },
     Positional {
         minimum: u32,
@@ -68,12 +114,41 @@ pub enum Arg {
     TrailingVarArgs {
         description: Option<String>,
     },
+    /// Collects the hyphen-led tokens the task does not otherwise declare, in
+    /// command-line order, instead of failing the parse with "unexpected
+    /// argument". `position` selects which side of the task name it collects
+    /// from; a task may declare one bucket per position.
+    ///
+    /// Tokens are collected verbatim: nothing is rewritten, so the wrapped tool
+    /// sees what was typed. A collected flag claims the token after it only when
+    /// `value_flags_from` lists it as taking a separate value — the arity of a
+    /// flag nobody declared is otherwise unknowable, so `--unknown 8` collects
+    /// the flag and leaves `8` as a positional.
+    ///
+    /// Declaring a bucket comes with an obligation: the task must claim it
+    /// (`ctx.args.claim(name)`) to say those flags are its to act on. The
+    /// runtime refuses to spawn the wrapped tool while a bucket holds unclaimed
+    /// flags, and fails the invocation if any are still unclaimed when the task
+    /// returns, rather than dropping them silently.
+    Passthrough {
+        position: PassthroughPosition,
+        /// Name of a sibling `args.string_list` arg listing the flags that take
+        /// a separate value (`-c opt`), so those two tokens are collected
+        /// together instead of the value being left behind as a positional.
+        /// Reading it from a sibling arg rather than inline is what lets
+        /// `config.axl` replace the list.
+        value_flags_from: Option<String>,
+        description: Option<String>,
+    },
     StringList {
         required: bool,
         default: Vec<String>,
         short: Option<String>,
         long: Option<String>,
         description: Option<String>,
+        /// Keep this arg off the CLI: settable from `config.axl` only. See
+        /// [`Arg::config_only`].
+        config_only: bool,
     },
     BooleanList {
         required: bool,
@@ -81,6 +156,9 @@ pub enum Arg {
         short: Option<String>,
         long: Option<String>,
         description: Option<String>,
+        /// Keep this arg off the CLI: settable from `config.axl` only. See
+        /// [`Arg::config_only`].
+        config_only: bool,
     },
     IntList {
         required: bool,
@@ -88,6 +166,9 @@ pub enum Arg {
         short: Option<String>,
         long: Option<String>,
         description: Option<String>,
+        /// Keep this arg off the CLI: settable from `config.axl` only. See
+        /// [`Arg::config_only`].
+        config_only: bool,
     },
     UIntList {
         required: bool,
@@ -95,6 +176,9 @@ pub enum Arg {
         short: Option<String>,
         long: Option<String>,
         description: Option<String>,
+        /// Keep this arg off the CLI: settable from `config.axl` only. See
+        /// [`Arg::config_only`].
+        config_only: bool,
     },
     /// Config-only arg — not exposed on the CLI. Set via config.axl only.
     ///
@@ -120,8 +204,9 @@ starlark_simple_value!(Arg);
 impl Arg {
     /// Returns `true` if this arg was declared with `required = true`.
     ///
-    /// Positional, TrailingVarArgs, and Custom do not carry a `required` field — callers
-    /// should disallow those in contexts where required args are not acceptable.
+    /// Positional, TrailingVarArgs, Passthrough, and Custom do not carry a `required`
+    /// field — callers should disallow those in contexts where required args are not
+    /// acceptable.
     pub fn is_required(&self) -> bool {
         match self {
             Self::String { required, .. }
@@ -132,14 +217,42 @@ impl Arg {
             | Self::BooleanList { required, .. }
             | Self::IntList { required, .. }
             | Self::UIntList { required, .. } => *required,
-            Self::Positional { .. } | Self::TrailingVarArgs { .. } | Self::Custom { .. } => false,
+            Self::Positional { .. }
+            | Self::TrailingVarArgs { .. }
+            | Self::Passthrough { .. }
+            | Self::Custom { .. } => false,
         }
     }
 
-    /// Returns `true` if this arg is exposed on the CLI (flags, positional, or trailing).
-    /// Only `Custom` is not CLI-exposed (config.axl only).
+    /// Returns `true` if this arg was declared `config_only = True`, keeping it
+    /// off the CLI and settable from config.axl only.
+    ///
+    /// Every flag-shaped kind carries the knob. The argv-shaped kinds
+    /// (`positional`, `trailing_var_args`, `passthrough`) do not: their content
+    /// comes from the command line, so there would be nothing left to set. See
+    /// also [`Arg::Custom`], which is config-only by construction.
+    pub fn config_only(&self) -> bool {
+        match self {
+            Self::String { config_only, .. }
+            | Self::Boolean { config_only, .. }
+            | Self::Int { config_only, .. }
+            | Self::UInt { config_only, .. }
+            | Self::StringList { config_only, .. }
+            | Self::BooleanList { config_only, .. }
+            | Self::IntList { config_only, .. }
+            | Self::UIntList { config_only, .. } => *config_only,
+            Self::Positional { .. }
+            | Self::TrailingVarArgs { .. }
+            | Self::Passthrough { .. }
+            | Self::Custom { .. } => false,
+        }
+    }
+
+    /// Returns `true` if this arg is exposed on the CLI (flags, positional, or
+    /// trailing). `Custom` never is, and any flag declared
+    /// `config_only = True` opts out — all are set from config.axl only.
     pub fn is_cli_exposed(&self) -> bool {
-        !matches!(self, Self::Custom { .. })
+        !matches!(self, Self::Custom { .. }) && !self.config_only()
     }
 
     /// Returns the `long` override if set, otherwise `None`.
@@ -153,7 +266,58 @@ impl Arg {
             | Self::BooleanList { long, .. }
             | Self::IntList { long, .. }
             | Self::UIntList { long, .. } => long.as_deref(),
-            Self::Positional { .. } | Self::TrailingVarArgs { .. } | Self::Custom { .. } => None,
+            Self::Positional { .. }
+            | Self::TrailingVarArgs { .. }
+            | Self::Passthrough { .. }
+            | Self::Custom { .. } => None,
+        }
+    }
+
+    /// The `description = "…"` this arg was declared with, if any.
+    pub fn description(&self) -> Option<&str> {
+        match self {
+            Self::String { description, .. }
+            | Self::Boolean { description, .. }
+            | Self::Int { description, .. }
+            | Self::UInt { description, .. }
+            | Self::Positional { description, .. }
+            | Self::TrailingVarArgs { description }
+            | Self::Passthrough { description, .. }
+            | Self::StringList { description, .. }
+            | Self::BooleanList { description, .. }
+            | Self::IntList { description, .. }
+            | Self::UIntList { description, .. }
+            | Self::Custom { description, .. } => description.as_deref(),
+        }
+    }
+
+    /// The position an `args.passthrough()` arg collects from, or `None` for
+    /// every other kind.
+    pub fn passthrough_position(&self) -> Option<PassthroughPosition> {
+        match self {
+            Self::Passthrough { position, .. } => Some(*position),
+            _ => None,
+        }
+    }
+
+    /// The sibling arg an `args.passthrough()` reads its value-taking flag list
+    /// from, if it declares one.
+    pub fn value_flags_from(&self) -> Option<&str> {
+        match self {
+            Self::Passthrough {
+                value_flags_from, ..
+            } => value_flags_from.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// This arg's declared list default, for the kinds that carry one. The
+    /// schema-level value of a `config_only` list before any config.axl
+    /// override is layered on.
+    pub fn string_list_default(&self) -> Option<&[String]> {
+        match self {
+            Self::StringList { default, .. } => Some(default),
+            _ => None,
         }
     }
 
@@ -240,6 +404,13 @@ impl Arg {
                     arg_name,
                 ));
             }
+            Self::Passthrough { .. } => {
+                return Err(anyhow::anyhow!(
+                    "arg {:?}: cannot override a passthrough default — it holds \
+                     whatever the command line was not otherwise able to parse",
+                    arg_name,
+                ));
+            }
         }
         Ok(next)
     }
@@ -288,6 +459,9 @@ impl Display for Arg {
             Self::TrailingVarArgs { .. } => {
                 write!(f, "<args.Arg: trailing variable arguments>")
             }
+            Self::Passthrough { position, .. } => {
+                write!(f, "<args.Arg: passthrough {}>", position.as_str())
+            }
             Self::StringList { .. } => write!(f, "<args.Arg: string_list>"),
             Self::BooleanList { .. } => write!(f, "<args.Arg: boolean_list>"),
             Self::IntList { .. } => write!(f, "<args.Arg: int_list>"),
@@ -303,6 +477,25 @@ impl<'v> UnpackValue<'v> for Arg {
     fn unpack_value_impl(value: Value<'v>) -> Result<Option<Self>, Self::Error> {
         Ok(value.downcast_ref::<Self>().map(|value| value.clone()))
     }
+}
+
+/// Reject `config_only` alongside a knob that names or demands a command-line
+/// spelling, which a config-only arg does not have.
+fn validated_config_only(
+    config_only: bool,
+    required: bool,
+    short: &NoneOr<String>,
+    long: &NoneOr<String>,
+) -> starlark::Result<bool> {
+    if config_only && (required || !short.is_none() || !long.is_none()) {
+        return Err(starlark::Error::new_kind(starlark::ErrorKind::Function(
+            anyhow::anyhow!(
+                "`config_only` cannot be combined with `required`, `short` or `long` — \
+                 the arg has no command-line spelling to require or name."
+            ),
+        )));
+    }
+    Ok(config_only)
 }
 
 /// Validate and unwrap the `long` override into `Option<String>`.
@@ -335,6 +528,9 @@ fn validated_long(long: NoneOr<String>) -> starlark::Result<Option<String>> {
     Ok(long.into_option())
 }
 
+// A Starlark constructor's kwargs become positional parameters of the generated
+// function, so the arg-count lint fires on `args.string` (8 named kwargs).
+#[allow(clippy::too_many_arguments)]
 #[starlark_module]
 pub fn register_globals(globals: &mut GlobalsBuilder) {
     const Args: StarlarkValueAsType<Arg> = StarlarkValueAsType::new();
@@ -364,9 +560,88 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         })
     }
 
+    /// Defines a bucket that collects the flags this task does not declare,
+    /// instead of failing the parse with "unexpected argument". For a task that
+    /// wraps another tool (`bazel`, `cargo`, …) and wants that tool's own flags
+    /// to work without being individually redeclared or wrapped.
+    ///
+    /// `position` selects which side of the task name a flag is collected from:
+    ///
+    /// * `"pre_command"` — before it: `aspect --output_base=/tmp build`. This is
+    ///   where Bazel takes its startup options.
+    /// * `"post_command"` — after it: `aspect build --remote_download_all`.
+    ///
+    /// A task may declare one bucket per position; both are lists of strings in
+    /// command-line order. Keeping them separate is what lets a task forward
+    /// each set to the slot it was typed for.
+    ///
+    /// `value_flags_from` names a sibling `args.string_list` of the flags that
+    /// take a separate value, so `-c opt` is collected as a pair. Without it — or
+    /// for a flag the list omits — the token after a collected flag is left
+    /// alone, since the arity of a flag nobody declared is unknowable: `--jobs 8`
+    /// would collect `--jobs` and leave `8` as a positional. Keeping the list in
+    /// a sibling arg rather than inline is what lets `config.axl` replace it.
+    ///
+    /// Nothing is rewritten on the way through: what the wrapped tool receives
+    /// is what was typed.
+    ///
+    /// **Read a bucket with `ctx.args.claim(name)`**, which both returns the
+    /// list and tells the runtime this task is responsible for those flags.
+    /// Buying out of the "unexpected argument" error is only sound if something
+    /// acts on what was collected, so the runtime refuses to spawn the wrapped
+    /// tool while a bucket is unclaimed, and fails the run if any bucket still
+    /// holds flags when the task returns. Reading the value as a plain attribute
+    /// is inspecting, not forwarding — claim before you run anything. A path
+    /// that deliberately runs nothing can claim to say so.
+    ///
+    /// Example:
+    /// ```starlark
+    /// def _impl(ctx):
+    ///     tool_flags = ctx.args.claim("tool_flags")
+    ///     return ctx.std.process.command("some-tool").args(tool_flags).spawn().wait().code
+    ///
+    /// my_task = task(
+    ///     implementation = _impl,
+    ///     args = {
+    ///         "targets": args.positional(minimum = 1, maximum = 512),
+    ///         "tool_flags": args.passthrough(position = "post_command"),
+    ///     },
+    /// )
+    /// ```
+    fn passthrough<'v>(
+        #[starlark(require = named)] position: String,
+        #[starlark(require = named, default = NoneOr::None)] value_flags_from: NoneOr<String>,
+        #[starlark(require = named, default = NoneOr::None)] description: NoneOr<String>,
+    ) -> starlark::Result<Arg> {
+        let Some(position) = PassthroughPosition::parse(&position) else {
+            return Err(starlark::Error::new_kind(starlark::ErrorKind::Function(
+                anyhow::anyhow!(
+                    "`position` must be {:?} or {:?}; got {:?}",
+                    PassthroughPosition::PRE_COMMAND,
+                    PassthroughPosition::POST_COMMAND,
+                    position,
+                ),
+            )));
+        };
+        Ok(Arg::Passthrough {
+            position,
+            value_flags_from: value_flags_from.into_option(),
+            description: description.into_option(),
+        })
+    }
+
     /// Defines a string flag that can be specified as `--flag_name=flag_value`.
     ///
     /// Use `long = "override-name"` to override the default kebab-case derivation.
+    ///
+    /// `config_only = True` keeps the arg off the command line entirely: it is
+    /// then settable only from `config.axl`, for a value a task reads but nobody
+    /// should type. Every flag-shaped constructor takes it, and it cannot be
+    /// combined with `required`, `short` or `long`, which name or demand a
+    /// command-line spelling that does not exist. `args.custom(type, ...)` is
+    /// config-only by construction and so has no such parameter; the argv-shaped
+    /// kinds (`positional`, `trailing_var_args`, `passthrough`) have none either,
+    /// since their content comes from the command line.
     ///
     /// `bare = "value"` additionally makes a valueless `--flag_name` legal,
     /// resolving to `value` — for a flag whose common case needs no argument
@@ -381,6 +656,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         #[starlark(require = named, default = NoneOr::None)] values: NoneOr<UnpackList<String>>,
         #[starlark(require = named, default = NoneOr::None)] description: NoneOr<String>,
         #[starlark(require = named, default = NoneOr::None)] bare: NoneOr<String>,
+        #[starlark(require = named, default = false)] config_only: bool,
     ) -> starlark::Result<Arg> {
         if required && default.is_some() {
             return Err(starlark::Error::new_kind(starlark::ErrorKind::Function(
@@ -402,6 +678,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
                 )));
             }
         }
+        let config_only = validated_config_only(config_only, required, &short, &long)?;
         Ok(Arg::String {
             required,
             default: default.unwrap_or_default(),
@@ -410,18 +687,21 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
             values: values.into_option().map(|it| it.items),
             description: description.into_option(),
             bare,
+            config_only,
         })
     }
 
     /// Defines a string list flag that can be specified multiple times.
     ///
     /// Use `long = "override-name"` to override the default kebab-case derivation.
+    /// `config_only = True` keeps it off the command line (see `args.string`).
     fn string_list<'v>(
         #[starlark(require = named, default = false)] required: bool,
         #[starlark(require = named, default = NoneOr::None)] default: NoneOr<UnpackList<String>>,
         #[starlark(require = named, default = NoneOr::None)] short: NoneOr<String>,
         #[starlark(require = named, default = NoneOr::None)] long: NoneOr<String>,
         #[starlark(require = named, default = NoneOr::None)] description: NoneOr<String>,
+        #[starlark(require = named, default = false)] config_only: bool,
     ) -> starlark::Result<Arg> {
         if required && !default.is_none() {
             return Err(starlark::Error::new_kind(starlark::ErrorKind::Function(
@@ -433,18 +713,21 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
                 anyhow::anyhow!("`short` must be a 1-character string."),
             )));
         }
+        let config_only = validated_config_only(config_only, required, &short, &long)?;
         Ok(Arg::StringList {
             required,
             default: default.into_option().map(|it| it.items).unwrap_or_default(),
             short: short.into_option(),
             long: validated_long(long)?,
             description: description.into_option(),
+            config_only,
         })
     }
 
     /// Defines a boolean flag. Use `--flag_name` (true) or `--flag_name=false`.
     ///
     /// Use `long = "override-name"` to override the default kebab-case derivation.
+    /// `config_only = True` keeps it off the command line (see `args.string`).
     fn boolean<'v>(
         #[starlark(require = named, default = false)] required: bool,
         #[starlark(require = named)] default: Option<bool>,
@@ -452,6 +735,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         #[starlark(require = named, default = NoneOr::None)] long: NoneOr<String>,
         #[starlark(require = named, default = NoneOr::None)] description: NoneOr<String>,
         _eval: &mut Evaluator<'v, '_, '_>,
+        #[starlark(require = named, default = false)] config_only: bool,
     ) -> starlark::Result<Arg> {
         if required && default.is_some() {
             return Err(starlark::Error::new_kind(starlark::ErrorKind::Function(
@@ -463,24 +747,28 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
                 anyhow::anyhow!("`short` must be a 1-character string."),
             )));
         }
+        let config_only = validated_config_only(config_only, required, &short, &long)?;
         Ok(Arg::Boolean {
             required,
             default: default.unwrap_or_default(),
             short: short.into_option(),
             long: validated_long(long)?,
             description: description.into_option(),
+            config_only,
         })
     }
 
     /// Defines a boolean list flag that can be specified multiple times.
     ///
     /// Use `long = "override-name"` to override the default kebab-case derivation.
+    /// `config_only = True` keeps it off the command line (see `args.string`).
     fn boolean_list<'v>(
         #[starlark(require = named, default = false)] required: bool,
         #[starlark(require = named, default = NoneOr::None)] default: NoneOr<UnpackList<bool>>,
         #[starlark(require = named, default = NoneOr::None)] short: NoneOr<String>,
         #[starlark(require = named, default = NoneOr::None)] long: NoneOr<String>,
         #[starlark(require = named, default = NoneOr::None)] description: NoneOr<String>,
+        #[starlark(require = named, default = false)] config_only: bool,
     ) -> starlark::Result<Arg> {
         if required && !default.is_none() {
             return Err(starlark::Error::new_kind(starlark::ErrorKind::Function(
@@ -492,24 +780,28 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
                 anyhow::anyhow!("`short` must be a 1-character string."),
             )));
         }
+        let config_only = validated_config_only(config_only, required, &short, &long)?;
         Ok(Arg::BooleanList {
             required,
             default: default.into_option().map(|it| it.items).unwrap_or_default(),
             short: short.into_option(),
             long: validated_long(long)?,
             description: description.into_option(),
+            config_only,
         })
     }
 
     /// Defines an integer flag.
     ///
     /// Use `long = "override-name"` to override the default kebab-case derivation.
+    /// `config_only = True` keeps it off the command line (see `args.string`).
     fn int<'v>(
         #[starlark(require = named, default = false)] required: bool,
         #[starlark(require = named)] default: Option<i32>,
         #[starlark(require = named, default = NoneOr::None)] short: NoneOr<String>,
         #[starlark(require = named, default = NoneOr::None)] long: NoneOr<String>,
         #[starlark(require = named, default = NoneOr::None)] description: NoneOr<String>,
+        #[starlark(require = named, default = false)] config_only: bool,
     ) -> starlark::Result<Arg> {
         if required && default.is_some() {
             return Err(starlark::Error::new_kind(starlark::ErrorKind::Function(
@@ -521,24 +813,28 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
                 anyhow::anyhow!("`short` must be a 1-character string."),
             )));
         }
+        let config_only = validated_config_only(config_only, required, &short, &long)?;
         Ok(Arg::Int {
             required,
             default: default.unwrap_or_default(),
             short: short.into_option(),
             long: validated_long(long)?,
             description: description.into_option(),
+            config_only,
         })
     }
 
     /// Defines an integer list flag that can be specified multiple times.
     ///
     /// Use `long = "override-name"` to override the default kebab-case derivation.
+    /// `config_only = True` keeps it off the command line (see `args.string`).
     fn int_list<'v>(
         #[starlark(require = named, default = false)] required: bool,
         #[starlark(require = named, default = NoneOr::None)] default: NoneOr<UnpackList<i32>>,
         #[starlark(require = named, default = NoneOr::None)] short: NoneOr<String>,
         #[starlark(require = named, default = NoneOr::None)] long: NoneOr<String>,
         #[starlark(require = named, default = NoneOr::None)] description: NoneOr<String>,
+        #[starlark(require = named, default = false)] config_only: bool,
     ) -> starlark::Result<Arg> {
         if required && !default.is_none() {
             return Err(starlark::Error::new_kind(starlark::ErrorKind::Function(
@@ -550,24 +846,28 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
                 anyhow::anyhow!("`short` must be a 1-character string."),
             )));
         }
+        let config_only = validated_config_only(config_only, required, &short, &long)?;
         Ok(Arg::IntList {
             required,
             default: default.into_option().map(|it| it.items).unwrap_or_default(),
             short: short.into_option(),
             long: validated_long(long)?,
             description: description.into_option(),
+            config_only,
         })
     }
 
     /// Defines an unsigned integer flag.
     ///
     /// Use `long = "override-name"` to override the default kebab-case derivation.
+    /// `config_only = True` keeps it off the command line (see `args.string`).
     fn uint<'v>(
         #[starlark(require = named, default = false)] required: bool,
         #[starlark(require = named)] default: Option<u32>,
         #[starlark(require = named, default = NoneOr::None)] short: NoneOr<String>,
         #[starlark(require = named, default = NoneOr::None)] long: NoneOr<String>,
         #[starlark(require = named, default = NoneOr::None)] description: NoneOr<String>,
+        #[starlark(require = named, default = false)] config_only: bool,
     ) -> starlark::Result<Arg> {
         if required && default.is_some() {
             return Err(starlark::Error::new_kind(starlark::ErrorKind::Function(
@@ -579,24 +879,28 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
                 anyhow::anyhow!("`short` must be a 1-character string."),
             )));
         }
+        let config_only = validated_config_only(config_only, required, &short, &long)?;
         Ok(Arg::UInt {
             required,
             default: default.unwrap_or_default(),
             short: short.into_option(),
             long: validated_long(long)?,
             description: description.into_option(),
+            config_only,
         })
     }
 
     /// Defines an unsigned integer list flag that can be specified multiple times.
     ///
     /// Use `long = "override-name"` to override the default kebab-case derivation.
+    /// `config_only = True` keeps it off the command line (see `args.string`).
     fn uint_list<'v>(
         #[starlark(require = named, default = false)] required: bool,
         #[starlark(require = named, default = NoneOr::None)] default: NoneOr<UnpackList<u32>>,
         #[starlark(require = named, default = NoneOr::None)] short: NoneOr<String>,
         #[starlark(require = named, default = NoneOr::None)] long: NoneOr<String>,
         #[starlark(require = named, default = NoneOr::None)] description: NoneOr<String>,
+        #[starlark(require = named, default = false)] config_only: bool,
     ) -> starlark::Result<Arg> {
         if required && !default.is_none() {
             return Err(starlark::Error::new_kind(starlark::ErrorKind::Function(
@@ -608,12 +912,14 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
                 anyhow::anyhow!("`short` must be a 1-character string."),
             )));
         }
+        let config_only = validated_config_only(config_only, required, &short, &long)?;
         Ok(Arg::UIntList {
             required,
             default: default.into_option().map(|it| it.items).unwrap_or_default(),
             short: short.into_option(),
             long: validated_long(long)?,
             description: description.into_option(),
+            config_only,
         })
     }
 
@@ -655,7 +961,8 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         // so `args.custom(dict, default = {})` ends up with `default = None` at access time.
         // Callers must defensively `or {}` / `or []`. A proper fix needs to deep-freeze
         // freezable values (dict/list/string/int/bool/tuple) into the frozen heap before
-        // storing.
+        // storing. For a list of strings, `args.string_list(config_only = True)` is
+        // config-only in the same way and does carry its default.
         let default_frozen = match default {
             None => None,
             Some(d) => {

@@ -490,6 +490,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
             "enabled".to_owned(),
             Arg::Boolean {
                 required: false,
+                config_only: false,
                 default: enabled,
                 short: None,
                 long: None,
@@ -522,6 +523,17 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
             ) {
                 return Err(anyhow::anyhow!(
                     "feature arg {:?}: positional args are not allowed in features",
+                    arg_name
+                ));
+            }
+            // A passthrough bucket is defined by what the *task* failed to
+            // recognize, and features inject their args into every task, so a
+            // feature-owned bucket would silently claim flags meant for any
+            // task it is active on.
+            if matches!(cli_arg, Arg::Passthrough { .. }) {
+                return Err(anyhow::anyhow!(
+                    "feature arg {:?}: passthrough args are not allowed in features — \
+                     declare one on the task that forwards them",
                     arg_name
                 ));
             }

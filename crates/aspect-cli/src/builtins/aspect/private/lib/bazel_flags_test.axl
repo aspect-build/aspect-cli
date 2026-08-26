@@ -27,13 +27,48 @@ def _fake_ctx(bazel_startup_flags = [], bazel_flags = [], trait = None):
     """Stand-in for `TaskContext` with the CLI args and trait map the helpers
     read. `ctx.traits[BazelTrait]` resolves against a plain dict — trait types
     are hashable, so a dict keyed by `BazelTrait` mimics the real trait map.
-    `hasattr` returns True for declared args, satisfying `_require_arg`."""
+    `hasattr` returns True for declared args, satisfying `_require_arg`.
+
+    Deliberately declares no passthrough buckets: a task may take the flag args
+    without them, and the resolve helpers must tolerate that — so `claim` answers
+    `[]` the way the real args store does for an arg the task never declared."""
     return struct(
         args = struct(
             bazel_startup_flags = bazel_startup_flags,
             bazel_flags = bazel_flags,
+            claim = lambda name: [],
         ),
         traits = {BazelTrait: trait if trait != None else _trait()},
+    )
+
+def _passthrough_ctx(startup = [], flags = [], passthrough_startup = [], passthrough = []):
+    """`_fake_ctx` plus the two passthrough buckets the CLI parser fills with the
+    flags it could not attribute to a declared arg.
+
+    Carries a `claim` that records what was claimed, mirroring the real args
+    store: the resolve helpers must claim a bucket they fold in, or the runtime
+    fails the invocation for dropping the user's flags. `claimed` is readable so
+    a test can assert the claim actually happened."""
+    buckets = {
+        "bazel_passthrough_startup_flags": passthrough_startup,
+        "bazel_passthrough_flags": passthrough,
+    }
+    claimed = []
+
+    def _claim(name):
+        claimed.append(name)
+        return buckets.get(name, [])
+
+    return struct(
+        args = struct(
+            bazel_startup_flags = startup,
+            bazel_flags = flags,
+            bazel_passthrough_startup_flags = passthrough_startup,
+            bazel_passthrough_flags = passthrough,
+            claim = _claim,
+        ),
+        claimed = claimed,
+        traits = {BazelTrait: _trait()},
     )
 
 def _announce_ctx(on_ci, version = "auto", command = "auto"):
@@ -125,6 +160,114 @@ def _test_flag_transforms(ctx):
         ["--client", "--startup-rewritten"],
     )
 
+def _test_passthrough_flags_follow_explicit_ones(ctx):
+    """A flag the parser routed into a passthrough bucket joins the slot it was
+    typed for, after the explicit `--bazel-flag` / `--bazel-startup-flag` values
+    so the direct spelling wins a collision."""
+    post_ctx = _passthrough_ctx(flags = ["--jobs=4"], passthrough = ["--jobs=8"])
+    _eq("post-command passthrough", bazel.flags.resolve(post_ctx), ["--jobs=4", "--jobs=8"])
+
+    pre_ctx = _passthrough_ctx(startup = ["--client"], passthrough_startup = ["--output_base=/tmp/o"])
+    _eq("pre-command passthrough", bazel.flags.resolve_startup(pre_ctx), ["--client", "--output_base=/tmp/o"])
+
+def _test_resolving_claims_the_bucket(ctx):
+    """Folding a bucket into the flag list must also claim it — the runtime fails
+    the invocation for flags left unclaimed, so a resolve that forgot to claim
+    would turn a working command line into an error."""
+    post_ctx = _passthrough_ctx(passthrough = ["--jobs=8"])
+    bazel.flags.resolve(post_ctx)
+    _eq("resolve claims post-command bucket", post_ctx.claimed, ["bazel_passthrough_flags"])
+
+    pre_ctx = _passthrough_ctx(passthrough_startup = ["--output_base=/tmp/o"])
+    bazel.flags.resolve_startup(pre_ctx)
+    _eq("resolve_startup claims pre-command bucket", pre_ctx.claimed, ["bazel_passthrough_startup_flags"])
+
+def _test_disclaim_accounts_for_both_buckets(ctx):
+    """A path that spawns no Bazel claims both buckets, so a legitimate no-op run
+    is not reported as having dropped the user's flags."""
+    c = _passthrough_ctx(passthrough = ["--jobs=8"], passthrough_startup = ["--output_base=/tmp/o"])
+    bazel.flags.disclaim_passthrough(c)
+    _eq(
+        "disclaim claims both buckets",
+        sorted(c.claimed),
+        ["bazel_passthrough_flags", "bazel_passthrough_startup_flags"],
+    )
+
+def _test_passthrough_buckets_are_optional(ctx):
+    """A task that declares the flag args without the passthrough buckets keeps
+    resolving — the buckets are additive, not part of the arg contract."""
+    _eq("no buckets, startup", bazel.flags.resolve_startup(_fake_ctx(bazel_startup_flags = ["--client"])), ["--client"])
+    _eq("no buckets, flags", bazel.flags.resolve(_fake_ctx(bazel_flags = ["--cli"])), ["--cli"])
+
+def _test_passthrough_args_shape(ctx):
+    """`bazel.flags.args` declares both buckets, one per command-line slot, plus
+    the value-flag list the post-command bucket reads arities from."""
+    fa = bazel.flags.args("the build")
+    _eq(
+        "flag arg keys",
+        sorted(fa.keys()),
+        [
+            "bazel_flags",
+            "bazel_passthrough_flags",
+            "bazel_passthrough_startup_flags",
+            "bazel_startup_flags",
+            "bazel_startup_value_flags",
+            "bazel_value_flags",
+        ],
+    )
+
+def _test_passthrough_args_is_the_opt_in_subset(ctx):
+    """`passthrough_args` is what a task with its own `--bazel-flag` wording
+    splats (delivery does); `flags.args` is that plus those two flags."""
+    pa = bazel.flags.passthrough_args()
+    _eq(
+        "passthrough arg keys",
+        sorted(pa.keys()),
+        [
+            "bazel_passthrough_flags",
+            "bazel_passthrough_startup_flags",
+            "bazel_startup_value_flags",
+            "bazel_value_flags",
+        ],
+    )
+    fa = bazel.flags.args("the build")
+    for key in pa.keys():
+        if key not in fa:
+            fail("flags.args must include %s" % key)
+
+def _test_startup_value_flags_cover_the_pre_command_slot(ctx):
+    """Startup options are their own slot and their own list, so
+    `aspect --output_base /tmp/o build` collects the value the way Bazel does."""
+    listed = bazel.flags.BAZEL_STARTUP_VALUE_FLAGS
+    for flag in ["--output_base", "--output_user_root", "--bazelrc", "--host_jvm_args"]:
+        if flag not in listed:
+            fail("expected %s in BAZEL_STARTUP_VALUE_FLAGS" % flag)
+    if "--batch" in listed:
+        fail("--batch takes no value; listing it would eat the task name")
+
+def _test_value_flags_mirror_bazel(ctx):
+    """The generated list carries Bazel's value-taking flags and none of its
+    booleans — a boolean in here would swallow the following target pattern."""
+    listed = bazel.flags.BAZEL_VALUE_FLAGS
+    for flag in ["-c", "-j", "--jobs", "--config", "--compilation_mode", "--test_output"]:
+        if flag not in listed:
+            fail("expected %s in BAZEL_VALUE_FLAGS" % flag)
+    for flag in ["-k", "--keep_going", "--remote_download_all", "--nobuild"]:
+        if flag in listed:
+            fail("%s takes no value; listing it would eat the next argument" % flag)
+
+    # Bazel 10 gave these an optional value (`--[no]disk_cache`), so the
+    # space-separated spelling is a target pattern there even though Bazel 6-9
+    # accept it. Regenerating from an older Bazel alone would put them back.
+    for flag in ["--disk_cache", "--execution_log_binary_file"]:
+        if flag in listed:
+            fail("%s is boolean on some supported Bazel; it must keep --flag=value only" % flag)
+
+    # Label-shaped flags are excluded on purpose: Bazel requires `=` for them.
+    for flag in listed:
+        if flag.startswith("--//") or ":" in flag:
+            fail("label-shaped flag %s must not be listed" % flag)
+
 def _test_flags_empty_defaults(ctx):
     """No CLI flags, no trait additions → empty result."""
     _eq(
@@ -204,6 +347,13 @@ def _test_config_names(ctx):
         testonly_config_names(["--config=a", "--foo", ("--config=b", "<7"), "--config=c"]),
         ["a", "b", "c"],
     )
+
+    # Bazel accepts `--config NAME` too, and a flag forwarded verbatim from the
+    # command line arrives in exactly that shape.
+    _eq("space form", testonly_config_names(["--config", "ci"]), ["ci"])
+    _eq("space form mid-list", testonly_config_names(["--keep_going", "--config", "ci", "--jobs=8"]), ["ci"])
+    _eq("space form, no value", testonly_config_names(["--config"]), [])
+    _eq("space form, flag follows", testonly_config_names(["--config", "--keep_going"]), [])
 
 def _test_flags_delta(ctx):
     """`testonly_flags_delta` returns the multiset difference full − base in
@@ -375,6 +525,14 @@ def _test_impl(ctx):
     _test_startup_input_list_not_mutated(ctx)
     _test_flags_full_chain_order(ctx)
     _test_flag_transforms(ctx)
+    _test_passthrough_flags_follow_explicit_ones(ctx)
+    _test_resolving_claims_the_bucket(ctx)
+    _test_disclaim_accounts_for_both_buckets(ctx)
+    _test_passthrough_buckets_are_optional(ctx)
+    _test_passthrough_args_shape(ctx)
+    _test_passthrough_args_is_the_opt_in_subset(ctx)
+    _test_value_flags_mirror_bazel(ctx)
+    _test_startup_value_flags_cover_the_pre_command_slot(ctx)
     _test_flags_empty_defaults(ctx)
     _test_announce_auto_follows_ci(ctx)
     _test_announce_explicit_overrides_ci(ctx)
@@ -388,7 +546,7 @@ def _test_impl(ctx):
     _test_setup_command_applies_to_ctx_bazel(ctx)
     _test_setup_command_trait_base_flags(ctx)
     _test_sibling_rc_transforms_startup(ctx)
-    print("bazel_flags_test.axl: OK (15 sections)")
+    print("bazel_flags_test.axl: OK (23 sections)")
     return 0
 
 bazel_flags_tests = task(

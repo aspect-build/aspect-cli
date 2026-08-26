@@ -1208,7 +1208,7 @@ def _delivery_impl(ctx):
         # phase 1/2, no digests); other combinations need digests and hard-error.
         if mode == "always" and dry_run and not track_state:
             info(ctx.std, "No remote cache configured; the preview will list candidates without action digests." +
-                          " Configure --bazel-flag=--remote_cache=<uri> (or set it in .bazelrc) to surface digests in the preview output.")
+                          " Configure --remote_cache=<uri> (or set it in .bazelrc) to surface digests in the preview output.")
             phase_1_2_runs = False
         else:
             error(ctx.std, "Delivery requires a remote cache but no --remote_cache or --remote_executor was found." +
@@ -1880,7 +1880,9 @@ Currently """ + ansi.ITALIC + "only" + ansi.ITALIC_OFF + """ supported on Aspect
             maximum = 1000000000,
             description = "Bazel target labels to deliver.",
         ),
-    } | bzl.announce.args("the delivery build phases") | bes_args(),
+    } | bzl.flags.passthrough_args(
+        post_note = " A forwarded flag applies to every build phase, change detection included — so one that adds non-determinism to release artifacts (--stamp, --workspace_status_command) belongs in --release-bazel-flag instead.",
+    ) | bzl.announce.args("the delivery build phases") | bes_args(),
     traits = [
         BazelTrait,
         DeliveryTrait,

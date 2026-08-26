@@ -216,6 +216,34 @@ pub struct Bazel<'v> {
     /// source of both command and startup flags for every Bazel invocation.
     #[allocative(skip)]
     pub active_rc: RefCell<Option<values::Value<'v>>>,
+    /// What an invocation needs to refuse to run on flags the task collected but
+    /// never claimed: the task's `ctx.args` store, its `args.passthrough()`
+    /// bucket names, and its kind for the message. Checking here rather than
+    /// only after the task returns is what makes a dropped flag cost
+    /// milliseconds instead of a whole build. See [`engine::passthrough`].
+    #[allocative(skip)]
+    pub claims: ClaimCheck<'v>,
+}
+
+/// The inputs to the pre-invocation claim check, carried on [`Bazel`] because
+/// that is where the task's calls arrive.
+#[derive(Debug)]
+pub struct ClaimCheck<'v> {
+    pub task_kind: String,
+    pub buckets: Vec<String>,
+    pub args: values::Value<'v>,
+}
+
+impl ClaimCheck<'_> {
+    /// Error unless every bucket holding collected flags has been claimed.
+    fn require_claimed(&self) -> anyhow::Result<()> {
+        crate::engine::passthrough::require_claimed(
+            &self.task_kind,
+            "run bazel",
+            &self.buckets,
+            self.args,
+        )
+    }
 }
 
 unsafe impl<'v> Trace<'v> for Bazel<'v> {
@@ -223,6 +251,7 @@ unsafe impl<'v> Trace<'v> for Bazel<'v> {
         if let Some(v) = self.active_rc.get_mut() {
             v.trace(tracer);
         }
+        self.claims.args.trace(tracer);
     }
 }
 
@@ -296,6 +325,26 @@ fn read_startup_flags<'v>(this: values::Value<'v>) -> anyhow::Result<Vec<String>
 }
 
 /// The active `RunCommand` set via `use_rc`, if any.
+/// Gate everything that reaches a Bazel server on the passthrough claim
+/// contract: a flag the task collected and never claimed would be silently
+/// absent from the command line we are about to run, so refuse here rather than
+/// after the build.
+///
+/// That includes the methods that only *talk to* a server rather than build —
+/// `shutdown`, `health_check`, `recover_poisoned_sandbox`, `cancel_invocation`,
+/// and `version`, whose `bazel info release` probe is memoized for the process
+/// and runs against the *default* server. An unclaimed startup option means the
+/// active rc names a different server than the user asked for, so probing or
+/// stopping the default one is worse than doing nothing.
+///
+/// A frozen `Bazel` (config-time) carries no task and so nothing to check.
+fn require_claimed_flags<'v>(this: values::Value<'v>) -> anyhow::Result<()> {
+    match this.downcast_ref::<Bazel>() {
+        Some(bazel) => bazel.claims.require_claimed(),
+        None => Ok(()),
+    }
+}
+
 fn read_active_rc<'v>(this: values::Value<'v>) -> Option<bazelrc::BazelRC> {
     let slot = if let Some(b) = this.downcast_ref::<Bazel>() {
         *b.active_rc.borrow()
@@ -517,6 +566,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         >,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<build::Build> {
+        require_claimed_flags(this)?;
         let build_events = partition_build_events(build_events);
         let execution_log = match execution_log {
             Either::Left(b) => (b, vec![]),
@@ -637,6 +687,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         >,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<build::Build> {
+        require_claimed_flags(this)?;
         let build_events = partition_build_events(build_events);
         let execution_log = match execution_log {
             Either::Left(b) => (b, vec![]),
@@ -707,6 +758,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = false)] announce_version: bool,
         #[starlark(require = named, default = false)] announce_command: bool,
     ) -> anyhow::Result<query::Query> {
+        require_claimed_flags(this)?;
         let extras = resolve_flags_for_running_bazel(&flags.items)?;
         let (startup, command_flags) = match effective_rc(this, rc) {
             Some(rc) => {
@@ -766,6 +818,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = NoneOr::None)] rc: NoneOr<values::Value<'v>>,
         #[starlark(require = named, default = NoneOr::None)] directory: NoneOr<String>,
     ) -> anyhow::Result<SmallMap<String, String>> {
+        require_claimed_flags(this)?;
         let (startup_flags, command_flags) = match effective_rc(this, rc) {
             Some(rc) => rc.resolve_for_command("info")?,
             None => (read_startup_flags(this)?, Vec::new()),
@@ -825,6 +878,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///     ctx.bazel.shutdown()       # stop it before wiping that output base
     /// ```
     fn shutdown<'v>(this: values::Value<'v>) -> anyhow::Result<i32> {
+        require_claimed_flags(this)?;
         let startup_flags = read_startup_flags(this)?;
 
         let mut cmd = bazel_command();
@@ -862,9 +916,10 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///         print("non-release or unknown Bazel")
     /// ```
     fn version<'v>(
-        #[allow(unused)] this: values::Value<'v>,
+        this: values::Value<'v>,
         #[starlark(require = named, default = true)] strip: bool,
     ) -> anyhow::Result<NoneOr<String>> {
+        require_claimed_flags(this)?;
         Ok(match info::release_version() {
             Some(v) if strip => NoneOr::Other(format!("{}.{}.{}", v.major, v.minor, v.patch)),
             Some(v) => NoneOr::Other(v.to_string()),
@@ -892,6 +947,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     fn health_check<'v>(
         this: values::Value<'v>,
     ) -> anyhow::Result<health_check::HealthCheckResult> {
+        require_claimed_flags(this)?;
         let startup_flags = read_startup_flags(this)?;
         Ok(health_check::run(&startup_flags))
     }
@@ -945,6 +1001,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     fn recover_poisoned_sandbox<'v>(
         this: values::Value<'v>,
     ) -> anyhow::Result<sandbox_recovery::SandboxRecoveryResult> {
+        require_claimed_flags(this)?;
         let startup_flags = read_startup_flags(this)?;
         let Some(output_base) = sandbox_recovery::output_base_from_flags(&startup_flags) else {
             return Ok(sandbox_recovery::SandboxRecoveryResult::skipped());
@@ -1076,6 +1133,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         this: values::Value<'v>,
         #[starlark(require = named, default = 5000)] force_kill_after_ms: i32,
     ) -> anyhow::Result<cancel::Cancellation> {
+        require_claimed_flags(this)?;
         let all_flags = read_startup_flags(this)?;
         let force_kill_after_ms = force_kill_after_ms.max(0) as u64;
 
