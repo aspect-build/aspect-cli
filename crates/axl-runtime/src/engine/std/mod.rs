@@ -22,6 +22,7 @@ pub mod io;
 mod net;
 mod process;
 pub mod stream;
+pub(crate) mod watch;
 
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
 #[display("<std.Std>")]
@@ -89,9 +90,19 @@ fn register_io_types(globals: &mut GlobalsBuilder) {
     const Writable: StarlarkValueAsType<stream::Writable> = StarlarkValueAsType::new();
 }
 
+#[starlark_module]
+fn register_watch_types(globals: &mut GlobalsBuilder) {
+    const CreatedEvent: StarlarkValueAsType<watch::WatchCreated> = StarlarkValueAsType::new();
+    const ModifiedEvent: StarlarkValueAsType<watch::WatchModified> = StarlarkValueAsType::new();
+    const RemovedEvent: StarlarkValueAsType<watch::WatchRemoved> = StarlarkValueAsType::new();
+}
+
 pub fn register_globals(globals: &mut GlobalsBuilder) {
     register_types(globals);
 
     globals.namespace("process", register_process_types);
     globals.namespace("io", register_io_types);
+    // `std.fs` is a module (the `fs.watch` event types live here); the
+    // filesystem value type stays `std.FileSystem`.
+    globals.namespace("fs", |g| g.namespace("watch", register_watch_types));
 }
