@@ -144,9 +144,9 @@ def _test_lookup_is_command_scoped(_):
 
 
 def _test_rejected_command_line_does_not_hang(ctx: TaskContext) -> None:
-    """A flag Bazel rejects: it exits without ever opening the build-event
-    pipe, and the invocation has to surface that exit rather than wait on a
-    writer that can never arrive.
+    """Regression for aspect-build/aspect-cli#1400: a flag Bazel rejects makes
+    it exit without ever opening the build-event pipe, and the invocation has
+    to surface that exit rather than wait on a writer that can never arrive.
 
     Requires `build_events`, since that is what puts a pipe there to wait on.
     A regression stalls this task until the CI job's own timeout — loud
