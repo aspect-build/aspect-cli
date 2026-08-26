@@ -244,9 +244,11 @@ dependencies = [
 name = "aspect-telemetry"
 version = "0.0.0-dev"
 dependencies = [
+ "chrono",
  "reqwest",
  "serde_json",
  "sha1",
+ "tempfile",
 ]
 
 [[package]]
