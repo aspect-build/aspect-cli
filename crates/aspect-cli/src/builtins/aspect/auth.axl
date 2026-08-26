@@ -310,12 +310,21 @@ def _entry_json(d) -> dict:
         doc["results_url"] = d.results_url
     return doc
 
+def _ignored_json(s) -> dict:
+    """One ignored `config.json` entry as a JSON object.
+
+    Mirrors `_entry_json`: `remove_command` is the exact command that clears it, or
+    None when a checked-in repo config declares it and `auth remove` cannot."""
+    return {
+        "name": s.name,
+        "path": s.path,
+        "user_config": s.user_config,
+        "remove_command": "aspect auth remove " + s.name if s.user_config else None,
+    }
+
 def _status_impl(ctx: TaskContext) -> int:
     entries = ctx.aspect.auth.list()
-
-    # Report ignored entries first — the deployment would otherwise just be missing.
-    for s in ctx.aspect.auth.shadowed():
-        warn(ctx.std, shadowed_warning(s))
+    ignored = ctx.aspect.auth.shadowed()
 
     # The built-in Aspect *account* (no build endpoints) vs. the configured
     # Workflows *deployments* are two different things — show them apart.
@@ -328,9 +337,14 @@ def _status_impl(ctx: TaskContext) -> int:
             "account": [_entry_json(d) for d in account],
             "deployments": [_entry_json(d) for d in deployments],
             "default_deployment": default_names[0] if default_names else None,
+            "ignored": [_ignored_json(s) for s in ignored],
         }
         ctx.std.io.stdout.write(json.encode(doc, indent = 2) + "\n")
         return 0
+
+    # Lead with what was dropped — the deployment would otherwise just be missing.
+    for s in ignored:
+        warn(ctx.std, shadowed_warning(s))
 
     print("Aspect account:")
     for d in account:
