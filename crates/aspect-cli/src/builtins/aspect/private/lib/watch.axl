@@ -1,0 +1,75 @@
+"""Workspace file-watch session for `--watch` tasks."""
+
+load("@std//time.axl", "sleep_iter")
+
+_DESCRIPTION = (
+    "Stay running after the first invocation: watch the workspace for " +
+    "source changes and re-run on each change (the run task also restarts " +
+    "or notifies its running target). Stop with Ctrl-C."
+)
+
+_ARGS = {
+    "watch": args.boolean(
+        default = False,
+        description = _DESCRIPTION,
+    ),
+}
+
+# Workspace entries never worth a rebuild: VCS internals, the aspect-cli
+# store, and bazel's convenience symlinks (bazel-bin, bazel-out,
+# bazel-<workspace>, ...) — outputs live in the output base outside the
+# workspace, but the symlinks themselves flicker during builds.
+_IGNORE_NAMES = [".git", ".jj", ".aspect"]
+
+def _ignores(root: str) -> list[str]:
+    # Convenience symlinks are handled generically (ignore_root_symlinks), but
+    # the delete half of a symlink swap can slip through when the debounce
+    # window splits the pair — keep the default names as belt and suspenders.
+    # A custom --symlink_prefix is covered by the generic rule alone.
+    names = list(_IGNORE_NAMES) + [
+        "bazel-bin",
+        "bazel-out",
+        "bazel-testlogs",
+        "bazel-" + root.rsplit("/", 1)[-1],
+    ]
+    return [root + "/" + name for name in names]
+
+def _new(ctx: TaskContext) -> struct:
+    """Start watching the bazel workspace. Returns a session:
+
+      try_pop() → None | fs.WatchBatch — non-blocking; a settled batch of
+          changes, each `struct(path, kind)` with kind
+          "created"/"modified"/"removed", plus `rescan` (watcher lost state).
+      drain() → None — discard pending changes (call after our own builds
+          so their filesystem noise doesn't trigger another cycle).
+      root — the watched workspace root.
+    """
+    root = ctx.std.env.bazel_root_dir()
+    w = ctx.std.fs.watch([root], ignore = _ignores(root), ignore_root_symlinks = True)
+    return struct(
+        try_pop = w.try_pop,
+        drain = w.drain,
+        root = root,
+    )
+
+_TICK_MS = 100
+
+def _loop(ws: struct, run_cycle) -> None:
+    """Re-run `run_cycle` on each settled batch of workspace changes — the
+    simple watch shape for tasks whose cycle is just re-running a bazel
+    command. Batches already queued when a cycle starts are coalesced into
+    it; a failed cycle waits for the next change like any other. Runs until
+    Ctrl-C."""
+    for _tick in sleep_iter(_TICK_MS):
+        if ws.try_pop() == None:
+            continue
+        for _ in range(1000):
+            if ws.try_pop() == None:
+                break
+        run_cycle()
+
+watch = namespace(
+    new = _new,
+    loop = _loop,
+    ARGS = _ARGS,
+)

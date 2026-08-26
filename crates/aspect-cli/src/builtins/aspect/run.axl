@@ -10,10 +10,178 @@ load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "phases")
 load("./private/lib/runnable.axl", "RUN_IN_DESCRIPTION", "resolve_run_in", "runnable")
 load("./private/lib/tips.axl", "tips")
+load("./private/lib/watch.axl", "watch")
+
+_WATCH_TICK_MS = 100
+
+def _build_once(ctx: TaskContext, ph, r, target: str, flags: list[str], rc, announce_version: bool, announce_command: bool, phase, label: str):
+    """One `bazel build` of `target` with BES drained into `ph.data` and the
+    runnable tracker `r`. Returns the BuildStatus."""
+    bazel_trait = ctx.traits[BazelTrait]
+    bes_sinks = collect_bes_sinks(ctx, bazel_trait, rc)
+    ph.data["bes_streamed_by_bazel"] = bes_streamed_by_bazel(ctx, rc)
+    events = bazel.build_events.iterator()
+    build_events = [events] + bes_sinks
+
+    for hook in bazel_trait.build_start:
+        hook(ctx)
+
+    ph.update(
+        "running",
+        phases.ProgressStyles(
+            body = label + "...",
+            stream = label,
+        ),
+        kind = "bazel_results",
+        phase = phase,
+    )
+
+    # After the phase line, so the streams are announced under the spawn they
+    # belong to.
+    announce_bes_sinks(ctx, bes_sinks)
+
+    build = ctx.bazel.build(
+        target,
+        build_events = build_events,
+        flags = flags,
+        aspects = r.aspects,
+        announce_version = announce_version,
+        announce_command = announce_command,
+    )
+
+    for _tick in sleep_iter(BES_DRAIN_TICK_MS):
+        for _ in range(10000):
+            event = events.try_pop()
+            if event == None:
+                break
+            r.event(event)
+            for handler in bazel_trait.build_event:
+                handler(ctx, event)
+            process_event(ph.data, event)
+        if events.done:
+            break
+
+    build_status = build.wait()
+    for sink in bes_sinks:
+        sink.wait()
+    summarize_bes_upload(ctx, bes_sinks)
+    dispatch_bazel_attempt_end(ctx, bazel_trait, build_status.code)
+    dispatch_bazel_build_end(ctx, bazel_trait, build_status.code)
+    return build_status
+
+def _stop_child(child: std.process.Child) -> None:
+    """Graceful stop with a bounded grace: SIGTERM, poll up to ~5s for exit,
+    then SIGKILL. Always reaps. A SIGTERM-ignoring child must not freeze the
+    watch loop."""
+    child.terminate()
+    for tick in sleep_iter(100):
+        if child.try_wait() != None:
+            return
+        if tick >= 50:
+            break
+    child.kill()
+    child.wait()
+
+def _spawn_target(ctx: TaskContext, ph, r, target: str, forward_args: list[str], spawn_cwd: str | None, watching: bool) -> std.process.Child | None:
+    """Resolve the entrypoint and spawn the target; None when unresolvable."""
+    entrypoint = r.determine_entrypoint(target)
+    if entrypoint == None:
+        error(ctx.std, "Failed to determine the run entrypoint for %s." % target)
+        return None
+    body = "Running %s (watching for changes)..." if watching else "Running %s..."
+    ph.update(
+        "running",
+        phases.ProgressStyles(
+            body = body % target,
+            stream = "Running %s" % target,
+        ),
+        phase = phases.Phase(name = "run", description = "Run target", emoji = "🚀"),
+    )
+    return r.spawn(entrypoint, forward_args, cwd = spawn_cwd)
+
+def _watch_loop(ctx: TaskContext, ph, r, target: str, forward_args: list[str], spawn_cwd: str | None, flags: list[str], rc, announce_version: bool, announce_command: bool):
+    """Restart-mode watch: rebuild on each settled batch of workspace changes,
+    then terminate and respawn the target. Runs until Ctrl-C (the OS shutdown
+    handler SIGTERMs the child)."""
+    ws = watch.new(ctx)
+
+    build_status = _build_once(
+        ctx,
+        ph,
+        r,
+        target,
+        flags,
+        rc,
+        announce_version,
+        announce_command,
+        phases.Phase(name = "build", description = "Build run target", emoji = "🔨"),
+        "Building %s" % target,
+    )
+
+    child = None
+    if build_status.success:
+        child = _spawn_target(ctx, ph, r, target, forward_args, spawn_cwd, watching = True)
+    else:
+        ph.update(
+            "running",
+            phases.ProgressStyles(body = "Build failed — watching %s for changes..." % ws.root),
+            kind = "bazel_results",
+        )
+
+    cycle = 0
+    for _tick in sleep_iter(_WATCH_TICK_MS):
+        if child != None:
+            status = child.try_wait()
+            if status != None:
+                ph.update(
+                    "running",
+                    phases.ProgressStyles(
+                        body = "%s exited with code %s — watching for changes..." % (target, status.code),
+                        stream = "%s exited with code %s" % (target, status.code),
+                    ),
+                )
+                child = None
+
+        batch = ws.try_pop()
+        if batch == None:
+            continue
+
+        cycle += 1
+        ph.reset(init_data())
+        build_status = _build_once(
+            ctx,
+            ph,
+            r,
+            target,
+            flags,
+            rc,
+            False,
+            announce_command,
+            phases.Phase(
+                name = "rebuild_%d" % cycle,
+                description = "Rebuild run target",
+                emoji = "🔨",
+            ),
+            "Rebuilding %s" % target,
+        )
+        # Deliberately no drain: bazel writes its outputs outside the
+        # workspace (the ignore list covers the convenience symlinks), so
+        # pending events here are the user's own mid-build edits — dropping
+        # them would silently miss a rebuild.
+
+        if not build_status.success:
+            ph.update(
+                "running",
+                phases.ProgressStyles(body = "Build failed — watching for changes..."),
+                kind = "bazel_results",
+            )
+            continue
+
+        if child != None:
+            _stop_child(child)
+        child = _spawn_target(ctx, ph, r, target, forward_args, spawn_cwd, watching = True)
 
 def _impl(ctx: TaskContext) -> int | TaskConclusion:
-    bazel_trait = ctx.traits[BazelTrait]
-
     target = ctx.args.target[0]
     forward_args = list(ctx.args.run_args)
 
@@ -22,8 +190,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # and before the build spends time.
     spawn_cwd = resolve_run_in(ctx, ctx.args.run_in)
 
-    data = init_data()
-    ph = phases.new(ctx, data)
+    ph = phases.new(ctx, init_data())
 
     # The single pre-task setup phase (status surface, rc parse, health
     # checks); returns the resolved flags (a failed health check fails the task
@@ -39,10 +206,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # flags + aspect injection that capture the executable, the `args` attribute,
     # and the target env so `r.spawn` replays them the way `bazel run` does.
     r = runnable(ctx, [target], rc = rc)
-    bes_sinks = collect_bes_sinks(ctx, bazel_trait, rc)
-    data["bes_streamed_by_bazel"] = bes_streamed_by_bazel(ctx, rc)
-    events = bazel.build_events.iterator()
-    build_events = [events] + bes_sinks
+    flags = r.flags + endpoint_auth_flags
 
     def _conclude(status, code, text):
         """Emit the terminal `task_update` and return the task's conclusion.
@@ -57,81 +221,42 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             status = status,
             final = True,
             conclusion = text,
-            data = data,
+            data = ph.data,
             progress = phases.ProgressStyles(body = text),
         ))
         return TaskConclusion(exit_code = code, text = text, flagged = False)
 
-    for hook in bazel_trait.build_start:
-        hook(ctx)
+    # The watch loop never concludes: it runs until Ctrl-C ends the process.
+    if ctx.args.watch:
+        return _watch_loop(ctx, ph, r, target, forward_args, spawn_cwd, flags, rc, announce_version, announce_command)
 
-    ph.update(
-        "running",
-        phases.ProgressStyles(
-            body = "Building %s..." % target,
-            stream = "Building %s" % target,
-        ),
-        kind = "bazel_results",
-        phase = phases.Phase(name = "build", description = "Build run target", emoji = "🔨"),
-    )
-
-    # After the phase line, so the streams are announced under the spawn they
-    # belong to.
-    announce_bes_sinks(ctx, bes_sinks)
-
-    build = ctx.bazel.build(
+    build_status = _build_once(
+        ctx,
+        ph,
+        r,
         target,
-        build_events = build_events,
-        flags = r.flags + endpoint_auth_flags,
-        aspects = r.aspects,
-        announce_version = announce_version,
-        announce_command = announce_command,
+        flags,
+        rc,
+        announce_version,
+        announce_command,
+        phases.Phase(name = "build", description = "Build run target", emoji = "🔨"),
+        "Building %s" % target,
     )
-
-    for _tick in sleep_iter(BES_DRAIN_TICK_MS):
-        for _ in range(10000):
-            event = events.try_pop()
-            if event == None:
-                break
-            r.event(event)
-            for handler in bazel_trait.build_event:
-                handler(ctx, event)
-            process_event(data, event)
-        if events.done:
-            break
-
-    build_status = build.wait()
-    for sink in bes_sinks:
-        sink.wait()
-    summarize_bes_upload(ctx, bes_sinks)
-    dispatch_bazel_attempt_end(ctx, bazel_trait, build_status.code)
-    dispatch_bazel_build_end(ctx, bazel_trait, build_status.code)
-
     if not build_status.success:
-        return _conclude("failed", build_status.code, conclusion("failed", data))
+        return _conclude("failed", build_status.code, conclusion("failed", ph.data))
 
-    entrypoint = r.determine_entrypoint(target)
-    if entrypoint == None:
-        error(ctx.std, "Failed to determine the run entrypoint for %s." % target)
+    child = _spawn_target(ctx, ph, r, target, forward_args, spawn_cwd, watching = False)
+    if child == None:
         return _conclude("failed", 1, "Could not determine the run entrypoint for %s" % target)
 
-    ph.update(
-        "running",
-        phases.ProgressStyles(
-            body = "Running %s..." % target,
-            stream = "Running %s" % target,
-        ),
-        phase = phases.Phase(name = "run", description = "Run target", emoji = "🚀"),
-    )
-
-    code = r.spawn(entrypoint, forward_args, cwd = spawn_cwd).wait().code
+    code = child.wait().code
     if code == 0:
         return _conclude("passed", code, "Ran %s" % target)
 
     # The build succeeded and the program failed. Record that so the renderer
     # reports a run failure rather than falling back to "Failed to build",
     # which is what a failed status with no failure buckets otherwise means.
-    data["run"] = {"exit_code": code}
+    ph.data["run"] = {"exit_code": code}
     return _conclude("failed", code, "%s exited %d" % (target, code))
 
 run = task(
@@ -157,7 +282,7 @@ run = task(
                 "this flag as a no-op."
             ),
         ),
-    } | bzl.flags.args("the build") | bzl.announce.args("the build") | bes_args(),
+    } | watch.ARGS | bzl.flags.args("the build") | bzl.announce.args("the build") | bes_args(),
     traits = [
         BazelTrait,
         HealthCheckTrait,
