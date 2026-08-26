@@ -465,7 +465,11 @@ mod tests {
         let _ = holder.kill();
 
         let events: Vec<_> = std::iter::from_fn(|| sub.recv().ok()).collect();
-        assert_eq!(events.len(), 1, "a late writer's events must not be dropped");
+        assert_eq!(
+            events.len(),
+            1,
+            "a late writer's events must not be dropped"
+        );
         assert!(events[0].last_message);
     }
 

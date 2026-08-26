@@ -387,12 +387,11 @@ mod tests {
     fn gives_up_when_no_writer_ever_opens() {
         let path = fifo();
         let started = Instant::now();
-        let err = match Pipe::open_waiting_for_writer(path.clone(), RetryPolicy::Never, POLL, || {
-            false
-        }) {
-            Ok(_) => panic!("must not hand back a pipe no writer will ever use"),
-            Err(e) => e,
-        };
+        let err =
+            match Pipe::open_waiting_for_writer(path.clone(), RetryPolicy::Never, POLL, || false) {
+                Ok(_) => panic!("must not hand back a pipe no writer will ever use"),
+                Err(e) => e,
+            };
 
         assert_eq!(err.kind(), ErrorKind::BrokenPipe);
         assert!(
@@ -445,18 +444,19 @@ mod tests {
         // loop's next read, which is what makes that read return data rather
         // than EAGAIN. Doing it from another thread would race that ordering.
         let mut wrote = false;
-        let mut pipe = Pipe::open_waiting_for_writer(path.clone(), RetryPolicy::Never, POLL, || {
-            if !wrote {
-                wrote = true;
-                let mut w = OpenOptions::new()
-                    .write(true)
-                    .open(&path_w)
-                    .expect("open write end");
-                w.write_all(b"hello world").expect("write");
-            }
-            true
-        })
-        .expect("data queued on the FIFO must end the wait");
+        let mut pipe =
+            Pipe::open_waiting_for_writer(path.clone(), RetryPolicy::Never, POLL, || {
+                if !wrote {
+                    wrote = true;
+                    let mut w = OpenOptions::new()
+                        .write(true)
+                        .open(&path_w)
+                        .expect("open write end");
+                    w.write_all(b"hello world").expect("write");
+                }
+                true
+            })
+            .expect("data queued on the FIFO must end the wait");
 
         // Read in small chunks: the hand-over buffer has to survive being
         // drained across several reads, not just one big one.
@@ -483,18 +483,19 @@ mod tests {
         // guard call, and the guard says "gone" every time. So the bytes can
         // only come back via the read taken after the writer is known gone.
         let mut wrote = false;
-        let mut pipe = Pipe::open_waiting_for_writer(path.clone(), RetryPolicy::Never, POLL, || {
-            if !wrote {
-                wrote = true;
-                let mut w = OpenOptions::new()
-                    .write(true)
-                    .open(&path_w)
-                    .expect("open write end");
-                w.write_all(b"late").expect("write");
-            }
-            false
-        })
-        .expect("bytes written before the last read must be delivered");
+        let mut pipe =
+            Pipe::open_waiting_for_writer(path.clone(), RetryPolicy::Never, POLL, || {
+                if !wrote {
+                    wrote = true;
+                    let mut w = OpenOptions::new()
+                        .write(true)
+                        .open(&path_w)
+                        .expect("open write end");
+                    w.write_all(b"late").expect("write");
+                }
+                false
+            })
+            .expect("bytes written before the last read must be delivered");
 
         let mut got = [0u8; 4];
         pipe.read_exact(&mut got).expect("read");
