@@ -50,7 +50,6 @@ rust_library(
         "@crates//:minijinja",
         "@crates//:nix",
         "@crates//:prost",
-        "@crates//:psl",
         "@crates//:rand",
         "@crates//:reqwest",
         "@crates//:rmcp",
