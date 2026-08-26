@@ -923,15 +923,8 @@ impl Build {
         cmd.stderr(stderr);
         cmd.stdin(Stdio::null());
 
-        let child = cmd
-            .spawn()
+        let (child, live_guard) = super::live::spawn_registered(&mut cmd)
             .map_err(|e| io::Error::other(format!("failed to spawn bazel: {e}")))?;
-
-        // Register the bazel client with the live-subprocess registry so
-        // aspect-cli's OS-signal handler can forward SIGINT to it on
-        // CI cancellation. The guard is stored on `Self` and unregisters
-        // when the `Build` is dropped (after `wait()`).
-        let live_guard = super::live::register(child.id());
 
         // Now that we have the spawned child's pid, start the BES reader.
         // The child pid is the per-invocation liveness signal the BES thread
