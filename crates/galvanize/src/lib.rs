@@ -145,12 +145,12 @@ impl Pipe {
     /// that leaves the `open` parked in the kernel with no read for
     /// [`RetryPolicy`] to govern, and nothing short of a signal to call it off.
     ///
-    /// Nothing here teaches the reader anything new. Its `open` returns, and
-    /// what the first read then finds is whatever the FIFO already implies: no
-    /// writer attached and no data, so end-of-stream — a plain `Ok(0)` under
-    /// [`RetryPolicy::Never`], surfaced as `BrokenPipe` by
-    /// [`RetryPolicy::IfOpenForPid`] once it confirms the pid is not holding
-    /// the path open either.
+    /// Nothing here teaches the reader anything new: its `open` returns and the
+    /// first read reports whatever the FIFO already implies. Ordinarily that is
+    /// end-of-stream, since this poke wrote nothing and closed — `read` gives
+    /// `Ok(0)` under [`RetryPolicy::Never`], which [`RetryPolicy::IfOpenForPid`]
+    /// turns into `BrokenPipe` once it confirms the pid is not holding the path
+    /// open either. It is `Ok(n)` instead when the real writer got there first.
     ///
     /// Returns whether a reader was actually waiting. `O_NONBLOCK` keeps this
     /// from becoming the mirror image of the problem it solves: with no reader
