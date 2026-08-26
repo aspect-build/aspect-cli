@@ -26,6 +26,11 @@ pub enum BuildEventStreamError {
     ProstEncode(#[from] prost::EncodeError),
 }
 
+/// How often the reader re-checks for a writer on the FIFO — both while
+/// waiting for the first one and in the gap between retry attempts. Short
+/// enough to be invisible next to a build, long enough not to spin.
+const WRITER_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
+
 #[derive(Debug)]
 pub struct BuildEventStream {
     /// Thread handle, stored in Option so we can take() it to join without consuming self.
@@ -50,11 +55,14 @@ impl BuildEventStream {
     /// (it's the pid that *holds the FIFO write end open during an
     /// attempt*; for real bazel that's the server/daemon pid).
     ///
-    /// `writer_pid` is the per-invocation pid whose death signals
-    /// "no more retries coming" — for real bazel that's the spawned
-    /// client process (`Command::spawn().id()`). The BES thread checks
-    /// it in the `expecting_retry` BrokenPipe branch; a live writer
-    /// means an inter-attempt gap, a dead writer means end-of-build.
+    /// `writer_pid` is the per-invocation pid whose death means no more bytes
+    /// are coming — for real bazel the spawned client process
+    /// (`Command::spawn().id()`). It bounds both waits this thread can get
+    /// stuck in: for the first writer to open the FIFO at all, and for a retry
+    /// attempt to reopen it after a `BrokenPipe`. Neither can be answered by
+    /// `server_pid`, since the daemon outlives the invocation and so always
+    /// looks like a writer still on its way.
+    ///
     /// Each `(path, signal)` pair gets raw FIFO bytes mirrored to `path`;
     /// `signal.complete(result)` fires after flush, unblocking the file
     /// sink handle's `wait()`.
@@ -86,6 +94,24 @@ impl BuildEventStream {
                 Ok(MultiWriter { writers })
             };
 
+            // Close a stream that has ended: no more events are coming, so
+            // subscribers are cut loose and the file sinks are flushed and
+            // signalled. Whether the build itself succeeded is the caller's
+            // business, read off bazel's exit code.
+            let finish = |raw_out: &mut MultiWriter<BufWriter<File>>| {
+                broadcaster.close();
+                match raw_out.flush() {
+                    Ok(()) => {
+                        signal_all(Ok(()));
+                        Ok(())
+                    }
+                    Err(e) => {
+                        signal_all(Err(format!("flush failed: {e}")));
+                        Err(BuildEventStreamError::IO(e))
+                    }
+                }
+            };
+
             let mut raw_out = match open_file_sinks(&raw_file_sink_paths) {
                 Ok(w) => w,
                 Err(e) => {
@@ -93,11 +119,30 @@ impl BuildEventStream {
                     return Err(BuildEventStreamError::IO(e));
                 }
             };
-            // mkfifo is idempotent (`Pipe::new` tolerates EEXIST), so this
-            // works whether the caller pre-created the FIFO via
-            // `reserve_path` (production) or not (unit tests).
-            let mut reader =
-                galvanize::Pipe::new(path, galvanize::RetryPolicy::IfOpenForPid(server_pid))?;
+            // mkfifo is idempotent (tolerates EEXIST), so this works whether
+            // the caller pre-created the FIFO via `reserve_path` (production)
+            // or not (unit tests).
+            galvanize::Pipe::mkfifo(&path)?;
+            let reader = galvanize::Pipe::open_waiting_for_writer(
+                path,
+                galvanize::RetryPolicy::IfOpenForPid(server_pid),
+                WRITER_POLL_INTERVAL,
+                || galvanize::is_pid_alive(writer_pid),
+            );
+            let mut reader = match reader {
+                Ok(reader) => reader,
+                // Bazel rejected the command line, or otherwise died before
+                // opening the BEP file: the invocation is over and emitted
+                // nothing.
+                Err(e) if e.kind() == ErrorKind::BrokenPipe => {
+                    return finish(&mut raw_out);
+                }
+                Err(e) => {
+                    signal_all(Err(format!("failed to open the BES pipe: {e}")));
+                    broadcaster.close();
+                    return Err(BuildEventStreamError::IO(e));
+                }
+            };
 
             let mut buf: Vec<u8> = Vec::with_capacity(1024 * 5);
             // Initial size for reading a varint
@@ -201,15 +246,7 @@ impl BuildEventStream {
                         broadcaster.send(event);
 
                         if last_message && !expecting_retry {
-                            broadcaster.close();
-                            match raw_out.flush() {
-                                Ok(()) => signal_all(Ok(())),
-                                Err(e) => {
-                                    signal_all(Err(format!("flush failed: {e}")));
-                                    return Err(BuildEventStreamError::IO(e));
-                                }
-                            }
-                            return Ok(());
+                            return finish(&mut raw_out);
                         }
                     }
                     Err(BuildEventStreamError::IO(err)) if err.kind() == ErrorKind::BrokenPipe => {
@@ -221,31 +258,15 @@ impl BuildEventStream {
                             // gone, no retry is coming — close gracefully
                             // instead of spinning.
                             //
-                            // We check `writer_pid` (the bazel client process
-                            // the runtime spawned), not the server/daemon pid
-                            // passed to galvanize. A bazel daemon stays alive
-                            // across invocations and would always look alive
-                            // here; only the per-invocation client pid dies
-                            // when the build is truly done.
-                            //
-                            // We use pid liveness, not `is_path_open_for_pid`,
-                            // because Bazel closes the BEP file at the end of
-                            // each attempt and reopens it for the next one
-                            // (FileTransport.SequentialWriter.close() runs on
-                            // every attempt). During that gap the writer pid
-                            // is alive but the FIFO has no writer; mistaking
-                            // that for "no retry coming" would drop attempt 2
-                            // events.
+                            // Pid liveness rather than `is_path_open_for_pid`:
+                            // Bazel closes the BEP file at the end of every
+                            // attempt and reopens it for the next
+                            // (FileTransport.SequentialWriter.close()), so
+                            // during that gap the writer is alive with no
+                            // writer attached to the FIFO. Reading that as "no
+                            // retry coming" would drop attempt 2's events.
                             if !galvanize::is_pid_alive(writer_pid) {
-                                broadcaster.close();
-                                match raw_out.flush() {
-                                    Ok(()) => signal_all(Ok(())),
-                                    Err(e) => {
-                                        signal_all(Err(format!("flush failed: {e}")));
-                                        return Err(BuildEventStreamError::IO(e));
-                                    }
-                                }
-                                return Ok(());
+                                return finish(&mut raw_out);
                             }
                             // Writer is alive; Bazel is between attempts.
                             // With no writer attached, read() on the FIFO
@@ -253,18 +274,10 @@ impl BuildEventStream {
                             // backoff creates a hot CPU spin until the next
                             // writer opens the pipe. Sleep briefly to yield
                             // the CPU between polls.
-                            std::thread::sleep(std::time::Duration::from_millis(10));
+                            std::thread::sleep(WRITER_POLL_INTERVAL);
                             continue;
                         }
-                        broadcaster.close();
-                        match raw_out.flush() {
-                            Ok(()) => signal_all(Ok(())),
-                            Err(e) => {
-                                signal_all(Err(format!("flush failed: {e}")));
-                                return Err(BuildEventStreamError::IO(e));
-                            }
-                        }
-                        return Ok(());
+                        return finish(&mut raw_out);
                     }
                     Err(err) => {
                         signal_all(Err(format!("BES read error: {err}")));
@@ -355,10 +368,9 @@ mod tests {
         std::env::temp_dir().join(format!("test-bes-{}.fifo", uuid::Uuid::new_v4()))
     }
 
-    /// Poll until the FIFO inode appears at `path`. The BES thread mkfifos
-    /// the path lazily (via `Pipe::new` inside `BuildEventStream::spawn`),
-    /// so test main threads that open the writer side need to wait for the
-    /// inode to exist before calling `OpenOptions::open`.
+    /// Poll until the FIFO inode appears at `path`. The BES thread mkfifos the
+    /// path lazily inside `BuildEventStream::spawn`, so test threads that open
+    /// the writer side have to wait for the inode before `OpenOptions::open`.
     fn wait_for_fifo(path: &PathBuf) {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while !path.exists() {
@@ -383,6 +395,78 @@ mod tests {
             .stderr(std::process::Stdio::null())
             .spawn()
             .expect("failed to spawn sleep")
+    }
+
+    /// A pid that is certainly gone: spawn the shortest-lived process there is
+    /// and reap it, so `is_pid_alive` sees a free pid rather than a zombie.
+    fn dead_pid() -> u32 {
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("failed to spawn true");
+        let pid = child.id();
+        child.wait().expect("failed to reap true");
+        pid
+    }
+
+    // -------------------------------------------------------------------------
+    // No writer ever arrives: Bazel exited before opening the BEP file
+    // -------------------------------------------------------------------------
+
+    /// Bazel can exit before it ever opens the BEP file — an unrecognized flag,
+    /// a bad startup option — leaving a live daemon that still looks like a
+    /// writer on its way. The stream has to end, empty, rather than wait on a
+    /// writer that cannot arrive; the caller reports bazel's exit code.
+    #[test]
+    fn a_writer_that_never_opens_ends_the_stream() {
+        let outcome = crate::test::with_timeout(Duration::from_secs(10), || {
+            let path = temp_fifo_path();
+            // Server alive (daemons outlive the invocation), invocation gone.
+            let mut holder = spawn_pid_holder();
+            let mut stream =
+                BuildEventStream::spawn(path, holder.id(), dead_pid(), vec![]).unwrap();
+            let sub = stream.subscribe();
+            let joined = stream.join().is_ok();
+            let events: Vec<_> = std::iter::from_fn(|| sub.recv().ok()).collect();
+            let _ = holder.kill();
+            (joined, events.len())
+        });
+        assert_eq!(
+            outcome,
+            Some((true, 0)),
+            "the stream must end promptly and empty, not wait for a writer that cannot come"
+        );
+    }
+
+    /// The other edge of the same wait: this thread starts the moment bazel is
+    /// spawned, but bazel does not open the BEP file until its JVM is up
+    /// seconds later, and that gap must not be mistaken for an invocation that
+    /// will never write. Every event of a real build rides on the difference.
+    #[test]
+    fn a_writer_that_opens_late_still_delivers_its_events() {
+        let path = temp_fifo_path();
+        let mut holder = spawn_pid_holder();
+        let pid = holder.id();
+
+        let mut stream = BuildEventStream::spawn(path.clone(), pid, pid, vec![]).unwrap();
+        let sub = stream.subscribe();
+        wait_for_fifo(&path);
+
+        let path_w = path.clone();
+        let writer = std::thread::spawn(move || {
+            // Many poll intervals' worth of "no writer", so the reader cannot
+            // pass this test by racing to its first read.
+            std::thread::sleep(Duration::from_millis(300));
+            let mut f = OpenOptions::new().write(true).open(&path_w).unwrap();
+            f.write_all(&encode_event(&make_event(true))).unwrap();
+        });
+
+        writer.join().unwrap();
+        stream.join().unwrap();
+        let _ = holder.kill();
+
+        let events: Vec<_> = std::iter::from_fn(|| sub.recv().ok()).collect();
+        assert_eq!(events.len(), 1, "a late writer's events must not be dropped");
+        assert!(events[0].last_message);
     }
 
     // -------------------------------------------------------------------------
