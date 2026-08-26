@@ -4856,6 +4856,29 @@ def _results_new(ctx, command):
             ),
         )
 
+    def watch_attempt(n):
+        """Fresh attempt surface for watch cycle `n`: like a retry's reset,
+        labeled as a re-run rather than a retry."""
+        ph.reset(init_data())
+        data["bes_streamed_by_bazel"] = m["bazel_streams_bes"]
+        data["aspect_results_url"] = m["results_url"]
+        m["first"] = True
+        m["attempts"] = 1
+        m["label"] = "Re-running bazel " + command + "..."
+        ph.update(
+            _pick_status(command, data, had_failure = False, terminal = False),
+            phases.ProgressStyles(
+                body = m["label"],
+                stream = "Re-running bazel " + command + " (change %d)" % n,
+            ),
+            kind = "bazel_results",
+            phase = phases.Phase(
+                name = command + "_watch_%d" % n,
+                description = ("Run bazel tests" if command == "test" else "Build bazel targets") + " — watch cycle",
+                emoji = "🧪" if command == "test" else "🔨",
+            ),
+        )
+
     def invocation(inv):
         data["sink_invocation_id"] = inv.sink_invocation_id
 
@@ -4950,6 +4973,7 @@ def _results_new(ctx, command):
         live = bool(ctx.traits[Phases].task_update),
         setup = setup,
         attempt = attempt,
+        watch_attempt = watch_attempt,
         invocation = invocation,
         process = process,
         conclude = conclude,

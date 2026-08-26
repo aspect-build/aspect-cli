@@ -9,6 +9,7 @@ load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "phases")
 load("./private/lib/repro_commands.axl", "repro_flavor_args")
 load("./private/lib/tips.axl", "tips")
+load("./private/lib/watch.axl", "watch")
 
 # Where `--combined_report=lcov` writes the merged LCOV report, relative to
 # `bazel info output_path`. Bazel has no flag to redirect this, so
@@ -73,6 +74,23 @@ def _run_coverage_tool(ctx, bin, raw_args, report_path):
             " (continuing; tool failure does not fail the test task)\n",
         )
 
+def _coverage_post(ctx: TaskContext) -> None:
+    """--coverage-report / --coverage-tool handling after a test invocation."""
+    if not ctx.args.coverage:
+        return
+    report_path = _resolve_report(ctx)
+    if not report_path:
+        if ctx.args.coverage_report or ctx.args.coverage_tool:
+            ctx.std.io.stderr.write("--coverage: combined LCOV report not found; skipping --coverage-report / --coverage-tool\n")
+        return
+    if ctx.args.coverage_report:
+        _copy_combined_report(ctx, report_path, ctx.args.coverage_report)
+    if ctx.args.coverage_tool:
+        # Tool sees the original Bazel output path. If --coverage-report
+        # was also set, the copied file is identical, so it doesn't
+        # matter which one the tool reads.
+        _run_coverage_tool(ctx, ctx.args.coverage_tool, ctx.args.coverage_tool_args, report_path)
+
 def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # Coverage flags must land BEFORE the invocation handle resolves the rc, so
     # append to the trait here (the constructor folds `extra_flags` into the rc).
@@ -87,34 +105,45 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     rs.setup(bz.targets, bz.rc, bz.bazel_streams_bes, bz.results_url)
     bz.start()
 
-    w = None
-    for i in bz.attempts:
-        rs.attempt(i, prior = w)
-        sp = bz.spawn(i, events = results.KINDS if rs.live else False)
-        rs.invocation(sp)
-        for event in sp.events:
-            bz.on_event(event)
-            rs.process(event)
-        w = sp.wait()
-        if w.success or not bz.should_retry(sp, w):
-            break
+    def cycle(bz, on_first_attempt):
+        w = None
+        for i in bz.attempts:
+            if i == 0:
+                on_first_attempt(w)
+            else:
+                rs.attempt(i, prior = w)
+            sp = bz.spawn(i, events = results.KINDS if rs.live else False)
+            rs.invocation(sp)
+            for event in sp.events:
+                bz.on_event(event)
+                rs.process(event)
+            w = sp.wait()
+            if w.success or not bz.should_retry(sp, w):
+                break
+        bz.finish(w)
+        return w
 
-    bz.finish(w)
+    if ctx.args.watch:
+        # Watch before the first run so edits made during it aren't missed.
+        ws = watch.new(ctx)
+        n = [0]
+
+        def rerun():
+            n[0] += 1
+            # A fresh handle reparses the rc, so .bazelrc edits and refreshed
+            # endpoint auth apply to this cycle.
+            cycle(bzl.test(ctx), lambda _prior: rs.watch_attempt(n[0]))
+            _coverage_post(ctx)
+
+        cycle(bz, lambda prior: rs.attempt(0, prior = prior))
+        _coverage_post(ctx)
+        # Never concludes: re-runs per change until Ctrl-C ends the process.
+        return watch.loop(ws, rerun)
+
+    w = cycle(bz, lambda prior: rs.attempt(0, prior = prior))
     conclusion = rs.conclude(w, bz.targets)
 
-    if ctx.args.coverage:
-        report_path = _resolve_report(ctx)
-        if not report_path:
-            if ctx.args.coverage_report or ctx.args.coverage_tool:
-                ctx.std.io.stderr.write("--coverage: combined LCOV report not found; skipping --coverage-report / --coverage-tool\n")
-        else:
-            if ctx.args.coverage_report:
-                _copy_combined_report(ctx, report_path, ctx.args.coverage_report)
-            if ctx.args.coverage_tool:
-                # Tool sees the original Bazel output path. If --coverage-report
-                # was also set, the copied file is identical, so it doesn't
-                # matter which one the tool reads.
-                _run_coverage_tool(ctx, ctx.args.coverage_tool, ctx.args.coverage_tool_args, report_path)
+    _coverage_post(ctx)
 
     return conclusion
 
@@ -138,7 +167,7 @@ test = task(
             long = "coverage-tool-arg",
             description = "Argument forwarded to --coverage-tool. Repeat the flag to pass multiple. The `{report}` (or `{lcov}`) placeholder is replaced with the absolute path of the merged LCOV report. Example: `--coverage-tool=codecov --coverage-tool-arg=-f --coverage-tool-arg={report}`.",
         ),
-    } | bzl.targets_arg("test") | bzl.core_args("the test invocation") | repro_flavor_args(),
+    } | watch.ARGS | bzl.targets_arg("test") | bzl.core_args("the test invocation") | repro_flavor_args(),
     traits = [
         BazelTrait,
         HealthCheckTrait,

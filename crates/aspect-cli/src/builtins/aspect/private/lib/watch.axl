@@ -1,0 +1,97 @@
+"""Workspace file-watch session for `--watch` tasks."""
+
+load("@std//time.axl", "sleep_iter")
+
+_DESCRIPTION = (
+    "Stay running after the first invocation: watch the workspace for " +
+    "source changes and re-run on each change (the run task also restarts " +
+    "or notifies its running target). Stop with Ctrl-C."
+)
+
+_ARGS = {
+    "watch": args.boolean(
+        default = False,
+        description = _DESCRIPTION,
+    ),
+}
+
+# Workspace entries never worth a rebuild: VCS internals, the aspect-cli
+# store, and bazel's convenience symlinks (bazel-bin, bazel-out,
+# bazel-<workspace>, ...) — outputs live in the output base outside the
+# workspace, but the symlinks themselves flicker during builds.
+_IGNORE_NAMES = [".git", ".jj", ".aspect"]
+
+def _ignores(root: str) -> list[str]:
+    # `fs.watch` ignore prefixes must be absolute. A custom --symlink_prefix
+    # is not covered here; list its links too if you use one.
+    names = list(_IGNORE_NAMES) + [
+        "bazel-bin",
+        "bazel-out",
+        "bazel-testlogs",
+        "bazel-" + root.rsplit("/", 1)[-1],
+    ]
+    return [root + "/" + name for name in names]
+
+# `type(event)` -> the kind string the run task's protocols speak. The keys are
+# the `std.fs.watch.*Event` type names (`type()` returns them as strings).
+_KIND = {
+    "fs.watch.CreatedEvent": "created",
+    "fs.watch.ModifiedEvent": "modified",
+    "fs.watch.RemovedEvent": "removed",
+}
+
+def _adapt(root: str, batch) -> struct | None:
+    """Normalize an `fs.watch` batch into the run task's shape: `changes`, a
+    list of `struct(path, kind)` with an absolute `path` (fs.watch reports
+    paths relative to the root; the IBP / ibazel / runfiles-delta consumers
+    key on absolute paths) and `kind` one of "created"/"modified"/"removed",
+    plus `rescan`."""
+    if batch == None:
+        return None
+    return struct(
+        changes = [
+            struct(path = root + "/" + e.path, kind = _KIND[type(e)])
+            for e in batch.events
+        ],
+        rescan = batch.rescan,
+    )
+
+def _new(ctx: TaskContext) -> struct:
+    """Start watching the bazel workspace. Returns a session:
+
+      try_pop() → None | struct — non-blocking; a settled batch with `changes`
+          (each `struct(path, kind)`, kind "created"/"modified"/"removed") and
+          `rescan` (watcher lost state, treat as everything-changed).
+      drain() → None — discard pending changes (call after our own builds
+          so their filesystem noise doesn't trigger another cycle).
+      root — the watched workspace root.
+    """
+    root = ctx.std.env.bazel_root_dir()
+    w = ctx.std.fs.watch(root, ignore = _ignores(root))
+    return struct(
+        try_pop = lambda: _adapt(root, w.try_pop()),
+        drain = w.drain,
+        root = root,
+    )
+
+_TICK_MS = 100
+
+def _loop(ws: struct, run_cycle) -> None:
+    """Re-run `run_cycle` on each settled batch of workspace changes — the
+    simple watch shape for tasks whose cycle is just re-running a bazel
+    command. Batches already queued when a cycle starts are coalesced into
+    it; a failed cycle waits for the next change like any other. Runs until
+    Ctrl-C."""
+    for _tick in sleep_iter(_TICK_MS):
+        if ws.try_pop() == None:
+            continue
+        for _ in range(1000):
+            if ws.try_pop() == None:
+                break
+        run_cycle()
+
+watch = namespace(
+    new = _new,
+    loop = _loop,
+    ARGS = _ARGS,
+)
