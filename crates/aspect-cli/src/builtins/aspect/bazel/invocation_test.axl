@@ -12,6 +12,10 @@ default reaches Bazel — get that wrong and a caller-forwarded
 `--target_pattern_file` collides with an invented pattern, which Bazel
 rejects outright.
 
+Every section but the last is pure logic. The last one spawns a real Bazel,
+because the thing it guards — an invocation that Bazel rejects outright —
+only exists once there is a real process to reject it.
+
 Run with:
   aspect dev test-bazel-invocation
 """
@@ -138,6 +142,31 @@ def _test_lookup_is_command_scoped(_):
     rc = _fake_rc({"build": {"--target_pattern_file": "/tmp/p"}})
     _eq("test unaffected", target_patterns(False, ["..."], "", rc, "test"), ["..."])
 
+
+def _test_rejected_command_line_does_not_hang(ctx: TaskContext) -> None:
+    """Regression for aspect-build/aspect-cli#1400: a flag Bazel rejects makes
+    it exit without ever opening the build-event pipe, and the invocation has
+    to surface that exit rather than wait on a writer that can never arrive.
+
+    Requires `build_events`, since that is what puts a pipe there to wait on.
+    A regression stalls this task until the CI job's own timeout — loud
+    enough to spot, which is the point of running it here against a real
+    Bazel rather than a fake."""
+    events = bazel.build_events.iterator()
+    build = ctx.bazel.build(
+        "//crates/galvanize:galvanize",
+        build_events = [events],
+        flags = ["--definitely_not_a_flag"],
+        stderr = None,
+    )
+    seen = 0
+    for _ in events:
+        seen += 1
+    status = build.wait()
+    if status.success:
+        fail("expected Bazel to reject --definitely_not_a_flag")
+    _eq("rejected command line yields no events", seen, 0)
+
 def _test_impl(ctx: TaskContext) -> int:
     _test_attempt_dispatch_empty_is_noop(ctx)
     _test_build_end_dispatch_empty_is_noop(ctx)
@@ -149,7 +178,11 @@ def _test_impl(ctx: TaskContext) -> int:
     _test_explicit_patterns_always_reach_bazel(ctx)
     _test_aspect_own_flag_suppresses_the_default(ctx)
     _test_lookup_is_command_scoped(ctx)
-    print("invocation_test.axl: OK (10 sections)")
+
+    # Spawns a real Bazel; keep it last so a stall cannot mask the pure
+    # sections above.
+    _test_rejected_command_line_does_not_hang(ctx)
+    print("invocation_test.axl: OK (11 sections)")
     return 0
 
 invocation_tests = task(

@@ -1,4 +1,4 @@
-load("//bazel/rust:defs.bzl", "rust_library")
+load("//bazel/rust:defs.bzl", "rust_library", "rust_test")
 
 config_setting(
     name = "macos",
@@ -23,4 +23,9 @@ rust_library(
         ":macos": ["@crates//:proc_pidinfo"],
         ":linux": ["@crates//:procfs"],
     }),
+)
+
+rust_test(
+    name = "galvanize_test",
+    crate = ":galvanize",
 )

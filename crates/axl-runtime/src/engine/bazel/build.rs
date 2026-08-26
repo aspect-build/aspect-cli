@@ -1202,6 +1202,50 @@ Test = task(implementation = _impl)
         assert_eq!(exit, Some(0));
     }
 
+    /// A mistyped flag reaches Bazel, which rejects the command line and
+    /// exits without ever opening the BEP file. The build must report that
+    /// exit code instead of waiting forever on a writer that cannot come.
+    #[test]
+    fn a_rejected_command_line_does_not_hang_the_bes_reader() {
+        use std::time::Duration;
+        // Generous: the timeout is here to catch a hang, not to bound a
+        // healthy run, which finishes in well under a second.
+        let result = crate::test::with_timeout(Duration::from_secs(60), || {
+            crate::test::eval(
+                r#"
+def _impl(ctx):
+    iter = bazel.build_events.iterator()
+    build = ctx.bazel.build(
+        flags = ["--scenario=rejects_command_line"],
+        build_events = [iter],
+        stderr = None,
+    )
+    events = 0
+    for _ in iter:
+        events += 1
+    status = build.wait()
+    if status.success: return 1
+    if status.code != 2: return 2
+    if events != 0: return 3
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+            )
+            .with_fake_bazel()
+            .run_task(0)
+        });
+
+        match result {
+            None => panic!("timed out: a rejected command line hung the BES reader"),
+            Some(exit) => assert_eq!(
+                exit.expect("run_task"),
+                Some(0),
+                "expected an empty stream and bazel's exit code 2"
+            ),
+        }
+    }
+
     /// Regression for aspect-build/aspect-cli#1060: REMOTE_CACHE_EVICTED
     /// without a follow-up retry must not hang the BES reader.
     #[test]

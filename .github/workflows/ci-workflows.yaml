@@ -575,6 +575,13 @@ jobs:
           "$LAUNCHER" build --task-id not-a-uuid //... && echo "ERROR: --task-id should reject non-UUID" && exit 1 || true
           echo "--- invalid task-key"
           "$LAUNCHER" build --task:name "bad key!" //... && echo "ERROR: --task:name should reject invalid chars" && exit 1 || true
+          # A flag Bazel rejects has to come back as Bazel's error. This is the
+          # shape that used to hang: Bazel exits without opening the build-event
+          # pipe, and the reader waited on it forever. `timeout` bounds a
+          # regression to a clear failure instead of the whole job budget.
+          echo "--- flag rejected by Bazel"
+          timeout 180 "$LAUNCHER" build --bazel-flag=--definitely_not_a_flag //... 2>&1 | grep -q "Unrecognized option" \
+            || { echo "ERROR: a Bazel-rejected flag must fail, not hang"; exit 1; }
           echo "--- aspect dev test-template-snapshots"
           "$LAUNCHER" dev test-template-snapshots
           echo "--- aspect dev test-lint-template-snapshots"
