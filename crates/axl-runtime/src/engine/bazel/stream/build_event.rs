@@ -4,9 +4,9 @@ use std::fs::File;
 use std::io::BufWriter;
 use std::io::ErrorKind;
 use std::io::Write;
-use std::{env, io};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::{env, io};
 use std::{
     io::Read,
     path::PathBuf,
@@ -33,12 +33,46 @@ pub enum BuildEventStreamError {
 /// enough to be invisible next to a build, long enough not to spin.
 const WRITER_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
 
-/// How many times the watchdog offers to release an open that has not parked
-/// yet, before concluding it never will. At [`WRITER_POLL_INTERVAL`] apiece
-/// this spans about two seconds — far longer than the gap between spawning
-/// this thread and its `open`, and it only ever elapses when that `open` never
-/// happened at all.
+/// How many times [`spawn_open_watchdog`] offers to release an open that has
+/// not parked yet, before concluding it never will. At
+/// [`WRITER_POLL_INTERVAL`] apiece this spans about two seconds, far longer
+/// than the microseconds between spawning the watchdog and the open it guards.
 const WRITER_RELEASE_OFFERS: u32 = 200;
+
+/// Release a reader parked in `Pipe::open` on `path` once `writer_pid` — the
+/// invocation expected to write there — is gone.
+///
+/// Bazel can reject a command line and exit without ever opening the BEP file,
+/// leaving its daemon behind to look like a writer still on its way, and a
+/// FIFO's blocking open would then park for the life of the process. Guessing
+/// wrong is cheap: a FIFO ends only once every writer has closed, so a poke
+/// landing beside a writer bazel did open is invisible to the reader.
+///
+/// The returned flag retires the watchdog; the caller sets it once its own
+/// open has returned, so a reader that got its writer honestly is left alone.
+fn spawn_open_watchdog(path: PathBuf, writer_pid: u32) -> Arc<AtomicBool> {
+    let opened = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&opened);
+    thread::spawn(move || {
+        let mut offers = 0;
+        while !flag.load(Ordering::Relaxed) {
+            // `poke_writer` only lands while a reader is actually parked, which
+            // may still be moments away when the invocation is already over —
+            // so keep offering rather than giving up on the first miss.
+            if !galvanize::is_pid_alive(writer_pid) {
+                if let Ok(true) = galvanize::Pipe::poke_writer(&path) {
+                    return;
+                }
+                offers += 1;
+                if offers >= WRITER_RELEASE_OFFERS {
+                    return;
+                }
+            }
+            thread::sleep(WRITER_POLL_INTERVAL);
+        }
+    });
+    opened
+}
 
 #[derive(Debug)]
 pub struct BuildEventStream {
@@ -67,10 +101,10 @@ impl BuildEventStream {
     /// `writer_pid` is the per-invocation pid whose death means no more bytes
     /// are coming — for real bazel the spawned client process
     /// (`Command::spawn().id()`). It answers both "will a writer ever arrive?"
-    /// (the watchdog below, which releases the initial open) and "is another
-    /// attempt coming?" (the `BrokenPipe` branch in the read loop). Neither
-    /// question can be put to `server_pid`, since the daemon outlives the
-    /// invocation and so always looks like a writer still on its way.
+    /// (see [`spawn_open_watchdog`]) and "is another attempt coming?" (the
+    /// `BrokenPipe` branch in the read loop). Neither question can be put to
+    /// `server_pid`, since the daemon outlives the invocation and so always
+    /// looks like a writer still on its way.
     ///
     /// Each `(path, signal)` pair gets raw FIFO bytes mirrored to `path`;
     /// `signal.complete(result)` fires after flush, unblocking the file
@@ -103,10 +137,9 @@ impl BuildEventStream {
                 Ok(MultiWriter { writers })
             };
 
-            // Close a stream that has ended: no more events are coming, so
-            // subscribers are cut loose and the file sinks are flushed and
-            // signalled. Whether the build itself succeeded is the caller's
-            // business, read off bazel's exit code.
+            // End the stream: cut subscribers loose, flush and signal the
+            // file sinks. Says nothing about whether the build succeeded —
+            // that is the caller's to read off bazel's exit code.
             let finish = |raw_out: &mut MultiWriter<BufWriter<File>>| {
                 broadcaster.close();
                 match raw_out.flush() {
@@ -130,48 +163,11 @@ impl BuildEventStream {
             };
             // mkfifo is idempotent (tolerates EEXIST), so this works whether
             // the caller pre-created the FIFO via `reserve_path` (production)
-            // or not (unit tests). It has to happen before the watchdog, which
-            // has nothing to poke until the inode exists.
+            // or not (unit tests). Before the watchdog, which has nothing to
+            // poke until the inode exists.
             galvanize::Pipe::mkfifo(&path)?;
 
-            // Bazel can reject the command line and exit without ever opening
-            // the BEP file, leaving its daemon behind to look like a writer
-            // still on its way — and `Pipe::open` would then park for the life
-            // of the process. This watchdog releases it once the invocation is
-            // over. Guessing wrong is cheap: a poke alongside a writer bazel
-            // did open is invisible, since a FIFO ends only when every writer
-            // has closed.
-            let opened = Arc::new(AtomicBool::new(false));
-            {
-                let path = path.clone();
-                let opened = Arc::clone(&opened);
-                thread::spawn(move || {
-                    let mut offers = 0;
-                    loop {
-                        if opened.load(Ordering::Relaxed) {
-                            return;
-                        }
-                        if !galvanize::is_pid_alive(writer_pid) {
-                            match galvanize::Pipe::poke_writer(&path) {
-                                // Released, or the FIFO is gone and there is
-                                // nothing left to release.
-                                Ok(true) | Err(_) => return,
-                                // Nobody parked on it yet: the open is still on
-                                // its way. Keep offering briefly — a reader that
-                                // has not arrived by now never will.
-                                Ok(false) => {
-                                    offers += 1;
-                                    if offers >= WRITER_RELEASE_OFFERS {
-                                        return;
-                                    }
-                                }
-                            }
-                        }
-                        thread::sleep(WRITER_POLL_INTERVAL);
-                    }
-                });
-            }
-
+            let opened = spawn_open_watchdog(path.clone(), writer_pid);
             let mut reader =
                 galvanize::Pipe::open(path, galvanize::RetryPolicy::IfOpenForPid(server_pid))?;
             opened.store(true, Ordering::Relaxed);
@@ -444,6 +440,33 @@ mod tests {
     // No writer ever arrives: Bazel exited before opening the BEP file
     // -------------------------------------------------------------------------
 
+    /// The watchdog usually starts while the invocation is still alive, but
+    /// nothing guarantees it: an invocation already over when the watchdog
+    /// starts means the first poke arrives before there is any reader to
+    /// release. Poking is only effective against a parked reader, so the
+    /// watchdog has to keep offering — one attempt would strand this reader.
+    #[test]
+    fn the_watchdog_waits_for_a_reader_that_has_not_parked_yet() {
+        let released = crate::test::with_timeout(Duration::from_secs(10), || {
+            let path = temp_fifo_path();
+            galvanize::Pipe::mkfifo(&path).expect("mkfifo");
+
+            // Dead from the outset, so the watchdog starts poking immediately —
+            // well before the open below exists to be released.
+            let opened = spawn_open_watchdog(path.clone(), dead_pid());
+            std::thread::sleep(Duration::from_millis(100));
+
+            let reader = galvanize::Pipe::open(path, galvanize::RetryPolicy::Never);
+            opened.store(true, Ordering::Relaxed);
+            reader.is_ok()
+        });
+        assert_eq!(
+            released,
+            Some(true),
+            "the watchdog must keep offering until the reader is there to release"
+        );
+    }
+
     /// Bazel can exit before it ever opens the BEP file — an unrecognized flag,
     /// a bad startup option — leaving a live daemon that still looks like a
     /// writer on its way. The stream has to end, empty, rather than wait on a
@@ -469,10 +492,10 @@ mod tests {
         );
     }
 
-    /// The other edge of the same wait: this thread starts the moment bazel is
-    /// spawned, but bazel does not open the BEP file until its JVM is up
-    /// seconds later, and that gap must not be mistaken for an invocation that
-    /// will never write. Every event of a real build rides on the difference.
+    /// The other edge: the reader starts the moment bazel is spawned, but bazel
+    /// does not open the BEP file until its JVM is up seconds later. That gap
+    /// must not be taken for an invocation that will never write, or every
+    /// event of a real build is lost.
     #[test]
     fn a_writer_that_opens_late_still_delivers_its_events() {
         let path = temp_fifo_path();

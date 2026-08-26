@@ -325,8 +325,15 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(5));
         }
-        assert!(poked, "a reader was parked in open; the poke should have found it");
-        assert_eq!(reader.join().expect("reader thread"), 0, "the released reader must see end-of-stream");
+        assert!(
+            poked,
+            "a reader was parked in open; the poke should have found it"
+        );
+        assert_eq!(
+            reader.join().expect("reader thread"),
+            0,
+            "the released reader must see end-of-stream"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
