@@ -108,30 +108,10 @@ fn is_path_open_for_pid(path: &Path, pid: u32) -> io::Result<bool> {
     Ok(false)
 }
 
-/// Drop `O_NONBLOCK` from an open descriptor, so reads block again.
-fn clear_nonblocking(file: &File) -> io::Result<()> {
-    use std::os::fd::AsRawFd;
-
-    let fd = file.as_raw_fd();
-    // SAFETY: `fd` is owned by `file` and stays open for this call; F_GETFL and
-    // F_SETFL only read and rewrite this descriptor's status flags.
-    unsafe {
-        let flags = libc::fcntl(fd, libc::F_GETFL);
-        if flags == -1 || libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) == -1 {
-            return Err(io::Error::last_os_error());
-        }
-    }
-    Ok(())
-}
-
 pub struct Pipe {
     path: PathBuf,
     inner: File,
     policy: RetryPolicy,
-    /// Bytes already read off the FIFO while waiting for a writer to show up
-    /// (see [`Pipe::open_waiting_for_writer`]), handed to the next `read`
-    /// before the fd is touched again. Empty for every other constructor.
-    pending: Vec<u8>,
 }
 
 pub enum RetryPolicy {
@@ -158,10 +138,43 @@ impl Pipe {
         }
     }
 
+    /// Release a reader parked in [`Pipe::open`] by briefly becoming the writer
+    /// it is waiting for: open the write end and close it without writing.
+    /// The reader's open returns and its first read reports end-of-stream.
+    ///
+    /// For callers whose real writer may die before it ever opens the FIFO:
+    /// that leaves the `open` parked in the kernel with no read for
+    /// [`RetryPolicy`] to govern, and nothing short of a signal to call it off.
+    ///
+    /// Returns whether a reader was actually waiting. `O_NONBLOCK` keeps this
+    /// from becoming the mirror image of the problem it solves: with no reader
+    /// on the other side the open fails `ENXIO` rather than parking, reported
+    /// here as `Ok(false)`.
+    ///
+    /// Harmless to call when the real writer did arrive: a FIFO reports
+    /// end-of-stream only once *every* writer has closed, so a poke alongside
+    /// a live writer is invisible to the reader.
+    pub fn poke_writer(path: &Path) -> io::Result<bool> {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(path)
+        {
+            Ok(_) => Ok(true),
+            Err(e) if e.raw_os_error() == Some(libc::ENXIO) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Open the read end of an existing FIFO at `path`. Blocks until a
     /// writer connects (POSIX FIFO semantics) unless one already has.
     /// Pair with `mkfifo` when the caller needs to control ordering
     /// between FIFO creation and writer spawn.
+    ///
+    /// A writer that never arrives parks this forever; see
+    /// [`Pipe::poke_writer`] for the way out.
     pub fn open(path: PathBuf, policy: RetryPolicy) -> io::Result<Self> {
         let inner = File::open(&path)?;
         let path = path.canonicalize()?;
@@ -169,88 +182,6 @@ impl Pipe {
             inner,
             policy,
             path,
-            pending: Vec::new(),
-        })
-    }
-
-    /// Open the read end of an existing FIFO without committing to a writer
-    /// ever arriving. Returns `ErrorKind::BrokenPipe` once `should_wait`
-    /// reports the writer is no longer coming.
-    ///
-    /// [`Pipe::open`] cannot do this: a blocking `open(O_RDONLY)` on a FIFO
-    /// parks in the kernel until a writer opens the other end, and nothing
-    /// short of a signal calls it off — so a writer that dies *before* opening
-    /// strands the caller for good, with no read for [`RetryPolicy`] to
-    /// govern. `O_NONBLOCK` makes the open return at once; this then polls
-    /// every `poll_interval`, asking `should_wait` whether to keep waiting.
-    ///
-    /// Readiness is decided by a read rather than by `poll` flags, whose
-    /// meaning for an unconnected FIFO varies by platform. The read results
-    /// POSIX does pin down are easy to read backwards:
-    ///
-    /// * `Ok(0)` — *nobody* has the FIFO open for writing. Ambiguous between
-    ///   "the writer has not gotten to it yet" and "the writer is finished",
-    ///   so it is a waiting state rather than an answer. Mistaking it for a
-    ///   writer sighting hands back a pipe whose first read reports the stream
-    ///   already over, losing everything the writer had yet to send.
-    /// * `EAGAIN` — a writer *is* attached, with nothing written yet. Proof it
-    ///   arrived, so the wait ends here.
-    /// * `Ok(n)` — data, which this read has consumed; the bytes are held in
-    ///   `pending` for the first [`Read::read`] call.
-    ///
-    /// Once a writer has been seen the descriptor goes back to blocking, so
-    /// streaming reads cost exactly what [`Pipe::open`]'s do.
-    pub fn open_waiting_for_writer(
-        path: PathBuf,
-        policy: RetryPolicy,
-        poll_interval: std::time::Duration,
-        mut should_wait: impl FnMut() -> bool,
-    ) -> io::Result<Self> {
-        use std::os::unix::fs::OpenOptionsExt;
-
-        /// Enough to hold whatever a writer managed to send before this thread
-        /// got to its first read; the rest stays in the FIFO for later reads.
-        const FIRST_READ_CAPACITY: usize = 4096;
-
-        let inner = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NONBLOCK)
-            .open(&path)?;
-
-        let mut pending = vec![0u8; FIRST_READ_CAPACITY];
-        let mut buffered = 0;
-        // Whether `should_wait` has already gone false. Reading once more
-        // after it does is what keeps a writer that filled the FIFO and exited
-        // between two polls from being treated as one that never wrote.
-        let mut writer_gone = false;
-        loop {
-            match (&inner).read(&mut pending) {
-                Ok(n) if n > 0 => {
-                    buffered = n;
-                    break;
-                }
-                Err(e) if e.kind() == ErrorKind::WouldBlock => break,
-                Ok(_) => {}
-                Err(e) => return Err(e),
-            }
-            if writer_gone {
-                return Err(io::Error::new(
-                    ErrorKind::BrokenPipe,
-                    "no writer opened the pipe",
-                ));
-            }
-            writer_gone = !should_wait();
-            std::thread::sleep(poll_interval);
-        }
-        pending.truncate(buffered);
-
-        clear_nonblocking(&inner)?;
-        let path = path.canonicalize()?;
-        Ok(Self {
-            inner,
-            policy,
-            path,
-            pending,
         })
     }
 
@@ -263,12 +194,6 @@ impl Pipe {
     }
 
     fn read_with_policy(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if !self.pending.is_empty() {
-            let n = buf.len().min(self.pending.len());
-            buf[..n].copy_from_slice(&self.pending[..n]);
-            self.pending.drain(..n);
-            return Ok(n);
-        }
         match self.policy {
             RetryPolicy::Never => self.inner.read(buf).map_err(|err| err.into()),
             RetryPolicy::IfOpenForPid(pid) => loop {
@@ -362,12 +287,8 @@ impl Read for StreamingFile {
 mod tests {
     use super::*;
 
-    use std::fs::OpenOptions;
-    use std::io::Write;
     use std::sync::atomic::{AtomicU32, Ordering};
-    use std::time::{Duration, Instant};
-
-    const POLL: Duration = Duration::from_millis(5);
+    use std::time::Duration;
 
     /// A FIFO of our own, created and owned by the calling test.
     fn fifo() -> PathBuf {
@@ -381,125 +302,95 @@ mod tests {
         path
     }
 
-    /// Nothing ever opens the write end, and the caller stops waiting: the open
-    /// has to fail rather than park in the kernel the way `open` would.
+    /// The reason `poke_writer` exists: a reader parked in `open` with no writer
+    /// coming has to be able to get out, and what it sees on the way out is an
+    /// ended stream.
     #[test]
-    fn gives_up_when_no_writer_ever_opens() {
+    fn poking_releases_a_parked_reader() {
         let path = fifo();
-        let started = Instant::now();
-        let err =
-            match Pipe::open_waiting_for_writer(path.clone(), RetryPolicy::Never, POLL, || false) {
-                Ok(_) => panic!("must not hand back a pipe no writer will ever use"),
-                Err(e) => e,
-            };
+        let path_r = path.clone();
+        let reader = std::thread::spawn(move || {
+            let mut pipe = Pipe::open(path_r, RetryPolicy::Never).expect("open read end");
+            let mut buf = [0u8; 8];
+            pipe.read(&mut buf).expect("read")
+        });
 
-        assert_eq!(err.kind(), ErrorKind::BrokenPipe);
+        // Poll rather than sleep-once: the poke only works while the reader is
+        // parked, and `Ok(false)` says it wasn't there yet.
+        let mut poked = false;
+        for _ in 0..200 {
+            if Pipe::poke_writer(&path).expect("poke") {
+                poked = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(poked, "a reader was parked in open; the poke should have found it");
+        assert_eq!(reader.join().expect("reader thread"), 0, "the released reader must see end-of-stream");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// With nobody parked the poke must report that and return, not park in the
+    /// kernel itself waiting for a reader.
+    #[test]
+    fn poking_an_unattended_fifo_reports_no_reader() {
+        let path = fifo();
         assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "gave up after {:?}; it should take a couple of polls",
-            started.elapsed()
+            !Pipe::poke_writer(&path).expect("poke must not fail"),
+            "no reader is waiting on this FIFO"
         );
         let _ = std::fs::remove_file(&path);
     }
 
-    /// A writer that has attached without sending anything yet is still a
-    /// writer, and `EAGAIN` is the only proof of one — so the wait ends there,
-    /// whatever the guard says.
-    ///
-    /// The writer opens from another thread because `open(O_WRONLY)` on a FIFO
-    /// blocks until a reader arrives: opening it up front would deadlock
-    /// against the very open under test.
+    /// A poke is allowed to lose the race and land while the real writer holds
+    /// the FIFO open. The reader must not see that as the end of anything.
     #[test]
-    fn ends_the_wait_when_a_writer_attaches_without_writing() {
+    fn poking_alongside_a_live_writer_does_not_end_the_stream() {
         let path = fifo();
-        let path_w = path.clone();
-        let writer = std::thread::spawn(move || {
-            OpenOptions::new()
-                .write(true)
-                .open(&path_w)
-                .expect("open write end")
-        });
-
-        // Bounded rather than `|| true`, so a regression fails the test
-        // instead of hanging it.
-        let mut polls = 0;
-        let pipe = Pipe::open_waiting_for_writer(path.clone(), RetryPolicy::Never, POLL, || {
-            polls += 1;
-            polls < 200
-        });
-        assert!(pipe.is_ok(), "an attached writer must end the wait");
-
-        drop(writer.join().expect("writer thread"));
-        let _ = std::fs::remove_file(&path);
-    }
-
-    /// The wait spends a read to learn where it stands, so whatever that read
-    /// swallowed has to reach the caller's first `read`.
-    #[test]
-    fn hands_over_bytes_it_read_while_waiting() {
-        let path = fifo();
-        let path_w = path.clone();
-
-        // Writing from inside the guard puts the bytes in the FIFO before the
-        // loop's next read, which is what makes that read return data rather
-        // than EAGAIN. Doing it from another thread would race that ordering.
-        let mut wrote = false;
-        let mut pipe =
-            Pipe::open_waiting_for_writer(path.clone(), RetryPolicy::Never, POLL, || {
-                if !wrote {
-                    wrote = true;
-                    let mut w = OpenOptions::new()
-                        .write(true)
-                        .open(&path_w)
-                        .expect("open write end");
-                    w.write_all(b"hello world").expect("write");
+        let path_r = path.clone();
+        let reader = std::thread::spawn(move || {
+            let mut pipe = Pipe::open(path_r, RetryPolicy::Never).expect("open read end");
+            let mut got = Vec::new();
+            let mut buf = [0u8; 4];
+            loop {
+                match pipe.read(&mut buf).expect("read") {
+                    0 => break,
+                    n => got.extend_from_slice(&buf[..n]),
                 }
-                true
-            })
-            .expect("data queued on the FIFO must end the wait");
-
-        // Read in small chunks: the hand-over buffer has to survive being
-        // drained across several reads, not just one big one.
-        let mut got = Vec::new();
-        let mut chunk = [0u8; 4];
-        loop {
-            match pipe.read(&mut chunk).expect("read") {
-                0 => break,
-                n => got.extend_from_slice(&chunk[..n]),
             }
-        }
-        assert_eq!(got, b"hello world");
-        let _ = std::fs::remove_file(&path);
-    }
+            got
+        });
 
-    /// A writer can fill the FIFO and exit between two polls. Its bytes are
-    /// still in the pipe, so noticing it left must not throw them away.
-    #[test]
-    fn delivers_bytes_from_a_writer_that_left_between_polls() {
-        let path = fifo();
-        let path_w = path.clone();
-
-        // The whole writer lifetime — attach, write, leave — happens inside one
-        // guard call, and the guard says "gone" every time. So the bytes can
-        // only come back via the read taken after the writer is known gone.
-        let mut wrote = false;
-        let mut pipe =
-            Pipe::open_waiting_for_writer(path.clone(), RetryPolicy::Never, POLL, || {
-                if !wrote {
-                    wrote = true;
-                    let mut w = OpenOptions::new()
-                        .write(true)
-                        .open(&path_w)
-                        .expect("open write end");
-                    w.write_all(b"late").expect("write");
+        let mut w = {
+            use std::io::Write;
+            let mut w = None;
+            for _ in 0..200 {
+                match std::fs::OpenOptions::new().write(true).open(&path) {
+                    Ok(f) => {
+                        w = Some(f);
+                        break;
+                    }
+                    Err(_) => std::thread::sleep(Duration::from_millis(5)),
                 }
-                false
-            })
-            .expect("bytes written before the last read must be delivered");
+            }
+            let mut f = w.expect("open write end");
+            f.write_all(b"before").expect("write");
+            f
+        };
 
-        let mut got = [0u8; 4];
-        pipe.read_exact(&mut got).expect("read");
-        assert_eq!(&got, b"late");
+        // Poke while the real writer is still attached, then keep writing.
+        let _ = Pipe::poke_writer(&path).expect("poke");
+        {
+            use std::io::Write;
+            w.write_all(b"after").expect("write after the poke");
+        }
+        drop(w);
+
+        assert_eq!(
+            reader.join().expect("reader thread"),
+            b"beforeafter".to_vec(),
+            "a poke beside a live writer must not truncate the stream"
+        );
         let _ = std::fs::remove_file(&path);
     }
 }

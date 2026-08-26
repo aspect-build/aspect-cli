@@ -5,6 +5,8 @@ use std::io::BufWriter;
 use std::io::ErrorKind;
 use std::io::Write;
 use std::{env, io};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     io::Read,
     path::PathBuf,
@@ -26,10 +28,17 @@ pub enum BuildEventStreamError {
     ProstEncode(#[from] prost::EncodeError),
 }
 
-/// How often the reader re-checks for a writer on the FIFO — both while
-/// waiting for the first one and in the gap between retry attempts. Short
+/// How often to re-check for a writer on the FIFO — while the watchdog waits
+/// for the invocation to end, and in the gap between retry attempts. Short
 /// enough to be invisible next to a build, long enough not to spin.
 const WRITER_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// How many times the watchdog offers to release an open that has not parked
+/// yet, before concluding it never will. At [`WRITER_POLL_INTERVAL`] apiece
+/// this spans about two seconds — far longer than the gap between spawning
+/// this thread and its `open`, and it only ever elapses when that `open` never
+/// happened at all.
+const WRITER_RELEASE_OFFERS: u32 = 200;
 
 #[derive(Debug)]
 pub struct BuildEventStream {
@@ -57,11 +66,11 @@ impl BuildEventStream {
     ///
     /// `writer_pid` is the per-invocation pid whose death means no more bytes
     /// are coming — for real bazel the spawned client process
-    /// (`Command::spawn().id()`). It bounds both waits this thread can get
-    /// stuck in: for the first writer to open the FIFO at all, and for a retry
-    /// attempt to reopen it after a `BrokenPipe`. Neither can be answered by
-    /// `server_pid`, since the daemon outlives the invocation and so always
-    /// looks like a writer still on its way.
+    /// (`Command::spawn().id()`). It answers both "will a writer ever arrive?"
+    /// (the watchdog below, which releases the initial open) and "is another
+    /// attempt coming?" (the `BrokenPipe` branch in the read loop). Neither
+    /// question can be put to `server_pid`, since the daemon outlives the
+    /// invocation and so always looks like a writer still on its way.
     ///
     /// Each `(path, signal)` pair gets raw FIFO bytes mirrored to `path`;
     /// `signal.complete(result)` fires after flush, unblocking the file
@@ -121,28 +130,51 @@ impl BuildEventStream {
             };
             // mkfifo is idempotent (tolerates EEXIST), so this works whether
             // the caller pre-created the FIFO via `reserve_path` (production)
-            // or not (unit tests).
+            // or not (unit tests). It has to happen before the watchdog, which
+            // has nothing to poke until the inode exists.
             galvanize::Pipe::mkfifo(&path)?;
-            let reader = galvanize::Pipe::open_waiting_for_writer(
-                path,
-                galvanize::RetryPolicy::IfOpenForPid(server_pid),
-                WRITER_POLL_INTERVAL,
-                || galvanize::is_pid_alive(writer_pid),
-            );
-            let mut reader = match reader {
-                Ok(reader) => reader,
-                // Bazel rejected the command line, or otherwise died before
-                // opening the BEP file: the invocation is over and emitted
-                // nothing.
-                Err(e) if e.kind() == ErrorKind::BrokenPipe => {
-                    return finish(&mut raw_out);
-                }
-                Err(e) => {
-                    signal_all(Err(format!("failed to open the BES pipe: {e}")));
-                    broadcaster.close();
-                    return Err(BuildEventStreamError::IO(e));
-                }
-            };
+
+            // Bazel can reject the command line and exit without ever opening
+            // the BEP file, leaving its daemon behind to look like a writer
+            // still on its way — and `Pipe::open` would then park for the life
+            // of the process. This watchdog releases it once the invocation is
+            // over. Guessing wrong is cheap: a poke alongside a writer bazel
+            // did open is invisible, since a FIFO ends only when every writer
+            // has closed.
+            let opened = Arc::new(AtomicBool::new(false));
+            {
+                let path = path.clone();
+                let opened = Arc::clone(&opened);
+                thread::spawn(move || {
+                    let mut offers = 0;
+                    loop {
+                        if opened.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        if !galvanize::is_pid_alive(writer_pid) {
+                            match galvanize::Pipe::poke_writer(&path) {
+                                // Released, or the FIFO is gone and there is
+                                // nothing left to release.
+                                Ok(true) | Err(_) => return,
+                                // Nobody parked on it yet: the open is still on
+                                // its way. Keep offering briefly — a reader that
+                                // has not arrived by now never will.
+                                Ok(false) => {
+                                    offers += 1;
+                                    if offers >= WRITER_RELEASE_OFFERS {
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                        thread::sleep(WRITER_POLL_INTERVAL);
+                    }
+                });
+            }
+
+            let mut reader =
+                galvanize::Pipe::open(path, galvanize::RetryPolicy::IfOpenForPid(server_pid))?;
+            opened.store(true, Ordering::Relaxed);
 
             let mut buf: Vec<u8> = Vec::with_capacity(1024 * 5);
             // Initial size for reading a varint
