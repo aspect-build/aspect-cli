@@ -29,11 +29,46 @@ fn settle(sub: &mut Box<dyn Subscription>) {
     sub.drain();
 }
 
-#[test]
-fn reports_created_file() {
+fn watchman_available() -> bool {
+    std::process::Command::new("watchman")
+        .arg("version")
+        .output()
+        .is_ok_and(|out| out.status.success())
+}
+
+/// Skip watchman tests (with a note) on machines without the binary.
+macro_rules! backend_tests {
+    ($($name:ident),* $(,)?) => {
+        mod notify {
+            $(#[test]
+            fn $name() {
+                super::$name(crate::Backend::Notify);
+            })*
+        }
+        mod watchman {
+            $(#[test]
+            fn $name() {
+                if !super::watchman_available() {
+                    eprintln!("watchman not on PATH; skipping");
+                    return;
+                }
+                super::$name(crate::Backend::Watchman);
+            })*
+        }
+    };
+}
+
+backend_tests!(
+    reports_created_file,
+    reports_removed_file,
+    ignores_configured_prefixes,
+    drain_discards_pending,
+);
+
+fn reports_created_file(backend: Backend) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().canonicalize().unwrap();
-    let mut sub = watch(Backend::default(), quick_config(root.clone())).unwrap();
+    let mut sub = watch(backend, quick_config(root.clone())).unwrap();
     settle(&mut sub);
     fs::write(root.join("a.txt"), "hello").unwrap();
     let batch = recv_batch(&mut sub);
@@ -43,12 +78,11 @@ fn reports_created_file() {
     );
 }
 
-#[test]
-fn reports_removed_file() {
+fn reports_removed_file(backend: Backend) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().canonicalize().unwrap();
     fs::write(root.join("a.txt"), "hello").unwrap();
-    let mut sub = watch(Backend::default(), quick_config(root.clone())).unwrap();
+    let mut sub = watch(backend, quick_config(root.clone())).unwrap();
     settle(&mut sub);
     fs::remove_file(root.join("a.txt")).unwrap();
     let batch = recv_batch(&mut sub);
@@ -60,14 +94,13 @@ fn reports_removed_file() {
     assert_eq!(change.kind, ChangeKind::Removed);
 }
 
-#[test]
-fn ignores_configured_prefixes() {
+fn ignores_configured_prefixes(backend: Backend) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().canonicalize().unwrap();
     fs::create_dir(root.join("ignored")).unwrap();
     let mut config = quick_config(root.clone());
     config.ignore_prefixes = vec![root.join("ignored")];
-    let mut sub = watch(Backend::default(), config).unwrap();
+    let mut sub = watch(backend, config).unwrap();
     settle(&mut sub);
     fs::write(root.join("ignored/a.txt"), "x").unwrap();
     fs::write(root.join("kept.txt"), "x").unwrap();
@@ -89,10 +122,22 @@ fn ignores_configured_prefixes() {
 }
 
 #[test]
-fn drain_discards_pending() {
+fn auto_backend_detection_follows_watchmanconfig() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().canonicalize().unwrap();
-    let mut sub = watch(Backend::default(), quick_config(root.clone())).unwrap();
+    let nested = root.join("a/b");
+    fs::create_dir_all(&nested).unwrap();
+    assert!(!crate::in_watchman_project(&root));
+    fs::write(root.join(".watchmanconfig"), "{}").unwrap();
+    assert!(crate::in_watchman_project(&root));
+    // Only the watched root itself opts in — no ancestor discovery.
+    assert!(!crate::in_watchman_project(&nested));
+}
+
+fn drain_discards_pending(backend: Backend) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let mut sub = watch(backend, quick_config(root.clone())).unwrap();
     settle(&mut sub);
     fs::write(root.join("noise.txt"), "x").unwrap();
     // Wait until the write is definitely pending, then discard it.

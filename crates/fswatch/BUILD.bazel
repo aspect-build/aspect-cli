@@ -8,7 +8,9 @@ rust_library(
     ],
     deps = [
         "@crates//:notify",
+        "@crates//:serde_json",
         "@crates//:thiserror",
+        "@crates//:tracing",
     ],
 )
 
