@@ -237,6 +237,16 @@ fn scenario(name: &str) -> Scenario {
             exit: ExitBehavior::Code(2),
         },
 
+        // Bazel rejecting the command line: it exits nonzero having never
+        // opened the BEP file, so no attempts at all. The read side waits on
+        // a writer that cannot come, which is what `spawn_open_watchdog`
+        // exists to break out of.
+        "rejects_command_line" => Scenario {
+            open_delay: Duration::ZERO,
+            attempts: vec![],
+            exit: ExitBehavior::Code(2),
+        },
+
         // Like `success`, but basil is killed by SIGKILL after the event
         // sequence is flushed. The parent's `ExitStatus::code()` is
         // `None`, which exercises the signal-kill path in `wait()`'s
