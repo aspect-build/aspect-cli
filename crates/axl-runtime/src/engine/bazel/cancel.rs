@@ -14,7 +14,7 @@ use starlark::values::ValueLike;
 use starlark::values::starlark_value;
 
 use super::info;
-use super::process;
+use crate::engine::process;
 
 #[derive(Debug, ProvidesStaticType, Display, Trace, NoSerialize, Allocative)]
 #[display("<bazel.build.Cancellation>")]
