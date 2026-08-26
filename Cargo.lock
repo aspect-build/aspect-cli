@@ -358,6 +358,7 @@ dependencies = [
  "either",
  "fibre",
  "flate2",
+ "fswatch",
  "futures 0.3.31",
  "futures-util",
  "galvanize",
