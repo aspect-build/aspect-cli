@@ -156,34 +156,17 @@ steps:
       timeout 180 $$LAUNCHER build --bazel-flag=--definitely_not_a_flag //... 2>&1 | grep -q "Unrecognized option" || { echo "ERROR: a Bazel-rejected flag must fail, not hang"; exit 1; }
       echo "--- :aspect: flag rejected by Bazel (bare)"
       timeout 180 $$LAUNCHER build --definitely_not_a_flag //... 2>&1 | grep -q "Unrecognized option" || { echo "ERROR: a bare Bazel-rejected flag must fail the same way"; exit 1; }
-      echo "--- :aspect: aspect dev test-template-snapshots"
-      $$LAUNCHER dev test-template-snapshots
-      echo "--- :aspect: aspect dev test-lint-template-snapshots"
-      $$LAUNCHER dev test-lint-template-snapshots
-      echo "--- :aspect: aspect dev test-lint-annotation-plan"
-      $$LAUNCHER dev test-lint-annotation-plan
-      echo "--- :aspect: aspect dev test-format-template-snapshots"
-      $$LAUNCHER dev test-format-template-snapshots
-      echo "--- :aspect: aspect dev test-gazelle-template-snapshots"
-      $$LAUNCHER dev test-gazelle-template-snapshots
-      echo "--- :aspect: aspect dev test-delivery-template-snapshots"
-      $$LAUNCHER dev test-delivery-template-snapshots
-      echo "--- :aspect: aspect dev test-bk-annotation-snapshots"
-      $$LAUNCHER dev test-bk-annotation-snapshots
-      echo "--- :aspect: aspect dev test-pr-comment-snapshots"
-      $$LAUNCHER dev test-pr-comment-snapshots
-      echo "--- :aspect: aspect dev test-github-detect"
-      $$LAUNCHER dev test-github-detect
-      echo "--- :aspect: aspect dev test-gitlab-detect"
-      $$LAUNCHER dev test-gitlab-detect
-      echo "--- :aspect: aspect dev test-gitlab-client"
-      $$LAUNCHER dev test-gitlab-client
-      echo "--- :aspect: aspect dev test-tips"
-      $$LAUNCHER dev test-tips
-      echo "--- :aspect: aspect dev test-rate-limit"
-      $$LAUNCHER dev test-rate-limit
-      echo "--- :aspect: aspect dev test-runner-job-history"
-      $$LAUNCHER dev test-runner-job-history
+      # Every `dev test-*` suite, discovered rather than listed. This block used
+      # to be a hand-maintained allowlist that had drifted badly: 30 of the 44
+      # registered suites were named in neither pipeline and so had never run.
+      echo "--- :aspect: aspect dev test-* (all registered suites)"
+      $$LAUNCHER dev --help | awk '/^Tasks:/{t=1;next} t && /^  test-/{print $$1}' > /tmp/axl-suites.txt
+      test -s /tmp/axl-suites.txt || { echo "ERROR: no dev test-* suites discovered"; exit 1; }
+      echo "discovered $$(wc -l < /tmp/axl-suites.txt) suites"
+      while read -r suite; do
+        echo "--- :aspect: aspect dev $$suite"
+        $$LAUNCHER dev "$$suite"
+      done < /tmp/axl-suites.txt
       echo "--- :aspect: aspect tests axl"
       # Run AXL tests last — cancel tests may kill the Bazel server. $$LAUNCHER /
       # $$CLI are stable target/ci/ copies (not bazel-out paths), so that's
