@@ -5,10 +5,33 @@ through each surface feature's `template_preset` arg. It resolves as the
 lower-precedence `base` layer of `check_dispatch.resolve_templates`, so a
 config's own `args.templates` still overrides individual slots on top of it.
 
-Adding a preset: register a `TemplatePreset` in `_PRESETS` below. Author its
-templates as new strings — never by extracting fragments out of the built-in
-template constants, which live configs `.replace()` against behind load-time
-`fail()` drift guards.
+To add a preset, register a `TemplatePreset` in `_PRESETS`. The rules
+`_validation_errors` enforces at load time, and why each exists:
+
+  - The registered key must equal the preset's own `name`, and `description`
+    must be set — both are user-visible, in `--help` and `aspect feature`.
+
+  - `_DEFAULT` must name a registered preset. Clap validates a config-supplied
+    value against `values`, but not on `--help` or `aspect feature`, so a
+    broken default would leave those paths quietly reporting a layout that
+    cannot render. The load-time check covers them.
+
+  - A slot's value must be a non-empty string. `""` cannot blank a slot:
+    renderers resolve `templates.get(slot) or BUILT_IN`, so a falsy override
+    yields the built-in it meant to replace. Use a comment-only template
+    (`{# blank #}`) instead. `title` cannot be blanked by any means — a blank
+    render falls back to the built-in layout because GitHub requires a
+    check-run title.
+
+  - A per-kind block must name a real task kind, or it silently never applies.
+
+  - A preset that overrides anything must also override `"body"`. Without it
+    the check surfaces take the preset's layout while the PR/MR comments keep
+    the built-in, which reads worse than either layout on its own.
+
+Author a preset's templates as new strings, never by extracting fragments out
+of the built-in template constants — live configs `.replace()` against those
+behind their own load-time drift guards.
 """
 
 load("./check_dispatch.axl", "TEMPLATE_SCOPE_KEYS")
@@ -25,7 +48,7 @@ TemplatePreset = record(
 _PRESETS = {
     "full": TemplatePreset(
         name = "full",
-        description = "The complete report: every target bucket, the Bazel details umbrella, workspace status.",
+        description = "the complete report — every target bucket, the Bazel details umbrella, and workspace status",
         templates = {},
     ),
 }
@@ -36,64 +59,55 @@ def _slot_errors(preset_name: str, slot: str, template) -> list[str]:
     if type(template) != "string":
         return ["preset {!r}: {!r} must be a Jinja2 string, got {!r}".format(preset_name, slot, template)]
     if not template:
-        return [("preset {!r}: {!r} is empty, which yields the built-in it meant to replace " +
-                 "(renderers resolve `templates.get(slot) or BUILT_IN`). Use a comment-only " +
-                 "template such as `{{# blank #}}`.").format(preset_name, slot)]
+        return [("preset {!r}: {!r} is empty, which yields the built-in it meant to replace. " +
+                 "Use a comment-only template such as `{{# blank #}}`.").format(preset_name, slot)]
     return []
 
+def _preset_errors(name: str, preset: TemplatePreset) -> list[str]:
+    errors = []
+    if name != preset.name:
+        errors.append("preset registered under {!r} but names itself {!r}".format(name, preset.name))
+    if not preset.description:
+        errors.append("preset {!r} has no description; it is shown in `--help`".format(name))
+
+    for key in sorted(preset.templates.keys()):
+        value = preset.templates[key]
+        if key in TEMPLATE_SCOPE_KEYS:
+            if type(value) != "dict":
+                errors.append(("preset {!r}: {!r} is a task kind, so it must map to a dict of slot " +
+                               "overrides, got {!r}").format(name, key, value))
+                continue
+            for slot in sorted(value.keys()):
+                errors.extend(_slot_errors(name, "%s.%s" % (key, slot), value[slot]))
+        elif type(value) == "dict":
+            errors.append("preset {!r}: {!r} is not a task kind; expected one of {}".format(
+                name,
+                key,
+                ", ".join(TEMPLATE_SCOPE_KEYS),
+            ))
+        else:
+            errors.extend(_slot_errors(name, key, value))
+
+    if preset.templates and "body" not in preset.templates:
+        errors.append(("preset {!r} overrides check-surface templates but not \"body\", so PR and MR " +
+                       "comments would keep the built-in layout while check runs and annotations " +
+                       "change").format(name))
+    return errors
+
 def _validation_errors(presets: dict, default: str) -> list[str]:
-    """Every problem with a registry, as messages. Pure, so the rules are unit-testable.
-
-    `default` must name a registered preset. A feature arg's default is baked
-    into clap's `default_value` and validated on every command, so a bad
-    default fails every invocation rather than only the surface that reads it.
-
-    A slot's value must be a non-empty string. `""` cannot blank a slot —
-    renderers resolve `templates.get(slot) or BUILT_IN`, so a falsy override
-    yields the built-in it meant to replace; use a comment-only template
-    (`{# blank #}`). `title` cannot be blanked at all, since a blank render
-    falls back to the built-in layout (GitHub requires a check-run title).
-
-    A preset that overrides anything must also override `"body"`, the PR/MR
-    summary comment. Without it the check surfaces take the preset's layout
-    while the comment surfaces keep the built-in, which reads worse than
-    either layout on its own.
-    """
+    """Every problem with a registry, as messages. Pure, so the rules stay unit-testable."""
     errors = []
     if default not in presets:
         errors.append("default preset {!r} is not registered; known presets: {}".format(
             default,
             ", ".join(sorted(presets.keys())),
         ))
-
     for name in sorted(presets.keys()):
-        preset = presets[name]
-        if name != preset.name:
-            errors.append("preset registered under {!r} but names itself {!r}".format(name, preset.name))
-
-        for key in sorted(preset.templates.keys()):
-            value = preset.templates[key]
-            if type(value) == "dict":
-                if key not in TEMPLATE_SCOPE_KEYS:
-                    errors.append("preset {!r}: {!r} is not a task kind; expected one of {}".format(
-                        name,
-                        key,
-                        ", ".join(TEMPLATE_SCOPE_KEYS),
-                    ))
-                for slot in sorted(value.keys()):
-                    errors.extend(_slot_errors(name, "%s.%s" % (key, slot), value[slot]))
-            else:
-                errors.extend(_slot_errors(name, key, value))
-
-        if preset.templates and "body" not in preset.templates:
-            errors.append(("preset {!r} overrides check-surface templates but not \"body\", so PR and " +
-                           "MR comments would keep the built-in layout while check runs and " +
-                           "annotations change").format(name))
-
+        errors.extend(_preset_errors(name, presets[name]))
     return errors
 
 def _validate(presets: dict, default: str) -> list[str]:
-    """Check the registry at load time; return its sorted names."""
+    """Check a registry at load time; return its sorted names."""
     errors = _validation_errors(presets, default)
     if errors:
         fail("invalid template preset registry:\n  " + "\n  ".join(errors))
@@ -107,15 +121,19 @@ def _templates(name: str) -> dict:
         fail("unknown template preset {!r}; known presets: {}".format(name, ", ".join(_NAMES)))
     return _PRESETS[name].templates
 
+def _arg_description() -> str:
+    """The `template_preset` help text, listing each registered preset."""
+    return ("Named bundle of Jinja2 templates for this feature's rendered output. " +
+            "Slots set via this feature's `templates` arg override the preset. Presets: " +
+            "; ".join(["%s is %s" % (n, _PRESETS[n].description) for n in _NAMES]) + ".")
+
 def _args() -> dict:
     """The `template_preset` arg every status-surface feature declares. Splat into `args = {...}`."""
     return {
         "template_preset": args.string(
             default = _DEFAULT,
             values = _NAMES,
-            description = ("Named bundle of Jinja2 templates for this feature's rendered output. " +
-                           "%r is the complete built-in report. Individual slots set via this " +
-                           "feature's `templates` arg override the preset.") % _DEFAULT,
+            description = _arg_description(),
         ),
     }
 
@@ -124,6 +142,5 @@ template_presets = namespace(
     NAMES = _NAMES,
     args = _args,
     templates = _templates,
-    validate = _validate,
     validation_errors = _validation_errors,
 )

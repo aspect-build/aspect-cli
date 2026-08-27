@@ -130,6 +130,15 @@ def kind_for_task(task_kind):
 # the flat "title"/"summary"/"details" keys that address every kind at once.
 TEMPLATE_SCOPE_KEYS = sorted(_TASK_KIND_DEFAULTS.keys())
 
+def _layer_overrides(layer, task_kind, label):
+    """One layer's flat keys, overlaid with its `task_kind` block."""
+    resolved = {k: v for k, v in layer.items() if k not in TEMPLATE_SCOPE_KEYS}
+    scoped = layer.get(task_kind) or {}
+    if type(scoped) != "dict":
+        fail("%s[%r] must be a dict of template overrides, got %r" % (label, task_kind, scoped))
+    resolved.update(scoped)
+    return resolved
+
 def resolve_templates(templates, task_kind, base = None):
     """Narrow template overrides to the flat {"title", "summary", "details"} dict
     the per-kind renderers accept.
@@ -146,31 +155,24 @@ def resolve_templates(templates, task_kind, base = None):
     it also keeps `build` and `test` separable even though both render through
     `bazel_results`.
 
-    `base` is a lower-precedence layer of the same shape: the templates
-    contributed by the selected preset (`template_presets.templates(...)`),
-    which the user's `args.templates` overrides. The layers are resolved in
-    order rather than merged first, which is what keeps four levels of
-    precedence distinct:
+    `base` is an optional lower-precedence layer of the same shape — the
+    templates contributed by the selected preset — which `templates` overrides.
+    Resolving the layers in order rather than merging them first is what keeps
+    four levels of precedence distinct:
 
         base flat  <  base scoped  <  templates flat  <  templates scoped
 
     Merging the two dicts up front would collapse that: a per-kind block in
     `base` would outrank an explicit flat key in `templates`, letting a preset
-    beat the config that selected it. `base = None` reduces to the
-    single-layer behavior exactly.
+    beat the config that selected it.
 
     Returns None when nothing applies, matching what the renderers treat as
     "use the built-ins".
     """
     resolved = {}
-    for layer in [base, templates]:
-        if not layer:
-            continue
-        resolved.update({k: v for k, v in layer.items() if k not in TEMPLATE_SCOPE_KEYS})
-        scoped = layer.get(task_kind) or {}
-        if type(scoped) != "dict":
-            fail("templates[%r] must be a dict of template overrides, got %r" % (task_kind, scoped))
-        resolved.update(scoped)
+    for (label, layer) in [("template preset", base), ("templates", templates)]:
+        if layer:
+            resolved.update(_layer_overrides(layer, task_kind, label))
     return resolved or None
 
 # Per-surface inline-snippet budgets (max snippets shown + per-snippet line cap).

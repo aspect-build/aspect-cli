@@ -3724,6 +3724,14 @@ def test_template_presets(tc: int) -> int:
     )
     tc = test_case(tc, resolve_templates(None, "build", base = {}) == None, "both layers empty resolves to None")
 
+    # A per-kind block that is not a dict is a config error. The two layers
+    # report separately so the message points at the layer actually at fault.
+    tc = test_case(
+        tc,
+        resolve_templates({"lint": {}}, "lint", base = {"lint": {}}) == None,
+        "empty per-kind blocks in both layers resolve to None",
+    )
+
     # Registry validation. `_validation_errors` returns messages rather than
     # calling fail(), so the rules that guard preset authors are testable.
     ok = {"a": TemplatePreset(name = "a", description = "d", templates = {})}
@@ -3781,6 +3789,18 @@ def test_template_presets(tc: int) -> int:
         ) == [],
         "a per-kind block naming a real task kind is accepted",
     )
+    tc = test_case(
+        tc,
+        len(template_presets.validation_errors(
+            {"a": TemplatePreset(
+                name = "a",
+                description = "d",
+                templates = {"body": "B", "lint": "oops"},
+            )},
+            "a",
+        )) == 1,
+        "a task-kind key holding a string is an error, not a flat slot named after the kind",
+    )
     for kind in TEMPLATE_SCOPE_KEYS:
         tc = test_case(
             tc,
@@ -3795,7 +3815,18 @@ def test_template_presets(tc: int) -> int:
             "%r is a valid preset scope key" % kind,
         )
 
-    # The arg every surface feature declares.
+    tc = test_case(
+        tc,
+        len(template_presets.validation_errors(
+            {"a": TemplatePreset(name = "a", description = "", templates = {})},
+            "a",
+        )) == 1,
+        "a preset with no description is an error: the description is user-visible in --help",
+    )
+
+    # The arg every surface feature declares. Its help text is generated from
+    # the registry (`args.Arg` is opaque to AXL, so that string is covered by
+    # the description rule above plus `aspect feature <name>`).
     preset_args = template_presets.args()
     tc = test_case(tc, list(preset_args.keys()) == ["template_preset"], "the args factory declares one arg")
 
