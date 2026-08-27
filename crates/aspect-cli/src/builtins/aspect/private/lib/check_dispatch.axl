@@ -13,6 +13,11 @@ Split here, not in the features:
   renderer_for_kind(kind)
   kind_for_task(task_kind)   Initial kind to use before the first
                              task_update has fired.
+  resolve_templates(templates, task_kind, base = None)
+                             Narrow layered template overrides to the flat
+                             dict the renderers accept.
+  snippet_budget_for(surface)
+                             Per-surface inline log-snippet budget.
   to_display_name(name)      snake_case → CamelCase task display name.
   make_render_ctx(state)     Build the render_ctx dict the per-kind
                              renderers consume from a feature's
@@ -122,14 +127,14 @@ def kind_for_task(task_kind):
     return _TASK_KIND_DEFAULTS.get(task_kind, "bazel_results")
 
 # Task-kind keys a `templates` dict may nest an override under, as opposed to
-# the flat "summary"/"details" keys that address every kind at once.
+# the flat "title"/"summary"/"details" keys that address every kind at once.
 TEMPLATE_SCOPE_KEYS = sorted(_TASK_KIND_DEFAULTS.keys())
 
-def resolve_templates(templates, task_kind):
-    """Narrow a feature's `args.templates` to the flat {"summary", "details"}
-    dict the per-kind renderers accept.
+def resolve_templates(templates, task_kind, base = None):
+    """Narrow template overrides to the flat {"title", "summary", "details"} dict
+    the per-kind renderers accept.
 
-    Two shapes are supported, and they compose:
+    Two shapes are supported within a layer, and they compose:
 
       {"summary": ...}                     — applies to every task kind
       {"lint": {"summary": ...}}           — applies to `lint` tasks only
@@ -141,19 +146,31 @@ def resolve_templates(templates, task_kind):
     it also keeps `build` and `test` separable even though both render through
     `bazel_results`.
 
+    `base` is a lower-precedence layer of the same shape: the templates
+    contributed by the selected preset (`template_presets.templates(...)`),
+    which the user's `args.templates` overrides. The layers are resolved in
+    order rather than merged first, which is what keeps four levels of
+    precedence distinct:
+
+        base flat  <  base scoped  <  templates flat  <  templates scoped
+
+    Merging the two dicts up front would collapse that: a per-kind block in
+    `base` would outrank an explicit flat key in `templates`, letting a preset
+    beat the config that selected it. `base = None` reduces to the
+    single-layer behavior exactly.
+
     Returns None when nothing applies, matching what the renderers treat as
     "use the built-ins".
     """
-    if not templates:
-        return None
-
-    flat = {k: v for k, v in templates.items() if k not in TEMPLATE_SCOPE_KEYS}
-    scoped = templates.get(task_kind) or {}
-    if type(scoped) != "dict":
-        fail("templates[%r] must be a dict of template overrides, got %r" % (task_kind, scoped))
-
-    resolved = dict(flat)
-    resolved.update(scoped)
+    resolved = {}
+    for layer in [base, templates]:
+        if not layer:
+            continue
+        resolved.update({k: v for k, v in layer.items() if k not in TEMPLATE_SCOPE_KEYS})
+        scoped = layer.get(task_kind) or {}
+        if type(scoped) != "dict":
+            fail("templates[%r] must be a dict of template overrides, got %r" % (task_kind, scoped))
+        resolved.update(scoped)
     return resolved or None
 
 # Per-surface inline-snippet budgets (max snippets shown + per-snippet line cap).
