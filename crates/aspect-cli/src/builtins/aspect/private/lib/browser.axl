@@ -1,0 +1,92 @@
+"""Opening a URL in the user's browser.
+
+`open` exists only on macOS, so spawning it on Linux is a hard AXL error
+(`No such file or directory`) rather than a failed exit status — hence the
+per-OS candidate list, the `$PATH` check before every spawn, and the
+headless gate that keeps a text-mode browser from taking over the terminal.
+Callers fall back to printing the URL when `open_url` returns False.
+"""
+
+# Debian's `sensible-browser`/`x-www-browser` come last; `www-browser` is
+# deliberately absent, being a text browser that would seize the terminal.
+_LINUX_OPENERS = [
+    ["xdg-open"],
+    ["wslview"],
+    ["gio", "open"],
+    ["sensible-browser"],
+    ["x-www-browser"],
+]
+
+# A graphical session, or WSL (whose `wslview` hands off to the Windows host).
+_LINUX_DISPLAY_VARS = ["DISPLAY", "WAYLAND_DISPLAY", "WSL_DISTRO_NAME"]
+
+_ENV_VARS = ["BROWSER"] + _LINUX_DISPLAY_VARS
+
+# Extensions `_resolve` appends on Windows, where "cmd" on $PATH is "cmd.exe".
+_WINDOWS_EXTS = ["", ".exe", ".cmd", ".bat"]
+
+def _browser_var_commands(spec: str, url: str) -> list:
+    """The argv lists named by a `$BROWSER` value: colon-separated commands,
+    each substituting `%s` with the URL or taking it as a trailing argument."""
+    commands = []
+    for entry in spec.split(":"):
+        argv = entry.split()
+        if not argv:
+            continue
+        if "%s" in argv:
+            commands.append([url if a == "%s" else a for a in argv])
+        else:
+            commands.append(argv + [url])
+    return commands
+
+def _open_commands(os_name: str, env: dict, url: str) -> list:
+    """Candidate argv lists for opening `url`, most preferred first.
+
+    `$BROWSER` wins everywhere. Empty for a Linux host with no graphical
+    session and no `$BROWSER` — there is nothing there to open a page with.
+    """
+    commands = _browser_var_commands(env.get("BROWSER") or "", url)
+    if os_name == "macos":
+        commands.append(["open", url])
+    elif os_name == "windows":
+        # `start`'s first quoted argument is the window title, not the URL.
+        commands.append(["cmd", "/c", "start", "", url])
+    elif any([env.get(v) for v in _LINUX_DISPLAY_VARS]):
+        commands.extend([argv + [url] for argv in _LINUX_OPENERS])
+    return commands
+
+def _resolve(ctx: TaskContext, program: str) -> str | None:
+    """`program` resolved against `$PATH`, or None when it isn't there.
+
+    Checked up front because spawning a missing binary aborts the task."""
+    if "/" in program or "\\" in program:
+        return program if ctx.std.fs.exists(program) else None
+    windows = ctx.std.env.os() == "windows"
+    exts = _WINDOWS_EXTS if windows else [""]
+    for entry in (ctx.std.env.var("PATH") or "").split(";" if windows else ":"):
+        if not entry:
+            continue
+        for ext in exts:
+            candidate = entry + "/" + program + ext
+            if ctx.std.fs.exists(candidate):
+                return candidate
+    return None
+
+def _open_url(ctx: TaskContext, url: str) -> bool:
+    """Open `url` in the user's browser, returning whether one was launched."""
+    env = {v: ctx.std.env.var(v) or "" for v in _ENV_VARS}
+    for argv in _open_commands(ctx.std.env.os(), env, url):
+        program = _resolve(ctx, argv[0])
+        if not program:
+            continue
+        cmd = ctx.std.process.command(program).stdout("null").stderr("null")
+        for arg in argv[1:]:
+            cmd = cmd.arg(arg)
+        if cmd.spawn().wait().success:
+            return True
+    return False
+
+browser = namespace(
+    open_url = _open_url,
+    testonly_open_commands = _open_commands,
+)

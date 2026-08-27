@@ -1,0 +1,86 @@
+"""Unit tests for `browser.axl`'s candidate-command builder — the per-OS opener
+choice, `$BROWSER` precedence and `%s` substitution, and the headless-Linux
+gate. The `$PATH` resolution and the spawn itself need a host, and are not
+covered here.
+
+Run with:
+  aspect dev test-browser
+"""
+
+load("./browser.axl", "browser")
+
+_URL = "https://auth.aspect.build/oauth/authorize?client_id=abc"
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _commands(os_name, **env):
+    return browser.testonly_open_commands(os_name, env, _URL)
+
+def _test_macos(_):
+    _eq("macos", _commands("macos"), [["open", _URL]])
+
+def _test_windows(_):
+    _eq("windows", _commands("windows"), [["cmd", "/c", "start", "", _URL]])
+
+def _test_linux_graphical(_):
+    got = _commands("linux", DISPLAY = ":0")
+    _eq("first opener", got[0], ["xdg-open", _URL])
+    _eq("gio takes a subcommand", got[2], ["gio", "open", _URL])
+    if ["www-browser", _URL] in got:
+        fail("www-browser is a text browser and must not be a candidate")
+
+def _test_linux_wayland_and_wsl(_):
+    _eq("wayland", _commands("linux", WAYLAND_DISPLAY = "wayland-0"), _commands("linux", DISPLAY = ":0"))
+    _eq("wsl", _commands("linux", WSL_DISTRO_NAME = "Ubuntu"), _commands("linux", DISPLAY = ":0"))
+
+def _test_linux_headless(_):
+    _eq("no display", _commands("linux"), [])
+    _eq("empty display", _commands("linux", DISPLAY = ""), [])
+
+def _test_browser_var(_):
+    _eq(
+        "appended url",
+        _commands("linux", BROWSER = "firefox", DISPLAY = ":0")[0],
+        ["firefox", _URL],
+    )
+    _eq(
+        "%s substitution",
+        _commands("macos", BROWSER = "chromium --new-window %s")[0],
+        ["chromium", "--new-window", _URL],
+    )
+    _eq(
+        "colon-separated list",
+        _commands("linux", BROWSER = "firefox:epiphany")[:2],
+        [["firefox", _URL], ["epiphany", _URL]],
+    )
+    _eq("empty entries ignored", _commands("linux", BROWSER = ":: :"), [])
+
+def _test_other_unix(_):
+    _eq("freebsd is treated as linux", _commands("freebsd", DISPLAY = ":0"), _commands("linux", DISPLAY = ":0"))
+    _eq("headless freebsd", _commands("freebsd"), [])
+
+_UNIT_TESTS = [
+    _test_browser_var,
+    _test_linux_graphical,
+    _test_linux_headless,
+    _test_linux_wayland_and_wsl,
+    _test_macos,
+    _test_other_unix,
+    _test_windows,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("browser.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+browser_tests = task(
+    summary = "Run the browser-opener AXL unit tests.",
+    kind = "test-browser",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

@@ -14,6 +14,7 @@ load("@aspect//private/lib/aspect_endpoint_auth_test.axl", "aspect_endpoint_auth
 load("@aspect//private/lib/bazel_flags_test.axl", "bazel_flags_tests")
 load("@aspect//private/lib/bazel_results_test.axl", "bazel_results_unit_tests", "template_snapshot_tests")
 load("@aspect//private/lib/bazelrc_test.axl", "bazelrc_tests")
+load("@aspect//private/lib/browser_test.axl", "browser_tests")
 load("@aspect//private/lib/ci_test.axl", "ci_tests")
 load("@aspect//private/lib/circleci_test.axl", "circleci_tests")
 load("@aspect//private/lib/delivery_results_test.axl", "delivery_results_unit_tests", "delivery_template_snapshot_tests")
@@ -387,6 +388,10 @@ def config(ctx: ConfigContext):
     # auth.axl: status/configure detail string builders.
     # Run with: aspect dev test-auth
     ctx.tasks.add(auth_tests)
+
+    # browser.axl: per-OS URL-opener candidates, $BROWSER, headless gate.
+    # Run with: aspect dev test-browser
+    ctx.tasks.add(browser_tests)
 
     # delivery_results template snapshots.
     # Run with: aspect dev test-delivery-template-snapshots

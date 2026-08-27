@@ -1,4 +1,5 @@
 load("./private/lib/aspect_endpoint_auth.axl", "login_hint")
+load("./private/lib/browser.axl", "browser")
 load("./private/lib/deployment_flags.axl", "REMOTE_DEFAULT_CAPS", "capability_labels", "join_and")
 load("./private/lib/environment.axl", "error", "info", "warn")
 load("./private/lib/prompt.axl", "prompt_choice")
@@ -7,12 +8,11 @@ def _run_browser_login(ctx: TaskContext, deployment: str):
     """Open the deployment's authorize URL in a browser and wait for the callback,
     returning the minted credentials. Prints the URL if a browser can't be opened."""
     session = ctx.aspect.auth.login(deployment = deployment)
-    result = ctx.std.process.command("open").arg(session.url).spawn().wait()
-    if not result.success:
+    if browser.open_url(ctx, session.url):
+        print("Browser opened. Waiting for authentication...")
+    else:
         print("Open this URL to log in:")
         print("  " + session.url)
-    else:
-        print("Browser opened. Waiting for authentication...")
     return session.wait()
 
 # Width of the label column in a deployment's detail block so values align. Must
