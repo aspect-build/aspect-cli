@@ -2,7 +2,7 @@
 Workflows runner for subsequent jobs.
 
 Two failure modes, coordinated by `sandbox_recovery.new(environment)`,
-whose three hooks the Workflows feature registers when
+whose hooks the Workflows feature registers when
 `environment.runner != None`.
 
 1. **Stranded sandbox subtree** (bazelbuild/bazel#23880). When a Bazel
@@ -13,49 +13,50 @@ whose three hooks the Workflows feature registers when
    `<output_base>/sandbox/<strategy>/` is left behind on disk. Every
    subsequent `bazel build/test` against the same output_base crashes
    in `checkSandboxBaseTopOnlyContainsPersistentDirs`. Fixed upstream
-   by abe8d6090 (Bazel 9.0+). We detect via
+   by abe8d6090 (Bazel 9.0+). Detected via
    `ctx.bazel.recover_poisoned_sandbox()` (lists entries under
    `<output_base>/sandbox/` against Bazel's
-   `SANDBOX_BASE_PERSISTENT_DIRS` whitelist) and `rm -rf` the offending
-   entries. Wired as `bazel_attempt_end` so a *repaired* sandbox gives
-   the next retry a clean state to try again on.
+   `SANDBOX_BASE_PERSISTENT_DIRS` whitelist), which `rm -rf`s the
+   offending entries. Wired as `bazel_attempt_end` so a *repaired*
+   sandbox gives the next retry a clean state to try again on.
 
 2. **Persistent server-internal failure across all retries**. When
    the FINAL attempt exits with `BLAZE_INTERNAL_ERROR (37)` or
    `LOCAL_ENVIRONMENTAL_ERROR (36)`, the Bazel server is persistently
    sick (could be #23880 the disk-scan missed, JVM OOM, native crash,
-   corrupt lock file, etc.). The `bazel.build(ctx)` retry loop only
-   continues retrying on these two codes — `bazel_trait.build_retry`
-   keys off `default_retry`. So a final exit code that is itself
-   retryable-class means *every* prior attempt was also retryable-class
-   (otherwise the loop would have broken on a non-retryable exit). The
-   final code alone is therefore sufficient to detect "all attempts
-   hit server-internal trouble" without tracking per-attempt history.
-   Wired as `build_end` so it fires once per task.
+   corrupt lock file, etc.). The retry loop only continues on codes
+   the retry predicate accepts, so a final exit that is itself
+   retryable-class implies every prior attempt was too. The final code
+   alone therefore detects "all attempts hit server-internal trouble"
+   without tracking per-attempt history. Wired as `build_end`.
 
-**Never signal unhealthy mid-job.** `signal_instance_unhealthy` is not
-a drain request: on AWS it flips the instance to `Unhealthy` with
-`--no-should-respect-grace-period`, and on GCP it calls
-`instance-groups managed delete-instances` outright. Either way the
-ASG/MIG reclaims the box within a couple of minutes, killing whatever
-is still running on it. Signalling from a *non-final* attempt therefore
-races the retry we just started: the runner is torn out mid-retry, the
-agent takes a cancellation signal, and the job dies with SIGTERM/143
-instead of reporting the real Bazel exit code.
+**Never signal unhealthy while the task is still running.**
+`signal_instance_unhealthy` is not a drain request: on AWS it flips the
+instance to `Unhealthy` with `--no-should-respect-grace-period`, and on
+GCP it calls `instance-groups managed delete-instances` outright. Either
+way the ASG/MIG reclaims the box within a couple of minutes, killing
+whatever is still running on it. Signalling mid-task therefore races the
+work still in flight: the runner is torn out, the agent takes a
+cancellation signal, and the job dies with SIGTERM/143 instead of
+reporting its real exit code.
 
-So `still_poisoned` does NOT signal from the attempt hook. It records
-the verdict, and `build_retry` then declines to retry — a sandbox we
-could not clean poisons every subsequent invocation on this output
-base, so the retry is guaranteed to fail anyway. The task ends on its
-real exit code and the deferred signal fires from `build_end`, once
-the job has its verdict and is winding down. The runner still leaves
-the pool before it can take the next job.
+`build_end` is NOT job completion — it is per-*build*. `delivery.axl`
+fires it after phases 1/2 and then keeps working for minutes (phase 3
+plus the deliverable subprocesses), and phase 3 deliberately fires only
+`bazel_attempt_end`. So both signal paths register a `ctx.defer`
+instead, which runs after the task impl returns (even on a fatal
+Starlark error) and is the only true end-of-task seam. Defers are
+registered at most once per task; `_signal_pending` is the latch.
+
+The poisoning verdict additionally suppresses retries: a sandbox we
+could not clean poisons every subsequent invocation on the same output
+base, so the retry is guaranteed to reach the same crash.
 
 Critical: a sequence like 37 → repair → real-build-failure (exit 1)
 does NOT signal unhealthy. The retry loop breaks on the non-retryable
-exit; the final code is 1 (build failure), not retryable; nothing
-recorded a poisoning verdict; the build_end hook returns early. The
-runner is healthy enough to produce a verdict.
+exit, the repair cleared the sandbox so no poisoning verdict was
+recorded, and exit 1 is not server-internal-error class. The runner is
+healthy enough to produce a verdict.
 """
 
 load("@aspect//bazel.axl", "default_retry")
@@ -64,37 +65,53 @@ load("./ansi.axl", "ansi")
 def _signal_unhealthy(ctx, environment) -> None:
     """Best-effort invoke the Workflows agent's `signal_instance_unhealthy`
     binary. No-op when the binary isn't present (e.g. older agent versions
-    that pre-date the script). Caller is responsible for surfacing the
-    *reason* in a warning before calling — this helper only does the
-    side-effect."""
+    that pre-date the script)."""
     signal_bin = environment.runner.bin_dir + "/signal_instance_unhealthy"
     if ctx.std.fs.exists(signal_bin):
         ctx.std.process.command(signal_bin).spawn().wait()
 
-def _new(environment):
-    """Build the three coordinated hooks for one task's bazel run.
+def _new(environment, retry_predicate = default_retry):
+    """Build the coordinated sandbox-recovery hooks for one task.
 
-    Holds the one bit of cross-hook state (§7): whether some attempt
-    left behind sandbox poisoning we could not clean. That verdict is
-    set by `attempt_end`, read by `build_retry` to stop retrying, and
-    read again by `build_end` to decide whether to signal unhealthy.
+    Holds the cross-hook state (§7): whether an attempt left behind
+    sandbox poisoning we could not clean, and whether the deferred
+    unhealthy signal has already been registered.
+
+    Args:
+        environment:     resolved Workflows runner environment; only
+                         `.runner.bin_dir` is read.
+        retry_predicate: the task's existing `BazelTrait.build_retry`,
+                         which `build_retry` delegates to whenever no
+                         poisoning has been recorded. Defaults to
+                         `default_retry`.
 
     Returns a struct of `attempt_end(ctx, exit_code)`,
     `build_retry(code)` and `build_end(ctx, exit_code)`.
     """
 
-    # Single-key dict rather than a record: Starlark records are frozen,
-    # and this genuinely needs to be mutated across hook invocations.
-    state = {"still_poisoned": False}
+    # Mutable across hook invocations, so a dict rather than a record.
+    state = {"still_poisoned": False, "signal_pending": False}
+
+    def _defer_signal(ctx, reason: str) -> None:
+        """Register the unhealthy signal to fire once the task is over.
+        Idempotent: one task reclaims its runner at most once, however
+        many attempts or builds report trouble."""
+        if state["signal_pending"]:
+            return
+        state["signal_pending"] = True
+        print(
+            ansi.style("WARNING", ansi.RED) + ": " + reason + " Marking this " +
+            "runner unhealthy once the job finishes, so the next job lands " +
+            "on a fresh instance.",
+        )
+        ctx.defer(lambda: _signal_unhealthy(ctx, environment))
 
     def _attempt_end(ctx, _exit_code) -> None:
         """Detect + repair stranded sandbox state after each attempt.
 
-        `clean` is the common case and is silent. `repaired` prints a
-        warning and lets the retry proceed on the cleaned state.
-        `still_poisoned` records the verdict so `build_retry` stops the
-        loop and `build_end` signals — deliberately NOT signalling here,
-        which would kill the job mid-flight.
+        `clean` is silent (the common case). `repaired` warns and lets the
+        retry proceed on the cleaned state. `still_poisoned` records the
+        verdict, which stops further retries, and defers the signal.
 
         Ignores `exit_code` — the recovery decision is purely on-disk.
         """
@@ -113,52 +130,40 @@ def _new(environment):
 
         state["still_poisoned"] = True
         remaining = ", ".join(result.remaining) if result.remaining else "(unknown)"
-        print(
-            ansi.style("WARNING", ansi.RED) + ": bazel#23880-style sandbox poisoning " +
-            "detected and could not be cleaned (entries that survived " +
-            "removal: " + remaining + "). Not retrying — every further " +
-            "Bazel invocation on this output base would crash the same " +
-            "way. This runner will be marked unhealthy once the job " +
-            "finishes, so the next job lands on a fresh instance.",
+        _defer_signal(
+            ctx,
+            "bazel#23880-style sandbox poisoning detected and could not be " +
+            "cleaned (entries that survived removal: " + remaining + "). Not " +
+            "retrying — every further Bazel invocation on this output base " +
+            "would crash the same way.",
         )
 
     def _build_retry(code: int) -> bool:
-        """`build_retry` predicate: `default_retry`, but never once we've
-        seen an uncleanable sandbox. Retrying onto poisoning we failed to
-        remove just burns minutes to reach the same crash."""
+        """Delegate to the task's retry predicate, except once an
+        uncleanable sandbox is recorded — retrying onto poisoning we
+        failed to remove just burns minutes to reach the same crash."""
         if state["still_poisoned"]:
             return False
-        return default_retry(code)
+        return retry_predicate(code)
 
     def _build_end(ctx, exit_code) -> None:
-        """Signal the runner unhealthy when the sandbox stayed poisoned,
-        or when the FINAL exit code is server-internal-error class.
+        """Defer the unhealthy signal when a build's final exit code is
+        server-internal-error class.
 
-        The retry loop only continues on `default_retry`-matching codes,
-        so a final exit that is itself retryable-class implies every
-        prior attempt was too — the server is persistently sick. A final
-        non-retryable code (success, build failure, test failure, user
-        error, …) with no poisoning verdict means the server produced a
-        verdict, so the runner is fine; we no-op.
+        Classification is `default_retry`, not `retry_predicate`: a task
+        that declines to retry 37 has not thereby made its runner healthy.
+        A non-retryable code (success, build failure, test failure, user
+        error, …) means the server produced a verdict, so the runner is
+        fine. Fires per *build*, so a multi-build task (delivery) may call
+        this more than once; `_defer_signal` is idempotent.
         """
-        if state["still_poisoned"]:
-            print(
-                ansi.style("WARNING", ansi.RED) + ": marking this runner unhealthy " +
-                "(sandbox poisoning could not be cleaned) so the next job " +
-                "lands on a fresh instance.",
-            )
-            _signal_unhealthy(ctx, environment)
-            return
-
         if not default_retry(exit_code):
             return
-        print(
-            ansi.style("WARNING", ansi.RED) + ": Bazel exited " + str(exit_code) +
-            " after all retries (server-internal-error class). Marking " +
-            "this runner unhealthy so the next job lands on a fresh " +
-            "instance.",
+        _defer_signal(
+            ctx,
+            "Bazel exited " + str(exit_code) + " after all retries " +
+            "(server-internal-error class).",
         )
-        _signal_unhealthy(ctx, environment)
 
     return struct(
         attempt_end = _attempt_end,

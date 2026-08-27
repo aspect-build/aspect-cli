@@ -51,13 +51,14 @@ def _workflows_impl(ctx: FeatureContext):
 
         # Detect + repair stranded sandbox state (bazelbuild/bazel#23880) after
         # every bazel attempt, stop retrying onto a sandbox we could not clean,
-        # and signal the runner unhealthy at build_end. See
-        # `lib/sandbox_recovery.axl` for the full rationale; on-runner only
-        # because `signal_instance_unhealthy` is meaningless off-runner.
-        # The three hooks share one recovery state, so they come from a single
-        # `.new()` — registering them independently would drop the verdict that
-        # links them.
-        recovery = sandbox_recovery.new(environment)
+        # and mark the runner unhealthy once the task ends. See
+        # `lib/sandbox_recovery.axl`; on-runner only because
+        # `signal_instance_unhealthy` is meaningless off-runner.
+        #
+        # The hooks share one recovery state, so they come from a single
+        # `.new()`. `build_retry` is a single-valued attr, so the current
+        # predicate is passed in and delegated to rather than dropped.
+        recovery = sandbox_recovery.new(environment, retry_predicate = bazel_trait.build_retry)
         bazel_trait.bazel_attempt_end.append(recovery.attempt_end)
         bazel_trait.build_retry = recovery.build_retry
         bazel_trait.build_end.append(recovery.build_end)
