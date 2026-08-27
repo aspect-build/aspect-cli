@@ -239,14 +239,18 @@ def _test_impl(ctx):
         print("buildkite-agent annotate --style %s --context %s --scope=job" % (style, context_id))
         print("─" * 70)
 
-        # Show first 2500 chars of the formatted body — enough to see the
+        # Show the first 70 lines of the formatted body — enough to see the
         # title/summary and the first chunk of the body without flooding.
-        # The exact length is deliberately not printed: the summary carries a
-        # live `ctx.task.elapsed_ms` reading, so it shifts by a character
-        # whenever the run crosses a digit boundary (99ms -> 100ms) and would
-        # make this snapshot flap between runs.
-        print(body[:2500])
-        if len(body) > 2500:
+        #
+        # Truncation is by line, not by character, and the byte length is
+        # deliberately not printed. The summary carries a live
+        # `ctx.task.elapsed_ms` reading, so any character-offset cut lands in a
+        # different place whenever a run crosses a digit boundary (99ms ->
+        # 100ms), which splits a different line in half and makes the snapshot
+        # flap between runs. A line budget is invariant to that.
+        body_lines = body.split("\n")
+        print("\n".join(body_lines[:70]))
+        if len(body_lines) > 70:
             print("... [truncated]")
         print("")
 
