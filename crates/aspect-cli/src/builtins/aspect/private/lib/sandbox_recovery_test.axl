@@ -1,20 +1,21 @@
 """Tests for `lib/sandbox_recovery.axl`.
 
-Exercises the per-attempt hook (detect + repair, escalate on
-`still_poisoned`) and the final-status hook (signal on server-internal
-final exit code).
+Exercises the per-attempt hook (detect + repair, record the verdict on
+`still_poisoned`), the retry predicate (delegate to the task's predicate,
+but stop retrying onto a sandbox we could not clean) and the build-end
+hook (server-internal-error class). Both signal paths register a
+`ctx.defer` rather than signalling inline, so the tests assert on what
+was deferred and then run the defers.
 
 Run with:
   aspect dev test-sandbox-recovery
 """
 
-load("./sandbox_recovery.axl", "make_attempt_end_hook", "make_final_status_hook")
+load("./sandbox_recovery.axl", "sandbox_recovery")
 
 def _eq(label, got, want):
     if got != want:
         fail("%s: got %r, want %r" % (label, got, want))
-
-# ── fakes ─────────────────────────────────────────────────────────────────
 
 def _fake_recovery_result(outcome, removed = [], remaining = []):
     """Stand-in for `bazel.SandboxRecoveryResult`. The hooks read
@@ -31,17 +32,20 @@ def _fake_environment(signal_bin_exists = True):
     )
 
 def _fake_ctx(environment, recovery):
-    """Build a fake TaskContext wired up so the hook's `ctx.bazel.recover_poisoned_sandbox()`,
-    `ctx.std.fs.exists()`, and `ctx.std.process.command().spawn().wait()`
-    calls are observable via the returned `recorder` dict.
+    """Build a fake TaskContext so the hooks' `recover_poisoned_sandbox()`,
+    `ctx.defer()`, `ctx.std.fs.exists()` and
+    `ctx.std.process.command().spawn().wait()` calls are observable via the
+    returned `recorder` dict.
 
-    `recovery` is the `RecoveryResult`-shaped stand-in to return from
-    `recover_poisoned_sandbox`."""
-    recorder = {"spawned": []}
+    `recorder["deferred"]` collects the callables passed to `ctx.defer`;
+    `recorder["spawned"]` stays empty until `_run_defers` invokes them,
+    which is what lets a test distinguish "signal deferred" from "signal
+    fired mid-task". `recovery` is the `RecoveryResult`-shaped stand-in
+    to return from `recover_poisoned_sandbox`."""
+    recorder = {"spawned": [], "deferred": []}
 
     def _spawn():
-        # `.spawn().wait()` chain — both no-op; recording happens on
-        # `command()` because that's where the binary path is visible.
+        # Recording happens on `command()` — that's where the path is visible.
         return struct(wait = lambda: None)
 
     def _command(path):
@@ -49,14 +53,13 @@ def _fake_ctx(environment, recovery):
         return struct(spawn = _spawn)
 
     def _exists(path):
-        # The hook checks the signal binary's existence before invoking
-        # it. Mirror the environment's flag.
         if path == environment.runner.bin_dir + "/signal_instance_unhealthy":
             return environment._signal_bin_exists
         return False
 
     ctx = struct(
         bazel = struct(recover_poisoned_sandbox = lambda: recovery),
+        defer = lambda fn: recorder["deferred"].append(fn),
         std = struct(
             fs = struct(exists = _exists),
             process = struct(command = _command),
@@ -64,131 +67,220 @@ def _fake_ctx(environment, recovery):
     )
     return ctx, recorder
 
-# ── attempt-end hook ──────────────────────────────────────────────────────
+def _run_defers(recorder):
+    """Invoke everything registered via `ctx.defer`, mimicking the runtime
+    running defers after the task impl returns."""
+    for fn in recorder["deferred"]:
+        fn()
+
+_SIGNAL_BIN = "/etc/aspect/workflows/bin/signal_instance_unhealthy"
 
 def _test_attempt_hook_clean_is_quiet(_):
-    """Clean outcome: hook must NOT signal unhealthy. This is the
-    overwhelming-majority case (no poisoning on disk)."""
+    """Clean outcome: no signal, no defer. This is the overwhelming-majority
+    case (no poisoning on disk)."""
     env = _fake_environment()
-    hook = make_attempt_end_hook(env)
+    rec = sandbox_recovery.new(env)
     ctx, recorder = _fake_ctx(env, _fake_recovery_result("clean"))
-    hook(ctx, 0)
-    _eq("clean → no signal", recorder["spawned"], [])
+    rec.attempt_end(ctx, 0)
+    _eq("clean → no defer", recorder["deferred"], [])
+    _eq("clean → retry policy unchanged", rec.build_retry(37), True)
 
 def _test_attempt_hook_repaired_does_not_signal(_):
-    """Repaired outcome: rm -rf succeeded. Print a warning (not asserted
-    here) but do NOT signal — the retry can succeed on the cleaned state."""
+    """Repaired outcome: rm -rf succeeded. Warn (not asserted here) but do
+    not signal — the retry can succeed on the cleaned state."""
     env = _fake_environment()
-    hook = make_attempt_end_hook(env)
+    rec = sandbox_recovery.new(env)
     ctx, recorder = _fake_ctx(
         env,
         _fake_recovery_result("repaired", removed = ["linux-sandbox"]),
     )
-    hook(ctx, 37)  # retryable code; hook ignores it on repair path
-    _eq("repaired → no signal", recorder["spawned"], [])
+    rec.attempt_end(ctx, 37)
+    _eq("repaired → no defer", recorder["deferred"], [])
+    _eq("repaired → still retryable", rec.build_retry(37), True)
 
-def _test_attempt_hook_still_poisoned_signals(_):
-    """still_poisoned: rm -rf failed. Hook must signal unhealthy via
-    the agent binary so the next job lands on a fresh runner."""
+def _test_still_poisoned_does_not_signal_during_task(_):
+    """REGRESSION: still_poisoned must not signal while the task runs.
+
+    `signal_instance_unhealthy` is a hard reclaim (AWS: set-instance-health
+    Unhealthy with no grace period; GCP: delete-instances), so signalling
+    mid-task tears the runner out from under work still in flight and the
+    job dies on SIGTERM/143 instead of reporting its real exit code."""
     env = _fake_environment()
-    hook = make_attempt_end_hook(env)
+    rec = sandbox_recovery.new(env)
     ctx, recorder = _fake_ctx(
         env,
         _fake_recovery_result("still_poisoned", remaining = ["linux-sandbox"]),
     )
-    hook(ctx, 37)
-    _eq(
-        "still_poisoned → signal invoked",
-        recorder["spawned"],
-        ["/etc/aspect/workflows/bin/signal_instance_unhealthy"],
-    )
+    rec.attempt_end(ctx, 37)
+    _eq("still_poisoned → nothing spawned yet", recorder["spawned"], [])
+    _eq("still_poisoned → signal deferred", len(recorder["deferred"]), 1)
 
-def _test_attempt_hook_still_poisoned_noops_when_binary_absent(_):
-    """When the signal binary doesn't exist (older agent), the hook must
-    skip the invocation rather than fail. The warning print still
-    happens — the agent's just missing the script."""
-    env = _fake_environment(signal_bin_exists = False)
-    hook = make_attempt_end_hook(env)
+def _test_still_poisoned_stops_retrying(_):
+    """REGRESSION: an uncleanable sandbox poisons every later invocation on
+    the same output base, so the retry cannot succeed. `build_retry` must
+    decline even a normally-retryable code."""
+    env = _fake_environment()
+    rec = sandbox_recovery.new(env)
+    ctx, _recorder = _fake_ctx(
+        env,
+        _fake_recovery_result("still_poisoned", remaining = ["linux-sandbox"]),
+    )
+    _eq("before poisoning → 37 retryable", rec.build_retry(37), True)
+    rec.attempt_end(ctx, 37)
+    _eq("after poisoning → 37 not retryable", rec.build_retry(37), False)
+    _eq("after poisoning → 36 not retryable", rec.build_retry(36), False)
+
+def _test_still_poisoned_signals_after_task(_):
+    """The signal is deferred, not dropped: running the defers marks the
+    runner unhealthy so the next job lands fresh. Never calling build_end
+    mirrors delivery's phase 3, which fires only `bazel_attempt_end`."""
+    env = _fake_environment()
+    rec = sandbox_recovery.new(env)
     ctx, recorder = _fake_ctx(
         env,
         _fake_recovery_result("still_poisoned", remaining = ["linux-sandbox"]),
     )
-    hook(ctx, 37)
+    rec.attempt_end(ctx, 37)
+    _run_defers(recorder)
+    _eq("still_poisoned → signal on defer", recorder["spawned"], [_SIGNAL_BIN])
+
+def _test_still_poisoned_noops_when_binary_absent(_):
+    """Missing signal binary (older agent) → the deferred signal skips the
+    invocation rather than failing."""
+    env = _fake_environment(signal_bin_exists = False)
+    rec = sandbox_recovery.new(env)
+    ctx, recorder = _fake_ctx(
+        env,
+        _fake_recovery_result("still_poisoned", remaining = ["linux-sandbox"]),
+    )
+    rec.attempt_end(ctx, 37)
+    _run_defers(recorder)
     _eq("absent binary → no spawn", recorder["spawned"], [])
 
-# ── final-status hook ─────────────────────────────────────────────────────
+def _test_repeated_poisoning_defers_signal_once(_):
+    """Poisoning seen on several attempts (and then a retryable build_end)
+    must still register exactly one defer — one job, one reclaim."""
+    env = _fake_environment()
+    rec = sandbox_recovery.new(env)
+    ctx, recorder = _fake_ctx(
+        env,
+        _fake_recovery_result("still_poisoned", remaining = ["linux-sandbox"]),
+    )
+    rec.attempt_end(ctx, 37)
+    rec.attempt_end(ctx, 37)
+    rec.build_end(ctx, 37)
+    _eq("repeat poisoning → one defer", len(recorder["deferred"]), 1)
+    _run_defers(recorder)
+    _eq("repeat poisoning → one signal", recorder["spawned"], [_SIGNAL_BIN])
 
-def _test_final_hook_signals_on_blaze_internal_error(_):
+def _test_build_retry_delegates_to_task_predicate(_):
+    """REGRESSION: `build_retry` is a single-valued attr, so the feature
+    must delegate to the predicate already on the trait instead of
+    silently reinstating `default_retry`."""
+    env = _fake_environment()
+    rec = sandbox_recovery.new(env, retry_predicate = lambda code: code == 42)
+    _eq("delegates: 42 retryable", rec.build_retry(42), True)
+    _eq("delegates: 37 not retryable", rec.build_retry(37), False)
+
+def _test_build_retry_delegation_yields_to_poisoning(_):
+    """Even a permissive task predicate must not retry onto an uncleanable
+    sandbox."""
+    env = _fake_environment()
+    rec = sandbox_recovery.new(env, retry_predicate = lambda _code: True)
+    ctx, _recorder = _fake_ctx(
+        env,
+        _fake_recovery_result("still_poisoned", remaining = ["linux-sandbox"]),
+    )
+    _eq("permissive predicate retries", rec.build_retry(1), True)
+    rec.attempt_end(ctx, 37)
+    _eq("poisoning overrides predicate", rec.build_retry(1), False)
+
+def _test_build_end_signals_on_blaze_internal_error(_):
     """Final exit 37 → server persistently sick → signal unhealthy.
 
     Per `default_retry`, 37 (BLAZE_INTERNAL_ERROR) is the canonical
     retryable-class code; a final exit of 37 means all retries hit it."""
     env = _fake_environment()
-    hook = make_final_status_hook(env)
+    rec = sandbox_recovery.new(env)
     ctx, recorder = _fake_ctx(env, _fake_recovery_result("clean"))
-    hook(ctx, 37)
-    _eq(
-        "final 37 → signal invoked",
-        recorder["spawned"],
-        ["/etc/aspect/workflows/bin/signal_instance_unhealthy"],
-    )
+    rec.build_end(ctx, 37)
+    _eq("final 37 → nothing spawned yet", recorder["spawned"], [])
+    _run_defers(recorder)
+    _eq("final 37 → signal on defer", recorder["spawned"], [_SIGNAL_BIN])
 
-def _test_final_hook_signals_on_local_environmental_error(_):
+def _test_build_end_signals_on_local_environmental_error(_):
     """Final exit 36 → same policy as 37 (server-internal-error class)."""
     env = _fake_environment()
-    hook = make_final_status_hook(env)
+    rec = sandbox_recovery.new(env)
     ctx, recorder = _fake_ctx(env, _fake_recovery_result("clean"))
-    hook(ctx, 36)
-    _eq(
-        "final 36 → signal invoked",
-        recorder["spawned"],
-        ["/etc/aspect/workflows/bin/signal_instance_unhealthy"],
-    )
+    rec.build_end(ctx, 36)
+    _run_defers(recorder)
+    _eq("final 36 → signal on defer", recorder["spawned"], [_SIGNAL_BIN])
 
-def _test_final_hook_quiet_on_success(_):
+def _test_build_end_classification_ignores_task_predicate(_):
+    """The server-sick classification is `default_retry`, deliberately not
+    the task's predicate: a task that declines to retry 37 has not made its
+    runner healthy."""
+    env = _fake_environment()
+    rec = sandbox_recovery.new(env, retry_predicate = lambda _code: False)
+    ctx, recorder = _fake_ctx(env, _fake_recovery_result("clean"))
+    rec.build_end(ctx, 37)
+    _run_defers(recorder)
+    _eq("final 37 → signal regardless of predicate", recorder["spawned"], [_SIGNAL_BIN])
+
+def _test_build_end_quiet_on_success(_):
     """Final exit 0 → success → no signal."""
     env = _fake_environment()
-    hook = make_final_status_hook(env)
+    rec = sandbox_recovery.new(env)
     ctx, recorder = _fake_ctx(env, _fake_recovery_result("clean"))
-    hook(ctx, 0)
+    rec.build_end(ctx, 0)
+    _run_defers(recorder)
     _eq("final 0 → no signal", recorder["spawned"], [])
 
-def _test_final_hook_quiet_on_real_failure(_):
-    """Final exit 1 (build failure) → server produced a verdict →
-    runner is fine → no signal. This is the critical contract: a
-    successful retry-after-repair that ends in a normal build failure
-    must NOT mark the runner unhealthy.
+def _test_build_end_quiet_on_real_failure(_):
+    """Final exit 1 (build failure) → server produced a verdict → runner is
+    fine → no signal. This is the critical contract: a successful
+    retry-after-repair ending in a normal build failure must NOT mark the
+    runner unhealthy.
 
     Standard non-retryable codes: 1 (build), 2 (cmdline), 3 (tests),
     4 (no tests), 6 (run), 7 (analysis), 8 (interrupted)."""
     env = _fake_environment()
-    hook = make_final_status_hook(env)
+    rec = sandbox_recovery.new(env)
     ctx, recorder = _fake_ctx(env, _fake_recovery_result("clean"))
     for code in [1, 2, 3, 4, 6, 7, 8]:
         recorder["spawned"] = []
-        hook(ctx, code)
+        recorder["deferred"] = []
+        rec.build_end(ctx, code)
+        _run_defers(recorder)
         _eq("final %d → no signal" % code, recorder["spawned"], [])
 
-def _test_final_hook_noops_when_binary_absent(_):
-    """Missing signal binary → no spawn (same defensiveness as the
-    attempt-end hook)."""
+def _test_build_end_noops_when_binary_absent(_):
+    """Missing signal binary → no spawn."""
     env = _fake_environment(signal_bin_exists = False)
-    hook = make_final_status_hook(env)
+    rec = sandbox_recovery.new(env)
     ctx, recorder = _fake_ctx(env, _fake_recovery_result("clean"))
-    hook(ctx, 37)
+    rec.build_end(ctx, 37)
+    _run_defers(recorder)
     _eq("absent binary → no spawn", recorder["spawned"], [])
 
 def _test_impl(ctx):
     _test_attempt_hook_clean_is_quiet(ctx)
     _test_attempt_hook_repaired_does_not_signal(ctx)
-    _test_attempt_hook_still_poisoned_signals(ctx)
-    _test_attempt_hook_still_poisoned_noops_when_binary_absent(ctx)
-    _test_final_hook_signals_on_blaze_internal_error(ctx)
-    _test_final_hook_signals_on_local_environmental_error(ctx)
-    _test_final_hook_quiet_on_success(ctx)
-    _test_final_hook_quiet_on_real_failure(ctx)
-    _test_final_hook_noops_when_binary_absent(ctx)
-    print("sandbox_recovery_test.axl: OK (9 sections)")
+    _test_still_poisoned_does_not_signal_during_task(ctx)
+    _test_still_poisoned_stops_retrying(ctx)
+    _test_still_poisoned_signals_after_task(ctx)
+    _test_still_poisoned_noops_when_binary_absent(ctx)
+    _test_repeated_poisoning_defers_signal_once(ctx)
+    _test_build_retry_delegates_to_task_predicate(ctx)
+    _test_build_retry_delegation_yields_to_poisoning(ctx)
+    _test_build_end_signals_on_blaze_internal_error(ctx)
+    _test_build_end_signals_on_local_environmental_error(ctx)
+    _test_build_end_classification_ignores_task_predicate(ctx)
+    _test_build_end_quiet_on_success(ctx)
+    _test_build_end_quiet_on_real_failure(ctx)
+    _test_build_end_noops_when_binary_absent(ctx)
+    print("sandbox_recovery_test.axl: OK (15 sections)")
     return 0
 
 sandbox_recovery_tests = task(
