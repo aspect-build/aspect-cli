@@ -11,11 +11,7 @@ load(
     "sanitize_filename",
 )
 load("../private/lib/health_check.axl", "HealthCheckTrait", "agent_health_check")
-load(
-    "../private/lib/sandbox_recovery.axl",
-    "make_attempt_end_hook",
-    "make_final_status_hook",
-)
+load("../private/lib/sandbox_recovery.axl", "sandbox_recovery")
 
 def _workflows_impl(ctx: FeatureContext):
     environment = get_workflows_environment(ctx.std)
@@ -54,12 +50,17 @@ def _workflows_impl(ctx: FeatureContext):
         hc_trait.health_check.append(lambda ctx: agent_health_check(ctx, environment))
 
         # Detect + repair stranded sandbox state (bazelbuild/bazel#23880) after
-        # every bazel attempt, and signal the runner unhealthy when the final
-        # exit is server-internal-error class. See `lib/sandbox_recovery.axl`
-        # for the full rationale; on-runner only because `signal_instance_unhealthy`
-        # is meaningless off-runner.
-        bazel_trait.bazel_attempt_end.append(make_attempt_end_hook(environment))
-        bazel_trait.build_end.append(make_final_status_hook(environment))
+        # every bazel attempt, stop retrying onto a sandbox we could not clean,
+        # and signal the runner unhealthy at build_end. See
+        # `lib/sandbox_recovery.axl` for the full rationale; on-runner only
+        # because `signal_instance_unhealthy` is meaningless off-runner.
+        # The three hooks share one recovery state, so they come from a single
+        # `.new()` — registering them independently would drop the verdict that
+        # links them.
+        recovery = sandbox_recovery.new(environment)
+        bazel_trait.bazel_attempt_end.append(recovery.attempt_end)
+        bazel_trait.build_retry = recovery.build_retry
+        bazel_trait.build_end.append(recovery.build_end)
 
         # Flags to optimize build & test
         (startup_flags, build_flags) = get_bazelrc_flags(
