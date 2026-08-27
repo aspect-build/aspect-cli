@@ -32,16 +32,17 @@ _PRESETS = {
 
 _DEFAULT = "full"
 
-def _validate_slot(preset_name: str, slot: str, template) -> None:
+def _slot_errors(preset_name: str, slot: str, template) -> list[str]:
     if type(template) != "string":
-        fail("template preset {!r}: {!r} must be a Jinja2 string, got {!r}".format(preset_name, slot, template))
+        return ["preset {!r}: {!r} must be a Jinja2 string, got {!r}".format(preset_name, slot, template)]
     if not template:
-        fail(("template preset {!r}: {!r} is empty, which yields the built-in it meant to replace " +
-              "(renderers resolve `templates.get(slot) or BUILT_IN`). Use a comment-only template " +
-              "such as `{{# blank #}}`.").format(preset_name, slot))
+        return [("preset {!r}: {!r} is empty, which yields the built-in it meant to replace " +
+                 "(renderers resolve `templates.get(slot) or BUILT_IN`). Use a comment-only " +
+                 "template such as `{{# blank #}}`.").format(preset_name, slot)]
+    return []
 
-def _validate(presets: dict, default: str) -> list[str]:
-    """Check the registry at load time; return its sorted names.
+def _validation_errors(presets: dict, default: str) -> list[str]:
+    """Every problem with a registry, as messages. Pure, so the rules are unit-testable.
 
     `default` must name a registered preset. A feature arg's default is baked
     into clap's `default_value` and validated on every command, so a bad
@@ -58,33 +59,44 @@ def _validate(presets: dict, default: str) -> list[str]:
     while the comment surfaces keep the built-in, which reads worse than
     either layout on its own.
     """
+    errors = []
     if default not in presets:
-        fail("default template preset {!r} is not registered; known presets: {}".format(
+        errors.append("default preset {!r} is not registered; known presets: {}".format(
             default,
             ", ".join(sorted(presets.keys())),
         ))
 
-    for name, preset in presets.items():
+    for name in sorted(presets.keys()):
+        preset = presets[name]
         if name != preset.name:
-            fail("template preset registered under {!r} but names itself {!r}".format(name, preset.name))
+            errors.append("preset registered under {!r} but names itself {!r}".format(name, preset.name))
 
-        for key, value in preset.templates.items():
+        for key in sorted(preset.templates.keys()):
+            value = preset.templates[key]
             if type(value) == "dict":
                 if key not in TEMPLATE_SCOPE_KEYS:
-                    fail("template preset {!r}: {!r} is not a task kind; expected one of {}".format(
+                    errors.append("preset {!r}: {!r} is not a task kind; expected one of {}".format(
                         name,
                         key,
                         ", ".join(TEMPLATE_SCOPE_KEYS),
                     ))
-                for slot, template in value.items():
-                    _validate_slot(name, "%s.%s" % (key, slot), template)
+                for slot in sorted(value.keys()):
+                    errors.extend(_slot_errors(name, "%s.%s" % (key, slot), value[slot]))
             else:
-                _validate_slot(name, key, value)
+                errors.extend(_slot_errors(name, key, value))
 
         if preset.templates and "body" not in preset.templates:
-            fail(("template preset {!r} overrides check-surface templates but not \"body\", so PR and " +
-                  "MR comments would keep the built-in layout while check runs and annotations change").format(name))
+            errors.append(("preset {!r} overrides check-surface templates but not \"body\", so PR and " +
+                           "MR comments would keep the built-in layout while check runs and " +
+                           "annotations change").format(name))
 
+    return errors
+
+def _validate(presets: dict, default: str) -> list[str]:
+    """Check the registry at load time; return its sorted names."""
+    errors = _validation_errors(presets, default)
+    if errors:
+        fail("invalid template preset registry:\n  " + "\n  ".join(errors))
     return sorted(presets.keys())
 
 _NAMES = _validate(_PRESETS, _DEFAULT)
@@ -113,4 +125,5 @@ template_presets = namespace(
     args = _args,
     templates = _templates,
     validate = _validate,
+    validation_errors = _validation_errors,
 )
