@@ -96,6 +96,7 @@ load(
 )
 load("../private/lib/repro_commands.axl", "ASPECT_CLI_INSTALL_HINT_MARKDOWN", "dedup_and_attribute", "rehydrate_commands")
 load("../private/lib/result_text.axl", "severity_for_status")
+load("../private/lib/template_presets.axl", "template_presets")
 load(
     "../private/lib/tips.axl",
     "SURFACE_GITHUB_PR_SUMMARY",
@@ -1343,7 +1344,9 @@ def _github_status_comments(ctx: FeatureContext):
 
     # args.custom(dict, ...) hands None at runtime, not the declared default.
     templates = ctx.args.templates or {}
-    body_template = templates.get("body") or _DEFAULT_BODY_TEMPLATE
+    body_template = (templates.get("body") or
+                     template_presets.templates(ctx.args.template_preset).get("body") or
+                     _DEFAULT_BODY_TEMPLATE)
     status_badges = dict(_DEFAULT_STATUS_BADGES)
     status_badges.update(ctx.args.status_badges or {})
 
@@ -2035,7 +2038,7 @@ GithubStatusComments = feature(
                           "ci_run_url, aspect_url, check_run_url, current_phase, progress, " +
                           "failed_in_phase, repro_commands, fix_commands, …}), and `repro_rows` / " +
                           "`fix_rows` (deduped across siblings via dedup_and_attribute). " +
-                          "Empty dict → built-in default. config.axl only.",
+                          "Empty dict → the selected `template_preset`. config.axl only.",
         ),
         "status_badges": args.custom(
             dict,
@@ -2047,5 +2050,5 @@ GithubStatusComments = feature(
                           "override is keyed by badge_key not raw lifecycle status. " +
                           "config.axl only.",
         ),
-    },
+    } | template_presets.args(),
 )

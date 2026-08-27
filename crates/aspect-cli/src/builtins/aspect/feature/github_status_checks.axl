@@ -33,6 +33,10 @@ downgraded to a publish and logged. Only `BuildkiteAnnotations` honors it.
 Hooks see every surface that consults them, so scope with `update.surface` when
 more than one is enabled. See `StatusSurfaceUpdate` for the full field set.
 
+`template_preset` selects a named bundle of templates as the starting
+layout; `templates` overrides individual slots on top of whatever the
+preset supplies (see `template_presets`).
+
 Templates and metadata_keys are feature args. `templates` takes flat
 "summary"/"details" keys applying to every task kind, and/or per-task-kind
 blocks that overlay them (see `check_dispatch.resolve_templates`):
@@ -90,6 +94,7 @@ load(
     "should_emit_phase_change",
     "usage_footer",
 )
+load("../private/lib/template_presets.axl", "template_presets")
 load("../private/lib/tips.axl", "SURFACE_GITHUB_STATUS_CHECKS", "collect_tips_sorted")
 
 _LOG = feature_logger("GitHub status checks")
@@ -162,6 +167,7 @@ def _github_status_checks(ctx: FeatureContext):
     lifecycle = ctx.traits[Phases]
 
     templates = ctx.args.templates or {}
+    preset_templates = template_presets.templates(ctx.args.template_preset)
     metadata_keys = list(ctx.args.metadata_keys or [])
 
     # Check-run URL is published below via `checkrun.set_url`; siblings
@@ -290,7 +296,7 @@ def _github_status_checks(ctx: FeatureContext):
             "running",
             make_render_ctx(_state, tips = collect_tips_sorted(ctx, surface = SURFACE_GITHUB_STATUS_CHECKS), api_usage = usage_footer(ctx), last_updated_at = format_run_date(ctx, now_ms(ctx))),
             dict(_ci_links_base),
-            resolve_templates(templates, ctx.task.kind),
+            resolve_templates(templates, ctx.task.kind, base = preset_templates),
             metadata_keys,
         )
 
@@ -566,7 +572,7 @@ def _github_status_checks(ctx: FeatureContext):
             status,
             make_render_ctx(_state, tips = collect_tips_sorted(ctx, surface = SURFACE_GITHUB_STATUS_CHECKS), api_usage = usage_footer(ctx), last_updated_at = format_run_date(ctx, now_ms(ctx))),
             _make_links(data),
-            resolve_templates(templates, ctx.task.kind),
+            resolve_templates(templates, ctx.task.kind, base = preset_templates),
             metadata_keys,
             snippet_options = _snippet_opts,
             max_snippets = _max_snippets,
@@ -656,7 +662,7 @@ GithubStatusChecks = feature(
                           "that kind alone, e.g. {\"summary\": ..., \"lint\": {\"details\": ...}}. " +
                           "The \"title\" template renders with `icon`, `task_kind`, `subject`, " +
                           "`state` and `status`; a broken title falls back to the built-in layout. " +
-                          "Empty dict (default) uses the feature's built-in templates.",
+                          "Empty dict (default) leaves the selected `template_preset` in effect.",
         ),
         "metadata_keys": args.string_list(
             default = [],
@@ -668,5 +674,5 @@ GithubStatusChecks = feature(
                           "custom keys via --bes_metadata=MY_KEY=value or --build_metadata=MY_KEY=value " +
                           "on their Bazel invocation.",
         ),
-    },
+    } | template_presets.args(),
 )

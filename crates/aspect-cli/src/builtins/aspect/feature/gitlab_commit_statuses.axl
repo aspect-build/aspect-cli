@@ -67,8 +67,10 @@ more than one is enabled. See `StatusSurfaceUpdate` for the full field set.
 
 Rendering goes through the shared `check_dispatch.RENDERERS` table —
 templates and `metadata_keys` configure exactly as they do for
-`GithubStatusChecks`. Flat "summary"/"details" keys apply to every task
-kind; a per-task-kind block overlays them for that kind alone (see
+`GithubStatusChecks`. `template_preset` selects a named bundle of templates
+as the starting layout and `templates` overrides individual slots on top of
+it (see `template_presets`). Flat "summary"/"details" keys apply to every
+task kind; a per-task-kind block overlays them for that kind alone (see
 `check_dispatch.resolve_templates`):
 
     def config(ctx: ConfigContext):
@@ -118,6 +120,7 @@ load(
     "effective_throttle_factor",
     "should_emit_phase_change",
 )
+load("../private/lib/template_presets.axl", "template_presets")
 
 _LOG = feature_logger("GitLab commit statuses")
 
@@ -184,6 +187,7 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
     lifecycle = ctx.traits[Phases]
 
     templates = ctx.args.templates or {}
+    preset_templates = template_presets.templates(ctx.args.template_preset)
     metadata_keys = list(ctx.args.metadata_keys or [])
 
     mode = ctx.args.mode
@@ -354,7 +358,7 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
             "running",
             make_render_ctx(_state, last_updated_at = format_run_date(ctx, now_ms(ctx))),
             initial_links,
-            resolve_templates(templates, ctx.task.kind),
+            resolve_templates(templates, ctx.task.kind, base = preset_templates),
             metadata_keys,
         )
         (initial_state, initial_desc) = _decide(ctx, "running", False, "pending", initial_output)
@@ -429,7 +433,7 @@ def _gitlab_commit_statuses(ctx: FeatureContext):
             status,
             make_render_ctx(_state, last_updated_at = format_run_date(ctx, now_ms(ctx))),
             links,
-            resolve_templates(templates, ctx.task.kind),
+            resolve_templates(templates, ctx.task.kind, base = preset_templates),
             metadata_keys,
         )
 
@@ -497,7 +501,7 @@ GitlabCommitStatuses = feature(
                           "that kind alone, e.g. {\"summary\": ..., \"lint\": {\"details\": ...}}. " +
                           "The \"title\" template renders with `icon`, `task_kind`, `subject`, " +
                           "`state` and `status`; a broken title falls back to the built-in layout. " +
-                          "Empty dict (default) uses the feature's built-in templates. Note: only the rendered `title` lands on the commit status (in `description`, truncated to 255 chars) \u2014 the full body is rendered into the GitlabStatusComments rolling note.",
+                          "Empty dict (default) leaves the selected `template_preset` in effect. Note: only the rendered `title` lands on the commit status (in `description`, truncated to 255 chars) \u2014 the full body is rendered into the GitlabStatusComments rolling note.",
         ),
         "metadata_keys": args.string_list(
             default = [],
@@ -505,5 +509,5 @@ GitlabCommitStatuses = feature(
             description = "Additional BES build_metadata keys to surface in the render-context (used " +
                           "by sibling features like GitlabStatusComments). Use [\"*\"] for all keys.",
         ),
-    },
+    } | template_presets.args(),
 )

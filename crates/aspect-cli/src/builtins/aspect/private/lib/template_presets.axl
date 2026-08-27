@@ -1,0 +1,116 @@
+"""Named bundles of status-surface template overrides.
+
+A preset is one coherent layout for the CI status surfaces, selected by name
+through each surface feature's `template_preset` arg. It resolves as the
+lower-precedence `base` layer of `check_dispatch.resolve_templates`, so a
+config's own `args.templates` still overrides individual slots on top of it.
+
+Adding a preset: register a `TemplatePreset` in `_PRESETS` below. Author its
+templates as new strings — never by extracting fragments out of the built-in
+template constants, which live configs `.replace()` against behind load-time
+`fail()` drift guards.
+"""
+
+load("./check_dispatch.axl", "TEMPLATE_SCOPE_KEYS")
+
+TemplatePreset = record(
+    name = field(str),
+    description = field(str),
+    templates = field(dict, default = {}),
+)
+
+# `full` deliberately contributes nothing: every renderer already falls back to
+# its built-in when a slot is absent, so the shipped layout *is* the empty
+# preset. Output stays byte-identical with no template string duplicated here.
+_PRESETS = {
+    "full": TemplatePreset(
+        name = "full",
+        description = "The complete report: every target bucket, the Bazel details umbrella, workspace status.",
+        templates = {},
+    ),
+}
+
+_DEFAULT = "full"
+
+def _validate_slot(preset_name: str, slot: str, template) -> None:
+    if type(template) != "string":
+        fail("template preset {!r}: {!r} must be a Jinja2 string, got {!r}".format(preset_name, slot, template))
+    if not template:
+        fail(("template preset {!r}: {!r} is empty, which yields the built-in it meant to replace " +
+              "(renderers resolve `templates.get(slot) or BUILT_IN`). Use a comment-only template " +
+              "such as `{{# blank #}}`.").format(preset_name, slot))
+
+def _validate(presets: dict, default: str) -> list[str]:
+    """Check the registry at load time; return its sorted names.
+
+    `default` must name a registered preset. A feature arg's default is baked
+    into clap's `default_value` and validated on every command, so a bad
+    default fails every invocation rather than only the surface that reads it.
+
+    A slot's value must be a non-empty string. `""` cannot blank a slot —
+    renderers resolve `templates.get(slot) or BUILT_IN`, so a falsy override
+    yields the built-in it meant to replace; use a comment-only template
+    (`{# blank #}`). `title` cannot be blanked at all, since a blank render
+    falls back to the built-in layout (GitHub requires a check-run title).
+
+    A preset that overrides anything must also override `"body"`, the PR/MR
+    summary comment. Without it the check surfaces take the preset's layout
+    while the comment surfaces keep the built-in, which reads worse than
+    either layout on its own.
+    """
+    if default not in presets:
+        fail("default template preset {!r} is not registered; known presets: {}".format(
+            default,
+            ", ".join(sorted(presets.keys())),
+        ))
+
+    for name, preset in presets.items():
+        if name != preset.name:
+            fail("template preset registered under {!r} but names itself {!r}".format(name, preset.name))
+
+        for key, value in preset.templates.items():
+            if type(value) == "dict":
+                if key not in TEMPLATE_SCOPE_KEYS:
+                    fail("template preset {!r}: {!r} is not a task kind; expected one of {}".format(
+                        name,
+                        key,
+                        ", ".join(TEMPLATE_SCOPE_KEYS),
+                    ))
+                for slot, template in value.items():
+                    _validate_slot(name, "%s.%s" % (key, slot), template)
+            else:
+                _validate_slot(name, key, value)
+
+        if preset.templates and "body" not in preset.templates:
+            fail(("template preset {!r} overrides check-surface templates but not \"body\", so PR and " +
+                  "MR comments would keep the built-in layout while check runs and annotations change").format(name))
+
+    return sorted(presets.keys())
+
+_NAMES = _validate(_PRESETS, _DEFAULT)
+
+def _templates(name: str) -> dict:
+    """The template overrides `name` contributes, shaped as a `resolve_templates` layer."""
+    if name not in _PRESETS:
+        fail("unknown template preset {!r}; known presets: {}".format(name, ", ".join(_NAMES)))
+    return _PRESETS[name].templates
+
+def _args() -> dict:
+    """The `template_preset` arg every status-surface feature declares. Splat into `args = {...}`."""
+    return {
+        "template_preset": args.string(
+            default = _DEFAULT,
+            values = _NAMES,
+            description = ("Named bundle of Jinja2 templates for this feature's rendered output. " +
+                           "%r is the complete built-in report. Individual slots set via this " +
+                           "feature's `templates` arg override the preset.") % _DEFAULT,
+        ),
+    }
+
+template_presets = namespace(
+    DEFAULT = _DEFAULT,
+    NAMES = _NAMES,
+    args = _args,
+    templates = _templates,
+    validate = _validate,
+)

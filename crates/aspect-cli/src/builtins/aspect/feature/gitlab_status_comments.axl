@@ -78,6 +78,7 @@ load(
     "epoch_now_s",
     "should_emit_phase_change",
 )
+load("../private/lib/template_presets.axl", "template_presets")
 
 _LOG = feature_logger("GitLab status comments")
 
@@ -177,7 +178,9 @@ def _gitlab_status_comments(ctx: FeatureContext):
     min_poll_interval_seconds = max(1, ctx.args.min_poll_interval_seconds)
 
     templates = ctx.args.templates or {}
-    body_template = templates.get("body") or DEFAULT_BODY_TEMPLATE
+    body_template = (templates.get("body") or
+                     template_presets.templates(ctx.args.template_preset).get("body") or
+                     DEFAULT_BODY_TEMPLATE)
     status_badges = dict(DEFAULT_STATUS_BADGES)
     status_badges.update(ctx.args.status_badges or {})
 
@@ -572,7 +575,7 @@ GitlabStatusComments = feature(
             default = {},
             description = "Per-section Jinja2 template overrides. Keys: 'body'. " +
                           "Vars available match the GithubStatusComments template contract " +
-                          "(see feature/github_status_comments.axl). Empty dict → built-in default. " +
+                          "(see feature/github_status_comments.axl). Empty dict → the selected `template_preset`. " +
                           "config.axl only.",
         ),
         "status_badges": args.custom(
@@ -582,5 +585,5 @@ GitlabStatusComments = feature(
                           "(failed='❌ failed', warning='⚠️ warning', running='🔄 running', " +
                           "passed='✅ passed', aborted='🔥 aborted'). config.axl only.",
         ),
-    },
+    } | template_presets.args(),
 )
