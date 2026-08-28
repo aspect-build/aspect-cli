@@ -3778,6 +3778,46 @@ def test_template_presets(tc: int) -> int:
         ) == [],
         "a preset covering only the comment surfaces is valid",
     )
+
+    # A subset is fine; a slot no renderer reads is not. Without this a typo
+    # leaves the preset selectable and silently inert.
+    tc = test_case(
+        tc,
+        len(template_presets.validation_errors(
+            {"a": TemplatePreset(name = "a", description = "d", templates = {"summray": "S"})},
+            "a",
+        )) == 1,
+        "a misspelled top-level slot is an error",
+    )
+    tc = test_case(
+        tc,
+        len(template_presets.validation_errors(
+            {"a": TemplatePreset(name = "a", description = "d", templates = {"lint": {"body": "B"}})},
+            "a",
+        )) == 1,
+        "\"body\" inside a per-kind block is an error — a comment covers every task",
+    )
+    tc = test_case(
+        tc,
+        len(template_presets.validation_errors(
+            {"a": TemplatePreset(name = "a", description = "d", templates = {"lint": {"summray": "S"}})},
+            "a",
+        )) == 1,
+        "a misspelled slot inside a per-kind block is an error",
+    )
+    for slot in ("title", "summary", "details"):
+        tc = test_case(
+            tc,
+            template_presets.validation_errors(
+                {"a": TemplatePreset(
+                    name = "a",
+                    description = "d",
+                    templates = {slot: "S", "lint": {slot: "S"}},
+                )},
+                "a",
+            ) == [],
+            "%r is a valid slot flat and per-kind" % slot,
+        )
     tc = test_case(
         tc,
         len(template_presets.validation_errors(
