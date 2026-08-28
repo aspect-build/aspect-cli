@@ -560,9 +560,16 @@ jobs:
             cd crates/aspect-cli
             "$LAUNCHER" user user-task-subdir
           )
+          # These four smoke checks assert CLI behavior, not status reporting, so
+          # the job's own status is the signal — same reasoning as the delivery
+          # digest jobs. Left enabled they each orphan a check run that the API
+          # sweeper finalizes as DISCONNECTED, putting four red herrings on every
+          # PR. The two `grep -q` builds below orphan because grep exits on its
+          # first match and tears down the pipeline mid-write; these two `run`
+          # invocations orphan for a reason not yet established.
           echo "--- aspect run smoke (//examples/deliverable)"
-          "$LAUNCHER" run //examples/deliverable:py_deliverable
-          "$LAUNCHER" run //examples/deliverable:sh_deliverable -- forwarded-arg
+          "$LAUNCHER" run --github-status-checks:enabled=false //examples/deliverable:py_deliverable
+          "$LAUNCHER" run --github-status-checks:enabled=false //examples/deliverable:sh_deliverable -- forwarded-arg
           echo "--- aspect help"
           "$LAUNCHER" help
           echo "--- aspect-launcher --version"
@@ -588,10 +595,10 @@ jobs:
           # Both spellings have to behave identically: the explicit escape
           # hatch, and the bare flag this routes to Bazel on its own.
           echo "--- flag rejected by Bazel (--bazel-flag)"
-          timeout 180 "$LAUNCHER" build --bazel-flag=--definitely_not_a_flag //... 2>&1 | grep -q "Unrecognized option" \
+          timeout 180 "$LAUNCHER" build --github-status-checks:enabled=false --bazel-flag=--definitely_not_a_flag //... 2>&1 | grep -q "Unrecognized option" \
             || { echo "ERROR: a Bazel-rejected flag must fail, not hang"; exit 1; }
           echo "--- flag rejected by Bazel (bare)"
-          timeout 180 "$LAUNCHER" build --definitely_not_a_flag //... 2>&1 | grep -q "Unrecognized option" \
+          timeout 180 "$LAUNCHER" build --github-status-checks:enabled=false --definitely_not_a_flag //... 2>&1 | grep -q "Unrecognized option" \
             || { echo "ERROR: a bare Bazel-rejected flag must fail the same way"; exit 1; }
           echo "--- aspect dev test-* (every AXL suite)"
           ./tools/run-axl-suites.sh "$LAUNCHER"
