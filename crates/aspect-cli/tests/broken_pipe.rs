@@ -89,3 +89,27 @@ fn credential_helper_reports_a_failed_response_write() {
         "credential helper reported success for a response Bazel never received"
     );
 }
+
+/// AXL `print()` goes through starlark's default handler, a bare `eprintln!`
+/// that panics on a failed write. Any task printing to a departed reader —
+/// `aspect dev test-… | head` — aborted the process before it could report a
+/// result. `dev test-bazel-results` prints heavily and needs no network.
+#[test]
+fn closed_stderr_does_not_panic_during_an_axl_task() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_aspect-cli"))
+        .args(["dev", "test-bazel-results"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn aspect-cli");
+
+    // Close the read end before the task prints, so its writes get EPIPE.
+    drop(child.stderr.take().expect("piped stderr"));
+
+    let status = child.wait().expect("wait for aspect-cli");
+    assert_ne!(
+        status.code(),
+        Some(PANIC_EXIT),
+        "an AXL print() to a closed stderr panicked instead of being discarded"
+    );
+}

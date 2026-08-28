@@ -49,3 +49,26 @@ macro_rules! errln {
         let _ = writeln!(std::io::stderr(), $($arg)*);
     }};
 }
+
+/// AXL `print()` that survives a closed stderr.
+///
+/// Starlark's default handler is a bare `eprintln!`, which panics when the
+/// write fails — so any `print()` from AXL takes the process down as soon as a
+/// reader leaves (`aspect build … | head`). The panic aborts mid-task, so the
+/// task never runs its terminal update and its status-surface entry is
+/// stranded showing "running".
+///
+/// Install with `eval.set_print_handler(&TOLERANT_PRINT_HANDLER)`. Discarding
+/// the write matches `outln!`/`errln!`: nobody is reading the output, and
+/// finishing the task matters more than the line nobody sees.
+pub struct TolerantPrintHandler;
+
+impl starlark::PrintHandler for TolerantPrintHandler {
+    fn println(&self, text: &str) -> starlark::Result<()> {
+        errln!("{text}");
+        Ok(())
+    }
+}
+
+/// Shared instance — the handler is stateless.
+pub static TOLERANT_PRINT_HANDLER: TolerantPrintHandler = TolerantPrintHandler;

@@ -384,6 +384,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             let func = heap.access_owned_frozen_value(&def);
 
             let mut eval = Evaluator::new(&self.env.0);
+            eval.set_print_handler(&crate::out::TOLERANT_PRINT_HANDLER);
             eval.set_loader(self.loader);
             eval.extra = Some(&self.loader.env);
             eval.eval_function(func, &[context_value], &[])?;
@@ -465,6 +466,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
                 self.telemetry_value,
             ));
             let mut eval = Evaluator::new(&self.env.0);
+            eval.set_print_handler(&crate::out::TOLERANT_PRINT_HANDLER);
             eval.set_loader(self.loader);
             eval.extra = Some(&self.loader.env);
             eval.eval_function(feature.implementation(), &[fctx], &[])
@@ -588,6 +590,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         ));
 
         let mut eval = Evaluator::new(&self.env.0);
+        eval.set_print_handler(&crate::out::TOLERANT_PRINT_HANDLER);
         eval.set_loader(self.loader);
         eval.extra = Some(&self.loader.env);
 

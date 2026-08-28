@@ -342,11 +342,20 @@ fn writable_methods(registry: &mut MethodsBuilder) {
                 let inner = borrowed
                     .as_mut()
                     .ok_or_else(|| anyhow!("stream is closed"))?;
-                inner
-                    .lock()
-                    .write(data)
-                    .map(|f| f as u32)
-                    .map_err(|err| anyhow!(err))
+                match inner.lock().write(data) {
+                    Ok(n) => Ok(n as u32),
+                    // The console reader left — `aspect build … | head`, or a
+                    // CI assertion piping into `grep -q`. Nobody will read what
+                    // follows, but the task must still finish and report its
+                    // result: failing here strands its status-surface entry
+                    // showing "running". Reported as written, like `errln!`.
+                    // Only the inherited console streams get this; a `File` or
+                    // a child's stdin still propagates.
+                    Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => {
+                        Ok(data.len() as u32)
+                    }
+                    Err(err) => Err(anyhow!(err)),
+                }
             }
             Writable::Stderr(stderr) => {
                 let guard = stderr.lock().unwrap();
@@ -354,11 +363,20 @@ fn writable_methods(registry: &mut MethodsBuilder) {
                 let inner = borrowed
                     .as_mut()
                     .ok_or_else(|| anyhow!("stream is closed"))?;
-                inner
-                    .lock()
-                    .write(data)
-                    .map(|f| f as u32)
-                    .map_err(|err| anyhow!(err))
+                match inner.lock().write(data) {
+                    Ok(n) => Ok(n as u32),
+                    // The console reader left — `aspect build … | head`, or a
+                    // CI assertion piping into `grep -q`. Nobody will read what
+                    // follows, but the task must still finish and report its
+                    // result: failing here strands its status-surface entry
+                    // showing "running". Reported as written, like `errln!`.
+                    // Only the inherited console streams get this; a `File` or
+                    // a child's stdin still propagates.
+                    Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => {
+                        Ok(data.len() as u32)
+                    }
+                    Err(err) => Err(anyhow!(err)),
+                }
             }
             Writable::File(file) => {
                 let mut guard = file.lock().unwrap();

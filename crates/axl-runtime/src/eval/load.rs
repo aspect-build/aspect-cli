@@ -151,6 +151,7 @@ impl<'m> AxlLoader<'m> {
                 module.set("#_is_std#", Value::new_bool(true));
             }
             let mut eval = Evaluator::new(&module);
+            eval.set_print_handler(&crate::out::TOLERANT_PRINT_HANDLER);
             eval.set_loader(self);
             eval.extra = Some(&self.env);
             eval.eval_module(ast, &self.globals)?;
