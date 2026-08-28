@@ -562,11 +562,7 @@ jobs:
           )
           # These four smoke checks assert CLI behavior, not status reporting, so
           # the job's own status is the signal — same reasoning as the delivery
-          # digest jobs. Left enabled they each orphan a check run that the API
-          # sweeper finalizes as DISCONNECTED, putting four red herrings on every
-          # PR. The two `grep -q` builds below orphan because grep exits on its
-          # first match and tears down the pipeline mid-write; these two `run`
-          # invocations orphan for a reason not yet established.
+          # digest jobs.
           echo "--- aspect run smoke (//examples/deliverable)"
           "$LAUNCHER" run --github-status-checks:enabled=false //examples/deliverable:py_deliverable
           "$LAUNCHER" run --github-status-checks:enabled=false //examples/deliverable:sh_deliverable -- forwarded-arg
