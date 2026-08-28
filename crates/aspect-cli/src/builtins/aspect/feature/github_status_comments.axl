@@ -118,11 +118,10 @@ GITHUB_STATUS_COMMENT_ROLES = ["prs.write"]
 
 _MARKER_FMT = "<!-- aspect-ci-status:pr-%d -->"
 
-# Fallback CI-host link label/icon for entries serialized without host metadata
+# Fallback CI-host link label for entries serialized without host metadata
 # (older entries, or hosts not in the registry). New entries carry the detected
-# host's `ci_host_label` / `ci_host_icon` from `detect_ci_host`.
+# host's `ci_host_label` from `detect_ci_host`.
 _DEFAULT_CI_HOST_LABEL = "GitHub Actions"
-_DEFAULT_CI_HOST_ICON = "🐙"
 
 # Cross-workflow state block embedded in the rendered comment.
 #
@@ -183,25 +182,16 @@ _DEFAULT_STATUS_BADGES = {
 # changed in AXL.
 _DEFAULT_BODY_TEMPLATE = """{{ marker }}
 
-## ✨ Aspect Workflows Tasks
+## Aspect Workflows Tasks
 {% if started_at %}📅 {{ started_at }}<br>
 {% endif %}{% if not entries -%}
 _No tasks have reported yet._
 {% else -%}
-{% macro section(label, icon, items) -%}
-{% if items %}
-## {{ icon }} {{ items|length }} {{ label }} task{{ "s" if items|length != 1 else "" }}
+## Task Results
 
-{% for e in items -%}
-- {{ status_badges[e._badge_key] }} {{ e.name or e.kind }}{% if e.name and e.name != e.kind %} [{{ e.kind }}]{% endif %}{% if e._elapsed_text %} · {{ e._elapsed_text }}{% endif %}{% if e._links_text %} · {{ e._links_text }}{% endif %}{% if e._result_text %}<br>💬 {{ e._result_text }}{% endif %}
+{% for e in entries -%}
+- {{ status_badges[e._badge_key] }} **{{ e.name or e.kind }}**{% if e.name and e.name != e.kind %} [{{ e.kind }}]{% endif %}{% if e._result_text %} · {{ e._result_text }}{% endif %}{% if e._elapsed_text %} · {{ e._elapsed_text }}{% endif %}{% if e._links_text %} · {{ e._links_text }}{% endif %}
 {% endfor -%}
-{% endif -%}
-{% endmacro -%}
-{{ section("in progress", "🔄", sections.running) -}}
-{{ section("failed",      "❌", sections.failed) -}}
-{{ section("failing",     "❌", sections.failing) -}}
-{{ section("flagged",     "⚠️", sections.flagged) -}}
-{{ section("successful",  "✅", sections.successful) -}}
 {% macro snippet_block(s) %}
 ❌ {{ s.kind or (s.bucket if s.bucket != "timeout" else "test") }} `{{ s.label }}` {{ s.verb }}:
 {{ s.fence }}text
@@ -317,20 +307,19 @@ def _links_cell_text(entry):
     parts = []
 
     if entry.get("aspect_url"):
-        parts.append("✨ [Aspect](%s)" % entry["aspect_url"])
+        parts.append("[Aspect](%s)" % entry["aspect_url"])
 
     # Independent of the Aspect link — both render when set.
     bes_url = entry.get("bes_url", "")
     if bes_url and bes_url != entry.get("aspect_url", ""):
-        parts.append("🔗 [BES](%s)" % bes_url)
+        parts.append("[BES](%s)" % bes_url)
 
     if entry.get("ci_run_url"):
-        icon = entry.get("ci_host_icon") or _DEFAULT_CI_HOST_ICON
         label = entry.get("ci_host_label") or _DEFAULT_CI_HOST_LABEL
-        parts.append("%s [%s](%s)" % (icon, label, entry["ci_run_url"]))
+        parts.append("[%s](%s)" % (label, entry["ci_run_url"]))
 
     if entry.get("check_run_url"):
-        parts.append("☑️ [Check](%s)" % entry["check_run_url"])
+        parts.append("[Check](%s)" % entry["check_run_url"])
 
     return " · ".join(parts)
 
@@ -339,7 +328,7 @@ def _elapsed_text(entry):
     ms = entry.get("elapsed_ms", 0) or 0
     if ms <= 0:
         return ""
-    return "⏱ " + format_duration_ms(ms)
+    return format_duration_ms(ms)
 
 def _result_cell_text(entry):
     """Compose the row's result text from the producer's `progress.body`.
