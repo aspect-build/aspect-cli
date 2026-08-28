@@ -289,9 +289,6 @@ def _badge_key_for(entry):
 
 # ─── Cell formatters ──────────────────────────────────────────────────────────
 
-# Long CI host labels abbreviated for the row; anything absent is used as-is.
-_SHORT_CI_HOST_LABELS = {"GitHub Actions": "GHA"}
-
 def _links_cell_text(entry):
     """Build the row's link line; each link is `<icon> <label>`, omitted
     when its URL is unset (see `_publish` for URL sourcing):
@@ -319,7 +316,7 @@ def _links_cell_text(entry):
 
     if entry.get("ci_run_url"):
         label = entry.get("ci_host_label") or _DEFAULT_CI_HOST_LABEL
-        parts.append("[%s](%s)" % (_SHORT_CI_HOST_LABELS.get(label, label), entry["ci_run_url"]))
+        parts.append("[%s](%s)" % (label, entry["ci_run_url"]))
 
     if entry.get("check_run_url"):
         parts.append("[Check](%s)" % entry["check_run_url"])
@@ -377,37 +374,6 @@ def _result_cell_text(entry):
 
 # ─── Pre-render decoration + rollup ───────────────────────────────────────────
 
-def _shorten_phase_segment(segment):
-    """Drop the `Bazel <command>` narration from one ` · `-separated segment."""
-    if segment.startswith("Spawning bazel "):
-        return "Spawning"
-    if segment.startswith("Bazel "):
-        rest = segment[len("Bazel "):].split(" ", 1)
-        return rest[1] if len(rest) == 2 else rest[0]
-    return segment
-
-def shorten_result_text(text):
-    """Drop what a row already says through its own task label and icon.
-
-    Producers narrate the live phase in full — "Spawning bazel build...",
-    "Bazel test running... (12 of 58 tests run)" — which reads well as a
-    check-run summary but is redundant beside the task name. Each segment is
-    shortened, then a leading `failed in <phase>` is dropped when the segment
-    after it already reports the failure:
-
-      Spawning bazel build...                      -> Spawning
-      Bazel test running... (12 of 58 tests run)   -> running... (12 of 58 tests run)
-      failed in test · failed                      -> failed
-      failed in build · Bazel build failed (3)     -> failed (3)
-
-    Detail the producer appended always survives. Public so the AXL suite can
-    exercise the rules directly.
-    """
-    segments = [_shorten_phase_segment(s) for s in text.split(" · ")]
-    if len(segments) > 1 and segments[0].startswith("failed in ") and segments[1].startswith("failed"):
-        segments = segments[1:]
-    return " · ".join(segments)
-
 def _prepare_for_render(entries):
     """Decorate entries for the template, sorted by (job, name, key) so
     positions stay stable across PATCHes. `_severity` is a pure status
@@ -417,7 +383,7 @@ def _prepare_for_render(entries):
         e["_badge_key"] = _badge_key_for(e)
         e["_links_text"] = _links_cell_text(e)
         e["_elapsed_text"] = _elapsed_text(e)
-        e["_result_text"] = shorten_result_text(_result_cell_text(e))
+        e["_result_text"] = _result_cell_text(e)
     return sorted(entries, key = lambda e: (
         e.get("job", ""),
         e.get("kind", ""),

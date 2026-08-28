@@ -10,7 +10,6 @@ load(
     "version_tuple",
 )
 load("@aspect//delivery.axl", delivery_UncacheableAction = "UncacheableAction", delivery_collect_blocking_culprits = "collect_blocking_culprits", delivery_count_unexplained_unresolved = "count_unexplained_unresolved", delivery_fmt_elapsed = "fmt_elapsed", delivery_should_surface_phase2_stderr = "should_surface_phase2_stderr", delivery_should_upload_grpc_log = "should_upload_grpc_log")
-load("@aspect//feature/github_status_comments.axl", "shorten_result_text")
 load("@aspect//lint.axl", "filter_all", "filter_changeset", "linter_error_message", "parse_patch_hunks")
 load("@aspect//private/lib/artifacts.axl", "artifact_name", "build_log_header", "build_log_relpath", "collect_build_action_logs", "dedup_path", "testlog_dest_dir")
 load("@aspect//private/lib/bazel_results.axl", "bb_clientd_root", "compute_reproducer_command", "file_uri_to_path", "init_data", "render_check_output", "resolve_aspect_url", "summary_title")
@@ -3833,30 +3832,6 @@ def test_template_presets(tc: int) -> int:
 
     return tc
 
-def test_shorten_result_text(tc: int) -> int:
-    """The status-comment row drops what its own task label already says: the
-    `Bazel <command>` narration, and a `failed in <phase>` prefix ahead of a
-    segment that already reports the failure."""
-    cases = [
-        ("Spawning bazel build...", "Spawning"),
-        ("Spawning bazel test...", "Spawning"),
-        ("Bazel test running... (12 of 58 tests run)", "running... (12 of 58 tests run)"),
-        ("Bazel build complete", "complete"),
-        ("Bazel build failing", "failing"),
-        ("failed in test · failed", "failed"),
-        ("failed in build · Bazel build failed (3 actions failed)", "failed (3 actions failed)"),
-        # No bazel narration to strip; producers own these verbatim.
-        ("Lint failed (2 errors)", "Lint failed (2 errors)"),
-        ("aborted (timeout)", "aborted (timeout)"),
-        ("", ""),
-        # The phase prefix survives when what follows is not a failure report.
-        ("failed in build · flaky", "failed in build · flaky"),
-    ]
-    for (raw, want) in cases:
-        got = shorten_result_text(raw)
-        tc = test_case(tc, got == want, "shorten_result_text(%r) == %r (got %r)" % (raw, want, got))
-    return tc
-
 def impl(ctx: TaskContext) -> int:
     tc = 0
 
@@ -3947,7 +3922,6 @@ def impl(ctx: TaskContext) -> int:
     tc = test_gitlab_token_cache(ctx, tc, temp_dir)
     tc = test_prompt_choice(tc)
     tc = test_template_presets(tc)
-    tc = test_shorten_result_text(tc)
 
     print(tc, "tests passed")
     return 0

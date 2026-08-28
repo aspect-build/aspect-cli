@@ -1571,8 +1571,8 @@ def _check_row_renders_name_and_kind(ctx):
 
 def _check_ci_host_link_label(ctx):
     """The CI build/job link is labelled for the host that produced the entry
-    (carried as `ci_host_label`), abbreviated where the full name is long, and
-    falls back to GitHub Actions for entries serialized without host metadata."""
+    (carried as `ci_host_label`), and falls back to GitHub Actions for entries
+    serialized without host metadata."""
     bk_url = "https://buildkite.com/acme/repo/builds/1#job"
     gha_url = "https://github.com/acme/repo/actions/runs/1"
     entries = [
@@ -1606,8 +1606,8 @@ def _check_ci_host_link_label(ctx):
         bucket_entries(prepared),
     )
     _eq("ci-host — Buildkite label", ("[Buildkite](%s)" % bk_url) in body, True)
-    _eq("ci-host — no GitHub Actions mislabel for the BK url", ("[GHA](%s)" % bk_url) in body, False)
-    _eq("ci-host — missing metadata falls back to GitHub Actions, abbreviated", ("[GHA](%s)" % gha_url) in body, True)
+    _eq("ci-host — no GitHub Actions mislabel for the BK url", ("[GitHub Actions](%s)" % bk_url) in body, False)
+    _eq("ci-host — missing metadata falls back to GitHub Actions", ("[GitHub Actions](%s)" % gha_url) in body, True)
 
 def _check_repro_dedup_consecutive_headings(ctx):
     """Two fix commands from the same task collapse to one heading.
