@@ -182,23 +182,15 @@ _DEFAULT_STATUS_BADGES = {
 # changed in AXL.
 _DEFAULT_BODY_TEMPLATE = """{{ marker }}
 
-## ✨ Aspect Workflows Tasks
+## Aspect Workflows Tasks
 {% if started_at %}📅 {{ started_at }}<br>
 {% endif %}{% if not entries -%}
 _No tasks have reported yet._
 {% else -%}
-{% macro task_icon(entry) -%}
-{%- if entry._badge_key == "passed" -%}✅
-{%- elif entry._badge_key == "failed" -%}❌
-{%- elif entry._badge_key == "warning" -%}⚠️
-{%- elif entry._badge_key == "aborted" -%}🔥
-{%- else -%}🔄
-{%- endif -%}
-{%- endmacro -%}
 ## Task Results
 
 {% for e in entries -%}
-- {{ task_icon(e) }} **{{ e.name or e.kind }}**{% if e.name and e.name != e.kind %} [{{ e.kind }}]{% endif %} · {{ e._result_text or status_badges[e._badge_key] }}{% if e._elapsed_text %} · {{ e._elapsed_text }}{% endif %}{% if e._links_text %} · {{ e._links_text }}{% endif %}
+- {{ status_badges[e._badge_key] }} **{{ e.name or e.kind }}**{% if e.name and e.name != e.kind %} [{{ e.kind }}]{% endif %}{% if e._result_text %} · {{ e._result_text }}{% endif %}{% if e._elapsed_text %} · {{ e._elapsed_text }}{% endif %}{% if e._links_text %} · {{ e._links_text }}{% endif %}
 {% endfor -%}
 {% macro snippet_block(s) %}
 ❌ {{ s.kind or (s.bucket if s.bucket != "timeout" else "test") }} `{{ s.label }}` {{ s.verb }}:

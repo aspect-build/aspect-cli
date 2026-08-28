@@ -1564,6 +1564,7 @@ def _check_row_renders_name_and_kind(ctx):
         DEFAULT_STATUS_BADGES,
         bucket_entries(prepared),
     )
+    _eq("row — the badge map drives the row icon", "✅ **lint**" in body, True)
     _eq("row — name != kind renders '<name> [<kind>]'", "**delivery-gha-debug** [delivery]" in body, True)
     _eq("row — name == kind omits the bracket", "**lint** [lint]" in body, False)
     _eq("row — name == kind still renders the name", "✅ **lint** ·" in body, True)
