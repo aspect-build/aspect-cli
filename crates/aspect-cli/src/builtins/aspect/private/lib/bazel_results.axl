@@ -2848,8 +2848,9 @@ SUMMARY_TEMPLATE = """{% if detail_rows %}{% for row in detail_rows %}
 :speech_balloon: **Last update:** `{{ last_update }}`{% endif %}""" + TIPS_BLOCK
 
 # Reusable Jinja snippets: iterate producer-authored repro_commands/fix_commands
-# into one fenced code block per entry + optional italic description. Headings
-# use the same emojis (🔁 / 🛠️) as the PR-comment aggregator.
+# into one fenced code block per entry + optional italic description. These
+# render inside a check run or annotation, where the emoji is the only visual
+# break in a wall of text; the PR comment drops it, having its own structure.
 REPRO_COMMANDS_BLOCK = """{%- if repro_commands %}
 ### 🔁 Reproduce
 {% for c in repro_commands %}

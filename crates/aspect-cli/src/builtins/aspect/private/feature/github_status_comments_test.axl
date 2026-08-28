@@ -836,8 +836,8 @@ def _check_select_snippets(ctx):
         bucket_entries(prepared),
         snippet_rows = sel_rows,
     )
-    _eq("select: render emits Build Failures group", "## 💥 Build Failures" in body, True)
-    _eq("select: render emits Test Failures group", "## ❌ Test Failures" in body, True)
+    _eq("select: render emits Build Failures group", "## Build Failures" in body, True)
+    _eq("select: render emits Test Failures group", "## Test Failures" in body, True)
     _eq(
         "select: build header is kind + label (no inline tasks)",
         "❌ genrule `//pkg:broken` failed to build:" in body,

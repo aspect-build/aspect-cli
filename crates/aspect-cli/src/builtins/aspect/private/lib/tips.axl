@@ -476,7 +476,7 @@ def tip_to_payload(t):
 
 def decorate_tip(t):
     """Project a stored tip into the render-shape consumed by the surface
-    templates (`TIPS_BLOCK` in `bazel_results.axl`, the `## 💡 Tips` section
+    templates (`TIPS_BLOCK` in `bazel_results.axl`, the `## Tips` section
     in `feature/github_status_comments.axl`) — single source of truth so both
     stay aligned. The PR-comment aggregator adds a `task_names` list for its
     "Surfaced by:" footer."""
