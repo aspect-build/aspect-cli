@@ -15,7 +15,12 @@ ASPECT="${1:-aspect}"
 SUITES="$(mktemp)"
 trap 'rm -f "$SUITES"' EXIT
 
-"$ASPECT" dev --help | awk '/^Tasks:/ { in_tasks = 1; next } in_tasks && /^  test-/ { print $1 }' >"$SUITES"
+# `dev --help` is plain when stdout is not a TTY, but CLICOLOR_FORCE=1 makes it
+# emit SGR escapes that would hide the `Tasks:` header from the match below.
+# There is no machine-readable task listing to use instead.
+"$ASPECT" dev --help |
+    sed $'s/\x1b\[[0-9;]*[a-zA-Z]//g' |
+    awk '/^Tasks:/ { in_tasks = 1; next } in_tasks && /^  test-/ { print $1 }' >"$SUITES"
 
 count="$(wc -l <"$SUITES" | tr -d ' ')"
 if [[ "$count" -eq 0 ]]; then
