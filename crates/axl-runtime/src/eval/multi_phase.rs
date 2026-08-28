@@ -1,3 +1,4 @@
+use crate::errln;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
@@ -413,16 +414,16 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         let label = task_label(task.group(), &task.kind(), task_name, task_name_meaningful);
         // Identity banner above the task header — see `crate::banner`.
         if banner::show_runtime_banner() {
-            eprintln!("{}\n", banner::line_from_pkg());
+            errln!("{}\n", banner::line_from_pkg());
         }
         if std::env::var_os("BUILDKITE").is_some() {
             // The BK section header replaces the `→` line on BK (avoids
             // duplicating the same text in the BK log viewer).
-            eprintln!("--- :aspect: {}Running{} {}", verb_seq, reset, label);
+            errln!("--- :aspect: {}Running{} {}", verb_seq, reset, label);
         } else {
             // 🎬 (clapper board) pairs with the closing ✅ / ⚠️ / ❌ as
             // the task's bookend.
-            eprintln!("→ 🎬 {}Running{} {}", verb_seq, reset, label);
+            errln!("→ 🎬 {}Running{} {}", verb_seq, reset, label);
         }
         Ok(())
     }
@@ -674,10 +675,10 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             // keep `---` and let the auto-expand handle the summary.
             let unclean = failed || flagged;
             if unclean {
-                eprintln!("^^^ +++");
+                errln!("^^^ +++");
             }
             let bookend_marker = if unclean { "+++" } else { "---" };
-            eprintln!(
+            errln!(
                 "{} {} {}{}{} · {}{}{}{}{}",
                 bookend_marker,
                 verdict.bk_shortcode,
@@ -691,8 +692,8 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
                 breakdown,
             );
         } else {
-            eprintln!();
-            eprintln!(
+            errln!();
+            errln!(
                 "→ {} {}{}{} {}{}{}{}{}",
                 verdict.glyph,
                 verdict.color,

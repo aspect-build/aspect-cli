@@ -1,3 +1,4 @@
+use crate::errln;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -699,10 +700,10 @@ pub(super) fn announce_spawn(
 ) {
     let (grey, reset) = grey_style();
     if announce.version {
-        eprintln!("{grey}INFO: {}{reset}", version_line(version));
+        errln!("{grey}INFO: {}{reset}", version_line(version));
     }
     if announce.command {
-        eprintln!("{grey}INFO: Spawning: {}{reset}", render_command(cmd));
+        errln!("{grey}INFO: Spawning: {}{reset}", render_command(cmd));
     }
 }
 
@@ -963,7 +964,7 @@ impl Build {
         let sink_invocation_id: Option<String> = if !grpc_sinks.is_empty() {
             let invocation_id = uuid::Uuid::new_v4().to_string();
             if debug {
-                eprintln!(
+                errln!(
                     "BES sinks: spawning {} gRPC sink(s) sink_invocation_id={}",
                     grpc_sinks.len(),
                     invocation_id
@@ -981,7 +982,7 @@ impl Build {
                     .unwrap_or_else(|_| "<unset>".to_string());
                 let bes_results = std::env::var("ASPECT_WORKFLOWS_BES_RESULTS_URL")
                     .unwrap_or_else(|_| "<unset>".to_string());
-                eprintln!(
+                errln!(
                     "BES sinks: 0 gRPC sinks configured (skipping spawn). \
                      ASPECT_WORKFLOWS_BES_BACKEND={bes_backend} \
                      ASPECT_WORKFLOWS_BES_RESULTS_URL={bes_results}"

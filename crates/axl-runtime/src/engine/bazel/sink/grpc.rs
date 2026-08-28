@@ -1,3 +1,4 @@
+use crate::errln;
 use std::{
     collections::HashMap,
     sync::OnceLock,
@@ -97,7 +98,7 @@ fn dbg(endpoint: &str, invocation_id: &str, msg: &str) {
         return;
     }
     let short = invocation_id.get(..8).unwrap_or(invocation_id);
-    eprintln!("BES sink {endpoint} [{short}]: {msg}");
+    errln!("BES sink {endpoint} [{short}]: {msg}");
 }
 
 /// Emit a user-facing `WARNING:` for this sink, prefixed `BES sink <endpoint>:`

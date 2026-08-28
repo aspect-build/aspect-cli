@@ -178,6 +178,7 @@
 //! - Dead subscribers are cleaned up lazily on the next `send()`
 //! - The `close()` method immediately frees all sender resources
 
+use crate::outln;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, Weak};
 
@@ -294,7 +295,7 @@ impl<T> std::ops::Deref for Subscriber<T> {
 /// // Subscribe and consume
 /// let sub = broadcaster.subscribe();
 /// for event in std::iter::from_fn(|| sub.recv().ok()) {
-///     println!("Received: {}", event);
+///     outln!("Received: {}", event);
 /// }
 /// ```
 #[derive(Debug)]

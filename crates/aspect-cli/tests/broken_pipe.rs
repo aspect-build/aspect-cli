@@ -1,0 +1,91 @@
+//! A closed stdout must not abort the CLI.
+//!
+//! `println!` / `eprintln!` panic when their write fails, and a reader that
+//! stops early — `aspect build … | head`, or a CI assertion piping into
+//! `grep -q` — closes the pipe as soon as it has what it wants. The panic
+//! (exit 101) aborts the process mid-task, so nothing runs the task's terminal
+//! update and its GitHub check run is stranded "running" until the API sweeper
+//! finalizes it as DISCONNECTED. See `axl_runtime::out`.
+//!
+//! Closing the read end before the child writes anything makes the first write
+//! fail deterministically, rather than depending on the buffering race that
+//! decides whether a real pipeline trips it.
+
+use std::io::Write;
+use std::process::{Command, Stdio};
+
+/// Rust's exit code for a panic.
+const PANIC_EXIT: i32 = 101;
+
+#[test]
+fn closed_stdout_does_not_panic() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_aspect-cli"))
+        // `describe` serializes the whole CLI surface through our own stdout
+        // path (`cmd.rs`), unlike `--help`, which clap writes and error-checks
+        // itself.
+        .arg("describe")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn aspect-cli");
+
+    // Close our read end before the child writes, so its writes get EPIPE.
+    drop(child.stdout.take().expect("piped stdout"));
+
+    let status = child.wait().expect("wait for aspect-cli");
+    assert_ne!(
+        status.code(),
+        Some(PANIC_EXIT),
+        "writing to a closed stdout panicked instead of exiting cleanly"
+    );
+}
+
+/// `aspect feature` renders its list through `print!`, which the newline-less
+/// `out!` covers; a partial migration would leave this path panicking.
+#[test]
+fn closed_stdout_does_not_panic_listing_features() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_aspect-cli"))
+        .arg("feature")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn aspect-cli");
+    drop(child.stdout.take().expect("piped stdout"));
+
+    let status = child.wait().expect("wait for aspect-cli");
+    assert_ne!(
+        status.code(),
+        Some(PANIC_EXIT),
+        "`feature` panicked writing to a closed stdout"
+    );
+}
+
+/// The credential helper's stdout is a protocol payload, not console output:
+/// Bazel parses it. A failed write means Bazel got no response, so the helper
+/// must report failure rather than exit 0 on output nobody received — the one
+/// place `out!`/`outln!` would be the wrong tool.
+#[test]
+fn credential_helper_reports_a_failed_response_write() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_aspect-cli"))
+        .arg("get")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn aspect-cli get");
+
+    // Close the read end first, so the helper's response write cannot land.
+    drop(child.stdout.take().expect("piped stdout"));
+    child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(br#"{"uri":"https://example.com"}"#)
+        .expect("write the helper request");
+
+    let status = child.wait().expect("wait for aspect-cli get");
+    assert!(
+        !status.success(),
+        "credential helper reported success for a response Bazel never received"
+    );
+}
