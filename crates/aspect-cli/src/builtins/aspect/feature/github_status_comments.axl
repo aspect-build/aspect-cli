@@ -356,12 +356,29 @@ def denied_terminal_post_warning(task_name, post_grant_run):
     return ("Terminal status for %s was contributed but the server withheld the comment post; " +
             "it will only appear if another job posts later%s") % (task_name, held)
 
+def _with_failed_phase(entry, text):
+    """Prefix `failed in <phase>` when the phase adds something.
+
+    A producer's short text names the outcome but not where it happened, and
+    the phase is often a step of its own — gazelle's `diff`, lint's `filter`.
+    Dropped only when the phase is the task's own kind, which the row already
+    prints beside the text. The long-form path below keeps the prefix
+    unconditionally: its surfaces render the text on its own, with no task
+    label next to it to make the phase redundant.
+    """
+    if entry.get("status", "") != "failed":
+        return text
+    phase = entry.get("failed_in_phase", "")
+    if not phase or phase == entry.get("kind", ""):
+        return text
+    return "failed in %s · %s" % (phase, text)
+
 def _result_cell_text(entry):
     """Compose the row's result text.
 
     A producer may supply `progress.short` for surfaces that name the task
-    beside the text; it is used verbatim. Otherwise the text is composed from
-    `progress.body`.
+    beside the text; it is used as-is apart from the failed-phase prefix (see
+    `_with_failed_phase`). Otherwise the text is composed from `progress.body`.
 
     Layout per status:
       aborted                       — `aborted (reason)?`
@@ -379,12 +396,9 @@ def _result_cell_text(entry):
         return text
     pg = entry.get("progress", {}) or {}
 
-    # A producer that supplies `short` has written the row's whole text: it
-    # already knows the outcome and the phase, so composing a `failed in …`
-    # prefix around it would put back the duplication it exists to remove.
     short = pg.get("short", "")
     if short:
-        return short
+        return _with_failed_phase(entry, short)
 
     body = pg.get("body", "")
 
@@ -1931,6 +1945,10 @@ def _github_status_comments(ctx: FeatureContext):
 def prepare_for_render(entries):
     """Public test hook; see `_prepare_for_render`."""
     return _prepare_for_render(entries)
+
+def result_cell_text(entry):
+    """Public test hook; see `_result_cell_text`."""
+    return _result_cell_text(entry)
 
 def rehydrate_entries(entries):
     """Rehydrate API/state-block entries' command lists in place; see

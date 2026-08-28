@@ -10,7 +10,7 @@ load(
     "version_tuple",
 )
 load("@aspect//delivery.axl", delivery_UncacheableAction = "UncacheableAction", delivery_collect_blocking_culprits = "collect_blocking_culprits", delivery_count_unexplained_unresolved = "count_unexplained_unresolved", delivery_fmt_elapsed = "fmt_elapsed", delivery_should_surface_phase2_stderr = "should_surface_phase2_stderr", delivery_should_upload_grpc_log = "should_upload_grpc_log")
-load("@aspect//feature/github_status_comments.axl", "denied_terminal_post_warning", "dropped_terminal_contribute_warning")
+load("@aspect//feature/github_status_comments.axl", "denied_terminal_post_warning", "dropped_terminal_contribute_warning", "result_cell_text", "results_subset")
 load("@aspect//lint.axl", "filter_all", "filter_changeset", "linter_error_message", "parse_patch_hunks")
 load("@aspect//private/lib/artifacts.axl", "artifact_name", "build_log_header", "build_log_relpath", "collect_build_action_logs", "dedup_path", "testlog_dest_dir")
 load("@aspect//private/lib/bazel_results.axl", "bb_clientd_root", "compute_reproducer_command", "file_uri_to_path", "init_data", "render_check_output", "resolve_aspect_url", "summary_title")
@@ -3952,6 +3952,89 @@ def test_terminal_progress(tc: int) -> int:
     tc = test_case(tc, phases.ProgressStyles(body = "x").short == "", "short defaults to empty")
     return tc
 
+def test_result_cell_text(tc: int) -> int:
+    """The comment row prefers `short`, but a failure in a phase that is not the
+    task's own kind still says which phase — the short text names the outcome,
+    not where it happened."""
+
+    def entry(**kw):
+        base = {"status": "failed", "kind": "gazelle", "progress": {"body": "B", "short": "failed (3 out of date)"}}
+        base.update(kw)
+        return base
+
+    tc = test_case(
+        tc,
+        result_cell_text(entry(failed_in_phase = "diff")) == "failed in diff · failed (3 out of date)",
+        "a phase unlike the task kind is kept",
+    )
+    tc = test_case(
+        tc,
+        result_cell_text(entry(failed_in_phase = "gazelle")) == "failed (3 out of date)",
+        "a phase equal to the task kind is dropped — the row already prints it",
+    )
+    tc = test_case(
+        tc,
+        result_cell_text(entry(failed_in_phase = "")) == "failed (3 out of date)",
+        "no phase recorded leaves the short text alone",
+    )
+    tc = test_case(
+        tc,
+        result_cell_text(entry(status = "passed", failed_in_phase = "diff")) == "failed (3 out of date)",
+        "a non-failed status never gets a phase prefix",
+    )
+
+    # Without `short`, the long-form composition is unchanged.
+    tc = test_case(
+        tc,
+        result_cell_text({
+            "status": "failed",
+            "kind": "gazelle",
+            "failed_in_phase": "diff",
+            "progress": {"body": "Gazelle failed (3 out of date)"},
+        }) ==
+        "failed in diff · Gazelle failed (3 out of date)",
+        "the long form still composes the phase prefix",
+    )
+    return tc
+
+def test_results_subset_carries_progress(tc: int) -> int:
+    """`results_subset` is how both the GitHub and GitLab comment features turn
+    an update into an entry. It must carry the whole `ProgressStyles` through —
+    the GitLab path passed `None` here for its entire life, so MR rows rendered
+    no producer text at all."""
+    styles = phases.terminal_progress("Lint", "complete", "clean")
+    subset = results_subset(
+        {},
+        1000,
+        aspect_url = "",
+        bes_url = "",
+        check_run_url = "",
+        current_phase = "",
+        current_phase_elapsed_ms = 0,
+        progress_styles = styles,
+        failed_in_phase = "",
+        start_time_ms = 0,
+    )
+    pg = subset.get("progress") or {}
+    tc = test_case(tc, pg.get("body") == "Lint complete (clean)", "the long form survives into the entry")
+    tc = test_case(tc, pg.get("short") == "complete (clean)", "the short form survives into the entry")
+
+    # `None` is legitimate for callers with no styles yet; it must not crash.
+    empty = results_subset(
+        {},
+        0,
+        aspect_url = "",
+        bes_url = "",
+        check_run_url = "",
+        current_phase = "",
+        current_phase_elapsed_ms = 0,
+        progress_styles = None,
+        failed_in_phase = "",
+        start_time_ms = 0,
+    )
+    tc = test_case(tc, (empty.get("progress") or {}).get("short") == "", "no styles yields an empty short")
+    return tc
+
 def impl(ctx: TaskContext) -> int:
     tc = 0
 
@@ -4043,6 +4126,8 @@ def impl(ctx: TaskContext) -> int:
     tc = test_prompt_choice(tc)
     tc = test_template_presets(tc)
     tc = test_terminal_progress(tc)
+    tc = test_result_cell_text(tc)
+    tc = test_results_subset_carries_progress(tc)
     tc = test_denied_terminal_post_warning(tc)
 
     print(tc, "tests passed")
