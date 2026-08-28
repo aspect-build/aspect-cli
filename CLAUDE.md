@@ -64,11 +64,21 @@ something these macros can absorb.
 
 ### Testing
 
-`crates/aspect-cli/tests/broken_pipe.rs` is the regression suite. A test closes
+`no_panicking_print_macros` (a unit test in each crate) scans that crate's own
+sources and fails on a reintroduced macro, naming the file and line. It runs
+under Bazel, so it is enforced in CI.
+
+`crates/aspect-cli/tests/broken_pipe.rs` covers the behavior. Its tests close
 the child's pipe *before* it writes, so the first write fails deterministically
 rather than depending on the buffering race a real pipeline hits.
 
-Exercise the path you actually changed. A test against `--help` passes whether
-or not the fix works, because clap writes and error-checks its own help; it has
-to be a command that goes through the code under test. Confirm the test fails
-with the fix reverted before trusting it.
+Two things to know when adding tests here:
+
+- **Exercise the path you changed.** A test against `--help` passes whether or
+  not the fix works, because clap writes and error-checks its own help. Confirm
+  the test fails with the fix reverted before trusting it.
+- **`rust_test(crate = …)` runs unit tests only.** Anything under `tests/`
+  needs its own `rust_test` target with `srcs`, or it never runs — CI has no
+  `cargo test` step. Resolve the binary through `ASPECT_CLI_BIN` (set by the
+  rule's `env`) with an `option_env!("CARGO_BIN_EXE_…")` fallback for cargo;
+  plain `env!` will not compile under Bazel.

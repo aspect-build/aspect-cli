@@ -550,3 +550,19 @@ async fn run_shutdown_sequence(signal_name: &str, exit_code: i32) {
     errln!("aspect-cli: exiting with code {exit_code}");
     std::process::exit(exit_code);
 }
+
+#[cfg(test)]
+mod print_macro_guard {
+    /// `println!` and friends panic on a failed write, which strands a task
+    /// mid-run when a pipeline reader leaves. See CLAUDE.md.
+    #[test]
+    fn no_panicking_print_macros() {
+        static SRC: include_dir::Dir<'_> = include_dir::include_dir!("$CARGO_MANIFEST_DIR/src");
+        let found = axl_runtime::out::panicking_print_macros(&SRC);
+        assert!(
+            found.is_empty(),
+            "use outln!/errln!/out! from axl_runtime::out instead (see CLAUDE.md):\n  {}",
+            found.join("\n  ")
+        );
+    }
+}
