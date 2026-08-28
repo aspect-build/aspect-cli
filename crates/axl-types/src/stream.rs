@@ -289,6 +289,23 @@ impl<'v> values::StarlarkValue<'v> for Writable {
 
 starlark_simple_value!(Writable);
 
+/// Swallow `BrokenPipe` on the inherited console streams.
+///
+/// A departed reader (`aspect build … | head`) is not a task failure: the task
+/// must still finish and report its result, or its status-surface entry is
+/// stranded showing "running". Applies to writes *and* flushes — stdout is
+/// line-buffered, so a write with no newline is buffered and reports success,
+/// and the `BrokenPipe` first surfaces at the flush.
+///
+/// Only for `Stdout`/`Stderr`. A `File` or a child's stdin failing is a real
+/// error and still propagates.
+fn ignore_broken_pipe(result: std::io::Result<()>) -> std::io::Result<()> {
+    match result {
+        Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        other => other,
+    }
+}
+
 #[starlark_module]
 fn writable_methods(registry: &mut MethodsBuilder) {
     /// Returns true if the underlying stream is connected to a terminal/tty.
@@ -342,11 +359,14 @@ fn writable_methods(registry: &mut MethodsBuilder) {
                 let inner = borrowed
                     .as_mut()
                     .ok_or_else(|| anyhow!("stream is closed"))?;
-                inner
-                    .lock()
-                    .write(data)
-                    .map(|f| f as u32)
-                    .map_err(|err| anyhow!(err))
+                match inner.lock().write(data) {
+                    Ok(n) => Ok(n as u32),
+                    // Reported as written; see `ignore_broken_pipe`.
+                    Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => {
+                        Ok(data.len() as u32)
+                    }
+                    Err(err) => Err(anyhow!(err)),
+                }
             }
             Writable::Stderr(stderr) => {
                 let guard = stderr.lock().unwrap();
@@ -354,11 +374,14 @@ fn writable_methods(registry: &mut MethodsBuilder) {
                 let inner = borrowed
                     .as_mut()
                     .ok_or_else(|| anyhow!("stream is closed"))?;
-                inner
-                    .lock()
-                    .write(data)
-                    .map(|f| f as u32)
-                    .map_err(|err| anyhow!(err))
+                match inner.lock().write(data) {
+                    Ok(n) => Ok(n as u32),
+                    // Reported as written; see `ignore_broken_pipe`.
+                    Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => {
+                        Ok(data.len() as u32)
+                    }
+                    Err(err) => Err(anyhow!(err)),
+                }
             }
             Writable::File(file) => {
                 let mut guard = file.lock().unwrap();
@@ -387,14 +410,14 @@ fn writable_methods(registry: &mut MethodsBuilder) {
                 let guard = stdout.lock().unwrap();
                 let mut borrowed = guard.borrow_mut();
                 if let Some(inner) = borrowed.as_mut() {
-                    inner.lock().flush()?;
+                    ignore_broken_pipe(inner.lock().flush())?;
                 }
             }
             Writable::Stderr(stderr) => {
                 let guard = stderr.lock().unwrap();
                 let mut borrowed = guard.borrow_mut();
                 if let Some(inner) = borrowed.as_mut() {
-                    inner.lock().flush()?;
+                    ignore_broken_pipe(inner.lock().flush())?;
                 }
             }
             Writable::File(file) => {
@@ -443,5 +466,35 @@ fn writable_methods(registry: &mut MethodsBuilder) {
             }
         };
         Ok(NoneType)
+    }
+}
+
+#[cfg(test)]
+mod broken_pipe_tests {
+    use super::ignore_broken_pipe;
+    use std::io::{Error, ErrorKind};
+
+    #[test]
+    fn broken_pipe_is_swallowed() {
+        let r = ignore_broken_pipe(Err(Error::new(ErrorKind::BrokenPipe, "reader left")));
+        assert!(
+            r.is_ok(),
+            "a departed console reader must not fail the task"
+        );
+    }
+
+    #[test]
+    fn other_errors_still_propagate() {
+        // A full disk or a closed file descriptor is a real failure — only a
+        // reader walking away from the console is benign.
+        for kind in [ErrorKind::PermissionDenied, ErrorKind::Other] {
+            let r = ignore_broken_pipe(Err(Error::new(kind, "real failure")));
+            assert!(r.is_err(), "{kind:?} must propagate");
+        }
+    }
+
+    #[test]
+    fn success_passes_through() {
+        assert!(ignore_broken_pipe(Ok(())).is_ok());
     }
 }
