@@ -127,8 +127,18 @@ def kind_for_task(task_kind):
     return _TASK_KIND_DEFAULTS.get(task_kind, "bazel_results")
 
 # Task-kind keys a `templates` dict may nest an override under, as opposed to
-# the flat "title"/"summary"/"details" keys that address every kind at once.
+# the flat slot keys that address every kind at once.
 TEMPLATE_SCOPE_KEYS = sorted(_TASK_KIND_DEFAULTS.keys())
+
+# Slots the per-kind renderers consume. Valid as a flat key or inside a
+# per-kind block; anything else in a `templates` dict is inert.
+RENDERER_TEMPLATE_SLOTS = ["details", "summary", "title"]
+
+# The PR/MR summary comment's only slot, owned by the comment features. Listed
+# here so preset validation can see the whole slot vocabulary in one place — a
+# lib cannot import a feature. Never scopeable per task kind: one comment
+# aggregates every sibling task, so there is no single kind to scope it to.
+COMMENT_TEMPLATE_SLOT = "body"
 
 def _layer_overrides(layer, task_kind, label):
     """One layer's flat keys, overlaid with its `task_kind` block."""
