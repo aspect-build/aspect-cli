@@ -2694,7 +2694,7 @@ build:foo --foo-flag
         // flags must appear AFTER the unconditional common flags so they win under
         // last-write-wins — matching Bazel's CLI-overrides-RC semantics.
         //
-        // Regression test for the monopi remote_timeout bug:
+        // Regression test for the remote_timeout config-override bug:
         //   common --remote_timeout=600          ← RC default
         //   common:ci --remote_timeout=3600      ← CI override
         // With --config=ci, 3600 must win.
@@ -2722,7 +2722,7 @@ common:ci --remote_timeout=3600
 
     #[test]
     fn cli_config_modify_execution_info_order() {
-        // Regression test for the monopi Tar caching bug:
+        // Regression test for the Tar caching bug:
         //   common --modify_execution_info=Tar=+no-remote-cache   ← local default
         //   common:ci --modify_execution_info=Tar=-no-remote-cache ← CI override (allow hits)
         // With --config=ci, the `-` (remove) must come AFTER the `+` (add) so

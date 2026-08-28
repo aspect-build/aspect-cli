@@ -181,6 +181,13 @@ def _make_warming_archive_failed():
     r["warming"]["archive_error"] = "the warming archiver exited with code 3"
     return r
 
+# How much of each rendered body the snapshot prints — enough to catch a
+# rendering regression without flooding. Cut by line, never by character or
+# byte count: the summary carries a live `ctx.task.elapsed_ms` reading, so a
+# character offset lands somewhere different once a run crosses a digit
+# boundary (99ms -> 100ms) and splits a different line in half.
+_SNAPSHOT_MAX_LINES = 70
+
 def _test_impl(ctx):
     scenarios = [
         # (label,                                       kind,                data,                               status,    final, subject,      task_kind)
@@ -239,14 +246,9 @@ def _test_impl(ctx):
         print("buildkite-agent annotate --style %s --context %s --scope=job" % (style, context_id))
         print("─" * 70)
 
-        # Show first 2500 chars of the formatted body — enough to see the
-        # title/summary and the first chunk of the body without flooding.
-        # The exact length is deliberately not printed: the summary carries a
-        # live `ctx.task.elapsed_ms` reading, so it shifts by a character
-        # whenever the run crosses a digit boundary (99ms -> 100ms) and would
-        # make this snapshot flap between runs.
-        print(body[:2500])
-        if len(body) > 2500:
+        body_lines = body.split("\n")
+        print("\n".join(body_lines[:_SNAPSHOT_MAX_LINES]))
+        if len(body_lines) > _SNAPSHOT_MAX_LINES:
             print("... [truncated]")
         print("")
 

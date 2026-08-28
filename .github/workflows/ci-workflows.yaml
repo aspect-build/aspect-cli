@@ -593,34 +593,8 @@ jobs:
           echo "--- flag rejected by Bazel (bare)"
           timeout 180 "$LAUNCHER" build --definitely_not_a_flag //... 2>&1 | grep -q "Unrecognized option" \
             || { echo "ERROR: a bare Bazel-rejected flag must fail the same way"; exit 1; }
-          echo "--- aspect dev test-template-snapshots"
-          "$LAUNCHER" dev test-template-snapshots
-          echo "--- aspect dev test-lint-template-snapshots"
-          "$LAUNCHER" dev test-lint-template-snapshots
-          echo "--- aspect dev test-lint-annotation-plan"
-          "$LAUNCHER" dev test-lint-annotation-plan
-          echo "--- aspect dev test-format-template-snapshots"
-          "$LAUNCHER" dev test-format-template-snapshots
-          echo "--- aspect dev test-gazelle-template-snapshots"
-          "$LAUNCHER" dev test-gazelle-template-snapshots
-          echo "--- aspect dev test-delivery-template-snapshots"
-          "$LAUNCHER" dev test-delivery-template-snapshots
-          echo "--- aspect dev test-bk-annotation-snapshots"
-          "$LAUNCHER" dev test-bk-annotation-snapshots
-          echo "--- aspect dev test-pr-comment-snapshots"
-          "$LAUNCHER" dev test-pr-comment-snapshots
-          echo "--- aspect dev test-github-detect"
-          "$LAUNCHER" dev test-github-detect
-          echo "--- aspect dev test-gitlab-detect"
-          "$LAUNCHER" dev test-gitlab-detect
-          echo "--- aspect dev test-gitlab-client"
-          "$LAUNCHER" dev test-gitlab-client
-          echo "--- aspect dev test-tips"
-          "$LAUNCHER" dev test-tips
-          echo "--- aspect dev test-rate-limit"
-          "$LAUNCHER" dev test-rate-limit
-          echo "--- aspect dev test-runner-job-history"
-          "$LAUNCHER" dev test-runner-job-history
+          echo "--- aspect dev test-* (every AXL suite)"
+          ./tools/run-axl-suites.sh "$LAUNCHER"
   # NOTE: the Buildkite `bazelrc-e2e` step is intentionally NOT ported here. It
   # asserts that bare `bazel` and `aspect` start the SAME Bazel server (identical
   # startup flags, no server thrash). On a GitHub Actions Workflows runner `bazel`

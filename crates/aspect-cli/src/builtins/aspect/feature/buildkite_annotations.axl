@@ -85,6 +85,9 @@ Rendering goes through the shared `check_dispatch.RENDERERS` table, so
 module exports its `SUMMARY_TEMPLATE` / `DETAILS_TEMPLATE` so a config can
 patch the built-in rather than re-author it.
 
+`template_preset` selects a named bundle of templates as the starting layout;
+`templates` overrides individual slots on top of it (see `template_presets`).
+
 Flat "summary"/"details" keys apply to every task kind; a per-task-kind
 block ("build", "lint", …) overlays them for that kind alone, so a config
 can set a shared default and still special-case one task (see
@@ -120,6 +123,7 @@ load(
 )
 load("../private/lib/rate_limit.axl", "usage_footer")
 load("../private/lib/result_text.axl", "severity_for_status")
+load("../private/lib/template_presets.axl", "template_presets")
 load("../private/lib/tips.axl", "SURFACE_BUILDKITE_ANNOTATIONS", "collect_tips_sorted")
 
 # ─── Style selection ──────────────────────────────────────────────────────────
@@ -316,6 +320,7 @@ def _buildkite_annotations(ctx: FeatureContext):
     lifecycle = ctx.traits[Phases]
 
     templates = ctx.args.templates or {}
+    preset_templates = template_presets.templates(ctx.args.template_preset)
     metadata_keys = list(ctx.args.metadata_keys or [])
 
     mode = ctx.args.mode
@@ -450,7 +455,7 @@ def _buildkite_annotations(ctx: FeatureContext):
             status,
             make_render_ctx(_state, tips = collect_tips_sorted(ctx, surface = SURFACE_BUILDKITE_ANNOTATIONS), api_usage = usage_footer(ctx), last_updated_at = format_run_date(ctx, now_ms(ctx))),
             _make_links(data),
-            resolve_templates(templates, ctx.task.kind),
+            resolve_templates(templates, ctx.task.kind, base = preset_templates),
             metadata_keys,
             snippet_options = _snippet_opts,
             max_snippets = _max_snippets,
@@ -526,7 +531,7 @@ BuildkiteAnnotations = feature(
                           "that kind alone, e.g. {\"summary\": ..., \"lint\": {\"details\": ...}}. " +
                           "The \"title\" template renders with `icon`, `task_kind`, `subject`, " +
                           "`state` and `status`; a broken title falls back to the built-in layout. " +
-                          "Empty dict (default) uses the feature's built-in templates. The renderer's title, summary and details are concatenated into one Markdown annotation, hard-capped at Buildkite's 1 MiB limit.",
+                          "Empty dict (default) leaves the selected `template_preset` in effect. The renderer's title, summary and details are concatenated into one Markdown annotation, hard-capped at Buildkite's 1 MiB limit.",
         ),
         "metadata_keys": args.string_list(
             default = [],
@@ -538,5 +543,5 @@ BuildkiteAnnotations = feature(
                           "custom keys via --bes_metadata=MY_KEY=value or --build_metadata=MY_KEY=value " +
                           "on their Bazel invocation.",
         ),
-    },
+    } | template_presets.args(),
 )
