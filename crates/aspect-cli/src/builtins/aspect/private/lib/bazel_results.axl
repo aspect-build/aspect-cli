@@ -2000,6 +2000,14 @@ def compute_invocation_state(data, status):
         for bucket in _FAILURE_BUCKETS:
             if counts.get(bucket, 0) > 0:
                 return _BUCKET_INVOCATION_LABELS[bucket]
+
+        # `aspect run` builds a target and then executes it. When the build
+        # succeeded and the program exited non-zero there is no failure bucket,
+        # and the fallback below would report a build failure for a build that
+        # worked. Only `run` sets this.
+        run_exit = (data.get("run") or {}).get("exit_code", 0)
+        if run_exit:
+            return "Run failed (exit %d)" % run_exit
         return _BUCKET_INVOCATION_LABELS[_BUCKET_FAILED_TO_BUILD]
 
     for group in _BUCKET_PRIORITY_GROUPS:

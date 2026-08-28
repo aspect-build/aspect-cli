@@ -127,6 +127,11 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     code = r.spawn(entrypoint, forward_args, cwd = spawn_cwd).wait().code
     if code == 0:
         return _conclude("passed", code, "Ran %s" % target)
+
+    # The build succeeded and the program failed. Record that so the renderer
+    # reports a run failure rather than falling back to "Failed to build",
+    # which is what a failed status with no failure buckets otherwise means.
+    data["run"] = {"exit_code": code}
     return _conclude("failed", code, "%s exited %d" % (target, code))
 
 run = task(

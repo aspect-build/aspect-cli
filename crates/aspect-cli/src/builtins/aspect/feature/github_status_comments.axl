@@ -330,6 +330,18 @@ def _elapsed_text(entry):
         return ""
     return format_duration_ms(ms)
 
+def dropped_terminal_contribute_warning(task_name, error):
+    """Warn that a task's terminal contribution never reached the API.
+
+    Mid-run this is unremarkable — the next tick retries. On the terminal
+    update there is no next tick, so if the comment-state fallback cannot post
+    either, the task's entry keeps whatever a previous post captured and
+    reports a finished task as still running. Traced rather than warned, that
+    failure is invisible in a normal CI log.
+    """
+    return ("Terminal status for %s could not be contributed to the status-comment API (%s); " +
+            "falling back to coordinating through the comment itself") % (task_name, error or "unknown")
+
 def denied_terminal_post_warning(task_name, post_grant_run):
     """Warn that a task's terminal status was contributed but not posted.
 
@@ -1635,7 +1647,17 @@ def _github_status_comments(ctx: FeatureContext):
             # API unreachable / errored — fall back to coordinating through the
             # comment's own state block (read → merge our entry → render →
             # post), so a single job still renders a correct comment.
-            _LOG.trace("status-comment API unavailable (%s); using comment-state fallback" % result.get("error", ""))
+            # Mid-run this is unremarkable — the next tick retries. On the
+            # terminal update there is no next tick: if the fallback below
+            # cannot post, the task's last state is whatever a previous post
+            # captured, so the failure is worth naming rather than tracing.
+            if final:
+                _LOG.warn(ctx.std, dropped_terminal_contribute_warning(
+                    ctx.task.name,
+                    result.get("error", ""),
+                ))
+            else:
+                _LOG.trace("status-comment API unavailable (%s); using comment-state fallback" % result.get("error", ""))
             _publish_via_comment_state(ctx, token, own_entry, now_epoch, final)
             return
 
