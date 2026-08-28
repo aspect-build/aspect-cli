@@ -52,7 +52,27 @@ ProgressStyles = record(
     # Live terminal output. ANSI welcome; present-continuous, no
     # trailing "..." since it's a live stream.
     stream = field(str, default = ""),
+
+    # `body` for a surface that already names the task beside it — the PR/MR
+    # comment, whose rows read `**test-gha** [test] · <short>`. Drop what the
+    # label already says ("Bazel test complete (28/28)" -> "complete (28/28)")
+    # and keep the detail. Optional: unset falls back to `body`.
+    short = field(str, default = ""),
 )
+
+def terminal_progress(noun: str, verb: str, detail: str = "") -> ProgressStyles:
+    """`ProgressStyles` for a terminal verdict, in both forms.
+
+    `body` reads `<noun> <verb> (<detail>)` for surfaces that show the text on
+    its own. `short` drops the noun for surfaces that print the task label
+    beside it — the PR/MR comment row, where "Lint complete (clean)" sits next
+    to `**lint-gha** [lint]` and says "lint" twice.
+    """
+    suffix = (" (" + detail + ")") if detail else ""
+    return ProgressStyles(
+        body = noun + " " + verb + suffix,
+        short = verb + suffix,
+    )
 
 # Lifecycle severity bucket:
 #   running — clean in-flight; warning — non-fatal (live or terminal);
@@ -1076,6 +1096,7 @@ phases = namespace(
     bk_phase_section_marker = _bk_phase_section_marker,
     Phase = Phase,
     ProgressStyles = ProgressStyles,
+    terminal_progress = terminal_progress,
     Update = TaskUpdate,
     ReproFixCommand = ReproFixCommand,
 )

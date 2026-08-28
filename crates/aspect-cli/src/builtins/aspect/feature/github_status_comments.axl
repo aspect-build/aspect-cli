@@ -357,7 +357,11 @@ def denied_terminal_post_warning(task_name, post_grant_run):
             "it will only appear if another job posts later%s") % (task_name, held)
 
 def _result_cell_text(entry):
-    """Compose the row's result text from the producer's `progress.body`.
+    """Compose the row's result text.
+
+    A producer may supply `progress.short` for surfaces that name the task
+    beside the text; it is used verbatim. Otherwise the text is composed from
+    `progress.body`.
 
     Layout per status:
       aborted                       — `aborted (reason)?`
@@ -374,6 +378,14 @@ def _result_cell_text(entry):
             text = text + " (%s)" % entry["abort_reason"]
         return text
     pg = entry.get("progress", {}) or {}
+
+    # A producer that supplies `short` has written the row's whole text: it
+    # already knows the outcome and the phase, so composing a `failed in …`
+    # prefix around it would put back the duplication it exists to remove.
+    short = pg.get("short", "")
+    if short:
+        return short
+
     body = pg.get("body", "")
 
     parts = []
@@ -617,12 +629,13 @@ def _ci_identity(env, marker):
 
 def _progress_dict(progress_styles):
     """Serialize a ProgressStyles record to a dict surviving the contribution
-    JSON round-trip (entry["progress"]["body"/"stream"])."""
+    JSON round-trip (entry["progress"]["body"/"stream"/"short"])."""
     if progress_styles == None:
-        return {"body": "", "stream": ""}
+        return {"body": "", "stream": "", "short": ""}
     return {
         "body": progress_styles.body or "",
         "stream": progress_styles.stream or "",
+        "short": progress_styles.short or "",
     }
 
 def _results_subset(

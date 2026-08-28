@@ -898,17 +898,18 @@ def _compact_text(status, data):
             if total > 0:
                 return "%d/%d delivered" % (done, total)
             return "%d delivered" % done
-    return ""
+    return phases.ProgressStyles()
 
-def _body_text(status, data):
-    """Narrative-form `progress.body` for the PR-comment 💬 line."""
+def _progress(status, data):
+    """Terminal `ProgressStyles` — long form for standalone surfaces, short
+    form for rows that already name the task."""
     compact = _compact_text(status, data)
     if status == "passed" or status == "warning":
-        return "Delivery complete" + ((" (" + compact + ")") if compact else "")
+        return phases.terminal_progress("Delivery", "complete", compact)
     if status == "failed":
-        return "Delivery failed" + ((" (" + compact + ")") if compact else "")
+        return phases.terminal_progress("Delivery", "failed", compact)
     if status == "aborted":
-        return "Delivery aborted"
+        return phases.terminal_progress("Delivery", "aborted")
     return ""
 
 def _fire_target_hook(data, delivery_trait, run_tracker, label):
@@ -1008,9 +1009,7 @@ def _emit_final(ph, exit_code):
         final = True,
         conclusion = bookend,
         data = data,
-        progress = phases.ProgressStyles(
-            body = _body_text(final_status, data),
-        ),
+        progress = _progress(final_status, data),
     ))
     print_repro_and_fix(ctx.std, data, final_status)
 

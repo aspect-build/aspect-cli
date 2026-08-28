@@ -72,6 +72,7 @@ load(
 )
 load("../lib/bazel_results.axl", "compute_reproducer_command")
 load("../lib/github.axl", "github")
+load("../lib/lifecycle.axl", "phases")
 load("../lib/repro_commands.axl", "rehydrate_commands")
 load("../lib/tips.axl", "tips")
 
@@ -116,48 +117,53 @@ def _with_commands(data, repro = [], fix = []):
     )
     return out
 
-def _body_for(kind, status, data):
-    """Mirror the producer's `progress.body` narrative form.
+# Live-phase narrative per kind. Bazel's is built from the command name; the
+# rest are fixed phrases their producers emit while running.
+_RUNNING_BODY = {
+    "lint": "Linting...",
+    "format": "Formatting...",
+    "gazelle": "Running gazelle...",
+    "delivery": "Delivering...",
+}
 
-    Running emits ship the live phase narrative (`Bazel test running
-    (12 of 58 tests run)` / `Linting`); terminal emits ship a verb-prefixed
-    summary (`Bazel test complete (58/58 passed)` /
-    `Lint failed (3 errors)`)."""
+# Noun each producer leads its terminal text with.
+_TERMINAL_NOUN = {
+    "lint": "Lint",
+    "format": "Format",
+    "gazelle": "Gazelle",
+    "delivery": "Delivery",
+}
+
+_TERMINAL_VERBS = {
+    "passed": "complete",
+    "warning": "complete",
+    "failing": "failing",
+    "failed": "failed",
+    "aborted": "aborted",
+}
+
+def _progress_for(kind, status, data):
+    """Mirror the `progress` dict a producer ships, as it reaches an entry.
+
+    Terminal emits go through `phases.terminal_progress`, the same composer the
+    producers use, so this cannot drift from them on shape. Live emits carry no
+    `short`: only bazel's names its command, and the rest are already short.
+    """
     compact = _compact_for(kind, status, data)
+    suffix = (" (" + compact + ")") if compact else ""
+    is_bazel = kind == "build" or kind == "test"
 
-    # Live forms.
     if status == "running":
-        if kind == "build" or kind == "test":
-            base = "Bazel " + kind + " running..."
-            return base + (" (" + compact + ")") if compact else base
-        if kind == "lint":
-            return ("Linting... (" + compact + ")") if compact else "Linting..."
-        if kind == "format":
-            return ("Formatting... (" + compact + ")") if compact else "Formatting..."
-        if kind == "gazelle":
-            return ("Running gazelle... (" + compact + ")") if compact else "Running gazelle..."
-        if kind == "delivery":
-            return ("Delivering... (" + compact + ")") if compact else "Delivering..."
-        return ""
+        if is_bazel:
+            styles = phases.terminal_progress("Bazel " + kind, "running..." + suffix)
+            return {"body": styles.body, "stream": "", "short": styles.short}
+        body = _RUNNING_BODY.get(kind, "")
+        return {"body": (body + suffix) if body else "", "stream": "", "short": ""}
 
-    # Terminal / live-non-running forms — verb-prefixed summary.
-    verb_map = {
-        "passed": "complete",
-        "warning": "complete",
-        "failing": "failing",
-        "failed": "failed",
-        "aborted": "aborted",
-    }
-    verb = verb_map.get(status, status)
-    if kind == "build" or kind == "test":
-        return "Bazel " + kind + " " + verb + ((" (" + compact + ")") if compact else "")
-    title = {
-        "lint": "Lint",
-        "format": "Format",
-        "gazelle": "Gazelle",
-        "delivery": "Delivery",
-    }.get(kind, kind)
-    return title + " " + verb + ((" (" + compact + ")") if compact else "")
+    verb = _TERMINAL_VERBS.get(status, status)
+    noun = ("Bazel " + kind) if is_bazel else _TERMINAL_NOUN.get(kind, kind)
+    styles = phases.terminal_progress(noun, verb, compact)
+    return {"body": styles.body, "stream": "", "short": styles.short}
 
 def _compact_for(kind, status, data):
     if kind == "build" or kind == "test":
@@ -354,10 +360,7 @@ def _entry(
     else:
         # Default: mirror what each producer ships — narrative `body`
         # text + empty `stream`.
-        payload["progress"] = {
-            "body": _body_for(kind, status, data),
-            "stream": "",
-        }
+        payload["progress"] = _progress_for(kind, status, data)
     payload["kind"] = task_kind
     payload["name"] = task_name
     payload["job"] = job

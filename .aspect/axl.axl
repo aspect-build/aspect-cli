@@ -26,7 +26,7 @@ load(
 )
 load("@aspect//private/lib/github.axl", "detect_commit_sha", "github")
 load("@aspect//private/lib/gitlab_token_cache.axl", "gitlab_token_cache")
-load("@aspect//private/lib/lifecycle.axl", "ReproFixCommand")
+load("@aspect//private/lib/lifecycle.axl", "ReproFixCommand", "phases")
 load("@aspect//private/lib/log_snippet.axl", "SnippetOptions", "code_fence_for", "extract_junit_failure", "extract_snippet")
 load("@aspect//private/lib/path_glob.axl", "match_any", "match_path")
 load("@aspect//private/lib/prompt.axl", "prompt_choice")
@@ -3928,6 +3928,30 @@ def test_denied_terminal_post_warning(tc: int) -> int:
     tc = test_case(tc, without.endswith("posts later"), "the message ends cleanly with no holder")
     return tc
 
+def test_terminal_progress(tc: int) -> int:
+    """`ProgressStyles.short` drops the leading noun for surfaces that print
+    the task label beside the text — a PR-comment row reads
+    `**lint-gha** [lint] · complete (clean)`, not `… · Lint complete (clean)`.
+    Both forms come from one composer so they cannot describe different
+    outcomes."""
+    p = phases.terminal_progress("Lint", "complete", "clean")
+    tc = test_case(tc, p.body == "Lint complete (clean)", "body keeps the noun")
+    tc = test_case(tc, p.short == "complete (clean)", "short drops the noun")
+
+    bare = phases.terminal_progress("Gazelle", "aborted")
+    tc = test_case(tc, bare.body == "Gazelle aborted", "body with no detail")
+    tc = test_case(tc, bare.short == "aborted", "short with no detail")
+
+    # The detail is the part worth keeping; it must survive into both.
+    detailed = phases.terminal_progress("Bazel test", "complete", "28/28 passed · 27 cached")
+    tc = test_case(tc, "28/28 passed · 27 cached" in detailed.body, "body keeps the detail")
+    tc = test_case(tc, "28/28 passed · 27 cached" in detailed.short, "short keeps the detail")
+    tc = test_case(tc, not detailed.short.startswith("Bazel"), "short has no command lead")
+
+    # Unset is the documented fallback: surfaces read `body`.
+    tc = test_case(tc, phases.ProgressStyles(body = "x").short == "", "short defaults to empty")
+    return tc
+
 def impl(ctx: TaskContext) -> int:
     tc = 0
 
@@ -4018,6 +4042,7 @@ def impl(ctx: TaskContext) -> int:
     tc = test_gitlab_token_cache(ctx, tc, temp_dir)
     tc = test_prompt_choice(tc)
     tc = test_template_presets(tc)
+    tc = test_terminal_progress(tc)
     tc = test_denied_terminal_post_warning(tc)
 
     print(tc, "tests passed")
