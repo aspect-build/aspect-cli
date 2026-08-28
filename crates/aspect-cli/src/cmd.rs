@@ -15,7 +15,7 @@
 //!
 //! Everything else in this module is private.
 
-use axl_runtime::{errln, outln};
+use axl_runtime::{errln, out, outln};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
@@ -335,7 +335,7 @@ impl<'a, 'v> Cmd<'a, 'v> {
 
         match name {
             None => {
-                print!(
+                out!(
                     "{}",
                     render_feature_list(version, &blocks, color::stdout_supports_color())
                 );

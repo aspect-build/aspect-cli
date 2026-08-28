@@ -10,6 +10,10 @@
 //! These macros discard the write error instead. Output past the close is lost
 //! either way — nobody is reading it — but the process finishes its work,
 //! reports its real result, and exits with its real code.
+//!
+//! For human-facing console output only. Anything a *program* consumes — a
+//! credential-helper response, a machine-readable dump — must propagate the
+//! failure rather than report success on output nobody received.
 
 /// `println!` that ignores a failed write (notably a closed pipe).
 #[macro_export]
@@ -21,6 +25,15 @@ macro_rules! outln {
     ($($arg:tt)*) => {{
         use std::io::Write as _;
         let _ = writeln!(std::io::stdout(), $($arg)*);
+    }};
+}
+
+/// `print!` that ignores a failed write (notably a closed pipe).
+#[macro_export]
+macro_rules! out {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = write!(std::io::stdout(), $($arg)*);
     }};
 }
 
