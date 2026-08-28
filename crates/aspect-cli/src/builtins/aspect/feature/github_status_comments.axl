@@ -330,6 +330,20 @@ def _elapsed_text(entry):
         return ""
     return format_duration_ms(ms)
 
+def denied_terminal_post_warning(task_name, post_grant_run):
+    """Warn that a task's terminal status was contributed but not posted.
+
+    A terminal publish is the job's last word — there is no later emit from
+    this task. If the server withholds the post and no other job posts
+    afterwards, the entry stays frozen at whatever the previous post captured,
+    reporting a finished task as still running for as long as the comment
+    lives. That failure is otherwise invisible, so it gets a log line naming
+    the grant holder when the server reports one (older servers do not).
+    """
+    held = " (post grant held by run %s)" % post_grant_run if post_grant_run else ""
+    return ("Terminal status for %s was contributed but the server withheld the comment post; " +
+            "it will only appear if another job posts later%s") % (task_name, held)
+
 def _result_cell_text(entry):
     """Compose the row's result text from the producer's `progress.body`.
 
@@ -1646,6 +1660,12 @@ def _github_status_comments(ctx: FeatureContext):
         _state["_shown_fixes"] = sel["shown_fixes"]
 
         if not result.get("should_post"):
+            # Mid-run denials are routine throttling; a terminal one is not.
+            if final:
+                _LOG.warn(ctx.std, denied_terminal_post_warning(
+                    ctx.task.name,
+                    result.get("post_grant_run", ""),
+                ))
             return
 
         # Resolve the comment id before posting so we PATCH the existing comment
