@@ -25,9 +25,12 @@ To add a preset, register a `TemplatePreset` in `_PRESETS`. The rules
 
   - A per-kind block must name a real task kind, or it silently never applies.
 
-  - A preset that overrides anything must also override `"body"`. Without it
-    the check surfaces take the preset's layout while the PR/MR comments keep
-    the built-in, which reads worse than either layout on its own.
+A preset may cover any subset of the surfaces. `template_preset` is a
+per-feature arg, so a config selects presets surface by surface — a preset that
+only defines check-surface slots is a normal thing to write, and applying it to
+a comment feature simply leaves `body` on the built-in. Slots a preset does not
+define always fall through, which is the same rule that makes the empty `full`
+preset render exactly today's output.
 
 Author a preset's templates as new strings, never by extracting fragments out
 of the built-in template constants — live configs `.replace()` against those
@@ -88,10 +91,6 @@ def _preset_errors(name: str, preset: TemplatePreset) -> list[str]:
         else:
             errors.extend(_slot_errors(name, key, value))
 
-    if preset.templates and "body" not in preset.templates:
-        errors.append(("preset {!r} overrides check-surface templates but not \"body\", so PR and MR " +
-                       "comments would keep the built-in layout while check runs and annotations " +
-                       "change").format(name))
     return errors
 
 def _validation_errors(presets: dict, default: str) -> list[str]:
