@@ -4,7 +4,7 @@ load("@aspect//bazel/build_events.axl", "announce_bes_sinks", "bes_args", "bes_s
 load("@aspect//bazel.axl", "BazelTrait", "dispatch_bazel_attempt_end", "dispatch_bazel_build_end", bzl = "bazel")
 load("@std//time.axl", "sleep_iter")
 load("./private/lib/artifacts.axl", "artifacts")
-load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "init_data", "process_event")
+load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "conclusion", "init_data", "process_event")
 load("./private/lib/environment.axl", "error")
 load("./private/lib/health_check.axl", "HealthCheckTrait")
 load("./private/lib/lifecycle.axl", "phases")
@@ -43,6 +43,24 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     data["bes_streamed_by_bazel"] = bes_streamed_by_bazel(ctx, rc)
     events = bazel.build_events.iterator()
     build_events = [events] + bes_sinks
+
+    def _conclude(status, code, text):
+        """Emit the terminal `task_update` and return the task's conclusion.
+
+        Every exit path goes through here. Without a terminal update the status
+        surfaces keep whatever "running" state they last saw — a finished run
+        shows as still in progress for as long as the PR comment lives, because
+        nothing ever supersedes it.
+        """
+        ph.dispatch(phases.Update(
+            kind = "bazel_results",
+            status = status,
+            final = True,
+            conclusion = text,
+            data = data,
+            progress = phases.ProgressStyles(body = text),
+        ))
+        return TaskConclusion(exit_code = code, text = text, flagged = False)
 
     for hook in bazel_trait.build_start:
         hook(ctx)
@@ -90,12 +108,12 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     dispatch_bazel_build_end(ctx, bazel_trait, build_status.code)
 
     if not build_status.success:
-        return build_status.code
+        return _conclude("failed", build_status.code, conclusion("failed", data))
 
     entrypoint = r.determine_entrypoint(target)
     if entrypoint == None:
         error(ctx.std, "Failed to determine the run entrypoint for %s." % target)
-        return 1
+        return _conclude("failed", 1, "Could not determine the run entrypoint for %s" % target)
 
     ph.update(
         "running",
@@ -106,7 +124,10 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         phase = phases.Phase(name = "run", description = "Run target", emoji = "🚀"),
     )
 
-    return r.spawn(entrypoint, forward_args, cwd = spawn_cwd).wait().code
+    code = r.spawn(entrypoint, forward_args, cwd = spawn_cwd).wait().code
+    if code == 0:
+        return _conclude("passed", code, "Ran %s" % target)
+    return _conclude("failed", code, "%s exited %d" % (target, code))
 
 run = task(
     summary = "Build a target with bazel and run the resulting binary.",
