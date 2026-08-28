@@ -19,12 +19,12 @@ trap 'rm -f "$SUITES"' EXIT
 
 count="$(wc -l <"$SUITES" | tr -d ' ')"
 if [[ "$count" -eq 0 ]]; then
-  echo "ERROR: no 'dev test-*' suites discovered — refusing to pass having tested nothing." >&2
-  exit 1
+    echo "ERROR: no 'dev test-*' suites discovered — refusing to pass having tested nothing." >&2
+    exit 1
 fi
 echo "Discovered $count AXL test suites."
 
 while read -r suite; do
-  echo "--- $ASPECT dev $suite"
-  "$ASPECT" dev "$suite"
+    echo "--- $ASPECT dev $suite"
+    "$ASPECT" dev "$suite"
 done <"$SUITES"
