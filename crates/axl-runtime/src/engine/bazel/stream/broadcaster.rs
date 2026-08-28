@@ -178,7 +178,6 @@
 //! - Dead subscribers are cleaned up lazily on the next `send()`
 //! - The `close()` method immediately frees all sender resources
 
-use crate::outln;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, Weak};
 
@@ -510,6 +509,7 @@ impl<T: Clone> Default for Broadcaster<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::outln;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc::TryRecvError;
     use std::thread;
