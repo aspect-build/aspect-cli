@@ -15,6 +15,7 @@
 //!
 //! Everything else in this module is private.
 
+use axl_runtime::{errln, outln};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
@@ -304,7 +305,7 @@ impl<'a, 'v> Cmd<'a, 'v> {
                 match select_task(&full, name) {
                     Some(t) => t,
                     None => {
-                        eprintln!(
+                        errln!(
                             "error: no task {name:?}. Run `aspect describe` for the list of commands."
                         );
                         return ExitCode::FAILURE;
@@ -314,11 +315,11 @@ impl<'a, 'v> Cmd<'a, 'v> {
         };
         match serde_json::to_string_pretty(&doc) {
             Ok(s) => {
-                println!("{s}");
+                outln!("{s}");
                 ExitCode::SUCCESS
             }
             Err(e) => {
-                eprintln!("error: failed to serialize the CLI surface: {e}");
+                errln!("error: failed to serialize the CLI surface: {e}");
                 ExitCode::FAILURE
             }
         }
@@ -349,7 +350,7 @@ impl<'a, 'v> Cmd<'a, 'v> {
                 }
                 None => {
                     let valid: Vec<String> = blocks.iter().map(|(f, _)| f.name()).collect();
-                    eprintln!(
+                    errln!(
                         "\x1b[1;31merror:\x1b[0m unknown feature {name:?}. Valid features: {}",
                         valid.join(", ")
                     );

@@ -19,6 +19,7 @@
 
 use anyhow::Context;
 use axl_runtime::engine::{profile_for_uri, resolve_access_token};
+use axl_runtime::outln;
 
 /// The credential-helper command, as the spec passes it (`argv[1]`). Also the
 /// reserved top-level command name the CLI guards in `cmd`.
@@ -61,7 +62,7 @@ pub fn run() -> anyhow::Result<()> {
     // passes (a global `--credential_helper=aspect` never sends a token to a
     // third-party host) and Bazel falls back to whatever it would otherwise use.
     let Some(deployment) = resolved.deployment else {
-        println!("{}", no_credential_response());
+        outln!("{}", no_credential_response());
         return Ok(());
     };
 
@@ -83,7 +84,7 @@ pub fn run() -> anyhow::Result<()> {
             )
         })?;
 
-    println!("{}", bearer_response(&token));
+    outln!("{}", bearer_response(&token));
     Ok(())
 }
 

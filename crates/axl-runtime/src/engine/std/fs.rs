@@ -1,3 +1,4 @@
+use crate::outln;
 use allocative::Allocative;
 use derive_more::Display;
 use starlark::environment::Methods;
@@ -399,7 +400,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = pos)] path: values::StringValue,
     ) -> anyhow::Result<bool> {
-        println!(
+        outln!(
             r#"Deprecated: is_file is deprecated and will be removed in a future version of AXL.
             Use `fs.metadata().is_file` instead."#
         );

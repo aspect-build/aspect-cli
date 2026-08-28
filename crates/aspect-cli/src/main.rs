@@ -56,6 +56,7 @@ fn install_allocator_error_handler() {
     unsafe { libmimalloc_sys::mi_register_error(Some(on_error), std::ptr::null_mut()) };
 }
 
+use axl_runtime::{errln, outln};
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -235,7 +236,7 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
 
             match matches.subcommand_name() {
                 Some("version") => {
-                    println!("{}", cargo_pkg_display_version());
+                    outln!("{}", cargo_pkg_display_version());
                     return Ok(ExitCode::SUCCESS);
                 }
                 Some("help") => {
@@ -291,7 +292,7 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                 for spec in &mut exporters {
                     if let ExporterSpec::File(file) = spec {
                         if file.destination == FileDestination::Stdout {
-                            eprintln!(
+                            errln!(
                                 "warning: a stdout telemetry exporter is configured, but `aspect \
                                  mcp` owns stdout for the MCP protocol — redirecting it to stderr."
                             );
@@ -343,7 +344,7 @@ fn main() -> ExitCode {
         return match credential_helper::run() {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => {
-                eprintln!("error: {err:?}");
+                errln!("error: {err:?}");
                 ExitCode::FAILURE
             }
         };
@@ -352,7 +353,7 @@ fn main() -> ExitCode {
     match run() {
         Ok(code) => code,
         Err(err) => {
-            eprintln!("error: {err:?}");
+            errln!("error: {err:?}");
             ExitCode::FAILURE
         }
     }
@@ -519,7 +520,7 @@ async fn run_shutdown_sequence(signal_name: &str, exit_code: i32) {
         }
     }
 
-    eprintln!("aspect-cli: received {signal_name}, cancelling bazel subprocesses…");
+    errln!("aspect-cli: received {signal_name}, cancelling bazel subprocesses…");
 
     // Two graceful SIGINTs; the CI/off-CI split below decides what follows.
     // See `install_shutdown_handler` for the full rationale.
@@ -530,7 +531,7 @@ async fn run_shutdown_sequence(signal_name: &str, exit_code: i32) {
     if on_recognized_ci() {
         // Stop short of KillServerProcess and SIGKILL — let bazel finish its
         // own cleanup so a cancellation can't strand a poisoned sandbox.
-        eprintln!("aspect-cli: on CI, leaving bazel to wind down; exiting with code {exit_code}");
+        errln!("aspect-cli: on CI, leaving bazel to wind down; exiting with code {exit_code}");
         std::process::exit(exit_code);
     }
 
@@ -542,10 +543,10 @@ async fn run_shutdown_sequence(signal_name: &str, exit_code: i32) {
 
     let killed = bazel_live::force_kill_all_remaining();
     if killed > 0 {
-        eprintln!("aspect-cli: SIGKILL'd {killed} bazel subprocess(es) that didn't exit");
+        errln!("aspect-cli: SIGKILL'd {killed} bazel subprocess(es) that didn't exit");
         tokio::time::sleep(POST_KILL_GRACE).await;
     }
 
-    eprintln!("aspect-cli: exiting with code {exit_code}");
+    errln!("aspect-cli: exiting with code {exit_code}");
     std::process::exit(exit_code);
 }

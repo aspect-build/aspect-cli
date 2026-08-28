@@ -18,6 +18,7 @@
 //!     predicate reads the ambient environment directly (via [`crate::ci`] and
 //!     `IsTerminal`) instead of `std.io.stdout.is_tty`.
 
+use crate::errln;
 use std::io::IsTerminal;
 
 use crate::ci::on_recognized_ci;
@@ -80,7 +81,7 @@ fn colorize() -> bool {
 
 /// Print one severity-prefixed line to stderr, colorized per [`colorize`].
 fn emit(sev: Severity, msg: &str) {
-    eprintln!("{}", format_line(sev, colorize(), msg));
+    errln!("{}", format_line(sev, colorize(), msg));
 }
 
 /// Print a cyan `INFO:` line for a notable runtime branch.

@@ -16,6 +16,7 @@
 //! version-gating message instead. An agent then relays an actionable answer
 //! rather than the session dying on a transport error.
 
+use crate::errln;
 use std::sync::Arc;
 
 use allocative::Allocative;
@@ -739,7 +740,7 @@ fn serve_blocking(deployment_name: Option<&str>) -> anyhow::Result<i32> {
         match http.get(&probe_url).send().await {
             Ok(r) if r.status().is_success() => true,
             Ok(r) => {
-                eprintln!(
+                errln!(
                     "warning: {probe_url} answered HTTP {} — serving anyway; tools will explain \
                      what the deployment is missing and re-check on every call.",
                     r.status()
@@ -747,7 +748,7 @@ fn serve_blocking(deployment_name: Option<&str>) -> anyhow::Result<i32> {
                 false
             }
             Err(e) => {
-                eprintln!(
+                errln!(
                     "warning: could not probe {probe_url} ({e}) — serving anyway; tools will \
                      re-check on every call."
                 );
@@ -764,7 +765,7 @@ fn serve_blocking(deployment_name: Option<&str>) -> anyhow::Result<i32> {
         http,
     };
 
-    eprintln!(
+    errln!(
         "aspect mcp: serving build results for deployment '{}' ({origin}) over stdio",
         deployment.name
     );

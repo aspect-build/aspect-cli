@@ -17,6 +17,7 @@
 use axl_runtime::engine::telemetry::{
     ExporterSpec, FileDestination, FileSpec, OtlpProtocol, OtlpSpec,
 };
+use axl_runtime::errln;
 use opentelemetry::{KeyValue, global, trace::TracerProvider as _};
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_otlp::{WithExportConfig, WithHttpConfig, WithTonicConfig};
@@ -747,7 +748,7 @@ impl Drop for OtelGuard {
             .unwrap_or(false);
         let timeout = shutdown_timeout();
         if any_otel && debug {
-            eprintln!(
+            errln!(
                 "telemetry: flushing exporters (per-provider timeout {}ms; \
                  set ASPECT_TELEMETRY_SHUTDOWN_TIMEOUT_MS to override)",
                 timeout.as_millis()
@@ -774,18 +775,18 @@ impl Drop for OtelGuard {
             let elapsed_ms = start.elapsed().as_millis();
             if errors.is_empty() {
                 if debug {
-                    eprintln!("telemetry: flush complete in {}ms", elapsed_ms);
+                    errln!("telemetry: flush complete in {}ms", elapsed_ms);
                 }
             } else {
                 // Always surface errors — visibility gap, not a build failure.
-                eprintln!(
+                errln!(
                     "telemetry: flush completed with errors after {}ms — \
                      some records may have been dropped (this does not affect \
                      the task exit code)",
                     elapsed_ms
                 );
                 for err in errors {
-                    eprintln!("  {}", err);
+                    errln!("  {}", err);
                 }
             }
         }
