@@ -590,12 +590,31 @@ jobs:
           # regression to a clear failure instead of the whole job budget.
           # Both spellings have to behave identically: the explicit escape
           # hatch, and the bare flag this routes to Bazel on its own.
+          # Capture rather than pipe into `grep -q`. Piping discards everything
+          # the CLI writes, so any warning these invocations emit — including
+          # the withheld-post diagnostic — is invisible, and grep exiting at the
+          # match closes the pipe mid-write. Capturing keeps the output in the
+          # job log and lets the reader stay to EOF, matching what the delivery
+          # jobs already do.
+          # `timeout` exits 124 when it kills the command. Check that before the
+          # grep: the error text is printed early, so a launcher that prints it
+          # and *then* hangs — the regression this guards — still satisfies the
+          # grep. Only the exit status distinguishes the two.
+          assert_rejects_flag() {
+            local label="$1"; shift
+            local out code
+            out="$(timeout 180 "$LAUNCHER" build --github-status-checks:enabled=false "$@" //... 2>&1)" && code=0 || code=$?
+            echo "$out"
+            if [ "$code" -eq 124 ]; then
+              echo "ERROR: $label hung until the 180s timeout instead of failing"; exit 1
+            fi
+            echo "$out" | grep -q "Unrecognized option" \
+              || { echo "ERROR: $label must fail with Bazel's own error"; exit 1; }
+          }
           echo "--- flag rejected by Bazel (--bazel-flag)"
-          timeout 180 "$LAUNCHER" build --github-status-checks:enabled=false --bazel-flag=--definitely_not_a_flag //... 2>&1 | grep -q "Unrecognized option" \
-            || { echo "ERROR: a Bazel-rejected flag must fail, not hang"; exit 1; }
+          assert_rejects_flag "a Bazel-rejected flag" --bazel-flag=--definitely_not_a_flag
           echo "--- flag rejected by Bazel (bare)"
-          timeout 180 "$LAUNCHER" build --github-status-checks:enabled=false --definitely_not_a_flag //... 2>&1 | grep -q "Unrecognized option" \
-            || { echo "ERROR: a bare Bazel-rejected flag must fail the same way"; exit 1; }
+          assert_rejects_flag "a bare Bazel-rejected flag" --definitely_not_a_flag
           echo "--- aspect dev test-* (every AXL suite)"
           ./tools/run-axl-suites.sh "$LAUNCHER"
   # NOTE: the Buildkite `bazelrc-e2e` step is intentionally NOT ported here. It
