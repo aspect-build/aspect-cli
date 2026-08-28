@@ -735,6 +735,33 @@ def _test_failed_status_without_failure_bucket(ctx):
         "Failed to build",
     )
 
+def _test_run_exit_is_not_a_build_failure(ctx):
+    """`aspect run` builds a target and then executes it. A program that exits
+    non-zero after a clean build leaves no failure bucket, so without the run
+    marker the state falls through to "Failed to build" — reporting a build
+    failure for a build that worked."""
+    data = _make_unaffected_targets_built()
+    data["run"] = {"exit_code": 42}
+    _eq(
+        "compute_invocation_state — non-zero run exit is a run failure",
+        compute_invocation_state(data, "failed"),
+        "Run failed (exit 42)",
+    )
+    _eq(
+        "conclusion — non-zero run exit is a run failure",
+        conclusion("failed", data),
+        "Run failed (exit 42)",
+    )
+
+    # A clean run must not be mistaken for one.
+    zero = _make_unaffected_targets_built()
+    zero["run"] = {"exit_code": 0}
+    _eq(
+        "compute_invocation_state — run exit 0 keeps the build verdict",
+        compute_invocation_state(zero, "failed"),
+        "Failed to build",
+    )
+
 def _test_failed_status_with_explicit_action_failure(ctx):
     _eq(
         "compute_invocation_state — failed with failed_action",
@@ -1420,6 +1447,7 @@ _UNIT_TESTS = [
     _test_build_started_preserves_bazel_streamed,
     _test_render_bes_url,
     _test_failed_status_without_failure_bucket,
+    _test_run_exit_is_not_a_build_failure,
     _test_failed_status_with_explicit_action_failure,
     _test_passed_status_returns_successful_build,
     _test_aborted_short_circuits,
