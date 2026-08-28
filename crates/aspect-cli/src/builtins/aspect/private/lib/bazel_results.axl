@@ -4740,16 +4740,20 @@ def _live_progress(data, command, status):
                 actions = data["bazel"].get("actions_executed", 0) or 0
                 if actions > 0:
                     running_detail = pluralize(actions, "action") + " executed"
-        head = base + " running..."
-        body = head + (" (" + running_detail + ")") if running_detail else head
+        lead = "running..."
+        detail = running_detail
     else:
-        verb = _TERMINAL_VERB.get(status, status)
-        body = base + " " + verb
-        tail = _compact_text(command, status, data)
-        if tail:
-            body = body + " (" + tail + ")"
+        lead = _TERMINAL_VERB.get(status, status)
+        detail = _compact_text(command, status, data)
 
-    return phases.ProgressStyles(body = body, stream = "")
+    suffix = (" (" + detail + ")") if detail else ""
+    return phases.ProgressStyles(
+        body = base + " " + lead + suffix,
+        stream = "",
+        # Same text without the `Bazel <command>` lead, which a surface that
+        # prints the task label beside it already says.
+        short = lead + suffix,
+    )
 
 # ms since the last live emit before a heartbeat is forced (matches
 # MIN_HEARTBEAT_INTERVAL_MS); measured off the monotonic clock.

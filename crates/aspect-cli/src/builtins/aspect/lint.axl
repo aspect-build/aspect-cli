@@ -551,7 +551,7 @@ def _compact_text(status, data):
     bits = _sev_bits(e, w, i)
     if bits:
         return " · ".join(bits)
-    return ""
+    return phases.ProgressStyles()
 
 def _sev_bits(e, w, i):
     """Per-severity count bits in display order (error → warning → info), skipping zeros."""
@@ -564,19 +564,19 @@ def _sev_bits(e, w, i):
         bits.append("%d info" % i)
     return bits
 
-def _body_text(status, data):
+def _progress(status, data):
     """Narrative `progress.body` for the PR-comment 💬 line — wraps `_compact_text`
     with a status verb prefix (e.g. `Lint failed · 3 errors`). Terminal emits only.
     """
     compact = _compact_text(status, data)
     if status == "passed":
-        return "Lint complete" + ((" (" + compact + ")") if compact else "")
+        return phases.terminal_progress("Lint", "complete", compact)
     if status == "warning":
-        return "Lint complete" + ((" (" + compact + ")") if compact else "")
+        return phases.terminal_progress("Lint", "complete", compact)
     if status == "failed":
-        return "Lint failed" + ((" (" + compact + ")") if compact else "")
+        return phases.terminal_progress("Lint", "failed", compact)
     if status == "aborted":
-        return "Lint aborted"
+        return phases.terminal_progress("Lint", "aborted")
     return ""
 
 def _read_lint_file(ctx, filepath, timeout_ms = _LINT_FILE_PROBE_TIMEOUT_MS, expected_len = -1):
@@ -1172,9 +1172,7 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
         final = True,
         conclusion = bookend,
         data = data,
-        progress = phases.ProgressStyles(
-            body = _body_text(final_status, data),
-        ),
+        progress = _progress(final_status, data),
     ))
     print_repro_and_fix(ctx.std, data, final_status)
 

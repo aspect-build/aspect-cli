@@ -479,7 +479,7 @@ def _gitlab_status_comments(ctx: FeatureContext):
             check_run_url = "",
             current_phase = (update.progress.body or _state.get("_current_phase", "")),
             current_phase_elapsed_ms = 0,
-            progress_styles = update.progress.styles if hasattr(update.progress, "styles") else None,
+            progress_styles = update.progress,
             failed_in_phase = _state.get("_failed_in_phase", ""),
             start_time_ms = _state.get("_task_started_at_ms", 0),
         )

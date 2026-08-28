@@ -136,17 +136,18 @@ def _compact_text(status, data):
         if n > 0:
             return "%d update%s pending" % (n, "s" if n != 1 else "")
         return ""
-    return ""
+    return phases.ProgressStyles()
 
-def _body_text(status, data):
-    """Narrative-form `progress.body` for the PR-comment 💬 line."""
+def _progress(status, data):
+    """Terminal `ProgressStyles` — long form for standalone surfaces, short
+    form for rows that already name the task."""
     compact = _compact_text(status, data)
     if status == "passed" or status == "warning":
-        return "Gazelle complete" + ((" (" + compact + ")") if compact else "")
+        return phases.terminal_progress("Gazelle", "complete", compact)
     if status == "failed":
-        return "Gazelle failed" + ((" (" + compact + ")") if compact else "")
+        return phases.terminal_progress("Gazelle", "failed", compact)
     if status == "aborted":
-        return "Gazelle aborted"
+        return phases.terminal_progress("Gazelle", "aborted")
     return ""
 
 # Above this many dirs, the producer truncates the positional list and adds a
@@ -406,9 +407,7 @@ def _emit_final(ph, exit_code):
         final = True,
         conclusion = bookend,
         data = data,
-        progress = phases.ProgressStyles(
-            body = _body_text(status, data),
-        ),
+        progress = _progress(status, data),
     ))
     print_repro_and_fix(ctx.std, data, status)
 
