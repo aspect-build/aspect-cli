@@ -3841,6 +3841,25 @@ def test_denied_terminal_post_warning(tc: int) -> int:
     tc = test_case(tc, "lint-gha" in with_holder, "the warning names the task")
     tc = test_case(tc, "post grant held by run 123456" in with_holder, "the warning names the grant holder")
 
+    # The formatter is only useful if the field survives the response wrapper,
+    # which rebuilds the body rather than passing it through.
+    piped = github.contribute_result({
+        "state": {"entries": []},
+        "should_post": False,
+        "comment_id": "c1",
+        "post_grant_run": "987654",
+    })
+    tc = test_case(tc, piped.get("post_grant_run") == "987654", "the contribute wrapper preserves post_grant_run")
+    tc = test_case(
+        tc,
+        "post grant held by run 987654" in denied_terminal_post_warning("t", piped.get("post_grant_run", "")),
+        "a server-reported holder reaches the warning end to end",
+    )
+
+    # Older servers omit the field entirely.
+    older = github.contribute_result({"state": {}, "should_post": False, "comment_id": ""})
+    tc = test_case(tc, older.get("post_grant_run") == "", "an omitted post_grant_run reads as empty, not missing")
+
     without = denied_terminal_post_warning("lint-gha", "")
     tc = test_case(tc, "lint-gha" in without, "the warning names the task with no holder reported")
     tc = test_case(tc, "post grant held by" not in without, "no dangling holder clause when the server reports none")

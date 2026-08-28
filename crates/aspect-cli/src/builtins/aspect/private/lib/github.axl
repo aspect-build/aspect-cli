@@ -472,6 +472,21 @@ def _authenticate(ctx, owner, repo, profile = None, roles = None, _reason = None
 
 # Status-comment coordination (Aspect API)
 
+def contribute_result(parsed):
+    """Narrow a 2xx `contribute` body to the fields callers read.
+
+    Every field a caller needs must be listed here — the response is rebuilt,
+    not passed through, so anything omitted silently reads as absent no matter
+    what the server sent. `post_grant_run` is optional: older servers omit it.
+    """
+    return {
+        "success": True,
+        "state": parsed.get("state") or {},
+        "should_post": bool(parsed.get("should_post", False)),
+        "comment_id": parsed.get("comment_id", "") or "",
+        "post_grant_run": parsed.get("post_grant_run", "") or "",
+    }
+
 def _status_comment_contribute(ctx, request, profile = None):
     """Contribute this job's task status for a PR to the Aspect API and get
     back the merged set of all jobs' contributions + a posting directive.
@@ -514,12 +529,7 @@ def _status_comment_contribute(ctx, request, profile = None):
         if type(parsed) != "dict" or "state" not in parsed:
             snippet = (resp.body or "")[:200].replace("\n", " ")
             return {"success": False, "error": "unusable 2xx body: %s" % snippet, "status": resp.status}
-        return {
-            "success": True,
-            "state": parsed.get("state") or {},
-            "should_post": bool(parsed.get("should_post", False)),
-            "comment_id": parsed.get("comment_id", "") or "",
-        }
+        return contribute_result(parsed)
 
     return {"success": False, "error": resp.body or "", "status": resp.status}
 
@@ -2346,6 +2356,7 @@ github = struct(
     with_job_link_role = with_job_link_role,
     authenticate = _authenticate,
     status_comment_contribute = _status_comment_contribute,
+    contribute_result = contribute_result,
     status_check_register = _status_check_register,
     preferred_token_pair = _preferred_token_pair,
     missing_credentials_reason = _missing_credentials_reason,
