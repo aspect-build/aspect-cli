@@ -562,10 +562,16 @@ jobs:
           )
           # These four smoke checks assert CLI behavior, not status reporting, so
           # the job's own status is the signal — same reasoning as the delivery
-          # digest jobs.
+          # digest jobs. Reporting anything is actively misleading here: two of
+          # them pass Bazel a flag it must reject, so the PR comment carried two
+          # red rows for a passing PR.
+          no_status=(
+            --github-status-checks:enabled=false
+            --github-status-comments:enabled=false
+          )
           echo "--- aspect run smoke (//examples/deliverable)"
-          "$LAUNCHER" run --github-status-checks:enabled=false //examples/deliverable:py_deliverable
-          "$LAUNCHER" run --github-status-checks:enabled=false //examples/deliverable:sh_deliverable -- forwarded-arg
+          "$LAUNCHER" run "${no_status[@]}" //examples/deliverable:py_deliverable
+          "$LAUNCHER" run "${no_status[@]}" //examples/deliverable:sh_deliverable -- forwarded-arg
           echo "--- aspect help"
           "$LAUNCHER" help
           echo "--- aspect-launcher --version"
@@ -603,7 +609,7 @@ jobs:
           assert_rejects_flag() {
             local label="$1"; shift
             local out code
-            out="$(timeout 180 "$LAUNCHER" build --github-status-checks:enabled=false "$@" //... 2>&1)" && code=0 || code=$?
+            out="$(timeout 180 "$LAUNCHER" build "${no_status[@]}" "$@" //... 2>&1)" && code=0 || code=$?
             echo "$out"
             if [ "$code" -eq 124 ]; then
               echo "ERROR: $label hung until the 180s timeout instead of failing"; exit 1
