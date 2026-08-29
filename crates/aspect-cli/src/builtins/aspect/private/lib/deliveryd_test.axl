@@ -281,6 +281,7 @@ def _test_impl(ctx):
     return 0
 
 deliveryd_tests = task(
+    summary = "Run the deliveryd AXL unit tests.",
     kind = "test-deliveryd",
     group = ["dev"],
     implementation = _test_impl,
